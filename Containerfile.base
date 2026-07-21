@@ -1,83 +1,210 @@
 # ─────────────────────────────────────────────────────────────────────────
-# APEX-OS — base image
+# APEX-OS — base image (production)
 #
-# fedora-bootc + Hyprland (COPR solopasha/hyprland) + quickshell
-# (COPR errornointernet/quickshell) + greetd/cage hosting the apex-greet
-# Quickshell greeter. Shared foundation for the Daily and Gaming editions.
+#   fedora-bootc:43
+#     → CachyOS perf kernel swap (bieszczaders COPR)      [own RUN]
+#     → desktop + greeter stack (hyprland/quickshell/…)   [own RUN]
+#     → sched-ext userspace (scx)                          [own RUN]
+#     → Bazaar app store (ublue-os COPR)                   [own RUN]
+#     → flathub first-boot unit + greeter payload + greetd
 #
-# Base tag — fedora-bootc:43.
-#   F44 (the newer stable) was evaluated first but the solopasha COPR ships
-#   aquamarine-0.9.5 linked against libdisplay-info.so.2, while F44 already
-#   moved to libdisplay-info 0.3 (soname .so.3) — so hyprland is currently
-#   uninstallable there. F43 ships libdisplay-info 0.2 (.so.2) and the whole
-#   stack resolves cleanly. Revisit F44 once the COPR rebuilds aquamarine.
+# Shared foundation for the Daily and Gaming editions. Both editions want the
+# performance kernel, so the CachyOS swap lives HERE, in the base — the flavor
+# images (Containerfile.daily / .gaming) derive from this and only add their
+# edition bits (VARIANT stamp, battery/GPU stacks).
+#
+# ── Layering discipline (M0 spike B finding) ──
+# Spike B found that folding the NVIDIA akmod build + the scx install into one
+# dnf flow corrupted the sqlite rpmdb baked into that layer. The production
+# rule, applied throughout this tree: keep every heavy dnf transaction in its
+# OWN `RUN … && dnf5 clean all` layer. The kernel swap, the desktop stack, scx,
+# and Bazaar are therefore four separate transactions. The NVIDIA akmod (the
+# other heavy build) lives in Containerfile.gaming, again in its own stage.
+#
+# ── Base tag: fedora-bootc:43 (NOT 44) ──
+# solopasha/hyprland ships aquamarine-0.9.5 linked against libdisplay-info.so.2;
+# F44 moved to libdisplay-info 0.3 (soname .so.3), so hyprland is currently
+# uninstallable there. F43 ships libdisplay-info 0.2 (.so.2) and the whole stack
+# resolves. Revisit F44 once the COPR rebuilds aquamarine. (M0 spike A.)
 # ─────────────────────────────────────────────────────────────────────────
 FROM quay.io/fedora/fedora-bootc:43
 
-# ── Desktop + greeter runtime ────────────────────────────────────────────
-# The dnf5 `copr` subcommand lives in the dnf5-plugins package, which is not
-# in the base image, so install it first. quickshell comes from the COPR at
-# 0.3.0 (the exact version apex-greet was written against — Fedora proper
-# only carries 0.2.1); hyprland 0.51.x + its aquamarine backend come from
-# solopasha. greetd, cage, foot, xwayland-satellite and base JetBrains Mono
-# are stock Fedora. The COPRs are disabled again after install so the shipped
-# image carries no active COPR repo (bootc hygiene) — the RPMs are baked in.
-RUN dnf5 install -y dnf5-plugins && \
-    dnf5 -y copr enable solopasha/hyprland && \
-    dnf5 -y copr enable errornointernet/quickshell && \
-    dnf5 install -y --setopt=install_weak_deps=False \
+# OCI provenance. The git SHA is injected by CI (--build-arg APEX_REVISION=…)
+# so every image is traceable back to the exact source commit — the plan's
+# "image carries git SHA" rule (org.opencontainers.image.revision).
+ARG APEX_REVISION=dev
+ARG APEX_VERSION=43
+LABEL org.opencontainers.image.title="APEX-OS base" \
+      org.opencontainers.image.description="APEX-OS shared base: fedora-bootc:43 + CachyOS kernel + Hyprland/quickshell + greetd/apex-greet + scx + Bazaar" \
+      org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \
+      org.opencontainers.image.revision="${APEX_REVISION}" \
+      org.opencontainers.image.version="${APEX_VERSION}" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="APEX-OS"
+
+# ── Stage 1: CachyOS kernel swap ───────────────────────────────────────────
+# Replace Fedora's kernel with the CachyOS-for-Fedora COPR kernel (BORE +
+# sched-ext, 1000 Hz) — the Phase-A perf kernel proven in M0 spike B.
+# `-devel-matched` pulls the version-locked headers the Gaming edition needs to
+# build the out-of-tree NVIDIA akmod against exactly this kernel. The COPRs are
+# disabled again so the shipped image carries no active COPR repo (bootc
+# hygiene); the RPMs are baked in. Own transaction, `dnf5 clean all` at the end.
+#
+# The kernel install is split so the kernel-cachyos-core %posttrans can fail
+# cosmetically without aborting the build: on F43 that scriptlet runs
+# rpm-ostree's kernel-install → dracut BEFORE `modules.dep` is written, so
+# dracut errors "modules.dep is missing" and the scriptlet returns non-zero
+# (on F42/spike B it merely warned). The RPMs are fully installed regardless
+# (posttrans is the final phase) — we regenerate the initramfs ourselves in the
+# next step. So: tolerate the install's non-zero exit, then HARD-GATE on
+# `rpm -q` proving the kernel packages actually landed. A genuine failure
+# (COPR down, package missing) fails the `rpm -q` and aborts.
+RUN set -eux; \
+    dnf5 -y install dnf5-plugins; \
+    dnf5 -y copr enable bieszczaders/kernel-cachyos; \
+    dnf5 -y copr enable bieszczaders/kernel-cachyos-addons; \
+    dnf5 -y remove --no-autoremove \
+        kernel kernel-core kernel-modules kernel-modules-core; \
+    dnf5 -y install \
+        kernel-cachyos kernel-cachyos-core kernel-cachyos-modules \
+        kernel-cachyos-devel-matched \
+      || echo "WARN: kernel install exited non-zero (expected: cosmetic %posttrans dracut) — verifying RPMs landed"; \
+    rpm -q kernel-cachyos kernel-cachyos-core kernel-cachyos-modules kernel-cachyos-devel-matched; \
+    dnf5 -y copr disable bieszczaders/kernel-cachyos; \
+    dnf5 -y copr disable bieszczaders/kernel-cachyos-addons; \
+    dnf5 clean all
+
+# Ensure the kernel image + initramfs live under /usr/lib/modules/<kver>/ —
+# bootc boots from there, NOT from /boot. Run depmod (modules.dep is present
+# post-transaction, but re-assert it) and regenerate the initramfs with a
+# generic (non-hostonly) dracut, since the %posttrans one did not complete.
+# Then HARD-VERIFY both vmlinuz and initramfs exist. Stamp the kver to
+# /usr/lib/apex-cachyos-kver so the Gaming akmod stage can read it, and drop
+# serial-console kargs so headless QEMU / CI boots are observable (harmless on
+# real hardware with no serial port).
+RUN set -eux; \
+    KVER="$(basename "$(ls -d /usr/lib/modules/*cachyos*)")"; \
+    echo "CachyOS kver: ${KVER}"; \
+    depmod -a "${KVER}"; \
+    if [ ! -s "/usr/lib/modules/${KVER}/initramfs.img" ]; then \
+        echo "initramfs missing -> regenerating with dracut"; \
+        dracut --force --no-hostonly --reproducible --zstd \
+            --kver "${KVER}" "/usr/lib/modules/${KVER}/initramfs.img"; \
+    fi; \
+    test -s "/usr/lib/modules/${KVER}/initramfs.img"; \
+    test -s "/usr/lib/modules/${KVER}/vmlinuz"; \
+    printf '%s\n' "${KVER}" > /usr/lib/apex-cachyos-kver; \
+    mkdir -p /usr/lib/bootc/kargs.d; \
+    printf 'kargs = ["console=ttyS0,115200", "console=tty0"]\n' \
+        > /usr/lib/bootc/kargs.d/10-apex-serial.toml
+
+# ── Stage 2: desktop + greeter stack ───────────────────────────────────────
+# hyprland (solopasha COPR 0.51.x) + quickshell (errornointernet COPR 0.3.0 —
+# the exact version apex-greet targets) + greetd. The greeter's compositor host
+# is moving OFF cage: M0 spike A found cage 0.2.0 does not serve wlr-layer-shell
+# to quickshell 0.3.0, so the greeter never paints under it. sway 1.11 and labwc
+# 0.9.6 (both stock F43, both layer-shell v4) are installed as the real host;
+# cage is kept only as a last-resort fallback. xwayland-satellite/foot round out
+# the session. flatpak + distrobox are the userspace app plumbing both editions
+# want (podman + rpm-ostree are already in fedora-bootc). COPRs disabled after.
+# Own transaction, `dnf5 clean all` at the end.
+RUN set -eux; \
+    dnf5 -y copr enable solopasha/hyprland; \
+    dnf5 -y copr enable errornointernet/quickshell; \
+    dnf5 -y install --setopt=install_weak_deps=False \
         hyprland \
         quickshell \
         greetd \
+        sway \
+        labwc \
         cage \
         xwayland-satellite \
         foot \
         jetbrains-mono-fonts \
-        fontconfig && \
-    dnf5 -y copr disable solopasha/hyprland && \
-    dnf5 -y copr disable errornointernet/quickshell && \
+        fontconfig \
+        flatpak \
+        distrobox; \
+    dnf5 -y copr disable solopasha/hyprland; \
+    dnf5 -y copr disable errornointernet/quickshell; \
     dnf5 clean all
 
-# ── JetBrainsMono Nerd Font ──────────────────────────────────────────────
-# apex-greet's QML uses the "JetBrainsMono Nerd Font" family for both body
-# text and its Nerd-Font glyphs (person / lock / caps-lock icons). Fedora
-# packages only plain JetBrains Mono (no Nerd glyphs), so fetch the patched
-# family and register it. ADD downloads the release tarball; it is not
-# auto-extracted from a URL, so unpack it in the following step.
+# ── Stage 3: JetBrainsMono Nerd Font ───────────────────────────────────────
+# apex-greet's QML uses the "JetBrainsMono Nerd Font" family for both body text
+# and its Nerd-Font glyphs (person / lock / caps-lock icons). Fedora packages
+# only plain JetBrains Mono (no Nerd glyphs), so fetch the patched family. ADD
+# downloads but does not auto-extract a tarball, so unpack in the RUN.
 ADD https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.tar.xz \
     /usr/share/fonts/jetbrains-mono-nerd/JetBrainsMono.tar.xz
-RUN cd /usr/share/fonts/jetbrains-mono-nerd && \
-    tar -xJf JetBrainsMono.tar.xz && \
-    rm -f JetBrainsMono.tar.xz && \
+RUN set -eux; \
+    cd /usr/share/fonts/jetbrains-mono-nerd; \
+    tar -xJf JetBrainsMono.tar.xz; \
+    rm -f JetBrainsMono.tar.xz; \
     fc-cache -f /usr/share/fonts/jetbrains-mono-nerd
 
-# ── Greeter payload ──────────────────────────────────────────────────────
+# ── Stage 4: sched-ext userspace (scx) ─────────────────────────────────────
+# scx-scheds (the scheduler set) + scx-tools (scx_loader/scxctl) from the
+# CachyOS addons COPR — the sched-ext userspace apexd will drive. Isolated in
+# its OWN transaction because M0 spike B traced rpmdb corruption to combining
+# this install with the akmod flow. `dnf5 clean all` at the end.
+RUN set -eux; \
+    dnf5 -y copr enable bieszczaders/kernel-cachyos-addons; \
+    dnf5 -y install scx-scheds scx-tools; \
+    dnf5 -y copr disable bieszczaders/kernel-cachyos-addons; \
+    rpm -q scx-scheds scx-tools > /usr/lib/apex-scx-versions 2>&1 || true; \
+    dnf5 clean all
+
+# ── Stage 5: Bazaar app store ──────────────────────────────────────────────
+# Bazaar (leaf GTK4 Flatpak store — the M0 store decision; no gnome-shell /
+# PackageKit pulled in) from the ublue-os/packages COPR, the same RPM path
+# Bazzite uses. COPR disabled after; own transaction, `dnf5 clean all`.
+RUN set -eux; \
+    dnf5 -y copr enable ublue-os/packages; \
+    dnf5 -y install bazaar; \
+    dnf5 -y copr disable ublue-os/packages; \
+    dnf5 clean all
+
+# ── Stage 6: flathub remote (first-boot) + greeter payload + config ────────
+# Flathub CANNOT reliably be added at build time on bootc: `flatpak remote-add
+# --system` writes to /var/lib/flatpak, and bootc treats /var as machine-local
+# state that is only seeded once and never updated — a build-time remote is
+# fragile across upgrades. So ship an idempotent first-boot oneshot (the uBlue
+# pattern) that adds Flathub on the running system. `flatpak remote-add
+# --if-not-exists` makes it safe to run repeatedly; a stamp keeps it quiet after
+# the first success. Flatseal is then installable from Flathub as a first-run
+# app (documented in the flavor images / README) — it cannot be preinstalled
+# because flatpak install needs a running system.
+COPY files/system/flatpak/flathub.flatpakrepo /etc/flatpak/flathub.flatpakrepo
+COPY files/system/units/apex-flathub-setup.service \
+     /usr/lib/systemd/system/apex-flathub-setup.service
+
 # The whole apex-greet tree lands at /usr/share/apex-greet so the QML's
-# Qt.resolvedUrl("assets/…") resolves in place; the wallpaper is dropped
-# where GreetSurface.qml expects it; greetd-config.toml becomes the live
-# greetd config.
+# Qt.resolvedUrl("assets/…") resolves in place; the wallpaper is dropped where
+# GreetSurface.qml expects it; greetd-config.toml becomes the live greetd
+# config; sway-greet.conf is the layer-shell-capable host config it launches.
 COPY files/desktop/apex-greet /usr/share/apex-greet
 COPY files/branding/wallpapers/apex-wallpaper-default.jpg \
      /usr/share/backgrounds/apex/default.jpg
 COPY files/desktop/apex-greet/greetd-config.toml /etc/greetd/config.toml
 
-# System configuration, folded into one layer:
-#   - Writable state dir for apex-greet's last-user / last-session memory,
-#     owned by the greetd session user (Fedora's greetd package provisions
-#     the `greetd` user via sysusers.d — there is no `greeter` user);
-#     tmpfiles creates it at boot, after systemd-sysusers has run.
-#   - os-release stamp so apex-greet resolves the Daily (chartreuse) edition
-#     via VARIANT_ID (/etc/os-release is a symlink into /usr/lib).
-#   - greetd as the display manager: enabling it creates the
-#     display-manager.service alias, and graphical.target Wants
-#     display-manager.service, so a graphical boot starts greetd → cage →
-#     the apex-greet greeter on tty1. hyprland ships
-#     /usr/share/wayland-sessions/hyprland.desktop for the session picker.
-RUN printf 'd /var/lib/apex-greet 0755 greetd greetd -\n' \
-        > /usr/lib/tmpfiles.d/apex-greet.conf && \
-    printf 'VARIANT="Daily"\nVARIANT_ID=daily\n' >> /usr/lib/os-release && \
-    systemctl enable greetd.service && \
+# System wiring, one layer (no dnf):
+#   - Writable state dir for apex-greet's last-user/last-session memory, owned
+#     by the greetd session user (Fedora's greetd package provisions the
+#     `greetd` user via sysusers.d — there is NO `greeter` user); tmpfiles
+#     creates it at boot after systemd-sysusers has run.
+#   - Enable the flathub first-boot oneshot.
+#   - greetd as the display manager (enabling it creates the
+#     display-manager.service alias; graphical.target Wants it), so a graphical
+#     boot starts greetd → sway → the apex-greet greeter on tty1.
+#   - graphical.target as default.
+# NOTE: VARIANT is deliberately NOT stamped here — the flavor images
+# (Containerfile.daily / .gaming) own the os-release VARIANT/VARIANT_ID stamp,
+# which is what drives apex-greet's edition (gold/chartreuse) branding.
+RUN set -eux; \
+    printf 'd /var/lib/apex-greet 0755 greetd greetd -\n' \
+        > /usr/lib/tmpfiles.d/apex-greet.conf; \
+    systemctl enable apex-flathub-setup.service; \
+    systemctl enable greetd.service; \
     systemctl set-default graphical.target
 
-# bootc container sanity lint (non-fatal for the spike).
+# ── Stage 7: bootc container sanity lint (informational) ───────────────────
 RUN bootc container lint || true

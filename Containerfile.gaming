@@ -1,1 +1,93 @@
-# APEX-OS gaming image — see docs/; not yet implemented (M1)
+# ─────────────────────────────────────────────────────────────────────────
+# APEX-OS — Gaming edition (gold)
+#
+#   FROM apex-base → stamp VARIANT=Gaming + GPU split.
+#
+#   ARG GPU=nvidia  →  RPMFusion + DIY NVIDIA akmod built against the base's
+#                      CachyOS kernel, in its OWN stage, HARD-FAIL on failure.
+#   ARG GPU=mesa    →  no akmod (mesa is already in the base via the desktop
+#                      stack) — an all-AMD/Intel gaming image.
+#
+# M1 scope: prove the GPU/akmod split works and the NVIDIA akmod builds in the
+# pipeline against the shared CachyOS kernel. The full gaming userspace (Steam,
+# gamescope, MangoHud, the nvidia driver libraries, Proton-GE, WiVRn, Sunshine,
+# OpenRGB, …) is a documented placeholder below and lands in a later milestone.
+#
+# Unlike the M0 spike (which was capture-and-continue so the other checks could
+# run), production HARD-FAILS if the akmod does not build and resolve: a Gaming
+# image whose NVIDIA module is missing must never ship.
+# ─────────────────────────────────────────────────────────────────────────
+ARG BASE=localhost/apex-base:latest
+FROM ${BASE}
+
+ARG APEX_REVISION=dev
+ARG GPU=nvidia
+LABEL org.opencontainers.image.title="APEX-OS Gaming" \
+      org.opencontainers.image.description="APEX-OS Gaming edition (gold) — performance-tuned desktop; GPU=nvidia|mesa" \
+      org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \
+      org.opencontainers.image.revision="${APEX_REVISION}" \
+      org.opencontainers.image.version="gaming" \
+      org.opencontainers.image.vendor="APEX-OS" \
+      org.apex-os.gpu="${GPU}"
+
+# ── Edition stamp ──────────────────────────────────────────────────────────
+# VARIANT_ID=gaming drives apex-greet's gold spark + accent.
+RUN set -eux; \
+    printf 'VARIANT="Gaming"\nVARIANT_ID=gaming\n' >> /usr/lib/os-release
+
+# ── GPU stage: DIY NVIDIA akmod (own stage, HARD-FAIL) ─────────────────────
+# nvidia: enable RPMFusion, install the akmods framework + akmod-nvidia source,
+# compile the module against the base's CachyOS kernel (kver stamped at
+# /usr/lib/apex-cachyos-kver by the base; -devel-matched headers already present
+# at /usr/src/kernels/<kver>), install the produced kmod RPM, and VERIFY that
+# `modinfo` resolves nvidia against that exact kernel. `set -e` means any
+# failure — akmods rc!=0, no kmod RPM produced, or modinfo unresolved — aborts
+# the whole build. RPMFusion is left enabled so the gaming userspace driver +
+# apps can be layered from it later.
+#
+# mesa: nothing to do — mesa ships in the base. This keeps a single Containerfile
+# serving both matrix legs (GPU=nvidia and GPU=mesa).
+RUN set -eux; \
+    if [ "${GPU}" = "nvidia" ]; then \
+        KVER="$(cat /usr/lib/apex-cachyos-kver)"; \
+        echo "Building NVIDIA akmod against CachyOS kver: ${KVER}"; \
+        dnf5 -y install \
+            "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
+            "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"; \
+        dnf5 -y install akmods akmod-nvidia kmodtool gcc make; \
+        test -d "/usr/src/kernels/${KVER}" \
+            || { echo "FATAL: kernel-devel headers missing for ${KVER}"; exit 1; }; \
+        akmods --force --kernels "${KVER}" --kmod nvidia; \
+        RPM="$(ls /var/cache/akmods/nvidia/kmod-nvidia-*.rpm 2>/dev/null | head -1)"; \
+        test -n "${RPM}" && test -f "${RPM}" \
+            || { echo "FATAL: NVIDIA akmod did not produce a kmod RPM"; \
+                 cat /var/cache/akmods/nvidia/*.failed.log 2>/dev/null || true; exit 1; }; \
+        echo "Built kmod RPM: ${RPM}"; \
+        dnf5 -y install "${RPM}"; \
+        depmod -a "${KVER}"; \
+        modinfo -k "${KVER}" nvidia > /tmp/modinfo-nvidia.txt \
+            || { echo "FATAL: modinfo nvidia unresolved for ${KVER}"; exit 1; }; \
+        NVIDIA_VER="$(rpm -q --qf '%{VERSION}' akmod-nvidia)"; \
+        printf 'PASS driver=%s kver=%s\n' "${NVIDIA_VER}" "${KVER}" \
+            > /usr/lib/apex-nvidia-akmod-status; \
+        echo "=== modinfo nvidia (kver ${KVER}) ==="; head -8 /tmp/modinfo-nvidia.txt; \
+    elif [ "${GPU}" = "mesa" ]; then \
+        echo "GPU=mesa: no akmod needed (mesa is in the base)"; \
+        printf 'MESA no-akmod\n' > /usr/lib/apex-nvidia-akmod-status; \
+    else \
+        echo "FATAL: unknown GPU='${GPU}' (expected nvidia|mesa)"; exit 1; \
+    fi; \
+    dnf5 clean all
+
+# ── Gaming userspace (PLACEHOLDER — later milestone) ───────────────────────
+# Kept out of the M1 skeleton on purpose (heavy, and orthogonal to proving the
+# akmod pipeline). When implemented, install in its own `RUN … && dnf5 clean
+# all` layer(s), e.g.:
+#   nvidia userspace : xorg-x11-drv-nvidia xorg-x11-drv-nvidia-cuda (RPMFusion)
+#   core             : steam gamescope mangohud gamemode vulkan-tools
+#   proton/compat    : Proton-GE (Flatpak/manual), protontricks
+#   VR               : wivrn monado (RPM, NVENC on nvidia)
+#   streaming        : sunshine
+#   peripherals      : openrgb + controller udev
+#   overlays/capture : obs-studio obs-vkcapture
+RUN bootc container lint || true
