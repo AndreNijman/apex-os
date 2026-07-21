@@ -36,6 +36,15 @@ Item {
         }
     }
 
+    // Keep the username field in sync when the last-user file resolves
+    // asynchronously after this surface has already loaded.
+    Connections {
+        target: root.ctx
+        function onUsernameChanged() {
+            if (!usernameInput.activeFocus) usernameInput.text = root.ctx.username
+        }
+    }
+
     // ── Background: gradient fallback ──────────────────────────────
     // Always present so an empty / broken wallpaper path can never
     // leave a blank surface.
@@ -245,6 +254,14 @@ Item {
                         root.capsOn = !root.capsOn
                         return
                     }
+                    // Alt+Left / Alt+Right cycle the session (keyboard
+                    // parity with the on-screen ‹ › picker).
+                    if ((event.modifiers & Qt.AltModifier) &&
+                        (event.key === Qt.Key_Left || event.key === Qt.Key_Right)) {
+                        root.ctx.cycleSession(event.key === Qt.Key_Left ? -1 : 1)
+                        event.accepted = true
+                        return
+                    }
                     // Caps-Lock detection via typed-character case.
                     if (event.text.length === 1) {
                         var c = event.text
@@ -309,6 +326,58 @@ Item {
             color: root.ctx.hasError ? root.theme.errorColor : root.theme.subtext
             font.family:    root.theme.fontFamily
             font.pixelSize: 14
+        }
+    }
+
+    // ── Session picker (subtle, bottom-centre) ────────────────────
+    // Matches the Lockscreen typography: JetBrainsMono, subtext colour.
+    // Rendered as "‹ Session ›"; arrows cycle, hover picks up the accent.
+    Row {
+        id: sessionPicker
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom:           parent.bottom
+        anchors.bottomMargin:     40
+        spacing: 14
+        visible: root.ctx.sessions.length > 0
+
+        Text {
+            id: prevArrow
+            anchors.verticalCenter: parent.verticalCenter
+            text:  "‹"
+            color: prevMouse.containsMouse ? root.theme.active : root.theme.subtext
+            font.family:    root.theme.fontFamily
+            font.pixelSize: 20
+            MouseArea {
+                id: prevMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape:  Qt.PointingHandCursor
+                onClicked:    root.ctx.cycleSession(-1)
+            }
+        }
+        Text {
+            anchors.verticalCenter:  parent.verticalCenter
+            horizontalAlignment:     Text.AlignHCenter
+            width: Math.max(160, implicitWidth)
+            text:  root.ctx.sessionName
+            color: root.theme.subtext
+            font.family:    root.theme.fontFamily
+            font.pixelSize: 15
+        }
+        Text {
+            id: nextArrow
+            anchors.verticalCenter: parent.verticalCenter
+            text:  "›"
+            color: nextMouse.containsMouse ? root.theme.active : root.theme.subtext
+            font.family:    root.theme.fontFamily
+            font.pixelSize: 20
+            MouseArea {
+                id: nextMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape:  Qt.PointingHandCursor
+                onClicked:    root.ctx.cycleSession(1)
+            }
         }
     }
 
