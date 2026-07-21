@@ -14,19 +14,26 @@ time).
 | `GreetContext.qml` | Non-visual shared state + the greetd auth backend, edition detection, session list, last-user/last-session memory. |
 | `GreetSurface.qml` | The per-output visuals: clock, wallpaper/gradient, logo, username + password pills, spinner, error shake, session picker. |
 | `assets/spark-{gold,chartreuse,white}.png` | Edition spark logos (256px). |
-| `greetd-config.toml` | Example `/etc/greetd/config.toml`. |
+| `greetd-config.toml` | Example `/etc/greetd/config.toml` (launches sway). |
+| `sway-greet.conf` | The sway host config — hosts quickshell as its only client. |
+| `labwc-greet/` | Fallback host: labwc config dir (`rc.xml`, `autostart`, `environment`) + note. |
 
 ## How it works
 
 ### Window model
 
-The greeter runs under **`cage`** (a kiosk Wayland compositor), *not* as
-a session lock. cage implements `wlr-layer-shell` — the same mechanism
-gtkgreet uses — so the fullscreen surface is a Quickshell `PanelWindow`
-anchored to all four edges, on the `Overlay` layer, with
+The greeter runs under **`sway`** (a wlroots kiosk compositor), *not* as
+a session lock. sway implements `wlr-layer-shell` natively — the same
+mechanism gtkgreet uses — so the fullscreen surface is a Quickshell
+`PanelWindow` anchored to all four edges, on the `Overlay` layer, with
 `WlrKeyboardFocus.Exclusive`. One surface is created per output via
-`Variants` over `Quickshell.screens`. (Under cage there is normally a
-single output; extra outputs mirror the same shared state.)
+`Variants` over `Quickshell.screens`. (There is normally a single output;
+extra outputs mirror the same shared state.)
+
+> The host **changed from `cage` to `sway` in M1**: M0 spike A proved
+> `cage` 0.2.0 does **not** expose `wlr-layer-shell` to quickshell 0.3.0, so
+> the `PanelWindow` never got a surface and the greeter launched but never
+> painted. See **Compositor host** below and `docs/m0-results.md` "Spike A".
 
 ### Auth flow (PamContext → Greetd)
 
@@ -81,25 +88,95 @@ blurMax 48, brightness −0.30, saturation −0.10) under a 0.35 black
 scrim. A missing file falls back to the vertical gradient
 (`darker(background)` → accent).
 
-## Integration (greetd + cage)
+## Compositor host
+
+The greeter is a quickshell **layer-shell** surface (`PanelWindow`, Overlay
+layer, exclusive keyboard). It therefore needs a host compositor that serves
+`wlr-layer-shell` to quickshell.
+
+| Host | Layer-shell? | Status | Config |
+|---|---|---|---|
+| **`cage` 0.2.0** | **No** (for quickshell 0.3.0) | **Abandoned** — greeter launches but never paints | — |
+| **`sway` 1.11** | Yes (native) | **Primary host** | `sway-greet.conf` |
+| **`labwc` 0.9.6** | Yes (native) | **Fallback host** | `labwc-greet/` |
+
+**Why not cage.** M0 spike A found that `cage` 0.2.0 does not expose
+`wlr-layer-shell` to quickshell 0.3.0 (`Failed to initialize layershell
+integration`), so the `PanelWindow` never gets a surface — greetd starts,
+apex-greet launches, the greetd/PAM conversation is reachable, but nothing
+paints. (gtkgreet works under cage only because it falls back to an
+xdg-toplevel; quickshell's `PanelWindow` does not.) `sway` and `labwc` both
+implement `wlr-layer-shell` v4 natively, which is the whole reason for the
+M1 swap. Full detail in `docs/m0-results.md` "Spike A".
+
+`sway-greet.conf` is a deliberately bare, keybind-free config: it does **not**
+`include /etc/sway/config.d/*`, has no bar and no app launchers, hides the
+cursor when idle, disables titlebars/borders, disables Xwayland, paints a
+black root as a pre-map fallback, leaves output resolution to autodetect, and
+runs quickshell as its **only** client via
+`exec "qs -p /usr/share/apex-greet/shell.qml; swaymsg exit"` — so sway exits
+the moment quickshell quits (mirroring `cage -d`'s exit-with-child). On a
+successful login greetd itself terminates the greeter and starts the user
+session; the `swaymsg exit` covers the cancel/crash path.
+
+### labwc fallback
+
+If sway misbehaves on some hardware, swap to labwc — also native layer-shell.
+Point greetd at:
+
+```toml
+command = "labwc -C /usr/share/apex-greet/labwc-greet"
+```
+
+The `labwc-greet/` config dir holds `rc.xml` (no decorations, no keybinds,
+tap-to-click off), `autostart` (runs quickshell, then `labwc -e` on quit), and
+`environment` (XKB layout). See `labwc-greet/README.md` for caveats (no
+cursor-idle-hide equivalent).
+
+### No-GPU render fallback (untested — HW/GL-runner verify item)
+
+On a machine with **no working GL**, the software-render combo is:
+
+```sh
+WLR_RENDERER=pixman LIBGL_ALWAYS_SOFTWARE=1 QT_QUICK_BACKEND=software \
+  sway -c /usr/share/apex-greet/sway-greet.conf
+```
+
+set in the greetd session **environment** (e.g. an `environment.d` drop-in or a
+wrapper), not in the sway config. Caveat: M0 spike A found `WLR_RENDERER=pixman`
+**crash-looped cage** specifically; sway's pixman renderer is more robust, but
+this exact combo under sway is **untested** and must be verified on real
+hardware or a GL-capable runner. (For labwc, the same three vars are listed,
+commented, in `labwc-greet/environment`.)
+
+## Integration (greetd + sway)
 
 Install the greeter tree to `/usr/share/apex-greet/` (so
 `Qt.resolvedUrl("assets/…")` resolves to
 `/usr/share/apex-greet/assets/…`) and drop `greetd-config.toml` at
-`/etc/greetd/config.toml`.
+`/etc/greetd/config.toml`. The `sway-greet.conf` and `labwc-greet/` files ship
+inside the same tree.
+
+**Base-image dependency.** `Containerfile.base` now installs **`sway`** and
+**`labwc`** (both stock Fedora 43) alongside `greetd`/`quickshell` — the
+images-ci work adds these packages; this greeter tree only references them. The
+abandoned `cage` package can be dropped once the sway host is HW-verified.
 
 ### Containerfile snippet
 
 ```dockerfile
-# Greeter runtime
-RUN dnf install -y greetd cage quickshell && dnf clean all
+# Greeter runtime — sway is the host, labwc the fallback (both native
+# wlr-layer-shell); cage is abandoned (M0 spike A: no layer-shell for quickshell).
+RUN dnf install -y greetd sway labwc quickshell && dnf clean all
 
-# Greeter files (from this repo's files/desktop/apex-greet)
+# Greeter files (from this repo's files/desktop/apex-greet) — includes
+# sway-greet.conf and labwc-greet/.
 COPY files/desktop/apex-greet /usr/share/apex-greet
 COPY files/branding/wallpapers/apex-wallpaper-default.jpg \
      /usr/share/backgrounds/apex/default.jpg
 
-# greetd config
+# greetd config — its default_session.command launches
+#   sway -c /usr/share/apex-greet/sway-greet.conf
 COPY files/desktop/apex-greet/greetd-config.toml /etc/greetd/config.toml
 
 # Writable state dir, owned by the greetd session user. On Fedora the
@@ -113,8 +190,8 @@ RUN printf 'd /var/lib/apex-greet 0755 greetd greetd -\n' \
 RUN systemctl enable greetd.service
 ```
 
-Package names (`greetd`, `cage`, `quickshell`) may differ per repo/COPR;
-`quickshell` must be the same major version these files were written
+Package names (`greetd`, `sway`, `labwc`, `quickshell`) may differ per
+repo/COPR; `quickshell` must be the same major version these files were written
 against (developed on Quickshell 0.3.0).
 
 ### State dir & SELinux
@@ -141,11 +218,12 @@ at the `PanelWindow` line — QML syntax/type errors would be reported
 *before* that. (Auth needs a live greetd socket, so full behaviour is
 only testable in a VM.)
 
-**Nested run on a dev box.** With cage installed, run the greeter inside
-a nested window on your existing Wayland session:
+**Nested run on a dev box.** With sway installed, run the host config nested
+inside a window on your existing Wayland session (edit the `exec` path to the
+in-tree `shell.qml`, or install the tree to `/usr/share/apex-greet` first):
 
 ```sh
-cage -- qs -p files/desktop/apex-greet/shell.qml
+sway -c files/desktop/apex-greet/sway-greet.conf
 ```
 
 greetd is absent, so `Greetd.available` is false and Enter shows
@@ -153,11 +231,26 @@ greetd is absent, so `Greetd.available` is false and Enter shows
 session picker, and shake animation are all exercised. Full auth +
 launch is validated in an APEX-OS VM where greetd owns the VT.
 
+**Config syntax check (no HW).** The sway config parses cleanly under
+`sway --validate`. sway 1.11's `--validate` still brings up the wlroots
+backend first, so in a headless container force the software/headless path:
+
+```sh
+# in a Fedora 43 container with sway installed:
+export XDG_RUNTIME_DIR=/tmp/xrt; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
+WLR_BACKENDS=headless WLR_RENDERER=pixman \
+  sway --validate -c /usr/share/apex-greet/sway-greet.conf   # exit 0 = clean
+```
+
+(`sway-greet.conf` was validated exactly this way against sway 1.11 in a
+`fedora-bootc:43` container — clean, exit 0. labwc has no `--validate`; its
+`rc.xml` is checked for XML well-formedness with `xmllint --noout`.)
+
 ## Differences from the Brain_Shell Lockscreen
 
 | Aspect | Brain_Shell `Lockscreen.qml` | apex-greet |
 |---|---|---|
-| Window primitive | `WlSessionLock` + `WlSessionLockSurface` | `PanelWindow` (layer-shell) over `Variants`/`Quickshell.screens`, under cage |
+| Window primitive | `WlSessionLock` + `WlSessionLockSurface` | `PanelWindow` (layer-shell) over `Variants`/`Quickshell.screens`, under sway (labwc fallback) |
 | Auth backend | `Quickshell.Services.Pam` (`PamContext`, config `system-auth`) | `Quickshell.Services.Greetd` (`createSession`/`respond`/`launch`) |
 | Unlock/exit | sets `LockState.locked = false` | `Greetd.launch(argv)` → quickshell exits, session starts |
 | Palette | `Theme`/`Colors` singletons (live, from colors.json) | inlined `ThemeGreet` (colors.json fallbacks), accent per edition |
@@ -169,17 +262,19 @@ launch is validated in an APEX-OS VM where greetd owns the VT.
 
 ## Known limitations / to verify
 
-- **Compositor host: cage is insufficient — use sway or labwc.** M0 spike A
-  found that `cage` 0.2.0 does not expose `wlr-layer-shell` to quickshell
-  0.3.0 (`Failed to initialize layershell integration`), so the greeter's
-  `PanelWindow` never gets a surface and nothing paints — even though
-  greetd starts, apex-greet launches, and the greetd/PAM conversation is
-  reachable. Switch `default_session.command` to a compositor that
-  provides layer-shell: `sway` (1.11) or `labwc` (0.9.6), both packaged,
-  e.g. `sway -c /usr/share/apex-greet/sway-greet.conf` running quickshell
-  as its only client. Live render + login must be re-verified on real
-  hardware or a GPU/virgl-capable runner (headless QEMU with `virtio-vga`
-  gives no GL; `WLR_RENDERER=pixman` crash-looped cage in the spike).
+- **Live render under sway not yet HW-verified (the key M1 open item).**
+  M1 switched the host from `cage` to `sway` (see **Compositor host**), which
+  fixes the layer-shell gap that kept the greeter from painting (M0 spike A:
+  `cage` 0.2.0 gave `Failed to initialize layershell integration`). The
+  `sway-greet.conf` config is syntax-clean (`sway --validate`, sway 1.11), but
+  **quickshell 0.3.0's `PanelWindow` actually mapping and painting under sway
+  has NOT been confirmed on real pixels yet** — M0's headless QEMU could not
+  present a capturable GL surface (`virtio-vga` gives no usable GL scanout;
+  `egl-headless` exposes no 2D surface to `screendump`). Verify visual render +
+  a full login on real hardware or a GPU/virgl-capable runner. Also unverified
+  there: the no-GPU `WLR_RENDERER=pixman` fallback (it crash-looped *cage* in
+  the spike; sway's pixman renderer is expected to be more robust but is
+  untested) — see **No-GPU render fallback**.
 - **`echoResponse` heuristic.** Hidden prompts get the password, visible
   prompts get the username. Correct for the usual `pam_unix` password
   prompt after `createSession`; a PAM stack that asks something else
