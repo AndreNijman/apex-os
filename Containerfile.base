@@ -144,7 +144,7 @@ RUN set -eux; \
         matugen \
         pipewire pipewire-pulseaudio wireplumber rtkit \
         playerctl brightnessctl wl-clipboard slurp wtype cliphist \
-        upower libnotify lm_sensors rfkill cava wf-recorder ImageMagick \
+        upower libnotify lm_sensors cava wf-recorder ImageMagick \
         qt6ct mpv-mpris xdg-user-dirs polkit gnome-keyring \
         gammastep geoclue2 jq; \
     dnf5 -y copr disable solopasha/hyprland; \
