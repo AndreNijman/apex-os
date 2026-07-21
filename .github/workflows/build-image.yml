@@ -254,7 +254,7 @@ jobs:
             -v "$(pwd)/output":/output \
             -v /var/lib/containers/storage:/var/lib/containers/storage \
             quay.io/centos-bootc/bootc-image-builder:latest \
-            --type anaconda-iso --local \
+            --type anaconda-iso --rootfs btrfs --local \
             "$IMAGE:daily"
           ls -lhR output/bootiso || ls -lhR output
 
