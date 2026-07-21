@@ -1,1 +1,48 @@
-# APEX-OS daily image — see docs/; not yet implemented (M1)
+# ─────────────────────────────────────────────────────────────────────────
+# APEX-OS — Daily edition (chartreuse)
+#
+#   FROM apex-base → stamp VARIANT=Daily + laptop/battery skeleton.
+#
+# The heavy lifting (CachyOS kernel, desktop/greeter stack, scx, Bazaar) is all
+# in the base. The Daily edition is intentionally thin for M1: it stamps the
+# edition (which drives apex-greet's chartreuse branding via os-release
+# VARIANT_ID) and lays the groundwork for the laptop power story. The full §10
+# battery stack (charge thresholds, ASPM/ABM/APST, sysctl/udev tuning,
+# AC/battery auto-switching) is owned by apexd at M3 — only the placeholder is
+# here.
+# ─────────────────────────────────────────────────────────────────────────
+ARG BASE=localhost/apex-base:latest
+FROM ${BASE}
+
+ARG APEX_REVISION=dev
+LABEL org.opencontainers.image.title="APEX-OS Daily" \
+      org.opencontainers.image.description="APEX-OS Daily edition (chartreuse) — general-purpose daily driver" \
+      org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \
+      org.opencontainers.image.revision="${APEX_REVISION}" \
+      org.opencontainers.image.version="daily" \
+      org.opencontainers.image.vendor="APEX-OS"
+
+# ── Edition stamp ──────────────────────────────────────────────────────────
+# os-release VARIANT_ID=daily is what apex-greet reads to pick the chartreuse
+# spark + accent. /etc/os-release is a symlink into /usr/lib/os-release, so
+# append there. (The base deliberately leaves this unset.)
+RUN set -eux; \
+    printf 'VARIANT="Daily"\nVARIANT_ID=daily\n' >> /usr/lib/os-release
+
+# ── Laptop / battery skeleton ──────────────────────────────────────────────
+# power-profiles-daemon (NOT tlp — tlp conflicts with PPD on Fedora and fights
+# the platform profile driver; the plan standardises on PPD + apexd's own
+# sysctl/udev layer). Own dnf transaction, `dnf5 clean all`.
+#
+# amd-debug-tools (the s2idle "doctor" for `apex doctor suspend`) is NOT yet
+# packaged for F43 — install it here once it lands; for now it is a documented
+# gap. The rest of the §10 battery stack (charge thresholds 75-80 with the
+# udev-race fix, DYTC lapmode, ASPM/ABM/APST, RyzenAdj-under-lockdown via a
+# signed ryzen_smu akmod) is apexd's job at M3 and is intentionally absent here.
+RUN set -eux; \
+    dnf5 -y install power-profiles-daemon; \
+    systemctl enable power-profiles-daemon.service; \
+    dnf5 clean all
+
+# Informational lint.
+RUN bootc container lint || true

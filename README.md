@@ -38,7 +38,11 @@ contexts. See [docs/branding.md](docs/branding.md).
 
 ## Status
 
-**Pre-M0 planning.** Branding is complete (logos, Plymouth themes for both
-editions, default wallpaper). Container images, kernel, apexd, and CI are
-scaffolded but **not yet implemented** — image work lands in M1. See
-[docs/experiments.md](docs/experiments.md) for the log of exploratory branches.
+**M1 — production images + CI.** The three images build locally (shared
+`Containerfile.base` → `daily` / `gaming`, with the CachyOS kernel, desktop /
+greeter stack, scx, and Bazaar), the DIY NVIDIA akmod builds against the shared
+kernel, and `.github/workflows/build-image.yml` builds, cosign-signs (keyless),
+and pushes all three to GHCR. See [docs/m1-notes.md](docs/m1-notes.md) for build
+results, package drift, and open items (greeter render still needs a GL target).
+Earlier: [docs/m0-results.md](docs/m0-results.md) (spikes) and
+[docs/experiments.md](docs/experiments.md).
