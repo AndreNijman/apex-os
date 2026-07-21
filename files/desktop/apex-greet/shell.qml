@@ -11,11 +11,13 @@ import Quickshell.Wayland
 // stage, so the palette, wallpaper, clock and all state are inlined
 // here instead of imported.
 //
-// Runtime model: this runs under `cage` (a kiosk Wayland compositor)
-// launched by greetd — NOT a session lock. cage implements
-// wlr-layer-shell (the same path gtkgreet uses), so the fullscreen
-// surface is a PanelWindow anchored to all four edges with Exclusive
-// keyboard focus, one per output via Variants over Quickshell.screens.
+// Runtime model: this runs under `sway` (a wlroots kiosk compositor)
+// launched by greetd — NOT a session lock. sway implements
+// wlr-layer-shell natively (the same path gtkgreet uses), so the
+// fullscreen surface is a PanelWindow anchored to all four edges with
+// Exclusive keyboard focus, one per output via Variants over
+// Quickshell.screens. (Host changed cage → sway in M1: cage 0.2.0 did
+// not serve layer-shell to quickshell 0.3.0 — see M0 spike A / README.)
 //
 // Auth backend is Quickshell.Services.Greetd (see GreetContext.qml),
 // which replaces the Lockscreen's PamContext.
