@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=niri
+Comment=A scrollable-tiling Wayland compositor
+# `niri --session` also imports the environment into the systemd user manager
+# and D-Bus (the supported way to start a niri session), matching how the
+# greeter execs it: apex-greet runs the Exec line via `sh -lc "<Exec>"`.
+Exec=niri --session
+Type=Application
+DesktopNames=niri
+Keywords=tiling;wayland;compositor;
