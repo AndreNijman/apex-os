@@ -174,6 +174,11 @@ Item {
                 selectionColor:      root.theme.active
                 font.family:         root.theme.fontFamily
                 font.pixelSize:      16
+                // Tab / Shift+Tab move between the two pills so a
+                // keyboard-only login works when no username is prefilled.
+                activeFocusOnTab:    true
+                KeyNavigation.tab:     passwordInput
+                KeyNavigation.backtab: passwordInput
                 onTextChanged: root.ctx.username = text
                 onAccepted:    passwordInput.forceActiveFocus()
                 Component.onCompleted: text = root.ctx.username
@@ -232,6 +237,10 @@ Item {
                 passwordCharacter:   "●"
                 passwordMaskDelay:   0
                 activeFocusOnPress:  true
+                // Tab / Shift+Tab step back to the username pill.
+                activeFocusOnTab:    true
+                KeyNavigation.tab:     usernameInput
+                KeyNavigation.backtab: usernameInput
 
                 // Mirror the buffer into shared state (used by Greetd).
                 onTextChanged: {
@@ -392,7 +401,16 @@ Item {
         NumberAnimation { target: root; property: "shakeOffset"; to:   0; duration: 45 }
     }
 
-    // Grab keyboard focus as soon as the surface appears.
-    Component.onCompleted: passwordInput.forceActiveFocus()
-    onVisibleChanged: if (visible) passwordInput.forceActiveFocus()
+    // Grab keyboard focus as soon as the surface appears. Start on the
+    // username field when nothing is prefilled (fresh boot / no last-user)
+    // so a username can be typed without a mouse; otherwise go straight to
+    // the password field, matching the returning-user fast path.
+    function focusInitial() {
+        if (root.ctx.username.length === 0)
+            usernameInput.forceActiveFocus()
+        else
+            passwordInput.forceActiveFocus()
+    }
+    Component.onCompleted: focusInitial()
+    onVisibleChanged: if (visible) focusInitial()
 }
