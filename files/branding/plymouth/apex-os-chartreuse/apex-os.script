@@ -1,0 +1,179 @@
+# APEX-OS boot splash -- "Convergence"
+# 4 comets orbit and accelerate, spiral into the center (anticipation),
+# flash, and morph into the spark (back-out overshoot + rotation settle).
+# Wordmark rises in underneath; spark holds with a subtle breathing loop.
+
+HI_R = 0.851; HI_G = 0.976; HI_B = 0.616;   # #D9F99D (chartreuse highlight)
+
+PI = 3.14159265;
+
+w = Window.GetWidth();
+h = Window.GetHeight();
+
+Window.SetBackgroundTopColor(0.043, 0.055, 0.078);
+Window.SetBackgroundBottomColor(0.016, 0.02, 0.031);
+
+mode = Plymouth.GetMode();
+
+cx = w / 2;
+cy = h / 2 - h * 0.06;
+
+if (w < h) { base = w * 0.26; } else { base = h * 0.26; }
+R0 = base * 0.95;
+cw = base * 0.38;
+
+comet_image = Image("comet.png");
+glow_image  = Image("glow.png");
+spark_image = Image("spark.png");
+flash_image = Image("flash.png");
+
+# --- comets ---
+ncomets = 4;
+for (i = 0; i < ncomets; i++) {
+  comet[i] = Sprite();
+  comet[i].SetOpacity(0);
+}
+
+# --- center glow / flash ---
+glow = Sprite();
+glow.SetOpacity(0);
+
+# --- spark + white energy overlay ---
+spark = Sprite();
+spark.SetOpacity(0);
+flash = Sprite();
+flash.SetOpacity(0);
+spark_done = 0;
+
+# --- wordmark ---
+wm_image = Image.Text("A P E X   O S", 0.85, 0.87, 0.92);
+wordmark = Sprite(wm_image);
+wordmark.SetOpacity(0);
+
+# --- password prompt sprites (LUKS) ---
+prompt_sprite = Sprite();
+bullet_sprite = Sprite();
+dim = 1;
+
+t = 0;
+if (mode == "shutdown") { t = 200; }   # skip intro, static spark
+
+fun refresh () {
+  t++;
+
+  # ===== phase 1+2: accelerating orbit, then spiral in (t 1..54) =====
+  if (t <= 54) {
+    theta = 0.06 * t + 0.0022 * t * t;       # ease-in angular acceleration
+    if (t < 30) { R = R0; }
+    else {
+      p = (t - 30) / 22; if (p > 1) { p = 1; }
+      R = R0 * (1 - p) * (1 - p);            # accelerating contraction
+    }
+
+    if (t < 10)       { cop = t / 10; }
+    else if (t > 46)  { cop = (52 - t) / 6; if (cop < 0) { cop = 0; } }
+    else              { cop = 1; }
+
+    for (i = 0; i < ncomets; i++) {
+      a = theta + i * PI / 2;
+      dx = R * Math.Cos(a);
+      dy = R * Math.Sin(a);
+      phi = a + PI / 2;                      # tangent = direction of travel
+      cimg = comet_image.Scale(cw, cw).Rotate(phi);
+      comet[i].SetImage(cimg);
+      comet[i].SetPosition(cx + dx - cimg.GetWidth() / 2,
+                           cy + dy - cimg.GetHeight() / 2, 10);
+      comet[i].SetOpacity(cop * dim);
+    }
+  } else {
+    for (i = 0; i < ncomets; i++) { comet[i].SetOpacity(0); }
+  }
+
+  # ===== glow: gather, then flash outward (t 38..62) =====
+  if (t >= 38 && t < 50) {
+    gop = (t - 38) / 12 * 0.85;
+    gs  = base * (0.3 + 0.3 * (t - 38) / 12);
+  } else if (t >= 50 && t <= 62) {
+    gop = 1 - (t - 50) / 12;
+    gs  = base * (0.6 + 1.4 * (t - 50) / 12);
+  } else { gop = 0; gs = 2; }
+
+  if (gop > 0) {
+    gimg = glow_image.Scale(gs, gs);
+    glow.SetImage(gimg);
+    glow.SetPosition(cx - gimg.GetWidth() / 2, cy - gimg.GetHeight() / 2, 8);
+  }
+  glow.SetOpacity(gop * dim);
+
+  # ===== phase 3: spark morph -- back-out overshoot + rotation settle (t 50..70) =====
+  if (t >= 50 && t <= 70) {
+    p = (t - 50) / 20; if (p > 1) { p = 1; }
+    q = p - 1;
+    s   = 1 + 2.70158 * q * q * q + 1.70158 * q * q;   # back-out ease (overshoot ~1.1)
+    rot = -2.4 * q * q * q;                            # spin settles to 0
+    ss  = base * s; if (ss < 4) { ss = 4; }
+
+    simg = spark_image.Scale(ss, ss).Rotate(rot);
+    spark.SetImage(simg);
+    spark.SetPosition(cx - simg.GetWidth() / 2, cy - simg.GetHeight() / 2, 11);
+    if (p < 0.34) { spark.SetOpacity(p / 0.34 * dim); }
+    else          { spark.SetOpacity(1 * dim); }
+
+    fop = (1 - p) * (1 - p);                           # white-hot, cools to brand color
+    fimg = flash_image.Scale(ss, ss).Rotate(rot);
+    flash.SetImage(fimg);
+    flash.SetPosition(cx - fimg.GetWidth() / 2, cy - fimg.GetHeight() / 2, 12);
+    flash.SetOpacity(fop * 0.9 * dim);
+  }
+  if (t > 70 && !spark_done) {
+    simg = spark_image.Scale(base, base);
+    spark.SetImage(simg);
+    spark.SetPosition(cx - simg.GetWidth() / 2, cy - simg.GetHeight() / 2, 11);
+    spark_done = 1;
+    flash.SetOpacity(0);
+  }
+  if (t > 70) {   # idle breathing
+    spark.SetOpacity((0.93 + 0.07 * Math.Sin((t - 70) / 9)) * dim);
+  }
+
+  # ===== phase 4: wordmark rises in (t 62..84) =====
+  if (t >= 62 && t <= 84) {
+    p = (t - 62) / 22; q = 1 - p;
+    wordmark.SetOpacity((1 - q * q) * dim);
+    wordmark.SetPosition(cx - wm_image.GetWidth() / 2,
+                         cy + base / 2 + h * 0.06 + q * q * h * 0.02, 10);
+  } else if (t > 84) {
+    wordmark.SetOpacity(1 * dim);
+  }
+
+  # ===== idle: spark breathing only =====
+}
+
+fun display_password (prompt, bullets) {
+  dim = 0.25;
+
+  pimg = Image.Text(prompt, 0.85, 0.87, 0.92);
+  prompt_sprite.SetImage(pimg);
+  prompt_sprite.SetPosition(cx - pimg.GetWidth() / 2, cy - base / 8, 20);
+  prompt_sprite.SetOpacity(1);
+
+  btxt = "";
+  for (i = 0; i < bullets; i++) { btxt = btxt + "* "; }
+  bimg = Image.Text(btxt, HI_R, HI_G, HI_B);
+  bullet_sprite.SetImage(bimg);
+  bullet_sprite.SetPosition(cx - bimg.GetWidth() / 2, cy + base / 8, 20);
+  bullet_sprite.SetOpacity(1);
+}
+
+fun display_normal () {
+  dim = 1;
+  prompt_sprite.SetOpacity(0);
+  bullet_sprite.SetOpacity(0);
+}
+
+fun message (text) { }
+
+Plymouth.SetRefreshFunction(refresh);
+Plymouth.SetDisplayPasswordFunction(display_password);
+Plymouth.SetDisplayNormalFunction(display_normal);
+Plymouth.SetMessageFunction(message);

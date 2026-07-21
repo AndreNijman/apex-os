@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=APEX-OS Chartreuse
+Description=APEX-OS boot splash (chartreuse spark)
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/apex-os-chartreuse
+ScriptFile=/usr/share/plymouth/themes/apex-os-chartreuse/apex-os.script
