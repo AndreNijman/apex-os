@@ -146,7 +146,7 @@ RUN set -eux; \
     dnf5 -y install \
         hyprland quickshell greetd sway labwc cage xwayland-satellite foot \
         jetbrains-mono-fonts fontconfig flatpak distrobox git-core niri \
-        hyprlock hypridle hyprsunset hyprshot grimblast polkit-gnome \
+        hyprlock hypridle hyprsunset hyprshot grimblast mate-polkit \
         pipewire pipewire-pulseaudio wireplumber rtkit \
         playerctl brightnessctl wl-clipboard slurp wtype cliphist \
         upower libnotify lm_sensors cava wf-recorder ImageMagick \
