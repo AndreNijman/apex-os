@@ -1,0 +1,14 @@
+// APEX-OS: let an active local user start/stop/restart ONLY sing-box.service
+// without a password, so APEX Shell's VPN tab can toggle the tunnel via
+// systemctl (no sudo). Mirrors the rule the shell ships in dots-extra/polkit.
+// Ordered 49- so it precedes the distro 50-* defaults.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "sing-box.service") {
+        var verb = action.lookup("verb");
+        if ((verb == "start" || verb == "stop" || verb == "restart") &&
+            subject.local && subject.active) {
+            return polkit.Result.YES;
+        }
+    }
+});

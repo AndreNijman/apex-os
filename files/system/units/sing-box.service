@@ -1,0 +1,21 @@
+# sing-box VPN, shipped DISABLED — APEX Shell's VPN tab starts/stops it on
+# demand via systemctl (authorized by the polkit rule 49-apex-singbox.rules,
+# no password). The user supplies /etc/sing-box/config.json (rendered by the
+# shell from its template). Never autostarts.
+[Unit]
+Description=sing-box VPN (APEX-OS; toggled by APEX Shell)
+Documentation=https://sing-box.sagernet.org
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/sing-box/config.json
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
+Restart=on-failure
+RestartSec=2
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

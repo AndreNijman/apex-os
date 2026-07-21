@@ -27,6 +27,31 @@
 # uninstallable there. F43 ships libdisplay-info 0.2 (.so.2) and the whole stack
 # resolves. Revisit F44 once the COPR rebuilds aquamarine. (M0 spike A.)
 # ─────────────────────────────────────────────────────────────────────────
+# ═══ Builder stage — compile Rust components, keep toolchain out of the image ═
+#   • apexd + apex  (the workspace under apexd/; embeds config/sysprofiles/*.toml
+#     via include_str!, so config/ must sit at ../../../config relative to the
+#     crate — hence both apexd/ and config/ are copied under /build/)
+#   • awww + awww-daemon (the swww fork APEX Shell's WallpaperService drives;
+#     not packaged for Fedora, so built from source). Best-effort: a build
+#     failure writes a marker and does NOT abort the image (wallpaper daemon
+#     degrades to static; every other feature is unaffected).
+FROM quay.io/fedora/fedora-bootc:43 AS builder
+RUN dnf5 -y install cargo rust git-core >/dev/null && dnf5 clean all
+COPY apexd/ /build/apexd/
+COPY config/ /build/config/
+RUN set -eux; cd /build/apexd; cargo build --release --locked; \
+    install -Dm755 target/release/apexd /out/usr/bin/apexd; \
+    install -Dm755 target/release/apex  /out/usr/bin/apex
+RUN set -eux; \
+    if git clone --depth 1 https://codeberg.org/LGFae/awww /build/awww \
+       && cd /build/awww && cargo build --release; then \
+        for b in target/release/awww target/release/awww-daemon; do \
+            [ -x "$b" ] && install -Dm755 "$b" "/out/usr/bin/$(basename "$b")"; \
+        done; echo "awww: built" > /out/awww-status; \
+    else echo "awww: BUILD FAILED (wallpaper daemon absent; non-fatal)" > /out/awww-status; \
+    fi; cat /out/awww-status
+
+# ─────────────────────────────────────────────────────────────────────────
 FROM quay.io/fedora/fedora-bootc:43
 
 # OCI provenance. The git SHA is injected by CI (--build-arg APEX_REVISION=…)
@@ -111,21 +136,20 @@ RUN set -eux; \
 RUN set -eux; \
     dnf5 -y copr enable solopasha/hyprland; \
     dnf5 -y copr enable errornointernet/quickshell; \
-    dnf5 -y install --setopt=install_weak_deps=False \
-        hyprland \
-        quickshell \
-        greetd \
-        sway \
-        labwc \
-        cage \
-        xwayland-satellite \
-        foot \
-        jetbrains-mono-fonts \
-        fontconfig \
-        flatpak \
-        distrobox; \
+    dnf5 -y copr enable atim/matugen; \
+    dnf5 -y install \
+        hyprland quickshell greetd sway labwc cage xwayland-satellite foot \
+        jetbrains-mono-fonts fontconfig flatpak distrobox git-core niri \
+        hyprlock hypridle hyprsunset hyprpolkitagent hyprshot grimblast \
+        matugen \
+        pipewire pipewire-pulseaudio wireplumber rtkit \
+        playerctl brightnessctl wl-clipboard slurp wtype cliphist \
+        upower libnotify lm_sensors rfkill cava wf-recorder ImageMagick \
+        qt6ct mpv-mpris xdg-user-dirs polkit gnome-keyring \
+        gammastep geoclue2 jq; \
     dnf5 -y copr disable solopasha/hyprland; \
     dnf5 -y copr disable errornointernet/quickshell; \
+    dnf5 -y copr disable atim/matugen; \
     dnf5 clean all
 
 # ── Stage 3: JetBrainsMono Nerd Font ───────────────────────────────────────
@@ -162,6 +186,58 @@ RUN set -eux; \
     dnf5 -y install bazaar; \
     dnf5 -y copr disable ublue-os/packages; \
     dnf5 clean all
+
+# ── Stage 5b: apexd + apex CLI, sysprofiles, D-Bus/polkit, sing-box ─────────
+# apexd (power/profile daemon) + apex CLI from the builder stage; the six
+# sysprofiles (also embedded in the binary) ship to the runtime override dir.
+# D-Bus system service + policy + unit wire it up; polkit lets an active local
+# user set tiers/thresholds passwordless. awww lands too if it built.
+COPY --from=builder /out/usr/bin/ /usr/bin/
+COPY config/sysprofiles/ /usr/share/apexos/sysprofiles/
+COPY apexd/apexd/apexd.service /usr/lib/systemd/system/apexd.service
+COPY files/system/dbus-1/system-services/org.apexos.Apexd1.service \
+     /usr/share/dbus-1/system-services/org.apexos.Apexd1.service
+COPY files/system/dbus-1/system.d/org.apexos.Apexd1.conf \
+     /usr/share/dbus-1/system.d/org.apexos.Apexd1.conf
+COPY files/system/polkit-1/actions/org.apexos.apexd.policy \
+     /usr/share/polkit-1/actions/org.apexos.apexd.policy
+COPY files/system/polkit-1/rules.d/49-apex-singbox.rules \
+     /usr/share/polkit-1/rules.d/49-apex-singbox.rules
+COPY files/system/units/sing-box.service /usr/lib/systemd/system/sing-box.service
+RUN systemctl enable apexd.service
+
+# sing-box official static binary (not in Fedora). Shipped DISABLED (unit gates
+# on the user's /etc/sing-box/config.json). Non-fatal: a fetch failure leaves the
+# VPN tab degraded but never aborts the image build.
+RUN set -eux; \
+    if ver="$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name | sed 's/^v//')" \
+       && [ -n "$ver" ] \
+       && curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-amd64.tar.gz" -o /tmp/sb.tgz \
+       && tar -xzf /tmp/sb.tgz -C /tmp; then \
+        install -Dm755 "/tmp/sing-box-${ver}-linux-amd64/sing-box" /usr/bin/sing-box; \
+        /usr/bin/sing-box version; echo "sing-box ${ver} installed"; \
+    else echo "sing-box: fetch FAILED (VPN tab degraded; non-fatal)"; fi; \
+    rm -rf /tmp/sb.tgz /tmp/sing-box-*-linux-amd64
+
+# ── Stage 5c: APEX Shell first-boot provisioner (per-user) ─────────────────
+# Clones APEX Shell into each user's $HOME on first login + seeds config; enabled
+# globally so it runs for every user.
+COPY files/system/units/apex-shell-firstrun.service \
+     /usr/lib/systemd/user/apex-shell-firstrun.service
+COPY files/system/libexec/apex-shell-firstrun /usr/libexec/apex-shell-firstrun
+RUN systemctl --global enable apex-shell-firstrun.service
+
+# Greeter session picker: offer Hyprland + niri only. sway/labwc are the greeter
+# HOST compositor, not user sessions — strip their wayland-session files so they
+# are never offered as logins. apex-greet enumerates /usr/share/wayland-sessions.
+COPY files/desktop/wayland-sessions/niri.desktop \
+     /usr/share/wayland-sessions/niri.desktop
+RUN set -eux; \
+    rm -f /usr/share/wayland-sessions/sway.desktop \
+          /usr/share/wayland-sessions/labwc.desktop; \
+    [ -f /usr/share/wayland-sessions/hyprland.desktop ] || \
+      printf '[Desktop Entry]\nName=Hyprland\nComment=Dynamic tiling Wayland compositor\nExec=Hyprland\nType=Application\nDesktopNames=Hyprland\n' \
+        > /usr/share/wayland-sessions/hyprland.desktop
 
 # ── Stage 6: flathub remote (first-boot) + greeter payload + config ────────
 # Flathub CANNOT reliably be added at build time on bootc: `flatpak remote-add

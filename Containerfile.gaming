@@ -92,12 +92,10 @@ RUN set -eux; \
 #   overlays/capture : obs-studio obs-vkcapture
 
 # ═══════════════════════════════════════════════════════════════════════════
-# M2 — branding + shell provisioner + greeter session finalization
+# M2 — edition branding (Plymouth). Shared M2 (provisioner, session curation) +
+# M3 (apexd) live in the BASE; this flavor only sets its gold Plymouth theme.
+# Placed AFTER the GPU stage so the Plymouth initramfs rebuild is the one shipped.
 # ═══════════════════════════════════════════════════════════════════════════
-# Placed AFTER the GPU stage so the final initramfs (rebuilt below for Plymouth)
-# is the one that ships. The provisioner + session curation blocks are identical
-# to Containerfile.daily; only the Plymouth theme differs (Gaming → gold). See
-# docs/m2-notes.md.
 
 # ── Plymouth boot splash: apex-os-gold (Gaming) ────────────────────────────
 # VARIANT_ID=gaming boots the gold spark. Copy the theme, set it as the Plymouth
@@ -127,37 +125,5 @@ RUN set -eux; \
     mkdir -p /usr/lib/bootc/kargs.d; \
     printf 'kargs = ["quiet", "splash"]\n' \
         > /usr/lib/bootc/kargs.d/20-apex-plymouth.toml
-
-# ── First-login shell provisioner (systemd USER service) ───────────────────
-# Ships the per-user first-boot provisioner and enables it image-wide with
-# `systemctl --global enable`, which symlinks the user unit into every user's
-# default.target.wants. On first login it clones APEX Shell into the user's
-# home and seeds the shell config (see files/system/libexec/apex-shell-firstrun
-# and docs/m2-notes.md). Requires `git` at RUNTIME — a base package addition
-# the base owner must fold in (documented in docs/m2-notes.md).
-COPY files/system/units/apex-shell-firstrun.service \
-     /usr/lib/systemd/user/apex-shell-firstrun.service
-COPY files/system/libexec/apex-shell-firstrun \
-     /usr/libexec/apex-shell-firstrun
-RUN set -eux; \
-    chmod 0755 /usr/libexec/apex-shell-firstrun; \
-    systemctl --global enable apex-shell-firstrun.service
-
-# ── Greeter session picker: offer Hyprland + niri only ─────────────────────
-# apex-greet enumerates /usr/share/wayland-sessions/*.desktop. The base installs
-# sway + labwc as the greeter's HOST compositor (not user sessions), and both
-# ship a wayland-session file — remove them so they are never offered as logins.
-# Hyprland ships its own session file (guaranteed with a fallback); niri's is
-# shipped here. `niri` itself is a base package addition (see docs/m2-notes.md);
-# without it the niri session is offered but will not launch.
-COPY files/desktop/wayland-sessions/niri.desktop \
-     /usr/share/wayland-sessions/niri.desktop
-RUN set -eux; \
-    rm -f /usr/share/wayland-sessions/sway.desktop \
-          /usr/share/wayland-sessions/labwc.desktop; \
-    if [ ! -f /usr/share/wayland-sessions/hyprland.desktop ]; then \
-        printf '[Desktop Entry]\nName=Hyprland\nComment=Dynamic tiling Wayland compositor\nExec=Hyprland\nType=Application\nDesktopNames=Hyprland\n' \
-            > /usr/share/wayland-sessions/hyprland.desktop; \
-    fi
 
 RUN bootc container lint || true
