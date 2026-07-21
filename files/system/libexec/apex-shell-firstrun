@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX-OS — first-login provisioner
+#  Installed to /usr/libexec/apex-shell-firstrun; driven by the per-user
+#  systemd unit apex-shell-firstrun.service (see files/system/units/).
+#
+#  Runs ONCE per user, at first login. It clones the public APEX Shell repo
+#  into the user's home and seeds the per-user config the shell expects.
+#
+#  Why not just run the shell's own install.sh?
+#    install.sh (github.com/AndreNijman/apex-shell) is an ARCH installer:
+#      * it hard-`die`s on any non-Arch distro (APEX-OS is fedora-bootc), and
+#      * step 4 runs `dots-extra/install-arch.sh`, which does `sudo pacman`/AUR
+#        package installs — impossible from an unprivileged user service, and
+#        unnecessary here because every dependency is baked into the image, and
+#      * it requires a pre-existing ~/.config/hypr config (else it `die`s).
+#    So this script REPLICATES install.sh's per-user *seeding* (the parts that
+#    are not package installation): the shallow clone, the portable matugen
+#    render (install.sh step 5), and the config-dir seeding + Hyprland autostart
+#    wiring (dots-extra/install-arch.sh steps 5-6). The seeding is kept faithful
+#    so the shell's auto-updater and hot-reload keep working off the live clone.
+#
+#  Idempotent + network-failure-tolerant: writes the marker ONLY on full
+#  success; any failure leaves it absent so the next login retries.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+REPO_URL="https://github.com/AndreNijman/apex-shell"
+SRC_DIR="${HOME}/.local/src/apex-shell"
+CFG_DIR="${HOME}/.config/apex-shell"
+MARKER="${CFG_DIR}/.provisioned"
+SYS_WALLPAPER="/usr/share/backgrounds/apex/default.jpg"
+
+log() { printf '[apex-shell-firstrun] %s\n' "$*"; }
+
+# Belt-and-suspenders: the unit's ConditionPathExists already gates this, but a
+# manual invocation should also no-op once provisioned.
+if [ -e "${MARKER}" ]; then
+    log "already provisioned (${MARKER} present) — nothing to do."
+    exit 0
+fi
+
+# ── 1. Wait (briefly) for network ────────────────────────────────────────────
+# A first login can beat NetworkManager reaching online; poll the remote a few
+# times. If still offline we exit non-zero WITHOUT the marker, so the unit
+# retries at the next login (network-failure-tolerant, per the design).
+online() { git ls-remote --exit-code "${REPO_URL}" HEAD >/dev/null 2>&1; }
+if ! online; then
+    for i in $(seq 1 15); do
+        log "waiting for network (${i}/15)..."
+        sleep 2
+        online && break
+    done
+fi
+if ! online; then
+    log "network still unavailable — leaving marker unset; will retry next login."
+    exit 1
+fi
+
+# ── 2. Clone (shallow) or refresh the shell checkout ─────────────────────────
+mkdir -p "$(dirname "${SRC_DIR}")"
+if [ -d "${SRC_DIR}/.git" ]; then
+    log "existing checkout found — fetching latest main."
+    git -C "${SRC_DIR}" fetch --depth 1 origin main
+    git -C "${SRC_DIR}" reset --hard origin/main
+else
+    # Scrub any partial/non-git dir left by a failed earlier run, then clone.
+    [ -e "${SRC_DIR}" ] && rm -rf "${SRC_DIR}"
+    log "cloning ${REPO_URL} (shallow) -> ${SRC_DIR}"
+    git clone --depth 1 "${REPO_URL}" "${SRC_DIR}"
+fi
+
+# ── 3. Render matugen.toml (install.sh step 5) ───────────────────────────────
+# matugen does NOT expand ~ or env vars in template paths, so the shipped
+# matugen.toml.in carries @SRCDIR@/@HOME@ placeholders we substitute here into
+# an absolute-path config. Matugen is REQUIRED for the shell's theming.
+mkdir -p "${CFG_DIR}"
+MATUGEN_TMPL="${SRC_DIR}/src/config/matugen.toml.in"
+if [ -f "${MATUGEN_TMPL}" ]; then
+    sed -e "s|@SRCDIR@|${SRC_DIR}|g" -e "s|@HOME@|${HOME}|g" \
+        "${MATUGEN_TMPL}" > "${CFG_DIR}/matugen.toml"
+    log "rendered ${CFG_DIR}/matugen.toml"
+else
+    log "WARN: matugen template not found at ${MATUGEN_TMPL}"
+fi
+
+# ── 4. Seed config dirs + defaults (install-arch.sh step 6) ──────────────────
+USER_DATA="${CFG_DIR}/src/user_data"
+mkdir -p "${USER_DATA}" \
+         "${HOME}/.config/hypr/shaders" \
+         "${HOME}/.config/matugen/templates" \
+         "${HOME}/.cache/apex-shell" \
+         "${HOME}/Pictures/Wallpapers"
+
+# configProvider=conf: this provisioner seeds a hyprland.conf (not a .lua), so
+# the shell writes keybind edits back to the .conf. keybinds.json defaults empty.
+[ -f "${USER_DATA}/config_Provider.json" ] || \
+    printf '{"configProvider": "conf"}\n' > "${USER_DATA}/config_Provider.json"
+[ -f "${USER_DATA}/keybinds.json" ] || \
+    printf '{}\n' > "${USER_DATA}/keybinds.json"
+[ -f "${HOME}/.cache/apex-shell/colors.json" ] || \
+    : > "${HOME}/.cache/apex-shell/colors.json"
+
+# hypridle config (don't clobber a user-customised one).
+cp -n "${SRC_DIR}/src/config/hypridle.conf" "${HOME}/.config/hypr/" 2>/dev/null || true
+
+# Seed the shell's shipped wallpapers, plus the system APEX wallpaper the
+# greeter uses (/usr/share/backgrounds/apex/default.jpg) so shell + greeter
+# share one default look.
+cp -n -r "${SRC_DIR}/src/assets/wallpapers/." "${HOME}/Pictures/Wallpapers/" 2>/dev/null || true
+[ -f "${SYS_WALLPAPER}" ] && \
+    cp -n "${SYS_WALLPAPER}" "${HOME}/Pictures/Wallpapers/apex-os-default.jpg" 2>/dev/null || true
+
+# ── 5. Hyprland autostart (install-arch.sh step 5, self-seeding) ─────────────
+# install-arch.sh appends the autostart block to a PRE-EXISTING hyprland.conf.
+# A fresh APEX-OS user has none, so seed a usable base first (distro default if
+# present, else a minimal one), THEN append the APEX Shell autostart block
+# (guarded by a marker so re-runs never duplicate it).
+HYPR_CONF="${HOME}/.config/hypr/hyprland.conf"
+if [ ! -f "${HYPR_CONF}" ]; then
+    if [ -f /usr/share/hypr/hyprland.conf ]; then
+        cp /usr/share/hypr/hyprland.conf "${HYPR_CONF}"
+    elif [ -f /usr/share/hyprland/hyprland.conf ]; then
+        cp /usr/share/hyprland/hyprland.conf "${HYPR_CONF}"
+    else
+        cat > "${HYPR_CONF}" <<'HYPRDEF'
+# Minimal APEX-OS Hyprland base (seeded by apex-shell-firstrun).
+# Extend freely — this only guarantees a usable session with a terminal;
+# the APEX Shell autostart block below is appended after it.
+$mainMod = SUPER
+monitor = , preferred, auto, 1
+env = XCURSOR_SIZE,24
+bind = $mainMod, Return, exec, foot
+bind = $mainMod, Q, killactive,
+bind = $mainMod SHIFT, E, exit,
+bind = $mainMod, Space, exec, foot
+HYPRDEF
+    fi
+fi
+if ! grep -q 'apex-shell' "${HYPR_CONF}" 2>/dev/null; then
+    cat >> "${HYPR_CONF}" <<HYPRAPEX
+
+# ── APEX Shell autostarts (seeded by apex-shell-firstrun) ──
+exec-once = awww-daemon
+exec-once = hypridle -c ${SRC_DIR}/src/config/hypridle.conf
+exec-once = quickshell -c ${SRC_DIR}
+exec-once = systemctl --user start hyprpolkitagent
+exec-once = wl-paste --type text  --watch cliphist store
+exec-once = wl-paste --type image --watch cliphist store
+HYPRAPEX
+    log "seeded Hyprland autostart -> ${HYPR_CONF}"
+fi
+
+# ── 6. niri autostart (APEX-OS addition; the shell supports niri) ────────────
+# The shell's own installer only covers Hyprland, but APEX Shell auto-detects
+# niri (NiriService.qml) and the greeter offers a niri session, so seed a niri
+# config that launches the shell too. Only if niri is actually installed.
+if command -v niri >/dev/null 2>&1 || [ -x /usr/bin/niri ]; then
+    NIRI_CONF="${HOME}/.config/niri/config.kdl"
+    mkdir -p "${HOME}/.config/niri"
+    if [ ! -f "${NIRI_CONF}" ]; then
+        if [ -f /usr/share/niri/default-config.kdl ]; then
+            cp /usr/share/niri/default-config.kdl "${NIRI_CONF}"
+        else
+            : > "${NIRI_CONF}"
+        fi
+    fi
+    if ! grep -q 'apex-shell' "${NIRI_CONF}" 2>/dev/null; then
+        cat >> "${NIRI_CONF}" <<NIRIAPEX
+
+// ── APEX Shell autostarts (seeded by apex-shell-firstrun) ──
+spawn-at-startup "awww-daemon"
+spawn-at-startup "quickshell" "-c" "${SRC_DIR}"
+spawn-at-startup "wl-paste" "--type" "text" "--watch" "cliphist" "store"
+spawn-at-startup "wl-paste" "--type" "image" "--watch" "cliphist" "store"
+NIRIAPEX
+        log "seeded niri autostart -> ${NIRI_CONF}"
+    fi
+fi
+
+# ── 7. Mark provisioned (ONLY on full success) ───────────────────────────────
+# Reached only if every step above succeeded (set -e). The marker lives inside
+# ~/.config/apex-shell, which step 3/4 created; its presence disables the unit
+# on every future login.
+touch "${MARKER}"
+log "provisioning complete — marker written to ${MARKER}"

@@ -1,0 +1,39 @@
+# APEX-OS — first-login provisioner (systemd USER service).
+#
+# APEX Shell is a LIVE git checkout the user updates in place (its own
+# auto-updater pulls `~/.local/src/apex-shell`, and Quickshell hot-reloads
+# from there). That rules out seeding it via /etc/skel — a skel copy would
+# be a detached, non-git snapshot that the shell's updater and hot-reload
+# could not drive. So instead every user gets their OWN clone + config the
+# first time they log in, via this oneshot.
+#
+# It runs once per user: the ConditionPathExists gate below makes systemd
+# skip the unit entirely once the per-user marker exists, so there is no
+# work on any subsequent login. The script itself is also idempotent and
+# only writes the marker on full success — a failed run (e.g. no network at
+# first login) leaves the marker absent, so the next login retries.
+#
+# Enabled image-wide with `systemctl --global enable` (see the flavor
+# Containerfiles), which symlinks it into every user's default.target.wants.
+[Unit]
+Description=APEX-OS first-login provisioner (clone APEX Shell + seed user config)
+Documentation=https://github.com/AndreNijman/apex-shell
+# Run-once gate: skip the whole unit once this user has been provisioned.
+ConditionPathExists=!%h/.config/apex-shell/.provisioned
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/apex-shell-firstrun
+# The script polls for network itself (see below); cap the whole attempt so a
+# wedged clone can never hang the user session. A timeout is a failure, so the
+# marker is not written and the next login retries.
+TimeoutStartSec=300
+# A first-run failure must never wedge login; the missing marker is the retry.
+Restart=no
+
+[Install]
+# default.target is always reached when the user manager starts at login, so
+# the unit runs on first login regardless of which compositor is chosen — it
+# does NOT depend on graphical-session.target (which is not reached under a
+# bare Hyprland/greetd session that has no uwsm/systemd handoff).
+WantedBy=default.target
