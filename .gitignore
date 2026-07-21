@@ -1,0 +1,17 @@
+# Compiled / generated
+*.qmlc
+target/
+node_modules/
+
+# Build artifacts — disk and installer images (large, never versioned)
+*.img
+*.iso
+
+# Signing material — PRIVATE KEYS NEVER IN REPO (see signing/README.md)
+*.key
+*.priv
+*.pem
+*.p12
+
+# OS cruft
+.DS_Store
