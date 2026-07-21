@@ -1,0 +1,44 @@
+# APEX-OS system profile: intel-hybrid
+#
+# CPU-class profile for Intel hybrid (P-core / E-core) parts driven by
+# intel_pstate in active/HWP mode. Selected when the CPU vendor is Intel and a
+# P/E hybrid topology is detected, unless a device profile (e.g.
+# msi-katana-gf76) overrides it.
+#
+# intel_pstate active mode exposes the same governor names (performance,
+# powersave) and the same EPP strings as amd-pstate-epp, so the three-knob
+# table is identical in shape; Intel-specific divergence (P/E cpuset policy,
+# NVIDIA clock locks) lives in the device profiles and lands with M6.
+
+id = "intel-hybrid"
+kind = "class"
+description = "Intel hybrid P/E (intel_pstate HWP)"
+
+[defaults]
+ac = "performance"
+battery = "balanced"
+
+[tiers.ultra-max]
+governor = "performance"
+epp = "performance"
+platform_profile = "performance"
+
+[tiers.ultra]
+governor = "performance"
+epp = "performance"
+platform_profile = "performance"
+
+[tiers.performance]
+governor = "performance"
+epp = "balance_performance"
+platform_profile = "performance"
+
+[tiers.balanced]
+governor = "powersave"
+epp = "balance_power"
+platform_profile = "balanced"
+
+[tiers.power-saver]
+governor = "powersave"
+epp = "power"
+platform_profile = "low-power"

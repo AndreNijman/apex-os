@@ -38,6 +38,14 @@ contexts. See [docs/branding.md](docs/branding.md).
 
 ## Status
 
+**M3 — apexd v1 (power engine).** The `apexd/` cargo workspace ships
+`apexd-core` (fingerprint, layered profile selection, tier engine, `SysWriter`),
+the `apexd` daemon (frozen `org.apexos.Apexd1` D-Bus API, AC/battery
+auto-switch, gated RyzenAdj EC-defeat loop, Prometheus metrics on :9723), and
+the `apex` control CLI. The six system profiles live in `config/sysprofiles/`.
+See [docs/m3-notes.md](docs/m3-notes.md) and the frozen contract in
+[docs/apexd-dbus.md](docs/apexd-dbus.md).
+
 **M1 — production images + CI.** The three images build locally (shared
 `Containerfile.base` → `daily` / `gaming`, with the CachyOS kernel, desktop /
 greeter stack, scx, and Bazaar), the DIY NVIDIA akmod builds against the shared
