@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>APEX-OS</vendor>
+  <vendor_url>https://github.com/AndreNijman/apex-os</vendor_url>
+
+  <!-- Power tier changes (SetTier, SetAutoSwitch). The logged-in local user
+       may switch tiers without a password; inactive/remote sessions need an
+       administrator. -->
+  <action id="org.apexos.apexd.manage-power">
+    <description>Manage APEX-OS power tiers</description>
+    <message>Authentication is required to change the APEX-OS power tier</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Battery management (SetChargeThresholds, SetTravelMode, Calibrate). -->
+  <action id="org.apexos.apexd.manage-battery">
+    <description>Manage APEX-OS battery charge settings</description>
+    <message>Authentication is required to change APEX-OS battery settings</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
