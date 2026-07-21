@@ -44,5 +44,76 @@ RUN set -eux; \
     systemctl enable power-profiles-daemon.service; \
     dnf5 clean all
 
+# ═══════════════════════════════════════════════════════════════════════════
+# M2 — branding + shell provisioner + greeter session finalization
+# ═══════════════════════════════════════════════════════════════════════════
+# All three M2 concerns live in the flavor images (not the base) so each edition
+# is independently complete and the shared base is left untouched for the base
+# owner. The provisioner + session curation are edition-agnostic and DUPLICATED
+# verbatim in Containerfile.gaming; only the Plymouth theme differs per edition
+# (Daily → chartreuse, Gaming → gold). See docs/m2-notes.md.
+
+# ── Plymouth boot splash: apex-os-chartreuse (Daily) ───────────────────────
+# The VARIANT_ID=daily edition boots the chartreuse spark. Copy the theme, set
+# it as the Plymouth default, then rebuild the CachyOS initramfs so the theme
+# is actually present in the initrd bootc boots from (/usr/lib/modules/<kver>/
+# initramfs.img). `plymouth-set-default-theme` WITHOUT -R only sets the default;
+# we run dracut ourselves (mirroring the base's Stage-1 flags) because on bootc
+# the initramfs is regenerated in-image, not by the tool's -R host path. The
+# theme uses `ModuleName=script`, so the script plugin (plymouth-plugin-script)
+# is required. Own dnf transaction, `dnf5 clean all` at the end.
+COPY files/branding/plymouth/apex-os-chartreuse \
+     /usr/share/plymouth/themes/apex-os-chartreuse
+RUN set -eux; \
+    dnf5 -y install plymouth plymouth-scripts plymouth-plugin-script; \
+    plymouth-set-default-theme apex-os-chartreuse; \
+    KVER="$(cat /usr/lib/apex-cachyos-kver)"; \
+    dracut --force --no-hostonly --reproducible --zstd \
+        --add plymouth --kver "${KVER}" \
+        "/usr/lib/modules/${KVER}/initramfs.img"; \
+    test -s "/usr/lib/modules/${KVER}/initramfs.img"; \
+    dnf5 clean all
+# Kernel args for the graphical splash. `quiet splash` per the theme's own
+# README (files/branding/plymouth/README.md). NOTE: `quiet` raises the console
+# loglevel, so it trims the verbose serial output the base's 10-apex-serial.toml
+# enabled for CI/QEMU observability (warnings/errors still print). Drop `quiet`
+# here if noisier boot logs are wanted. bootc merges all kargs.d files.
+RUN set -eux; \
+    mkdir -p /usr/lib/bootc/kargs.d; \
+    printf 'kargs = ["quiet", "splash"]\n' \
+        > /usr/lib/bootc/kargs.d/20-apex-plymouth.toml
+
+# ── First-login shell provisioner (systemd USER service) ───────────────────
+# Ships the per-user first-boot provisioner and enables it image-wide with
+# `systemctl --global enable`, which symlinks the user unit into every user's
+# default.target.wants. On first login it clones APEX Shell into the user's
+# home and seeds the shell config (see files/system/libexec/apex-shell-firstrun
+# and docs/m2-notes.md). Requires `git` at RUNTIME — a base package addition
+# the base owner must fold in (documented in docs/m2-notes.md).
+COPY files/system/units/apex-shell-firstrun.service \
+     /usr/lib/systemd/user/apex-shell-firstrun.service
+COPY files/system/libexec/apex-shell-firstrun \
+     /usr/libexec/apex-shell-firstrun
+RUN set -eux; \
+    chmod 0755 /usr/libexec/apex-shell-firstrun; \
+    systemctl --global enable apex-shell-firstrun.service
+
+# ── Greeter session picker: offer Hyprland + niri only ─────────────────────
+# apex-greet enumerates /usr/share/wayland-sessions/*.desktop. The base installs
+# sway + labwc as the greeter's HOST compositor (not user sessions), and both
+# ship a wayland-session file — remove them so they are never offered as logins.
+# Hyprland ships its own session file (guaranteed with a fallback); niri's is
+# shipped here. `niri` itself is a base package addition (see docs/m2-notes.md);
+# without it the niri session is offered but will not launch.
+COPY files/desktop/wayland-sessions/niri.desktop \
+     /usr/share/wayland-sessions/niri.desktop
+RUN set -eux; \
+    rm -f /usr/share/wayland-sessions/sway.desktop \
+          /usr/share/wayland-sessions/labwc.desktop; \
+    if [ ! -f /usr/share/wayland-sessions/hyprland.desktop ]; then \
+        printf '[Desktop Entry]\nName=Hyprland\nComment=Dynamic tiling Wayland compositor\nExec=Hyprland\nType=Application\nDesktopNames=Hyprland\n' \
+            > /usr/share/wayland-sessions/hyprland.desktop; \
+    fi
+
 # Informational lint.
 RUN bootc container lint || true
