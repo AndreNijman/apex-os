@@ -75,6 +75,14 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | sudo podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
 
+      # cosign runs as the normal user, not under sudo, so it cannot see the
+      # rootful podman auth above. Give cosign its own GHCR credential (written
+      # to the user's docker config) so `cosign sign` can pull the digest to
+      # sign it — the packages are private, so this pull needs auth.
+      - name: Log in cosign to GHCR
+        run: |
+          cosign login "$REGISTRY" -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+
       - name: Build base
         run: |
           sudo podman build --isolation=chroot \
@@ -134,6 +142,10 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | sudo podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+
+      - name: Log in cosign to GHCR
+        run: |
+          cosign login "$REGISTRY" -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
 
       # FROM the base pinned by digest — the exact image job 1 pushed and signed.
       - name: Build ${{ matrix.flavor }}
