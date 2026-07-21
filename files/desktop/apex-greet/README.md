@@ -169,6 +169,17 @@ launch is validated in an APEX-OS VM where greetd owns the VT.
 
 ## Known limitations / to verify
 
+- **Compositor host: cage is insufficient — use sway or labwc.** M0 spike A
+  found that `cage` 0.2.0 does not expose `wlr-layer-shell` to quickshell
+  0.3.0 (`Failed to initialize layershell integration`), so the greeter's
+  `PanelWindow` never gets a surface and nothing paints — even though
+  greetd starts, apex-greet launches, and the greetd/PAM conversation is
+  reachable. Switch `default_session.command` to a compositor that
+  provides layer-shell: `sway` (1.11) or `labwc` (0.9.6), both packaged,
+  e.g. `sway -c /usr/share/apex-greet/sway-greet.conf` running quickshell
+  as its only client. Live render + login must be re-verified on real
+  hardware or a GPU/virgl-capable runner (headless QEMU with `virtio-vga`
+  gives no GL; `WLR_RENDERER=pixman` crash-looped cage in the spike).
 - **`echoResponse` heuristic.** Hidden prompts get the password, visible
   prompts get the username. Correct for the usual `pam_unix` password
   prompt after `createSession`; a PAM stack that asks something else

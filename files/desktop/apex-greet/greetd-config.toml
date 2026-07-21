@@ -15,8 +15,11 @@
 vt = 1
 
 [default_session]
-# cage flags: -d = no client-side decorations, -s = allow VT switching.
-# quickshell loads the greeter from its install path.
+# NOTE (M0 spike A): cage 0.2.0 does NOT provide wlr-layer-shell to
+# quickshell 0.3.0, so the greeter fails to paint under cage. Use a
+# layer-shell-capable host (sway/labwc) instead — see README "Known
+# limitations". This cage line is kept only as the original reference;
+# M1 replaces it with a sway/labwc launch and verifies render on HW.
 command = "cage -ds -- qs -p /usr/share/apex-greet/shell.qml"
 # Fedora's greetd package provisions a `greetd` system user (sysusers.d);
 # there is no `greeter` user. logind grants this user the seat/DRM access
