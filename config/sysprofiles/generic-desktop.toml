@@ -1,0 +1,38 @@
+# APEX-OS system profile: generic-desktop
+#
+# Base fallback for any desktop/tower chassis. Selected by chassis type when
+# no more specific class (amd-zen / intel-hybrid) or device profile matches.
+#
+# The three-knob tier table (governor / EPP / platform_profile) is expressed in
+# full; the daemon's real SysWriter applies only the knobs the running kernel
+# actually exposes (it path-checks scaling_governor, energy_performance_preference
+# and /sys/firmware/acpi/platform_profile). On a plain acpi-cpufreq desktop the
+# EPP and platform_profile writes are simply skipped.
+
+id = "generic-desktop"
+kind = "generic"
+description = "Generic desktop / tower (chassis fallback)"
+
+[defaults]
+ac = "balanced"
+battery = "balanced"
+
+[tiers.ultra-max]
+governor = "performance"
+epp = "performance"
+
+[tiers.ultra]
+governor = "performance"
+epp = "performance"
+
+[tiers.performance]
+governor = "performance"
+epp = "balance_performance"
+
+[tiers.balanced]
+governor = "powersave"
+epp = "balance_power"
+
+[tiers.power-saver]
+governor = "powersave"
+epp = "power"

@@ -1,0 +1,44 @@
+# APEX-OS system profile: generic-laptop
+#
+# Base fallback for any portable/notebook chassis. Selected by chassis type
+# when no more specific class (amd-zen / intel-hybrid) or device profile
+# matches. Leans toward battery preservation on DC.
+#
+# platform_profile is expressed (most modern laptops carry the ACPI
+# platform_profile interface); the real SysWriter skips it if the running
+# machine does not export it. Charge thresholds are intentionally NOT set here
+# (the correct sysfs path and safe defaults are device-specific), only in the
+# device profiles that know the hardware.
+
+id = "generic-laptop"
+kind = "generic"
+description = "Generic laptop / notebook (chassis fallback)"
+
+[defaults]
+ac = "balanced"
+battery = "power-saver"
+
+[tiers.ultra-max]
+governor = "performance"
+epp = "performance"
+platform_profile = "performance"
+
+[tiers.ultra]
+governor = "performance"
+epp = "performance"
+platform_profile = "performance"
+
+[tiers.performance]
+governor = "performance"
+epp = "balance_performance"
+platform_profile = "performance"
+
+[tiers.balanced]
+governor = "powersave"
+epp = "balance_power"
+platform_profile = "balanced"
+
+[tiers.power-saver]
+governor = "powersave"
+epp = "power"
+platform_profile = "low-power"

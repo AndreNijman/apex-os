@@ -1,0 +1,65 @@
+# APEX-OS system profile: thinkpad-l16-g2
+#
+# Device profile for the Lenovo ThinkPad L16 Gen 2 (AMD Ryzen 7 PRO 250 /
+# Radeon 780M, amd-pstate-epp). Matched on DMI product_version / product_family
+# "ThinkPad L16" (the product_name is the bare MTM code, e.g. 21SCCTO1WW, so
+# matching must look at version/family too). Supersedes the amd-zen class
+# profile on this exact machine.
+#
+# Adds two device-specific capabilities the class profile cannot assume:
+#   * charge thresholds on BAT0 (start/stop) for battery longevity
+#   * a RyzenAdj STAPM/fast reapply loop bound to the ultra-max tier only,
+#     to defeat the embedded-controller's ~30 W clawback (hard ceiling < 80 W)
+
+id = "thinkpad-l16-g2"
+kind = "device"
+description = "Lenovo ThinkPad L16 Gen 2 (AMD Zen, Radeon 780M)"
+
+[defaults]
+ac = "performance"
+battery = "balanced"
+
+[tiers.ultra-max]
+governor = "performance"
+epp = "performance"
+platform_profile = "performance"
+
+[tiers.ultra]
+governor = "performance"
+epp = "performance"
+platform_profile = "performance"
+
+[tiers.performance]
+governor = "performance"
+epp = "balance_performance"
+platform_profile = "performance"
+
+[tiers.balanced]
+governor = "powersave"
+epp = "balance_power"
+platform_profile = "balanced"
+
+[tiers.power-saver]
+governor = "powersave"
+epp = "power"
+platform_profile = "low-power"
+
+[charge]
+start = 75
+stop = 80
+start_path = "/sys/class/power_supply/BAT0/charge_control_start_threshold"
+end_path = "/sys/class/power_supply/BAT0/charge_control_end_threshold"
+
+# RyzenAdj EC-defeat loop. Values in milliwatts. Only re-applied while the
+# active tier is one of `tiers` (ultra-max). The daemon runs it on a fixed
+# cadence and tears it down when switching away. Gated at runtime: it only
+# executes if the device is thinkpad-l16-g2 AND `ryzenadj` is on PATH AND the
+# daemon is not in dry-run mode.
+[ryzenadj]
+stapm_mw = 62000     # sustained package (STAPM)
+fast_mw = 75000      # fast PPT (short-burst ceiling)
+slow_mw = 62000      # slow PPT
+tctl_max = 95        # thermal ceiling (degrees C)
+ceiling_mw = 79000   # hard sanity ceiling, must stay < 80 W
+interval_secs = 1    # reapply cadence — defeats the EC clawback
+tiers = ["ultra-max"]
