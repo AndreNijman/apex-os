@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.apexos.Apexd1
+Exec=/usr/bin/apexd
+User=root
+SystemdService=apexd.service

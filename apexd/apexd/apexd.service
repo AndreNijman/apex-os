@@ -1,0 +1,23 @@
+[Unit]
+Description=APEX-OS power daemon (apexd)
+Documentation=https://github.com/AndreNijman/apex-os
+After=dbus.service polkit.service
+Wants=polkit.service
+
+[Service]
+Type=dbus
+BusName=org.apexos.Apexd1
+ExecStart=/usr/bin/apexd
+Restart=on-failure
+RestartSec=2
+# apexd needs raw sysfs writes (cpufreq, platform_profile, charge thresholds)
+# and, on the L16, to exec ryzenadj — so it runs as root and is only lightly
+# sandboxed. Set APEXD_DRY_RUN=1 here to make it plan without writing.
+Environment=RUST_BACKTRACE=1
+ProtectHome=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target
