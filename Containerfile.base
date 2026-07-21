@@ -53,6 +53,10 @@ RUN set -eux; \
         done; echo "awww: built" > /out/awww-status; \
     else echo "awww: BUILD FAILED (wallpaper daemon absent; non-fatal)" > /out/awww-status; \
     fi; cat /out/awww-status
+# matugen (Rust, from crates.io) — built here rather than via a COPR that lacks a
+# fedora-43 build; COPY'd out with the other binaries. The shell's theming needs
+# it, so this one IS fatal on failure.
+RUN cargo install matugen --root /out/usr
 
 # ─────────────────────────────────────────────────────────────────────────
 FROM quay.io/fedora/fedora-bootc:43
@@ -139,12 +143,10 @@ RUN set -eux; \
 RUN set -eux; \
     dnf5 -y copr enable solopasha/hyprland; \
     dnf5 -y copr enable errornointernet/quickshell; \
-    dnf5 -y copr enable atim/matugen; \
     dnf5 -y install \
         hyprland quickshell greetd sway labwc cage xwayland-satellite foot \
         jetbrains-mono-fonts fontconfig flatpak distrobox git-core niri \
         hyprlock hypridle hyprsunset hyprpolkitagent hyprshot grimblast \
-        matugen \
         pipewire pipewire-pulseaudio wireplumber rtkit \
         playerctl brightnessctl wl-clipboard slurp wtype cliphist \
         upower libnotify lm_sensors cava wf-recorder ImageMagick \
@@ -152,7 +154,6 @@ RUN set -eux; \
         gammastep geoclue2 jq; \
     dnf5 -y copr disable solopasha/hyprland; \
     dnf5 -y copr disable errornointernet/quickshell; \
-    dnf5 -y copr disable atim/matugen; \
     dnf5 clean all
 
 # ── Stage 3: JetBrainsMono Nerd Font ───────────────────────────────────────
