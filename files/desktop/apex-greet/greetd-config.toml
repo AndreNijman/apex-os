@@ -1,0 +1,21 @@
+# APEX-OS greeter — example /etc/greetd/config.toml
+#
+# greetd starts on a VT and runs `default_session.command` as the
+# `greeter` user. Here that command is `cage` (a single-client kiosk
+# Wayland compositor) running quickshell with the apex-greet config.
+#
+# quickshell speaks to greetd over the UNIX socket greetd hands to its
+# child via $GREETD_SOCK — this is what Quickshell.Services.Greetd uses.
+# On a successful authentication apex-greet calls Greetd.launch(...),
+# greetd tears the greeter down and starts the user's session on the
+# same VT.
+
+[terminal]
+# Run the greeter on VT 1. Adjust if another unit owns tty1.
+vt = 1
+
+[default_session]
+# cage flags: -d = no client-side decorations, -s = allow VT switching.
+# quickshell loads the greeter from its install path.
+command = "cage -ds -- qs -p /usr/share/apex-greet/shell.qml"
+user = "greeter"
