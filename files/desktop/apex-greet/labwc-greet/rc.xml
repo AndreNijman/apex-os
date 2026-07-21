@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+<!--
+  APEX-OS greeter — labwc rc.xml (fallback host).
+
+  Minimal config to host the apex-greet quickshell greeter.  labwc, like sway,
+  implements wlr-layer-shell natively, so apex-greet's PanelWindow (Overlay
+  layer, exclusive keyboard) maps here where it did NOT under cage 0.2.0 (see
+  docs/m0-results.md "Spike A").
+
+  labwc is loaded via `labwc -C /usr/share/apex-greet/labwc-greet` (config
+  directory holding this rc.xml + autostart + environment).  See README
+  "Compositor host" for when to reach for labwc instead of sway.
+
+  This is intentionally bare: no keybinds, no menu, no bar — the greeter owns
+  all input and is the only client.
+-->
+<labwc_config>
+
+  <core>
+    <!-- No server-side decorations: the greeter is a layer surface (never
+         decorated anyway); this keeps any stray xdg-toplevel borderless too. -->
+    <decoration>client</decoration>
+    <gap>0</gap>
+  </core>
+
+  <!-- Empty theme name = labwc built-in theme.  Decorations are suppressed
+       per-window below, so the theme is effectively unused. -->
+  <theme>
+    <name></name>
+    <font place="ActiveWindow">
+      <name>JetBrainsMono Nerd Font</name>
+      <size>10</size>
+    </font>
+  </theme>
+
+  <!-- Touchpad: tap-to-click OFF (greeter is keyboard-driven). -->
+  <libinput>
+    <device category="touchpad">
+      <tap>no</tap>
+      <naturalScroll>no</naturalScroll>
+    </device>
+  </libinput>
+
+  <!-- Force any toplevel window to be undecorated / borderless. -->
+  <windowRules>
+    <windowRule identifier="*" serverDecoration="no" skipTaskbar="yes" />
+  </windowRules>
+
+  <!-- No keybinds: kiosk greeter, keyboard events belong to the client.
+       (Omitting <keyboard> entirely means labwc's built-in defaults would
+       apply, so declare an explicit empty set.) -->
+  <keyboard>
+  </keyboard>
+
+</labwc_config>
