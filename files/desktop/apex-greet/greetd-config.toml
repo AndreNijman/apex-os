@@ -1,27 +1,25 @@
-# APEX-OS greeter — example /etc/greetd/config.toml
+# APEX-OS greeter — /etc/greetd/config.toml
 #
-# greetd starts on a VT and runs `default_session.command` as the
-# `greeter` user. Here that command is `cage` (a single-client kiosk
-# Wayland compositor) running quickshell with the apex-greet config.
-#
-# quickshell speaks to greetd over the UNIX socket greetd hands to its
-# child via $GREETD_SOCK — this is what Quickshell.Services.Greetd uses.
-# On a successful authentication apex-greet calls Greetd.launch(...),
-# greetd tears the greeter down and starts the user's session on the
-# same VT.
+# greetd starts on a VT and runs `default_session.command` as the greetd
+# session user. That command is a Wayland compositor hosting quickshell with
+# the apex-greet config. quickshell speaks to greetd over the UNIX socket
+# greetd hands its child via $GREETD_SOCK (Quickshell.Services.Greetd). On a
+# successful authentication apex-greet calls Greetd.launch(...); greetd tears
+# the greeter down and starts the user's session on the same VT.
 
 [terminal]
 # Run the greeter on VT 1. Adjust if another unit owns tty1.
 vt = 1
 
 [default_session]
-# NOTE (M0 spike A): cage 0.2.0 does NOT provide wlr-layer-shell to
-# quickshell 0.3.0, so the greeter fails to paint under cage. Use a
-# layer-shell-capable host (sway/labwc) instead — see README "Known
-# limitations". This cage line is kept only as the original reference;
-# M1 replaces it with a sway/labwc launch and verifies render on HW.
-command = "cage -ds -- qs -p /usr/share/apex-greet/shell.qml"
-# Fedora's greetd package provisions a `greetd` system user (sysusers.d);
-# there is no `greeter` user. logind grants this user the seat/DRM access
-# the greeter needs for the duration of the greet session.
+# Compositor host = sway (M0 spike A finding). cage 0.2.0 does NOT serve
+# wlr-layer-shell to quickshell 0.3.0, so the greeter cannot paint under cage;
+# sway 1.11 (and labwc 0.9.6, both installed in the base as alternatives) do
+# layer-shell v4. sway-greet.conf runs quickshell as sway's only client.
+#   Fallback reference (insufficient — kept only for provenance):
+#     command = "cage -ds -- qs -p /usr/share/apex-greet/shell.qml"
+command = "sway --config /usr/share/apex-greet/sway-greet.conf"
+# Fedora's greetd package provisions a `greetd` system user (sysusers.d); there
+# is no `greeter` user. logind grants this user the seat/DRM access the greeter
+# needs for the duration of the greet session.
 user = "greetd"
