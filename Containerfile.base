@@ -36,6 +36,9 @@
 #     failure writes a marker and does NOT abort the image (wallpaper daemon
 #     degrades to static; every other feature is unaffected).
 FROM quay.io/fedora/fedora-bootc:43 AS builder
+# /root is special in bootc images (symlink → /var/roothome), so cargo's default
+# $HOME/.cargo fails ("File exists" on mkdir). Point CARGO_HOME at the build tree.
+ENV CARGO_HOME=/build/.cargo
 RUN dnf5 -y install cargo rust git-core >/dev/null && dnf5 clean all
 COPY apexd/ /build/apexd/
 COPY config/ /build/config/
