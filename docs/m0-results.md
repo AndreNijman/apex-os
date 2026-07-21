@@ -233,3 +233,633 @@ Under `/home/andre/apex-os-m0-work/spike-a/shots/` (NOT committed):
 IPC/PAM conversation is reachable. `greetd`'s own PAM stack authenticated
 `test` on the serial getty. So the greeter, its greetd backend, and auth are
 all wired correctly; only the on-screen surface is missing.
+
+## Spike B — kernel + akmods
+
+**Goal:** prove the Phase-A kernel path — the CachyOS-for-Fedora COPR kernel
+swapped into a `fedora-bootc` image, an NVIDIA akmod built against it DIY,
+binderfs/scheduler config verified, sched-ext userspace available, the
+image-layering model determined, and the result booted in a VM.
+
+**Host / tooling:** Void Linux, podman 5.8.3 (rootful build via passwordless
+sudo), qemu 11.0.2 + KVM, bootc-image-builder, 16 threads. Large artifacts live
+outside the repo in `~/apex-os-m0-work/spike-b/`. Repo deliverable:
+`kernel/Containerfile.kernel-spike`.
+
+### Verdict per sub-goal
+
+| Sub-goal | Result |
+|----------|--------|
+| Kernel swap (Fedora → CachyOS in a bootc image) | **PASS** |
+| Initramfs regenerated into `/usr/lib/modules/<kver>/` | **PASS** (kernel scriptlets auto-generate it; no manual dracut needed) |
+| NVIDIA akmod DIY build against CachyOS kernel | **PASS** (driver 580.159.03, akmods rc=0) |
+| `modinfo nvidia` resolves against CachyOS kver | **PASS** (vermagic `7.0.12-cachyos1.fc42.x86_64`) |
+| Kernel config table (binderfs/ntsync/sched-ext/amdxdna/hz/preempt) | **PASS** (all present — table below) |
+| sched-ext userspace (scx-scheds + scx_loader/scxctl) | **PASS** (1.1.0) |
+| Layering-support verdict | **PASS — layering supported** (`rpm-ostree` present) |
+| VM boot | **PARTIAL** — CachyOS kernel boots under KVM, no panic; full multi-user pending (see below) |
+
+Two defects were found that do **not** block the Phase-A decision but must be
+fixed before M1: a corrupt rpmdb baked into the scx layer, and the VM full-boot
+being blocked by the build host's missing cgroup mount. Both are detailed below.
+
+### Exact versions
+
+| Item | Value |
+|------|-------|
+| Base image | `quay.io/fedora/fedora-bootc:42` |
+| Base image digest | `sha256:3b80fff7ae609cc4c0ea6a1c728e32003a72719d1e0441637894a46ce840b0fe` |
+| Base OS | Fedora Linux 42 (Adams) |
+| Stock kernel (removed) | `6.19.14-101.fc42` |
+| **CachyOS kernel installed** | **`kernel-cachyos-7.0.12-cachyos1.fc42.x86_64`** (BORE 6.6.3, 1000 Hz) |
+| CachyOS COPR | `bieszczaders/kernel-cachyos` (kernel) + `bieszczaders/kernel-cachyos-addons` (scx) |
+| **NVIDIA driver** | **`580.159.03`** (RPMFusion nonfree, proprietary) |
+| Built kmod RPM | `kmod-nvidia-7.0.12-cachyos1.fc42.x86_64-580.159.03-1.fc42.x86_64.rpm` (~9 MB) |
+| scx | `scx-scheds-1.1.0-1.fc42`, `scx-tools-1.1.0-1.fc42` (scx_loader/scxctl `1.1.0`) |
+| bootc | `1.15.1` |
+| rpm-ostree | `2025.12-1.fc42` (present ⇒ layering supported) |
+| dnf5 / dracut / gcc | `5.2.18.0` / `107-4.fc42` / `15.2.1` |
+| Spike image build time | **1029 s (~17 min)**, 16 threads (no build cache) |
+| Final image size | 5.1 GB |
+
+### 1. Kernel swap — PASS
+
+Clean in a bootc container build with `dnf5`:
+
+```
+dnf5 -y install dnf5-plugins
+dnf5 -y copr enable bieszczaders/kernel-cachyos
+dnf5 -y copr enable bieszczaders/kernel-cachyos-addons
+dnf5 -y remove --no-autoremove kernel kernel-core kernel-modules kernel-modules-core
+dnf5 -y install kernel-cachyos kernel-cachyos-core kernel-cachyos-modules kernel-cachyos-devel-matched
+```
+
+- Removing the four Fedora kernel packages drags in nothing else (only benign
+  `grep: /etc/default/grub: No such file` noise from kernel-core `%preun`).
+- The CachyOS `%posttrans` scriptlet runs `Generating initramfs` + `depmod`
+  itself. Net result in the image, confirmed present:
+  `/usr/lib/modules/7.0.12-cachyos1.fc42.x86_64/{vmlinuz (~16.6 MB),
+  initramfs.img (~132 MB), config (~293 KB)}`. **No manual dracut step was
+  needed** (the Containerfile keeps a conditional dracut fallback, which stayed
+  dormant). Note the config is at `/usr/lib/modules/<kver>/config`, **not**
+  `/boot/config-<kver>`.
+- `kernel-cachyos-devel-matched` lands headers at
+  `/usr/src/kernels/7.0.12-cachyos1.fc42.x86_64` (required for the akmod build).
+- COPR ships split packages mirroring Fedora's layout (`kernel-cachyos` meta +
+  `-core` + `-modules` + `-devel` + `-devel-matched`). Default desktop
+  `kernel-cachyos` is the correct pick; `-lts`/`-rt`/`-server`/`-lto` also exist.
+
+### 2. NVIDIA akmod (DIY) — PASS (the plan's biggest Phase-A risk)
+
+As of Feb 2026 the CachyOS COPR dropped prebuilt NVIDIA (the only
+`kernel-cachyos-nvidia-open` packages in the repo are stale 6.18.12/6.12.73, not
+the 7.0.12 default), so the driver **must** be compiled DIY. Done via RPMFusion:
+
+```
+dnf5 -y install rpmfusion-free-release rpmfusion-nonfree-release   # from mirrors.rpmfusion.org
+dnf5 -y install akmods akmod-nvidia kmodtool gcc make
+akmods --force --kernels 7.0.12-cachyos1.fc42.x86_64 --kmod nvidia
+```
+
+- `akmods` exit code **0**; built
+  `kmod-nvidia-7.0.12-cachyos1.fc42.x86_64-580.159.03-1.fc42.x86_64.rpm` and
+  auto-installed it (`akmods` installs the kmod itself; the later explicit
+  `dnf5 install` reports "already installed").
+- `modinfo -k 7.0.12-cachyos1.fc42.x86_64 nvidia` →
+  `filename: /lib/modules/7.0.12-cachyos1.fc42.x86_64/extra/nvidia/nvidia.ko.xz`,
+  `version: 580.159.03`, `vermagic: 7.0.12-cachyos1.fc42.x86_64 SMP preempt
+  mod_unload`. All five modules present on disk (`nvidia`, `nvidia-drm`,
+  `nvidia-modeset`, `nvidia-uvm`, `nvidia-peermem`).
+- **No version skew:** the 580.159.03 driver builds cleanly against a 7.0 kernel
+  with gcc 15.2.1 — the GCC-built CachyOS kernel + RPMFusion gcc akmod path is
+  compatible. (The Containerfile makes this step capture-and-continue with a
+  `/usr/lib/apex-nvidia-akmod-status` marker so a future skew failure won't block
+  the other checks. Marker read `PASS driver=580.159.03 kver=7.0.12-...`.)
+
+### 3. Kernel config table
+
+From `/usr/lib/modules/7.0.12-cachyos1.fc42.x86_64/config`:
+
+| Option | Value | Notes |
+|--------|-------|-------|
+| `CONFIG_ANDROID_BINDERFS` | **=y** | waydroid — binderfs present |
+| `CONFIG_ANDROID_BINDER_IPC` | **=y** | waydroid |
+| `CONFIG_NTSYNC` | **=m** | ntsync (Proton) — module |
+| `CONFIG_SCHED_CLASS_EXT` | **=y** | sched-ext. NB: the old `CONFIG_SCHED_EXT` symbol was **renamed** to `CONFIG_SCHED_CLASS_EXT`; searching the old name reports "absent". sched-ext **is** enabled. |
+| `CONFIG_DRM_ACCEL_AMDXDNA` | **=m** | XDNA NPU (npu-twin) — module |
+| `CONFIG_HZ` / `CONFIG_HZ_1000` | **=1000 / =y** | 1000 Hz tick as expected |
+| `CONFIG_PREEMPT` | **=y** | full preemption |
+| `CONFIG_PREEMPT_DYNAMIC` | **=y** | runtime-selectable preempt |
+| `CONFIG_PREEMPT_VOLUNTARY` | not set | (PREEMPT is the compiled default) |
+| `CONFIG_PREEMPT_LAZY` | not set | |
+| `CONFIG_FUTEX` (+ `_PI`/`_PRIVATE_HASH`/`_MPOL`) | **=y** | there is no `CONFIG_FUTEX_WAITV` symbol — `futex_waitv` is an unconditional syscall when `CONFIG_FUTEX=y`, so it **is** available (ntsync + futex_waitv requirement met). |
+
+### 4. sched-ext userspace — PASS
+
+`scx-scheds 1.1.0-1.fc42` + `scx-tools 1.1.0-1.fc42` (from the addons COPR;
+`scx_loader`/`scxctl` moved to `scx-tools` at v1.0.18+). Verified in-image:
+`scx_loader --version` and `scxctl --version` both report **1.1.0**; the full
+scheduler set is on PATH (`scx_bpfland`, `scx_lavd`, `scx_rusty`, `scx_flash`,
+`scx_layered`, `scx_p2dq`, `scx_cosmos`, `scx_tickless`, `scx_rustland`,
+`scx_chaos`, `scx_cake`, `scx_beerland`, `scx_pandemonium`) plus `scx_loader`
+(`/usr/bin` and `/usr/sbin`) and `scxctl` (`/usr/sbin`).
+
+### 5. Layering-support verdict — SUPPORTED
+
+`fedora-bootc:42` ships **both** stacks: `rpm-ostree-2025.12-1.fc42` **is
+present** (so client-side `rpm-ostree install` package layering works for
+users) **and** `dnf5` + `bootc 1.15.1` for the bootc-native path. This is the
+escape-hatch row in plan §4a: **package layering is available**, not
+bootc-native-only. Caveat: exercising layering on the *spike* image would hit
+the rpmdb defect below — fix that first.
+
+### 6. VM boot — PARTIAL (kernel proven, multi-user pending)
+
+`bootc-image-builder` (and `bootc install to-disk`) **cannot run on this build
+host**: `/sys/fs/cgroup` is empty `sysfs` (no cgroup hierarchy mounted on this
+Void box), so bib's nested osbuild aborts with
+`crun: invalid file system type on /sys/fs/cgroup`. Mounting cgroups would be a
+host-level change (out of scope), so the qcow2 path was not completed.
+
+Instead the CachyOS kernel + initramfs were **extracted from the image**
+(`podman create` + `podman cp`, no cgroups needed) and **direct-booted headless
+under QEMU+KVM** (`-kernel`/`-initrd`, serial → file). Serial evidence:
+
+- `BORE CPU Scheduler modification 6.6.3 by Masahito Suzuki` — the **CachyOS
+  BORE signature** (stock Fedora kernels have no BORE): conclusive proof the
+  swapped kernel is the one running.
+- `smpboot: CPU0: AMD Ryzen 7 PRO 250 w/ Radeon 780M`, 4 vCPU SMP up,
+  `systemd 257.13 … Detected virtualization kvm`, initrd userspace reached
+  `initrd-switch-root.target`.
+- **No kernel panic.** Kernel init in ~855 ms; clean `reboot: Power down`.
+- `switch-root` fails (`status=1`) — **expected**: a direct `-kernel` boot has
+  no ostree/composefs root disk to switch into. That final step is exactly what
+  `bootc install` would provide.
+
+So the kernel version is proven four independent ways: RPM NEVRA, `vmlinuz`
+bzImage magic (`version 7.0.12-cachyos1.fc42.x86_64`), the installed nvidia
+module's `vermagic`, and the BORE banner on the live serial console.
+
+**Exact remaining step (VM boot → full multi-user):** produce the qcow2 with
+`bootc-image-builder` (config + serial karg already written to
+`~/apex-os-m0-work/spike-b/{bib-config.toml,boot-qemu.sh}`, and a boot-check
+oneshot service is baked into `localhost/apex-kernel-spike-bootcheck` to print
+`uname -r` + nvidia-module presence to the console and power off). This needs a
+host with cgroups mounted (a CI runner, or `mount -t cgroup2 none /sys/fs/cgroup`
+on the build box). On such a host the whole step is: `bib --type qcow2 --local
+--config /config.toml localhost/apex-kernel-spike-bootcheck` → `boot-qemu.sh`.
+
+### 7. Defects found (fix before M1)
+
+1. **Corrupt rpmdb baked into the scx layer.** After the `scx-scheds`/`scx-tools`
+   install step, the sqlite rpmdb is corrupt: `rpm -qa` (full scan) returns 924
+   packages, but indexed point-lookups (`rpm -q scx-scheds`) fail with
+   `database disk image is malformed`; `rpm --rebuilddb` cannot recover it and
+   deleting the `-wal`/`-shm` sidecars does not help. **Localized precisely:**
+   the post-akmod / pre-scx image layer is clean (`rpm -q` works, 923 pkgs), so
+   the scx-install transaction (or the layer commit after it) introduces the
+   corruption. Root cause not yet pinned — candidates: a dnf5 write of the large
+   (~135 MB) `scx-scheds` package, or a podman-overlayfs + sqlite-mmap
+   interaction on this Void host. Does **not** affect kernel boot (boot never
+   reads the rpmdb) but would break runtime `rpm`/`dnf`/`rpm-ostree` (i.e.
+   layering and updates). Must root-cause before M1; try installing scx in its
+   own stage and/or `rpm --rebuilddb` at a readable checkpoint, and re-test on a
+   cgroup-enabled CI host to rule out the Void-host overlay theory.
+2. **`bootc container lint`: 4 warnings** (9 checks passed, 1 skipped) — all
+   `var-tmpfiles`: akmod build leftovers in `/var` (`/var/cache/akmods/...`
+   incl. the kmod RPM, `/var/log/akmods`, plus `libX11`/`libdnf5`/`ldconfig`
+   caches). Cosmetic for a spike; for production, build the akmod in a separate
+   stage and copy only the kmod RPM into the final image (the ublue pattern),
+   leaving `/var` clean.
+
+
+## Spike D — Secure Boot chain
+
+**Goal:** prove the Secure Boot signing-chain mechanics with our own key — an
+APEX-signed kernel boots with SB **enforcing** in a VM, and unsigned / foreign
+kernels are **rejected** by the firmware. Scriptable and headless (no
+interactive MokManager), so it can drop into CI.
+
+**Verdict:**
+
+| Step | Result |
+|------|--------|
+| Generate APEX signing keypair (test) | **PASS** |
+| Enroll our cert as PK/KEK/db, SB on, headless | **PASS** |
+| APEX-signed kernel boots under SB enforcing (SB detected + lockdown active + userspace) | **PASS** |
+| Unsigned kernel rejected by firmware | **PASS** (`Access Denied`) |
+| Foreign (rogue-key) signed kernel rejected | **PASS** (`Access Denied`) |
+| Kernel-module signing (bonus) | **NOT DEMONSTRATED in-VM** — impractical here; exact procedure documented below |
+
+Everything below was run on the Void host (qemu 11.0.2 + KVM). Large artifacts
+live outside the repo in `~/apex-os-m0-work/spike-d/`; only the scripts
+(`signing/spike-d/`) are committed. **No key material is committed.**
+
+### Environment / tools installed
+
+- `qemu-system-x86_64` 11.0.2, KVM (`/dev/kvm`, user in `kvm` group).
+- OVMF: `edk2-ovmf-202605_1`, SB-enforcing build
+  `/usr/share/edk2/x64/OVMF_CODE.secure.4m.fd`
+  (sha256 `71359fc0…97d5`), template varstore `OVMF_VARS.4m.fd`
+  (sha256 `5d2ac383…5d1e`).
+- **Installed via xbps:** `sbsigntool-0.9.4_6` (provides `sbsign`, `sbverify`,
+  `sbvarsign`).
+- **Installed via pip (isolated venv, host untouched):** `virt-firmware 26.7.2`
+  → `virt-fw-vars`. (System pip is PEP-668 "externally managed"; a venv at
+  `~/apex-os-m0-work/spike-d/venv` avoids `--break-system-packages`.)
+- Already present: `gcc`, `cpio`, `mtools` (`mcopy`/`mmd`/`mformat`),
+  `mkfs.vfat`, `openssl`.
+
+### Test subject
+
+Rather than download a distro cloud image, the stock host kernel
+`/boot/vmlinuz-7.1.4_1` was used as the test subject — it already carries what
+we need: `CONFIG_EFI_STUB=y` (bootable PE with EFI handoff),
+`CONFIG_SECURITY_LOCKDOWN_LSM=y` + `_EARLY=y`, `CONFIG_SERIAL_8250_CONSOLE=y`.
+A ~330 KB initramfs (statically-linked C `init`, see
+`~/apex-os-m0-work/spike-d/initramfs/init.c`) mounts `/proc` `/sys` `efivarfs`,
+tags the kernel's SB/lockdown log lines, reads the `SecureBoot` EFI var, and
+powers off — so the VM proves userspace with no root disk and self-terminates.
+
+### Exact invocations
+
+**1. Keypair (`keygen.sh`)** — RSA-2048, self-signed, SHA-256; the future
+"APEX MOK"/db key (here a throwaway TEST key):
+
+```sh
+openssl req -new -x509 -newkey rsa:2048 -nodes \
+  -keyout apex-mok.key -out apex-mok.crt -days 3650 -sha256 \
+  -subj "/CN=APEX-OS TEST Secure Boot key (SPIKE-D, DO NOT TRUST)/"
+openssl x509 -in apex-mok.crt -outform DER -out apex-mok.der
+```
+
+**2. Enroll into an SB-enforcing varstore (`enroll-vars.sh`)** — headless, our
+key only, Microsoft keys deliberately omitted:
+
+```sh
+virt-fw-vars \
+  --input  /usr/share/edk2/x64/OVMF_VARS.4m.fd \
+  --set-pk  <GUID> apex-mok.der \
+  --add-kek <GUID> apex-mok.der \
+  --add-db  <GUID> apex-mok.der \
+  --no-microsoft --secure-boot \
+  --output apex-VARS.ours-only.4m.fd
+```
+
+Result (`virt-fw-vars --print`): `PK`, `KEK`, `db` each a 911-byte blob (our
+cert), `dbx` seeded, `SecureBootEnable: ON`. PK present ⇒ firmware leaves Setup
+Mode and enters User Mode = SB enforcing.
+
+**3. Sign the kernel (`sign-kernel.sh` → `sbsign`)**:
+
+```sh
+sbsign --key apex-mok.key --cert apex-mok.crt \
+       --output vmlinuz-apex-signed.efi /boot/vmlinuz-7.1.4_1
+sbverify --cert apex-mok.crt vmlinuz-apex-signed.efi   # -> Signature verification OK
+```
+
+A rogue keypair (not enrolled) signed a second copy, and a third copy was left
+unsigned, for the negative tests.
+
+**4. Boot under SB enforcing (`boot-sb-vm.sh`)** — the key QEMU invocation
+(SMM on, which the `OVMF_CODE.secure` build requires):
+
+```sh
+qemu-system-x86_64 \
+  -machine q35,smm=on,accel=kvm -cpu host -m 2048 -smp 2 \
+  -global driver=cfi.pflash01,property=secure,value=on \
+  -global ICH9-LPC.disable_s3=1 \
+  -drive if=pflash,unit=0,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.secure.4m.fd \
+  -drive if=pflash,unit=1,format=raw,file=vars-<test>.fd \
+  -drive if=virtio,format=raw,file=esp-<test>.img,media=disk \
+  -serial file:serial-<test>.log -display none -no-reboot
+```
+
+The FAT ESP holds `\EFI\BOOT\BOOTX64.EFI` (an **APEX-signed** UEFI shell) plus a
+`startup.nsh` that launches `vmlinuz.efi` with a cmdline + `initrd=`. The shell
+being APEX-signed is itself a positive check (it loads); the shell's `LoadImage`
+of the kernel is the signature gate under test. The cmdline included
+`console=ttyS0,115200 ... lockdown=integrity` (see lockdown note below).
+
+### Serial evidence
+
+**Positive — APEX-signed kernel boots (SB enforcing):**
+
+```
+FS0:\> vmlinuz.efi initrd=\initramfs.cpio.gz console=ttyS0,115200 ... lockdown=integrity
+[    0.016634] Secure boot enabled
+[    0.925962] Lockdown: swapper/0: hibernation is restricted; see man kernel_lockdown.7
+[    0.977893] Run /init as init process
+APEX-SPIKE-D: >>> reached userspace: kernel executed under UEFI Secure Boot <<<
+APEX-EVIDENCE: Kernel is locked down from command line; see man kernel_lockdown.7
+APEX-EVIDENCE: Secure boot enabled
+APEX-EVIDENCE: efivar SecureBoot = 1 (1 = enabled)
+[    2.004344] reboot: Power down
+```
+
+⇒ firmware verified the kernel against db, kernel detected Secure Boot, lockdown
+LSM is active and enforcing (hibernation restricted), and userspace ran.
+
+**Negative — unsigned kernel AND rogue-signed kernel (same VARS):**
+
+```
+FS0:\> vmlinuz.efi initrd=\initramfs.cpio.gz console=ttyS0,115200 ...
+Script Error Status: Access Denied (line number 5)
+```
+
+⇒ firmware `LoadImage` refused the image (`EFI_ACCESS_DENIED`); **no kernel
+messages, no userspace** — the boot never started. Identical result whether the
+image was unsigned or signed by a key absent from db, confirming it is the
+signature-vs-db check doing the gating, not merely the presence of a signature.
+(The OVMF `release` build emits nothing on debug port 0x402, so the shell's
+`Access Denied` on serial is the authoritative rejection evidence.)
+
+### Lockdown caveat (important, and it differs on real distro kernels)
+
+The Void host kernel is built `CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y` — it does
+**not** auto-enter lockdown just because Secure Boot is on. So `lockdown=integrity`
+was passed on the cmdline to activate the lockdown LSM, and the log reads
+"locked down **from command line**". Fedora/RHEL/Ubuntu kernels are built with
+the SB→lockdown coupling and would instead print "locked down **from EFI Secure
+Boot mode**" automatically. **Implication for the APEX kernel:** build it with
+`CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y` (or the SB-coupling) so lockdown is
+automatic under SB and not dependent on a cmdline argument a user could drop.
+
+### Kernel-module signing (bonus) — why not shown in-VM, and the real procedure
+
+Not demonstrated end-to-end here, for concrete reasons on this host:
+
+- No kernel-devel/`build` tree and no `scripts/sign-file` for `7.1.4_1`, so an
+  out-of-tree `.ko` can't be built/signed in place.
+- More fundamentally: **module signatures are checked against the kernel
+  keyring, not the UEFI db.** The stock Void kernel has
+  `CONFIG_SECONDARY_TRUSTED_KEYRING` unset and no `.machine`/MOK keyring
+  (`CONFIG_INTEGRITY_MACHINE_KEYRING`), so it only trusts its ephemeral built-in
+  `certs/signing_key.pem`. Enrolling our key in **db** (which gates the *boot*
+  chain) does nothing for module trust. Under `lockdown=integrity` unsigned
+  modules are refused, but we cannot make this kernel *accept* an APEX-signed
+  module without rebuilding it.
+
+Exact procedure for the APEX image pipeline (captured in
+`signing/spike-d/sign-module.sh`):
+
+```sh
+# Sign every shipped kmod with the APEX key (DER cert), sha512 to match
+# the kernel's CONFIG_MODULE_SIG_HASH:
+/lib/modules/<kver>/build/scripts/sign-file sha512 apex-mok.key apex-mok.der module.ko
+```
+
+For the kernel to trust those signatures, the APEX kernel must be built so the
+APEX public key is in a trusted keyring — either bundled at build time
+(`CONFIG_SYSTEM_TRUSTED_KEYS=/path/apex.pem`, with `CONFIG_MODULE_SIG=y`), or
+loaded at runtime via the `.machine` keyring (`CONFIG_INTEGRITY_MACHINE_KEYRING=y`
++ shim/MOK). Pair with `CONFIG_MODULE_SIG_FORCE=y` (or `module.sig_enforce=1`)
+to reject unsigned modules unconditionally.
+
+### Implications for the CI signing pipeline (M1/M5)
+
+- The four scripts in `signing/spike-d/` are the pipeline primitives:
+  `sbsign` for boot components (kernel/UKI/shim/bootloader), `virt-fw-vars` for
+  building test varstores, and `boot-sb-vm.sh` as an automated SB smoke test
+  that CI can gate on (APEX-signed boots, unsigned/foreign `Access Denied`).
+- Keep the private key out of the tree — inject from a CI secret / HSM at sign
+  time. Only the public cert (DER) ships in images for enrollment. Repo
+  `.gitignore` already blocks `*.key`/`*.pem`/`*.p12`.
+- Sign **all** early-boot PE objects with the same key: kernel/UKI and, if shim
+  is used, the shim's payload (grub/systemd-boot/UKI). Prefer a single UKI
+  (kernel+initrd+cmdline in one signed PE) so the cmdline is inside the
+  signature envelope and can't be tampered with — and so lockdown isn't left to
+  a mutable cmdline arg.
+- Match the kernel's module-sig hash (sha512 here) and bake the APEX key into a
+  trusted keyring so kmod signing is enforceable (above).
+
+### db-enroll (this VM) vs shim + MOK (real hardware) — state it plainly
+
+This spike enrolled the APEX key directly into UEFI **db** (with self-owned
+PK/KEK). That is legitimate and fully enforcing, but only feasible where we
+control the firmware's key database — i.e. VMs, or physical machines where the
+owner clears Setup Mode and enrolls a custom PK/db. It is **not** how most retail
+hardware ships: those trust the **Microsoft UEFI CA** in db and cannot easily
+have db rewritten.
+
+On real hardware the APEX flow is therefore **shim + MOK**, not db:
+
+1. Ship a `shim` signed by the Microsoft UEFI CA (already trusted in db).
+2. shim carries/enrolls the **APEX cert as a MOK** (Machine Owner Key); MOK
+   enrollment is confirmed once by the user in MokManager at first boot (or
+   pre-seeded via `mokutil`).
+3. shim verifies the APEX-signed kernel/UKI against the MOK — no db change
+   needed, SB stays enforcing, and the MOK is linked into the kernel's
+   `.machine` keyring so the **same key also validates signed modules**.
+
+So: the *signing* commands proven here (`sbsign`, `sign-file`) are identical for
+both paths — only *where the trust anchor lives* differs (db in the VM;
+MOK-behind-shim on locked-down retail firmware). To offer both, ship the APEX
+cert for db-enrollment on owner-controlled machines **and** a
+Microsoft-CA-signed shim that enrolls the same cert as a MOK everywhere else.
+```
+
+## Spike E — dual-boot `to-filesystem` rehearsal (shared ESP)
+
+**Date:** 2026-07-21   **Host:** Void Linux, qemu 11.0.2 + KVM, OVMF (edk2 x64,
+4 MB split), podman 5.8.3   **Image:** `quay.io/fedora/fedora-bootc:43`
+(bootc **1.16.3**)   **Scripts:** [`files/scripts/spike-e/`](../files/scripts/spike-e/)
+(reusable install template)   **Artifacts:** `~/apex-os-m0-work/spike-e/` (VM
+disks + `out/` captures, not in repo).
+
+### Question
+
+Does `bootc install to-filesystem`, run against a **shared ESP** that already
+carries an incumbent OS's bootloader files, **clobber, reorder, or preserve**
+that OS's EFI boot entries, `BootOrder`, and ESP files? This de-risks the real
+installs on the **ThinkPad L16** (Void, EFISTUB entries + kernels *on* the ESP)
+and **MSI Katana** (Windows).
+
+### Method (rehearsal harness)
+
+A 30 GB GPT VM disk was built with a layout mirroring the L16:
+
+| Part | Size | FS | Role |
+|------|------|----|------|
+| `vda1` | 1 GiB | FAT32 | **shared ESP** |
+| `vda2` | 12 GiB | ext4 | incumbent root (Alpine) |
+| `vda3` | ~17 GiB | btrfs (empty) | APEX-OS install target |
+
+The **incumbent is Alpine 3.24.1** booting **classic EFISTUB** exactly like
+Void on the L16: kernel + initramfs copied *onto* the shared ESP at
+`\EFI\alpine\` and an `efibootmgr` entry whose `LoadOptions` carry the cmdline
+(`initrd=\EFI\alpine\initramfs-lts root=UUID=… …`). Using a **non-Fedora
+incumbent in its own ESP vendor dir** (`/EFI/alpine`, not `/EFI/fedora`) is
+deliberate — it is the only way to tell "bootc wiped the whole ESP" apart from
+"bootc overwrote its own vendor dir".
+
+The install was run **from inside the VM** (podman in the incumbent) — the only
+safe place to let bootc's `efibootmgr` touch NVRAM, since that NVRAM belongs to
+the VM's OVMF (`OVMF_VARS` pflash), never the host. The host's ESP / efibootmgr
+/ bootloader were never touched. NVRAM persists across VM reboots, so
+`BootOrder` survival is directly observable.
+
+Choreography (host-driven state machine over a serial log + a shared payload
+disk carrying the image tar): **setup** (create the incumbent's NVRAM entry) →
+**before** (capture) → **install** → **after** (capture) → boot-test the bootc
+OS → boot-test the incumbent. See `99-run-all.sh`.
+
+### The `bootc install` invocation that worked
+
+```sh
+# target prepared first: vda3 (empty btrfs) -> /target ; vda1 (ESP) -> /target/boot/efi
+podman run --rm --privileged --pid=host --network=host \
+    -v /dev:/dev \
+    -v /run/udev:/run/udev \
+    -v /var/lib/containers:/var/lib/containers \
+    -v /target:/target \
+    quay.io/fedora/fedora-bootc:43 \
+    bootc install to-filesystem \
+      --karg=root=UUID=<apex-root-uuid> --karg=rw \
+      --karg=console=tty0 --karg=console=ttyS0,115200 \
+      --skip-fetch-check \
+      /target
+```
+
+`--replace` was **not** passed (target root is empty). The default mode is what
+preserves the foreign ESP content — see gotchas. Result:
+
+```
+Installing image: docker://quay.io/fedora/fedora-bootc:43
+Initializing ostree layout
+Deploying container image...done (9 seconds)
+Bootloader: grub
+Installing bootloader via bootupd
+Executing: "efibootmgr" "--create" "--disk" "/dev/vda" "--part" "1" \
+           "--loader" "\EFI\fedora\shimx64.efi" "--label" "Fedora"
+Installation complete!
+```
+
+The apex root received a correct bootc/ostree deployment
+(`.bootc-aleph.json`, `ostree/deploy/default/deploy`, `/boot` with
+`grub2/`, `loader/`, `bootupd-state.json`).
+
+### `efibootmgr` before / after
+
+**Before** (`BootCurrent: 0002`):
+```
+BootOrder: 0002,0000,0001,0003,0004,0005,0006,0007
+Boot0002* Alpine (incumbent)  HD(1,GPT,…)/\EFI\alpine\vmlinuz-lts  [+cmdline in LoadOptions]
+```
+
+**After** (bootc's own ordering, before any orchestration):
+```
+BootOrder: 0008,0002,0000,0001,0003,0004,0005,0006,0007
+Boot0002* Alpine (incumbent)  HD(1,GPT,…)/\EFI\alpine\vmlinuz-lts   <- PRESERVED, byte-identical
+Boot0008* Fedora              HD(1,GPT,…)/\EFI\fedora\shimx64.efi   <- NEW (added by bootc)
+```
+
+**Diff:**
+- `Boot0002` (incumbent): **untouched** — same device path, same LoadOptions/cmdline.
+- All other pre-existing entries (`0000,0001,0003–0007`): **untouched**.
+- `Boot0008 "Fedora"`: **added** via `efibootmgr --create` (label from
+  `/EFI/fedora/BOOTX64.CSV`).
+- `BootOrder`: **reordered** — bootc's `--create` **prepends**, so `0008`
+  (Fedora) becomes the default and the incumbent `0002` is demoted from 1st to
+  2nd. **Nothing was deleted or renumbered.**
+
+### ESP contents + space delta
+
+| | Before | After |
+|---|---|---|
+| `/EFI/alpine/vmlinuz-lts` | 14,468,096 B | 14,468,096 B (identical) |
+| `/EFI/alpine/initramfs-lts` | 20,876,653 B | 20,876,653 B (identical) |
+| `/EFI/BOOT/` (BOOTX64.EFI + fbx64.efi) | — | 1,037,240 B (added) |
+| `/EFI/fedora/` (shim, grub, mm, CSV, grub.cfg, bootuuid.cfg) | — | 6,794,292 B (added) |
+| **ESP total used** | **35,344,749 B (~33.7 MiB)** | **43,176,281 B (~41.2 MiB)** |
+
+**bootc ESP delta ≈ 7.47 MiB (7,831,532 B)** — the `/EFI/BOOT` + `/EFI/fedora`
+trees. The incumbent's `/EFI/alpine` kernels were **not touched**. (The L16 ESP
+already carries Void kernels/initramfs; budget ~8–10 MiB headroom for bootc.)
+
+### Pass / fail per sub-goal
+
+| Sub-goal | Result |
+|---|---|
+| Incumbent boots (before) | **PASS** — OVMF loaded `Boot0002` → `\EFI\alpine\vmlinuz-lts` → Alpine. |
+| `to-filesystem` completes | **PASS** — rc=0, primary attempt (no `--disable-selinux`). |
+| bootc OS boots after | **PASS** — shim→grub→ostree kernel→dracut→**switch-root** into the ostree root; second systemd reached `basic`/`network` targets. |
+| Incumbent boots after | **PASS** — normal boot loaded `Boot0002` → Alpine (kernel + os-release + cmdline confirmed from inside). |
+| Existing entries/BootOrder preserved | **PASS (with caveat)** — entries & ESP files preserved byte-for-byte; `BootOrder` **reordered** (bootc prepended itself as default). |
+| ESP delta measured | **PASS** — +7.47 MiB. |
+
+### Gotchas / findings
+
+1. **bootupd only manages `/EFI/BOOT` + its own vendor dir (`/EFI/fedora`).** It
+   did **not** wipe the ESP. The upstream warning that "bootc install is always
+   destructive with respect to `/boot` and the ESP" (PR #1752 / docs) did **not**
+   materialise for `to-filesystem` in **default (empty-root)** mode on
+   bootc 1.16.3 — foreign vendor dirs survive. This is the central good news.
+2. **Never use `--replace=alongside` on a shared ESP with a foreign OS.** Its
+   own help says it wipes bootloader state ("the bootloader state will have its
+   contents wiped and replaced"). We used the default empty-root mode instead.
+3. **bootc prepends its NVRAM entry and becomes the default boot.** The incumbent
+   is preserved but demoted. The real install must **re-assert `BootOrder`**
+   afterwards to the desired default (`efibootmgr -o …`) and record it.
+4. **`/EFI/BOOT/BOOTX64.EFI` (removable fallback) is written by bootc.** It was
+   absent before and bootc created it. If an incumbent already uses the
+   removable-media fallback path, bootc **would overwrite** it. Void on the L16
+   boots via a dedicated efibootmgr EFISTUB entry (not the fallback), so this is
+   expected-safe — but **pre-flight check the L16's `\EFI\BOOT\` before install.**
+5. **SELinux was a non-issue.** The primary attempt (no `--disable-selinux`)
+   succeeded even though the install host (Alpine) has no SELinux — bootc labels
+   the target from the container's policy. The script keeps a `--disable-selinux`
+   fallback but it was not needed. (Real install from a Fedora live USB is still
+   the recommended, most-faithful environment.)
+6. **`bootc install` needs `/run/udev` on the host.** From a bare Alpine
+   minirootfs it aborts with *"Comparing filesystems at /run/udev …: No such file
+   or directory"*. Fixed by running `eudev` (`udevadm trigger`/`settle`) and
+   bind-mounting `-v /run/udev:/run/udev`. A normal Fedora live USB already runs
+   systemd-udevd, so this is a harness detail, not a real-install step.
+7. **podman needs cgroup v2 mounted.** Alpine's minirootfs mounts no cgroups;
+   crun failed with *"invalid file system type on /sys/fs/cgroup"* until
+   `mount -t cgroup2 none /sys/fs/cgroup`. Again a harness detail (Fedora live
+   has it).
+8. **First-boot bootstrap of the incumbent:** OVMF did **not** reliably fall
+   through to its internal UEFI Shell / `startup.nsh` (it exhausted disk options
+   then hung on PXE). The harness boots the incumbent once via qemu `-kernel`
+   (still under OVMF, so efivarfs works) purely to *create* its persistent
+   EFISTUB entry; every subsequent boot uses the real NVRAM entry. Not relevant
+   to the real machines (which already have their entries).
+9. **LUKS was deferred.** The host lacks `cryptsetup`, so this ran plain btrfs.
+   The core ESP/BootOrder result is independent of LUKS. For the L16 LUKS2 path
+   (plan §5b): create LUKS2 + btrfs by hand, mount the decrypted root at
+   `/target`, add a **separate unencrypted `/boot`** partition mounted at
+   `/target/boot`, and pass `--boot-mount-spec UUID=<boot>` so kernels/BLS land
+   on the plain `/boot` while `/` stays encrypted. Needs a dedicated LUKS rehearsal.
+
+### Verdict — is this safe enough for the L16?
+
+**Yes, with defined pre-flight guards.** `bootc install to-filesystem` in
+default empty-root mode is **non-destructive to a foreign OS's ESP files and
+NVRAM entries**: it adds `/EFI/BOOT` + `/EFI/fedora` (~7.5 MiB) and prepends one
+NVRAM entry. Void's EFISTUB kernels on the shared ESP and Void's efibootmgr
+entry will survive; only the default boot target changes.
+
+**Pre-flight checks the real L16 install needs (beyond the plan's current list):**
+
+- **Snapshot boot state first:** `efibootmgr -v` + a recursive listing of the
+  real ESP, saved off-box, so the post-install diff is auditable and BootOrder
+  can be restored.
+- **Inspect `\EFI\BOOT\` on the L16 before install** — if Void relies on the
+  removable fallback there, bootc will overwrite it; plan to restore/relayer.
+- **Re-assert `BootOrder` after install** (`efibootmgr -o …`) — bootc makes
+  itself the default; decide and set the intended default explicitly, and
+  confirm Void's entry is still bootable.
+- **Verify ESP free space** (≥ ~10 MiB headroom) — trivially satisfied on a
+  ≥256 MiB ESP but worth asserting since the L16 ESP already holds Void kernels.
+- **Target root must be empty** and passed *without* `--replace` — and
+  **`--replace=alongside` is forbidden** on the shared ESP.
+- **Pin the bootc/image version and re-run this spike on every bump** — the
+  "preserve vs wipe" behaviour is a bootupd implementation detail, not a
+  guarantee; this result is specific to bootc 1.16.3 / fedora-bootc:43.
+- **Prefer a Fedora live USB as the install host** (SELinux + udev + cgroup2
+  present) to avoid the harness workarounds above; capture the Windows/Void
+  baseline and (Katana) BitLocker recovery key first per the existing plan.
+- **Still to rehearse separately:** the **LUKS2 + separate `/boot` +
+  `--boot-mount-spec`** variant (§5b), and Secure Boot interaction (§5a).
