@@ -1,0 +1,23 @@
+# Thin derived image on top of the spike image that bakes a boot-time
+# diagnostic service. It writes the RUNNING kernel version and NVIDIA module
+# presence to the console once multi-user is reached, then powers off, so the
+# headless QEMU serial capture deterministically proves what actually booted.
+FROM localhost/apex-kernel-spike:latest
+
+RUN cat > /usr/lib/systemd/system/apex-bootcheck.service <<'UNIT'
+[Unit]
+Description=APEX spike boot check
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/bin/bash -c 'echo "APEX-BOOTCHECK-BEGIN"; echo "APEX uname=$(uname -r)"; echo "APEX system-running=$(systemctl is-system-running || true)"; kv=$(uname -r); if [ -e /usr/lib/modules/$kv/extra/nvidia/nvidia.ko.xz ] || [ -e /usr/lib/modules/$kv/extra/nvidia/nvidia.ko ]; then echo "APEX nvidia-ko=PRESENT"; ls /usr/lib/modules/$kv/extra/nvidia/; else echo "APEX nvidia-ko=ABSENT"; fi; echo "APEX-BOOTCHECK-END"; systemctl poweroff'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+RUN systemctl enable apex-bootcheck.service

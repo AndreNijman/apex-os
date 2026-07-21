@@ -1,0 +1,132 @@
+# APEX-OS — M0 Spike B: CachyOS kernel swap + DIY NVIDIA akmod on fedora-bootc
+#
+# This is a THROWAWAY spike image, not a production APEX-OS image. It exists to
+# de-risk the Phase-A kernel path:
+#   1. swap Fedora's kernel for the CachyOS-for-Fedora COPR kernel in a bootc
+#      image (initramfs regenerated into /usr/lib/modules/<kver>/ as bootc needs)
+#   2. build the RPMFusion NVIDIA akmod DIY against that kernel (the COPR dropped
+#      prebuilt NVIDIA in Feb 2026 -> we must compile it ourselves)
+#   3. bake the sched-ext userspace so scx schedulers are available
+#   4. leave the image inspectable for the kernel config + layering checks
+#
+# The NVIDIA akmod step is capture-and-continue: a build failure is recorded to
+# /usr/lib/apex-nvidia-akmod-status with the compiler log rather than aborting
+# the whole image, so the other spike checks (config table, layering, VM boot)
+# still run. Read that file (and the build log) for the akmod verdict.
+#
+# Build:
+#   sudo podman build -f kernel/Containerfile.kernel-spike \
+#     -t localhost/apex-kernel-spike:latest .
+
+ARG BASE_IMAGE=quay.io/fedora/fedora-bootc:42
+FROM ${BASE_IMAGE}
+
+# ---------------------------------------------------------------------------
+# 1. Kernel swap: Fedora kernel -> CachyOS (bieszczaders/kernel-cachyos).
+#    kernel-cachyos is the default desktop variant (1000 Hz, BORE + sched-ext).
+#    devel-matched pulls the version-locked -devel needed to build out-of-tree
+#    modules (the NVIDIA akmod) against exactly this kernel.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    dnf5 -y install dnf5-plugins; \
+    dnf5 -y copr enable bieszczaders/kernel-cachyos; \
+    dnf5 -y copr enable bieszczaders/kernel-cachyos-addons; \
+    dnf5 -y remove --no-autoremove \
+        kernel kernel-core kernel-modules kernel-modules-core; \
+    dnf5 -y install \
+        kernel-cachyos kernel-cachyos-core kernel-cachyos-modules \
+        kernel-cachyos-devel-matched; \
+    dnf5 clean all
+
+# ---------------------------------------------------------------------------
+# 2. Ensure the initramfs exists at /usr/lib/modules/<kver>/initramfs.img.
+#    bootc boots from the UKI/initramfs shipped inside /usr/lib/modules, NOT
+#    from /boot. If the kernel scriptlets did not produce one in the container
+#    (no running system, no /boot), regenerate it with a generic (non-hostonly)
+#    dracut. Fail hard if the kernel image or initramfs is missing.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    KVER="$(basename "$(ls -d /usr/lib/modules/*cachyos*)")"; \
+    echo "CachyOS kver: ${KVER}"; \
+    if [ ! -s "/usr/lib/modules/${KVER}/initramfs.img" ]; then \
+        echo "initramfs missing -> regenerating with dracut"; \
+        dracut --force --no-hostonly --reproducible --zstd \
+            --kver "${KVER}" "/usr/lib/modules/${KVER}/initramfs.img"; \
+    else \
+        echo "initramfs already present (kernel scriptlets generated it)"; \
+    fi; \
+    test -s "/usr/lib/modules/${KVER}/initramfs.img"; \
+    test -s "/usr/lib/modules/${KVER}/vmlinuz"; \
+    printf '%s\n' "${KVER}" > /usr/lib/apex-cachyos-kver; \
+    ls -la "/usr/lib/modules/${KVER}/"
+
+# ---------------------------------------------------------------------------
+# 3. NVIDIA akmod DIY against the CachyOS kernel.
+#    RPMFusion free+nonfree -> akmod-nvidia (source) -> akmods compiles the
+#    module for the exact CachyOS kver -> install the produced kmod RPM ->
+#    verify `modinfo nvidia` resolves against the CachyOS kernel.
+#    Capture-and-continue: records PASS/FAIL to /usr/lib/apex-nvidia-akmod-status.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    dnf5 -y install \
+      "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
+      "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"; \
+    dnf5 -y install akmods akmod-nvidia kmodtool gcc make; \
+    dnf5 clean all
+
+RUN set -eux; \
+    KVER="$(cat /usr/lib/apex-cachyos-kver)"; \
+    STATUS=/usr/lib/apex-nvidia-akmod-status; \
+    NVIDIA_VER="$(rpm -q --qf '%{VERSION}' akmod-nvidia 2>/dev/null || echo unknown)"; \
+    echo "akmod-nvidia driver version: ${NVIDIA_VER}"; \
+    echo "target kernel: ${KVER}"; \
+    ls -d "/usr/src/kernels/${KVER}" 2>&1 || echo "WARN: no /usr/src/kernels/${KVER}"; \
+    set +e; \
+    akmods --force --kernels "${KVER}" --kmod nvidia; \
+    AKRC=$?; \
+    set -e; \
+    echo "akmods exit code: ${AKRC}"; \
+    ls -la /var/cache/akmods/nvidia/ 2>&1 || true; \
+    RPM="$(ls /var/cache/akmods/nvidia/kmod-nvidia-*.rpm 2>/dev/null | head -1)"; \
+    if [ -n "${RPM}" ] && [ -f "${RPM}" ]; then \
+        echo "built kmod RPM: ${RPM}"; \
+        dnf5 -y install "${RPM}"; \
+        depmod -a "${KVER}"; \
+        if modinfo -k "${KVER}" nvidia >/tmp/modinfo.txt 2>&1; then \
+            echo "PASS driver=${NVIDIA_VER} kver=${KVER}" > "${STATUS}"; \
+            echo "=== modinfo nvidia (kver ${KVER}) ==="; \
+            head -12 /tmp/modinfo.txt; \
+        else \
+            echo "FAIL modinfo-unresolved driver=${NVIDIA_VER} kver=${KVER}" > "${STATUS}"; \
+            cat /tmp/modinfo.txt; \
+        fi; \
+    else \
+        echo "FAIL akmod-build rc=${AKRC} driver=${NVIDIA_VER} kver=${KVER}" > "${STATUS}"; \
+        echo "=== AKMOD BUILD FAILED — dumping failure logs ==="; \
+        cat /var/cache/akmods/nvidia/*.failed.log 2>/dev/null || \
+            echo "(no .failed.log found)"; \
+    fi; \
+    echo "akmod status file:"; cat "${STATUS}"
+
+# ---------------------------------------------------------------------------
+# 4. sched-ext userspace: scx schedulers + scxctl/scx_loader (scx-tools).
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    dnf5 -y install scx-scheds scx-tools; \
+    dnf5 clean all; \
+    rpm -q scx-scheds scx-tools > /usr/lib/apex-scx-versions 2>&1 || true; \
+    cat /usr/lib/apex-scx-versions
+
+# ---------------------------------------------------------------------------
+# 5. Serial console kargs so the headless QEMU boot test can read the console
+#    and confirm `uname -r` == the CachyOS kver.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    mkdir -p /usr/lib/bootc/kargs.d; \
+    printf 'kargs = ["console=ttyS0,115200", "console=tty0"]\n' \
+        > /usr/lib/bootc/kargs.d/10-apex-serial.toml
+
+# ---------------------------------------------------------------------------
+# 6. bootc lint (informational — do not fail the spike on lint).
+# ---------------------------------------------------------------------------
+RUN bootc container lint || true
