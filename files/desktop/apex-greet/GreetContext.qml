@@ -30,10 +30,44 @@ Item {
     // ── Edition ("gaming" | "daily" | "mono") ─────────────────────
     property string edition: "mono"
 
-    // Command line of the selected session. Empty until the session
-    // picker (added in a later commit) populates it; a login shell is
-    // used as a safe fallback so the auth flow is testable on its own.
-    property string sessionCommand: ""
+    // ── Session model ─────────────────────────────────────────────
+    // sessions: [{ id, name, exec }] parsed from wayland-sessions.
+    property var    sessions:     []
+    property int    sessionIndex: 0
+    property string _wantSession: ""    // desired id from last-session
+
+    readonly property var currentSession:
+        (sessions.length > 0 && sessionIndex >= 0 && sessionIndex < sessions.length)
+            ? sessions[sessionIndex] : null
+    readonly property string sessionName: currentSession ? currentSession.name : "Default"
+    // Command line of the selected session; a login shell is the safe
+    // fallback when no wayland-sessions exist (e.g. the dev box).
+    readonly property string sessionCommand: currentSession ? currentSession.exec : ""
+
+    function cycleSession(dir) {
+        var n = ctx.sessions.length
+        if (n === 0) return
+        ctx.sessionIndex = ((ctx.sessionIndex + dir) % n + n) % n
+    }
+
+    function _addSession(line) {
+        var t = line.trim()
+        if (t === "") return
+        var parts = t.split("\t")
+        if (parts.length < 3) return
+        var exec = parts[2].replace(/%[a-zA-Z]/g, "").trim()   // strip field codes
+        if (exec === "") return
+        var list = ctx.sessions.slice()
+        list.push({ id: parts[0], name: parts[1], exec: exec })
+        ctx.sessions = list
+        ctx._selectWanted()
+    }
+
+    function _selectWanted() {
+        if (ctx._wantSession === "") return
+        for (var i = 0; i < ctx.sessions.length; i++)
+            if (ctx.sessions[i].id === ctx._wantSession) { ctx.sessionIndex = i; return }
+    }
 
     // ── Live clock (local ticker, mirrors the Lockscreen) ─────────
     property string timeText: Qt.formatDateTime(new Date(), "hh:mm")
@@ -94,11 +128,37 @@ Item {
     // Hand the chosen session to greetd. greetd opens the PAM session
     // and execs the command; quickshell exits. A login shell wraps the
     // Exec line so PATH / profile resolve, mirroring common greeters.
+    //
+    // last-user / last-session are written FIRST (values passed via env
+    // so a hostile username can't inject shell), and the actual launch
+    // is deferred to persistProc.onExited so the write flushes before
+    // quickshell exits. An unwritable state dir is tolerated.
+    property var _pendingArgv: null
     function launch() {
         var cmd  = ctx.sessionCommand.trim()
         var argv = cmd.length > 0 ? ["sh", "-lc", cmd]
                                   : ["sh", "-lc", "exec ${SHELL:-/bin/sh} -l"]
-        Greetd.launch(argv)
+        ctx._pendingArgv = argv
+        persistProc.environment = {
+            "AG_USER": ctx.username,
+            "AG_SESS": ctx.currentSession ? ctx.currentSession.id : ""
+        }
+        persistProc.command = ["sh", "-c",
+            "d=/var/lib/apex-greet; mkdir -p \"$d\" 2>/dev/null;" +
+            " printf '%s' \"$AG_USER\" > \"$d/last-user\" 2>/dev/null || true;" +
+            " printf '%s' \"$AG_SESS\" > \"$d/last-session\" 2>/dev/null || true"]
+        persistProc.running = true
+    }
+
+    Process {
+        id: persistProc
+        onExited: function(exitCode, exitStatus) {
+            if (ctx._pendingArgv) {
+                var a = ctx._pendingArgv
+                ctx._pendingArgv = null
+                Greetd.launch(a)
+            }
+        }
     }
 
     Connections {
@@ -148,6 +208,47 @@ Item {
                 if (v === "gaming" || v === "daily") ctx.edition = v
                 else if (v !== "")                   ctx.edition = "mono"
             }
+        }
+    }
+
+    // ── Last user (prefill) ───────────────────────────────────────
+    Process {
+        running: true
+        command: ["sh", "-c", "cat /var/lib/apex-greet/last-user 2>/dev/null; echo"]
+        stdout: SplitParser {
+            onRead: function(line) {
+                var u = line.trim()
+                if (u !== "" && ctx.username === "") ctx.username = u
+            }
+        }
+    }
+
+    // ── Last session (preselect once the list is parsed) ──────────
+    Process {
+        running: true
+        command: ["sh", "-c", "cat /var/lib/apex-greet/last-session 2>/dev/null; echo"]
+        stdout: SplitParser {
+            onRead: function(line) {
+                var s = line.trim()
+                if (s !== "") { ctx._wantSession = s; ctx._selectWanted() }
+            }
+        }
+    }
+
+    // ── Session list from /usr/share/wayland-sessions/*.desktop ───
+    Process {
+        running: true
+        command: ["sh", "-c",
+            "for f in /usr/share/wayland-sessions/*.desktop; do" +
+            " [ -r \"$f\" ] || continue;" +
+            " id=$(basename \"$f\" .desktop);" +
+            " name=$(sed -n 's/^Name=//p' \"$f\" | head -n1);" +
+            " exec=$(sed -n 's/^Exec=//p' \"$f\" | head -n1);" +
+            " [ -n \"$exec\" ] || continue;" +
+            " printf '%s\\t%s\\t%s\\n' \"$id\" \"${name:-$id}\" \"$exec\";" +
+            " done"]
+        stdout: SplitParser {
+            onRead: function(line) { ctx._addSession(line) }
         }
     }
 }
