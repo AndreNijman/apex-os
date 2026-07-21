@@ -1,0 +1,45 @@
+# APEX-OS system profile: amd-zen
+#
+# CPU-class profile for AMD Zen parts driven by amd-pstate-epp (EPP active
+# mode). Selected when the CPU vendor is AMD and the scaling driver is
+# amd-pstate/amd-pstate-epp, unless a device profile (e.g. thinkpad-l16-g2)
+# overrides it.
+#
+# The EPP table mirrors the proven L16 "powermode" mapping:
+#   ultra-max/ultra/performance -> performance governor, top EPP
+#   balanced/power-saver        -> powersave governor, progressively softer EPP
+# amd-pstate-epp exposes exactly two governors (performance, powersave); the
+# EPP string is what actually grades performance within each governor.
+
+id = "amd-zen"
+kind = "class"
+description = "AMD Zen (amd-pstate-epp)"
+
+[defaults]
+ac = "performance"
+battery = "balanced"
+
+[tiers.ultra-max]
+governor = "performance"
+epp = "performance"
+platform_profile = "performance"
+
+[tiers.ultra]
+governor = "performance"
+epp = "performance"
+platform_profile = "performance"
+
+[tiers.performance]
+governor = "performance"
+epp = "balance_performance"
+platform_profile = "performance"
+
+[tiers.balanced]
+governor = "powersave"
+epp = "balance_power"
+platform_profile = "balanced"
+
+[tiers.power-saver]
+governor = "powersave"
+epp = "power"
+platform_profile = "low-power"
