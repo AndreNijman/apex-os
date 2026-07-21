@@ -26,6 +26,10 @@ on:
         description: "Also build a daily qcow2 disk image (bootc-image-builder)"
         type: boolean
         default: false
+      build_iso:
+        description: "Build the daily APEX-OS installer ISO (anaconda-iso)"
+        type: boolean
+        default: false
   schedule:
     # Weekly rebuild (Mon 06:00 UTC) to pick up upstream base / COPR / RPMFusion
     # security updates even without a source change.
@@ -47,6 +51,9 @@ jobs:
   # ── Job 1: shared base ────────────────────────────────────────────────────
   base:
     runs-on: ubuntu-latest
+    # Skip the whole image rebuild on an ISO-only dispatch (installer-iso pulls
+    # the already-published :daily tag). flavors/qcow2 need base, so they skip too.
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2) }}
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
@@ -212,5 +219,49 @@ jobs:
         with:
           name: apex-os-daily-qcow2
           path: output/qcow2/*.qcow2
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ── Job 4: installer ISO (dispatch-gated) ─────────────────────────────────
+  # Builds the APEX-OS Daily installer as an Anaconda ISO (bootc-image-builder
+  # --type anaconda-iso) — a bootable USB that installs the signed daily image
+  # to a target disk. The image is pulled into local storage first (each job is
+  # a fresh runner; --local needs it present). Uploaded as an artifact for the
+  # maintainer to write to a USB stick.
+  installer-iso:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.build_iso
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Log in to GHCR (rootful podman)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | sudo podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+
+      - name: Pull the latest green daily image into local storage
+        run: sudo podman pull "$IMAGE:daily"
+
+      - name: Build daily installer ISO via bootc-image-builder
+        run: |
+          mkdir -p output
+          sudo podman run --rm --privileged \
+            --security-opt label=type:unconfined_t \
+            -v "$(pwd)/output":/output \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            quay.io/centos-bootc/bootc-image-builder:latest \
+            --type anaconda-iso --local \
+            "$IMAGE:daily"
+          ls -lhR output/bootiso || ls -lhR output
+
+      - name: Upload installer ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-os-daily-installer-iso
+          path: output/bootiso/*.iso
           if-no-files-found: warn
           retention-days: 7
