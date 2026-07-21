@@ -1,26 +1,42 @@
 # APEX-OS greeter — example /etc/greetd/config.toml
 #
 # greetd starts on a VT and runs `default_session.command` as the
-# `greeter` user. Here that command is `cage` (a single-client kiosk
-# Wayland compositor) running quickshell with the apex-greet config.
+# `greetd` user. Here that command is `sway` (a full wlroots compositor)
+# running quickshell — via sway-greet.conf — with the apex-greet config.
+#
+# WHY sway, NOT cage (M0 spike A): cage 0.2.0 does NOT expose wlr-layer-shell
+# to quickshell 0.3.0 ("Failed to initialize layershell integration"), so
+# apex-greet's PanelWindow never gets a surface — the greeter launches but
+# never paints. sway implements wlr-layer-shell natively, so the layer
+# surface is allowed and maps. See docs/m0-results.md "Spike A" and
+# apex-greet/README.md "Compositor host". labwc is the documented fallback
+# host (files/desktop/apex-greet/labwc-greet/).
 #
 # quickshell speaks to greetd over the UNIX socket greetd hands to its
 # child via $GREETD_SOCK — this is what Quickshell.Services.Greetd uses.
 # On a successful authentication apex-greet calls Greetd.launch(...),
-# greetd tears the greeter down and starts the user's session on the
-# same VT.
+# greetd tears the greeter (this sway process) down and starts the user's
+# session on the same VT.
 
 [terminal]
 # Run the greeter on VT 1. Adjust if another unit owns tty1.
 vt = 1
 
 [default_session]
-# NOTE (M0 spike A): cage 0.2.0 does NOT provide wlr-layer-shell to
-# quickshell 0.3.0, so the greeter fails to paint under cage. Use a
-# layer-shell-capable host (sway/labwc) instead — see README "Known
-# limitations". This cage line is kept only as the original reference;
-# M1 replaces it with a sway/labwc launch and verifies render on HW.
-command = "cage -ds -- qs -p /usr/share/apex-greet/shell.qml"
+# sway hosts the greeter via a purpose-built, keybind-free config that
+# launches quickshell as its only client and exits when quickshell quits.
+command = "sway -c /usr/share/apex-greet/sway-greet.conf"
+#
+# ABANDONED host (M0 spike A) — cage 0.2.0 does not serve quickshell's
+# layer-shell, so the greeter never paints under it. Kept ONLY as a labelled
+# record of what was tried; do NOT re-enable without confirming a cage build
+# that exposes wlr-layer-shell to quickshell:
+#   command = "cage -ds -- qs -p /usr/share/apex-greet/shell.qml"
+#
+# FALLBACK host — labwc (also native wlr-layer-shell). Swap the command above
+# for this line if sway misbehaves on some hardware (see labwc-greet/README.md):
+#   command = "labwc -C /usr/share/apex-greet/labwc-greet"
+#
 # Fedora's greetd package provisions a `greetd` system user (sysusers.d);
 # there is no `greeter` user. logind grants this user the seat/DRM access
 # the greeter needs for the duration of the greet session.
