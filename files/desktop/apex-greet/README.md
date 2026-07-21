@@ -102,10 +102,11 @@ COPY files/branding/wallpapers/apex-wallpaper-default.jpg \
 # greetd config
 COPY files/desktop/apex-greet/greetd-config.toml /etc/greetd/config.toml
 
-# Writable state dir, owned by the greetd session user. tmpfiles is used
-# so it exists at boot even though `greeter` may be created only when the
-# greetd package's sysusers entry runs.
-RUN printf 'd /var/lib/apex-greet 0755 greeter greeter -\n' \
+# Writable state dir, owned by the greetd session user. On Fedora the
+# greetd package provisions a `greetd` user (sysusers.d) — there is no
+# `greeter` user — so the dir is owned by `greetd`. tmpfiles creates it at
+# boot (after systemd-sysusers has run).
+RUN printf 'd /var/lib/apex-greet 0755 greetd greetd -\n' \
       > /usr/lib/tmpfiles.d/apex-greet.conf
 
 # Make greetd the display manager
@@ -118,10 +119,10 @@ against (developed on Quickshell 0.3.0).
 
 ### State dir & SELinux
 
-The greeter runs as the **`greeter`** user, so `/var/lib/apex-greet`
-must be writable by it (the tmpfiles line above). Under SELinux the dir
-gets `var_lib_t`; if the greeter session is confined and the
-`last-user`/`last-session` write is denied, the greeter still works —
+The greeter runs as the **`greetd`** user (Fedora's packaged greetd user),
+so `/var/lib/apex-greet` must be writable by it (the tmpfiles line above).
+Under SELinux the dir gets `var_lib_t`; if the greeter session is confined
+and the `last-user`/`last-session` write is denied, the greeter still works —
 the write just fails and prefill is skipped next boot. To keep the
 memory feature, either relabel the dir for the greetd domain or ship an
 allow rule; verify with `ausearch -m avc -ts recent` after first login.

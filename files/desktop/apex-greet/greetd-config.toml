@@ -18,4 +18,7 @@ vt = 1
 # cage flags: -d = no client-side decorations, -s = allow VT switching.
 # quickshell loads the greeter from its install path.
 command = "cage -ds -- qs -p /usr/share/apex-greet/shell.qml"
-user = "greeter"
+# Fedora's greetd package provisions a `greetd` system user (sysusers.d);
+# there is no `greeter` user. logind grants this user the seat/DRM access
+# the greeter needs for the duration of the greet session.
+user = "greetd"
