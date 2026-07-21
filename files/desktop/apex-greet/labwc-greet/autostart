@@ -1,0 +1,23 @@
+#!/bin/sh
+# APEX-OS greeter — labwc autostart (fallback host).
+#
+# labwc runs this file at startup (`sh <config-dir>/autostart`).  It launches
+# the apex-greet quickshell greeter as the ONLY client, then brings labwc down
+# when quickshell quits.
+#
+# Two exit paths (same as the sway host):
+#   1. Success: apex-greet calls Greetd.launch(argv); greetd terminates the
+#      greeter (this labwc process) and starts the user session.
+#   2. Cancel / crash: quickshell exits on its own; the `labwc -e` below tells
+#      the running labwc instance to exit (SIGTERM) so greetd never sees a
+#      blank host.
+#
+# NOTE: `qs` runs in the FOREGROUND here (no `&`) so this script blocks until
+# quickshell exits — that is what lets the exit line run afterwards.
+
+qs -p /usr/share/apex-greet/shell.qml
+
+# quickshell has exited without a session handoff (cancel / crash) — drop the
+# compositor.  `labwc -e` exits the running instance; the pkill is a fallback
+# for labwc builds without `-e`.
+labwc -e 2>/dev/null || pkill -TERM -x labwc 2>/dev/null || true

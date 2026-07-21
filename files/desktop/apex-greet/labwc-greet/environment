@@ -1,0 +1,14 @@
+# APEX-OS greeter — labwc environment (fallback host).
+#
+# labwc reads this file at startup and exports each KEY=value into the
+# compositor + client environment.  Keyboard layout is set here (labwc takes
+# xkb settings from the environment, not rc.xml).  Adjust per locale at
+# image-build time if needed.
+
+XKB_DEFAULT_LAYOUT=us
+
+# No-GPU last resort (leave commented unless the target has no working GL —
+# see README "No-GPU render fallback"; UNTESTED, real-HW verify item):
+# WLR_RENDERER=pixman
+# LIBGL_ALWAYS_SOFTWARE=1
+# QT_QUICK_BACKEND=software
