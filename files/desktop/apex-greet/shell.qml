@@ -31,7 +31,7 @@ ShellRoot {
     // spark logo are edition-derived so gaming / daily / dev each get
     // their own accent.
     QtObject {
-        id: theme
+        id: greetTheme
         readonly property string fontFamily: "JetBrainsMono Nerd Font"
         readonly property color background: "#1a282a"
         readonly property color text:       "#cdd6f4"
@@ -43,20 +43,20 @@ ShellRoot {
         // else (dev box / VARIANT_ID unset) → the Brain_Shell blue so
         // the greeter is pixel-identical to the Lockscreen off-target.
         readonly property color active:
-            ctx.edition === "gaming" ? "#fde047"
-          : ctx.edition === "daily"  ? "#d9f99d"
+            greetCtx.edition === "gaming" ? "#fde047"
+          : greetCtx.edition === "daily"  ? "#d9f99d"
           : "#a6d0f7"
 
         // Assets ship alongside this file, so Qt.resolvedUrl works both
         // in-tree (dev) and installed at /usr/share/apex-greet/.
         readonly property url logoSource:
-            ctx.edition === "gaming" ? Qt.resolvedUrl("assets/spark-gold.png")
-          : ctx.edition === "daily"  ? Qt.resolvedUrl("assets/spark-chartreuse.png")
+            greetCtx.edition === "gaming" ? Qt.resolvedUrl("assets/spark-gold.png")
+          : greetCtx.edition === "daily"  ? Qt.resolvedUrl("assets/spark-chartreuse.png")
           : Qt.resolvedUrl("assets/spark-white.png")
     }
 
     // ── Shared greeter state + auth backend ───────────────────────
-    GreetContext { id: ctx }
+    GreetContext { id: greetCtx }
 
     // ── One fullscreen layer-shell surface per output ─────────────
     Variants {
@@ -84,8 +84,8 @@ ShellRoot {
 
             GreetSurface {
                 anchors.fill: parent
-                theme: theme
-                ctx:   ctx
+                theme: greetTheme
+                ctx:   greetCtx
             }
         }
     }
