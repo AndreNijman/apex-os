@@ -1,0 +1,34 @@
+# APEX-OS — add the Flathub remote on first boot.
+#
+# Why a first-boot unit and not a build-time `flatpak remote-add`:
+# on bootc, `flatpak remote-add --system` writes to /var/lib/flatpak, but /var
+# is machine-local state that bootc seeds once and never updates — a remote
+# added at build time is fragile across image upgrades. Adding it on the
+# running system is the robust, uBlue-idiomatic pattern.
+#
+# Idempotent: `--if-not-exists` is a no-op if the remote already exists, and the
+# stamp keeps the unit from doing work on every subsequent boot. The shipped
+# /etc/flatpak/flathub.flatpakrepo carries Flathub's URL + GPG key, so no remote
+# repo definition needs fetching (only network to actually install apps later).
+[Unit]
+Description=APEX-OS: register the Flathub Flatpak remote (first boot)
+Documentation=https://flathub.org
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/var/lib/flatpak/.apex-flathub-added
+# The shipped repo file must be present to add the remote from it.
+ConditionPathExists=/etc/flatpak/flathub.flatpakrepo
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/flatpak remote-add --if-not-exists --system flathub /etc/flatpak/flathub.flatpakrepo
+# Stamp only on success (remote-add above); co-located with flatpak state,
+# which remote-add has just created.
+ExecStartPost=/usr/bin/touch /var/lib/flatpak/.apex-flathub-added
+# A missing network or transient failure should not wedge the boot; the unit
+# retries on the next boot because the stamp is only written on success.
+SuccessExitStatus=0
+
+[Install]
+WantedBy=multi-user.target
