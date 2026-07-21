@@ -1,0 +1,204 @@
+name: build-image
+
+# Build, sign (cosign keyless), and push the three APEX-OS images to GHCR.
+#
+#   base            → ghcr.io/andrenijman/apex-os-base
+#   daily           → ghcr.io/andrenijman/apex-os:daily
+#   gaming-mesa     → ghcr.io/andrenijman/apex-os:gaming-mesa
+#   gaming-nvidia   → ghcr.io/andrenijman/apex-os:gaming-nvidia
+#
+# The base is built once; its immutable digest is passed to the flavor builds
+# as --build-arg BASE=<base>@<digest> so every flavor is pinned to the exact
+# base it was built against. Signing is keyless (Sigstore/Fulcio) via the
+# runner's OIDC token — no private key is stored anywhere.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Containerfile*"
+      - "files/**"
+      - "kernel/**"
+      - ".github/**"
+  workflow_dispatch:
+    inputs:
+      build_qcow2:
+        description: "Also build a daily qcow2 disk image (bootc-image-builder)"
+        type: boolean
+        default: false
+  schedule:
+    # Weekly rebuild (Mon 06:00 UTC) to pick up upstream base / COPR / RPMFusion
+    # security updates even without a source change.
+    - cron: "0 6 * * 1"
+
+# Least privilege. id-token:write is required for cosign keyless (OIDC) signing;
+# packages:write is required to push to GHCR.
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ghcr.io/andrenijman/apex-os-base
+  IMAGE: ghcr.io/andrenijman/apex-os
+
+jobs:
+  # ── Job 1: shared base ────────────────────────────────────────────────────
+  base:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The base image is large (CachyOS kernel + desktop stack ≈ several GB).
+      # ubuntu-latest ships with ~14 GB free; reclaim space from toolchains we
+      # do not use so the build + push has headroom.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Rootful podman: the CachyOS kernel's %posttrans (rpm-ostree
+      # kernel-install → dracut) and the NVIDIA akmod build need device access
+      # (/dev/kmsg, loop) that rootless podman on the runner denies. This
+      # matches the local build recipe. --isolation=chroot sidesteps nested
+      # cgroup setup on the runner.
+      - name: Log in to GHCR (rootful podman)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | sudo podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+
+      - name: Build base
+        run: |
+          sudo podman build --isolation=chroot \
+            --build-arg APEX_REVISION="${{ github.sha }}" \
+            -f Containerfile.base \
+            -t "$IMAGE_BASE:latest" \
+            -t "$IMAGE_BASE:${{ github.sha }}" \
+            .
+
+      - name: Push base + capture digest
+        id: push
+        run: |
+          sudo podman push "$IMAGE_BASE:${{ github.sha }}" \
+            --digestfile=/tmp/base.digest
+          sudo podman push "$IMAGE_BASE:latest"
+          DIGEST="$(cat /tmp/base.digest)"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Base digest: $DIGEST"
+
+      # Keyless signature over the immutable digest (never a tag). Uses the
+      # runner's ambient OIDC identity; cosign v2 needs no COSIGN_EXPERIMENTAL.
+      - name: Sign base (cosign keyless)
+        run: |
+          cosign sign --yes "$IMAGE_BASE@${{ steps.push.outputs.digest }}"
+
+  # ── Job 2: flavors (need the base digest) ────────────────────────────────
+  flavors:
+    needs: base
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: daily
+            containerfile: Containerfile.daily
+            build_args: ""
+          - flavor: gaming-mesa
+            containerfile: Containerfile.gaming
+            build_args: "--build-arg GPU=mesa"
+          - flavor: gaming-nvidia
+            containerfile: Containerfile.gaming
+            build_args: "--build-arg GPU=nvidia"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Log in to GHCR (rootful podman)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | sudo podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+
+      # FROM the base pinned by digest — the exact image job 1 pushed and signed.
+      - name: Build ${{ matrix.flavor }}
+        run: |
+          sudo podman build --isolation=chroot \
+            --build-arg BASE="$IMAGE_BASE@${{ needs.base.outputs.digest }}" \
+            --build-arg APEX_REVISION="${{ github.sha }}" \
+            ${{ matrix.build_args }} \
+            -f "${{ matrix.containerfile }}" \
+            -t "$IMAGE:${{ matrix.flavor }}" \
+            -t "$IMAGE:${{ matrix.flavor }}-${{ github.sha }}" \
+            .
+
+      - name: Push ${{ matrix.flavor }} + capture digest
+        id: push
+        run: |
+          sudo podman push "$IMAGE:${{ matrix.flavor }}-${{ github.sha }}" \
+            --digestfile=/tmp/flavor.digest
+          sudo podman push "$IMAGE:${{ matrix.flavor }}"
+          DIGEST="$(cat /tmp/flavor.digest)"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "${{ matrix.flavor }} digest: $DIGEST"
+
+      - name: Sign ${{ matrix.flavor }} (cosign keyless)
+        run: |
+          cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
+
+  # ── Job 3: qcow2 (stretch, dispatch-gated, non-blocking) ─────────────────
+  # Proves bootc-image-builder produces a bootable disk from the daily image.
+  # GitHub runners have NO /dev/kvm, so the disk is NOT booted here — producing
+  # the qcow2 is the check. Gated on manual dispatch (build_qcow2=true) and
+  # continue-on-error so bib flakiness never fails the image pipeline.
+  qcow2:
+    needs: flavors
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.build_qcow2
+    continue-on-error: true
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Log in to GHCR (rootful podman)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | sudo podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+
+      - name: Build daily qcow2 via bootc-image-builder
+        run: |
+          mkdir -p output
+          sudo podman run --rm --privileged \
+            --security-opt label=type:unconfined_t \
+            -v "$(pwd)/output":/output \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            quay.io/centos-bootc/bootc-image-builder:latest \
+            --type qcow2 --rootfs xfs --local \
+            "$IMAGE:daily-${{ github.sha }}"
+          ls -lh output/qcow2 || ls -lhR output
+
+      - name: Upload qcow2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-os-daily-qcow2
+          path: output/qcow2/*.qcow2
+          if-no-files-found: warn
+          retention-days: 7
