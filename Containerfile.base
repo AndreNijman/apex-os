@@ -1,1 +1,83 @@
-# APEX-OS base image — see docs/; not yet implemented (M1)
+# ─────────────────────────────────────────────────────────────────────────
+# APEX-OS — base image
+#
+# fedora-bootc + Hyprland (COPR solopasha/hyprland) + quickshell
+# (COPR errornointernet/quickshell) + greetd/cage hosting the apex-greet
+# Quickshell greeter. Shared foundation for the Daily and Gaming editions.
+#
+# Base tag — fedora-bootc:43.
+#   F44 (the newer stable) was evaluated first but the solopasha COPR ships
+#   aquamarine-0.9.5 linked against libdisplay-info.so.2, while F44 already
+#   moved to libdisplay-info 0.3 (soname .so.3) — so hyprland is currently
+#   uninstallable there. F43 ships libdisplay-info 0.2 (.so.2) and the whole
+#   stack resolves cleanly. Revisit F44 once the COPR rebuilds aquamarine.
+# ─────────────────────────────────────────────────────────────────────────
+FROM quay.io/fedora/fedora-bootc:43
+
+# ── Desktop + greeter runtime ────────────────────────────────────────────
+# The dnf5 `copr` subcommand lives in the dnf5-plugins package, which is not
+# in the base image, so install it first. quickshell comes from the COPR at
+# 0.3.0 (the exact version apex-greet was written against — Fedora proper
+# only carries 0.2.1); hyprland 0.51.x + its aquamarine backend come from
+# solopasha. greetd, cage, foot, xwayland-satellite and base JetBrains Mono
+# are stock Fedora. The COPRs are disabled again after install so the shipped
+# image carries no active COPR repo (bootc hygiene) — the RPMs are baked in.
+RUN dnf5 install -y dnf5-plugins && \
+    dnf5 -y copr enable solopasha/hyprland && \
+    dnf5 -y copr enable errornointernet/quickshell && \
+    dnf5 install -y --setopt=install_weak_deps=False \
+        hyprland \
+        quickshell \
+        greetd \
+        cage \
+        xwayland-satellite \
+        foot \
+        jetbrains-mono-fonts \
+        fontconfig && \
+    dnf5 -y copr disable solopasha/hyprland && \
+    dnf5 -y copr disable errornointernet/quickshell && \
+    dnf5 clean all
+
+# ── JetBrainsMono Nerd Font ──────────────────────────────────────────────
+# apex-greet's QML uses the "JetBrainsMono Nerd Font" family for both body
+# text and its Nerd-Font glyphs (person / lock / caps-lock icons). Fedora
+# packages only plain JetBrains Mono (no Nerd glyphs), so fetch the patched
+# family and register it. ADD downloads the release tarball; it is not
+# auto-extracted from a URL, so unpack it in the following step.
+ADD https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.tar.xz \
+    /usr/share/fonts/jetbrains-mono-nerd/JetBrainsMono.tar.xz
+RUN cd /usr/share/fonts/jetbrains-mono-nerd && \
+    tar -xJf JetBrainsMono.tar.xz && \
+    rm -f JetBrainsMono.tar.xz && \
+    fc-cache -f /usr/share/fonts/jetbrains-mono-nerd
+
+# ── Greeter payload ──────────────────────────────────────────────────────
+# The whole apex-greet tree lands at /usr/share/apex-greet so the QML's
+# Qt.resolvedUrl("assets/…") resolves in place; the wallpaper is dropped
+# where GreetSurface.qml expects it; greetd-config.toml becomes the live
+# greetd config.
+COPY files/desktop/apex-greet /usr/share/apex-greet
+COPY files/branding/wallpapers/apex-wallpaper-default.jpg \
+     /usr/share/backgrounds/apex/default.jpg
+COPY files/desktop/apex-greet/greetd-config.toml /etc/greetd/config.toml
+
+# System configuration, folded into one layer:
+#   - Writable state dir for apex-greet's last-user / last-session memory,
+#     owned by the greetd session user (Fedora's greetd package provisions
+#     the `greetd` user via sysusers.d — there is no `greeter` user);
+#     tmpfiles creates it at boot, after systemd-sysusers has run.
+#   - os-release stamp so apex-greet resolves the Daily (chartreuse) edition
+#     via VARIANT_ID (/etc/os-release is a symlink into /usr/lib).
+#   - greetd as the display manager: enabling it creates the
+#     display-manager.service alias, and graphical.target Wants
+#     display-manager.service, so a graphical boot starts greetd → cage →
+#     the apex-greet greeter on tty1. hyprland ships
+#     /usr/share/wayland-sessions/hyprland.desktop for the session picker.
+RUN printf 'd /var/lib/apex-greet 0755 greetd greetd -\n' \
+        > /usr/lib/tmpfiles.d/apex-greet.conf && \
+    printf 'VARIANT="Daily"\nVARIANT_ID=daily\n' >> /usr/lib/os-release && \
+    systemctl enable greetd.service && \
+    systemctl set-default graphical.target
+
+# bootc container sanity lint (non-fatal for the spike).
+RUN bootc container lint || true
