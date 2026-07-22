@@ -247,17 +247,23 @@ RUN set -eux; \
 # PulseAudio volume control, the disk-management tools, and the Bluetooth stack.
 # Own transaction, `dnf5 clean all`. bluetooth.service is enabled so BT works on
 # first boot; blueman gives the tray applet the shell's BT tab can also drive.
+# Package-name notes (verified against Fedora): the Thunar RPM is capitalised
+# `Thunar`; Fedora dropped p7zip for `7zip` (upstream 7-Zip, provides 7z + RAR
+# extraction); there is no `gvfs-archive` subpackage. `unrar` (RPMFusion nonfree)
+# is best-effort — `7zip`/`unar` already cover RAR — so a nonfree-repo hiccup can
+# never abort this stage.
 RUN set -eux; \
     dnf5 -y install \
         firefox \
-        thunar thunar-volman thunar-archive-plugin \
-        gvfs gvfs-mtp gvfs-smb gvfs-archive \
+        Thunar thunar-volman thunar-archive-plugin \
+        gvfs gvfs-mtp gvfs-smb \
         evince qimgv mpv \
-        p7zip p7zip-plugins unzip unrar unar xarchiver \
+        7zip unzip unar xarchiver \
         btop qalculate-gtk neovim nano \
         pavucontrol \
         gparted parted gdisk udisks2 smartmontools \
         bluez bluez-tools blueman; \
+    dnf5 -y install --skip-unavailable unrar; \
     systemctl enable bluetooth.service; \
     dnf5 clean all
 
@@ -283,7 +289,7 @@ RUN set -eux; \
     dnf5 -y install \
         google-noto-color-emoji-fonts \
         google-noto-sans-cjk-fonts google-noto-serif-cjk-fonts \
-        liberation-fonts \
+        liberation-sans-fonts liberation-serif-fonts liberation-mono-fonts \
         dejavu-sans-fonts dejavu-serif-fonts dejavu-sans-mono-fonts; \
     dnf5 -y install --skip-unavailable \
         google-noto-sans-vf-fonts google-noto-serif-vf-fonts \
