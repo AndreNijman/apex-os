@@ -8,14 +8,14 @@
 #   ARG GPU=mesa    →  no akmod (mesa is already in the base via the desktop
 #                      stack) — an all-AMD/Intel gaming image.
 #
-# M1 scope: prove the GPU/akmod split works and the NVIDIA akmod builds in the
-# pipeline against the shared CachyOS kernel. The full gaming userspace (Steam,
-# gamescope, MangoHud, the nvidia driver libraries, Proton-GE, WiVRn, Sunshine,
-# OpenRGB, …) is a documented placeholder below and lands in a later milestone.
-#
-# Unlike the M0 spike (which was capture-and-continue so the other checks could
-# run), production HARD-FAILS if the akmod does not build and resolve: a Gaming
-# image whose NVIDIA module is missing must never ship.
+# GPU/akmod split: the NVIDIA akmod builds in the pipeline against the shared
+# CachyOS kernel (HARD-FAIL if it does not build/resolve — a Gaming image whose
+# NVIDIA module is missing must never ship). v2.8 adds the gaming userspace on
+# top: nvidia driver libs + CUDA, the §4c fresher mesa leg (Terra, freeworld
+# fallback), Steam (baked), gamescope/MangoHud/gamemode, and best-effort
+# peripheral tools. Still to land in a later pass: Proton-GE, WiVRn/Monado,
+# Sunshine, OBS, and the xone/xpadneo controller akmods (need a CachyOS-matched
+# akmod source — see the userspace stage note).
 # ─────────────────────────────────────────────────────────────────────────
 ARG BASE=localhost/apex-base:latest
 FROM ${BASE}
@@ -79,17 +79,69 @@ RUN set -eux; \
     fi; \
     dnf5 clean all
 
-# ── Gaming userspace (PLACEHOLDER — later milestone) ───────────────────────
-# Kept out of the M1 skeleton on purpose (heavy, and orthogonal to proving the
-# akmod pipeline). When implemented, install in its own `RUN … && dnf5 clean
-# all` layer(s), e.g.:
-#   nvidia userspace : xorg-x11-drv-nvidia xorg-x11-drv-nvidia-cuda (RPMFusion)
-#   core             : steam gamescope mangohud gamemode vulkan-tools
-#   proton/compat    : Proton-GE (Flatpak/manual), protontricks
-#   VR               : wivrn monado (RPM, NVENC on nvidia)
-#   streaming        : sunshine
-#   peripherals      : openrgb + controller udev
-#   overlays/capture : obs-studio obs-vkcapture
+# ── GPU userspace: nvidia driver libs + CUDA (nvidia leg only) ─────────────
+# The akmod stage above built and verified the kernel MODULE. A working Gaming-
+# nvidia system also needs the USERSPACE driver (libGL/libnvidia-*) and — per the
+# v2.8 plan — the CUDA toolkit runtime on the nvidia edition. nvidia-vaapi-driver
+# bridges VA-API onto NVDEC so the base's codec userland has HW decode on nvidia
+# too. RPMFusion is already enabled (base + the akmod stage). mesa leg: nothing
+# here (mesa userspace comes from the base / the Terra stage below). Own dnf
+# transaction, `dnf5 clean all`.
+RUN set -eux; \
+    if [ "${GPU}" = "nvidia" ]; then \
+        dnf5 -y install \
+            xorg-x11-drv-nvidia xorg-x11-drv-nvidia-cuda nvidia-vaapi-driver; \
+        echo "nvidia userspace + CUDA installed"; \
+    else \
+        echo "GPU=mesa: no nvidia userspace"; \
+    fi; \
+    dnf5 clean all
+
+# ── §4c mesa leg: fresher, codec-enabled mesa via Terra (Gaming) ───────────
+# §4c pins the Gaming edition to a FRESHER mesa than Daily's Fedora-stable — for
+# the latest RADV/gaming fixes. Terra (fyralabs) ships a newer mesa built WITHOUT
+# Fedora's codec crippling, so a single distro-sync gets BOTH the fresher stack
+# AND working H.264/H.265 (no RPMFusion freeworld swap needed on this leg).
+# Robust by design: if Terra is unavailable at build time this falls back to
+# Fedora-stable mesa + RPMFusion's freeworld VA drivers (exactly Daily's path) —
+# so codecs work either way; only the "fresher" part is best-effort. Own dnf
+# transaction, `dnf5 clean all`.
+RUN set -eux; \
+    if dnf5 -y install --nogpgcheck \
+            --repofrompath "terra,https://repos.fyralabs.com/terra\$releasever" \
+            terra-release \
+       && dnf5 -y --repo=terra distro-sync \
+            mesa-dri-drivers mesa-vulkan-drivers mesa-va-drivers \
+            mesa-vdpau-drivers mesa-libGL mesa-libEGL mesa-filesystem; then \
+        echo "gaming mesa: Terra (fresher, codec-enabled)" > /usr/lib/apex-mesa-leg; \
+    else \
+        echo "Terra unavailable — falling back to stable mesa + RPMFusion freeworld VA"; \
+        dnf5 -y install --allowerasing \
+            mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld; \
+        echo "gaming mesa: Fedora-stable + freeworld VA (Terra fallback)" > /usr/lib/apex-mesa-leg; \
+    fi; \
+    cat /usr/lib/apex-mesa-leg; \
+    dnf5 clean all
+
+# ── Gaming userspace: Steam + tooling + peripherals ────────────────────────
+# Steam is BAKED into the Gaming edition (v2.7). steam-devices ships the
+# controller/HMD udev rules (the reliable, kernel-build-free half of the
+# controller stack). gamescope/mangohud/gamemode/vulkan-tools are the core
+# gaming runtime. dualsensectl + openrgb are peripheral tools installed
+# best-effort (`--skip-unavailable`) so a missing package never breaks the build.
+#
+# NOTE — controller akmods (xone/xpadneo) are DEFERRED, not forgotten: they are
+# out-of-tree kernel modules that must be rebuilt against the CachyOS COPR kernel
+# (same class as the nvidia akmod), and no akmod source is currently published
+# that matches this kernel — a prebuilt kmod would be for the wrong kernel. Xbox
+# pads work via in-kernel xpad and DualSense via in-kernel hid-playstation today;
+# xpadneo/xone (rumble, battery, dongle) land once a matched akmod source exists.
+RUN set -eux; \
+    dnf5 -y install \
+        steam steam-devices \
+        gamescope mangohud gamemode vulkan-tools; \
+    dnf5 -y install --skip-unavailable dualsensectl openrgb; \
+    dnf5 clean all
 
 # ═══════════════════════════════════════════════════════════════════════════
 # M2 — edition branding (Plymouth). Shared M2 (provisioner, session curation) +
