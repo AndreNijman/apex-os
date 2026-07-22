@@ -121,6 +121,7 @@ RUN set -eux; \
             --repofrompath "terra,https://repos.fyralabs.com/terra\$releasever" \
             terra-release \
          && dnf5 -y distro-sync "mesa*"; then \
+        dnf5 -y remove terra-release || true; \
         echo "gaming mesa: Terra latest-stable (mesa-git COPR fallback)" > /usr/lib/apex-mesa-leg; \
     else \
         echo "mesa-git + Terra unavailable — Fedora-stable + RPMFusion freeworld VA"; \
@@ -128,6 +129,7 @@ RUN set -eux; \
             mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld; \
         echo "gaming mesa: Fedora-stable + freeworld VA (last-resort fallback)" > /usr/lib/apex-mesa-leg; \
     fi; \
+    rm -f /etc/yum.repos.d/terra*.repo /etc/yum.repos.d/*terra*.repo; \
     cat /usr/lib/apex-mesa-leg; \
     dnf5 clean all
 
