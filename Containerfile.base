@@ -60,11 +60,22 @@ RUN set -eux; \
 # fedora-43 build; COPY'd out with the other binaries. The shell's theming needs
 # it, so this one IS fatal on failure.
 RUN cargo install matugen --root /out/usr
-# yazi (Rust TUI file manager, the CLI companion to Thunar). Fedora's package
-# lags and is not guaranteed on F43, so build the pinned release from crates.io
-# in the builder — same pattern as matugen. yazi-fm is the `yazi` binary,
-# yazi-cli is the `ya` helper. COPY'd out to /usr with the other binaries.
-RUN cargo install --locked yazi-fm yazi-cli --root /out/usr
+# yazi (Rust TUI file manager, the CLI companion to Thunar). NOT packaged in
+# Fedora dist-git, and `cargo install yazi-fm yazi-cli` from crates.io is BROKEN:
+# yazi-plugin `include_bytes!`s its preset .lua files via a workspace-relative
+# path (../yazi-plugin/preset/…) that only resolves inside the intact repo tree,
+# not when the crates are unpacked individually from the registry. So build from
+# the pinned git WORKSPACE (same clone+build pattern as awww above). yazi-fm →
+# `yazi`, yazi-cli → `ya`. Non-fatal: a failure leaves the TUI FM absent (Thunar,
+# the GUI handler, remains) but never aborts the image.
+RUN set -eux; \
+    if git clone --depth 1 --branch v26.5.6 https://github.com/sxyazi/yazi /build/yazi \
+       && cd /build/yazi \
+       && cargo build --release --locked -p yazi-fm -p yazi-cli; then \
+        install -Dm755 target/release/yazi /out/usr/bin/yazi; \
+        install -Dm755 target/release/ya   /out/usr/bin/ya; \
+        echo "yazi: built v26.5.6 from git workspace"; \
+    else echo "yazi: BUILD FAILED (TUI file manager absent; non-fatal — Thunar remains)"; fi
 
 # ─────────────────────────────────────────────────────────────────────────
 FROM quay.io/fedora/fedora-bootc:43
