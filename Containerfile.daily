@@ -44,6 +44,20 @@ RUN set -eux; \
     systemctl enable power-profiles-daemon.service; \
     dnf5 clean all
 
+# ── §4c mesa leg: codec-enabled VA drivers on STABLE mesa ──────────────────
+# The base bakes the codec userland (full ffmpeg + gstreamer) but leaves the
+# mesa VA/VDPAU drivers per-edition, because §4c pins Daily to Fedora's *stable*
+# mesa and Gaming to a fresher mesa. Here on Daily we keep stable mesa and only
+# swap Fedora's crippled VA/VDPAU drivers for RPMFusion's freeworld builds (they
+# conflict, hence --allowerasing), which unlocks H.264/H.265 hardware decode on
+# the AMD 780M's RADV stack — the whole point of the mpv.conf `hwdec=auto-safe`
+# the base ships. RPMFusion is already enabled (base Stage 5a-codecs). Own dnf
+# transaction, `dnf5 clean all`.
+RUN set -eux; \
+    dnf5 -y install --allowerasing \
+        mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld; \
+    dnf5 clean all
+
 # ═══════════════════════════════════════════════════════════════════════════
 # M2 — edition branding (Plymouth). The shared M2 concerns (APEX Shell first-boot
 # provisioner, greeter session curation) + M3 (apexd) all live in the BASE now,
