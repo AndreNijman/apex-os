@@ -223,7 +223,8 @@ RUN set -eux; \
         gstreamer1-plugins-base gstreamer1-plugins-good \
         gstreamer1-plugins-bad-free gstreamer1-plugins-bad-freeworld \
         gstreamer1-plugins-ugly gstreamer1-libav \
-        gstreamer1-vaapi libva libva-utils; \
+        libva libva-utils; \
+    dnf5 -y install --skip-unavailable gstreamer1-vaapi; \
     dnf5 clean all
 
 # ── Stage 5a-apps: baked userland (both editions) ──────────────────────────
@@ -261,13 +262,22 @@ COPY files/desktop/mpv/mpv.conf /etc/mpv/mpv.conf
 # tofu and CJK was missing entirely. Add Noto Color Emoji + Noto CJK (sans+serif)
 # + Noto general sans/serif + the Liberation (MS-metric-compatible) and DejaVu
 # families. Rebuild the font cache once. Own transaction, `dnf5 clean all`.
+# The gap being fixed is emoji + CJK — keep those (and the always-present
+# Liberation/DejaVu Latin families) STRICT. The general-purpose Noto Latin
+# families were renamed to variable-font (…-vf-fonts) packages across recent
+# Fedora and the legacy names may be gone on F43, so install them best-effort
+# (--skip-unavailable, trying both spellings) — Liberation/DejaVu already cover
+# Latin regardless.
 RUN set -eux; \
     dnf5 -y install \
         google-noto-color-emoji-fonts \
         google-noto-sans-cjk-fonts google-noto-serif-cjk-fonts \
-        google-noto-sans-fonts google-noto-serif-fonts \
-        liberation-fonts liberation-mono-fonts \
+        liberation-fonts \
         dejavu-sans-fonts dejavu-serif-fonts dejavu-sans-mono-fonts; \
+    dnf5 -y install --skip-unavailable \
+        google-noto-sans-vf-fonts google-noto-serif-vf-fonts \
+        google-noto-sans-mono-vf-fonts \
+        google-noto-sans-fonts google-noto-serif-fonts; \
     fc-cache -f; \
     dnf5 clean all
 
