@@ -44,18 +44,31 @@ RUN set -eux; \
     systemctl enable power-profiles-daemon.service; \
     dnf5 clean all
 
-# ── §4c mesa leg: codec-enabled VA drivers on STABLE mesa ──────────────────
-# The base bakes the codec userland (full ffmpeg + gstreamer) but leaves the
-# mesa VA/VDPAU drivers per-edition, because §4c pins Daily to Fedora's *stable*
-# mesa and Gaming to a fresher mesa. Here on Daily we keep stable mesa and only
-# swap Fedora's crippled VA/VDPAU drivers for RPMFusion's freeworld builds (they
-# conflict, hence --allowerasing), which unlocks H.264/H.265 hardware decode on
-# the AMD 780M's RADV stack — the whole point of the mpv.conf `hwdec=auto-safe`
-# the base ships. RPMFusion is already enabled (base Stage 5a-codecs). Own dnf
-# transaction, `dnf5 clean all`.
+# ── §4c mesa leg: latest-STABLE mesa via Terra (Daily) ─────────────────────
+# §4c pins Daily to the latest *stable* mesa (Terra/ublue), NOT bleeding-edge
+# git — a 780M browser/dev box gains ~nothing from mesa-git's weekly churn and
+# its compositor/suspend regression risk (the plan's M4 gate depends on Daily
+# being a stable baseline). Terra (fyralabs) ships a newer *release* mesa than
+# the fc43-pinned base, built WITHOUT Fedora's codec crippling — so a single
+# distro-sync gets BOTH the fresher stable stack AND H.264/H.265 hardware decode
+# on the AMD 780M's RADV (the point of the base's mpv.conf `hwdec=auto-safe`), no
+# separate freeworld swap needed. Terra stays enabled so Daily tracks stable mesa
+# (weekly CI rebuild refreshes it). Robust: if Terra is unavailable at build time
+# this falls back to Fedora-stable mesa + RPMFusion freeworld VA — codecs work
+# either way, only the "fresher" part is best-effort. Own dnf transaction.
 RUN set -eux; \
-    dnf5 -y install --allowerasing \
-        mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld; \
+    if dnf5 -y install --nogpgcheck \
+            --repofrompath "terra,https://repos.fyralabs.com/terra\$releasever" \
+            terra-release \
+       && dnf5 -y distro-sync "mesa*"; then \
+        echo "daily mesa: Terra latest-stable (codec-enabled)" > /usr/lib/apex-mesa-leg; \
+    else \
+        echo "Terra unavailable — Fedora-stable mesa + RPMFusion freeworld VA"; \
+        dnf5 -y install --allowerasing \
+            mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld; \
+        echo "daily mesa: Fedora-stable + freeworld VA (Terra fallback)" > /usr/lib/apex-mesa-leg; \
+    fi; \
+    cat /usr/lib/apex-mesa-leg; \
     dnf5 clean all
 
 # ═══════════════════════════════════════════════════════════════════════════

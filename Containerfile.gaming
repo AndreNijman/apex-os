@@ -97,28 +97,34 @@ RUN set -eux; \
     fi; \
     dnf5 clean all
 
-# ── §4c mesa leg: fresher, codec-enabled mesa via Terra (Gaming) ───────────
-# §4c pins the Gaming edition to a FRESHER mesa than Daily's Fedora-stable — for
-# the latest RADV/gaming fixes. Terra (fyralabs) ships a newer mesa built WITHOUT
-# Fedora's codec crippling, so a single distro-sync gets BOTH the fresher stack
-# AND working H.264/H.265 (no RPMFusion freeworld swap needed on this leg).
-# Robust by design: if Terra is unavailable at build time this falls back to
-# Fedora-stable mesa + RPMFusion's freeworld VA drivers (exactly Daily's path) —
-# so codecs work either way; only the "fresher" part is best-effort. Own dnf
-# transaction, `dnf5 clean all`.
+# ── §4c mesa leg: mesa-git (Gaming) ────────────────────────────────────────
+# §4c pins Gaming to mesa-*git* (main-branch RADV): per-release FPS/stutter fixes
+# ahead of the fc43-pinned base, for native-Linux titles + the compositor (Proton
+# titles also benefit via the pressure-vessel runtime). Andre ruled this with the
+# guardrail dropped — mesa-git's weekly regression risk is covered by bootc
+# rollback + `apex pin`, and mesa flavor is an M7 bench variable. mesa-git is
+# built from source so it is inherently codec-enabled (H.264/H.265 HW decode).
+#
+# The COPR is enabled only for the bake and disabled after (bootc: the image is
+# immutable and rebuilt weekly by CI, which is how it stays current — a volatile
+# git COPR left enabled at runtime is the wrong update path). Layered fallback for
+# CI determinism: mesa-git COPR → Terra latest-stable → Fedora-stable + freeworld
+# VA. Codecs work in every leg; only "how fresh" degrades. Own dnf transaction.
 RUN set -eux; \
-    if dnf5 -y install --nogpgcheck \
+    if dnf5 -y copr enable xxmitsu/mesa-git \
+       && dnf5 -y distro-sync "mesa*"; then \
+        dnf5 -y copr disable xxmitsu/mesa-git; \
+        echo "gaming mesa: mesa-git (xxmitsu COPR, main-branch RADV)" > /usr/lib/apex-mesa-leg; \
+    elif dnf5 -y install --nogpgcheck \
             --repofrompath "terra,https://repos.fyralabs.com/terra\$releasever" \
             terra-release \
-       && dnf5 -y --repo=terra distro-sync \
-            mesa-dri-drivers mesa-vulkan-drivers mesa-va-drivers \
-            mesa-vdpau-drivers mesa-libGL mesa-libEGL mesa-filesystem; then \
-        echo "gaming mesa: Terra (fresher, codec-enabled)" > /usr/lib/apex-mesa-leg; \
+         && dnf5 -y distro-sync "mesa*"; then \
+        echo "gaming mesa: Terra latest-stable (mesa-git COPR fallback)" > /usr/lib/apex-mesa-leg; \
     else \
-        echo "Terra unavailable — falling back to stable mesa + RPMFusion freeworld VA"; \
+        echo "mesa-git + Terra unavailable — Fedora-stable + RPMFusion freeworld VA"; \
         dnf5 -y install --allowerasing \
             mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld; \
-        echo "gaming mesa: Fedora-stable + freeworld VA (Terra fallback)" > /usr/lib/apex-mesa-leg; \
+        echo "gaming mesa: Fedora-stable + freeworld VA (last-resort fallback)" > /usr/lib/apex-mesa-leg; \
     fi; \
     cat /usr/lib/apex-mesa-leg; \
     dnf5 clean all
