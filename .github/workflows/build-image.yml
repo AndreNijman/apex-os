@@ -7,10 +7,19 @@ name: build-image
 #   gaming-mesa     → ghcr.io/andrenijman/apex-os:gaming-mesa
 #   gaming-nvidia   → ghcr.io/andrenijman/apex-os:gaming-nvidia
 #
-# The base is built once; its immutable digest is passed to the flavor builds
-# as --build-arg BASE=<base>@<digest> so every flavor is pinned to the exact
-# base it was built against. Signing is keyless (Sigstore/Fulcio) via the
-# runner's OIDC token — no private key is stored anywhere.
+# Speed design (GitHub-hosted runners, no persistent storage):
+#   1. Base-gate — the ~45 min base (CachyOS kernel + Rust + desktop stack) is
+#      REBUILT only when base-relevant files change (or on schedule / forced).
+#      A flavor-only push skips it entirely; the flavors resolve the last-good
+#      base digest from GHCR instead. Turns a flavor fix from ~50 min → ~15 min.
+#   2. Registry layer cache — when the base DOES rebuild, unchanged layers are
+#      pulled from a GHCR cache tag instead of recompiled (guarded: only used if
+#      the runner's podman supports --cache-to/--cache-from). Bypassed on the
+#      weekly schedule / force_base so upstream kernel/COPR updates are picked up.
+#
+# The base's immutable digest is passed to the flavor builds as
+# --build-arg BASE=<base>@<digest> so every flavor is pinned to an exact base.
+# Signing is keyless (Sigstore/Fulcio) via the runner's OIDC token.
 
 on:
   push:
@@ -18,6 +27,8 @@ on:
     paths:
       - "Containerfile*"
       - "files/**"
+      - "apexd/**"
+      - "config/**"
       - "kernel/**"
       - ".github/**"
   workflow_dispatch:
@@ -30,13 +41,17 @@ on:
         description: "Build the daily APEX-OS installer ISO (anaconda-iso)"
         type: boolean
         default: false
+      force_base:
+        description: "Force a full, cache-bypassing base rebuild"
+        type: boolean
+        default: false
   schedule:
     # Weekly rebuild (Mon 06:00 UTC) to pick up upstream base / COPR / RPMFusion
-    # security updates even without a source change.
+    # security updates even without a source change. Bypasses the layer cache.
     - cron: "0 6 * * 1"
 
 # Least privilege. id-token:write is required for cosign keyless (OIDC) signing;
-# packages:write is required to push to GHCR.
+# packages:write is required to push to GHCR (images + the layer-cache tag).
 permissions:
   contents: read
   packages: write
@@ -46,14 +61,48 @@ env:
   REGISTRY: ghcr.io
   IMAGE_BASE: ghcr.io/andrenijman/apex-os-base
   IMAGE: ghcr.io/andrenijman/apex-os
+  CACHE_REF: ghcr.io/andrenijman/apex-os-base:buildcache
 
 jobs:
-  # ── Job 1: shared base ────────────────────────────────────────────────────
-  base:
+  # ── Job 0: change detection ───────────────────────────────────────────────
+  # Decide whether the base must rebuild. On a push, only base-relevant paths
+  # trigger a base rebuild; a flavor-only push reuses the last-good base. On
+  # schedule / any non-ISO dispatch, base always rebuilds (handled in job 1's if).
+  changes:
     runs-on: ubuntu-latest
-    # Skip the whole image rebuild on an ISO-only dispatch (installer-iso pulls
-    # the already-published :daily tag). flavors/qcow2 need base, so they skip too.
+    # Skip on an ISO-only dispatch (installer-iso pulls the published :daily).
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2) }}
+    outputs:
+      base: ${{ steps.filter.outputs.base }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Path filter
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            base:
+              - 'Containerfile.base'
+              - 'apexd/**'
+              - 'config/**'
+              - 'kernel/**'
+              - 'files/**'
+              - '.github/workflows/build-image.yml'
+
+  # ── Job 1: shared base (gated) ────────────────────────────────────────────
+  base:
+    needs: changes
+    runs-on: ubuntu-latest
+    # Run when: NOT an ISO-only dispatch, AND (it is not a push → schedule/dispatch
+    # always rebuild base) OR (it is a push and base-relevant files changed).
+    if: >-
+      ${{
+        !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2)
+        && (github.event_name != 'push' || needs.changes.outputs.base == 'true')
+      }}
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
@@ -90,9 +139,35 @@ jobs:
         run: |
           cosign login "$REGISTRY" -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
 
+      # Registry layer cache — reuse unchanged layers (kernel/Rust/desktop) from a
+      # GHCR cache tag across runs. Guarded: only if this podman supports the
+      # flags. Bypassed (fresh build) on schedule / force_base so upstream updates
+      # land. --cache-to always runs (when supported) to keep the cache warm.
+      - name: Compute cache args
+        id: cache
+        run: |
+          FRESH=false
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.force_base }}" = "true" ]; then
+            FRESH=true
+          fi
+          ARGS=""
+          if sudo podman build --help 2>/dev/null | grep -q -- '--cache-to'; then
+            ARGS="--layers --cache-to $CACHE_REF"
+            if [ "$FRESH" != "true" ]; then
+              ARGS="$ARGS --cache-from $CACHE_REF"
+            else
+              ARGS="$ARGS --no-cache"
+            fi
+            echo "Layer cache enabled (fresh=$FRESH): $ARGS"
+          else
+            [ "$FRESH" = "true" ] && ARGS="--no-cache"
+            echo "podman lacks --cache-to; caching disabled (fresh=$FRESH)"
+          fi
+          echo "args=$ARGS" >> "$GITHUB_OUTPUT"
+
       - name: Build base
         run: |
-          sudo podman build --isolation=chroot \
+          sudo podman build --isolation=chroot ${{ steps.cache.outputs.args }} \
             --build-arg APEX_REVISION="${{ github.sha }}" \
             -f Containerfile.base \
             -t "$IMAGE_BASE:latest" \
@@ -115,9 +190,17 @@ jobs:
         run: |
           cosign sign --yes "$IMAGE_BASE@${{ steps.push.outputs.digest }}"
 
-  # ── Job 2: flavors (need the base digest) ────────────────────────────────
+  # ── Job 2: flavors ────────────────────────────────────────────────────────
+  # Run whenever base did not FAIL — so on a flavor-only push (base skipped) the
+  # flavors still build, resolving the last-good base digest from GHCR.
   flavors:
-    needs: base
+    needs: [changes, base]
+    if: >-
+      ${{
+        always() && !cancelled()
+        && needs.base.result != 'failure'
+        && !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2)
+      }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -154,11 +237,29 @@ jobs:
         run: |
           cosign login "$REGISTRY" -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
 
-      # FROM the base pinned by digest — the exact image job 1 pushed and signed.
+      # Resolve the base digest to pin FROM. If the base job ran this workflow,
+      # use its output; if it was skipped (flavor-only push), resolve the digest
+      # of the last-good :latest base from GHCR.
+      - name: Resolve base digest
+        id: base
+        run: |
+          D="${{ needs.base.outputs.digest }}"
+          if [ -z "$D" ]; then
+            echo "Base job skipped — resolving last-good $IMAGE_BASE:latest"
+            sudo podman pull "$IMAGE_BASE:latest"
+            D="$(sudo podman image inspect "$IMAGE_BASE:latest" \
+                  --format '{{index .RepoDigests 0}}' | sed 's/.*@//')"
+          fi
+          test -n "$D"
+          echo "digest=$D" >> "$GITHUB_OUTPUT"
+          echo "Using base digest: $D"
+
+      # FROM the base pinned by digest — the exact base job 1 pushed and signed,
+      # or the last-good published base when the base job was skipped.
       - name: Build ${{ matrix.flavor }}
         run: |
           sudo podman build --isolation=chroot \
-            --build-arg BASE="$IMAGE_BASE@${{ needs.base.outputs.digest }}" \
+            --build-arg BASE="$IMAGE_BASE@${{ steps.base.outputs.digest }}" \
             --build-arg APEX_REVISION="${{ github.sha }}" \
             ${{ matrix.build_args }} \
             -f "${{ matrix.containerfile }}" \
@@ -227,7 +328,8 @@ jobs:
   # --type anaconda-iso) — a bootable USB that installs the signed daily image
   # to a target disk. The image is pulled into local storage first (each job is
   # a fresh runner; --local needs it present). Uploaded as an artifact for the
-  # maintainer to write to a USB stick.
+  # maintainer to write to a USB stick. Independent of base/flavors: it pulls
+  # the already-published :daily, so it runs on an ISO-only dispatch.
   installer-iso:
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && inputs.build_iso
