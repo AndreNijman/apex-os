@@ -82,15 +82,17 @@ RUN set -eux; \
 # ── GPU userspace: nvidia driver libs + CUDA (nvidia leg only) ─────────────
 # The akmod stage above built and verified the kernel MODULE. A working Gaming-
 # nvidia system also needs the USERSPACE driver (libGL/libnvidia-*) and — per the
-# v2.8 plan — the CUDA toolkit runtime on the nvidia edition. nvidia-vaapi-driver
-# bridges VA-API onto NVDEC so the base's codec userland has HW decode on nvidia
-# too. RPMFusion is already enabled (base + the akmod stage). mesa leg: nothing
-# here (mesa userspace comes from the base / the Terra stage below). Own dnf
+# v2.8 plan — the CUDA toolkit runtime on the nvidia edition. The VA-API↔NVDEC
+# bridge (RPMFusion renamed it nvidia-vaapi-driver → libva-nvidia-driver) gives
+# the base's codec userland HW decode on nvidia too; best-effort (--skip-
+# unavailable, both names) so a rename can never abort the critical driver + CUDA
+# install. RPMFusion is already enabled (base + the akmod stage). mesa leg: nothing
+# here (mesa userspace comes from the base / the mesa-git stage below). Own dnf
 # transaction, `dnf5 clean all`.
 RUN set -eux; \
     if [ "${GPU}" = "nvidia" ]; then \
-        dnf5 -y install \
-            xorg-x11-drv-nvidia xorg-x11-drv-nvidia-cuda nvidia-vaapi-driver; \
+        dnf5 -y install xorg-x11-drv-nvidia xorg-x11-drv-nvidia-cuda; \
+        dnf5 -y install --skip-unavailable libva-nvidia-driver nvidia-vaapi-driver; \
         echo "nvidia userspace + CUDA installed"; \
     else \
         echo "GPU=mesa: no nvidia userspace"; \
