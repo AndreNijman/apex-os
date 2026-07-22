@@ -6,6 +6,9 @@
 #     → desktop + greeter stack (hyprland/quickshell/…)   [own RUN]
 #     → sched-ext userspace (scx)                          [own RUN]
 #     → Bazaar app store (ublue-os COPR)                   [own RUN]
+#     → RPMFusion + full codecs (ffmpeg/gstreamer/VA-API)  [own RUN]
+#     → baked userland apps (firefox/thunar/mpv/…) + fonts [own RUN]
+#     → yazi (cargo) + Zed (tarball)
 #     → flathub first-boot unit + greeter payload + greetd
 #
 # Shared foundation for the Daily and Gaming editions. Both editions want the
@@ -57,6 +60,11 @@ RUN set -eux; \
 # fedora-43 build; COPY'd out with the other binaries. The shell's theming needs
 # it, so this one IS fatal on failure.
 RUN cargo install matugen --root /out/usr
+# yazi (Rust TUI file manager, the CLI companion to Thunar). Fedora's package
+# lags and is not guaranteed on F43, so build the pinned release from crates.io
+# in the builder — same pattern as matugen. yazi-fm is the `yazi` binary,
+# yazi-cli is the `ya` helper. COPY'd out to /usr with the other binaries.
+RUN cargo install --locked yazi-fm yazi-cli --root /out/usr
 
 # ─────────────────────────────────────────────────────────────────────────
 FROM quay.io/fedora/fedora-bootc:43
@@ -190,6 +198,94 @@ RUN set -eux; \
     dnf5 -y install bazaar; \
     dnf5 -y copr disable ublue-os/packages; \
     dnf5 clean all
+
+# ── Stage 5a-codecs: RPMFusion + full multimedia stack (§4c) ───────────────
+# Fedora ships a legally-crippled multimedia stack: `ffmpeg-free` (no H.264/H.265/
+# AAC encoders) and mesa built WITHOUT the proprietary video codecs, so hardware
+# H.264/H.265 decode on the AMD 780M is dead out of the box. This stage fixes the
+# CODEC USERLAND that both editions share; the mesa VA drivers themselves are
+# swapped per-edition (Daily → mesa-va-drivers-freeworld; Gaming → Terra mesa),
+# because §4c pins Daily to stable mesa and Gaming to a fresher mesa.
+#
+# Enable RPMFusion free+nonfree and LEAVE THEM ENABLED (unlike the COPRs, which
+# are one-shot build inputs disabled after use): RPMFusion is a persistent,
+# well-known repo the running system wants so users can install codecs/drivers —
+# the same posture Bazzite ships. Swap ffmpeg-free → full ffmpeg with
+# --allowerasing (they conflict), then the GStreamer plugin set (good is Fedora;
+# bad-freeworld/ugly/libav are RPMFusion) + VA-API userland. openh264 comes from
+# Fedora's Cisco repo. Own transaction, `dnf5 clean all`.
+RUN set -eux; \
+    dnf5 -y install \
+        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
+        "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"; \
+    dnf5 -y install --allowerasing ffmpeg; \
+    dnf5 -y install \
+        gstreamer1-plugins-base gstreamer1-plugins-good \
+        gstreamer1-plugins-bad-free gstreamer1-plugins-bad-freeworld \
+        gstreamer1-plugins-ugly gstreamer1-libav \
+        gstreamer1-vaapi libva libva-utils; \
+    dnf5 clean all
+
+# ── Stage 5a-apps: baked userland (both editions) ──────────────────────────
+# The daily-driver application set the plan bakes into every APEX-OS install so a
+# fresh boot is usable with zero Flatpak round-trips: Firefox (the default and
+# only baked browser), the Thunar + gvfs file-manager stack (yazi, the TUI
+# companion, is built in the builder stage), a PDF viewer, image viewer, mpv, the
+# archive tools, btop, a calculator, editors (neovim/nano — Zed is fetched below),
+# PulseAudio volume control, the disk-management tools, and the Bluetooth stack.
+# Own transaction, `dnf5 clean all`. bluetooth.service is enabled so BT works on
+# first boot; blueman gives the tray applet the shell's BT tab can also drive.
+RUN set -eux; \
+    dnf5 -y install \
+        firefox \
+        thunar thunar-volman thunar-archive-plugin \
+        gvfs gvfs-mtp gvfs-smb gvfs-archive \
+        evince qimgv mpv \
+        p7zip p7zip-plugins unzip unrar unar xarchiver \
+        btop qalculate-gtk neovim nano \
+        pavucontrol \
+        gparted parted gdisk udisks2 smartmontools \
+        bluez bluez-tools blueman; \
+    systemctl enable bluetooth.service; \
+    dnf5 clean all
+
+# Default browser (system-wide XDG): Firefox is the only baked browser, but set
+# the http/https/html handlers explicitly so any "open link" honours it without
+# a per-user round-trip. /etc/xdg/mimeapps.list is the system default layer.
+COPY files/desktop/xdg/mimeapps.list /etc/xdg/mimeapps.list
+# mpv config (HW decode via VA-API on the 780M; safe fallback elsewhere).
+COPY files/desktop/mpv/mpv.conf /etc/mpv/mpv.conf
+
+# ── Stage 5a-fonts: full font stack ────────────────────────────────────────
+# The base previously shipped only JetBrainsMono Nerd Font, so emoji rendered as
+# tofu and CJK was missing entirely. Add Noto Color Emoji + Noto CJK (sans+serif)
+# + Noto general sans/serif + the Liberation (MS-metric-compatible) and DejaVu
+# families. Rebuild the font cache once. Own transaction, `dnf5 clean all`.
+RUN set -eux; \
+    dnf5 -y install \
+        google-noto-color-emoji-fonts \
+        google-noto-sans-cjk-fonts google-noto-serif-cjk-fonts \
+        google-noto-sans-fonts google-noto-serif-fonts \
+        liberation-fonts liberation-mono-fonts \
+        dejavu-sans-fonts dejavu-serif-fonts dejavu-sans-mono-fonts; \
+    fc-cache -f; \
+    dnf5 clean all
+
+# ── Stage 5a-zed: Zed editor (/usr, official tarball) ──────────────────────
+# Zed is not packaged for Fedora (upstream ships a Flatpak or a raw tarball, and
+# Flatpaks cannot be installed at bootc build time). Fetch the official Linux
+# tarball into /usr/lib and symlink the launcher onto PATH. Non-fatal, same
+# posture as sing-box: a fetch failure leaves Zed absent (neovim/nano still there)
+# but never aborts the image build. The tarball unpacks to `zed.app/`.
+RUN set -eux; \
+    if curl -fsSL "https://zed.dev/api/releases/stable/latest/zed-linux-x86_64.tar.gz" -o /tmp/zed.tgz \
+       && tar -xzf /tmp/zed.tgz -C /usr/lib; then \
+        ln -sf /usr/lib/zed.app/bin/zed /usr/bin/zed; \
+        install -Dm644 /usr/lib/zed.app/share/applications/zed.desktop \
+            /usr/share/applications/dev.zed.Zed.desktop 2>/dev/null || true; \
+        echo "zed: installed to /usr/lib/zed.app"; \
+    else echo "zed: fetch FAILED (editor absent; non-fatal — neovim/nano remain)"; fi; \
+    rm -f /tmp/zed.tgz
 
 # ── Stage 5b: apexd + apex CLI, sysprofiles, D-Bus/polkit, sing-box ─────────
 # apexd (power/profile daemon) + apex CLI from the builder stage; the six
