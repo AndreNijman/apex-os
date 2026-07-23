@@ -42,7 +42,10 @@ FROM quay.io/fedora/fedora-bootc:43 AS builder
 # /root is special in bootc images (symlink → /var/roothome), so cargo's default
 # $HOME/.cargo fails ("File exists" on mkdir). Point CARGO_HOME at the build tree.
 ENV CARGO_HOME=/build/.cargo
-RUN dnf5 -y install cargo rust git-core >/dev/null && dnf5 clean all
+# Parallel RPM downloads (default 3 → 20): base stages are download-bound, not
+# CPU-bound, so this is the biggest build-time lever. See the main stage + apex-logs 38.
+RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
+    dnf5 -y install cargo rust git-core >/dev/null && dnf5 clean all
 COPY apexd/ /build/apexd/
 COPY config/ /build/config/
 RUN set -eux; cd /build/apexd; cargo build --release --locked; \
@@ -92,6 +95,15 @@ LABEL org.opencontainers.image.title="APEX-OS base" \
       org.opencontainers.image.version="${APEX_VERSION}" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="APEX-OS"
+
+# ── dnf: parallel downloads (build-speed lever) ────────────────────────────
+# Raise max_parallel_downloads from the default 3 → 20 before any dnf runs. The
+# heavy base stages are dominated by RPM *download* time, not CPU (a 16-core box
+# sits near-idle during them), so more parallel fetches is the single biggest
+# build-time win. This persists in the shipped /etc/dnf/dnf.conf, so the Daily/
+# Gaming derivatives inherit it AND runtime `dnf`/`rpm-ostree` fetches are faster
+# too. (apex-logs 38-dnf-parallel-downloads.md)
+RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf
 
 # ── Stage 1: CachyOS kernel swap ───────────────────────────────────────────
 # Replace Fedora's kernel with the CachyOS-for-Fedora COPR kernel (BORE +
