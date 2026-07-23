@@ -1,0 +1,10 @@
+{
+  "//": "APEX-OS Firefox defaults (apex-logs 28-dark-mode.md). Sets dark UI + dark",
+  "//2": "content by default; Status 'default' means users can still change it.",
+  "policies": {
+    "Preferences": {
+      "ui.systemUsesDarkTheme": { "Value": 1, "Status": "default" },
+      "layout.css.prefers-color-scheme.content-override": { "Value": 0, "Status": "default" }
+    }
+  }
+}
