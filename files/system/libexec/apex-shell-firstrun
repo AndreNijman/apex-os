@@ -33,6 +33,15 @@ SYS_WALLPAPER="/usr/share/backgrounds/apex/default.jpg"
 
 log() { printf '[apex-shell-firstrun] %s\n' "$*"; }
 
+# Human users only. System/service accounts (greetd at ~uid 970, etc.) can get a
+# transient systemd --user manager and would otherwise clone the shell into their
+# state dir. Gate on the regular-user UID range so this only ever provisions real
+# logins (uid >= 1000). See apex-logs/18-greetd-provisioner-scope.md.
+if [ "$(id -u)" -lt 1000 ]; then
+    log "system user (uid $(id -u)) — not a human login; skipping."
+    exit 0
+fi
+
 # Belt-and-suspenders: the unit's ConditionPathExists already gates this, but a
 # manual invocation should also no-op once provisioned.
 if [ -e "${MARKER}" ]; then
@@ -130,10 +139,10 @@ if [ ! -f "${HYPR_CONF}" ]; then
 $mainMod = SUPER
 monitor = , preferred, auto, 1
 env = XCURSOR_SIZE,24
-bind = $mainMod, Return, exec, foot
+bind = $mainMod, Return, exec, alacritty
 bind = $mainMod, Q, killactive,
 bind = $mainMod SHIFT, E, exit,
-bind = $mainMod, Space, exec, foot
+bind = $mainMod, Space, exec, alacritty
 HYPRDEF
     fi
 fi

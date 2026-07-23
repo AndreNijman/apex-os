@@ -1,0 +1,5 @@
+# APEX-OS dark mode default (apex-logs 28-dark-mode.md).
+# System default (not a lock) — users may still switch to light.
+[org/gnome/desktop/interface]
+color-scheme='prefer-dark'
+gtk-theme='Adwaita'
