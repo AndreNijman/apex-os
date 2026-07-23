@@ -1,0 +1,45 @@
+# APEX-OS installer live-environment rootfs.
+#
+# A small Fedora rootfs (NOT the APEX image) that boots as a live ISO and runs
+# the apex-install TUI. The APEX-OS image to install is embedded in this env's
+# container storage so the install works fully offline via
+#   podman run localhost/apex-os:daily bootc install to-disk …
+#
+# Plain fedora base (not fedora-bootc) so writes under /var (the embedded image
+# store) persist in the image layers. Built into a live ISO by build-live-iso.sh.
+FROM registry.fedoraproject.org/fedora:43
+
+# Live-env + installer toolchain. kernel + dracut(+live) make it bootable as a
+# squashfs live image; newt=whiptail; podman/skopeo run the install; btrfs-progs/
+# dosfstools/util-linux for the target disk; NetworkManager for first-boot net.
+RUN dnf -y install --setopt=install_weak_deps=False \
+        kernel systemd systemd-udev dracut dracut-live \
+        podman skopeo \
+        newt util-linux coreutils bash \
+        btrfs-progs dosfstools e2fsprogs gdisk \
+        NetworkManager iproute iputils \
+        plymouth kbd \
+    && dnf clean all
+
+# The installer TUI.
+COPY apex-install /usr/bin/apex-install
+RUN chmod 0755 /usr/bin/apex-install
+
+# Embed the APEX-OS image (oci-archive placed next to this file by the build) into
+# this env's container storage, so `podman run localhost/apex-os:daily …` works
+# offline in the live session. Then remove the archive to save space.
+COPY apex.oci /var/tmp/apex.oci
+RUN skopeo copy --dest-compress-format zstd \
+        oci-archive:/var/tmp/apex.oci containers-storage:localhost/apex-os:daily \
+    && rm -f /var/tmp/apex.oci \
+    && podman images
+
+# Auto-launch the installer on tty1; boot to multi-user (no GUI needed).
+COPY apex-installer.service /usr/lib/systemd/system/apex-installer.service
+RUN systemctl set-default multi-user.target \
+    && systemctl enable apex-installer.service \
+    && systemctl enable NetworkManager.service \
+    && systemctl mask getty@tty1.service
+
+# A friendly hostname in the live env.
+RUN echo apex-installer > /etc/hostname
