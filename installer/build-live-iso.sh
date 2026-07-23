@@ -40,6 +40,11 @@ sudo podman build --build-arg "ALLOW_UNATTENDED=$ALLOW_UNATTENDED" \
   -f "$HERE/Containerfile.installer" -t "$IMG" "$HERE"
 
 echo "== 2. export the rootfs =="
+# A previous run may have left overlay/subvol mounts under rootfs (step 3's
+# containers-storage embed). Detach them deepest-first or `rm -rf` fails
+# "device busy" and set -e aborts the build.
+mount | awk -v d="$WORK/rootfs" 'index($3,d)==1 {print $3}' | sort -r \
+  | while read -r m; do sudo umount -l "$m" 2>/dev/null || true; done
 sudo rm -rf "$WORK/rootfs"; mkdir -p "$WORK/rootfs"
 cid=$(sudo podman create "$IMG")
 sudo podman export "$cid" | sudo tar -x -C "$WORK/rootfs"
