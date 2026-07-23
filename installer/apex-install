@@ -25,6 +25,19 @@ BT="APEX-OS Installer"
 IMAGE="${APEX_IMAGE:-localhost/apex-os:daily}"
 ROOTFS_TYPE="${APEX_ROOTFS:-btrfs}"
 
+# On the live ISO the image is ALSO present as an OCI directory (ISO /container,
+# mounted at /run/initramfs/live/container). Prefer it as the bootc install
+# source: the oci transport streams blobs straight off the read-only ISO,
+# whereas containers-storage re-tars every layer into the container's /var/tmp
+# — which lives in the RAM-backed live overlay and overflows on 4G machines.
+# Absent (e.g. plain-host testing) we fall back to the embedded storage image.
+OCI_DIR="${APEX_OCI_DIR:-/run/initramfs/live/container}"
+SRC_VOL=(); SRC_ARGS=()
+if [ -d "$OCI_DIR" ]; then
+  SRC_VOL=(-v "$OCI_DIR":/run/apex-oci:ro)
+  SRC_ARGS=(--source-imgref "oci:/run/apex-oci" --target-imgref "$IMAGE")
+fi
+
 log()  { printf '%s %s\n' "$(date +%T)" "$*" >>"$LOG"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 UI=whiptail; have whiptail || UI=dialog
@@ -32,9 +45,28 @@ UI=whiptail; have whiptail || UI=dialog
 msg()  { $UI --backtitle "$BT" --title "$1" --msgbox "$2" "${3:-16}" "${4:-72}"; }
 yn()   { $UI --backtitle "$BT" --title "$1" --yesno "$2" "${3:-16}" "${4:-72}"; }
 
+# Detect unattended mode EARLY so die() never blocks on a TUI dialog when
+# nobody is watching (headless QEMU/CI runs).
+CMD=$(cat /proc/cmdline 2>/dev/null || true)
+kv()    { echo "$CMD" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
+kvall() { echo "$CMD" | tr ' ' '\n' | sed -n "s/^$1=//p"; }
+UNATTENDED=0
+# Unattended install is a TEST/CI-only feature. It requires BOTH the kernel flag
+# AND a marker file baked ONLY into test builds. On the production USB the marker
+# is absent, so `apex.unattended` (even hand-added at the boot menu) is IGNORED
+# and we always fall through to the interactive TUI — no accidental disk wipe.
+if echo "$CMD" | grep -qw apex.unattended && [ -f /usr/share/apex-installer/allow-unattended ]; then
+  UNATTENDED=1
+fi
+
 # fail-loud: show the exact reason + log path, then drop to a shell option.
 die() {
   log "FATAL: $1"
+  if [ "$UNATTENDED" = 1 ]; then
+    echo "APEX-INSTALL-FAILED: $1" >&2
+    echo "APEX-INSTALL-FAILED: $1"
+    exit 1
+  fi
   $UI --backtitle "$BT" --title "✗ Installation failed" --msgbox \
 "$1
 
@@ -54,34 +86,73 @@ if ! podman image exists "$IMAGE" 2>/dev/null && [ ! -e /run/install/repo/contai
   die "The APEX-OS image ($IMAGE) is not present in the live environment."
 fi
 
+# ── shared post-install: create the admin account inside the new system ──────
+# useradd/chpasswd via --root against the ostree deployment's /etc. The stateroot
+# var is bind-mounted over the deployment's /var first, so the home dir (through
+# the /home -> var/home symlink) is created where the booted system really has
+# its /var. Afterwards the SELinux labels shadow-utils lost are restored with
+# the TARGET's own setfiles+policy (the live env runs selinux=0, so every file
+# (re)written here has no label — and the installed system enforces policy:
+# greetd/polkitd get denied on an unlabeled /etc/passwd and login breaks).
+create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefix
+  local deploy=$1 user=$2 pass=$3 host=$4 pfx=$5 statevar setype spec f
+  statevar=$(dirname "$(dirname "$deploy")")/var
+  mount --bind "$statevar" "$deploy/var" 2>>"$LOG" \
+    || die "$pfx: bind-mounting the stateroot var failed."
+  useradd --root "$deploy" -m -G wheel -s /bin/bash "$user" 2>>"$LOG" \
+    || { umount "$deploy/var" 2>/dev/null; die "$pfx: useradd failed for $user (see $LOG)."; }
+  echo "$user:$pass" | chpasswd --root "$deploy" 2>>"$LOG" \
+    || { umount "$deploy/var" 2>/dev/null; die "$pfx: setting the password failed (see $LOG)."; }
+  echo "$host" > "$deploy/etc/hostname" 2>>"$LOG" || true
+  setype=$(sed -n 's/^SELINUXTYPE=//p' "$deploy/etc/selinux/config" 2>/dev/null | head -1)
+  spec="/etc/selinux/${setype:-targeted}/contexts/files/file_contexts"
+  if [ -x "$deploy/usr/sbin/setfiles" ] && [ -f "$deploy$spec" ]; then
+    local paths=(/etc/hostname /var/home)
+    for f in passwd passwd- shadow shadow- group group- gshadow gshadow- subuid subgid .pwd.lock; do
+      [ -e "$deploy/etc/$f" ] && paths+=("/etc/$f")
+    done
+    chroot "$deploy" /usr/sbin/setfiles -F "$spec" "${paths[@]}" 2>&1 | tee -a "$LOG" \
+      || { umount "$deploy/var" 2>/dev/null; die "$pfx: SELinux relabel of the account files failed (see $LOG)."; }
+  fi
+  umount "$deploy/var" 2>>"$LOG" || true
+}
+
 # ── unattended mode (automation / QEMU boot-test) ────────────────────────────
 # If the kernel cmdline has `apex.unattended`, skip the TUI and install using
-# apex.disk=/dev/X apex.user=NAME apex.pass=PW apex.host=NAME. Same code path as
-# the interactive install, so a green unattended run validates the whole flow.
-CMD=$(cat /proc/cmdline 2>/dev/null || true)
-kv() { echo "$CMD" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
-if echo "$CMD" | grep -qw apex.unattended; then
+# apex.disk=/dev/X apex.user=NAME apex.pass=PW apex.host=NAME. Repeatable
+# apex.karg=... adds extra kernel args to the installed system (e.g. a serial
+# console for the QEMU boot-test); apex.poweroff powers off on success. Same
+# code path as the interactive install, so a green run validates the flow.
+if [ "$UNATTENDED" = 1 ]; then
+  # Everything to the kernel console (ttyS0 in the QEMU test) so the run is
+  # observable on serial, not stuck on tty1.
+  [ -w /dev/console ] && exec >/dev/console 2>&1
   DISK=$(kv apex.disk); USERNAME=$(kv apex.user); P1=$(kv apex.pass); HOSTNAME=$(kv apex.host)
   : "${USERNAME:=andre}"; : "${HOSTNAME:=apex}"; : "${P1:=apex}"
   [ -b "$DISK" ] || die "unattended: apex.disk=$DISK is not a block device."
   log "UNATTENDED install: DISK=$DISK USER=$USERNAME HOST=$HOSTNAME"
-  clear; echo "APEX-OS unattended install to $DISK …"
+  echo "APEX-OS unattended install to $DISK …"
+  EXTRA_KARGS=()
+  for k in $(kvall apex.karg); do EXTRA_KARGS+=(--karg "$k"); done
   set +e
-  podman run --rm --privileged --pid=host --security-opt label=disable \
-    -v /var/lib/containers:/var/lib/containers -v /dev:/dev "$IMAGE" \
+  # --net=host: no netavark needed in the live env; bootc install is offline.
+  podman run --rm --privileged --pid=host --net=host --security-opt label=disable \
+    -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+    ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
     bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
-      --karg quiet --karg splash "$DISK" 2>&1 | tee -a "$LOG"
+      --karg quiet --karg splash ${EXTRA_KARGS[@]+"${EXTRA_KARGS[@]}"} \
+      ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
+      "$DISK" 2>&1 | tee -a "$LOG"
   rc=${PIPESTATUS[0]}; set -e
   [ "$rc" = 0 ] || die "unattended: bootc install exited $rc (see $LOG)."
   MNT=$(mktemp -d); part=$(lsblk -rno NAME "$DISK" | tail -1)
   mount "/dev/$part" "$MNT" || die "unattended: mount of new root failed."
   deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1)
   [ -n "$deploy" ] || { umount "$MNT"; die "unattended: deployment not found."; }
-  useradd --root "$deploy" -m -G wheel -s /bin/bash "$USERNAME" || die "unattended: useradd failed."
-  echo "$USERNAME:$P1" | chpasswd --root "$deploy" || die "unattended: chpasswd failed."
-  echo "$HOSTNAME" > "$deploy/etc/hostname" || true
+  create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "unattended"
   sync; umount "$MNT" 2>/dev/null; rmdir "$MNT" 2>/dev/null || true
   echo "APEX-INSTALL-UNATTENDED-OK"; log "unattended install complete"
+  if echo "$CMD" | grep -qw apex.poweroff; then sync; poweroff; fi
   exit 0
 fi
 
@@ -163,11 +234,13 @@ echo "Installing APEX-OS to $DISK … (full log: $LOG)"; echo
 log "install start: DISK=$DISK USER=$USERNAME HOST=$HOSTNAME IMAGE=$IMAGE FS=$ROOTFS_TYPE"
 
 set +e
-podman run --rm --privileged --pid=host --security-opt label=disable \
+# --net=host: no netavark needed in the live env; bootc install is offline.
+podman run --rm --privileged --pid=host --net=host --security-opt label=disable \
   -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
-  "$IMAGE" \
+  ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
   bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
-    --karg quiet --karg splash "$DISK" 2>&1 | tee -a "$LOG"
+    --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
+    "$DISK" 2>&1 | tee -a "$LOG"
 rc=${PIPESTATUS[0]}
 set -e
 [ "$rc" = 0 ] || die "bootc install exited $rc. The exact error is above and in $LOG (search for 'error:'). No boot config was left half-written by grub2-mkconfig — bootc uses bootupd."
@@ -180,14 +253,7 @@ mount "$root_part" "$MNT" 2>>"$LOG" || die "Could not mount the new root ($root_
 # ostree layout: the deployed root is the newest dir under ostree/deploy/*/deploy/*.0
 deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1)
 [ -n "$deploy" ] || { umount "$MNT"; die "Installed ostree deployment not found under $root_part."; }
-# useradd/chpasswd against the deployment's /etc; homes live in /var/home (bootc).
-mkdir -p "$MNT"/deploy_var 2>/dev/null || true
-chroot_root="$deploy"
-useradd --root "$chroot_root" -m -G wheel -s /bin/bash "$USERNAME" 2>>"$LOG" \
-  || die "useradd failed for $USERNAME (see $LOG)."
-echo "$USERNAME:$P1" | chpasswd --root "$chroot_root" 2>>"$LOG" \
-  || die "Setting the password failed (see $LOG)."
-echo "$HOSTNAME" > "$chroot_root/etc/hostname" 2>>"$LOG" || true
+create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
 sync; umount "$MNT" 2>/dev/null; rmdir "$MNT" 2>/dev/null || true
 log "post-install: user $USERNAME created, hostname=$HOSTNAME"
 
