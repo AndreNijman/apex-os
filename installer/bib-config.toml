@@ -1,0 +1,59 @@
+# bootc-image-builder configuration for the APEX-OS installer ISO.
+#
+# Consumed by the `installer-iso` job in .github/workflows/build-image.yml, which
+# mounts this file at /config.toml inside the bootc-image-builder container so it
+# is applied to `--type anaconda-iso`. It intentionally does NOT apply to the
+# qcow2 job: a qcow2 is a self-contained VM disk image and MUST keep bib's default
+# automatic partitioning to lay itself out.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY THIS FILE EXISTS
+# ─────────────────────────────────────────────────────────────────────────────
+# The installer ISO used to (1) WIPE the target disk unattended and (2) leave a
+# locked-root / no-user system that dead-ended at the apex-greet login. Both came
+# from ONE omission: the ISO was built with NO bib config, so anaconda-iso shipped
+# bootc-image-builder's DEFAULT kickstart. Verified from the generated osbuild
+# manifest, that default is:
+#
+#     clearpart: { all: true }     ← wipes ALL disks, no prompt   (defect 1)
+#     rootpw:    { lock: true }    ← root locked, and no user      (defect 2)
+#     lang/keyboard/timezone, dhcp network, %post (bootc switch)
+#
+# bootc-image-builder REPLACES that default kickstart when
+# [customizations.installer.kickstart].contents is provided — it then only
+# auto-injects the `ostreecontainer` line (the install source) and the standard
+# %post. Everything else is up to us. So by supplying contents that OMIT any
+# storage section and any user/rootpw, the destructive defaults simply are not
+# emitted (confirmed: clearpart GONE, rootpw null in the manifest), and anaconda
+# boots GRAPHICAL INTERACTIVE (no inst.text / inst.cmdline). The operator is then
+# REQUIRED to:
+#
+#   1. open "Installation Destination", pick the target disk, and choose the
+#      partitioning themselves — NOTHING is written until they confirm; and
+#   2. open "User Creation" and make an account (tick "Make this user
+#      administrator" for sudo) — so there is no locked-out first boot.
+#
+# This makes an accidental full-disk wipe and the no-user lockout impossible,
+# while keeping the install a couple of clicks. No password is baked into the
+# repo. See ~/Projects/apex-logs/36-installer-iso-kickstart.md.
+
+[customizations.installer.kickstart]
+contents = """
+# ── APEX-OS interactive installer kickstart ──────────────────────────────────
+# bootc-image-builder injects the `ostreecontainer` install line and the standard
+# %post above/around this; the lines below are the complete remainder.
+#
+# Safe, non-destructive defaults ONLY. There is deliberately:
+#   • NO clearpart / autopart / part / reqpart / ignoredisk
+#       → "Installation Destination" is interactive; the operator selects the
+#         disk and reviews before anything is written.
+#   • NO user / rootpw
+#       → "User Creation" is interactive and required; no locked-root lockout,
+#         and no credential stored in the repository.
+#   • NO reboot / poweroff
+#       → the operator reviews the completion summary and reboots manually, so
+#         the USB stick can be removed first.
+lang en_US.UTF-8
+keyboard --xlayouts=us
+timezone Australia/Perth --utc
+"""
