@@ -170,7 +170,8 @@ RUN set -eux; \
         playerctl brightnessctl wl-clipboard slurp wtype cliphist \
         upower libnotify lm_sensors cava wf-recorder ImageMagick \
         qt6ct mpv-mpris xdg-user-dirs polkit gnome-keyring \
-        gammastep geoclue2 jq; \
+        gammastep geoclue2 jq dconf \
+        NetworkManager-wifi wpa_supplicant wireless-regdb iw; \
     dnf5 -y copr disable solopasha/hyprland; \
     dnf5 -y copr disable errornointernet/quickshell; \
     dnf5 clean all
@@ -260,6 +261,7 @@ RUN set -eux; \
         evince qimgv mpv \
         7zip unzip unar xarchiver \
         btop qalculate-gtk neovim nano \
+        alacritty fastfetch \
         pavucontrol \
         gparted parted gdisk udisks2 smartmontools \
         bluez bluez-tools blueman; \
@@ -313,6 +315,82 @@ RUN set -eux; \
         echo "zed: installed to /usr/lib/zed.app"; \
     else echo "zed: fetch FAILED (editor absent; non-fatal — neovim/nano remain)"; fi; \
     rm -f /tmp/zed.tgz
+
+# ── Stage 5a-devstack: full development toolchain (apex-logs 35-dev-stack.md) ─
+# Both editions ship a complete dev environment out of the box: the C/C++
+# toolchain + build systems + debuggers, the language toolchains
+# (Python/Node/Rust/Go/Ruby/JDK), and the common CLI dev tools (gh, git-lfs,
+# ripgrep, fd, fzf, bat, buildah). rust/cargo exist in the builder stage but not
+# the final image, so add them here for users too. Zed (GUI editor) is installed
+# in stage 5a-zed above. Own transaction, `dnf5 clean all`.
+RUN set -eux; \
+    dnf5 -y install \
+        gcc gcc-c++ clang llvm lld \
+        make automake autoconf libtool pkgconf-pkg-config \
+        cmake meson ninja-build gdb strace ltrace \
+        python3-pip python3-devel pipx \
+        rust cargo golang ruby rubygems \
+        java-latest-openjdk-devel \
+        nodejs nodejs-npm \
+        gh git-lfs ripgrep fd-find fzf bat buildah; \
+    dnf5 clean all
+
+# ── Stage 5a-claude: Claude Code CLI (apex-logs 35) ─────────────────────────
+# System-wide via npm global into /usr (NOT /usr/local — that becomes a symlink
+# to writable /var below) so every user gets `claude` on PATH. The autoupdater is
+# disabled fleet-wide via /etc/environment (DISABLE_AUTOUPDATER=1) because it
+# cannot write read-only /usr — updates ride the image rebuild. Non-fatal: a
+# registry hiccup leaves claude absent but never aborts the build.
+#
+# HOME=/tmp: in bootc images /root is a symlink to /var/roothome (absent at build
+# time), so npm's default cache ($HOME/.npm → /root/.npm) fails with ENOTDIR —
+# the same trap the builder stage documents for cargo. Point HOME at a writable
+# build dir. Verified: installs `claude` → /usr/bin/claude.
+RUN set -eux; \
+    export HOME=/tmp; \
+    if npm install -g --prefix /usr @anthropic-ai/claude-code; then \
+        echo "claude-code: installed ($(claude --version 2>/dev/null || echo present))"; \
+    else echo "claude-code: npm install FAILED (absent; non-fatal)"; fi
+
+# ── System config drop-ins: dark mode, default terminal, fastfetch, Firefox ──
+# Dark mode (apex-logs 28): GTK3/4 prefer-dark, qt6ct dark palette, and the dconf
+# default color-scheme=prefer-dark that the freedesktop appearance portal reads
+# (so Flatpaks/GTK4 follow). Default terminal = Alacritty (apex-logs 31).
+# fastfetch greeting config + logo (apex-logs 33). Firefox dark defaults.
+COPY files/system/gtk/gtk-3.0-settings.ini /etc/gtk-3.0/settings.ini
+COPY files/system/gtk/gtk-4.0-settings.ini /etc/gtk-4.0/settings.ini
+COPY files/system/qt6ct/qt6ct.conf /etc/xdg/qt6ct/qt6ct.conf
+COPY files/system/dconf/00-apex-dark /etc/dconf/db/local.d/00-apex-dark
+COPY files/system/dconf/profile-user /etc/dconf/profile/user
+COPY files/system/firefox/policies.json /etc/firefox/policies/policies.json
+COPY files/system/xdg/xdg-terminals.list /etc/xdg/xdg-terminals.list
+COPY files/system/fastfetch/config.jsonc /etc/fastfetch/config.jsonc
+COPY files/system/fastfetch/apex-logo.txt /etc/fastfetch/apex-logo.txt
+
+# ── System defaults + hardening (no dnf) ────────────────────────────────────
+#   - os-release: brand as APEX-OS, keep ID=fedora for ecosystem compat; the
+#     flavor images append VARIANT/VARIANT_ID after this. (apex-logs 34)
+#   - mask serial-getty@ttyS0: the console=ttyS0 karg (for QEMU/CI) makes systemd
+#     spawn a getty that restart-loops on hardware with no serial port; masking
+#     stops the loop while serial *console* output still works. (apex-logs 04)
+#   - mask systemd-remount-fs: fails on the composefs/overlay root. (apex-logs 03)
+#   - /usr/local -> ../var/usrlocal: /usr is read-only on bootc, so redirect
+#     /usr/local to writable per-machine state + a tmpfiles dir. (apex-logs 08)
+#   - /etc/environment: session-wide theme + default terminal + Claude autoupdate
+#     off, via pam_env so a greetd/Hyprland session (no uwsm) inherits them.
+#   - /etc/bashrc: fastfetch greeting on every interactive terminal, colour by
+#     scheme, once per shell session. (apex-logs 33)
+#   - dconf update: compile the prefer-dark default into the local db.
+RUN set -eux; \
+    sed -i -e 's/^NAME=.*/NAME="APEX-OS"/' -e 's/^PRETTY_NAME=.*/PRETTY_NAME="APEX-OS"/' /usr/lib/os-release; \
+    printf 'ANSI_COLOR="0;38;2;161;201;153"\nDEFAULT_HOSTNAME="apex"\nHOME_URL="https://github.com/AndreNijman/apex-os"\nBUG_REPORT_URL="https://github.com/AndreNijman/apex-os/issues"\n' >> /usr/lib/os-release; \
+    systemctl mask serial-getty@ttyS0.service; \
+    systemctl mask systemd-remount-fs.service; \
+    rm -rf /usr/local && ln -s ../var/usrlocal /usr/local; \
+    printf 'd /var/usrlocal 0755 root root -\n' > /usr/lib/tmpfiles.d/apex-usrlocal.conf; \
+    printf 'QT_QPA_PLATFORMTHEME=qt6ct\nGTK_THEME=Adwaita:dark\nTERMINAL=alacritty\nDISABLE_AUTOUPDATER=1\n' >> /etc/environment; \
+    printf '\n# APEX-OS fastfetch greeting (apex-logs 33-fastfetch-terminal.md)\nif [[ $- == *i* ]] && [ -z "${APEX_GREETED:-}" ] && command -v fastfetch >/dev/null 2>&1; then\n    export APEX_GREETED=1\n    _apex_c=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)\n    case "$_apex_c" in *dark*) _apex_lc=white;; *) _apex_lc=black;; esac\n    fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "$_apex_lc"\n    unset _apex_c _apex_lc\nfi\n' >> /etc/bashrc; \
+    dconf update
 
 # ── Stage 5b: apexd + apex CLI, sysprofiles, D-Bus/polkit, sing-box ─────────
 # apexd (power/profile daemon) + apex CLI from the builder stage; the six

@@ -1,0 +1,29 @@
+{
+    "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+    // APEX-OS system fastfetch config (apex-logs 33-fastfetch-terminal.md).
+    // Invoked from /etc/bashrc as `fastfetch --config /etc/fastfetch/config.jsonc
+    // --logo-color-1 <white|black>` so the logo colour tracks the colour scheme.
+    "logo": {
+        "type": "file",
+        "source": "/etc/fastfetch/apex-logo.txt",
+        "padding": { "top": 0, "left": 2, "right": 3 }
+    },
+    "display": {
+        "separator": "  ",
+        "color": { "keys": "38;2;161;201;153" }
+    },
+    "modules": [
+        // Leading blank line vertically centres the info block against the taller
+        // logo (fastfetch has no native vertical centring).
+        "break",
+        { "type": "title", "format": "{#38;2;161;201;153}{user-name}{#}@{#38;2;161;201;153}{host-name}{#}" },
+        { "type": "custom", "format": "{#38;2;161;201;153}╭──────────╮" },
+        { "type": "os",     "key": "│ os       │", "format": "{name} {version-id}" },
+        { "type": "kernel", "key": "│ kernel   │" },
+        { "type": "uptime", "key": "│ uptime   │" },
+        { "type": "wm",     "key": "│ wm       │" },
+        { "type": "cpu",    "key": "│ cpu      │" },
+        { "type": "memory", "key": "│ memory   │" },
+        { "type": "custom", "format": "{#38;2;161;201;153}╰──────────╯" }
+    ]
+}
