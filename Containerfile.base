@@ -341,7 +341,13 @@ RUN set -eux; \
 # disabled fleet-wide via /etc/environment (DISABLE_AUTOUPDATER=1) because it
 # cannot write read-only /usr — updates ride the image rebuild. Non-fatal: a
 # registry hiccup leaves claude absent but never aborts the build.
+#
+# HOME=/tmp: in bootc images /root is a symlink to /var/roothome (absent at build
+# time), so npm's default cache ($HOME/.npm → /root/.npm) fails with ENOTDIR —
+# the same trap the builder stage documents for cargo. Point HOME at a writable
+# build dir. Verified: installs `claude` → /usr/bin/claude.
 RUN set -eux; \
+    export HOME=/tmp; \
     if npm install -g --prefix /usr @anthropic-ai/claude-code; then \
         echo "claude-code: installed ($(claude --version 2>/dev/null || echo present))"; \
     else echo "claude-code: npm install FAILED (absent; non-fatal)"; fi
