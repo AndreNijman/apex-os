@@ -1,0 +1,23 @@
+# Auto-launch the APEX-OS guided installer on tty1 in the live environment.
+[Unit]
+Description=APEX-OS guided installer
+After=systemd-user-sessions.service plymouth-quit-wait.service
+After=getty@tty1.service
+Conflicts=getty@tty1.service
+ConditionPathExists=/usr/bin/apex-install
+
+[Service]
+Type=idle
+ExecStart=/usr/bin/apex-install
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal+console
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+# If the installer exits (cancel / error), drop to a shell so the user isn't stuck.
+ExecStopPost=-/usr/bin/bash -lc 'echo; echo "Installer exited. A shell follows (or reboot)."; exec /bin/bash'
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

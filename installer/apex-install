@@ -54,6 +54,37 @@ if ! podman image exists "$IMAGE" 2>/dev/null && [ ! -e /run/install/repo/contai
   die "The APEX-OS image ($IMAGE) is not present in the live environment."
 fi
 
+# ── unattended mode (automation / QEMU boot-test) ────────────────────────────
+# If the kernel cmdline has `apex.unattended`, skip the TUI and install using
+# apex.disk=/dev/X apex.user=NAME apex.pass=PW apex.host=NAME. Same code path as
+# the interactive install, so a green unattended run validates the whole flow.
+CMD=$(cat /proc/cmdline 2>/dev/null || true)
+kv() { echo "$CMD" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
+if echo "$CMD" | grep -qw apex.unattended; then
+  DISK=$(kv apex.disk); USERNAME=$(kv apex.user); P1=$(kv apex.pass); HOSTNAME=$(kv apex.host)
+  : "${USERNAME:=andre}"; : "${HOSTNAME:=apex}"; : "${P1:=apex}"
+  [ -b "$DISK" ] || die "unattended: apex.disk=$DISK is not a block device."
+  log "UNATTENDED install: DISK=$DISK USER=$USERNAME HOST=$HOSTNAME"
+  clear; echo "APEX-OS unattended install to $DISK …"
+  set +e
+  podman run --rm --privileged --pid=host --security-opt label=disable \
+    -v /var/lib/containers:/var/lib/containers -v /dev:/dev "$IMAGE" \
+    bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
+      --karg quiet --karg splash "$DISK" 2>&1 | tee -a "$LOG"
+  rc=${PIPESTATUS[0]}; set -e
+  [ "$rc" = 0 ] || die "unattended: bootc install exited $rc (see $LOG)."
+  MNT=$(mktemp -d); part=$(lsblk -rno NAME "$DISK" | tail -1)
+  mount "/dev/$part" "$MNT" || die "unattended: mount of new root failed."
+  deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1)
+  [ -n "$deploy" ] || { umount "$MNT"; die "unattended: deployment not found."; }
+  useradd --root "$deploy" -m -G wheel -s /bin/bash "$USERNAME" || die "unattended: useradd failed."
+  echo "$USERNAME:$P1" | chpasswd --root "$deploy" || die "unattended: chpasswd failed."
+  echo "$HOSTNAME" > "$deploy/etc/hostname" || true
+  sync; umount "$MNT" 2>/dev/null; rmdir "$MNT" 2>/dev/null || true
+  echo "APEX-INSTALL-UNATTENDED-OK"; log "unattended install complete"
+  exit 0
+fi
+
 yn "Welcome to APEX-OS" \
 "This installs APEX-OS to a disk you choose.
 
