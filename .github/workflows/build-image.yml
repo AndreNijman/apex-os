@@ -61,7 +61,11 @@ env:
   REGISTRY: ghcr.io
   IMAGE_BASE: ghcr.io/andrenijman/apex-os-base
   IMAGE: ghcr.io/andrenijman/apex-os
-  CACHE_REF: ghcr.io/andrenijman/apex-os-base:buildcache
+  # podman's --cache-to/--cache-from require a BARE repository (no tag/digest);
+  # it manages its own cache tags underneath. A tagged ref here fails the base
+  # build with "repository must contain neither a tag nor digest". Dedicated
+  # cache repo so it never mingles with the base image's :latest/:sha tags.
+  CACHE_REF: ghcr.io/andrenijman/apex-os-cache
 
 jobs:
   # ── Job 0: change detection ───────────────────────────────────────────────
