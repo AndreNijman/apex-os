@@ -127,7 +127,13 @@ cp -n -r "${SRC_DIR}/src/assets/wallpapers/." "${HOME}/Pictures/Wallpapers/" 2>/
 # (guarded by a marker so re-runs never duplicate it).
 HYPR_CONF="${HOME}/.config/hypr/hyprland.conf"
 if [ ! -f "${HYPR_CONF}" ]; then
-    if [ -f /usr/share/hypr/hyprland.conf ]; then
+    if [ -f /usr/share/apex/hypr/hyprland.conf ]; then
+        # APEX default config (APEX keybinds + $terminal=alacritty/$fileManager=
+        # thunar/$browser=firefox + autostart + shell-keybind source). Substitute
+        # @HOME@ with the real home. It already carries the APEX Shell autostart,
+        # so the append-guard below (grep apex-shell) skips re-appending.
+        sed "s|@HOME@|${HOME}|g" /usr/share/apex/hypr/hyprland.conf > "${HYPR_CONF}"
+    elif [ -f /usr/share/hypr/hyprland.conf ]; then
         cp /usr/share/hypr/hyprland.conf "${HYPR_CONF}"
     elif [ -f /usr/share/hyprland/hyprland.conf ]; then
         cp /usr/share/hyprland/hyprland.conf "${HYPR_CONF}"
@@ -153,7 +159,7 @@ if ! grep -q 'apex-shell' "${HYPR_CONF}" 2>/dev/null; then
 exec-once = awww-daemon
 exec-once = hypridle -c ${SRC_DIR}/src/config/hypridle.conf
 exec-once = quickshell -c ${SRC_DIR}
-exec-once = systemctl --user start hyprpolkitagent
+exec-once = /usr/libexec/polkit-mate-authentication-agent-1
 exec-once = wl-paste --type text  --watch cliphist store
 exec-once = wl-paste --type image --watch cliphist store
 HYPRAPEX
@@ -168,7 +174,9 @@ if command -v niri >/dev/null 2>&1 || [ -x /usr/bin/niri ]; then
     NIRI_CONF="${HOME}/.config/niri/config.kdl"
     mkdir -p "${HOME}/.config/niri"
     if [ ! -f "${NIRI_CONF}" ]; then
-        if [ -f /usr/share/niri/default-config.kdl ]; then
+        if [ -f /usr/share/doc/niri/default-config.kdl ]; then
+            cp /usr/share/doc/niri/default-config.kdl "${NIRI_CONF}"
+        elif [ -f /usr/share/niri/default-config.kdl ]; then
             cp /usr/share/niri/default-config.kdl "${NIRI_CONF}"
         else
             : > "${NIRI_CONF}"

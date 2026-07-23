@@ -44,8 +44,15 @@ FROM quay.io/fedora/fedora-bootc:43 AS builder
 ENV CARGO_HOME=/build/.cargo
 # Parallel RPM downloads (default 3 → 20): base stages are download-bound, not
 # CPU-bound, so this is the biggest build-time lever. See the main stage + apex-logs 38.
+# awww build deps (apex-logs 39): its `common` crate links liblz4 via pkg-config
+# and awww-daemon needs wayland-protocols/wayland/xkbcommon dev files — without
+# these the build-script exits 101 and the wallpaper daemon silently never builds.
+# Verified locally: with these, awww + awww-daemon compile. gcc/cc is needed by
+# several -sys crates.
 RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
-    dnf5 -y install cargo rust git-core >/dev/null && dnf5 clean all
+    dnf5 -y install cargo rust git-core gcc lz4-devel pkgconf-pkg-config \
+        wayland-protocols-devel wayland-devel libxkbcommon-devel >/dev/null \
+    && dnf5 clean all
 COPY apexd/ /build/apexd/
 COPY config/ /build/config/
 RUN set -eux; cd /build/apexd; cargo build --release --locked; \
@@ -362,7 +369,8 @@ RUN set -eux; \
     export HOME=/tmp; \
     if npm install -g --prefix /usr @anthropic-ai/claude-code; then \
         echo "claude-code: installed ($(claude --version 2>/dev/null || echo present))"; \
-    else echo "claude-code: npm install FAILED (absent; non-fatal)"; fi
+    else echo "claude-code: npm install FAILED (absent; non-fatal)"; fi; \
+    rm -rf /tmp/.npm /tmp/.node-compile-cache /root/.npm 2>/dev/null || true
 
 # ── System config drop-ins: dark mode, default terminal, fastfetch, Firefox ──
 # Dark mode (apex-logs 28): GTK3/4 prefer-dark, qt6ct dark palette, and the dconf
@@ -394,14 +402,20 @@ COPY files/system/fastfetch/apex-logo.txt /etc/fastfetch/apex-logo.txt
 #     scheme, once per shell session. (apex-logs 33)
 #   - dconf update: compile the prefer-dark default into the local db.
 RUN set -eux; \
-    sed -i -e 's/^NAME=.*/NAME="APEX-OS"/' -e 's/^PRETTY_NAME=.*/PRETTY_NAME="APEX-OS"/' /usr/lib/os-release; \
-    printf 'ANSI_COLOR="0;38;2;161;201;153"\nDEFAULT_HOSTNAME="apex"\nHOME_URL="https://github.com/AndreNijman/apex-os"\nBUG_REPORT_URL="https://github.com/AndreNijman/apex-os/issues"\n' >> /usr/lib/os-release; \
+    sed -i \
+      -e 's|^NAME=.*|NAME="APEX-OS"|' \
+      -e 's|^PRETTY_NAME=.*|PRETTY_NAME="APEX-OS"|' \
+      -e 's|^ANSI_COLOR=.*|ANSI_COLOR="0;38;2;161;201;153"|' \
+      -e 's|^HOME_URL=.*|HOME_URL="https://github.com/AndreNijman/apex-os"|' \
+      -e 's|^BUG_REPORT_URL=.*|BUG_REPORT_URL="https://github.com/AndreNijman/apex-os/issues"|' \
+      -e 's|^DEFAULT_HOSTNAME=.*|DEFAULT_HOSTNAME="apex"|' \
+      /usr/lib/os-release; \
     systemctl mask serial-getty@ttyS0.service; \
     systemctl mask systemd-remount-fs.service; \
     rm -rf /usr/local && ln -s ../var/usrlocal /usr/local; \
     printf 'd /var/usrlocal 0755 root root -\n' > /usr/lib/tmpfiles.d/apex-usrlocal.conf; \
-    printf 'QT_QPA_PLATFORMTHEME=qt6ct\nGTK_THEME=Adwaita:dark\nTERMINAL=alacritty\nDISABLE_AUTOUPDATER=1\n' >> /etc/environment; \
-    printf '\n# APEX-OS fastfetch greeting (apex-logs 33-fastfetch-terminal.md)\nif [[ $- == *i* ]] && [ -z "${APEX_GREETED:-}" ] && command -v fastfetch >/dev/null 2>&1; then\n    export APEX_GREETED=1\n    _apex_c=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)\n    case "$_apex_c" in *dark*) _apex_lc=white;; *) _apex_lc=black;; esac\n    fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "$_apex_lc"\n    unset _apex_c _apex_lc\nfi\n' >> /etc/bashrc; \
+    printf 'QT_QPA_PLATFORMTHEME=qt6ct\nTERMINAL=alacritty\nDISABLE_AUTOUPDATER=1\n' >> /etc/environment; \
+    printf '\n# APEX-OS fastfetch greeting (apex-logs 33-fastfetch-terminal.md)\nif [[ $- == *i* ]] && [ -z "${APEX_GREETED:-}" ] && command -v fastfetch >/dev/null 2>&1; then\n    export APEX_GREETED=1\n    _apex_c=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)\n    case "$_apex_c" in *light*) _apex_lc=black;; *) _apex_lc=white;; esac\n    fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "$_apex_lc"\n    unset _apex_c _apex_lc\nfi\n' >> /etc/bashrc; \
     dconf update
 
 # ── Stage 5b: apexd + apex CLI, sysprofiles, D-Bus/polkit, sing-box ─────────
@@ -410,6 +424,34 @@ RUN set -eux; \
 # D-Bus system service + policy + unit wire it up; polkit lets an active local
 # user set tiers/thresholds passwordless. awww lands too if it built.
 COPY --from=builder /out/usr/bin/ /usr/bin/
+# Wallpaper daemon fallback: awww is built best-effort in the builder stage. If
+# it did NOT land (build hiccup), the shell's WallpaperService (`awww img …`) and
+# the seeded `exec-once = awww-daemon` would silently do nothing → no wallpaper on
+# a fresh install (apex-logs 39). swaybg IS installed, so drop in swaybg-backed
+# shims for the two subcommands the shell uses, guaranteeing a working wallpaper
+# either way. If the real awww built, these are skipped.
+RUN set -eux; \
+    if [ ! -x /usr/bin/awww ]; then \
+      printf '%s\n' '#!/usr/bin/env bash' \
+        '# APEX-OS swaybg shim for `awww img … <path>` (real awww absent). apex-logs 39.' \
+        'sub="${1:-}"; shift || true' \
+        '[ "$sub" = "img" ] || exit 0' \
+        'img=""; for a in "$@"; do [ -f "$a" ] && img="$a"; done' \
+        '[ -n "$img" ] || exit 0' \
+        'pkill -x swaybg >/dev/null 2>&1 || true' \
+        'setsid -f swaybg -i "$img" -m fill >/dev/null 2>&1; exit 0' \
+        > /usr/bin/awww; \
+      printf '%s\n' '#!/usr/bin/env bash' \
+        '# APEX-OS swaybg shim for awww-daemon (restore last wallpaper, stay as swaybg). apex-logs 39.' \
+        'wall=""; [ -e "$HOME/.curr_wall" ] && wall="$(readlink -f "$HOME/.curr_wall" 2>/dev/null)"' \
+        'if [ -z "$wall" ] || [ ! -f "$wall" ]; then wall="/usr/share/backgrounds/apex/default.jpg"; fi' \
+        '[ -f "$wall" ] || exit 0' \
+        'pkill -x swaybg >/dev/null 2>&1 || true' \
+        'exec swaybg -i "$wall" -m fill' \
+        > /usr/bin/awww-daemon; \
+      chmod 0755 /usr/bin/awww /usr/bin/awww-daemon; \
+      echo "awww: real binary absent — installed swaybg shims"; \
+    else echo "awww: real binary present"; fi
 COPY config/sysprofiles/ /usr/share/apexos/sysprofiles/
 COPY apexd/apexd/apexd.service /usr/lib/systemd/system/apexd.service
 COPY files/system/dbus-1/system-services/org.apexos.Apexd1.service \
@@ -444,14 +486,29 @@ COPY files/system/units/apex-shell-firstrun.service \
 COPY files/system/libexec/apex-shell-firstrun /usr/libexec/apex-shell-firstrun
 RUN systemctl --global enable apex-shell-firstrun.service
 
+# Default APEX Hyprland config template, seeded per-user by the provisioner
+# (@HOME@ substituted at seed time). Ships the APEX keybinds + $terminal=alacritty
+# etc. so a fresh login is the intended APEX session, not the stock hyprland
+# example (which binds dolphin/wofi that aren't installed). apex-logs 16.
+COPY files/desktop/hypr/hyprland.conf /usr/share/apex/hypr/hyprland.conf
+
 # Greeter session picker: offer Hyprland + niri only. sway/labwc are the greeter
 # HOST compositor, not user sessions — strip their wayland-session files so they
 # are never offered as logins. apex-greet enumerates /usr/share/wayland-sessions.
+#
+# CRITICAL (apex-logs 25/39): also remove hyprland-uwsm.desktop. hyprland pulls in
+# hyprland-uwsm, whose session Exec is the multi-token `uwsm start -- hyprland.desktop`.
+# This greeter build launches only the FIRST Exec token → bare `uwsm` (rc=2, instant
+# death), and hyprland-uwsm.desktop sorts BEFORE hyprland.desktop, so it would be the
+# default on every fresh install → a silent login bounce-loop. Removing it makes plain
+# `hyprland.desktop` (single-token `Exec=Hyprland`) the working default. (uwsm the
+# package stays; only the broken session entry is removed.)
 COPY files/desktop/wayland-sessions/niri.desktop \
      /usr/share/wayland-sessions/niri.desktop
 RUN set -eux; \
     rm -f /usr/share/wayland-sessions/sway.desktop \
-          /usr/share/wayland-sessions/labwc.desktop; \
+          /usr/share/wayland-sessions/labwc.desktop \
+          /usr/share/wayland-sessions/hyprland-uwsm.desktop; \
     [ -f /usr/share/wayland-sessions/hyprland.desktop ] || \
       printf '[Desktop Entry]\nName=Hyprland\nComment=Dynamic tiling Wayland compositor\nExec=Hyprland\nType=Application\nDesktopNames=Hyprland\n' \
         > /usr/share/wayland-sessions/hyprland.desktop
