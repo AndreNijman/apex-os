@@ -348,17 +348,53 @@ jobs:
       - name: Pull the latest green daily image into local storage
         run: sudo podman pull "$IMAGE:daily"
 
+      # The installer config (installer/bib-config.toml) is mounted at
+      # /config.toml so bootc-image-builder applies our INTERACTIVE kickstart
+      # instead of its destructive default (clearpart --all + locked root). See
+      # that file's header and docs. Without it the ISO wipes the target disk
+      # unattended and locks the user out — the two bugs this fixes.
       - name: Build daily installer ISO via bootc-image-builder
         run: |
           mkdir -p output
+          test -f installer/bib-config.toml  # fail loudly if the config is missing
           sudo podman run --rm --privileged \
             --security-opt label=type:unconfined_t \
             -v "$(pwd)/output":/output \
+            -v "$(pwd)/installer/bib-config.toml":/config.toml:ro \
             -v /var/lib/containers/storage:/var/lib/containers/storage \
             quay.io/centos-bootc/bootc-image-builder:latest \
             --type anaconda-iso --rootfs btrfs --local \
             "$IMAGE:daily"
           ls -lhR output/bootiso || ls -lhR output
+
+      # Guard: extract the embedded kickstart from the built ISO and FAIL the
+      # build if the destructive defaults ever reappear (clearpart/autopart) or
+      # a root password / user got baked in. Cheap insurance against a future
+      # bib change silently restoring the unattended wipe. Uses the runner's own
+      # xorriso (no mount) to pull the kickstart files from the ISO root.
+      - name: Verify embedded kickstart is non-destructive
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq xorriso
+          iso=$(ls output/bootiso/*.iso | head -1)
+          echo "Inspecting $iso"
+          rm -rf ksdump && mkdir ksdump
+          # anaconda loads /osbuild.ks which %includes /osbuild-base.ks (both at
+          # the ISO root). Extract both; the base file is where clearpart/rootpw
+          # would live, so require it.
+          xorriso -osirrox on -indev "$iso" -extract /osbuild.ks      ksdump/osbuild.ks      2>/dev/null || true
+          xorriso -osirrox on -indev "$iso" -extract /osbuild-base.ks ksdump/osbuild-base.ks 2>/dev/null || true
+          cat ksdump/osbuild.ks ksdump/osbuild-base.ks > extracted.ks 2>/dev/null || true
+          echo "----- embedded kickstart -----"; cat extracted.ks; echo "------------------------------"
+          if [ ! -s ksdump/osbuild-base.ks ]; then
+            echo "::error::Could not extract /osbuild-base.ks from the ISO — cannot verify it is non-destructive"; exit 1
+          fi
+          if grep -Eiq '^[[:space:]]*(clearpart|autopart|ignoredisk|zerombr)\b' extracted.ks; then
+            echo "::error::Destructive storage directive found in kickstart"; exit 1
+          fi
+          if grep -Eiq '^[[:space:]]*(rootpw|user[[:space:]]+--)' extracted.ks; then
+            echo "::error::A baked user/rootpw was found in kickstart (should be interactive)"; exit 1
+          fi
+          echo "OK: no clearpart/autopart/rootpw/user — install is interactive."
 
       - name: Upload installer ISO artifact
         uses: actions/upload-artifact@v4
