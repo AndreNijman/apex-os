@@ -12,10 +12,10 @@ name: build-image
 #      REBUILT only when base-relevant files change (or on schedule / forced).
 #      A flavor-only push skips it entirely; the flavors resolve the last-good
 #      base digest from GHCR instead. Turns a flavor fix from ~50 min → ~15 min.
-#   2. Registry layer cache — when the base DOES rebuild, unchanged layers are
-#      pulled from a GHCR cache tag instead of recompiled (guarded: only used if
-#      the runner's podman supports --cache-to/--cache-from). Bypassed on the
-#      weekly schedule / force_base so upstream kernel/COPR updates are picked up.
+#   2. No registry layer cache — podman's --cache-to export proved unreliable on
+#      the runner (partial push then "image not known"), so the base builds
+#      plainly. A full base build is ~60 min; the base-gate above is what keeps
+#      most pushes fast. schedule / force_base pass --no-cache for a clean build.
 #
 # The base's immutable digest is passed to the flavor builds as
 # --build-arg BASE=<base>@<digest> so every flavor is pinned to an exact base.
@@ -51,7 +51,7 @@ on:
     - cron: "0 6 * * 1"
 
 # Least privilege. id-token:write is required for cosign keyless (OIDC) signing;
-# packages:write is required to push to GHCR (images + the layer-cache tag).
+# packages:write is required to push to GHCR (the base + flavor images).
 permissions:
   contents: read
   packages: write
@@ -61,11 +61,6 @@ env:
   REGISTRY: ghcr.io
   IMAGE_BASE: ghcr.io/andrenijman/apex-os-base
   IMAGE: ghcr.io/andrenijman/apex-os
-  # podman's --cache-to/--cache-from require a BARE repository (no tag/digest);
-  # it manages its own cache tags underneath. A tagged ref here fails the base
-  # build with "repository must contain neither a tag nor digest". Dedicated
-  # cache repo so it never mingles with the base image's :latest/:sha tags.
-  CACHE_REF: ghcr.io/andrenijman/apex-os-cache
 
 jobs:
   # ── Job 0: change detection ───────────────────────────────────────────────
@@ -143,29 +138,19 @@ jobs:
         run: |
           cosign login "$REGISTRY" -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
 
-      # Registry layer cache — reuse unchanged layers (kernel/Rust/desktop) from a
-      # GHCR cache tag across runs. Guarded: only if this podman supports the
-      # flags. Bypassed (fresh build) on schedule / force_base so upstream updates
-      # land. --cache-to always runs (when supported) to keep the cache warm.
+      # NO registry layer cache. podman's --cache-to export is unreliable on the
+      # runner: it pushes a partial cache and then fails mid-build with
+      # "failed pushing cache ... image not known" (and earlier rejected a tagged
+      # ref outright). It is only a speed optimisation — the base-gate already
+      # skips the base entirely on flavor-only pushes, and a full base build is
+      # ~60 min with or without it — so the reliable choice is to drop it and
+      # build plainly. Only honour the no-cache signal on schedule / force_base.
       - name: Compute cache args
         id: cache
         run: |
-          FRESH=false
-          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.force_base }}" = "true" ]; then
-            FRESH=true
-          fi
           ARGS=""
-          if sudo podman build --help 2>/dev/null | grep -q -- '--cache-to'; then
-            ARGS="--layers --cache-to $CACHE_REF"
-            if [ "$FRESH" != "true" ]; then
-              ARGS="$ARGS --cache-from $CACHE_REF"
-            else
-              ARGS="$ARGS --no-cache"
-            fi
-            echo "Layer cache enabled (fresh=$FRESH): $ARGS"
-          else
-            [ "$FRESH" = "true" ] && ARGS="--no-cache"
-            echo "podman lacks --cache-to; caching disabled (fresh=$FRESH)"
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.force_base }}" = "true" ]; then
+            ARGS="--no-cache"
           fi
           echo "args=$ARGS" >> "$GITHUB_OUTPUT"
 
