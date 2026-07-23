@@ -338,6 +338,11 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && inputs.build_iso
     steps:
+      # Needed for installer/bib-config.toml (the interactive kickstart) — this
+      # job previously pulled only the published image and had no checkout.
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
