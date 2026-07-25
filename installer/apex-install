@@ -134,6 +134,9 @@ if [ "$UNATTENDED" = 1 ]; then
   echo "APEX-OS unattended install to $DISK …"
   EXTRA_KARGS=()
   for k in $(kvall apex.karg); do EXTRA_KARGS+=(--karg "$k"); done
+  # Disarm the ERR trap around the install (it fires even under `set +e`, and a
+  # failing `podman … | tee` pipeline would pre-empt the rc check below).
+  trap - ERR
   set +e
   # --net=host: no netavark needed in the live env; bootc install is offline.
   podman run --rm --privileged --pid=host --net=host --security-opt label=disable \
@@ -143,14 +146,15 @@ if [ "$UNATTENDED" = 1 ]; then
       --karg quiet --karg splash ${EXTRA_KARGS[@]+"${EXTRA_KARGS[@]}"} \
       ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
       "$DISK" 2>&1 | tee -a "$LOG"
-  rc=${PIPESTATUS[0]}; set -e
+  rc=${PIPESTATUS[0]}
+  trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
   [ "$rc" = 0 ] || die "unattended: bootc install exited $rc (see $LOG)."
-  MNT=$(mktemp -d); part=$(lsblk -rno NAME "$DISK" | tail -1)
+  MNT=$(mktemp -d); part=$(lsblk -rno NAME "$DISK" | tail -1 || true)
   mount "/dev/$part" "$MNT" || die "unattended: mount of new root failed."
-  deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1)
-  [ -n "$deploy" ] || { umount "$MNT"; die "unattended: deployment not found."; }
+  deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
+  [ -n "$deploy" ] || { umount "$MNT" 2>/dev/null || true; die "unattended: deployment not found."; }
   create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "unattended"
-  sync; umount "$MNT" 2>/dev/null; rmdir "$MNT" 2>/dev/null || true
+  sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true
   echo "APEX-INSTALL-UNATTENDED-OK"; log "unattended install complete"
   if echo "$CMD" | grep -qw apex.poweroff; then sync; poweroff; fi
   exit 0
@@ -167,20 +171,34 @@ Continue?" 16 70 || { clear; echo "Installer cancelled."; exit 0; }
 
 # ── 1. target disk (guarded) ─────────────────────────────────────────────────
 # Identify the live/boot device so we never offer it as a target.
+# `|| true` on every one of these: with `pipefail` a failing pipeline makes the
+# assignment non-zero, which trips the ERR trap (fires even under `set +e`).
 live_src=$(findmnt -no SOURCE / 2>/dev/null || true)          # e.g. /dev/mapper/live-rw or overlay
-boot_disk=$(lsblk -no PKNAME "$(findmnt -no SOURCE /run/initramfs/live 2>/dev/null)" 2>/dev/null | head -1)
-usb_boot=$(lsblk -o NAME,MOUNTPOINT,RM -rn 2>/dev/null | awk '$2 ~ /live|install|ISO/ {print $1}' | head -1)
+boot_disk=$(lsblk -no PKNAME "$(findmnt -no SOURCE /run/initramfs/live 2>/dev/null || true)" 2>/dev/null | head -1 || true)
+usb_boot=$(lsblk -o NAME,MOUNTPOINT,RM -rn 2>/dev/null | awk '$2 ~ /live|install|ISO/ {print $1}' | head -1 || true)
 
 menu=(); count=0
-while read -r name size model tran rm; do
-  [ -z "$name" ] && continue
+while read -r name; do
+  if [ -z "$name" ]; then continue; fi
   dev="/dev/$name"
   # Exclude the disk we booted from.
   if [ -n "$boot_disk" ] && [ "$name" = "$boot_disk" ]; then continue; fi
   case " $usb_boot " in *" $name "*) continue;; esac
-  label="$size  ${model:-disk}  [${tran:-?}$([ "$rm" = 1 ] && echo ,removable)]"
+  # Query each column SEPARATELY. Do NOT use positional `read a b c` over a
+  # multi-column lsblk: MODEL contains spaces ("USB DISK 3.2", "SPCC M.2 PCIe
+  # SSD"), which silently shifts TRAN/RM into garbage.
+  size=$(lsblk -dno SIZE  "$dev" 2>/dev/null | tr -d ' ')            || size=""
+  model=$(lsblk -dno MODEL "$dev" 2>/dev/null | sed 's/^ *//; s/ *$//') || model=""
+  tran=$(lsblk -dno TRAN  "$dev" 2>/dev/null | tr -d ' ')            || tran=""
+  removable=$(lsblk -dno RM "$dev" 2>/dev/null | tr -d ' ')          || removable=""
+  # Plain if/then — never `$( [ … ] && … )`: that substitution exits non-zero for
+  # a NON-removable disk, which becomes the assignment's status and trips the ERR
+  # trap, killing the installer while merely listing disks (apex-logs 41).
+  flags="${tran:-?}"
+  if [ "$removable" = "1" ]; then flags="$flags,removable"; fi
+  label="${size:-?}  ${model:-disk}  [$flags]"
   menu+=("$dev" "$label"); count=$((count+1))
-done < <(lsblk -dn -o NAME,SIZE,MODEL,TRAN,RM -e 7,11 2>/dev/null)
+done < <(lsblk -dn -o NAME -e 7,11 2>/dev/null)
 
 [ "$count" -gt 0 ] || die "No eligible target disks were found (the live/boot device is excluded)."
 
@@ -211,7 +229,7 @@ HOSTNAME=$($UI --backtitle "$BT" --title "Hostname" --inputbox "Computer name:" 
 HOSTNAME=$(echo "$HOSTNAME" | tr -d '[:space:]'); [ -n "$HOSTNAME" ] || HOSTNAME=apex
 
 # ── 3. confirm (show what will be destroyed; require typed ERASE) ─────────────
-disk_info=$(lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null)
+disk_info=$(lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null || true)
 yn "⚠  Final confirmation" \
 "About to ERASE and install to:
 
@@ -233,6 +251,11 @@ clear
 echo "Installing APEX-OS to $DISK … (full log: $LOG)"; echo
 log "install start: DISK=$DISK USER=$USERNAME HOST=$HOSTNAME IMAGE=$IMAGE FS=$ROOTFS_TYPE"
 
+# Disarm the ERR trap around the install: the trap fires even under `set +e`, and
+# with pipefail a failing `podman … | tee` pipeline would hit it BEFORE we can
+# read rc — reporting a useless "unexpected error on line N" instead of the real
+# bootc error. We check rc explicitly and re-arm immediately after.
+trap - ERR
 set +e
 # --net=host: no netavark needed in the live env; bootc install is offline.
 podman run --rm --privileged --pid=host --net=host --security-opt label=disable \
@@ -242,19 +265,23 @@ podman run --rm --privileged --pid=host --net=host --security-opt label=disable 
     --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
     "$DISK" 2>&1 | tee -a "$LOG"
 rc=${PIPESTATUS[0]}
-set -e
+trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
 [ "$rc" = 0 ] || die "bootc install exited $rc. The exact error is above and in $LOG (search for 'error:'). No boot config was left half-written by grub2-mkconfig — bootc uses bootupd."
 
 # ── 5. create the account in the freshly installed system ─────────────────────
 echo; echo "Creating your account …"; log "post-install: create user $USERNAME"
 MNT=$(mktemp -d)
-part=$(lsblk -rno NAME "$DISK" | tail -1); root_part="/dev/$part"
+part=$(lsblk -rno NAME "$DISK" | tail -1 || true); root_part="/dev/$part"
 mount "$root_part" "$MNT" 2>>"$LOG" || die "Could not mount the new root ($root_part) to create your account."
 # ostree layout: the deployed root is the newest dir under ostree/deploy/*/deploy/*.0
-deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1)
-[ -n "$deploy" ] || { umount "$MNT"; die "Installed ostree deployment not found under $root_part."; }
+# `|| true`: no glob match makes the pipeline non-zero → ERR trap. The explicit
+# emptiness check on the next line is what should report the problem.
+deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
+[ -n "$deploy" ] || { umount "$MNT" 2>/dev/null || true; die "Installed ostree deployment not found under $root_part."; }
 create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
-sync; umount "$MNT" 2>/dev/null; rmdir "$MNT" 2>/dev/null || true
+# Never let cleanup failures trip the ERR trap AFTER a successful install — that
+# would report failure on a system that is actually installed fine.
+sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true
 log "post-install: user $USERNAME created, hostname=$HOSTNAME"
 
 # ── 6. done ──────────────────────────────────────────────────────────────────
