@@ -76,7 +76,10 @@ echo "== 5. ext4 rootfs.img inside squashfs (classic LiveOS layout) =="
 # dmsquash-live default (dm-snapshot) mode expects squashfs.img containing
 # LiveOS/rootfs.img (an ext4 fs image). Size it to the rootfs + 15% + slack.
 bytes=$(sudo du -sb --apparent-size "$WORK/rootfs" | cut -f1)
-imgsz=$(( bytes + bytes / 7 + 768*1024*1024 ))
+# +40% and a 1.5G floor of slack. `du --apparent-size` undercounts real ext4 cost
+# (metadata, block rounding), and the previous +15%/768M left the live root 96%
+# full (~525MB free) — zero margin for logs, /tmp or a container scratch dir.
+imgsz=$(( bytes + bytes * 2 / 5 + 1536*1024*1024 ))
 sudo rm -rf "$WORK/sqroot"; sudo mkdir -p "$WORK/sqroot/LiveOS" "$WORK/mnt"
 sudo truncate -s "$imgsz" "$WORK/sqroot/LiveOS/rootfs.img"
 sudo mkfs.ext4 -q -F -L "APEX-LIVE-ROOT" "$WORK/sqroot/LiveOS/rootfs.img"
@@ -84,7 +87,8 @@ sudo mount -o loop "$WORK/sqroot/LiveOS/rootfs.img" "$WORK/mnt"
 sudo cp -a "$WORK/rootfs/." "$WORK/mnt/"
 sudo umount "$WORK/mnt"; sudo rmdir "$WORK/mnt"
 
-rm -rf "$ISOROOT"; mkdir -p "$ISOROOT/LiveOS" "$ISOROOT/images/pxeboot" "$ISOROOT/EFI/BOOT"
+# sudo: a previous run's step 5b leaves $ISOROOT/container root-owned.
+sudo rm -rf "$ISOROOT"; mkdir -p "$ISOROOT/LiveOS" "$ISOROOT/images/pxeboot" "$ISOROOT/EFI/BOOT"
 sudo mksquashfs "$WORK/sqroot" "$ISOROOT/LiveOS/squashfs.img" \
   -comp zstd -b 1M -noappend -no-progress
 sudo rm -rf "$WORK/sqroot"
@@ -156,12 +160,44 @@ sudo cp "$WORK/grub.cfg"    "$ISOROOT/EFI/BOOT/grub.cfg"
 sudo mkdir -p "$ISOROOT/images"
 sudo cp "$WORK/efiboot.img" "$ISOROOT/images/efiboot.img"
 
+echo "== 6b. build-time invariants (fail loudly rather than ship a broken ISO) =="
+# CRITICAL-1 shipped because nothing asserted the live env could actually run the
+# installer: `clear` (ncurses) was missing, so every install died the moment the
+# user confirmed. Assert the things the installer depends on, in the ROOTFS.
+_need_bin() { sudo test -x "$WORK/rootfs/usr/bin/$1" || sudo test -x "$WORK/rootfs/usr/sbin/$1" \
+    || { echo "BUILD ASSERT FAILED: /usr/bin/$1 missing from the live rootfs"; exit 1; }; }
+for b in clear whiptail podman lsblk useradd chpasswd mount umount blkid udevadm partprobe awk sed; do
+  _need_bin "$b"
+done
+sudo test -x "$WORK/rootfs/usr/bin/apex-install" \
+  || { echo "BUILD ASSERT FAILED: apex-install missing"; exit 1; }
+sudo bash -n "$WORK/rootfs/usr/bin/apex-install" \
+  || { echo "BUILD ASSERT FAILED: apex-install has a syntax error"; exit 1; }
+# Production must NOT carry the unattended marker.
+if [ "$PRODUCTION" = 1 ]; then
+  if sudo test -e "$WORK/rootfs/usr/share/apex-installer/allow-unattended"; then
+    echo "BUILD ASSERT FAILED: production build contains the unattended marker"; exit 1; fi
+  if grep -qi 'apex.unattended' "$WORK/grub.cfg"; then
+    echo "BUILD ASSERT FAILED: production grub.cfg contains an unattended entry"; exit 1; fi
+  echo "asserts OK: no unattended marker, no unattended menu entry"
+else
+  echo "asserts OK (test build: unattended intentionally present)"
+fi
+
 echo "== 7. xorriso: UEFI ISO (El Torito for CD/QEMU + appended ESP for USB) =="
+# -appended_part_as_gpt + -partition_offset 16: without these the image carries an
+# MBR-only table whose partition 1 starts at LBA 0, which some UEFI firmwares
+# dislike when booting from USB. Produces a valid GPT with the ESP intact and the
+# APEX-INSTALL label still resolvable from both whole-disk and partition views.
 sudo xorriso -as mkisofs \
     -iso-level 3 -rational-rock -joliet -joliet-long \
     -V "$LABEL" \
     -e images/efiboot.img -no-emul-boot \
     -append_partition 2 0xef "$WORK/efiboot.img" \
+    -appended_part_as_gpt -partition_offset 16 \
     -o "$OUT" "$ISOROOT"
+
+# Checksum the ISO we just built (it used to record the PREVIOUS build's hash).
+sudo sha256sum "$OUT" | sudo tee "$OUT.sha256" >/dev/null
 echo "== DONE: $OUT =="
-ls -lh "$OUT"
+ls -lh "$OUT"; cat "$OUT.sha256"

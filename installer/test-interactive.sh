@@ -54,8 +54,16 @@ printf '#!/usr/bin/env bash\necho "[stub] podman $*"\nexit 0\n' > "$BIN/podman"
 # post-install partition lookup on the fake disk.
 cat > "$BIN/lsblk" <<STUB
 #!/usr/bin/env bash
+# Fake target: report one partition, honouring the NAME,TYPE query the installer
+# uses to find the root partition by identity (not by position).
 for a in "\$@"; do
-  case "\$a" in "$FAKE_DISK") echo "apex-test-fake1"; exit 0 ;; esac
+  case "\$a" in
+    "$FAKE_DISK")
+      for b in "\$@"; do
+        case "\$b" in *TYPE*) echo "apex-test-fake1 part"; exit 0 ;; esac
+      done
+      echo "apex-test-fake1"; exit 0 ;;
+  esac
 done
 exec /usr/bin/lsblk "\$@"
 STUB
@@ -68,6 +76,14 @@ STUB
 # post-install account step finds a deploy dir and runs its real logic.
 DEPLOY="$TMP/root/ostree/deploy/default/deploy/abc.0"
 mkdir -p "$DEPLOY/etc" "$DEPLOY/var/home" "$TMP/root/ostree/deploy/default/var"
+# The installer now REFUSES to finish without the SELinux relabel tooling in the
+# target (an unlabeled /etc/passwd = login denied = unusable system). Provide the
+# fixture so the happy path can complete; `chroot`/`setfiles` are stubbed inert.
+mkdir -p "$DEPLOY/usr/sbin" "$DEPLOY/etc/selinux/targeted/contexts/files"
+printf 'SELINUXTYPE=targeted\n' > "$DEPLOY/etc/selinux/config"
+: > "$DEPLOY/etc/selinux/targeted/contexts/files/file_contexts"
+printf '#!/bin/sh\nexit 0\n' > "$DEPLOY/usr/sbin/setfiles"; chmod +x "$DEPLOY/usr/sbin/setfiles"
+printf 'root:x:0:0::/root:/bin/bash\n' > "$DEPLOY/etc/passwd"
 cat > "$BIN/mktemp" <<STUB
 #!/usr/bin/env bash
 if [ "\${1:-}" = "-d" ]; then echo "$TMP/root"; else exec /usr/bin/mktemp "\$@"; fi

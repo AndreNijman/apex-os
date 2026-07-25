@@ -23,6 +23,8 @@ BT="APEX-OS Installer"
 # The image to install. The live env preloads it into podman storage as this ref
 # (see the ISO build); override with APEX_IMAGE=... for testing.
 IMAGE="${APEX_IMAGE:-localhost/apex-os:daily}"
+# Update origin recorded in the INSTALLED system (so `bootc upgrade` works).
+TARGET_IMAGE="${APEX_TARGET_IMAGE:-ghcr.io/andrenijman/apex-os:daily}"
 ROOTFS_TYPE="${APEX_ROOTFS:-btrfs}"
 
 # On the live ISO the image is ALSO present as an OCI directory (ISO /container,
@@ -35,14 +37,43 @@ OCI_DIR="${APEX_OCI_DIR:-/run/initramfs/live/container}"
 SRC_VOL=(); SRC_ARGS=()
 if [ -d "$OCI_DIR" ]; then
   SRC_VOL=(-v "$OCI_DIR":/run/apex-oci:ro)
-  SRC_ARGS=(--source-imgref "oci:/run/apex-oci" --target-imgref "$IMAGE")
+  # --target-imgref is what the INSTALLED system records as its update origin.
+  # It must be the real registry, not the live env's local tag: with
+  # `localhost/apex-os:daily` baked in, `bootc upgrade` fails permanently on the
+  # installed machine (nothing to pull from).
+  SRC_ARGS=(--source-imgref "oci:/run/apex-oci" --target-imgref "$TARGET_IMAGE")
 fi
 
-log()  { printf '%s %s\n' "$(date +%T)" "$*" >>"$LOG"; }
+# `|| true`: a full RAM disk (or an unwritable log) must never trip the ERR trap
+# and turn a fine install into a reported failure.
+log()  { printf '%s %s\n' "$(date +%T)" "$*" >>"$LOG" 2>/dev/null || true; }
 have() { command -v "$1" >/dev/null 2>&1; }
 UI=whiptail; have whiptail || UI=dialog
 
-msg()  { $UI --backtitle "$BT" --title "$1" --msgbox "$2" "${3:-16}" "${4:-72}"; }
+# Progress state — die() uses these to tell the TRUTH about what happened to the
+# disk. Before this, die() always claimed "nothing further was written", even
+# when called AFTER `bootc install --wipe` had already erased the target.
+WROTE_DISK=0      # 1 once bootc install has begun writing
+INSTALLED_OK=0    # 1 once bootc install returned success
+
+# `clear` lives in the ncurses package, which the live env did NOT ship (only
+# ncurses-libs, pulled in by newt/whiptail). A bare `clear` therefore failed with
+# 127 and — under the ERR trap — killed the installer the moment the user
+# confirmed ERASE ("Unexpected error on line 250"). The image now installs
+# ncurses, and this fallback makes the script independent of it regardless.
+if ! have clear; then
+  clear() { printf '\033[H\033[2J\033[3J'; }
+fi
+
+# msg() MUST NOT propagate a non-zero status. whiptail returns 255 on ESC (and on
+# any display failure), and `msg` is a NON-FINAL command inside `… || { msg …;
+# continue; }` groups — which the ERR trap does NOT exempt. That shipped as a
+# third crash ("Unexpected error on line 223": blank password → ESC).
+# NOTE: rewriting those groups as `if` does NOT help — only the *condition* of an
+# `if` is exempt from the trap, never the body. Neutralising msg() is the fix.
+msg()  { $UI --backtitle "$BT" --title "$1" --msgbox "$2" "${3:-16}" "${4:-72}" || true; }
+# yn() deliberately KEEPS its exit status — it is the user's Yes/No answer. It is
+# only ever used as `yn … || { … }`, where the command before `||` is exempt.
 yn()   { $UI --backtitle "$BT" --title "$1" --yesno "$2" "${3:-16}" "${4:-72}"; }
 
 # Detect unattended mode EARLY so die() never blocks on a TUI dialog when
@@ -59,10 +90,24 @@ if echo "$CMD" | grep -qw apex.unattended && [ -f /usr/share/apex-installer/allo
   UNATTENDED=1
 fi
 
-# fail-loud: show the exact reason + log path, then drop to a shell option.
+# fail-loud: the exact reason, the TRUE state of the disk, the last log lines,
+# and how to get a shell. Never claims "nothing was written" once it has been.
 die() {
   log "FATAL: $1"
+  local tail_txt state
+  tail_txt=$(tail -n 15 "$LOG" 2>/dev/null || true)
+  if [ "$INSTALLED_OK" = 1 ]; then
+    state="IMPORTANT: ${DISK:-the target disk} WAS erased and APEX-OS IS installed on it, but the
+step above did not finish. Your account was probably NOT created — do not reboot
+expecting to log in. Re-run apex-install, or fix it from the rescue shell."
+  elif [ "$WROTE_DISK" = 1 ]; then
+    state="IMPORTANT: ${DISK:-the target disk} WAS already erased and is now INCOMPLETE.
+It will not boot. Re-run apex-install to try again."
+  else
+    state="Nothing was written to any disk. Your disks were not touched."
+  fi
   if [ "$UNATTENDED" = 1 ]; then
+    # Both streams on purpose: the stdout copy is what the QEMU/CI serial capture greps.
     echo "APEX-INSTALL-FAILED: $1" >&2
     echo "APEX-INSTALL-FAILED: $1"
     exit 1
@@ -70,13 +115,43 @@ die() {
   $UI --backtitle "$BT" --title "✗ Installation failed" --msgbox \
 "$1
 
-Nothing further was written. The full log is at:
-  $LOG
+$state
 
-Press OK, then choose a shell to inspect (Ctrl+Alt+F2), or power off and retry.
-Your other disks were not touched." 20 74
+Last log lines:
+$tail_txt
+
+Full log: $LOG  (also copied to the USB's APEXEFI partition if possible)
+For a shell: Ctrl+Alt+F2, log in as  root  /  apex" 26 78 || true
+  save_log_to_esp
   exit 1
 }
+
+# The live log lives in a RAM-backed filesystem and dies with the reboot — the
+# user literally could not retrieve it to report a failure. Best-effort copy to
+# the ISO's writable APEXEFI (ESP) partition so it survives.
+save_log_to_esp() {
+  local esp dst
+  esp=$(blkid -L APEXEFI 2>/dev/null || true)
+  [ -n "$esp" ] || return 0
+  dst=$(mktemp -d 2>/dev/null) || return 0
+  if mount "$esp" "$dst" 2>/dev/null; then
+    cp -f "$LOG" "$dst/apex-install.log" 2>/dev/null || true
+    sync 2>/dev/null || true
+    umount "$dst" 2>/dev/null || true
+  fi
+  rmdir "$dst" 2>/dev/null || true
+  return 0
+}
+
+# Ctrl+C / SIGTERM during the install previously killed the installer with ZERO
+# output — leaving a half-wiped disk and no explanation.
+on_signal() {
+  trap - INT TERM HUP ERR
+  echo
+  echo "Interrupted by signal."
+  die "Interrupted (Ctrl+C or shutdown signal)."
+}
+trap on_signal INT TERM HUP
 trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
 
 # ── preflight ────────────────────────────────────────────────────────────────
@@ -106,7 +181,14 @@ create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefi
   echo "$host" > "$deploy/etc/hostname" 2>>"$LOG" || true
   setype=$(sed -n 's/^SELINUXTYPE=//p' "$deploy/etc/selinux/config" 2>/dev/null | head -1)
   spec="/etc/selinux/${setype:-targeted}/contexts/files/file_contexts"
-  if [ -x "$deploy/usr/sbin/setfiles" ] && [ -f "$deploy$spec" ]; then
+  # If the relabel tooling is missing we must NOT silently continue and then
+  # claim success: unlabeled /etc/passwd means greetd/polkitd get AVC-denied and
+  # the user cannot log in — an unusable system reported as a clean install.
+  if [ ! -x "$deploy/usr/sbin/setfiles" ] || [ ! -f "$deploy$spec" ]; then
+    umount "$deploy/var" 2>/dev/null || true
+    die "$pfx: cannot SELinux-relabel the new account files (setfiles or the policy file_contexts is missing in the installed system). Without the relabel, login would be denied. The OS is installed on $DISK but the account is not usable."
+  fi
+  if true; then
     local paths=(/etc/hostname /var/home)
     for f in passwd passwd- shadow shadow- group group- gshadow gshadow- subuid subgid .pwd.lock; do
       [ -e "$deploy/etc/$f" ] && paths+=("/etc/$f")
@@ -132,6 +214,7 @@ if [ "$UNATTENDED" = 1 ]; then
   [ -b "$DISK" ] || die "unattended: apex.disk=$DISK is not a block device."
   log "UNATTENDED install: DISK=$DISK USER=$USERNAME HOST=$HOSTNAME"
   echo "APEX-OS unattended install to $DISK …"
+  WROTE_DISK=1
   EXTRA_KARGS=()
   for k in $(kvall apex.karg); do EXTRA_KARGS+=(--karg "$k"); done
   # Disarm the ERR trap around the install (it fires even under `set +e`, and a
@@ -149,8 +232,20 @@ if [ "$UNATTENDED" = 1 ]; then
   rc=${PIPESTATUS[0]}
   trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
   [ "$rc" = 0 ] || die "unattended: bootc install exited $rc (see $LOG)."
-  MNT=$(mktemp -d); part=$(lsblk -rno NAME "$DISK" | tail -1 || true)
-  mount "/dev/$part" "$MNT" || die "unattended: mount of new root failed."
+  INSTALLED_OK=1
+  MNT=$(mktemp -d)
+  udevadm settle --timeout=30 2>>"$LOG" || true
+  partprobe "$DISK" 2>>"$LOG" || true
+  udevadm settle --timeout=30 2>>"$LOG" || true
+  root_part=""
+  for p in $(lsblk -rno NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part"{print $1}'); do
+    if mount -o ro "/dev/$p" "$MNT" 2>/dev/null; then
+      if [ -d "$MNT/ostree/deploy" ]; then umount "$MNT" 2>/dev/null || true; root_part="/dev/$p"; break; fi
+      umount "$MNT" 2>/dev/null || true
+    fi
+  done
+  [ -n "$root_part" ] || die "unattended: installed root filesystem not found on $DISK."
+  mount "$root_part" "$MNT" || die "unattended: mount of new root failed."
   deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
   [ -n "$deploy" ] || { umount "$MNT" 2>/dev/null || true; die "unattended: deployment not found."; }
   create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "unattended"
@@ -175,7 +270,14 @@ Continue?" 16 70 || { clear; echo "Installer cancelled."; exit 0; }
 # assignment non-zero, which trips the ERR trap (fires even under `set +e`).
 live_src=$(findmnt -no SOURCE / 2>/dev/null || true)          # e.g. /dev/mapper/live-rw or overlay
 boot_disk=$(lsblk -no PKNAME "$(findmnt -no SOURCE /run/initramfs/live 2>/dev/null || true)" 2>/dev/null | head -1 || true)
-usb_boot=$(lsblk -o NAME,MOUNTPOINT,RM -rn 2>/dev/null | awk '$2 ~ /live|install|ISO/ {print $1}' | head -1 || true)
+# Map live-media matches back to their PARENT DISK. The old form compared a
+# *partition* name (sda1) against the menu's *disk* names (sda) — it could never
+# match, so this second guard was a silent no-op; and `head -1` discarded every
+# match after the first (two live sticks → only one excluded).
+usb_boot=$(lsblk -o NAME,MOUNTPOINT -rn 2>/dev/null \
+  | awk '$2 ~ /(^|\/)(live|install|ISO)/ {print $1}' \
+  | while read -r n; do p=$(lsblk -no PKNAME "/dev/$n" 2>/dev/null | head -1); printf '%s ' "${p:-$n}"; done \
+  | tr -s ' ' || true)
 
 menu=(); count=0
 while read -r name; do
@@ -194,11 +296,23 @@ while read -r name; do
   # Plain if/then — never `$( [ … ] && … )`: that substitution exits non-zero for
   # a NON-removable disk, which becomes the assignment's status and trips the ERR
   # trap, killing the installer while merely listing disks (apex-logs 41).
+  # Serial + a short contents hint so two same-size/same-model disks are
+  # distinguishable, and so a disk that already holds data is visibly different
+  # from a blank one BEFORE the confirm screen.
+  serial=$(lsblk -dno SERIAL "$dev" 2>/dev/null | tr -d ' ' | tail -c 9) || serial=""
+  parts=$(lsblk -rno TYPE "$dev" 2>/dev/null | grep -c '^part$' || true)
+  labels=$(lsblk -rno LABEL "$dev" 2>/dev/null | grep -v '^$' | head -2 | tr '\n' ',' | sed 's/,$//') || labels=""
   flags="${tran:-?}"
   if [ "$removable" = "1" ]; then flags="$flags,removable"; fi
-  label="${size:-?}  ${model:-disk}  [$flags]"
+  content="empty"
+  if [ "${parts:-0}" -gt 0 ]; then content="${parts} part"; fi
+  if [ -n "$labels" ]; then content="$content: $labels"; fi
+  label="${size:-?}  ${model:-disk}  [$flags]  ${serial:+sn:$serial  }($content)"
   menu+=("$dev" "$label"); count=$((count+1))
-done < <(lsblk -dn -o NAME -e 7,11 2>/dev/null)
+  # Real whole disks only: skip 0-byte phantoms (empty card-reader slots) that
+  # would otherwise bury the actual disks in the menu.
+done < <(lsblk -dn -o NAME,SIZE,TYPE -e 7,11 2>/dev/null \
+         | awk '$3=="disk" && $2!="0B" && $2!="0" {print $1}')
 
 [ "$count" -gt 0 ] || die "No eligible target disks were found (the live/boot device is excluded)."
 
@@ -215,7 +329,26 @@ if findmnt -rno SOURCE | grep -q "^$DISK"; then die "$DISK (or a partition of it
 USERNAME=$($UI --backtitle "$BT" --title "Create your account" --inputbox \
 "Username (lowercase, no spaces):" 10 60 "andre" 3>&1 1>&2 2>&3) || exit 0
 USERNAME=$(echo "$USERNAME" | tr -d '[:space:]')
-[ -n "$USERNAME" ] || die "Username cannot be empty."
+# Validate NOW, before anything is erased. Previously an invalid name (uppercase,
+# leading digit/dash, reserved) only failed at `useradd` — i.e. AFTER the disk was
+# wiped, leaving an installed system with no account (the locked-out failure).
+while :; do
+  if [ -z "$USERNAME" ]; then
+    msg "Username" "Username cannot be empty."
+  elif ! printf '%s' "$USERNAME" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$'; then
+    msg "Username" "Invalid username: '$USERNAME'
+
+Use lowercase letters, digits, - and _ ; must start with a letter or _
+(max 32 characters)."
+  elif printf '%s' "$USERNAME" | grep -Eqx 'root|bin|daemon|adm|nobody|greetd|systemd-.*'; then
+    msg "Username" "'$USERNAME' is a reserved system account. Pick another name."
+  else
+    break
+  fi
+  USERNAME=$($UI --backtitle "$BT" --title "Create your account" --inputbox \
+    "Username (lowercase, no spaces):" 10 60 "andre" 3>&1 1>&2 2>&3) || exit 0
+  USERNAME=$(echo "$USERNAME" | tr -d '[:space:]')
+done
 
 while :; do
   P1=$($UI --backtitle "$BT" --title "Password" --passwordbox "Password for $USERNAME:" 10 60 3>&1 1>&2 2>&3) || exit 0
@@ -230,8 +363,15 @@ HOSTNAME=$(echo "$HOSTNAME" | tr -d '[:space:]'); [ -n "$HOSTNAME" ] || HOSTNAME
 
 # ── 3. confirm (show what will be destroyed; require typed ERASE) ─────────────
 disk_info=$(lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null || true)
-yn "⚠  Final confirmation" \
-"About to ERASE and install to:
+# The destruction warning goes FIRST. whiptail silently clips text that overflows
+# the box (returning 0, no scrollbar, no hint) — with the warning last, any disk
+# with ≥5 partitions pushed "ALL DATA WILL BE LOST" off the bottom. That is, it
+# vanished exactly when there WAS data to lose, and showed on empty test disks.
+# Also size the box from the actual content instead of hard-coding 20 rows.
+confirm_body="ALL DATA ON $DISK WILL BE PERMANENTLY LOST.
+This cannot be undone.
+
+About to ERASE and install to:
 
 $disk_info
 
@@ -239,8 +379,11 @@ User:     $USERNAME   (administrator)
 Hostname: $HOSTNAME
 Filesystem: $ROOTFS_TYPE
 
-ALL DATA ON $DISK WILL BE PERMANENTLY LOST.
-Proceed?" 20 74 || { clear; echo "Cancelled — nothing was written."; exit 0; }
+Proceed?"
+_lines=$(printf '%s\n' "$confirm_body" | wc -l)
+_h=$(( _lines + 8 )); [ "$_h" -lt 20 ] && _h=20; [ "$_h" -gt 40 ] && _h=40
+yn "⚠  Final confirmation" "$confirm_body" "$_h" 78 \
+  || { clear; echo "Cancelled — nothing was written."; exit 0; }
 
 TYPED=$($UI --backtitle "$BT" --title "Type to confirm" --inputbox \
 "To confirm erasing $DISK, type:  ERASE" 10 60 "" 3>&1 1>&2 2>&3) || exit 0
@@ -249,6 +392,8 @@ TYPED=$($UI --backtitle "$BT" --title "Type to confirm" --inputbox \
 # ── 4. install (bootc install to-disk via the embedded image; stream to log) ──
 clear
 echo "Installing APEX-OS to $DISK … (full log: $LOG)"; echo
+echo "Do not power off — $DISK is being erased and rewritten from here on."; echo
+WROTE_DISK=1   # from this point the target's old contents are gone
 log "install start: DISK=$DISK USER=$USERNAME HOST=$HOSTNAME IMAGE=$IMAGE FS=$ROOTFS_TYPE"
 
 # Disarm the ERR trap around the install: the trap fires even under `set +e`, and
@@ -267,11 +412,26 @@ podman run --rm --privileged --pid=host --net=host --security-opt label=disable 
 rc=${PIPESTATUS[0]}
 trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
 [ "$rc" = 0 ] || die "bootc install exited $rc. The exact error is above and in $LOG (search for 'error:'). No boot config was left half-written by grub2-mkconfig — bootc uses bootupd."
+INSTALLED_OK=1   # the OS is on the disk; only account setup remains
 
 # ── 5. create the account in the freshly installed system ─────────────────────
 echo; echo "Creating your account …"; log "post-install: create user $USERNAME"
 MNT=$(mktemp -d)
-part=$(lsblk -rno NAME "$DISK" | tail -1 || true); root_part="/dev/$part"
+# Find the root partition by WHAT IT IS, not by position. `lsblk … | tail -1` was
+# wrong: it can return the whole disk (no partitions yet visible) or a non-root
+# partition, producing a false FAILURE after a perfectly good install. Settle
+# udev first — the partition table was just rewritten.
+udevadm settle --timeout=30 2>>"$LOG" || true
+partprobe "$DISK" 2>>"$LOG" || true
+udevadm settle --timeout=30 2>>"$LOG" || true
+root_part=""
+for p in $(lsblk -rno NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part"{print $1}'); do
+  if mount -o ro "/dev/$p" "$MNT" 2>/dev/null; then
+    if [ -d "$MNT/ostree/deploy" ]; then umount "$MNT" 2>/dev/null || true; root_part="/dev/$p"; break; fi
+    umount "$MNT" 2>/dev/null || true
+  fi
+done
+[ -n "$root_part" ] || die "Installed root filesystem not found on $DISK after bootc reported success. The OS is installed but the account could not be created."
 mount "$root_part" "$MNT" 2>>"$LOG" || die "Could not mount the new root ($root_part) to create your account."
 # ostree layout: the deployed root is the newest dir under ostree/deploy/*/deploy/*.0
 # `|| true`: no glob match makes the pipeline non-zero → ERR trap. The explicit

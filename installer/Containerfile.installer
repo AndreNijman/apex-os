@@ -24,7 +24,7 @@ FROM registry.fedoraproject.org/fedora:43
 RUN dnf -y install --setopt=install_weak_deps=False \
         kernel systemd systemd-udev dracut dracut-live device-mapper \
         podman skopeo \
-        newt util-linux coreutils bash shadow-utils \
+        newt ncurses util-linux coreutils bash shadow-utils \
         btrfs-progs dosfstools e2fsprogs gdisk \
         NetworkManager iproute iputils \
         plymouth kbd \
