@@ -16,7 +16,12 @@ TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
 # If the installer exits (cancel / error), drop to a shell so the user isn't stuck.
-ExecStopPost=-/usr/bin/bash -lc 'echo; echo "Installer exited. A shell follows (or reboot)."; exec /bin/bash'
+# TimeoutStopSec=infinity is REQUIRED: with the default 45s stop timeout systemd
+# SIGTERMs (then SIGABRTs) this rescue shell out from under the user — killing
+# their only chance to read the non-persistent log. Verified: the promised shell
+# was dead ~45s after the installer exited.
+ExecStopPost=-/usr/bin/bash -lc 'echo; echo "Installer exited. Rescue shell (log: /var/log/apex-install.log). Also: Ctrl+Alt+F2, login root/apex."; exec /bin/bash'
+TimeoutStopSec=infinity
 Restart=no
 
 [Install]
