@@ -90,6 +90,10 @@ case "\$args" in
                             echo "\${b}3 100G ext4 OTHER_OS"; exit 0 ;;
   *SERIAL,WWN*)         echo "FAKESERIAL 0xfake"; exit 0 ;;
 esac
+# parentage: any <disk>N reports <disk> as its parent
+case "\$args" in
+  *PKNAME*) case "\$args" in *"\${d}"[0-9]*) echo "\$b"; exit 0 ;; *) echo ""; exit 0 ;; esac ;;
+esac
 # per-partition queries
 case "\$args" in
   *"\${d}2"*|*"\${d}3"*|*"\${d}1"*)

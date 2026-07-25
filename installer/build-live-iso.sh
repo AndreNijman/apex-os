@@ -166,7 +166,8 @@ echo "== 6b. build-time invariants (fail loudly rather than ship a broken ISO) =
 # user confirmed. Assert the things the installer depends on, in the ROOTFS.
 _need_bin() { sudo test -x "$WORK/rootfs/usr/bin/$1" || sudo test -x "$WORK/rootfs/usr/sbin/$1" \
     || { echo "BUILD ASSERT FAILED: /usr/bin/$1 missing from the live rootfs"; exit 1; }; }
-for b in clear whiptail podman lsblk useradd chpasswd mount umount blkid udevadm partprobe awk sed; do
+for b in clear whiptail podman lsblk useradd chpasswd mount umount blkid udevadm partprobe awk sed \
+         mkfs.btrfs findmnt tput mktemp basename dirname chroot tee find df grep; do
   _need_bin "$b"
 done
 sudo test -x "$WORK/rootfs/usr/bin/apex-install" \

@@ -25,7 +25,8 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         kernel systemd systemd-udev dracut dracut-live device-mapper \
         podman skopeo \
         newt ncurses util-linux coreutils bash shadow-utils \
-        btrfs-progs dosfstools e2fsprogs gdisk \
+        btrfs-progs dosfstools e2fsprogs xfsprogs gdisk parted \
+        lvm2 cryptsetup mdadm \
         NetworkManager iproute iputils \
         plymouth kbd \
         grub2-tools-extra grub2-efi-x64-modules \
