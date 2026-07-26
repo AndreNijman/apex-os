@@ -6,6 +6,8 @@
 //! metrics. Never writes hardware when `APEXD_DRY_RUN=1` (or `--dry-run`).
 
 mod dbus;
+mod fan;
+mod game;
 mod metrics;
 mod polkit;
 mod state;
@@ -15,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use apexd_core::gpu::{NvidiaSmi, RealNvidiaSmi};
 use apexd_core::syswriter::{RealWriter, SysWriter};
 use apexd_core::{select, Fingerprint, ProfileSet};
 
@@ -71,15 +74,31 @@ async fn main() -> Result<()> {
         charge_stop,
     };
 
-    let ctx = Ctx::new(profiles, selection, fingerprint, writer, dry_run, initial);
+    let nvidia: Arc<dyn NvidiaSmi> = Arc::new(RealNvidiaSmi);
+    let ctx = Ctx::new(
+        profiles,
+        selection,
+        fingerprint,
+        writer,
+        dry_run,
+        initial,
+        Path::new("/sys"),
+        nvidia,
+    );
 
     if ctx.device_is_l16 && !ctx.ryzenadj_present {
         eprintln!("apexd: note: L16 detected but ryzenadj not on PATH — ultra-max EC-defeat loop disabled");
     }
+    if ctx.fan.supported() {
+        eprintln!("apexd: fan control: {}", ctx.fan.backends().join("; "));
+    } else {
+        eprintln!("apexd: fan control: no controllable fan found (reporting unsupported)");
+    }
 
-    // Bring hardware to the initial state (charge thresholds + tier).
+    // Bring hardware to the initial state (charge thresholds + tier + fan).
     ctx.apply_charge_defaults().await.ok();
     ctx.apply_tier(initial_tier).await.ok();
+    ctx.fan.apply_default().await;
 
     // Build the D-Bus service: six interfaces on one path.
     let conn = zbus::connection::Builder::system()
@@ -90,8 +109,8 @@ async fn main() -> Result<()> {
         .serve_at(OBJECT_PATH, BatteryIface { ctx: ctx.clone() })?
         .serve_at(OBJECT_PATH, ProfileIface { ctx: ctx.clone() })?
         .serve_at(OBJECT_PATH, MetricsIface { ctx: ctx.clone() })?
-        .serve_at(OBJECT_PATH, FanIface)?
-        .serve_at(OBJECT_PATH, GameModeIface)?
+        .serve_at(OBJECT_PATH, FanIface { ctx: ctx.clone() })?
+        .serve_at(OBJECT_PATH, GameModeIface { ctx: ctx.clone() })?
         .build()
         .await
         .context("building the D-Bus service")?;
@@ -104,11 +123,18 @@ async fn main() -> Result<()> {
     // AC/battery poll loop.
     tokio::spawn(ac_event_loop(ctx.clone(), conn.clone()));
 
-    // Run until told to stop, then tear the ryzenadj loop down cleanly.
+    // Run until told to stop, then unwind in the reverse order of set-up.
     wait_for_shutdown().await;
     eprintln!("apexd: shutting down");
-    // Dropping ctx aborts the ryzenadj task; make it explicit by switching to a
-    // non-ryzenadj tier so the writer records the teardown too.
+    // 1. Leave game mode: releases the GPU clock locks, the IRQ affinities and
+    //    the cpuset, and restores the tier the session interrupted.
+    ctx.game_exit().await.ok();
+    // 2. Hand the fans back to the firmware. This must happen before the
+    //    process can exit for any *graceful* reason; a crash is covered by
+    //    `ExecStopPost=/usr/bin/apex fan restore --local` in apexd.service.
+    ctx.fan.restore().await;
+    // 3. Dropping ctx aborts the ryzenadj task; make it explicit by switching to
+    //    a non-ryzenadj tier so the writer records the teardown too.
     ctx.apply_tier(apexd_core::Tier::Balanced).await.ok();
     Ok(())
 }

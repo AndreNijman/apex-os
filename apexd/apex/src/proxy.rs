@@ -58,6 +58,44 @@ pub trait Profile {
     fn device(&self) -> zbus::Result<String>;
 }
 
+#[proxy(
+    interface = "org.apexos.Apexd1.Fan",
+    default_service = "org.apexos.Apexd1",
+    default_path = "/org/apexos/Apexd1"
+)]
+pub trait Fan {
+    fn set_mode(&self, mode: &str) -> zbus::Result<()>;
+    fn set_pwm(&self, pwm: u8) -> zbus::Result<()>;
+    fn restore_firmware(&self) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn mode(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn supported(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn modes(&self) -> zbus::Result<Vec<String>>;
+    #[zbus(property)]
+    fn pwm(&self) -> zbus::Result<u8>;
+    #[zbus(property)]
+    fn fans(&self) -> zbus::Result<Vec<std::collections::HashMap<String, zvariant::OwnedValue>>>;
+}
+
+#[proxy(
+    interface = "org.apexos.Apexd1.GameMode",
+    default_service = "org.apexos.Apexd1",
+    default_path = "/org/apexos/Apexd1"
+)]
+pub trait GameMode {
+    fn set_active(&self, active: bool) -> zbus::Result<()>;
+    fn start_for_pid(&self, pid: u32) -> zbus::Result<()>;
+    fn attach_pid(&self, pid: u32) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn active(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn supported(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn status(&self) -> zbus::Result<std::collections::HashMap<String, zvariant::OwnedValue>>;
+}
+
 /// Connect to the system bus, returning None (never panicking) if the bus
 /// itself is unreachable.
 pub async fn connect() -> Option<zbus::Connection> {

@@ -137,6 +137,55 @@ pub enum Action {
     /// Tear the RyzenAdj reapply loop down (emitted when leaving a tier that
     /// requested it).
     StopRyzenAdj,
+
+    // ── M6: fan control ──────────────────────────────────────────────────────
+    /// Write a hwmon `pwmN_enable` (0 = full speed / no control, 1 = manual,
+    /// 2 = firmware automatic). Absolute path.
+    FanPwmEnable { path: String, value: u8 },
+    /// Write a hwmon `pwmN` duty cycle (0-255). Absolute path.
+    FanPwm { path: String, value: u8 },
+    /// Write a vendor fan attribute (e.g. msi-ec `fan_mode` / `cooler_boost`).
+    /// Absolute path, string value; `what` is a log label.
+    FanVendorAttr {
+        path: String,
+        value: String,
+        what: String,
+    },
+    /// The one safety primitive: hand a fan back to firmware control, with a
+    /// documented fallback ladder (prior enable -> 2 (auto) -> full speed).
+    /// A fan must never be left in manual mode at a low duty cycle.
+    FanSafeRestore {
+        enable_path: Option<String>,
+        pwm_path: Option<String>,
+        prior_enable: Option<u8>,
+        prior_pwm: Option<u8>,
+    },
+
+    // ── M6: game orchestration ───────────────────────────────────────────────
+    /// `nvidia-smi -i <gpu> -pm <0|1>`.
+    NvidiaPersistence { gpu: u32, enabled: bool },
+    /// `nvidia-smi -i <gpu> -lgc <min>,<max>`.
+    NvidiaLockGraphics { gpu: u32, min_mhz: u32, max_mhz: u32 },
+    /// `nvidia-smi -i <gpu> -lmc <min>,<max>`.
+    NvidiaLockMemory { gpu: u32, min_mhz: u32, max_mhz: u32 },
+    /// `nvidia-smi -i <gpu> -rgc`.
+    NvidiaResetGraphics { gpu: u32 },
+    /// `nvidia-smi -i <gpu> -rmc`.
+    NvidiaResetMemory { gpu: u32 },
+    /// Write a CPU list to an absolute `/proc/irq/<n>/smp_affinity_list` path.
+    /// Never fatal: many IRQs are kernel-managed and reject affinity writes.
+    IrqAffinity { path: String, cpus: String },
+    /// Ensure a cgroup-v2 directory exists and carries the given cpuset.
+    CgroupEnsure {
+        path: String,
+        cpus: String,
+        mems: String,
+    },
+    /// Move a PID into the cgroup at `path` (writes `<path>/cgroup.procs`).
+    /// Used both to pin a game and — with the recorded prior path — to restore.
+    CgroupAttach { path: String, pid: u32 },
+    /// Remove an emptied cgroup directory (best-effort).
+    CgroupRemove { path: String },
 }
 
 impl Action {
@@ -168,6 +217,55 @@ impl Action {
                 }
             ),
             Action::StopRyzenAdj => "stop ryzenadj reapply loop".to_string(),
+            Action::FanPwmEnable { path, value } => {
+                let meaning = match value {
+                    0 => " (no control = full speed)",
+                    1 => " (manual)",
+                    2 => " (firmware automatic)",
+                    _ => "",
+                };
+                format!("{path} <- {value}{meaning}")
+            }
+            Action::FanPwm { path, value } => {
+                format!("{path} <- {value} ({}%)", (*value as u32 * 100) / 255)
+            }
+            Action::FanVendorAttr { path, value, what } => {
+                format!("{what}: {path} <- {value}")
+            }
+            Action::FanSafeRestore {
+                enable_path,
+                prior_enable,
+                prior_pwm,
+                ..
+            } => format!(
+                "restore fan to firmware control ({}, prior enable={}, prior pwm={})",
+                enable_path.as_deref().unwrap_or("no pwm_enable"),
+                prior_enable
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                prior_pwm.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+            ),
+            Action::NvidiaPersistence { gpu, enabled } => {
+                format!("nvidia-smi -i {gpu} -pm {}", u8::from(*enabled))
+            }
+            Action::NvidiaLockGraphics {
+                gpu,
+                min_mhz,
+                max_mhz,
+            } => format!("nvidia-smi -i {gpu} -lgc {min_mhz},{max_mhz}"),
+            Action::NvidiaLockMemory {
+                gpu,
+                min_mhz,
+                max_mhz,
+            } => format!("nvidia-smi -i {gpu} -lmc {min_mhz},{max_mhz}"),
+            Action::NvidiaResetGraphics { gpu } => format!("nvidia-smi -i {gpu} -rgc"),
+            Action::NvidiaResetMemory { gpu } => format!("nvidia-smi -i {gpu} -rmc"),
+            Action::IrqAffinity { path, cpus } => format!("{path} <- {cpus}"),
+            Action::CgroupEnsure { path, cpus, mems } => {
+                format!("cgroup {path}: cpuset.cpus={cpus} cpuset.mems={mems}")
+            }
+            Action::CgroupAttach { path, pid } => format!("cgroup {path}: attach pid {pid}"),
+            Action::CgroupRemove { path } => format!("cgroup {path}: remove"),
         }
     }
 }

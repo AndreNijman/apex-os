@@ -15,7 +15,9 @@ use apexd_core::tier::Tier;
 use clap::{Args, Parser, Subcommand};
 
 use crate::ops::LocalView;
-use crate::proxy::{connect, daemon_running, BatteryProxy, PowerProxy, ProfileProxy};
+use crate::proxy::{
+    connect, daemon_running, BatteryProxy, FanProxy, GameModeProxy, PowerProxy, ProfileProxy,
+};
 
 #[derive(Parser)]
 #[command(name = "apex", version, about = "APEX-OS control CLI")]
@@ -34,6 +36,16 @@ enum Cmd {
     Profile,
     /// Battery: status, charge thresholds, travel mode, calibration.
     Battery(BatteryArgs),
+    /// Fans: report speeds, switch mode, restore firmware control.
+    Fan {
+        #[command(subcommand)]
+        cmd: Option<FanCmd>,
+    },
+    /// Game mode: P-core pinning, IRQ steering, GPU clock locks, top tier.
+    Game {
+        #[command(subcommand)]
+        cmd: GameCmd,
+    },
     /// Print the hardware fingerprint and layered profile selection.
     Fingerprint,
     /// Pin the current deployment (ostree admin pin 0).
@@ -46,6 +58,39 @@ enum Cmd {
     Doctor,
     /// Show the booted image and its changelog labels.
     Changelog,
+}
+
+#[derive(Subcommand)]
+enum FanCmd {
+    /// Show every discovered fan, the active mode and the supported modes.
+    Status,
+    /// Switch mode: auto, max, manual, manual:<0-255> or curve.
+    Mode { name: String },
+    /// Manual mode at an explicit duty cycle (0-255).
+    Pwm { value: u8 },
+    /// Hand the fans back to firmware control.
+    Restore {
+        /// Write sysfs directly instead of going through apexd. This is the
+        /// crash-safety path (`ExecStopPost=`) and needs root, not the daemon.
+        #[arg(long)]
+        local: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GameCmd {
+    /// Enter game mode, optionally pinning a process (and its children).
+    Start {
+        /// PID to move into the game cpuset.
+        #[arg(long)]
+        pid: Option<u32>,
+    },
+    /// Leave game mode, restoring everything it changed.
+    Stop,
+    /// Show the session (or what one would look like).
+    Status,
+    /// Attach another PID to a running session.
+    Attach { pid: u32 },
 }
 
 #[derive(Args)]
@@ -69,6 +114,8 @@ async fn main() {
         Cmd::Tier { name } => cmd_tier(name).await,
         Cmd::Profile => cmd_profile().await,
         Cmd::Battery(args) => cmd_battery(args).await,
+        Cmd::Fan { cmd } => cmd_fan(cmd.unwrap_or(FanCmd::Status)).await,
+        Cmd::Game { cmd } => cmd_game(cmd).await,
         Cmd::Fingerprint => cmd_fingerprint(),
         Cmd::Pin => ops::pin(),
         Cmd::Rollback => ops::rollback(),
@@ -328,6 +375,257 @@ async fn cmd_battery(args: BatteryArgs) -> i32 {
     0
 }
 
+async fn cmd_fan(cmd: FanCmd) -> i32 {
+    // `restore --local` deliberately skips every daemon check: it is the path
+    // `apexd.service`'s ExecStopPost= takes after a crash, when there is no
+    // daemon left to ask.
+    if let FanCmd::Restore { local: true } = cmd {
+        return fan_restore_locally();
+    }
+
+    let conn = connect().await;
+    let running = match &conn {
+        Some(c) => daemon_running(c).await,
+        None => false,
+    };
+    let proxy = match (&conn, running) {
+        (Some(c), true) => FanProxy::new(c).await.ok(),
+        _ => None,
+    };
+
+    match cmd {
+        FanCmd::Status => {
+            match &proxy {
+                Some(p) => {
+                    let supported = p.supported().await.unwrap_or(false);
+                    println!("mode      : {}", p.mode().await.unwrap_or_default());
+                    println!("supported : {supported}");
+                    if let Ok(modes) = p.modes().await {
+                        println!("modes     : {}", modes.join(", "));
+                    }
+                    if let Ok(pwm) = p.pwm().await {
+                        if pwm > 0 {
+                            println!("pwm       : {pwm} ({}%)", (pwm as u32 * 100) / 255);
+                        }
+                    }
+                    if let Ok(fans) = p.fans().await {
+                        if fans.is_empty() {
+                            println!("fans      : (none detected)");
+                        }
+                        for f in fans {
+                            println!("  {}", render_fan(&f));
+                        }
+                    }
+                }
+                None => {
+                    let v = LocalView::detect();
+                    let cfg = v.active_profile().fan_config();
+                    let inv = apexd_core::fan::FanInventory::discover(Path::new("/sys"), &cfg);
+                    println!("apexd not running — reading fans locally.");
+                    println!("supported : {}", inv.controllable());
+                    println!("modes     : {}", inv.modes(&cfg).join(", "));
+                    let readings = inv.read();
+                    if readings.is_empty() {
+                        println!("fans      : (none detected)");
+                    }
+                    for r in readings {
+                        let mut parts = vec![r.id.clone()];
+                        if let Some(rpm) = r.rpm {
+                            parts.push(format!("{rpm} rpm"));
+                        }
+                        if let Some(p) = r.percent {
+                            parts.push(format!("{p}%"));
+                        }
+                        if let Some(p) = r.pwm {
+                            parts.push(format!("pwm {p}"));
+                        }
+                        if r.controllable {
+                            parts.push("controllable".into());
+                        }
+                        println!("  {}", parts.join("  "));
+                    }
+                }
+            }
+            0
+        }
+        FanCmd::Mode { name } => match &proxy {
+            Some(p) => match p.set_mode(&name).await {
+                Ok(()) => {
+                    println!("apex: fan mode -> {name}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("apex: SetMode failed: {e}");
+                    1
+                }
+            },
+            None => {
+                eprintln!("apex: apexd not running — cannot change fan mode.");
+                1
+            }
+        },
+        FanCmd::Pwm { value } => match &proxy {
+            Some(p) => match p.set_pwm(value).await {
+                Ok(()) => {
+                    println!("apex: fan pwm -> {value}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("apex: SetPwm failed: {e}");
+                    1
+                }
+            },
+            None => {
+                eprintln!("apex: apexd not running — cannot set fan pwm.");
+                1
+            }
+        },
+        FanCmd::Restore { local: _ } => match &proxy {
+            Some(p) => match p.restore_firmware().await {
+                Ok(()) => {
+                    println!("apex: fans restored to firmware control");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("apex: RestoreFirmware failed: {e} — falling back to a local restore");
+                    fan_restore_locally()
+                }
+            },
+            // No daemon: still restore, directly. Never leave fans in whatever
+            // state a dead daemon left them.
+            None => fan_restore_locally(),
+        },
+    }
+}
+
+/// Write the fan-restore plan straight to sysfs. Root-only; honours
+/// `APEXD_DRY_RUN=1`.
+fn fan_restore_locally() -> i32 {
+    let v = LocalView::detect();
+    let cfg = v.active_profile().fan_config();
+    let dry = apexd_core::dry_run_from_env();
+    let writer = apexd_core::RealWriter::new(dry);
+    let n = apexd_core::fan::restore_to_firmware(Path::new("/sys"), &cfg, &writer);
+    if n == 0 {
+        println!("apex: no controllable fan found — nothing to restore");
+    } else {
+        println!(
+            "apex: fans handed back to firmware control ({n} action(s){})",
+            if dry { ", dry-run" } else { "" }
+        );
+    }
+    0
+}
+
+async fn cmd_game(cmd: GameCmd) -> i32 {
+    let conn = connect().await;
+    let running = match &conn {
+        Some(c) => daemon_running(c).await,
+        None => false,
+    };
+    let proxy = match (&conn, running) {
+        (Some(c), true) => GameModeProxy::new(c).await.ok(),
+        _ => None,
+    };
+
+    match cmd {
+        GameCmd::Status => {
+            match &proxy {
+                Some(p) => {
+                    println!("active    : {}", p.active().await.unwrap_or(false));
+                    println!("supported : {}", p.supported().await.unwrap_or(false));
+                    if let Ok(status) = p.status().await {
+                        let mut keys: Vec<&String> = status.keys().collect();
+                        keys.sort();
+                        for k in keys {
+                            if k == "active" || k == "supported" {
+                                continue;
+                            }
+                            println!("{k:10}: {}", render_value(&status[k]));
+                        }
+                    }
+                }
+                None => {
+                    let v = LocalView::detect();
+                    let cfg = v.active_profile().game_config();
+                    let topo = apexd_core::CoreTopology::detect_from(Path::new("/sys"));
+                    println!("apexd not running — showing the local view.");
+                    println!("supported : {}", cfg.enabled);
+                    println!("tier      : {}", cfg.tier);
+                    println!("cpuset    : {}", cfg.cpuset);
+                    println!("irq       : {}", cfg.irq);
+                    println!("cgroup    : {}", cfg.cgroup);
+                    println!(
+                        "cores     : P={} E={} (detected via {})",
+                        if topo.pcore_list().is_empty() { "(none)".into() } else { topo.pcore_list() },
+                        if topo.ecore_list().is_empty() { "(none)".into() } else { topo.ecore_list() },
+                        topo.source.as_str()
+                    );
+                    println!(
+                        "nvidia-smi: {}",
+                        if apexd_core::gpu::nvidia_smi_available() { "present" } else { "absent" }
+                    );
+                }
+            }
+            0
+        }
+        GameCmd::Start { pid } => match &proxy {
+            Some(p) => {
+                let res = match pid {
+                    Some(pid) => p.start_for_pid(pid).await,
+                    None => p.set_active(true).await,
+                };
+                match res {
+                    Ok(()) => {
+                        println!("apex: game mode ON");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("apex: entering game mode failed: {e}");
+                        1
+                    }
+                }
+            }
+            None => {
+                eprintln!("apex: apexd not running — cannot enter game mode.");
+                1
+            }
+        },
+        GameCmd::Stop => match &proxy {
+            Some(p) => match p.set_active(false).await {
+                Ok(()) => {
+                    println!("apex: game mode OFF");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("apex: leaving game mode failed: {e}");
+                    1
+                }
+            },
+            None => {
+                eprintln!("apex: apexd not running — cannot leave game mode.");
+                1
+            }
+        },
+        GameCmd::Attach { pid } => match &proxy {
+            Some(p) => match p.attach_pid(pid).await {
+                Ok(()) => {
+                    println!("apex: pid {pid} attached to the game cpuset");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("apex: AttachPid failed: {e}");
+                    1
+                }
+            },
+            None => {
+                eprintln!("apex: apexd not running — cannot attach a pid.");
+                1
+            }
+        },
+    }
+}
+
 async fn cmd_doctor() -> i32 {
     let v = LocalView::detect();
     let conn = connect().await;
@@ -364,6 +662,47 @@ async fn cmd_doctor() -> i32 {
     let s2idle = read_sys("power/mem_sleep").map(|s| s.contains("[s2idle]")).unwrap_or(false);
     line(s2idle, "s2idle is the active suspend mode");
 
+    // ── M6: fan control and game orchestration ───────────────────────────────
+    let fan_cfg = v.active_profile().fan_config();
+    let inv = apexd_core::fan::FanInventory::discover(Path::new("/sys"), &fan_cfg);
+    line(
+        inv.controllable(),
+        &format!(
+            "fan control channel present, write access unverified ({})",
+            if inv.controls.is_empty() && inv.msi_ec.is_none() {
+                "none".to_string()
+            } else {
+                let mut s: Vec<String> = inv.controls.iter().map(|c| c.id.clone()).collect();
+                if inv.msi_ec.is_some() {
+                    s.push("msi-ec".into());
+                }
+                s.join(", ")
+            }
+        ),
+    );
+    let topo = apexd_core::CoreTopology::detect_from(Path::new("/sys"));
+    if v.fingerprint.cpu.hybrid {
+        line(
+            topo.is_hybrid(),
+            &format!(
+                "P/E split detected via {} (P={} E={})",
+                topo.source.as_str(),
+                topo.pcore_list(),
+                topo.ecore_list()
+            ),
+        );
+    }
+    if v.fingerprint.gpus.iter().any(|g| g.vendor == apexd_core::GpuVendor::Nvidia) {
+        line(
+            apexd_core::gpu::nvidia_smi_available(),
+            "nvidia-smi on PATH (needed for game-mode clock locks)",
+        );
+    }
+    line(
+        Path::new("/sys/fs/cgroup/cgroup.controllers").exists(),
+        "cgroup v2 present (needed for game-mode cpuset pinning)",
+    );
+
     let metrics_up = TcpStream::connect_timeout(
         &"127.0.0.1:9723".parse::<SocketAddr>().unwrap(),
         Duration::from_millis(200),
@@ -375,6 +714,48 @@ async fn cmd_doctor() -> i32 {
 }
 
 // ── small helpers ────────────────────────────────────────────────────────────
+
+/// Render one `a{sv}` fan entry as a single line.
+fn render_fan(f: &std::collections::HashMap<String, zvariant::OwnedValue>) -> String {
+    let get = |k: &str| f.get(k).map(render_value);
+    let mut parts = vec![get("id").unwrap_or_else(|| "?".into())];
+    if let Some(rpm) = get("rpm") {
+        parts.push(format!("{rpm} rpm"));
+    }
+    if let Some(pct) = get("percent") {
+        parts.push(format!("{pct}%"));
+    }
+    if let Some(pwm) = get("pwm") {
+        parts.push(format!("pwm {pwm}"));
+    }
+    if get("controllable").as_deref() == Some("true") {
+        parts.push("controllable".into());
+    }
+    parts.join("  ")
+}
+
+/// Human rendering for the handful of D-Bus variant types apexd returns.
+fn render_value(v: &zvariant::OwnedValue) -> String {
+    fn inner(v: &zvariant::Value<'_>) -> String {
+        use zvariant::Value;
+        match v {
+            Value::Str(s) => s.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::U8(n) => n.to_string(),
+            Value::U16(n) => n.to_string(),
+            Value::U32(n) => n.to_string(),
+            Value::U64(n) => n.to_string(),
+            Value::I16(n) => n.to_string(),
+            Value::I32(n) => n.to_string(),
+            Value::I64(n) => n.to_string(),
+            Value::F64(n) => format!("{n:.2}"),
+            Value::Array(a) => a.iter().map(inner).collect::<Vec<_>>().join(", "),
+            Value::Value(b) => inner(b),
+            other => format!("{other:?}"),
+        }
+    }
+    inner(v)
+}
 
 fn print_kv(key: &str, val: Option<String>) {
     if let Some(v) = val {
