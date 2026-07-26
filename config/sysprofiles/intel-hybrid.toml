@@ -7,8 +7,14 @@
 #
 # intel_pstate active mode exposes the same governor names (performance,
 # powersave) and the same EPP strings as amd-pstate-epp, so the three-knob
-# table is identical in shape; Intel-specific divergence (P/E cpuset policy,
-# NVIDIA clock locks) lives in the device profiles and lands with M6.
+# table is identical in shape.
+#
+# M6: every Intel hybrid part gets P-core pinning and IRQ steering for free —
+# both are derived at runtime from /sys/devices/cpu_core/cpus, so no per-machine
+# CPU numbers appear here. GPU clock locking is deliberately NOT enabled at the
+# class level (persistence only): a class profile cannot know what dGPU, if any,
+# is fitted, and locking clocks is a device-specific decision. See
+# msi-katana-gf76.toml for the device-level version.
 
 id = "intel-hybrid"
 kind = "class"
@@ -42,3 +48,15 @@ platform_profile = "balanced"
 governor = "powersave"
 epp = "power"
 platform_profile = "low-power"
+
+[gamemode]
+enabled = true
+tier = "ultra-max"
+cpuset = "p-cores"
+irq = "away-from-game"
+irq_pin_to_game = ["nvidia", "amdgpu"]
+
+[gamemode.nvidia]
+enabled = true
+persistence = true
+# No graphics_clock / memory_clock: nothing is locked at the class level.

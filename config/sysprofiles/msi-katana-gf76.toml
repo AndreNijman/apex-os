@@ -5,11 +5,13 @@
 # "Katana". Supersedes the intel-hybrid class profile on this machine.
 #
 # This is an always-on-AC gaming laptop, so the AC default is the top tier.
-# NVIDIA clock locks, P/E cpuset pinning and IRQ affinity are M6 (game
-# orchestration) concerns and are intentionally NOT here yet. platform_profile
-# is omitted because MSI's EC (msi-ec) does not reliably export the ACPI
-# platform_profile interface; the real SysWriter would skip it anyway.
+# platform_profile is omitted because MSI's EC (msi-ec) does not reliably export
+# the ACPI platform_profile interface; the real SysWriter would skip it anyway.
 # Charge thresholds use the msi-ec 60/80 longevity window.
+#
+# M6 adds the [fan] and [gamemode] tables below: NVIDIA clock locks, P/E cpuset
+# pinning and IRQ affinity now live here. Both tables are optional — a profile
+# without them gets the shipped defaults, so the pre-M6 profiles still parse.
 
 id = "msi-katana-gf76"
 kind = "device"
@@ -39,8 +41,80 @@ epp = "balance_power"
 governor = "powersave"
 epp = "power"
 
+# NOTE (M6): these BAT1 attributes are provided by the msi-ec driver. The
+# in-tree msi-ec in the shipped kernel carries a 25-entry EC-firmware allowlist
+# that does NOT include this machine's board (MS-17L3) and has no `force`
+# parameter, so on the current image the module does not bind and these writes
+# are silently skipped by the SysWriter (a missing attribute is never an error).
+# The block is kept because it is correct the moment msi-ec does bind — see the
+# IMAGE TODO in docs/m6-notes.md for how to make that happen.
 [charge]
 start = 60
 stop = 80
 start_path = "/sys/class/power_supply/BAT1/charge_control_start_threshold"
 end_path = "/sys/class/power_supply/BAT1/charge_control_end_threshold"
+
+# ── Fans ─────────────────────────────────────────────────────────────────────
+# Reality check for this board (MS-17L3), as of the current image:
+#
+#   * msi-ec is the only driver that can *command* MSI fans (`fan_mode`
+#     auto/silent/basic/advanced plus `cooler_boost` on/off — it has no pwm),
+#     but the in-tree module's EC-firmware allowlist does not list this board
+#     and the build has no `force` parameter, so it does not bind.
+#   * msi-wmi-platform *does* bind (with `force=1`) and registers an hwmon
+#     device with four read-only `fanN_input` channels — RPM you can watch, but
+#     no pwm and no mode.
+#
+# So on the shipped image apexd reports `Fan.Supported = false`, shows whatever
+# RPM msi-wmi-platform offers, and touches nothing. `backend = "auto"` probes in
+# order (hwmon pwm -> msi-wmi-platform -> msi-ec) and simply takes what exists;
+# the settings below become live the moment a controlling driver does bind.
+[fan]
+backend = "auto"
+min_pwm = 90              # ~35%: floor for any pwm we ever command
+max_pwm = 255
+boost_pwm_threshold = 200 # a manual pwm >= this trips cooler_boost on msi-ec
+msi_ec_auto_mode = "auto"
+msi_ec_max_mode = "advanced"
+curve_interval_secs = 3
+# Only used where a genuine pwm channel exists; harmless otherwise.
+[[fan.curve]]
+temp_c = 45.0
+pwm = 90
+[[fan.curve]]
+temp_c = 60.0
+pwm = 130
+[[fan.curve]]
+temp_c = 75.0
+pwm = 190
+[[fan.curve]]
+temp_c = 85.0
+pwm = 255
+
+# ── Game mode ────────────────────────────────────────────────────────────────
+# i7-12700H: 6 P-cores (12 threads, CPUs 0-11) + 8 E-cores (CPUs 12-19). The
+# cpuset is resolved at runtime from /sys/devices/cpu_core/cpus, never
+# hard-coded, so a BIOS with E-cores disabled degrades to "all CPUs".
+# IRQs are parked on the E-cores while a game runs, except the NVIDIA
+# interrupt, which belongs on the cores doing the rendering work.
+[gamemode]
+enabled = true
+tier = "ultra"            # ultra == ultra-max on this profile (no ryzenadj)
+fan_mode = "max"          # cooler boost for the duration of a session
+cpuset = "p-cores"
+irq = "away-from-game"
+irq_pin_to_game = ["nvidia"]
+cgroup = "/sys/fs/cgroup/apex-game"
+
+# RTX 3070 Laptop (GA104, 8 GB GDDR6). Values are clamped at runtime against
+# `nvidia-smi --query-gpu=clocks.max.graphics,clocks.max.memory`, so an
+# over-ambitious number here can never reach the driver.
+#   graphics_clock = [floor, ceiling] in MHz — the floor stops the GPU dropping
+#   out of its boost bin mid-frame; 1620 MHz is the part's rated boost.
+#   memory_clock = "max" locks GDDR6 to its top supported bin (6001 MHz for the
+#   12 Gbps modules MSI ships in this chassis).
+[gamemode.nvidia]
+enabled = true
+persistence = true
+graphics_clock = [1200, 1620]
+memory_clock = "max"
