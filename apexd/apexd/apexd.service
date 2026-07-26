@@ -8,14 +8,23 @@ Wants=polkit.service
 Type=dbus
 BusName=org.apexos.Apexd1
 ExecStart=/usr/bin/apexd
+# Fan safety net: this runs after the main process stops for *any* reason,
+# including a crash or a SIGKILL, where no in-process restore could have run.
+# It re-discovers the fans and hands every one of them back to firmware control
+# without needing the daemon or the bus. See docs/m6-notes.md.
+ExecStopPost=-/usr/bin/apex fan restore --local
 Restart=on-failure
 RestartSec=2
-# apexd needs raw sysfs writes (cpufreq, platform_profile, charge thresholds)
-# and, on the L16, to exec ryzenadj — so it runs as root and is only lightly
+# apexd needs raw sysfs writes (cpufreq, platform_profile, charge thresholds,
+# hwmon pwm), to exec ryzenadj (L16) and nvidia-smi (Katana), and to write
+# /proc/irq/*/smp_affinity_list — so it runs as root and is only lightly
 # sandboxed. Set APEXD_DRY_RUN=1 here to make it plan without writing.
 Environment=RUST_BACKTRACE=1
 ProtectHome=yes
-ProtectControlGroups=yes
+# NOT ProtectControlGroups: M6 game mode creates a cgroup-v2 cpuset
+# (/sys/fs/cgroup/apex-game) and moves the game's PIDs into it, which needs
+# /sys/fs/cgroup writable. Hardening this back on silently disables P/E pinning.
+ProtectControlGroups=no
 RestrictRealtime=yes
 MemoryDenyWriteExecute=yes
 

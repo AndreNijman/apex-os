@@ -55,6 +55,31 @@ end_path = "/sys/class/power_supply/BAT0/charge_control_end_threshold"
 # cadence and tears it down when switching away. Gated at runtime: it only
 # executes if the device is thinkpad-l16-g2 AND `ryzenadj` is on PATH AND the
 # daemon is not in dry-run mode.
+# ── Fans (M6) ────────────────────────────────────────────────────────────────
+# Verified on this machine: thinkpad_acpi's hwmon node ("thinkpad") publishes
+# fan1_input plus pwm1 and pwm1_enable at mode 0644 — but the driver answers
+# -EPERM to any write unless it was loaded with fan_control=1, which APEX-OS
+# does not do. So the attributes look controllable and are not; apexd writes,
+# reads back, sees nothing moved, and reports the refusal instead of pretending.
+# No default_mode is set here: there is no reason to poke the EC at boot.
+[fan]
+backend = "auto"
+min_pwm = 90
+
+# ── Game mode (M6) ───────────────────────────────────────────────────────────
+# Uniform Zen 4 cores: there is no P/E split to pin to, and steering IRQs around
+# a homogeneous CPU buys nothing, so both are off. No NVIDIA GPU either. What
+# game mode still does here is hold the top tier (which is where the RyzenAdj
+# EC-defeat loop lives) for the duration of the session.
+[gamemode]
+enabled = true
+tier = "ultra-max"
+cpuset = "all"
+irq = "off"
+
+[gamemode.nvidia]
+enabled = false
+
 [ryzenadj]
 stapm_mw = 62000     # sustained package (STAPM)
 fast_mw = 75000      # fast PPT (short-burst ceiling)
