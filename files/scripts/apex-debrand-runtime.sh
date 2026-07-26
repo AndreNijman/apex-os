@@ -68,9 +68,9 @@ usage() {
 Options:
   --apply                 actually write changes (default: dry run)
   --brand NAME            product name to brand with (default: APEX-OS)
-  --boot-dir DIR          operate on this /boot (default: /boot).
-                          Implies --skip-efi and --skip-os-release unless you
-                          re-enable them explicitly after this flag.
+  --boot-dir DIR          operate on this /boot (default: /boot). Also skips
+                          the EFI and /etc/os-release steps, which belong to
+                          the running system, not to an offline /boot.
   --skip-bls              do not touch /boot/loader/entries
   --skip-efi              do not touch EFI NVRAM
   --skip-os-release       do not touch /etc/os-release
@@ -147,7 +147,9 @@ new_title() {
     local t="$1"
     # ostree's own format is "<PRETTY_NAME> [<version>] (ostree:N)". Preserve the
     # (ostree:N) suffix exactly and replace only the product part, so the result
-    # is byte-identical to what ostree will regenerate from the branded image.
+    # matches what ostree regenerates from the branded image. (The optional
+    # <version> comes from ostree commit metadata; the current image carries
+    # none, which is why today's titles have no version segment either.)
     if [[ "$t" =~ ^(.*)\ (\(ostree:[0-9]+\))$ ]]; then
         printf '%s %s\n' "$BRAND" "${BASH_REMATCH[2]}"
         return
