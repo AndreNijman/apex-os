@@ -115,6 +115,10 @@ serial --unit=0 --speed=115200
 terminal_input serial console
 terminal_output serial console
 
+# shim/grub are loaded from the ESP, but the kernel + initrd live on the ISO9660
+# filesystem — point \$root at it by volume label before referencing those paths.
+search --no-floppy --set=root --label $LABEL
+
 set default=0
 set timeout=10
 
@@ -138,26 +142,48 @@ menuentry "Unattended install to /dev/vda -- WIPES /dev/vda (QEMU/CI only)" {
 }
 EOF
 fi
-# Standalone grub EFI binary; the embedded (memdisk) config only locates the ISO
-# by label and chains to /EFI/BOOT/grub.cfg above. Do NOT change \$prefix here:
-# modules (configfile.mod, search.mod, …) live in the memdisk and grub loads
-# them from \$prefix on demand — repointing it breaks module loading.
-cat > "$WORK/grub-embed.cfg" <<EOF
-search --no-floppy --set=root --label $LABEL
-configfile (\$root)/EFI/BOOT/grub.cfg
-EOF
-sudo podman run --rm --security-opt label=disable -v "$WORK":/w "$IMG" \
-  grub2-mkstandalone -O x86_64-efi -o /w/BOOTX64.EFI \
-    "boot/grub/grub.cfg=/w/grub-embed.cfg"
-# efiboot.img: FAT image holding /EFI/BOOT/BOOTX64.EFI (El Torito UEFI image).
-efisz=$(( ($(stat -c%s "$WORK/BOOTX64.EFI") / 1048576 + 8) ))
+# ── SECURE BOOT: use Fedora's SIGNED shim chain, not a self-built binary ─────
+# A `grub2-mkstandalone` BOOTX64.EFI is unsigned, so SB firmware refuses it
+# ("Access Denied -- rejected probably by Secure Boot", reproduced under OVMF).
+# Instead ship the standard, already-signed chain:
+#   BOOTX64.EFI  = shimx64.efi  (signed by the Microsoft UEFI CA → firmware trusts it)
+#   grubx64.efi  = Fedora's signed grub2 (shim verifies it against its embedded Fedora cert)
+#   mmx64.efi    = MokManager, for enrolling our own key later (Stage B)
+# The live kernel is Fedora's, which is already signed, so the whole chain
+# validates with SB ON and no user action.
+#
+# Fedora's signed grub is built with prefix /EFI/fedora, and when loaded from
+# /EFI/BOOT it looks for its config next to itself; ship grub.cfg in BOTH places
+# so either resolution order finds it.
+# `|| true` on every find: this script runs under `set -e`, and `find` exits
+# non-zero when any listed path is missing (/usr/share/shim does not exist on a
+# stock Fedora rootfs) — which silently killed the build at this step.
+SHIM=$(sudo find "$WORK/rootfs/boot/efi" -name 'shimx64.efi' 2>/dev/null | head -1 || true)
+GRUBEFI=$(sudo find "$WORK/rootfs/boot/efi" -name 'grubx64.efi' 2>/dev/null | head -1 || true)
+MMEFI=$(sudo find "$WORK/rootfs/boot/efi" -name 'mmx64.efi' 2>/dev/null | head -1 || true)
+[ -n "$SHIM" ] && [ -n "$GRUBEFI" ] \
+  || { echo "BUILD ASSERT FAILED: signed shimx64.efi/grubx64.efi not found in the rootfs (shim-x64 + grub2-efi-x64 installed?)"; exit 1; }
+echo "shim:    $SHIM"
+echo "grubefi: $GRUBEFI"
+
+# efiboot.img: FAT image holding the whole signed chain (El Torito UEFI image).
 rm -f "$WORK/efiboot.img"
-mkfs.fat -C -n APEXEFI "$WORK/efiboot.img" $(( efisz * 1024 ))
-mmd   -i "$WORK/efiboot.img" ::/EFI ::/EFI/BOOT
+mkfs.fat -C -n APEXEFI "$WORK/efiboot.img" 20480
+mmd   -i "$WORK/efiboot.img" ::/EFI ::/EFI/BOOT ::/EFI/fedora
+sudo cp "$SHIM"    "$WORK/BOOTX64.EFI"
+sudo cp "$GRUBEFI" "$WORK/grubx64.efi"
 mcopy -i "$WORK/efiboot.img" "$WORK/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
+mcopy -i "$WORK/efiboot.img" "$WORK/grubx64.efi" ::/EFI/BOOT/grubx64.efi
+mcopy -i "$WORK/efiboot.img" "$WORK/grub.cfg"    ::/EFI/BOOT/grub.cfg
+mcopy -i "$WORK/efiboot.img" "$WORK/grub.cfg"    ::/EFI/fedora/grub.cfg
+if [ -n "$MMEFI" ]; then sudo cp "$MMEFI" "$WORK/mmx64.efi"; mcopy -i "$WORK/efiboot.img" "$WORK/mmx64.efi" ::/EFI/BOOT/mmx64.efi; fi
+
+sudo mkdir -p "$ISOROOT/EFI/BOOT" "$ISOROOT/EFI/fedora" "$ISOROOT/images"
 sudo cp "$WORK/BOOTX64.EFI" "$ISOROOT/EFI/BOOT/BOOTX64.EFI"
+sudo cp "$WORK/grubx64.efi" "$ISOROOT/EFI/BOOT/grubx64.efi"
 sudo cp "$WORK/grub.cfg"    "$ISOROOT/EFI/BOOT/grub.cfg"
-sudo mkdir -p "$ISOROOT/images"
+sudo cp "$WORK/grub.cfg"    "$ISOROOT/EFI/fedora/grub.cfg"
+[ -n "$MMEFI" ] && sudo cp "$WORK/mmx64.efi" "$ISOROOT/EFI/BOOT/mmx64.efi"
 sudo cp "$WORK/efiboot.img" "$ISOROOT/images/efiboot.img"
 
 echo "== 6b. build-time invariants (fail loudly rather than ship a broken ISO) =="
@@ -167,7 +193,8 @@ echo "== 6b. build-time invariants (fail loudly rather than ship a broken ISO) =
 _need_bin() { sudo test -x "$WORK/rootfs/usr/bin/$1" || sudo test -x "$WORK/rootfs/usr/sbin/$1" \
     || { echo "BUILD ASSERT FAILED: /usr/bin/$1 missing from the live rootfs"; exit 1; }; }
 for b in clear whiptail podman lsblk useradd chpasswd mount umount blkid udevadm partprobe awk sed \
-         mkfs.btrfs findmnt tput mktemp basename dirname chroot tee find df grep; do
+         mkfs.btrfs findmnt tput mktemp basename dirname chroot tee find df grep \
+         mokutil efibootmgr; do
   _need_bin "$b"
 done
 sudo test -x "$WORK/rootfs/usr/bin/apex-install" \

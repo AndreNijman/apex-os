@@ -779,6 +779,65 @@ create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
 sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true
 log "post-install: user $USERNAME created, hostname=$HOSTNAME"
 
+# ── 5b. Secure Boot: enrol the APEX key so the installed kernel will boot ────
+# The CachyOS kernel is signed with the APEX MOK (see Containerfile.base). With
+# Secure Boot ON, shim will only accept it once that key is enrolled — a one-time
+# step that REQUIRES physical presence at the MokManager screen (by design; it
+# cannot be automated away). Offer it here rather than letting the machine fail
+# to boot after the install.
+SB_STATE="unknown"
+if have mokutil; then SB_STATE=$(mokutil --sb-state 2>/dev/null | tr -d '\n' || true); fi
+sb_on=0
+case "$SB_STATE" in *[Ee]nabled*) sb_on=1 ;; esac
+cert="$deploy/usr/share/apex-os/secureboot/apex-mok.der"
+kstate=$(cat "$deploy/usr/share/apex-os/secureboot/kernel-signed" 2>/dev/null || echo unknown)
+if [ "$sb_on" = 1 ]; then
+  if [ "$kstate" = signed ] && [ -f "$cert" ] && have mokutil; then
+    if yn "Secure Boot is ON" \
+"Secure Boot is enabled on this machine.
+
+APEX-OS uses a custom (CachyOS) kernel, which Microsoft does not sign. It is
+signed with APEX's own key instead — that key has to be enrolled once, or the
+machine will refuse to boot APEX.
+
+Enrol it now? You will choose a password, and on the next boot a blue
+MokManager screen asks you to confirm with it (this is the physical-presence
+check; it only happens once).
+
+Choosing No is fine — you can install anyway and either enrol later with
+'mokutil --import', or turn Secure Boot off in firmware." 22 76; then
+      MOKPW=$($UI --backtitle "$BT" --title "MOK enrolment password" --passwordbox \
+"Choose a password you will re-type at the blue MokManager screen on the next
+boot (it is used once, then discarded):" 12 70 3>&1 1>&2 2>&3 || true)
+      if [ -n "${MOKPW:-}" ]; then
+        if printf '%s\n%s\n' "$MOKPW" "$MOKPW" | mokutil --import "$cert" >>"$LOG" 2>&1; then
+          log "secureboot: MOK enrolment queued"
+          msg "Enrolment queued" \
+"Done. On the next boot, a blue 'MOK management' screen appears:
+
+  Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
+
+After that APEX-OS boots normally with Secure Boot ON." 16 74
+        else
+          msg "Enrolment failed" \
+"mokutil could not queue the key (see $LOG).
+
+APEX-OS is installed. To boot it, either turn Secure Boot off in firmware, or
+run this from a live session later:
+  mokutil --import /usr/share/apex-os/secureboot/apex-mok.der" 16 76
+        fi
+      fi
+    fi
+  else
+    msg "Secure Boot is ON — action needed" \
+"Secure Boot is enabled, but this build's kernel is not signed with an APEX key
+(state: $kstate).
+
+APEX-OS is installed, but it will NOT boot until you turn Secure Boot OFF in
+your firmware settings. Everything else about the install is complete." 16 76
+  fi
+fi
+
 # ── 6. done ──────────────────────────────────────────────────────────────────
 if [ "$INSTALL_MODE" = partition ]; then
   done_extra="Installed into $TARGET; the other partitions on $DISK were not touched.
