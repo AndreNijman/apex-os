@@ -102,7 +102,7 @@ COPY files/branding/plymouth/apex-os-chartreuse \
 RUN set -eux; \
     dnf5 -y install plymouth plymouth-scripts plymouth-plugin-script; \
     plymouth-set-default-theme apex-os-chartreuse; \
-    KVER="$(cat /usr/lib/apex-cachyos-kver)"; \
+    KVER="$(cat /usr/lib/apex-kver)"; \
     dracut --force --no-hostonly --reproducible --zstd \
         --add plymouth --kver "${KVER}" \
         "/usr/lib/modules/${KVER}/initramfs.img"; \

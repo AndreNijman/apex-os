@@ -38,7 +38,7 @@ RUN set -eux; \
 # ── GPU stage: DIY NVIDIA akmod (own stage, HARD-FAIL) ─────────────────────
 # nvidia: enable RPMFusion, install the akmods framework + akmod-nvidia source,
 # compile the module against the base's CachyOS kernel (kver stamped at
-# /usr/lib/apex-cachyos-kver by the base; -devel-matched headers already present
+# /usr/lib/apex-kver by the base; -devel-matched headers already present
 # at /usr/src/kernels/<kver>), install the produced kmod RPM, and VERIFY that
 # `modinfo` resolves nvidia against that exact kernel. `set -e` means any
 # failure — akmods rc!=0, no kmod RPM produced, or modinfo unresolved — aborts
@@ -49,7 +49,7 @@ RUN set -eux; \
 # serving both matrix legs (GPU=nvidia and GPU=mesa).
 RUN set -eux; \
     if [ "${GPU}" = "nvidia" ]; then \
-        KVER="$(cat /usr/lib/apex-cachyos-kver)"; \
+        KVER="$(cat /usr/lib/apex-kver)"; \
         echo "Building NVIDIA akmod against CachyOS kver: ${KVER}"; \
         dnf5 -y install \
             "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
@@ -172,7 +172,7 @@ COPY files/branding/plymouth/apex-os-gold \
 RUN set -eux; \
     dnf5 -y install plymouth plymouth-scripts plymouth-plugin-script; \
     plymouth-set-default-theme apex-os-gold; \
-    KVER="$(cat /usr/lib/apex-cachyos-kver)"; \
+    KVER="$(cat /usr/lib/apex-kver)"; \
     dracut --force --no-hostonly --reproducible --zstd \
         --add plymouth --kver "${KVER}" \
         "/usr/lib/modules/${KVER}/initramfs.img"; \

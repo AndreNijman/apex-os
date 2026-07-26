@@ -843,8 +843,8 @@ if [ "$INSTALL_MODE" = partition ]; then
   done_extra="Installed into $TARGET; the other partitions on $DISK were not touched.
 
 Your firmware boot menu should now list APEX-OS alongside your other OS.
-If it does not appear, pick it from the one-time boot menu (F12 on ThinkPads)
-and look for \"Fedora\" / \"APEX\". Your previous OS entry is still there."
+If it does not appear, pick it from the one-time boot menu (F12 on ThinkPads).
+Your previous OS entry is still there."
 else
   done_extra="Installed on $DISK (whole disk)."
 fi
