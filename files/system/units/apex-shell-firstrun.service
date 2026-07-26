@@ -7,19 +7,23 @@
 # could not drive. So instead every user gets their OWN clone + config the
 # first time they log in, via this oneshot.
 #
-# It runs once per user: the ConditionPathExists gate below makes systemd
-# skip the unit entirely once the per-user marker exists, so there is no
-# work on any subsequent login. The script itself is also idempotent and
-# only writes the marker on full success — a failed run (e.g. no network at
-# first login) leaves the marker absent, so the next login retries.
+# The EXPENSIVE work (clone + matugen render) runs once per user: the script
+# short-circuits on its own ~/.config/apex-shell/.provisioned marker, which it
+# writes only on full success — a failed run (e.g. no network at first login)
+# leaves the marker absent, so the next login retries.
+#
+# There is deliberately NO ConditionPathExists gate here (apex-logs 43). The
+# script's step 0 re-seeds the Hyprland config on EVERY login, because greetd
+# execs the compositor in parallel with this unit: if Hyprland wins the startup
+# race it writes its own stock config, and the user is stuck with it forever
+# once the marker exists. Letting the unit start each login — it costs a few ms
+# and exits immediately when provisioned — is what makes that state repairable.
 #
 # Enabled image-wide with `systemctl --global enable` (see the flavor
 # Containerfiles), which symlinks it into every user's default.target.wants.
 [Unit]
 Description=APEX-OS first-login provisioner (clone APEX Shell + seed user config)
 Documentation=https://github.com/AndreNijman/apex-shell
-# Run-once gate: skip the whole unit once this user has been provisioned.
-ConditionPathExists=!%h/.config/apex-shell/.provisioned
 
 [Service]
 Type=oneshot

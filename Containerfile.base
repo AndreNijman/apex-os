@@ -496,13 +496,28 @@ COPY files/desktop/hypr/hyprland.conf /usr/share/apex/hypr/hyprland.conf
 # HOST compositor, not user sessions — strip their wayland-session files so they
 # are never offered as logins. apex-greet enumerates /usr/share/wayland-sessions.
 #
-# CRITICAL (apex-logs 25/39): also remove hyprland-uwsm.desktop. hyprland pulls in
-# hyprland-uwsm, whose session Exec is the multi-token `uwsm start -- hyprland.desktop`.
-# This greeter build launches only the FIRST Exec token → bare `uwsm` (rc=2, instant
-# death), and hyprland-uwsm.desktop sorts BEFORE hyprland.desktop, so it would be the
-# default on every fresh install → a silent login bounce-loop. Removing it makes plain
-# `hyprland.desktop` (single-token `Exec=Hyprland`) the working default. (uwsm the
-# package stays; only the broken session entry is removed.)
+# Also remove hyprland-uwsm.desktop (hyprland pulls in hyprland-uwsm, whose session
+# Exec is `uwsm start -- hyprland.desktop`).
+#
+# WHY, honestly stated (apex-logs 25/39, corrected in 43): a fresh install with this
+# entry present bounce-looped at login on real hardware, and a diagnostic wrapper did
+# record a bare `uwsm` (empty args, ppid `greetd --session-worker`) being executed.
+# Those OBSERVATIONS stand. The mechanism previously recorded here — "the greeter
+# launches only the FIRST Exec token" — is WRONG: GreetContext.qml::launch() runs the
+# session as `["sh","-lc", cmd]`, i.e. the full Exec string through a shell. That form
+# dates to 6d3060e (2026-07-21), two days BEFORE the wrapper evidence, git history
+# shows no split-on-space version ever existed, and the greeter installed on the system
+# that produced the evidence is cmp-identical to this tree. So where the bare `uwsm`
+# came from is UNEXPLAINED — it was not the greeter dropping Exec tokens.
+#
+# The removal stays regardless, on a mechanism-independent ground: hyprland-uwsm.desktop
+# sorts BEFORE hyprland.desktop, so it becomes the default session on every fresh
+# install, and shipping an entry that empirically bounce-looped AS THE DEFAULT locks
+# users out. Plain `hyprland.desktop` is known-good.
+#
+# uwsm the PACKAGE stays installed, so restoring the entry is a one-line experiment for
+# whoever chases the real cause. Do not re-add it as the sort-first default without
+# first reproducing a clean login on hardware.
 COPY files/desktop/wayland-sessions/niri.desktop \
      /usr/share/wayland-sessions/niri.desktop
 RUN set -eux; \
