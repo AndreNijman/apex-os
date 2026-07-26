@@ -149,7 +149,7 @@ RUN set -eux; \
 # post-transaction, but re-assert it) and regenerate the initramfs with a
 # generic (non-hostonly) dracut, since the %posttrans one did not complete.
 # Then HARD-VERIFY both vmlinuz and initramfs exist. Stamp the kver to
-# /usr/lib/apex-cachyos-kver so the Gaming akmod stage can read it, and drop
+# /usr/lib/apex-kver so the Gaming akmod stage can read it, and drop
 # serial-console kargs so headless QEMU / CI boots are observable (harmless on
 # real hardware with no serial port).
 RUN set -eux; \
@@ -163,7 +163,7 @@ RUN set -eux; \
     fi; \
     test -s "/usr/lib/modules/${KVER}/initramfs.img"; \
     test -s "/usr/lib/modules/${KVER}/vmlinuz"; \
-    printf '%s\n' "${KVER}" > /usr/lib/apex-cachyos-kver; \
+    printf '%s\n' "${KVER}" > /usr/lib/apex-kver; \
     mkdir -p /usr/lib/bootc/kargs.d; \
     printf 'kargs = ["console=ttyS0,115200", "console=tty0"]\n' \
         > /usr/lib/bootc/kargs.d/10-apex-serial.toml
@@ -183,7 +183,7 @@ RUN set -eux; \
 # will not boot.
 RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
     set -eux; \
-    KVER="$(cat /usr/lib/apex-cachyos-kver)"; \
+    KVER="$(cat /usr/lib/apex-kver)"; \
     if [ -s /run/secrets/apex_sb_key ] && [ -s /run/secrets/apex_sb_crt ]; then \
         dnf5 -y install sbsigntools >/dev/null; \
         sbsign --key /run/secrets/apex_sb_key --cert /run/secrets/apex_sb_crt \
@@ -423,9 +423,40 @@ COPY files/system/xdg/xdg-terminals.list /etc/xdg/xdg-terminals.list
 COPY files/system/fastfetch/config.jsonc /etc/fastfetch/config.jsonc
 COPY files/system/fastfetch/apex-logo.txt /etc/fastfetch/apex-logo.txt
 
+# Distro logo icon for os-release LOGO=apex-os-logo (replaces fedora-logo-icon).
+# Anything that resolves LOGO through the icon theme (GNOME About, Bazaar,
+# fastfetch's icon lookups) then gets the APEX spark instead of the Fedora F.
+COPY files/branding/logos/chartreuse/apex-spark-chartreuse-16.png  /usr/share/icons/hicolor/16x16/apps/apex-os-logo.png
+COPY files/branding/logos/chartreuse/apex-spark-chartreuse-32.png  /usr/share/icons/hicolor/32x32/apps/apex-os-logo.png
+COPY files/branding/logos/chartreuse/apex-spark-chartreuse-64.png  /usr/share/icons/hicolor/64x64/apps/apex-os-logo.png
+COPY files/branding/logos/chartreuse/apex-spark-chartreuse-128.png /usr/share/icons/hicolor/128x128/apps/apex-os-logo.png
+COPY files/branding/logos/chartreuse/apex-spark-chartreuse-256.png /usr/share/icons/hicolor/256x256/apps/apex-os-logo.png
+COPY files/branding/logos/chartreuse/apex-spark-chartreuse-512.png /usr/share/icons/hicolor/512x512/apps/apex-os-logo.png
+COPY files/branding/logos/chartreuse/apex-spark-chartreuse.svg     /usr/share/icons/hicolor/scalable/apps/apex-os-logo.svg
+
 # ── System defaults + hardening (no dnf) ────────────────────────────────────
 #   - os-release: brand as APEX-OS, keep ID=fedora for ecosystem compat; the
 #     flavor images append VARIANT/VARIANT_ID after this. (apex-logs 34)
+#     Every DISPLAY key is rebranded (NAME/PRETTY_NAME/VERSION/URLs/LOGO/CPE,
+#     REDHAT_* dropped). ID and VERSION_ID deliberately stay `fedora`/`43` —
+#     they are machine-facing keys with verified consumers: `dnf copr enable`
+#     derives its chroot from ID+VERSION_ID (ID=apex → "Chroot not found in the
+#     given Copr project (apex-43-x86_64)", reproduced) and dnf's $releasever
+#     comes from VERSION_ID. Nothing user-visible reads ID. See docs/branding.md.
+#     A surgical `sed -e` (not a heredoc) so a future fedora-bootc base bump
+#     keeps any new keys it adds.
+#   - /usr/lib/fedora-release: this is what `/etc/system-release` (and
+#     /etc/redhat-release) symlink to, and bootupd's get_product_name() reads it,
+#     strips / *release.*/ and uses the result as the efibootmgr LABEL. Leaving
+#     it as "Fedora release 43 (Forty Three)" is why the firmware boot menu said
+#     "Fedora". Content is rewritten in place — the file is NOT renamed, the
+#     symlink chain and `[ -f /etc/fedora-release ]` probes must keep working.
+#   - /usr/lib/issue{,.net}: agetty expands \S to PRETTY_NAME (so the VT login
+#     banner brands itself), but the stock "Kernel \r on \m" line prints
+#     7.1.3-cachyos1.fc43.x86_64. Drop that line — the kernel release string
+#     itself cannot be changed without building the kernel from source.
+#   - LOGO=apex-os-logo needs a real icon or it dangles: install the chartreuse
+#     spark into the hicolor theme at the sizes it ships.
 #   - mask serial-getty@ttyS0: the console=ttyS0 karg (for QEMU/CI) makes systemd
 #     spawn a getty that restart-loops on hardware with no serial port; masking
 #     stops the loop while serial *console* output still works. (apex-logs 04)
@@ -441,11 +472,26 @@ RUN set -eux; \
     sed -i \
       -e 's|^NAME=.*|NAME="APEX-OS"|' \
       -e 's|^PRETTY_NAME=.*|PRETTY_NAME="APEX-OS"|' \
+      -e 's|^VERSION=.*|VERSION="43"|' \
+      -e 's|^VERSION_CODENAME=.*|VERSION_CODENAME=""|' \
       -e 's|^ANSI_COLOR=.*|ANSI_COLOR="0;38;2;161;201;153"|' \
+      -e 's|^LOGO=.*|LOGO=apex-os-logo|' \
+      -e 's|^CPE_NAME=.*|CPE_NAME="cpe:/o:apexos:apex_os:43"|' \
       -e 's|^HOME_URL=.*|HOME_URL="https://github.com/AndreNijman/apex-os"|' \
+      -e 's|^DOCUMENTATION_URL=.*|DOCUMENTATION_URL="https://github.com/AndreNijman/apex-os#readme"|' \
+      -e 's|^SUPPORT_URL=.*|SUPPORT_URL="https://github.com/AndreNijman/apex-os/discussions"|' \
       -e 's|^BUG_REPORT_URL=.*|BUG_REPORT_URL="https://github.com/AndreNijman/apex-os/issues"|' \
       -e 's|^DEFAULT_HOSTNAME=.*|DEFAULT_HOSTNAME="apex"|' \
+      -e '/^REDHAT_/d' \
       /usr/lib/os-release; \
+    grep -q '^PRETTY_NAME="APEX-OS"$' /usr/lib/os-release; \
+    test "$(grep -ci fedora /usr/lib/os-release)" = 1; \
+    grep -qx 'ID=fedora' /usr/lib/os-release; \
+    printf '%s\n' 'APEX-OS release 43' > /usr/lib/fedora-release; \
+    printf '%s\n' 'cpe:/o:apexos:apex_os:43' > /usr/lib/system-release-cpe; \
+    printf '%s\n\n' '\S' > /usr/lib/issue; \
+    printf '%s\n' '\S' > /usr/lib/issue.net; \
+    gtk-update-icon-cache -qf /usr/share/icons/hicolor 2>/dev/null || true; \
     systemctl mask serial-getty@ttyS0.service; \
     systemctl mask systemd-remount-fs.service; \
     rm -rf /usr/local && ln -s ../var/usrlocal /usr/local; \
@@ -521,6 +567,13 @@ COPY files/system/units/apex-shell-firstrun.service \
      /usr/lib/systemd/user/apex-shell-firstrun.service
 COPY files/system/libexec/apex-shell-firstrun /usr/libexec/apex-shell-firstrun
 RUN systemctl --global enable apex-shell-firstrun.service
+
+# One-shot de-branding migration for systems installed from a PRE-branding image.
+# The BLS entry titles, the EFI NVRAM label and a hand-written /etc/os-release
+# all live OUTSIDE the ostree deployment, so `bootc upgrade` never replaces them.
+# Dry-run by default; needs --apply. See docs/branding.md.
+COPY --chmod=0755 files/scripts/apex-debrand-runtime.sh \
+     /usr/libexec/apex-debrand-runtime
 
 # Default APEX Hyprland config template, seeded per-user by the provisioner
 # (@HOME@ substituted at seed time). Ships the APEX keybinds + $terminal=alacritty
