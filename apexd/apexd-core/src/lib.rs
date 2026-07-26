@@ -12,19 +12,41 @@
 //!   effects; [`MockWriter`] records them for tests, [`RealWriter`] applies
 //!   them (honouring dry-run).
 //!
+//! M6 adds four more pure modules on the same pattern — read sysfs, plan
+//! [`Action`]s, let the writer do the touching:
+//!
+//! * [`topology`] resolves the P-core/E-core split (Alder Lake and friends).
+//! * [`fan`] enumerates hwmon and msi-ec fans and plans mode changes, with an
+//!   explicit "hand the fan back to firmware" primitive.
+//! * [`gpu`] plans NVIDIA clock locks around `nvidia-smi`.
+//! * [`irq`] plans interrupt-affinity steering, and [`game`] combines the three
+//!   into a symmetric enter/exit pair.
+//!
 //! The daemon and CLI are thin shells over this crate.
 
+pub mod fan;
 pub mod fingerprint;
+pub mod game;
+pub mod gpu;
+pub mod irq;
 pub mod profile;
 pub mod select;
 pub mod syswriter;
 pub mod tier;
+pub mod topology;
 
+pub use fan::{FanInventory, FanMode, FanSnapshot, UnknownFanMode};
 pub use fingerprint::{CpuInfo, CpuVendor, Fingerprint, GpuInfo, GpuVendor};
-pub use profile::{ChargeConfig, Profile, ProfileKind, ProfileSet, RyzenAdjConfig, TierSettings};
+pub use game::{GameInputs, GamePlan, PidPlacement};
+pub use gpu::{NvidiaGpu, NvidiaSmi, RealNvidiaSmi};
+pub use profile::{
+    ChargeConfig, CpusetPolicy, FanConfig, GameModeConfig, IrqPolicy, NvidiaConfig, Profile,
+    ProfileKind, ProfileSet, RyzenAdjConfig, TierSettings,
+};
 pub use select::{select, Selection};
 pub use syswriter::{MockWriter, RealWriter, SysWriter};
 pub use tier::{Action, Tier, UnknownTier};
+pub use topology::{CoreSource, CoreTopology};
 
 /// The default on-disk override directory for profiles. If present it wins
 /// over the embedded set.

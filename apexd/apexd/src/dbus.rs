@@ -11,7 +11,7 @@ use std::sync::Arc;
 use apexd_core::tier::Tier;
 use zbus::message::Header;
 use zbus::{interface, Connection, SignalContext};
-use zvariant::OwnedValue;
+use zvariant::{OwnedValue, Value};
 
 use crate::metrics::Reading;
 use crate::polkit::{authorize, ACTION_BATTERY, ACTION_POWER};
@@ -253,39 +253,234 @@ impl MetricsIface {
     }
 }
 
-// ── Fan (stub, real impl M6) ─────────────────────────────────────────────────
+// ── Fan (M6) ─────────────────────────────────────────────────────────────────
 
-/// `org.apexos.Apexd1.Fan` — declared now, no-op until M6.
-pub struct FanIface;
+/// `org.apexos.Apexd1.Fan` — real fan control since M6.
+///
+/// `Mode` and `SetMode` keep their frozen M3 signatures. `Mode` still answers
+/// `auto` on a machine with no controllable fan (the shell reads it
+/// unconditionally); the new `Supported` property is where "this machine has no
+/// fan knob" is expressed.
+pub struct FanIface {
+    pub ctx: Arc<Ctx>,
+}
 
 #[interface(name = "org.apexos.Apexd1.Fan")]
 impl FanIface {
+    /// Current mode keyword: `auto`, `max`, `manual` or `curve`.
     #[zbus(property)]
     async fn mode(&self) -> String {
-        "auto".to_string()
+        self.ctx.fan.mode().await.as_str().to_string()
     }
 
-    /// No-op stub (fan control lands with M6).
-    async fn set_mode(&self, _mode: String) -> zbus::fdo::Result<()> {
+    /// Whether this machine exposes a fan knob apexd can turn.
+    #[zbus(property)]
+    async fn supported(&self) -> bool {
+        self.ctx.fan.supported()
+    }
+
+    /// The mode keywords this hardware accepts.
+    #[zbus(property)]
+    async fn modes(&self) -> Vec<String> {
+        self.ctx.fan.modes()
+    }
+
+    /// The duty cycle apexd last commanded (0 unless in manual/curve mode).
+    #[zbus(property)]
+    async fn pwm(&self) -> u8 {
+        match self.ctx.fan.mode().await {
+            apexd_core::fan::FanMode::Manual(p) => p,
+            _ => 0,
+        }
+    }
+
+    /// Per-fan readings: `id`(s), `chip`(s), `rpm`(u, where the backend reports
+    /// RPM), `percent`(y, where it reports a percentage instead — msi-ec),
+    /// `pwm`(y) and `controllable`(b).
+    #[zbus(property)]
+    async fn fans(&self) -> Vec<HashMap<String, OwnedValue>> {
+        self.ctx
+            .fan
+            .readings()
+            .into_iter()
+            .map(|r| {
+                let mut m: HashMap<String, OwnedValue> = HashMap::new();
+                insert_value(&mut m, "id", Value::from(r.id));
+                insert_value(&mut m, "chip", Value::from(r.chip));
+                if let Some(rpm) = r.rpm {
+                    insert_value(&mut m, "rpm", Value::from(rpm));
+                }
+                if let Some(pct) = r.percent {
+                    insert_value(&mut m, "percent", Value::from(pct));
+                }
+                if let Some(pwm) = r.pwm {
+                    insert_value(&mut m, "pwm", Value::from(pwm));
+                }
+                insert_value(&mut m, "controllable", Value::from(r.controllable));
+                m
+            })
+            .collect()
+    }
+
+    /// Switch fan mode. Accepts `auto`, `max`, `manual`, `manual:<0-255>` and
+    /// `curve`. polkit `manage-power`.
+    async fn set_mode(
+        &self,
+        mode: String,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        authorize(conn, &hdr, ACTION_POWER).await?;
+        let min = 255u8;
+        let m = apexd_core::fan::FanMode::parse(&mode, min).map_err(|e| {
+            zbus::fdo::Error::InvalidArgs(e.to_string())
+        })?;
+        self.ctx.fan.set_mode(m).await.map_err(to_fdo)?;
+        self.mode_changed(&ctxt).await?;
+        self.pwm_changed(&ctxt).await?;
+        Ok(())
+    }
+
+    /// Manual mode at an explicit duty cycle (0-255, floored by the profile's
+    /// `min_pwm`). polkit `manage-power`.
+    async fn set_pwm(
+        &self,
+        pwm: u8,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        authorize(conn, &hdr, ACTION_POWER).await?;
+        self.ctx
+            .fan
+            .set_mode(apexd_core::fan::FanMode::Manual(pwm))
+            .await
+            .map_err(to_fdo)?;
+        self.mode_changed(&ctxt).await?;
+        self.pwm_changed(&ctxt).await?;
+        Ok(())
+    }
+
+    /// Hand the fans back to firmware control immediately. polkit
+    /// `manage-power`.
+    async fn restore_firmware(
+        &self,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        authorize(conn, &hdr, ACTION_POWER).await?;
+        self.ctx.fan.restore().await;
+        self.mode_changed(&ctxt).await?;
+        self.pwm_changed(&ctxt).await?;
         Ok(())
     }
 }
 
-// ── GameMode (stub, real impl M6) ────────────────────────────────────────────
+// ── GameMode (M6) ────────────────────────────────────────────────────────────
 
-/// `org.apexos.Apexd1.GameMode` — declared now, no-op until M6.
-pub struct GameModeIface;
+/// `org.apexos.Apexd1.GameMode` — real orchestration since M6: top tier, fan
+/// mode, NVIDIA clock locks, P-core cpuset and IRQ steering, all reversed on
+/// exit.
+pub struct GameModeIface {
+    pub ctx: Arc<Ctx>,
+}
 
 #[interface(name = "org.apexos.Apexd1.GameMode")]
 impl GameModeIface {
+    /// Whether a session is running.
     #[zbus(property)]
     async fn active(&self) -> bool {
-        false
+        self.ctx.game_active().await
     }
 
-    /// No-op stub (game orchestration lands with M6).
-    async fn set_active(&self, _active: bool) -> zbus::fdo::Result<()> {
+    /// Whether the active profile permits game mode.
+    #[zbus(property)]
+    async fn supported(&self) -> bool {
+        self.ctx.game_supported()
+    }
+
+    /// Session detail: `active`(b), `cpus`(s), `core_source`(s),
+    /// `irqs_steered`(u), `gpus_locked`(au), `pids`(au), `prior_tier`(s),
+    /// `tier`(s), `cgroup`(s), `notes`(as) — plus `pcores`/`ecores` when idle.
+    #[zbus(property)]
+    async fn status(&self) -> HashMap<String, OwnedValue> {
+        self.ctx.game_status().await
+    }
+
+    /// Enter or leave game mode. polkit `manage-power`.
+    async fn set_active(
+        &self,
+        active: bool,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        authorize(conn, &hdr, ACTION_POWER).await?;
+        self.transition(active, &[], &ctxt, conn).await
+    }
+
+    /// Enter game mode and pin `pid` (and thus its children, which inherit the
+    /// cgroup) to the game's cpuset. polkit `manage-power`.
+    async fn start_for_pid(
+        &self,
+        pid: u32,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        authorize(conn, &hdr, ACTION_POWER).await?;
+        self.transition(true, &[pid], &ctxt, conn).await
+    }
+
+    /// Attach one more PID to a running session. polkit `manage-power`.
+    async fn attach_pid(
+        &self,
+        pid: u32,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        authorize(conn, &hdr, ACTION_POWER).await?;
+        self.ctx.game_attach(pid).await.map_err(to_fdo)
+    }
+
+    /// Emitted on every entry/exit (D-Bus name `ActiveChanged`).
+    #[zbus(signal, name = "ActiveChanged")]
+    async fn active_changed_signal(ctxt: &SignalContext<'_>, active: bool) -> zbus::Result<()>;
+}
+
+impl GameModeIface {
+    /// Shared enter/exit body: flip the session, then tell the bus about both
+    /// the game state *and* the tier the session moved.
+    async fn transition(
+        &self,
+        active: bool,
+        pids: &[u32],
+        ctxt: &SignalContext<'_>,
+        conn: &Connection,
+    ) -> zbus::fdo::Result<()> {
+        if active {
+            self.ctx.game_enter(pids).await.map_err(to_fdo)?;
+        } else {
+            self.ctx.game_exit().await.map_err(to_fdo)?;
+        }
+        let tier = self.ctx.state.lock().await.tier;
+        GameModeIface::active_changed_signal(ctxt, active).await?;
+        self.active_changed(ctxt).await?;
+        self.status_changed(ctxt).await?;
+        // The tier moved underneath the Power interface; keep its consumers
+        // (apex-shell) in step.
+        if let Err(e) = emit_tier_changed(conn, tier).await {
+            eprintln!("apexd: game: emitting TierChanged failed: {e}");
+        }
         Ok(())
+    }
+}
+
+fn insert_value(m: &mut HashMap<String, OwnedValue>, key: &str, v: Value<'_>) {
+    if let Ok(owned) = v.try_to_owned() {
+        m.insert(key.to_string(), owned);
     }
 }
 
