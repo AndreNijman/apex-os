@@ -1,0 +1,63 @@
+# APEX-OS installer live-environment rootfs.
+#
+# A small Fedora rootfs (NOT the APEX image) that boots as a live ISO and runs
+# the apex-install TUI. The APEX-OS image to install is embedded in this env's
+# container storage so the install works fully offline via
+#   podman run localhost/apex-os:daily bootc install to-disk …
+#
+# NOTE: the APEX image is NOT embedded here. `skopeo copy … containers-storage:`
+# cannot run inside a podman build (the build container's fs is overlayfs and
+# containers/storage refuses overlay-on-overlay). build-live-iso.sh injects the
+# store into the exported rootfs on the HOST instead (step 3 there).
+#
+# Plain fedora base (not fedora-bootc) so the rootfs is a simple mutable tree.
+# Built into a live ISO by build-live-iso.sh.
+FROM registry.fedoraproject.org/fedora:43
+
+# Live-env + installer toolchain. kernel + dracut(+live) make it bootable as a
+# squashfs live image; newt=whiptail; podman/skopeo run the install; btrfs-progs/
+# dosfstools/util-linux for the target disk; shadow-utils for useradd/chpasswd
+# into the installed tree; device-mapper for the dmsquash-live snapshot root;
+# grub2-tools-extra/-efi-x64-modules so build-live-iso.sh can produce the ISO's
+# UEFI grub binary with this same container (host may lack grub2-mkstandalone);
+# NetworkManager for first-boot net.
+RUN dnf -y install --setopt=install_weak_deps=False \
+        kernel systemd systemd-udev dracut dracut-live device-mapper \
+        podman skopeo \
+        newt ncurses util-linux coreutils bash shadow-utils \
+        btrfs-progs dosfstools e2fsprogs xfsprogs gdisk parted \
+        lvm2 cryptsetup mdadm \
+        NetworkManager iproute iputils \
+        plymouth kbd \
+        grub2-tools-extra grub2-efi-x64-modules \
+        shim-x64 grub2-efi-x64 mokutil efibootmgr \
+    && dnf clean all
+
+# The installer TUI.
+COPY apex-install /usr/bin/apex-install
+RUN chmod 0755 /usr/bin/apex-install
+
+# Unattended-install marker. apex-install only honours `apex.unattended` when
+# this file exists — baked ONLY for test/CI builds (ALLOW_UNATTENDED=1). The
+# PRODUCTION build (default 0) omits it, so the flashed USB has no unattended
+# path at all. build-live-iso.sh also drops the unattended boot-menu entry in
+# production.
+ARG ALLOW_UNATTENDED=0
+RUN if [ "$ALLOW_UNATTENDED" = 1 ]; then \
+        install -Dm644 /dev/null /usr/share/apex-installer/allow-unattended; \
+        echo "installer image: UNATTENDED TEST MODE ENABLED"; \
+    else echo "installer image: production build (no unattended)"; fi
+
+# Auto-launch the installer on tty1; boot to multi-user (no GUI needed).
+COPY apex-installer.service /usr/lib/systemd/system/apex-installer.service
+RUN systemctl set-default multi-user.target \
+    && systemctl enable apex-installer.service \
+    && systemctl enable NetworkManager.service \
+    && systemctl mask getty@tty1.service
+
+# Live-env-only root login (tty2 / serial) for rescue & debugging. This is the
+# throwaway live session, not the installed system.
+RUN echo 'root:apex' | chpasswd
+
+# A friendly hostname in the live env.
+RUN echo apex-installer > /etc/hostname

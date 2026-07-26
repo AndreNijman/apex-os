@@ -1,0 +1,864 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-install — APEX-OS guided installer
+#
+#  A deliberately small, transparent alternative to Anaconda. Runs in the live
+#  environment and installs the embedded APEX-OS image to a disk YOU choose,
+#  using `bootc install to-disk` (bootupd static bootloader — NOT grub2-mkconfig,
+#  which is what silently killed the Anaconda install; see apex-logs 40).
+#
+#  Design rules:
+#   1. It can NEVER fail silently. Every step logs to the screen and to
+#      /var/log/apex-install.log; on ANY error it shows the exact message + the
+#      log path and refuses to report success.
+#   2. It NEVER writes a disk you didn't explicitly choose and confirm. The live
+#      boot device is excluded; you pick the target, review it, and type ERASE.
+#   3. Three screens: disk → account → confirm. Then a live progress view.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+LOG=/var/log/apex-install.log
+: > "$LOG" 2>/dev/null || LOG=/tmp/apex-install.log
+BT="APEX-OS Installer"
+# The image to install. The live env preloads it into podman storage as this ref
+# (see the ISO build); override with APEX_IMAGE=... for testing.
+IMAGE="${APEX_IMAGE:-localhost/apex-os:daily}"
+# Update origin recorded in the INSTALLED system (so `bootc upgrade` works).
+TARGET_IMAGE="${APEX_TARGET_IMAGE:-ghcr.io/andrenijman/apex-os:daily}"
+ROOTFS_TYPE="${APEX_ROOTFS:-btrfs}"
+
+# On the live ISO the image is ALSO present as an OCI directory (ISO /container,
+# mounted at /run/initramfs/live/container). Prefer it as the bootc install
+# source: the oci transport streams blobs straight off the read-only ISO,
+# whereas containers-storage re-tars every layer into the container's /var/tmp
+# — which lives in the RAM-backed live overlay and overflows on 4G machines.
+# Absent (e.g. plain-host testing) we fall back to the embedded storage image.
+OCI_DIR="${APEX_OCI_DIR:-/run/initramfs/live/container}"
+SRC_VOL=(); SRC_ARGS=()
+if [ -d "$OCI_DIR" ]; then
+  SRC_VOL=(-v "$OCI_DIR":/run/apex-oci:ro)
+  # --target-imgref is what the INSTALLED system records as its update origin.
+  # It must be the real registry, not the live env's local tag: with
+  # `localhost/apex-os:daily` baked in, `bootc upgrade` fails permanently on the
+  # installed machine (nothing to pull from).
+  SRC_ARGS=(--source-imgref "oci:/run/apex-oci" --target-imgref "$TARGET_IMAGE")
+fi
+
+# `|| true`: a full RAM disk (or an unwritable log) must never trip the ERR trap
+# and turn a fine install into a reported failure.
+log()  { printf '%s %s\n' "$(date +%T)" "$*" >>"$LOG" 2>/dev/null || true; }
+have() { command -v "$1" >/dev/null 2>&1; }
+UI=whiptail; have whiptail || UI=dialog
+
+# Progress state — die() uses these to tell the TRUTH about what happened to the
+# disk. Before this, die() always claimed "nothing further was written", even
+# when called AFTER `bootc install --wipe` had already erased the target.
+WROTE_DISK=0      # 1 once bootc install has begun writing
+INSTALLED_OK=0    # 1 once bootc install returned success
+
+# `clear` lives in the ncurses package, which the live env did NOT ship (only
+# ncurses-libs, pulled in by newt/whiptail). A bare `clear` therefore failed with
+# 127 and — under the ERR trap — killed the installer the moment the user
+# confirmed ERASE ("Unexpected error on line 250"). The image now installs
+# ncurses, and this fallback makes the script independent of it regardless.
+if ! have clear; then
+  clear() { printf '\033[H\033[2J\033[3J'; }
+fi
+
+# msg() MUST NOT propagate a non-zero status. whiptail returns 255 on ESC (and on
+# any display failure), and `msg` is a NON-FINAL command inside `… || { msg …;
+# continue; }` groups — which the ERR trap does NOT exempt. That shipped as a
+# third crash ("Unexpected error on line 223": blank password → ESC).
+# NOTE: rewriting those groups as `if` does NOT help — only the *condition* of an
+# `if` is exempt from the trap, never the body. Neutralising msg() is the fix.
+msg()  { $UI --backtitle "$BT" --scrolltext --title "$1" --msgbox "$2" "${3:-16}" "${4:-72}" || true; }
+# yn() deliberately KEEPS its exit status — it is the user's Yes/No answer. It is
+# only ever used as `yn … || { … }`, where the command before `||` is exempt.
+yn()   { $UI --backtitle "$BT" --scrolltext --title "$1" --yesno "$2" "${3:-16}" "${4:-72}"; }
+
+# Detect unattended mode EARLY so die() never blocks on a TUI dialog when
+# nobody is watching (headless QEMU/CI runs).
+CMD=$(cat /proc/cmdline 2>/dev/null || true)
+kv()    { echo "$CMD" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
+kvall() { echo "$CMD" | tr ' ' '\n' | sed -n "s/^$1=//p"; }
+UNATTENDED=0
+# Unattended install is a TEST/CI-only feature. It requires BOTH the kernel flag
+# AND a marker file baked ONLY into test builds. On the production USB the marker
+# is absent, so `apex.unattended` (even hand-added at the boot menu) is IGNORED
+# and we always fall through to the interactive TUI — no accidental disk wipe.
+if echo "$CMD" | grep -qw apex.unattended && [ -f /usr/share/apex-installer/allow-unattended ]; then
+  UNATTENDED=1
+fi
+
+# Release anything WE mounted. Without this, a failure or Ctrl+C left
+# /run/apex-target — and the shared ESP mounted under it — in place, so the next
+# run refused with "currently mounted", stranding the user on a half-installed
+# disk with no way forward. Deepest mount first. Safe to call at any time.
+TROOT=/run/apex-target
+unmount_target() {
+  umount "$TROOT/boot/efi" 2>/dev/null || true
+  umount "$TROOT"          2>/dev/null || true
+  [ -n "${MNT:-}" ] && { umount "$MNT/boot/efi" 2>/dev/null || true; umount "$MNT" 2>/dev/null || true; }
+  return 0
+}
+
+# fail-loud: the exact reason, the TRUE state of the disk, the last log lines,
+# and how to get a shell. Never claims "nothing was written" once it has been.
+die() {
+  log "FATAL: $1"
+  # Always release our own mounts first: leaving /run/apex-target (and the shared
+  # ESP under it) mounted makes the very next run refuse with "currently
+  # mounted", stranding the user on a half-installed disk.
+  unmount_target
+  local tail_txt state what others
+  tail_txt=$(tail -n 15 "$LOG" 2>/dev/null || true)
+  # Describe what WE actually targeted. Hard-coding $DISK told a partition-mode
+  # user "/dev/nvme0n1 WAS already erased" — i.e. that their whole disk (and the
+  # other OS on it) was gone — directly contradicting the specific message above
+  # it, and in the more frightening direction.
+  what="${TARGET_DESC:-${DISK:-the target disk}}"
+  if [ "${INSTALL_MODE:-disk}" = partition ]; then
+    others="The other partitions on ${DISK:-the disk} were not erased by the installer."
+  else
+    others="Your other disks were not touched."
+  fi
+  if [ "$INSTALLED_OK" = 1 ]; then
+    state="IMPORTANT: $what WAS written and APEX-OS IS installed there, but the
+step above did not finish. Your account was probably NOT created — do not reboot
+expecting to log in. Re-run apex-install, or fix it from the rescue shell.
+$others"
+  elif [ "$WROTE_DISK" = 1 ]; then
+    state="IMPORTANT: $what may already have been erased and left INCOMPLETE
+(the exact message above says how far it got). If it was, it will not boot.
+Re-run apex-install to try again.
+$others"
+  else
+    state="Nothing was written. $others"
+  fi
+  if [ "$UNATTENDED" = 1 ]; then
+    # Both streams on purpose: the stdout copy is what the QEMU/CI serial capture greps.
+    echo "APEX-INSTALL-FAILED: $1" >&2
+    echo "APEX-INSTALL-FAILED: $1"
+    exit 1
+  fi
+  $UI --backtitle "$BT" --title "✗ Installation failed" --msgbox \
+"$1
+
+$state
+
+Last log lines:
+$tail_txt
+
+Full log: $LOG  (also copied to the USB's APEXEFI partition if possible)
+For a shell: Ctrl+Alt+F2, log in as  root  /  apex" 26 78 || true
+  save_log_to_esp
+  exit 1
+}
+
+# The live log lives in a RAM-backed filesystem and dies with the reboot — the
+# user literally could not retrieve it to report a failure. Best-effort copy to
+# the ISO's writable APEXEFI (ESP) partition so it survives.
+save_log_to_esp() {
+  local esp dst
+  esp=$(blkid -L APEXEFI 2>/dev/null || true)
+  [ -n "$esp" ] || return 0
+  dst=$(mktemp -d 2>/dev/null) || return 0
+  if mount "$esp" "$dst" 2>/dev/null; then
+    cp -f "$LOG" "$dst/apex-install.log" 2>/dev/null || true
+    sync 2>/dev/null || true
+    umount "$dst" 2>/dev/null || true
+  fi
+  rmdir "$dst" 2>/dev/null || true
+  return 0
+}
+
+# Ctrl+C / SIGTERM during the install previously killed the installer with ZERO
+# output — leaving a half-wiped disk and no explanation.
+on_signal() {
+  trap - INT TERM HUP ERR
+  echo
+  echo "Interrupted by signal."
+  die "Interrupted (Ctrl+C or shutdown signal)."
+}
+trap on_signal INT TERM HUP
+trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
+
+# ── preflight ────────────────────────────────────────────────────────────────
+[ "$(id -u)" = 0 ] || die "apex-install must run as root."
+# Clear any mounts left behind by a previous aborted run, so a retry is not
+# blocked by its own leftovers ("currently mounted — refusing").
+unmount_target
+have podman || die "podman is missing from the live environment."
+if ! podman image exists "$IMAGE" 2>/dev/null && [ ! -e /run/install/repo/container ]; then
+  die "The APEX-OS image ($IMAGE) is not present in the live environment."
+fi
+
+# ── shared post-install: create the admin account inside the new system ──────
+# useradd/chpasswd via --root against the ostree deployment's /etc. The stateroot
+# var is bind-mounted over the deployment's /var first, so the home dir (through
+# the /home -> var/home symlink) is created where the booted system really has
+# its /var. Afterwards the SELinux labels shadow-utils lost are restored with
+# the TARGET's own setfiles+policy (the live env runs selinux=0, so every file
+# (re)written here has no label — and the installed system enforces policy:
+# greetd/polkitd get denied on an unlabeled /etc/passwd and login breaks).
+create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefix
+  local deploy=$1 user=$2 pass=$3 host=$4 pfx=$5 statevar setype spec f
+  statevar=$(dirname "$(dirname "$deploy")")/var
+  mount --bind "$statevar" "$deploy/var" 2>>"$LOG" \
+    || die "$pfx: bind-mounting the stateroot var failed."
+  useradd --root "$deploy" -m -G wheel -s /bin/bash "$user" 2>>"$LOG" \
+    || { umount "$deploy/var" 2>/dev/null; die "$pfx: useradd failed for $user (see $LOG)."; }
+  echo "$user:$pass" | chpasswd --root "$deploy" 2>>"$LOG" \
+    || { umount "$deploy/var" 2>/dev/null; die "$pfx: setting the password failed (see $LOG)."; }
+  echo "$host" > "$deploy/etc/hostname" 2>>"$LOG" || true
+  setype=$(sed -n 's/^SELINUXTYPE=//p' "$deploy/etc/selinux/config" 2>/dev/null | head -1)
+  spec="/etc/selinux/${setype:-targeted}/contexts/files/file_contexts"
+  # If the relabel tooling is missing we must NOT silently continue and then
+  # claim success: unlabeled /etc/passwd means greetd/polkitd get AVC-denied and
+  # the user cannot log in — an unusable system reported as a clean install.
+  if [ ! -x "$deploy/usr/sbin/setfiles" ] || [ ! -f "$deploy$spec" ]; then
+    umount "$deploy/var" 2>/dev/null || true
+    die "$pfx: cannot SELinux-relabel the new account files (setfiles or the policy file_contexts is missing in the installed system). Without the relabel, login would be denied. The OS is installed on $DISK but the account is not usable."
+  fi
+  if true; then
+    local paths=(/etc/hostname /var/home)
+    for f in passwd passwd- shadow shadow- group group- gshadow gshadow- subuid subgid .pwd.lock; do
+      [ -e "$deploy/etc/$f" ] && paths+=("/etc/$f")
+    done
+    chroot "$deploy" /usr/sbin/setfiles -F "$spec" "${paths[@]}" 2>&1 | tee -a "$LOG" \
+      || { umount "$deploy/var" 2>/dev/null; die "$pfx: SELinux relabel of the account files failed (see $LOG)."; }
+  fi
+  umount "$deploy/var" 2>>"$LOG" || true
+}
+
+# ── unattended mode (automation / QEMU boot-test) ────────────────────────────
+# If the kernel cmdline has `apex.unattended`, skip the TUI and install using
+# apex.disk=/dev/X apex.user=NAME apex.pass=PW apex.host=NAME. Repeatable
+# apex.karg=... adds extra kernel args to the installed system (e.g. a serial
+# console for the QEMU boot-test); apex.poweroff powers off on success. Same
+# code path as the interactive install, so a green run validates the flow.
+if [ "$UNATTENDED" = 1 ]; then
+  # Everything to the kernel console (ttyS0 in the QEMU test) so the run is
+  # observable on serial, not stuck on tty1.
+  [ -w /dev/console ] && exec >/dev/console 2>&1
+  DISK=$(kv apex.disk); USERNAME=$(kv apex.user); P1=$(kv apex.pass); HOSTNAME=$(kv apex.host)
+  : "${USERNAME:=andre}"; : "${HOSTNAME:=apex}"; : "${P1:=apex}"
+  [ -b "$DISK" ] || die "unattended: apex.disk=$DISK is not a block device."
+  log "UNATTENDED install: DISK=$DISK USER=$USERNAME HOST=$HOSTNAME"
+  echo "APEX-OS unattended install to $DISK …"
+  WROTE_DISK=1
+  EXTRA_KARGS=()
+  for k in $(kvall apex.karg); do EXTRA_KARGS+=(--karg "$k"); done
+  # Disarm the ERR trap around the install (it fires even under `set +e`, and a
+  # failing `podman … | tee` pipeline would pre-empt the rc check below).
+  trap - ERR
+  set +e
+  # --net=host: no netavark needed in the live env; bootc install is offline.
+  podman run --rm --privileged --pid=host --net=host --security-opt label=disable \
+    -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+    ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
+    bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
+      --karg quiet --karg splash ${EXTRA_KARGS[@]+"${EXTRA_KARGS[@]}"} \
+      ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
+      "$DISK" 2>&1 | tee -a "$LOG"
+  rc=${PIPESTATUS[0]}
+  trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
+  [ "$rc" = 0 ] || die "unattended: bootc install exited $rc (see $LOG)."
+  INSTALLED_OK=1
+  MNT=$(mktemp -d)
+  udevadm settle --timeout=30 2>>"$LOG" || true
+  partprobe "$DISK" 2>>"$LOG" || true
+  udevadm settle --timeout=30 2>>"$LOG" || true
+  root_part=""
+  for p in $(lsblk -rno NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part"{print $1}'); do
+    if mount -o ro "/dev/$p" "$MNT" 2>/dev/null; then
+      if [ -d "$MNT/ostree/deploy" ]; then umount "$MNT" 2>/dev/null || true; root_part="/dev/$p"; break; fi
+      umount "$MNT" 2>/dev/null || true
+    fi
+  done
+  [ -n "$root_part" ] || die "unattended: installed root filesystem not found on $DISK."
+  mount "$root_part" "$MNT" || die "unattended: mount of new root failed."
+  deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
+  [ -n "$deploy" ] || { umount "$MNT" 2>/dev/null || true; die "unattended: deployment not found."; }
+  create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "unattended"
+  sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true
+  echo "APEX-INSTALL-UNATTENDED-OK"; log "unattended install complete"
+  if echo "$CMD" | grep -qw apex.poweroff; then sync; poweroff; fi
+  exit 0
+fi
+
+yn "Welcome to APEX-OS" \
+"This installs APEX-OS to a disk you choose.
+
+Steps: pick the target disk → create your account → confirm.
+Nothing is erased until you confirm. Your account is created for you (no
+locked-out first boot).
+
+Continue?" 16 70 || { clear; echo "Installer cancelled."; exit 0; }
+
+# ── 1. target disk (guarded) ─────────────────────────────────────────────────
+# Identify the live/boot device so we never offer it as a target.
+# `|| true` on every one of these: with `pipefail` a failing pipeline makes the
+# assignment non-zero, which trips the ERR trap (fires even under `set +e`).
+live_src=$(findmnt -no SOURCE / 2>/dev/null || true)          # e.g. /dev/mapper/live-rw or overlay
+boot_disk=$(lsblk -no PKNAME "$(findmnt -no SOURCE /run/initramfs/live 2>/dev/null || true)" 2>/dev/null | head -1 || true)
+# Map live-media matches back to their PARENT DISK. The old form compared a
+# *partition* name (sda1) against the menu's *disk* names (sda) — it could never
+# match, so this second guard was a silent no-op; and `head -1` discarded every
+# match after the first (two live sticks → only one excluded).
+usb_boot=$(lsblk -o NAME,MOUNTPOINT -rn 2>/dev/null \
+  | awk '$2 ~ /(^|\/)(live|install|ISO)/ {print $1}' \
+  | while read -r n; do p=$(lsblk -no PKNAME "/dev/$n" 2>/dev/null | head -1); printf '%s ' "${p:-$n}"; done \
+  | tr -s ' ' || true)
+
+menu=(); count=0
+while read -r name; do
+  if [ -z "$name" ]; then continue; fi
+  dev="/dev/$name"
+  # Exclude the disk we booted from.
+  if [ -n "$boot_disk" ] && [ "$name" = "$boot_disk" ]; then continue; fi
+  case " $usb_boot " in *" $name "*) continue;; esac
+  # Query each column SEPARATELY. Do NOT use positional `read a b c` over a
+  # multi-column lsblk: MODEL contains spaces ("USB DISK 3.2", "SPCC M.2 PCIe
+  # SSD"), which silently shifts TRAN/RM into garbage.
+  size=$(lsblk -dno SIZE  "$dev" 2>/dev/null | tr -d ' ')            || size=""
+  model=$(lsblk -dno MODEL "$dev" 2>/dev/null | sed 's/^ *//; s/ *$//') || model=""
+  tran=$(lsblk -dno TRAN  "$dev" 2>/dev/null | tr -d ' ')            || tran=""
+  removable=$(lsblk -dno RM "$dev" 2>/dev/null | tr -d ' ')          || removable=""
+  # Plain if/then — never `$( [ … ] && … )`: that substitution exits non-zero for
+  # a NON-removable disk, which becomes the assignment's status and trips the ERR
+  # trap, killing the installer while merely listing disks (apex-logs 41).
+  # Serial + a short contents hint so two same-size/same-model disks are
+  # distinguishable, and so a disk that already holds data is visibly different
+  # from a blank one BEFORE the confirm screen.
+  serial=$(lsblk -dno SERIAL "$dev" 2>/dev/null | tr -d ' ' | tail -c 9) || serial=""
+  parts=$(lsblk -rno TYPE "$dev" 2>/dev/null | grep -c '^part$' || true)
+  labels=$(lsblk -rno LABEL "$dev" 2>/dev/null | grep -v '^$' | head -2 | tr '\n' ',' | sed 's/,$//') || labels=""
+  flags="${tran:-?}"
+  if [ "$removable" = "1" ]; then flags="$flags,removable"; fi
+  content="empty"
+  if [ "${parts:-0}" -gt 0 ]; then content="${parts} part"; fi
+  if [ -n "$labels" ]; then content="$content: $labels"; fi
+  label="${size:-?}  ${model:-disk}  [$flags]  ${serial:+sn:$serial  }($content)"
+  menu+=("$dev" "$label"); count=$((count+1))
+  # Real whole disks only: skip 0-byte phantoms (empty card-reader slots) that
+  # would otherwise bury the actual disks in the menu.
+done < <(lsblk -dn -o NAME,SIZE,TYPE -e 7,11 2>/dev/null \
+         | awk '$3=="disk" && $2!="0B" && $2!="0" {print $1}')
+
+[ "$count" -gt 0 ] || die "No eligible target disks were found (the live/boot device is excluded)."
+
+DISK=$($UI --backtitle "$BT" --title "Select the target disk" --menu \
+"Choose the disk to install APEX-OS on.
+(The disk you booted from is not listed.)" 20 74 "$count" "${menu[@]}" 3>&1 1>&2 2>&3) \
+  || { clear; echo "Cancelled."; exit 0; }
+
+# ── 1b. whole disk, or one partition of it? ──────────────────────────────────
+# Whole-disk wipes everything (simple, what most people want on a blank machine).
+# Partition mode installs into ONE existing partition and leaves the rest — the
+# dual-boot path — via `bootc install to-filesystem` on a shared ESP.
+INSTALL_MODE=$($UI --backtitle "$BT" --title "How should $DISK be used?" --menu \
+"APEX-OS can take the whole disk, or just one partition of it." 16 78 2 \
+  "disk"      "Use the ENTIRE disk — erases every partition on $DISK" \
+  "partition" "Install into ONE existing partition — keep the others (dual-boot)" \
+  3>&1 1>&2 2>&3) || { clear; echo "Cancelled."; exit 0; }
+case "$INSTALL_MODE" in disk|partition) : ;; *) die "Unexpected install mode '$INSTALL_MODE'." ;; esac
+
+# Hard guard: refuse anything that isn't a whole block device, or that backs a mount now.
+[ -b "$DISK" ] || die "$DISK is not a block device."
+if findmnt -rno SOURCE | grep -qE "^${DISK}([0-9p]|$)"; then die "$DISK (or a partition of it) is currently mounted — refusing."; fi
+
+# Remember the target's identity so we can re-verify it right before writing:
+# kernel names (/dev/sda) can be reassigned if devices are unplugged/replugged.
+DISK_ID=$(lsblk -dno SERIAL,WWN "$DISK" 2>/dev/null | tr -s ' ' || true)
+
+# ── 1c. partition mode: pick the partition + locate the ESP ──────────────────
+# TARGET is what actually gets written; TARGET_DESC is how we describe it to the
+# user (and in die()), since in partition mode only ONE partition is destroyed.
+TARGET="$DISK"; TARGET_DESC="the whole disk $DISK"; ESP_DEV=""
+if [ "$INSTALL_MODE" = partition ]; then
+  # The ESP is required (UEFI) and must never be offered as the install target.
+  # PARTTYPE c12a7328-… is the GPT EFI System Partition GUID.
+  ESP_DEV=$(lsblk -rno NAME,PARTTYPE "$DISK" 2>/dev/null \
+    | awk 'tolower($2)=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"{print "/dev/"$1; exit}' || true)
+  if [ -z "$ESP_DEV" ]; then
+    # MBR fallback: type 0xEF ONLY. The old fallback took the first *vfat*
+    # partition, which happily adopted a FAT32 photo/data partition as "the ESP"
+    # and then let bootupd write into it (and it selected PARTFLAGS without ever
+    # testing it). A plain vfat filesystem is NOT evidence of an ESP.
+    ESP_DEV=$(lsblk -rno NAME,PARTTYPE "$DISK" 2>/dev/null \
+      | awk 'tolower($2)=="0xef"{print "/dev/"$1; exit}' || true)
+  fi
+  [ -n "$ESP_DEV" ] || die "No EFI System Partition found on $DISK.
+
+Installing into a partition needs an existing ESP (GPT type EF00, or MBR 0xEF)
+to add the APEX boot entry to. A plain FAT partition is not enough.
+Use whole-disk mode instead (which creates one), or create an ESP first."
+
+  # in_use <dev> — true if the partition, OR anything stacked on top of it, is in
+  # use. `lsblk -rno MOUNTPOINT <part> | head -1` was NOT enough: it reads the
+  # partition's own (always empty) row, so an LVM PV whose logical volumes are
+  # mounted looked free. /sys holders catches dm/md stacking even when lsblk
+  # shows no children.
+  in_use() {
+    local d="$1" n; n=$(basename "$d")
+    lsblk -rno MOUNTPOINT "$d" 2>/dev/null | grep -qv '^$' && return 0
+    [ -n "$(ls -A "/sys/class/block/$n/holders" 2>/dev/null || true)" ] && return 0
+    findmnt -rno SOURCE 2>/dev/null | grep -qx "$d" && return 0
+    return 1
+  }
+
+  pmenu=(); pcount=0; skipped=""
+  while read -r pname; do
+    [ -n "$pname" ] || continue
+    pdev="/dev/$pname"
+    [ "$pdev" = "$ESP_DEV" ] && continue                       # never the ESP
+    pfs=$(lsblk -rno FSTYPE "$pdev" 2>/dev/null | head -1 || true)
+    # REFUSE container members outright. The live env ships no lvm2/cryptsetup/
+    # mdadm, so these are never activated here: lsblk shows no children and
+    # `mkfs -f` happily succeeds — silently destroying an entire volume group,
+    # LUKS container or RAID member. That is the default layout of most Linux
+    # installs people dual-boot with, so this must be a hard refusal, not a hint.
+    case "$pfs" in
+      LVM2_member|crypto_LUKS|linux_raid_member|ddf_raid_member|isw_raid_member|zfs_member|bcache)
+        skipped="$skipped
+  $pdev ($pfs) — part of a larger volume; erasing it would destroy the whole container"
+        continue ;;
+    esac
+    if in_use "$pdev"; then
+      skipped="$skipped
+  $pdev — currently in use (mounted, or has an active volume/RAID on top)"
+      continue
+    fi
+    psize=$(lsblk -rno SIZE   "$pdev" 2>/dev/null | head -1 || true)
+    plab=$(lsblk -rno LABEL  "$pdev" 2>/dev/null | head -1 || true)
+    pmenu+=("$pdev" "${psize:-?}  ${pfs:-unformatted}${plab:+  \"$plab\"}  → WILL BE FORMATTED")
+    pcount=$((pcount+1))
+  done < <(lsblk -rno NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part"{print $1}')
+
+  [ "$pcount" -gt 0 ] || die "No usable partitions on $DISK.
+${skipped:+
+Excluded:$skipped
+}
+Free up a partition first, or use whole-disk mode."
+
+  TARGET=$($UI --backtitle "$BT" --title "Select the target PARTITION" --menu \
+"APEX-OS will be installed into ONE of these partitions.
+That partition is reformatted; every OTHER partition on $DISK is left alone.
+The EFI partition ($ESP_DEV) is shared — an APEX boot entry is added to it." \
+    20 78 "$pcount" "${pmenu[@]}" 3>&1 1>&2 2>&3) || { clear; echo "Cancelled."; exit 0; }
+  # Re-validate the SELECTED target independently of the menu (defence in depth:
+  # every one of these must hold no matter how TARGET was chosen).
+  [ -b "$TARGET" ] || die "$TARGET is not a block device."
+  # Confirm it really is a partition OF this disk by parentage, not by string
+  # prefix: "/dev/nvme0n1" is a text prefix of "/dev/nvme0n11p2", a different disk.
+  # Compare basenames, not "/dev/$tparent" = "$DISK": don't re-introduce the
+  # assumption that every path is literally under /dev/ (that assumption already
+  # caused the KEPT-list bug).
+  tparent=$(lsblk -no PKNAME "$TARGET" 2>/dev/null | head -1 | tr -d ' ' || true)
+  [ -n "$tparent" ] && [ "$tparent" = "$(basename "$DISK")" ] \
+    || die "$TARGET is not a partition of $DISK (parent is ${tparent:-unknown}) — refusing."
+  [ "$TARGET" = "$ESP_DEV" ] && die "Refusing to install over the EFI System Partition."
+  tfs=$(lsblk -rno FSTYPE "$TARGET" 2>/dev/null | head -1 || true)
+  case "$tfs" in
+    LVM2_member|crypto_LUKS|linux_raid_member|ddf_raid_member|isw_raid_member|zfs_member|bcache)
+      die "$TARGET is a $tfs — it belongs to a larger volume (LVM/LUKS/RAID).
+Erasing it would destroy that entire container, not just this partition. Refusing." ;;
+  esac
+  in_use "$TARGET" && die "$TARGET is in use (mounted, or has an active volume/RAID on top) — refusing."
+
+  # Room check: the image alone is ~10 GB.
+  tbytes=$(lsblk -bdno SIZE "$TARGET" 2>/dev/null | head -1 || echo 0)
+  case "$tbytes" in ''|*[!0-9]*) tbytes=0 ;; esac
+  if [ "$tbytes" -lt 16000000000 ]; then
+    yn "Partition may be too small" \
+"$TARGET is $(lsblk -dno SIZE "$TARGET" 2>/dev/null | tr -d ' ').
+
+APEX-OS needs roughly 16 GB minimum (the image alone is ~10 GB).
+Continue anyway?" 14 70 || { clear; echo "Cancelled."; exit 0; }
+  fi
+  # Validate the filesystem tooling NOW, while nothing has been destroyed. The
+  # force flag differs per fs (`mkfs.ext4 -f` is not even a valid option), and
+  # mkfs.xfs is not shipped in the live env — previously any non-btrfs choice
+  # failed only AFTER the partition had been marked for erasure.
+  case "$ROOTFS_TYPE" in
+    btrfs)     MKFS_FORCE="-f" ;;
+    ext4|ext3) MKFS_FORCE="-F" ;;
+    xfs)       MKFS_FORCE="-f" ;;
+    *)         die "Unsupported root filesystem '$ROOTFS_TYPE'." ;;
+  esac
+  have "mkfs.$ROOTFS_TYPE" || die "mkfs.$ROOTFS_TYPE is not available in this installer.
+Only filesystems with tooling present can be used (btrfs is the default)."
+
+  # Fedora-family neighbour check. APEX installs its bootloader under
+  # \EFI\fedora\ — the SAME directory an existing Fedora/RHEL-family install
+  # uses. bootupd rewrites \EFI\fedora\bootuuid.cfg to point at OUR new root,
+  # and the neighbour's unchanged grub.cfg resolves its prefix from that file.
+  # Net effect: the neighbour's data survives untouched, but its existing
+  # firmware entry starts booting APEX. Detect it, back the files up, and say so
+  # plainly instead of claiming "your existing OS entries stay".
+  ESP_SHARED_FEDORA=0; ESP_WARN=""
+  _probe=$(mktemp -d 2>/dev/null || echo /tmp/apex-esp-probe); mkdir -p "$_probe"
+  if mount -o ro "$ESP_DEV" "$_probe" 2>/dev/null; then
+    if [ -e "$_probe/EFI/fedora/bootuuid.cfg" ] || [ -e "$_probe/EFI/fedora/grub.cfg" ]; then
+      ESP_SHARED_FEDORA=1
+      ESP_WARN="
+!! A Fedora-family install already uses \\EFI\\fedora on this ESP.
+   APEX uses that same directory. Its boot files will be UPDATED to point at
+   APEX, so the existing \"Fedora\" entry in your firmware menu will boot
+   APEX-OS after this. The other install's DATA is not touched, but you will
+   need to re-add a boot entry for it (its files stay in place, and the
+   originals are backed up to \\EFI\\fedora\\apex-backup\\).
+"
+    fi
+    umount "$_probe" 2>/dev/null || true
+  fi
+  rmdir "$_probe" 2>/dev/null || true
+
+  TARGET_DESC="partition $TARGET (on $DISK)"
+fi
+
+# ── 2. account ───────────────────────────────────────────────────────────────
+USERNAME=$($UI --backtitle "$BT" --title "Create your account" --inputbox \
+"Username (lowercase, no spaces):" 10 60 "andre" 3>&1 1>&2 2>&3) || exit 0
+USERNAME=$(echo "$USERNAME" | tr -d '[:space:]')
+# Validate NOW, before anything is erased. Previously an invalid name (uppercase,
+# leading digit/dash, reserved) only failed at `useradd` — i.e. AFTER the disk was
+# wiped, leaving an installed system with no account (the locked-out failure).
+while :; do
+  if [ -z "$USERNAME" ]; then
+    msg "Username" "Username cannot be empty."
+  elif ! printf '%s' "$USERNAME" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$'; then
+    msg "Username" "Invalid username: '$USERNAME'
+
+Use lowercase letters, digits, - and _ ; must start with a letter or _
+(max 32 characters)."
+  elif printf '%s' "$USERNAME" | grep -Eqx 'root|bin|daemon|adm|nobody|greetd|systemd-.*'; then
+    msg "Username" "'$USERNAME' is a reserved system account. Pick another name."
+  else
+    break
+  fi
+  USERNAME=$($UI --backtitle "$BT" --title "Create your account" --inputbox \
+    "Username (lowercase, no spaces):" 10 60 "andre" 3>&1 1>&2 2>&3) || exit 0
+  USERNAME=$(echo "$USERNAME" | tr -d '[:space:]')
+done
+
+while :; do
+  P1=$($UI --backtitle "$BT" --title "Password" --passwordbox "Password for $USERNAME:" 10 60 3>&1 1>&2 2>&3) || exit 0
+  P2=$($UI --backtitle "$BT" --title "Password" --passwordbox "Confirm password:" 10 60 3>&1 1>&2 2>&3) || exit 0
+  [ -n "$P1" ] || { msg "Password" "Password cannot be empty."; continue; }
+  [ "$P1" = "$P2" ] || { msg "Password" "Passwords did not match — try again."; continue; }
+  break
+done
+
+HOSTNAME=$($UI --backtitle "$BT" --title "Hostname" --inputbox "Computer name:" 10 60 "apex" 3>&1 1>&2 2>&3) || exit 0
+HOSTNAME=$(echo "$HOSTNAME" | tr -d '[:space:]'); [ -n "$HOSTNAME" ] || HOSTNAME=apex
+
+# ── 3. confirm (show what will be destroyed; require typed ERASE) ─────────────
+disk_info=$(lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null || true)
+# The destruction warning goes FIRST. whiptail silently clips text that overflows
+# the box (returning 0, no scrollbar, no hint) — with the warning last, any disk
+# with ≥5 partitions pushed "ALL DATA WILL BE LOST" off the bottom. That is, it
+# vanished exactly when there WAS data to lose, and showed on empty test disks.
+# Also size the box from the actual content instead of hard-coding 20 rows.
+if [ "$INSTALL_MODE" = partition ]; then
+  # Spell out BOTH sides: what dies, and what explicitly survives. The whole
+  # point of this mode is that the other partitions are kept.
+  # basename, NOT ${x#/dev/}: the prefix-strip silently fails for any path that
+  # is not literally under /dev/, which listed the TARGET itself under "KEPT" —
+  # i.e. it told the user the partition being erased would be preserved.
+  # Only real PARTITIONS of this disk. Keying on NAME alone let dm/LVM children
+  # through, so logical volumes that mkfs was about to destroy were printed under
+  # "KEPT" (and as /dev/ paths that do not even exist).
+  preserved=$(lsblk -rno NAME,TYPE,SIZE,FSTYPE,LABEL "$DISK" 2>/dev/null \
+    | awk -v t="$(basename "$TARGET")" -v e="$(basename "$ESP_DEV")" \
+      '$2=="part" && $1!=t && $1!=e {printf "  /dev/%s  %s  %s %s\n",$1,$3,$4,$5}' || true)
+  [ -n "$preserved" ] || preserved="  (none — no other partitions on this disk)"
+  # Hoist: a command substitution inside an ASSIGNMENT makes the assignment's exit
+  # status its own — a non-zero lsblk here would trip the ERR trap (the "line 181"
+  # bug class, 4th instance). As an argument to `yn` it would be safe; here it is not.
+  tsize=$(lsblk -dno SIZE "$TARGET" 2>/dev/null | tr -d ' ' || true)
+  confirm_body="ONLY $TARGET WILL BE ERASED. All data on it is lost forever.
+
+KEPT (not touched):
+$preserved
+
+The shared EFI partition $ESP_DEV is NOT erased — an APEX boot entry is
+added to it. The generic fallback loader (\\EFI\\BOOT\\BOOTX64.EFI) is
+replaced.
+$ESP_WARN
+
+Target:   $TARGET  (${tsize:-?}) → $ROOTFS_TYPE
+User:     $USERNAME   (administrator)
+Hostname: $HOSTNAME
+
+Proceed?"
+else
+  confirm_body="ALL DATA ON $DISK WILL BE PERMANENTLY LOST.
+This cannot be undone.
+
+About to ERASE and install to:
+
+$disk_info
+
+User:     $USERNAME   (administrator)
+Hostname: $HOSTNAME
+Filesystem: $ROOTFS_TYPE
+
+Proceed?"
+fi
+_lines=$(printf '%s\n' "$confirm_body" | wc -l)
+# Clamp to the REAL terminal height (a fixed 40 scrolled the top border off a
+# 25-row console). The warning is first, so if anything is ever clipped it is the
+# trailing detail, never the warning.
+_rows=$( (tput lines 2>/dev/null || echo 24) )
+case "$_rows" in ''|*[!0-9]*) _rows=24 ;; esac
+_h=$(( _lines + 8 ))
+[ "$_h" -lt 20 ] && _h=20
+[ "$_h" -gt $(( _rows - 1 )) ] && _h=$(( _rows - 1 ))
+[ "$_h" -lt 12 ] && _h=12
+yn "⚠  Final confirmation" "$confirm_body" "$_h" 78 \
+  || { clear; echo "Cancelled — nothing was written."; exit 0; }
+
+TYPED=$($UI --backtitle "$BT" --title "Type to confirm" --inputbox \
+"To confirm erasing $TARGET, type:  ERASE" 10 60 "" 3>&1 1>&2 2>&3) || exit 0
+[ "$TYPED" = "ERASE" ] || die "Confirmation text did not match ERASE — aborted before writing anything."
+
+# Re-verify the target is still the SAME physical device we showed the user.
+# Kernel names can be reassigned if something is unplugged/replugged between the
+# menu and the write; installing onto a renamed device would destroy the wrong disk.
+NOW_ID=$(lsblk -dno SERIAL,WWN "$DISK" 2>/dev/null | tr -s ' ' || true)
+[ "$NOW_ID" = "$DISK_ID" ] || die "$DISK is no longer the same device it was when you selected it
+(identity changed: '$DISK_ID' → '$NOW_ID').
+Nothing was written. Unplug/replug nothing and start the installer again."
+
+# ── 4. install (via the embedded image; stream to log) ───────────────────────
+clear
+echo "Installing APEX-OS to $TARGET_DESC … (full log: $LOG)"; echo
+echo "Do not power off — $TARGET is being erased and rewritten from here on."; echo
+# NOTE: WROTE_DISK is deliberately NOT set here. In partition mode the ESP
+# free-space check runs first and can fail with everything still intact; claiming
+# destruction at that point is a lie in the frightening direction. Each branch
+# sets it at the exact moment data actually starts being destroyed.
+log "install start: MODE=$INSTALL_MODE TARGET=$TARGET DISK=$DISK ESP=${ESP_DEV:-n/a} USER=$USERNAME HOST=$HOSTNAME FS=$ROOTFS_TYPE"
+
+# Disarm the ERR trap around the install: the trap fires even under `set +e`, and
+# with pipefail a failing `podman … | tee` pipeline would hit it BEFORE we can
+# read rc — reporting a useless "unexpected error on line N" instead of the real
+# bootc error. We check rc explicitly and re-arm immediately after.
+trap - ERR
+set +e
+if [ "$INSTALL_MODE" = partition ]; then
+  # ── partition mode: prepare the filesystem ourselves, then to-filesystem ──
+  # Proven on a loopback multi-OS disk: the other partitions and the existing
+  # /EFI/Microsoft entry survive; APEX is added under /EFI/fedora alongside them.
+  mkdir -p "$TROOT"
+  # Check the ESP has room BEFORE destroying the target. bootupd writes ~20-30 MB
+  # (shim, grub, fallback); running out mid-write left a TRUNCATED BOOTX64.EFI
+  # with the working original already gone — i.e. an unbootable machine, after we
+  # had also erased the target. Verify first, fail while everything is intact.
+  if mount -o ro "$ESP_DEV" "$TROOT" >>"$LOG" 2>&1; then
+    esp_free=$(df -Pk "$TROOT" 2>/dev/null | awk 'NR==2{print $4}' || true)
+    umount "$TROOT" 2>/dev/null || true
+    case "$esp_free" in ''|*[!0-9]*) esp_free=0 ;; esac
+    if [ "$esp_free" -lt 40960 ]; then
+      rc=93
+      echo "ESP $ESP_DEV has only ${esp_free}KB free; need ~40MB" | tee -a "$LOG"
+    fi
+  else
+    rc=92; echo "could not read the ESP $ESP_DEV" | tee -a "$LOG"
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    WROTE_DISK=1   # mkfs starts here — the target's contents are now going away
+    mkfs."$ROOTFS_TYPE" $MKFS_FORCE -L apex-root "$TARGET" >>"$LOG" 2>&1 \
+      || { rc=90; echo "mkfs.$ROOTFS_TYPE failed on $TARGET" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mount "$TARGET" "$TROOT" >>"$LOG" 2>&1 || { rc=91; echo "mounting $TARGET failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT/boot/efi"
+    mount "$ESP_DEV" "$TROOT/boot/efi" >>"$LOG" 2>&1 \
+      || { rc=92; echo "mounting the ESP $ESP_DEV failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    # Record what the ESP looked like BEFORE, so a bootloader problem afterwards
+    # is diagnosable rather than mysterious.
+    { echo "--- ESP $ESP_DEV before install ---"; find "$TROOT/boot/efi" -maxdepth 3; } >>"$LOG" 2>&1 || true
+    # Back up the neighbour's \EFI\fedora boot files: bootupd is about to rewrite
+    # bootuuid.cfg (and may touch grub.cfg), which redirects the existing
+    # "Fedora" firmware entry at APEX. Keeping the originals makes that
+    # recoverable instead of permanent.
+    if [ "${ESP_SHARED_FEDORA:-0}" = 1 ] && [ -d "$TROOT/boot/efi/EFI/fedora" ]; then
+      mkdir -p "$TROOT/boot/efi/EFI/fedora/apex-backup" 2>/dev/null || true
+      for f in bootuuid.cfg grub.cfg BOOTX64.CSV; do
+        [ -e "$TROOT/boot/efi/EFI/fedora/$f" ] \
+          && cp -n "$TROOT/boot/efi/EFI/fedora/$f" "$TROOT/boot/efi/EFI/fedora/apex-backup/$f" 2>/dev/null
+      done
+      cp -n "$TROOT/boot/efi/EFI/BOOT/BOOTX64.EFI" "$TROOT/boot/efi/EFI/fedora/apex-backup/BOOTX64.EFI.orig" 2>/dev/null || true
+      { echo "--- backed up neighbour EFI files to EFI/fedora/apex-backup ---"
+        ls -l "$TROOT/boot/efi/EFI/fedora/apex-backup" 2>/dev/null; } >>"$LOG" 2>&1 || true
+    fi
+    podman run --rm --privileged --pid=host --net=host --security-opt label=disable \
+      -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+      -v "$TROOT":"$TROOT":rshared \
+      ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
+      bootc install to-filesystem \
+        --skip-fetch-check --acknowledge-destructive \
+        --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
+        "$TROOT" 2>&1 | tee -a "$LOG"
+    rc=${PIPESTATUS[0]}
+    { echo "--- ESP $ESP_DEV after install ---"; find "$TROOT/boot/efi" -maxdepth 3; } >>"$LOG" 2>&1 || true
+  fi
+  umount "$TROOT/boot/efi" 2>/dev/null || true
+  umount "$TROOT" 2>/dev/null || true
+else
+  # --net=host: no netavark needed in the live env; bootc install is offline.
+  # Set BEFORE the call: `--wipe` destroys the disk immediately, so a Ctrl+C one
+  # second later must NOT be reported as "nothing was written".
+  WROTE_DISK=1
+  podman run --rm --privileged --pid=host --net=host --security-opt label=disable \
+    -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+    ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
+    bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
+      --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
+      "$DISK" 2>&1 | tee -a "$LOG"
+  rc=${PIPESTATUS[0]}
+fi
+trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
+# Distinguish OUR pre-install preparation failures from a real bootc failure —
+# reporting "bootc install exited 90" when mkfs was the thing that failed sends
+# you looking in the wrong place.
+case "$rc" in
+  0)  : ;;
+  90) die "Could not format $TARGET as $ROOTFS_TYPE (mkfs failed — see $LOG). The partition was NOT changed; your other partitions are untouched." ;;
+  91) die "Could not mount the freshly formatted $TARGET (see $LOG). $TARGET was reformatted and is now empty; your other partitions are untouched." ;;
+  92) die "Could not read/mount the EFI System Partition $ESP_DEV (see $LOG). Nothing was formatted; $TARGET and your other partitions are untouched." ;;
+  93) die "The EFI System Partition $ESP_DEV does not have enough free space (~40MB needed) for the APEX boot files.
+
+Nothing was formatted — $TARGET and your other partitions are untouched.
+Free up space on the ESP (old distro directories under \\EFI\\ are the usual culprit) and try again." ;;
+  *)  die "bootc install exited $rc. The exact error is above and in $LOG (search for 'error:'). No boot config was left half-written by grub2-mkconfig — bootc uses bootupd." ;;
+esac
+INSTALLED_OK=1   # the OS is on the disk; only account setup remains
+
+# ── 5. create the account in the freshly installed system ─────────────────────
+echo; echo "Creating your account …"; log "post-install: create user $USERNAME"
+MNT=$(mktemp -d)
+# Find the root partition by WHAT IT IS, not by position. `lsblk … | tail -1` was
+# wrong: it can return the whole disk (no partitions yet visible) or a non-root
+# partition, producing a false FAILURE after a perfectly good install. Settle
+# udev first — the partition table was just rewritten.
+udevadm settle --timeout=30 2>>"$LOG" || true
+if [ "$INSTALL_MODE" = partition ]; then
+  # We formatted and installed into this exact partition — no searching, and
+  # crucially NO partprobe (the partition table was not modified in this mode;
+  # re-reading it needlessly on a disk holding another live OS is pointless risk).
+  root_part="$TARGET"
+else
+  partprobe "$DISK" 2>>"$LOG" || true
+  udevadm settle --timeout=30 2>>"$LOG" || true
+  root_part=""
+  for p in $(lsblk -rno NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part"{print $1}'); do
+    if mount -o ro "/dev/$p" "$MNT" 2>/dev/null; then
+      if [ -d "$MNT/ostree/deploy" ]; then umount "$MNT" 2>/dev/null || true; root_part="/dev/$p"; break; fi
+      umount "$MNT" 2>/dev/null || true
+    fi
+  done
+fi
+[ -n "$root_part" ] || die "Installed root filesystem not found on $DISK after bootc reported success. The OS is installed but the account could not be created."
+mount "$root_part" "$MNT" 2>>"$LOG" || die "Could not mount the new root ($root_part) to create your account."
+# ostree layout: the deployed root is the newest dir under ostree/deploy/*/deploy/*.0
+# `|| true`: no glob match makes the pipeline non-zero → ERR trap. The explicit
+# emptiness check on the next line is what should report the problem.
+deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
+[ -n "$deploy" ] || { umount "$MNT" 2>/dev/null || true; die "Installed ostree deployment not found under $root_part."; }
+create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
+# Never let cleanup failures trip the ERR trap AFTER a successful install — that
+# would report failure on a system that is actually installed fine.
+sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true
+log "post-install: user $USERNAME created, hostname=$HOSTNAME"
+
+# ── 5b. Secure Boot: enrol the APEX key so the installed kernel will boot ────
+# The CachyOS kernel is signed with the APEX MOK (see Containerfile.base). With
+# Secure Boot ON, shim will only accept it once that key is enrolled — a one-time
+# step that REQUIRES physical presence at the MokManager screen (by design; it
+# cannot be automated away). Offer it here rather than letting the machine fail
+# to boot after the install.
+SB_STATE="unknown"
+if have mokutil; then SB_STATE=$(mokutil --sb-state 2>/dev/null | tr -d '\n' || true); fi
+sb_on=0
+case "$SB_STATE" in *[Ee]nabled*) sb_on=1 ;; esac
+cert="$deploy/usr/share/apex-os/secureboot/apex-mok.der"
+kstate=$(cat "$deploy/usr/share/apex-os/secureboot/kernel-signed" 2>/dev/null || echo unknown)
+if [ "$sb_on" = 1 ]; then
+  if [ "$kstate" = signed ] && [ -f "$cert" ] && have mokutil; then
+    if yn "Secure Boot is ON" \
+"Secure Boot is enabled on this machine.
+
+APEX-OS uses a custom (CachyOS) kernel, which Microsoft does not sign. It is
+signed with APEX's own key instead — that key has to be enrolled once, or the
+machine will refuse to boot APEX.
+
+Enrol it now? You will choose a password, and on the next boot a blue
+MokManager screen asks you to confirm with it (this is the physical-presence
+check; it only happens once).
+
+Choosing No is fine — you can install anyway and either enrol later with
+'mokutil --import', or turn Secure Boot off in firmware." 22 76; then
+      MOKPW=$($UI --backtitle "$BT" --title "MOK enrolment password" --passwordbox \
+"Choose a password you will re-type at the blue MokManager screen on the next
+boot (it is used once, then discarded):" 12 70 3>&1 1>&2 2>&3 || true)
+      if [ -n "${MOKPW:-}" ]; then
+        if printf '%s\n%s\n' "$MOKPW" "$MOKPW" | mokutil --import "$cert" >>"$LOG" 2>&1; then
+          log "secureboot: MOK enrolment queued"
+          msg "Enrolment queued" \
+"Done. On the next boot, a blue 'MOK management' screen appears:
+
+  Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
+
+After that APEX-OS boots normally with Secure Boot ON." 16 74
+        else
+          msg "Enrolment failed" \
+"mokutil could not queue the key (see $LOG).
+
+APEX-OS is installed. To boot it, either turn Secure Boot off in firmware, or
+run this from a live session later:
+  mokutil --import /usr/share/apex-os/secureboot/apex-mok.der" 16 76
+        fi
+      fi
+    fi
+  else
+    msg "Secure Boot is ON — action needed" \
+"Secure Boot is enabled, but this build's kernel is not signed with an APEX key
+(state: $kstate).
+
+APEX-OS is installed, but it will NOT boot until you turn Secure Boot OFF in
+your firmware settings. Everything else about the install is complete." 16 76
+  fi
+fi
+
+# ── 6. done ──────────────────────────────────────────────────────────────────
+if [ "$INSTALL_MODE" = partition ]; then
+  done_extra="Installed into $TARGET; the other partitions on $DISK were not touched.
+
+Your firmware boot menu should now list APEX-OS alongside your other OS.
+If it does not appear, pick it from the one-time boot menu (F12 on ThinkPads)
+and look for \"Fedora\" / \"APEX\". Your previous OS entry is still there."
+else
+  done_extra="Installed on $DISK (whole disk)."
+fi
+msg "✓ Installation complete" \
+"APEX-OS is installed.
+
+$done_extra
+
+Log in as: $USERNAME
+Hostname:  $HOSTNAME
+
+Remove the USB stick and reboot. On first login the shell finishes setting
+itself up (needs network the first time).
+
+Full log: $LOG" 22 76
+clear
+echo "APEX-OS installed. Remove the USB and reboot."

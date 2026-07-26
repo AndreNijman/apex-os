@@ -168,6 +168,42 @@ RUN set -eux; \
     printf 'kargs = ["console=ttyS0,115200", "console=tty0"]\n' \
         > /usr/lib/bootc/kargs.d/10-apex-serial.toml
 
+# ── Stage 1b: Secure Boot — sign the kernel with the APEX MOK ──────────────
+# The CachyOS kernel comes from a COPR and is UNSIGNED (verified: PE certificate
+# table size 0). Under Secure Boot, Fedora's signed grub refuses to boot it, so
+# APEX would only run with SB disabled. Microsoft will not sign a custom kernel,
+# so the standard answer is a Machine Owner Key: we sign vmlinuz ourselves and
+# the user enrols our public cert once via MokManager (shim's mechanism).
+#
+# The private key is supplied as a BUILD SECRET and never enters the image or the
+# repo:  podman build --secret id=apex_sb_key,src=/path/apex-mok.key \
+#                     --secret id=apex_sb_crt,src=/path/apex-mok.crt
+# Without the secret the kernel is left unsigned and the image simply requires
+# SB off — the build says so loudly rather than silently shipping something that
+# will not boot.
+RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
+    set -eux; \
+    KVER="$(cat /usr/lib/apex-cachyos-kver)"; \
+    if [ -s /run/secrets/apex_sb_key ] && [ -s /run/secrets/apex_sb_crt ]; then \
+        dnf5 -y install sbsigntools >/dev/null; \
+        sbsign --key /run/secrets/apex_sb_key --cert /run/secrets/apex_sb_crt \
+               --output "/usr/lib/modules/${KVER}/vmlinuz.signed" \
+               "/usr/lib/modules/${KVER}/vmlinuz"; \
+        mv "/usr/lib/modules/${KVER}/vmlinuz.signed" "/usr/lib/modules/${KVER}/vmlinuz"; \
+        sbverify --list "/usr/lib/modules/${KVER}/vmlinuz" | head -5; \
+        mkdir -p /usr/share/apex-os/secureboot; \
+        openssl x509 -in /run/secrets/apex_sb_crt -outform DER \
+                -out /usr/share/apex-os/secureboot/apex-mok.der; \
+        printf 'signed\n' > /usr/share/apex-os/secureboot/kernel-signed; \
+        dnf5 -y remove sbsigntools >/dev/null 2>&1 || true; \
+        dnf5 clean all; \
+        echo "SECURE BOOT: kernel ${KVER} signed with the APEX MOK"; \
+    else \
+        mkdir -p /usr/share/apex-os/secureboot; \
+        printf 'unsigned\n' > /usr/share/apex-os/secureboot/kernel-signed; \
+        echo "SECURE BOOT: no signing secret supplied — kernel left UNSIGNED (Secure Boot must be OFF)"; \
+    fi
+
 # ── Stage 2: desktop + greeter stack ───────────────────────────────────────
 # hyprland (solopasha COPR 0.51.x) + quickshell (errornointernet COPR 0.3.0 —
 # the exact version apex-greet targets) + greetd. The greeter's compositor host

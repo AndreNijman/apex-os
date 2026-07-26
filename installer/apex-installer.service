@@ -1,0 +1,28 @@
+# Auto-launch the APEX-OS guided installer on tty1 in the live environment.
+[Unit]
+Description=APEX-OS guided installer
+After=systemd-user-sessions.service plymouth-quit-wait.service
+After=getty@tty1.service
+Conflicts=getty@tty1.service
+ConditionPathExists=/usr/bin/apex-install
+
+[Service]
+Type=idle
+ExecStart=/usr/bin/apex-install
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal+console
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+# If the installer exits (cancel / error), drop to a shell so the user isn't stuck.
+# TimeoutStopSec=infinity is REQUIRED: with the default 45s stop timeout systemd
+# SIGTERMs (then SIGABRTs) this rescue shell out from under the user — killing
+# their only chance to read the non-persistent log. Verified: the promised shell
+# was dead ~45s after the installer exited.
+ExecStopPost=-/usr/bin/bash -lc 'echo; echo "Installer exited. Rescue shell (log: /var/log/apex-install.log). Also: Ctrl+Alt+F2, login root/apex."; exec /bin/bash'
+TimeoutStopSec=infinity
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
