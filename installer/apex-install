@@ -489,6 +489,32 @@ Continue anyway?" 14 70 || { clear; echo "Cancelled."; exit 0; }
   esac
   have "mkfs.$ROOTFS_TYPE" || die "mkfs.$ROOTFS_TYPE is not available in this installer.
 Only filesystems with tooling present can be used (btrfs is the default)."
+
+  # Fedora-family neighbour check. APEX installs its bootloader under
+  # \EFI\fedora\ — the SAME directory an existing Fedora/RHEL-family install
+  # uses. bootupd rewrites \EFI\fedora\bootuuid.cfg to point at OUR new root,
+  # and the neighbour's unchanged grub.cfg resolves its prefix from that file.
+  # Net effect: the neighbour's data survives untouched, but its existing
+  # firmware entry starts booting APEX. Detect it, back the files up, and say so
+  # plainly instead of claiming "your existing OS entries stay".
+  ESP_SHARED_FEDORA=0; ESP_WARN=""
+  _probe=$(mktemp -d 2>/dev/null || echo /tmp/apex-esp-probe); mkdir -p "$_probe"
+  if mount -o ro "$ESP_DEV" "$_probe" 2>/dev/null; then
+    if [ -e "$_probe/EFI/fedora/bootuuid.cfg" ] || [ -e "$_probe/EFI/fedora/grub.cfg" ]; then
+      ESP_SHARED_FEDORA=1
+      ESP_WARN="
+!! A Fedora-family install already uses \\EFI\\fedora on this ESP.
+   APEX uses that same directory. Its boot files will be UPDATED to point at
+   APEX, so the existing \"Fedora\" entry in your firmware menu will boot
+   APEX-OS after this. The other install's DATA is not touched, but you will
+   need to re-add a boot entry for it (its files stay in place, and the
+   originals are backed up to \\EFI\\fedora\\apex-backup\\).
+"
+    fi
+    umount "$_probe" 2>/dev/null || true
+  fi
+  rmdir "$_probe" 2>/dev/null || true
+
   TARGET_DESC="partition $TARGET (on $DISK)"
 fi
 
@@ -558,8 +584,9 @@ KEPT (not touched):
 $preserved
 
 The shared EFI partition $ESP_DEV is NOT erased — an APEX boot entry is
-added to it. Your existing OS entries stay, but the generic fallback
-loader (\\EFI\\BOOT\\BOOTX64.EFI) may be replaced.
+added to it. The generic fallback loader (\\EFI\\BOOT\\BOOTX64.EFI) is
+replaced.
+$ESP_WARN
 
 Target:   $TARGET  (${tsize:-?}) → $ROOTFS_TYPE
 User:     $USERNAME   (administrator)
@@ -658,6 +685,20 @@ if [ "$INSTALL_MODE" = partition ]; then
     # Record what the ESP looked like BEFORE, so a bootloader problem afterwards
     # is diagnosable rather than mysterious.
     { echo "--- ESP $ESP_DEV before install ---"; find "$TROOT/boot/efi" -maxdepth 3; } >>"$LOG" 2>&1 || true
+    # Back up the neighbour's \EFI\fedora boot files: bootupd is about to rewrite
+    # bootuuid.cfg (and may touch grub.cfg), which redirects the existing
+    # "Fedora" firmware entry at APEX. Keeping the originals makes that
+    # recoverable instead of permanent.
+    if [ "${ESP_SHARED_FEDORA:-0}" = 1 ] && [ -d "$TROOT/boot/efi/EFI/fedora" ]; then
+      mkdir -p "$TROOT/boot/efi/EFI/fedora/apex-backup" 2>/dev/null || true
+      for f in bootuuid.cfg grub.cfg BOOTX64.CSV; do
+        [ -e "$TROOT/boot/efi/EFI/fedora/$f" ] \
+          && cp -n "$TROOT/boot/efi/EFI/fedora/$f" "$TROOT/boot/efi/EFI/fedora/apex-backup/$f" 2>/dev/null
+      done
+      cp -n "$TROOT/boot/efi/EFI/BOOT/BOOTX64.EFI" "$TROOT/boot/efi/EFI/fedora/apex-backup/BOOTX64.EFI.orig" 2>/dev/null || true
+      { echo "--- backed up neighbour EFI files to EFI/fedora/apex-backup ---"
+        ls -l "$TROOT/boot/efi/EFI/fedora/apex-backup" 2>/dev/null; } >>"$LOG" 2>&1 || true
+    fi
     podman run --rm --privileged --pid=host --net=host --security-opt label=disable \
       -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
       -v "$TROOT":"$TROOT":rshared \
