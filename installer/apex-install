@@ -20,11 +20,20 @@ set -uo pipefail
 LOG=/var/log/apex-install.log
 : > "$LOG" 2>/dev/null || LOG=/tmp/apex-install.log
 BT="APEX-OS Installer"
+# Which edition this ISO carries. build-live-iso.sh stamps it; a missing stamp
+# means an old ISO, so fall back to daily.
+#
+# This MUST drive TARGET_IMAGE. It is not cosmetic: TARGET_IMAGE is written into
+# the installed system as its `bootc upgrade` origin. A Gaming ISO that recorded
+# the daily origin would install correctly and then SILENTLY convert itself to
+# Daily on the first upgrade — dropping the NVIDIA driver on a machine that
+# needs it to display anything. Caught before the first Katana flash.
+EDITION="${APEX_EDITION:-$(cat /usr/lib/apex-installer/edition 2>/dev/null || echo daily)}"
 # The image to install. The live env preloads it into podman storage as this ref
 # (see the ISO build); override with APEX_IMAGE=... for testing.
-IMAGE="${APEX_IMAGE:-localhost/apex-os:daily}"
+IMAGE="${APEX_IMAGE:-localhost/apex-os:${EDITION}}"
 # Update origin recorded in the INSTALLED system (so `bootc upgrade` works).
-TARGET_IMAGE="${APEX_TARGET_IMAGE:-ghcr.io/andrenijman/apex-os:daily}"
+TARGET_IMAGE="${APEX_TARGET_IMAGE:-ghcr.io/andrenijman/apex-os:${EDITION}}"
 ROOTFS_TYPE="${APEX_ROOTFS:-btrfs}"
 
 # On the live ISO the image is ALSO present as an OCI directory (ISO /container,

@@ -17,7 +17,15 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="${WORK:-/var/tmp/apex-iso-build}"
-OCI="$WORK/apex.oci"                       # produced by: sudo skopeo copy containers-storage:localhost/apex-os:daily oci-archive:$OCI:apex-os-daily
+# Which edition this ISO installs: daily | gaming-nvidia | gaming-mesa.
+# This is NOT cosmetic. It names the embedded storage tag AND is stamped into
+# the live env so apex-install derives its --target-imgref from it. Hardcoding
+# `daily` here (as this script used to) produced a Gaming ISO that installed the
+# right bits but recorded the DAILY registry ref as the upgrade origin — the
+# machine would silently convert itself to Daily on the first `bootc upgrade`,
+# dropping the NVIDIA driver. Keep this parameterised.
+EDITION="${EDITION:-daily}"
+OCI="$WORK/apex.oci"                       # produced by: sudo skopeo copy containers-storage:localhost/apex-os:$EDITION oci-archive:$OCI:apex-os-$EDITION
 OUT="${OUT:-$WORK/apex-os-installer.iso}"
 LABEL="APEX-INSTALL"
 IMG=localhost/apex-installer:latest
@@ -58,8 +66,17 @@ echo "== 3. embed the APEX image into the live env's container storage =="
 # /var/lib/containers/storage already holds localhost/apex-os:daily.
 sudo rm -rf "$WORK/cs-run"
 sudo skopeo copy "oci-archive:$OCI" \
-  "containers-storage:[overlay@$WORK/rootfs/var/lib/containers/storage+$WORK/cs-run]localhost/apex-os:daily"
+  "containers-storage:[overlay@$WORK/rootfs/var/lib/containers/storage+$WORK/cs-run]localhost/apex-os:${EDITION}"
 sudo rm -rf "$WORK/cs-run"
+
+# Stamp the edition so apex-install derives IMAGE and --target-imgref from it
+# rather than assuming daily. Asserted below, because a wrong or missing stamp
+# is silent at install time and only bites on the first `bootc upgrade`.
+sudo install -Dm644 /dev/null "$WORK/rootfs/usr/lib/apex-installer/edition"
+printf '%s\n' "$EDITION" | sudo tee "$WORK/rootfs/usr/lib/apex-installer/edition" >/dev/null
+grep -qx "$EDITION" "$WORK/rootfs/usr/lib/apex-installer/edition" \
+  || { echo "FATAL: edition stamp not written"; exit 1; }
+echo "edition stamped: $EDITION"
 
 echo "== 4. dracut live initramfs (dmsquash-live) =="
 # Built inside the installer image (same kernel/modules as the live rootfs).
