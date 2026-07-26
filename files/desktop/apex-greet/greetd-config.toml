@@ -25,7 +25,20 @@ vt = 1
 [default_session]
 # sway hosts the greeter via a purpose-built, keybind-free config that
 # launches quickshell as its only client and exits when quickshell quits.
-command = "sway -c /usr/share/apex-greet/sway-greet.conf"
+#
+# --unsupported-gpu is REQUIRED, not optional (apex-logs 46).
+# sway 1.11's detect_proprietary() walks EVERY DRM backend, matches `nvidia-drm`,
+# and calls exit(EXIT_FAILURE) unless this flag is passed. It fires even when
+# sway would render on an Intel/AMD iGPU and the NVIDIA card is merely present —
+# so on any hybrid-graphics machine the greeter dies before it paints and there
+# is NO way to log in, on any display.
+#
+# It is a no-op without a proprietary driver, so it lives here in the shared
+# greeter config rather than the gaming leg: `daily` and `gaming-mesa` carry the
+# same latent bug the moment they meet an NVIDIA GPU.
+#
+# `labwc` (installed, see the fallback note below) has no such gate.
+command = "sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf"
 #
 # ABANDONED host (M0 spike A) — cage 0.2.0 does not serve quickshell's
 # layer-shell, so the greeter never paints under it. Kept ONLY as a labelled
