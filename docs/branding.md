@@ -124,6 +124,8 @@ Fixes land in one of two places:
 | 16 | Live-ISO GRUB menu | already `Install APEX-OS` | unchanged | image (pre-existing) | `installer/build-live-iso.sh` |
 | 17 | Plymouth boot splash | already `apex-os-chartreuse` / `apex-os-gold`, wordmark `A P E X   O S` | unchanged | image (pre-existing) | `files/branding/plymouth/` |
 | 18 | Greeter (`apex-greet`) | no distro string at all | unchanged | n/a | verified clean |
+| 18a | `hostnamectl` "Operating System" | `Fedora Linux 43 (Forty Three)` | `APEX-OS` | image | reads os-release `PRETTY_NAME`; covered by surface 3. Its "Kernel:" line still shows the CachyOS release string — see the unfixable table |
+| 18b | `neofetch` / `screenfetch` / `lsb_release` | — | — | n/a | **not installed** in the image (verified). `fastfetch` is the only fetch tool, and it is handled by surfaces 12–13. If one is ever layered in, it will auto-detect the Fedora logo from `ID` exactly as bare `fastfetch` would, and needs the same `logo.source` pin |
 | 19 | Local `/etc/os-release` override on installed systems | a hand-written file with `VERSION="43 (Forty Three)"`, `LOGO=fedora-logo-icon`, `REDHAT_*`, fedora URLs | branded, and removed entirely once the image's own os-release is branded | **runtime** | `apex-debrand-runtime.sh`. See the warning below |
 
 ### The `/etc/os-release` trap (surface 19)
@@ -195,16 +197,35 @@ grep -qx 'ID=fedora' /usr/lib/os-release
 
 ## Fixing an already-installed system
 
+Do the boot-menu change and the NVRAM change as **separate steps**, in this
+order. The BLS rewrite has been tested against a copy of the real entries; the
+NVRAM write has not (there is no way to dry-run firmware). Keeping them apart
+means that if the firmware misbehaves on the relabel, you are already booted
+through a verified-good boot menu instead of debugging two changes at once.
+
 ```sh
 # 1. See what would change — writes nothing.
 sudo /usr/libexec/apex-debrand-runtime            # or ./files/scripts/apex-debrand-runtime.sh
 
-# 2. Apply: BLS titles + EFI NVRAM label + /etc/os-release.
-sudo /usr/libexec/apex-debrand-runtime --apply
+# 2. Boot menu titles + the /etc/os-release override. Reboot and confirm the
+#    GRUB menu now reads "APEX-OS (ostree:N)".
+sudo /usr/libexec/apex-debrand-runtime --apply --skip-efi
 
 # 3. A second install on another partition has its own /boot but SHARES the ESP
-#    (and therefore the single firmware boot entry) — do the BLS titles only.
-sudo /usr/libexec/apex-debrand-runtime --apply --skip-efi --boot-dir /mnt/other/boot
+#    (and therefore the single firmware boot entry) — do its BLS titles too.
+sudo /usr/libexec/apex-debrand-runtime --apply --boot-dir /mnt/other/boot
+
+# 4. Only now, the firmware boot entry label ("Fedora" -> "APEX-OS"). Run this
+#    ONCE for the whole disk, not once per install.
+sudo /usr/libexec/apex-debrand-runtime --apply --skip-bls --skip-os-release
+
+# 5. AFTER the first `bootc upgrade` onto a branded image, run it once more.
+#    /usr/lib/os-release is branded by then, so the script takes the other
+#    branch: it deletes the transitional /etc/os-release override and restores
+#    the image symlink. THIS STEP IS NOT OPTIONAL — skipping it leaves the
+#    override merging forward forever, pinning VERSION_ID=43 across a future
+#    rebase to an F44 base.
+sudo /usr/libexec/apex-debrand-runtime --apply --skip-bls --skip-efi
 ```
 
 Safety properties (all exercised against a copy of the real
