@@ -20,7 +20,7 @@ apexd-core/src/syswriter.rs  RealWriter support for them + the fan-restore ladde
 apexd/src/fan.rs             FanController: snapshot, modes, curve loop, restore
 apexd/src/game.rs            GameSession: prior-state capture, enter/exit, status
 apexd/src/dbus.rs            real .Fan and .GameMode interfaces
-apexd/apexd.service          ProtectControlGroups=no + the ExecStopPost fan safety net
+apexd/apexd/apexd.service    ProtectControlGroups=no + the ExecStopPost fan safety net
 apex/src/main.rs             `apex fan …` and `apex game …`
 config/sysprofiles/*.toml    Katana M6 values; L16 + intel-hybrid degradation
 ```
@@ -35,8 +35,9 @@ no toolchain):
 
 ```
 cargo build --release --locked   Finished `release` profile [optimized] target(s)
-cargo test                       72 passed; 0 failed   (21 fan + 15 gamemode +
-                                 10 profile_m6 + 9 topology + 11 tier_plan + 6 selection)
+cargo test                       77 passed; 0 failed   (21 fan + 15 gamemode +
+                                 10 profile_m6 + 9 topology + 11 tier_plan +
+                                 6 selection + 5 apexd in-crate)
 cargo clippy --all-targets -- -D warnings   clean
 ```
 
@@ -98,9 +99,10 @@ neutralises all of it, and a machine with no controllable fan reports
 L16): `thinkpad_acpi` publishes `pwm1` and `pwm1_enable` at mode 0644 and then
 answers `-EPERM` to every write, because the module was not loaded with
 `fan_control=1`. Discovery cannot tell the difference from the file mode, so
-`FanController::set_mode` **reads the controls back** after applying and returns
-an error naming the likely cause if nothing moved — rather than reporting a
-successful mode change that did nothing. `apex doctor` phrases its check as
+`FanController::set_mode` **reads the controls back** after applying and, if
+nothing moved, **replays the snapshot before returning an error** — a plan can
+land its `pwm_enable=1` write and then have its duty-cycle write refused, and
+that half-applied state is precisely the one the safety model must not end in. `apex doctor` phrases its check as
 "fan control channel present, write access unverified" for the same reason.
 
 ## The MSI Katana reality (important)
@@ -179,6 +181,11 @@ that rejects an affinity write is a logged skip, not a failed session.
 * Profile schema: pre-M6 profiles parse unchanged and get safe defaults; partial
   tables keep the other defaults; the Katana values are what the file says;
   an unparseable IRQ policy fails safe to `off`.
+* The daemon half of game-mode symmetry (`apexd/src/game.rs`, in-crate tests
+  against a `MockWriter` and an empty sysfs root): enter holds the profile's
+  game tier and disables auto-switch, exit restores both, a repeated enter
+  cannot overwrite the recorded prior state, and an exit with no session (or a
+  second exit) changes nothing.
 
 **Not verified — no access to the target machines. Honest list:**
 

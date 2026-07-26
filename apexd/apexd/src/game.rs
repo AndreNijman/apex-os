@@ -120,7 +120,7 @@ impl Ctx {
         let prior_fan_mode = match &cfg.fan_mode {
             Some(want) if self.fan.supported() => {
                 let prior = self.fan.mode().await;
-                match FanMode::parse(want, 255) {
+                match FanMode::parse(want, self.fan.default_manual_pwm()) {
                     Ok(m) => match self.fan.set_mode(m).await {
                         Ok(()) => Some(prior),
                         Err(e) => {
@@ -292,5 +292,174 @@ impl Ctx {
 fn insert(m: &mut HashMap<String, OwnedValue>, key: &str, v: Value<'_>) {
     if let Ok(owned) = v.try_to_owned() {
         m.insert(key.to_string(), owned);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The half of "enter/exit is symmetric" that lives in the daemon rather
+    //! than in sysfs: the tier and the auto-switch flag.
+    //!
+    //! `apexd-core`'s fixture tests prove the filesystem is restored;
+    //! these prove the daemon state is, including the rule that prior state is
+    //! captured only on the 0 -> 1 transition. Everything runs against a
+    //! `MockWriter` and a temp-dir sysfs root, so nothing real is touched.
+
+    use std::sync::Arc;
+
+    use apexd_core::gpu::MockNvidiaSmi;
+    use apexd_core::syswriter::{MockWriter, SysWriter};
+    use apexd_core::{ProfileSet, Selection};
+
+    use crate::state::{Ctx, State};
+    use apexd_core::tier::Tier;
+
+    /// A profile whose game mode changes nothing outside the daemon: no
+    /// cpuset, no IRQ steering, no NVIDIA. What is left is exactly the tier
+    /// and auto-switch behaviour under test.
+    const PROFILE: &str = r#"
+        id = "test-game"
+        kind = "device"
+        [defaults]
+        ac = "balanced"
+        battery = "power-saver"
+        [tiers.ultra-max]
+        governor = "performance"
+        [tiers.ultra]
+        governor = "performance"
+        [tiers.performance]
+        governor = "performance"
+        [tiers.balanced]
+        governor = "powersave"
+        [tiers.power-saver]
+        governor = "powersave"
+        [gamemode]
+        tier = "ultra-max"
+        cpuset = "off"
+        irq = "off"
+        [gamemode.nvidia]
+        enabled = false
+    "#;
+
+    fn ctx(tag: &str) -> Arc<Ctx> {
+        let root = std::env::temp_dir().join(format!(
+            "apexd-game-ctx-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join("profiles")).unwrap();
+        std::fs::write(root.join("profiles/test-game.toml"), PROFILE).unwrap();
+
+        let set = ProfileSet::load(Some(&root.join("profiles"))).unwrap();
+        let selection = Selection {
+            generic: "test-game".into(),
+            class: None,
+            device: Some("test-game".into()),
+            active: "test-game".into(),
+        };
+        // An empty sysfs root: no fans, no CPUs, nothing to discover.
+        let fingerprint = apexd_core::Fingerprint::detect_from(&root, &root);
+        let writer: Arc<dyn SysWriter> = Arc::new(MockWriter::new());
+        Ctx::new(
+            set,
+            selection,
+            fingerprint,
+            writer,
+            false,
+            State {
+                tier: Tier::Balanced,
+                auto_switch: true,
+                on_ac: true,
+                travel_mode: false,
+                charge_start: 0,
+                charge_stop: 100,
+            },
+            root,
+            Arc::new(MockNvidiaSmi::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn enter_holds_the_game_tier_and_exit_puts_everything_back() {
+        let ctx = ctx("roundtrip");
+        assert!(!ctx.game_active().await);
+
+        ctx.game_enter(&[]).await.unwrap();
+        {
+            let st = ctx.state.lock().await;
+            assert_eq!(st.tier, Tier::UltraMax, "the session holds the profile's game tier");
+            assert!(
+                !st.auto_switch,
+                "auto-switch must be off, or an AC transition would clobber the game tier"
+            );
+        }
+        assert!(ctx.game_active().await);
+
+        ctx.game_exit().await.unwrap();
+        let st = ctx.state.lock().await;
+        assert_eq!(st.tier, Tier::Balanced, "the tier the session interrupted comes back");
+        assert!(st.auto_switch, "and so does auto-switch");
+        drop(st);
+        assert!(!ctx.game_active().await);
+    }
+
+    #[tokio::test]
+    async fn a_second_enter_cannot_overwrite_the_recorded_prior_state() {
+        let ctx = ctx("double-enter");
+        ctx.game_enter(&[]).await.unwrap();
+        // At this point tier == ultra-max and auto_switch == false. A second
+        // enter must NOT record those as the values to restore.
+        ctx.game_enter(&[]).await.unwrap();
+        ctx.game_enter(&[]).await.unwrap();
+
+        ctx.game_exit().await.unwrap();
+        let st = ctx.state.lock().await;
+        assert_eq!(st.tier, Tier::Balanced);
+        assert!(st.auto_switch);
+    }
+
+    #[tokio::test]
+    async fn exit_without_a_session_is_a_no_op() {
+        let ctx = ctx("exit-idle");
+        {
+            let mut st = ctx.state.lock().await;
+            st.tier = Tier::Performance;
+            st.auto_switch = false;
+        }
+        ctx.game_exit().await.unwrap();
+        ctx.game_exit().await.unwrap();
+        let st = ctx.state.lock().await;
+        assert_eq!(st.tier, Tier::Performance, "an idle exit changes nothing");
+        assert!(!st.auto_switch);
+    }
+
+    #[tokio::test]
+    async fn exit_is_idempotent_after_a_real_session() {
+        let ctx = ctx("exit-twice");
+        ctx.game_enter(&[]).await.unwrap();
+        ctx.game_exit().await.unwrap();
+        {
+            let mut st = ctx.state.lock().await;
+            st.tier = Tier::PowerSaver; // something else moves the tier afterwards
+        }
+        ctx.game_exit().await.unwrap();
+        let st = ctx.state.lock().await;
+        assert_eq!(
+            st.tier,
+            Tier::PowerSaver,
+            "a second exit must not re-apply the restored tier"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_requires_an_active_session() {
+        let ctx = ctx("attach");
+        assert!(ctx.game_attach(4242).await.is_err());
+        ctx.game_enter(&[]).await.unwrap();
+        // cpuset = "off": there is no cgroup to attach to, and saying so beats
+        // pretending the PID was pinned.
+        assert!(ctx.game_attach(4242).await.is_err());
+        ctx.game_exit().await.unwrap();
     }
 }

@@ -89,6 +89,14 @@ impl FanController {
         self.inv.modes(&self.cfg)
     }
 
+    /// The duty cycle a bare `manual` (no explicit value) resolves to: the
+    /// profile's floor. One definition, used by the D-Bus method, the CLI and
+    /// the profile's `default_mode` alike — `manual` must never quietly mean
+    /// the same thing as `max`.
+    pub fn default_manual_pwm(&self) -> u8 {
+        self.cfg.min_pwm
+    }
+
     /// A short description of the discovered backends, for the start-up log and
     /// `apex fan status`.
     pub fn backends(&self) -> Vec<String> {
@@ -158,9 +166,16 @@ impl FanController {
                 // 0644 and then answers -EPERM unless it was loaded with
                 // fan_control=1. Read back rather than claim success.
                 if !self.took_effect(other) {
+                    // A partially applied plan is the one state the safety
+                    // model must never end in: `pwm_enable=1` can have landed
+                    // while the duty-cycle write was refused, which is exactly
+                    // "manual at whatever pwm happened to be there". Replay the
+                    // snapshot before reporting the failure.
+                    self.restore().await;
                     bail!(
-                        "the driver refused every fan write (attributes exist but are not \
-                         effective — e.g. thinkpad_acpi needs fan_control=1)"
+                        "the driver refused the fan write (attributes exist but are not \
+                         effective — e.g. thinkpad_acpi needs fan_control=1); fans handed \
+                         back to firmware control"
                     );
                 }
             }

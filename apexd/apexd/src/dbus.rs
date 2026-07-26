@@ -332,10 +332,10 @@ impl FanIface {
         #[zbus(header)] hdr: Header<'_>,
     ) -> zbus::fdo::Result<()> {
         authorize(conn, &hdr, ACTION_POWER).await?;
-        let min = 255u8;
-        let m = apexd_core::fan::FanMode::parse(&mode, min).map_err(|e| {
-            zbus::fdo::Error::InvalidArgs(e.to_string())
-        })?;
+        // A bare `manual` resolves to the profile's floor, not to full speed.
+        let default_pwm = self.ctx.fan.default_manual_pwm();
+        let m = apexd_core::fan::FanMode::parse(&mode, default_pwm)
+            .map_err(|e| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
         self.ctx.fan.set_mode(m).await.map_err(to_fdo)?;
         self.mode_changed(&ctxt).await?;
         self.pwm_changed(&ctxt).await?;
