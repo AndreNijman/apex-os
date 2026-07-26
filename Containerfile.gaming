@@ -99,6 +99,130 @@ RUN set -eux; \
     fi; \
     dnf5 clean all
 
+# ── GPU boot correctness: nouveau, KMS, initramfs (nvidia leg) ─────────────
+# Everything here MUST land before the Plymouth dracut run further down, which is
+# the last initramfs regeneration in this build. (apex-logs 46)
+#
+# WHY THIS STAGE EXISTS — three findings from the flash-readiness review:
+#
+# 1. nouveau is NOT blacklisted. RPMFusion ships its blacklist ONLY via a
+#    %posttrans grubby call, which is inert on bootc — there is no modprobe.d
+#    fallback anywhere in RPMFusion F43. The CachyOS kernel ships nouveau with a
+#    catch-all pci:v000010DEd* alias AND nouveau is present in the initramfs, so
+#    it races nvidia for the dGPU during early boot.
+#
+# 2. RPMFusion deliberately OMITS nvidia from the initramfs
+#    (/usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf), reasoning "avoid
+#    needing to regenerate the ramdisk on updates". That reasoning does not apply
+#    to bootc, where every driver update IS an image rebuild — and the omission
+#    means the splash/greeter cannot come up on a dGPU-attached output. We
+#    OVERWRITE that exact file (plain `=`, not `+=`) rather than relying on
+#    add_drivers-vs-omit_drivers precedence, so the fix is correct either way.
+#
+# 3. nvidia-drm modeset: RPMFusion's nvidia-kmod carries make_modeset_default.patch
+#    so the built default is already on. We set it EXPLICITLY anyway, so a future
+#    RPMFusion respin that drops that patch cannot silently ship an image with no
+#    KMS — an explicit modprobe option beats whatever the compiled-in default is.
+# printf, not a heredoc: heredoc bodies do not survive backslash-continued RUN
+# lines reliably, and this project has already shipped one Dockerfile-escaping bug.
+RUN set -eux; \
+    if [ "${GPU}" = "nvidia" ]; then \
+        mkdir -p /usr/lib/modprobe.d /usr/lib/bootc/kargs.d /usr/lib/dracut/dracut.conf.d; \
+        printf '%s\n' \
+            '# APEX-OS (apex-logs 46). nouveau must never bind the dGPU: it races' \
+            '# the proprietary driver, and RPMFusion ships its blacklist only via a' \
+            '# %posttrans grubby call, which is inert on bootc.' \
+            'blacklist nouveau' \
+            'install nouveau /bin/false' \
+            '# Explicit, so we do not depend on RPMFusion make_modeset_default.patch' \
+            '# surviving a respin. modeset=1 is required by every Wayland compositor;' \
+            '# fbdev=1 gives a console/splash framebuffer on dGPU-attached outputs.' \
+            'options nvidia-drm modeset=1 fbdev=1' \
+            > /usr/lib/modprobe.d/50-apex-nvidia.conf; \
+        printf '%s\n' \
+            '# rd.driver.blacklist is the mechanism dracut honours in the INITRAMFS' \
+            '# phase — modprobe.d alone is weaker there, and nouveau is verifiably' \
+            '# inside the initramfs. modprobe.blacklist covers the real root.' \
+            'kargs = ["rd.driver.blacklist=nouveau", "modprobe.blacklist=nouveau"]' \
+            > /usr/lib/bootc/kargs.d/25-apex-nvidia.toml; \
+        printf '%s\n' \
+            '# APEX-OS overwrite of RPMFusion 99-nvidia-dracut.conf.' \
+            '# Assignment, NOT +=, so their omit_drivers is cleared outright and we' \
+            '# do not depend on add_drivers-vs-omit_drivers precedence.' \
+            'omit_drivers=""' \
+            'add_drivers+=" nvidia nvidia_modeset nvidia_drm nvidia_uvm "' \
+            > /usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf; \
+        systemctl mask nvidia-fallback.service; \
+        for u in nvidia-powerd nvidia-persistenced; do \
+            mkdir -p "/usr/lib/systemd/system/${u}.service.d"; \
+            printf '%s\n' \
+                '# Portability (apex-logs 46): this image is meant to run on ANY' \
+                '# machine, including ones with no NVIDIA GPU. Without this gate' \
+                '# these units fail at every boot on AMD/Intel hardware and show' \
+                '# up as failed units, which is noise the user then has to triage.' \
+                '[Unit]' \
+                'ConditionPathExistsGlob=/sys/module/nvidia' \
+                > "/usr/lib/systemd/system/${u}.service.d/10-apex-nvidia-only.conf"; \
+        done; \
+        test -s /usr/lib/modprobe.d/50-apex-nvidia.conf; \
+        test -s /usr/lib/bootc/kargs.d/25-apex-nvidia.toml; \
+        grep -q 'omit_drivers=""' /usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf; \
+        echo "nvidia: nouveau blacklisted, KMS forced, driver added to initramfs"; \
+    else \
+        echo "GPU=mesa: no nouveau/KMS handling needed"; \
+    fi
+
+# ── Cross-GPU: stop other daemons fighting apexd (M6) ──────────────────────
+# nvidia-fallback is masked ABOVE for a reason that matters on NON-nvidia
+# machines: this image ships the rd.driver.blacklist karg, and that unit's
+# ConditionKernelCommandLine matches it — so an AMD/Intel box running this image
+# would splash "NVIDIA kernel module missing, falling back to nouveau" on every
+# boot. Masking it is what keeps the gaming image portable.
+#
+# irqbalance actively undoes M6's IRQ pinning, and a static
+# IRQBALANCE_BANNED_CPULIST cannot track a cpuset chosen at runtime — so on a
+# gaming image it is masked outright. apexd detects it either way and reports the
+# conflict in `apex game status`.
+#
+# gamemoded writes scaling_governor with no config shipped, which fights apexd
+# for the same sysfs. /etc/gamemode.ini hands the governor to apexd and wires
+# gamemode's own hooks into `apex game`, so Steam's gamemoderun drives M6.
+RUN set -eux; \
+    systemctl mask irqbalance.service || true; \
+    printf '%s\n' \
+        '[general]' \
+        '; apexd owns scaling_governor (M6 tier engine). Matching gamemoded to' \
+        '; apexd game tier means neither daemon flaps the governor against the' \
+        '; other.' \
+        'desiredgov=performance' \
+        'defaultgov=performance' \
+        'igpu_desiredgov=performance' \
+        '' \
+        '[custom]' \
+        '; Makes Steam `gamemoderun %command%` drive APEX game mode: P-core' \
+        '; cpuset, IRQ steering, NVIDIA clock locks and fan boost. Idempotent,' \
+        '; and safe when apexd is absent (the CLI reports unsupported, not err).' \
+        'start=/usr/bin/apex game start' \
+        'end=/usr/bin/apex game stop' \
+        > /etc/gamemode.ini; \
+    test -s /etc/gamemode.ini
+
+# ── M6 fan backend: msi-wmi-platform (MSI hardware) ────────────────────────
+# The in-tree msi-ec has a 25-entry EC-firmware allowlist with NO 17L3 entry, and
+# no `force` parameter — so it will NOT bind on the MSI Katana GF76 (board
+# MS-17L3). msi-wmi-platform does take force=1 and registers an hwmon device, so
+# it is the viable fan/telemetry backend on that machine. Loading it taints the
+# kernel; harmless, and a no-op on non-MSI hardware where the WMI GUID is absent.
+# apexd probes hwmon -> msi-wmi-platform -> msi-ec -> unsupported, so a machine
+# without any of them degrades cleanly rather than failing. (apex-logs 46)
+RUN set -eux; \
+    mkdir -p /usr/lib/modules-load.d /usr/lib/modprobe.d; \
+    printf '%s\n' 'msi-wmi-platform' > /usr/lib/modules-load.d/apex-msi.conf; \
+    printf '%s\n' 'options msi-wmi-platform force=1' \
+        > /usr/lib/modprobe.d/51-apex-msi.conf; \
+    test -s /usr/lib/modules-load.d/apex-msi.conf; \
+    test -s /usr/lib/modprobe.d/51-apex-msi.conf
+
 # ── §4c mesa leg: mesa-git (Gaming) ────────────────────────────────────────
 # §4c pins Gaming to mesa-*git* (main-branch RADV): per-release FPS/stutter fixes
 # ahead of the fc43-pinned base, for native-Linux titles + the compositor (Proton
