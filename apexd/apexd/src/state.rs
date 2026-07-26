@@ -1,16 +1,20 @@
 //! Daemon runtime state and the logic that turns tier changes into writer
 //! actions, including the gated RyzenAdj reapply loop.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
+use apexd_core::gpu::NvidiaSmi;
 use apexd_core::profile::Profile;
 use apexd_core::syswriter::SysWriter;
 use apexd_core::tier::{Action, Tier};
 use apexd_core::{ProfileSet, Selection};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+
+use crate::fan::FanController;
+use crate::game::GameSession;
 
 /// Mutable daemon state (behind an async mutex).
 #[derive(Debug, Clone)]
@@ -36,11 +40,20 @@ pub struct Ctx {
     pub device_is_l16: bool,
     /// True when `ryzenadj` is on PATH.
     pub ryzenadj_present: bool,
+    /// The sysfs root everything reads from (parameterised for fixtures).
+    pub sys_root: PathBuf,
+    /// M6: fan discovery, mode state and the restore path.
+    pub fan: Arc<FanController>,
+    /// M6: read-side access to `nvidia-smi`.
+    pub nvidia: Arc<dyn NvidiaSmi>,
+    /// M6: the active game session, if any.
+    pub game: Mutex<Option<GameSession>>,
     pub state: Mutex<State>,
     ryzenadj_loop: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Ctx {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         set: ProfileSet,
         selection: Selection,
@@ -48,8 +61,16 @@ impl Ctx {
         writer: Arc<dyn SysWriter>,
         dry_run: bool,
         initial: State,
+        sys_root: impl Into<PathBuf>,
+        nvidia: Arc<dyn NvidiaSmi>,
     ) -> Arc<Ctx> {
         let device_is_l16 = selection.device.as_deref() == Some("thinkpad-l16-g2");
+        let sys_root = sys_root.into();
+        let fan_cfg = set
+            .get(&selection.active)
+            .map(|p| p.fan_config())
+            .unwrap_or_default();
+        let fan = FanController::new(sys_root.clone(), fan_cfg, writer.clone());
         Arc::new(Ctx {
             set,
             selection,
@@ -58,6 +79,10 @@ impl Ctx {
             dry_run,
             device_is_l16,
             ryzenadj_present: ryzenadj_available(),
+            sys_root,
+            fan,
+            nvidia,
+            game: Mutex::new(None),
             state: Mutex::new(initial),
             ryzenadj_loop: Mutex::new(None),
         })
