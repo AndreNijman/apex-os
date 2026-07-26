@@ -170,13 +170,16 @@ echo "grubefi: $GRUBEFI"
 rm -f "$WORK/efiboot.img"
 mkfs.fat -C -n APEXEFI "$WORK/efiboot.img" 20480
 mmd   -i "$WORK/efiboot.img" ::/EFI ::/EFI/BOOT ::/EFI/fedora
-sudo cp "$SHIM"    "$WORK/BOOTX64.EFI"
-sudo cp "$GRUBEFI" "$WORK/grubx64.efi"
+# install -m 0644, not cp: Fedora ships these EFI binaries mode 700 root:root and
+# `cp` preserves that, so the UNPRIVILEGED mcopy below could not read them
+# ("Permission denied") and set -e killed the build.
+sudo install -m 0644 "$SHIM"    "$WORK/BOOTX64.EFI"
+sudo install -m 0644 "$GRUBEFI" "$WORK/grubx64.efi"
 mcopy -i "$WORK/efiboot.img" "$WORK/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
 mcopy -i "$WORK/efiboot.img" "$WORK/grubx64.efi" ::/EFI/BOOT/grubx64.efi
 mcopy -i "$WORK/efiboot.img" "$WORK/grub.cfg"    ::/EFI/BOOT/grub.cfg
 mcopy -i "$WORK/efiboot.img" "$WORK/grub.cfg"    ::/EFI/fedora/grub.cfg
-if [ -n "$MMEFI" ]; then sudo cp "$MMEFI" "$WORK/mmx64.efi"; mcopy -i "$WORK/efiboot.img" "$WORK/mmx64.efi" ::/EFI/BOOT/mmx64.efi; fi
+if [ -n "$MMEFI" ]; then sudo install -m 0644 "$MMEFI" "$WORK/mmx64.efi"; mcopy -i "$WORK/efiboot.img" "$WORK/mmx64.efi" ::/EFI/BOOT/mmx64.efi; fi
 
 sudo mkdir -p "$ISOROOT/EFI/BOOT" "$ISOROOT/EFI/fedora" "$ISOROOT/images"
 sudo cp "$WORK/BOOTX64.EFI" "$ISOROOT/EFI/BOOT/BOOTX64.EFI"
