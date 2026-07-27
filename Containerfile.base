@@ -87,6 +87,53 @@ RUN set -eux; \
         echo "yazi: built v26.5.6 from git workspace"; \
     else echo "yazi: BUILD FAILED (TUI file manager absent; non-fatal — Thunar remains)"; fi
 
+# ═══ Qt builder — hyprland-qt-support + hyprland-qtutils from source ═══════
+# Hyprland warns at every startup: "Your system does not have hyprland-qtutils
+# installed", and without it CAsyncDialogBox cannot create dialogs and the ANR
+# (application-not-responding) manager will not start. hyprland *recommends* the
+# package, so it should arrive as a weak dep — it does not, and cannot:
+#
+#   solopasha's hyprland-qt-support requires libQt6Core.so.6(Qt_6.9_PRIVATE_API)
+#   while this image ships qt6-qtbase 6.10.3. Qt private-API symbol versions are
+#   matched EXACTLY, so the packaged build is uninstallable here and dnf silently
+#   drops the unsatisfiable recommend. There is no other repo carrying it.
+#
+# So build it against the Qt we actually have. Its own stage, like the Rust one,
+# so cmake/ninja/gcc-c++ and ~1 GB of -devel never reach the shipped image.
+#
+# Two things that are easy to get wrong here:
+#   * hyprutils/hyprlang -devel MUST come from the SAME COPR as the runtime libs.
+#     Fedora ships hyprutils 0.7.1 (libhyprutils.so.6); the desktop stack below
+#     pulls 0.10.0 (so.9) from solopasha, and the Fedora -devel cannot resolve.
+#   * qt6-*-private-devel are required: WaylandClientPrivate depends on
+#     Qt6CorePrivate, and without it cmake fails with a misleading
+#     "config file exists but set _FOUND to FALSE" error.
+FROM quay.io/fedora/fedora-bootc:43 AS qtbuilder
+RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
+    dnf5 -y copr enable solopasha/hyprland; \
+    dnf5 -y install cmake ninja-build gcc-c++ git-core pkgconf \
+        qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel \
+        qt6-qtwayland-devel qt6-qtbase-private-devel qt6-qtdeclarative-private-devel \
+        hyprlang-devel hyprutils-devel >/dev/null \
+    && dnf5 clean all
+# INSTALL_QML_PREFIX must be RELATIVE — an absolute path gets CMAKE_INSTALL_PREFIX
+# prepended too, and the QML lands in /usr/usr/lib64 where Qt never looks.
+RUN set -eux; \
+    git clone --depth 1 https://github.com/hyprwm/hyprland-qt-support /b/qs; \
+    cmake -S /b/qs -B /b/qs/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr -DINSTALL_QML_PREFIX=lib64/qt6/qml; \
+    cmake --build /b/qs/build -j"$(nproc)"; \
+    DESTDIR=/out cmake --install /b/qs/build; \
+    cmake --install /b/qs/build
+RUN set -eux; \
+    git clone --depth 1 https://github.com/hyprwm/hyprland-qtutils /b/qu; \
+    cmake -S /b/qu -B /b/qu/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr; \
+    cmake --build /b/qu/build -j"$(nproc)"; \
+    DESTDIR=/out cmake --install /b/qu/build; \
+    test -x /out/usr/bin/hyprland-dialog; \
+    test ! -d /out/usr/usr
+
 # ─────────────────────────────────────────────────────────────────────────
 FROM quay.io/fedora/fedora-bootc:43
 
@@ -230,6 +277,22 @@ RUN set -eux; \
     dnf5 -y copr disable solopasha/hyprland; \
     dnf5 -y copr disable errornointernet/quickshell; \
     dnf5 clean all
+
+# hyprland-qtutils, built above against this image's Qt 6.10 (see the qtbuilder
+# stage for why the packaged build cannot be installed). Provides hyprland-dialog,
+# hyprland-donate-screen and hyprland-update-screen, which silences Hyprland's
+# startup warning and — more importantly — makes CAsyncDialogBox and the ANR
+# manager functional. Asserted, because a silently-missing binary here is exactly
+# the failure mode that shipped before.
+COPY --from=qtbuilder /out/ /
+RUN set -eux; \
+    for b in hyprland-dialog hyprland-donate-screen hyprland-update-screen; do \
+        command -v "$b" >/dev/null || { echo "FATAL: $b missing from qtbuilder"; exit 1; }; \
+    done; \
+    ! ldd /usr/bin/hyprland-dialog | grep 'not found'; \
+    test -d /usr/lib64/qt6/qml/org/hyprland/style; \
+    test ! -d /usr/usr; \
+    echo "hyprland-qtutils: installed from source, all libs resolve"
 
 # ── Stage 3: JetBrainsMono Nerd Font ───────────────────────────────────────
 # apex-greet's QML uses the "JetBrainsMono Nerd Font" family for both body text
