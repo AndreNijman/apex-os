@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX-OS — systemd system environment generator: XKB defaults
+#  Installed to /usr/lib/systemd/system-environment-generators/50-apex-keymap
+#
+#  WHY THIS EXISTS
+#  The greeter is where a user types their PASSWORD. If it is stuck on a US
+#  layout, anyone whose password contains a character that moves between
+#  layouts (z/y on QWERTZ, a/q on AZERTY, and every symbol on both) simply
+#  cannot log in to the machine they just installed. The greeter host configs
+#  used to hardcode `xkb_layout us` / `XKB_DEFAULT_LAYOUT=us` for exactly one
+#  reason: there was nothing else to read.
+#
+#  Now there is. systemd runs every executable in
+#  /usr/lib/systemd/system-environment-generators/ at manager startup and on
+#  daemon-reload, and each KEY=VALUE printed on stdout is added to the manager
+#  environment — which every spawned service inherits. greetd inherits it, the
+#  sway/labwc greeter host inherits it from greetd, and both wlroots
+#  compositors honour XKB_DEFAULT_LAYOUT when their config does not override
+#  it. One file, and the greeter follows the system keymap on every machine.
+#
+#  SOURCE OF TRUTH: /etc/X11/xorg.conf.d/00-keyboard.conf, which is what
+#  `localectl set-x11-keymap` and Anaconda-class installers write. This file is
+#  machine-local (/etc), so it is the installer's job to put a keymap there —
+#  see the cross-scope note in the universal-image review. If it is absent or
+#  has no layout, we print NOTHING and every consumer keeps its own default of
+#  `us`, i.e. exactly the behaviour that shipped before this generator existed.
+#
+#  CONTRACT: generators must be fast, must not block, and must never fail the
+#  boot. This one only reads a file and prints; it exits 0 unconditionally.
+# ─────────────────────────────────────────────────────────────────────────────
+
+XKB_CONF="/etc/X11/xorg.conf.d/00-keyboard.conf"
+
+# Nothing to do (and nothing to break) if no keymap was ever configured.
+[ -r "${XKB_CONF}" ] || exit 0
+
+read_xkb_option() {
+    # $1 = XkbLayout | XkbVariant | XkbModel | XkbOptions
+    sed -n "s/.*Option[[:space:]]\+\"$1\"[[:space:]]\+\"\([^\"]*\)\".*/\1/p" \
+        "${XKB_CONF}" 2>/dev/null | head -n1
+}
+
+layout="$(read_xkb_option XkbLayout || true)"
+
+# A variant/model/options value is only meaningful alongside a layout, so the
+# whole block is gated on the layout being present.
+[ -n "${layout}" ] || exit 0
+
+printf 'XKB_DEFAULT_LAYOUT=%s\n' "${layout}"
+
+variant="$(read_xkb_option XkbVariant || true)"
+[ -n "${variant}" ] && printf 'XKB_DEFAULT_VARIANT=%s\n' "${variant}"
+
+model="$(read_xkb_option XkbModel || true)"
+[ -n "${model}" ] && printf 'XKB_DEFAULT_MODEL=%s\n' "${model}"
+
+options="$(read_xkb_option XkbOptions || true)"
+[ -n "${options}" ] && printf 'XKB_DEFAULT_OPTIONS=%s\n' "${options}"
+
+exit 0
