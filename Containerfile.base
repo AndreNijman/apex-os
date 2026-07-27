@@ -118,15 +118,24 @@ RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
     && dnf5 clean all
 # INSTALL_QML_PREFIX must be RELATIVE — an absolute path gets CMAKE_INSTALL_PREFIX
 # prepended too, and the QML lands in /usr/usr/lib64 where Qt never looks.
+# Pinned to release tags, NOT main. This runs in CI for every base rebuild
+# (including the weekly cron), so tracking upstream HEAD would let an unrelated
+# upstream commit break everyone's image build with no source change here. These
+# are the same versions the COPR packages (qt-support 0.1.0, qtutils 0.1.5) —
+# we are only rebuilding them against Qt 6.10 instead of 6.9.
+ARG HYPR_QT_SUPPORT_TAG=v0.1.0
+ARG HYPR_QTUTILS_TAG=v0.1.5
 RUN set -eux; \
-    git clone --depth 1 https://github.com/hyprwm/hyprland-qt-support /b/qs; \
+    git clone --depth 1 --branch "${HYPR_QT_SUPPORT_TAG}" \
+        https://github.com/hyprwm/hyprland-qt-support /b/qs; \
     cmake -S /b/qs -B /b/qs/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr -DINSTALL_QML_PREFIX=lib64/qt6/qml; \
     cmake --build /b/qs/build -j"$(nproc)"; \
     DESTDIR=/out cmake --install /b/qs/build; \
     cmake --install /b/qs/build
 RUN set -eux; \
-    git clone --depth 1 https://github.com/hyprwm/hyprland-qtutils /b/qu; \
+    git clone --depth 1 --branch "${HYPR_QTUTILS_TAG}" \
+        https://github.com/hyprwm/hyprland-qtutils /b/qu; \
     cmake -S /b/qu -B /b/qu/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr; \
     cmake --build /b/qu/build -j"$(nproc)"; \
