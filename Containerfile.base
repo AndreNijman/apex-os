@@ -87,62 +87,6 @@ RUN set -eux; \
         echo "yazi: built v26.5.6 from git workspace"; \
     else echo "yazi: BUILD FAILED (TUI file manager absent; non-fatal — Thunar remains)"; fi
 
-# ═══ Qt builder — hyprland-qt-support + hyprland-qtutils from source ═══════
-# Hyprland warns at every startup: "Your system does not have hyprland-qtutils
-# installed", and without it CAsyncDialogBox cannot create dialogs and the ANR
-# (application-not-responding) manager will not start. hyprland *recommends* the
-# package, so it should arrive as a weak dep — it does not, and cannot:
-#
-#   solopasha's hyprland-qt-support requires libQt6Core.so.6(Qt_6.9_PRIVATE_API)
-#   while this image ships qt6-qtbase 6.10.3. Qt private-API symbol versions are
-#   matched EXACTLY, so the packaged build is uninstallable here and dnf silently
-#   drops the unsatisfiable recommend. There is no other repo carrying it.
-#
-# So build it against the Qt we actually have. Its own stage, like the Rust one,
-# so cmake/ninja/gcc-c++ and ~1 GB of -devel never reach the shipped image.
-#
-# Two things that are easy to get wrong here:
-#   * hyprutils/hyprlang -devel MUST come from the SAME COPR as the runtime libs.
-#     Fedora ships hyprutils 0.7.1 (libhyprutils.so.6); the desktop stack below
-#     pulls 0.10.0 (so.9) from solopasha, and the Fedora -devel cannot resolve.
-#   * qt6-*-private-devel are required: WaylandClientPrivate depends on
-#     Qt6CorePrivate, and without it cmake fails with a misleading
-#     "config file exists but set _FOUND to FALSE" error.
-FROM quay.io/fedora/fedora-bootc:43 AS qtbuilder
-RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
-    dnf5 -y copr enable solopasha/hyprland; \
-    dnf5 -y install cmake ninja-build gcc-c++ git-core pkgconf \
-        qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel \
-        qt6-qtwayland-devel qt6-qtbase-private-devel qt6-qtdeclarative-private-devel \
-        hyprlang-devel hyprutils-devel >/dev/null \
-    && dnf5 clean all
-# INSTALL_QML_PREFIX must be RELATIVE — an absolute path gets CMAKE_INSTALL_PREFIX
-# prepended too, and the QML lands in /usr/usr/lib64 where Qt never looks.
-# Pinned to release tags, NOT main. This runs in CI for every base rebuild
-# (including the weekly cron), so tracking upstream HEAD would let an unrelated
-# upstream commit break everyone's image build with no source change here. These
-# are the same versions the COPR packages (qt-support 0.1.0, qtutils 0.1.5) —
-# we are only rebuilding them against Qt 6.10 instead of 6.9.
-ARG HYPR_QT_SUPPORT_TAG=v0.1.0
-ARG HYPR_QTUTILS_TAG=v0.1.5
-RUN set -eux; \
-    git clone --depth 1 --branch "${HYPR_QT_SUPPORT_TAG}" \
-        https://github.com/hyprwm/hyprland-qt-support /b/qs; \
-    cmake -S /b/qs -B /b/qs/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/usr -DINSTALL_QML_PREFIX=lib64/qt6/qml; \
-    cmake --build /b/qs/build -j"$(nproc)"; \
-    DESTDIR=/out cmake --install /b/qs/build; \
-    cmake --install /b/qs/build
-RUN set -eux; \
-    git clone --depth 1 --branch "${HYPR_QTUTILS_TAG}" \
-        https://github.com/hyprwm/hyprland-qtutils /b/qu; \
-    cmake -S /b/qu -B /b/qu/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/usr; \
-    cmake --build /b/qu/build -j"$(nproc)"; \
-    DESTDIR=/out cmake --install /b/qu/build; \
-    test -x /out/usr/bin/hyprland-dialog; \
-    test ! -d /out/usr/usr
-
 # ─────────────────────────────────────────────────────────────────────────
 FROM quay.io/fedora/fedora-bootc:43
 
@@ -368,21 +312,68 @@ RUN set -eux; \
     dnf5 -y copr disable errornointernet/quickshell; \
     dnf5 clean all
 
-# hyprland-qtutils, built above against this image's Qt 6.10 (see the qtbuilder
-# stage for why the packaged build cannot be installed). Provides hyprland-dialog,
-# hyprland-donate-screen and hyprland-update-screen, which silences Hyprland's
-# startup warning and — more importantly — makes CAsyncDialogBox and the ANR
-# manager functional. Asserted, because a silently-missing binary here is exactly
-# the failure mode that shipped before.
-COPY --from=qtbuilder /out/ /
+# ── hyprland-qtutils, built HERE against the desktop stack ──────────────────
+# Hyprland warns at every startup without it, and CAsyncDialogBox cannot create
+# dialogs at all — the ANR manager never starts either. hyprland *recommends*
+# the package but it is uninstallable: solopasha's hyprland-qt-support links
+# Qt 6.9 PRIVATE API while this image ships Qt 6.10.3, and private-API symbol
+# versions match exactly. So it is built from source.
+#
+# It is built in THIS stage, not a separate builder, and that is deliberate. A
+# builder starting from bare fedora-bootc resolves hyprutils-devel to FEDORA's
+# 0.7.1 (the COPR does not ship that subpackage) while this image runs 0.10.0
+# from the COPR — so the build linked against different libraries than the
+# target and cmake failed on the Qt private targets. Building where the desktop
+# stack already exists guarantees the versions are the ones actually shipping.
+#
+# Devel packages are installed and removed in the SAME layer, so ~1 GB of Qt
+# headers never reaches the image. Pinned to release tags, not main: this runs
+# on every base rebuild including the weekly cron, and tracking upstream HEAD
+# would let an unrelated commit break everyone's build.
+ARG HYPR_QT_SUPPORT_TAG=v0.1.0
+# Pinned to a COMMIT, not v0.1.5: that tag predates upstream 5ffdfc1
+# "cmake: Added find_package entry for WaylandClientPrivate", without which
+# the build fails against Qt 6.10 with "Target ... links to
+# Qt6::WaylandClientPrivate but the target was not found". Verified: v0.1.5
+# fails and this commit configures cleanly, both against the real desktop stack.
+ARG HYPR_QTUTILS_REF=56d993aced40a9058350d24ff4a7fb4eb961f89b
 RUN set -eux; \
+    dnf5 -y copr enable solopasha/hyprland; \
+    dnf5 -y install cmake ninja-build gcc-c++ git-core pkgconf \
+        qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel \
+        qt6-qtwayland-devel qt6-qtbase-private-devel \
+        qt6-qtdeclarative-private-devel \
+        hyprlang-devel hyprutils-devel; \
+    rpm -q hyprutils-devel qt6-qtbase-devel qt6-qtwayland-devel; \
+    git clone --depth 1 --branch "${HYPR_QT_SUPPORT_TAG}" \
+        https://github.com/hyprwm/hyprland-qt-support /b/qs; \
+    cmake -S /b/qs -B /b/qs/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr -DINSTALL_QML_PREFIX=lib64/qt6/qml; \
+    cmake --build /b/qs/build -j"$(nproc)"; \
+    cmake --install /b/qs/build; \
+    mkdir -p /b/qu; git -C /b/qu init -q; \
+    git -C /b/qu remote add origin https://github.com/hyprwm/hyprland-qtutils; \
+    git -C /b/qu fetch -q --depth 1 origin "${HYPR_QTUTILS_REF}"; \
+    git -C /b/qu checkout -q FETCH_HEAD; \
+    cmake -S /b/qu -B /b/qu/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr; \
+    cmake --build /b/qu/build -j"$(nproc)"; \
+    cmake --install /b/qu/build; \
     for b in hyprland-dialog hyprland-donate-screen hyprland-update-screen; do \
-        command -v "$b" >/dev/null || { echo "FATAL: $b missing from qtbuilder"; exit 1; }; \
+        command -v "$b" >/dev/null || { echo "FATAL: $b missing"; exit 1; }; \
     done; \
     ! ldd /usr/bin/hyprland-dialog | grep 'not found'; \
     test -d /usr/lib64/qt6/qml/org/hyprland/style; \
     test ! -d /usr/usr; \
-    echo "hyprland-qtutils: installed from source, all libs resolve"
+    rm -rf /b; \
+    dnf5 -y remove cmake ninja-build gcc-c++ pkgconf \
+        'qt6-*-devel' 'hypr*-devel' || true; \
+    dnf5 -y copr disable solopasha/hyprland; \
+    dnf5 clean all; \
+    command -v hyprland-dialog; \
+    echo "hyprland-qtutils: built against the shipping Qt and hypr libraries"
+
+
 
 # ── Stage 3: JetBrainsMono Nerd Font ───────────────────────────────────────
 # apex-greet's QML uses the "JetBrainsMono Nerd Font" family for both body text
