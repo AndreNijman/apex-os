@@ -99,6 +99,30 @@ if echo "$CMD" | grep -qw apex.unattended && [ -f /usr/share/apex-installer/allo
   UNATTENDED=1
 fi
 
+# ── Console quieting ────────────────────────────────────────────────────────
+# whiptail draws directly on the console, so any kernel printk lands ON TOP of
+# the dialog and the installer becomes unreadable — reproduced on an Acer Aspire,
+# where audit records and serial-getty churn scribbled over the welcome box.
+#
+# The kernel cmdline carries loglevel=3 audit=0, but relying on that alone means
+# one wrong karg silently makes the installer unusable again. Belt and braces:
+# drop the console log level for as long as the TUI is up, and put it back on
+# every exit path so a post-mortem or a dropped shell still shows kernel output.
+PRINTK_SAVED=""
+quiet_console() {
+  [ -w /proc/sys/kernel/printk ] || return 0
+  PRINTK_SAVED="$(cat /proc/sys/kernel/printk 2>/dev/null || true)"
+  # 1 = KERN_ALERT and above only; panics still reach the screen.
+  echo 1 > /proc/sys/kernel/printk 2>/dev/null || true
+  return 0
+}
+restore_console() {
+  [ -n "$PRINTK_SAVED" ] || return 0
+  [ -w /proc/sys/kernel/printk ] || return 0
+  printf '%s\n' "$PRINTK_SAVED" > /proc/sys/kernel/printk 2>/dev/null || true
+  return 0
+}
+
 # Release anything WE mounted. Without this, a failure or Ctrl+C left
 # /run/apex-target — and the shared ESP mounted under it — in place, so the next
 # run refused with "currently mounted", stranding the user on a half-installed
@@ -114,6 +138,7 @@ unmount_target() {
 # fail-loud: the exact reason, the TRUE state of the disk, the last log lines,
 # and how to get a shell. Never claims "nothing was written" once it has been.
 die() {
+  restore_console
   log "FATAL: $1"
   # Always release our own mounts first: leaving /run/apex-target (and the shared
   # ESP under it) mounted makes the very next run refuse with "currently
@@ -185,12 +210,16 @@ save_log_to_esp() {
 # output — leaving a half-wiped disk and no explanation.
 on_signal() {
   trap - INT TERM HUP ERR
+  restore_console
   echo
   echo "Interrupted by signal."
   die "Interrupted (Ctrl+C or shutdown signal)."
 }
 trap on_signal INT TERM HUP
 trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
+
+# Quiet the console now that the traps that restore it are in place.
+quiet_console
 
 # ── preflight ────────────────────────────────────────────────────────────────
 [ "$(id -u)" = 0 ] || die "apex-install must run as root."

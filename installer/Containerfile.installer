@@ -21,7 +21,19 @@ FROM registry.fedoraproject.org/fedora:43
 # grub2-tools-extra/-efi-x64-modules so build-live-iso.sh can produce the ISO's
 # UEFI grub binary with this same container (host may lack grub2-mkstandalone);
 # NetworkManager for first-boot net.
+# linux-firmware is listed EXPLICITLY because install_weak_deps=False is set
+# below: firmware is only a *weak* dependency of the kernel, so it was silently
+# excluded and the live environment shipped with /lib/firmware absent entirely
+# (0 files). Without GPU firmware i915/amdgpu cannot initialise, KMS fails, and
+# the installer black-screens on real hardware — reproduced on an Acer Aspire,
+# which only booted with nomodeset. QEMU never caught it because its virtio/bochs
+# GPU needs no firmware, and the ThinkPad install was done from a running system
+# rather than this ISO, so this path was never exercised on metal.
+# It costs ~1 GB of ISO, which is the correct trade for an installer that has to
+# boot on unknown hardware. The INSTALLED image already has firmware; this gap
+# was only ever in the live environment.
 RUN dnf -y install --setopt=install_weak_deps=False \
+        linux-firmware \
         kernel systemd systemd-udev dracut dracut-live device-mapper \
         podman skopeo \
         newt ncurses util-linux coreutils bash shadow-utils \
@@ -53,7 +65,8 @@ COPY apex-installer.service /usr/lib/systemd/system/apex-installer.service
 RUN systemctl set-default multi-user.target \
     && systemctl enable apex-installer.service \
     && systemctl enable NetworkManager.service \
-    && systemctl mask getty@tty1.service
+    && systemctl mask getty@tty1.service \
+    && systemctl mask serial-getty@ttyS0.service
 
 # Live-env-only root login (tty2 / serial) for rescue & debugging. This is the
 # throwaway live session, not the installed system.
