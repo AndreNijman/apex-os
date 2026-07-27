@@ -1,37 +1,32 @@
 # APEX-OS system profile: amd-zen
 #
 # CPU-class profile for AMD Zen parts driven by amd-pstate-epp (EPP active
-# mode). Selected when the CPU vendor is AMD and the scaling driver is
-# amd-pstate/amd-pstate-epp, unless a device profile (e.g. thinkpad-l16-g2)
-# overrides it.
+# mode). Selected when the CPU vendor is AMD, unless a device profile overrides
+# it.
 #
-# The EPP table mirrors the proven L16 "powermode" mapping:
-#   ultra-max/ultra/performance -> performance governor, top EPP
-#   balanced/power-saver        -> powersave governor, progressively softer EPP
-# amd-pstate-epp exposes exactly two governors (performance, powersave); the
-# EPP string is what actually grades performance within each governor.
+# The class deliberately makes no assumption beyond "AMD": an older Zen box on
+# plain acpi-cpufreq, or amd-pstate in passive/guided mode, gets the same table
+# and the writer drops the knobs that part does not publish. amd-pstate-epp
+# exposes exactly two governors (performance, powersave); the EPP string is what
+# actually grades performance within each governor, and where EPP is absent the
+# governor alone still does the right thing.
+#
+# No [ryzenadj] table and no power-limit tuning of any kind. Package power
+# limits are per-SKU, per-chassis and per-cooling-solution — a class profile
+# cannot know a safe number, and asserting one from a class profile would push
+# a laptop past its thermal envelope.
 
 id = "amd-zen"
 kind = "class"
-description = "AMD Zen (amd-pstate-epp)"
+description = "AMD Zen (amd-pstate / acpi-cpufreq)"
 
 [defaults]
 ac = "performance"
 battery = "balanced"
 
-[tiers.ultra-max]
-governor = "performance"
-epp = "performance"
-platform_profile = "performance"
-
-[tiers.ultra]
-governor = "performance"
-epp = "performance"
-platform_profile = "performance"
-
 [tiers.performance]
 governor = "performance"
-epp = "balance_performance"
+epp = "performance"
 platform_profile = "performance"
 
 [tiers.balanced]

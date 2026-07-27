@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::tier::Action;
 
@@ -33,8 +33,14 @@ pub trait SysWriter: Send + Sync {
     }
 }
 
-/// Writes real sysfs and execs `ryzenadj`. When `dry_run` is set, it logs the
+/// Writes real sysfs and runs `nvidia-smi`. When `dry_run` is set, it logs the
 /// intended effect and does nothing — the same switch `APEXD_DRY_RUN=1` flips.
+///
+/// Every write is capability-checked first: absent attributes are skipped, and
+/// values the running kernel does not advertise are substituted from a ladder
+/// of near-equivalents (see [`governor_ladder`], [`epp_ladder`],
+/// [`platform_profile_ladder`]) rather than pushed at a driver that will refuse
+/// them.
 pub struct RealWriter {
     dry_run: bool,
     sys_root: PathBuf,
@@ -116,22 +122,25 @@ impl RealWriter {
 
     /// Write a value to a sysfs attribute if it exists. A missing attribute is
     /// not an error (the profile expresses full intent; hardware may not have
-    /// every knob).
+    /// every knob), and neither is a driver that rejects the write.
+    ///
+    /// A rejection used to be fatal, which made the whole tier plan abort
+    /// part-applied on perfectly ordinary hardware — `intel_pstate` in active
+    /// mode refuses an `energy_performance_preference` write while the
+    /// `performance` governor is selected, for instance. Tolerating it is what
+    /// lets one plan run everywhere.
     fn write_if_present(&self, path: &Path, value: &str) -> Result<()> {
-        if !path.exists() {
-            eprintln!("apexd: skip (absent) {} <- {value}", path.display());
-            return Ok(());
-        }
-        if self.dry_run {
-            eprintln!("apexd: [dry-run] {} <- {value}", path.display());
-            return Ok(());
-        }
-        std::fs::write(path, value)
-            .with_context(|| format!("writing {} <- {value}", path.display()))?;
+        self.write_tolerant(path, value, "sysfs");
         Ok(())
     }
 
     /// Every cpufreq policy directory under the sysfs root.
+    ///
+    /// Prefers the per-policy directories (`cpufreq/policy*`), which every
+    /// modern driver registers, and falls back to the per-CPU `cpuN/cpufreq`
+    /// links that older kernels and some ARM `cpufreq-dt` setups present
+    /// instead. A machine with no cpufreq at all (a VM with no scaling driver)
+    /// simply gets an empty list and a logged skip.
     fn cpufreq_policies(&self) -> Vec<PathBuf> {
         let base = self.sys_root.join("devices/system/cpu/cpufreq");
         let mut out = Vec::new();
@@ -147,46 +156,96 @@ impl RealWriter {
                 }
             }
         }
+        if out.is_empty() {
+            for cpu in crate::topology::online_cpus(&self.sys_root) {
+                let p = self
+                    .sys_root
+                    .join(format!("devices/system/cpu/cpu{cpu}/cpufreq"));
+                if p.is_dir() {
+                    out.push(p);
+                }
+            }
+        }
         out.sort();
+        out.dedup();
         out
     }
 
-    fn write_all_policies(&self, attr: &str, value: &str) -> Result<()> {
+    /// Write a per-policy attribute, choosing the closest value the policy says
+    /// it accepts.
+    ///
+    /// `choices_attr` names the sibling attribute that lists the legal values
+    /// (`scaling_available_governors`,
+    /// `energy_performance_available_preferences`). When it is absent the value
+    /// is attempted as-is; when it is present the ladder is walked and the
+    /// first advertised candidate wins. This is the whole reason a
+    /// `performance`/`powersave` table works on `acpi-cpufreq`, `intel_pstate`,
+    /// `amd-pstate` and ARM `cpufreq-dt` without per-driver special cases.
+    fn write_policy_attr(&self, attr: &str, choices_attr: &str, value: &str, ladder: &[&str]) {
         let policies = self.cpufreq_policies();
         if policies.is_empty() {
             eprintln!("apexd: no cpufreq policies found; skip {attr} <- {value}");
+            return;
         }
         for p in policies {
-            self.write_if_present(&p.join(attr), value)?;
+            let target = p.join(attr);
+            if !target.exists() {
+                eprintln!("apexd: skip (absent) {} <- {value}", target.display());
+                continue;
+            }
+            let choices = read_tokens(&p.join(choices_attr));
+            let chosen = match &choices {
+                // No list published: the driver takes whatever it takes.
+                None => Some(value.to_string()),
+                Some(list) => pick_supported(value, ladder, list),
+            };
+            match chosen {
+                Some(v) => {
+                    if v != value {
+                        eprintln!(
+                            "apexd: {} does not offer '{value}'; using '{v}' instead",
+                            target.display()
+                        );
+                    }
+                    self.write_tolerant(&target, &v, attr);
+                }
+                None => eprintln!(
+                    "apexd: skip ({attr} offers none of {value}/{}) {}",
+                    ladder.join("/"),
+                    target.display()
+                ),
+            }
         }
-        Ok(())
     }
 
-    fn run_ryzenadj(
-        &self,
-        stapm_mw: u32,
-        fast_mw: u32,
-        slow_mw: u32,
-        tctl_max: Option<u32>,
-    ) -> Result<()> {
-        let mut args = vec![
-            format!("--stapm-limit={stapm_mw}"),
-            format!("--fast-limit={fast_mw}"),
-            format!("--slow-limit={slow_mw}"),
-        ];
-        if let Some(t) = tctl_max {
-            args.push(format!("--tctl-temp={t}"));
-        }
-        if self.dry_run {
-            eprintln!("apexd: [dry-run] ryzenadj {}", args.join(" "));
+    /// Write the ACPI platform profile, mapped onto what the firmware offers.
+    /// `platform_profile_choices` is wildly vendor-specific — `low-power
+    /// balanced performance` on one machine, `quiet balanced balanced-
+    /// performance performance` on the next, `cool quiet performance` on an
+    /// older ThinkPad — so the requested value is matched through a ladder of
+    /// synonyms rather than written blind.
+    fn write_platform_profile(&self, value: &str) -> Result<()> {
+        let path = self.sys_root.join("firmware/acpi/platform_profile");
+        if !path.exists() {
+            eprintln!("apexd: skip (absent) {} <- {value}", path.display());
             return Ok(());
         }
-        let status = std::process::Command::new("ryzenadj")
-            .args(&args)
-            .status()
-            .context("spawning ryzenadj")?;
-        if !status.success() {
-            anyhow::bail!("ryzenadj exited with {status}");
+        let choices = read_tokens(&self.sys_root.join("firmware/acpi/platform_profile_choices"));
+        let chosen = match &choices {
+            None => Some(value.to_string()),
+            Some(list) => pick_supported(value, platform_profile_ladder(value), list),
+        };
+        match chosen {
+            Some(v) => {
+                if v != value {
+                    eprintln!("apexd: platform_profile has no '{value}'; using '{v}' instead");
+                }
+                self.write_tolerant(&path, &v, "platform_profile");
+            }
+            None => eprintln!(
+                "apexd: skip (platform_profile offers none of the '{value}' synonyms) {}",
+                path.display()
+            ),
         }
         Ok(())
     }
@@ -336,12 +395,25 @@ impl RealWriter {
 impl SysWriter for RealWriter {
     fn apply(&self, action: &Action) -> Result<()> {
         match action {
-            Action::Governor(g) => self.write_all_policies("scaling_governor", g),
-            Action::Epp(e) => self.write_all_policies("energy_performance_preference", e),
-            Action::PlatformProfile(p) => self.write_if_present(
-                &self.sys_root.join("firmware/acpi/platform_profile"),
-                p,
-            ),
+            Action::Governor(g) => {
+                self.write_policy_attr(
+                    "scaling_governor",
+                    "scaling_available_governors",
+                    g,
+                    governor_ladder(g),
+                );
+                Ok(())
+            }
+            Action::Epp(e) => {
+                self.write_policy_attr(
+                    "energy_performance_preference",
+                    "energy_performance_available_preferences",
+                    e,
+                    epp_ladder(e),
+                );
+                Ok(())
+            }
+            Action::PlatformProfile(p) => self.write_platform_profile(p),
             Action::ChargeThresholds {
                 start,
                 stop,
@@ -350,22 +422,11 @@ impl SysWriter for RealWriter {
             } => {
                 // Stop threshold last: some ECs reject a start >= stop, and
                 // writing stop first widens the window before narrowing.
-                self.write_if_present(Path::new(end_path), &stop.to_string())?;
-                self.write_if_present(Path::new(start_path), &start.to_string())?;
-                Ok(())
-            }
-            Action::RyzenAdj {
-                stapm_mw,
-                fast_mw,
-                slow_mw,
-                tctl_max,
-            } => self.run_ryzenadj(*stapm_mw, *fast_mw, *slow_mw, *tctl_max),
-            // The reapply loop lives in the daemon; at the writer level there
-            // is nothing to undo (limits decay on their own once we stop
-            // re-asserting them).
-            Action::StopRyzenAdj => {
-                if self.dry_run {
-                    eprintln!("apexd: [dry-run] stop ryzenadj loop");
+                if let Some(end_path) = end_path {
+                    self.write_if_present(Path::new(end_path), &stop.to_string())?;
+                }
+                if let Some(start_path) = start_path {
+                    self.write_if_present(Path::new(start_path), &start.to_string())?;
                 }
                 Ok(())
             }
@@ -445,6 +506,82 @@ impl SysWriter for RealWriter {
 
     fn is_live(&self) -> bool {
         !self.dry_run
+    }
+}
+
+// ── capability probing: what does this kernel actually accept? ───────────────
+
+/// Read a whitespace-separated sysfs list (`scaling_available_governors` and
+/// friends). `None` when the attribute does not exist — which means "the driver
+/// publishes no list", not "the list is empty".
+fn read_tokens(path: &Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(
+        text.split_whitespace()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
+}
+
+/// The first of `value` then `ladder` that appears in `available`.
+fn pick_supported(value: &str, ladder: &[&str], available: &[String]) -> Option<String> {
+    let has = |c: &str| available.iter().any(|a| a.eq_ignore_ascii_case(c));
+    if has(value) {
+        return Some(value.to_string());
+    }
+    ladder
+        .iter()
+        .find(|c| has(c))
+        .map(|c| (*c).to_string())
+}
+
+/// Fallbacks for a `scaling_governor` value.
+///
+/// `performance` and `powersave` are near-universal, but they are not
+/// guaranteed: a kernel can be built without `CPU_FREQ_GOV_POWERSAVE`, and some
+/// ARM defconfigs ship only `schedutil` plus `performance`. Substituting the
+/// nearest governor in the same direction beats writing `EINVAL` at the driver.
+fn governor_ladder(value: &str) -> &'static [&'static str] {
+    match value.to_ascii_lowercase().as_str() {
+        "performance" => &["performance", "schedutil", "ondemand"],
+        "powersave" => &["powersave", "schedutil", "conservative", "ondemand"],
+        "schedutil" => &["schedutil", "ondemand", "powersave"],
+        "ondemand" => &["ondemand", "schedutil", "conservative"],
+        "conservative" => &["conservative", "ondemand", "schedutil", "powersave"],
+        _ => &["schedutil", "ondemand", "powersave"],
+    }
+}
+
+/// Fallbacks for an `energy_performance_preference` value.
+///
+/// The four canonical strings (`performance`, `balance_performance`,
+/// `balance_power`, `power`) are what `intel_pstate` and `amd-pstate` publish,
+/// but a driver in a different operating mode may offer only a subset, and
+/// `default` is always a safe landing spot.
+fn epp_ladder(value: &str) -> &'static [&'static str] {
+    match value.to_ascii_lowercase().as_str() {
+        "performance" => &["performance", "balance_performance", "default"],
+        "balance_performance" => &["balance_performance", "performance", "default"],
+        "balance_power" => &["balance_power", "balance_performance", "default"],
+        "power" => &["power", "balance_power", "default"],
+        _ => &["default", "balance_performance"],
+    }
+}
+
+/// Synonyms for an ACPI `platform_profile` value, ordered by how close they are
+/// to the intent. The vocabulary differs per vendor: `low-power` on one
+/// machine, `quiet` or `cool` on another, and `balanced-performance` sits
+/// between `balanced` and `performance` on newer firmware.
+fn platform_profile_ladder(value: &str) -> &'static [&'static str] {
+    match value.to_ascii_lowercase().as_str() {
+        "performance" => &["performance", "balanced-performance", "balanced"],
+        "balanced-performance" => &["balanced-performance", "performance", "balanced"],
+        "balanced" => &["balanced", "balanced-performance", "quiet", "performance"],
+        "low-power" => &["low-power", "quiet", "cool", "balanced"],
+        "quiet" => &["quiet", "low-power", "cool", "balanced"],
+        "cool" => &["cool", "quiet", "low-power", "balanced"],
+        _ => &["balanced"],
     }
 }
 

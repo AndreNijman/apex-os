@@ -109,7 +109,7 @@ fn machine(tag: &str) -> Fixture {
 
 fn katana_cfg(f: &Fixture) -> GameModeConfig {
     GameModeConfig {
-        tier: Tier::Ultra,
+        tier: Tier::Performance,
         fan_mode: Some("max".into()),
         cpuset: "p-cores".into(),
         cgroup: f.abs("sys/fs/cgroup/apex-game"),
