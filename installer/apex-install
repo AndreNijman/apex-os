@@ -284,7 +284,24 @@ create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefi
   statevar=$(dirname "$(dirname "$deploy")")/var
   mount --bind "$statevar" "$deploy/var" 2>>"$LOG" \
     || die "$pfx: bind-mounting the stateroot var failed."
-  useradd --root "$deploy" -m -G wheel -s /bin/bash "$user" 2>>"$LOG" \
+  # zsh is the APEX default shell (with starship, seeded at first login). Fall
+  # back to bash if the image somehow lacks zsh — a user with a nonexistent
+  # login shell cannot log in at all, which is a far worse failure than bash.
+  # Written as an `if` for legibility and to avoid the `||`/`&&` precedence trap
+  # (both operators are left-associative, so the bare form parses as
+  # `(A || B) && x=y` — correct here, but only by accident).
+  #
+  # NOTE: the bare form does NOT trip this script's ERR trap, contrary to what
+  # you might expect from the header notes. Measured: with both tests failing,
+  # bash exempts every command in a `&&`/`||` list except the one after the
+  # final operator, and that assignment never runs. Recorded so nobody "fixes"
+  # a non-problem here later.
+  ushell=/bin/bash
+  if [ -x "$deploy/bin/zsh" ] || [ -x "$deploy/usr/bin/zsh" ]; then
+    ushell=/bin/zsh
+  fi
+  log "creating $user with login shell $ushell"
+  useradd --root "$deploy" -m -G wheel -s "$ushell" "$user" 2>>"$LOG" \
     || { umount "$deploy/var" 2>/dev/null; die "$pfx: useradd failed for $user (see $LOG)."; }
   echo "$user:$pass" | chpasswd --root "$deploy" 2>>"$LOG" \
     || { umount "$deploy/var" 2>/dev/null; die "$pfx: setting the password failed (see $LOG)."; }

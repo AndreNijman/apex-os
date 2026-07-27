@@ -838,6 +838,52 @@ RUN set -eux; \
     else echo "sing-box: fetch FAILED (VPN tab degraded; non-fatal)"; fi; \
     rm -rf /tmp/sb.tgz /tmp/sing-box-*-linux-amd64
 
+# ── Stage 5b2: zsh + starship as the default interactive shell ─────────────
+# zsh with the packaged plugins, plus the modern CLI tools the shipped .zshrc
+# aliases to. Every alias is guarded by `command -v`, so the config still works
+# in a rescue shell that has none of them — but on a real install they are here.
+#
+# NO framework (oh-my-zsh etc). A framework is a second config system with its
+# own update path and a slow startup; everything APEX needs is a zsh builtin or
+# one small package.
+RUN set -eux; \
+    dnf5 -y install \
+        zsh zsh-autosuggestions zsh-syntax-highlighting \
+        eza bat zoxide fzf ripgrep fd-find; \
+    dnf5 clean all
+
+# starship is NOT packaged in Fedora, and the COPRs offering it are unvetted
+# personal repos. Take the official static musl release, pinned by version AND
+# verified against its published sha256 — an unverified curl|tar into /usr/bin
+# is a supply-chain hole, not a convenience.
+ARG STARSHIP_VERSION=v1.26.0
+ARG STARSHIP_SHA256=b7c232b0e8249d8e55a40beb79c5c43a7d370f3f9408bd215deb0170daeaadf3
+RUN set -eux; \
+    url="https://github.com/starship/starship/releases/download/${STARSHIP_VERSION}/starship-x86_64-unknown-linux-musl.tar.gz"; \
+    curl -fsSL "$url" -o /tmp/starship.tgz; \
+    echo "${STARSHIP_SHA256}  /tmp/starship.tgz" | sha256sum -c -; \
+    tar xzf /tmp/starship.tgz -C /usr/bin starship; \
+    chmod 0755 /usr/bin/starship; \
+    rm -f /tmp/starship.tgz; \
+    starship --version
+
+# Templates seeded per-user by the provisioner (NOT /etc/skel: the provisioner
+# has to substitute the edition accent, and skel cannot).
+COPY files/desktop/zsh/zshrc            /usr/share/apex/zsh/zshrc
+COPY files/desktop/starship/starship.toml /usr/share/apex/starship/starship.toml
+
+# zsh becomes the default login shell for accounts created from here on. This
+# sets the DEFAULT in useradd's config rather than rewriting existing accounts —
+# changing a shell out from under an existing user is not ours to do.
+RUN set -eux; \
+    sed -i 's|^SHELL=.*|SHELL=/bin/zsh|' /etc/default/useradd; \
+    grep -q '^SHELL=/bin/zsh' /etc/default/useradd; \
+    grep -q '^/bin/zsh$' /etc/shells || echo /bin/zsh >> /etc/shells; \
+    test -x /usr/bin/starship; \
+    test -s /usr/share/apex/zsh/zshrc; \
+    test -s /usr/share/apex/starship/starship.toml; \
+    zsh -n /usr/share/apex/zsh/zshrc
+
 # ── Stage 5c: APEX Shell first-boot provisioner (per-user) ─────────────────
 # Clones APEX Shell into each user's $HOME on first login + seeds config; enabled
 # globally so it runs for every user.

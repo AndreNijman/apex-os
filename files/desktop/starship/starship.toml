@@ -1,0 +1,153 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX-OS starship prompt
+#
+#  @ACCENT@ is substituted per-edition by apex-shell-firstrun: chartreuse for
+#  Daily, gold for Gaming, matching docs/branding.md. The prompt is part of the
+#  product identity, so it uses the same accent as the greeter, the boot splash
+#  and the installer rather than picking its own.
+#
+#  DELIBERATELY NOT the default starship look. The stock preset is a rainbow
+#  powerline — the visual equivalent of a default. This is the APEX direction:
+#  industrial, mono, one accent, information where you need it and nowhere else.
+#
+#  Two lines on purpose: the command always starts at the same column no matter
+#  how deep the path or how long the branch name, so typing never jumps around.
+# ─────────────────────────────────────────────────────────────────────────────
+
+format = """
+$directory$git_branch$git_status$nix_shell$container
+$character"""
+
+right_format = "$cmd_duration$status$jobs$time"
+
+add_newline = true
+command_timeout = 800
+
+# ── prompt character ─────────────────────────────────────────────────────────
+# A single heavy angle. Accent when the last command succeeded, danger red when
+# it did not — the state you actually need at a glance, encoded in colour rather
+# than an extra symbol.
+[character]
+success_symbol = "[❯](bold @ACCENT@)"
+error_symbol   = "[❯](bold #FF5C5C)"
+vimcmd_symbol  = "[❮](bold @ACCENT@)"
+
+# ── location ─────────────────────────────────────────────────────────────────
+[directory]
+style              = "bold @ACCENT@"
+truncation_length  = 4
+truncate_to_repo   = true
+truncation_symbol  = "…/"
+read_only          = "  ro"
+read_only_style    = "#FF5C5C"
+home_symbol        = "~"
+
+# ── git ──────────────────────────────────────────────────────────────────────
+# Dim: which branch you are on matters, but it is context, not the subject.
+[git_branch]
+symbol = " "
+style  = "#8A93A6"
+format = "[on ](#5A6272)[$symbol$branch]($style)"
+
+[git_status]
+style      = "#E5C07B"
+format     = "[ $all_status$ahead_behind]($style)"
+conflicted = "!${count}"
+ahead      = "↑${count}"
+behind     = "↓${count}"
+diverged   = "↕${ahead_count}/${behind_count}"
+untracked  = "?${count}"
+stashed    = "*${count}"
+modified   = "~${count}"
+staged     = "+${count}"
+renamed    = "»${count}"
+deleted    = "-${count}"
+
+# ── right side: only things that are true ────────────────────────────────────
+[cmd_duration]
+min_time            = 2000
+style               = "#8A93A6"
+format              = "[$duration]($style)"
+show_milliseconds   = false
+
+[status]
+disabled          = false
+style             = "#FF5C5C"
+format            = "[ $status]($style)"
+map_symbol        = false
+pipestatus        = true
+
+[jobs]
+style  = "#E5C07B"
+format = "[ $number⌁]($style)"
+number_threshold = 1
+symbol_threshold = 1
+
+[time]
+disabled    = false
+style       = "#5A6272"
+format      = "[ $time]($style)"
+time_format = "%H:%M"
+
+# ── containers / toolboxes ───────────────────────────────────────────────────
+# APEX-OS is image-based and distrobox is baked in, so knowing you are inside a
+# container is genuinely load-bearing here — a `dnf install` in the wrong place
+# is a confusing five minutes.
+[container]
+style  = "#E5C07B"
+format = "[⬢ $name]($style) "
+
+[nix_shell]
+style  = "#8A93A6"
+format = "[❄ $name]($style) "
+
+# ── everything else off ──────────────────────────────────────────────────────
+# A prompt is not a dashboard. Language/toolchain versions are a `--version`
+# away and mostly noise; they are off by default and easy to re-enable.
+[username]
+disabled = true
+
+[hostname]
+disabled = true
+
+[package]
+disabled = true
+
+[rust]
+disabled = true
+
+[python]
+disabled = true
+
+[nodejs]
+disabled = true
+
+[golang]
+disabled = true
+
+[java]
+disabled = true
+
+[ruby]
+disabled = true
+
+[php]
+disabled = true
+
+[docker_context]
+disabled = true
+
+[aws]
+disabled = true
+
+[gcloud]
+disabled = true
+
+[kubernetes]
+disabled = true
+
+[memory_usage]
+disabled = true
+
+[battery]
+disabled = true
