@@ -205,9 +205,26 @@ RUN set -eux; \
 # post-transaction, but re-assert it) and regenerate the initramfs with a
 # generic (non-hostonly) dracut, since the %posttrans one did not complete.
 # Then HARD-VERIFY both vmlinuz and initramfs exist. Stamp the kver to
-# /usr/lib/apex-kver so the Gaming akmod stage can read it, and drop
-# serial-console kargs so headless QEMU / CI boots are observable (harmless on
-# real hardware with no serial port).
+# /usr/lib/apex-kver so the Gaming akmod stage can read it.
+#
+# ── Serial console: OPT-IN, not default ────────────────────────────────────
+# This image previously shipped `console=ttyS0,115200 console=tty0` to every
+# install. That karg exists for headless QEMU / CI observability, and it is the
+# wrong default for a distro strangers install on arbitrary laptops:
+#
+#   * On any machine whose firmware exposes a UART (docking stations, many
+#     business laptops, most desktop boards), the kernel really does route
+#     printk to it and every boot pays a 115200-baud serialisation cost.
+#   * systemd's getty generator spawns serial-getty@ttyS0 off the karg; the
+#     unit is masked below, but that is papering over a karg we should not be
+#     setting on user hardware in the first place.
+#   * The benefit is CI-only and the cost on unknown hardware cannot be
+#     verified from here — so the default must be "off".
+#
+# CI opts back in with `--build-arg APEX_SERIAL_CONSOLE=1`. The
+# serial-getty@ttyS0 mask stays UNCONDITIONAL further down: it is free
+# insurance for users whose firmware exposes a UART for other reasons.
+ARG APEX_SERIAL_CONSOLE=0
 RUN set -eux; \
     KVER="$(basename "$(ls -d /usr/lib/modules/*cachyos*)")"; \
     echo "CachyOS kver: ${KVER}"; \
@@ -221,8 +238,72 @@ RUN set -eux; \
     test -s "/usr/lib/modules/${KVER}/vmlinuz"; \
     printf '%s\n' "${KVER}" > /usr/lib/apex-kver; \
     mkdir -p /usr/lib/bootc/kargs.d; \
-    printf 'kargs = ["console=ttyS0,115200", "console=tty0"]\n' \
-        > /usr/lib/bootc/kargs.d/10-apex-serial.toml
+    if [ "${APEX_SERIAL_CONSOLE}" = "1" ]; then \
+        printf 'kargs = ["console=ttyS0,115200", "console=tty0"]\n' \
+            > /usr/lib/bootc/kargs.d/10-apex-serial.toml; \
+        echo "serial console: ENABLED (APEX_SERIAL_CONSOLE=1 — CI/QEMU build)"; \
+    else \
+        rm -f /usr/lib/bootc/kargs.d/10-apex-serial.toml; \
+        echo "serial console: disabled (default; pass --build-arg APEX_SERIAL_CONSOLE=1 for CI)"; \
+    fi
+
+# ── Stage 1c: hardware-enablement firmware Fedora's weak deps DO NOT pull ──
+# THE BUG THIS FIXES: `linux-firmware` Recommends exactly 13 subpackages
+# (amd-gpu, amd-ucode, atheros, brcmfmac, cirrus-audio, intel-audio, intel-gpu,
+# mt7xxx, nvidia-gpu, nxpwireless, qcom-wwan, realtek, tiwilink) and NOTHING
+# recommends the rest. Fedora ships the remainder only through the
+# @hardware-support COMPS GROUP, which this image never installs because it
+# installs individual packages. Verified against fedora:43:
+#   `dnf repoquery --recommends linux-firmware`  → the 13 above, and no more
+#   `dnf group info hardware-support`            → the full default list
+#   `dnf repoquery --whatrecommends alsa-sof-firmware` → EMPTY
+# and verified against the built image:
+#   `find /usr/lib/firmware -name 'iwlwifi*'` → 0 files
+#   `find /usr/lib/firmware -iname '*sof*'`   → 0 files
+#   /usr/share/alsa/ucm2                      → did not exist
+# (note the path: modern iwlwifi firmware lives under intel/iwlwifi/, not at
+# the top level — check both before concluding anything about this.)
+#
+# What that meant for anyone who is not the developer:
+#   * iwlwifi-{dvm,mvm,mld}-firmware — Intel Wi-Fi. mvm alone covers 7260
+#     through AX211, i.e. the single most common laptop Wi-Fi family there is;
+#     mld covers Wi-Fi 7 (BE200/BE201). Without them the driver probes, finds
+#     no firmware and the machine has NO WIRELESS NETWORKING. On a laptop with
+#     no Ethernet port that is an unrecoverable first boot.
+#   * alsa-sof-firmware — the Sound Open Firmware DSP images every Intel
+#     laptop since ~Tiger Lake and every AMD ACP laptop (Rembrandt/Phoenix)
+#     needs. Without it there is NO AUDIO AT ALL, not even a fallback card.
+#   * alsa-ucm — the UCM2 use-case profiles ALSA/PipeWire need to route those
+#     codecs. /usr/share/alsa/ucm2 did not exist in the image. Nothing in
+#     Fedora recommends it either (verified: --whatrecommends is empty).
+#   * intel-vsc-firmware — the Visual Sensing Controller on newer Intel
+#     laptops; without it the MIPI/IPU6 webcam never enumerates.
+#   * usb_modeswitch — flips USB WWAN/LTE sticks out of their fake-CD mode.
+#
+# Installed STRICT (no --skip-unavailable): every name here was verified to
+# resolve in fedora:43, and a firmware package silently vanishing is exactly
+# the class of regression that shipped a no-Wi-Fi image. The long tail of
+# legacy/rare radios below is best-effort — cheap to carry, never worth
+# aborting a build for. Own transaction, `dnf5 clean all`, per the layering
+# discipline at the top of this file.
+RUN set -eux; \
+    dnf5 -y install \
+        alsa-sof-firmware alsa-ucm alsa-utils \
+        iwlwifi-dvm-firmware iwlwifi-mvm-firmware iwlwifi-mld-firmware \
+        iwlegacy-firmware intel-vsc-firmware \
+        libertas-firmware b43-fwcutter b43-openfwwf \
+        usb_modeswitch usb_modeswitch-data; \
+    dnf5 -y install --skip-unavailable \
+        mediatek-firmware qcom-firmware qcom-accel-firmware \
+        atmel-firmware zd1211-firmware; \
+    test -n "$(find /usr/lib/firmware -name 'iwlwifi*' -print -quit)" \
+        || { echo "FATAL: no iwlwifi firmware landed — Intel Wi-Fi would be dead"; exit 1; }; \
+    test -d /usr/lib/firmware/intel/sof \
+        || { echo "FATAL: no SOF firmware — laptop audio would be dead"; exit 1; }; \
+    test -d /usr/share/alsa/ucm2 \
+        || { echo "FATAL: no ALSA UCM2 profiles — codec routing would be broken"; exit 1; }; \
+    echo "firmware: iwlwifi $(find /usr/lib/firmware -name 'iwlwifi*' | wc -l) files, SOF + UCM2 present"; \
+    dnf5 clean all
 
 # ── Stage 1b: Secure Boot — sign the kernel with the APEX MOK ──────────────
 # The CachyOS kernel comes from a COPR and is UNSIGNED (verified: PE certificate
