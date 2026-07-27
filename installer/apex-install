@@ -99,6 +99,12 @@ if echo "$CMD" | grep -qw apex.unattended && [ -f /usr/share/apex-installer/allo
   UNATTENDED=1
 fi
 
+# NODIALOG: no whiptail is on screen, so every prompt must be skipped and every
+# outcome reported machine-readably instead. True for CI/unattended AND for the
+# graphical front end, which drives this engine with --headless and parses
+# stdout. Set properly further down, once HEADLESS has been parsed.
+NODIALOG=0
+
 # ── Console quieting ────────────────────────────────────────────────────────
 # whiptail draws directly on the console, so any kernel printk lands ON TOP of
 # the dialog and the installer becomes unreadable — reproduced on an Acer Aspire,
@@ -169,8 +175,9 @@ $others"
   else
     state="Nothing was written. $others"
   fi
-  if [ "$UNATTENDED" = 1 ]; then
-    # Both streams on purpose: the stdout copy is what the QEMU/CI serial capture greps.
+  if [ "${NODIALOG:-0}" = 1 ]; then
+    # Both streams on purpose: the stdout copy is what the QEMU/CI serial capture
+    # and the graphical front end read.
     echo "APEX-INSTALL-FAILED: $1" >&2
     echo "APEX-INSTALL-FAILED: $1"
     exit 1
@@ -239,6 +246,39 @@ fi
 # the TARGET's own setfiles+policy (the live env runs selinux=0, so every file
 # (re)written here has no label — and the installed system enforces policy:
 # greetd/polkitd get denied on an unlabeled /etc/passwd and login breaks).
+# ── shared post-install: carry the live session's network config into the target
+# Whatever wifi the user joined in the installer should just work on first boot —
+# otherwise the freshly installed machine comes up with no network, which is
+# exactly when it needs one (the first-login provisioner clones APEX Shell over
+# the network, and a failed clone leaves the desktop unprovisioned).
+#
+# NetworkManager is strict about these files and fails CLOSED and SILENTLY:
+# anything not 0600 root:root is ignored with no visible error, and on an
+# SELinux target a wrong label has the same effect. Both are set explicitly —
+# this exact mistake cost a whole debugging session on p5.
+copy_network_to() {  # $1=deploy dir
+  local deploy="$1" src=/etc/NetworkManager/system-connections dst n=0
+  [ -d "$src" ] || return 0
+  dst="$deploy/etc/NetworkManager/system-connections"
+  mkdir -p "$dst" 2>/dev/null || return 0
+  for f in "$src"/*.nmconnection; do
+    [ -e "$f" ] || continue
+    cp -a "$f" "$dst/" 2>/dev/null || continue
+    n=$((n+1))
+  done
+  [ "$n" -gt 0 ] || { log "network: no saved connections to carry over"; return 0; }
+  chown root:root "$dst"/*.nmconnection 2>/dev/null || true
+  chmod 0600      "$dst"/*.nmconnection 2>/dev/null || true
+  # Label with the TARGET's policy, not the live env's. Best effort: a missing
+  # policy must not fail the install, but a wrong label means no network.
+  if have setfiles && [ -f "$deploy/etc/selinux/targeted/contexts/files/file_contexts" ]; then
+    setfiles -r "$deploy" "$deploy/etc/selinux/targeted/contexts/files/file_contexts" \
+      "$dst" >>"$LOG" 2>&1 || true
+  fi
+  log "network: carried $n connection(s) into the installed system"
+  return 0
+}
+
 create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefix
   local deploy=$1 user=$2 pass=$3 host=$4 pfx=$5 statevar setype spec f
   statevar=$(dirname "$(dirname "$deploy")")/var
@@ -319,13 +359,98 @@ if [ "$UNATTENDED" = 1 ]; then
   deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
   [ -n "$deploy" ] || { umount "$MNT" 2>/dev/null || true; die "unattended: deployment not found."; }
   create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "unattended"
+  copy_network_to "$deploy"
   sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true
   echo "APEX-INSTALL-UNATTENDED-OK"; log "unattended install complete"
   if echo "$CMD" | grep -qw apex.poweroff; then sync; poweroff; fi
   exit 0
 fi
 
-yn "Welcome to APEX-OS" \
+# ── HEADLESS / GUI MODE ──────────────────────────────────────────────────────
+# The graphical installer (apex-installer-gui) is a FRONT END only. It collects
+# answers and hands them here; every disk guard, ESP check, LVM/LUKS refusal,
+# bootc invocation, account creation, SELinux relabel and Secure Boot step below
+# is the SAME audited code the TUI runs. There is exactly one install engine.
+#
+#   apex-install --headless ANSWERS        install from a key=value answers file
+#
+# The GUI enumerates disks itself (a front end presenting choices) and this
+# engine independently re-validates whatever comes back. That is deliberate
+# defence in depth: the live USB, for instance, is excluded by the GUI for UX
+# AND refused here by the "currently mounted" guard, so a front-end bug cannot
+# turn into a wiped boot stick.
+#
+# The answers file is written 0600 by the GUI and removed by it afterwards; it
+# carries the password, so it must never be world-readable or logged.
+HEADLESS=0
+case "${1:-}" in
+  --headless) HEADLESS=1; ANSWERS="${2:-}"; shift 2 || true ;;
+  "")         : ;;
+  *)          die "unknown argument: $1 (expected --headless ANSWERS)" ;;
+esac
+[ "$HEADLESS" = 1 ] && NODIALOG=1
+[ "$UNATTENDED" = 1 ] && NODIALOG=1
+true
+
+if [ "$HEADLESS" = 1 ]; then
+  [ -f "$ANSWERS" ] || die "answers file not found: $ANSWERS"
+  # Only ever accept a fixed key set — never `source` an attacker-writable file.
+  while IFS='=' read -r k v; do
+    case "$k" in
+      mode)      INSTALL_MODE="$v" ;;
+      disk)      DISK="$v" ;;
+      target)    TARGET="$v" ;;
+      esp)       ESP_DEV="$v" ;;
+      username)  USERNAME="$v" ;;
+      password)  P1="$v" ;;
+      hostname)  HOSTNAME="$v" ;;
+      rootfs)    ROOTFS_TYPE="$v" ;;
+      mokpw)     MOKPW="$v" ;;
+      ''|\#*)    : ;;
+      *)         die "unknown key in answers file: $k" ;;
+    esac
+  done < "$ANSWERS"
+
+  : "${INSTALL_MODE:?answers: mode missing}"
+  : "${DISK:?answers: disk missing}"
+  : "${USERNAME:?answers: username missing}"
+  : "${HOSTNAME:?answers: hostname missing}"
+  [ -n "${P1:-}" ] || die "answers: password missing"
+  case "$INSTALL_MODE" in disk|partition) : ;; *) die "answers: bad mode '$INSTALL_MODE'" ;; esac
+
+  # Re-run the SAME guards the TUI applies. The GUI is not trusted to have done
+  # them: a front end must never be the only thing standing between a typo and a
+  # wiped disk.
+  [ -b "$DISK" ] || die "$DISK is not a block device."
+  if findmnt -rno SOURCE | grep -qE "^${DISK}([0-9p]|$)"; then
+    die "$DISK (or a partition of it) is currently mounted — refusing."
+  fi
+  if [ "$INSTALL_MODE" = partition ]; then
+    [ -n "${TARGET:-}" ] || die "answers: target partition missing for partition mode"
+    [ -b "$TARGET" ] || die "$TARGET is not a block device."
+    [ -n "${ESP_DEV:-}" ] || die "answers: esp missing for partition mode"
+    [ -b "$ESP_DEV" ] || die "$ESP_DEV is not a block device."
+    # Same container-member refusal as the TUI: mkfs on an LVM PV / LUKS header
+    # silently destroys everything inside it, and the live env may not even have
+    # the tooling to notice it is mounted.
+    tfs=$(lsblk -dno FSTYPE "$TARGET" 2>/dev/null | tr -d ' ' || true)
+    case "$tfs" in
+      LVM2_member|crypto_LUKS|linux_raid_member|ddf_raid_member|isw_raid_member|zfs_member|bcache)
+        die "$TARGET is a $tfs container member — refusing to format it." ;;
+    esac
+    TARGET_DESC="$TARGET (partition of $DISK)"
+  else
+    TARGET="$DISK"
+    TARGET_DESC="$DISK (entire disk)"
+  fi
+  log "headless: MODE=$INSTALL_MODE TARGET=$TARGET ESP=${ESP_DEV:-n/a} USER=$USERNAME HOST=$HOSTNAME"
+fi
+
+
+# Guarded: in headless/GUI mode there is no whiptail on screen, so an
+# unguarded prompt here would block the install forever on a dialog nobody
+# can see or answer.
+[ "$HEADLESS" = 1 ] || yn "Welcome to APEX-OS" \
 "This installs APEX-OS to a disk you choose.
 
 Steps: pick the target disk → create your account → confirm.
@@ -333,6 +458,12 @@ Nothing is erased until you confirm. Your account is created for you (no
 locked-out first boot).
 
 Continue?" 16 70 || { clear; echo "Installer cancelled."; exit 0; }
+
+# Everything from here to the install step is the INTERACTIVE (whiptail) path.
+# Skipped wholesale in headless/GUI mode, which has already set the same
+# variables and re-run the same guards above.
+if [ "$HEADLESS" != 1 ]; then
+
 
 # ── 1. target disk (guarded) ─────────────────────────────────────────────────
 # Identify the live/boot device so we never offer it as a target.
@@ -670,6 +801,10 @@ NOW_ID=$(lsblk -dno SERIAL,WWN "$DISK" 2>/dev/null | tr -s ' ' || true)
 (identity changed: '$DISK_ID' → '$NOW_ID').
 Nothing was written. Unplug/replug nothing and start the installer again."
 
+
+fi   # end interactive collection
+
+
 # ── 4. install (via the embedded image; stream to log) ───────────────────────
 clear
 echo "Installing APEX-OS to $TARGET_DESC … (full log: $LOG)"; echo
@@ -812,6 +947,7 @@ mount "$root_part" "$MNT" 2>>"$LOG" || die "Could not mount the new root ($root_
 deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
 [ -n "$deploy" ] || { umount "$MNT" 2>/dev/null || true; die "Installed ostree deployment not found under $root_part."; }
 create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
+copy_network_to "$deploy"
 # Never let cleanup failures trip the ERR trap AFTER a successful install — that
 # would report failure on a system that is actually installed fine.
 sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true

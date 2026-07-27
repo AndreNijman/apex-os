@@ -1,14 +1,20 @@
 # Auto-launch the APEX-OS guided installer on tty1 in the live environment.
+#
+# ExecStart is the LAUNCHER, not the installer: it brings up the graphical
+# installer under cage and falls back to the whiptail one if the machine cannot
+# paint a GUI (no DRM node, no GL, missing bindings). A graphical installer has
+# strictly more ways to fail to appear than a text one, so the fallback is not
+# optional — see apex-logs 48 for the black screen that motivated it.
 [Unit]
 Description=APEX-OS guided installer
 After=systemd-user-sessions.service plymouth-quit-wait.service
 After=getty@tty1.service
 Conflicts=getty@tty1.service
-ConditionPathExists=/usr/bin/apex-install
+ConditionPathExists=/usr/bin/apex-installer-launch
 
 [Service]
 Type=idle
-ExecStart=/usr/bin/apex-install
+ExecStart=/usr/bin/apex-installer-launch
 StandardInput=tty
 StandardOutput=tty
 StandardError=journal+console

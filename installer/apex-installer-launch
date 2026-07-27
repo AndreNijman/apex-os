@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-installer-launch — bring up the graphical installer, or fall back.
+#
+#  Runs the GTK installer inside `cage` (a kiosk compositor that fullscreens one
+#  application). If ANY part of that fails — no DRM device, no GL, missing GPU
+#  firmware, cage refusing to start — this falls back to the whiptail installer
+#  rather than leaving a black screen.
+#
+#  That fallback is the whole point. The first real-hardware test of this ISO
+#  gave an Acer Aspire a black screen and no way to tell why (apex-logs 48), and
+#  a graphical installer has strictly MORE ways to fail to paint than a TUI does.
+#  A GUI that cannot start must degrade to something that can, on its own.
+#
+#  Force either path from the boot menu:
+#    apex.tui   always use the text installer
+#    apex.gui   try the graphical one even if the probe says no
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+LOG=/var/log/apex-installer-launch.log
+log() { printf '%s %s\n' "$(date +%T)" "$*" >>"$LOG" 2>/dev/null || true; }
+CMD=$(cat /proc/cmdline 2>/dev/null || true)
+have() { command -v "$1" >/dev/null 2>&1; }
+
+run_tui() { log "starting whiptail installer"; exec /usr/bin/apex-install; }
+
+# Explicit opt-out always wins.
+if echo "$CMD" | grep -qw apex.tui; then
+    log "apex.tui on the cmdline"
+    run_tui
+fi
+
+# Probe, unless told to skip it. Each of these is a real way the GUI silently
+# fails to appear, and each is cheap to check.
+if ! echo "$CMD" | grep -qw apex.gui; then
+    if ! have cage; then            log "cage missing";            run_tui; fi
+    if ! have apex-installer-gui; then log "gui missing";           run_tui; fi
+    if ! ls /dev/dri/card* >/dev/null 2>&1; then
+        # No DRM device at all — this is the nomodeset case. GTK would fall back
+        # to software rendering only if a compositor could start, and cage cannot
+        # without a DRM node.
+        log "no /dev/dri/card* — nomodeset or missing GPU firmware"
+        run_tui
+    fi
+    if ! python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")' 2>>"$LOG"; then
+        log "python gtk4/adw bindings unavailable"
+        run_tui
+    fi
+fi
+
+# Software rendering is fine and far more portable than depending on a working
+# GL driver for what is a handful of static screens.
+export GDK_BACKEND=wayland
+export GSK_RENDERER="${GSK_RENDERER:-cairo}"
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/0}"
+mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+
+log "starting cage + apex-installer-gui"
+# -d: don't exit when the client does; we handle the exit ourselves below.
+if cage -- /usr/bin/apex-installer-gui >>"$LOG" 2>&1; then
+    log "gui exited cleanly"
+    exit 0
+fi
+
+# cage or the GUI died. Do not strand the user on a blank screen — say what
+# happened on the console and hand over to the installer that works everywhere.
+rc=$?
+log "cage/gui failed rc=$rc — falling back to the text installer"
+printf '\n\n  The graphical installer could not start (see %s).\n' "$LOG" >/dev/tty1 2>/dev/null || true
+printf '  Falling back to the text installer.\n\n' >/dev/tty1 2>/dev/null || true
+sleep 3
+run_tui
