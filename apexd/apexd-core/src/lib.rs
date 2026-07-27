@@ -4,6 +4,9 @@
 //!
 //! * [`fingerprint`] reads (never writes) `/proc` + `/sys` to build a
 //!   [`Fingerprint`].
+//! * [`battery`] enumerates the machine's batteries and probes which of them
+//!   (if any) accept charge thresholds. No battery is ever named in code or in
+//!   a profile.
 //! * [`select`] maps a [`Fingerprint`] to a layered [`Selection`]
 //!   (generic -> class -> device).
 //! * [`profile`] models the tuning profiles and turns a (profile, tier) pair
@@ -24,6 +27,7 @@
 //!
 //! The daemon and CLI are thin shells over this crate.
 
+pub mod battery;
 pub mod fan;
 pub mod fingerprint;
 pub mod game;
@@ -35,13 +39,14 @@ pub mod syswriter;
 pub mod tier;
 pub mod topology;
 
+pub use battery::{Battery, BatteryInventory, ThresholdSupport};
 pub use fan::{FanInventory, FanMode, FanSnapshot, UnknownFanMode};
 pub use fingerprint::{CpuInfo, CpuVendor, Fingerprint, GpuInfo, GpuVendor};
 pub use game::{GameInputs, GamePlan, PidPlacement};
 pub use gpu::{NvidiaGpu, NvidiaSmi, RealNvidiaSmi};
 pub use profile::{
     ChargeConfig, CpusetPolicy, FanConfig, GameModeConfig, IrqPolicy, NvidiaConfig, Profile,
-    ProfileKind, ProfileSet, RyzenAdjConfig, TierSettings,
+    ProfileKind, ProfileSet, TierSettings,
 };
 pub use select::{select, Selection};
 pub use syswriter::{MockWriter, RealWriter, SysWriter};

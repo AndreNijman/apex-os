@@ -6,10 +6,17 @@
 # matching must look at version/family too). Supersedes the amd-zen class
 # profile on this exact machine.
 #
-# Adds two device-specific capabilities the class profile cannot assume:
-#   * charge thresholds on BAT0 (start/stop) for battery longevity
-#   * a RyzenAdj STAPM/fast reapply loop bound to the ultra-max tier only,
-#     to defeat the embedded-controller's ~30 W clawback (hard ceiling < 80 W)
+# What this device profile adds over the class is a battery-longevity charge
+# window. It does NOT name a battery: apexd enumerates
+# /sys/class/power_supply at start-up, keeps whatever reports type=Battery, and
+# writes the window to every pack whose driver publishes threshold attributes.
+# On this machine that resolves to BAT0 via thinkpad_acpi; on a machine where
+# it resolves to nothing, the window is skipped and reported unsupported.
+#
+# The RyzenAdj STAPM/fast reapply loop that used to live here was removed in the
+# universal-hardware pass. It was gated on this exact machine, its power numbers
+# were this machine's numbers, and it only ran in a tier that no longer exists.
+# See docs/m3-notes.md for the reasoning.
 
 id = "thinkpad-l16-g2"
 kind = "device"
@@ -19,19 +26,9 @@ description = "Lenovo ThinkPad L16 Gen 2 (AMD Zen, Radeon 780M)"
 ac = "performance"
 battery = "balanced"
 
-[tiers.ultra-max]
-governor = "performance"
-epp = "performance"
-platform_profile = "performance"
-
-[tiers.ultra]
-governor = "performance"
-epp = "performance"
-platform_profile = "performance"
-
 [tiers.performance]
 governor = "performance"
-epp = "balance_performance"
+epp = "performance"
 platform_profile = "performance"
 
 [tiers.balanced]
@@ -44,18 +41,12 @@ governor = "powersave"
 epp = "power"
 platform_profile = "low-power"
 
+# Charge window only — no paths. Applied to whichever batteries support it.
 [charge]
 start = 75
 stop = 80
-start_path = "/sys/class/power_supply/BAT0/charge_control_start_threshold"
-end_path = "/sys/class/power_supply/BAT0/charge_control_end_threshold"
 
-# RyzenAdj EC-defeat loop. Values in milliwatts. Only re-applied while the
-# active tier is one of `tiers` (ultra-max). The daemon runs it on a fixed
-# cadence and tears it down when switching away. Gated at runtime: it only
-# executes if the device is thinkpad-l16-g2 AND `ryzenadj` is on PATH AND the
-# daemon is not in dry-run mode.
-# ── Fans (M6) ────────────────────────────────────────────────────────────────
+# ── Fans ─────────────────────────────────────────────────────────────────────
 # Verified on this machine: thinkpad_acpi's hwmon node ("thinkpad") publishes
 # fan1_input plus pwm1 and pwm1_enable at mode 0644 — but the driver answers
 # -EPERM to any write unless it was loaded with fan_control=1, which APEX-OS
@@ -66,25 +57,15 @@ end_path = "/sys/class/power_supply/BAT0/charge_control_end_threshold"
 backend = "auto"
 min_pwm = 90
 
-# ── Game mode (M6) ───────────────────────────────────────────────────────────
+# ── Game mode ────────────────────────────────────────────────────────────────
 # Uniform Zen 4 cores: there is no P/E split to pin to, and steering IRQs around
 # a homogeneous CPU buys nothing, so both are off. No NVIDIA GPU either. What
-# game mode still does here is hold the top tier (which is where the RyzenAdj
-# EC-defeat loop lives) for the duration of the session.
+# game mode still does here is hold the top tier for the duration of a session.
 [gamemode]
 enabled = true
-tier = "ultra-max"
+tier = "performance"
 cpuset = "all"
 irq = "off"
 
 [gamemode.nvidia]
 enabled = false
-
-[ryzenadj]
-stapm_mw = 62000     # sustained package (STAPM)
-fast_mw = 75000      # fast PPT (short-burst ceiling)
-slow_mw = 62000      # slow PPT
-tctl_max = 95        # thermal ceiling (degrees C)
-ceiling_mw = 79000   # hard sanity ceiling, must stay < 80 W
-interval_secs = 1    # reapply cadence — defeats the EC clawback
-tiers = ["ultra-max"]

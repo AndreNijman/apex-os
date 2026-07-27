@@ -38,63 +38,18 @@ pub struct Defaults {
     pub battery: Tier,
 }
 
-fn default_start_path() -> String {
-    "/sys/class/power_supply/BAT0/charge_control_start_threshold".to_string()
-}
-fn default_end_path() -> String {
-    "/sys/class/power_supply/BAT0/charge_control_end_threshold".to_string()
-}
-
-/// Battery charge-threshold configuration for a device profile.
+/// Battery charge-threshold *policy* for a profile: the window, and nothing
+/// else.
+///
+/// Deliberately carries no sysfs paths. Which battery (or batteries) can honour
+/// a threshold, and under which attribute spelling, is a runtime question
+/// answered by [`crate::battery::BatteryInventory`] — a profile that named
+/// `BAT0` or `BAT1` was guessing, and guessed wrong on any machine but the one
+/// it was written for.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChargeConfig {
     pub start: u8,
     pub stop: u8,
-    #[serde(default = "default_start_path")]
-    pub start_path: String,
-    #[serde(default = "default_end_path")]
-    pub end_path: String,
-}
-
-fn default_interval_secs() -> u64 {
-    1
-}
-fn default_ryzenadj_tiers() -> Vec<Tier> {
-    vec![Tier::UltraMax]
-}
-
-/// RyzenAdj EC-defeat loop configuration (device extra, AMD only).
-#[derive(Debug, Clone, Deserialize)]
-pub struct RyzenAdjConfig {
-    pub stapm_mw: u32,
-    pub fast_mw: u32,
-    pub slow_mw: u32,
-    #[serde(default)]
-    pub tctl_max: Option<u32>,
-    /// Hard sanity ceiling in milliwatts; any limit at or above this is
-    /// clamped so a bad profile can never exceed the thermal envelope.
-    pub ceiling_mw: u32,
-    #[serde(default = "default_interval_secs")]
-    pub interval_secs: u64,
-    #[serde(default = "default_ryzenadj_tiers")]
-    pub tiers: Vec<Tier>,
-}
-
-impl RyzenAdjConfig {
-    /// Ceiling-clamped copy of the three limits, in milliwatts.
-    pub fn clamped(&self) -> (u32, u32, u32) {
-        let c = self.ceiling_mw;
-        (
-            self.stapm_mw.min(c),
-            self.fast_mw.min(c),
-            self.slow_mw.min(c),
-        )
-    }
-
-    /// True if this loop should run in the given tier.
-    pub fn applies_to(&self, tier: Tier) -> bool {
-        self.tiers.contains(&tier)
-    }
 }
 
 // ── M6: fan control ──────────────────────────────────────────────────────────
@@ -269,7 +224,8 @@ fn default_irq() -> String {
 #[serde(default)]
 pub struct GameModeConfig {
     pub enabled: bool,
-    /// Tier held for the duration of a session (default `ultra-max`).
+    /// Tier held for the duration of a session (default `performance`, the top
+    /// tier every machine can honour).
     pub tier: Tier,
     /// Fan mode held for the duration of a session (`None` = leave as-is).
     pub fan_mode: Option<String>,
@@ -290,7 +246,7 @@ impl Default for GameModeConfig {
     fn default() -> GameModeConfig {
         GameModeConfig {
             enabled: true,
-            tier: Tier::UltraMax,
+            tier: Tier::Performance,
             fan_mode: None,
             cpuset: default_cpuset(),
             cgroup: default_cgroup(),
@@ -334,8 +290,6 @@ pub struct Profile {
     tiers: HashMap<Tier, TierSettings>,
     #[serde(default)]
     pub charge: Option<ChargeConfig>,
-    #[serde(default)]
-    pub ryzenadj: Option<RyzenAdjConfig>,
     /// M6 fan policy. Absent in pre-M6 profiles; defaults apply.
     #[serde(default)]
     pub fan: Option<FanConfig>,
@@ -345,7 +299,7 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// Parse a profile from a TOML string, validating that all five tiers are
+    /// Parse a profile from a TOML string, validating that every tier is
     /// present.
     pub fn from_toml(s: &str) -> Result<Profile> {
         let p: Profile = toml::from_str(s).context("parsing profile TOML")?;
@@ -371,7 +325,14 @@ impl Profile {
     /// performs no I/O and is fully unit-testable.
     ///
     /// Charge thresholds are intentionally NOT part of a tier plan — they are
-    /// applied independently (see [`Profile::charge_action`]).
+    /// applied independently against the discovered batteries (see
+    /// [`Profile::charge_window`]).
+    ///
+    /// Every action a tier can emit is one of the three portable CPU/platform
+    /// knobs. The writer validates each against what the running kernel
+    /// advertises and skips or substitutes rather than failing, so the same
+    /// plan is safe on AMD `amd-pstate`, Intel `intel_pstate` (hybrid or not),
+    /// plain `acpi-cpufreq` and ARM `cpufreq-dt` alike.
     pub fn plan_tier(&self, tier: Tier) -> Vec<Action> {
         let mut actions = Vec::new();
         let s = self.tier(tier);
@@ -384,32 +345,14 @@ impl Profile {
         if let Some(p) = &s.platform_profile {
             actions.push(Action::PlatformProfile(p.clone()));
         }
-        if let Some(rz) = &self.ryzenadj {
-            if rz.applies_to(tier) {
-                let (stapm, fast, slow) = rz.clamped();
-                actions.push(Action::RyzenAdj {
-                    stapm_mw: stapm,
-                    fast_mw: fast,
-                    slow_mw: slow,
-                    tctl_max: rz.tctl_max,
-                });
-            }
-        }
         actions
     }
 
-    /// The transition plan from `from` to `to`: the target tier's plan, plus a
-    /// `StopRyzenAdj` teardown when leaving a ryzenadj tier for a non-ryzenadj
-    /// one. This is what the daemon applies on a tier change.
-    pub fn plan_transition(&self, from: Option<Tier>, to: Tier) -> Vec<Action> {
-        let mut actions = Vec::new();
-        if let (Some(from), Some(rz)) = (from, &self.ryzenadj) {
-            if rz.applies_to(from) && !rz.applies_to(to) {
-                actions.push(Action::StopRyzenAdj);
-            }
-        }
-        actions.extend(self.plan_tier(to));
-        actions
+    /// The transition plan from `from` to `to`. Tiers are pure state
+    /// assertions, so this is simply the target tier's plan — there is nothing
+    /// left over from the previous tier that needs tearing down.
+    pub fn plan_transition(&self, _from: Option<Tier>, to: Tier) -> Vec<Action> {
+        self.plan_tier(to)
     }
 
     /// The profile's fan policy, or the shipped defaults when it declares none.
@@ -423,14 +366,23 @@ impl Profile {
         self.gamemode.clone().unwrap_or_default()
     }
 
-    /// The charge-threshold action for this profile, if it declares one.
-    pub fn charge_action(&self) -> Option<Action> {
-        self.charge.as_ref().map(|c| Action::ChargeThresholds {
-            start: c.start,
-            stop: c.stop,
-            start_path: c.start_path.clone(),
-            end_path: c.end_path.clone(),
-        })
+    /// The `(start, stop)` charge window this profile wants, if it declares one.
+    /// Turning that into writes is [`BatteryInventory::plan_thresholds`], which
+    /// discovers the batteries and their attribute spellings at runtime.
+    ///
+    /// [`BatteryInventory::plan_thresholds`]: crate::battery::BatteryInventory::plan_thresholds
+    pub fn charge_window(&self) -> Option<(u8, u8)> {
+        self.charge.as_ref().map(|c| (c.start, c.stop))
+    }
+
+    /// The charge-threshold actions for this profile against `batteries`.
+    /// Empty when the profile declares no window *or* when no battery on this
+    /// machine accepts one — both are ordinary states, not errors.
+    pub fn charge_actions(&self, batteries: &crate::battery::BatteryInventory) -> Vec<Action> {
+        match self.charge_window() {
+            Some((start, stop)) => batteries.plan_thresholds(start, stop),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -485,8 +437,16 @@ impl ProfileSet {
     }
 
     /// Load profiles from a directory of `*.toml` files, falling back to the
-    /// embedded set if the directory is absent or empty. A malformed file is a
-    /// hard error (fail loud rather than silently mistune).
+    /// embedded set if the directory is absent, unreadable, or yields nothing
+    /// usable.
+    ///
+    /// A malformed or stale file is **logged and skipped**, not fatal. This is
+    /// deliberate: the on-disk set is an override that an older image, a hand
+    /// edit or a partially-applied update can leave inconsistent with the
+    /// binary's schema (a profile still naming a tier that no longer exists,
+    /// say). Refusing to start the power daemon over one bad override would
+    /// leave the machine with no power management at all, which is strictly
+    /// worse than running the embedded profiles.
     pub fn load(dir: Option<&Path>) -> Result<ProfileSet> {
         let Some(dir) = dir else {
             return Ok(ProfileSet::builtin());
@@ -495,22 +455,47 @@ impl ProfileSet {
             return Ok(ProfileSet::builtin());
         }
         let mut set = ProfileSet::default();
-        let mut count = 0;
-        for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-            let entry = entry?;
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!(
+                    "apexd: cannot read {} ({e}) — using the embedded profiles",
+                    dir.display()
+                );
+                return Ok(ProfileSet::builtin());
+            }
+        };
+        for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("toml") {
                 continue;
             }
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let p = Profile::from_toml(&text)
-                .with_context(|| format!("parsing {}", path.display()))?;
-            set.profiles.insert(p.id.clone(), p);
-            count += 1;
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("apexd: skipping {} (unreadable: {e})", path.display());
+                    continue;
+                }
+            };
+            match Profile::from_toml(&text) {
+                Ok(p) => {
+                    set.profiles.insert(p.id.clone(), p);
+                }
+                Err(e) => eprintln!("apexd: skipping {} ({e:#})", path.display()),
+            }
         }
-        if count == 0 {
+        if set.profiles.is_empty() {
             return Ok(ProfileSet::builtin());
+        }
+        // Backfill anything the override directory did not supply, so a
+        // directory holding only a device profile still has a generic layer to
+        // fall back to.
+        for (name, toml) in BUILTIN_PROFILE_TOML {
+            if !set.profiles.contains_key(name) {
+                if let Ok(p) = Profile::from_toml(toml) {
+                    set.profiles.insert(p.id.clone(), p);
+                }
+            }
         }
         Ok(set)
     }

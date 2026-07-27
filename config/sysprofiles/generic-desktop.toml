@@ -2,12 +2,21 @@
 #
 # Base fallback for any desktop/tower chassis. Selected by chassis type when
 # no more specific class (amd-zen / intel-hybrid) or device profile matches.
+# This is also where a machine that matches *nothing at all* lands, so it must
+# stay expressible on hardware nobody has tested — including a VM with no
+# cpufreq driver and an ARM board with no EPP.
 #
 # The three-knob tier table (governor / EPP / platform_profile) is expressed in
 # full; the daemon's real SysWriter applies only the knobs the running kernel
-# actually exposes (it path-checks scaling_governor, energy_performance_preference
-# and /sys/firmware/acpi/platform_profile). On a plain acpi-cpufreq desktop the
+# actually exposes. It path-checks scaling_governor,
+# energy_performance_preference and /sys/firmware/acpi/platform_profile, and
+# additionally validates each value against what the driver advertises
+# (scaling_available_governors, energy_performance_available_preferences),
+# substituting the nearest supported value. On a plain acpi-cpufreq desktop the
 # EPP and platform_profile writes are simply skipped.
+#
+# No [charge] table: a desktop has no battery, and charge thresholds are
+# resolved from runtime battery discovery in any case.
 
 id = "generic-desktop"
 kind = "generic"
@@ -17,17 +26,9 @@ description = "Generic desktop / tower (chassis fallback)"
 ac = "balanced"
 battery = "balanced"
 
-[tiers.ultra-max]
-governor = "performance"
-epp = "performance"
-
-[tiers.ultra]
-governor = "performance"
-epp = "performance"
-
 [tiers.performance]
 governor = "performance"
-epp = "balance_performance"
+epp = "performance"
 
 [tiers.balanced]
 governor = "powersave"

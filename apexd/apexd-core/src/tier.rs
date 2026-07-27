@@ -1,22 +1,26 @@
 //! Power tiers and the hardware actions they map to.
 //!
-//! The five tier IDs are frozen and must match the strings the D-Bus API and
-//! the apex-shell `PowerProfileService` use verbatim:
-//! `ultra-max`, `ultra`, `performance`, `balanced`, `power-saver`.
+//! The three tier IDs are the wire contract: they must match the strings the
+//! D-Bus API and the apex-shell `PowerProfileService` use verbatim:
+//! `performance`, `balanced`, `power-saver`.
+//!
+//! Every tier here is expressible on *any* machine, because a tier is only ever
+//! a request for the three portable knobs (`scaling_governor`,
+//! `energy_performance_preference`, ACPI `platform_profile`) and the writer
+//! applies only the ones the running kernel actually exposes. The former
+//! `ultra` / `ultra-max` tiers were removed in the universal-hardware pass:
+//! they existed to drive a RyzenAdj/EC-defeat path that only ever worked on one
+//! specific laptop and could not be honoured anywhere else.
 
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-/// A power tier, ordered from most aggressive (`UltraMax`) to most frugal
+/// A power tier, ordered from most aggressive (`Performance`) to most frugal
 /// (`PowerSaver`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Tier {
-    #[serde(rename = "ultra-max")]
-    UltraMax,
-    #[serde(rename = "ultra")]
-    Ultra,
     #[serde(rename = "performance")]
     Performance,
     #[serde(rename = "balanced")]
@@ -28,19 +32,11 @@ pub enum Tier {
 impl Tier {
     /// All tiers, highest to lowest. This is the canonical order the CLI and
     /// D-Bus `Tiers` property advertise.
-    pub const ALL: [Tier; 5] = [
-        Tier::UltraMax,
-        Tier::Ultra,
-        Tier::Performance,
-        Tier::Balanced,
-        Tier::PowerSaver,
-    ];
+    pub const ALL: [Tier; 3] = [Tier::Performance, Tier::Balanced, Tier::PowerSaver];
 
-    /// The frozen, wire-facing string ID.
+    /// The wire-facing string ID.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Tier::UltraMax => "ultra-max",
-            Tier::Ultra => "ultra",
             Tier::Performance => "performance",
             Tier::Balanced => "balanced",
             Tier::PowerSaver => "power-saver",
@@ -50,8 +46,6 @@ impl Tier {
     /// A human-friendly label (matches the shell's picker labels).
     pub const fn label(self) -> &'static str {
         match self {
-            Tier::UltraMax => "Ultra-Max",
-            Tier::Ultra => "Ultra Performance",
             Tier::Performance => "Performance",
             Tier::Balanced => "Balanced",
             Tier::PowerSaver => "Power Saver",
@@ -75,8 +69,6 @@ impl FromStr for Tier {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "ultra-max" => Ok(Tier::UltraMax),
-            "ultra" => Ok(Tier::Ultra),
             "performance" => Ok(Tier::Performance),
             "balanced" => Ok(Tier::Balanced),
             "power-saver" => Ok(Tier::PowerSaver),
@@ -119,24 +111,20 @@ pub enum Action {
     Epp(String),
     /// Write `/sys/firmware/acpi/platform_profile` (skipped where absent).
     PlatformProfile(String),
-    /// Write battery charge start/stop thresholds.
+    /// Write battery charge start/stop thresholds on one battery.
+    ///
+    /// Both paths are optional because charge-threshold support is ragged: many
+    /// drivers expose only `charge_control_end_threshold`, some use the older
+    /// `charge_{start,stop}_threshold` spelling, and most hardware has neither.
+    /// The paths are discovered at runtime (see [`crate::battery`]) rather than
+    /// named in a profile, so a machine with one battery, two batteries or none
+    /// at all is handled by the same code.
     ChargeThresholds {
         start: u8,
         stop: u8,
-        start_path: String,
-        end_path: String,
+        start_path: Option<String>,
+        end_path: Option<String>,
     },
-    /// One RyzenAdj invocation (the daemon repeats this on a cadence while the
-    /// active tier requests it). Milliwatts.
-    RyzenAdj {
-        stapm_mw: u32,
-        fast_mw: u32,
-        slow_mw: u32,
-        tctl_max: Option<u32>,
-    },
-    /// Tear the RyzenAdj reapply loop down (emitted when leaving a tier that
-    /// requested it).
-    StopRyzenAdj,
 
     // ── M6: fan control ──────────────────────────────────────────────────────
     /// Write a hwmon `pwmN_enable` (0 = full speed / no control, 1 = manual,
@@ -202,21 +190,10 @@ impl Action {
                 start_path,
                 end_path,
             } => format!(
-                "charge thresholds start={start} ({start_path}) stop={stop} ({end_path})"
+                "charge thresholds start={start} ({}) stop={stop} ({})",
+                start_path.as_deref().unwrap_or("unsupported"),
+                end_path.as_deref().unwrap_or("unsupported"),
             ),
-            Action::RyzenAdj {
-                stapm_mw,
-                fast_mw,
-                slow_mw,
-                tctl_max,
-            } => format!(
-                "ryzenadj stapm={stapm_mw}mW fast={fast_mw}mW slow={slow_mw}mW{}",
-                match tctl_max {
-                    Some(t) => format!(" tctl={t}C"),
-                    None => String::new(),
-                }
-            ),
-            Action::StopRyzenAdj => "stop ryzenadj reapply loop".to_string(),
             Action::FanPwmEnable { path, value } => {
                 let meaning = match value {
                     0 => " (no control = full speed)",

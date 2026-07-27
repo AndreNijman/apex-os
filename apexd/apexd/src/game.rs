@@ -323,10 +323,6 @@ mod tests {
         [defaults]
         ac = "balanced"
         battery = "power-saver"
-        [tiers.ultra-max]
-        governor = "performance"
-        [tiers.ultra]
-        governor = "performance"
         [tiers.performance]
         governor = "performance"
         [tiers.balanced]
@@ -334,7 +330,7 @@ mod tests {
         [tiers.power-saver]
         governor = "powersave"
         [gamemode]
-        tier = "ultra-max"
+        tier = "performance"
         cpuset = "off"
         irq = "off"
         [gamemode.nvidia]
@@ -388,7 +384,11 @@ mod tests {
         ctx.game_enter(&[]).await.unwrap();
         {
             let st = ctx.state.lock().await;
-            assert_eq!(st.tier, Tier::UltraMax, "the session holds the profile's game tier");
+            assert_eq!(
+                st.tier,
+                Tier::Performance,
+                "the session holds the profile's game tier"
+            );
             assert!(
                 !st.auto_switch,
                 "auto-switch must be off, or an AC transition would clobber the game tier"
@@ -408,7 +408,7 @@ mod tests {
     async fn a_second_enter_cannot_overwrite_the_recorded_prior_state() {
         let ctx = ctx("double-enter");
         ctx.game_enter(&[]).await.unwrap();
-        // At this point tier == ultra-max and auto_switch == false. A second
+        // At this point tier == performance and auto_switch == false. A second
         // enter must NOT record those as the values to restore.
         ctx.game_enter(&[]).await.unwrap();
         ctx.game_enter(&[]).await.unwrap();

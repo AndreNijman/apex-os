@@ -4,11 +4,21 @@
 # when no more specific class (amd-zen / intel-hybrid) or device profile
 # matches. Leans toward battery preservation on DC.
 #
+# Together with generic-desktop this is the "machine nobody has tested" path:
+# an unrecognised vendor, an ARM laptop, an Intel part with no P/E split, a
+# Snapdragon convertible. Everything expressed here is optional at the hardware
+# level.
+#
 # platform_profile is expressed (most modern laptops carry the ACPI
 # platform_profile interface); the real SysWriter skips it if the running
-# machine does not export it. Charge thresholds are intentionally NOT set here
-# (the correct sysfs path and safe defaults are device-specific), only in the
-# device profiles that know the hardware.
+# machine does not export it, and maps the value onto whatever
+# platform_profile_choices advertises when the exact string is missing —
+# `low-power` becomes `quiet` or `cool` on firmware that spells it that way.
+#
+# No [charge] table. Charge thresholds are a policy the *user* should opt into,
+# the safe window differs per pack chemistry, and most hardware cannot honour
+# one at all. Where a window is wanted, apexd discovers the batteries and their
+# threshold attributes at runtime — no profile ever names BAT0 or BAT1.
 
 id = "generic-laptop"
 kind = "generic"
@@ -18,19 +28,9 @@ description = "Generic laptop / notebook (chassis fallback)"
 ac = "balanced"
 battery = "power-saver"
 
-[tiers.ultra-max]
-governor = "performance"
-epp = "performance"
-platform_profile = "performance"
-
-[tiers.ultra]
-governor = "performance"
-epp = "performance"
-platform_profile = "performance"
-
 [tiers.performance]
 governor = "performance"
-epp = "balance_performance"
+epp = "performance"
 platform_profile = "performance"
 
 [tiers.balanced]
