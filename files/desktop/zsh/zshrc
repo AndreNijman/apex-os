@@ -1,0 +1,122 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX-OS — default zsh configuration
+#
+#  Seeded per-user by apex-shell-firstrun. This is a STARTING POINT, not a
+#  managed file: it is only written when ~/.zshrc does not already exist, so
+#  anything you change here survives updates and re-logins.
+#
+#  No framework. oh-my-zsh and friends add a second config system, a slow
+#  startup and a lot of behaviour you did not ask for. Everything below is
+#  either a zsh builtin or one small package, and every block says why it exists.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── history ──────────────────────────────────────────────────────────────────
+# Big, shared across sessions, deduplicated, and written as you go so a crash or
+# a hard poweroff does not lose the last hour of commands.
+HISTFILE="${XDG_STATE_HOME:-$HOME/.local/state}/zsh/history"
+mkdir -p "${HISTFILE:h}" 2>/dev/null
+HISTSIZE=100000
+SAVEHIST=100000
+setopt SHARE_HISTORY INC_APPEND_HISTORY EXTENDED_HISTORY
+setopt HIST_IGNORE_DUPS HIST_IGNORE_ALL_DUPS HIST_IGNORE_SPACE
+setopt HIST_REDUCE_BLANKS HIST_VERIFY
+
+# ── navigation ───────────────────────────────────────────────────────────────
+setopt AUTO_CD AUTO_PUSHD PUSHD_IGNORE_DUPS PUSHD_SILENT
+setopt EXTENDED_GLOB NO_CASE_GLOB NUMERIC_GLOB_SORT
+setopt INTERACTIVE_COMMENTS          # let you # comment in an interactive shell
+unsetopt BEEP
+
+# ── completion ───────────────────────────────────────────────────────────────
+# Cached so shell startup stays fast; case-insensitive and substring matching so
+# `cd dow<Tab>` and `cd Downloads` both work.
+autoload -Uz compinit
+ZCOMPDUMP="${XDG_CACHE_HOME:-$HOME/.cache}/zsh/zcompdump"
+mkdir -p "${ZCOMPDUMP:h}" 2>/dev/null
+# Only re-scan the completion tree once a day — compinit is the single biggest
+# cost in zsh startup.
+if [[ -n ${ZCOMPDUMP}(#qN.mh+24) ]]; then compinit -d "$ZCOMPDUMP"; else compinit -C -d "$ZCOMPDUMP"; fi
+
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|=*' 'l:|=* r:|=*'
+zstyle ':completion:*' menu select
+zstyle ':completion:*' group-name ''
+zstyle ':completion:*:descriptions' format '%F{#8A93A6}%d%f'
+zstyle ':completion:*' use-cache on
+zstyle ':completion:*' cache-path "${XDG_CACHE_HOME:-$HOME/.cache}/zsh/zcompcache"
+zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}"
+
+# ── keys ─────────────────────────────────────────────────────────────────────
+# Emacs bindings (what most people expect), plus the keys that are wrong by
+# default on a lot of terminals.
+bindkey -e
+bindkey '^[[H'    beginning-of-line
+bindkey '^[[F'    end-of-line
+bindkey '^[[3~'   delete-char
+bindkey '^[[1;5C' forward-word
+bindkey '^[[1;5D' backward-word
+bindkey '^H'      backward-kill-word
+# Up/Down search history for what you have already typed, rather than walking
+# blindly through every command. This is the single best zsh quality-of-life fix.
+autoload -Uz up-line-or-beginning-search down-line-or-beginning-search
+zle -N up-line-or-beginning-search
+zle -N down-line-or-beginning-search
+bindkey '^[[A' up-line-or-beginning-search
+bindkey '^[[B' down-line-or-beginning-search
+
+# ── plugins (packaged, not vendored) ─────────────────────────────────────────
+# Order matters: syntax highlighting must be sourced LAST or it does not see the
+# widgets the other plugins define.
+[[ -r /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]] && \
+    source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=#4A5162'
+ZSH_AUTOSUGGEST_STRATEGY=(history completion)
+
+# ── aliases ──────────────────────────────────────────────────────────────────
+# Modern replacements only when they are actually installed, so this file still
+# works in a container or a rescue shell that has none of them.
+if command -v eza >/dev/null 2>&1; then
+    alias ls='eza --group-directories-first --icons=auto'
+    alias ll='eza -l --group-directories-first --icons=auto --git'
+    alias la='eza -la --group-directories-first --icons=auto --git'
+    alias lt='eza --tree --level=2 --icons=auto'
+else
+    alias ls='ls --color=auto --group-directories-first'
+    alias ll='ls -lh'
+    alias la='ls -lah'
+fi
+command -v bat  >/dev/null 2>&1 && alias cat='bat --paging=never --style=plain'
+command -v rg   >/dev/null 2>&1 && alias grep='rg'
+alias ip='ip -color=auto'
+alias df='df -h'
+alias free='free -h'
+alias ..='cd ..'
+alias ...='cd ../..'
+
+# APEX-OS is image-based: these are the commands people actually need and
+# usually have to look up.
+alias apex-update='sudo bootc upgrade'
+alias apex-status='bootc status'
+alias apex-rollback='sudo bootc rollback'
+
+# ── tools ────────────────────────────────────────────────────────────────────
+command -v zoxide  >/dev/null 2>&1 && eval "$(zoxide init zsh --cmd cd)"
+command -v fzf     >/dev/null 2>&1 && source <(fzf --zsh) 2>/dev/null
+
+# ── prompt ───────────────────────────────────────────────────────────────────
+# starship, themed to the running edition (see ~/.config/starship.toml).
+# If it is somehow missing, fall back to a readable built-in prompt rather than
+# leaving the user staring at a bare `%`.
+if command -v starship >/dev/null 2>&1; then
+    eval "$(starship init zsh)"
+else
+    autoload -Uz colors && colors
+    PROMPT='%F{green}%~%f %# '
+fi
+
+# Syntax highlighting LAST — see the note above.
+[[ -r /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]] && \
+    source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+
+# ── local overrides ──────────────────────────────────────────────────────────
+# Anything you want that should NOT be touched by APEX. Sourced last so it wins.
+[[ -r "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"

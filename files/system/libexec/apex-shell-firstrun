@@ -137,6 +137,35 @@ elif is_stock_hypr_conf "${HYPR_CONF}"; then
     hyprctl reload >/dev/null 2>&1 || true
 fi
 
+# ── zsh + starship, themed to the running edition ───────────────────────────
+# Seeded here rather than /etc/skel because the starship theme carries an
+# @ACCENT@ placeholder that has to become chartreuse on Daily and gold on
+# Gaming — skel is a straight copy and cannot substitute anything.
+#
+# Both are seeded ONLY if absent. These are the user's dotfiles from the moment
+# they first log in; APEX writes a good starting point and then never touches
+# them again, so nothing anyone customises is at risk on a later boot.
+ZSHRC_TMPL="/usr/share/apex/zsh/zshrc"
+STARSHIP_TMPL="/usr/share/apex/starship/starship.toml"
+
+# Accent follows VARIANT_ID (docs/branding.md): the prompt should match the
+# greeter and the boot splash of the edition actually running.
+APEX_VARIANT="$(sed -n 's/^VARIANT_ID=//p' /etc/os-release 2>/dev/null | tr -d '"' | head -1)"
+case "${APEX_VARIANT}" in
+    gaming*) APEX_ACCENT="#FDE047" ;;   # gold
+    *)       APEX_ACCENT="#D9F99D" ;;   # chartreuse
+esac
+
+if [ -f "${ZSHRC_TMPL}" ] && [ ! -f "${HOME}/.zshrc" ]; then
+    cp "${ZSHRC_TMPL}" "${HOME}/.zshrc"
+    log "seeded ~/.zshrc"
+fi
+if [ -f "${STARSHIP_TMPL}" ] && [ ! -f "${HOME}/.config/starship.toml" ]; then
+    mkdir -p "${HOME}/.config"
+    sed "s|@ACCENT@|${APEX_ACCENT}|g" "${STARSHIP_TMPL}" > "${HOME}/.config/starship.toml"
+    log "seeded ~/.config/starship.toml (accent ${APEX_ACCENT} for '${APEX_VARIANT:-daily}')"
+fi
+
 # Belt-and-suspenders: the unit's own gate covers this, but a manual invocation
 # should also no-op once provisioned. Everything BELOW here is the one-time,
 # network-dependent work; the config seeding above deliberately runs every login.

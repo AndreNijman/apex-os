@@ -14,6 +14,55 @@
 # Built into a live ISO by build-live-iso.sh.
 FROM registry.fedoraproject.org/fedora:43
 
+# ── Firmware: its OWN transaction, with weak deps ENABLED on purpose ─────────
+# The live env shipped with /lib/firmware absent entirely, so i915/amdgpu could
+# not initialise, KMS failed, and the installer black-screened on an Acer Aspire
+# that only booted with nomodeset (apex-logs 48).
+#
+# The first fix — adding `linux-firmware` to the big install below — did NOT
+# work, and the failure was silent: `linux-firmware` is a METAPACKAGE whose GPU
+# and wifi content lives in subpackages (amd-gpu-firmware, intel-gpu-firmware,
+# nvidia-gpu-firmware, atheros-, brcmfmac-, mt7xxx-, realtek-, …) that it pulls
+# as RECOMMENDS. install_weak_deps=False strips all thirteen, leaving 649 files
+# and zero i915. Measured, not assumed.
+#
+# So firmware gets its own transaction with weak deps left ON. Naming the
+# subpackages individually would work today and rot the first time Fedora adds
+# one; this keeps working.
+# EVERY firmware package Fedora ships, not a hand-picked list. This ISO has to
+# boot and connect on hardware nobody working on it owns, so enumerating the
+# adapters we happen to have is the wrong shape: it silently excludes everyone
+# else, and it rots the moment Fedora adds a package.
+#
+# linux-firmware alone is not enough twice over. Its GPU and wifi content lives
+# in subpackages it only RECOMMENDS (see above), and Intel wifi, legacy Intel
+# wifi, Marvell, Atmel, ZyDAS, Qualcomm and the Intel camera controller are
+# packaged entirely separately and recommended by nothing at all.
+#
+# Excluded: gnome-firmware (a GUI updater) and python3-virt-firmware (a library)
+# — neither ships hardware blobs.
+#
+# The assertions are the point. Every previous attempt at this failed SILENTLY
+# and shipped a black screen; a build that cannot prove it has GPU and wifi
+# firmware must not produce an ISO.
+RUN set -eux; \
+    pkgs="$(dnf -q repoquery --qf '%{name}\n' '*-firmware' 2>/dev/null \
+            | grep -vE '^(gnome-firmware|python3-virt-firmware)$' \
+            | sort -u | tr '\n' ' ')"; \
+    echo "installing firmware packages: $pkgs"; \
+    dnf -y install --skip-unavailable $pkgs; \
+    dnf clean all; \
+    n=$(find /lib/firmware -type f | wc -l); \
+    echo "firmware files: $n"; \
+    [ "$n" -gt 2500 ] || { echo "FATAL: only $n firmware files"; exit 1; }; \
+    for d in i915 amdgpu nvidia; do \
+        c=$(find /lib/firmware -path "*/$d/*" -type f | wc -l); \
+        [ "$c" -gt 0 ] || { echo "FATAL: no $d firmware"; exit 1; }; \
+        echo "  $d: $c files"; \
+    done; \
+    [ "$(find /lib/firmware -iname 'iwlwifi*' | wc -l)" -gt 0 ] \
+        || { echo "FATAL: no Intel wifi firmware"; exit 1; }
+
 # Live-env + installer toolchain. kernel + dracut(+live) make it bootable as a
 # squashfs live image; newt=whiptail; podman/skopeo run the install; btrfs-progs/
 # dosfstools/util-linux for the target disk; shadow-utils for useradd/chpasswd
@@ -40,7 +89,6 @@ FROM registry.fedoraproject.org/fedora:43
 # boot on unknown hardware. The INSTALLED image already has firmware; this gap
 # was only ever in the live environment.
 RUN dnf -y install --setopt=install_weak_deps=False \
-        linux-firmware \
         kernel systemd systemd-udev dracut dracut-live device-mapper \
         podman skopeo \
         newt ncurses util-linux coreutils bash shadow-utils \
