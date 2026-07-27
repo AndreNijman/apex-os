@@ -1,11 +1,20 @@
 # APEX-OS greeter — labwc environment (fallback host).
 #
 # labwc reads this file at startup and exports each KEY=value into the
-# compositor + client environment.  Keyboard layout is set here (labwc takes
-# xkb settings from the environment, not rc.xml).  Adjust per locale at
-# image-build time if needed.
-
-XKB_DEFAULT_LAYOUT=us
+# compositor + client environment.
+#
+# XKB_DEFAULT_LAYOUT is DELIBERATELY NOT SET HERE. It used to be pinned to
+# `us`, which meant a QWERTZ/AZERTY user typed their password on the wrong
+# layout at the one screen where that locks them out of the machine. Worse,
+# a value set here would OVERRIDE the correct one: labwc applies this file on
+# top of the inherited environment.
+#
+# The layout now arrives from the APEX keymap generator
+# (/usr/lib/systemd/system-environment-generators/50-apex-keymap), which reads
+# the system keymap from /etc/X11/xorg.conf.d/00-keyboard.conf and exports
+# XKB_DEFAULT_LAYOUT into greetd's environment; labwc inherits it. With no
+# system keymap configured, nothing is exported and xkbcommon's own `us`
+# default applies — identical to the old behaviour.
 
 # No-GPU last resort (leave commented unless the target has no working GL —
 # see README "No-GPU render fallback"; UNTESTED, real-HW verify item):
