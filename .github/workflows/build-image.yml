@@ -163,6 +163,51 @@ jobs:
             -t "$IMAGE_BASE:${{ github.sha }}" \
             .
 
+      # Gate the push on the base actually being usable. Everything asserted here
+      # has silently shipped broken at least once: hyprland-qtutils was absent for
+      # weeks because dnf dropped an unsatisfiable weak dep without failing the
+      # build (apex-logs 47), and the Fedora de-branding regressed the same way.
+      # A green `podman build` is not evidence the image is correct.
+      - name: Verify base image
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          run() { sudo podman run --rm --entrypoint /bin/sh "$IMAGE_BASE:latest" -c "$1"; }
+
+          # hyprland-qtutils, built from source against Qt 6.10 (the packaged
+          # build links Qt 6.9 private API and cannot install here).
+          for b in hyprland-dialog hyprland-donate-screen hyprland-update-screen; do
+            run "command -v $b >/dev/null" || fail "$b missing from base image"
+          done
+          run 'test -d /usr/lib64/qt6/qml/org/hyprland/style' \
+            || fail "hyprland QML style not installed"
+          run '! ldd /usr/bin/hyprland-dialog | grep -q "not found"' \
+            || fail "hyprland-dialog has unresolved libraries"
+
+          # The greeter must tolerate NVIDIA: sway exits(1) on nvidia-drm without
+          # this flag, which means no login at all on a hybrid-graphics machine.
+          run 'grep -q -- --unsupported-gpu /etc/greetd/config.toml' \
+            || fail "greeter missing --unsupported-gpu"
+
+          # De-branding: ID=fedora is deliberate (dnf copr chroots derive from it);
+          # it must be the ONLY Fedora string left in os-release.
+          N=$(run 'grep -ci fedora /usr/lib/os-release')
+          [ "$N" = "1" ] || fail "expected exactly 1 Fedora string in os-release, found $N"
+          run 'grep -q "^PRETTY_NAME=\"APEX-OS\"" /usr/lib/os-release' \
+            || fail "os-release not branded"
+          run 'grep -q "^APEX-OS release" /etc/system-release' \
+            || fail "/etc/system-release not branded (bootupd derives the EFI label from it)"
+
+          # M6 + the per-user provisioner race fix.
+          run 'test -x /usr/bin/apexd && test -x /usr/bin/apex' || fail "apexd/apex missing"
+          run 'test -s /usr/share/apex/hypr/hyprland.conf' || fail "APEX hyprland template missing"
+          run 'grep -q CRITICAL /usr/libexec/apex-shell-firstrun' \
+            || fail "provisioner is missing the config-seeding race fix"
+          run 'test ! -e /usr/share/wayland-sessions/hyprland-uwsm.desktop' \
+            || fail "hyprland-uwsm.desktop present; it sorts first and bounce-loops"
+
+          echo "base image verified"
+
       - name: Push base + capture digest
         id: push
         run: |
