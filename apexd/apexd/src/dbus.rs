@@ -109,6 +109,12 @@ impl PowerIface {
 // ── Battery ──────────────────────────────────────────────────────────────────
 
 /// `org.apexos.Apexd1.Battery` — charge thresholds, travel mode, calibration.
+///
+/// Every reading comes from the batteries discovered at start-up, never from a
+/// hard-coded `BAT0`/`BAT1`. On a machine with no battery the properties answer
+/// their neutral values (`Capacity = 0`, `Status = "Unknown"`,
+/// `Supported = false`) and the mutating methods fail with a clear message
+/// instead of pretending to have written something.
 pub struct BatteryIface {
     pub ctx: Arc<Ctx>,
 }
@@ -128,6 +134,21 @@ impl BatteryIface {
     #[zbus(property)]
     async fn travel_mode(&self) -> bool {
         self.ctx.state.lock().await.travel_mode
+    }
+
+    /// Whether this machine has any battery charge-threshold control at all.
+    /// False on a desktop, and false on the many laptops whose driver exposes
+    /// no threshold attribute.
+    #[zbus(property)]
+    async fn supported(&self) -> bool {
+        self.ctx.charge_thresholds_supported()
+    }
+
+    /// The batteries discovered on this machine (`BAT0`, `BAT1`, `CMB0`, …).
+    /// Empty on a desktop.
+    #[zbus(property)]
+    async fn batteries(&self) -> Vec<String> {
+        self.ctx.batteries.names()
     }
 
     #[zbus(property)]
@@ -206,11 +227,10 @@ impl BatteryIface {
     }
 }
 
+/// Read a field from the machine's primary battery. `None` when there is no
+/// battery, or when this driver does not publish that field.
 fn read_battery_field(ctx: &Arc<Ctx>, field: &str) -> Option<String> {
-    let bat = ctx.fingerprint.batteries.first().cloned().unwrap_or_else(|| "BAT0".to_string());
-    std::fs::read_to_string(format!("/sys/class/power_supply/{bat}/{field}"))
-        .ok()
-        .map(|s| s.trim().to_string())
+    ctx.batteries.primary()?.read(field)
 }
 
 // ── Profile ──────────────────────────────────────────────────────────────────

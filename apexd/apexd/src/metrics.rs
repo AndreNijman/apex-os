@@ -23,6 +23,22 @@ pub struct Reading {
     pub ppt_watts: Option<f64>,
     pub battery_uwh: Option<u64>,
     pub temps: Vec<(String, f64)>,
+    /// Whether the daemon is actually applying anything, or only logging.
+    pub dry_run: bool,
+    /// Machine identity, for the `apexd_machine_info` label set. This is how a
+    /// bug report from hardware nobody here owns arrives with enough context to
+    /// be actionable.
+    pub machine: MachineInfo,
+}
+
+/// The label set of the `apexd_machine_info` metric.
+pub struct MachineInfo {
+    pub vendor: String,
+    pub product: String,
+    pub cpu_vendor: String,
+    pub scaling_driver: String,
+    pub profile: String,
+    pub batteries: usize,
 }
 
 impl Reading {
@@ -31,11 +47,31 @@ impl Reading {
             let st = ctx.state.lock().await;
             (st.tier, st.on_ac)
         };
+        let fp = &ctx.fingerprint;
         Reading {
             tier,
             on_ac,
+            dry_run: ctx.dry_run,
+            machine: MachineInfo {
+                vendor: fp.sys_vendor.clone(),
+                product: if fp.product_name.is_empty() {
+                    fp.product_version.clone()
+                } else {
+                    fp.product_name.clone()
+                },
+                cpu_vendor: fp.cpu.vendor.as_str().to_string(),
+                scaling_driver: fp
+                    .cpu
+                    .scaling_driver
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string()),
+                profile: ctx.selection.active.clone(),
+                batteries: ctx.batteries.len(),
+            },
             ppt_watts: read_ppt_watts(Path::new("/sys")),
-            battery_uwh: read_battery_uwh(Path::new("/sys")),
+            // Summed over the discovered packs, whatever they are called, and
+            // derived from charge x voltage on drivers that report no energy.
+            battery_uwh: ctx.batteries.energy_uwh(),
             temps: read_temps(Path::new("/sys")),
         }
     }
@@ -54,6 +90,23 @@ impl Reading {
         out.push_str("# TYPE apexd_ac_online gauge\n");
         out.push_str(&format!("apexd_ac_online {}\n", if self.on_ac { 1 } else { 0 }));
 
+        out.push_str("# HELP apexd_dry_run Whether apexd is logging intent instead of writing hardware.\n");
+        out.push_str("# TYPE apexd_dry_run gauge\n");
+        out.push_str(&format!("apexd_dry_run {}\n", if self.dry_run { 1 } else { 0 }));
+
+        let m = &self.machine;
+        out.push_str("# HELP apexd_machine_info Detected machine, always 1; the labels carry the detail.\n");
+        out.push_str("# TYPE apexd_machine_info gauge\n");
+        out.push_str(&format!(
+            "apexd_machine_info{{vendor=\"{}\",product=\"{}\",cpu_vendor=\"{}\",scaling_driver=\"{}\",profile=\"{}\",batteries=\"{}\"}} 1\n",
+            escape_label(&m.vendor),
+            escape_label(&m.product),
+            escape_label(&m.cpu_vendor),
+            escape_label(&m.scaling_driver),
+            escape_label(&m.profile),
+            m.batteries,
+        ));
+
         if let Some(w) = self.ppt_watts {
             out.push_str("# HELP apexd_ppt_watts Package power draw in watts.\n");
             out.push_str("# TYPE apexd_ppt_watts gauge\n");
@@ -70,7 +123,10 @@ impl Reading {
             out.push_str("# HELP apexd_temp_celsius Thermal zone temperature in celsius.\n");
             out.push_str("# TYPE apexd_temp_celsius gauge\n");
             for (zone, c) in &self.temps {
-                out.push_str(&format!("apexd_temp_celsius{{zone=\"{zone}\"}} {c:.1}\n"));
+                out.push_str(&format!(
+                    "apexd_temp_celsius{{zone=\"{}\"}} {c:.1}\n",
+                    escape_label(zone)
+                ));
             }
         }
         out
@@ -94,6 +150,22 @@ impl Reading {
     }
 }
 
+/// Escape a Prometheus label value. DMI strings are attacker-adjacent free text
+/// (`product_name` is whatever the vendor wrote), so a stray quote, backslash
+/// or newline must not be able to corrupt the exposition format.
+fn escape_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn insert(m: &mut HashMap<String, OwnedValue>, key: &str, v: Value<'_>) {
     if let Ok(owned) = v.try_to_owned() {
         m.insert(key.to_string(), owned);
@@ -109,24 +181,6 @@ fn read_ppt_watts(sys_root: &Path) -> Option<f64> {
         if let Ok(s) = std::fs::read_to_string(&uw) {
             if let Ok(v) = s.trim().parse::<f64>() {
                 return Some(v / 1_000_000.0);
-            }
-        }
-    }
-    None
-}
-
-/// Battery energy in µWh, from BAT*/energy_now.
-fn read_battery_uwh(sys_root: &Path) -> Option<u64> {
-    let base = sys_root.join("class/power_supply");
-    let entries = std::fs::read_dir(&base).ok()?;
-    for e in entries.flatten() {
-        let name = e.file_name().into_string().unwrap_or_default();
-        if !name.starts_with("BAT") {
-            continue;
-        }
-        if let Ok(s) = std::fs::read_to_string(e.path().join("energy_now")) {
-            if let Ok(v) = s.trim().parse::<u64>() {
-                return Some(v);
             }
         }
     }

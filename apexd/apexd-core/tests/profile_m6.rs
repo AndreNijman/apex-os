@@ -20,10 +20,6 @@ const PRE_M6: &str = r#"
     [defaults]
     ac = "balanced"
     battery = "power-saver"
-    [tiers.ultra-max]
-    governor = "performance"
-    [tiers.ultra]
-    governor = "performance"
     [tiers.performance]
     governor = "performance"
     [tiers.balanced]
@@ -45,7 +41,7 @@ fn a_profile_without_the_new_keys_still_parses() {
     assert!(fan.default_mode.is_none(), "no unsolicited fan writes at start-up");
     let game = p.game_config();
     assert!(game.enabled);
-    assert_eq!(game.tier, Tier::UltraMax);
+    assert_eq!(game.tier, Tier::Performance);
     assert_eq!(game.cpuset_policy(), CpusetPolicy::PCores);
     assert_eq!(game.irq_policy(), IrqPolicy::AwayFromGame);
     assert_eq!(game.cgroup, "/sys/fs/cgroup/apex-game");
@@ -80,7 +76,7 @@ fn a_partial_gamemode_table_keeps_the_other_defaults() {
     let p = Profile::from_toml(&toml).unwrap();
     let game = p.game_config();
     assert_eq!(game.cpuset_policy(), CpusetPolicy::Off);
-    assert_eq!(game.tier, Tier::UltraMax);
+    assert_eq!(game.tier, Tier::Performance);
     assert_eq!(game.irq_policy(), IrqPolicy::AwayFromGame);
     assert!(game.nvidia.enabled);
 }
@@ -108,7 +104,7 @@ fn katana_carries_the_real_m6_values() {
 
     let game = p.game_config();
     assert!(game.enabled);
-    assert_eq!(game.tier, Tier::Ultra);
+    assert_eq!(game.tier, Tier::Performance);
     assert_eq!(game.fan_mode.as_deref(), Some("max"));
     assert_eq!(game.cpuset_policy(), CpusetPolicy::PCores);
     assert_eq!(game.irq_policy(), IrqPolicy::AwayFromGame);
@@ -139,11 +135,9 @@ fn thinkpad_degrades_gracefully() {
     assert_eq!(game.cpuset_policy(), CpusetPolicy::All);
     assert_eq!(game.irq_policy(), IrqPolicy::Off);
     assert!(!game.nvidia.enabled);
-    assert_eq!(game.tier, Tier::UltraMax, "game mode holds the ryzenadj tier");
+    assert_eq!(game.tier, Tier::Performance, "game mode holds the top tier");
     assert_eq!(p.fan_config().min_pwm, 90);
-    // The M3 behaviour is untouched.
     assert_eq!(p.defaults.ac, Tier::Performance);
-    assert!(p.ryzenadj.is_some());
 }
 
 #[test]

@@ -356,20 +356,29 @@ async fn cmd_battery(args: BatteryArgs) -> i32 {
         }
     }
 
-    // Daemon-less read-only view.
-    let v = LocalView::detect();
-    let bat = v
-        .fingerprint
-        .batteries
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "BAT0".to_string());
-    println!("battery : {}", read_sys(&format!("class/power_supply/{bat}/status")).unwrap_or_else(|| "Unknown".into()));
-    println!("capacity: {}%", read_sys(&format!("class/power_supply/{bat}/capacity")).unwrap_or_else(|| "?".into()));
-    if let Some(end) = read_sys(&format!("class/power_supply/{bat}/charge_control_end_threshold")) {
-        let start = read_sys(&format!("class/power_supply/{bat}/charge_control_start_threshold"))
-            .unwrap_or_else(|| "?".into());
-        println!("charge  : {start}-{end}");
+    // Daemon-less read-only view, against whatever batteries this machine has.
+    let inv = apexd_core::BatteryInventory::detect();
+    let Some(bat) = inv.primary() else {
+        println!("battery : (none — this machine has no battery)");
+        println!("(apexd not running — read locally)");
+        return 0;
+    };
+    println!("battery : {}", bat.read("status").unwrap_or_else(|| "Unknown".into()));
+    println!("capacity: {}%", bat.read("capacity").unwrap_or_else(|| "?".into()));
+    if inv.len() > 1 {
+        println!("packs   : {}", inv.names().join(", "));
+    }
+    for b in &inv.batteries {
+        let end = b.end_path.as_deref().and_then(read_abs);
+        let start = b.start_path.as_deref().and_then(read_abs);
+        match (start, end) {
+            (Some(s), Some(e)) => println!("charge  : {} {s}-{e}", b.name),
+            (None, Some(e)) => println!("charge  : {} stop at {e} (no start threshold)", b.name),
+            _ => {}
+        }
+    }
+    if !inv.supports_thresholds() {
+        println!("charge  : not supported on this hardware");
     }
     println!("(apexd not running — read locally)");
     0
@@ -638,25 +647,41 @@ async fn cmd_doctor() -> i32 {
     line(true, &format!("profile resolved: active={} class={} device={}",
         v.selection.active, v.selection.class_or_empty(), v.selection.device_or_empty()));
 
+    // Every check below reports what this machine has; a WARN is information,
+    // not a fault. Nothing here is required for apexd to work.
     let driver = v.fingerprint.cpu.scaling_driver.as_deref().unwrap_or("");
     line(
+        !driver.is_empty(),
+        &format!(
+            "cpufreq scaling driver present ({})",
+            if driver.is_empty() { "none" } else { driver }
+        ),
+    );
+    line(
         v.fingerprint.cpu.amd_pstate() || v.fingerprint.cpu.intel_pstate(),
-        &format!("EPP-capable scaling driver ({})", if driver.is_empty() { "none" } else { driver }),
+        &format!(
+            "EPP-capable scaling driver ({}) — without it, tiers use the governor alone",
+            if driver.is_empty() { "none" } else { driver }
+        ),
     );
     line(
         Path::new("/sys/firmware/acpi/platform_profile").exists(),
-        "ACPI platform_profile present",
+        &format!(
+            "ACPI platform_profile present (choices: {})",
+            read_sys("firmware/acpi/platform_profile_choices").unwrap_or_else(|| "none".into())
+        ),
     );
 
-    let bat = v.fingerprint.batteries.first().cloned().unwrap_or_else(|| "BAT0".into());
-    line(
-        Path::new(&format!("/sys/class/power_supply/{bat}/charge_control_end_threshold")).exists(),
-        "charge threshold control present",
-    );
-
-    if v.selection.device.as_deref() == Some("thinkpad-l16-g2") {
-        let rz = which("ryzenadj");
-        line(rz, "ryzenadj on PATH (needed for ultra-max EC-defeat loop)");
+    let inv = apexd_core::BatteryInventory::detect();
+    line(!inv.is_empty(), &format!("battery discovery: {}", inv.summary()));
+    if !inv.is_empty() {
+        line(
+            inv.supports_thresholds(),
+            &format!(
+                "charge threshold control present ({})",
+                inv.threshold_support().as_str()
+            ),
+        );
     }
 
     let s2idle = read_sys("power/mem_sleep").map(|s| s.contains("[s2idle]")).unwrap_or(false);
@@ -768,13 +793,9 @@ fn line(ok: bool, what: &str) {
 }
 
 fn read_sys(rel: &str) -> Option<String> {
-    std::fs::read_to_string(format!("/sys/{rel}"))
-        .ok()
-        .map(|s| s.trim().to_string())
+    read_abs(&format!("/sys/{rel}"))
 }
 
-fn which(program: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|d| d.join(program).is_file()))
-        .unwrap_or(false)
+fn read_abs(path: &str) -> Option<String> {
+    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
