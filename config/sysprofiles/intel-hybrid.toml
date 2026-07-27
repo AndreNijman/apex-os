@@ -7,13 +7,16 @@
 #
 # intel_pstate active mode exposes the same governor names (performance,
 # powersave) and the same EPP strings as amd-pstate-epp, so the three-knob
-# table is identical in shape.
+# table is identical in shape. Note that intel_pstate refuses an EPP write
+# while the `performance` governor is selected; the writer treats that refusal
+# as a skip rather than a failure, so the tier still applies.
 #
-# M6: every Intel hybrid part gets P-core pinning and IRQ steering for free —
-# both are derived at runtime from /sys/devices/cpu_core/cpus, so no per-machine
-# CPU numbers appear here. GPU clock locking is deliberately NOT enabled at the
-# class level (persistence only): a class profile cannot know what dGPU, if any,
-# is fitted, and locking clocks is a device-specific decision. See
+# Every Intel hybrid part gets P-core pinning and IRQ steering for free — both
+# are derived at runtime from the topology ladder in `topology.rs`, so no
+# per-machine CPU numbers appear here, and a BIOS with E-cores disabled simply
+# degrades to "all CPUs". GPU clock locking is deliberately NOT enabled at the
+# class level (persistence only): a class profile cannot know what dGPU, if
+# any, is fitted, and locking clocks is a device-specific decision. See
 # msi-katana-gf76.toml for the device-level version.
 
 id = "intel-hybrid"
@@ -24,19 +27,9 @@ description = "Intel hybrid P/E (intel_pstate HWP)"
 ac = "performance"
 battery = "balanced"
 
-[tiers.ultra-max]
-governor = "performance"
-epp = "performance"
-platform_profile = "performance"
-
-[tiers.ultra]
-governor = "performance"
-epp = "performance"
-platform_profile = "performance"
-
 [tiers.performance]
 governor = "performance"
-epp = "balance_performance"
+epp = "performance"
 platform_profile = "performance"
 
 [tiers.balanced]
@@ -51,7 +44,7 @@ platform_profile = "low-power"
 
 [gamemode]
 enabled = true
-tier = "ultra-max"
+tier = "performance"
 cpuset = "p-cores"
 irq = "away-from-game"
 irq_pin_to_game = ["nvidia", "amdgpu"]

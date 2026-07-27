@@ -214,8 +214,22 @@ pub fn render_tier_plans(profile: &Profile) -> String {
             s.push_str(&format!("    - {}\n", a.describe()));
         }
     }
-    if let Some(charge) = profile.charge_action() {
-        s.push_str(&format!("  charge defaults\n    - {}\n", charge.describe()));
+    // Charge thresholds are resolved against the batteries this machine
+    // actually has, so the dry-run view reports discovery too — including
+    // "unsupported", which is the honest answer on most hardware.
+    if let Some((start, stop)) = profile.charge_window() {
+        s.push_str("  charge defaults\n");
+        let inv = apexd_core::BatteryInventory::detect();
+        let plan = inv.plan_thresholds(start, stop);
+        if plan.is_empty() {
+            s.push_str(&format!(
+                "    - wants {start}-{stop}, but no battery here accepts thresholds ({})\n",
+                inv.summary()
+            ));
+        }
+        for a in plan {
+            s.push_str(&format!("    - {}\n", a.describe()));
+        }
     }
     s.push_str(&format!(
         "  auto-switch defaults: AC -> {}, battery -> {}\n",
@@ -246,9 +260,13 @@ impl LocalView {
         }
     }
 
+    /// The resolved profile. Falls back to the generic layer (which
+    /// `ProfileSet` always retains) rather than panicking, so a broken override
+    /// directory downgrades the CLI's answer instead of aborting it.
     pub fn active_profile(&self) -> &Profile {
         self.set
             .get(&self.selection.active)
-            .expect("active profile always present")
+            .or_else(|| self.set.get(&self.selection.generic))
+            .expect("profile set always retains a generic layer")
     }
 }

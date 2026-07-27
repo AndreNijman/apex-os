@@ -1,9 +1,13 @@
 //! `apexd` — the APEX-OS power daemon.
 //!
-//! Detects the machine, selects a layered profile, exposes the frozen
+//! Detects the machine, selects a layered profile, exposes the
 //! `org.apexos.Apexd1` D-Bus surface, auto-switches tiers on AC/battery
-//! transitions, runs the gated RyzenAdj reapply loop, and serves Prometheus
-//! metrics. Never writes hardware when `APEXD_DRY_RUN=1` (or `--dry-run`).
+//! transitions, and serves Prometheus metrics. Never writes hardware when
+//! `APEXD_DRY_RUN=1` (or `--dry-run`).
+//!
+//! Nothing here assumes a particular machine: every capability (batteries,
+//! charge thresholds, cpufreq knobs, the ACPI platform profile, fans, GPUs) is
+//! probed at start-up, and an absent one is reported rather than fatal.
 
 mod dbus;
 mod fan;
@@ -54,12 +58,9 @@ async fn main() -> Result<()> {
     let on_ac = read_ac_online(Path::new("/sys"));
     let profile = profiles
         .get(&selection.active)
-        .context("active profile missing from set")?;
-    let (charge_start, charge_stop) = profile
-        .charge
-        .as_ref()
-        .map(|c| (c.start, c.stop))
-        .unwrap_or((0, 100));
+        .or_else(|| profiles.get(&selection.generic))
+        .context("profile set has no generic layer")?;
+    let (charge_start, charge_stop) = profile.charge_window().unwrap_or((0, 100));
     let initial_tier = if on_ac {
         profile.defaults.ac
     } else {
@@ -86,9 +87,7 @@ async fn main() -> Result<()> {
         nvidia,
     );
 
-    if ctx.device_is_l16 && !ctx.ryzenadj_present {
-        eprintln!("apexd: note: L16 detected but ryzenadj not on PATH — ultra-max EC-defeat loop disabled");
-    }
+    eprintln!("apexd: batteries: {}", ctx.batteries.summary());
     if ctx.fan.supported() {
         eprintln!("apexd: fan control: {}", ctx.fan.backends().join("; "));
     } else {
@@ -133,8 +132,9 @@ async fn main() -> Result<()> {
     //    process can exit for any *graceful* reason; a crash is covered by
     //    `ExecStopPost=/usr/bin/apex fan restore --local` in apexd.service.
     ctx.fan.restore().await;
-    // 3. Dropping ctx aborts the ryzenadj task; make it explicit by switching to
-    //    a non-ryzenadj tier so the writer records the teardown too.
+    // 3. Leave the machine on the middle tier rather than on whatever the last
+    //    request happened to be — a stopped daemon should not leave a laptop
+    //    pinned to `performance` with nothing left to walk it back down.
     ctx.apply_tier(apexd_core::Tier::Balanced).await.ok();
     Ok(())
 }

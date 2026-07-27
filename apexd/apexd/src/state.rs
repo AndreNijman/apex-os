@@ -1,17 +1,17 @@
 //! Daemon runtime state and the logic that turns tier changes into writer
-//! actions, including the gated RyzenAdj reapply loop.
+//! actions.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use apexd_core::battery::BatteryInventory;
 use apexd_core::gpu::NvidiaSmi;
 use apexd_core::profile::Profile;
 use apexd_core::syswriter::SysWriter;
-use apexd_core::tier::{Action, Tier};
+use apexd_core::tier::Tier;
 use apexd_core::{ProfileSet, Selection};
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 
 use crate::fan::FanController;
 use crate::game::GameSession;
@@ -35,11 +35,9 @@ pub struct Ctx {
     pub fingerprint: apexd_core::Fingerprint,
     pub writer: Arc<dyn SysWriter>,
     pub dry_run: bool,
-    /// True when the resolved device profile is the L16 (the only machine the
-    /// RyzenAdj loop is allowed to touch).
-    pub device_is_l16: bool,
-    /// True when `ryzenadj` is on PATH.
-    pub ryzenadj_present: bool,
+    /// The batteries this machine actually has, discovered at start-up, with
+    /// their charge-threshold capability probed. Empty on a desktop.
+    pub batteries: BatteryInventory,
     /// The sysfs root everything reads from (parameterised for fixtures).
     pub sys_root: PathBuf,
     /// M6: fan discovery, mode state and the restore path.
@@ -49,7 +47,6 @@ pub struct Ctx {
     /// M6: the active game session, if any.
     pub game: Mutex<Option<GameSession>>,
     pub state: Mutex<State>,
-    ryzenadj_loop: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Ctx {
@@ -64,47 +61,43 @@ impl Ctx {
         sys_root: impl Into<PathBuf>,
         nvidia: Arc<dyn NvidiaSmi>,
     ) -> Arc<Ctx> {
-        let device_is_l16 = selection.device.as_deref() == Some("thinkpad-l16-g2");
         let sys_root = sys_root.into();
         let fan_cfg = set
             .get(&selection.active)
             .map(|p| p.fan_config())
             .unwrap_or_default();
         let fan = FanController::new(sys_root.clone(), fan_cfg, writer.clone());
+        let batteries = BatteryInventory::discover(&sys_root);
         Arc::new(Ctx {
             set,
             selection,
             fingerprint,
             writer,
             dry_run,
-            device_is_l16,
-            ryzenadj_present: ryzenadj_available(),
+            batteries,
             sys_root,
             fan,
             nvidia,
             game: Mutex::new(None),
             state: Mutex::new(initial),
-            ryzenadj_loop: Mutex::new(None),
         })
     }
 
     /// The active profile.
+    ///
+    /// Selection can only ever name a profile the set contains — `ProfileSet`
+    /// guarantees the generic layer exists even when an on-disk override
+    /// directory supplies nothing usable — but fall back rather than panic if
+    /// that invariant is ever broken: a mistuned daemon beats a dead one.
     pub fn profile(&self) -> &Profile {
         self.set
             .get(&self.selection.active)
-            .expect("active profile always present")
+            .or_else(|| self.set.get(&self.selection.generic))
+            .expect("profile set always retains a generic layer")
     }
 
-    /// Whether the gated RyzenAdj reapply loop may run at all on this machine.
-    /// All three conditions must hold: it's the L16, ryzenadj is installed, and
-    /// we're not in dry-run.
-    pub fn ryzenadj_allowed(&self) -> bool {
-        self.device_is_l16 && self.ryzenadj_present && !self.dry_run
-    }
-
-    /// Apply a tier: update state, apply the transition plan through the
-    /// writer, and start/stop the RyzenAdj loop as the tier requires. Returns
-    /// the previous tier (or None if unchanged is fine to re-apply).
+    /// Apply a tier: update state and push the plan through the writer.
+    /// Returns the previous tier.
     pub async fn apply_tier(self: &Arc<Self>, tier: Tier) -> Result<Option<Tier>> {
         let prev = {
             let mut st = self.state.lock().await;
@@ -113,30 +106,8 @@ impl Ctx {
             Some(prev)
         };
 
-        let profile = self.profile();
-        let plan = profile.plan_transition(prev, tier);
-
-        // Apply non-ryzenadj actions synchronously through the writer. The
-        // RyzenAdj action itself is handled by the loop below (so we don't fire
-        // a single stray invocation here).
-        for action in &plan {
-            match action {
-                Action::RyzenAdj { .. } => {} // handled by the loop
-                other => self.writer.apply(other)?,
-            }
-        }
-
-        // Manage the reapply loop.
-        let wants_ryzenadj = profile
-            .ryzenadj
-            .as_ref()
-            .map(|rz| rz.applies_to(tier))
-            .unwrap_or(false);
-
-        if wants_ryzenadj && self.ryzenadj_allowed() {
-            self.start_ryzenadj_loop().await;
-        } else {
-            self.stop_ryzenadj_loop().await;
+        for action in &self.profile().plan_transition(prev, tier) {
+            self.writer.apply(action)?;
         }
 
         Ok(prev)
@@ -153,115 +124,111 @@ impl Ctx {
         }
     }
 
+    /// True when at least one discovered battery accepts a charge threshold.
+    pub fn charge_thresholds_supported(&self) -> bool {
+        self.batteries.supports_thresholds()
+    }
+
     /// Apply the battery charge thresholds the active profile declares (if
     /// any), recording them in state.
+    ///
+    /// A machine with no battery, or with batteries whose driver exposes no
+    /// threshold attribute, is a **silent** skip: the profile expressed an
+    /// intent the hardware cannot honour, which is not an error at start-up.
+    /// An *explicit* request goes through [`Ctx::set_charge_thresholds`], which
+    /// does say so.
     pub async fn apply_charge_defaults(self: &Arc<Self>) -> Result<()> {
-        if let Some(action) = self.profile().charge_action() {
-            if let Action::ChargeThresholds { start, stop, .. } = &action {
-                let mut st = self.state.lock().await;
-                st.charge_start = *start;
-                st.charge_stop = *stop;
-            }
-            self.writer.apply(&action)?;
+        let Some((start, stop)) = self.profile().charge_window() else {
+            return Ok(());
+        };
+        let plan = self.batteries.plan_thresholds(start, stop);
+        if plan.is_empty() {
+            return Ok(());
+        }
+        {
+            let mut st = self.state.lock().await;
+            st.charge_start = start;
+            st.charge_stop = stop;
+        }
+        for action in &plan {
+            self.writer.apply(action)?;
         }
         Ok(())
     }
 
-    /// Set explicit charge thresholds (from the D-Bus method).
+    /// Set explicit charge thresholds (from the D-Bus method), on every battery
+    /// that supports them. Errors — rather than silently succeeding — when the
+    /// machine has no threshold control at all, so a caller that asked for
+    /// something specific is told it did not happen.
     pub async fn set_charge_thresholds(self: &Arc<Self>, start: u8, stop: u8) -> Result<()> {
-        // Reuse the profile's sysfs paths where known, else the BAT0 defaults.
-        let (start_path, end_path) = match &self.profile().charge {
-            Some(c) => (c.start_path.clone(), c.end_path.clone()),
-            None => (
-                "/sys/class/power_supply/BAT0/charge_control_start_threshold".to_string(),
-                "/sys/class/power_supply/BAT0/charge_control_end_threshold".to_string(),
-            ),
-        };
-        self.writer.apply(&Action::ChargeThresholds {
-            start,
-            stop,
-            start_path,
-            end_path,
-        })?;
+        let plan = self.batteries.plan_thresholds(start, stop);
+        if plan.is_empty() {
+            bail!(
+                "this machine exposes no battery charge-threshold control ({})",
+                self.batteries.summary()
+            );
+        }
+        for action in &plan {
+            self.writer.apply(action)?;
+        }
         let mut st = self.state.lock().await;
         st.charge_start = start;
         st.charge_stop = stop;
         Ok(())
     }
-
-    async fn start_ryzenadj_loop(self: &Arc<Self>) {
-        let mut guard = self.ryzenadj_loop.lock().await;
-        if guard.is_some() {
-            return; // already running
-        }
-        let Some(rz) = self.profile().ryzenadj.clone() else {
-            return;
-        };
-        let (stapm, fast, slow) = rz.clamped();
-        let action = Action::RyzenAdj {
-            stapm_mw: stapm,
-            fast_mw: fast,
-            slow_mw: slow,
-            tctl_max: rz.tctl_max,
-        };
-        let writer = self.writer.clone();
-        let interval = std::time::Duration::from_secs(rz.interval_secs.max(1));
-        let handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(interval);
-            loop {
-                ticker.tick().await;
-                if let Err(e) = writer.apply(&action) {
-                    eprintln!("apexd: ryzenadj reapply failed: {e:#}");
-                }
-            }
-        });
-        *guard = Some(handle);
-        eprintln!("apexd: ryzenadj reapply loop started ({}s cadence)", rz.interval_secs);
-    }
-
-    async fn stop_ryzenadj_loop(self: &Arc<Self>) {
-        let mut guard = self.ryzenadj_loop.lock().await;
-        if let Some(handle) = guard.take() {
-            handle.abort();
-            let _ = self.writer.apply(&Action::StopRyzenAdj);
-            eprintln!("apexd: ryzenadj reapply loop torn down");
-        }
-    }
 }
 
-/// True when `ryzenadj` is resolvable on PATH.
-fn ryzenadj_available() -> bool {
-    std::env::var_os("PATH")
-        .map(|p| {
-            std::env::split_paths(&p).any(|dir| dir.join("ryzenadj").is_file())
-        })
-        .unwrap_or(false)
-}
-
-/// Read `<power_supply>/AC-ish/online`. Returns true if any Mains supply is
-/// online. Read-only.
+/// Whether the machine is running on wall power. Read-only.
+///
+/// The ladder matters because the power-supply class is not uniform:
+///
+/// 1. Any `Mains` supply reporting `online = 1` — the normal laptop answer.
+/// 2. A `Mains` supply exists and none is online -> on battery.
+/// 3. No `Mains` at all but a battery is present (USB-PD-only tablets, some
+///    ARM laptops, and any machine whose AC driver did not bind): believe the
+///    battery's own `status`, which reads `Discharging` off the wall.
+/// 4. Nothing readable at all (a desktop, a VM, a container): assume AC. A
+///    desktop must never be treated as if it were running on a battery.
 pub fn read_ac_online(sys_root: &Path) -> bool {
     let dir = sys_root.join("class/power_supply");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return true; // assume AC if we cannot tell (desktop-safe default)
     };
     let mut saw_mains = false;
+    let mut battery_discharging: Option<bool> = None;
     for e in entries.flatten() {
         let p = e.path();
         let ty = std::fs::read_to_string(p.join("type"))
             .unwrap_or_default()
             .trim()
             .to_string();
-        if ty == "Mains" {
-            saw_mains = true;
-            if std::fs::read_to_string(p.join("online"))
-                .map(|s| s.trim() == "1")
-                .unwrap_or(false)
-            {
-                return true;
+        match ty.as_str() {
+            "Mains" => {
+                saw_mains = true;
+                if std::fs::read_to_string(p.join("online"))
+                    .map(|s| s.trim() == "1")
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
             }
+            "Battery" => {
+                if let Ok(s) = std::fs::read_to_string(p.join("status")) {
+                    let s = s.trim().to_string();
+                    // Any pack that is charging means wall power is present.
+                    if s == "Charging" {
+                        battery_discharging = Some(false);
+                    } else if s == "Discharging" && battery_discharging.is_none() {
+                        battery_discharging = Some(true);
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    // If there is a Mains supply and none reported online, we're on battery.
-    !saw_mains
+    if saw_mains {
+        return false; // a Mains supply exists and none of them is online
+    }
+    // No AC line to consult: let the battery speak, else assume wall power.
+    !battery_discharging.unwrap_or(false)
 }

@@ -7,31 +7,18 @@
 # This is an always-on-AC gaming laptop, so the AC default is the top tier.
 # platform_profile is omitted because MSI's EC (msi-ec) does not reliably export
 # the ACPI platform_profile interface; the real SysWriter would skip it anyway.
-# Charge thresholds use the msi-ec 60/80 longevity window.
-#
-# M6 adds the [fan] and [gamemode] tables below: NVIDIA clock locks, P/E cpuset
-# pinning and IRQ affinity now live here. Both tables are optional — a profile
-# without them gets the shipped defaults, so the pre-M6 profiles still parse.
 
 id = "msi-katana-gf76"
 kind = "device"
 description = "MSI Katana GF76 (Intel i7-12700H, RTX 3070 Laptop)"
 
 [defaults]
-ac = "ultra"
-battery = "performance"
-
-[tiers.ultra-max]
-governor = "performance"
-epp = "performance"
-
-[tiers.ultra]
-governor = "performance"
-epp = "performance"
+ac = "performance"
+battery = "balanced"
 
 [tiers.performance]
 governor = "performance"
-epp = "balance_performance"
+epp = "performance"
 
 [tiers.balanced]
 governor = "powersave"
@@ -41,18 +28,20 @@ epp = "balance_power"
 governor = "powersave"
 epp = "power"
 
-# NOTE (M6): these BAT1 attributes are provided by the msi-ec driver. The
-# in-tree msi-ec in the shipped kernel carries a 25-entry EC-firmware allowlist
-# that does NOT include this machine's board (MS-17L3) and has no `force`
-# parameter, so on the current image the module does not bind and these writes
-# are silently skipped by the SysWriter (a missing attribute is never an error).
-# The block is kept because it is correct the moment msi-ec does bind — see the
-# IMAGE TODO in docs/m6-notes.md for how to make that happen.
+# The msi-ec 60/80 longevity window. No battery is named: this chassis presents
+# its pack as BAT1 rather than BAT0, which is exactly why the paths used to be
+# hard-coded here and exactly why they no longer are. apexd discovers the pack
+# and its threshold attributes at runtime.
+#
+# NOTE: those attributes come from the msi-ec driver. The in-tree msi-ec in the
+# shipped kernel carries a 25-entry EC-firmware allowlist that does NOT include
+# this machine's board (MS-17L3) and has no `force` parameter, so on the current
+# image the module does not bind, discovery finds no threshold attribute, and
+# the window is reported unsupported rather than failing. It becomes live the
+# moment msi-ec does bind — see the IMAGE TODO in docs/m6-notes.md.
 [charge]
 start = 60
 stop = 80
-start_path = "/sys/class/power_supply/BAT1/charge_control_start_threshold"
-end_path = "/sys/class/power_supply/BAT1/charge_control_end_threshold"
 
 # ── Fans ─────────────────────────────────────────────────────────────────────
 # Reality check for this board (MS-17L3), as of the current image:
@@ -99,7 +88,7 @@ pwm = 255
 # interrupt, which belongs on the cores doing the rendering work.
 [gamemode]
 enabled = true
-tier = "ultra"            # ultra == ultra-max on this profile (no ryzenadj)
+tier = "performance"
 fan_mode = "max"          # cooler boost for the duration of a session
 cpuset = "p-cores"
 irq = "away-from-game"
