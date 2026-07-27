@@ -128,9 +128,16 @@ CMDLINE="root=live:CDLABEL=$LABEL rd.live.image selinux=0"
 # Menu config lives ON THE ISO (editable without regenerating BOOTX64.EFI).
 # serial+console terminals so headless QEMU (and real serial rigs) get the menu.
 cat > "$WORK/grub.cfg" <<EOF
-serial --unit=0 --speed=115200
-terminal_input serial console
-terminal_output serial console
+# Serial is CONDITIONAL (apex-logs 48). Unconditionally running \`serial\` then
+# \`terminal_output serial console\` is fine under QEMU but hostile on real
+# laptops with no UART: the command can fail and take the console terminal down
+# with it, and a floating RS-232 line can inject phantom keypresses into the
+# menu. Guard it so headless/serial rigs still work while real hardware is never
+# put at risk by hardware it does not have.
+if serial --unit=0 --speed=115200; then
+    terminal_input serial console
+    terminal_output serial console
+fi
 
 # shim/grub are loaded from the ESP, but the kernel + initrd live on the ISO9660
 # filesystem — point \$root at it by volume label before referencing those paths.
@@ -139,12 +146,30 @@ search --no-floppy --set=root --label $LABEL
 set default=0
 set timeout=10
 
+# NO \`quiet\` on the default entry. This is an INSTALLER on unknown hardware —
+# there is no splash to protect, and \`quiet\` turns every possible failure
+# (KMS bringing up no display, dmsquash-live not finding the ISO, the installer
+# unit dying) into an identical featureless black screen. An Acer Aspire hit
+# exactly that: menu appeared, then nothing, with no way to tell which stage
+# failed. Text boot costs nothing here and makes the failure legible.
+#
+# console=tty0 LAST so the screen is the primary console; ttyS0 first keeps
+# QEMU/CI serial observability.
 menuentry "Install APEX-OS" {
-    linux /images/pxeboot/vmlinuz $CMDLINE quiet
+    linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 console=tty0
     initrd /images/pxeboot/initrd.img
 }
-menuentry "Install APEX-OS (verbose boot)" {
-    linux /images/pxeboot/vmlinuz $CMDLINE
+# For machines whose GPU the kernel cannot mode-set. "Menu, then black" is the
+# signature symptom, and this is the standard escape: no KMS, firmware
+# framebuffer only. The installer is a TUI, so it loses nothing.
+menuentry "Install APEX-OS (safe graphics — try this if the screen goes black)" {
+    linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 console=tty0 nomodeset
+    initrd /images/pxeboot/initrd.img
+}
+# Drops to a dracut shell if the live root is not found, instead of hanging
+# black. Use when the USB enumerates slowly or the ISO label is not matched.
+menuentry "Install APEX-OS (troubleshoot — dracut shell on failure)" {
+    linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 console=tty0 rd.shell rd.debug
     initrd /images/pxeboot/initrd.img
 }
 EOF
