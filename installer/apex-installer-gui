@@ -1,0 +1,963 @@
+#!/usr/bin/env python3
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-installer-gui — graphical front end for the APEX-OS installer
+#
+#  THIS IS A FRONT END ONLY. It collects answers and hands them to
+#  `apex-install --headless`, which is the same audited engine the TUI drives:
+#  every disk guard, LVM/LUKS refusal, ESP check, bootc invocation, account
+#  creation, SELinux relabel and Secure Boot step lives there, not here. There
+#  is exactly one install engine and this is not it.
+#
+#  Design (see docs/branding.md — colours are the established APEX tokens, not
+#  invented here): industrial/technical instrument. Mono for anything the
+#  machine said (device paths, sizes, serials); humanist sans for prose. The
+#  accent follows the EDITION being installed — chartreuse for Daily, gold for
+#  Gaming — so the installer looks like the thing it is about to install.
+#
+#  The memorable screen is Confirm: a stark, honest inventory of what dies and
+#  what survives. That screen is why this exists — whiptail silently CLIPPED it
+#  when a disk had five or more partitions, hiding "ALL DATA WILL BE LOST"
+#  exactly when there was data to lose. A scrolling GTK list cannot do that.
+# ─────────────────────────────────────────────────────────────────────────────
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gtk, Adw, Gdk, GLib, Gio, Pango
+
+import json
+import os
+import re
+import shlex
+import subprocess
+import tempfile
+
+ENGINE = "/usr/bin/apex-install"
+EDITION_FILE = "/usr/lib/apex-installer/edition"
+
+# ── design tokens ────────────────────────────────────────────────────────────
+# From files/branding/plymouth (background/surface/text) and docs/branding.md
+# (accents). Deliberately NOT re-picked here: the installer, the boot splash and
+# the greeter are the same product and must not drift apart.
+BG      = "#040508"
+SURFACE = "#0B0E14"
+RAISED  = "#131722"
+TEXT    = "#D9DEEB"
+DANGER  = "#FF5C5C"
+ACCENTS = {"daily": "#D9F99D", "gaming-nvidia": "#FDE047", "gaming-mesa": "#FDE047"}
+
+
+def edition():
+    try:
+        with open(EDITION_FILE) as f:
+            return f.read().strip() or "daily"
+    except OSError:
+        return "daily"
+
+
+def run(cmd, timeout=15):
+    """Run a command, never raise. Returns (rc, stdout)."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return 1, ""
+
+
+# ── hardware enumeration ─────────────────────────────────────────────────────
+# A front end presenting choices. The engine re-validates everything it is
+# handed, including refusing the live USB via its "currently mounted" guard, so
+# a bug here cannot wipe the boot stick.
+def live_disks():
+    """Disks backing the live session — excluded from the target list."""
+    out = set()
+    rc, txt = run(["lsblk", "-o", "NAME,MOUNTPOINT", "-rn"])
+    for line in txt.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        if re.search(r"(^|/)(live|install|ISO)", parts[1]):
+            rc2, parent = run(["lsblk", "-no", "PKNAME", f"/dev/{parts[0]}"])
+            p = parent.strip().splitlines()
+            out.add(p[0].strip() if p else parts[0])
+    return out
+
+
+def list_disks():
+    """Eligible whole disks. One lsblk in pairs format — quote-safe with spaces
+    in MODEL, which is what broke the TUI's positional parsing."""
+    skip = live_disks()
+    disks = []
+    rc, txt = run(["lsblk", "-dn", "-P", "-e", "7,11",
+                   "-o", "NAME,SIZE,TYPE,MODEL,TRAN,RM,SERIAL"])
+    for line in txt.splitlines():
+        d = dict(re.findall(r'(\w+)="([^"]*)"', line))
+        if d.get("TYPE") != "disk":
+            continue
+        if d.get("SIZE") in ("0B", "0", ""):
+            continue
+        if d.get("NAME") in skip:
+            continue
+        dev = f"/dev/{d['NAME']}"
+        rc2, ptxt = run(["lsblk", "-rno", "TYPE,SIZE,FSTYPE,LABEL", dev])
+        parts = [l for l in ptxt.splitlines() if l.split() and l.split()[0] == "part"]
+        disks.append({
+            "dev": dev,
+            "size": d.get("SIZE", "?"),
+            "model": (d.get("MODEL") or "disk").strip(),
+            "tran": d.get("TRAN", ""),
+            "removable": d.get("RM") == "1",
+            "serial": (d.get("SERIAL") or "")[-8:],
+            "nparts": len(parts),
+            "labels": [x.split()[-1] for x in parts if len(x.split()) >= 4][:3],
+        })
+    return disks
+
+
+def list_partitions(disk):
+    rc, txt = run(["lsblk", "-rno", "NAME,TYPE,SIZE,FSTYPE,LABEL,PARTTYPE", disk])
+    out = []
+    for line in txt.splitlines():
+        f = line.split()
+        if len(f) < 3 or f[1] != "part":
+            continue
+        name, _t, size = f[0], f[1], f[2]
+        fstype = f[3] if len(f) > 3 else ""
+        rest = f[4:] if len(f) > 4 else []
+        parttype = rest[-1] if rest and rest[-1].startswith("0x") or (rest and "-" in rest[-1]) else ""
+        label = " ".join(rest[:-1]) if parttype else " ".join(rest)
+        out.append({"dev": f"/dev/{name}", "size": size, "fstype": fstype,
+                    "label": label, "parttype": parttype})
+    return out
+
+
+def find_esp(disk):
+    """GPT ESP GUID or MBR 0xef only. A plain vfat partition is NOT assumed to
+    be an ESP — doing that once adopted a FAT32 photo partition and truncated
+    BOOTX64.EFI when it filled up."""
+    GPT_ESP = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+    for p in list_partitions(disk):
+        pt = (p.get("parttype") or "").lower()
+        if pt == GPT_ESP or pt == "0xef":
+            return p["dev"]
+    return ""
+
+
+CONTAINER_FS = {"LVM2_member", "crypto_LUKS", "linux_raid_member",
+                "ddf_raid_member", "isw_raid_member", "zfs_member", "bcache"}
+
+
+# ── wifi ─────────────────────────────────────────────────────────────────────
+def wifi_available():
+    rc, txt = run(["nmcli", "-t", "-f", "TYPE", "device"])
+    return any(l.strip() == "wifi" for l in txt.splitlines())
+
+
+def wifi_scan():
+    run(["nmcli", "device", "wifi", "rescan"], timeout=20)
+    rc, txt = run(["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"], timeout=20)
+    seen, nets = set(), []
+    for line in txt.splitlines():
+        # nmcli -t escapes colons inside fields as \: — split on unescaped ones.
+        f = re.split(r"(?<!\\):", line)
+        if len(f) < 3:
+            continue
+        ssid = f[0].replace("\\:", ":").strip()
+        if not ssid or ssid in seen:
+            continue
+        seen.add(ssid)
+        try:
+            sig = int(f[1])
+        except ValueError:
+            sig = 0
+        nets.append({"ssid": ssid, "signal": sig, "secure": bool(f[2].strip())})
+    nets.sort(key=lambda n: -n["signal"])
+    return nets
+
+
+def wifi_connect(ssid, password):
+    cmd = ["nmcli", "device", "wifi", "connect", ssid]
+    if password:
+        cmd += ["password", password]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    return p.returncode == 0, (p.stderr or p.stdout).strip()
+
+
+# ── styling ──────────────────────────────────────────────────────────────────
+CSS = """
+window, .apex-bg {{ background-color: {bg}; }}
+.apex-title {{ font-size: 30px; font-weight: 600; letter-spacing: -0.02em; color: {text}; }}
+.apex-sub   {{ font-size: 14px; color: alpha({text}, 0.55); }}
+.apex-step  {{ font-family: "JetBrains Mono","monospace"; font-size: 11px;
+               letter-spacing: 0.10em; color: alpha({text}, 0.45); }}
+.apex-mono  {{ font-family: "JetBrains Mono","monospace"; font-size: 13px; color: {text}; }}
+.apex-dim   {{ color: alpha({text}, 0.55); }}
+.apex-accent{{ color: {accent}; }}
+.apex-danger{{ color: {danger}; font-weight: 600; }}
+
+.apex-card {{ background-color: {surface}; border-radius: 4px;
+              border: 1px solid alpha({text}, 0.07); }}
+.apex-row  {{ background-color: {surface}; border-radius: 4px;
+              border: 1px solid alpha({text}, 0.07); padding: 12px 20px; min-height: 44px; }}
+.apex-row:hover {{ background-color: {raised}; }}
+.apex-row-sel {{ border: 1px solid {accent}; background-color: {raised}; }}
+
+/* GNOME's default selection is a solid blue that fights the APEX accent and
+   flattens the per-column colouring in the disk/partition lists. Replace it with
+   an accent wash plus an accent rule down the left edge, and let the child
+   labels keep their own colours. */
+/* NOTE the node name: GTK4 calls GtkListBox's CSS node `list`, not `listbox`.
+   Styling `listbox` silently does nothing and you keep GNOME's blue. */
+list > row:selected,
+list > row:selected:focus {{
+    background-color: alpha({accent}, 0.13);
+    box-shadow: inset 3px 0 0 {accent};
+    outline: none;
+}}
+list > row {{ border-bottom: 1px solid alpha({text}, 0.06); }}
+list > row:last-child {{ border-bottom: none; }}
+list {{ background-color: transparent; }}
+
+.apex-go {{ background: {accent}; color: {bg}; font-weight: 600;
+            border-radius: 4px; padding: 10px 28px; min-height: 44px; border: none; }}
+.apex-go:hover {{ opacity: 0.9; }}
+.apex-go:disabled {{ background: alpha({text}, 0.12); color: alpha({text}, 0.35); }}
+.apex-ghost {{ background: transparent; color: alpha({text}, 0.65);
+               border: 1px solid alpha({text}, 0.15); border-radius: 4px;
+               padding: 10px 22px; min-height: 44px; }}
+.apex-ghost:hover {{ color: {text}; border-color: alpha({text}, 0.35); }}
+.apex-destroy {{ background: {danger}; color: {bg}; font-weight: 600;
+                 border-radius: 4px; padding: 10px 28px; min-height: 44px; border: none; }}
+.apex-destroy:disabled {{ background: alpha({text}, 0.12); color: alpha({text}, 0.35); }}
+
+.apex-warn {{ background-color: alpha({danger}, 0.10);
+              border: 1px solid alpha({danger}, 0.45); border-radius: 4px; }}
+entry {{ background-color: {raised}; color: {text}; border-radius: 4px;
+         border: 1px solid alpha({text}, 0.12); padding: 10px 12px; min-height: 44px; }}
+entry:focus {{ border-color: {accent}; }}
+textview, textview text {{ background-color: {surface}; color: alpha({text}, 0.8);
+         font-family: "JetBrains Mono","monospace"; font-size: 11px; }}
+progressbar progress {{ background-color: {accent}; }}
+"""
+
+SP = 4  # base spacing unit; every gap below is a multiple
+
+
+def lbl(text, css=None, xalign=0.0, wrap=True, sel=False):
+    w = Gtk.Label(label=text, xalign=xalign, wrap=wrap, selectable=sel)
+    w.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+    if css:
+        for c in css.split():
+            w.add_css_class(c)
+    return w
+
+
+class Installer(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id="org.apexos.Installer",
+                         flags=Gio.ApplicationFlags.NON_UNIQUE)
+        self.connect("activate", self.startup)
+        self.ed = edition()
+        self.accent = ACCENTS.get(self.ed, ACCENTS["daily"])
+        self.answers = {"mode": "disk", "rootfs": "btrfs"}
+        self.disk = None
+        self.target = None
+        self.esp = ""
+        self.proc = None
+
+    # ── shell ────────────────────────────────────────────────────────────────
+    def startup(self, _app):
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+        prov = Gtk.CssProvider()
+        prov.load_from_data(CSS.format(bg=BG, surface=SURFACE, raised=RAISED,
+                                       text=TEXT, accent=self.accent,
+                                       danger=DANGER).encode())
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.win = Adw.ApplicationWindow(application=self)
+        self.win.set_title("APEX-OS Installer")
+        self.win.set_default_size(1024, 700)
+        self.win.fullscreen()
+        self.win.add_css_class("apex-bg")
+
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE,
+                               transition_duration=200)
+        self.win.set_content(self.stack)
+
+        for name, build in (("welcome", self.p_welcome), ("wifi", self.p_wifi),
+                            ("disk", self.p_disk), ("mode", self.p_mode),
+                            ("part", self.p_part), ("account", self.p_account),
+                            ("confirm", self.p_confirm), ("run", self.p_run),
+                            ("done", self.p_done)):
+            self.stack.add_named(Gtk.Box(), name)
+        self.builders = {"welcome": self.p_welcome, "wifi": self.p_wifi,
+                         "disk": self.p_disk, "mode": self.p_mode,
+                         "part": self.p_part, "account": self.p_account,
+                         "confirm": self.p_confirm, "run": self.p_run,
+                         "done": self.p_done}
+        # Test affordance: jump straight to a page for screenshotting. Only
+        # reachable by setting the env var explicitly; harmless in production.
+        start = os.environ.get("APEX_GUI_PAGE", "welcome")
+        if start != "welcome":
+            self.disk = os.environ.get("APEX_GUI_DISK", "")
+            self.target = os.environ.get("APEX_GUI_TARGET", "") or None
+            self.esp = os.environ.get("APEX_GUI_ESP", "")
+            self.answers.setdefault("username", "andre")
+            self.answers.setdefault("hostname", "apex")
+            self.answers["mode"] = os.environ.get("APEX_GUI_MODE", "disk")
+        self.go(start)
+        self.win.present()
+
+    def go(self, name):
+        """Rebuild on entry — every page reflects state chosen on earlier pages."""
+        page = self.builders[name]()
+        old = self.stack.get_child_by_name(name)
+        if old:
+            self.stack.remove(old)
+        self.stack.add_named(page, name)
+        self.stack.set_visible_child_name(name)
+
+    def frame(self, step, title, subtitle, body, actions):
+        """Every page: step marker, title, subtitle, body, action row.
+        Consistent structure is what makes an installer feel trustworthy."""
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.add_css_class("apex-bg")
+        clamp = Adw.Clamp(maximum_size=780, tightening_threshold=680)
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 4)
+        col.set_margin_top(SP * 14); col.set_margin_bottom(SP * 8)
+        col.set_margin_start(SP * 6); col.set_margin_end(SP * 6)
+        col.set_valign(Gtk.Align.FILL)
+
+        ed_name = {"daily": "DAILY", "gaming-nvidia": "GAMING",
+                   "gaming-mesa": "GAMING"}.get(self.ed, self.ed.upper())
+        col.append(lbl(f"APEX-OS  {ed_name}   ·   {step}", "apex-step"))
+        col.append(lbl(title, "apex-title"))
+        if subtitle:
+            col.append(lbl(subtitle, "apex-sub"))
+
+        body.set_vexpand(True)
+        body.set_margin_top(SP * 3)
+        col.append(body)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP * 3)
+        row.set_margin_top(SP * 4)
+        row.set_halign(Gtk.Align.FILL)
+        for w, end in actions:
+            if end:
+                w.set_hexpand(False)
+                spacer = Gtk.Box(hexpand=True)
+                if not any(getattr(c, "_spacer", False) for c in row):
+                    spacer._spacer = True
+                    row.append(spacer)
+            row.append(w)
+        col.append(row)
+        clamp.set_child(col)
+        outer.append(clamp)
+        return outer
+
+    def btn(self, label, css, cb, enabled=True):
+        b = Gtk.Button(label=label)
+        b.add_css_class(css)
+        b.connect("clicked", cb)
+        b.set_sensitive(enabled)
+        return b
+
+    # ── 1. welcome ───────────────────────────────────────────────────────────
+    def p_welcome(self):
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
+        card.add_css_class("apex-card")
+        card.set_margin_top(SP * 2)
+        for w in (SP * 5, SP * 5):
+            pass
+        card.set_margin_start(0); card.set_margin_end(0)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        inner.set_margin_top(SP * 5); inner.set_margin_bottom(SP * 5)
+        inner.set_margin_start(SP * 5); inner.set_margin_end(SP * 5)
+        for line in (
+            "Connect to Wi-Fi so the installed system has network on first boot.",
+            "Choose a disk, or a single partition to install alongside another OS.",
+            "Create your account — no locked-out first boot.",
+            "Review exactly what will be erased, then confirm.",
+        ):
+            r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP * 3)
+            r.append(lbl("—", "apex-accent apex-mono", wrap=False))
+            r.append(lbl(line, "apex-dim"))
+            inner.append(r)
+        card.append(inner)
+        body.append(card)
+        body.append(lbl("Nothing on any disk is touched until the confirmation step.",
+                        "apex-dim"))
+        return self.frame("STEP 1 OF 6", "Install APEX-OS",
+                          "A guided install. You can go back at any point before confirming.",
+                          body,
+                          [(self.btn("Quit", "apex-ghost", lambda *_: self.quit()), False),
+                           (self.btn("Begin", "apex-go", lambda *_: self.go("wifi")), True)])
+
+    # ── 2. wifi (skippable) ──────────────────────────────────────────────────
+    def p_wifi(self):
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        self.wifi_status = lbl("", "apex-dim")
+
+        if not wifi_available():
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
+            box.add_css_class("apex-card")
+            i = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
+            i.set_margin_top(SP * 5); i.set_margin_bottom(SP * 5)
+            i.set_margin_start(SP * 5); i.set_margin_end(SP * 5)
+            i.append(lbl("No Wi-Fi adapter detected.", "apex-mono"))
+            i.append(lbl("If you are on Ethernet you already have network and can "
+                         "continue. Otherwise the system will come up offline and you "
+                         "can connect after first boot.", "apex-dim"))
+            box.append(i)
+            body.append(box)
+            return self.frame("STEP 2 OF 6", "Network", None, body,
+                              [(self.btn("Back", "apex-ghost", lambda *_: self.go("welcome")), False),
+                               (self.btn("Continue", "apex-go", lambda *_: self.go("disk")), True)])
+
+        self.net_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.net_list.add_css_class("apex-card")
+        sc = Gtk.ScrolledWindow(vexpand=True)
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_child(self.net_list)
+        body.append(sc)
+
+        self.wifi_pw = Gtk.PasswordEntry(show_peek_icon=True)
+        self.wifi_pw.set_property("placeholder-text", "Network password")
+        body.append(self.wifi_pw)
+        body.append(self.wifi_status)
+
+        self._wifi_nets = []
+
+        def refresh(*_):
+            self.wifi_status.set_text("Scanning…")
+            child = self.net_list.get_first_child()
+            while child:
+                self.net_list.remove(child)
+                child = self.net_list.get_first_child()
+
+            def done():
+                self._wifi_nets = wifi_scan()
+                for n in self._wifi_nets:
+                    r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP * 3)
+                    r.set_margin_top(SP * 2); r.set_margin_bottom(SP * 2)
+                    r.set_margin_start(SP * 4); r.set_margin_end(SP * 4)
+                    bars = "▁▃▅▇"[:max(1, min(4, n["signal"] // 25 + 1))]
+                    r.append(lbl(bars, "apex-accent apex-mono", wrap=False))
+                    r.append(lbl(n["ssid"], "apex-mono"))
+                    lock = lbl("locked" if n["secure"] else "open", "apex-dim", wrap=False)
+                    lock.set_hexpand(True); lock.set_xalign(1.0)
+                    r.append(lock)
+                    self.net_list.append(r)
+                self.wifi_status.set_text(
+                    f"{len(self._wifi_nets)} network(s) found."
+                    if self._wifi_nets else "No networks found. Try scanning again.")
+                return False
+            GLib.timeout_add(50, done)
+
+        def connect(_b):
+            row = self.net_list.get_selected_row()
+            if row is None:
+                self.wifi_status.set_text("Pick a network first.")
+                return
+            n = self._wifi_nets[row.get_index()]
+            self.wifi_status.set_text(f"Connecting to {n['ssid']}…")
+
+            def work():
+                ok, err = wifi_connect(n["ssid"], self.wifi_pw.get_text())
+                if ok:
+                    self.wifi_status.set_text(
+                        f"Connected to {n['ssid']}. This will be copied to the "
+                        f"installed system.")
+                else:
+                    self.wifi_status.set_text(f"Could not connect: {err[:120]}")
+                return False
+            GLib.timeout_add(50, work)
+
+        refresh()
+        acts = [(self.btn("Back", "apex-ghost", lambda *_: self.go("welcome")), False),
+                (self.btn("Rescan", "apex-ghost", refresh), False),
+                (self.btn("Connect", "apex-ghost", connect), False),
+                (self.btn("Skip", "apex-ghost", lambda *_: self.go("disk")), True),
+                (self.btn("Continue", "apex-go", lambda *_: self.go("disk")), False)]
+        return self.frame("STEP 2 OF 6", "Connect to Wi-Fi",
+                          "Optional. If you connect, the network is carried into the "
+                          "installed system so it has Wi-Fi on first boot.",
+                          body, acts)
+
+    # ── 3. disk ──────────────────────────────────────────────────────────────
+    def p_disk(self):
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        disks = list_disks()
+        self._disks = disks
+
+        if not disks:
+            w = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            w.add_css_class("apex-warn")
+            i = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
+            i.set_margin_top(SP * 5); i.set_margin_bottom(SP * 5)
+            i.set_margin_start(SP * 5); i.set_margin_end(SP * 5)
+            i.append(lbl("No eligible disks found.", "apex-danger"))
+            i.append(lbl("The disk you booted from is excluded on purpose. If this "
+                         "machine has an internal drive and it is not listed, it may "
+                         "be in RAID/RST mode in firmware — switch it to AHCI and "
+                         "try again.", "apex-dim"))
+            w.append(i)
+            body.append(w)
+            return self.frame("STEP 3 OF 6", "Select a disk", None, body,
+                              [(self.btn("Back", "apex-ghost", lambda *_: self.go("wifi")), False),
+                               (self.btn("Rescan", "apex-ghost", lambda *_: self.go("disk")), True)])
+
+        self.disk_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.disk_list.add_css_class("apex-card")
+        for d in disks:
+            r = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP)
+            r.set_margin_top(SP * 3); r.set_margin_bottom(SP * 3)
+            r.set_margin_start(SP * 4); r.set_margin_end(SP * 4)
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP * 3)
+            top.append(lbl(d["dev"], "apex-mono apex-accent", wrap=False))
+            top.append(lbl(d["size"], "apex-mono", wrap=False))
+            m = lbl(d["model"], "apex-dim", wrap=False)
+            m.set_hexpand(True); m.set_xalign(1.0)
+            top.append(m)
+            r.append(top)
+            bits = []
+            if d["tran"]:
+                bits.append(d["tran"])
+            if d["removable"]:
+                bits.append("removable")
+            if d["serial"]:
+                bits.append(f"sn {d['serial']}")
+            bits.append(f"{d['nparts']} partition(s)" if d["nparts"] else "empty")
+            if d["labels"]:
+                bits.append(", ".join(d["labels"]))
+            r.append(lbl("   ".join(bits), "apex-dim apex-mono", wrap=False))
+            self.disk_list.append(r)
+        self.disk_list.select_row(self.disk_list.get_row_at_index(0))
+        sc = Gtk.ScrolledWindow(vexpand=True)
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_child(self.disk_list)
+        body.append(sc)
+        body.append(lbl("The disk you booted from is not listed.", "apex-dim"))
+
+        def nxt(_b):
+            row = self.disk_list.get_selected_row()
+            if row is None:
+                return
+            self.disk = self._disks[row.get_index()]["dev"]
+            self.go("mode")
+
+        return self.frame("STEP 3 OF 6", "Select a disk",
+                          "Where should APEX-OS go?", body,
+                          [(self.btn("Back", "apex-ghost", lambda *_: self.go("wifi")), False),
+                           (self.btn("Continue", "apex-go", nxt), True)])
+
+    # ── 4. whole disk or one partition ───────────────────────────────────────
+    def p_mode(self):
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        parts = list_partitions(self.disk)
+
+        def choose(mode):
+            def _cb(_b):
+                self.answers["mode"] = mode
+                self.go("part" if mode == "partition" else "account")
+            return _cb
+
+        for mode, title, desc, danger in (
+            ("disk", "Use the entire disk",
+             f"Erases every partition on {self.disk}. Simplest option on a machine "
+             f"you are dedicating to APEX-OS.", True),
+            ("partition", "Install into one partition",
+             "Keeps the other partitions and installs alongside your existing OS "
+             "(dual-boot). You choose which partition on the next screen.", False),
+        ):
+            b = Gtk.Button()
+            b.add_css_class("apex-row")
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP)
+            t = lbl(title, "apex-danger" if danger else "apex-accent")
+            inner.append(t)
+            inner.append(lbl(desc, "apex-dim"))
+            b.set_child(inner)
+            b.connect("clicked", choose(mode))
+            body.append(b)
+
+        if parts:
+            body.append(lbl(f"{self.disk} currently holds {len(parts)} partition(s).",
+                            "apex-dim apex-mono"))
+        else:
+            body.append(lbl(f"{self.disk} has no partitions — it looks empty.",
+                            "apex-dim apex-mono"))
+
+        return self.frame("STEP 4 OF 6", "How should this disk be used?",
+                          self.disk, body,
+                          [(self.btn("Back", "apex-ghost", lambda *_: self.go("disk")), False)])
+
+    # ── 4b. pick the partition ───────────────────────────────────────────────
+    def p_part(self):
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        parts = list_partitions(self.disk)
+        self.esp = find_esp(self.disk)
+        self._parts = [p for p in parts if p["dev"] != self.esp]
+
+        if not self.esp:
+            w = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            w.add_css_class("apex-warn")
+            i = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
+            i.set_margin_top(SP * 5); i.set_margin_bottom(SP * 5)
+            i.set_margin_start(SP * 5); i.set_margin_end(SP * 5)
+            i.append(lbl("No EFI System Partition found on this disk.", "apex-danger"))
+            i.append(lbl("Dual-boot needs an existing ESP to add a boot entry to. "
+                         "Use the whole disk instead, or create an ESP first.",
+                         "apex-dim"))
+            w.append(i)
+            body.append(w)
+            return self.frame("STEP 4 OF 6", "Choose a partition", self.disk, body,
+                              [(self.btn("Back", "apex-ghost", lambda *_: self.go("mode")), False)])
+
+        self.part_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.part_list.add_css_class("apex-card")
+        for p in self._parts:
+            r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP * 3)
+            r.set_margin_top(SP * 3); r.set_margin_bottom(SP * 3)
+            r.set_margin_start(SP * 4); r.set_margin_end(SP * 4)
+            blocked = p["fstype"] in CONTAINER_FS
+            r.append(lbl(p["dev"], "apex-mono" + ("" if blocked else " apex-accent"), wrap=False))
+            r.append(lbl(p["size"], "apex-mono", wrap=False))
+            desc = p["fstype"] or "unformatted"
+            if p["label"]:
+                desc += f"  {p['label']}"
+            if blocked:
+                desc += "   — cannot be used (container member)"
+            d = lbl(desc, "apex-danger" if blocked else "apex-dim", wrap=False)
+            d.set_hexpand(True); d.set_xalign(1.0)
+            r.append(d)
+            self.part_list.append(r)
+        sc = Gtk.ScrolledWindow(vexpand=True)
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_child(self.part_list)
+        body.append(sc)
+        body.append(lbl(f"EFI System Partition: {self.esp} — shared, not erased.",
+                        "apex-dim apex-mono"))
+        self.part_err = lbl("", "apex-danger")
+        body.append(self.part_err)
+
+        def nxt(_b):
+            row = self.part_list.get_selected_row()
+            if row is None:
+                self.part_err.set_text("Select a partition to install into.")
+                return
+            p = self._parts[row.get_index()]
+            if p["fstype"] in CONTAINER_FS:
+                self.part_err.set_text(
+                    f"{p['dev']} is a {p['fstype']} member. Formatting it would "
+                    f"destroy everything inside it. Pick another partition.")
+                return
+            self.target = p["dev"]
+            self.go("account")
+
+        return self.frame("STEP 4 OF 6", "Choose a partition",
+                          f"This partition will be erased. Everything else on "
+                          f"{self.disk} is kept.", body,
+                          [(self.btn("Back", "apex-ghost", lambda *_: self.go("mode")), False),
+                           (self.btn("Continue", "apex-go", nxt), True)])
+
+    # ── 5. account ───────────────────────────────────────────────────────────
+    def p_account(self):
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        grid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+
+        self.e_user = Gtk.Entry(text=self.answers.get("username", "andre"))
+        self.e_host = Gtk.Entry(text=self.answers.get("hostname", "apex"))
+        self.e_pw1 = Gtk.PasswordEntry(show_peek_icon=True)
+        self.e_pw2 = Gtk.PasswordEntry(show_peek_icon=True)
+        self.e_pw1.set_property("placeholder-text", "Password")
+        self.e_pw2.set_property("placeholder-text", "Repeat password")
+
+        for caption, widget in (("Username", self.e_user),
+                                ("Password", self.e_pw1),
+                                ("Repeat password", self.e_pw2),
+                                ("Computer name", self.e_host)):
+            grid.append(lbl(caption, "apex-dim"))
+            grid.append(widget)
+        body.append(grid)
+        self.acct_err = lbl("", "apex-danger")
+        body.append(self.acct_err)
+        body.append(lbl("This account is created during installation and is an "
+                        "administrator. There is no locked-out first boot.",
+                        "apex-dim"))
+
+        RESERVED = {"root", "bin", "daemon", "adm", "nobody", "greetd"}
+
+        def nxt(_b):
+            u = self.e_user.get_text().strip()
+            h = self.e_host.get_text().strip()
+            p1, p2 = self.e_pw1.get_text(), self.e_pw2.get_text()
+            if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", u):
+                self.acct_err.set_text(
+                    "Username must be lowercase letters, digits, - or _, start with "
+                    "a letter or _, and be at most 32 characters.")
+                return
+            if u in RESERVED or u.startswith("systemd-"):
+                self.acct_err.set_text(f"'{u}' is a reserved system account.")
+                return
+            if not p1:
+                self.acct_err.set_text("Password cannot be empty.")
+                return
+            if p1 != p2:
+                self.acct_err.set_text("The two passwords do not match.")
+                return
+            if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9-]{0,62}", h):
+                self.acct_err.set_text(
+                    "Computer name must be letters, digits and hyphens only.")
+                return
+            self.answers.update(username=u, hostname=h, password=p1)
+            self.go("confirm")
+
+        back = "part" if self.answers["mode"] == "partition" else "mode"
+        return self.frame("STEP 5 OF 6", "Create your account", None, body,
+                          [(self.btn("Back", "apex-ghost", lambda *_: self.go(back)), False),
+                           (self.btn("Continue", "apex-go", nxt), True)])
+
+    # ── 6. confirm — the screen this whole rewrite exists for ────────────────
+    def p_confirm(self):
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        mode = self.answers["mode"]
+        target = self.target if mode == "partition" else self.disk
+
+        # The warning comes FIRST and is never truncated. whiptail clipped this
+        # silently once a disk had five partitions — hiding the destruction
+        # notice exactly when there was most to lose.
+        warn = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        warn.add_css_class("apex-warn")
+        wi = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
+        wi.set_margin_top(SP * 4); wi.set_margin_bottom(SP * 4)
+        wi.set_margin_start(SP * 4); wi.set_margin_end(SP * 4)
+        if mode == "disk":
+            wi.append(lbl(f"EVERYTHING ON {self.disk} WILL BE ERASED", "apex-danger"))
+            wi.append(lbl("Every partition on this disk is destroyed, including any "
+                          "other operating system on it. This cannot be undone.",
+                          "apex-dim"))
+        else:
+            wi.append(lbl(f"{target} WILL BE ERASED", "apex-danger"))
+            wi.append(lbl(f"Only this partition is formatted. The rest of "
+                          f"{self.disk} is left alone.", "apex-dim"))
+        warn.append(wi)
+        body.append(warn)
+
+        # Full inventory, scrollable — never clipped.
+        inv = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP)
+        inv.add_css_class("apex-card")
+        ii = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP)
+        ii.set_margin_top(SP * 3); ii.set_margin_bottom(SP * 3)
+        ii.set_margin_start(SP * 4); ii.set_margin_end(SP * 4)
+        for p in list_partitions(self.disk):
+            dying = (mode == "disk") or (p["dev"] == target)
+            keep_esp = (mode == "partition" and p["dev"] == self.esp)
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP * 3)
+            if keep_esp:
+                verdict, css = "SHARED", "apex-accent"
+            elif dying:
+                verdict, css = "ERASED", "apex-danger"
+            else:
+                verdict, css = "KEPT", "apex-dim"
+            v = lbl(verdict, f"{css} apex-mono", wrap=False)
+            v.set_size_request(80, -1)
+            row.append(v)
+            row.append(lbl(p["dev"], "apex-mono", wrap=False))
+            row.append(lbl(p["size"], "apex-mono apex-dim", wrap=False))
+            d = lbl(f"{p['fstype'] or 'unformatted'}  {p['label']}".strip(),
+                    "apex-dim", wrap=False)
+            d.set_hexpand(True); d.set_xalign(1.0)
+            row.append(d)
+            ii.append(row)
+        if not list_partitions(self.disk):
+            ii.append(lbl("No existing partitions — the disk is empty.", "apex-dim"))
+        inv.append(ii)
+        sc = Gtk.ScrolledWindow(vexpand=True)
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_child(inv)
+        body.append(sc)
+
+        summary = (f"{self.answers['username']} @ {self.answers['hostname']}"
+                   f"   ·   {self.ed}   ·   btrfs")
+        body.append(lbl(summary, "apex-mono apex-dim"))
+
+        body.append(lbl("Type ERASE to confirm:", "apex-dim"))
+        self.e_erase = Gtk.Entry()
+        self.e_erase.set_property("placeholder-text", "ERASE")
+        body.append(self.e_erase)
+
+        go = self.btn("Erase and install", "apex-destroy", lambda *_: self.begin(), False)
+        self.e_erase.connect("changed",
+                             lambda e: go.set_sensitive(e.get_text().strip() == "ERASE"))
+        self.e_erase.connect("activate",
+                             lambda e: self.begin() if e.get_text().strip() == "ERASE" else None)
+
+        back = "account"
+        return self.frame("STEP 6 OF 6", "Confirm",
+                          "Nothing has been written yet. This is the last point at "
+                          "which you can go back.", body,
+                          [(self.btn("Back", "apex-ghost", lambda *_: self.go(back)), False),
+                           (go, True)])
+
+    # ── 7. run ───────────────────────────────────────────────────────────────
+    def begin(self):
+        self.go("run")
+
+    def p_run(self):
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        self.bar = Gtk.ProgressBar(show_text=False)
+        self.bar.set_pulse_step(0.06)
+        body.append(self.bar)
+        self.run_state = lbl("Preparing…", "apex-mono")
+        body.append(self.run_state)
+
+        self.logview = Gtk.TextView(editable=False, cursor_visible=False,
+                                    monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        self.logbuf = self.logview.get_buffer()
+        sc = Gtk.ScrolledWindow(vexpand=True)
+        sc.add_css_class("apex-card")
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_child(self.logview)
+        self.logscroll = sc
+        body.append(sc)
+        body.append(lbl("Do not power off. Full log: /var/log/apex-install.log",
+                        "apex-dim"))
+
+        page = self.frame("INSTALLING", "Installing APEX-OS",
+                          self.target if self.answers["mode"] == "partition" else self.disk,
+                          body, [])
+        GLib.idle_add(self.spawn_engine)
+        GLib.timeout_add(120, self.pulse)
+        return page
+
+    def pulse(self):
+        if self.proc is None or self.proc.poll() is None:
+            self.bar.pulse()
+            return True
+        return False
+
+    def append_log(self, text):
+        end = self.logbuf.get_end_iter()
+        self.logbuf.insert(end, text)
+        mark = self.logbuf.create_mark(None, self.logbuf.get_end_iter(), False)
+        self.logview.scroll_mark_onscreen(mark)
+        self.logbuf.delete_mark(mark)
+
+    def spawn_engine(self):
+        """Hand the answers to the ONE install engine. The password goes via a
+        0600 file, never argv — argv is world-readable in /proc."""
+        a = dict(self.answers)
+        a["disk"] = self.disk
+        if a["mode"] == "partition":
+            a["target"] = self.target
+            a["esp"] = self.esp
+
+        fd, path = tempfile.mkstemp(prefix="apex-answers-", dir="/run")
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            for k in ("mode", "disk", "target", "esp", "username", "password",
+                      "hostname", "rootfs"):
+                if a.get(k):
+                    f.write(f"{k}={a[k]}\n")
+        self._answers_path = path
+
+        try:
+            self.proc = subprocess.Popen(
+                [ENGINE, "--headless", path],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1)
+        except OSError as e:
+            self.finish(False, f"Could not start the install engine: {e}")
+            return False
+
+        GLib.io_add_watch(self.proc.stdout, GLib.IO_IN | GLib.IO_HUP, self.on_output)
+        return False
+
+    def on_output(self, src, cond):
+        line = src.readline()
+        if line:
+            self.append_log(line)
+            s = line.strip()
+            if s and not s.startswith("+"):
+                self.run_state.set_text(s[:110])
+            if "APEX-INSTALL-FAILED" in s:
+                self.finish(False, s.split("APEX-INSTALL-FAILED:", 1)[-1].strip())
+                return False
+        if cond & GLib.IO_HUP or (self.proc and self.proc.poll() is not None):
+            rc = self.proc.wait() if self.proc else 1
+            # Drain anything buffered after HUP so a failure reason is never lost.
+            try:
+                for rest in src:
+                    self.append_log(rest)
+            except (ValueError, OSError):
+                pass
+            self.finish(rc == 0, "" if rc == 0 else f"The installer exited with status {rc}.")
+            return False
+        return True
+
+    def finish(self, ok, err):
+        # The answers file carries the password — remove it whatever happened.
+        p = getattr(self, "_answers_path", None)
+        if p:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+            self._answers_path = None
+        self.ok, self.err = ok, err
+        self.go("done")
+
+    # ── 8. done ──────────────────────────────────────────────────────────────
+    def p_done(self):
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        ok = getattr(self, "ok", False)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        card.add_css_class("apex-card" if ok else "apex-warn")
+        i = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
+        i.set_margin_top(SP * 5); i.set_margin_bottom(SP * 5)
+        i.set_margin_start(SP * 5); i.set_margin_end(SP * 5)
+
+        if ok:
+            i.append(lbl("APEX-OS is installed.", "apex-accent"))
+            if self.answers["mode"] == "partition":
+                i.append(lbl(f"Installed into {self.target}. The other partitions "
+                             f"on {self.disk} were not touched.", "apex-dim"))
+            else:
+                i.append(lbl(f"Installed on {self.disk}.", "apex-dim"))
+            i.append(lbl(f"Log in as  {self.answers['username']}   ·   "
+                         f"hostname  {self.answers['hostname']}", "apex-mono"))
+            if os.path.isdir("/etc/NetworkManager/system-connections"):
+                n = len([f for f in os.listdir("/etc/NetworkManager/system-connections")
+                         if f.endswith(".nmconnection")])
+                if n:
+                    i.append(lbl(f"{n} saved network(s) carried over — Wi-Fi should "
+                                 f"work on first boot.", "apex-dim"))
+        else:
+            i.append(lbl("Installation failed.", "apex-danger"))
+            i.append(lbl(getattr(self, "err", "") or "See the log for details.",
+                         "apex-dim", sel=True))
+            i.append(lbl("Nothing further will be written. The full log is at "
+                         "/var/log/apex-install.log — switch to a shell with "
+                         "Ctrl+Alt+F2 (root / apex) to read it.", "apex-dim"))
+        card.append(i)
+        body.append(card)
+
+        acts = []
+        if ok:
+            acts.append((self.btn("Reboot now", "apex-go",
+                                  lambda *_: subprocess.Popen(["systemctl", "reboot"])), True))
+            acts.insert(0, (self.btn("Stay in the installer", "apex-ghost",
+                                     lambda *_: self.quit()), False))
+        else:
+            acts.append((self.btn("Quit", "apex-ghost", lambda *_: self.quit()), False))
+            acts.append((self.btn("Try again", "apex-go", lambda *_: self.go("welcome")), True))
+
+        return self.frame("DONE" if ok else "FAILED",
+                          "Installation complete" if ok else "Installation failed",
+                          None, body, acts)
+
+
+if __name__ == "__main__":
+    Installer().run(None)

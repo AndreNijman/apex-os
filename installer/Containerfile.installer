@@ -20,7 +20,14 @@ FROM registry.fedoraproject.org/fedora:43
 # into the installed tree; device-mapper for the dmsquash-live snapshot root;
 # grub2-tools-extra/-efi-x64-modules so build-live-iso.sh can produce the ISO's
 # UEFI grub binary with this same container (host may lack grub2-mkstandalone);
-# NetworkManager for first-boot net.
+# NetworkManager-wifi / wpa_supplicant / wireless-regdb / iw are listed
+# EXPLICITLY for the same reason linux-firmware is: they are WEAK dependencies of
+# NetworkManager and install_weak_deps=False silently drops them. Without
+# NetworkManager-wifi, NM has no wifi device support whatsoever — `nmcli device`
+# shows no wlan at all — so the installer could never offer to join a network.
+# (Third instance of this trap in one day: linux-firmware, hyprland-qtutils, and
+# now this. Anything only pulled in as a Recommends must be named here.)
+# The wifi firmware itself comes from linux-firmware, added above.
 # linux-firmware is listed EXPLICITLY because install_weak_deps=False is set
 # below: firmware is only a *weak* dependency of the kernel, so it was silently
 # excluded and the live environment shipped with /lib/firmware absent entirely
@@ -39,15 +46,27 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         newt ncurses util-linux coreutils bash shadow-utils \
         btrfs-progs dosfstools e2fsprogs xfsprogs gdisk parted \
         lvm2 cryptsetup mdadm \
-        NetworkManager iproute iputils \
+        NetworkManager NetworkManager-wifi wpa_supplicant wireless-regdb iw \
+        iproute iputils \
         plymouth kbd \
+        cage gtk4 libadwaita python3-gobject \
+        mesa-dri-drivers mesa-vulkan-drivers \
+        adwaita-icon-theme jetbrains-mono-fonts google-noto-sans-fonts \
+        abattis-cantarell-fonts \
         grub2-tools-extra grub2-efi-x64-modules \
         shim-x64 grub2-efi-x64 mokutil efibootmgr \
     && dnf clean all
 
 # The installer TUI.
-COPY apex-install /usr/bin/apex-install
-RUN chmod 0755 /usr/bin/apex-install
+# The install ENGINE (also the text-mode UI), the graphical front end, and the
+# launcher that picks between them. One engine, two front ends: apex-installer-gui
+# collects answers and drives `apex-install --headless`, so every disk guard and
+# safety check lives in exactly one place.
+COPY apex-install         /usr/bin/apex-install
+COPY apex-installer-gui   /usr/bin/apex-installer-gui
+COPY apex-installer-launch /usr/bin/apex-installer-launch
+RUN chmod 0755 /usr/bin/apex-install /usr/bin/apex-installer-gui \
+                /usr/bin/apex-installer-launch
 
 # Unattended-install marker. apex-install only honours `apex.unattended` when
 # this file exists — baked ONLY for test/CI builds (ALLOW_UNATTENDED=1). The
