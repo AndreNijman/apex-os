@@ -47,7 +47,11 @@
 set -uo pipefail
 
 LOG=/var/log/apex-installer-launch.log
-GUI_CMD=(cage -- /usr/bin/apex-installer-gui)
+# -s allows VT switching. Without it the kernel's Ctrl+Alt+Fn is dead for the
+# whole session — while the GUI's own install-failure page tells the user to
+# "switch to a shell with Ctrl+Alt+F2" to read the log. That advice has to be
+# true, and an escape hatch off a wedged GUI is worth having regardless.
+GUI_CMD=(cage -s -- /usr/bin/apex-installer-gui)
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null || true; }
 
 log "──── apex-installer-launch starting (pid $$) ────"
@@ -98,24 +102,51 @@ log "environment pinned: LIBSEAT_BACKEND=seatd WLR_RENDERER=pixman GSK_RENDERER=
 # connected (headless, or a framebuffer with no connector modelled — some
 # simpledrm setups), leave WLR_DRM_DEVICES unset and let wlroots choose, because
 # a wrong forced choice is worse than no choice.
-_gpu=""
-for _st in /sys/class/drm/card*-*/status; do
-    [ -r "$_st" ] || continue
-    [ "$(cat "$_st" 2>/dev/null)" = connected ] || continue
-    # …/card1-eDP-1/status  ->  card1  ->  /dev/dri/card1
-    _conndir=$(dirname "$_st")
-    _c=$(basename "$_conndir"); _c=${_c%%-*}
-    [ -e "/dev/dri/$_c" ] || continue
-    _gpu="/dev/dri/$_c"
-    log "display: connected output on $_c ($(basename "$_conndir"))"
-    break
-done
-if [ -n "$_gpu" ]; then
-    export WLR_DRM_DEVICES="$_gpu"
-    log "display: pinning the compositor to $_gpu"
-else
-    log "display: no connected connector found in sysfs — letting wlroots pick"
-fi
+# Pinning is a function, not a one-shot, because it MUST be recomputed before
+# the retry. The retry exists to absorb a late DRM handover — and the commonest
+# such handover is simpledrm being replaced by the real driver as its firmware
+# finishes loading, which makes the card we pinned on the first attempt vanish.
+# Pinning once would hand attempt 2 the same dead node and guarantee it fails
+# for the very reason the retry was added.
+#
+# It also refuses to choose when choosing would REMOVE displays. WLR_DRM_DEVICES
+# does not express a preference — it hides every card not listed. On a docked
+# laptop with the panel on the iGPU and the external monitor on the dGPU, both
+# cards have connected outputs, and pinning either one blanks the other. wlroots
+# handles that case correctly on its own, so when two or more cards have
+# something plugged in, stay out of the way.
+pick_gpu() {
+    unset WLR_DRM_DEVICES
+    local st conndir c cards="" gpu=""
+    for st in /sys/class/drm/card*-*/status; do
+        [ -r "$st" ] || continue
+        [ "$(cat "$st" 2>/dev/null)" = connected ] || continue
+        conndir=$(dirname "$st")
+        c=$(basename "$conndir"); c=${c%%-*}
+        [ -e "/dev/dri/$c" ] || continue
+        case " $cards " in *" $c "*) ;; *) cards="$cards $c" ;; esac
+        if [ -z "$gpu" ]; then
+            gpu="/dev/dri/$c"; _conndir="$conndir"
+            log "display: connected output on $c ($(basename "$conndir"))"
+        fi
+    done
+    set -- $cards
+    if [ "$#" -gt 1 ]; then
+        log "display: $# cards have connected outputs ($cards) — NOT pinning, wlroots drives them all"
+        _gpu="${gpu:-}"        # still used for the panel-width read
+        return 0
+    fi
+    if [ -n "$gpu" ]; then
+        export WLR_DRM_DEVICES="$gpu"
+        _gpu="$gpu"
+        log "display: pinning the compositor to $gpu"
+    else
+        _gpu=""
+        log "display: no connected connector found in sysfs — letting wlroots pick"
+    fi
+}
+_gpu=""; _conndir=""
+pick_gpu
 
 # ── Scale the UI on high-density panels ──────────────────────────────────────
 # cage does no scaling of its own, so on a 4K laptop panel every control renders
@@ -123,22 +154,30 @@ fi
 # into unreadable specks. That is not a crash, so nothing else here would catch
 # it, and the person in front of it cannot install the OS either way.
 #
-# Integer scaling only (GDK_SCALE takes integers), decided from the widest mode
-# the connected output reports. 2560 is the threshold: 1920-wide stays at 1x,
-# 2560+ goes to 2x. GSK_RENDERER=cairo handles integer scale factors fine.
+# NOT via GDK_SCALE. That was the first attempt here and it is a NO-OP under
+# this configuration — measured on the exact GTK build the image ships
+# (gtk4-4.20.4):
+#     GDK_BACKEND=wayland GDK_SCALE=2  ->  monitor scale_factor=1  (ignored)
+#     GDK_BACKEND=x11     GDK_SCALE=2  ->  monitor scale_factor=2  (honoured)
+# GTK4's Wayland backend takes its scale from the compositor, and cage offers no
+# way to set an output scale. We pin GDK_BACKEND=wayland, so the variable did
+# nothing at all — while the log cheerfully announced that scaling had been
+# applied, which is worse than not trying: it would send whoever debugs the
+# photo of a microscopic installer looking in the wrong place.
+#
+# So the decision is passed to the GUI instead, which can act on it in-process
+# through GtkSettings regardless of backend. We only measure and export; the
+# reading is deliberately separated from the acting.
+#
 # Read the modes of the CONNECTED connector specifically ("$_conndir"), not of
 # whichever connector sorts first — a laptop with a dark HDMI port listed before
 # its panel would otherwise be measured by the port nothing is plugged into.
 if [ -n "$_gpu" ]; then
     _w=$(head -1 "$_conndir/modes" 2>/dev/null | cut -dx -f1)
     case "$_w" in
-        ''|*[!0-9]*) log "display: could not read a mode width — leaving scale at 1" ;;
-        *) if [ "$_w" -ge 2560 ]; then
-               export GDK_SCALE=2
-               log "display: ${_w}px wide — setting GDK_SCALE=2 so the UI is readable"
-           else
-               log "display: ${_w}px wide — leaving scale at 1"
-           fi ;;
+        ''|*[!0-9]*) log "display: could not read a mode width — leaving text at 1x" ;;
+        *) export APEX_PANEL_WIDTH="$_w"
+           log "display: connected output is ${_w}px wide (APEX_PANEL_WIDTH, the GUI decides text scale)" ;;
     esac
 fi
 
@@ -211,6 +250,10 @@ if [ "$rc" -eq 0 ]; then
 fi
 log "attempt 1 failed (rc=$rc) — sleeping 2 s in case DRM master was released late, then retrying ONCE"
 sleep 2
+# Re-pick the GPU: the card that existed a moment ago may have been replaced by
+# the real driver taking over from simpledrm, which is precisely the handover
+# this retry is here to survive.
+pick_gpu
 start_gui 2
 rc=$?
 if [ "$rc" -eq 0 ]; then
@@ -277,7 +320,14 @@ chvt 1 2>>"$LOG" || log "chvt 1 failed (no kbd tools or no VT layer?) — contin
 if python3 -c '
 import fcntl, os, sys
 fd = os.open("/dev/tty1", os.O_RDWR | os.O_NOCTTY)
-fcntl.ioctl(fd, 0x4B3A, 0)   # KDSETMODE, KD_TEXT
+fcntl.ioctl(fd, 0x4B3A, 0)   # KDSETMODE,  KD_TEXT
+# Video alone is not enough. seatd also puts the VT keyboard into K_OFF while a
+# session owns it, and if seatd died without restoring it the console renders
+# the diagnostic perfectly and then accepts no input at all: a dead console
+# wearing the clothes of a working one. KDSKBMODE back to K_UNICODE.
+# (No apostrophes in here — this block lives inside a single-quoted python3 -c
+# argument, and one apostrophe ends the string and breaks the script.)
+fcntl.ioctl(fd, 0x4B45, 3)   # KDSKBMODE, K_UNICODE
 os.close(fd)
 ' 2>>"$LOG"; then
     log "VT restored to text mode (KDSETMODE/KD_TEXT)"

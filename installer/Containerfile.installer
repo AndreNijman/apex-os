@@ -69,6 +69,11 @@ RUN set -eux; \
 # into the installed tree; device-mapper for the dmsquash-live snapshot root;
 # grub2-tools-extra/-efi-x64-modules so build-live-iso.sh can produce the ISO's
 # UEFI grub binary with this same container (host may lack grub2-mkstandalone);
+# grub2-pc-modules for the same reason on the LEGACY-BIOS side: it provides
+# /usr/lib/grub/i386-pc (the module set grub2-mkimage -O i386-pc-eltorito needs
+# to build the ISO's BIOS boot image) plus boot_hybrid.img, the isohybrid MBR
+# code that makes a dd'd USB stick boot on pre-UEFI machines. grub2-mkimage
+# itself is already here via grub2-tools;
 # NetworkManager-wifi / wpa_supplicant / wireless-regdb / iw are listed
 # EXPLICITLY for the same reason linux-firmware is: they are WEAK dependencies of
 # NetworkManager and install_weak_deps=False silently drops them. Without
@@ -143,7 +148,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         mesa-dri-drivers mesa-vulkan-drivers \
         adwaita-icon-theme jetbrains-mono-fonts google-noto-sans-fonts \
         abattis-cantarell-fonts \
-        grub2-tools-extra grub2-efi-x64-modules \
+        grub2-tools-extra grub2-efi-x64-modules grub2-pc-modules \
         shim-x64 grub2-efi-x64 mokutil efibootmgr \
     && dnf clean all
 

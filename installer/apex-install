@@ -179,12 +179,13 @@ die() {
   if [ "$INSTALLED_OK" = 1 ]; then
     state="IMPORTANT: $what WAS written and APEX-OS IS installed there, but the
 step above did not finish. Your account was probably NOT created — do not reboot
-expecting to log in. Re-run apex-install, or fix it from the rescue shell.
+expecting to log in. Start the installer again from the boot menu, or fix it
+from the rescue shell.
 $others"
   elif [ "$WROTE_DISK" = 1 ]; then
     state="IMPORTANT: $what may already have been erased and left INCOMPLETE
 (the exact message above says how far it got). If it was, it will not boot.
-Re-run apex-install to try again.
+Start the installer again from the boot menu to try again.
 $others"
   else
     state="Nothing was written. $others"
@@ -237,6 +238,17 @@ on_signal() {
   echo "Interrupted by signal."
   die "Interrupted (Ctrl+C or shutdown signal)."
 }
+# Ignore SIGPIPE. If the graphical front end dies mid-install, our next write to
+# the pipe it was reading would otherwise kill this engine outright with signal
+# 13 — measured: bash dies on a closed pipe and a trailing `|| true` never runs,
+# so there would be no die(), no APEX-INSTALL-FAILED line, no save_log_to_esp
+# and no console message, on a machine whose disk is half-rewritten. With
+# SIGPIPE ignored the write returns EPIPE instead, which the `|| true` on every
+# log() and note() already absorbs, and the install carries on to a clean
+# finish. The comment above about a closed stdout not being an install failure
+# only becomes TRUE with this line present.
+trap '' PIPE
+
 trap on_signal INT TERM HUP
 trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
 
@@ -437,14 +449,48 @@ esac
 
 [ -f "$ANSWERS" ] || die "answers file not found: $ANSWERS"
 # Only ever accept a fixed key set — never `source` an attacker-writable file.
-# `|| [ -n "$k" ]` is not decoration. `read` returns non-zero when it hits EOF
-# without a trailing newline, and a plain `while read` DISCARDS that last line —
-# measured: an answers file ending `hostname=apex` with no final newline parsed
-# every key except hostname. The GUI happens to always write the newline, so
-# this was latent, but a silently dropped key is the worst shape of bug here:
-# a lost `mokpw` skips Secure Boot enrolment without a word, and a lost `rootfs`
-# quietly changes the filesystem the user asked for.
-while IFS='=' read -r k v || [ -n "$k" ]; do
+# Read WHOLE LINES and split them ourselves. Two separate measured bugs make
+# this the only safe shape:
+#
+#  1. `|| [ -n "$line" ]` — `read` returns non-zero at EOF without a trailing
+#     newline, and a plain `while read` DISCARDS that last line. Measured: a
+#     file ending `hostname=apex` with no final newline parsed every key except
+#     hostname. A silently dropped key is the worst shape of bug here — a lost
+#     `mokpw` skips Secure Boot enrolment without a word.
+#
+#  2. NOT `IFS='=' read -r k v`. That form eats a single TRAILING '=' from the
+#     value, because read strips one trailing IFS delimiter when filling the
+#     last variable. Measured, on the real loop:
+#         password=a=b=c  -> a=b=c   (fine)
+#         password=abc==  -> abc==   (fine)
+#         password=abc=   -> abc     (WRONG — one character silently gone)
+#     A trailing '=' is the canonical shape of a base64 password out of a
+#     password manager. chpasswd would then set a password DIFFERENT from the
+#     one the user typed, the install would print APEX-INSTALL-OK, and first
+#     login would fail with no error recorded anywhere — a locked-out system
+#     reported as a success. `${line#*=}` has no such behaviour.
+# Clear every answer variable before parsing, so "missing" means missing.
+#
+# This is not tidiness. **bash pre-populates $HOSTNAME** with the machine's own
+# hostname — measured, it is `apex` on this box and `apex-installer` in the live
+# ISO. So the "hostname missing" check could never fire, in this version OR in
+# the original `: "${HOSTNAME:?…}"` form. An answers file without a `hostname=`
+# line would sail through validation and install a system silently named after
+# the LIVE ENVIRONMENT instead of failing.
+#
+# Found the hard way: a test case that omitted hostname was expected to be
+# rejected, and instead ran all the way to `bootc install to-disk --wipe` on a
+# real USB stick. Nothing else stood between a missing key and a wiped disk.
+# ROOTFS_TYPE is deliberately NOT cleared — it has a real default (btrfs).
+INSTALL_MODE=""; DISK=""; TARGET=""; ESP_DEV=""
+USERNAME=""; P1=""; HOSTNAME=""; MOKPW=""
+
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    ''|'#'*) continue ;;
+    *'='*)   k=${line%%=*}; v=${line#*=} ;;
+    *)       die "malformed line in answers file (no '='): $line" ;;
+  esac
   case "$k" in
     mode)      INSTALL_MODE="$v" ;;
     disk)      DISK="$v" ;;
@@ -455,15 +501,20 @@ while IFS='=' read -r k v || [ -n "$k" ]; do
     hostname)  HOSTNAME="$v" ;;
     rootfs)    ROOTFS_TYPE="$v" ;;
     mokpw)     MOKPW="$v" ;;
-    ''|\#*)    : ;;
     *)         die "unknown key in answers file: $k" ;;
   esac
 done < "$ANSWERS"
 
-: "${INSTALL_MODE:?answers: mode missing}"
-: "${DISK:?answers: disk missing}"
-: "${USERNAME:?answers: username missing}"
-: "${HOSTNAME:?answers: hostname missing}"
+# `|| die`, NOT `: "${VAR:?...}"`. Measured: the `:?` form writes to stderr and
+# exits 1 WITHOUT running the ERR trap, so nothing ever emits the
+# `APEX-INSTALL-FAILED:` line the GUI watches for. The front end then shows the
+# reasonless "The installer exited with status 1", and save_log_to_esp never
+# runs, so the one artefact that could explain it is lost with the RAM disk.
+# Every failure in this engine must speak the same protocol.
+[ -n "${INSTALL_MODE:-}" ] || die "answers: mode missing"
+[ -n "${DISK:-}" ]         || die "answers: disk missing"
+[ -n "${USERNAME:-}" ]     || die "answers: username missing"
+[ -n "${HOSTNAME:-}" ]     || die "answers: hostname missing"
 [ -n "${P1:-}" ] || die "answers: password missing"
 case "$INSTALL_MODE" in disk|partition) : ;; *) die "answers: bad mode '$INSTALL_MODE'" ;; esac
 
@@ -483,8 +534,15 @@ case "$INSTALL_MODE" in disk|partition) : ;; *) die "answers: bad mode '$INSTALL
 # write, and it is the last thing between that file and an erased disk.
 printf '%s' "$USERNAME" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' \
   || die "Invalid username '$USERNAME'. Use lowercase letters, digits, - and _ ; it must start with a letter or _ and be at most 32 characters. Nothing has been erased."
+# The reserved list must cover names that ALREADY EXIST in the image being
+# installed, not just the famous ones. `lp`, `mail`, `games`, `ftp` and `sync`
+# ship in Fedora's `setup` package on every install, and `greetd` is created by
+# the greetd RPM this desktop depends on — the deleted text UI listed greetd for
+# exactly that reason and the rewrite dropped it. Any of these passes the regex
+# above, so without this list the disk is wiped and `useradd` then fails on a
+# name that was always going to collide.
 case "$USERNAME" in
-  root|bin|daemon|adm|sys|nobody|systemd*|dbus|polkitd|sshd|halt|shutdown|operator)
+  root|bin|daemon|adm|sys|sync|shutdown|halt|mail|operator|games|ftp|lp|news|uucp|man|proxy|backup|list|irc|gnats|nobody|systemd*|dbus|polkitd|sshd|chrony|tss|sssd|greetd|gdm|sddm|lightdm|colord|geoclue|rtkit|pipewire|flatpak|avahi|apex|apexd)
     die "'$USERNAME' is a reserved system account name — pick another. Nothing has been erased." ;;
 esac
 printf '%s' "$HOSTNAME" | grep -Eq '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$' \
@@ -494,9 +552,43 @@ printf '%s' "$HOSTNAME" | grep -Eq '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?
 # have done it: a front end must never be the only thing standing between a
 # typo and a wiped disk.
 [ -b "$DISK" ] || die "$DISK is not a block device."
+# A block device is not necessarily a DISK. The deleted text UI built its menu
+# from `lsblk -dn … '$3=="disk"'`, so DISK was structurally a whole disk and
+# nothing downstream had to think about it. Headless takes whatever the answers
+# file says, and `bootc install to-disk --wipe /dev/sda3` happily writes a GPT
+# *inside a partition* — destroying that partition and yielding something no
+# firmware will boot, while the neighbouring OS's entries rot.
+_dtype=$(lsblk -dno TYPE "$DISK" 2>/dev/null | tr -d ' ' || true)
+[ "$_dtype" = disk ] \
+  || die "$DISK is a '${_dtype:-unknown}', not a whole disk. Refusing — installing onto anything else produces a system that will not boot. Nothing has been erased."
 if findmnt -rno SOURCE | grep -qE "^${DISK}([0-9p]|$)"; then
   die "$DISK (or a partition of it) is currently mounted — refusing."
 fi
+
+# Refuse a target that cannot possibly hold the image, BEFORE erasing it. The
+# text UI warned below 16 GB; there was no check at all in headless mode, so a
+# too-small stick was wiped and the install then failed on space several minutes
+# later — destructive and pointless, when the size is knowable up front.
+_min_bytes=$((16 * 1000 * 1000 * 1000))
+_sz=$(lsblk -bdno SIZE "$DISK" 2>/dev/null | tr -d ' ' || true)
+case "$_sz" in
+  ''|*[!0-9]*) log "size check: could not read the size of $DISK — continuing" ;;
+  *) [ "$_sz" -ge "$_min_bytes" ] \
+       || die "$DISK is only $((_sz / 1000000000)) GB. APEX-OS needs at least 16 GB. Nothing has been erased." ;;
+esac
+
+# Validate the filesystem choice for BOTH modes, here, before the mode split.
+# It used to be checked only in the partition branch, so in whole-disk mode a
+# typo reached `bootc install to-disk --filesystem` — which rejects it only
+# after WROTE_DISK=1 has been set, making die() report that the disk "may
+# already have been erased and left INCOMPLETE" about a disk it never touched.
+# This file's rule is that it must never lie in the frightening direction.
+case "$ROOTFS_TYPE" in
+  btrfs)     MKFS_FORCE="-f" ;;
+  ext4|ext3) MKFS_FORCE="-F" ;;
+  xfs)       MKFS_FORCE="-f" ;;
+  *)         die "Unsupported root filesystem '$ROOTFS_TYPE'. Nothing has been erased." ;;
+esac
 if [ "$INSTALL_MODE" = partition ]; then
   [ -n "${TARGET:-}" ] || die "answers: target partition missing for partition mode"
   [ -b "$TARGET" ] || die "$TARGET is not a block device."
@@ -510,13 +602,44 @@ if [ "$INSTALL_MODE" = partition ]; then
   # malformed answers file could ask for.
   [ "$TARGET" != "$ESP_DEV" ] \
     || die "The root partition and the EFI System Partition are the same device ($TARGET). Formatting the ESP would leave the machine unable to boot anything. Nothing has been erased."
-  # The target must actually live on the disk we were told about. If they
-  # disagree, something upstream is confused, and the later partprobe/backup
-  # logic reasons about $DISK while mkfs writes to $TARGET — a mismatch there
-  # touches two disks instead of one.
-  _tdisk=$(lsblk -no PKNAME "$TARGET" 2>/dev/null | head -1 || true)
-  [ -z "$_tdisk" ] || [ "/dev/$_tdisk" = "$DISK" ] \
+  # The target must be a PARTITION, and it must live on the disk we were told
+  # about. Both halves matter and the first one was missing.
+  #
+  # The earlier version of this guard read `[ -z "$_tdisk" ] || …`, which let an
+  # EMPTY parent through. Measured: `lsblk -no PKNAME /dev/sdb` is empty exactly
+  # when the device is a WHOLE DISK — precisely the case this guard exists to
+  # refuse. So `mode=partition, disk=/dev/sda, target=/dev/sdb` passed every
+  # check and would have run mkfs over the whole of /dev/sdb, a disk the user
+  # never named as the target, and then reported the outcome as if it had
+  # happened on /dev/sda. Empty must FAIL, not pass; the text UI had it that way
+  # and the rewrite inverted it.
+  #
+  # Checking TYPE as well as PKNAME closes the related case of a device-mapper
+  # node sitting directly on the disk, which reports the disk as its parent and
+  # would otherwise satisfy the comparison.
+  _ttype=$(lsblk -dno TYPE "$TARGET" 2>/dev/null | tr -d ' ' || true)
+  [ "$_ttype" = part ] \
+    || die "$TARGET is a '${_ttype:-unknown}', not a partition. In partition mode the target must be a partition. Nothing has been erased."
+  _tdisk=$(lsblk -dno PKNAME "$TARGET" 2>/dev/null | head -1 | tr -d ' ' || true)
+  [ -n "$_tdisk" ] \
+    || die "Could not determine which disk $TARGET belongs to. Refusing to format it. Nothing has been erased."
+  [ "$_tdisk" = "$(basename "$DISK")" ] \
     || die "$TARGET is not a partition of $DISK (it belongs to /dev/$_tdisk). Refusing to act on two disks at once. Nothing has been erased."
+  # The ESP has to be on that same disk too, and it has to actually BE an ESP.
+  # Without the type check, an `esp=` pointing at a Windows data partition or a
+  # FAT photo partition passes `-b` and "mountable with 40MB free", and bootupd
+  # then writes an \EFI\ tree into it: the firmware never finds APEX, and a
+  # partition the user cares about gets boot files scribbled into it. The text
+  # UI located the ESP by GPT type GUID and explicitly refused to treat plain
+  # vfat as evidence.
+  _esp_disk=$(lsblk -dno PKNAME "$ESP_DEV" 2>/dev/null | head -1 | tr -d ' ' || true)
+  [ "$_esp_disk" = "$(basename "$DISK")" ] \
+    || die "The EFI System Partition $ESP_DEV is not on $DISK (it is on /dev/${_esp_disk:-unknown}). Nothing has been erased."
+  _esp_type=$(lsblk -dno PARTTYPE "$ESP_DEV" 2>/dev/null | tr -d ' ' | tr 'A-Z' 'a-z' || true)
+  case "$_esp_type" in
+    c12a7328-f81f-11d2-ba4b-00a0c93ec93b|0xef) : ;;
+    *) die "$ESP_DEV is not an EFI System Partition (partition type '${_esp_type:-none}'). Writing boot files there would not make the machine boot, and would damage whatever is on it. Nothing has been erased." ;;
+  esac
   # Container-member refusal: mkfs on an LVM PV / LUKS header silently destroys
   # everything inside it, and the live env may not even have the tooling to
   # notice it is mounted.
@@ -525,16 +648,9 @@ if [ "$INSTALL_MODE" = partition ]; then
     LVM2_member|crypto_LUKS|linux_raid_member|ddf_raid_member|isw_raid_member|zfs_member|bcache)
       die "$TARGET is a $tfs container member — refusing to format it." ;;
   esac
-  # Validate the filesystem tooling NOW, while nothing has been destroyed. The
-  # force flag differs per fs (`mkfs.ext4 -f` is not even a valid option), and
-  # mkfs.xfs is not shipped in the live env — checked any later than this, a
-  # non-btrfs choice would fail only AFTER the partition was marked for erasure.
-  case "$ROOTFS_TYPE" in
-    btrfs)     MKFS_FORCE="-f" ;;
-    ext4|ext3) MKFS_FORCE="-F" ;;
-    xfs)       MKFS_FORCE="-f" ;;
-    *)         die "Unsupported root filesystem '$ROOTFS_TYPE'." ;;
-  esac
+  # MKFS_FORCE is set above, for both modes. Only the TOOLING check is
+  # partition-specific: whole-disk mode hands the filesystem name to bootc,
+  # which brings its own mkfs, whereas partition mode runs ours.
   have "mkfs.$ROOTFS_TYPE" || die "mkfs.$ROOTFS_TYPE is not available in this installer.
 Only filesystems with tooling present can be used (btrfs is the default)."
 
@@ -572,6 +688,28 @@ log "headless: MODE=$INSTALL_MODE TARGET=$TARGET ESP=${ESP_DEV:-n/a} USER=$USERN
 # ── 4. install (via the embedded image; stream to log) ───────────────────────
 note "Installing APEX-OS to $TARGET_DESC … (full log: $LOG)"
 note "Do not power off — $TARGET is being erased and rewritten from here on."
+
+# ── Dry-run stop: the last line before anything is destroyed ─────────────────
+# APEX_DRY_RUN=1 runs the ENTIRE validation path for real — every guard, on the
+# real devices named — and then stops here, immediately before the first
+# destructive command. It exists because the test suite must be able to feed
+# this engine real device names without any possibility of erasing them.
+#
+# It is not paranoia. While testing the guards, one case that should have been
+# rejected was not (bash pre-sets $HOSTNAME, see the parser), and the engine ran
+# `bootc install to-disk --wipe` against a USB stick that was plugged in. The
+# guards are the primary defence; this is the one that does not depend on the
+# guards being right.
+#
+# Deliberately NOT reachable from the kernel cmdline or the answers file — only
+# from the environment, which the GUI never sets.
+if [ "${APEX_DRY_RUN:-0}" = 1 ]; then
+  note "APEX-DRY-RUN: validation complete, stopping before the first destructive write."
+  note "  would install: MODE=$INSTALL_MODE TARGET=$TARGET DISK=$DISK ESP=${ESP_DEV:-n/a} FS=$ROOTFS_TYPE USER=$USERNAME HOST=$HOSTNAME"
+  restore_console
+  echo "APEX-INSTALL-DRYRUN-OK"
+  exit 0
+fi
 # NOTE: WROTE_DISK is deliberately NOT set here. In partition mode the ESP
 # free-space check runs first and can fail with everything still intact; claiming
 # destruction at that point is a lie in the frightening direction. Each branch
