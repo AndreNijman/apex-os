@@ -874,16 +874,42 @@ sb_on=0
 case "$SB_STATE" in *[Ee]nabled*) sb_on=1 ;; esac
 cert="$deploy/usr/share/apex-os/secureboot/apex-mok.der"
 kstate=$(cat "$deploy/usr/share/apex-os/secureboot/kernel-signed" 2>/dev/null || echo unknown)
-if [ "$sb_on" = 1 ]; then
+# Enrol whenever a password was supplied and the kernel is signed — NOT only
+# when Secure Boot is already on. `mokutil --import` writes MokNew/MokAuth to
+# UEFI NVRAM, which is firmware state belonging to the MACHINE, not to the OS on
+# the disk. So a key queued here from the live environment is picked up by shim
+# on the next boot regardless, and the request persists in NVRAM until it is
+# processed — queueing it with Secure Boot off is safe and it is still waiting
+# if the user switches Secure Boot on afterwards.
+#
+# Gating this on sb_on was wrong and made the feature nearly unreachable: most
+# machines ship with Secure Boot off, so the front end never offered enrolment,
+# so the only route to a Secure Boot system was install, boot, run mokutil by
+# hand, reboot, then toggle the firmware. The whole point of doing it here is
+# that the user is already sitting in front of the machine.
+if [ -n "${MOKPW:-}" ] || [ "$sb_on" = 1 ]; then
   if [ "$kstate" = signed ] && [ -f "$cert" ] && have mokutil; then
     if [ -n "${MOKPW:-}" ]; then
       if printf '%s\n%s\n' "$MOKPW" "$MOKPW" | mokutil --import "$cert" >>"$LOG" 2>&1; then
         log "secureboot: MOK enrolment queued"
-        note "Secure Boot: enrolment queued. On the next boot, a blue 'MOK management' screen appears:
+        if [ "$sb_on" = 1 ]; then
+          note "Secure Boot: enrolment queued. On the next boot, a blue 'MOK management' screen appears:
 
   Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
 
 After that APEX-OS boots normally with Secure Boot ON."
+        else
+          note "Secure Boot: the APEX key is queued for enrolment. On the next boot, a blue 'MOK management' screen appears:
+
+  Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
+
+Secure Boot is currently OFF, so nothing about this install depends on it — but
+once the key is enrolled you can turn Secure Boot on in your firmware whenever
+you like and APEX-OS will boot. No second install, no mokutil by hand.
+
+If the blue screen does not appear because Secure Boot is off, the request stays
+queued in firmware and will be offered the first time you enable it."
+        fi
       else
         note "Secure Boot: mokutil could not queue the key (see $LOG).
 
@@ -892,7 +918,7 @@ run this from a live session later:
   mokutil --import /usr/share/apex-os/secureboot/apex-mok.der"
       fi
     else
-      note "Secure Boot is ON and no MOK enrolment password was supplied — the APEX key was NOT enrolled.
+      note "No MOK enrolment password was supplied — the APEX key was NOT enrolled. (Secure Boot is currently ${SB_STATE:-unknown}.)
 
 APEX-OS uses a custom (CachyOS) kernel, which Microsoft does not sign. It is
 signed with APEX's own key instead — that key has to be enrolled once, or the

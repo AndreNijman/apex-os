@@ -869,7 +869,7 @@ class Installer(Adw.Application):
                     "Computer name must be letters, digits and hyphens only.")
                 return
             self.answers.update(username=u, hostname=h, password=p1)
-            self.go("secureboot" if self.sb_enabled() else "confirm")
+            self.go("secureboot" if self.sb_offer() else "confirm")
 
         back = "part" if self.answers["mode"] == "partition" else "mode"
         return self.frame("STEP 5 OF 6", "Create your account", None,
@@ -879,20 +879,68 @@ class Installer(Adw.Application):
 
     # ── 5b. secure boot — shown only when the firmware has it enabled ────────
     def sb_enabled(self):
-        """True when the firmware reports Secure Boot enabled. mokutil missing,
-        failing or timing out means we cannot know — treat as off and never
-        block the flow on it. Cached: firmware state cannot change while the
-        installer is running."""
+        """True when the firmware reports Secure Boot enabled RIGHT NOW.
+
+        Only used to choose the wording on the Secure Boot page, never to decide
+        whether to show it — see sb_offer()."""
         if not hasattr(self, "_sb_state"):
             rc, txt = run(["mokutil", "--sb-state"], timeout=10)
             self._sb_state = "enabled" in txt.lower()
         return self._sb_state
 
+    def sb_offer(self):
+        """True when this install should offer to enrol the APEX key.
+
+        Deliberately NOT gated on Secure Boot being on already. It used to be,
+        and that was wrong: with Secure Boot off — the state most machines ship
+        in, and the state of both machines this was developed on — the page
+        never appeared, so nothing was enrolled, so turning Secure Boot on later
+        meant installing, booting, running mokutil by hand and rebooting again.
+        That is a ridiculous amount of ceremony to impose on someone who just
+        wanted the option later.
+
+        Enrolling from here works because `mokutil --import` writes MokNew and
+        MokAuth to UEFI NVRAM. That is firmware state, not filesystem state: it
+        belongs to the machine, not to the OS on the disk, and it survives the
+        install. shim picks it up on the next boot and runs MokManager. The
+        request also persists until it is processed, so queueing it while
+        Secure Boot is off is safe — if the firmware does not present
+        MokManager until Secure Boot is switched on, the pending request is
+        still there waiting when it is.
+
+        Three things must hold:
+          * we booted UEFI — no efivars means no Secure Boot and no NVRAM to
+            write to (a legacy-BIOS boot lands here);
+          * mokutil exists;
+          * the image actually ships a kernel signed with the APEX key, which
+            build-live-iso.sh stamps into the live environment because the
+            marker inside the image cannot be read before it is installed.
+        """
+        if not hasattr(self, "_sb_offer"):
+            ok = os.path.isdir("/sys/firmware/efi/efivars")
+            if ok:
+                rc, _ = run(["mokutil", "--sb-state"], timeout=10)
+                ok = rc == 0
+            if ok:
+                try:
+                    with open("/usr/lib/apex-installer/kernel-signed") as f:
+                        ok = f.read().strip() == "signed"
+                except OSError:
+                    ok = False
+            self._sb_offer = ok
+        return self._sb_offer
+
     def p_secureboot(self):
-        # Whether THIS build's kernel carries the APEX signature is only
-        # knowable after the image is deployed — the engine checks and skips
-        # enrolment if it is unsigned. This page states what is known now:
-        # Secure Boot is on, and the APEX kernel is not Microsoft-signed.
+        # Shown whenever the image ships an APEX-signed kernel and we booted
+        # UEFI — NOT only when Secure Boot is already on. See sb_offer() for
+        # why. The two situations need different words, though: with Secure
+        # Boot ON this is mandatory (skip it and the machine will not boot),
+        # and with it OFF this is an offer (do it now so switching Secure Boot
+        # on later is a firmware toggle instead of a second install-and-reboot
+        # dance). Saying "Secure Boot is enabled on this machine" to someone
+        # whose firmware has it off would be a plain lie, and this installer
+        # does not get to lie on the page immediately before it erases a disk.
+        on = self.sb_enabled()
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -900,11 +948,23 @@ class Installer(Adw.Application):
         i = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
         i.set_margin_top(SP * 5); i.set_margin_bottom(SP * 5)
         i.set_margin_start(SP * 5); i.set_margin_end(SP * 5)
-        i.append(lbl("Secure Boot is enabled on this machine.", "apex-mono"))
-        i.append(lbl("APEX-OS ships its own kernel. Microsoft does not sign it — "
-                     "it is signed with the APEX key. Until your firmware is told "
-                     "to trust that key, it will refuse to boot the installed "
-                     "system.", "apex-dim"))
+        i.append(lbl("Secure Boot is ON in this machine's firmware." if on
+                     else "Secure Boot is currently OFF in this machine's firmware.",
+                     "apex-mono"))
+        if on:
+            i.append(lbl("APEX-OS ships its own kernel. Microsoft does not sign it — "
+                         "it is signed with the APEX key. Until your firmware is told "
+                         "to trust that key, it will refuse to boot the installed "
+                         "system.", "apex-dim"))
+        else:
+            i.append(lbl("APEX-OS installs and boots fine as things stand — you do "
+                         "not have to do anything here. But APEX ships its own "
+                         "kernel, which Microsoft does not sign, so if you ever turn "
+                         "Secure Boot on it will refuse to boot unless its key was "
+                         "enrolled first. Enrolling now costs one password and takes "
+                         "effect on the next boot; doing it later means booting the "
+                         "installed system, running mokutil by hand and rebooting "
+                         "again.", "apex-dim"))
         i.append(lbl("Enrolling the key happens once. Choose a password now. On "
                      "the next boot a blue \"MOK management\" screen appears — "
                      "choose \"Enroll MOK\" and type this password. That screen "
@@ -924,8 +984,12 @@ class Installer(Adw.Application):
         body.append(self.e_mok2)
         self.mok_err = lbl("", "apex-danger")
         body.append(self.mok_err)
-        body.append(lbl("If you skip, the installed system will not boot until "
-                        "you turn Secure Boot off in firmware setup.", "apex-dim"))
+        body.append(lbl(
+            "If you skip, the installed system will not boot until you turn "
+            "Secure Boot off in firmware setup." if on else
+            "If you skip, nothing changes — the system installs and boots "
+            "normally. You would only need this if you later switch Secure "
+            "Boot on.", "apex-dim"))
 
         def nxt(_b):
             p1, p2 = self.e_mok1.get_text(), self.e_mok2.get_text()
@@ -949,12 +1013,20 @@ class Installer(Adw.Application):
             self.answers["mokpw"] = ""
             self.go("confirm")
 
-        return self.frame("STEP 5 OF 6", "Secure Boot",
-                          "This machine will not boot APEX-OS until the APEX "
-                          "signing key is enrolled.", self.scrolled(body),
+        # Subtitle and skip label BOTH have to follow the firmware state. With
+        # Secure Boot off, "this machine will not boot APEX-OS" is simply untrue,
+        # and offering to "turn Secure Boot off instead" offers to turn off
+        # something already off. Small strings, but this is the screen before the
+        # one that erases a disk and it does not get to say false things.
+        sub = ("This machine will not boot APEX-OS until the APEX signing key "
+               "is enrolled." if on else
+               "Optional. Enrol now and you can switch Secure Boot on later "
+               "without reinstalling.")
+        skip_label = ("Skip — I'll turn Secure Boot off instead" if on
+                      else "Skip — I don't use Secure Boot")
+        return self.frame("STEP 5 OF 6", "Secure Boot", sub, self.scrolled(body),
                           [(self.btn("Back", "apex-ghost", lambda *_: self.go("account")), False),
-                           (self.btn("Skip — I'll turn Secure Boot off instead",
-                                     "apex-ghost", skip), True),
+                           (self.btn(skip_label, "apex-ghost", skip), True),
                            (self.btn("Enrol and continue", "apex-go", nxt), False)])
 
     # ── 6. confirm — the screen this whole rewrite exists for ────────────────
@@ -1059,7 +1131,7 @@ class Installer(Adw.Application):
         self.e_erase.connect("activate",
                              lambda e: self.begin() if e.get_text().strip() == "ERASE" else None)
 
-        back = "secureboot" if self.sb_enabled() else "account"
+        back = "secureboot" if self.sb_offer() else "account"
         return self.frame("STEP 6 OF 6", "Confirm",
                           "Nothing has been written yet. This is the last point at "
                           "which you can go back.", body,
