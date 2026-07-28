@@ -142,21 +142,37 @@ if serial --unit=0 --speed=115200; then
     terminal_output serial console
 fi
 
-# LEGACY-BIOS-ONLY video handoff. On BIOS there is no GOP: if grub jumps into
-# the kernel while the card is still in VGA text mode, sysfb finds no
-# framebuffer to register, no DRM device node ever appears, and the graphical
-# installer has nothing to paint on -- the machine would sit on a text console
-# with the installer service dead. Setting gfxpayload to an explicit VBE mode
-# list makes grub program a linear framebuffer at handoff; simpledrm (built
-# into the live kernel, see the safe-graphics note below) then binds it exactly
-# as it binds the EFI GOP framebuffer on UEFI machines. The list ends in auto
-# so a VBE BIOS without 1024x768 still gets SOME linear mode rather than text.
-# Guarded by grub_platform so the UEFI path is completely unaffected: on EFI
-# the kernel takes the GOP framebuffer from firmware and ignores gfxpayload.
-# The menu itself stays on the text console -- only the handoff mode changes.
+# LEGACY-BIOS-ONLY video handoff. On BIOS there is no GOP: something must
+# program a VESA linear framebuffer before userspace starts, or sysfb has
+# nothing to register, no DRM device node ever appears, and the graphical
+# installer cannot start -- the launcher paints its DRM-nodes-absent bug
+# screen on a text console. QEMU hides this failure (its bochs GPU has a
+# native kernel driver that needs no firmware framebuffer), so it was only
+# caught by booting BIOS with nomodeset, which is exactly what every real
+# driverless legacy machine looks like.
+#
+# DO NOT "simplify" this back to gfxpayload. Fedora's i386-pc grub cannot do
+# the upstream video handoff: its linux command is the 16-bit-entry loader
+# (the module imports grub_relocator16_boot and resets the card to text mode
+# right before jumping) and contains no gfxpayload handling at all -- measured
+# on grub2-pc-modules 2.12-43.fc43 by dumping the ELF symbols and strings of
+# linux.mod, and confirmed in QEMU: with gfxpayload set, the kernel still came
+# up on the 80x25 VGA text console. What the 16-bit boot protocol DOES offer
+# is vga=791 (VESA mode 0x317, 1024x768 16bpp linear): grub parses it into the
+# boot header, the kernel sets the mode itself in real mode via the video
+# BIOS, sysfb registers it, simpledrm binds it, and the GUI paints -- verified
+# in QEMU with nomodeset (simple-framebuffer + simpledrm in the boot log, GUI
+# painted at 1024x768, bochs driver absent).
+# Worst case on a pre-VBE-2.0 card without that mode: the kernel prints
+# Undefined video mode number, waits 30 seconds for a key, then boots in text
+# mode -- the pre-fix behaviour, only slower. It cannot hang the boot. The
+# troubleshoot entry below deliberately omits it as the escape hatch.
+# On UEFI, biosfb expands to nothing: the UEFI cmdline stays byte-identical
+# to the UEFI-only builds and the kernel takes the GOP framebuffer as before.
 if [ "\$grub_platform" = "pc" ]; then
-    insmod all_video
-    set gfxpayload=1024x768x32,1024x768,auto
+    set biosfb=vga=791
+else
+    set biosfb=
 fi
 
 # shim/grub are loaded from the ESP, but the kernel + initrd live on the ISO9660
@@ -178,7 +194,7 @@ set timeout=10
 # console=tty0 LAST so the screen is the primary console; ttyS0 first keeps
 # QEMU/CI serial observability.
 menuentry "Install APEX-OS" {
-    linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 console=tty0
+    linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 console=tty0 \$biosfb
     initrd /images/pxeboot/initrd.img
 }
 # For machines whose GPU the kernel cannot mode-set. "Menu, then black" is the
@@ -188,10 +204,12 @@ menuentry "Install APEX-OS" {
 # The graphical installer still works here, and that is not luck. nomodeset
 # only stops NATIVE DRM drivers; the live kernel has CONFIG_DRM_SIMPLEDRM=y and
 # CONFIG_SYSFB_SIMPLEFB=y (both built in, not modules), so simpledrm binds the
-# firmware framebuffer the bootloader already set up and /dev/dri/card0 exists
-# regardless. cage runs on it with WLR_RENDERER=pixman (dumb buffers, no render
-# node — simpledrm has none) and GTK renders with GSK_RENDERER=cairo (shm, no
-# GL). Nothing in the installer's display path needs a real GPU driver.
+# boot-time framebuffer (the GOP one on UEFI, the vga=791 VESA one on BIOS)
+# and a /dev/dri card node exists regardless -- do not assume it is card0,
+# the number floats. cage runs on it with WLR_RENDERER=pixman (dumb buffers,
+# no render node — simpledrm has none) and GTK renders with GSK_RENDERER=cairo
+# (shm, no GL). Nothing in the installer's display path needs a real GPU
+# driver.
 #
 # NOTE for anyone editing this heredoc: it is UNQUOTED (<<EOF), so backticks and
 # dollar-variables in these comments are interpreted by the shell. Both bit this
@@ -202,11 +220,14 @@ menuentry "Install APEX-OS" {
 # reason to give up on the GUI, which was wrong and is what stranded users in
 # the old text installer.
 menuentry "Install APEX-OS (safe graphics — try this if the screen goes black)" {
-    linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 console=tty0 nomodeset
+    linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 console=tty0 nomodeset \$biosfb
     initrd /images/pxeboot/initrd.img
 }
 # Drops to a dracut shell if the live root is not found, instead of hanging
 # black. Use when the USB enumerates slowly or the ISO label is not matched.
+# Deliberately does NOT carry the biosfb vga mode: this entry doubles as the
+# escape hatch for a machine whose video BIOS misbehaves on the VESA mode set,
+# so it must stay bootable with the firmware console untouched.
 menuentry "Install APEX-OS (troubleshoot — dracut shell on failure)" {
     linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 console=tty0 rd.shell rd.debug
     initrd /images/pxeboot/initrd.img
@@ -218,7 +239,7 @@ EOF
 if [ "$PRODUCTION" != 1 ]; then
 cat >> "$WORK/grub.cfg" <<EOF
 menuentry "Unattended install to /dev/vda -- WIPES /dev/vda (QEMU/CI only)" {
-    linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 apex.unattended apex.disk=/dev/vda apex.user=andre apex.pass=testpass apex.host=apex apex.karg=console=ttyS0,115200 apex.poweroff
+    linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 apex.unattended apex.disk=/dev/vda apex.user=andre apex.pass=testpass apex.host=apex apex.karg=console=ttyS0,115200 apex.poweroff \$biosfb
     initrd /images/pxeboot/initrd.img
 }
 EOF
@@ -285,11 +306,14 @@ echo "== 6a. bootloader (legacy BIOS grub2: El Torito core + isohybrid MBR) =="
 # grub2-mkimage/the i386-pc module set (grub2-pc-modules is in the image for
 # exactly this). The embedded module list covers everything grub.cfg executes
 # (search_label for the root hunt, serial+terminal+test+echo for the guarded
-# console setup, all_video for the VBE handoff, linux+boot to start the
-# kernel, part_msdos+part_gpt+biosdisk+iso9660 so a dd'd USB enumerates); the
-# full i386-pc tree is ALSO shipped on the ISO at /boot/grub2/i386-pc so any
-# future grub.cfg edit that needs one more module autoloads it from the medium
-# instead of dying with "command not found" only on BIOS machines.
+# console setup, linux+boot to start the kernel, part_msdos+part_gpt+biosdisk+
+# iso9660 so a dd'd USB enumerates). all_video stays embedded only as a
+# videoinfo debugging aid at the grub prompt — the BIOS framebuffer is set by
+# the KERNEL via vga=791 because Fedora's BIOS grub cannot set it (see the
+# grub.cfg heredoc comment). The full i386-pc tree is ALSO shipped on the ISO
+# at /boot/grub2/i386-pc so any future grub.cfg edit that needs one more
+# module autoloads it from the medium instead of dying with "command not
+# found" only on BIOS machines.
 sudo rm -rf "$WORK/grub-i386-pc"
 sudo podman run --rm --security-opt label=disable -v "$WORK":/w "$IMG" \
   bash -c "grub2-mkimage -O i386-pc-eltorito -d /usr/lib/grub/i386-pc -p /boot/grub2 \
@@ -373,12 +397,17 @@ sudo cmp -s "$WORK/grub.cfg" "$ISOROOT/boot/grub2/grub.cfg" \
   || { echo "BUILD ASSERT FAILED: /boot/grub2/grub.cfg missing or differs from the UEFI menu — the one-menu-for-both-firmwares invariant is broken"; exit 1; }
 sudo test -f "$ISOROOT/boot/grub2/i386-pc/normal.mod" \
   || { echo "BUILD ASSERT FAILED: i386-pc module tree missing from the ISO (BIOS grub could not autoload anything)"; exit 1; }
-# The config the BIOS core will read must actually set a video mode, or BIOS
-# machines boot to a dead text console with no DRM node and no GUI (the single
-# most likely way to break this path — see the gfxpayload comment in grub.cfg).
-grep -q 'gfxpayload=1024x768x32' "$WORK/grub.cfg" \
-  || { echo "BUILD ASSERT FAILED: grub.cfg lost its BIOS gfxpayload block — legacy boots would have no framebuffer and no GUI"; exit 1; }
-echo "asserts OK: BIOS grub core, isohybrid MBR, shared menu, module tree, gfxpayload"
+# The config must actually get a framebuffer set on BIOS, or driverless legacy
+# machines boot to the DRM-nodes-absent bug screen instead of the GUI (the
+# single most likely way to break this path — see the vga=791 comment in the
+# grub.cfg heredoc: gfxpayload is a NO-OP on Fedora's BIOS grub, the kernel
+# has to set the mode itself). Check both the guard that sets biosfb and that
+# at least the default + safe-graphics entries actually reference it.
+grep -q 'biosfb=vga=791' "$WORK/grub.cfg" \
+  || { echo "BUILD ASSERT FAILED: grub.cfg lost its BIOS vga=791 framebuffer handoff — driverless legacy machines would get no GUI"; exit 1; }
+[ "$(grep -c '\$biosfb' "$WORK/grub.cfg")" -ge 2 ] \
+  || { echo "BUILD ASSERT FAILED: fewer than 2 menu entries reference biosfb — the vga=791 handoff is set but unused"; exit 1; }
+echo "asserts OK: BIOS grub core, isohybrid MBR, shared menu, module tree, vga=791 handoff"
 # Production must NOT carry the unattended marker.
 if [ "$PRODUCTION" = 1 ]; then
   if sudo test -e "$WORK/rootfs/usr/share/apex-installer/allow-unattended"; then
