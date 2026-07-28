@@ -1,75 +1,359 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  apex-installer-launch — bring up the graphical installer, or fall back.
+#  apex-installer-launch — start the graphical installer. One path, no probes.
 #
-#  Runs the GTK installer inside `cage` (a kiosk compositor that fullscreens one
-#  application). If ANY part of that fails — no DRM device, no GL, missing GPU
-#  firmware, cage refusing to start — this falls back to the whiptail installer
-#  rather than leaving a black screen.
+#  History, because it explains every line below. Earlier revisions of this
+#  script PROBED for GUI viability (is cage installed? does /dev/dri/card*
+#  exist? does `import gi` work?) and, when any probe failed, dropped users
+#  into a text-mode installer. On the first real-hardware test EVERY probe
+#  failed and users were stranded there (apex-logs 48). Measuring inside the
+#  built image showed the probes were reacting to image build bugs and one
+#  wrong assumption — not to genuine hardware diversity:
 #
-#  That fallback is the whole point. The first real-hardware test of this ISO
-#  gave an Acer Aspire a black screen and no way to tell why (apex-logs 48), and
-#  a graphical installer has strictly MORE ways to fail to paint than a TUI does.
-#  A GUI that cannot start must degrade to something that can, on its own.
+#    * gobject-introspection was missing from the image, so cairo-1.0.typelib
+#      was absent and every `import gi` died. That is a BUILD defect. The
+#      Containerfile now installs the package and hard-fails the build if the
+#      typelib or the import is missing, so probing for it here would only
+#      convert a loud build-time failure into a quiet runtime one.
 #
-#  Force either path from the boot menu:
-#    apex.tui   always use the text installer
-#    apex.gui   try the graphical one even if the probe says no
+#    * Fedora 43's libseat ships ONLY the logind and seatd backends — there is
+#      no `builtin` backend (verified by dumping the strings of libseat.so.1).
+#      A systemd service on tty1 has no logind session, so wlroots could never
+#      acquire a seat and cage could never become DRM master. The image now
+#      installs AND enables the seatd daemon; we pin LIBSEAT_BACKEND=seatd
+#      below and double-check the socket before launching.
+#
+#    * The old "no /dev/dri/card* means nomodeset, give up" logic was simply
+#      wrong, and it was the single biggest reason the GUI never appeared.
+#      The live kernel has CONFIG_DRM_SIMPLEDRM=y and CONFIG_SYSFB_SIMPLEFB=y
+#      BUILT IN, so simpledrm binds the firmware framebuffer (EFI GOP, or
+#      legacy-BIOS VBE) and a DRM node exists on UEFI and BIOS alike —
+#      including under nomodeset, which only suppresses NATIVE drivers;
+#      simpledrm is a firmware driver and is exactly what remains.
+#      ("A DRM node", not "card0": the numbering does not have to start at
+#      zero. On the ThinkPad this was developed on, the only GPU enumerates
+#      as card1 and /dev/dri/card0 does not exist at all.)
+#
+#  The text-mode installer has since been DELETED: /usr/bin/apex-install is a
+#  pure engine that the GUI drives as `apex-install --headless ANSWERS`. There
+#  is nothing to degrade to, so this script no longer branches at all. It has
+#  exactly one job: start cage + the GTK GUI with settings measured to work on
+#  simpledrm, and if that genuinely cannot happen, put a full diagnostic and a
+#  live root shell on tty1 — never a black screen, never a dead console.
 # ─────────────────────────────────────────────────────────────────────────────
+# No `set -e`: every failure below is handled explicitly, and an unhandled
+# `-e` exit would be exactly the kind of silent death this script exists to
+# prevent.
 set -uo pipefail
 
 LOG=/var/log/apex-installer-launch.log
-log() { printf '%s %s\n' "$(date +%T)" "$*" >>"$LOG" 2>/dev/null || true; }
-CMD=$(cat /proc/cmdline 2>/dev/null || true)
-have() { command -v "$1" >/dev/null 2>&1; }
+# -s allows VT switching. Without it the kernel's Ctrl+Alt+Fn is dead for the
+# whole session — while the GUI's own install-failure page tells the user to
+# "switch to a shell with Ctrl+Alt+F2" to read the log. That advice has to be
+# true, and an escape hatch off a wedged GUI is worth having regardless.
+GUI_CMD=(cage -s -- /usr/bin/apex-installer-gui)
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null || true; }
 
-run_tui() { log "starting whiptail installer"; exec /usr/bin/apex-install; }
+log "──── apex-installer-launch starting (pid $$) ────"
 
-# Explicit opt-out always wins.
-if echo "$CMD" | grep -qw apex.tui; then
-    log "apex.tui on the cmdline"
-    run_tui
-fi
-
-# Probe, unless told to skip it. Each of these is a real way the GUI silently
-# fails to appear, and each is cheap to check.
-if ! echo "$CMD" | grep -qw apex.gui; then
-    if ! have cage; then            log "cage missing";            run_tui; fi
-    if ! have apex-installer-gui; then log "gui missing";           run_tui; fi
-    if ! ls /dev/dri/card* >/dev/null 2>&1; then
-        # No DRM device at all — this is the nomodeset case. GTK would fall back
-        # to software rendering only if a compositor could start, and cage cannot
-        # without a DRM node.
-        log "no /dev/dri/card* — nomodeset or missing GPU firmware"
-        run_tui
-    fi
-    if ! python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")' 2>>"$LOG"; then
-        log "python gtk4/adw bindings unavailable"
-        run_tui
-    fi
-fi
-
-# Software rendering is fine and far more portable than depending on a working
-# GL driver for what is a handful of static screens.
+# ── Environment: software rendering, always, deterministically ───────────────
+# Measured working end to end on the built image (a real GTK4 4.20 window,
+# captured via grim). simpledrm exposes NO render node, so any GL path is dead
+# on arrival there; these settings make both the compositor and the client
+# render on the CPU:
+#   WLR_RENDERER=pixman   cage/wlroots draws with the dumb-buffer allocator —
+#                         no GL, no render node needed.
+#   GSK_RENDERER=cairo    the GTK client draws into shm buffers — no EGL/GL at
+#                         all, so no driver, firmware or GL stack can break it.
+# There is deliberately NO hardware-GL path and no boot-menu opt-in for one:
+# that would be an untested second code path whose failure mode is garbage
+# pixels that never trigger any error we could react to. These are eight
+# static form screens; software rendering is correct, not a compromise.
+export LIBSEAT_BACKEND=seatd       # F43 libseat: logind or seatd only, and a
+                                   # tty service has no logind session — seatd
+                                   # is the ONLY backend that can work here.
+export WLR_RENDERER=pixman
+export GSK_RENDERER=cairo
 export GDK_BACKEND=wayland
-export GSK_RENDERER="${GSK_RENDERER:-cairo}"
-export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/0}"
-mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
-chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+export LIBGL_ALWAYS_SOFTWARE=1     # anything that still asks for GL gets
+                                   # llvmpipe instead of a hard failure.
+export WLR_NO_HARDWARE_CURSORS=1   # hardware cursor planes on simpledrm are a
+                                   # known source of black/invisible cursors;
+                                   # make the compositor draw it in software.
+export XDG_RUNTIME_DIR=/run/user/0 # the wayland socket lives here; we run as
+                                   # root and nothing else creates this dir.
+mkdir -p "$XDG_RUNTIME_DIR" 2>>"$LOG" || true
+chmod 700 "$XDG_RUNTIME_DIR" 2>>"$LOG" || true  # wayland refuses runtime dirs
+                                                # that are group/world readable
+log "environment pinned: LIBSEAT_BACKEND=seatd WLR_RENDERER=pixman GSK_RENDERER=cairo GDK_BACKEND=wayland XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
 
-log "starting cage + apex-installer-gui"
-# -d: don't exit when the client does; we handle the exit ourselves below.
-if cage -- /usr/bin/apex-installer-gui >>"$LOG" 2>&1; then
-    log "gui exited cleanly"
+# ── Pick the GPU that the screen is actually plugged into ────────────────────
+# Hybrid-graphics laptops are the common case, not an edge case: an Intel or AMD
+# iGPU and a discrete NVIDIA/AMD, enumerated as card0 and card1 in an order the
+# kernel does not promise. wlroots takes the FIRST DRM device as its primary and
+# renders there; if that device has no connected output, the compositor comes up
+# on a GPU driving nothing and the laptop's own panel stays black — which looks
+# exactly like the installer failing to start, and would send someone chasing
+# the wrong bug.
+#
+# So do not guess: ask the kernel which connector is actually connected and hand
+# wlroots that card explicitly. /sys/class/drm/cardN-<connector>/status reads
+# "connected" only for a display that is really there. If nothing looks
+# connected (headless, or a framebuffer with no connector modelled — some
+# simpledrm setups), leave WLR_DRM_DEVICES unset and let wlroots choose, because
+# a wrong forced choice is worse than no choice.
+# Pinning is a function, not a one-shot, because it MUST be recomputed before
+# the retry. The retry exists to absorb a late DRM handover — and the commonest
+# such handover is simpledrm being replaced by the real driver as its firmware
+# finishes loading, which makes the card we pinned on the first attempt vanish.
+# Pinning once would hand attempt 2 the same dead node and guarantee it fails
+# for the very reason the retry was added.
+#
+# It also refuses to choose when choosing would REMOVE displays. WLR_DRM_DEVICES
+# does not express a preference — it hides every card not listed. On a docked
+# laptop with the panel on the iGPU and the external monitor on the dGPU, both
+# cards have connected outputs, and pinning either one blanks the other. wlroots
+# handles that case correctly on its own, so when two or more cards have
+# something plugged in, stay out of the way.
+pick_gpu() {
+    unset WLR_DRM_DEVICES
+    local st conndir c cards="" gpu=""
+    for st in /sys/class/drm/card*-*/status; do
+        [ -r "$st" ] || continue
+        [ "$(cat "$st" 2>/dev/null)" = connected ] || continue
+        conndir=$(dirname "$st")
+        c=$(basename "$conndir"); c=${c%%-*}
+        [ -e "/dev/dri/$c" ] || continue
+        case " $cards " in *" $c "*) ;; *) cards="$cards $c" ;; esac
+        if [ -z "$gpu" ]; then
+            gpu="/dev/dri/$c"; _conndir="$conndir"
+            log "display: connected output on $c ($(basename "$conndir"))"
+        fi
+    done
+    set -- $cards
+    if [ "$#" -gt 1 ]; then
+        log "display: $# cards have connected outputs ($cards) — NOT pinning, wlroots drives them all"
+        _gpu="${gpu:-}"        # still used for the panel-width read
+        return 0
+    fi
+    if [ -n "$gpu" ]; then
+        export WLR_DRM_DEVICES="$gpu"
+        _gpu="$gpu"
+        log "display: pinning the compositor to $gpu"
+    else
+        _gpu=""
+        log "display: no connected connector found in sysfs — letting wlroots pick"
+    fi
+}
+_gpu=""; _conndir=""
+pick_gpu
+
+# ── Scale the UI on high-density panels ──────────────────────────────────────
+# cage does no scaling of its own, so on a 4K laptop panel every control renders
+# at a quarter of its intended size — a 13" 3840x2160 screen turns the installer
+# into unreadable specks. That is not a crash, so nothing else here would catch
+# it, and the person in front of it cannot install the OS either way.
+#
+# NOT via GDK_SCALE. That was the first attempt here and it is a NO-OP under
+# this configuration — measured on the exact GTK build the image ships
+# (gtk4-4.20.4):
+#     GDK_BACKEND=wayland GDK_SCALE=2  ->  monitor scale_factor=1  (ignored)
+#     GDK_BACKEND=x11     GDK_SCALE=2  ->  monitor scale_factor=2  (honoured)
+# GTK4's Wayland backend takes its scale from the compositor, and cage offers no
+# way to set an output scale. We pin GDK_BACKEND=wayland, so the variable did
+# nothing at all — while the log cheerfully announced that scaling had been
+# applied, which is worse than not trying: it would send whoever debugs the
+# photo of a microscopic installer looking in the wrong place.
+#
+# So the decision is passed to the GUI instead, which can act on it in-process
+# through GtkSettings regardless of backend. We only measure and export; the
+# reading is deliberately separated from the acting.
+#
+# Read the modes of the CONNECTED connector specifically ("$_conndir"), not of
+# whichever connector sorts first — a laptop with a dark HDMI port listed before
+# its panel would otherwise be measured by the port nothing is plugged into.
+if [ -n "$_gpu" ]; then
+    _w=$(head -1 "$_conndir/modes" 2>/dev/null | cut -dx -f1)
+    case "$_w" in
+        ''|*[!0-9]*) log "display: could not read a mode width — leaving text at 1x" ;;
+        *) export APEX_PANEL_WIDTH="$_w"
+           log "display: connected output is ${_w}px wide (APEX_PANEL_WIDTH, the GUI decides text scale)" ;;
+    esac
+fi
+
+# ── Make sure seatd is actually serving before cage asks it for the seat ─────
+# The unit has Requires=seatd.service + After=seatd.service, so normally the
+# socket already exists. This block covers the remaining ways it doesn't:
+# seatd.service somehow not enabled in this image, seatd started but not yet
+# listening, or this script run by hand for debugging. The wait is BOUNDED —
+# five seconds, then we launch anyway and let the failure path record what
+# cage says, because looping forever here is just a black screen with a busy
+# CPU behind it.
+if [ -S /run/seatd.sock ]; then
+    log "seatd: /run/seatd.sock already present"
+else
+    log "seatd: /run/seatd.sock absent — issuing 'systemctl start seatd.service'"
+    if systemctl start seatd.service >>"$LOG" 2>&1; then
+        log "seatd: systemctl start returned success"
+    else
+        log "seatd: systemctl start FAILED — still waiting for the socket"
+    fi
+    for _ in {1..25}; do   # 25 × 0.2 s = 5 s ceiling
+        [ -S /run/seatd.sock ] && break
+        sleep 0.2
+    done
+    if [ -S /run/seatd.sock ]; then
+        log "seatd: socket appeared within the wait window"
+    else
+        log "seatd: WARNING — socket still absent after 5 s; cage will almost certainly be unable to acquire the seat"
+    fi
+fi
+
+# ── Get plymouth off the GPU before cage needs it ────────────────────────────
+# plymouth holds DRM master while the splash is up. The unit's
+# After=plymouth-quit-wait.service only ORDERS us after that unit — it does
+# NOT guarantee plymouthd has actually released the device, and a late release
+# is an independent, real black-screen cause. Ask it to quit and WAIT for the
+# release. Guarded on both sides: no plymouth binary, or a plymouthd that is
+# already gone, is harmless. (The unit also does this in an ExecStartPre=-;
+# repeating it here keeps the by-hand debugging path honest.)
+if command -v plymouth >/dev/null 2>&1; then
+    if plymouth quit --wait >>"$LOG" 2>&1; then
+        log "plymouth: quit --wait completed (DRM master released)"
+    else
+        log "plymouth: quit --wait failed or plymouthd not running — harmless, continuing"
+    fi
+else
+    log "plymouth: binary not present — nothing to quit"
+fi
+
+# ── Launch. Exactly one retry, then diagnose ─────────────────────────────────
+# Why one retry and not a loop: the only transient first-start failure seen in
+# practice is cage racing a late DRM-master release (plymouth or the console
+# layer finishing its handover just after we start). Two seconds and a second
+# attempt absorb that. Anything that fails twice is a real defect, and
+# retrying it forever is indistinguishable from a black screen — the one
+# outcome this script exists to rule out.
+start_gui() {
+    log "launching (attempt $1 of 2): ${GUI_CMD[*]}"
+    "${GUI_CMD[@]}" >>"$LOG" 2>&1
+    local rc=$?
+    log "attempt $1: cage exited rc=$rc"
+    return "$rc"
+}
+
+start_gui 1
+rc=$?
+if [ "$rc" -eq 0 ]; then
+    log "GUI session ended cleanly — done"
     exit 0
 fi
-
-# cage or the GUI died. Do not strand the user on a blank screen — say what
-# happened on the console and hand over to the installer that works everywhere.
+log "attempt 1 failed (rc=$rc) — sleeping 2 s in case DRM master was released late, then retrying ONCE"
+sleep 2
+# Re-pick the GPU: the card that existed a moment ago may have been replaced by
+# the real driver taking over from simpledrm, which is precisely the handover
+# this retry is here to survive.
+pick_gpu
+start_gui 2
 rc=$?
-log "cage/gui failed rc=$rc — falling back to the text installer"
-printf '\n\n  The graphical installer could not start (see %s).\n' "$LOG" >/dev/tty1 2>/dev/null || true
-printf '  Falling back to the text installer.\n\n' >/dev/tty1 2>/dev/null || true
-sleep 3
-run_tui
+if [ "$rc" -eq 0 ]; then
+    log "GUI session ended cleanly on the retry — done"
+    exit 0
+fi
+log "attempt 2 failed (rc=$rc) — the GUI cannot start on this machine; writing the diagnostic to tty1"
+
+# ── The failure path: diagnose on tty1, then a live root shell ───────────────
+# Non-negotiables: no black screen, no dead console, and a screen the user can
+# photograph that tells us everything we need to debug remotely. Budgeted for
+# an 80x25 text console — every tail is trimmed to 79 columns and the whole
+# report fits on one screen. The wording must make it unmistakable that this
+# is OUR bug, not the user's mistake: apex-logs 48 taught us that a stranded
+# user with no explanation blames themselves or the hardware.
+write_report() {
+    local rc=$1 card=ABSENT seat=ABSENT
+    # NOT `-e /dev/dri/card0`. The numbering is not guaranteed to start at zero:
+    # on the ThinkPad this was developed on the only GPU enumerates as card1 and
+    # there is no card0 at all, so a card0 test would print "ABSENT" on a machine
+    # whose graphics are perfectly fine and send the reader after a phantom bug.
+    # Report what is actually there.
+    card=$(ls -d /dev/dri/card* 2>/dev/null | tr '\n' ' ')
+    [ -n "$card" ] || card=ABSENT
+    [ -S /run/seatd.sock ] && seat=present
+    printf '===============================================================================\n'
+    printf ' APEX-OS INSTALLER BUG — the graphical installer could not start\n'
+    printf '===============================================================================\n'
+    printf ' This is a defect in the installer image, NOT something you did wrong.\n'
+    printf ' cage (the display compositor) exited with code %s on both attempts.\n' "$rc"
+    printf ' DRM nodes: %s\n /run/seatd.sock: %s   pinned GPU: %s\n' \
+        "$card" "$seat" "${WLR_DRM_DEVICES:-<auto>}"
+    printf ' ---- last lines of %s ----\n' "$LOG"
+    tail -n 6 "$LOG" 2>/dev/null | cut -c1-79 || printf ' (launch log unreadable)\n'
+    if command -v journalctl >/dev/null 2>&1; then
+        printf ' ---- last lines of journalctl -b -u apex-installer ----\n'
+        journalctl -b -u apex-installer --no-pager -n 5 -o cat 2>/dev/null | cut -c1-79 \
+            || printf ' (journal unavailable)\n'
+    fi
+    printf ' Please photograph this screen and report it to the APEX-OS developers,\n'
+    printf ' along with /var/log/apex-installer-launch.log if you can copy it off.\n'
+    printf ' You now have a root shell below. Full log: less %s\n' "$LOG"
+}
+
+# ── Put the VT back into TEXT MODE before painting anything ──────────────────
+# This is not cosmetic, it is the difference between a diagnostic and the black
+# screen this whole script exists to prevent.
+#
+# A compositor puts its VT into KD_GRAPHICS so the kernel stops drawing the text
+# console over its framebuffer, and restores KD_TEXT on a clean exit. We are
+# here precisely because cage did NOT exit cleanly — so the VT is very likely
+# still in KD_GRAPHICS, and in that mode the kernel DISCARDS console writes
+# entirely. Every printf below would succeed, the log would record that the
+# report was written, and the user would sit in front of an unchanged black
+# screen. ANSI reset sequences do not help: \033c is interpreted by the console
+# driver, which is exactly the layer that is muted.
+#
+# The only way back is the KDSETMODE ioctl. There is no shell utility for it in
+# this image, so call it through python3 — which is guaranteed present, because
+# the GUI is written in it. Values are from linux/kd.h: KDSETMODE = 0x4B3A,
+# KD_TEXT = 0. chvt first, in case cage switched to a VT of its own and left the
+# user looking at a different one.
+chvt 1 2>>"$LOG" || log "chvt 1 failed (no kbd tools or no VT layer?) — continuing"
+if python3 -c '
+import fcntl, os, sys
+fd = os.open("/dev/tty1", os.O_RDWR | os.O_NOCTTY)
+fcntl.ioctl(fd, 0x4B3A, 0)   # KDSETMODE,  KD_TEXT
+# Video alone is not enough. seatd also puts the VT keyboard into K_OFF while a
+# session owns it, and if seatd died without restoring it the console renders
+# the diagnostic perfectly and then accepts no input at all: a dead console
+# wearing the clothes of a working one. KDSKBMODE back to K_UNICODE.
+# (No apostrophes in here — this block lives inside a single-quoted python3 -c
+# argument, and one apostrophe ends the string and breaks the script.)
+fcntl.ioctl(fd, 0x4B45, 3)   # KDSKBMODE, K_UNICODE
+os.close(fd)
+' 2>>"$LOG"; then
+    log "VT restored to text mode (KDSETMODE/KD_TEXT)"
+else
+    log "WARNING: could not restore tty1 to text mode — the diagnostic below may be invisible"
+fi
+
+# \033c on top of that: a full terminal reset, harmless on an already-sane
+# console, and it clears whatever cage left on screen.
+{
+    printf '\033c'
+    write_report "$rc"
+} >/dev/tty1 2>/dev/null || log "could not write the diagnostic to /dev/tty1"
+
+# Keep a copy of the report in the log too — if the console is unreadable
+# (worst case), the log is the only forensics anyone gets.
+write_report "$rc" >>"$LOG" 2>/dev/null || true
+log "diagnostic written — handing tty1 to an interactive root shell"
+
+# A live root shell, explicitly wired to tty1 so this also behaves when the
+# script is run by hand from another terminal. bash may print a cosmetic
+# "cannot set terminal process group" warning; input still works. If even this
+# exec fails, exit 70 (EX_SOFTWARE) so the unit's ExecStopPost rescue shell —
+# the last safety net — takes over.
+shopt -s execfail   # a failed exec must fall through to the exit below, not
+                    # abort the script silently
+exec /bin/bash -i </dev/tty1 >/dev/tty1 2>&1
+log "FATAL: could not exec a rescue shell on tty1"
+exit 70   # EX_SOFTWARE: internal error — unambiguously an installer defect

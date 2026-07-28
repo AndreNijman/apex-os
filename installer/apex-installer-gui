@@ -3,10 +3,17 @@
 #  apex-installer-gui — graphical front end for the APEX-OS installer
 #
 #  THIS IS A FRONT END ONLY. It collects answers and hands them to
-#  `apex-install --headless`, which is the same audited engine the TUI drives:
-#  every disk guard, LVM/LUKS refusal, ESP check, bootc invocation, account
-#  creation, SELinux relabel and Secure Boot step lives there, not here. There
-#  is exactly one install engine and this is not it.
+#  `apex-install --headless`, which is the install engine: every disk guard,
+#  LVM/LUKS refusal, ESP check, bootc invocation, account creation, SELinux
+#  relabel and Secure Boot step lives there, not here. There is exactly one
+#  install engine and this is not it.
+#
+#  It is also the ONLY front end. The text-mode installer that used to sit
+#  behind this as a fallback has been deleted: on real hardware the GUI failed
+#  to start for reasons that were all fixable image bugs, and users were
+#  stranded in a text UI they were never meant to see. Everything the text UI
+#  could collect, this must be able to collect — including the Secure Boot MOK
+#  password — or the capability simply no longer exists.
 #
 #  Design (see docs/branding.md — colours are the established APEX tokens, not
 #  invented here): industrial/technical instrument. Mono for anything the
@@ -30,6 +37,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import threading
 
 ENGINE = "/usr/bin/apex-install"
 EDITION_FILE = "/usr/lib/apex-installer/edition"
@@ -59,7 +67,7 @@ def run(cmd, timeout=15):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return p.returncode, p.stdout
-    except (subprocess.TimeoutExpired, OSError):
+    except (subprocess.SubprocessError, OSError, ValueError):
         return 1, ""
 
 
@@ -95,9 +103,10 @@ def list_disks():
             continue
         if d.get("SIZE") in ("0B", "0", ""):
             continue
-        if d.get("NAME") in skip:
+        name = d.get("NAME")
+        if not name or name in skip:
             continue
-        dev = f"/dev/{d['NAME']}"
+        dev = f"/dev/{name}"
         rc2, ptxt = run(["lsblk", "-rno", "TYPE,SIZE,FSTYPE,LABEL", dev])
         parts = [l for l in ptxt.splitlines() if l.split() and l.split()[0] == "part"]
         disks.append({
@@ -175,11 +184,18 @@ def wifi_scan():
 
 
 def wifi_connect(ssid, password):
+    """Never raises — a hung or missing nmcli must degrade to an error
+    message, not a stack trace with the status stuck on 'Connecting…'."""
     cmd = ["nmcli", "device", "wifi", "connect", ssid]
     if password:
         cmd += ["password", password]
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    return p.returncode == 0, (p.stderr or p.stdout).strip()
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        return p.returncode == 0, (p.stderr or p.stdout).strip()
+    except subprocess.TimeoutExpired:
+        return False, "timed out after 60 seconds"
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
+        return False, str(e)
 
 
 # ── styling ──────────────────────────────────────────────────────────────────
@@ -274,6 +290,43 @@ class Installer(Adw.Application):
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
+        # ── Text scale on high-density panels ────────────────────────────────
+        # cage does no output scaling, so on a 13" 3840x2160 laptop panel every
+        # control renders at a quarter of its intended size. That is not a
+        # crash, so nothing else catches it, and the person in front of it
+        # cannot read the installer well enough to use it.
+        #
+        # This has to happen HERE, in-process, and not via GDK_SCALE in the
+        # launcher. Measured on the exact GTK this image ships (4.20.4):
+        # GDK_SCALE is honoured on the X11 backend and IGNORED on Wayland,
+        # where the scale comes from the compositor — and we run on Wayland
+        # under cage. gtk-xft-dpi is a GtkSettings property, so it applies on
+        # any backend; it scales text, which is the part that has to be
+        # legible. The launcher measures the panel and passes the width; the
+        # decision lives here so it can act on it.
+
+        # ── Short panels ─────────────────────────────────────────────────────
+        # 1024x600 netbooks and 800x600 firmware fallback modes are real, and on
+        # them this installer's generous vertical rhythm stops being generous
+        # and starts hiding things. Measured on the confirm page at 1024x600:
+        # GTK could not fit its 611px minimum, so it squashed the partition
+        # inventory to about two rows and the ERASED row — the partition being
+        # destroyed — fell below the fold. That is the exact failure this page
+        # was written to prevent whiptail from committing, reappearing in a
+        # different form.
+        #
+        # So measure the panel and tighten the layout when it is short, rather
+        # than letting GTK silently decide what to squash.
+        try:
+            pw = int(os.environ.get("APEX_PANEL_WIDTH", "0"))
+        except ValueError:
+            pw = 0
+        if pw >= 2560:
+            st = Gtk.Settings.get_default()
+            if st is not None:
+                # gtk-xft-dpi is in 1024ths of a point; 96*1024 is the default.
+                st.set_property("gtk-xft-dpi", 96 * 1024 * 2)
+
         self.win = Adw.ApplicationWindow(application=self)
         self.win.set_title("APEX-OS Installer")
         self.win.set_default_size(1024, 700)
@@ -287,12 +340,14 @@ class Installer(Adw.Application):
         for name, build in (("welcome", self.p_welcome), ("wifi", self.p_wifi),
                             ("disk", self.p_disk), ("mode", self.p_mode),
                             ("part", self.p_part), ("account", self.p_account),
+                            ("secureboot", self.p_secureboot),
                             ("confirm", self.p_confirm), ("run", self.p_run),
                             ("done", self.p_done)):
             self.stack.add_named(Gtk.Box(), name)
         self.builders = {"welcome": self.p_welcome, "wifi": self.p_wifi,
                          "disk": self.p_disk, "mode": self.p_mode,
                          "part": self.p_part, "account": self.p_account,
+                         "secureboot": self.p_secureboot,
                          "confirm": self.p_confirm, "run": self.p_run,
                          "done": self.p_done}
         # Test affordance: jump straight to a page for screenshotting. Only
@@ -305,6 +360,7 @@ class Installer(Adw.Application):
             self.answers.setdefault("username", "andre")
             self.answers.setdefault("hostname", "apex")
             self.answers["mode"] = os.environ.get("APEX_GUI_MODE", "disk")
+            self.ok = os.environ.get("APEX_GUI_OK", "") == "1"
         self.go(start)
         self.win.present()
 
@@ -317,14 +373,67 @@ class Installer(Adw.Application):
         self.stack.add_named(page, name)
         self.stack.set_visible_child_name(name)
 
+    def is_compact(self):
+        """True on a panel too short for the full vertical rhythm.
+
+        Asked per page rather than once at startup: probing the monitor list in
+        `activate` returned nothing under a headless compositor, so a
+        startup-time flag silently stayed False and the tightening never
+        happened. By the time a page is built the window is mapped and
+        fullscreened, so its own allocated height is the reliable number, with
+        the monitor geometry only as a fallback for the very first page.
+        """
+        try:
+            h = self.win.get_height()
+            if h > 0:
+                return h < 700
+        except Exception:
+            pass
+        try:
+            mons = Gdk.Display.get_default().get_monitors()
+            hs = [mons.get_item(i).get_geometry().height
+                  for i in range(mons.get_n_items())]
+            if hs:
+                return min(hs) < 700
+        except Exception:
+            pass
+        return False
+
+    def scrolled(self, body):
+        """Wrap a page body so it can never push the action row off-screen.
+
+        The action row is the only way forward, so a page that overflows the
+        panel is a stranded user — and there is no text installer to escape to
+        any more. Pages with a list already bring their own scroller; this is
+        for the FORM pages, whose fixed content is tall enough to overflow a
+        1024x600 netbook or an 800x600 firmware fallback mode. Measured: the
+        account page lands around 700px and the Secure Boot page (three
+        paragraphs, two entries, a three-button row) was trimmed to fit exactly
+        720px, so both clip below that.
+
+        Do not wrap a body that already contains a ScrolledWindow — a scroller
+        inside a scroller gets unbounded natural height and the inner list
+        grows forever instead of scrolling.
+        """
+        sc = Gtk.ScrolledWindow(vexpand=True)
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_propagate_natural_height(True)
+        sc.set_child(body)
+        return sc
+
     def frame(self, step, title, subtitle, body, actions):
         """Every page: step marker, title, subtitle, body, action row.
         Consistent structure is what makes an installer feel trustworthy."""
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         outer.add_css_class("apex-bg")
         clamp = Adw.Clamp(maximum_size=780, tightening_threshold=680)
-        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 4)
-        col.set_margin_top(SP * 14); col.set_margin_bottom(SP * 8)
+        # Vertical chrome is the first thing to give on a short panel: the
+        # generous top margin is presentation, the action row is function.
+        _tight = self.is_compact()
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                      spacing=SP * (2 if _tight else 4))
+        col.set_margin_top(SP * (4 if _tight else 14))
+        col.set_margin_bottom(SP * (3 if _tight else 8))
         col.set_margin_start(SP * 6); col.set_margin_end(SP * 6)
         col.set_valign(Gtk.Align.FILL)
 
@@ -336,7 +445,7 @@ class Installer(Adw.Application):
             col.append(lbl(subtitle, "apex-sub"))
 
         body.set_vexpand(True)
-        body.set_margin_top(SP * 3)
+        body.set_margin_top(SP * (1 if _tight else 3))
         col.append(body)
 
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP * 3)
@@ -428,51 +537,84 @@ class Installer(Adw.Application):
         body.append(self.wifi_status)
 
         self._wifi_nets = []
+        # Scans and connects run on worker threads: nmcli can take 20–60s and
+        # blocking the main loop that long looks like a dead installer. Skip
+        # and Back stay live the whole time. Results come back via idle_add;
+        # a captured-widget check discards them if the page was rebuilt.
+        self._wifi_busy = False
 
         def refresh(*_):
+            if self._wifi_busy:
+                self.wifi_status.set_text("Wait for the current scan or "
+                                          "connection to finish.")
+                return
+            self._wifi_busy = True
             self.wifi_status.set_text("Scanning…")
-            child = self.net_list.get_first_child()
-            while child:
-                self.net_list.remove(child)
-                child = self.net_list.get_first_child()
+            netlist, status = self.net_list, self.wifi_status
 
-            def done():
-                self._wifi_nets = wifi_scan()
-                for n in self._wifi_nets:
-                    r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP * 3)
-                    r.set_margin_top(SP * 2); r.set_margin_bottom(SP * 2)
-                    r.set_margin_start(SP * 4); r.set_margin_end(SP * 4)
-                    bars = "▁▃▅▇"[:max(1, min(4, n["signal"] // 25 + 1))]
-                    r.append(lbl(bars, "apex-accent apex-mono", wrap=False))
-                    r.append(lbl(n["ssid"], "apex-mono"))
-                    lock = lbl("locked" if n["secure"] else "open", "apex-dim", wrap=False)
-                    lock.set_hexpand(True); lock.set_xalign(1.0)
-                    r.append(lock)
-                    self.net_list.append(r)
-                self.wifi_status.set_text(
-                    f"{len(self._wifi_nets)} network(s) found."
-                    if self._wifi_nets else "No networks found. Try scanning again.")
-                return False
-            GLib.timeout_add(50, done)
+            def worker():
+                nets = wifi_scan()
+
+                def apply():
+                    if self.net_list is not netlist:
+                        return False  # page rebuilt while scanning — stale
+                    self._wifi_busy = False
+                    child = netlist.get_first_child()
+                    while child:
+                        netlist.remove(child)
+                        child = netlist.get_first_child()
+                    self._wifi_nets = nets
+                    for n in nets:
+                        r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP * 3)
+                        r.set_margin_top(SP * 2); r.set_margin_bottom(SP * 2)
+                        r.set_margin_start(SP * 4); r.set_margin_end(SP * 4)
+                        bars = "▁▃▅▇"[:max(1, min(4, n["signal"] // 25 + 1))]
+                        r.append(lbl(bars, "apex-accent apex-mono", wrap=False))
+                        r.append(lbl(n["ssid"], "apex-mono"))
+                        lock = lbl("locked" if n["secure"] else "open", "apex-dim", wrap=False)
+                        lock.set_hexpand(True); lock.set_xalign(1.0)
+                        r.append(lock)
+                        netlist.append(r)
+                    status.set_text(
+                        f"{len(nets)} network(s) found."
+                        if nets else "No networks found. Try scanning again, or "
+                                     "Skip — Wi-Fi can be set up after first boot.")
+                    return False
+                GLib.idle_add(apply)
+
+            threading.Thread(target=worker, daemon=True).start()
 
         def connect(_b):
+            if self._wifi_busy:
+                self.wifi_status.set_text("Wait for the current scan or "
+                                          "connection to finish.")
+                return
             row = self.net_list.get_selected_row()
-            if row is None:
+            if row is None or not 0 <= row.get_index() < len(self._wifi_nets):
                 self.wifi_status.set_text("Pick a network first.")
                 return
             n = self._wifi_nets[row.get_index()]
+            self._wifi_busy = True
             self.wifi_status.set_text(f"Connecting to {n['ssid']}…")
+            status, pw = self.wifi_status, self.wifi_pw.get_text()
 
-            def work():
-                ok, err = wifi_connect(n["ssid"], self.wifi_pw.get_text())
-                if ok:
-                    self.wifi_status.set_text(
-                        f"Connected to {n['ssid']}. This will be copied to the "
-                        f"installed system.")
-                else:
-                    self.wifi_status.set_text(f"Could not connect: {err[:120]}")
-                return False
-            GLib.timeout_add(50, work)
+            def worker():
+                ok, err = wifi_connect(n["ssid"], pw)
+
+                def apply():
+                    if self.wifi_status is not status:
+                        return False  # page rebuilt while connecting — stale
+                    self._wifi_busy = False
+                    if ok:
+                        status.set_text(
+                            f"Connected to {n['ssid']}. This will be copied to "
+                            f"the installed system.")
+                    else:
+                        status.set_text(f"Could not connect: {err[:120]}")
+                    return False
+                GLib.idle_add(apply)
+
+            threading.Thread(target=worker, daemon=True).start()
 
         refresh()
         acts = [(self.btn("Back", "apex-ghost", lambda *_: self.go("welcome")), False),
@@ -614,6 +756,22 @@ class Installer(Adw.Application):
             return self.frame("STEP 4 OF 6", "Choose a partition", self.disk, body,
                               [(self.btn("Back", "apex-ghost", lambda *_: self.go("mode")), False)])
 
+        if not self._parts:
+            w = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            w.add_css_class("apex-warn")
+            i = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
+            i.set_margin_top(SP * 5); i.set_margin_bottom(SP * 5)
+            i.set_margin_start(SP * 5); i.set_margin_end(SP * 5)
+            i.append(lbl("No partition to install into.", "apex-danger"))
+            i.append(lbl(f"The only partition on this disk is the EFI System "
+                         f"Partition ({self.esp}), which is shared and never "
+                         f"formatted. Go back and use the whole disk, or create "
+                         f"a partition with another tool first.", "apex-dim"))
+            w.append(i)
+            body.append(w)
+            return self.frame("STEP 4 OF 6", "Choose a partition", self.disk, body,
+                              [(self.btn("Back", "apex-ghost", lambda *_: self.go("mode")), False)])
+
         self.part_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.part_list.add_css_class("apex-card")
         for p in self._parts:
@@ -711,12 +869,165 @@ class Installer(Adw.Application):
                     "Computer name must be letters, digits and hyphens only.")
                 return
             self.answers.update(username=u, hostname=h, password=p1)
-            self.go("confirm")
+            self.go("secureboot" if self.sb_offer() else "confirm")
 
         back = "part" if self.answers["mode"] == "partition" else "mode"
-        return self.frame("STEP 5 OF 6", "Create your account", None, body,
+        return self.frame("STEP 5 OF 6", "Create your account", None,
+                          self.scrolled(body),
                           [(self.btn("Back", "apex-ghost", lambda *_: self.go(back)), False),
                            (self.btn("Continue", "apex-go", nxt), True)])
+
+    # ── 5b. secure boot — shown only when the firmware has it enabled ────────
+    def sb_enabled(self):
+        """True when the firmware reports Secure Boot enabled RIGHT NOW.
+
+        Only used to choose the wording on the Secure Boot page, never to decide
+        whether to show it — see sb_offer()."""
+        if not hasattr(self, "_sb_state"):
+            rc, txt = run(["mokutil", "--sb-state"], timeout=10)
+            self._sb_state = "enabled" in txt.lower()
+        return self._sb_state
+
+    def sb_offer(self):
+        """True when this install should offer to enrol the APEX key.
+
+        Deliberately NOT gated on Secure Boot being on already. It used to be,
+        and that was wrong: with Secure Boot off — the state most machines ship
+        in, and the state of both machines this was developed on — the page
+        never appeared, so nothing was enrolled, so turning Secure Boot on later
+        meant installing, booting, running mokutil by hand and rebooting again.
+        That is a ridiculous amount of ceremony to impose on someone who just
+        wanted the option later.
+
+        Enrolling from here works because `mokutil --import` writes MokNew and
+        MokAuth to UEFI NVRAM. That is firmware state, not filesystem state: it
+        belongs to the machine, not to the OS on the disk, and it survives the
+        install. shim picks it up on the next boot and runs MokManager. The
+        request also persists until it is processed, so queueing it while
+        Secure Boot is off is safe — if the firmware does not present
+        MokManager until Secure Boot is switched on, the pending request is
+        still there waiting when it is.
+
+        Three things must hold:
+          * we booted UEFI — no efivars means no Secure Boot and no NVRAM to
+            write to (a legacy-BIOS boot lands here);
+          * mokutil exists;
+          * the image actually ships a kernel signed with the APEX key, which
+            build-live-iso.sh stamps into the live environment because the
+            marker inside the image cannot be read before it is installed.
+        """
+        if not hasattr(self, "_sb_offer"):
+            ok = os.path.isdir("/sys/firmware/efi/efivars")
+            if ok:
+                rc, _ = run(["mokutil", "--sb-state"], timeout=10)
+                ok = rc == 0
+            if ok:
+                try:
+                    with open("/usr/lib/apex-installer/kernel-signed") as f:
+                        ok = f.read().strip() == "signed"
+                except OSError:
+                    ok = False
+            self._sb_offer = ok
+        return self._sb_offer
+
+    def p_secureboot(self):
+        # Shown whenever the image ships an APEX-signed kernel and we booted
+        # UEFI — NOT only when Secure Boot is already on. See sb_offer() for
+        # why. The two situations need different words, though: with Secure
+        # Boot ON this is mandatory (skip it and the machine will not boot),
+        # and with it OFF this is an offer (do it now so switching Secure Boot
+        # on later is a firmware toggle instead of a second install-and-reboot
+        # dance). Saying "Secure Boot is enabled on this machine" to someone
+        # whose firmware has it off would be a plain lie, and this installer
+        # does not get to lie on the page immediately before it erases a disk.
+        on = self.sb_enabled()
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        card.add_css_class("apex-card")
+        i = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
+        i.set_margin_top(SP * 5); i.set_margin_bottom(SP * 5)
+        i.set_margin_start(SP * 5); i.set_margin_end(SP * 5)
+        i.append(lbl("Secure Boot is ON in this machine's firmware." if on
+                     else "Secure Boot is currently OFF in this machine's firmware.",
+                     "apex-mono"))
+        if on:
+            i.append(lbl("APEX-OS ships its own kernel. Microsoft does not sign it — "
+                         "it is signed with the APEX key. Until your firmware is told "
+                         "to trust that key, it will refuse to boot the installed "
+                         "system.", "apex-dim"))
+        else:
+            i.append(lbl("APEX-OS installs and boots fine as things stand — you do "
+                         "not have to do anything here. But APEX ships its own "
+                         "kernel, which Microsoft does not sign, so if you ever turn "
+                         "Secure Boot on it will refuse to boot unless its key was "
+                         "enrolled first. Enrolling now costs one password and takes "
+                         "effect on the next boot; doing it later means booting the "
+                         "installed system, running mokutil by hand and rebooting "
+                         "again.", "apex-dim"))
+        i.append(lbl("Enrolling the key happens once. Choose a password now. On "
+                     "the next boot a blue \"MOK management\" screen appears — "
+                     "choose \"Enroll MOK\" and type this password. That screen "
+                     "is the firmware checking a person is physically present. "
+                     "After that the password is never needed again.", "apex-dim"))
+        card.append(i)
+        body.append(card)
+
+        # Placeholder-only entries (the wifi page's pattern) — with the
+        # explanation card above, captioned rows push the action row off a
+        # 720-pixel-tall screen.
+        self.e_mok1 = Gtk.PasswordEntry(show_peek_icon=True)
+        self.e_mok2 = Gtk.PasswordEntry(show_peek_icon=True)
+        self.e_mok1.set_property("placeholder-text", "One-time enrolment password")
+        self.e_mok2.set_property("placeholder-text", "Repeat password")
+        body.append(self.e_mok1)
+        body.append(self.e_mok2)
+        self.mok_err = lbl("", "apex-danger")
+        body.append(self.mok_err)
+        body.append(lbl(
+            "If you skip, the installed system will not boot until you turn "
+            "Secure Boot off in firmware setup." if on else
+            "If you skip, nothing changes — the system installs and boots "
+            "normally. You would only need this if you later switch Secure "
+            "Boot on.", "apex-dim"))
+
+        def nxt(_b):
+            p1, p2 = self.e_mok1.get_text(), self.e_mok2.get_text()
+            if not p1:
+                self.mok_err.set_text(
+                    "Choose a password, or skip if you will turn Secure Boot "
+                    "off instead.")
+                return
+            if not 8 <= len(p1) <= 256:
+                self.mok_err.set_text(
+                    "The enrolment password must be 8 to 256 characters — the "
+                    "firmware tooling rejects anything else.")
+                return
+            if p1 != p2:
+                self.mok_err.set_text("The two passwords do not match.")
+                return
+            self.answers["mokpw"] = p1
+            self.go("confirm")
+
+        def skip(_b):
+            self.answers["mokpw"] = ""
+            self.go("confirm")
+
+        # Subtitle and skip label BOTH have to follow the firmware state. With
+        # Secure Boot off, "this machine will not boot APEX-OS" is simply untrue,
+        # and offering to "turn Secure Boot off instead" offers to turn off
+        # something already off. Small strings, but this is the screen before the
+        # one that erases a disk and it does not get to say false things.
+        sub = ("This machine will not boot APEX-OS until the APEX signing key "
+               "is enrolled." if on else
+               "Optional. Enrol now and you can switch Secure Boot on later "
+               "without reinstalling.")
+        skip_label = ("Skip — I'll turn Secure Boot off instead" if on
+                      else "Skip — I don't use Secure Boot")
+        return self.frame("STEP 5 OF 6", "Secure Boot", sub, self.scrolled(body),
+                          [(self.btn("Back", "apex-ghost", lambda *_: self.go("account")), False),
+                           (self.btn(skip_label, "apex-ghost", skip), True),
+                           (self.btn("Enrol and continue", "apex-go", nxt), False)])
 
     # ── 6. confirm — the screen this whole rewrite exists for ────────────────
     def p_confirm(self):
@@ -750,7 +1061,8 @@ class Installer(Adw.Application):
         ii = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP)
         ii.set_margin_top(SP * 3); ii.set_margin_bottom(SP * 3)
         ii.set_margin_start(SP * 4); ii.set_margin_end(SP * 4)
-        for p in list_partitions(self.disk):
+        parts = list_partitions(self.disk)
+        for p in parts:
             dying = (mode == "disk") or (p["dev"] == target)
             keep_esp = (mode == "partition" and p["dev"] == self.esp)
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP * 3)
@@ -770,22 +1082,48 @@ class Installer(Adw.Application):
             d.set_hexpand(True); d.set_xalign(1.0)
             row.append(d)
             ii.append(row)
-        if not list_partitions(self.disk):
+        if not parts:
             ii.append(lbl("No existing partitions — the disk is empty.", "apex-dim"))
         inv.append(ii)
-        sc = Gtk.ScrolledWindow(vexpand=True)
-        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        sc.set_child(inv)
-        body.append(sc)
+
+        # ── What is fixed and what scrolls, and why ──────────────────────────
+        # The warning above is FIXED: it is the one thing that must be on screen
+        # no matter what, so it stays outside the scroller.
+        #
+        # Everything else — inventory, summary, the ERASE prompt — goes into ONE
+        # scroller, and the inventory no longer has a scroller of its own. That
+        # is the point of the change. A page's MINIMUM height is what GTK uses
+        # when deciding what to squash, and this page's minimum was 611px: on a
+        # 1024x600 panel GTK crushed the inventory to about two rows and the
+        # ERASED row — the partition about to be destroyed — fell below the fold
+        # behind a near-invisible overlay scrollbar. Exactly the sin this page
+        # exists to stop whiptail committing, in a new costume.
+        #
+        # Two earlier attempts failed and are worth recording. Setting
+        # min_content_height on the inventory made it WORSE (611 -> 693): it adds
+        # to the minimum, which is the number that hurts. Detecting a short panel
+        # at runtime and tightening margins did nothing either, because the
+        # window is not yet at its final size when the page is measured. Neither
+        # is a substitute for the page simply not DEMANDING more room than a
+        # small screen has. With one scroller the minimum collapses to the fixed
+        # chrome, while the natural size on a large screen is unchanged.
+        rest = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        rest.append(inv)
 
         summary = (f"{self.answers['username']} @ {self.answers['hostname']}"
                    f"   ·   {self.ed}   ·   btrfs")
-        body.append(lbl(summary, "apex-mono apex-dim"))
+        rest.append(lbl(summary, "apex-mono apex-dim"))
 
-        body.append(lbl("Type ERASE to confirm:", "apex-dim"))
+        rest.append(lbl("Type ERASE to confirm:", "apex-dim"))
         self.e_erase = Gtk.Entry()
         self.e_erase.set_property("placeholder-text", "ERASE")
-        body.append(self.e_erase)
+        rest.append(self.e_erase)
+
+        sc = Gtk.ScrolledWindow(vexpand=True)
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_propagate_natural_height(True)
+        sc.set_child(rest)
+        body.append(sc)
 
         go = self.btn("Erase and install", "apex-destroy", lambda *_: self.begin(), False)
         self.e_erase.connect("changed",
@@ -793,7 +1131,7 @@ class Installer(Adw.Application):
         self.e_erase.connect("activate",
                              lambda e: self.begin() if e.get_text().strip() == "ERASE" else None)
 
-        back = "account"
+        back = "secureboot" if self.sb_offer() else "account"
         return self.frame("STEP 6 OF 6", "Confirm",
                           "Nothing has been written yet. This is the last point at "
                           "which you can go back.", body,
@@ -805,6 +1143,10 @@ class Installer(Adw.Application):
         self.go("run")
 
     def p_run(self):
+        # A retry after failure re-enters here with the previous, dead process
+        # still in self.proc — pulse() would see poll() != None and stop the
+        # bar before the new engine even spawned. Reset first.
+        self.proc = None
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
         self.bar = Gtk.ProgressBar(show_text=False)
         self.bar.set_pulse_step(0.06)
@@ -832,6 +1174,8 @@ class Installer(Adw.Application):
         return page
 
     def pulse(self):
+        if self.stack.get_visible_child_name() != "run":
+            return False  # left the run page (e.g. spawn failed) — stop the timer
         if self.proc is None or self.proc.poll() is None:
             self.bar.pulse()
             return True
@@ -853,14 +1197,25 @@ class Installer(Adw.Application):
             a["target"] = self.target
             a["esp"] = self.esp
 
-        fd, path = tempfile.mkstemp(prefix="apex-answers-", dir="/run")
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w") as f:
-            for k in ("mode", "disk", "target", "esp", "username", "password",
-                      "hostname", "rootfs"):
-                if a.get(k):
-                    f.write(f"{k}={a[k]}\n")
-        self._answers_path = path
+        try:
+            fd, path = tempfile.mkstemp(prefix="apex-answers-", dir="/run")
+        except OSError as e:
+            self.finish(False, f"Could not create the answers file in /run: {e}")
+            return False
+        self._answers_path = path  # set before writing so finish() cleans up
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w") as f:
+                # mokpw is empty (or absent) when the user skipped enrolment or
+                # Secure Boot is off — the get() guard omits it and the engine
+                # skips the MOK step with an explanation.
+                for k in ("mode", "disk", "target", "esp", "username", "password",
+                          "hostname", "rootfs", "mokpw"):
+                    if a.get(k):
+                        f.write(f"{k}={a[k]}\n")
+        except OSError as e:
+            self.finish(False, f"Could not write the answers file: {e}")
+            return False
 
         try:
             self.proc = subprocess.Popen(
@@ -897,6 +1252,13 @@ class Installer(Adw.Application):
         return True
 
     def finish(self, ok, err):
+        # If the engine is somehow still alive (failure banner printed but the
+        # process hung), stop it — "Try again" must never race a dying engine.
+        if self.proc is not None and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+            except OSError:
+                pass
         # The answers file carries the password — remove it whatever happened.
         p = getattr(self, "_answers_path", None)
         if p:
@@ -907,6 +1269,21 @@ class Installer(Adw.Application):
             self._answers_path = None
         self.ok, self.err = ok, err
         self.go("done")
+
+    def _log_tail(self, lines=40):
+        """Last lines of the install log: the live buffer from the run page
+        when it has content, else /var/log/apex-install.log. Never raises."""
+        text = ""
+        buf = getattr(self, "logbuf", None)
+        if buf is not None:
+            text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+        if not text.strip():
+            try:
+                with open("/var/log/apex-install.log", errors="replace") as f:
+                    text = f.read()
+            except OSError:
+                return ""
+        return "\n".join(text.splitlines()[-lines:])
 
     # ── 8. done ──────────────────────────────────────────────────────────────
     def p_done(self):
@@ -928,12 +1305,14 @@ class Installer(Adw.Application):
                 i.append(lbl(f"Installed on {self.disk}.", "apex-dim"))
             i.append(lbl(f"Log in as  {self.answers['username']}   ·   "
                          f"hostname  {self.answers['hostname']}", "apex-mono"))
-            if os.path.isdir("/etc/NetworkManager/system-connections"):
+            try:
                 n = len([f for f in os.listdir("/etc/NetworkManager/system-connections")
                          if f.endswith(".nmconnection")])
-                if n:
-                    i.append(lbl(f"{n} saved network(s) carried over — Wi-Fi should "
-                                 f"work on first boot.", "apex-dim"))
+            except OSError:
+                n = 0
+            if n:
+                i.append(lbl(f"{n} saved network(s) carried over — Wi-Fi should "
+                             f"work on first boot.", "apex-dim"))
         else:
             i.append(lbl("Installation failed.", "apex-danger"))
             i.append(lbl(getattr(self, "err", "") or "See the log for details.",
@@ -944,12 +1323,26 @@ class Installer(Adw.Application):
         card.append(i)
         body.append(card)
 
+        if not ok:
+            # Put the evidence on screen — do not make a stranded user go
+            # hunting for a shell just to learn why it failed.
+            tail = self._log_tail()
+            if tail:
+                view = Gtk.TextView(editable=False, cursor_visible=False,
+                                    monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+                view.get_buffer().set_text(tail)
+                sc = Gtk.ScrolledWindow(vexpand=True)
+                sc.add_css_class("apex-card")
+                sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+                sc.set_child(view)
+                body.append(sc)
+
         acts = []
         if ok:
             acts.append((self.btn("Reboot now", "apex-go",
-                                  lambda *_: subprocess.Popen(["systemctl", "reboot"])), True))
+                                  lambda *_: run(["systemctl", "reboot"], timeout=30)), True))
             acts.insert(0, (self.btn("Stay in the installer", "apex-ghost",
-                                     lambda *_: self.quit()), False))
+                                     lambda *_: self.go("welcome")), False))
         else:
             acts.append((self.btn("Quit", "apex-ghost", lambda *_: self.quit()), False))
             acts.append((self.btn("Try again", "apex-go", lambda *_: self.go("welcome")), True))
