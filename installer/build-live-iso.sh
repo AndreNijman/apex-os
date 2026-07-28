@@ -81,6 +81,24 @@ grep -qx "$EDITION" "$WORK/rootfs/usr/lib/apex-installer/edition" \
   || { echo "FATAL: edition stamp not written"; exit 1; }
 echo "edition stamped: $EDITION"
 
+# Stamp whether the image we are about to install carries a kernel signed with
+# the APEX MOK. The installer needs this BEFORE it installs anything: it decides
+# whether to offer Secure Boot enrolment, and the marker it would otherwise read
+# (/usr/share/apex-os/secureboot/kernel-signed) only exists inside the image,
+# which is not mounted yet when the question has to be asked.
+#
+# Enrolment is offered from the LIVE environment on purpose. `mokutil --import`
+# writes MokNew/MokAuth to UEFI NVRAM — firmware state, not filesystem state —
+# so a key queued here is picked up by shim on the next boot and enrolled for the
+# machine, whichever OS is on the disk. Doing it during the install is the whole
+# point: the alternative was installing, booting, running mokutil by hand and
+# rebooting again, which is a lot to ask of someone who just wanted an OS.
+KSIGNED=$(sudo podman run --rm "localhost/apex-os:${EDITION}" \
+            cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null | tr -d '\n' || true)
+[ -n "$KSIGNED" ] || KSIGNED=unknown
+printf '%s\n' "$KSIGNED" | sudo tee "$WORK/rootfs/usr/lib/apex-installer/kernel-signed" >/dev/null
+echo "kernel-signed stamped: $KSIGNED"
+
 echo "== 4. dracut live initramfs (dmsquash-live) =="
 # Built inside the installer image (same kernel/modules as the live rootfs).
 # No 'livenet' (needs dracut-network, and we don't netboot).
