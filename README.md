@@ -19,98 +19,212 @@ contexts. See [docs/branding.md](docs/branding.md).
 
 ## Installing
 
-Download the installer, write it to a USB stick, boot it, and follow six
-screens. The installer is graphical, it never leaves you at a text prompt, and
-nothing on any disk is touched until you type `ERASE` on the confirmation
-screen.
+You need a USB stick of **4 GB or more** (it will be erased), a machine with at
+least **16 GB** of disk, and **internet on that machine while installing** — the
+download is done during the install, not before.
 
-### 1. Get the installer
+Roughly 30 minutes start to finish, most of it waiting.
 
-**Netinstall (recommended, ~1.8 GB)** — grab the newest ISO from
-[Releases](https://github.com/AndreNijman/apex-os/releases). It contains the
-installer only and downloads APEX-OS itself (~5 GB) while you watch, so you
-need a working internet connection during the install.
+---
 
-**Offline ISO (~12 GB)** — the whole OS is embedded, so the install needs no
-network at all. Too large to publish here; build it yourself (see below) or get
-it from someone who has one.
+### Step 1 — Download
 
-### 2. Write it to a USB stick
+From the [Releases page](https://github.com/AndreNijman/apex-os/releases), take
+the edition you want plus its `.sha256` file:
 
-Any 4 GB or larger stick. **This erases the stick.**
+| File | Edition |
+|------|---------|
+| `apex-os-daily-netinstall.iso` | **Daily** — general-purpose desktop |
+| `apex-os-gaming-nvidia-netinstall.iso` | **Gaming** — performance-tuned, NVIDIA |
+
+Check the download is intact. A truncated ISO fails much later, in ways that
+look like hardware problems.
+
+**Linux / macOS**
 
 ```sh
-# Linux/macOS — check the device name first, this is unforgiving
-lsblk                                   # find your stick, e.g. /dev/sdb
-sudo dd if=apex-os-daily-netinstall.iso of=/dev/sdb bs=4M oflag=direct status=progress
+sha256sum -c apex-os-daily-netinstall.iso.sha256      # macOS: shasum -a 256 -c
+```
+
+**Windows** (PowerShell) — compare the output to the contents of the `.sha256`
+file:
+
+```powershell
+Get-FileHash .\apex-os-daily-netinstall.iso -Algorithm SHA256
+```
+
+---
+
+### Step 2 — Write it to the USB stick
+
+> **This erases the whole stick.** On Linux, naming the wrong device erases that
+> device instead, with no confirmation and no undo. Check twice.
+
+**Windows — use [Rufus](https://rufus.ie/)** (portable, no install):
+
+1. Plug in the stick and open Rufus.
+2. **Device** — select your stick. Confirm the size looks right.
+3. **Boot selection** → SELECT → choose the `.iso`.
+4. Leave everything else alone and click **START**.
+5. If asked *ISOHybrid image detected*, choose **Write in DD Image mode**.
+6. Confirm the erase warning and wait.
+
+[balenaEtcher](https://etcher.balena.io/) also works and asks fewer questions —
+select image, select drive, Flash.
+
+**Linux**
+
+```sh
+lsblk                       # identify the stick — check SIZE, not just the name
+sudo dd if=apex-os-daily-netinstall.iso of=/dev/sdX bs=4M oflag=direct status=progress
 sync
 ```
 
-On Windows use [Rufus](https://rufus.ie/) or
-[balenaEtcher](https://etcher.balena.io/) in DD/image mode.
+Use the **whole disk** (`/dev/sdX`), never a partition (`/dev/sdX1`).
 
-The image is a hybrid ISO: the same stick boots on **UEFI and legacy BIOS**
-machines, and works with Secure Boot on (it ships the signed shim chain).
+**macOS**
 
-### 3. Boot it
+```sh
+diskutil list                          # find the disk, e.g. /dev/disk4
+diskutil unmountDisk /dev/diskN
+sudo dd if=apex-os-daily-netinstall.iso of=/dev/rdiskN bs=4m
+```
 
-Restart and pick the stick from your firmware's boot menu — usually **F12**,
-sometimes F9/F10/Esc. You may need to disable Fast Boot, and on some machines
-put the firmware in UEFI (non-CSM) mode.
+---
 
-The boot menu offers:
+### Step 3 — Only if you are keeping Windows on the same machine
 
-| Entry | When to use it |
-|-------|----------------|
-| **Install APEX-OS** | Normal. Start here. |
-| **Safe graphics** | The screen goes black after the menu. Uses the firmware framebuffer instead of a GPU driver — the graphical installer still works. |
-| **Troubleshoot** | Drops to a dracut shell if the live image cannot be found. |
+Skip this if APEX is taking the whole disk.
 
-### 4. Install
+The installer can install into an existing partition, but it will **not** shrink
+Windows for you. Do that from Windows first:
 
-Six screens: **network → disk → whole disk or one partition → your account →
-Secure Boot → confirm.**
+1. **Suspend BitLocker** — Control Panel → BitLocker → *Suspend protection*.
+   Changing the boot configuration with BitLocker active makes Windows demand a
+   48-digit recovery key on the next boot.
+2. **Turn off Fast Startup** — Control Panel → Power Options → *Choose what the
+   power buttons do* → uncheck **Turn on fast startup**. Fast Startup leaves the
+   Windows partition in a half-hibernated state that is unsafe to resize.
+3. **Shrink C:** — right-click Start → Disk Management → right-click `C:` →
+   *Shrink Volume*. Give APEX at least 40 GB.
+4. **Create a partition in the free space** — right-click the unallocated space
+   → *New Simple Volume* → accept the defaults. The installer needs a real
+   partition to select; unallocated space will not appear.
+5. Reboot into Windows once, cleanly, before installing.
 
-- **Network** is optional but worth doing: the connection is copied into the
-  installed system, so first boot already has Wi-Fi. It is *required* for the
-  netinstall ISO, which downloads the OS.
-- **Disk** lets you take the whole disk, or install into a single partition
-  alongside an existing OS. The stick you booted from is never offered.
-- **Secure Boot** appears on UEFI machines when the build ships a signed
-  kernel. APEX uses a custom kernel that Microsoft does not sign, so its own
-  key must be enrolled once — the installer queues this and a blue "MOK
-  management" screen appears on the next boot. Skippable.
-- **Confirm** lists every partition and whether it is ERASED, KEPT, or SHARED,
-  and requires you to type `ERASE`.
+---
 
-Then reboot, remove the stick, and log in as the account you created.
+### Step 4 — Boot the stick
+
+Restart and open the **one-time boot menu**: usually <kbd>F12</kbd>, sometimes
+<kbd>F9</kbd>, <kbd>F10</kbd> or <kbd>Esc</kbd> (ThinkPad F12, Dell F12, HP F9,
+Acer F12, MSI F11, ASUS Esc). Pick the USB entry.
+
+If the stick is not listed, go into firmware setup and disable **Fast Boot**.
+The stick boots both UEFI and legacy BIOS machines, so either mode is fine.
+
+At the APEX menu:
+
+| Entry | Use it when |
+|-------|-------------|
+| **Install APEX-OS** | Always start here |
+| **Safe graphics** | The screen goes black after the menu |
+| **Troubleshoot** | The stick is not found — drops to a debug shell |
+
+The graphical installer appears after about 30–60 seconds.
+
+---
+
+### Step 5 — Work through the installer
+
+**1 · Welcome** — read and continue.
+
+**2 · Network** — choose your Wi-Fi and enter the password. Enterprise networks
+(school, university, work) also ask for a username. For a network that does not
+broadcast its name, type it in the *hidden network* field. On Ethernet it simply
+reports that you are connected.
+**Do not skip this.** The download needs it, and the connection is copied into
+the installed system so it is online at first login.
+
+**3 · Disk** — choose the target. The stick you booted from is never offered. An
+empty list usually means the drive is in RAID/RST mode in firmware — switch it
+to **AHCI** and rescan.
+
+**4 · Use** — the whole disk, or the single partition you prepared in Step 3.
+
+**5 · Account** — the username must be **lowercase**, start with a letter or
+underscore, and contain no spaces. Set a password and a computer name.
+
+**5 · Secure Boot** *(UEFI machines)* — choose a one-time password to enrol the
+APEX signing key, or skip. Worth doing even if Secure Boot is currently off, so
+you can switch it on later without reinstalling.
+
+**6 · Confirm** — every partition is listed as **ERASED**, **KEPT** or
+**SHARED**. This is the last point at which nothing has been written. Type
+`ERASE` and start the install.
+
+---
+
+### Step 6 — First boot
+
+Installation takes 10–25 minutes depending on your connection. When it finishes,
+remove the stick and reboot.
+
+If you set a Secure Boot password, a blue **MOK management** screen appears
+first. This is the firmware confirming a person is physically present, and it
+happens only once:
+
+> **Enroll MOK → Continue → Yes →** type that password **→ Reboot**
+
+Then log in with the account you created. The desktop completes its setup on
+first login and **needs network to do it**, which is why Step 5.2 mattered.
+
+---
 
 ### If something goes wrong
 
-The installer writes `/var/log/apex-install.log` and
-`/var/log/apex-installer-launch.log`. If the graphical installer cannot start it
-prints a diagnostic on the console and leaves you at a root shell rather than a
-black screen — photograph it and open an issue. `Ctrl+Alt+F2` gives a login
-(`root` / `apex`) in the live environment.
+The installer never leaves you at a blank screen: it prints what failed and
+drops to a root shell. Photograph the screen — that is usually enough to
+diagnose it.
+
+- <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>F2</kbd> gives a login: `root` / `apex`
+- Logs: `/var/log/apex-install.log` and `/var/log/apex-installer-launch.log`
+- Nothing is written to any disk until you type `ERASE`, so a failure before
+  that point has changed nothing
+
+Please open an issue with the photograph or the log.
+
+### Known limitations
+
+- **USB Wi-Fi adapters needing out-of-tree drivers** (RTL8812AU / 88x2bu /
+  8188eu) do not work in the installer. Use Ethernet or phone USB tethering.
+- **Captive-portal Wi-Fi** (hotel/airport sign-in pages) cannot be completed —
+  there is no browser in the installer.
+- **Tablets with no physical keyboard** cannot complete the account step; there
+  is no on-screen keyboard yet.
+- The installer assumes a **US keyboard layout** when you type your password.
 
 ### Building the ISOs yourself
 
-Needs podman, ~90 GB free, and about 40 minutes.
+Needs podman, about 90 GB free and roughly 40 minutes.
 
 ```sh
-# export the OS image the ISO will carry (offline ISO only)
-sudo skopeo copy containers-storage:localhost/apex-os:daily \
-  oci-archive:/var/tmp/apex-iso/apex.oci:apex-os-daily
-
 cd installer
-# small ISO that downloads the OS at install time
+
+# small ISO that downloads the OS during the install
 NETINSTALL=1 EDITION=daily WORK=/var/tmp/apex-iso \
   OUT=/var/tmp/apex-iso/apex-daily-netinstall.iso sudo -E bash build-live-iso.sh
 
-# fat offline ISO
+# fat ISO with the whole OS embedded — installs with no network at all
+sudo skopeo copy containers-storage:localhost/apex-os:daily \
+  oci-archive:/var/tmp/apex-iso/apex.oci:apex-os-daily
 EDITION=daily WORK=/var/tmp/apex-iso \
   OUT=/var/tmp/apex-iso/apex-daily.iso sudo -E bash build-live-iso.sh
 ```
+
+To build the OS images with a signed kernel, use `./build-local.sh` — it passes
+the Secure Boot signing key and refuses to produce an unsigned image by accident.
+
 
 ## Updating
 
