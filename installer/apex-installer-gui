@@ -922,11 +922,27 @@ class Installer(Adw.Application):
                 rc, _ = run(["mokutil", "--sb-state"], timeout=10)
                 ok = rc == 0
             if ok:
+                # Offer unless we KNOW the kernel is unsigned.
+                #
+                # "signed"   — fat ISO, the embedded image is signed. Offer.
+                # "unknown"  — netinstall: the kernel belongs to whatever the
+                #              registry serves, which is not knowable here. Offer
+                #              anyway. Refusing would mean Secure Boot silently
+                #              never works for anyone who installs over the
+                #              network, which is most people, and a build-time
+                #              guess would go stale the moment CI republishes.
+                #              The engine re-checks the DEPLOYED image and skips
+                #              enrolment with an explanation if it turns out
+                #              unsigned, so the worst case is a password that
+                #              goes unused and a clear message saying so.
+                # "unsigned" — definitively no. Do not ask for a password that
+                #              cannot possibly be used.
                 try:
                     with open("/usr/lib/apex-installer/kernel-signed") as f:
-                        ok = f.read().strip() == "signed"
+                        self._sb_state_stamp = f.read().strip()
                 except OSError:
-                    ok = False
+                    self._sb_state_stamp = "unknown"
+                ok = self._sb_state_stamp != "unsigned"
             self._sb_offer = ok
         return self._sb_offer
 
@@ -970,6 +986,12 @@ class Installer(Adw.Application):
                      "choose \"Enroll MOK\" and type this password. That screen "
                      "is the firmware checking a person is physically present. "
                      "After that the password is never needed again.", "apex-dim"))
+        if getattr(self, "_sb_state_stamp", "") == "unknown":
+            i.append(lbl("This installer downloads APEX-OS, so whether the kernel "
+                         "it fetches carries the APEX signature is confirmed during "
+                         "the install. If it turns out unsigned, this step is "
+                         "skipped and you will be told — nothing breaks either way.",
+                         "apex-dim"))
         card.append(i)
         body.append(card)
 

@@ -971,13 +971,29 @@ Declining is fine — you can either enrol later with
 or turn Secure Boot off in firmware."
     fi
   else
-    note "Secure Boot is ON — action needed.
+    # Reached when the deployed kernel is not signed. With a network install the
+    # front end cannot know this in advance — it offers enrolment and we land
+    # here if the downloaded image turned out unsigned — so this must read
+    # sensibly whether or not Secure Boot is currently on, and must not imply the
+    # install failed. It did not; only enrolment was skipped.
+    if [ "$sb_on" = 1 ]; then
+      note "Secure Boot is ON — action needed.
 
 Secure Boot is enabled, but this build's kernel is not signed with an APEX key
 (state: $kstate).
 
 APEX-OS is installed, but it will NOT boot until you turn Secure Boot OFF in
 your firmware settings. Everything else about the install is complete."
+    else
+      note "Secure Boot: nothing to enrol — the installed kernel is not signed with an APEX key (state: $kstate).
+
+The install is complete and the system boots normally. Secure Boot is currently
+off; leave it off, because turning it on would stop this kernel from booting.
+
+If you want Secure Boot later, install a build whose kernel is signed and enrol
+its key with:
+  sudo mokutil --import /usr/share/apex-os/secureboot/apex-mok.der"
+    fi
   fi
 fi
 
