@@ -155,13 +155,61 @@ jobs:
           echo "args=$ARGS" >> "$GITHUB_OUTPUT"
 
       - name: Build base
+        env:
+          APEX_SB_KEY_B64: ${{ secrets.APEX_SB_KEY_B64 }}
+          APEX_SB_CRT_B64: ${{ secrets.APEX_SB_CRT_B64 }}
         run: |
+          # ── Secure Boot signing key ──────────────────────────────────────
+          # Containerfile.base signs the CachyOS kernel with the APEX MOK only
+          # when these build secrets are present, and otherwise stamps the image
+          # `unsigned` and carries on. CI used to pass nothing, so every image
+          # ever PUBLISHED to GHCR was unsigned: anyone installing from the
+          # registry could not use Secure Boot at all, and enrolling the APEX
+          # key would not have helped them, because their kernel did not carry
+          # its signature. Only locally-built images were signed. Now the
+          # published ones are too.
+          #
+          # The key lives only in $RUNNER_TEMP for the length of the build,
+          # 0600, and is shredded afterwards. It is never in the repo, never in
+          # a build ARG (those are visible in image history), and never in the
+          # image — the Containerfile takes it as --secret, which is a tmpfs
+          # mount that leaves no layer behind.
+          #
+          # Secrets are NOT exposed to workflows triggered by pull requests from
+          # forks, which is what makes this safe on a public repo. It does mean
+          # the key's security is the GitHub account's security: anyone able to
+          # push to main or run workflow_dispatch can use it.
+          SECDIR="$RUNNER_TEMP/apex-sb"
+          mkdir -p "$SECDIR"; chmod 700 "$SECDIR"
+          SECRET_ARGS=""
+          if [ -n "${APEX_SB_KEY_B64:-}" ] && [ -n "${APEX_SB_CRT_B64:-}" ]; then
+            printf '%s' "$APEX_SB_KEY_B64" | base64 -d > "$SECDIR/apex-mok.key"
+            printf '%s' "$APEX_SB_CRT_B64" | base64 -d > "$SECDIR/apex-mok.crt"
+            chmod 600 "$SECDIR"/apex-mok.*
+            # Fail now rather than ship an unsigned image because a secret was
+            # pasted in mangled. Silent degradation is how this shipped unsigned
+            # for weeks in the first place.
+            openssl rsa  -in "$SECDIR/apex-mok.key" -noout -check >/dev/null
+            openssl x509 -in "$SECDIR/apex-mok.crt" -noout        >/dev/null
+            k=$(openssl rsa  -in "$SECDIR/apex-mok.key" -noout -modulus | sha256sum)
+            c=$(openssl x509 -in "$SECDIR/apex-mok.crt" -noout -modulus | sha256sum)
+            [ "$k" = "$c" ] || { echo "FATAL: APEX_SB_KEY_B64 and APEX_SB_CRT_B64 are not a pair"; exit 1; }
+            SECRET_ARGS="--secret id=apex_sb_key,src=$SECDIR/apex-mok.key --secret id=apex_sb_crt,src=$SECDIR/apex-mok.crt"
+            echo "Secure Boot: signing key present — the kernel will be signed"
+          else
+            echo "Secure Boot: NO signing secret configured — the kernel will be UNSIGNED"
+          fi
+
           sudo podman build --isolation=chroot ${{ steps.cache.outputs.args }} \
             --build-arg APEX_REVISION="${{ github.sha }}" \
+            $SECRET_ARGS \
             -f Containerfile.base \
             -t "$IMAGE_BASE:latest" \
             -t "$IMAGE_BASE:${{ github.sha }}" \
             .
+
+          shred -u "$SECDIR"/apex-mok.* 2>/dev/null || rm -f "$SECDIR"/apex-mok.*
+          rmdir "$SECDIR" 2>/dev/null || true
 
       # Gate the push on the base actually being usable. Everything asserted here
       # has silently shipped broken at least once: hyprland-qtutils was absent for
@@ -183,6 +231,28 @@ jobs:
             || fail "hyprland QML style not installed"
           run '! ldd /usr/bin/hyprland-dialog | grep -q "not found"' \
             || fail "hyprland-dialog has unresolved libraries"
+
+          # Secure Boot: if a signing key is configured, the published kernel
+          # MUST actually carry the signature. Containerfile.base degrades to
+          # "unsigned" and keeps going when signing fails or the secret is
+          # absent — good for local builds, unacceptable for the artefact other
+          # people install. Every image ever pushed to GHCR before this was
+          # unsigned and nothing said so. Assert both the marker and the real PE
+          # certificate table, because the marker is only a claim.
+          if [ -n "${{ secrets.APEX_SB_KEY_B64 }}" ]; then
+            state=$(run 'cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null || echo missing')
+            [ "$state" = signed ] \
+              || fail "signing key is configured but the image is stamped '$state' — refusing to publish an unsigned kernel"
+            run 'test -s /usr/share/apex-os/secureboot/apex-mok.der' \
+              || fail "kernel-signed=signed but apex-mok.der is missing — users would have nothing to enrol"
+            sudo podman run --rm --entrypoint /bin/sh "$IMAGE_BASE:latest" -c \
+              'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/apex-kver)/vmlinuz' \
+              | grep -qi 'signature certificates\|image signature issuers\|APEX' \
+              || fail "sbverify found no signature on the shipped vmlinuz"
+            echo "Secure Boot: verified — the published kernel is signed and apex-mok.der ships with it"
+          else
+            echo "::warning::No APEX_SB_KEY_B64 secret — this image ships an UNSIGNED kernel and cannot be used with Secure Boot"
+          fi
 
           # The greeter must tolerate NVIDIA: sway exits(1) on nvidia-drm without
           # this flag, which means no login at all on a hybrid-graphics machine.
