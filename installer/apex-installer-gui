@@ -156,12 +156,53 @@ CONTAINER_FS = {"LVM2_member", "crypto_LUKS", "linux_raid_member",
 
 
 # ── wifi ─────────────────────────────────────────────────────────────────────
+def radio_on():
+    """Unblock the Wi-Fi radio before doing anything else.
+
+    A soft rfkill block is invisible in the UI and indistinguishable from "this
+    laptop has no Wi-Fi": the device exists, the scan returns nothing, and the
+    user is told there are no networks. Laptops ship blocked more often than you
+    would think — a stray Fn-key press, a previous OS that left it off, or
+    firmware that boots the radio down. Both switches have to be thrown:
+    rfkill is the kernel-level block and `nmcli radio wifi` is NetworkManager's
+    own, and either one alone leaves the card dark.
+
+    A HARD block (physical switch) cannot be undone in software; wifi_blocked()
+    detects that so the page can say so instead of pretending to scan.
+    """
+    run(["rfkill", "unblock", "wifi"], timeout=5)
+    run(["rfkill", "unblock", "all"], timeout=5)
+    run(["nmcli", "radio", "wifi", "on"], timeout=5)
+
+
+def wifi_blocked():
+    """True when a HARD rfkill block is active — a physical switch or BIOS
+    setting that no amount of software can clear. Worth saying out loud rather
+    than leaving someone staring at an empty network list."""
+    rc, txt = run(["rfkill", "list", "wifi"], timeout=5)
+    return "Hard blocked: yes" in txt
+
+
+def eth_status():
+    """('connected'|'disconnected'|'absent', device). Ethernet needs no
+    configuration when a DHCP server answers, but when it does not, saying
+    "cable in, no address" is the difference between a user waiting forever and
+    a user plugging into a different port."""
+    rc, txt = run(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device"])
+    for line in txt.splitlines():
+        f = line.split(":")
+        if len(f) >= 3 and f[1] == "ethernet":
+            return ("connected" if f[2] == "connected" else "disconnected"), f[0]
+    return "absent", ""
+
+
 def wifi_available():
     rc, txt = run(["nmcli", "-t", "-f", "TYPE", "device"])
     return any(l.strip() == "wifi" for l in txt.splitlines())
 
 
 def wifi_scan():
+    radio_on()
     run(["nmcli", "device", "wifi", "rescan"], timeout=20)
     rc, txt = run(["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"], timeout=20)
     seen, nets = set(), []
@@ -178,22 +219,62 @@ def wifi_scan():
             sig = int(f[1])
         except ValueError:
             sig = 0
-        nets.append({"ssid": ssid, "signal": sig, "secure": bool(f[2].strip())})
+        sec = f[2].strip()
+        # WPA-Enterprise needs a username as well as a password, and a totally
+        # different nmcli invocation. Detect it here so the page can ask.
+        ent = bool(re.search(r"802\.1X|EAP", sec, re.I))
+        nets.append({"ssid": ssid, "signal": sig, "secure": bool(sec),
+                     "security": sec, "enterprise": ent})
     nets.sort(key=lambda n: -n["signal"])
     return nets
 
 
-def wifi_connect(ssid, password):
-    """Never raises — a hung or missing nmcli must degrade to an error
-    message, not a stack trace with the status stuck on 'Connecting…'."""
-    cmd = ["nmcli", "device", "wifi", "connect", ssid]
-    if password:
-        cmd += ["password", password]
+def wifi_connect(ssid, password, identity="", hidden=False):
+    """Join a network. Never raises — a hung or missing nmcli must degrade to an
+    error message, not a stack trace with the status stuck on 'Connecting…'.
+
+    Three cases, because `nmcli device wifi connect … password …` only covers
+    the first one and silently cannot do the others:
+
+      * PSK / open      — the simple form.
+      * Hidden SSID     — same form plus `hidden yes`; without it nmcli will not
+                          associate with a network that does not beacon, and the
+                          user has no way to type a name that never appears in
+                          a scan.
+      * WPA-Enterprise  — needs a full connection profile with 802-1x settings.
+                          PEAP/MSCHAPv2 is the near-universal school, university
+                          and workplace configuration (eduroam included). Before
+                          this, enterprise networks could not be joined at all:
+                          the password field alone cannot express an identity,
+                          so anyone on a managed network was simply locked out
+                          of the network step.
+    """
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if identity:
+            name = f"apex-{ssid}"
+            run(["nmcli", "connection", "delete", name], timeout=15)
+            add = ["nmcli", "connection", "add", "type", "wifi",
+                   "con-name", name, "ssid", ssid,
+                   "wifi-sec.key-mgmt", "wpa-eap",
+                   "802-1x.eap", "peap", "802-1x.phase2-auth", "mschapv2",
+                   "802-1x.identity", identity, "802-1x.password", password]
+            if hidden:
+                add += ["wifi.hidden", "yes"]
+            p = subprocess.run(add, capture_output=True, text=True, timeout=30)
+            if p.returncode != 0:
+                return False, (p.stderr or p.stdout).strip()
+            p = subprocess.run(["nmcli", "connection", "up", name],
+                               capture_output=True, text=True, timeout=90)
+        else:
+            cmd = ["nmcli", "device", "wifi", "connect", ssid]
+            if password:
+                cmd += ["password", password]
+            if hidden:
+                cmd += ["hidden", "yes"]
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         return p.returncode == 0, (p.stderr or p.stdout).strip()
     except subprocess.TimeoutExpired:
-        return False, "timed out after 60 seconds"
+        return False, "timed out"
     except (subprocess.SubprocessError, OSError, ValueError) as e:
         return False, str(e)
 
@@ -514,10 +595,31 @@ class Installer(Adw.Application):
             i = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
             i.set_margin_top(SP * 5); i.set_margin_bottom(SP * 5)
             i.set_margin_start(SP * 5); i.set_margin_end(SP * 5)
-            i.append(lbl("No Wi-Fi adapter detected.", "apex-mono"))
-            i.append(lbl("If you are on Ethernet you already have network and can "
-                         "continue. Otherwise the system will come up offline and you "
-                         "can connect after first boot.", "apex-dim"))
+            if wifi_blocked():
+                i.append(lbl("Wi-Fi is switched off by a hardware switch.", "apex-mono"))
+                i.append(lbl("Software cannot turn this back on. Look for a physical "
+                             "Wi-Fi switch on the side of the laptop, an Fn key with a "
+                             "radio symbol, or a Wireless setting in firmware setup.",
+                             "apex-dim"))
+            else:
+                i.append(lbl("No Wi-Fi adapter detected.", "apex-mono"))
+            # Do not just assume Ethernet is fine — say what it is doing. A cable
+            # in a port with no DHCP server looks identical to a working
+            # connection from here, and the netinstall download will fail later
+            # for a reason the user was never given a chance to see.
+            est, edev = eth_status()
+            if est == "connected":
+                i.append(lbl(f"Wired network is connected on {edev} — you already "
+                             "have network and can continue.", "apex-dim"))
+            elif est == "disconnected":
+                i.append(lbl(f"A wired adapter ({edev}) is present but has no "
+                             "connection. Plug in a cable, or check the other end — "
+                             "if the network has no DHCP server this will not come up "
+                             "on its own.", "apex-dim"))
+            else:
+                i.append(lbl("No wired adapter either. The system will come up "
+                             "offline and you can connect after first boot.",
+                             "apex-dim"))
             box.append(i)
             body.append(box)
             return self.frame("STEP 2 OF 6", "Network", None, body,
@@ -531,9 +633,25 @@ class Installer(Adw.Application):
         sc.set_child(self.net_list)
         body.append(sc)
 
+        # Username, shown only for WPA-Enterprise. School, university and
+        # workplace networks (eduroam and friends) authenticate with an identity
+        # AND a password; a lone password field cannot express that, so before
+        # this anyone on a managed network simply could not get online.
+        self.wifi_user = Gtk.Entry()
+        self.wifi_user.set_property("placeholder-text", "Username (enterprise networks)")
+        self.wifi_user.set_visible(False)
+        body.append(self.wifi_user)
+
         self.wifi_pw = Gtk.PasswordEntry(show_peek_icon=True)
         self.wifi_pw.set_property("placeholder-text", "Network password")
         body.append(self.wifi_pw)
+
+        # A hidden network never appears in a scan, so without this there is no
+        # way to type its name and the user is simply stuck.
+        self.wifi_hidden = Gtk.Entry()
+        self.wifi_hidden.set_property("placeholder-text",
+                                      "Hidden network name (leave blank if it is in the list)")
+        body.append(self.wifi_hidden)
         body.append(self.wifi_status)
 
         self._wifi_nets = []
@@ -584,22 +702,53 @@ class Installer(Adw.Application):
 
             threading.Thread(target=worker, daemon=True).start()
 
+        def on_pick(_lb, _row):
+            # Reveal the username field only when it is needed. Showing it
+            # always would invite people to fill it in on a home network, where
+            # supplying an identity switches nmcli to an 802.1X profile that
+            # cannot possibly associate.
+            try:
+                r = self.net_list.get_selected_row()
+                ent = (r is not None and 0 <= r.get_index() < len(self._wifi_nets)
+                       and self._wifi_nets[r.get_index()].get("enterprise"))
+                self.wifi_user.set_visible(bool(ent))
+            except Exception:
+                pass
+        self.net_list.connect("row-selected", on_pick)
+
         def connect(_b):
             if self._wifi_busy:
                 self.wifi_status.set_text("Wait for the current scan or "
                                           "connection to finish.")
                 return
-            row = self.net_list.get_selected_row()
-            if row is None or not 0 <= row.get_index() < len(self._wifi_nets):
-                self.wifi_status.set_text("Pick a network first.")
+            # A typed hidden name wins over the list: if someone filled that in,
+            # the network they want is by definition not in the list.
+            hidden_name = self.wifi_hidden.get_text().strip()
+            if hidden_name:
+                n = {"ssid": hidden_name, "enterprise": bool(self.wifi_user.get_text().strip())}
+                is_hidden = True
+            else:
+                row = self.net_list.get_selected_row()
+                if row is None or not 0 <= row.get_index() < len(self._wifi_nets):
+                    self.wifi_status.set_text(
+                        "Pick a network first, or type a hidden network name.")
+                    return
+                n = self._wifi_nets[row.get_index()]
+                is_hidden = False
+
+            ident = self.wifi_user.get_text().strip()
+            if n.get("enterprise") and not ident:
+                self.wifi_status.set_text(
+                    f"{n['ssid']} is an enterprise network — enter your username as "
+                    "well as your password.")
                 return
-            n = self._wifi_nets[row.get_index()]
+
             self._wifi_busy = True
             self.wifi_status.set_text(f"Connecting to {n['ssid']}…")
             status, pw = self.wifi_status, self.wifi_pw.get_text()
 
             def worker():
-                ok, err = wifi_connect(n["ssid"], pw)
+                ok, err = wifi_connect(n["ssid"], pw, identity=ident, hidden=is_hidden)
 
                 def apply():
                     if self.wifi_status is not status:
