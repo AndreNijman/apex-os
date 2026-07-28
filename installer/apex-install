@@ -1,25 +1,47 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  apex-install — APEX-OS guided installer
+#  apex-install — the APEX-OS install ENGINE
 #
 #  A deliberately small, transparent alternative to Anaconda. Runs in the live
-#  environment and installs the embedded APEX-OS image to a disk YOU choose,
-#  using `bootc install to-disk` (bootupd static bootloader — NOT grub2-mkconfig,
-#  which is what silently killed the Anaconda install; see apex-logs 40).
+#  environment and installs the embedded APEX-OS image to the disk the user
+#  chose, using `bootc install to-disk` (bootupd static bootloader — NOT
+#  grub2-mkconfig, which is what silently killed the Anaconda install; see
+#  apex-logs 40).
+#
+#  This file is an ENGINE, not a user interface. It used to double as a
+#  whiptail text UI, reached as a fallback whenever the graphical installer
+#  failed to start — and that fallback is exactly where real users kept getting
+#  stranded, so the text UI was deleted outright (not hidden behind a flag;
+#  a hidden path nobody tests is how the stranding happened). There are exactly
+#  two ways to run this engine:
+#
+#    apex-install --headless ANSWERS   driven by the graphical front end
+#                                      (apex-installer-gui, started via
+#                                      apex-installer-launch). The GUI collects
+#                                      the answers, then reads this engine's
+#                                      stdout line by line as status text.
+#                                      Final-line protocol: `APEX-INSTALL-OK`
+#                                      on total success, `APEX-INSTALL-FAILED:
+#                                      <reason>` on any failure.
+#    apex.unattended (kernel cmdline)  TEST/CI only — see the marker-file gate
+#                                      below.
+#
+#  Run with no arguments it refuses (exit 2) and points at the graphical
+#  installer. It never prompts for anything.
 #
 #  Design rules:
-#   1. It can NEVER fail silently. Every step logs to the screen and to
-#      /var/log/apex-install.log; on ANY error it shows the exact message + the
+#   1. It can NEVER fail silently. Every step goes to stdout and to
+#      /var/log/apex-install.log; on ANY error it emits the exact message + the
 #      log path and refuses to report success.
-#   2. It NEVER writes a disk you didn't explicitly choose and confirm. The live
-#      boot device is excluded; you pick the target, review it, and type ERASE.
-#   3. Three screens: disk → account → confirm. Then a live progress view.
+#   2. It NEVER writes a disk the user didn't explicitly choose and confirm in
+#      the front end — and it does not trust the front end: every disk guard
+#      (live/boot device mounted, LVM/LUKS/RAID membership, ESP checks) is
+#      re-validated here before anything is written.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
 LOG=/var/log/apex-install.log
 : > "$LOG" 2>/dev/null || LOG=/tmp/apex-install.log
-BT="APEX-OS Installer"
 # Which edition this ISO carries. build-live-iso.sh stamps it; a missing stamp
 # means an old ISO, so fall back to daily.
 #
@@ -57,7 +79,21 @@ fi
 # and turn a fine install into a reported failure.
 log()  { printf '%s %s\n' "$(date +%T)" "$*" >>"$LOG" 2>/dev/null || true; }
 have() { command -v "$1" >/dev/null 2>&1; }
-UI=whiptail; have whiptail || UI=dialog
+
+# note(): the engine's ONE user-facing output primitive — stdout plus the log.
+# stdout is read line by line by the graphical front end (which shows the last
+# line as its status text), or lands on the serial console in CI, so everything
+# worth telling the user goes through here. This replaced the whiptail
+# msg()/yn() dialogs when the text UI was deleted; newt/whiptail is no longer
+# in the installer image, so any surviving dialog call would be a
+# command-not-found (127) — under the ERR trap, a reported FAILURE on a machine
+# that may in fact be installed fine.
+# `|| true` on the printf: note() MUST NOT propagate a non-zero status. A
+# closed stdout (front end died mid-run) is not an install failure, and note()
+# is used as a non-final command in contexts the ERR trap does not exempt —
+# the same crash class msg() once shipped ("Unexpected error on line 223").
+# SECRETS: note() logs its argument verbatim — never pass it (or log) P1/MOKPW.
+note() { printf '%s\n' "$*" || true; log "$*"; }
 
 # Progress state — die() uses these to tell the TRUTH about what happened to the
 # disk. Before this, die() always claimed "nothing further was written", even
@@ -65,28 +101,8 @@ UI=whiptail; have whiptail || UI=dialog
 WROTE_DISK=0      # 1 once bootc install has begun writing
 INSTALLED_OK=0    # 1 once bootc install returned success
 
-# `clear` lives in the ncurses package, which the live env did NOT ship (only
-# ncurses-libs, pulled in by newt/whiptail). A bare `clear` therefore failed with
-# 127 and — under the ERR trap — killed the installer the moment the user
-# confirmed ERASE ("Unexpected error on line 250"). The image now installs
-# ncurses, and this fallback makes the script independent of it regardless.
-if ! have clear; then
-  clear() { printf '\033[H\033[2J\033[3J'; }
-fi
-
-# msg() MUST NOT propagate a non-zero status. whiptail returns 255 on ESC (and on
-# any display failure), and `msg` is a NON-FINAL command inside `… || { msg …;
-# continue; }` groups — which the ERR trap does NOT exempt. That shipped as a
-# third crash ("Unexpected error on line 223": blank password → ESC).
-# NOTE: rewriting those groups as `if` does NOT help — only the *condition* of an
-# `if` is exempt from the trap, never the body. Neutralising msg() is the fix.
-msg()  { $UI --backtitle "$BT" --scrolltext --title "$1" --msgbox "$2" "${3:-16}" "${4:-72}" || true; }
-# yn() deliberately KEEPS its exit status — it is the user's Yes/No answer. It is
-# only ever used as `yn … || { … }`, where the command before `||` is exempt.
-yn()   { $UI --backtitle "$BT" --scrolltext --title "$1" --yesno "$2" "${3:-16}" "${4:-72}"; }
-
-# Detect unattended mode EARLY so die() never blocks on a TUI dialog when
-# nobody is watching (headless QEMU/CI runs).
+# Kernel cmdline, read EARLY: it carries the CI-only apex.unattended flag and
+# the apex.* keys that mode installs from.
 CMD=$(cat /proc/cmdline 2>/dev/null || true)
 kv()    { echo "$CMD" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
 kvall() { echo "$CMD" | tr ' ' '\n' | sed -n "s/^$1=//p"; }
@@ -94,25 +110,23 @@ UNATTENDED=0
 # Unattended install is a TEST/CI-only feature. It requires BOTH the kernel flag
 # AND a marker file baked ONLY into test builds. On the production USB the marker
 # is absent, so `apex.unattended` (even hand-added at the boot menu) is IGNORED
-# and we always fall through to the interactive TUI — no accidental disk wipe.
+# and the engine, run without --headless, refuses to start at all — no
+# accidental disk wipe.
 if echo "$CMD" | grep -qw apex.unattended && [ -f /usr/share/apex-installer/allow-unattended ]; then
   UNATTENDED=1
 fi
 
-# NODIALOG: no whiptail is on screen, so every prompt must be skipped and every
-# outcome reported machine-readably instead. True for CI/unattended AND for the
-# graphical front end, which drives this engine with --headless and parses
-# stdout. Set properly further down, once HEADLESS has been parsed.
-NODIALOG=0
-
 # ── Console quieting ────────────────────────────────────────────────────────
-# whiptail draws directly on the console, so any kernel printk lands ON TOP of
-# the dialog and the installer becomes unreadable — reproduced on an Acer Aspire,
+# Historically this existed because the whiptail UI drew directly on the
+# console and kernel printk landed ON TOP of it — reproduced on an Acer Aspire,
 # where audit records and serial-getty churn scribbled over the welcome box.
+# The text UI is gone, but the quieting is kept on purpose: on the
+# catastrophic-failure path (front end dead, engine output landing on the
+# console) printk churn would bury the failure text the user needs to read.
 #
 # The kernel cmdline carries loglevel=3 audit=0, but relying on that alone means
-# one wrong karg silently makes the installer unusable again. Belt and braces:
-# drop the console log level for as long as the TUI is up, and put it back on
+# one wrong karg silently makes the failure text unreadable again. Belt and
+# braces: drop the console log level while the engine runs, and put it back on
 # every exit path so a post-mortem or a dropped shell still shows kernel output.
 PRINTK_SAVED=""
 quiet_console() {
@@ -175,24 +189,25 @@ $others"
   else
     state="Nothing was written. $others"
   fi
-  if [ "${NODIALOG:-0}" = 1 ]; then
-    # Both streams on purpose: the stdout copy is what the QEMU/CI serial capture
-    # and the graphical front end read.
-    echo "APEX-INSTALL-FAILED: $1" >&2
+  # The full truth goes to stderr: that is where the console, the QEMU/CI
+  # serial capture and the front end's log collection see it, without
+  # disturbing the stdout status protocol.
+  {
     echo "APEX-INSTALL-FAILED: $1"
-    exit 1
-  fi
-  $UI --backtitle "$BT" --title "✗ Installation failed" --msgbox \
-"$1
-
-$state
-
-Last log lines:
-$tail_txt
-
-Full log: $LOG  (also copied to the USB's APEXEFI partition if possible)
-For a shell: Ctrl+Alt+F2, log in as  root  /  apex" 26 78 || true
+    echo
+    echo "$state"
+    echo
+    echo "Last log lines:"
+    echo "$tail_txt"
+    echo
+    echo "Full log: $LOG  (also copied to the USB's APEXEFI partition if possible)"
+    echo "For a shell: Ctrl+Alt+F2, log in as  root  /  apex"
+  } >&2
   save_log_to_esp
+  # The stdout copy goes LAST: it is the machine-readable failure sentinel the
+  # graphical front end and the QEMU/CI serial capture key on. Nothing may be
+  # printed to stdout after it.
+  echo "APEX-INSTALL-FAILED: $1"
   exit 1
 }
 
@@ -327,11 +342,12 @@ create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefi
 }
 
 # ── unattended mode (automation / QEMU boot-test) ────────────────────────────
-# If the kernel cmdline has `apex.unattended`, skip the TUI and install using
+# If the kernel cmdline has `apex.unattended` (and the test-build marker file —
+# see the gate above), install with no front end at all, using
 # apex.disk=/dev/X apex.user=NAME apex.pass=PW apex.host=NAME. Repeatable
 # apex.karg=... adds extra kernel args to the installed system (e.g. a serial
 # console for the QEMU boot-test); apex.poweroff powers off on success. Same
-# code path as the interactive install, so a green run validates the flow.
+# engine code path as a GUI-driven install, so a green run validates the flow.
 if [ "$UNATTENDED" = 1 ]; then
   # Everything to the kernel console (ttyS0 in the QEMU test) so the run is
   # observable on serial, not stuck on tty1.
@@ -383,13 +399,20 @@ if [ "$UNATTENDED" = 1 ]; then
   exit 0
 fi
 
-# ── HEADLESS / GUI MODE ──────────────────────────────────────────────────────
+# ── HEADLESS / GUI MODE — the only non-CI way to run this engine ─────────────
 # The graphical installer (apex-installer-gui) is a FRONT END only. It collects
 # answers and hands them here; every disk guard, ESP check, LVM/LUKS refusal,
-# bootc invocation, account creation, SELinux relabel and Secure Boot step below
-# is the SAME audited code the TUI runs. There is exactly one install engine.
+# bootc invocation, account creation, SELinux relabel and Secure Boot step
+# lives in this one engine. This file used to also carry a whiptail UI of its
+# own, reached as a fallback whenever the GUI failed to start — the exact place
+# real users kept getting stranded — so that UI was deleted entirely rather
+# than kept "just in case".
 #
 #   apex-install --headless ANSWERS        install from a key=value answers file
+#
+# Run with no arguments the engine REFUSES (exit 2) instead of guessing what to
+# do: an engine that quietly grows an interactive mode is how the stranding
+# fallback came to exist in the first place.
 #
 # The GUI enumerates disks itself (a front end presenting choices) and this
 # engine independently re-validates whatever comes back. That is deliberate
@@ -398,275 +421,114 @@ fi
 # turn into a wiped boot stick.
 #
 # The answers file is written 0600 by the GUI and removed by it afterwards; it
-# carries the password, so it must never be world-readable or logged.
-HEADLESS=0
+# carries the account password (and, optionally, the MOK enrolment password),
+# so it must never be world-readable or logged.
 case "${1:-}" in
-  --headless) HEADLESS=1; ANSWERS="${2:-}"; shift 2 || true ;;
-  "")         : ;;
+  --headless) ANSWERS="${2:-}" ;;
+  "")
+    # Not an install path — refuse loudly, start nothing, prompt for nothing.
+    restore_console
+    echo "apex-install is the install engine, not a user interface." >&2
+    echo "Run the graphical installer (apex-installer-launch), or pass --headless ANSWERS." >&2
+    exit 2
+    ;;
   *)          die "unknown argument: $1 (expected --headless ANSWERS)" ;;
 esac
-[ "$HEADLESS" = 1 ] && NODIALOG=1
-[ "$UNATTENDED" = 1 ] && NODIALOG=1
-true
 
-if [ "$HEADLESS" = 1 ]; then
-  [ -f "$ANSWERS" ] || die "answers file not found: $ANSWERS"
-  # Only ever accept a fixed key set — never `source` an attacker-writable file.
-  while IFS='=' read -r k v; do
-    case "$k" in
-      mode)      INSTALL_MODE="$v" ;;
-      disk)      DISK="$v" ;;
-      target)    TARGET="$v" ;;
-      esp)       ESP_DEV="$v" ;;
-      username)  USERNAME="$v" ;;
-      password)  P1="$v" ;;
-      hostname)  HOSTNAME="$v" ;;
-      rootfs)    ROOTFS_TYPE="$v" ;;
-      mokpw)     MOKPW="$v" ;;
-      ''|\#*)    : ;;
-      *)         die "unknown key in answers file: $k" ;;
-    esac
-  done < "$ANSWERS"
+[ -f "$ANSWERS" ] || die "answers file not found: $ANSWERS"
+# Only ever accept a fixed key set — never `source` an attacker-writable file.
+# `|| [ -n "$k" ]` is not decoration. `read` returns non-zero when it hits EOF
+# without a trailing newline, and a plain `while read` DISCARDS that last line —
+# measured: an answers file ending `hostname=apex` with no final newline parsed
+# every key except hostname. The GUI happens to always write the newline, so
+# this was latent, but a silently dropped key is the worst shape of bug here:
+# a lost `mokpw` skips Secure Boot enrolment without a word, and a lost `rootfs`
+# quietly changes the filesystem the user asked for.
+while IFS='=' read -r k v || [ -n "$k" ]; do
+  case "$k" in
+    mode)      INSTALL_MODE="$v" ;;
+    disk)      DISK="$v" ;;
+    target)    TARGET="$v" ;;
+    esp)       ESP_DEV="$v" ;;
+    username)  USERNAME="$v" ;;
+    password)  P1="$v" ;;
+    hostname)  HOSTNAME="$v" ;;
+    rootfs)    ROOTFS_TYPE="$v" ;;
+    mokpw)     MOKPW="$v" ;;
+    ''|\#*)    : ;;
+    *)         die "unknown key in answers file: $k" ;;
+  esac
+done < "$ANSWERS"
 
-  : "${INSTALL_MODE:?answers: mode missing}"
-  : "${DISK:?answers: disk missing}"
-  : "${USERNAME:?answers: username missing}"
-  : "${HOSTNAME:?answers: hostname missing}"
-  [ -n "${P1:-}" ] || die "answers: password missing"
-  case "$INSTALL_MODE" in disk|partition) : ;; *) die "answers: bad mode '$INSTALL_MODE'" ;; esac
+: "${INSTALL_MODE:?answers: mode missing}"
+: "${DISK:?answers: disk missing}"
+: "${USERNAME:?answers: username missing}"
+: "${HOSTNAME:?answers: hostname missing}"
+[ -n "${P1:-}" ] || die "answers: password missing"
+case "$INSTALL_MODE" in disk|partition) : ;; *) die "answers: bad mode '$INSTALL_MODE'" ;; esac
 
-  # Re-run the SAME guards the TUI applies. The GUI is not trusted to have done
-  # them: a front end must never be the only thing standing between a typo and a
-  # wiped disk.
-  [ -b "$DISK" ] || die "$DISK is not a block device."
-  if findmnt -rno SOURCE | grep -qE "^${DISK}([0-9p]|$)"; then
-    die "$DISK (or a partition of it) is currently mounted — refusing."
-  fi
-  if [ "$INSTALL_MODE" = partition ]; then
-    [ -n "${TARGET:-}" ] || die "answers: target partition missing for partition mode"
-    [ -b "$TARGET" ] || die "$TARGET is not a block device."
-    [ -n "${ESP_DEV:-}" ] || die "answers: esp missing for partition mode"
-    [ -b "$ESP_DEV" ] || die "$ESP_DEV is not a block device."
-    # Same container-member refusal as the TUI: mkfs on an LVM PV / LUKS header
-    # silently destroys everything inside it, and the live env may not even have
-    # the tooling to notice it is mounted.
-    tfs=$(lsblk -dno FSTYPE "$TARGET" 2>/dev/null | tr -d ' ' || true)
-    case "$tfs" in
-      LVM2_member|crypto_LUKS|linux_raid_member|ddf_raid_member|isw_raid_member|zfs_member|bcache)
-        die "$TARGET is a $tfs container member — refusing to format it." ;;
-    esac
-    TARGET_DESC="$TARGET (partition of $DISK)"
-  else
-    TARGET="$DISK"
-    TARGET_DESC="$DISK (entire disk)"
-  fi
-  log "headless: MODE=$INSTALL_MODE TARGET=$TARGET ESP=${ESP_DEV:-n/a} USER=$USERNAME HOST=$HOSTNAME"
-fi
+# ── Validate the account NOW, before anything is erased ──────────────────────
+# These three checks lived only in the deleted text UI, and deleting it took
+# them with it. They have to be here, not only in the GUI, and they have to run
+# BEFORE the disk is touched — that ordering is the whole point.
+#
+# The failure they prevent is the worst one this installer can produce: an
+# invalid username is not rejected by anything until `useradd` runs, and
+# `useradd` runs AFTER `bootc install --wipe` has already erased the target. The
+# result is a fully installed system with NO account on it — unbootable-into,
+# nothing to log in as, and the user's old OS gone. The original text UI
+# validated here for exactly this reason and its comment said so.
+#
+# A front end validating is not a substitute. The engine takes a file it did not
+# write, and it is the last thing between that file and an erased disk.
+printf '%s' "$USERNAME" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' \
+  || die "Invalid username '$USERNAME'. Use lowercase letters, digits, - and _ ; it must start with a letter or _ and be at most 32 characters. Nothing has been erased."
+case "$USERNAME" in
+  root|bin|daemon|adm|sys|nobody|systemd*|dbus|polkitd|sshd|halt|shutdown|operator)
+    die "'$USERNAME' is a reserved system account name — pick another. Nothing has been erased." ;;
+esac
+printf '%s' "$HOSTNAME" | grep -Eq '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$' \
+  || die "Invalid hostname '$HOSTNAME'. Use letters, digits and hyphens only, starting and ending with a letter or digit (max 63 characters). Nothing has been erased."
 
-
-# Guarded: in headless/GUI mode there is no whiptail on screen, so an
-# unguarded prompt here would block the install forever on a dialog nobody
-# can see or answer.
-[ "$HEADLESS" = 1 ] || yn "Welcome to APEX-OS" \
-"This installs APEX-OS to a disk you choose.
-
-Steps: pick the target disk → create your account → confirm.
-Nothing is erased until you confirm. Your account is created for you (no
-locked-out first boot).
-
-Continue?" 16 70 || { clear; echo "Installer cancelled."; exit 0; }
-
-# Everything from here to the install step is the INTERACTIVE (whiptail) path.
-# Skipped wholesale in headless/GUI mode, which has already set the same
-# variables and re-run the same guards above.
-if [ "$HEADLESS" != 1 ]; then
-
-
-# ── 1. target disk (guarded) ─────────────────────────────────────────────────
-# Identify the live/boot device so we never offer it as a target.
-# `|| true` on every one of these: with `pipefail` a failing pipeline makes the
-# assignment non-zero, which trips the ERR trap (fires even under `set +e`).
-live_src=$(findmnt -no SOURCE / 2>/dev/null || true)          # e.g. /dev/mapper/live-rw or overlay
-boot_disk=$(lsblk -no PKNAME "$(findmnt -no SOURCE /run/initramfs/live 2>/dev/null || true)" 2>/dev/null | head -1 || true)
-# Map live-media matches back to their PARENT DISK. The old form compared a
-# *partition* name (sda1) against the menu's *disk* names (sda) — it could never
-# match, so this second guard was a silent no-op; and `head -1` discarded every
-# match after the first (two live sticks → only one excluded).
-usb_boot=$(lsblk -o NAME,MOUNTPOINT -rn 2>/dev/null \
-  | awk '$2 ~ /(^|\/)(live|install|ISO)/ {print $1}' \
-  | while read -r n; do p=$(lsblk -no PKNAME "/dev/$n" 2>/dev/null | head -1); printf '%s ' "${p:-$n}"; done \
-  | tr -s ' ' || true)
-
-menu=(); count=0
-while read -r name; do
-  if [ -z "$name" ]; then continue; fi
-  dev="/dev/$name"
-  # Exclude the disk we booted from.
-  if [ -n "$boot_disk" ] && [ "$name" = "$boot_disk" ]; then continue; fi
-  case " $usb_boot " in *" $name "*) continue;; esac
-  # Query each column SEPARATELY. Do NOT use positional `read a b c` over a
-  # multi-column lsblk: MODEL contains spaces ("USB DISK 3.2", "SPCC M.2 PCIe
-  # SSD"), which silently shifts TRAN/RM into garbage.
-  size=$(lsblk -dno SIZE  "$dev" 2>/dev/null | tr -d ' ')            || size=""
-  model=$(lsblk -dno MODEL "$dev" 2>/dev/null | sed 's/^ *//; s/ *$//') || model=""
-  tran=$(lsblk -dno TRAN  "$dev" 2>/dev/null | tr -d ' ')            || tran=""
-  removable=$(lsblk -dno RM "$dev" 2>/dev/null | tr -d ' ')          || removable=""
-  # Plain if/then — never `$( [ … ] && … )`: that substitution exits non-zero for
-  # a NON-removable disk, which becomes the assignment's status and trips the ERR
-  # trap, killing the installer while merely listing disks (apex-logs 41).
-  # Serial + a short contents hint so two same-size/same-model disks are
-  # distinguishable, and so a disk that already holds data is visibly different
-  # from a blank one BEFORE the confirm screen.
-  serial=$(lsblk -dno SERIAL "$dev" 2>/dev/null | tr -d ' ' | tail -c 9) || serial=""
-  parts=$(lsblk -rno TYPE "$dev" 2>/dev/null | grep -c '^part$' || true)
-  labels=$(lsblk -rno LABEL "$dev" 2>/dev/null | grep -v '^$' | head -2 | tr '\n' ',' | sed 's/,$//') || labels=""
-  flags="${tran:-?}"
-  if [ "$removable" = "1" ]; then flags="$flags,removable"; fi
-  content="empty"
-  if [ "${parts:-0}" -gt 0 ]; then content="${parts} part"; fi
-  if [ -n "$labels" ]; then content="$content: $labels"; fi
-  label="${size:-?}  ${model:-disk}  [$flags]  ${serial:+sn:$serial  }($content)"
-  menu+=("$dev" "$label"); count=$((count+1))
-  # Real whole disks only: skip 0-byte phantoms (empty card-reader slots) that
-  # would otherwise bury the actual disks in the menu.
-done < <(lsblk -dn -o NAME,SIZE,TYPE -e 7,11 2>/dev/null \
-         | awk '$3=="disk" && $2!="0B" && $2!="0" {print $1}')
-
-[ "$count" -gt 0 ] || die "No eligible target disks were found (the live/boot device is excluded)."
-
-DISK=$($UI --backtitle "$BT" --title "Select the target disk" --menu \
-"Choose the disk to install APEX-OS on.
-(The disk you booted from is not listed.)" 20 74 "$count" "${menu[@]}" 3>&1 1>&2 2>&3) \
-  || { clear; echo "Cancelled."; exit 0; }
-
-# ── 1b. whole disk, or one partition of it? ──────────────────────────────────
-# Whole-disk wipes everything (simple, what most people want on a blank machine).
-# Partition mode installs into ONE existing partition and leaves the rest — the
-# dual-boot path — via `bootc install to-filesystem` on a shared ESP.
-INSTALL_MODE=$($UI --backtitle "$BT" --title "How should $DISK be used?" --menu \
-"APEX-OS can take the whole disk, or just one partition of it." 16 78 2 \
-  "disk"      "Use the ENTIRE disk — erases every partition on $DISK" \
-  "partition" "Install into ONE existing partition — keep the others (dual-boot)" \
-  3>&1 1>&2 2>&3) || { clear; echo "Cancelled."; exit 0; }
-case "$INSTALL_MODE" in disk|partition) : ;; *) die "Unexpected install mode '$INSTALL_MODE'." ;; esac
-
-# Hard guard: refuse anything that isn't a whole block device, or that backs a mount now.
+# Re-run the engine's full guard set on the answers. The GUI is not trusted to
+# have done it: a front end must never be the only thing standing between a
+# typo and a wiped disk.
 [ -b "$DISK" ] || die "$DISK is not a block device."
-if findmnt -rno SOURCE | grep -qE "^${DISK}([0-9p]|$)"; then die "$DISK (or a partition of it) is currently mounted — refusing."; fi
-
-# Remember the target's identity so we can re-verify it right before writing:
-# kernel names (/dev/sda) can be reassigned if devices are unplugged/replugged.
-DISK_ID=$(lsblk -dno SERIAL,WWN "$DISK" 2>/dev/null | tr -s ' ' || true)
-
-# ── 1c. partition mode: pick the partition + locate the ESP ──────────────────
-# TARGET is what actually gets written; TARGET_DESC is how we describe it to the
-# user (and in die()), since in partition mode only ONE partition is destroyed.
-TARGET="$DISK"; TARGET_DESC="the whole disk $DISK"; ESP_DEV=""
+if findmnt -rno SOURCE | grep -qE "^${DISK}([0-9p]|$)"; then
+  die "$DISK (or a partition of it) is currently mounted — refusing."
+fi
 if [ "$INSTALL_MODE" = partition ]; then
-  # The ESP is required (UEFI) and must never be offered as the install target.
-  # PARTTYPE c12a7328-… is the GPT EFI System Partition GUID.
-  ESP_DEV=$(lsblk -rno NAME,PARTTYPE "$DISK" 2>/dev/null \
-    | awk 'tolower($2)=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"{print "/dev/"$1; exit}' || true)
-  if [ -z "$ESP_DEV" ]; then
-    # MBR fallback: type 0xEF ONLY. The old fallback took the first *vfat*
-    # partition, which happily adopted a FAT32 photo/data partition as "the ESP"
-    # and then let bootupd write into it (and it selected PARTFLAGS without ever
-    # testing it). A plain vfat filesystem is NOT evidence of an ESP.
-    ESP_DEV=$(lsblk -rno NAME,PARTTYPE "$DISK" 2>/dev/null \
-      | awk 'tolower($2)=="0xef"{print "/dev/"$1; exit}' || true)
-  fi
-  [ -n "$ESP_DEV" ] || die "No EFI System Partition found on $DISK.
-
-Installing into a partition needs an existing ESP (GPT type EF00, or MBR 0xEF)
-to add the APEX boot entry to. A plain FAT partition is not enough.
-Use whole-disk mode instead (which creates one), or create an ESP first."
-
-  # in_use <dev> — true if the partition, OR anything stacked on top of it, is in
-  # use. `lsblk -rno MOUNTPOINT <part> | head -1` was NOT enough: it reads the
-  # partition's own (always empty) row, so an LVM PV whose logical volumes are
-  # mounted looked free. /sys holders catches dm/md stacking even when lsblk
-  # shows no children.
-  in_use() {
-    local d="$1" n; n=$(basename "$d")
-    lsblk -rno MOUNTPOINT "$d" 2>/dev/null | grep -qv '^$' && return 0
-    [ -n "$(ls -A "/sys/class/block/$n/holders" 2>/dev/null || true)" ] && return 0
-    findmnt -rno SOURCE 2>/dev/null | grep -qx "$d" && return 0
-    return 1
-  }
-
-  pmenu=(); pcount=0; skipped=""
-  while read -r pname; do
-    [ -n "$pname" ] || continue
-    pdev="/dev/$pname"
-    [ "$pdev" = "$ESP_DEV" ] && continue                       # never the ESP
-    pfs=$(lsblk -rno FSTYPE "$pdev" 2>/dev/null | head -1 || true)
-    # REFUSE container members outright. The live env ships no lvm2/cryptsetup/
-    # mdadm, so these are never activated here: lsblk shows no children and
-    # `mkfs -f` happily succeeds — silently destroying an entire volume group,
-    # LUKS container or RAID member. That is the default layout of most Linux
-    # installs people dual-boot with, so this must be a hard refusal, not a hint.
-    case "$pfs" in
-      LVM2_member|crypto_LUKS|linux_raid_member|ddf_raid_member|isw_raid_member|zfs_member|bcache)
-        skipped="$skipped
-  $pdev ($pfs) — part of a larger volume; erasing it would destroy the whole container"
-        continue ;;
-    esac
-    if in_use "$pdev"; then
-      skipped="$skipped
-  $pdev — currently in use (mounted, or has an active volume/RAID on top)"
-      continue
-    fi
-    psize=$(lsblk -rno SIZE   "$pdev" 2>/dev/null | head -1 || true)
-    plab=$(lsblk -rno LABEL  "$pdev" 2>/dev/null | head -1 || true)
-    pmenu+=("$pdev" "${psize:-?}  ${pfs:-unformatted}${plab:+  \"$plab\"}  → WILL BE FORMATTED")
-    pcount=$((pcount+1))
-  done < <(lsblk -rno NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part"{print $1}')
-
-  [ "$pcount" -gt 0 ] || die "No usable partitions on $DISK.
-${skipped:+
-Excluded:$skipped
-}
-Free up a partition first, or use whole-disk mode."
-
-  TARGET=$($UI --backtitle "$BT" --title "Select the target PARTITION" --menu \
-"APEX-OS will be installed into ONE of these partitions.
-That partition is reformatted; every OTHER partition on $DISK is left alone.
-The EFI partition ($ESP_DEV) is shared — an APEX boot entry is added to it." \
-    20 78 "$pcount" "${pmenu[@]}" 3>&1 1>&2 2>&3) || { clear; echo "Cancelled."; exit 0; }
-  # Re-validate the SELECTED target independently of the menu (defence in depth:
-  # every one of these must hold no matter how TARGET was chosen).
+  [ -n "${TARGET:-}" ] || die "answers: target partition missing for partition mode"
   [ -b "$TARGET" ] || die "$TARGET is not a block device."
-  # Confirm it really is a partition OF this disk by parentage, not by string
-  # prefix: "/dev/nvme0n1" is a text prefix of "/dev/nvme0n11p2", a different disk.
-  # Compare basenames, not "/dev/$tparent" = "$DISK": don't re-introduce the
-  # assumption that every path is literally under /dev/ (that assumption already
-  # caused the KEPT-list bug).
-  tparent=$(lsblk -no PKNAME "$TARGET" 2>/dev/null | head -1 | tr -d ' ' || true)
-  [ -n "$tparent" ] && [ "$tparent" = "$(basename "$DISK")" ] \
-    || die "$TARGET is not a partition of $DISK (parent is ${tparent:-unknown}) — refusing."
-  [ "$TARGET" = "$ESP_DEV" ] && die "Refusing to install over the EFI System Partition."
-  tfs=$(lsblk -rno FSTYPE "$TARGET" 2>/dev/null | head -1 || true)
+  [ -n "${ESP_DEV:-}" ] || die "answers: esp missing for partition mode"
+  [ -b "$ESP_DEV" ] || die "$ESP_DEV is not a block device."
+  # Formatting the ESP as the root filesystem destroys the boot partition of
+  # EVERY OS on the machine, including the one being installed, and produces a
+  # disk that boots nothing at all. The GUI presents them as two separate
+  # choices and will not offer the same device twice, but the engine must
+  # refuse it independently — this is the single most destructive thing a
+  # malformed answers file could ask for.
+  [ "$TARGET" != "$ESP_DEV" ] \
+    || die "The root partition and the EFI System Partition are the same device ($TARGET). Formatting the ESP would leave the machine unable to boot anything. Nothing has been erased."
+  # The target must actually live on the disk we were told about. If they
+  # disagree, something upstream is confused, and the later partprobe/backup
+  # logic reasons about $DISK while mkfs writes to $TARGET — a mismatch there
+  # touches two disks instead of one.
+  _tdisk=$(lsblk -no PKNAME "$TARGET" 2>/dev/null | head -1 || true)
+  [ -z "$_tdisk" ] || [ "/dev/$_tdisk" = "$DISK" ] \
+    || die "$TARGET is not a partition of $DISK (it belongs to /dev/$_tdisk). Refusing to act on two disks at once. Nothing has been erased."
+  # Container-member refusal: mkfs on an LVM PV / LUKS header silently destroys
+  # everything inside it, and the live env may not even have the tooling to
+  # notice it is mounted.
+  tfs=$(lsblk -dno FSTYPE "$TARGET" 2>/dev/null | tr -d ' ' || true)
   case "$tfs" in
     LVM2_member|crypto_LUKS|linux_raid_member|ddf_raid_member|isw_raid_member|zfs_member|bcache)
-      die "$TARGET is a $tfs — it belongs to a larger volume (LVM/LUKS/RAID).
-Erasing it would destroy that entire container, not just this partition. Refusing." ;;
+      die "$TARGET is a $tfs container member — refusing to format it." ;;
   esac
-  in_use "$TARGET" && die "$TARGET is in use (mounted, or has an active volume/RAID on top) — refusing."
-
-  # Room check: the image alone is ~10 GB.
-  tbytes=$(lsblk -bdno SIZE "$TARGET" 2>/dev/null | head -1 || echo 0)
-  case "$tbytes" in ''|*[!0-9]*) tbytes=0 ;; esac
-  if [ "$tbytes" -lt 16000000000 ]; then
-    yn "Partition may be too small" \
-"$TARGET is $(lsblk -dno SIZE "$TARGET" 2>/dev/null | tr -d ' ').
-
-APEX-OS needs roughly 16 GB minimum (the image alone is ~10 GB).
-Continue anyway?" 14 70 || { clear; echo "Cancelled."; exit 0; }
-  fi
   # Validate the filesystem tooling NOW, while nothing has been destroyed. The
   # force flag differs per fs (`mkfs.ext4 -f` is not even a valid option), and
-  # mkfs.xfs is not shipped in the live env — previously any non-btrfs choice
-  # failed only AFTER the partition had been marked for erasure.
+  # mkfs.xfs is not shipped in the live env — checked any later than this, a
+  # non-btrfs choice would fail only AFTER the partition was marked for erasure.
   case "$ROOTFS_TYPE" in
     btrfs)     MKFS_FORCE="-f" ;;
     ext4|ext3) MKFS_FORCE="-F" ;;
@@ -681,151 +543,35 @@ Only filesystems with tooling present can be used (btrfs is the default)."
   # uses. bootupd rewrites \EFI\fedora\bootuuid.cfg to point at OUR new root,
   # and the neighbour's unchanged grub.cfg resolves its prefix from that file.
   # Net effect: the neighbour's data survives untouched, but its existing
-  # firmware entry starts booting APEX. Detect it, back the files up, and say so
-  # plainly instead of claiming "your existing OS entries stay".
-  ESP_SHARED_FEDORA=0; ESP_WARN=""
+  # firmware entry starts booting APEX. Detect it here so the install step
+  # backs the originals up to \EFI\fedora\apex-backup\, and say so plainly
+  # instead of claiming "your existing OS entries stay".
+  ESP_SHARED_FEDORA=0
   _probe=$(mktemp -d 2>/dev/null || echo /tmp/apex-esp-probe); mkdir -p "$_probe"
   if mount -o ro "$ESP_DEV" "$_probe" 2>/dev/null; then
     if [ -e "$_probe/EFI/fedora/bootuuid.cfg" ] || [ -e "$_probe/EFI/fedora/grub.cfg" ]; then
       ESP_SHARED_FEDORA=1
-      ESP_WARN="
-!! A Fedora-family install already uses \\EFI\\fedora on this ESP.
-   APEX uses that same directory. Its boot files will be UPDATED to point at
-   APEX, so the existing \"Fedora\" entry in your firmware menu will boot
-   APEX-OS after this. The other install's DATA is not touched, but you will
-   need to re-add a boot entry for it (its files stay in place, and the
-   originals are backed up to \\EFI\\fedora\\apex-backup\\).
-"
+      note "A Fedora-family install already uses \\EFI\\fedora on this ESP.
+APEX uses that same directory. Its boot files will be UPDATED to point at
+APEX, so the existing \"Fedora\" entry in your firmware menu will boot
+APEX-OS after this. The other install's DATA is not touched, but you will
+need to re-add a boot entry for it (its files stay in place, and the
+originals are backed up to \\EFI\\fedora\\apex-backup\\)."
     fi
     umount "$_probe" 2>/dev/null || true
   fi
   rmdir "$_probe" 2>/dev/null || true
 
-  TARGET_DESC="partition $TARGET (on $DISK)"
-fi
-
-# ── 2. account ───────────────────────────────────────────────────────────────
-USERNAME=$($UI --backtitle "$BT" --title "Create your account" --inputbox \
-"Username (lowercase, no spaces):" 10 60 "andre" 3>&1 1>&2 2>&3) || exit 0
-USERNAME=$(echo "$USERNAME" | tr -d '[:space:]')
-# Validate NOW, before anything is erased. Previously an invalid name (uppercase,
-# leading digit/dash, reserved) only failed at `useradd` — i.e. AFTER the disk was
-# wiped, leaving an installed system with no account (the locked-out failure).
-while :; do
-  if [ -z "$USERNAME" ]; then
-    msg "Username" "Username cannot be empty."
-  elif ! printf '%s' "$USERNAME" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$'; then
-    msg "Username" "Invalid username: '$USERNAME'
-
-Use lowercase letters, digits, - and _ ; must start with a letter or _
-(max 32 characters)."
-  elif printf '%s' "$USERNAME" | grep -Eqx 'root|bin|daemon|adm|nobody|greetd|systemd-.*'; then
-    msg "Username" "'$USERNAME' is a reserved system account. Pick another name."
-  else
-    break
-  fi
-  USERNAME=$($UI --backtitle "$BT" --title "Create your account" --inputbox \
-    "Username (lowercase, no spaces):" 10 60 "andre" 3>&1 1>&2 2>&3) || exit 0
-  USERNAME=$(echo "$USERNAME" | tr -d '[:space:]')
-done
-
-while :; do
-  P1=$($UI --backtitle "$BT" --title "Password" --passwordbox "Password for $USERNAME:" 10 60 3>&1 1>&2 2>&3) || exit 0
-  P2=$($UI --backtitle "$BT" --title "Password" --passwordbox "Confirm password:" 10 60 3>&1 1>&2 2>&3) || exit 0
-  [ -n "$P1" ] || { msg "Password" "Password cannot be empty."; continue; }
-  [ "$P1" = "$P2" ] || { msg "Password" "Passwords did not match — try again."; continue; }
-  break
-done
-
-HOSTNAME=$($UI --backtitle "$BT" --title "Hostname" --inputbox "Computer name:" 10 60 "apex" 3>&1 1>&2 2>&3) || exit 0
-HOSTNAME=$(echo "$HOSTNAME" | tr -d '[:space:]'); [ -n "$HOSTNAME" ] || HOSTNAME=apex
-
-# ── 3. confirm (show what will be destroyed; require typed ERASE) ─────────────
-disk_info=$(lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null || true)
-# The destruction warning goes FIRST. whiptail silently clips text that overflows
-# the box (returning 0, no scrollbar, no hint) — with the warning last, any disk
-# with ≥5 partitions pushed "ALL DATA WILL BE LOST" off the bottom. That is, it
-# vanished exactly when there WAS data to lose, and showed on empty test disks.
-# Also size the box from the actual content instead of hard-coding 20 rows.
-if [ "$INSTALL_MODE" = partition ]; then
-  # Spell out BOTH sides: what dies, and what explicitly survives. The whole
-  # point of this mode is that the other partitions are kept.
-  # basename, NOT ${x#/dev/}: the prefix-strip silently fails for any path that
-  # is not literally under /dev/, which listed the TARGET itself under "KEPT" —
-  # i.e. it told the user the partition being erased would be preserved.
-  # Only real PARTITIONS of this disk. Keying on NAME alone let dm/LVM children
-  # through, so logical volumes that mkfs was about to destroy were printed under
-  # "KEPT" (and as /dev/ paths that do not even exist).
-  preserved=$(lsblk -rno NAME,TYPE,SIZE,FSTYPE,LABEL "$DISK" 2>/dev/null \
-    | awk -v t="$(basename "$TARGET")" -v e="$(basename "$ESP_DEV")" \
-      '$2=="part" && $1!=t && $1!=e {printf "  /dev/%s  %s  %s %s\n",$1,$3,$4,$5}' || true)
-  [ -n "$preserved" ] || preserved="  (none — no other partitions on this disk)"
-  # Hoist: a command substitution inside an ASSIGNMENT makes the assignment's exit
-  # status its own — a non-zero lsblk here would trip the ERR trap (the "line 181"
-  # bug class, 4th instance). As an argument to `yn` it would be safe; here it is not.
-  tsize=$(lsblk -dno SIZE "$TARGET" 2>/dev/null | tr -d ' ' || true)
-  confirm_body="ONLY $TARGET WILL BE ERASED. All data on it is lost forever.
-
-KEPT (not touched):
-$preserved
-
-The shared EFI partition $ESP_DEV is NOT erased — an APEX boot entry is
-added to it. The generic fallback loader (\\EFI\\BOOT\\BOOTX64.EFI) is
-replaced.
-$ESP_WARN
-
-Target:   $TARGET  (${tsize:-?}) → $ROOTFS_TYPE
-User:     $USERNAME   (administrator)
-Hostname: $HOSTNAME
-
-Proceed?"
+  TARGET_DESC="$TARGET (partition of $DISK)"
 else
-  confirm_body="ALL DATA ON $DISK WILL BE PERMANENTLY LOST.
-This cannot be undone.
-
-About to ERASE and install to:
-
-$disk_info
-
-User:     $USERNAME   (administrator)
-Hostname: $HOSTNAME
-Filesystem: $ROOTFS_TYPE
-
-Proceed?"
+  TARGET="$DISK"
+  TARGET_DESC="$DISK (entire disk)"
 fi
-_lines=$(printf '%s\n' "$confirm_body" | wc -l)
-# Clamp to the REAL terminal height (a fixed 40 scrolled the top border off a
-# 25-row console). The warning is first, so if anything is ever clipped it is the
-# trailing detail, never the warning.
-_rows=$( (tput lines 2>/dev/null || echo 24) )
-case "$_rows" in ''|*[!0-9]*) _rows=24 ;; esac
-_h=$(( _lines + 8 ))
-[ "$_h" -lt 20 ] && _h=20
-[ "$_h" -gt $(( _rows - 1 )) ] && _h=$(( _rows - 1 ))
-[ "$_h" -lt 12 ] && _h=12
-yn "⚠  Final confirmation" "$confirm_body" "$_h" 78 \
-  || { clear; echo "Cancelled — nothing was written."; exit 0; }
-
-TYPED=$($UI --backtitle "$BT" --title "Type to confirm" --inputbox \
-"To confirm erasing $TARGET, type:  ERASE" 10 60 "" 3>&1 1>&2 2>&3) || exit 0
-[ "$TYPED" = "ERASE" ] || die "Confirmation text did not match ERASE — aborted before writing anything."
-
-# Re-verify the target is still the SAME physical device we showed the user.
-# Kernel names can be reassigned if something is unplugged/replugged between the
-# menu and the write; installing onto a renamed device would destroy the wrong disk.
-NOW_ID=$(lsblk -dno SERIAL,WWN "$DISK" 2>/dev/null | tr -s ' ' || true)
-[ "$NOW_ID" = "$DISK_ID" ] || die "$DISK is no longer the same device it was when you selected it
-(identity changed: '$DISK_ID' → '$NOW_ID').
-Nothing was written. Unplug/replug nothing and start the installer again."
-
-
-fi   # end interactive collection
-
+log "headless: MODE=$INSTALL_MODE TARGET=$TARGET ESP=${ESP_DEV:-n/a} USER=$USERNAME HOST=$HOSTNAME"
 
 # ── 4. install (via the embedded image; stream to log) ───────────────────────
-clear
-echo "Installing APEX-OS to $TARGET_DESC … (full log: $LOG)"; echo
-echo "Do not power off — $TARGET is being erased and rewritten from here on."; echo
+note "Installing APEX-OS to $TARGET_DESC … (full log: $LOG)"
+note "Do not power off — $TARGET is being erased and rewritten from here on."
 # NOTE: WROTE_DISK is deliberately NOT set here. In partition mode the ESP
 # free-space check runs first and can fail with everything still intact; claiming
 # destruction at that point is a lie in the frightening direction. Each branch
@@ -933,7 +679,7 @@ esac
 INSTALLED_OK=1   # the OS is on the disk; only account setup remains
 
 # ── 5. create the account in the freshly installed system ─────────────────────
-echo; echo "Creating your account …"; log "post-install: create user $USERNAME"
+note "Creating your account …"; log "post-install: create user $USERNAME"
 MNT=$(mktemp -d)
 # Find the root partition by WHAT IT IS, not by position. `lsblk … | tail -1` was
 # wrong: it can return the whole disk (no partitions yet visible) or a non-root
@@ -974,8 +720,16 @@ log "post-install: user $USERNAME created, hostname=$HOSTNAME"
 # The CachyOS kernel is signed with the APEX MOK (see Containerfile.base). With
 # Secure Boot ON, shim will only accept it once that key is enrolled — a one-time
 # step that REQUIRES physical presence at the MokManager screen (by design; it
-# cannot be automated away). Offer it here rather than letting the machine fail
-# to boot after the install.
+# cannot be automated away).
+#
+# NON-INTERACTIVE by construction: the graphical front end asks the user up
+# front and passes their chosen MokManager password as `mokpw` in the answers
+# file; an empty or absent mokpw means the user declined. Nothing here may
+# prompt — a prompt at the engine's end has nobody to answer it, and would hang
+# a machine that is already fully installed.
+#
+# SECRET: MOKPW must never reach stdout or the log — note() logs its argument,
+# so no note()/log() line may interpolate it. It goes ONLY to mokutil's stdin.
 SB_STATE="unknown"
 if have mokutil; then SB_STATE=$(mokutil --sb-state 2>/dev/null | tr -d '\n' || true); fi
 sb_on=0
@@ -984,48 +738,40 @@ cert="$deploy/usr/share/apex-os/secureboot/apex-mok.der"
 kstate=$(cat "$deploy/usr/share/apex-os/secureboot/kernel-signed" 2>/dev/null || echo unknown)
 if [ "$sb_on" = 1 ]; then
   if [ "$kstate" = signed ] && [ -f "$cert" ] && have mokutil; then
-    if yn "Secure Boot is ON" \
-"Secure Boot is enabled on this machine.
+    if [ -n "${MOKPW:-}" ]; then
+      if printf '%s\n%s\n' "$MOKPW" "$MOKPW" | mokutil --import "$cert" >>"$LOG" 2>&1; then
+        log "secureboot: MOK enrolment queued"
+        note "Secure Boot: enrolment queued. On the next boot, a blue 'MOK management' screen appears:
+
+  Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
+
+After that APEX-OS boots normally with Secure Boot ON."
+      else
+        note "Secure Boot: mokutil could not queue the key (see $LOG).
+
+APEX-OS is installed. To boot it, either turn Secure Boot off in firmware, or
+run this from a live session later:
+  mokutil --import /usr/share/apex-os/secureboot/apex-mok.der"
+      fi
+    else
+      note "Secure Boot is ON and no MOK enrolment password was supplied — the APEX key was NOT enrolled.
 
 APEX-OS uses a custom (CachyOS) kernel, which Microsoft does not sign. It is
 signed with APEX's own key instead — that key has to be enrolled once, or the
 machine will refuse to boot APEX.
 
-Enrol it now? You will choose a password, and on the next boot a blue
-MokManager screen asks you to confirm with it (this is the physical-presence
-check; it only happens once).
-
-Choosing No is fine — you can install anyway and either enrol later with
-'mokutil --import', or turn Secure Boot off in firmware." 22 76; then
-      MOKPW=$($UI --backtitle "$BT" --title "MOK enrolment password" --passwordbox \
-"Choose a password you will re-type at the blue MokManager screen on the next
-boot (it is used once, then discarded):" 12 70 3>&1 1>&2 2>&3 || true)
-      if [ -n "${MOKPW:-}" ]; then
-        if printf '%s\n%s\n' "$MOKPW" "$MOKPW" | mokutil --import "$cert" >>"$LOG" 2>&1; then
-          log "secureboot: MOK enrolment queued"
-          msg "Enrolment queued" \
-"Done. On the next boot, a blue 'MOK management' screen appears:
-
-  Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
-
-After that APEX-OS boots normally with Secure Boot ON." 16 74
-        else
-          msg "Enrolment failed" \
-"mokutil could not queue the key (see $LOG).
-
-APEX-OS is installed. To boot it, either turn Secure Boot off in firmware, or
-run this from a live session later:
-  mokutil --import /usr/share/apex-os/secureboot/apex-mok.der" 16 76
-        fi
-      fi
+Declining is fine — you can either enrol later with
+  mokutil --import /usr/share/apex-os/secureboot/apex-mok.der
+or turn Secure Boot off in firmware."
     fi
   else
-    msg "Secure Boot is ON — action needed" \
-"Secure Boot is enabled, but this build's kernel is not signed with an APEX key
+    note "Secure Boot is ON — action needed.
+
+Secure Boot is enabled, but this build's kernel is not signed with an APEX key
 (state: $kstate).
 
 APEX-OS is installed, but it will NOT boot until you turn Secure Boot OFF in
-your firmware settings. Everything else about the install is complete." 16 76
+your firmware settings. Everything else about the install is complete."
   fi
 fi
 
@@ -1039,8 +785,7 @@ Your previous OS entry is still there."
 else
   done_extra="Installed on $DISK (whole disk)."
 fi
-msg "✓ Installation complete" \
-"APEX-OS is installed.
+note "APEX-OS is installed.
 
 $done_extra
 
@@ -1050,6 +795,10 @@ Hostname:  $HOSTNAME
 Remove the USB stick and reboot. On first login the shell finishes setting
 itself up (needs network the first time).
 
-Full log: $LOG" 22 76
-clear
-echo "APEX-OS installed. Remove the USB and reboot."
+Full log: $LOG"
+log "install complete"
+# The machine-readable success sentinel. It MUST be the very last line on
+# stdout: the graphical front end declares victory on exactly this string, the
+# same way it declares defeat on the APEX-INSTALL-FAILED: line die() emits.
+# Print NOTHING to stdout after it.
+echo "APEX-INSTALL-OK"

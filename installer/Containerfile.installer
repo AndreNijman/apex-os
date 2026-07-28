@@ -64,7 +64,7 @@ RUN set -eux; \
         || { echo "FATAL: no Intel wifi firmware"; exit 1; }
 
 # Live-env + installer toolchain. kernel + dracut(+live) make it bootable as a
-# squashfs live image; newt=whiptail; podman/skopeo run the install; btrfs-progs/
+# squashfs live image; podman/skopeo run the install; btrfs-progs/
 # dosfstools/util-linux for the target disk; shadow-utils for useradd/chpasswd
 # into the installed tree; device-mapper for the dmsquash-live snapshot root;
 # grub2-tools-extra/-efi-x64-modules so build-live-iso.sh can produce the ISO's
@@ -88,16 +88,58 @@ RUN set -eux; \
 # It costs ~1 GB of ISO, which is the correct trade for an installer that has to
 # boot on unknown hardware. The INSTALLED image already has firmware; this gap
 # was only ever in the live environment.
+#
+# newt (whiptail) is REMOVED on purpose: the whiptail text installer is being
+# deleted from apex-install in this same change. It existed as a fallback, and
+# on real hardware it is where users got STRANDED — the GUI failed to start
+# silently (missing typelib + no seat, both fixed here) and the launcher
+# dropped them into a text UI they were never meant to see. The GUI is now the
+# ONLY front end; if it cannot start, the assertions below fail the build
+# instead of an ISO shipping a dead-end fallback. ncurses stays — the engine
+# still uses `clear`.
+#
+# gobject-introspection is listed EXPLICITLY — the FIFTH weak-deps casualty in
+# this file (linux-firmware, its firmware subpackages, hyprland-qtutils,
+# NetworkManager-wifi, now this). python3-gobject only *recommends* it, so
+# install_weak_deps=False silently dropped it and the built image had no
+# /usr/lib64/girepository-1.0/cairo-1.0.typelib. Result, measured in
+# localhost/apex-installer:latest: EVERY `import gi` fails with
+#   ImportError: Typelib file for namespace 'cairo', version '1.0' not found
+# so apex-installer-gui died before it could draw a window and the installer
+# fell back to the text UI on real hardware. `dnf repoquery --whatprovides`
+# names gobject-introspection as the owner of that typelib.
+#
+# seatd is required because Fedora 43's libseat ships NO builtin backend.
+# Measured in the built image:
+#   grep -aoE '\b(seatd|logind|builtin)\b' /usr/lib64/libseat.so.1*
+# yields only `logind` and `seatd`. The installer runs as a systemd service
+# with TTYPath=/dev/tty1, which has no logind session, so the logind backend
+# can never grant a seat — and with no builtin backend to fall back on,
+# wlroots/cage cannot acquire a seat, cannot become DRM master, and the
+# compositor dies at startup. We standardise on the seatd daemon (enabled
+# below, so it is running before the installer service starts).
+#
+# xorg-x11-server-Xwayland: without it cage logs `Cannot find Xwayland binary
+# "/usr/bin/Xwayland"` / `Cannot create XWayland server` at every startup. It
+# survived that in testing, but it is console noise and an avoidable failure
+# mode, so the binary is installed.
+#
+# xkeyboard-config and libinput arrive transitively TODAY, but are named
+# EXPLICITLY for the same weak-deps reason as everything above: keyboard input
+# in the GUI depends on both, and a dependency that is only present by
+# accident is one packaging change away from vanishing silently. (dbus-daemon
+# is NOT needed and deliberately not listed — dbus-broker is already present.)
 RUN dnf -y install --setopt=install_weak_deps=False \
         kernel systemd systemd-udev dracut dracut-live device-mapper \
         podman skopeo \
-        newt ncurses util-linux coreutils bash shadow-utils \
+        ncurses util-linux coreutils bash shadow-utils \
         btrfs-progs dosfstools e2fsprogs xfsprogs gdisk parted \
         lvm2 cryptsetup mdadm \
         NetworkManager NetworkManager-wifi wpa_supplicant wireless-regdb iw \
         iproute iputils \
         plymouth kbd \
-        cage gtk4 libadwaita python3-gobject \
+        cage gtk4 libadwaita python3-gobject gobject-introspection \
+        seatd xorg-x11-server-Xwayland xkeyboard-config libinput \
         mesa-dri-drivers mesa-vulkan-drivers \
         adwaita-icon-theme jetbrains-mono-fonts google-noto-sans-fonts \
         abattis-cantarell-fonts \
@@ -116,6 +158,47 @@ COPY apex-installer-launch /usr/bin/apex-installer-launch
 RUN chmod 0755 /usr/bin/apex-install /usr/bin/apex-installer-gui \
                 /usr/bin/apex-installer-launch
 
+# ── Build-time assertions: the GUI stack must provably work ──────────────────
+# Every previous instance of this class of bug shipped SILENTLY: the missing
+# firmware black-screened an Acer, the missing cairo typelib killed every
+# `import gi`, the missing seat backend left cage unable to become DRM master —
+# and in each case the build succeeded and the failure only surfaced on real
+# hardware. A build that cannot prove the GUI can import its toolkit, find its
+# compositor, resolve its libraries, and parse its own code must not produce
+# an ISO. Each check echoes its evidence so the build log shows what passed.
+RUN set -eu; \
+    python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1"); from gi.repository import Gtk, Adw, Gdk, GLib, Gio, Pango' \
+        || { echo "FATAL: GTK4/libadwaita GI import failed — the GUI cannot start (weak-deps casualty again?)"; exit 1; }; \
+    echo "OK: python3 imports Gtk 4.0, Adw 1, Gdk, GLib, Gio, Pango via gi"; \
+    [ -f /usr/lib64/girepository-1.0/cairo-1.0.typelib ] \
+        || { echo "FATAL: cairo-1.0.typelib missing — gobject-introspection got dropped again"; exit 1; }; \
+    echo "OK: /usr/lib64/girepository-1.0/cairo-1.0.typelib present"; \
+    command -v cage >/dev/null \
+        || { echo "FATAL: cage not installed — no compositor, no GUI"; exit 1; }; \
+    echo "OK: cage at $(command -v cage)"; \
+    command -v seatd >/dev/null \
+        || { echo "FATAL: seatd not installed — cage cannot acquire a seat on tty1"; exit 1; }; \
+    echo "OK: seatd at $(command -v seatd)"; \
+    command -v Xwayland >/dev/null \
+        || { echo "FATAL: Xwayland not installed — cage cannot create its XWayland server"; exit 1; }; \
+    echo "OK: Xwayland at $(command -v Xwayland)"; \
+    if ldd /usr/bin/cage | grep 'not found'; then \
+        echo "FATAL: cage has unresolved shared libraries (above)"; exit 1; fi; \
+    echo "OK: every shared library cage links against resolves"; \
+    python3 -m py_compile /usr/bin/apex-installer-gui \
+        || { echo "FATAL: apex-installer-gui has a Python syntax error"; exit 1; }; \
+    rm -rf /usr/bin/__pycache__; \
+    echo "OK: apex-installer-gui compiles"; \
+    bash -n /usr/bin/apex-install \
+        || { echo "FATAL: apex-install has a bash syntax error"; exit 1; }; \
+    echo "OK: apex-install parses"; \
+    bash -n /usr/bin/apex-installer-launch \
+        || { echo "FATAL: apex-installer-launch has a bash syntax error"; exit 1; }; \
+    echo "OK: apex-installer-launch parses"; \
+    [ -f /usr/lib/systemd/system/seatd.service ] \
+        || { echo "FATAL: seatd.service unit file missing"; exit 1; }; \
+    echo "OK: seatd.service unit present"
+
 # Unattended-install marker. apex-install only honours `apex.unattended` when
 # this file exists — baked ONLY for test/CI builds (ALLOW_UNATTENDED=1). The
 # PRODUCTION build (default 0) omits it, so the flashed USB has no unattended
@@ -127,13 +210,30 @@ RUN if [ "$ALLOW_UNATTENDED" = 1 ]; then \
         echo "installer image: UNATTENDED TEST MODE ENABLED"; \
     else echo "installer image: production build (no unattended)"; fi
 
-# Auto-launch the installer on tty1; boot to multi-user (no GUI needed).
+# Auto-launch the installer on tty1; boot to multi-user (the GUI is not a
+# graphical.target session — cage is started directly by the installer unit).
+# seatd is enabled so the seat daemon is up BEFORE the installer starts: the
+# installer's tty1 has no logind session and Fedora 43's libseat has no builtin
+# backend (see the package-list comment), so a running seatd is the only way
+# cage can acquire a seat and become DRM master.
+#
+# NetworkManager-wait-online is masked. NetworkManager itself stays (the Wi-Fi
+# page and the carry-the-network-over step need it), but waiting for a route is
+# pointless in an installer that works fully offline, and it blocks the boot
+# transaction for up to 90s on any machine with an unplugged Ethernet port.
+# apex-installer.service is Type=idle, so systemd caps that delay at 5s rather
+# than 90 — but 5 extra seconds of blank console before the GUI paints is still
+# 5 seconds in which a user with no feedback concludes the installer has hung.
+# Observed in the QEMU boot test: "Starting NetworkManager Wait Online" sat on
+# the console with nothing after it.
 COPY apex-installer.service /usr/lib/systemd/system/apex-installer.service
 RUN systemctl set-default multi-user.target \
     && systemctl enable apex-installer.service \
     && systemctl enable NetworkManager.service \
+    && systemctl enable seatd.service \
     && systemctl mask getty@tty1.service \
-    && systemctl mask serial-getty@ttyS0.service
+    && systemctl mask serial-getty@ttyS0.service \
+    && systemctl mask NetworkManager-wait-online.service
 
 # Live-env-only root login (tty2 / serial) for rescue & debugging. This is the
 # throwaway live session, not the installed system.

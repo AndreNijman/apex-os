@@ -1,32 +1,69 @@
-# Auto-launch the APEX-OS guided installer on tty1 in the live environment.
+# Auto-launch the APEX-OS graphical installer on tty1 in the live environment.
 #
-# ExecStart is the LAUNCHER, not the installer: it brings up the graphical
-# installer under cage and falls back to the whiptail one if the machine cannot
-# paint a GUI (no DRM node, no GL, missing bindings). A graphical installer has
-# strictly more ways to fail to appear than a text one, so the fallback is not
-# optional — see apex-logs 48 for the black screen that motivated it.
+# ExecStart is the LAUNCHER, not the installer: /usr/bin/apex-installer-launch
+# starts the GTK GUI under cage with pinned software rendering
+# (WLR_RENDERER=pixman + GSK_RENDERER=cairo — measured to work on simpledrm,
+# which the live kernel provides on UEFI and BIOS alike, even under nomodeset)
+# and the seatd libseat backend. The graphical path is the ONLY path: the old
+# text-mode installer has been deleted, and /usr/bin/apex-install is now a
+# headless engine that the GUI drives. If the GUI genuinely cannot start, the
+# launcher retries once, then paints a full diagnostic on tty1 and leaves a
+# live root shell — never the unexplained black screen that stranded the first
+# hardware test (apex-logs 48).
 [Unit]
 Description=APEX-OS guided installer
+# seatd is a hard requirement, not a nicety: Fedora 43's libseat ships only
+# the logind and seatd backends (there is no `builtin`), and a service on tty1
+# has no logind session — so a running seatd daemon is the only way cage can
+# acquire the seat and become DRM master. Requires= pulls it in; After= makes
+# /run/seatd.sock exist before the launcher runs (the launcher still
+# re-checks, with a bounded wait, for the run-by-hand case).
+Requires=seatd.service
+After=seatd.service
 After=systemd-user-sessions.service plymouth-quit-wait.service
 After=getty@tty1.service
+# cage must own the VT alone; a getty on the same tty would fight it for input
+# and hang the terminal up underneath the compositor.
 Conflicts=getty@tty1.service
 ConditionPathExists=/usr/bin/apex-installer-launch
 
 [Service]
+# Type=idle stays: it delays ExecStart until all other boot jobs have been
+# dispatched, so late boot chatter is not sprayed across tty1 underneath cage
+# — and so the failure-path diagnostic (plain text on this VT) is not
+# interleaved with it either.
 Type=idle
+# plymouth holds DRM master while the splash is up, and the After= ordering on
+# plymouth-quit-wait.service above only ORDERS us — it does NOT guarantee the
+# device has actually been released, which is a measured, independent
+# black-screen cause. Ask plymouth to quit and wait for the release before the
+# launcher runs; the leading '-' makes a missing binary or an already-gone
+# plymouthd harmless. The launcher repeats this call (also guarded) so the
+# by-hand debugging path behaves the same way.
+ExecStartPre=-/usr/bin/plymouth quit --wait
 ExecStart=/usr/bin/apex-installer-launch
+# StandardInput=tty stays: cage takes its input via libinput, not stdin — but
+# the failure-path root shell inside the launcher, and the ExecStopPost rescue
+# shell below, are interactive and need a real controlling terminal.
 StandardInput=tty
 StandardOutput=tty
 StandardError=journal+console
+# TTYPath stays: cage under the seatd backend runs on a real VT — seat and VT
+# handover happen on this device — and the failure diagnostic is written here.
 TTYPath=/dev/tty1
+# TTYReset stays: restore sane termios at service start so the diagnostic and
+# rescue-shell text is legible even if a previous occupant left the tty raw.
 TTYReset=yes
+# TTYVHangup stays: hang up anything still attached to tty1 (e.g. a getty that
+# lost the Conflicts= race) before we start, so cage gets the VT exclusively.
 TTYVHangup=yes
-# If the installer exits (cancel / error), drop to a shell so the user isn't stuck.
-# TimeoutStopSec=infinity is REQUIRED: with the default 45s stop timeout systemd
-# SIGTERMs (then SIGABRTs) this rescue shell out from under the user — killing
-# their only chance to read the non-persistent log. Verified: the promised shell
-# was dead ~45s after the installer exited.
-ExecStopPost=-/usr/bin/bash -lc 'echo; echo "Installer exited. Rescue shell (log: /var/log/apex-install.log). Also: Ctrl+Alt+F2, login root/apex."; exec /bin/bash'
+# If the installer exits (finished, cancelled, or crashed past the launcher's
+# own diagnostic-and-shell path), drop to a shell so the user isn't stuck.
+# TimeoutStopSec=infinity is REQUIRED: with the default 45s stop timeout
+# systemd SIGTERMs (then SIGABRTs) this rescue shell out from under the user —
+# killing their only chance to read the non-persistent log. Verified: the
+# promised shell was dead ~45s after the installer exited.
+ExecStopPost=-/usr/bin/bash -lc 'echo; echo "Installer exited. Rescue shell (logs: /var/log/apex-installer-launch.log, /var/log/apex-install.log). Also: Ctrl+Alt+F2, login root/apex."; exec /bin/bash'
 TimeoutStopSec=infinity
 Restart=no
 

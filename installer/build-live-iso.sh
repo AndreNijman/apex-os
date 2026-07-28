@@ -28,7 +28,9 @@ EDITION="${EDITION:-daily}"
 OCI="$WORK/apex.oci"                       # produced by: sudo skopeo copy containers-storage:localhost/apex-os:$EDITION oci-archive:$OCI:apex-os-$EDITION
 OUT="${OUT:-$WORK/apex-os-installer.iso}"
 LABEL="APEX-INSTALL"
-IMG=localhost/apex-installer:latest
+# Overridable so a throwaway probe image can be built into a bootable ISO
+# without clobbering the real installer tag. The default is the production one.
+IMG="${IMG:-localhost/apex-installer:latest}"
 ISOROOT="$WORK/isoroot"
 
 # PRODUCTION=1 (default): the flashed-to-USB build. NO unattended install path —
@@ -161,7 +163,24 @@ menuentry "Install APEX-OS" {
 }
 # For machines whose GPU the kernel cannot mode-set. "Menu, then black" is the
 # signature symptom, and this is the standard escape: no KMS, firmware
-# framebuffer only. The installer is a TUI, so it loses nothing.
+# framebuffer only.
+#
+# The graphical installer still works here, and that is not luck. nomodeset
+# only stops NATIVE DRM drivers; the live kernel has CONFIG_DRM_SIMPLEDRM=y and
+# CONFIG_SYSFB_SIMPLEFB=y (both built in, not modules), so simpledrm binds the
+# firmware framebuffer the bootloader already set up and /dev/dri/card0 exists
+# regardless. cage runs on it with WLR_RENDERER=pixman (dumb buffers, no render
+# node — simpledrm has none) and GTK renders with GSK_RENDERER=cairo (shm, no
+# GL). Nothing in the installer's display path needs a real GPU driver.
+#
+# NOTE for anyone editing this heredoc: it is UNQUOTED (<<EOF), so backticks and
+# dollar-variables in these comments are interpreted by the shell. Both bit this
+# comment block during editing: a backtick-quoted word ran as a command, and a
+# dollar-word tripped the unbound-variable check. Keep prose free of both.
+#
+# This is worth stating because the launcher used to treat "no native KMS" as a
+# reason to give up on the GUI, which was wrong and is what stranded users in
+# the old text installer.
 menuentry "Install APEX-OS (safe graphics — try this if the screen goes black)" {
     linux /images/pxeboot/vmlinuz $CMDLINE console=ttyS0,115200 console=tty0 nomodeset
     initrd /images/pxeboot/initrd.img
@@ -237,7 +256,7 @@ echo "== 6b. build-time invariants (fail loudly rather than ship a broken ISO) =
 # user confirmed. Assert the things the installer depends on, in the ROOTFS.
 _need_bin() { sudo test -x "$WORK/rootfs/usr/bin/$1" || sudo test -x "$WORK/rootfs/usr/sbin/$1" \
     || { echo "BUILD ASSERT FAILED: /usr/bin/$1 missing from the live rootfs"; exit 1; }; }
-for b in clear whiptail podman lsblk useradd chpasswd mount umount blkid udevadm partprobe awk sed \
+for b in clear podman lsblk useradd chpasswd mount umount blkid udevadm partprobe awk sed \
          mkfs.btrfs findmnt tput mktemp basename dirname chroot tee find df grep \
          mokutil efibootmgr; do
   _need_bin "$b"
@@ -246,6 +265,42 @@ sudo test -x "$WORK/rootfs/usr/bin/apex-install" \
   || { echo "BUILD ASSERT FAILED: apex-install missing"; exit 1; }
 sudo bash -n "$WORK/rootfs/usr/bin/apex-install" \
   || { echo "BUILD ASSERT FAILED: apex-install has a syntax error"; exit 1; }
+
+# ── The GUI is now the ONLY front end — assert it can actually come up ───────
+# whiptail is deliberately NOT in the list above any more: the text installer is
+# gone. That removes the safety net this script used to lean on, so everything
+# the graphical installer needs has to be proven HERE, in the rootfs that is
+# about to be sealed into a squashfs, not just in the container image it came
+# from. Every failure in this area so far has been silent — a missing typelib,
+# a missing seat backend, absent firmware — and each one shipped an ISO that
+# booted to a black screen. If any of these is missing there is no fallback UI
+# left to rescue the user, so the build must stop instead.
+for b in cage seatd Xwayland apex-installer-gui apex-installer-launch; do
+  _need_bin "$b"
+done
+sudo chroot "$WORK/rootfs" python3 -c \
+  'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1"); from gi.repository import Gtk, Adw, Gdk, GLib, Gio, Pango' \
+  || { echo "BUILD ASSERT FAILED: the live rootfs cannot import GTK4/libadwaita — the GUI would not start (cairo typelib / gobject-introspection missing again?)"; exit 1; }
+sudo chroot "$WORK/rootfs" python3 -m py_compile /usr/bin/apex-installer-gui \
+  || { echo "BUILD ASSERT FAILED: apex-installer-gui has a Python syntax error"; exit 1; }
+sudo rm -rf "$WORK/rootfs/usr/bin/__pycache__"
+sudo bash -n "$WORK/rootfs/usr/bin/apex-installer-launch" \
+  || { echo "BUILD ASSERT FAILED: apex-installer-launch has a syntax error"; exit 1; }
+# Enablement, not just presence. An installed-but-not-enabled seatd is exactly
+# the kind of thing that looks fine in `rpm -q` and leaves cage unable to take
+# a seat on tty1 at boot, which is a black screen with no diagnosis.
+#
+# -L, not -e. These are symlinks whose targets are ABSOLUTE paths inside the
+# live rootfs (/usr/lib/systemd/system/…), and `test -e` FOLLOWS them — which
+# resolves against the build host's root, where those units do not exist. The
+# first version of this assert failed on a rootfs that was in fact correct.
+for u in apex-installer.service seatd.service; do
+  sudo test -L "$WORK/rootfs/etc/systemd/system/multi-user.target.wants/$u" \
+    || { echo "BUILD ASSERT FAILED: $u is not enabled in the live rootfs"; exit 1; }
+done
+sudo test -L "$WORK/rootfs/etc/systemd/system/getty@tty1.service" \
+  || { echo "BUILD ASSERT FAILED: getty@tty1 is not masked — it would fight cage for tty1"; exit 1; }
+echo "asserts OK: GUI stack present, importable, and enabled"
 # Production must NOT carry the unattended marker.
 if [ "$PRODUCTION" = 1 ]; then
   if sudo test -e "$WORK/rootfs/usr/share/apex-installer/allow-unattended"; then
