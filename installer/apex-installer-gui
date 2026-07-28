@@ -304,6 +304,19 @@ class Installer(Adw.Application):
         # any backend; it scales text, which is the part that has to be
         # legible. The launcher measures the panel and passes the width; the
         # decision lives here so it can act on it.
+
+        # ── Short panels ─────────────────────────────────────────────────────
+        # 1024x600 netbooks and 800x600 firmware fallback modes are real, and on
+        # them this installer's generous vertical rhythm stops being generous
+        # and starts hiding things. Measured on the confirm page at 1024x600:
+        # GTK could not fit its 611px minimum, so it squashed the partition
+        # inventory to about two rows and the ERASED row — the partition being
+        # destroyed — fell below the fold. That is the exact failure this page
+        # was written to prevent whiptail from committing, reappearing in a
+        # different form.
+        #
+        # So measure the panel and tighten the layout when it is short, rather
+        # than letting GTK silently decide what to squash.
         try:
             pw = int(os.environ.get("APEX_PANEL_WIDTH", "0"))
         except ValueError:
@@ -360,6 +373,32 @@ class Installer(Adw.Application):
         self.stack.add_named(page, name)
         self.stack.set_visible_child_name(name)
 
+    def is_compact(self):
+        """True on a panel too short for the full vertical rhythm.
+
+        Asked per page rather than once at startup: probing the monitor list in
+        `activate` returned nothing under a headless compositor, so a
+        startup-time flag silently stayed False and the tightening never
+        happened. By the time a page is built the window is mapped and
+        fullscreened, so its own allocated height is the reliable number, with
+        the monitor geometry only as a fallback for the very first page.
+        """
+        try:
+            h = self.win.get_height()
+            if h > 0:
+                return h < 700
+        except Exception:
+            pass
+        try:
+            mons = Gdk.Display.get_default().get_monitors()
+            hs = [mons.get_item(i).get_geometry().height
+                  for i in range(mons.get_n_items())]
+            if hs:
+                return min(hs) < 700
+        except Exception:
+            pass
+        return False
+
     def scrolled(self, body):
         """Wrap a page body so it can never push the action row off-screen.
 
@@ -388,8 +427,13 @@ class Installer(Adw.Application):
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         outer.add_css_class("apex-bg")
         clamp = Adw.Clamp(maximum_size=780, tightening_threshold=680)
-        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 4)
-        col.set_margin_top(SP * 14); col.set_margin_bottom(SP * 8)
+        # Vertical chrome is the first thing to give on a short panel: the
+        # generous top margin is presentation, the action row is function.
+        _tight = self.is_compact()
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                      spacing=SP * (2 if _tight else 4))
+        col.set_margin_top(SP * (4 if _tight else 14))
+        col.set_margin_bottom(SP * (3 if _tight else 8))
         col.set_margin_start(SP * 6); col.set_margin_end(SP * 6)
         col.set_valign(Gtk.Align.FILL)
 
@@ -401,7 +445,7 @@ class Installer(Adw.Application):
             col.append(lbl(subtitle, "apex-sub"))
 
         body.set_vexpand(True)
-        body.set_margin_top(SP * 3)
+        body.set_margin_top(SP * (1 if _tight else 3))
         col.append(body)
 
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP * 3)
@@ -969,19 +1013,45 @@ class Installer(Adw.Application):
         if not parts:
             ii.append(lbl("No existing partitions — the disk is empty.", "apex-dim"))
         inv.append(ii)
-        sc = Gtk.ScrolledWindow(vexpand=True)
-        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        sc.set_child(inv)
-        body.append(sc)
+
+        # ── What is fixed and what scrolls, and why ──────────────────────────
+        # The warning above is FIXED: it is the one thing that must be on screen
+        # no matter what, so it stays outside the scroller.
+        #
+        # Everything else — inventory, summary, the ERASE prompt — goes into ONE
+        # scroller, and the inventory no longer has a scroller of its own. That
+        # is the point of the change. A page's MINIMUM height is what GTK uses
+        # when deciding what to squash, and this page's minimum was 611px: on a
+        # 1024x600 panel GTK crushed the inventory to about two rows and the
+        # ERASED row — the partition about to be destroyed — fell below the fold
+        # behind a near-invisible overlay scrollbar. Exactly the sin this page
+        # exists to stop whiptail committing, in a new costume.
+        #
+        # Two earlier attempts failed and are worth recording. Setting
+        # min_content_height on the inventory made it WORSE (611 -> 693): it adds
+        # to the minimum, which is the number that hurts. Detecting a short panel
+        # at runtime and tightening margins did nothing either, because the
+        # window is not yet at its final size when the page is measured. Neither
+        # is a substitute for the page simply not DEMANDING more room than a
+        # small screen has. With one scroller the minimum collapses to the fixed
+        # chrome, while the natural size on a large screen is unchanged.
+        rest = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        rest.append(inv)
 
         summary = (f"{self.answers['username']} @ {self.answers['hostname']}"
                    f"   ·   {self.ed}   ·   btrfs")
-        body.append(lbl(summary, "apex-mono apex-dim"))
+        rest.append(lbl(summary, "apex-mono apex-dim"))
 
-        body.append(lbl("Type ERASE to confirm:", "apex-dim"))
+        rest.append(lbl("Type ERASE to confirm:", "apex-dim"))
         self.e_erase = Gtk.Entry()
         self.e_erase.set_property("placeholder-text", "ERASE")
-        body.append(self.e_erase)
+        rest.append(self.e_erase)
+
+        sc = Gtk.ScrolledWindow(vexpand=True)
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_propagate_natural_height(True)
+        sc.set_child(rest)
+        body.append(sc)
 
         go = self.btn("Erase and install", "apex-destroy", lambda *_: self.begin(), False)
         self.e_erase.connect("changed",

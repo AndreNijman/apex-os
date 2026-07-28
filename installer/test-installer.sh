@@ -36,9 +36,13 @@
 #  did not draw. Pages render at 1024x600 and 1366x768, the realistic
 #  worst-case laptop panels; one page already clipped its action row at 720 px
 #  (measured), which is exactly the failure class this half exists to catch.
-#  The exact pass criteria are documented on analyze.py below. No disk, real or
-#  virtual, is enumerated (lsblk is stubbed inside the container), let alone
-#  touched.
+#  Pixel checks alone are not enough, though: GTK prefers to SQUASH mid-page
+#  widgets over pushing the action row off-screen (measured: at 1024x600 the
+#  account page swallows the Computer-name field whole, buttons still visible),
+#  so every page is also measured — GTK is asked for the page's minimum height
+#  at each panel width, and it must fit. The exact pass criteria are documented
+#  inline below. No disk, real or virtual, is enumerated (lsblk is stubbed
+#  inside the container), let alone touched.
 #
 #  PASS = every engine case prints its expected APEX-INSTALL-FAILED reason and
 #         never "Unexpected error on line" (that string means the ERR trap
@@ -274,6 +278,47 @@ for f in sorted(os.listdir(OUT)):
           bottom_clean, actionpx, right_clean)
 PY
 
+    # The pixel checks cannot see a widget squashed in the MIDDLE of a page:
+    # when a page is taller than the panel, GTK shrinks body children below
+    # their minimum instead of pushing the action row off — measured at
+    # 1024x600, where the account page kept its buttons but swallowed the
+    # Computer-name entry whole. So ask GTK itself: import the real GUI (its
+    # __main__ guard makes that safe), build every page from the builders
+    # registry, and print each page's MINIMUM height at each panel width. A
+    # page whose minimum exceeds the panel height cannot be laid out without
+    # squashing or clipping something — that is the assertion.
+    cat > "$WORK/measure.py" <<'PY'
+import importlib.util, os
+from importlib.machinery import SourceFileLoader
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gtk
+
+# SourceFileLoader explicitly: the GUI has no .py extension, so
+# spec_from_file_location alone cannot infer a loader for it.
+loader = SourceFileLoader("apexgui", "/out/gui/apex-installer-gui")
+spec = importlib.util.spec_from_loader("apexgui", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+widths = [int(x) for x in os.environ["MEASURE_WIDTHS"].split()]
+app = mod.Installer()
+
+def measure(_app):
+    # Runs after the GUI's own activate handler, so builders exist and the
+    # APEX_GUI_* state has been seeded exactly as in a jump-to-page render.
+    for name, build in app.builders.items():
+        page = build()
+        for w in widths:
+            print("MEASURE", name, w, page.measure(Gtk.Orientation.VERTICAL, w)[0],
+                  flush=True)
+    app.quit()
+
+app.connect("activate", measure)
+app.run(None)
+PY
+
     # Runs INSIDE the container: for each geometry × page, start cage on a
     # headless output, let the first client resize it with wlr-randr, exec the
     # real GUI jumped to the page via APEX_GUI_PAGE (its documented test
@@ -305,6 +350,11 @@ for size in $sizes; do
     kill "$cpid" 2>/dev/null; wait "$cpid" 2>/dev/null
   done
 done
+# Layout audit (see measure.py): one more cage session, no screenshot — the
+# client measures every page at every panel width and prints MEASURE lines.
+rm -f "$XDG_RUNTIME_DIR"/wayland*
+MEASURE_WIDTHS="$(for s in $sizes; do printf '%s ' "${s%x*}"; done)" \
+  APEX_GUI_PAGE=confirm timeout 60 cage -- python3 /out/measure.py 2>/dev/null
 exec python3 /out/analyze.py
 INNER
 
@@ -333,6 +383,13 @@ INNER
                 || why="${why:+$why; }action-row band empty — buttons not visible"
             [ "$rclean" = 1 ] \
                 || why="${why:+$why; }content clipped at the RIGHT edge"
+            W=${size%x*}; H=${size#*x}
+            minh=$(grep -m1 "^MEASURE $p $W " "$WORK/render.log" | awk '{print $4}')
+            if [ -z "$minh" ]; then
+                why="${why:+$why; }page was never measured (measure.py died — see render.log)"
+            elif [ "$minh" -gt "$H" ]; then
+                why="${why:+$why; }needs ${minh}px height at ${W}px wide — a $size panel squashes or hides part of it"
+            fi
             if [ -z "$why" ]; then
                 printf 'PASS  %-30s\n' "$name"; pass=$((pass+1))
             else
