@@ -306,6 +306,13 @@ jobs:
         && !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2)
       }}
     runs-on: ubuntu-latest
+    # The `secrets` context is NOT available in a step-level `if:` — only in
+    # job-level env — so surface "is signing configured?" as a plain boolean
+    # here and let the verify step below branch on it. Without this the step
+    # would silently evaluate to false and never run, which is precisely the
+    # class of quietly-skipped check it exists to prevent.
+    env:
+      APEX_SB_CONFIGURED: ${{ secrets.APEX_SB_KEY_B64 != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -370,6 +377,39 @@ jobs:
             -t "$IMAGE:${{ matrix.flavor }}" \
             -t "$IMAGE:${{ matrix.flavor }}-${{ github.sha }}" \
             .
+
+      # Gate the PUSH on the edition actually carrying a signed kernel.
+      #
+      # Signing happens once in Containerfile.base and every edition inherits it
+      # — but the base job is gated on a path filter, so a push touching only
+      # installer/ or README.md skips it and the editions rebuild FROM THE LAST
+      # PUBLISHED BASE. If that base were unsigned, unsigned editions would be
+      # published and the base job's assertion — the only one that existed —
+      # would never have run. This is that missing check, on the artefact that
+      # users actually pull.
+      #
+      # sbverify against the real vmlinuz, not just the marker file: the marker
+      # is a claim written by the build, and this project has been bitten
+      # repeatedly by trusting claims over measurements.
+      - name: Verify ${{ matrix.flavor }} kernel signature
+        if: ${{ env.APEX_SB_CONFIGURED == 'true' }}
+        run: |
+          set -euo pipefail
+          state=$(sudo podman run --rm --entrypoint /bin/sh "$IMAGE:${{ matrix.flavor }}" \
+                    -c 'cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null || echo missing')
+          if [ "$state" != signed ]; then
+            echo "::error::${{ matrix.flavor }} is stamped '$state' — refusing to publish an unsigned kernel."
+            echo "::error::The base it was built from is not signed. If the base job was skipped, re-run with force_base=true."
+            exit 1
+          fi
+          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:${{ matrix.flavor }}" -c \
+            'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/apex-kver)/vmlinuz' \
+            | grep -qi 'signature certificates\|image signature issuers\|APEX' \
+            || { echo "::error::sbverify found no signature on ${{ matrix.flavor }}'s vmlinuz"; exit 1; }
+          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:${{ matrix.flavor }}" \
+            -c 'test -s /usr/share/apex-os/secureboot/apex-mok.der' \
+            || { echo "::error::${{ matrix.flavor }} has no apex-mok.der — users would have nothing to enrol"; exit 1; }
+          echo "${{ matrix.flavor }}: kernel signed and apex-mok.der present"
 
       - name: Push ${{ matrix.flavor }} + capture digest
         id: push
