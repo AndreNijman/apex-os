@@ -58,6 +58,16 @@ IMAGE="${APEX_IMAGE:-localhost/apex-os:${EDITION}}"
 TARGET_IMAGE="${APEX_TARGET_IMAGE:-ghcr.io/andrenijman/apex-os:${EDITION}}"
 ROOTFS_TYPE="${APEX_ROOTFS:-btrfs}"
 
+# NETWORK INSTALL. The full ISO embeds the OS image twice (an OCI dir on the ISO
+# and a copy in the live env's container storage) so an install needs no network
+# at all — but that is what makes it 12 GB, which is too big to publish anywhere
+# convenient and far too big to download casually. The netinstall ISO ships the
+# live environment only, about a tenth of the size, and pulls the OS from the
+# public registry while the user watches. build-live-iso.sh writes this marker
+# when it builds one.
+NETINSTALL=0
+[ -f /usr/lib/apex-installer/netinstall ] && NETINSTALL=1
+
 # On the live ISO the image is ALSO present as an OCI directory (ISO /container,
 # mounted at /run/initramfs/live/container). Prefer it as the bootc install
 # source: the oci transport streams blobs straight off the read-only ISO,
@@ -261,7 +271,14 @@ quiet_console
 # blocked by its own leftovers ("currently mounted — refusing").
 unmount_target
 have podman || die "podman is missing from the live environment."
-if ! podman image exists "$IMAGE" 2>/dev/null && [ ! -e /run/install/repo/container ]; then
+if [ "$NETINSTALL" = 1 ]; then
+  # Deliberately NOT a network check here. Preflight runs before the user has
+  # even seen the Wi-Fi page, so failing now for being offline would refuse an
+  # install that is about to become perfectly possible. The real check, and the
+  # pull, happen at the install step — before anything is written to the disk.
+  IMAGE="$TARGET_IMAGE"
+  note "Network install: APEX-OS will be downloaded from $TARGET_IMAGE."
+elif ! podman image exists "$IMAGE" 2>/dev/null && [ ! -e /run/install/repo/container ]; then
   die "The APEX-OS image ($IMAGE) is not present in the live environment."
 fi
 
@@ -687,6 +704,31 @@ log "headless: MODE=$INSTALL_MODE TARGET=$TARGET ESP=${ESP_DEV:-n/a} USER=$USERN
 
 # ── 4. install (via the embedded image; stream to log) ───────────────────────
 note "Installing APEX-OS to $TARGET_DESC … (full log: $LOG)"
+# ── Network install: fetch the OS BEFORE touching the disk ──────────────────
+# Ordering matters. If the download fails — no network, registry down, a typo in
+# the ref — the disk must still be untouched and the user must get a reason they
+# can act on. Doing this after the wipe would leave a machine with no OS and no
+# way back.
+if [ "$NETINSTALL" = 1 ]; then
+  note "Downloading APEX-OS from $TARGET_IMAGE — this is the slow part, and nothing has been erased yet."
+  if podman image exists "$TARGET_IMAGE" 2>/dev/null; then
+    note "Already downloaded."
+  else
+    pull_ok=0
+    for attempt in 1 2 3; do
+      [ "$attempt" = 1 ] || note "Download failed — retrying ($attempt of 3)…"
+      if podman pull "$TARGET_IMAGE" 2>&1 | tee -a "$LOG"; then pull_ok=1; break; fi
+    done
+    [ "$pull_ok" = 1 ] || die "Could not download APEX-OS from $TARGET_IMAGE after 3 attempts.
+
+Nothing has been erased — your disks are untouched.
+
+The usual cause is no network: go Back to the network step and connect, then try
+again. If you are online, the registry may be temporarily unavailable."
+  fi
+  note "Download complete."
+fi
+
 note "Do not power off — $TARGET is being erased and rewritten from here on."
 
 # ── Dry-run stop: the last line before anything is destroyed ─────────────────

@@ -40,11 +40,25 @@ ISOROOT="$WORK/isoroot"
 # PRODUCTION=0: test/CI build — bakes the marker + adds the unattended menu entry
 # so the QEMU boot-test can drive an end-to-end install headlessly.
 PRODUCTION="${PRODUCTION:-1}"
+
+# NETINSTALL=1: build the small ISO. It ships the live environment only and the
+# installer pulls the OS from the public registry at install time, which takes
+# it from ~12 GB to something publishable (GitHub caps release assets at 2 GiB)
+# and downloadable by someone who just wants to try this.
+#
+# NETINSTALL=0 (default) is the fat offline ISO: the OS image is embedded twice —
+# as an OCI dir on the ISO and in the live env's container storage — so an
+# install needs no network whatsoever. That is the one to hand someone on a USB
+# stick, and the one to use where the network cannot be trusted.
+NETINSTALL="${NETINSTALL:-0}"
+if [ "$NETINSTALL" = 1 ]; then echo "build mode: NETWORK INSTALL (small ISO, pulls the OS at install time)"; fi
 if [ "$PRODUCTION" = 1 ]; then ALLOW_UNATTENDED=0; else ALLOW_UNATTENDED=1; fi
 echo "build mode: PRODUCTION=$PRODUCTION (ALLOW_UNATTENDED=$ALLOW_UNATTENDED)"
 
 mkdir -p "$WORK"
-[ -f "$OCI" ] || { echo "ERROR: $OCI missing (run the skopeo export first)"; exit 1; }
+if [ "$NETINSTALL" != 1 ]; then
+  [ -f "$OCI" ] || { echo "ERROR: $OCI missing (run the skopeo export first)"; exit 1; }
+fi
 
 echo "== 1. build the installer live-env image =="
 sudo podman build --build-arg "ALLOW_UNATTENDED=$ALLOW_UNATTENDED" \
@@ -67,10 +81,15 @@ echo "== 3. embed the APEX image into the live env's container storage =="
 # Host-side (can't be a Containerfile RUN: overlay-on-overlay). The graphroot
 # lands inside the exported rootfs so the live session's default
 # /var/lib/containers/storage already holds localhost/apex-os:daily.
-sudo rm -rf "$WORK/cs-run"
-sudo skopeo copy "oci-archive:$OCI" \
-  "containers-storage:[overlay@$WORK/rootfs/var/lib/containers/storage+$WORK/cs-run]localhost/apex-os:${EDITION}"
-sudo rm -rf "$WORK/cs-run"
+if [ "$NETINSTALL" = 1 ]; then
+  echo "  (netinstall: skipping the embed — the installer downloads the OS instead)"
+  sudo install -Dm644 /dev/null "$WORK/rootfs/usr/lib/apex-installer/netinstall"
+else
+  sudo rm -rf "$WORK/cs-run"
+  sudo skopeo copy "oci-archive:$OCI" \
+    "containers-storage:[overlay@$WORK/rootfs/var/lib/containers/storage+$WORK/cs-run]localhost/apex-os:${EDITION}"
+  sudo rm -rf "$WORK/cs-run"
+fi
 
 # Stamp the edition so apex-install derives IMAGE and --target-imgref from it
 # rather than assuming daily. Asserted below, because a wrong or missing stamp
@@ -93,9 +112,23 @@ echo "edition stamped: $EDITION"
 # machine, whichever OS is on the disk. Doing it during the install is the whole
 # point: the alternative was installing, booting, running mokutil by hand and
 # rebooting again, which is a lot to ask of someone who just wanted an OS.
-KSIGNED=$(sudo podman run --rm "localhost/apex-os:${EDITION}" \
-            cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null | tr -d '\n' || true)
-[ -n "$KSIGNED" ] || KSIGNED=unknown
+if [ "$NETINSTALL" = 1 ]; then
+  # A netinstall ISO does not know what it will get. The signed state belongs to
+  # the image in the REGISTRY, which is built by CI and may differ from whatever
+  # happens to be in local storage right now — so reading the local copy would
+  # be answering a different question, and could promise Secure Boot support the
+  # downloaded kernel does not have.
+  #
+  # "unknown" is the honest answer and it fails safe: the GUI only offers MOK
+  # enrolment when the stamp says "signed", so a netinstall simply does not offer
+  # it, and the engine still reports the real state of the DEPLOYED image after
+  # the install. Nobody is told something untrue.
+  KSIGNED=unknown
+else
+  KSIGNED=$(sudo podman run --rm "localhost/apex-os:${EDITION}" \
+              cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null | tr -d '\n' || true)
+  [ -n "$KSIGNED" ] || KSIGNED=unknown
+fi
 printf '%s\n' "$KSIGNED" | sudo tee "$WORK/rootfs/usr/lib/apex-installer/kernel-signed" >/dev/null
 echo "kernel-signed stamped: $KSIGNED"
 
@@ -139,7 +172,11 @@ echo "== 5b. OCI dir on the ISO (bootc install source) =="
 # containers-storage instead would re-tar every layer into /var/tmp (RAM-backed
 # in the live env) and OOM on 4G machines.
 sudo rm -rf "$ISOROOT/container"
-sudo skopeo copy "oci-archive:$OCI" "oci:$ISOROOT/container"
+if [ "$NETINSTALL" = 1 ]; then
+  echo "  (netinstall: no OCI dir on the ISO)"
+else
+  sudo skopeo copy "oci-archive:$OCI" "oci:$ISOROOT/container"
+fi
 
 echo "== 6. bootloader (UEFI grub2) =="
 # selinux=0: the live env ships no SELinux policy; without this the LSM is
