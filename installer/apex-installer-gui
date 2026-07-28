@@ -290,6 +290,30 @@ class Installer(Adw.Application):
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
+        # ── Text scale on high-density panels ────────────────────────────────
+        # cage does no output scaling, so on a 13" 3840x2160 laptop panel every
+        # control renders at a quarter of its intended size. That is not a
+        # crash, so nothing else catches it, and the person in front of it
+        # cannot read the installer well enough to use it.
+        #
+        # This has to happen HERE, in-process, and not via GDK_SCALE in the
+        # launcher. Measured on the exact GTK this image ships (4.20.4):
+        # GDK_SCALE is honoured on the X11 backend and IGNORED on Wayland,
+        # where the scale comes from the compositor — and we run on Wayland
+        # under cage. gtk-xft-dpi is a GtkSettings property, so it applies on
+        # any backend; it scales text, which is the part that has to be
+        # legible. The launcher measures the panel and passes the width; the
+        # decision lives here so it can act on it.
+        try:
+            pw = int(os.environ.get("APEX_PANEL_WIDTH", "0"))
+        except ValueError:
+            pw = 0
+        if pw >= 2560:
+            st = Gtk.Settings.get_default()
+            if st is not None:
+                # gtk-xft-dpi is in 1024ths of a point; 96*1024 is the default.
+                st.set_property("gtk-xft-dpi", 96 * 1024 * 2)
+
         self.win = Adw.ApplicationWindow(application=self)
         self.win.set_title("APEX-OS Installer")
         self.win.set_default_size(1024, 700)
@@ -335,6 +359,28 @@ class Installer(Adw.Application):
             self.stack.remove(old)
         self.stack.add_named(page, name)
         self.stack.set_visible_child_name(name)
+
+    def scrolled(self, body):
+        """Wrap a page body so it can never push the action row off-screen.
+
+        The action row is the only way forward, so a page that overflows the
+        panel is a stranded user — and there is no text installer to escape to
+        any more. Pages with a list already bring their own scroller; this is
+        for the FORM pages, whose fixed content is tall enough to overflow a
+        1024x600 netbook or an 800x600 firmware fallback mode. Measured: the
+        account page lands around 700px and the Secure Boot page (three
+        paragraphs, two entries, a three-button row) was trimmed to fit exactly
+        720px, so both clip below that.
+
+        Do not wrap a body that already contains a ScrolledWindow — a scroller
+        inside a scroller gets unbounded natural height and the inner list
+        grows forever instead of scrolling.
+        """
+        sc = Gtk.ScrolledWindow(vexpand=True)
+        sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sc.set_propagate_natural_height(True)
+        sc.set_child(body)
+        return sc
 
     def frame(self, step, title, subtitle, body, actions):
         """Every page: step marker, title, subtitle, body, action row.
@@ -782,7 +828,8 @@ class Installer(Adw.Application):
             self.go("secureboot" if self.sb_enabled() else "confirm")
 
         back = "part" if self.answers["mode"] == "partition" else "mode"
-        return self.frame("STEP 5 OF 6", "Create your account", None, body,
+        return self.frame("STEP 5 OF 6", "Create your account", None,
+                          self.scrolled(body),
                           [(self.btn("Back", "apex-ghost", lambda *_: self.go(back)), False),
                            (self.btn("Continue", "apex-go", nxt), True)])
 
@@ -860,7 +907,7 @@ class Installer(Adw.Application):
 
         return self.frame("STEP 5 OF 6", "Secure Boot",
                           "This machine will not boot APEX-OS until the APEX "
-                          "signing key is enrolled.", body,
+                          "signing key is enrolled.", self.scrolled(body),
                           [(self.btn("Back", "apex-ghost", lambda *_: self.go("account")), False),
                            (self.btn("Skip — I'll turn Secure Boot off instead",
                                      "apex-ghost", skip), True),

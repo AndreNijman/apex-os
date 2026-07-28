@@ -5,14 +5,15 @@
 #                    + APEX image injected into its /var/lib/containers (host-side skopeo)
 #                   -> ext4 rootfs.img -> squashfs (classic dmsquash-live layout)
 #                    + dracut dmsquash-live initramfs
-#                   -> xorriso UEFI ISO  (UEFI-only; no BIOS/legacy boot)
+#                   -> xorriso hybrid ISO (UEFI incl. Secure Boot + legacy BIOS)
 #
 # Why the ext4-in-squashfs (dm-snapshot) layout instead of overlayfs live root:
 # podman/bootc in the live session need native overlay mounts, and the kernel
 # refuses overlay-on-overlayfs. With dm-snapshot the live root is plain ext4,
 # so `podman run … bootc install to-disk` behaves exactly like on a normal host.
 #
-# Boot-test in QEMU/OVMF before flashing. Run from the repo's installer/ dir.
+# Boot-test in QEMU BOTH ways (SeaBIOS and OVMF) before flashing. Run from the
+# repo's installer/ dir.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -141,8 +142,27 @@ if serial --unit=0 --speed=115200; then
     terminal_output serial console
 fi
 
+# LEGACY-BIOS-ONLY video handoff. On BIOS there is no GOP: if grub jumps into
+# the kernel while the card is still in VGA text mode, sysfb finds no
+# framebuffer to register, no DRM device node ever appears, and the graphical
+# installer has nothing to paint on -- the machine would sit on a text console
+# with the installer service dead. Setting gfxpayload to an explicit VBE mode
+# list makes grub program a linear framebuffer at handoff; simpledrm (built
+# into the live kernel, see the safe-graphics note below) then binds it exactly
+# as it binds the EFI GOP framebuffer on UEFI machines. The list ends in auto
+# so a VBE BIOS without 1024x768 still gets SOME linear mode rather than text.
+# Guarded by grub_platform so the UEFI path is completely unaffected: on EFI
+# the kernel takes the GOP framebuffer from firmware and ignores gfxpayload.
+# The menu itself stays on the text console -- only the handoff mode changes.
+if [ "\$grub_platform" = "pc" ]; then
+    insmod all_video
+    set gfxpayload=1024x768x32,1024x768,auto
+fi
+
 # shim/grub are loaded from the ESP, but the kernel + initrd live on the ISO9660
 # filesystem — point \$root at it by volume label before referencing those paths.
+# On the BIOS path both grub and the kernel live on the ISO9660 fs and this
+# search works identically, so the same file serves both firmwares unmodified.
 search --no-floppy --set=root --label $LABEL
 
 set default=0
@@ -250,6 +270,40 @@ sudo cp "$WORK/grub.cfg"    "$ISOROOT/EFI/fedora/grub.cfg"
 [ -n "$MMEFI" ] && sudo cp "$WORK/mmx64.efi" "$ISOROOT/EFI/BOOT/mmx64.efi"
 sudo cp "$WORK/efiboot.img" "$ISOROOT/images/efiboot.img"
 
+echo "== 6a. bootloader (legacy BIOS grub2: El Torito core + isohybrid MBR) =="
+# grub2 for BIOS too, NOT isolinux/syslinux: one bootloader means ONE menu file
+# — the exact grub.cfg written above is read unmodified by the BIOS core image
+# (its embedded prefix is /boot/grub2), so entries, cmdlines and the safety
+# reasoning in the comments can never drift apart between firmwares. Secure
+# Boot is untouched: this core image is only ever executed by legacy BIOS
+# firmware; UEFI still loads the signed shim chain from step 6. The layout
+# (grub2 El Torito entry + grub2-mbr boot code + appended GPT ESP) is the same
+# one every shipping Ubuntu hybrid ISO uses, so the xorriso combination in
+# step 7 is field-proven rather than invented here.
+#
+# Built INSIDE the installer image like the dracut step: the host may lack
+# grub2-mkimage/the i386-pc module set (grub2-pc-modules is in the image for
+# exactly this). The embedded module list covers everything grub.cfg executes
+# (search_label for the root hunt, serial+terminal+test+echo for the guarded
+# console setup, all_video for the VBE handoff, linux+boot to start the
+# kernel, part_msdos+part_gpt+biosdisk+iso9660 so a dd'd USB enumerates); the
+# full i386-pc tree is ALSO shipped on the ISO at /boot/grub2/i386-pc so any
+# future grub.cfg edit that needs one more module autoloads it from the medium
+# instead of dying with "command not found" only on BIOS machines.
+sudo rm -rf "$WORK/grub-i386-pc"
+sudo podman run --rm --security-opt label=disable -v "$WORK":/w "$IMG" \
+  bash -c "grub2-mkimage -O i386-pc-eltorito -d /usr/lib/grub/i386-pc -p /boot/grub2 \
+      -o /w/eltorito.img \
+      biosdisk iso9660 part_msdos part_gpt normal search search_label configfile \
+      linux echo test serial terminal all_video boot \
+    && cp /usr/lib/grub/i386-pc/boot_hybrid.img /w/boot_hybrid.img \
+    && mkdir -p /w/grub-i386-pc \
+    && cp /usr/lib/grub/i386-pc/*.mod /usr/lib/grub/i386-pc/*.lst /w/grub-i386-pc/"
+sudo mkdir -p "$ISOROOT/boot/grub2/i386-pc"
+sudo cp "$WORK/eltorito.img"      "$ISOROOT/images/eltorito.img"
+sudo cp "$WORK/grub.cfg"          "$ISOROOT/boot/grub2/grub.cfg"
+sudo cp -a "$WORK/grub-i386-pc/." "$ISOROOT/boot/grub2/i386-pc/"
+
 echo "== 6b. build-time invariants (fail loudly rather than ship a broken ISO) =="
 # CRITICAL-1 shipped because nothing asserted the live env could actually run the
 # installer: `clear` (ncurses) was missing, so every install died the moment the
@@ -301,6 +355,30 @@ done
 sudo test -L "$WORK/rootfs/etc/systemd/system/getty@tty1.service" \
   || { echo "BUILD ASSERT FAILED: getty@tty1 is not masked — it would fight cage for tty1"; exit 1; }
 echo "asserts OK: GUI stack present, importable, and enabled"
+
+# ── BIOS boot artifacts: prove the legacy path exists before xorriso runs ────
+# The ISO is dual-firmware now. A missing or truncated BIOS core image would
+# still produce an ISO that boots fine on every UEFI machine we test on, and
+# the regression would only surface in the field on exactly the machines this
+# path exists for — so a build that cannot prove the BIOS artifacts must stop.
+sudo test -s "$WORK/eltorito.img" \
+  || { echo "BUILD ASSERT FAILED: eltorito.img (BIOS grub core) missing or empty"; exit 1; }
+_sz=$(sudo stat -c%s "$WORK/eltorito.img")
+[ "$_sz" -ge 100000 ] \
+  || { echo "BUILD ASSERT FAILED: eltorito.img is only $_sz bytes — grub2-mkimage embedded too little (module list wrong?)"; exit 1; }
+_sz=$(sudo stat -c%s "$WORK/boot_hybrid.img")
+[ "$_sz" -gt 0 ] && [ "$_sz" -le 512 ] \
+  || { echo "BUILD ASSERT FAILED: boot_hybrid.img is $_sz bytes — must be 1..512 to fit the MBR boot-code area"; exit 1; }
+sudo cmp -s "$WORK/grub.cfg" "$ISOROOT/boot/grub2/grub.cfg" \
+  || { echo "BUILD ASSERT FAILED: /boot/grub2/grub.cfg missing or differs from the UEFI menu — the one-menu-for-both-firmwares invariant is broken"; exit 1; }
+sudo test -f "$ISOROOT/boot/grub2/i386-pc/normal.mod" \
+  || { echo "BUILD ASSERT FAILED: i386-pc module tree missing from the ISO (BIOS grub could not autoload anything)"; exit 1; }
+# The config the BIOS core will read must actually set a video mode, or BIOS
+# machines boot to a dead text console with no DRM node and no GUI (the single
+# most likely way to break this path — see the gfxpayload comment in grub.cfg).
+grep -q 'gfxpayload=1024x768x32' "$WORK/grub.cfg" \
+  || { echo "BUILD ASSERT FAILED: grub.cfg lost its BIOS gfxpayload block — legacy boots would have no framebuffer and no GUI"; exit 1; }
+echo "asserts OK: BIOS grub core, isohybrid MBR, shared menu, module tree, gfxpayload"
 # Production must NOT carry the unattended marker.
 if [ "$PRODUCTION" = 1 ]; then
   if sudo test -e "$WORK/rootfs/usr/share/apex-installer/allow-unattended"; then
@@ -312,18 +390,50 @@ else
   echo "asserts OK (test build: unattended intentionally present)"
 fi
 
-echo "== 7. xorriso: UEFI ISO (El Torito for CD/QEMU + appended ESP for USB) =="
+echo "== 7. xorriso: hybrid BIOS+UEFI ISO (El Torito for CD/QEMU + MBR/GPT for dd'd USB) =="
 # -appended_part_as_gpt + -partition_offset 16: without these the image carries an
 # MBR-only table whose partition 1 starts at LBA 0, which some UEFI firmwares
 # dislike when booting from USB. Produces a valid GPT with the ESP intact and the
 # APEX-INSTALL label still resolvable from both whole-disk and partition views.
+#
+# BIOS side (everything before -eltorito-alt-boot): -b makes the grub2 core the
+# FIRST El Torito entry, which BIOS firmware picks when booting the ISO as a
+# CD; --grub2-boot-info patches the core with its own LBA so the SAME core can
+# also be entered from the MBR path; --grub2-mbr installs grub's boot_hybrid
+# code in the system area so a dd'd USB stick boots on legacy BIOS;
+# --mbr-force-bootable sets the active flag some BIOSes insist on before they
+# will boot a disk at all. The UEFI side is UNCHANGED from the UEFI-only build:
+# same efiboot.img as an alt El Torito entry, same appended GPT ESP — a UEFI
+# machine (Secure Boot included) sees exactly what it saw before. This exact
+# combination is what Ubuntu's shipping hybrid ISOs use.
 sudo xorriso -as mkisofs \
     -iso-level 3 -rational-rock -joliet -joliet-long \
     -V "$LABEL" \
+    --grub2-mbr "$WORK/boot_hybrid.img" \
+    --mbr-force-bootable \
+    -b images/eltorito.img -no-emul-boot -boot-load-size 4 \
+    -boot-info-table --grub2-boot-info \
+    -eltorito-alt-boot \
     -e images/efiboot.img -no-emul-boot \
     -append_partition 2 0xef "$WORK/efiboot.img" \
     -appended_part_as_gpt -partition_offset 16 \
     -o "$OUT" "$ISOROOT"
+
+# Post-build proof that the EMITTED image advertises both firmware paths.
+# xorriso reads back its own boot records; the four properties below are
+# precisely what each firmware needs (BIOS: x86 El Torito entry + MBR boot
+# code; UEFI: EFI El Torito entry + GPT ESP). If any is absent the image
+# cannot boot somewhere we claim it does, so it must not ship.
+_rep=$(sudo xorriso -indev "$OUT" -report_el_torito plain -report_system_area plain 2>/dev/null)
+echo "$_rep" | grep -q 'El Torito boot img :   1  BIOS' \
+  || { echo "BUILD ASSERT FAILED: emitted ISO has no BIOS El Torito boot entry"; exit 1; }
+echo "$_rep" | grep -q 'El Torito boot img :   2  UEFI' \
+  || { echo "BUILD ASSERT FAILED: emitted ISO has no UEFI El Torito boot entry"; exit 1; }
+echo "$_rep" | grep -q 'grub2-mbr' \
+  || { echo "BUILD ASSERT FAILED: emitted ISO system area lacks the grub2 isohybrid MBR (dd'd USB would not BIOS-boot)"; exit 1; }
+echo "$_rep" | grep -q '28732ac11ff8d211ba4b00a0c93ec93b' \
+  || { echo "BUILD ASSERT FAILED: emitted ISO has no ESP-typed GPT partition (UEFI-from-USB regression)"; exit 1; }
+echo "asserts OK: emitted ISO carries BIOS+UEFI El Torito entries, isohybrid MBR, GPT ESP"
 
 # Checksum the ISO we just built (it used to record the PREVIOUS build's hash).
 sudo sha256sum "$OUT" | sudo tee "$OUT.sha256" >/dev/null
