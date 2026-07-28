@@ -710,21 +710,80 @@ note "Installing APEX-OS to $TARGET_DESC … (full log: $LOG)"
 # can act on. Doing this after the wipe would leave a machine with no OS and no
 # way back.
 if [ "$NETINSTALL" = 1 ]; then
+  # ── Say WHY before saying "download failed" ───────────────────────────────
+  # The first real install attempt failed here with three identical
+  # "Temporary failure in name resolution" errors inside ONE SECOND, and the
+  # message it produced ("the registry may be temporarily unavailable") sent the
+  # reader looking at GitHub when the actual problem was that the machine had no
+  # network at all. Diagnose the layers separately and name the one that broke.
+  net_diagnose() {
+    if ! ip route show default 2>/dev/null | grep -q .; then
+      echo "no-route"; return
+    fi
+    if ! getent hosts ghcr.io >/dev/null 2>&1; then
+      echo "no-dns"; return
+    fi
+    echo "ok"
+  }
+
+  # Give a just-connected link a moment to finish. DHCP, DNS from the lease and
+  # a wifi association all land a few seconds apart, so checking once and giving
+  # up is how a connection that was about to work gets reported as broken.
+  for _w in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(net_diagnose)" = ok ] && break
+    sleep 2
+  done
+
+  case "$(net_diagnose)" in
+    no-route)
+      die "This machine is not connected to any network, and this is the network
+installer — it has to download APEX-OS (about 5 GB) to install it.
+
+Nothing has been erased — your disks are untouched.
+
+Go Back to the Network step and connect to Wi-Fi, or plug in an Ethernet cable,
+then come back and confirm again.
+
+If you cannot get online here, use the full offline ISO instead: it contains the
+whole system and needs no network at all." ;;
+    no-dns)
+      die "This machine has a network connection, but cannot look up addresses on it
+(DNS is not answering), so APEX-OS cannot be downloaded.
+
+Nothing has been erased — your disks are untouched.
+
+Usually this means the network needs you to sign in first — a hotel, airport or
+school portal — which this installer cannot do. Try a different network, a phone
+hotspot, or use the full offline ISO, which needs no network at all." ;;
+  esac
+
   note "Downloading APEX-OS from $TARGET_IMAGE — this is the slow part, and nothing has been erased yet."
   if podman image exists "$TARGET_IMAGE" 2>/dev/null; then
     note "Already downloaded."
   else
     pull_ok=0
+    # Back off between attempts. The first version retried with NO delay at all,
+    # so all three attempts completed inside one second — which is one attempt
+    # wearing a disguise, and gives a flapping link or a slow DNS server no
+    # chance whatsoever to come good.
     for attempt in 1 2 3; do
-      [ "$attempt" = 1 ] || note "Download failed — retrying ($attempt of 3)…"
+      if [ "$attempt" != 1 ]; then
+        _wait=$(( attempt * 5 ))
+        note "Download failed — waiting ${_wait}s, then retrying (attempt $attempt of 3)…"
+        sleep "$_wait"
+      fi
       if podman pull "$TARGET_IMAGE" 2>&1 | tee -a "$LOG"; then pull_ok=1; break; fi
     done
     [ "$pull_ok" = 1 ] || die "Could not download APEX-OS from $TARGET_IMAGE after 3 attempts.
 
 Nothing has been erased — your disks are untouched.
 
-The usual cause is no network: go Back to the network step and connect, then try
-again. If you are online, the registry may be temporarily unavailable."
+The network looked usable when this started, so the download itself failed:
+the connection may have dropped, or the registry may be unreachable from here.
+The exact error is above and in $LOG.
+
+If this keeps happening, use the full offline ISO — it contains the whole system
+and needs no network at all."
   fi
   note "Download complete."
 fi

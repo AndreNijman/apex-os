@@ -196,6 +196,29 @@ def eth_status():
     return "absent", ""
 
 
+def netinstall():
+    """True when this ISO downloads the OS instead of carrying it."""
+    return os.path.exists("/usr/lib/apex-installer/netinstall")
+
+
+def online():
+    """(ok, reason). Cheap layered check, same shape as the engine's.
+
+    Exists because the first real install attempt reached the confirm screen,
+    typed ERASE, and only THEN discovered there was no network — the download
+    failed with a DNS error and the whole run was wasted. On an ISO that has to
+    download 5 GB, telling someone that before they commit is the difference
+    between a wasted minute and a wasted install.
+    """
+    rc, txt = run(["ip", "route", "show", "default"], timeout=5)
+    if not txt.strip():
+        return False, "not connected to any network"
+    rc, _ = run(["getent", "hosts", "ghcr.io"], timeout=10)
+    if rc != 0:
+        return False, "connected, but DNS is not answering"
+    return True, ""
+
+
 def wifi_available():
     rc, txt = run(["nmcli", "-t", "-f", "TYPE", "device"])
     return any(l.strip() == "wifi" for l in txt.splitlines())
@@ -1225,6 +1248,24 @@ class Installer(Adw.Application):
                           f"{self.disk} is left alone.", "apex-dim"))
         warn.append(wi)
         body.append(warn)
+
+        # A netinstall with no network will fail at the download step, AFTER the
+        # user has typed ERASE. Say so here, while it still costs nothing.
+        if netinstall():
+            ok, why = online()
+            if not ok:
+                nb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                nb.add_css_class("apex-warn")
+                ni = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP)
+                ni.set_margin_top(SP * 3); ni.set_margin_bottom(SP * 3)
+                ni.set_margin_start(SP * 4); ni.set_margin_end(SP * 4)
+                ni.append(lbl(f"NO NETWORK — this installer downloads APEX-OS ({why}).",
+                              "apex-danger"))
+                ni.append(lbl("The install will stop at the download step and nothing "
+                              "will be erased, but you will have to start again. Go "
+                              "Back to the Network step and connect first.", "apex-dim"))
+                nb.append(ni)
+                body.append(nb)
 
         # Full inventory, scrollable — never clipped.
         inv = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP)
