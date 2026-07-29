@@ -323,6 +323,120 @@ copy_network_to() {  # $1=deploy dir
   return 0
 }
 
+# ── shared post-install: locale + keyboard layout in the target ──────────────
+# THE CONTRACT THIS IMPLEMENTS
+# /usr/lib/systemd/system-environment-generators/50-apex-keymap (see
+# files/system/systemd/apex-keymap-env) exports XKB_DEFAULT_LAYOUT into the
+# systemd manager environment so greetd — and the sway/labwc greeter host it
+# spawns — use the machine's real layout instead of a hardcoded `us`. Its header
+# names its source of truth and whose job it is to write it:
+#
+#     SOURCE OF TRUTH: /etc/X11/xorg.conf.d/00-keyboard.conf [...] This file is
+#     machine-local (/etc), so it is the installer's job to put a keymap there.
+#
+# That job was never implemented. This script wrote no keymap, no locale and no
+# vconsole config, so on a script-installed machine:
+#   • the generator found no file and printed nothing → greeter fell back to `us`,
+#     i.e. the exact "cannot type my own password" failure it exists to prevent;
+#   • apex-shell-firstrun's FIRST keymap source (this same file) missed, it fell
+#     through to `localectl status`, and scraped the literal placeholder
+#     "(unset)" into the user's hyprland.conf as `kb_layout = (unset)`; and
+#   • /etc/locale.conf stayed absent → LANG=C.UTF-8.
+# Verified on the p6 install: no /etc/X11/xorg.conf.d/00-keyboard.conf existed and
+# `localectl status` reported "X11 Layout: (unset)".
+#
+# The image now also ships defaults for locale/vconsole (Containerfile.base), so
+# this function's real job is to record what the OPERATOR actually chose in the
+# live installer environment, overriding those defaults when it differs.
+# See apex-logs 54 / apexlogs/08-pending-root-fixes.md.
+set_locale_keymap_in() {  # $1=deploy dir
+  local deploy="$1" layout="" variant="" lang="" xkbdir tz=""
+  [ -d "$deploy/etc" ] || return 0
+
+  # Prefer whatever the LIVE environment is using — the operator may have set a
+  # layout in the installer. localectl needs dbus and may not answer here, so
+  # every read is best-effort and the placeholder "(unset)" is rejected, not
+  # treated as a value (the bug above).
+  if have localectl; then
+    layout=$(localectl status 2>/dev/null \
+      | sed -n 's/^[[:space:]]*X11 Layout:[[:space:]]*//p' | head -1)
+    variant=$(localectl status 2>/dev/null \
+      | sed -n 's/^[[:space:]]*X11 Variant:[[:space:]]*//p' | head -1)
+  fi
+  case "$layout"  in "(unset)"|"n/a") layout="" ;;  esac
+  case "$variant" in "(unset)"|"n/a") variant="" ;; esac
+  # Fall back to the live env's vconsole keymap, then to `us`. Written as a plain
+  # `if` rather than an `&&`/`||` chain — this file's own notes flag that trap.
+  if [ -z "$layout" ]; then
+    layout=$(sed -n 's/^KEYMAP=//p' /etc/vconsole.conf 2>/dev/null | tr -d '"' | head -1)
+  fi
+  [ -n "$layout" ] || layout=us
+
+  lang=$(sed -n 's/^LANG=//p' /etc/locale.conf 2>/dev/null | tr -d '"' | head -1)
+  # C.UTF-8 is systemd's fallback, not a choice — do not propagate it as one.
+  case "$lang" in ""|"C.UTF-8"|"C.utf8"|"C") lang="en_US.UTF-8" ;; esac
+
+  # X11/wayland layout — what the keymap generator and apex-shell-firstrun read.
+  xkbdir="$deploy/etc/X11/xorg.conf.d"
+  mkdir -p "$xkbdir" 2>>"$LOG" || return 0
+  {
+    printf '# Written by apex-install. Change with: localectl set-x11-keymap <layout>\n'
+    printf 'Section "InputClass"\n'
+    printf '        Identifier "system-keyboard"\n'
+    printf '        MatchIsKeyboard "on"\n'
+    printf '        Option "XkbLayout" "%s"\n' "$layout"
+    # Explicit `if`, not `[ -n "$variant" ] && printf ...`: this script installs an
+    # ERR trap that calls die(), and a bare `&&` whose test fails returns non-zero
+    # for the whole list. See the same warning in create_user_in() below.
+    if [ -n "$variant" ]; then
+      printf '        Option "XkbVariant" "%s"\n' "$variant"
+    fi
+    printf 'EndSection\n'
+  } > "$xkbdir/00-keyboard.conf" 2>>"$LOG" || true
+
+  # Console keymap + system locale.
+  printf '# Written by apex-install. Change with: localectl set-keymap <keymap>\nKEYMAP=%s\n' \
+    "$layout" > "$deploy/etc/vconsole.conf" 2>>"$LOG" || true
+  printf '# Written by apex-install. Change with: localectl set-locale LANG=...\nLANG=%s\n' \
+    "$lang" > "$deploy/etc/locale.conf" 2>>"$LOG" || true
+
+  # ── Timezone ───────────────────────────────────────────────────────────────
+  # /etc/localtime is a machine-local symlink into /usr/share/zoneinfo, and it
+  # was never written either — so on the p6 install the file did not exist AT ALL
+  # and systemd fell back to UTC. The clock read 13:45 while the wall clock said
+  # 21:45 (AWST is UTC+8): every timestamp, the bar clock, file mtimes, and
+  # `hypridle`/cron-style scheduling were eight hours out.
+  #
+  # Carry over whatever the LIVE environment resolved (the ISO's kickstart sets
+  # `timezone Australia/Perth --utc`, so a real operator install lands here with
+  # it already correct), and fall back to the same value the kickstart uses so the
+  # two install paths agree.
+  if [ -L /etc/localtime ]; then
+    tz=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')
+  fi
+  if [ -z "$tz" ] && have timedatectl; then
+    tz=$(timedatectl show --property=Timezone --value 2>/dev/null)
+  fi
+  case "$tz" in ""|"UTC") tz="Australia/Perth" ;; esac
+  if [ -e "$deploy/usr/share/zoneinfo/$tz" ]; then
+    ln -sfn "../usr/share/zoneinfo/$tz" "$deploy/etc/localtime" 2>>"$LOG" || true
+  else
+    log "locale/keymap: WARN zoneinfo for '$tz' missing in target — leaving UTC"
+    tz="UTC"
+  fi
+
+  # Relabel with the TARGET's policy — the live env runs selinux=0, so anything
+  # written here is unlabeled, and an unlabeled /etc file can be denied on the
+  # installed system (the same trap copy_network_to documents above).
+  if have setfiles && [ -f "$deploy/etc/selinux/targeted/contexts/files/file_contexts" ]; then
+    setfiles -r "$deploy" "$deploy/etc/selinux/targeted/contexts/files/file_contexts" \
+      "$deploy/etc/X11" "$deploy/etc/vconsole.conf" "$deploy/etc/locale.conf" \
+      "$deploy/etc/localtime" >>"$LOG" 2>&1 || true
+  fi
+  log "locale/keymap: LANG=$lang layout=$layout${variant:+ variant=$variant} tz=$tz"
+  return 0
+}
+
 create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefix
   local deploy=$1 user=$2 pass=$3 host=$4 pfx=$5 statevar setype spec f
   statevar=$(dirname "$(dirname "$deploy")")/var
@@ -422,6 +536,7 @@ if [ "$UNATTENDED" = 1 ]; then
   [ -n "$deploy" ] || { umount "$MNT" 2>/dev/null || true; die "unattended: deployment not found."; }
   create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "unattended"
   copy_network_to "$deploy"
+  set_locale_keymap_in "$deploy"
   sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true
   echo "APEX-INSTALL-UNATTENDED-OK"; log "unattended install complete"
   if echo "$CMD" | grep -qw apex.poweroff; then sync; poweroff; fi
@@ -950,6 +1065,7 @@ deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
 [ -n "$deploy" ] || { umount "$MNT" 2>/dev/null || true; die "Installed ostree deployment not found under $root_part."; }
 create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
 copy_network_to "$deploy"
+set_locale_keymap_in "$deploy"
 # Never let cleanup failures trip the ERR trap AFTER a successful install — that
 # would report failure on a system that is actually installed fine.
 sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true

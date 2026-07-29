@@ -294,6 +294,23 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
 # cage is kept only as a last-resort fallback. xwayland-satellite/foot round out
 # the session. flatpak + distrobox are the userspace app plumbing both editions
 # want (podman + rpm-ostree are already in fedora-bootc). COPRs disabled after.
+#
+# glibc-langpack-en + zram-generator-defaults close two first-boot gaps found on
+# the p6 install (apex-logs 53):
+#   • glibc-langpack-en — the image shipped ONLY glibc-minimal-langpack, so
+#     `locale -a` listed nothing but C/C.utf8/POSIX and en_US.UTF-8 did not
+#     EXIST on the system. The installer kickstart asks for `lang en_US.UTF-8`
+#     and `localectl set-locale LANG=en_US.UTF-8` looks like it works, but
+#     neither can be satisfied without this package — so every install fell back
+#     to the systemd default C.UTF-8 (no collation rules, C-style time/number
+#     formatting).
+#   • zram-generator-defaults — zram-generator itself was already pulled in as a
+#     dependency, but with NO configuration, so the generator ran and created
+#     nothing. Result: no swap of any kind, and `systemd-oomd` logging
+#     "No swap; memory pressure usage will be degraded" on every boot, which
+#     leaves OOM handling abrupt instead of graduated. This package ships
+#     Fedora's standard /usr/lib/systemd/zram-generator.conf (min(ram/2, 8G),
+#     zstd) — the same default the other Fedora atomic desktops carry.
 # Own transaction, `dnf5 clean all` at the end.
 RUN set -eux; \
     dnf5 -y copr enable solopasha/hyprland; \
@@ -307,7 +324,8 @@ RUN set -eux; \
         upower libnotify lm_sensors cava wf-recorder ImageMagick \
         qt6ct mpv-mpris xdg-user-dirs polkit gnome-keyring \
         gammastep geoclue2 jq dconf \
-        NetworkManager-wifi wpa_supplicant wireless-regdb iw; \
+        NetworkManager-wifi wpa_supplicant wireless-regdb iw \
+        glibc-langpack-en zram-generator-defaults; \
     dnf5 -y copr disable solopasha/hyprland; \
     dnf5 -y copr disable errornointernet/quickshell; \
     dnf5 clean all
@@ -881,7 +899,46 @@ RUN set -eux; \
 COPY files/system/units/apex-shell-firstrun.service \
      /usr/lib/systemd/user/apex-shell-firstrun.service
 COPY files/system/libexec/apex-shell-firstrun /usr/libexec/apex-shell-firstrun
+# Race-safe launcher for hypridle + quickshell. The seeded Hyprland/niri configs
+# call THIS instead of pointing exec-once straight at ~/.local/src/apex-shell:
+# greetd starts the compositor in parallel with the provisioner above, so a direct
+# autostart fires 2-5s before the clone exists and dies. See the file's own header
+# and apex-logs 51. --chmod=0755 because a non-executable launcher would silently
+# give every user a bar-less session.
+COPY --chmod=0755 files/system/libexec/apex-shell-autostart \
+     /usr/libexec/apex-shell-autostart
 RUN systemctl --global enable apex-shell-firstrun.service
+
+# ── Default locale: a REAL one, not systemd's C.UTF-8 fallback ──────────────
+# With no /etc/locale.conf, systemd falls back to LANG=C.UTF-8, which has no
+# collation rules (bytewise sorting) and C-style time/number formatting. Nothing
+# in the image set one, and the script installer (installer/apex-install) never
+# ran localectl either — so every install booted with the fallback. Shipping the
+# file here means EVERY install path gets a valid locale, including a bare
+# `bootc install` with no APEX installer involved.
+#
+# This is an /etc file, so ostree 3-way-merges it: a user who runs
+# `localectl set-locale ...` overrides it and their choice survives upgrades.
+# Requires glibc-langpack-en (installed in the desktop-stack layer above) —
+# without it this would name a locale that does not exist. See apex-logs 53.
+RUN printf '# APEX-OS default locale. Override with: localectl set-locale LANG=...\nLANG=en_US.UTF-8\n' \
+      > /etc/locale.conf; \
+    printf '# APEX-OS default console keymap. Override with: localectl set-keymap ...\nKEYMAP=us\n' \
+      > /etc/vconsole.conf
+
+# ── Default timezone ────────────────────────────────────────────────────────
+# /etc/localtime did not exist at all on the p6 install, so systemd fell back to
+# UTC: the clock read 13:45 while the wall clock said 21:45 (AWST is UTC+8).
+# Everything time-stamped was eight hours out — the bar clock, journal entries,
+# file mtimes, hypridle's timers. Neither the image nor installer/apex-install
+# ever wrote it; only the ISO kickstart did (`timezone Australia/Perth --utc`),
+# and this machine was installed via the script path.
+#
+# Australia/Perth matches installer/bib-config.toml so both install paths agree.
+# It is an /etc symlink, so ostree 3-way-merges it and
+# `timedatectl set-timezone <tz>` overrides it permanently.
+# See apex-logs 55 / apexlogs/09-timezone-utc.md.
+RUN ln -sfn ../usr/share/zoneinfo/Australia/Perth /etc/localtime
 
 # One-shot de-branding migration for systems installed from a PRE-branding image.
 # The BLS entry titles, the EFI NVRAM label and a hand-written /etc/os-release
