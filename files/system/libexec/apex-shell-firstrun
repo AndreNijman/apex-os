@@ -1,45 +1,63 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  APEX-OS — first-login provisioner
+#  APEX-OS — per-login user provisioner
 #  Installed to /usr/libexec/apex-shell-firstrun; driven by the per-user
 #  systemd unit apex-shell-firstrun.service (see files/system/units/).
 #
-#  Runs ONCE per user, at first login. It clones the public APEX Shell repo
-#  into the user's home and seeds the per-user config the shell expects.
+#  Seeds the per-user config APEX Shell expects. It does NOT install the shell:
+#  since apex-logs 56 the shell itself ships INSIDE the image at
+#  /usr/share/apex-shell (see Containerfile.base "Stage 5b2").
 #
-#  Why not just run the shell's own install.sh?
-#    install.sh (github.com/AndreNijman/apex-shell) is an ARCH installer:
-#      * it hard-`die`s on any non-Arch distro (APEX-OS is fedora-bootc), and
-#      * step 4 runs `dots-extra/install-arch.sh`, which does `sudo pacman`/AUR
-#        package installs — impossible from an unprivileged user service, and
-#        unnecessary here because every dependency is baked into the image, and
-#      * it requires a pre-existing ~/.config/hypr config (else it `die`s).
-#    So this script REPLICATES install.sh's per-user *seeding* (the parts that
-#    are not package installation): the shallow clone, the portable matugen
-#    render (install.sh step 5), and the config-dir seeding + Hyprland autostart
-#    wiring (dots-extra/install-arch.sh steps 5-6). The seeding is kept faithful
-#    so the shell's auto-updater and hot-reload keep working off the live clone.
+#  WHAT CHANGED, AND WHY IT MATTERS HERE
+#  This script used to `git clone` github.com/AndreNijman/apex-shell into
+#  ~/.local/src/apex-shell on first login. That gave APEX-OS two independent
+#  update channels (bootc for the OS, an in-app `git pull` for the entire UI) and
+#  made the desktop depend on the network at first login. Worse, it created an
+#  unwinnable race: greetd execs the compositor in PARALLEL with this unit, so the
+#  compositor's autostart fired against a directory this script had not finished
+#  cloning yet (measured 2-5s early — apex-logs 51), and the user landed in a bare
+#  compositor with no bar.
 #
-#  Idempotent + network-failure-tolerant: writes the marker ONLY on full
-#  success; any failure leaves it absent so the next login retries.
+#  With the shell vendored into the image, ALL of that disappears:
+#    * one update channel — `apex update` moves the OS and the UI together;
+#    * the race is structurally impossible, not merely mitigated: the shell exists
+#      before the compositor is ever exec'd;
+#    * no network is needed at first login — this is now pure local file seeding;
+#    * the UI is covered by the image's cosign signature and by `apex rollback`.
+#
+#  So what is left here is cheap, local, and idempotent. There is deliberately NO
+#  `.provisioned` marker any more: the marker existed to gate the expensive
+#  network clone, and it is precisely what made every past silent defect permanent
+#  (it short-circuited the retry-at-next-login design — apex-logs 52). Everything
+#  below is safe to re-run, so it simply runs every login and self-heals.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-REPO_URL="https://github.com/AndreNijman/apex-shell"
-SRC_DIR="${HOME}/.local/src/apex-shell"
+# The shell now lives in the image. Constant, read-only, always present.
+SRC_DIR="/usr/share/apex-shell"
 CFG_DIR="${HOME}/.config/apex-shell"
-MARKER="${CFG_DIR}/.provisioned"
 SYS_WALLPAPER="/usr/share/backgrounds/apex/default.jpg"
+# Where the shell used to be cloned. Only referenced to MIGRATE away from it.
+LEGACY_SRC_DIR="${HOME}/.local/src/apex-shell"
 
 log() { printf '[apex-shell-firstrun] %s\n' "$*"; }
 
 # Human users only. System/service accounts (greetd at ~uid 970, etc.) can get a
-# transient systemd --user manager and would otherwise clone the shell into their
+# transient systemd --user manager and would otherwise seed config into their
 # state dir. Gate on the regular-user UID range so this only ever provisions real
 # logins (uid >= 1000). See apex-logs/18-greetd-provisioner-scope.md.
 if [ "$(id -u)" -lt 1000 ]; then
     log "system user (uid $(id -u)) — not a human login; skipping."
     exit 0
+fi
+
+# The image must actually contain the shell. If it does not, seeding a config that
+# points at it would produce a session with no UI and no explanation, so fail
+# loudly instead — this is an image-build defect, not a user problem.
+if [ ! -s "${SRC_DIR}/shell.qml" ]; then
+    log "FATAL: ${SRC_DIR}/shell.qml is missing — the image did not ship APEX Shell."
+    log "       this is an image-build bug; see Containerfile.base Stage 5b2."
+    exit 1
 fi
 
 # ── 0. Seed the compositor config FIRST — before ANYTHING that can block ─────
@@ -203,45 +221,51 @@ if [ -f "${STARSHIP_TMPL}" ] && [ ! -f "${HOME}/.config/starship.toml" ]; then
     log "seeded ~/.config/starship.toml (accent ${APEX_ACCENT} for '${APEX_VARIANT:-daily}')"
 fi
 
-# Belt-and-suspenders: the unit's own gate covers this, but a manual invocation
-# should also no-op once provisioned. Everything BELOW here is the one-time,
-# network-dependent work; the config seeding above deliberately runs every login.
-if [ -e "${MARKER}" ]; then
-    log "already provisioned (${MARKER} present) — nothing further to do."
-    exit 0
-fi
+# ── 1-2. (removed) network poll + git clone ──────────────────────────────────
+# Both are gone: the shell ships in the image now. What used to be a 30s network
+# poll followed by a shallow clone — the two steps that created the startup race
+# and the first-login network dependency — is simply not needed. Nothing below
+# touches the network, so there is nothing left to fail or retry.
 
-# ── 1. Wait (briefly) for network ────────────────────────────────────────────
-# A first login can beat NetworkManager reaching online; poll the remote a few
-# times. If still offline we exit non-zero WITHOUT the marker, so the unit
-# retries at the next login (network-failure-tolerant, per the design).
-online() { git ls-remote --exit-code "${REPO_URL}" HEAD >/dev/null 2>&1; }
-if ! online; then
-    for i in $(seq 1 15); do
-        log "waiting for network (${i}/15)..."
-        sleep 2
-        online && break
+# ── 2b. MIGRATION: retire the old per-user clone ─────────────────────────────
+# Machines provisioned before apex-logs 56 have a real git checkout at
+# ~/.local/src/apex-shell, and a hyprland.conf whose $shellDir, $qsIpc and
+# autostart all point INTO it. If we leave those references alone, such a machine
+# keeps running the stale cloned shell forever and the whole point of the merge is
+# lost — it would still be on two channels.
+#
+# The rewrite below is deliberately narrow: it only rewrites the literal legacy
+# path, and only in files APEX itself seeded. The checkout is NOT deleted — that
+# is the user's data (they may have local commits or a stash from the old in-app
+# updater), and reclaiming ~30MB is not worth deleting something we did not create.
+migrate_legacy_paths() {
+    local f changed=0
+    for f in "${HOME}/.config/hypr/hyprland.conf" \
+             "${HOME}/.config/hypr/hypridle.conf" \
+             "${HOME}/.config/niri/config.kdl"; do
+        [ -f "${f}" ] || continue
+        if grep -q -- "${LEGACY_SRC_DIR}" "${f}" 2>/dev/null; then
+            cp -a "${f}" "${f}.pre-vendor.bak" 2>/dev/null || true
+            sed -i "s|${LEGACY_SRC_DIR}|${SRC_DIR}|g" "${f}"
+            log "migrated legacy shell path in ${f} (backup: ${f}.pre-vendor.bak)"
+            changed=1
+        fi
     done
-fi
-if ! online; then
-    log "network still unavailable — leaving marker unset; will retry next login."
-    exit 1
-fi
+    # The old ~/.local/bin/apex-shell-autostart shim (apex-logs 51) is superseded
+    # by /usr/libexec/apex-shell-autostart, which the seeded config now calls.
+    if [ -f "${HOME}/.local/bin/apex-shell-autostart" ]; then
+        mv -f "${HOME}/.local/bin/apex-shell-autostart" \
+              "${HOME}/.local/bin/apex-shell-autostart.superseded" 2>/dev/null || true
+        log "retired ~/.local/bin/apex-shell-autostart (now /usr/libexec/apex-shell-autostart)"
+    fi
+    if [ -d "${LEGACY_SRC_DIR}" ] && [ "${changed}" = 1 ]; then
+        log "NOTE: ${LEGACY_SRC_DIR} is no longer used; the shell now runs from ${SRC_DIR}."
+        log "      it is left in place (your data); remove it by hand if you want the space."
+    fi
+}
+migrate_legacy_paths
 
-# ── 2. Clone (shallow) or refresh the shell checkout ─────────────────────────
-mkdir -p "$(dirname "${SRC_DIR}")"
-if [ -d "${SRC_DIR}/.git" ]; then
-    log "existing checkout found — fetching latest main."
-    git -C "${SRC_DIR}" fetch --depth 1 origin main
-    git -C "${SRC_DIR}" reset --hard origin/main
-else
-    # Scrub any partial/non-git dir left by a failed earlier run, then clone.
-    [ -e "${SRC_DIR}" ] && rm -rf "${SRC_DIR}"
-    log "cloning ${REPO_URL} (shallow) -> ${SRC_DIR}"
-    git clone --depth 1 "${REPO_URL}" "${SRC_DIR}"
-fi
-
-# ── 3. Render matugen.toml (install.sh step 5) ───────────────────────────────
+# ── 3. Render matugen.toml ───────────────────────────────────────────────────
 # matugen does NOT expand ~ or env vars in template paths, so the shipped
 # matugen.toml.in carries @SRCDIR@/@HOME@ placeholders we substitute here into
 # an absolute-path config. Matugen is REQUIRED for the shell's theming.
@@ -312,8 +336,60 @@ done
 [ -f "${HOME}/.cache/apex-shell/colors.json" ] || \
     : > "${HOME}/.cache/apex-shell/colors.json"
 
-# hypridle config (don't clobber a user-customised one).
-cp -n "${SRC_DIR}/src/config/hypridle.conf" "${HOME}/.config/hypr/" 2>/dev/null || true
+# ── Retire the shell's in-app updater: the image IS the update channel ───────
+# UpdateService.qml is the OTHER half of the two-channel problem. ~30s after the
+# shell starts it pings 1.1.1.1, runs `git fetch origin main` in Quickshell.shellDir,
+# counts `HEAD..origin/main`, and pops a dialog offering to `git pull`.
+#
+# shellDir is now /usr/share/apex-shell: read-only, and with no .git at all (the
+# Containerfile drops it after vendoring). So every one of those commands would
+# fail. Left enabled, the user would get either a permanently-checking spinner or
+# an error dialog offering an update that is impossible to apply — while the REAL
+# update path (`apex update`) sits elsewhere. That is worse than no updater.
+#
+# The whole check chain in UpdateService is gated on `autoUpdate`, so seeding it
+# false disables it cleanly with no upstream patching. Seeded only if absent, so a
+# user who deliberately re-enables it keeps their choice.
+#
+# `apex update` is the single channel: it moves the OS and the shell together, and
+# `apex rollback` reverts both. See apex-logs 56.
+[ -f "${USER_DATA}/update_prefs.json" ] || \
+    printf '{"autoUpdate":false}\n' > "${USER_DATA}/update_prefs.json"
+
+# ── hypridle: the IMAGE copy is authoritative (this is the LOCK SCREEN) ──────
+# This used to `cp -n` the shipped hypridle.conf into ~/.config/hypr/, and the
+# launcher then PREFERRED that copy. Net effect: a second update channel for the
+# most security-relevant config in the session.
+#
+# hypridle is what locks the machine. Its rules are:
+#     300s  dim         360s  display off
+#     330s  loginctl lock-session   ->  the APEX Shell lock screen
+#     900s  suspend
+# and lock_cmd/DpmsControl paths inside it point at the shell. Because the $HOME
+# copy won on every login, an image update that changed the lock timeout — or
+# fixed a broken lock_cmd — could never reach an already-provisioned user. The
+# lock screen was pinned to whatever shipped the day they first logged in.
+#
+# Now: no copy is made. The launcher uses ${SRC_DIR}/src/config/hypridle.conf, so
+# lock behaviour follows the image like everything else. A user who genuinely
+# wants to customise it creates ~/.config/hypr/hypridle.conf themselves and the
+# launcher honours it — an explicit, deliberate opt-out of the single channel
+# rather than an accidental one.
+#
+# MIGRATION: an existing copy that is byte-identical to a shipped version (modulo
+# the legacy path rewrite migrate_legacy_paths just did) was written by US and
+# never touched by the user, so removing it is safe and restores the single
+# channel. Anything genuinely edited is left strictly alone.
+HYPRIDLE_USER="${HOME}/.config/hypr/hypridle.conf"
+if [ -f "${HYPRIDLE_USER}" ]; then
+    if cmp -s "${HYPRIDLE_USER}" "${SRC_DIR}/src/config/hypridle.conf"; then
+        rm -f "${HYPRIDLE_USER}"
+        log "removed unmodified ~/.config/hypr/hypridle.conf — lock/idle config now follows the image"
+    else
+        log "keeping your customised ~/.config/hypr/hypridle.conf (it overrides the image copy)"
+        log "  delete it to go back to image-managed lock/idle behaviour"
+    fi
+fi
 
 # Seed the shell's shipped wallpapers, plus the system APEX wallpaper the
 # greeter uses (/usr/share/backgrounds/apex/default.jpg) so shell + greeter
@@ -451,13 +527,15 @@ fi
 
 # ── 8. Verify our own postconditions BEFORE claiming success ─────────────────
 # Every defect this script has shipped was a SILENT one: it wrote a bad value,
-# exited 0, logged "provisioning complete", and wrote the marker — which then
-# disabled the retry-at-next-login mechanism that was supposed to be the safety
-# net. `systemctl --failed` stayed empty while the desktop was unusable.
+# exited 0, logged "provisioning complete", and wrote a marker that then disabled
+# the retry-at-next-login mechanism meant to be the safety net.
+# `systemctl --failed` stayed empty while the desktop was unusable.
 #
-# So check the things that actually have to be true. A failure here logs loudly
-# and leaves the MARKER UNWRITTEN, which is what makes the next login retry.
-# See apex-logs 52 / apexlogs/06-orchestrator-root-cause.md.
+# The marker is gone entirely now (nothing expensive is left to gate), so this
+# script re-runs and self-heals every login. These checks therefore serve a
+# different purpose: make a broken seed VISIBLE — a non-zero exit shows up in
+# `systemctl --user status apex-shell-firstrun.service` instead of being reported
+# as success. See apex-logs 52 / apexlogs/06-orchestrator-root-cause.md.
 PROVISION_OK=1
 fail_check() { PROVISION_OK=0; log "POSTCONDITION FAILED: $*"; }
 
@@ -465,7 +543,7 @@ fail_check() { PROVISION_OK=0; log "POSTCONDITION FAILED: $*"; }
     || fail_check "the shell entrypoint ${SRC_DIR}/shell.qml is missing"
 grep -q '(unset)' "${HYPR_CONF}" 2>/dev/null \
     && fail_check "${HYPR_CONF} still contains an '(unset)' placeholder"
-for _j in config_Provider.json keybinds.json wallpaper.json; do
+for _j in config_Provider.json keybinds.json wallpaper.json update_prefs.json; do
     [ -f "${USER_DATA}/${_j}" ] || continue
     # python3 is in the image; fall back to a no-op if it ever is not.
     if command -v python3 >/dev/null 2>&1; then
@@ -480,14 +558,28 @@ if command -v hyprctl >/dev/null 2>&1 && hyprctl version >/dev/null 2>&1; then
         || fail_check "Hyprland reports config errors: $(hyprctl configerrors 2>/dev/null | head -3)"
 fi
 
+# Also verify the thing the whole lock screen depends on: hypridle's lock_cmd must
+# point at a shell that actually exists. A stale lock_cmd means the machine stops
+# locking on idle and NOTHING says so — the failure mode is silent and it is a
+# security one, so it gets an explicit check rather than trust.
+_idle_conf="${SRC_DIR}/src/config/hypridle.conf"
+[ -f "${HOME}/.config/hypr/hypridle.conf" ] && _idle_conf="${HOME}/.config/hypr/hypridle.conf"
+if [ -f "${_idle_conf}" ]; then
+    _lock_target="$(sed -n 's/^[[:space:]]*lock_cmd[[:space:]]*=[[:space:]]*qs -c \([^ ]*\).*/\1/p' \
+        "${_idle_conf}" | head -1)"
+    if [ -n "${_lock_target}" ] && [ ! -s "${_lock_target}/shell.qml" ]; then
+        fail_check "hypridle lock_cmd points at '${_lock_target}', which has no shell.qml — the session would stop locking on idle"
+    fi
+fi
+
 if [ "${PROVISION_OK}" -ne 1 ]; then
-    log "provisioning INCOMPLETE — marker deliberately NOT written; next login retries."
+    log "provisioning INCOMPLETE — see the failures above; this login is not fully set up."
+    log "the unit runs again at every login, so fixing the cause is enough — no marker to clear."
     exit 1
 fi
 
-# ── 9. Mark provisioned (ONLY on full success) ───────────────────────────────
-# Reached only if every step above succeeded (set -e) AND every postcondition in
-# step 8 held. The marker lives inside ~/.config/apex-shell, which step 3/4
-# created; its presence disables the unit on every future login.
-touch "${MARKER}"
-log "provisioning complete — marker written to ${MARKER}"
+# ── 9. Done ──────────────────────────────────────────────────────────────────
+# No marker is written. There is nothing expensive left to gate (the clone is gone),
+# and the marker is exactly what made every past silent defect permanent by
+# short-circuiting the retry design. Re-running this is cheap and idempotent.
+log "user provisioning complete (shell: ${SRC_DIR})"

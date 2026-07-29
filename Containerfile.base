@@ -893,21 +893,196 @@ RUN set -eux; \
     test -s /usr/share/apex/starship/starship.toml; \
     zsh -n /usr/share/apex/zsh/zshrc
 
-# ── Stage 5c: APEX Shell first-boot provisioner (per-user) ─────────────────
-# Clones APEX Shell into each user's $HOME on first login + seeds config; enabled
-# globally so it runs for every user.
+# ── Stage 5b2: APEX Shell, VENDORED INTO THE IMAGE ──────────────────────────
+# APEX Shell now ships INSIDE the image at /usr/share/apex-shell instead of being
+# cloned into every user's $HOME on first login.
+#
+# WHY THE CHANGE (apex-logs 56)
+# The old model gave APEX-OS *two independent update channels* with no version
+# coupling: the OS moved via `apex update` (bootc), and the shell moved via its own
+# in-app `git pull` of ~/.local/src/apex-shell behind a login-time popup. A machine
+# could sit on a new OS with an old shell or the reverse, and nothing detected the
+# mismatch. It also meant the shell — the entire user interface — was fetched over
+# the network at first login, unsigned, outside the image's atomic/rollback story.
+#
+# Vendoring it here fixes all of that AND kills a whole bug class structurally:
+#   * ONE update channel. `apex update` moves the OS and the UI together, atomically,
+#     with `apex rollback` covering both.
+#   * The clone race (apex-logs 51) becomes IMPOSSIBLE, not merely mitigated. The
+#     shell is present before the compositor is ever exec'd, so the autostart
+#     cannot fire against a directory that does not exist yet.
+#   * No network needed at first login. Provisioning is now pure local file seeding.
+#   * The shell is covered by the image's cosign signature and by ostree integrity.
+#   * One copy on disk instead of one per user.
+#
+# The cost: users can no longer `git pull` the shell in place. That is the point —
+# it is the second channel we are deliberately removing. Local hacking is still
+# possible by pointing the autostart at your own checkout.
+#
+# APEX_SHELL_REF pins what gets vendored (default: main). CI can pass a tag/SHA for
+# a reproducible release build. The resolved SHA is written to
+# /usr/share/apex-shell/.apex-shell-commit and stamped as an OCI label so
+# `apex changelog` / `skopeo inspect` can report exactly which shell shipped.
+ARG APEX_SHELL_REF=main
+RUN set -eux; \
+    rm -rf /usr/share/apex-shell; \
+    # `--branch` accepts a branch or tag but NOT a bare SHA, so try it first and
+    # fall back to clone-then-fetch for a pinned commit. The rm -rf between the two
+    # matters: a failed clone can leave a partial directory behind, and the second
+    # clone would then fail on "destination path already exists" — turning a
+    # recoverable case into a hard build failure.
+    if git clone --depth 1 --branch "${APEX_SHELL_REF}" \
+         https://github.com/AndreNijman/apex-shell /usr/share/apex-shell 2>/dev/null; then \
+        echo "cloned apex-shell at ref ${APEX_SHELL_REF}"; \
+    else \
+        rm -rf /usr/share/apex-shell; \
+        git clone https://github.com/AndreNijman/apex-shell /usr/share/apex-shell; \
+        git -C /usr/share/apex-shell checkout --detach "${APEX_SHELL_REF}"; \
+        echo "cloned apex-shell and checked out ${APEX_SHELL_REF}"; \
+    fi; \
+    SHA="$(git -C /usr/share/apex-shell rev-parse HEAD)"; \
+    printf '%s\n' "${SHA}" > /usr/share/apex-shell/.apex-shell-commit; \
+    # HARD-VERIFY the entrypoint exists before we throw away the git metadata —
+    # a silently-empty /usr/share/apex-shell would mean no UI on every machine.
+    test -s /usr/share/apex-shell/shell.qml; \
+    test -d /usr/share/apex-shell/src/services; \
+    # Drop .git: this is no longer a live checkout, and its presence would invite
+    # the in-app updater to try to fetch into a read-only /usr.
+    rm -rf /usr/share/apex-shell/.git; \
+    echo "vendored apex-shell ${SHA}"
+LABEL org.apexos.apex-shell.ref="${APEX_SHELL_REF}"
+
+# ── Stage 5b3: the two paths that assumed a WRITABLE shell tree ─────────────
+# /usr is a read-only ostree/composefs mount, so anything the shell writes inside
+# its own tree must be redirected into $HOME. An audit of the whole checkout found
+# exactly ONE such write, plus one stale reader:
+#
+#  1. src/config/matugen.toml.in wrote its hyprlock palette to
+#     '@SRCDIR@/src/config/colors.conf' — i.e. back into the source tree. On a
+#     read-only tree matugen would fail that one output. The call site guards with
+#     `|| true`, so it would fail SILENTLY, which is worse than loudly.
+#  2. src/config/hyprlock.conf sourced that file by a HARDCODED
+#     ~/.local/src/apex-shell path (not even @SRCDIR@-substituted), so it was
+#     already broken for any non-default install location.
+#
+# Both are redirected to ~/.config/hypr/apex-shell-hyprlock-colors.conf. Note that
+# hyprlock is currently DEAD CODE upstream — src/windows/Lockscreen.qml is a native
+# Wayland session lock that "replaces hyprlock", and the hyprlock invocation in
+# src/scripts/PowerControl.sh is commented out as an emergency fallback. These are
+# fixed anyway so the fallback works if it is ever re-enabled, and so nothing in
+# the image attempts a doomed write.
+#
+# THESE PATCHES BELONG UPSTREAM in apex-shell; doing them here is drift. Tracked in
+# apex-logs 56. The matugen one is hard-verified because it is the only functional
+# change — if upstream reworks that file, this build must fail loudly rather than
+# quietly ship a shell that cannot theme the lock screen.
+RUN set -eux; \
+    S=/usr/share/apex-shell; \
+    # (a) matugen's in-tree write -> $HOME. The ONLY genuine write into the tree.
+    sed -i "s|output_path = '@SRCDIR@/src/config/colors.conf'|output_path = '@HOME@/.config/hypr/apex-shell-hyprlock-colors.conf'|" \
+        "$S/src/config/matugen.toml.in"; \
+    grep -q "output_path = '@HOME@/.config/hypr/apex-shell-hyprlock-colors.conf'" \
+        "$S/src/config/matugen.toml.in"; \
+    ! grep -q "output_path = '@SRCDIR@" "$S/src/config/matugen.toml.in"; \
+    # (b) hyprlock's reader of that file -> the same $HOME path. Must run BEFORE
+    #     the generic rewrite in (c), or (c) would turn it into a /usr path that
+    #     can never be written to.
+    sed -i 's|^source = ~/.local/src/apex-shell/src/config/colors.conf|source = ~/.config/hypr/apex-shell-hyprlock-colors.conf|' \
+        "$S/src/config/hyprlock.conf"; \
+    # (c) EVERY remaining hardcoded ~/.local/src/apex-shell -> the image path.
+    #     These are not cosmetic. src/config/hypridle.conf alone carries FOUR
+    #     functional ones, and all four fail silently once the shell moves:
+    #       lock_cmd         = qs -c ~/.local/src/apex-shell ipc call lockscreen lock
+    #       after_sleep_cmd  = ~/.local/src/apex-shell/src/scripts/DpmsControl.sh on
+    #       on-timeout       = ~/.local/src/apex-shell/src/scripts/DpmsControl.sh off
+    #       on-resume        = ~/.local/src/apex-shell/src/scripts/DpmsControl.sh on
+    #     lock_cmd is the idle LOCK SCREEN. A broken lock_cmd means the machine
+    #     stops locking on idle and nothing says so — a security regression, not a
+    #     cosmetic one. Rewritten generically rather than line-by-line so a future
+    #     upstream addition of another such path is caught by the guard below.
+    grep -rl '~/\.local/src/apex-shell' "$S" 2>/dev/null | while read -r f; do \
+        sed -i 's|~/\.local/src/apex-shell|/usr/share/apex-shell|g' "$f"; \
+    done; \
+    # (d) HARD GUARD: nothing may still point at the old per-user clone path, and
+    #     nothing may still target an unwritable in-tree output. If upstream adds
+    #     one, this build fails loudly instead of shipping a silent regression.
+    if grep -rn '~/\.local/src/apex-shell' "$S" 2>/dev/null; then \
+        echo "FATAL: stale per-user clone path survived the rewrite (above)"; exit 1; \
+    fi; \
+    grep -q '^lock_cmd\|lock_cmd = qs -c /usr/share/apex-shell' "$S/src/config/hypridle.conf"; \
+    grep -q 'lock_cmd = qs -c /usr/share/apex-shell ipc call lockscreen lock' \
+        "$S/src/config/hypridle.conf"; \
+    echo "shell paths rewritten to /usr/share/apex-shell; lock_cmd + DPMS verified"
+
+# The config UI shows the shell version via `git -C <shellDir> describe`, which
+# returns nothing now that .git is gone (the field would read "…" forever). Fall
+# back to the commit file written above. Cosmetic, so a non-matching upstream
+# refactor warns instead of failing the build.
+RUN set -eux; \
+    F=/usr/share/apex-shell/src/services/config_tab/pages/MiscPage.qml; \
+    if grep -q 'describe --tags --always 2>/dev/null' "$F"; then \
+        sed -i 's|describe --tags --always 2>/dev/null|describe --tags --always 2>/dev/null \|\| cut -c1-12 $1/.apex-shell-commit 2>/dev/null|' "$F"; \
+        # $1 is left UNQUOTED on purpose: the replacement is spliced into a QML
+        # string literal, and adding quotes here would need QML-level escaping
+        # (\") -- getting that wrong is a syntax error that takes out the whole
+        # config page. shellDir is an image-controlled path with no spaces.
+        # Verified by loading a patched read-only tree in quickshell.
+        awk '/describe --tags/{n=gsub(/"/,"\""); exit (n%2)}' "$F"; \
+        echo "MiscPage version falls back to .apex-shell-commit"; \
+    else \
+        echo "WARN: MiscPage version command changed upstream — version display may read '…'"; \
+    fi
+
+# ── Stage 5c: APEX Shell per-user provisioner ──────────────────────────────
+# Seeds each user's config on login. No longer clones anything: the shell itself
+# lives in /usr/share/apex-shell (Stage 5b2 above), so this is pure local file
+# seeding — no network, no marker, no race. Enabled globally so it runs for every
+# user.
 COPY files/system/units/apex-shell-firstrun.service \
      /usr/lib/systemd/user/apex-shell-firstrun.service
 COPY files/system/libexec/apex-shell-firstrun /usr/libexec/apex-shell-firstrun
-# Race-safe launcher for hypridle + quickshell. The seeded Hyprland/niri configs
-# call THIS instead of pointing exec-once straight at ~/.local/src/apex-shell:
-# greetd starts the compositor in parallel with the provisioner above, so a direct
-# autostart fires 2-5s before the clone exists and dies. See the file's own header
-# and apex-logs 51. --chmod=0755 because a non-executable launcher would silently
-# give every user a bar-less session.
+# Idempotent launcher for hypridle + quickshell. Kept after vendoring because it
+# still owns two things: preferring the user's own ~/.config/hypr/hypridle.conf
+# over the image copy, and refusing to start a second instance (which is what lets
+# the provisioner safely re-invoke it to repair a live session).
 COPY --chmod=0755 files/system/libexec/apex-shell-autostart \
      /usr/libexec/apex-shell-autostart
 RUN systemctl --global enable apex-shell-firstrun.service
+
+# ── NO unattended OS updates, and NO unattended reboots ─────────────────────
+# fedora-bootc ships bootc-fetch-apply-updates.timer, which on this machine was
+# ACTIVE despite being `preset: disabled` — nothing in this repo enabled it. It
+# fires roughly every 2h, runs `bootc upgrade --apply`, and then reboots the
+# machine on its own. Observed live (apex-logs 57):
+#
+#   systemd[1]: Stopped run-p147322-i134392.service - [systemd-run]
+#               /usr/bin/systemctl reboot "--message=Initiated by bootc"
+#
+# It rebooted a working desktop mid-session, with no prompt and no warning, to
+# pick up an image that had been pushed minutes earlier. On a server that is a
+# reasonable default. On a daily-driver laptop it is data loss waiting to happen:
+# anything unsaved in any application is simply gone.
+#
+# APEX-OS already has an explicit, user-driven update path — `apex update`
+# (bootc upgrade + fwupdmgr) — plus `apex rollback` and `apex pin`. An
+# unattended timer duplicating that while adding a surprise reboot is strictly
+# worse than the command the user chose to run.
+#
+# Masked rather than disabled: `disabled` was not enough here (it was disabled
+# AND active). Masking is the only state that cannot be silently re-activated by
+# a preset or a dependency. It lands in /etc, so it is 3-way-merged and any user
+# who WANTS unattended updates can opt back in with:
+#
+#     sudo systemctl unmask bootc-fetch-apply-updates.timer
+#     sudo systemctl enable --now bootc-fetch-apply-updates.timer
+#
+# Updates are still fully available — they are just always the user's decision.
+RUN set -eux; \
+    systemctl mask bootc-fetch-apply-updates.timer; \
+    systemctl mask bootc-fetch-apply-updates.service; \
+    test -L /etc/systemd/system/bootc-fetch-apply-updates.timer; \
+    test "$(readlink /etc/systemd/system/bootc-fetch-apply-updates.timer)" = /dev/null; \
+    echo "unattended bootc updates masked - 'apex update' is the update path"
 
 # ── Default locale: a REAL one, not systemd's C.UTF-8 fallback ──────────────
 # With no /etc/locale.conf, systemd falls back to LANG=C.UTF-8, which has no
