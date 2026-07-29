@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX-OS — race-safe launcher for the APEX Shell session components
+#  Installed to /usr/libexec/apex-shell-autostart; referenced from the seeded
+#  Hyprland config (files/desktop/hypr/hyprland.conf) and the niri config that
+#  apex-shell-firstrun writes.
+#
+#  WHY THIS EXISTS
+#  greetd `exec`s the compositor in PARALLEL with the apex-shell-firstrun user
+#  unit. Neither waits for the other. Measured on a first login (p6-class,
+#  ThinkPad L16 Gen 2):
+#
+#     13:10:55  systemd: Starting apex-shell-firstrun.service
+#     13:10:55  greetd execs Hyprland (PID 1726)
+#     13:10:55  firstrun seeds ~/.config/hypr/hyprland.conf
+#     13:10:55  Hyprland: "Using config: ~/.config/hypr/hyprland.conf"
+#               └─ parses it and fires ALL exec-once lines RIGHT HERE,
+#                  while ~/.local/src/apex-shell DOES NOT EXIST YET
+#     13:10:57  firstrun STARTS the shallow clone
+#     13:11:00  clone finishes
+#
+#  So the two autostart lines that pointed into the checkout ran 2-5 SECONDS
+#  before it existed, and both died instantly. The user landed in a bare
+#  compositor: no bar, no popups, no idle management, no lock timeout. Every
+#  OTHER exec-once survived (awww-daemon, polkit agent, both wl-paste watchers,
+#  fcitx5) because none of them reference the clone — that asymmetry is the
+#  fingerprint of this bug.
+#
+#  WHY ORDERING ALONE CANNOT FIX IT
+#  The provisioner's step-0 comment ("apex-logs 43") moved config seeding to the
+#  TOP of the script to win a different race: if Hyprland starts first it writes
+#  its own stock config and the user is stuck with it. That fix is correct, and it
+#  makes THIS race strictly worse — seeding sooner guarantees Hyprland reads a
+#  config whose exec-once targets are not there yet. The two halves need fixing
+#  in opposite directions: seed EARLY, launch LATE. A concurrent script cannot do
+#  both, so the compositor side has to wait. That is this file.
+#
+#  Idempotent by design: it refuses to start a second copy of either process, so
+#  it is safe to run by hand to repair a live session, and safe for
+#  apex-shell-firstrun to invoke at the end of its own run (step 7) to rescue the
+#  login that is already in progress.
+#
+#  See apex-logs 51 / apexlogs/03-apex-shell-autostart-race.md.
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTE: deliberately NOT `set -e`. This is a session-critical launcher; a
+# non-zero from any probe below must never stop us from getting to the point
+# where quickshell is started.
+set -uo pipefail
+
+SHELL_DIR="${HOME}/.local/src/apex-shell"
+ENTRY="${SHELL_DIR}/shell.qml"
+TIMEOUT="${APEX_SHELL_WAIT_TIMEOUT:-120}"   # a cold clone over slow DSL is slow
+
+log() { printf '[apex-shell-autostart] %s\n' "$*" >&2; }
+
+# ── Wait for the checkout the provisioner is cloning ────────────────────────
+# Gate on shell.qml, NOT on the directory: `git clone` creates its target
+# directory FIRST and populates it over the following seconds, so a directory
+# test would let us through against a half-written tree and quickshell would fail
+# on a missing import instead. shell.qml is the entrypoint quickshell actually
+# loads, so its presence is the real "the clone is usable" signal.
+waited=0
+while [ ! -f "${ENTRY}" ]; do
+    if [ "${waited}" -ge "${TIMEOUT}" ]; then
+        log "timed out after ${TIMEOUT}s waiting for ${ENTRY}."
+        log "the provisioner is probably failing — check:"
+        log "  systemctl --user status apex-shell-firstrun.service"
+        log "  journalctl --user -u apex-shell-firstrun.service -b"
+        exit 1
+    fi
+    [ $(( waited % 10 )) -eq 0 ] && log "waiting for ${ENTRY} (${waited}/${TIMEOUT}s)..."
+    sleep 1
+    waited=$(( waited + 1 ))
+done
+[ "${waited}" -gt 0 ] && log "checkout appeared after ${waited}s"
+
+# ── hypridle ────────────────────────────────────────────────────────────────
+# Prefer the user's OWN ~/.config/hypr/hypridle.conf when it exists.
+#
+# apex-shell-firstrun `cp -n`s the shipped config there precisely so it can be
+# customised without an update overwriting it — but the seeded hyprland.conf then
+# pointed hypridle at the pristine IN-REPO copy anyway. Net effect: edits to
+# ~/.config/hypr/hypridle.conf were silently ignored, AND the shell's own
+# auto-updater (`git reset --hard origin/main`) could revert the file that was
+# actually in use, underneath a running session. Honour the copy the `cp -n`
+# clearly intended to be authoritative.
+if pgrep -x hypridle >/dev/null 2>&1; then
+    log "hypridle already running — skipping"
+else
+    IDLE_CONF="${SHELL_DIR}/src/config/hypridle.conf"
+    [ -f "${HOME}/.config/hypr/hypridle.conf" ] \
+        && IDLE_CONF="${HOME}/.config/hypr/hypridle.conf"
+    if [ -f "${IDLE_CONF}" ]; then
+        log "starting hypridle -c ${IDLE_CONF}"
+        hypridle -c "${IDLE_CONF}" &
+    else
+        log "no hypridle config found — skipping hypridle"
+    fi
+fi
+
+# ── quickshell (the APEX Shell bar / popups / IPC target) ────────────────────
+# Match on the CONFIG PATH, not just the process name: `qs` and `quickshell` are
+# the same binary under two names, and the generated keybinds shell out to
+# `qs ipc -c <dir> call ...` on every popup, so a bare `pgrep -x quickshell`
+# would both miss a running copy started as `qs` and risk matching a transient
+# IPC invocation.
+if pgrep -f "quickshell -c ${SHELL_DIR}" >/dev/null 2>&1 \
+   || pgrep -f "qs -p ${SHELL_DIR}" >/dev/null 2>&1; then
+    log "APEX Shell already running — skipping"
+    exit 0
+fi
+
+log "starting quickshell -c ${SHELL_DIR}"
+exec quickshell -c "${SHELL_DIR}"

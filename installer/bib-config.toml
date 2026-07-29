@@ -53,7 +53,19 @@ contents = """
 #   • NO reboot / poweroff
 #       → the operator reviews the completion summary and reboots manually, so
 #         the USB stick can be removed first.
+#
+# `lang en_US.UTF-8` requires glibc-langpack-en to be present in the image, or it
+# silently degrades to the C.UTF-8 fallback -- the image shipped only
+# glibc-minimal-langpack until apex-logs 53, so en_US.UTF-8 did not exist and
+# this line could not be honoured. It is installed now; keep it that way.
+#
+# `--vckeymap` is set as well as `--xlayouts`: they write DIFFERENT files
+# (/etc/vconsole.conf vs /etc/X11/xorg.conf.d/00-keyboard.conf) and only the
+# latter is read by the 50-apex-keymap generator that gives greetd its layout,
+# while only the former sets the TTY. Specifying just one leaves the other on a
+# default, which is how a machine ends up with a correct greeter and a US
+# console (or vice versa).
 lang en_US.UTF-8
-keyboard --xlayouts=us
+keyboard --xlayouts=us --vckeymap=us
 timezone Australia/Perth --utc
 """
