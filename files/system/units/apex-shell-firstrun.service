@@ -1,38 +1,43 @@
-# APEX-OS — first-login provisioner (systemd USER service).
+# APEX-OS — per-login user provisioner (systemd USER service).
 #
-# APEX Shell is a LIVE git checkout the user updates in place (its own
-# auto-updater pulls `~/.local/src/apex-shell`, and Quickshell hot-reloads
-# from there). That rules out seeding it via /etc/skel — a skel copy would
-# be a detached, non-git snapshot that the shell's updater and hot-reload
-# could not drive. So instead every user gets their OWN clone + config the
-# first time they log in, via this oneshot.
+# Seeds each user's APEX Shell config. It does NOT install the shell: since
+# apex-logs 56 the shell ships inside the image at /usr/share/apex-shell, so this
+# unit does pure local file seeding — no network, no git, no marker.
 #
-# The EXPENSIVE work (clone + matugen render) runs once per user: the script
-# short-circuits on its own ~/.config/apex-shell/.provisioned marker, which it
-# writes only on full success — a failed run (e.g. no network at first login)
-# leaves the marker absent, so the next login retries.
+# WHY THE SHELL IS NO LONGER CLONED PER-USER
+# It used to be a live git checkout in ~/.local/src/apex-shell, updated in place by
+# the shell's own in-app updater and hot-reloaded by Quickshell. That gave APEX-OS
+# TWO independent update channels with no version coupling (bootc for the OS, an
+# in-app `git pull` for the entire UI), made the desktop depend on the network at
+# first login, and put the UI outside the image's signing and rollback story.
+# It also created an unwinnable race: greetd execs the compositor in PARALLEL with
+# this unit, so the compositor's autostart fired against a not-yet-cloned directory
+# and the user got a bare session with no bar (apex-logs 51).
 #
-# There is deliberately NO ConditionPathExists gate here (apex-logs 43). The
-# script's step 0 re-seeds the Hyprland config on EVERY login, because greetd
-# execs the compositor in parallel with this unit: if Hyprland wins the startup
-# race it writes its own stock config, and the user is stuck with it forever
-# once the marker exists. Letting the unit start each login — it costs a few ms
-# and exits immediately when provisioned — is what makes that state repairable.
+# Vendoring the shell into the image fixed all of it at once, and this unit shrank
+# to seeding as a result.
+#
+# There is deliberately NO ConditionPathExists gate and NO .provisioned marker.
+# The marker used to gate the expensive clone — and it is exactly what made every
+# past silent defect permanent, because it short-circuited the retry-at-next-login
+# design that was supposed to be the safety net (apex-logs 52). Everything the
+# script does now is cheap and idempotent, so it runs every login and self-heals:
+# a clobbered config, a stale legacy path, a missing seed all get repaired.
 #
 # Enabled image-wide with `systemctl --global enable` (see the flavor
 # Containerfiles), which symlinks it into every user's default.target.wants.
 [Unit]
-Description=APEX-OS first-login provisioner (clone APEX Shell + seed user config)
+Description=APEX-OS per-login user provisioner (seed APEX Shell user config)
 Documentation=https://github.com/AndreNijman/apex-shell
 
 [Service]
 Type=oneshot
 ExecStart=/usr/libexec/apex-shell-firstrun
-# The script polls for network itself (see below); cap the whole attempt so a
-# wedged clone can never hang the user session. A timeout is a failure, so the
-# marker is not written and the next login retries.
-TimeoutStartSec=300
-# A first-run failure must never wedge login; the missing marker is the retry.
+# Nothing here touches the network any more, so this no longer needs to cover a
+# cold clone. Kept as a low bound purely so a pathological hang can never wedge a
+# login; normal runs finish in well under a second.
+TimeoutStartSec=60
+# A failure must never wedge login. The unit simply runs again next login.
 Restart=no
 
 [Install]
