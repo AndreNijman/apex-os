@@ -1077,18 +1077,46 @@ RUN set -eux; \
     chown root:root /etc/sudoers.d/020-apex-boot-windows; \
     chmod 0440 /etc/sudoers.d/020-apex-boot-windows; \
     visudo -cf /etc/sudoers.d/020-apex-boot-windows; \
-    # Repoint the vendored shell at the image helper. The guards matter more than
-    # the sed: if upstream renames this path, a silent no-op would restore exactly
-    # the bug being fixed, so assert BOTH that the dead path is gone and that the
-    # real one is present.
+    # apex-shell main now calls /usr/libexec/apex-boot-windows itself (upstream
+    # 412d5b2), so this sed is a BACKWARD-COMPAT SHIM, not the fix: it only does
+    # anything when APEX_SHELL_REF pins a shell older than that commit. Kept so
+    # pinning an old ref still produces a working button rather than a dead one.
+    # LIVE lines only, for both the rewrite and the check — the fourth time this
+    # pattern has bitten in this repo (see the (unset) postcondition, the
+    # bash-only-test-syntax check and the fastfetch guard). Rewriting comments made
+    # the sed edit upstream's own explanation of the bug into a false statement, and
+    # checking them made a correctly-fixed upstream file fail the guard.
     P=/usr/share/apex-shell/src/scripts/PowerControl.sh; \
-    sed -i 's|/usr/local/bin/caelestia-boot-windows|/usr/libexec/apex-boot-windows|g' "$P"; \
-    if grep -q 'caelestia-boot-windows' "$P"; then \
-        echo "FATAL: PowerControl.sh still references the caelestia helper path"; exit 1; \
+    # Record whether this is a PRE-probe shell before rewriting, so the guard below
+    # can tell "someone pinned an old release" apart from "main regressed".
+    PRE_PROBE=0; \
+    if grep -vE '^[[:space:]]*#' "$P" | grep -q 'caelestia-boot-windows'; then PRE_PROBE=1; fi; \
+    sed -i '/^[[:space:]]*#/!s|/usr/local/bin/caelestia-boot-windows|/usr/libexec/apex-boot-windows|g' "$P"; \
+    if grep -vE '^[[:space:]]*#' "$P" | grep -q 'caelestia-boot-windows'; then \
+        echo "FATAL: PowerControl.sh still calls the dead /usr/local helper path"; exit 1; \
     fi; \
     grep -q '/usr/libexec/apex-boot-windows' "$P"; \
+    # The probe action PowerMenu uses to decide whether to show the Windows row. If
+    # an upstream refactor drops it the probe fails, the row is hidden, and the
+    # button silently disappears for everyone — indistinguishable from "you have no
+    # Windows", which is the exact silent-regression class this file exists to catch.
+    #
+    # But a shell pinned from BEFORE the probe existed legitimately does not have it,
+    # and APEX_SHELL_REF exists precisely so an old release can be rebuilt
+    # reproducibly. Failing that build would be obstructive and wrong — the button
+    # was already dead in those refs. So: hard failure only when this is a
+    # post-fix shell that LOST the probe; a warning when an old ref was pinned.
+    if ! grep -q 'windows-check' "$P"; then \
+        if [ "$PRE_PROBE" = 1 ]; then \
+            echo "WARN: pinned apex-shell predates the windows-check probe — the Windows row will stay hidden in this image"; \
+        else \
+            echo "FATAL: PowerControl.sh has no windows-check action — PowerMenu would hide the Windows row on every machine"; exit 1; \
+        fi; \
+    else \
+        grep -q 'windows-check' /usr/share/apex-shell/src/services/PowerMenu.qml; \
+    fi; \
     bash -n "$P"; \
-    echo "windows boot helper installed; PowerControl.sh repointed at /usr/libexec"
+    echo "windows boot helper installed; PowerControl.sh + PowerMenu probe verified"
 
 # The config UI shows the shell version via `git -C <shellDir> describe`, which
 # returns nothing now that .git is gone (the field would read "…" forever). Fall
