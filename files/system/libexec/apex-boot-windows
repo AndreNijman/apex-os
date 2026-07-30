@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX-OS — one-shot reboot into Windows  (apex-logs 15)
+#
+#  Arms the EFI BootNext variable to the Windows Boot Manager and reboots.
+#  BootNext is consumed by the firmware after a single boot, so the machine
+#  returns to APEX-OS on the next power-on without any further action. Nothing
+#  about the persistent BootOrder is modified.
+#
+#  WHY THIS FILE EXISTS AT ALL
+#  The shell's power menu has always had a "Boot into Windows" button, and it has
+#  never worked on any machine. src/scripts/PowerControl.sh called
+#  /usr/local/bin/caelestia-boot-windows — a path inherited from the upstream
+#  project apex-shell was forked from, which APEX-OS never shipped. It could not
+#  have shipped it there either: on a bootc system /usr is read-only, so
+#  Containerfile.base redirects /usr/local -> ../var/usrlocal (writable per-machine
+#  state). An image simply cannot deliver a file to /usr/local/bin. The button
+#  printed "no Windows boot helper installed" to a log nobody reads and did
+#  nothing. The helper therefore lives in /usr/libexec, which IS image content, and
+#  the build rewrites the vendored PowerControl.sh to call it.
+#
+#  WHY IT VERIFIES THE LOADER INSTEAD OF TRUSTING THE BOOT ENTRY
+#  An NVRAM entry named "Windows Boot Manager" is NOT proof that Windows exists.
+#  Windows leaves its entry behind when its partition is deleted, so a machine with
+#  no Windows at all can still advertise one. This was found on the author's own
+#  laptop: Boot0000 pointed at \EFI\Microsoft\Boot\bootmgfw.efi on an ESP whose
+#  only directories were BOOT and fedora. Arming BootNext there would reboot the
+#  machine into a loader that does not exist — a boot failure, triggered by
+#  clicking a button on the desktop, on a system that was working fine. So the
+#  entry's ESP is resolved by partition UUID and the loader is confirmed present
+#  before anything is armed or rebooted.
+#
+#  Usage:
+#    apex-boot-windows            arm BootNext and reboot
+#    apex-boot-windows --check    report whether a bootable Windows exists; never
+#                                 touches NVRAM and never reboots. Exit 0 = yes.
+#
+#  Runs as root through a dedicated NOPASSWD sudoers rule restricted to exactly
+#  these two invocations (/etc/sudoers.d/020-apex-boot-windows). It takes no
+#  caller-supplied paths or entry numbers on purpose: the only privileged actions
+#  are "set BootNext to an entry I verified myself" and "reboot", and an
+#  unprivileged local user can already reboot via logind.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+WIN_LOADER_REL='EFI/Microsoft/Boot/bootmgfw.efi'
+ESP_TYPE_GUID='c12a7328-f81f-11d2-ba4b-00a0c93ec93b'
+CHECK_ONLY=0
+[ "${1:-}" = "--check" ] && CHECK_ONLY=1
+
+log() { printf '[apex-boot-windows] %s\n' "$*" >&2; }
+
+# Surface the reason in the SESSION, not just on a stderr nobody sees. The shell
+# runs us through sudo, so SUDO_USER identifies who clicked the button and their
+# bus lives at a well-known path. Without this, "no Windows found" is invisible and
+# the button looks broken rather than honest. Skipped for --check, which is a query.
+notify_user() {
+    [ "${CHECK_ONLY}" = 1 ] && return 0
+    [ -n "${SUDO_USER:-}" ] || return 0
+    command -v notify-send >/dev/null 2>&1 || return 0
+    local uid
+    uid="$(id -u "${SUDO_USER}" 2>/dev/null)" || return 0
+    [ -S "/run/user/${uid}/bus" ] || return 0
+    su -s /bin/sh "${SUDO_USER}" -c \
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus \
+         notify-send --app-name='APEX-OS' --icon=computer-fail \
+         'Boot into Windows' '$(printf '%s' "$1" | sed "s/'/'\\\\''/g")'" \
+        >/dev/null 2>&1 || true
+}
+
+fail() { log "$*"; notify_user "$*"; exit 1; }
+
+[ "$(id -u)" = 0 ] || fail "This helper must run as root (via the APEX sudoers rule)."
+
+# ── 1. UEFI is mandatory ─────────────────────────────────────────────────────
+# BootNext is an EFI variable. On a BIOS/CSM install there is no equivalent, and
+# there is no safe generic way to chainload Windows, so say so plainly.
+[ -d /sys/firmware/efi ] \
+    || fail "This machine is booted in legacy BIOS mode, so a one-shot Windows boot is not possible."
+command -v efibootmgr >/dev/null 2>&1 \
+    || fail "efibootmgr is not installed, so the Windows boot entry cannot be set."
+
+# ── 2. Is the loader present on the ESP a given entry points at? ─────────────
+# Returns 0 = loader confirmed, 1 = ESP readable but loader absent (stale entry),
+# 2 = could not verify (no such partition, or it would not mount read-only).
+esp_has_loader() {
+    local partuuid="$1" dev mp tmp rc
+    dev="/dev/disk/by-partuuid/${partuuid}"
+    [ -b "${dev}" ] || return 2
+
+    # If it is already mounted, use that — do not disturb an in-use mount.
+    mp="$(findmnt -fnro TARGET --source "${dev}" 2>/dev/null | head -1)"
+    if [ -n "${mp}" ]; then
+        [ -f "${mp}/${WIN_LOADER_REL}" ] && return 0 || return 1
+    fi
+
+    tmp="$(mktemp -d)" || return 2
+    # Read-only, and no exec/suid/dev: we are only stat-ing one file on a
+    # partition that may be controlled by another OS.
+    if mount -o ro,nosuid,nodev,noexec "${dev}" "${tmp}" 2>/dev/null; then
+        rc=1
+        [ -f "${tmp}/${WIN_LOADER_REL}" ] && rc=0
+        umount "${tmp}" 2>/dev/null || true
+        rmdir "${tmp}" 2>/dev/null || true
+        return "${rc}"
+    fi
+    rmdir "${tmp}" 2>/dev/null || true
+    return 2
+}
+
+# ── 3. Does ANY ESP carry a Windows loader? ──────────────────────────────────
+# Used only to tell two very different situations apart: "there is no Windows on
+# this machine" versus "Windows is here but the firmware has no entry for it".
+# The advice for those is not the same, so they must not share a message.
+any_esp_has_loader() {
+    local name part
+    while read -r name part; do
+        [ "${part}" = "${ESP_TYPE_GUID}" ] || continue
+        for pu in /dev/disk/by-partuuid/*; do
+            [ -b "${pu}" ] || continue
+            [ "$(readlink -f "${pu}")" = "/dev/${name}" ] || continue
+            esp_has_loader "$(basename "${pu}")" && return 0
+        done
+    done < <(lsblk -rno NAME,PARTTYPE 2>/dev/null)
+    return 1
+}
+
+# ── 4. Find a Windows entry whose loader actually exists ─────────────────────
+FOUND_ENTRY=""
+FOUND_LABEL=""
+STALE_SEEN=0
+UNVERIFIABLE_ENTRY=""
+UNVERIFIABLE_LABEL=""
+
+while IFS= read -r line; do
+    num="$(printf '%s' "${line}" | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p')"
+    [ -n "${num}" ] || continue
+    # Label is between the boot number/active flag and the first tab.
+    label="$(printf '%s' "${line}" | sed -n 's/^Boot[0-9A-Fa-f]\{4\}\*\{0,1\} \([^\t]*\).*/\1/p')"
+    guid="$(printf '%s' "${line}" | sed -n 's/.*GPT,\([0-9a-fA-F-]\{36\}\).*/\1/p')"
+
+    if [ -n "${guid}" ]; then
+        esp_has_loader "${guid}"
+        case "$?" in
+            0) FOUND_ENTRY="${num}"; FOUND_LABEL="${label}"; break ;;
+            1) STALE_SEEN=1; log "ignoring Boot${num} (${label}): its ESP has no ${WIN_LOADER_REL}" ;;
+            *) UNVERIFIABLE_ENTRY="${num}"; UNVERIFIABLE_LABEL="${label}" ;;
+        esac
+    else
+        # Non-GPT device path (MBR, or a firmware-specific form we do not parse).
+        UNVERIFIABLE_ENTRY="${num}"; UNVERIFIABLE_LABEL="${label}"
+    fi
+done < <(efibootmgr -v 2>/dev/null | grep -i 'Windows Boot Manager')
+
+# An entry we could not check is still better than refusing outright: a working
+# dual-boot must not be blocked just because its ESP would not mount here. Only
+# accept it when nothing was positively proven stale.
+if [ -z "${FOUND_ENTRY}" ] && [ -n "${UNVERIFIABLE_ENTRY}" ] && [ "${STALE_SEEN}" = 0 ]; then
+    FOUND_ENTRY="${UNVERIFIABLE_ENTRY}"
+    FOUND_LABEL="${UNVERIFIABLE_LABEL}"
+    log "could not verify Boot${FOUND_ENTRY}'s ESP; proceeding on the firmware's word"
+fi
+
+# ── 5. Decide ────────────────────────────────────────────────────────────────
+if [ -z "${FOUND_ENTRY}" ]; then
+    if [ "${STALE_SEEN}" = 1 ]; then
+        fail "This machine advertises a Windows Boot Manager entry, but the Windows loader is gone — Windows was removed and its firmware entry was left behind. Nothing was rebooted."
+    elif any_esp_has_loader; then
+        fail "Windows is installed on this machine but has no UEFI boot entry, so it cannot be selected. Repairing it needs the Windows recovery media (bootrec /rebuildbcd)."
+    else
+        fail "No Windows installation was found on this machine."
+    fi
+fi
+
+if [ "${CHECK_ONLY}" = 1 ]; then
+    log "bootable Windows found: Boot${FOUND_ENTRY} (${FOUND_LABEL})"
+    exit 0
+fi
+
+# ── 6. Arm BootNext and reboot ───────────────────────────────────────────────
+# BootNext only, never BootOrder: this must be a ONE-shot. Setting BootOrder would
+# silently make Windows the permanent default, which is not what the button says.
+efibootmgr --bootnext "${FOUND_ENTRY}" >/dev/null 2>&1 \
+    || fail "Could not set the EFI BootNext variable (is efivarfs mounted read-only?). Nothing was rebooted."
+log "BootNext armed -> Boot${FOUND_ENTRY} (${FOUND_LABEL}); rebooting"
+exec systemctl reboot
