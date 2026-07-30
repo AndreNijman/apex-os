@@ -688,6 +688,42 @@ RUN set -eux; \
     else echo "claude-code: npm install FAILED (absent; non-fatal)"; fi; \
     rm -rf /tmp/.npm /tmp/.node-compile-cache /root/.npm 2>/dev/null || true
 
+# ── npm global prefix: per-user, not root-owned /usr/local (apex-logs 16) ────
+# Fedora's nodejs ships /etc/npmrc with `prefix=/usr/local`. On a bootc system
+# /usr/local is a symlink to ../var/usrlocal, created root-owned 0755 by the
+# tmpfiles rule below, so ANY `npm install -g` as a normal user dies with:
+#
+#   npm error code EACCES
+#   npm error syscall rename
+#   npm error path /var/usrlocal/lib/node_modules/@openai/codex
+#
+# It is not fixable by chmod-ing that directory: anything a user installed after
+# a `sudo npm i -g` stays root-owned and the next unprivileged install fails on
+# the rename again. And making a shared system path group-writable to install
+# arbitrary npm packages is a bad trade.
+#
+# So point the GLOBAL prefix at the user's own tree. npm expands ${HOME} in
+# npmrc (verified against npm 10.9.7: it resolves to /var/home/<user>/.local),
+# and ~/.local/bin is already first on PATH via /etc/environment and the seeded
+# hyprland.conf, so `npm i -g <pkg>` then `<pkg>` just works with no sudo.
+#
+# This does NOT affect the image's own globals: the claude-code install above
+# passes --prefix /usr explicitly, which overrides npmrc. Anyone who genuinely
+# wants a system-wide install can still say `sudo npm i -g --prefix /usr/local`.
+#
+# Both files are written because ostree keeps the package copy at /usr/etc and
+# derives /etc from it; a future nodejs update replaces /usr/etc/npmrc, and this
+# RUN re-applies after every dnf install so the fix cannot silently regress.
+RUN set -eux; \
+    for f in /etc/npmrc /usr/etc/npmrc; do \
+        [ -f "$f" ] || continue; \
+        sed -i 's|^prefix=/usr/local$|prefix=${HOME}/.local|' "$f"; \
+        grep -q '^prefix=\${HOME}/.local$' "$f"; \
+        ! grep -q '^prefix=/usr/local$' "$f"; \
+    done; \
+    grep -q '^prefix=\${HOME}/.local$' /etc/npmrc; \
+    echo "npm global prefix -> \${HOME}/.local (was root-owned /usr/local)"
+
 # ── System config drop-ins: dark mode, default terminal, fastfetch, Firefox ──
 # Dark mode (apex-logs 28): GTK3/4 prefer-dark, qt6ct dark palette, and the dconf
 # default color-scheme=prefer-dark that the freedesktop appearance portal reads
