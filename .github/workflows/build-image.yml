@@ -281,9 +281,21 @@ jobs:
       - name: Push base + capture digest
         id: push
         run: |
-          sudo podman push "$IMAGE_BASE:${{ github.sha }}" \
+          # zstd:chunked instead of the default gzip (apex-logs 16). Two effects,
+          # neither of which changes image CONTENT — only how it is packed:
+          #   - zstd compresses this tree meaningfully smaller than gzip, and
+          #     decompresses several times faster, so `apex update` spends less
+          #     time both downloading and unpacking.
+          #   - :chunked publishes a per-layer chunk manifest, which lets a client
+          #     fetch only the chunks it does not already have instead of whole
+          #     layers.
+          # Requires an OCI manifest (podman already produces one here) and a
+          # client that understands zstd; the fleet is bootc 1.16+/ostree 2026.2,
+          # which does. `apex rollback` remains the escape hatch.
+          sudo podman push --compression-format zstd:chunked \
+            "$IMAGE_BASE:${{ github.sha }}" \
             --digestfile=/tmp/base.digest
-          sudo podman push "$IMAGE_BASE:latest"
+          sudo podman push --compression-format zstd:chunked "$IMAGE_BASE:latest"
           DIGEST="$(cat /tmp/base.digest)"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Base digest: $DIGEST"
@@ -414,9 +426,12 @@ jobs:
       - name: Push ${{ matrix.flavor }} + capture digest
         id: push
         run: |
-          sudo podman push "$IMAGE:${{ matrix.flavor }}-${{ github.sha }}" \
+          # zstd:chunked — see the note on the base push. This is the one users
+          # actually pull, so it is where the download saving lands.
+          sudo podman push --compression-format zstd:chunked \
+            "$IMAGE:${{ matrix.flavor }}-${{ github.sha }}" \
             --digestfile=/tmp/flavor.digest
-          sudo podman push "$IMAGE:${{ matrix.flavor }}"
+          sudo podman push --compression-format zstd:chunked "$IMAGE:${{ matrix.flavor }}"
           DIGEST="$(cat /tmp/flavor.digest)"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "${{ matrix.flavor }} digest: $DIGEST"
