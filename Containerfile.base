@@ -881,6 +881,13 @@ RUN set -eux; \
 COPY files/desktop/zsh/zshrc            /usr/share/apex/zsh/zshrc
 COPY files/desktop/starship/starship.toml /usr/share/apex/starship/starship.toml
 
+# starship in bash too (apex-logs 14). zsh is the default login shell and gets its
+# prompt from the seeded ~/.zshrc, but bash was left with the stock prompt, so any
+# bash — root, a TTY, a nested shell, `podman exec` — looked nothing like the rest
+# of the OS. A profile.d drop-in is image-managed, so unlike a dotfile it keeps
+# working and keeps improving across updates.
+COPY files/desktop/bash/apex-starship.sh /etc/profile.d/apex-starship.sh
+
 # zsh becomes the default login shell for accounts created from here on. This
 # sets the DEFAULT in useradd's config rather than rewriting existing accounts —
 # changing a shell out from under an existing user is not ours to do.
@@ -891,7 +898,16 @@ RUN set -eux; \
     test -x /usr/bin/starship; \
     test -s /usr/share/apex/zsh/zshrc; \
     test -s /usr/share/apex/starship/starship.toml; \
-    zsh -n /usr/share/apex/zsh/zshrc
+    zsh -n /usr/share/apex/zsh/zshrc; \
+    bash -n /etc/profile.d/apex-starship.sh; \
+    test -s /etc/profile.d/apex-starship.sh; \
+    grep -q 'starship init bash' /etc/profile.d/apex-starship.sh; \
+    grep -q 'BASH_VERSION' /etc/profile.d/apex-starship.sh; \
+    grep -q 'starship init zsh' /usr/share/apex/zsh/zshrc; \
+    grep -q '@ACCENT@' /usr/share/apex/starship/starship.toml; \
+    grep -q 'zmodload zsh/complist' /usr/share/apex/zsh/zshrc; \
+    grep -q 'bindkey -M menuselect' /usr/share/apex/zsh/zshrc; \
+    zsh -fc 'zmodload zsh/complist && bindkey -M menuselect >/dev/null'
 
 # ── Stage 5b2: APEX Shell, VENDORED INTO THE IMAGE ──────────────────────────
 # APEX Shell now ships INSIDE the image at /usr/share/apex-shell instead of being
@@ -1127,6 +1143,23 @@ COPY --chmod=0755 files/scripts/apex-debrand-runtime.sh \
 # etc. so a fresh login is the intended APEX session, not the stock hyprland
 # example (which binds dolphin/wofi that aren't installed). apex-logs 16.
 COPY files/desktop/hypr/hyprland.conf /usr/share/apex/hypr/hyprland.conf
+
+# Guards for the seeded Hyprland template (apex-logs 14):
+#   1. the autostart must be the libexec launcher. The retired
+#      ~/.local/bin/apex-shell-autostart shim is deleted by the provisioner, so a
+#      template still naming it seeds a dead exec-once and the session comes up
+#      with no bar at all.
+#   2. the template must NOT contain the value localectl prints for an unset
+#      keymap. apex-shell-firstrun greps seeded configs for it, so shipping it —
+#      even inside a comment — made a correct, brand-new install fail its own
+#      provisioning check. The check strips comments now; this keeps the string
+#      out of the file so neither half of the bug can return.
+RUN set -eux; \
+    grep -q '^exec-once = /usr/libexec/apex-shell-autostart' /usr/share/apex/hypr/hyprland.conf; \
+    ! grep -q 'local/bin/apex-shell-autostart' /usr/share/apex/hypr/hyprland.conf; \
+    ! grep -q '(unset)' /usr/share/apex/hypr/hyprland.conf; \
+    grep -q '@KB_LAYOUT@' /usr/share/apex/hypr/hyprland.conf; \
+    grep -q '@HOME@' /usr/share/apex/hypr/hyprland.conf
 
 # Greeter session picker: offer Hyprland + niri only. sway/labwc are the greeter
 # HOST compositor, not user sessions — strip their wayland-session files so they
