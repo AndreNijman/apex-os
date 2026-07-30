@@ -137,7 +137,8 @@ alias apex-status='bootc status'
 alias apex-rollback='sudo bootc rollback'
 
 # ── tools ────────────────────────────────────────────────────────────────────
-command -v zoxide  >/dev/null 2>&1 && eval "$(zoxide init zsh --cmd cd)"
+# fzf here (it defines widgets, so it must come before syntax highlighting below).
+# zoxide is deliberately NOT here — see the note after the prompt.
 command -v fzf     >/dev/null 2>&1 && source <(fzf --zsh) 2>/dev/null
 
 # ── prompt ───────────────────────────────────────────────────────────────────
@@ -150,6 +151,15 @@ else
     autoload -Uz colors && colors
     PROMPT='%F{green}%~%f %# '
 fi
+
+# zoxide AFTER starship, deliberately. zoxide installs a precmd hook and checks at
+# startup that nothing registered another one after it; starship's init does exactly
+# that. With zoxide first, every single new shell printed
+#   "zoxide: detected a possible configuration issue. Please ensure that zoxide is
+#    initialized right at the end of your shell configuration file"
+# above the prompt — which is also the upstream-recommended ordering, so this is
+# the fix rather than silencing the warning with _ZO_DOCTOR=0.
+command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init zsh --cmd cd)"
 
 # Syntax highlighting LAST — see the note above.
 [[ -r /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]] && \

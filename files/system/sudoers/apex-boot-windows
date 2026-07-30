@@ -1,0 +1,23 @@
+# APEX-OS — let the desktop power menu arm a one-shot reboot into Windows.
+#
+# The shell's "Boot into Windows" button runs src/scripts/PowerControl.sh as the
+# logged-in user; setting an EFI variable needs root, and a password prompt is not
+# something a compositor-spawned script can present. This rule is what the comment
+# in PowerControl.sh has always claimed existed — APEX-OS never actually shipped
+# one, which is half the reason that button has never worked (apex-logs 15).
+#
+# Deliberately narrow: exactly two invocations of one image-owned helper.
+# The empty string after the first form means "with no arguments at all". Without
+# it, sudoers grants the command with ANY arguments, which is a much wider grant
+# than intended even for a helper that currently ignores them.
+#
+# This is not a meaningful escalation. /usr/libexec/apex-boot-windows accepts no
+# caller-supplied paths and no boot-entry number: it resolves the Windows entry
+# itself, verifies the loader exists, and its only privileged effects are setting
+# EFI BootNext to that verified entry and rebooting. An unprivileged local user can
+# already reboot the machine through logind, and BootNext is consumed after one
+# boot, so nothing about the persistent boot order changes.
+#
+# wheel rather than every local user: this is an administrative action on firmware
+# state, and the APEX installer puts the primary account in wheel.
+%wheel ALL=(root) NOPASSWD: /usr/libexec/apex-boot-windows "", /usr/libexec/apex-boot-windows --check

@@ -920,7 +920,14 @@ RUN set -eux; \
     grep -q 'greeting.sh' /etc/bashrc; \
     grep -q 'greeting.sh' /usr/share/apex/zsh/zshrc; \
     grep -q 'fastfetch' /usr/share/apex/shell/greeting.sh; \
-    ! grep -q 'fastfetch' /etc/bashrc
+    # LIVE lines only. This guard's job is "no fastfetch INVOCATION survives in
+    # /etc/bashrc" — the inline block must be gone and only the shared file
+    # sourced. Grepping the whole file failed the build on the first attempt,
+    # because the replacement comment explaining the change says the word
+    # "fastfetch" itself. Third instance of a guard tripping over a legitimate
+    # mention in a comment (see also the (unset) postcondition and this file's
+    # bash-only-test-syntax check), hence comment-stripping here too.
+    ! grep -vE '^[[:space:]]*#' /etc/bashrc | grep -q 'fastfetch'
 
 # ── Stage 5b2: APEX Shell, VENDORED INTO THE IMAGE ──────────────────────────
 # APEX Shell now ships INSIDE the image at /usr/share/apex-shell instead of being
@@ -1042,6 +1049,46 @@ RUN set -eux; \
     grep -q 'lock_cmd = qs -c /usr/share/apex-shell ipc call lockscreen lock' \
         "$S/src/config/hypridle.conf"; \
     echo "shell paths rewritten to /usr/share/apex-shell; lock_cmd + DPMS verified"
+
+# ── Stage 5b3: make the power menu's "Boot into Windows" button work ─────────
+# It never has, on any machine. PowerControl.sh called
+# /usr/local/bin/caelestia-boot-windows — a path inherited from the project
+# apex-shell was forked from, which APEX-OS has never shipped and CANNOT ship:
+# /usr is read-only on bootc, so /usr/local is redirected to ../var/usrlocal
+# (writable per-machine state) earlier in this file. No image can put a file
+# there. The button logged "no Windows boot helper installed" to a log nobody
+# reads. Its comment also claimed a dedicated NOPASSWD sudoers rule existed;
+# none was ever shipped either. Both halves are fixed here (apex-logs 15).
+#
+# efibootmgr is made an EXPLICIT dependency. It was only ever present transitively
+# (via the shim/grub2-efi chain), and the button is now useless without it, so a
+# future base change dropping that chain must not silently break the feature.
+COPY files/system/libexec/apex-boot-windows /usr/libexec/apex-boot-windows
+COPY files/system/sudoers/apex-boot-windows /etc/sudoers.d/020-apex-boot-windows
+RUN set -eux; \
+    dnf5 -y install efibootmgr; \
+    dnf5 clean all; \
+    test -x /usr/sbin/efibootmgr -o -x /usr/bin/efibootmgr; \
+    chmod 0755 /usr/libexec/apex-boot-windows; \
+    bash -n /usr/libexec/apex-boot-windows; \
+    # sudoers files are parsed by a setuid binary: wrong mode or a syntax error is
+    # refused at RUNTIME, which would mean a password prompt no compositor-spawned
+    # script can answer. visudo -c turns that into a build failure instead.
+    chown root:root /etc/sudoers.d/020-apex-boot-windows; \
+    chmod 0440 /etc/sudoers.d/020-apex-boot-windows; \
+    visudo -cf /etc/sudoers.d/020-apex-boot-windows; \
+    # Repoint the vendored shell at the image helper. The guards matter more than
+    # the sed: if upstream renames this path, a silent no-op would restore exactly
+    # the bug being fixed, so assert BOTH that the dead path is gone and that the
+    # real one is present.
+    P=/usr/share/apex-shell/src/scripts/PowerControl.sh; \
+    sed -i 's|/usr/local/bin/caelestia-boot-windows|/usr/libexec/apex-boot-windows|g' "$P"; \
+    if grep -q 'caelestia-boot-windows' "$P"; then \
+        echo "FATAL: PowerControl.sh still references the caelestia helper path"; exit 1; \
+    fi; \
+    grep -q '/usr/libexec/apex-boot-windows' "$P"; \
+    bash -n "$P"; \
+    echo "windows boot helper installed; PowerControl.sh repointed at /usr/libexec"
 
 # The config UI shows the shell version via `git -C <shellDir> describe`, which
 # returns nothing now that .git is gone (the field would read "…" forever). Fall
