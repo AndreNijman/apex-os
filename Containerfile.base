@@ -784,7 +784,7 @@ RUN set -eux; \
     rm -rf /usr/local && ln -s ../var/usrlocal /usr/local; \
     printf 'd /var/usrlocal 0755 root root -\n' > /usr/lib/tmpfiles.d/apex-usrlocal.conf; \
     printf 'QT_QPA_PLATFORMTHEME=qt6ct\nTERMINAL=alacritty\nDISABLE_AUTOUPDATER=1\n' >> /etc/environment; \
-    printf '\n# APEX-OS fastfetch greeting (apex-logs 33-fastfetch-terminal.md)\nif [[ $- == *i* ]] && [ -z "${APEX_GREETED:-}" ] && command -v fastfetch >/dev/null 2>&1; then\n    export APEX_GREETED=1\n    _apex_c=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)\n    case "$_apex_c" in *light*) _apex_lc=black;; *) _apex_lc=white;; esac\n    fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "$_apex_lc"\n    unset _apex_c _apex_lc\nfi\n' >> /etc/bashrc; \
+    printf '\n# APEX-OS fastfetch greeting. The logic lives in ONE file shared with zsh —\n# zsh is the default login shell, so a bash-only greeting was never seen by\n# real users (apex-logs 14). Guarded so a partial image cannot break bash.\n[ -r /usr/share/apex/shell/greeting.sh ] && . /usr/share/apex/shell/greeting.sh\n' >> /etc/bashrc; \
     dconf update
 
 # ── Stage 5b: apexd + apex CLI, sysprofiles, D-Bus/polkit, sing-box ─────────
@@ -888,6 +888,10 @@ COPY files/desktop/starship/starship.toml /usr/share/apex/starship/starship.toml
 # working and keeps improving across updates.
 COPY files/desktop/bash/apex-starship.sh /etc/profile.d/apex-starship.sh
 
+# The fastfetch greeting, sourced by /etc/bashrc AND by the seeded ~/.zshrc, so the
+# two can never drift. Image-managed for the same reason as the prompt above.
+COPY files/desktop/shell/apex-greeting.sh /usr/share/apex/shell/greeting.sh
+
 # zsh becomes the default login shell for accounts created from here on. This
 # sets the DEFAULT in useradd's config rather than rewriting existing accounts —
 # changing a shell out from under an existing user is not ours to do.
@@ -907,7 +911,16 @@ RUN set -eux; \
     grep -q '@ACCENT@' /usr/share/apex/starship/starship.toml; \
     grep -q 'zmodload zsh/complist' /usr/share/apex/zsh/zshrc; \
     grep -q 'bindkey -M menuselect' /usr/share/apex/zsh/zshrc; \
-    zsh -fc 'zmodload zsh/complist && bindkey -M menuselect >/dev/null'
+    zsh -fc 'zmodload zsh/complist && bindkey -M menuselect >/dev/null'; \
+    test -s /usr/share/apex/shell/greeting.sh; \
+    sh -n   /usr/share/apex/shell/greeting.sh; \
+    bash -n /usr/share/apex/shell/greeting.sh; \
+    zsh -n  /usr/share/apex/shell/greeting.sh; \
+    ! grep -q '\[\[' /usr/share/apex/shell/greeting.sh; \
+    grep -q 'greeting.sh' /etc/bashrc; \
+    grep -q 'greeting.sh' /usr/share/apex/zsh/zshrc; \
+    grep -q 'fastfetch' /usr/share/apex/shell/greeting.sh; \
+    ! grep -q 'fastfetch' /etc/bashrc
 
 # ── Stage 5b2: APEX Shell, VENDORED INTO THE IMAGE ──────────────────────────
 # APEX Shell now ships INSIDE the image at /usr/share/apex-shell instead of being

@@ -158,3 +158,12 @@ fi
 # ── local overrides ──────────────────────────────────────────────────────────
 # Anything you want that should NOT be touched by APEX. Sourced last so it wins.
 [[ -r "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"
+
+# ── greeting ─────────────────────────────────────────────────────────────────
+# fastfetch on every new terminal. Shared verbatim with bash (/etc/bashrc sources
+# the same file), because zsh is the default login shell here and a bash-only
+# greeting meant nobody actually saw it.
+#
+# LAST on purpose, after the local overrides above: that is what lets you put
+# APEX_NO_GREETING=1 in ~/.zshrc.local and have it actually take effect.
+[[ -r /usr/share/apex/shell/greeting.sh ]] && source /usr/share/apex/shell/greeting.sh
