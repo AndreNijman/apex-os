@@ -30,6 +30,15 @@ unsetopt BEEP
 # ── completion ───────────────────────────────────────────────────────────────
 # Cached so shell startup stays fast; case-insensitive and substring matching so
 # `cd dow<Tab>` and `cd Downloads` both work.
+#
+# zsh/complist MUST be loaded, and it must be loaded before compinit runs. It is
+# what provides the `menuselect` keymap and the highlighted, arrow-navigable
+# completion menu. Without it `zstyle ... menu select` below is a silent NO-OP:
+# zsh falls back to dumping every match as a flat column list with no selection,
+# no highlight and no keys — which is exactly how this config shipped, and why
+# completion felt a decade out of date (apex-logs 14).
+zmodload zsh/complist
+
 autoload -Uz compinit
 ZCOMPDUMP="${XDG_CACHE_HOME:-$HOME/.cache}/zsh/zcompdump"
 mkdir -p "${ZCOMPDUMP:h}" 2>/dev/null
@@ -37,13 +46,42 @@ mkdir -p "${ZCOMPDUMP:h}" 2>/dev/null
 # cost in zsh startup.
 if [[ -n ${ZCOMPDUMP}(#qN.mh+24) ]]; then compinit -d "$ZCOMPDUMP"; else compinit -C -d "$ZCOMPDUMP"; fi
 
+# A second <Tab> enters the menu; accepting a match leaves the cursor at the end
+# of the word rather than mid-word. MENU_COMPLETE stays OFF deliberately: it
+# inserts the first match blindly instead of showing you the choices.
+setopt AUTO_MENU ALWAYS_TO_END LIST_PACKED
+unsetopt MENU_COMPLETE FLOW_CONTROL
+
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|=*' 'l:|=* r:|=*'
 zstyle ':completion:*' menu select
 zstyle ':completion:*' group-name ''
-zstyle ':completion:*:descriptions' format '%F{#8A93A6}%d%f'
 zstyle ':completion:*' use-cache on
 zstyle ':completion:*' cache-path "${XDG_CACHE_HOME:-$HOME/.cache}/zsh/zcompcache"
 zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}"
+# Labelled groups, and say WHY there is nothing rather than just beeping.
+zstyle ':completion:*' verbose yes
+zstyle ':completion:*:descriptions' format '%F{#8A93A6}%B%d%b%f'
+zstyle ':completion:*:messages'     format '%F{#8A93A6}%d%f'
+zstyle ':completion:*:warnings'     format '%F{#F87171}no matches for %d%f'
+zstyle ':completion:*:corrections'  format '%F{#FDE047}%d (errors: %e)%f'
+# Long lists get a position indicator instead of scrolling off into nowhere.
+zstyle ':completion:*' select-prompt '%SMatch %m: %p%s'
+# `sudo <Tab>` should complete the commands root can actually run.
+zstyle ':completion:*:sudo:*' command-path /usr/local/sbin /usr/local/bin \
+                                           /usr/sbin /usr/bin /sbin /bin
+# Killing a process should show you what you are about to kill.
+zstyle ':completion:*:*:*:*:processes' command 'ps -u $USER -o pid,user,comm -w -w'
+zstyle ':completion:*:*:kill:*:processes' list-colors '=(#b) #([0-9]#)*=0=01;31'
+zstyle ':completion:*:kill:*' force-list always
+# Keep . and .. out of directory completion; they are never what you meant.
+zstyle ':completion:*' special-dirs false
+
+# Keys INSIDE the completion menu. Arrows work by default; these add the ones
+# people reach for and expect to exist.
+bindkey -M menuselect '^[[Z' reverse-menu-complete   # Shift-Tab steps backwards
+bindkey -M menuselect '^M'   .accept-line            # Enter accepts and runs
+bindkey -M menuselect '^['   send-break              # Esc leaves the menu alone
+bindkey -M menuselect '/'    history-incremental-search-forward  # type to filter
 
 # ── keys ─────────────────────────────────────────────────────────────────────
 # Emacs bindings (what most people expect), plus the keys that are wrong by

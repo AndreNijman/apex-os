@@ -197,11 +197,48 @@ fi
 # @ACCENT@ placeholder that has to become chartreuse on Daily and gold on
 # Gaming — skel is a straight copy and cannot substitute anything.
 #
-# Both are seeded ONLY if absent. These are the user's dotfiles from the moment
-# they first log in; APEX writes a good starting point and then never touches
-# them again, so nothing anyone customises is at risk on a later boot.
+# These are the user's dotfiles from the moment they first log in; APEX writes a
+# good starting point and then never touches anything the user has edited.
+#
+# WHY THIS IS NOT SIMPLY `[ ! -f ~/.zshrc ]` (apex-logs 14)
+# It was, and the consequence was that the APEX zsh config NEVER landed on ANY
+# machine. The `zsh` package ships /etc/skel/.zshrc, and useradd copies it into
+# every new home when the account is created — long before this unit first runs.
+# So ~/.zshrc always existed, the seed was always skipped, and every user got the
+# stock Fedora skeleton instead: a bare `compinit`, no starship, no
+# autosuggestions, no syntax highlighting. Both "starship does not work" and "tab
+# completion is useless" traced back to this single condition. The failure was
+# silent: the unit logged nothing and exited 0.
+#
+# So: seed when the file is ABSENT, or when it is provably the distro skeleton
+# that useradd wrote. A file the user has actually touched is never overwritten.
 ZSHRC_TMPL="/usr/share/apex/zsh/zshrc"
 STARSHIP_TMPL="/usr/share/apex/starship/starship.toml"
+
+# True when $1 is a zsh rc that APEX may safely replace. Deliberately
+# conservative: anything carrying our own header, or already using any of the
+# features we would be adding, is treated as the user's file and left alone.
+is_stock_zshrc() {
+    [ -f "$1" ] || return 1
+    grep -q 'APEX-OS — default zsh configuration' "$1" && return 1
+    grep -qE 'starship|zsh-autosuggestions|zsh-syntax-highlighting' "$1" && return 1
+    # Byte-identical to the skeleton on this release -> useradd wrote it, not a human.
+    [ -f /etc/skel/.zshrc ] && cmp -s "$1" /etc/skel/.zshrc && return 0
+    # A different zsh release ships a slightly different skeleton, so byte equality
+    # alone would silently stop migrating after any zsh update. Fall back to
+    # recognising the skeleton by its opening line...
+    grep -q '^# \.zshrc is sourced in interactive shells' "$1" || return 1
+    # ...but then decide on the ACTIVE lines only. The stock file's entire substance
+    # is a bare compinit plus COMPLETE_IN_WORD; everything else in it is commented
+    # out. If every active line is one of those, there is nothing of the user's in
+    # here to lose. A single line we do not recognise means they have added
+    # something, and we keep our hands off it.
+    local active
+    active="$(grep -vE '^[[:space:]]*(#|$)' "$1" 2>/dev/null \
+        | grep -vxE '[[:space:]]*(autoload -U[a-z]* compinit|compinit|setopt COMPLETE_IN_WORD)[[:space:]]*')"
+    [ -z "${active}" ] && return 0
+    return 1
+}
 
 # Accent follows VARIANT_ID (docs/branding.md): the prompt should match the
 # greeter and the boot splash of the edition actually running.
@@ -211,14 +248,27 @@ case "${APEX_VARIANT}" in
     *)       APEX_ACCENT="#D9F99D" ;;   # chartreuse
 esac
 
-if [ -f "${ZSHRC_TMPL}" ] && [ ! -f "${HOME}/.zshrc" ]; then
-    cp "${ZSHRC_TMPL}" "${HOME}/.zshrc"
-    log "seeded ~/.zshrc"
+if [ -f "${ZSHRC_TMPL}" ]; then
+    if [ ! -f "${HOME}/.zshrc" ]; then
+        cp "${ZSHRC_TMPL}" "${HOME}/.zshrc"
+        log "seeded ~/.zshrc"
+    elif is_stock_zshrc "${HOME}/.zshrc"; then
+        cp -a "${HOME}/.zshrc" "${HOME}/.zshrc.stock.bak" 2>/dev/null || true
+        cp "${ZSHRC_TMPL}" "${HOME}/.zshrc"
+        log "replaced the distro skeleton ~/.zshrc with the APEX config (backup: ~/.zshrc.stock.bak)"
+        log "  open a new terminal to pick up starship and the completion setup"
+    fi
 fi
-if [ -f "${STARSHIP_TMPL}" ] && [ ! -f "${HOME}/.config/starship.toml" ]; then
-    mkdir -p "${HOME}/.config"
-    sed "s|@ACCENT@|${APEX_ACCENT}|g" "${STARSHIP_TMPL}" > "${HOME}/.config/starship.toml"
-    log "seeded ~/.config/starship.toml (accent ${APEX_ACCENT} for '${APEX_VARIANT:-daily}')"
+# Re-render when absent, and also when a previous run left the placeholder behind:
+# an unsubstituted @ACCENT@ is not a valid starship colour, so the prompt would
+# lose its edition accent with no error anywhere.
+if [ -f "${STARSHIP_TMPL}" ]; then
+    if [ ! -f "${HOME}/.config/starship.toml" ] \
+       || grep -q '@ACCENT@' "${HOME}/.config/starship.toml" 2>/dev/null; then
+        mkdir -p "${HOME}/.config"
+        sed "s|@ACCENT@|${APEX_ACCENT}|g" "${STARSHIP_TMPL}" > "${HOME}/.config/starship.toml"
+        log "seeded ~/.config/starship.toml (accent ${APEX_ACCENT} for '${APEX_VARIANT:-daily}')"
+    fi
 fi
 
 # ── 1-2. (removed) network poll + git clone ──────────────────────────────────
@@ -244,10 +294,56 @@ migrate_legacy_paths() {
              "${HOME}/.config/hypr/hypridle.conf" \
              "${HOME}/.config/niri/config.kdl"; do
         [ -f "${f}" ] || continue
-        if grep -q -- "${LEGACY_SRC_DIR}" "${f}" 2>/dev/null; then
+        # BOTH spellings have to be matched (apex-logs 14). This used to grep only
+        # for the absolute "${HOME}/.local/src/apex-shell", but hypridle.conf is
+        # written with a LITERAL TILDE — `lock_cmd = qs -c ~/.local/src/apex-shell`
+        # — so it never matched, hypridle.conf was never migrated, and the lock
+        # screen stayed pointed at the pre-vendor checkout on every upgraded
+        # machine. Silently: the file was then judged "customised" further down and
+        # deliberately preserved, which made the staleness permanent.
+        # LIVE lines only, in both the test and the rewrite. The seeded templates
+        # explain this very migration in their comments, so matching comment text
+        # made a pristine brand-new config look like a legacy one: it fired on every
+        # fresh install, left a spurious .pre-vendor.bak, logged a migration that had
+        # not happened, and rewrote the explanation into nonsense ("it used to be
+        # cloned per-user into /usr/share/apex-shell"). Comment markers: # for
+        # hypr/hypridle, // for niri's KDL.
+        if grep -vE '^[[:space:]]*(#|//)' "${f}" 2>/dev/null \
+           | grep -qE -- "(${LEGACY_SRC_DIR}|~/\.local/src/apex-shell)"; then
             cp -a "${f}" "${f}.pre-vendor.bak" 2>/dev/null || true
-            sed -i "s|${LEGACY_SRC_DIR}|${SRC_DIR}|g" "${f}"
+            # Detection is live-lines-only (above) but the REWRITE is global, comments
+            # included. Once a live line has proven this is a genuine legacy config,
+            # the comments must move with it: hypridle.conf documents itself with an
+            # `ln -sf <path>` line, and the shipped copy has that comment updated too.
+            # Leaving it behind keeps the file one line different from the image copy
+            # forever, so it is judged "customised", never adopted, and never picks up
+            # a later image change — the exact pinning this migration exists to undo.
+            #
+            # Match on the path SUFFIX rather than a ${HOME} prefix: /home is a symlink
+            # to /var/home on Fedora Atomic, so a seeded config can legitimately hold
+            # /home/user/.local/src/apex-shell while $HOME is /var/home/user, and a
+            # ${HOME}-anchored pattern misses those while still logging success. One
+            # expression covers the absolute, ~ and ${HOME} spellings.
+            sed -i -e "s|[^[:space:]]*\.local/src/apex-shell|${SRC_DIR}|g" "${f}"
             log "migrated legacy shell path in ${f} (backup: ${f}.pre-vendor.bak)"
+            changed=1
+        fi
+    done
+    # Anything that still CALLS the old shim has to be repointed BEFORE we retire
+    # it below, or the retirement turns a seeded `exec-once` into a dead path and
+    # the session comes up with no bar, no idle management and no lock — which is
+    # exactly what happened (apex-logs 14). The seed rendered an absolute path, so
+    # cover that as well as the ~ and ${HOME} spellings.
+    for f in "${HOME}/.config/hypr/hyprland.conf" \
+             "${HOME}/.config/niri/config.kdl"; do
+        [ -f "${f}" ] || continue
+        if grep -vE '^[[:space:]]*(#|//)' "${f}" 2>/dev/null \
+           | grep -q -- '\.local/bin/apex-shell-autostart'; then
+            cp -a "${f}" "${f}.pre-vendor.bak" 2>/dev/null || true
+            # Live-lines detection, global rewrite, suffix match — same reasoning as above.
+            sed -i -e "s|[^[:space:]]*\.local/bin/apex-shell-autostart|/usr/libexec/apex-shell-autostart|g" \
+                   "${f}"
+            log "repointed the retired autostart shim in ${f} -> /usr/libexec/apex-shell-autostart"
             changed=1
         fi
     done
@@ -370,24 +466,63 @@ done
 # fixed a broken lock_cmd — could never reach an already-provisioned user. The
 # lock screen was pinned to whatever shipped the day they first logged in.
 #
-# Now: no copy is made. The launcher uses ${SRC_DIR}/src/config/hypridle.conf, so
-# lock behaviour follows the image like everything else. A user who genuinely
-# wants to customise it creates ~/.config/hypr/hypridle.conf themselves and the
-# launcher honours it — an explicit, deliberate opt-out of the single channel
-# rather than an accidental one.
+# WHY THE IMAGE COPY CANNOT SIMPLY BE THE DEFAULT (apex-logs 14)
+# The intended design was: no copy in $HOME, the launcher passes
+# `hypridle -c ${SRC_DIR}/src/config/hypridle.conf`, and lock behaviour follows
+# the image like everything else. hypridle 0.1.7 makes that impossible. It lists
+#     -c, --config <path>   Specify a custom config file path
+# in its own --help and then IGNORES it: it only ever searches $HOME/.config/hypr,
+# $XDG_CONFIG_HOME/hypr and — per its error message — /etc/hypr. Verified against
+# the shipped binary: `-c` and `--config` with a valid readable path both abort
+# with "Could not find config in HOME, XDG_CONFIG_HOME, XDG_CONFIG_DIRS or
+# /etc/hypr", and it does not in fact read /etc/hypr either (a config placed there
+# is still reported missing). It does not exit cleanly — it throws and dumps core.
 #
-# MIGRATION: an existing copy that is byte-identical to a shipped version (modulo
-# the legacy path rewrite migrate_legacy_paths just did) was written by US and
-# never touched by the user, so removing it is safe and restores the single
-# channel. Anything genuinely edited is left strictly alone.
+# So the ONLY location hypridle will load is under $HOME. That inverts the design:
+# deleting ~/.config/hypr/hypridle.conf does not "fall back to the image copy", it
+# leaves hypridle with NO config at all, so it core-dumps at session start and the
+# machine silently stops locking on idle, blanking the display and suspending.
+# That is a security regression that reports success — the exact failure class this
+# file exists to prevent.
+#
+# Therefore the file is now a MANAGED COPY: we write the image content into $HOME
+# and record its checksum. On a later login, if the file still matches what we
+# wrote, the user has not touched it and we refresh it from the image — so an
+# image update DOES reach an existing user, which was the whole point of vendoring.
+# If it differs from our stamp, the user edited it and we never touch it again.
+#
+# Revert to `-c` and drop the copy once hypridle honours the flag; the postcondition
+# below will keep us honest either way.
 HYPRIDLE_USER="${HOME}/.config/hypr/hypridle.conf"
-if [ -f "${HYPRIDLE_USER}" ]; then
-    if cmp -s "${HYPRIDLE_USER}" "${SRC_DIR}/src/config/hypridle.conf"; then
-        rm -f "${HYPRIDLE_USER}"
-        log "removed unmodified ~/.config/hypr/hypridle.conf — lock/idle config now follows the image"
+HYPRIDLE_IMG="${SRC_DIR}/src/config/hypridle.conf"
+APEX_STATE="${XDG_STATE_HOME:-${HOME}/.local/state}/apex"
+HYPRIDLE_STAMP="${APEX_STATE}/hypridle.conf.sha256"
+if [ -f "${HYPRIDLE_IMG}" ]; then
+    # Every step below is `|| true`: this script runs under `set -euo pipefail`, and
+    # a read-only or full $HOME must not abort provisioning half way through. A bad
+    # state here is caught by the postcondition instead of by a dead unit.
+    mkdir -p "${HOME}/.config/hypr" "${APEX_STATE}" 2>/dev/null || true
+    _img_sum="$(sha256sum "${HYPRIDLE_IMG}" 2>/dev/null | cut -d' ' -f1 || true)"
+    if [ ! -f "${HYPRIDLE_USER}" ]; then
+        cp "${HYPRIDLE_IMG}" "${HYPRIDLE_USER}" || true
+        printf '%s\n' "${_img_sum}" > "${HYPRIDLE_STAMP}" 2>/dev/null || true
+        log "installed the image lock/idle config -> ~/.config/hypr/hypridle.conf"
     else
-        log "keeping your customised ~/.config/hypr/hypridle.conf (it overrides the image copy)"
-        log "  delete it to go back to image-managed lock/idle behaviour"
+        _cur_sum="$(sha256sum "${HYPRIDLE_USER}" 2>/dev/null | cut -d' ' -f1 || true)"
+        _was_sum="$(tr -d '[:space:]' < "${HYPRIDLE_STAMP}" 2>/dev/null || true)"
+        if [ "${_cur_sum}" = "${_img_sum}" ]; then
+            # Already current. Claim it as managed so the NEXT image change can
+            # refresh it — this is also how a pre-stamp machine gets adopted, since
+            # migrate_legacy_paths above has just rewritten it back to image content.
+            printf '%s\n' "${_img_sum}" > "${HYPRIDLE_STAMP}" 2>/dev/null || true
+        elif [ -n "${_was_sum}" ] && [ "${_cur_sum}" = "${_was_sum}" ]; then
+            cp "${HYPRIDLE_IMG}" "${HYPRIDLE_USER}" || true
+            printf '%s\n' "${_img_sum}" > "${HYPRIDLE_STAMP}" 2>/dev/null || true
+            log "refreshed ~/.config/hypr/hypridle.conf from the image (you had not modified it)"
+        else
+            log "keeping your customised ~/.config/hypr/hypridle.conf"
+            log "  delete it and log in again to return to the image lock/idle config"
+        fi
     fi
 fi
 
@@ -541,8 +676,15 @@ fail_check() { PROVISION_OK=0; log "POSTCONDITION FAILED: $*"; }
 
 [ -f "${SRC_DIR}/shell.qml" ] \
     || fail_check "the shell entrypoint ${SRC_DIR}/shell.qml is missing"
-grep -q '(unset)' "${HYPR_CONF}" 2>/dev/null \
-    && fail_check "${HYPR_CONF} still contains an '(unset)' placeholder"
+# Only LIVE settings count — comments must be stripped first (apex-logs 14).
+# This used to grep the whole file, which made it self-triggering: the template's
+# own comment block explains the original bug by quoting the broken line, so the
+# string appears legitimately in every seeded config and the check failed on a
+# BRAND-NEW install of a correct image. A postcondition that cannot pass is worse
+# than no postcondition — it trains you to ignore a red unit.
+if grep -vE '^[[:space:]]*#' "${HYPR_CONF}" 2>/dev/null | grep -q '(unset)'; then
+    fail_check "${HYPR_CONF} has an '(unset)' placeholder in a live setting"
+fi
 for _j in config_Provider.json keybinds.json wallpaper.json update_prefs.json; do
     [ -f "${USER_DATA}/${_j}" ] || continue
     # python3 is in the image; fall back to a no-op if it ever is not.
@@ -567,9 +709,35 @@ _idle_conf="${SRC_DIR}/src/config/hypridle.conf"
 if [ -f "${_idle_conf}" ]; then
     _lock_target="$(sed -n 's/^[[:space:]]*lock_cmd[[:space:]]*=[[:space:]]*qs -c \([^ ]*\).*/\1/p' \
         "${_idle_conf}" | head -1)"
+    # A leading ~ must be expanded by hand (apex-logs 14). "${_lock_target}/shell.qml"
+    # keeps the tilde LITERAL inside the quotes, so the -s test resolved a relative
+    # path named "~" and failed for every tilde-spelled lock_cmd — reporting a broken
+    # lock screen on machines whose lock screen was fine, while the genuinely stale
+    # path went unnoticed underneath the noise.
+    case "${_lock_target}" in
+        "~")   _lock_target="${HOME}" ;;
+        "~/"*) _lock_target="${HOME}/${_lock_target#\~/}" ;;
+    esac
     if [ -n "${_lock_target}" ] && [ ! -s "${_lock_target}/shell.qml" ]; then
         fail_check "hypridle lock_cmd points at '${_lock_target}', which has no shell.qml — the session would stop locking on idle"
     fi
+fi
+
+# hypridle ignores -c (see the long note above), so a config under $HOME is the
+# only thing that makes idle lock, DPMS blank and auto-suspend run at all. Its
+# absence is silent and security-relevant, so it is a hard failure.
+[ -s "${HOME}/.config/hypr/hypridle.conf" ] \
+    || fail_check "no ~/.config/hypr/hypridle.conf — hypridle ignores -c, so idle lock, display blank and suspend will not run"
+
+# The APEX zsh config must have actually landed. Skipped when the user clearly owns
+# the file, so a deliberately hand-written ~/.zshrc never turns the unit red.
+if is_stock_zshrc "${HOME}/.zshrc"; then
+    fail_check "~/.zshrc is still the distro skeleton — the APEX zsh config did not seed (no starship, no completion setup)"
+elif [ -f "${HOME}/.zshrc" ] && grep -q 'APEX-OS — default zsh configuration' "${HOME}/.zshrc"; then
+    grep -q 'starship init zsh' "${HOME}/.zshrc" \
+        || fail_check "~/.zshrc is the APEX config but does not initialise starship"
+    grep -q 'zmodload zsh/complist' "${HOME}/.zshrc" \
+        || fail_check "~/.zshrc is the APEX config but never loads zsh/complist — 'menu select' would be a no-op"
 fi
 
 if [ "${PROVISION_OK}" -ne 1 ]; then
