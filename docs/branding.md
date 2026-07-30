@@ -45,9 +45,13 @@ Each theme contains its `.plymouth` descriptor, the shared `apex-os.script`
 animation, and the sprite images `spark.png`, `comet.png`, `glow.png`,
 `flash.png`.
 
-**Animation — "Convergence":** four comets orbit and accelerate, spiral into
-the center, flash, and morph into the spark; the wordmark rises in underneath
-and the spark holds with a subtle breathing loop. LUKS password prompts are
+**Animation — "Convergence":** four comets with soft, speed-stretched light
+trails swoop in from outside the frame, orbit and accelerate, spiral into the
+center, flash, and morph into the spark; the wordmark rises in underneath and
+the spark holds with a subtle breathing loop. The trails are tapered ribbons
+sampled from each comet's own past path (stretching with angular velocity),
+and the heads rotate with the true velocity vector, so the motion reads as a
+continuous fluid sweep rather than orbiting dashes. LUKS password prompts are
 handled (theme dims, prompt + bullets shown); shutdown shows a static spark.
 
 Install (inside the image build):
