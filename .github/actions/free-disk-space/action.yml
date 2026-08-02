@@ -1,0 +1,45 @@
+name: Free disk space
+description: >-
+  Reclaim space on a GitHub-hosted runner so a multi-gigabyte bootc image build
+  has headroom. Shared by every job in build-image.yml.
+
+# ubuntu-latest ships with roughly 14 GB free on /, and an APEX-OS image is
+# ~5 GB compressed / ~13 GB extracted. That was already tight when the base
+# built everything itself; since the core/base split the base job also has to
+# PULL the ~13 GB core before adding its own layers, so the old five-directory
+# cleanup is no longer enough on its own.
+#
+# Everything removed here is a preinstalled toolchain or cached image that no
+# APEX-OS job uses. Each `|| true` is deliberate: the exact set of preinstalled
+# software changes between runner image releases, and a job must not fail
+# because a directory GitHub used to ship has been renamed or dropped.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        echo "--- before ---"
+        df -h /
+        # Language runtimes and SDKs: ~15 GB combined, none of them used here.
+        sudo rm -rf \
+          /usr/share/dotnet \
+          /usr/share/swift \
+          /usr/local/lib/android \
+          /usr/local/share/powershell \
+          /usr/local/share/boost \
+          /usr/local/.ghcup \
+          /opt/ghc \
+          /opt/hostedtoolcache \
+          "$AGENT_TOOLSDIRECTORY" || true
+        # The runner preloads several GB of Docker images (buildpack, node,
+        # …). podman keeps its own store, so nothing here needs them.
+        sudo docker image prune --all --force >/dev/null 2>&1 || true
+        # APT's cache and the preinstalled browsers/DB servers.
+        sudo apt-get remove -y -qq '^dotnet-.*' '^llvm-.*' 'php.*' \
+          google-chrome-stable firefox microsoft-edge-stable \
+          mongodb-* mysql-* postgresql-* azure-cli >/dev/null 2>&1 || true
+        sudo apt-get autoremove -y -qq >/dev/null 2>&1 || true
+        sudo apt-get clean
+        echo "--- after ---"
+        df -h /

@@ -1,25 +1,50 @@
 name: build-image
 
-# Build, sign (cosign keyless), and push the three APEX-OS images to GHCR.
+# Build, sign (cosign keyless), and push the APEX-OS images to GHCR.
 #
-#   base            → ghcr.io/andrenijman/apex-os-base
+#   core            → ghcr.io/andrenijman/apex-os-core      (heavy, slow-moving)
+#   base            → ghcr.io/andrenijman/apex-os-base      (thin, per-commit)
 #   daily           → ghcr.io/andrenijman/apex-os:daily
 #   gaming-mesa     → ghcr.io/andrenijman/apex-os:gaming-mesa
 #   gaming-nvidia   → ghcr.io/andrenijman/apex-os:gaming-nvidia
 #
-# Speed design (GitHub-hosted runners, no persistent storage):
-#   1. Base-gate — the ~45 min base (CachyOS kernel + Rust + desktop stack) is
-#      REBUILT only when base-relevant files change (or on schedule / forced).
-#      A flavor-only push skips it entirely; the flavors resolve the last-good
-#      base digest from GHCR instead. Turns a flavor fix from ~50 min → ~15 min.
-#   2. No registry layer cache — podman's --cache-to export proved unreliable on
-#      the runner (partial push then "image not known"), so the base builds
-#      plainly. A full base build is ~60 min; the base-gate above is what keeps
-#      most pushes fast. schedule / force_base pass --no-cache for a clean build.
+# ═══ THE THREE-TIER SPLIT, AND WHY `apex update` USED TO PULL 5.3 GB ═══
+#
+# Everything used to live in one `base` image. That base was gated on a path
+# filter covering files/**, apexd/** and config/** — i.e. essentially every
+# commit — and it built with no layer cache, so every dnf/RUN layer got a fresh
+# digest even when the installed bytes were identical. bootc reuses a layer only
+# when it already holds that exact digest, so a one-line shell tweak invalidated
+# all of them. Measured on the author's L16 against the live registry:
+#
+#     $ bootc upgrade --check
+#     Total new layers: 153   Size: 5.3 GB
+#     Removed layers:   152   Size: 5.4 GB
+#
+# 153 of 153 layers, every single update. The fix is the `core` tier: the
+# slow-moving ~95% of the image is built once and consumed by the base as
+# FROM apex-os-core@sha256:… . A digest-pinned FROM reuses those layer
+# descriptors verbatim, so bootc already has the blobs and downloads none of
+# them. A normal push now rebuilds only base + flavor — tens of MiB.
+#
+# It is also much faster to BUILD: a flavor- or base-only push skips the ~45 min
+# core entirely.
+#
+# ── When each tier rebuilds ──
+#   core    Containerfile.core / kernel/** changed · force_core · or the weekly
+#           cron found a NEW fedora-bootc digest. That last condition matters:
+#           an unconditional weekly rebuild would reissue ~5 GB of
+#           byte-different, content-identical layers to the whole fleet every
+#           Monday, which is the very cost this split exists to remove. The
+#           digest core was built from is stamped on it as a label and compared.
+#   base    Containerfile.base / apexd/** / config/** / files/** changed, or
+#           core rebuilt.
+#   flavor  every run (they are thin, and they must follow the base digest).
 #
 # The base's immutable digest is passed to the flavor builds as
-# --build-arg BASE=<base>@<digest> so every flavor is pinned to an exact base.
-# Signing is keyless (Sigstore/Fulcio) via the runner's OIDC token.
+# --build-arg BASE=<base>@<digest>, and core's as --build-arg CORE=<core>@<digest>,
+# so every tier is pinned to an exact parent. Signing is keyless
+# (Sigstore/Fulcio) via the runner's OIDC token.
 
 on:
   push:
@@ -41,17 +66,18 @@ on:
         description: "Build the daily APEX-OS installer ISO (anaconda-iso)"
         type: boolean
         default: false
-      force_base:
-        description: "Force a full, cache-bypassing base rebuild"
+      force_core:
+        description: "Force a full, cache-bypassing CORE rebuild (~45 min; makes the next update a full download for every user)"
         type: boolean
         default: false
   schedule:
-    # Weekly rebuild (Mon 06:00 UTC) to pick up upstream base / COPR / RPMFusion
-    # security updates even without a source change. Bypasses the layer cache.
+    # Weekly (Mon 06:00 UTC) to pick up upstream fedora-bootc / COPR / RPMFusion
+    # security updates. This only rebuilds core when the upstream base image has
+    # actually moved — see the gate in job 0.
     - cron: "0 6 * * 1"
 
 # Least privilege. id-token:write is required for cosign keyless (OIDC) signing;
-# packages:write is required to push to GHCR (the base + flavor images).
+# packages:write is required to push to GHCR.
 permissions:
   contents: read
   packages: write
@@ -59,115 +85,170 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  IMAGE_CORE: ghcr.io/andrenijman/apex-os-core
   IMAGE_BASE: ghcr.io/andrenijman/apex-os-base
   IMAGE: ghcr.io/andrenijman/apex-os
+  UPSTREAM_BASE: quay.io/fedora/fedora-bootc:43
 
 jobs:
-  # ── Job 0: change detection ───────────────────────────────────────────────
-  # Decide whether the base must rebuild. On a push, only base-relevant paths
-  # trigger a base rebuild; a flavor-only push reuses the last-good base. On
-  # schedule / any non-ISO dispatch, base always rebuilds (handled in job 1's if).
+  # ── Job 0: what has to rebuild ────────────────────────────────────────────
   changes:
     runs-on: ubuntu-latest
     # Skip on an ISO-only dispatch (installer-iso pulls the published :daily).
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2) }}
     outputs:
+      core: ${{ steps.gate.outputs.core }}
       base: ${{ steps.filter.outputs.base }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
+
       - name: Path filter
         id: filter
         uses: dorny/paths-filter@v3
         with:
           filters: |
+            core:
+              - 'Containerfile.core'
+              - 'kernel/**'
+              - '.github/workflows/build-image.yml'
             base:
               - 'Containerfile.base'
               - 'apexd/**'
               - 'config/**'
-              - 'kernel/**'
               - 'files/**'
               - '.github/workflows/build-image.yml'
 
-  # ── Job 1: shared base (gated) ────────────────────────────────────────────
-  base:
+      # The whole point of the core tier is that it does NOT move for no reason:
+      # every core rebuild is a full multi-GB download for every machine on the
+      # fleet. So the weekly cron asks whether upstream actually changed instead
+      # of assuming it did.
+      - name: Decide whether core must rebuild
+        id: gate
+        run: |
+          set -euo pipefail
+
+          decide() { echo "core=$1" >> "$GITHUB_OUTPUT"; echo "core rebuild: $1 ($2)"; exit 0; }
+
+          [ "${{ inputs.force_core }}" = "true" ] && decide true "force_core requested"
+          [ "${{ steps.filter.outputs.core }}" = "true" ] && decide true "core sources changed"
+
+          # Not a scheduled run and nothing core-relevant changed → reuse.
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            decide false "no core-relevant change"
+          fi
+
+          command -v skopeo >/dev/null || sudo apt-get install -y -qq skopeo
+
+          # What upstream is at right now.
+          UP="$(skopeo inspect --format '{{.Digest}}' "docker://$UPSTREAM_BASE")"
+          echo "upstream $UPSTREAM_BASE = $UP"
+
+          # What the published core was built from. Missing image, missing label
+          # or an unreadable registry all fall through to "rebuild" — failing
+          # towards a rebuild is the safe direction for a security refresh.
+          HAVE="$(skopeo inspect \
+                    --creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+                    --format '{{ index .Labels "org.apexos.fedora-bootc.digest" }}' \
+                    "docker://$IMAGE_CORE:latest" 2>/dev/null || echo '')"
+          echo "published core was built from = ${HAVE:-<none>}"
+
+          [ -n "$HAVE" ] || decide true "no published core to reuse"
+          [ "$HAVE" = "$UP" ] && decide false "upstream fedora-bootc has not moved since the last core"
+          decide true "upstream fedora-bootc moved"
+
+  # ── Job 1: Rust — fast gate on the apexd/apex workspace ───────────────────
+  # apexd and apex are compiled INSIDE the base build, so a compile error used
+  # to surface ~10 minutes into a container build with no test coverage at all
+  # (the workspace has 100+ tests and CI ran none of them). This job takes ~2
+  # min and blocks the base, so a broken CLI can never be published.
+  rust:
+    runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2) }}
+    defaults:
+      run:
+        working-directory: apexd
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup component add clippy rustfmt
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apexd/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('apexd/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  # ── Job 2: core (heavy, gated) ────────────────────────────────────────────
+  core:
     needs: changes
     runs-on: ubuntu-latest
-    # Run when: NOT an ISO-only dispatch, AND (it is not a push → schedule/dispatch
-    # always rebuild base) OR (it is a push and base-relevant files changed).
-    if: >-
-      ${{
-        !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2)
-        && (github.event_name != 'push' || needs.changes.outputs.base == 'true')
-      }}
+    if: ${{ needs.changes.outputs.core == 'true' }}
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The base image is large (CachyOS kernel + desktop stack ≈ several GB).
-      # ubuntu-latest ships with ~14 GB free; reclaim space from toolchains we
-      # do not use so the build + push has headroom.
       - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
-          df -h /
+        uses: ./.github/actions/free-disk-space
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
       # Rootful podman: the CachyOS kernel's %posttrans (rpm-ostree
-      # kernel-install → dracut) and the NVIDIA akmod build need device access
-      # (/dev/kmsg, loop) that rootless podman on the runner denies. This
-      # matches the local build recipe. --isolation=chroot sidesteps nested
-      # cgroup setup on the runner.
+      # kernel-install → dracut) needs device access (/dev/kmsg, loop) that
+      # rootless podman on the runner denies. --isolation=chroot sidesteps
+      # nested cgroup setup on the runner.
       - name: Log in to GHCR (rootful podman)
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | sudo podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
 
       # cosign runs as the normal user, not under sudo, so it cannot see the
-      # rootful podman auth above. Give cosign its own GHCR credential (written
-      # to the user's docker config) so `cosign sign` can pull the digest to
-      # sign it — the packages are private, so this pull needs auth.
+      # rootful podman auth above. Give cosign its own GHCR credential so
+      # `cosign sign` can pull the digest to sign it — the packages are private.
       - name: Log in cosign to GHCR
         run: |
           cosign login "$REGISTRY" -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
 
-      # NO registry layer cache. podman's --cache-to export is unreliable on the
-      # runner: it pushes a partial cache and then fails mid-build with
-      # "failed pushing cache ... image not known" (and earlier rejected a tagged
-      # ref outright). It is only a speed optimisation — the base-gate already
-      # skips the base entirely on flavor-only pushes, and a full base build is
-      # ~60 min with or without it — so the reliable choice is to drop it and
-      # build plainly. Only honour the no-cache signal on schedule / force_base.
-      - name: Compute cache args
-        id: cache
+      # Stamped onto the image as a label so job 0 can tell, next Monday,
+      # whether upstream has actually moved. Without it the weekly cron would
+      # reissue the whole image every week regardless.
+      - name: Resolve upstream fedora-bootc digest
+        id: upstream
         run: |
-          ARGS=""
-          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.force_base }}" = "true" ]; then
-            ARGS="--no-cache"
-          fi
-          echo "args=$ARGS" >> "$GITHUB_OUTPUT"
+          command -v skopeo >/dev/null || sudo apt-get install -y -qq skopeo
+          D="$(skopeo inspect --format '{{.Digest}}' "docker://$UPSTREAM_BASE")"
+          test -n "$D"
+          echo "digest=$D" >> "$GITHUB_OUTPUT"
+          echo "fedora-bootc digest: $D"
 
-      - name: Build base
+      - name: Build core
         env:
           APEX_SB_KEY_B64: ${{ secrets.APEX_SB_KEY_B64 }}
           APEX_SB_CRT_B64: ${{ secrets.APEX_SB_CRT_B64 }}
         run: |
           # ── Secure Boot signing key ──────────────────────────────────────
-          # Containerfile.base signs the CachyOS kernel with the APEX MOK only
+          # Containerfile.core signs the CachyOS kernel with the APEX MOK only
           # when these build secrets are present, and otherwise stamps the image
           # `unsigned` and carries on. CI used to pass nothing, so every image
           # ever PUBLISHED to GHCR was unsigned: anyone installing from the
           # registry could not use Secure Boot at all, and enrolling the APEX
           # key would not have helped them, because their kernel did not carry
-          # its signature. Only locally-built images were signed. Now the
-          # published ones are too.
+          # its signature. Only locally-built images were signed.
           #
           # The key lives only in $RUNNER_TEMP for the length of the build,
           # 0600, and is shredded afterwards. It is never in the repo, never in
@@ -179,6 +260,10 @@ jobs:
           # forks, which is what makes this safe on a public repo. It does mean
           # the key's security is the GitHub account's security: anyone able to
           # push to main or run workflow_dispatch can use it.
+          #
+          # NOTE: signing now happens once here, in core, and every tier
+          # inherits the signed vmlinuz. The base and flavor jobs re-verify it
+          # on the artefact users actually pull.
           SECDIR="$RUNNER_TEMP/apex-sb"
           mkdir -p "$SECDIR"; chmod 700 "$SECDIR"
           SECRET_ARGS=""
@@ -200,64 +285,45 @@ jobs:
             echo "Secure Boot: NO signing secret configured — the kernel will be UNSIGNED"
           fi
 
-          sudo podman build --isolation=chroot ${{ steps.cache.outputs.args }} \
+          # --no-cache on a forced or scheduled rebuild: those are exactly the
+          # runs whose purpose is to pick up new upstream content.
+          NOCACHE=""
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.force_core }}" = "true" ]; then
+            NOCACHE="--no-cache"
+          fi
+
+          sudo podman build --isolation=chroot $NOCACHE \
             --build-arg APEX_REVISION="${{ github.sha }}" \
+            --build-arg FEDORA_BOOTC_DIGEST="${{ steps.upstream.outputs.digest }}" \
             $SECRET_ARGS \
-            -f Containerfile.base \
-            -t "$IMAGE_BASE:latest" \
-            -t "$IMAGE_BASE:${{ github.sha }}" \
+            -f Containerfile.core \
+            -t "$IMAGE_CORE:latest" \
+            -t "$IMAGE_CORE:${{ github.sha }}" \
             .
 
           shred -u "$SECDIR"/apex-mok.* 2>/dev/null || rm -f "$SECDIR"/apex-mok.*
           rmdir "$SECDIR" 2>/dev/null || true
 
-      # Gate the push on the base actually being usable. Everything asserted here
-      # has silently shipped broken at least once: hyprland-qtutils was absent for
-      # weeks because dnf dropped an unsatisfiable weak dep without failing the
-      # build (apex-logs 47), and the Fedora de-branding regressed the same way.
-      # A green `podman build` is not evidence the image is correct.
-      - name: Verify base image
+      # Gate the push on the core actually being usable. Everything asserted
+      # here has silently shipped broken at least once: hyprland-qtutils was
+      # absent for weeks because dnf dropped an unsatisfiable weak dep without
+      # failing the build (apex-logs 47), and the Fedora de-branding regressed
+      # the same way. A green `podman build` is not evidence the image is right.
+      - name: Verify core image
         run: |
           set -euo pipefail
           fail() { echo "::error::$*"; exit 1; }
-          run() { sudo podman run --rm --entrypoint /bin/sh "$IMAGE_BASE:latest" -c "$1"; }
+          run() { sudo podman run --rm --entrypoint /bin/sh "$IMAGE_CORE:latest" -c "$1"; }
 
           # hyprland-qtutils, built from source against Qt 6.10 (the packaged
           # build links Qt 6.9 private API and cannot install here).
           for b in hyprland-dialog hyprland-donate-screen hyprland-update-screen; do
-            run "command -v $b >/dev/null" || fail "$b missing from base image"
+            run "command -v $b >/dev/null" || fail "$b missing from core image"
           done
           run 'test -d /usr/lib64/qt6/qml/org/hyprland/style' \
             || fail "hyprland QML style not installed"
           run '! ldd /usr/bin/hyprland-dialog | grep -q "not found"' \
             || fail "hyprland-dialog has unresolved libraries"
-
-          # Secure Boot: if a signing key is configured, the published kernel
-          # MUST actually carry the signature. Containerfile.base degrades to
-          # "unsigned" and keeps going when signing fails or the secret is
-          # absent — good for local builds, unacceptable for the artefact other
-          # people install. Every image ever pushed to GHCR before this was
-          # unsigned and nothing said so. Assert both the marker and the real PE
-          # certificate table, because the marker is only a claim.
-          if [ -n "${{ secrets.APEX_SB_KEY_B64 }}" ]; then
-            state=$(run 'cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null || echo missing')
-            [ "$state" = signed ] \
-              || fail "signing key is configured but the image is stamped '$state' — refusing to publish an unsigned kernel"
-            run 'test -s /usr/share/apex-os/secureboot/apex-mok.der' \
-              || fail "kernel-signed=signed but apex-mok.der is missing — users would have nothing to enrol"
-            sudo podman run --rm --entrypoint /bin/sh "$IMAGE_BASE:latest" -c \
-              'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/apex-kver)/vmlinuz' \
-              | grep -qi 'signature certificates\|image signature issuers\|APEX' \
-              || fail "sbverify found no signature on the shipped vmlinuz"
-            echo "Secure Boot: verified — the published kernel is signed and apex-mok.der ships with it"
-          else
-            echo "::warning::No APEX_SB_KEY_B64 secret — this image ships an UNSIGNED kernel and cannot be used with Secure Boot"
-          fi
-
-          # The greeter must tolerate NVIDIA: sway exits(1) on nvidia-drm without
-          # this flag, which means no login at all on a hybrid-graphics machine.
-          run 'grep -q -- --unsupported-gpu /etc/greetd/config.toml' \
-            || fail "greeter missing --unsupported-gpu"
 
           # De-branding: ID=fedora is deliberate (dnf copr chroots derive from it);
           # it must be the ONLY Fedora string left in os-release.
@@ -268,6 +334,146 @@ jobs:
           run 'grep -q "^APEX-OS release" /etc/system-release' \
             || fail "/etc/system-release not branded (bootupd derives the EFI label from it)"
 
+          # Things the BASE tier can no longer install for itself, because it
+          # runs no dnf at all. If any of these regress, the base build fails
+          # far less legibly than this does.
+          run 'test -x /usr/sbin/efibootmgr -o -x /usr/bin/efibootmgr' \
+            || fail "efibootmgr missing — the Windows-boot button cannot work"
+          run 'command -v plymouth-set-default-theme >/dev/null' \
+            || fail "plymouth engine missing — both flavors set a theme against it"
+          run 'command -v setpriv >/dev/null' \
+            || fail "setpriv missing — the greeter-wallpaper helper drops privileges with it"
+          run 'command -v starship >/dev/null && command -v zsh >/dev/null' \
+            || fail "zsh/starship missing"
+          run 'command -v matugen >/dev/null' \
+            || fail "matugen missing — the shell cannot theme without it"
+          run 'command -v cargo >/dev/null' \
+            || fail "cargo missing — Containerfile.base compiles apexd in a stage FROM this image"
+
+          # Secure Boot: if a signing key is configured, the published kernel
+          # MUST actually carry the signature. Containerfile.core degrades to
+          # "unsigned" and keeps going when signing fails or the secret is
+          # absent — good for local builds, unacceptable for the artefact other
+          # people install. Assert both the marker and the real PE certificate
+          # table, because the marker is only a claim.
+          if [ -n "${{ secrets.APEX_SB_KEY_B64 }}" ]; then
+            state=$(run 'cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null || echo missing')
+            [ "$state" = signed ] \
+              || fail "signing key is configured but the image is stamped '$state' — refusing to publish an unsigned kernel"
+            run 'test -s /usr/share/apex-os/secureboot/apex-mok.der' \
+              || fail "kernel-signed=signed but apex-mok.der is missing — users would have nothing to enrol"
+            sudo podman run --rm --entrypoint /bin/sh "$IMAGE_CORE:latest" -c \
+              'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/apex-kver)/vmlinuz' \
+              | grep -qi 'signature certificates\|image signature issuers\|APEX' \
+              || fail "sbverify found no signature on the shipped vmlinuz"
+            echo "Secure Boot: verified — the published kernel is signed and apex-mok.der ships with it"
+          else
+            echo "::warning::No APEX_SB_KEY_B64 secret — this image ships an UNSIGNED kernel and cannot be used with Secure Boot"
+          fi
+
+          echo "core image verified"
+
+      - name: Push core + capture digest
+        id: push
+        run: |
+          # zstd:chunked instead of the default gzip (apex-logs 16). Two effects,
+          # neither of which changes image CONTENT — only how it is packed:
+          #   - zstd compresses this tree meaningfully smaller than gzip, and
+          #     decompresses several times faster, so `apex update` spends less
+          #     time both downloading and unpacking.
+          #   - :chunked publishes a per-layer chunk manifest.
+          # Requires an OCI manifest (podman already produces one here) and a
+          # client that understands zstd; the fleet is bootc 1.16+/ostree 2026.2,
+          # which does. `apex rollback` remains the escape hatch.
+          sudo podman push --compression-format zstd:chunked \
+            "$IMAGE_CORE:${{ github.sha }}" \
+            --digestfile=/tmp/core.digest
+          sudo podman push --compression-format zstd:chunked "$IMAGE_CORE:latest"
+          DIGEST="$(cat /tmp/core.digest)"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Core digest: $DIGEST"
+
+      - name: Sign core (cosign keyless)
+        run: |
+          cosign sign --yes "$IMAGE_CORE@${{ steps.push.outputs.digest }}"
+
+  # ── Job 3: base (thin) ────────────────────────────────────────────────────
+  # Runs whenever core did not FAIL, so a base-only push (core skipped) still
+  # builds, resolving the last-good core digest from GHCR.
+  base:
+    needs: [changes, rust, core]
+    if: >-
+      ${{
+        always() && !cancelled()
+        && needs.rust.result == 'success'
+        && needs.core.result != 'failure'
+        && !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2)
+      }}
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Log in to GHCR (rootful podman)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | sudo podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+
+      - name: Log in cosign to GHCR
+        run: |
+          cosign login "$REGISTRY" -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+
+      # Resolve the core digest to build FROM. If the core job ran in this
+      # workflow use its output; otherwise resolve the last-good published core.
+      # Failing here is FATAL and says so: on the very first run after this
+      # split there is no apex-os-core:latest yet, and silently falling through
+      # to an unpinned tag (or to fedora-bootc) would produce a wrong image.
+      - name: Resolve core digest
+        id: core
+        run: |
+          set -euo pipefail
+          D="${{ needs.core.outputs.digest }}"
+          if [ -z "$D" ]; then
+            echo "Core job skipped — resolving last-good $IMAGE_CORE:latest"
+            if ! sudo podman pull "$IMAGE_CORE:latest"; then
+              echo "::error::Cannot pull $IMAGE_CORE:latest and the core job did not run."
+              echo "::error::If this is the first build after the core/base split, re-run this workflow with force_core=true."
+              exit 1
+            fi
+            D="$(sudo podman image inspect "$IMAGE_CORE:latest" \
+                  --format '{{index .RepoDigests 0}}' | sed 's/.*@//')"
+          fi
+          if [ -z "$D" ]; then
+            echo "::error::Resolved an empty core digest — refusing to build against an unpinned parent."
+            exit 1
+          fi
+          echo "digest=$D" >> "$GITHUB_OUTPUT"
+          echo "Using core digest: $D"
+
+      - name: Build base
+        run: |
+          sudo podman build --isolation=chroot \
+            --build-arg CORE="$IMAGE_CORE@${{ steps.core.outputs.digest }}" \
+            --build-arg APEX_REVISION="${{ github.sha }}" \
+            -f Containerfile.base \
+            -t "$IMAGE_BASE:latest" \
+            -t "$IMAGE_BASE:${{ github.sha }}" \
+            .
+
+      - name: Verify base image
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          run() { sudo podman run --rm --entrypoint /bin/sh "$IMAGE_BASE:latest" -c "$1"; }
+
           # M6 + the per-user provisioner race fix.
           run 'test -x /usr/bin/apexd && test -x /usr/bin/apex' || fail "apexd/apex missing"
           run 'test -s /usr/share/apex/hypr/hyprland.conf' || fail "APEX hyprland template missing"
@@ -276,22 +482,56 @@ jobs:
           run 'test ! -e /usr/share/wayland-sessions/hyprland-uwsm.desktop' \
             || fail "hyprland-uwsm.desktop present; it sorts first and bounce-loops"
 
+          # The greeter must tolerate NVIDIA: sway exits(1) on nvidia-drm without
+          # this flag, which means no login at all on a hybrid-graphics machine.
+          run 'grep -q -- --unsupported-gpu /etc/greetd/config.toml' \
+            || fail "greeter missing --unsupported-gpu"
+
+          # `apex update` must refuse to run unprivileged, with a message that
+          # names sudo. The container runs as root, so assert the refusal by
+          # dropping to a non-root uid — testing it as root would prove nothing.
+          out=$(sudo podman run --rm --user 1000:1000 --entrypoint /bin/sh \
+                  "$IMAGE_BASE:latest" -c 'apex update --check 2>&1' || true)
+          echo "$out" | grep -q 'sudo apex update --check' \
+            || fail "apex update does not tell an unprivileged caller to use sudo (got: $out)"
+          # …and the verbs the desktop drives as the session user must NOT be gated.
+          run 'apex tier >/dev/null' \
+            || fail "apex tier broke — APEX Shell's power tab calls it as the session user"
+
+          # Greeter wallpaper: the helper, its sudoers rule, and both ends of the
+          # wiring. This is the fix for "the lock screen keeps the default
+          # wallpaper", and every part of it is silently skippable at runtime,
+          # so it is asserted at build time instead.
+          run 'test -x /usr/libexec/apex-greet-wallpaper' \
+            || fail "greeter wallpaper helper missing"
+          run 'test -f /etc/sudoers.d/030-apex-greet-wallpaper' \
+            || fail "greeter wallpaper sudoers rule missing"
+          run 'visudo -cf /etc/sudoers.d/030-apex-greet-wallpaper >/dev/null' \
+            || fail "greeter wallpaper sudoers rule does not parse — sudo would refuse it at runtime"
+          run 'grep -q "apex-greet/wallpapers" /usr/share/apex-greet/GreetContext.qml' \
+            || fail "greeter no longer reads the published wallpaper"
+          run '! grep -q "file:///usr/share/backgrounds/apex/default.jpg" /usr/share/apex-greet/GreetSurface.qml' \
+            || fail "GreetSurface has gone back to the hardcoded default wallpaper"
+          run 'grep -q apex-greet-wallpaper /usr/share/apex-shell/src/services/WallpaperService.qml' \
+            || fail "vendored apex-shell does not publish the wallpaper on change"
+          run 'grep -q apex-greet-wallpaper /usr/libexec/apex-shell-autostart' \
+            || fail "session launcher does not publish the wallpaper on login"
+
+          # Secure Boot, re-asserted on the tier that inherits it. The core job
+          # is gated, so a push touching only files/** rebuilds this image FROM
+          # THE LAST PUBLISHED CORE — if that core were unsigned, an unsigned
+          # base would ship and core's assertion would never have run.
+          if [ -n "${{ secrets.APEX_SB_KEY_B64 }}" ]; then
+            state=$(run 'cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null || echo missing')
+            [ "$state" = signed ] \
+              || fail "base is stamped '$state' — the core it was built from is not signed. Re-run with force_core=true."
+          fi
+
           echo "base image verified"
 
       - name: Push base + capture digest
         id: push
         run: |
-          # zstd:chunked instead of the default gzip (apex-logs 16). Two effects,
-          # neither of which changes image CONTENT — only how it is packed:
-          #   - zstd compresses this tree meaningfully smaller than gzip, and
-          #     decompresses several times faster, so `apex update` spends less
-          #     time both downloading and unpacking.
-          #   - :chunked publishes a per-layer chunk manifest, which lets a client
-          #     fetch only the chunks it does not already have instead of whole
-          #     layers.
-          # Requires an OCI manifest (podman already produces one here) and a
-          # client that understands zstd; the fleet is bootc 1.16+/ostree 2026.2,
-          # which does. `apex rollback` remains the escape hatch.
           sudo podman push --compression-format zstd:chunked \
             "$IMAGE_BASE:${{ github.sha }}" \
             --digestfile=/tmp/base.digest
@@ -300,21 +540,17 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Base digest: $DIGEST"
 
-      # Keyless signature over the immutable digest (never a tag). Uses the
-      # runner's ambient OIDC identity; cosign v2 needs no COSIGN_EXPERIMENTAL.
       - name: Sign base (cosign keyless)
         run: |
           cosign sign --yes "$IMAGE_BASE@${{ steps.push.outputs.digest }}"
 
-  # ── Job 2: flavors ────────────────────────────────────────────────────────
-  # Run whenever base did not FAIL — so on a flavor-only push (base skipped) the
-  # flavors still build, resolving the last-good base digest from GHCR.
+  # ── Job 4: flavors ────────────────────────────────────────────────────────
   flavors:
-    needs: [changes, base]
+    needs: [base]
     if: >-
       ${{
         always() && !cancelled()
-        && needs.base.result != 'failure'
+        && needs.base.result == 'success'
         && !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2)
       }}
     runs-on: ubuntu-latest
@@ -343,10 +579,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
-          df -h /
+        uses: ./.github/actions/free-disk-space
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -360,29 +593,11 @@ jobs:
         run: |
           cosign login "$REGISTRY" -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
 
-      # Resolve the base digest to pin FROM. If the base job ran this workflow,
-      # use its output; if it was skipped (flavor-only push), resolve the digest
-      # of the last-good :latest base from GHCR.
-      - name: Resolve base digest
-        id: base
-        run: |
-          D="${{ needs.base.outputs.digest }}"
-          if [ -z "$D" ]; then
-            echo "Base job skipped — resolving last-good $IMAGE_BASE:latest"
-            sudo podman pull "$IMAGE_BASE:latest"
-            D="$(sudo podman image inspect "$IMAGE_BASE:latest" \
-                  --format '{{index .RepoDigests 0}}' | sed 's/.*@//')"
-          fi
-          test -n "$D"
-          echo "digest=$D" >> "$GITHUB_OUTPUT"
-          echo "Using base digest: $D"
-
-      # FROM the base pinned by digest — the exact base job 1 pushed and signed,
-      # or the last-good published base when the base job was skipped.
+      # FROM the base pinned by digest — the exact base job 3 pushed and signed.
       - name: Build ${{ matrix.flavor }}
         run: |
           sudo podman build --isolation=chroot \
-            --build-arg BASE="$IMAGE_BASE@${{ steps.base.outputs.digest }}" \
+            --build-arg BASE="$IMAGE_BASE@${{ needs.base.outputs.digest }}" \
             --build-arg APEX_REVISION="${{ github.sha }}" \
             ${{ matrix.build_args }} \
             -f "${{ matrix.containerfile }}" \
@@ -391,14 +606,6 @@ jobs:
             .
 
       # Gate the PUSH on the edition actually carrying a signed kernel.
-      #
-      # Signing happens once in Containerfile.base and every edition inherits it
-      # — but the base job is gated on a path filter, so a push touching only
-      # installer/ or README.md skips it and the editions rebuild FROM THE LAST
-      # PUBLISHED BASE. If that base were unsigned, unsigned editions would be
-      # published and the base job's assertion — the only one that existed —
-      # would never have run. This is that missing check, on the artefact that
-      # users actually pull.
       #
       # sbverify against the real vmlinuz, not just the marker file: the marker
       # is a claim written by the build, and this project has been bitten
@@ -411,7 +618,7 @@ jobs:
                     -c 'cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null || echo missing')
           if [ "$state" != signed ]; then
             echo "::error::${{ matrix.flavor }} is stamped '$state' — refusing to publish an unsigned kernel."
-            echo "::error::The base it was built from is not signed. If the base job was skipped, re-run with force_base=true."
+            echo "::error::The core it was built from is not signed. Re-run with force_core=true."
             exit 1
           fi
           sudo podman run --rm --entrypoint /bin/sh "$IMAGE:${{ matrix.flavor }}" -c \
@@ -426,7 +633,7 @@ jobs:
       - name: Push ${{ matrix.flavor }} + capture digest
         id: push
         run: |
-          # zstd:chunked — see the note on the base push. This is the one users
+          # zstd:chunked — see the note on the core push. This is the one users
           # actually pull, so it is where the download saving lands.
           sudo podman push --compression-format zstd:chunked \
             "$IMAGE:${{ matrix.flavor }}-${{ github.sha }}" \
@@ -436,11 +643,47 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "${{ matrix.flavor }} digest: $DIGEST"
 
+      # How much this push actually costs the fleet. The point of the core tier
+      # is that this number is small; printing it into the run summary is what
+      # turns "it should be small" into something anyone can check at a glance,
+      # and what will make a regression obvious the week it happens.
+      - name: Report update cost for ${{ matrix.flavor }}
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null || sudo apt-get install -y -qq skopeo
+          creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
+          new=$(skopeo inspect --raw --creds "$creds" \
+                  "docker://$IMAGE@${{ steps.push.outputs.digest }}")
+          # Layers shared with the parent core are the ones bootc will NOT
+          # download; anything else is new bytes on every machine.
+          core=$(skopeo inspect --raw --creds "$creds" \
+                  "docker://$IMAGE_CORE:latest" 2>/dev/null || echo '{}')
+          python3 - "$new" "$core" <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, sys
+          new, core = json.loads(sys.argv[1]), json.loads(sys.argv[2] or '{}')
+          nl = new.get('layers', [])
+          shared = {l['digest'] for l in core.get('layers', [])}
+          fresh = [l for l in nl if l['digest'] not in shared]
+          mib = lambda b: b / 2**20
+          print(f"### `${{ matrix.flavor }}` update cost")
+          print()
+          print(f"- total image: **{len(nl)} layers, {mib(sum(l['size'] for l in nl)):.0f} MiB**")
+          print(f"- inherited from core (not re-downloaded): "
+                f"**{len(nl) - len(fresh)} layers, {mib(sum(l['size'] for l in nl) - sum(l['size'] for l in fresh)):.0f} MiB**")
+          print(f"- NOT inherited from core: "
+                f"**{len(fresh)} layers, {mib(sum(l['size'] for l in fresh)):.0f} MiB**")
+          print()
+          print("The last figure is an UPPER BOUND on what `apex update` downloads: "
+                "base/flavor layers that happen to be unchanged since the previous "
+                "push are also reused, but are counted as new here. Before the "
+                "core/base split this number was the whole image (153 layers, 5.3 GB).")
+          PY
+
       - name: Sign ${{ matrix.flavor }} (cosign keyless)
         run: |
           cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
 
-  # ── Job 3: qcow2 (stretch, dispatch-gated, non-blocking) ─────────────────
+  # ── Job 5: qcow2 (stretch, dispatch-gated, non-blocking) ─────────────────
   # Proves bootc-image-builder produces a bootable disk from the daily image.
   # GitHub runners have NO /dev/kvm, so the disk is NOT booted here — producing
   # the qcow2 is the check. Gated on manual dispatch (build_qcow2=true) and
@@ -451,11 +694,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.build_qcow2
     continue-on-error: true
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
-          df -h /
+        uses: ./.github/actions/free-disk-space
 
       - name: Log in to GHCR (rootful podman)
         run: |
@@ -465,6 +708,7 @@ jobs:
       - name: Build daily qcow2 via bootc-image-builder
         run: |
           mkdir -p output
+          sudo podman pull "$IMAGE:daily-${{ github.sha }}"
           sudo podman run --rm --privileged \
             --security-opt label=type:unconfined_t \
             -v "$(pwd)/output":/output \
@@ -482,27 +726,23 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # ── Job 4: installer ISO (dispatch-gated) ─────────────────────────────────
+  # ── Job 6: installer ISO (dispatch-gated) ─────────────────────────────────
   # Builds the APEX-OS Daily installer as an Anaconda ISO (bootc-image-builder
   # --type anaconda-iso) — a bootable USB that installs the signed daily image
   # to a target disk. The image is pulled into local storage first (each job is
   # a fresh runner; --local needs it present). Uploaded as an artifact for the
-  # maintainer to write to a USB stick. Independent of base/flavors: it pulls
-  # the already-published :daily, so it runs on an ISO-only dispatch.
+  # maintainer to write to a USB stick. Independent of core/base/flavors: it
+  # pulls the already-published :daily, so it runs on an ISO-only dispatch.
   installer-iso:
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && inputs.build_iso
     steps:
-      # Needed for installer/bib-config.toml (the interactive kickstart) — this
-      # job previously pulled only the published image and had no checkout.
+      # Needed for installer/bib-config.toml (the interactive kickstart).
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
-          df -h /
+        uses: ./.github/actions/free-disk-space
 
       - name: Log in to GHCR (rootful podman)
         run: |
