@@ -99,7 +99,9 @@ bottom rather than papered over.
 
 Fixes land in one of two places:
 
-- **image** — `Containerfile.base` (or a file under `files/`). Applies to every
+- **image** — `Containerfile.core` for OS-level branding (os-release,
+  fedora-release, issue), `Containerfile.base` for anything COPY'd out of
+  `files/`. Applies to every
   deployment created from a newly built image.
 - **runtime** — `files/scripts/apex-debrand-runtime.sh`. Applies to a system that
   is **already installed**. Three of these surfaces live *outside* the ostree
@@ -110,8 +112,8 @@ Fixes land in one of two places:
 
 | # | Surface | Was | Is now | Fixed in | Where |
 |---|---------|-----|--------|----------|-------|
-| 1 | GRUB boot menu entry (`/boot/loader/entries/*.conf` → `title`) | `Fedora Linux 43 (Forty Three) (ostree:0)` | `APEX-OS (ostree:0)` | image **+** runtime | ostree derives the title from the deployment's os-release `PRETTY_NAME`; `Containerfile.base` sets it. Existing entries: `apex-debrand-runtime.sh` |
-| 2 | Firmware boot entry label (`efibootmgr`) | `Boot0002* Fedora` | `Boot####* APEX-OS` | image **+** runtime | bootupd's `get_product_name()` reads `/etc/system-release`; `Containerfile.base` rewrites `/usr/lib/fedora-release`. Existing NVRAM: `apex-debrand-runtime.sh` |
+| 1 | GRUB boot menu entry (`/boot/loader/entries/*.conf` → `title`) | `Fedora Linux 43 (Forty Three) (ostree:0)` | `APEX-OS (ostree:0)` | image **+** runtime | ostree derives the title from the deployment's os-release `PRETTY_NAME`; `Containerfile.core` sets it. Existing entries: `apex-debrand-runtime.sh` |
+| 2 | Firmware boot entry label (`efibootmgr`) | `Boot0002* Fedora` | `Boot####* APEX-OS` | image **+** runtime | bootupd's `get_product_name()` reads `/etc/system-release`; `Containerfile.core` rewrites `/usr/lib/fedora-release`. Existing NVRAM: `apex-debrand-runtime.sh` |
 | 3 | `os-release` `NAME` / `PRETTY_NAME` | `Fedora Linux` / `Fedora Linux 43 (Forty Three)` | `APEX-OS` / `APEX-OS` | image | `Containerfile.base` os-release `sed` |
 | 4 | `os-release` `VERSION` | `43 (Forty Three)` (Fedora codename) | `43` | image | same `sed` |
 | 5 | `os-release` `LOGO` | `fedora-logo-icon` | `apex-os-logo` | image | same `sed`; the icon itself is installed into `hicolor` from `files/branding/logos/chartreuse/` |
