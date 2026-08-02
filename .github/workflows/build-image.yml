@@ -140,7 +140,7 @@ jobs:
             decide false "no core-relevant change"
           fi
 
-          command -v skopeo >/dev/null || sudo apt-get install -y -qq skopeo
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
 
           # What upstream is at right now.
           UP="$(skopeo inspect --format '{{.Digest}}' "docker://$UPSTREAM_BASE")"
@@ -234,7 +234,7 @@ jobs:
       - name: Resolve upstream fedora-bootc digest
         id: upstream
         run: |
-          command -v skopeo >/dev/null || sudo apt-get install -y -qq skopeo
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           D="$(skopeo inspect --format '{{.Digest}}' "docker://$UPSTREAM_BASE")"
           test -n "$D"
           echo "digest=$D" >> "$GITHUB_OUTPUT"
@@ -647,6 +647,10 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "${{ matrix.flavor }} digest: $DIGEST"
 
+      - name: Sign ${{ matrix.flavor }} (cosign keyless)
+        run: |
+          cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
+
       # How much this push actually costs the fleet. The point of the core tier
       # is that this number is small; printing it into the run summary is what
       # turns "it should be small" into something anyone can check at a glance,
@@ -654,7 +658,7 @@ jobs:
       - name: Report update cost for ${{ matrix.flavor }}
         run: |
           set -euo pipefail
-          command -v skopeo >/dev/null || sudo apt-get install -y -qq skopeo
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
           new=$(skopeo inspect --raw --creds "$creds" \
                   "docker://$IMAGE@${{ steps.push.outputs.digest }}")
@@ -682,10 +686,6 @@ jobs:
                 "push are also reused, but are counted as new here. Before the "
                 "core/base split this number was the whole image (153 layers, 5.3 GB).")
           PY
-
-      - name: Sign ${{ matrix.flavor }} (cosign keyless)
-        run: |
-          cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
 
   # ── Job 5: qcow2 (stretch, dispatch-gated, non-blocking) ─────────────────
   # Proves bootc-image-builder produces a bootable disk from the daily image.
