@@ -17,8 +17,12 @@ Item {
     required property var ctx
 
     // Wallpaper is a system path (not shipped with the greeter); a
-    // missing file falls back to the gradient below.
-    readonly property url wallpaper: "file:///usr/share/backgrounds/apex/default.jpg"
+    // missing file falls back to the gradient below. Resolved by the
+    // shared context: the last user's own published wallpaper when
+    // there is one, the shipped default otherwise. It used to be this
+    // literal default, which is why the login screen never followed the
+    // wallpaper you picked in APEX Shell — see GreetContext.
+    readonly property url wallpaper: root.ctx.wallpaper
 
     property real shakeOffset: 0
     property bool capsOn:      false

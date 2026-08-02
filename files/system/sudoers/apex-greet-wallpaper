@@ -1,0 +1,26 @@
+# APEX-OS — let a desktop user publish their wallpaper to the login screen.
+#
+# APEX Shell's WallpaperService runs as the logged-in user. The greeter runs as
+# the `greetd` system user and cannot read mode-0700 home directories, so the
+# chosen wallpaper has to be copied into /var/lib/apex-greet/wallpapers/ — which
+# needs root. A password prompt is not something a compositor-spawned script can
+# present, hence NOPASSWD.
+#
+# The empty string after the command means "with no arguments at all". Without
+# it, sudoers grants the command with ANY arguments — a far wider grant than
+# intended even for a helper that ignores them.
+#
+# ALL, not %wheel (which is what the Windows-boot rule uses): setting your own
+# desktop wallpaper is not an administrative action. Restricting it to wheel
+# would give every non-wheel account a login screen that silently refuses to
+# follow the wallpaper they just picked, which is the bug this fixes.
+#
+# The grant is safe to hand to every local user because the helper takes no
+# caller-supplied path, resolves the caller from SUDO_UID, and — the part that
+# matters — READS THE SOURCE FILE WITH THE CALLER'S OWN PRIVILEGES via setpriv.
+# Root's only privileged action is writing validated image bytes to a fixed
+# directory under a filename derived from the passwd database. A symlink attack
+# at ~/.curr_wall_static.jpg therefore gains nothing: the read fails exactly as
+# it would if the user ran `cat` themselves. See the helper's header for the
+# full argument.
+ALL ALL=(root) NOPASSWD: /usr/libexec/apex-greet-wallpaper ""
