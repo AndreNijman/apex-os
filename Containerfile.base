@@ -1,94 +1,64 @@
 # ─────────────────────────────────────────────────────────────────────────
-# APEX-OS — base image (production)
+# APEX-OS — base image (thin, fast-moving tier)
 #
-#   fedora-bootc:43
-#     → CachyOS perf kernel swap (bieszczaders COPR)      [own RUN]
-#     → desktop + greeter stack (hyprland/quickshell/…)   [own RUN]
-#     → sched-ext userspace (scx)                          [own RUN]
-#     → Bazaar app store (ublue-os COPR)                   [own RUN]
-#     → RPMFusion + full codecs (ffmpeg/gstreamer/VA-API)  [own RUN]
-#     → baked userland apps (firefox/thunar/mpv/…) + fonts [own RUN]
-#     → yazi (cargo) + Zed (tarball)
-#     → flathub first-boot unit + greeter payload + greetd
+#   FROM apex-os-core@<digest>
+#     → apexd + apex CLI (compiled here)
+#     → sysprofiles, D-Bus policy, polkit rules, systemd units
+#     → every COPY out of files/**  (branding, dotfile templates, greeter,
+#       provisioner, helpers, sudoers rules)
+#     → the vendored APEX Shell + its read-only-/usr path rewrites
 #
-# Shared foundation for the Daily and Gaming editions. Both editions want the
-# performance kernel, so the CachyOS swap lives HERE, in the base — the flavor
-# images (Containerfile.daily / .gaming) derive from this and only add their
-# edition bits (VARIANT stamp, battery/GPU stacks).
+# ═══ WHY THE SPLIT: this tier is the one that changes ═══
 #
-# ── Layering discipline (M0 spike B finding) ──
-# Spike B found that folding the NVIDIA akmod build + the scx install into one
-# dnf flow corrupted the sqlite rpmdb baked into that layer. The production
-# rule, applied throughout this tree: keep every heavy dnf transaction in its
-# OWN `RUN … && dnf5 clean all` layer. The kernel swap, the desktop stack, scx,
-# and Bazaar are therefore four separate transactions. The NVIDIA akmod (the
-# other heavy build) lives in Containerfile.gaming, again in its own stage.
+# `apex update` used to re-download the entire OS on every push. The base job's
+# path filter fires on files/**, apexd/** and config/** — almost every commit —
+# and a cacheless rebuild gives every layer a new digest even when the content
+# is identical, so bootc could reuse nothing. Measured on the author's L16 the
+# published daily image was 155 layers / 5.07 GiB compressed, and essentially
+# all of it moved every time.
 #
-# ── Base tag: fedora-bootc:43 (NOT 44) ──
-# solopasha/hyprland ships aquamarine-0.9.5 linked against libdisplay-info.so.2;
-# F44 moved to libdisplay-info 0.3 (soname .so.3), so hyprland is currently
-# uninstallable there. F43 ships libdisplay-info 0.2 (.so.2) and the whole stack
-# resolves. Revisit F44 once the COPR rebuilds aquamarine. (M0 spike A.)
+# So the ~95% that does not change per commit now lives in Containerfile.core
+# and is consumed here by DIGEST. A digest-pinned FROM reuses those layer
+# descriptors verbatim: bootc already holds the blobs and fetches none of them.
+# What is left in this file is the volatile remainder — a handful of COPY layers
+# and two small binaries, tens of MiB rather than gigabytes.
+#
+# ── The rule for anything added here ──
+# If it runs `dnf`, downloads, or compiles a third-party program, it belongs in
+# Containerfile.core. This tier may only COPY repo content, compile apexd, and
+# assert against those. A RUN that needs both must be split across the two
+# files — see the zsh verification, the Windows-boot helper and the Hyprland
+# template guards below, each of which is the base half of a pair.
+#
+# ── CORE must be pinned by digest ──
+# CI passes --build-arg CORE=ghcr.io/andrenijman/apex-os-core@sha256:… . The
+# `:latest` default exists only so a local `podman build -f Containerfile.base .`
+# works; a tag would defeat the whole point in CI, because a tag that moves
+# gives no reuse guarantee at all.
 # ─────────────────────────────────────────────────────────────────────────
-# ═══ Builder stage — compile Rust components, keep toolchain out of the image ═
-#   • apexd + apex  (the workspace under apexd/; embeds config/sysprofiles/*.toml
-#     via include_str!, so config/ must sit at ../../../config relative to the
-#     crate — hence both apexd/ and config/ are copied under /build/)
-#   • awww + awww-daemon (the swww fork APEX Shell's WallpaperService drives;
-#     not packaged for Fedora, so built from source). Best-effort: a build
-#     failure writes a marker and does NOT abort the image (wallpaper daemon
-#     degrades to static; every other feature is unaffected).
-FROM quay.io/fedora/fedora-bootc:43 AS builder
+ARG CORE=ghcr.io/andrenijman/apex-os-core:latest
+
+# ═══ apexd builder ═══════════════════════════════════════════════════════
+# Built FROM the core image rather than a bare fedora-bootc, on purpose: core
+# already carries rust + cargo (the baked dev toolchain), so this stage installs
+# nothing and starts compiling immediately. It also guarantees the compiler that
+# builds apexd is exactly the one shipped to users.
+#
+# apexd + apex are the workspace under apexd/; they embed config/sysprofiles/*.toml
+# via include_str!, so config/ must sit at ../../../config relative to the crate —
+# hence both apexd/ and config/ are copied under /build/.
+FROM ${CORE} AS apex-builder
 # /root is special in bootc images (symlink → /var/roothome), so cargo's default
 # $HOME/.cargo fails ("File exists" on mkdir). Point CARGO_HOME at the build tree.
 ENV CARGO_HOME=/build/.cargo
-# Parallel RPM downloads (default 3 → 20): base stages are download-bound, not
-# CPU-bound, so this is the biggest build-time lever. See the main stage + apex-logs 38.
-# awww build deps (apex-logs 39): its `common` crate links liblz4 via pkg-config
-# and awww-daemon needs wayland-protocols/wayland/xkbcommon dev files — without
-# these the build-script exits 101 and the wallpaper daemon silently never builds.
-# Verified locally: with these, awww + awww-daemon compile. gcc/cc is needed by
-# several -sys crates.
-RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
-    dnf5 -y install cargo rust git-core gcc lz4-devel pkgconf-pkg-config \
-        wayland-protocols-devel wayland-devel libxkbcommon-devel >/dev/null \
-    && dnf5 clean all
 COPY apexd/ /build/apexd/
 COPY config/ /build/config/
 RUN set -eux; cd /build/apexd; cargo build --release --locked; \
     install -Dm755 target/release/apexd /out/usr/bin/apexd; \
     install -Dm755 target/release/apex  /out/usr/bin/apex
-RUN set -eux; \
-    if git clone --depth 1 https://codeberg.org/LGFae/awww /build/awww \
-       && cd /build/awww && cargo build --release; then \
-        for b in target/release/awww target/release/awww-daemon; do \
-            [ -x "$b" ] && install -Dm755 "$b" "/out/usr/bin/$(basename "$b")"; \
-        done; echo "awww: built" > /out/awww-status; \
-    else echo "awww: BUILD FAILED (wallpaper daemon absent; non-fatal)" > /out/awww-status; \
-    fi; cat /out/awww-status
-# matugen (Rust, from crates.io) — built here rather than via a COPR that lacks a
-# fedora-43 build; COPY'd out with the other binaries. The shell's theming needs
-# it, so this one IS fatal on failure.
-RUN cargo install matugen --root /out/usr
-# yazi (Rust TUI file manager, the CLI companion to Thunar). NOT packaged in
-# Fedora dist-git, and `cargo install yazi-fm yazi-cli` from crates.io is BROKEN:
-# yazi-plugin `include_bytes!`s its preset .lua files via a workspace-relative
-# path (../yazi-plugin/preset/…) that only resolves inside the intact repo tree,
-# not when the crates are unpacked individually from the registry. So build from
-# the pinned git WORKSPACE (same clone+build pattern as awww above). yazi-fm →
-# `yazi`, yazi-cli → `ya`. Non-fatal: a failure leaves the TUI FM absent (Thunar,
-# the GUI handler, remains) but never aborts the image.
-RUN set -eux; \
-    if git clone --depth 1 --branch v26.5.6 https://github.com/sxyazi/yazi /build/yazi \
-       && cd /build/yazi \
-       && cargo build --release --locked -p yazi-fm -p yazi-cli; then \
-        install -Dm755 target/release/yazi /out/usr/bin/yazi; \
-        install -Dm755 target/release/ya   /out/usr/bin/ya; \
-        echo "yazi: built v26.5.6 from git workspace"; \
-    else echo "yazi: BUILD FAILED (TUI file manager absent; non-fatal — Thunar remains)"; fi
 
 # ─────────────────────────────────────────────────────────────────────────
-FROM quay.io/fedora/fedora-bootc:43
+FROM ${CORE}
 
 # OCI provenance. The git SHA is injected by CI (--build-arg APEX_REVISION=…)
 # so every image is traceable back to the exact source commit — the plan's
@@ -96,395 +66,30 @@ FROM quay.io/fedora/fedora-bootc:43
 ARG APEX_REVISION=dev
 ARG APEX_VERSION=43
 LABEL org.opencontainers.image.title="APEX-OS base" \
-      org.opencontainers.image.description="APEX-OS shared base: fedora-bootc:43 + CachyOS kernel + Hyprland/quickshell + greetd/apex-greet + scx + Bazaar" \
+      org.opencontainers.image.description="APEX-OS shared base: apex-os-core + apexd/apex + APEX Shell + greeter payload" \
       org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \
       org.opencontainers.image.revision="${APEX_REVISION}" \
       org.opencontainers.image.version="${APEX_VERSION}" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="APEX-OS"
 
-# ── dnf: parallel downloads (build-speed lever) ────────────────────────────
-# Raise max_parallel_downloads from the default 3 → 20 before any dnf runs. The
-# heavy base stages are dominated by RPM *download* time, not CPU (a 16-core box
-# sits near-idle during them), so more parallel fetches is the single biggest
-# build-time win. This persists in the shipped /etc/dnf/dnf.conf, so the Daily/
-# Gaming derivatives inherit it AND runtime `dnf`/`rpm-ostree` fetches are faster
-# too. (apex-logs 38-dnf-parallel-downloads.md)
-RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf
+# ── apexd + apex CLI ────────────────────────────────────────────────────────
+# The two binaries from the builder stage above. awww/matugen/yazi are NOT here
+# — they are slow-moving third-party tools and ship in core.
+COPY --from=apex-builder /out/usr/bin/ /usr/bin/
 
-# ── Stage 1: CachyOS kernel swap ───────────────────────────────────────────
-# Replace Fedora's kernel with the CachyOS-for-Fedora COPR kernel (BORE +
-# sched-ext, 1000 Hz) — the Phase-A perf kernel proven in M0 spike B.
-# `-devel-matched` pulls the version-locked headers the Gaming edition needs to
-# build the out-of-tree NVIDIA akmod against exactly this kernel. The COPRs are
-# disabled again so the shipped image carries no active COPR repo (bootc
-# hygiene); the RPMs are baked in. Own transaction, `dnf5 clean all` at the end.
-#
-# The kernel install is split so the kernel-cachyos-core %posttrans can fail
-# cosmetically without aborting the build: on F43 that scriptlet runs
-# rpm-ostree's kernel-install → dracut BEFORE `modules.dep` is written, so
-# dracut errors "modules.dep is missing" and the scriptlet returns non-zero
-# (on F42/spike B it merely warned). The RPMs are fully installed regardless
-# (posttrans is the final phase) — we regenerate the initramfs ourselves in the
-# next step. So: tolerate the install's non-zero exit, then HARD-GATE on
-# `rpm -q` proving the kernel packages actually landed. A genuine failure
-# (COPR down, package missing) fails the `rpm -q` and aborts.
-RUN set -eux; \
-    dnf5 -y install dnf5-plugins; \
-    dnf5 -y copr enable bieszczaders/kernel-cachyos; \
-    dnf5 -y copr enable bieszczaders/kernel-cachyos-addons; \
-    dnf5 -y remove --no-autoremove \
-        kernel kernel-core kernel-modules kernel-modules-core; \
-    dnf5 -y install \
-        kernel-cachyos kernel-cachyos-core kernel-cachyos-modules \
-        kernel-cachyos-devel-matched \
-      || echo "WARN: kernel install exited non-zero (expected: cosmetic %posttrans dracut) — verifying RPMs landed"; \
-    rpm -q kernel-cachyos kernel-cachyos-core kernel-cachyos-modules kernel-cachyos-devel-matched; \
-    dnf5 -y copr disable bieszczaders/kernel-cachyos; \
-    dnf5 -y copr disable bieszczaders/kernel-cachyos-addons; \
-    dnf5 clean all
-
-# Ensure the kernel image + initramfs live under /usr/lib/modules/<kver>/ —
-# bootc boots from there, NOT from /boot. Run depmod (modules.dep is present
-# post-transaction, but re-assert it) and regenerate the initramfs with a
-# generic (non-hostonly) dracut, since the %posttrans one did not complete.
-# Then HARD-VERIFY both vmlinuz and initramfs exist. Stamp the kver to
-# /usr/lib/apex-kver so the Gaming akmod stage can read it.
-#
-# ── Serial console: OPT-IN, not default ────────────────────────────────────
-# This image previously shipped `console=ttyS0,115200 console=tty0` to every
-# install. That karg exists for headless QEMU / CI observability, and it is the
-# wrong default for a distro strangers install on arbitrary laptops:
-#
-#   * On any machine whose firmware exposes a UART (docking stations, many
-#     business laptops, most desktop boards), the kernel really does route
-#     printk to it and every boot pays a 115200-baud serialisation cost.
-#   * systemd's getty generator spawns serial-getty@ttyS0 off the karg; the
-#     unit is masked below, but that is papering over a karg we should not be
-#     setting on user hardware in the first place.
-#   * The benefit is CI-only and the cost on unknown hardware cannot be
-#     verified from here — so the default must be "off".
-#
-# CI opts back in with `--build-arg APEX_SERIAL_CONSOLE=1`. The
-# serial-getty@ttyS0 mask stays UNCONDITIONAL further down: it is free
-# insurance for users whose firmware exposes a UART for other reasons.
-ARG APEX_SERIAL_CONSOLE=0
-RUN set -eux; \
-    KVER="$(basename "$(ls -d /usr/lib/modules/*cachyos*)")"; \
-    echo "CachyOS kver: ${KVER}"; \
-    depmod -a "${KVER}"; \
-    if [ ! -s "/usr/lib/modules/${KVER}/initramfs.img" ]; then \
-        echo "initramfs missing -> regenerating with dracut"; \
-        dracut --force --no-hostonly --reproducible --zstd \
-            --kver "${KVER}" "/usr/lib/modules/${KVER}/initramfs.img"; \
-    fi; \
-    test -s "/usr/lib/modules/${KVER}/initramfs.img"; \
-    test -s "/usr/lib/modules/${KVER}/vmlinuz"; \
-    printf '%s\n' "${KVER}" > /usr/lib/apex-kver; \
-    mkdir -p /usr/lib/bootc/kargs.d; \
-    if [ "${APEX_SERIAL_CONSOLE}" = "1" ]; then \
-        printf 'kargs = ["console=ttyS0,115200", "console=tty0"]\n' \
-            > /usr/lib/bootc/kargs.d/10-apex-serial.toml; \
-        echo "serial console: ENABLED (APEX_SERIAL_CONSOLE=1 — CI/QEMU build)"; \
-    else \
-        rm -f /usr/lib/bootc/kargs.d/10-apex-serial.toml; \
-        echo "serial console: disabled (default; pass --build-arg APEX_SERIAL_CONSOLE=1 for CI)"; \
-    fi
-
-# ── Stage 1c: hardware-enablement firmware Fedora's weak deps DO NOT pull ──
-# THE BUG THIS FIXES: `linux-firmware` Recommends exactly 13 subpackages
-# (amd-gpu, amd-ucode, atheros, brcmfmac, cirrus-audio, intel-audio, intel-gpu,
-# mt7xxx, nvidia-gpu, nxpwireless, qcom-wwan, realtek, tiwilink) and NOTHING
-# recommends the rest. Fedora ships the remainder only through the
-# @hardware-support COMPS GROUP, which this image never installs because it
-# installs individual packages. Verified against fedora:43:
-#   `dnf repoquery --recommends linux-firmware`  → the 13 above, and no more
-#   `dnf group info hardware-support`            → the full default list
-#   `dnf repoquery --whatrecommends alsa-sof-firmware` → EMPTY
-# and verified against the built image:
-#   `find /usr/lib/firmware -name 'iwlwifi*'` → 0 files
-#   `find /usr/lib/firmware -iname '*sof*'`   → 0 files
-#   /usr/share/alsa/ucm2                      → did not exist
-# (note the path: modern iwlwifi firmware lives under intel/iwlwifi/, not at
-# the top level — check both before concluding anything about this.)
-#
-# What that meant for anyone who is not the developer:
-#   * iwlwifi-{dvm,mvm,mld}-firmware — Intel Wi-Fi. mvm alone covers 7260
-#     through AX211, i.e. the single most common laptop Wi-Fi family there is;
-#     mld covers Wi-Fi 7 (BE200/BE201). Without them the driver probes, finds
-#     no firmware and the machine has NO WIRELESS NETWORKING. On a laptop with
-#     no Ethernet port that is an unrecoverable first boot.
-#   * alsa-sof-firmware — the Sound Open Firmware DSP images every Intel
-#     laptop since ~Tiger Lake and every AMD ACP laptop (Rembrandt/Phoenix)
-#     needs. Without it there is NO AUDIO AT ALL, not even a fallback card.
-#   * alsa-ucm — the UCM2 use-case profiles ALSA/PipeWire need to route those
-#     codecs. /usr/share/alsa/ucm2 did not exist in the image. Nothing in
-#     Fedora recommends it either (verified: --whatrecommends is empty).
-#   * intel-vsc-firmware — the Visual Sensing Controller on newer Intel
-#     laptops; without it the MIPI/IPU6 webcam never enumerates.
-#   * usb_modeswitch — flips USB WWAN/LTE sticks out of their fake-CD mode.
-#
-# Installed STRICT (no --skip-unavailable): every name here was verified to
-# resolve in fedora:43, and a firmware package silently vanishing is exactly
-# the class of regression that shipped a no-Wi-Fi image. The long tail of
-# legacy/rare radios below is best-effort — cheap to carry, never worth
-# aborting a build for. Own transaction, `dnf5 clean all`, per the layering
-# discipline at the top of this file.
-RUN set -eux; \
-    dnf5 -y install \
-        alsa-sof-firmware alsa-ucm alsa-utils \
-        iwlwifi-dvm-firmware iwlwifi-mvm-firmware iwlwifi-mld-firmware \
-        iwlegacy-firmware intel-vsc-firmware \
-        libertas-firmware b43-fwcutter b43-openfwwf \
-        usb_modeswitch usb_modeswitch-data; \
-    dnf5 -y install --skip-unavailable \
-        mediatek-firmware qcom-firmware qcom-accel-firmware \
-        atmel-firmware zd1211-firmware; \
-    test -n "$(find /usr/lib/firmware -name 'iwlwifi*' -print -quit)" \
-        || { echo "FATAL: no iwlwifi firmware landed — Intel Wi-Fi would be dead"; exit 1; }; \
-    test -d /usr/lib/firmware/intel/sof \
-        || { echo "FATAL: no SOF firmware — laptop audio would be dead"; exit 1; }; \
-    test -d /usr/share/alsa/ucm2 \
-        || { echo "FATAL: no ALSA UCM2 profiles — codec routing would be broken"; exit 1; }; \
-    echo "firmware: iwlwifi $(find /usr/lib/firmware -name 'iwlwifi*' | wc -l) files, SOF + UCM2 present"; \
-    dnf5 clean all
-
-# ── Stage 1b: Secure Boot — sign the kernel with the APEX MOK ──────────────
-# The CachyOS kernel comes from a COPR and is UNSIGNED (verified: PE certificate
-# table size 0). Under Secure Boot, Fedora's signed grub refuses to boot it, so
-# APEX would only run with SB disabled. Microsoft will not sign a custom kernel,
-# so the standard answer is a Machine Owner Key: we sign vmlinuz ourselves and
-# the user enrols our public cert once via MokManager (shim's mechanism).
-#
-# The private key is supplied as a BUILD SECRET and never enters the image or the
-# repo:  podman build --secret id=apex_sb_key,src=/path/apex-mok.key \
-#                     --secret id=apex_sb_crt,src=/path/apex-mok.crt
-# Without the secret the kernel is left unsigned and the image simply requires
-# SB off — the build says so loudly rather than silently shipping something that
-# will not boot.
-RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
-    set -eux; \
-    KVER="$(cat /usr/lib/apex-kver)"; \
-    if [ -s /run/secrets/apex_sb_key ] && [ -s /run/secrets/apex_sb_crt ]; then \
-        dnf5 -y install sbsigntools >/dev/null; \
-        sbsign --key /run/secrets/apex_sb_key --cert /run/secrets/apex_sb_crt \
-               --output "/usr/lib/modules/${KVER}/vmlinuz.signed" \
-               "/usr/lib/modules/${KVER}/vmlinuz"; \
-        mv "/usr/lib/modules/${KVER}/vmlinuz.signed" "/usr/lib/modules/${KVER}/vmlinuz"; \
-        sbverify --list "/usr/lib/modules/${KVER}/vmlinuz" | head -5; \
-        mkdir -p /usr/share/apex-os/secureboot; \
-        openssl x509 -in /run/secrets/apex_sb_crt -outform DER \
-                -out /usr/share/apex-os/secureboot/apex-mok.der; \
-        printf 'signed\n' > /usr/share/apex-os/secureboot/kernel-signed; \
-        dnf5 -y remove sbsigntools >/dev/null 2>&1 || true; \
-        dnf5 clean all; \
-        echo "SECURE BOOT: kernel ${KVER} signed with the APEX MOK"; \
-    else \
-        mkdir -p /usr/share/apex-os/secureboot; \
-        printf 'unsigned\n' > /usr/share/apex-os/secureboot/kernel-signed; \
-        echo "SECURE BOOT: no signing secret supplied — kernel left UNSIGNED (Secure Boot must be OFF)"; \
-    fi
-
-# ── Stage 2: desktop + greeter stack ───────────────────────────────────────
-# hyprland (solopasha COPR 0.51.x) + quickshell (errornointernet COPR 0.3.0 —
-# the exact version apex-greet targets) + greetd. The greeter's compositor host
-# is moving OFF cage: M0 spike A found cage 0.2.0 does not serve wlr-layer-shell
-# to quickshell 0.3.0, so the greeter never paints under it. sway 1.11 and labwc
-# 0.9.6 (both stock F43, both layer-shell v4) are installed as the real host;
-# cage is kept only as a last-resort fallback. xwayland-satellite/foot round out
-# the session. flatpak + distrobox are the userspace app plumbing both editions
-# want (podman + rpm-ostree are already in fedora-bootc). COPRs disabled after.
-#
-# glibc-langpack-en + zram-generator-defaults close two first-boot gaps found on
-# the p6 install (apex-logs 53):
-#   • glibc-langpack-en — the image shipped ONLY glibc-minimal-langpack, so
-#     `locale -a` listed nothing but C/C.utf8/POSIX and en_US.UTF-8 did not
-#     EXIST on the system. The installer kickstart asks for `lang en_US.UTF-8`
-#     and `localectl set-locale LANG=en_US.UTF-8` looks like it works, but
-#     neither can be satisfied without this package — so every install fell back
-#     to the systemd default C.UTF-8 (no collation rules, C-style time/number
-#     formatting).
-#   • zram-generator-defaults — zram-generator itself was already pulled in as a
-#     dependency, but with NO configuration, so the generator ran and created
-#     nothing. Result: no swap of any kind, and `systemd-oomd` logging
-#     "No swap; memory pressure usage will be degraded" on every boot, which
-#     leaves OOM handling abrupt instead of graduated. This package ships
-#     Fedora's standard /usr/lib/systemd/zram-generator.conf (min(ram/2, 8G),
-#     zstd) — the same default the other Fedora atomic desktops carry.
-# Own transaction, `dnf5 clean all` at the end.
-RUN set -eux; \
-    dnf5 -y copr enable solopasha/hyprland; \
-    dnf5 -y copr enable errornointernet/quickshell; \
-    dnf5 -y install \
-        hyprland quickshell greetd sway labwc cage xwayland-satellite foot \
-        jetbrains-mono-fonts fontconfig flatpak distrobox git-core niri \
-        hyprlock hypridle hyprsunset hyprshot grimblast mate-polkit \
-        pipewire pipewire-pulseaudio wireplumber rtkit \
-        playerctl brightnessctl wl-clipboard slurp wtype cliphist \
-        upower libnotify lm_sensors cava wf-recorder ImageMagick \
-        qt6ct mpv-mpris xdg-user-dirs polkit gnome-keyring \
-        gammastep geoclue2 jq dconf \
-        NetworkManager-wifi wpa_supplicant wireless-regdb iw \
-        glibc-langpack-en zram-generator-defaults; \
-    dnf5 -y copr disable solopasha/hyprland; \
-    dnf5 -y copr disable errornointernet/quickshell; \
-    dnf5 clean all
-
-# ── hyprland-qtutils, built HERE against the desktop stack ──────────────────
-# Hyprland warns at every startup without it, and CAsyncDialogBox cannot create
-# dialogs at all — the ANR manager never starts either. hyprland *recommends*
-# the package but it is uninstallable: solopasha's hyprland-qt-support links
-# Qt 6.9 PRIVATE API while this image ships Qt 6.10.3, and private-API symbol
-# versions match exactly. So it is built from source.
-#
-# It is built in THIS stage, not a separate builder, and that is deliberate. A
-# builder starting from bare fedora-bootc resolves hyprutils-devel to FEDORA's
-# 0.7.1 (the COPR does not ship that subpackage) while this image runs 0.10.0
-# from the COPR — so the build linked against different libraries than the
-# target and cmake failed on the Qt private targets. Building where the desktop
-# stack already exists guarantees the versions are the ones actually shipping.
-#
-# Devel packages are installed and removed in the SAME layer, so ~1 GB of Qt
-# headers never reaches the image. Pinned to release tags, not main: this runs
-# on every base rebuild including the weekly cron, and tracking upstream HEAD
-# would let an unrelated commit break everyone's build.
-ARG HYPR_QT_SUPPORT_TAG=v0.1.0
-# Pinned to a COMMIT, not v0.1.5: that tag predates upstream 5ffdfc1
-# "cmake: Added find_package entry for WaylandClientPrivate", without which
-# the build fails against Qt 6.10 with "Target ... links to
-# Qt6::WaylandClientPrivate but the target was not found". Verified: v0.1.5
-# fails and this commit configures cleanly, both against the real desktop stack.
-ARG HYPR_QTUTILS_REF=56d993aced40a9058350d24ff4a7fb4eb961f89b
-RUN set -eux; \
-    dnf5 -y copr enable solopasha/hyprland; \
-    dnf5 -y install cmake ninja-build gcc-c++ git-core pkgconf \
-        qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel \
-        qt6-qtwayland-devel qt6-qtbase-private-devel \
-        qt6-qtdeclarative-private-devel \
-        hyprlang-devel hyprutils-devel; \
-    rpm -q hyprutils-devel qt6-qtbase-devel qt6-qtwayland-devel; \
-    git clone --depth 1 --branch "${HYPR_QT_SUPPORT_TAG}" \
-        https://github.com/hyprwm/hyprland-qt-support /b/qs; \
-    cmake -S /b/qs -B /b/qs/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/usr -DINSTALL_QML_PREFIX=lib64/qt6/qml; \
-    cmake --build /b/qs/build -j"$(nproc)"; \
-    cmake --install /b/qs/build; \
-    mkdir -p /b/qu; git -C /b/qu init -q; \
-    git -C /b/qu remote add origin https://github.com/hyprwm/hyprland-qtutils; \
-    git -C /b/qu fetch -q --depth 1 origin "${HYPR_QTUTILS_REF}"; \
-    git -C /b/qu checkout -q FETCH_HEAD; \
-    cmake -S /b/qu -B /b/qu/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/usr; \
-    cmake --build /b/qu/build -j"$(nproc)"; \
-    cmake --install /b/qu/build; \
-    for b in hyprland-dialog hyprland-donate-screen hyprland-update-screen; do \
-        command -v "$b" >/dev/null || { echo "FATAL: $b missing"; exit 1; }; \
-    done; \
-    ! ldd /usr/bin/hyprland-dialog | grep 'not found'; \
-    test -d /usr/lib64/qt6/qml/org/hyprland/style; \
-    test ! -d /usr/usr; \
-    rm -rf /b; \
-    dnf5 -y remove cmake ninja-build gcc-c++ pkgconf \
-        'qt6-*-devel' 'hypr*-devel' || true; \
-    dnf5 -y copr disable solopasha/hyprland; \
-    dnf5 clean all; \
-    command -v hyprland-dialog; \
-    echo "hyprland-qtutils: built against the shipping Qt and hypr libraries"
-
-
-
-# ── Stage 3: JetBrainsMono Nerd Font ───────────────────────────────────────
-# apex-greet's QML uses the "JetBrainsMono Nerd Font" family for both body text
-# and its Nerd-Font glyphs (person / lock / caps-lock icons). Fedora packages
-# only plain JetBrains Mono (no Nerd glyphs), so fetch the patched family. ADD
-# downloads but does not auto-extract a tarball, so unpack in the RUN.
-ADD https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.tar.xz \
-    /usr/share/fonts/jetbrains-mono-nerd/JetBrainsMono.tar.xz
-RUN set -eux; \
-    cd /usr/share/fonts/jetbrains-mono-nerd; \
-    tar -xJf JetBrainsMono.tar.xz; \
-    rm -f JetBrainsMono.tar.xz; \
-    fc-cache -f /usr/share/fonts/jetbrains-mono-nerd
-
-# ── Stage 4: sched-ext userspace (scx) ─────────────────────────────────────
-# scx-scheds (the scheduler set) + scx-tools (scx_loader/scxctl) from the
-# CachyOS addons COPR — the sched-ext userspace apexd will drive. Isolated in
-# its OWN transaction because M0 spike B traced rpmdb corruption to combining
-# this install with the akmod flow. `dnf5 clean all` at the end.
-RUN set -eux; \
-    dnf5 -y copr enable bieszczaders/kernel-cachyos-addons; \
-    dnf5 -y install scx-scheds scx-tools; \
-    dnf5 -y copr disable bieszczaders/kernel-cachyos-addons; \
-    rpm -q scx-scheds scx-tools > /usr/lib/apex-scx-versions 2>&1 || true; \
-    dnf5 clean all
-
-# ── Stage 5: Bazaar app store ──────────────────────────────────────────────
-# Bazaar (leaf GTK4 Flatpak store — the M0 store decision; no gnome-shell /
-# PackageKit pulled in) from the ublue-os/packages COPR, the same RPM path
-# Bazzite uses. COPR disabled after; own transaction, `dnf5 clean all`.
-RUN set -eux; \
-    dnf5 -y copr enable ublue-os/packages; \
-    dnf5 -y install bazaar; \
-    dnf5 -y copr disable ublue-os/packages; \
-    dnf5 clean all
-
-# ── Stage 5a-codecs: RPMFusion + full multimedia stack (§4c) ───────────────
-# Fedora ships a legally-crippled multimedia stack: `ffmpeg-free` (no H.264/H.265/
-# AAC encoders) and mesa built WITHOUT the proprietary video codecs, so hardware
-# H.264/H.265 decode on the AMD 780M is dead out of the box. This stage fixes the
-# CODEC USERLAND that both editions share; the mesa VA drivers themselves are
-# swapped per-edition (Daily → mesa-va-drivers-freeworld; Gaming → Terra mesa),
-# because §4c pins Daily to stable mesa and Gaming to a fresher mesa.
-#
-# Enable RPMFusion free+nonfree and LEAVE THEM ENABLED (unlike the COPRs, which
-# are one-shot build inputs disabled after use): RPMFusion is a persistent,
-# well-known repo the running system wants so users can install codecs/drivers —
-# the same posture Bazzite ships. Swap ffmpeg-free → full ffmpeg with
-# --allowerasing (they conflict), then the GStreamer plugin set (good is Fedora;
-# bad-freeworld/ugly/libav are RPMFusion) + VA-API userland. openh264 comes from
-# Fedora's Cisco repo. Own transaction, `dnf5 clean all`.
-RUN set -eux; \
-    dnf5 -y install \
-        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
-        "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"; \
-    dnf5 -y install --allowerasing ffmpeg; \
-    dnf5 -y install \
-        gstreamer1-plugins-base gstreamer1-plugins-good \
-        gstreamer1-plugins-bad-free gstreamer1-plugins-bad-freeworld \
-        gstreamer1-plugins-ugly gstreamer1-libav \
-        libva libva-utils; \
-    dnf5 -y install --skip-unavailable gstreamer1-vaapi; \
-    dnf5 clean all
-
-# ── Stage 5a-apps: baked userland (both editions) ──────────────────────────
-# The daily-driver application set the plan bakes into every APEX-OS install so a
-# fresh boot is usable with zero Flatpak round-trips: Firefox (the default and
-# only baked browser), the Thunar + gvfs file-manager stack (yazi, the TUI
-# companion, is built in the builder stage), a PDF viewer, image viewer, mpv, the
-# archive tools, btop, a calculator, editors (neovim/nano — Zed is fetched below),
-# PulseAudio volume control, the disk-management tools, and the Bluetooth stack.
-# Own transaction, `dnf5 clean all`. bluetooth.service is enabled so BT works on
-# first boot; blueman gives the tray applet the shell's BT tab can also drive.
-# Package-name notes (verified against Fedora): the Thunar RPM is capitalised
-# `Thunar`; Fedora dropped p7zip for `7zip` (upstream 7-Zip, provides 7z + RAR
-# extraction); there is no `gvfs-archive` subpackage. `unrar` (RPMFusion nonfree)
-# is best-effort — `7zip`/`unar` already cover RAR — so a nonfree-repo hiccup can
-# never abort this stage.
-RUN set -eux; \
-    dnf5 -y install \
-        firefox \
-        Thunar thunar-volman thunar-archive-plugin \
-        gvfs gvfs-mtp gvfs-smb \
-        evince qimgv mpv \
-        7zip unzip unar xarchiver \
-        btop qalculate-gtk neovim nano \
-        alacritty fastfetch \
-        pavucontrol \
-        gparted parted gdisk udisks2 smartmontools \
-        bluez bluez-tools blueman; \
-    dnf5 -y install --skip-unavailable unrar; \
-    systemctl enable bluetooth.service; \
-    dnf5 clean all
+COPY config/sysprofiles/ /usr/share/apexos/sysprofiles/
+COPY apexd/apexd/apexd.service /usr/lib/systemd/system/apexd.service
+COPY files/system/dbus-1/system-services/org.apexos.Apexd1.service \
+     /usr/share/dbus-1/system-services/org.apexos.Apexd1.service
+COPY files/system/dbus-1/system.d/org.apexos.Apexd1.conf \
+     /usr/share/dbus-1/system.d/org.apexos.Apexd1.conf
+COPY files/system/polkit-1/actions/org.apexos.apexd.policy \
+     /usr/share/polkit-1/actions/org.apexos.apexd.policy
+COPY files/system/polkit-1/rules.d/49-apex-singbox.rules \
+     /usr/share/polkit-1/rules.d/49-apex-singbox.rules
+COPY files/system/units/sing-box.service /usr/lib/systemd/system/sing-box.service
+RUN systemctl enable apexd.service
 
 # Default browser (system-wide XDG): Firefox is the only baked browser, but set
 # the http/https/html handlers explicitly so any "open link" honours it without
@@ -492,237 +97,6 @@ RUN set -eux; \
 COPY files/desktop/xdg/mimeapps.list /etc/xdg/mimeapps.list
 # mpv config (HW decode via VA-API; safe fallback on any GPU vendor).
 COPY files/desktop/mpv/mpv.conf /etc/mpv/mpv.conf
-
-# ── Stage 5a-print: printing + scanning ────────────────────────────────────
-# The image had NO print stack at all — no cups, no drivers, no discovery. A
-# general-purpose desktop distro that cannot print is not usable by "absolutely
-# everyone", and printing is not something a user can bolt on easily on an
-# immutable /usr (it needs a system daemon, not a Flatpak).
-#
-# This is Fedora's @printing group minus cups-browsed: modern CUPS does
-# driverless IPP/AirPrint natively via DNS-SD, cups-browsed exists for legacy
-# CUPS-broadcast networks, and it carried the 2024 remote-code-execution CVE
-# cluster. Left out deliberately; add it if legacy print servers matter to you.
-#
-# DISCOVERY IS HALF THE JOB. A driverless printer is only findable if mDNS
-# works: avahi is already installed AND enabled in this image (verified), but
-# `nss-mdns` was absent and /etc/nsswitch.conf had no mdns module, so nothing
-# could resolve a printer's .local name.
-#
-# nss-mdns wires itself through authselect (`%posttrans` runs
-# `authselect enable-feature with-mdns4`), which is the ONLY correct mechanism
-# here: /etc/nsswitch.conf in this image is a symlink to
-# /etc/authselect/nsswitch.conf, and authselect-apply-changes.service is
-# enabled — so hand-editing that file would both replace the symlink with a
-# regular file and be regenerated away at boot. We re-assert the feature
-# idempotently in case the scriptlet is a no-op at build time, then report the
-# resulting hosts line. Never fatal: a printer found by IP still prints.
-#
-# cups.SOCKET, not cups.service: socket activation means cupsd only runs when
-# something actually prints, instead of sitting resident on every laptop.
-RUN set -eux; \
-    dnf5 -y install \
-        cups cups-filters cups-pk-helper ghostscript \
-        gutenprint gutenprint-cups hplip \
-        nss-mdns system-config-printer \
-        sane-backends sane-airscan; \
-    systemctl enable cups.socket; \
-    authselect enable-feature with-mdns4 >/dev/null 2>&1 || true; \
-    grep '^hosts:' /etc/nsswitch.conf; \
-    grep -q mdns /etc/nsswitch.conf \
-        || echo "WARN: mdns not in nsswitch — .local printer discovery degraded"; \
-    dnf5 clean all
-
-# ── Stage 5a-im: input methods (non-Latin scripts) ─────────────────────────
-# The image shipped Noto CJK fonts so Chinese/Japanese/Korean text RENDERS,
-# but there was no IME anywhere in it — no ibus, no fcitx — so a CJK user
-# could read their language and not type a single character of it. That is a
-# hard blocker for a very large fraction of "absolutely everyone", and it is
-# not fixable post-install on a read-only /usr.
-#
-# fcitx5 over ibus: this is a wlroots/Hyprland desktop, and fcitx5 is the
-# stack with working Wayland text-input-v3 / input-method-v2 support, which is
-# what Hyprland implements. Engines cover the major non-Latin input needs:
-# chinese-addons (pinyin/shuangpin/table), hangul, anthy (Japanese), and m17n
-# (the catch-all: Indic, Cyrillic, Arabic, Hebrew, Thai, Vietnamese, …).
-#
-# ONLY XMODIFIERS is exported. Wayland-native GTK4/Qt6 clients reach fcitx5
-# through text-input-v3 with no env vars at all; setting GTK_IM_MODULE/
-# QT_IM_MODULE on Wayland is the classic misconfiguration that breaks input in
-# native clients. XMODIFIERS is the one that XWayland apps genuinely need, and
-# it is inert when fcitx5 is not running.
-#
-# Autostart is wired in the seeded Hyprland config (files/desktop/hypr/
-# hyprland.conf), NOT via /etc/xdg/autostart — greetd execs Hyprland directly,
-# so nothing in this image processes XDG autostart entries.
-RUN set -eux; \
-    dnf5 -y install \
-        fcitx5 fcitx5-gtk fcitx5-qt fcitx5-configtool \
-        fcitx5-chinese-addons fcitx5-hangul fcitx5-anthy fcitx5-m17n; \
-    printf 'XMODIFIERS=@im=fcitx\n' >> /etc/environment; \
-    command -v fcitx5 >/dev/null; \
-    dnf5 clean all
-
-# ── Stage 5a-laptop: ordinary laptop hardware every vendor ships ───────────
-# Gaps found by diffing the built image against Fedora's @hardware-support and
-# the things a normal laptop owner expects to just work:
-#
-#   fprintd            fingerprint readers (near-universal on business
-#                      laptops). Installed but NOT wired into PAM — enabling
-#                      the authselect with-fingerprint feature changes the
-#                      login stack and is not something to ship untested.
-#                      `fprintd-enroll` then works for whoever wants it.
-#   iio-sensor-proxy   accelerometer / ambient-light / hinge sensors. Without
-#                      it a convertible or tablet has no rotation data at all.
-#   switcheroo-control the dGPU-offload service xdg-desktop-portal and
-#                      PrefersNonDefaultGPU desktop entries query. On any
-#                      hybrid-graphics laptop (a huge share of them) its
-#                      absence means apps can never be launched on the dGPU.
-#   ModemManager       + NetworkManager-ppp: built-in WWAN/LTE modems, which
-#                      is how a lot of business laptops get online at all.
-#   NetworkManager-bluetooth  Bluetooth PAN/DUN tethering off a phone.
-#   nm-connection-editor  the only GUI here that can configure WPA2-Enterprise,
-#                      802.1X, static routes or a VPN — i.e. what a user on a
-#                      university or corporate network needs on day one.
-#   libinput-utils / usbutils / pciutils  the tools any bug report will ask for.
-#
-# thermald is Intel-only and its Fedora unit has NO vendor condition, plus
-# `Restart=on-failure` — so enabling it as-is would restart-loop into a failed
-# unit on every AMD boot. The ExecCondition drop-in makes systemd skip it
-# cleanly (condition-failed, not failed) on non-Intel machines, the same
-# portability posture Containerfile.gaming already applies to the NVIDIA units.
-RUN set -eux; \
-    dnf5 -y install \
-        fprintd fprintd-pam iio-sensor-proxy switcheroo-control thermald \
-        ModemManager NetworkManager-ppp NetworkManager-bluetooth \
-        nm-connection-editor \
-        libinput-utils usbutils pciutils; \
-    mkdir -p /usr/lib/systemd/system/thermald.service.d; \
-    printf '%s\n' \
-        '# APEX-OS: thermald is Intel-only, its Fedora unit has no vendor gate,' \
-        '# and it carries Restart=on-failure — so on an AMD machine it would' \
-        '# restart-loop into a permanently failed unit. ExecCondition makes' \
-        '# systemd skip it cleanly instead.' \
-        '[Service]' \
-        'ExecCondition=/bin/sh -c "grep -q GenuineIntel /proc/cpuinfo"' \
-        > /usr/lib/systemd/system/thermald.service.d/10-apex-intel-only.conf; \
-    systemctl enable switcheroo-control.service; \
-    systemctl enable ModemManager.service; \
-    systemctl enable thermald.service; \
-    dnf5 clean all
-
-# ── Stage 5a-fonts: full font stack ────────────────────────────────────────
-# The base previously shipped only JetBrainsMono Nerd Font, so emoji rendered as
-# tofu and CJK was missing entirely. Add Noto Color Emoji + Noto CJK (sans+serif)
-# + Noto general sans/serif + the Liberation (MS-metric-compatible) and DejaVu
-# families. Rebuild the font cache once. Own transaction, `dnf5 clean all`.
-# The gap being fixed is emoji + CJK — keep those (and the always-present
-# Liberation/DejaVu Latin families) STRICT. The general-purpose Noto Latin
-# families were renamed to variable-font (…-vf-fonts) packages across recent
-# Fedora and the legacy names may be gone on F43, so install them best-effort
-# (--skip-unavailable, trying both spellings) — Liberation/DejaVu already cover
-# Latin regardless.
-RUN set -eux; \
-    dnf5 -y install \
-        google-noto-color-emoji-fonts \
-        google-noto-sans-cjk-fonts google-noto-serif-cjk-fonts \
-        liberation-sans-fonts liberation-serif-fonts liberation-mono-fonts \
-        dejavu-sans-fonts dejavu-serif-fonts dejavu-sans-mono-fonts; \
-    dnf5 -y install --skip-unavailable \
-        google-noto-sans-vf-fonts google-noto-serif-vf-fonts \
-        google-noto-sans-mono-vf-fonts \
-        google-noto-sans-fonts google-noto-serif-fonts; \
-    fc-cache -f; \
-    dnf5 clean all
-
-# ── Stage 5a-zed: Zed editor (/usr, official tarball) ──────────────────────
-# Zed is not packaged for Fedora (upstream ships a Flatpak or a raw tarball, and
-# Flatpaks cannot be installed at bootc build time). Fetch the official Linux
-# tarball into /usr/lib and symlink the launcher onto PATH. Non-fatal, same
-# posture as sing-box: a fetch failure leaves Zed absent (neovim/nano still there)
-# but never aborts the image build. The tarball unpacks to `zed.app/`.
-RUN set -eux; \
-    if curl -fsSL "https://zed.dev/api/releases/stable/latest/zed-linux-x86_64.tar.gz" -o /tmp/zed.tgz \
-       && tar -xzf /tmp/zed.tgz -C /usr/lib; then \
-        ln -sf /usr/lib/zed.app/bin/zed /usr/bin/zed; \
-        install -Dm644 /usr/lib/zed.app/share/applications/zed.desktop \
-            /usr/share/applications/dev.zed.Zed.desktop 2>/dev/null || true; \
-        echo "zed: installed to /usr/lib/zed.app"; \
-    else echo "zed: fetch FAILED (editor absent; non-fatal — neovim/nano remain)"; fi; \
-    rm -f /tmp/zed.tgz
-
-# ── Stage 5a-devstack: full development toolchain (apex-logs 35-dev-stack.md) ─
-# Both editions ship a complete dev environment out of the box: the C/C++
-# toolchain + build systems + debuggers, the language toolchains
-# (Python/Node/Rust/Go/Ruby/JDK), and the common CLI dev tools (gh, git-lfs,
-# ripgrep, fd, fzf, bat, buildah). rust/cargo exist in the builder stage but not
-# the final image, so add them here for users too. Zed (GUI editor) is installed
-# in stage 5a-zed above. Own transaction, `dnf5 clean all`.
-RUN set -eux; \
-    dnf5 -y install \
-        gcc gcc-c++ clang llvm lld \
-        make automake autoconf libtool pkgconf-pkg-config \
-        cmake meson ninja-build gdb strace ltrace \
-        python3-pip python3-devel pipx \
-        rust cargo golang ruby rubygems \
-        java-latest-openjdk-devel \
-        nodejs nodejs-npm \
-        gh git-lfs ripgrep fd-find fzf bat buildah; \
-    dnf5 clean all
-
-# ── Stage 5a-claude: Claude Code CLI (apex-logs 35) ─────────────────────────
-# System-wide via npm global into /usr (NOT /usr/local — that becomes a symlink
-# to writable /var below) so every user gets `claude` on PATH. The autoupdater is
-# disabled fleet-wide via /etc/environment (DISABLE_AUTOUPDATER=1) because it
-# cannot write read-only /usr — updates ride the image rebuild. Non-fatal: a
-# registry hiccup leaves claude absent but never aborts the build.
-#
-# HOME=/tmp: in bootc images /root is a symlink to /var/roothome (absent at build
-# time), so npm's default cache ($HOME/.npm → /root/.npm) fails with ENOTDIR —
-# the same trap the builder stage documents for cargo. Point HOME at a writable
-# build dir. Verified: installs `claude` → /usr/bin/claude.
-RUN set -eux; \
-    export HOME=/tmp; \
-    if npm install -g --prefix /usr @anthropic-ai/claude-code; then \
-        echo "claude-code: installed ($(claude --version 2>/dev/null || echo present))"; \
-    else echo "claude-code: npm install FAILED (absent; non-fatal)"; fi; \
-    rm -rf /tmp/.npm /tmp/.node-compile-cache /root/.npm 2>/dev/null || true
-
-# ── npm global prefix: per-user, not root-owned /usr/local (apex-logs 16) ────
-# Fedora's nodejs ships /etc/npmrc with `prefix=/usr/local`. On a bootc system
-# /usr/local is a symlink to ../var/usrlocal, created root-owned 0755 by the
-# tmpfiles rule below, so ANY `npm install -g` as a normal user dies with:
-#
-#   npm error code EACCES
-#   npm error syscall rename
-#   npm error path /var/usrlocal/lib/node_modules/@openai/codex
-#
-# It is not fixable by chmod-ing that directory: anything a user installed after
-# a `sudo npm i -g` stays root-owned and the next unprivileged install fails on
-# the rename again. And making a shared system path group-writable to install
-# arbitrary npm packages is a bad trade.
-#
-# So point the GLOBAL prefix at the user's own tree. npm expands ${HOME} in
-# npmrc (verified against npm 10.9.7: it resolves to /var/home/<user>/.local),
-# and ~/.local/bin is already first on PATH via /etc/environment and the seeded
-# hyprland.conf, so `npm i -g <pkg>` then `<pkg>` just works with no sudo.
-#
-# This does NOT affect the image's own globals: the claude-code install above
-# passes --prefix /usr explicitly, which overrides npmrc. Anyone who genuinely
-# wants a system-wide install can still say `sudo npm i -g --prefix /usr/local`.
-#
-# Both files are written because ostree keeps the package copy at /usr/etc and
-# derives /etc from it; a future nodejs update replaces /usr/etc/npmrc, and this
-# RUN re-applies after every dnf install so the fix cannot silently regress.
-RUN set -eux; \
-    for f in /etc/npmrc /usr/etc/npmrc; do \
-        [ -f "$f" ] || continue; \
-        sed -i 's|^prefix=/usr/local$|prefix=${HOME}/.local|' "$f"; \
-        grep -q '^prefix=\${HOME}/.local$' "$f"; \
-        ! grep -q '^prefix=/usr/local$' "$f"; \
-    done; \
-    grep -q '^prefix=\${HOME}/.local$' /etc/npmrc; \
-    echo "npm global prefix -> \${HOME}/.local (was root-owned /usr/local)"
 
 # ── System config drop-ins: dark mode, default terminal, fastfetch, Firefox ──
 # Dark mode (apex-logs 28): GTK3/4 prefer-dark, qt6ct dark palette, and the dconf
@@ -757,160 +131,15 @@ COPY files/branding/logos/chartreuse/apex-spark-chartreuse-256.png /usr/share/ic
 COPY files/branding/logos/chartreuse/apex-spark-chartreuse-512.png /usr/share/icons/hicolor/512x512/apps/apex-os-logo.png
 COPY files/branding/logos/chartreuse/apex-spark-chartreuse.svg     /usr/share/icons/hicolor/scalable/apps/apex-os-logo.svg
 
-# ── System defaults + hardening (no dnf) ────────────────────────────────────
-#   - os-release: brand as APEX-OS, keep ID=fedora for ecosystem compat; the
-#     flavor images append VARIANT/VARIANT_ID after this. (apex-logs 34)
-#     Every DISPLAY key is rebranded (NAME/PRETTY_NAME/VERSION/URLs/LOGO/CPE,
-#     REDHAT_* dropped). ID and VERSION_ID deliberately stay `fedora`/`43` —
-#     they are machine-facing keys with verified consumers: `dnf copr enable`
-#     derives its chroot from ID+VERSION_ID (ID=apex → "Chroot not found in the
-#     given Copr project (apex-43-x86_64)", reproduced) and dnf's $releasever
-#     comes from VERSION_ID. Nothing user-visible reads ID. See docs/branding.md.
-#     A surgical `sed -e` (not a heredoc) so a future fedora-bootc base bump
-#     keeps any new keys it adds.
-#   - /usr/lib/fedora-release: this is what `/etc/system-release` (and
-#     /etc/redhat-release) symlink to, and bootupd's get_product_name() reads it,
-#     strips / *release.*/ and uses the result as the efibootmgr LABEL. Leaving
-#     it as "Fedora release 43 (Forty Three)" is why the firmware boot menu said
-#     "Fedora". Content is rewritten in place — the file is NOT renamed, the
-#     symlink chain and `[ -f /etc/fedora-release ]` probes must keep working.
-#   - /usr/lib/issue{,.net}: agetty expands \S to PRETTY_NAME (so the VT login
-#     banner brands itself), but the stock "Kernel \r on \m" line prints
-#     7.1.3-cachyos1.fc43.x86_64. Drop that line — the kernel release string
-#     itself cannot be changed without building the kernel from source.
-#   - LOGO=apex-os-logo needs a real icon or it dangles: install the chartreuse
-#     spark into the hicolor theme at the sizes it ships.
-#   - mask serial-getty@ttyS0: the console=ttyS0 karg (for QEMU/CI) makes systemd
-#     spawn a getty that restart-loops on hardware with no serial port; masking
-#     stops the loop while serial *console* output still works. (apex-logs 04)
-#   - mask systemd-remount-fs: fails on the composefs/overlay root. (apex-logs 03)
-#   - /usr/local -> ../var/usrlocal: /usr is read-only on bootc, so redirect
-#     /usr/local to writable per-machine state + a tmpfiles dir. (apex-logs 08)
-#   - /etc/environment: session-wide theme + default terminal + Claude autoupdate
-#     off, via pam_env so a greetd/Hyprland session (no uwsm) inherits them.
-#   - /etc/bashrc: fastfetch greeting on every interactive terminal, colour by
-#     scheme, once per shell session. (apex-logs 33)
-#   - dconf update: compile the prefer-dark default into the local db.
+# Rebuild the caches that the two COPY blocks above seeded. Both HAVE to run
+# after the copies, which is why they are not in core's hardening layer:
+#   - gtk-update-icon-cache: os-release says LOGO=apex-os-logo, and that name
+#     only resolves once the spark PNGs/SVG are in the hicolor theme.
+#   - dconf update: compiles /etc/dconf/db/local.d/00-apex-dark (prefer-dark)
+#     into the local database the freedesktop appearance portal reads.
 RUN set -eux; \
-    sed -i \
-      -e 's|^NAME=.*|NAME="APEX-OS"|' \
-      -e 's|^PRETTY_NAME=.*|PRETTY_NAME="APEX-OS"|' \
-      -e 's|^VERSION=.*|VERSION="43"|' \
-      -e 's|^VERSION_CODENAME=.*|VERSION_CODENAME=""|' \
-      -e 's|^ANSI_COLOR=.*|ANSI_COLOR="0;38;2;161;201;153"|' \
-      -e 's|^LOGO=.*|LOGO=apex-os-logo|' \
-      -e 's|^CPE_NAME=.*|CPE_NAME="cpe:/o:apexos:apex_os:43"|' \
-      -e 's|^HOME_URL=.*|HOME_URL="https://github.com/AndreNijman/apex-os"|' \
-      -e 's|^DOCUMENTATION_URL=.*|DOCUMENTATION_URL="https://github.com/AndreNijman/apex-os#readme"|' \
-      -e 's|^SUPPORT_URL=.*|SUPPORT_URL="https://github.com/AndreNijman/apex-os/discussions"|' \
-      -e 's|^BUG_REPORT_URL=.*|BUG_REPORT_URL="https://github.com/AndreNijman/apex-os/issues"|' \
-      -e 's|^DEFAULT_HOSTNAME=.*|DEFAULT_HOSTNAME="apex"|' \
-      -e '/^REDHAT_/d' \
-      /usr/lib/os-release; \
-    grep -q '^PRETTY_NAME="APEX-OS"$' /usr/lib/os-release; \
-    test "$(grep -ci fedora /usr/lib/os-release)" = 1; \
-    grep -qx 'ID=fedora' /usr/lib/os-release; \
-    printf '%s\n' 'APEX-OS release 43' > /usr/lib/fedora-release; \
-    printf '%s\n' 'cpe:/o:apexos:apex_os:43' > /usr/lib/system-release-cpe; \
-    printf '%s\n\n' '\S' > /usr/lib/issue; \
-    printf '%s\n' '\S' > /usr/lib/issue.net; \
     gtk-update-icon-cache -qf /usr/share/icons/hicolor 2>/dev/null || true; \
-    systemctl mask serial-getty@ttyS0.service; \
-    systemctl mask systemd-remount-fs.service; \
-    rm -rf /usr/local && ln -s ../var/usrlocal /usr/local; \
-    printf 'd /var/usrlocal 0755 root root -\n' > /usr/lib/tmpfiles.d/apex-usrlocal.conf; \
-    printf 'QT_QPA_PLATFORMTHEME=qt6ct\nTERMINAL=alacritty\nDISABLE_AUTOUPDATER=1\n' >> /etc/environment; \
-    printf '\n# APEX-OS fastfetch greeting. The logic lives in ONE file shared with zsh —\n# zsh is the default login shell, so a bash-only greeting was never seen by\n# real users (apex-logs 14). Guarded so a partial image cannot break bash.\n[ -r /usr/share/apex/shell/greeting.sh ] && . /usr/share/apex/shell/greeting.sh\n' >> /etc/bashrc; \
     dconf update
-
-# ── Stage 5b: apexd + apex CLI, sysprofiles, D-Bus/polkit, sing-box ─────────
-# apexd (power/profile daemon) + apex CLI from the builder stage; the six
-# sysprofiles (also embedded in the binary) ship to the runtime override dir.
-# D-Bus system service + policy + unit wire it up; polkit lets an active local
-# user set tiers/thresholds passwordless. awww lands too if it built.
-COPY --from=builder /out/usr/bin/ /usr/bin/
-# Wallpaper daemon fallback: awww is built best-effort in the builder stage. If
-# it did NOT land (build hiccup), the shell's WallpaperService (`awww img …`) and
-# the seeded `exec-once = awww-daemon` would silently do nothing → no wallpaper on
-# a fresh install (apex-logs 39). swaybg IS installed, so drop in swaybg-backed
-# shims for the two subcommands the shell uses, guaranteeing a working wallpaper
-# either way. If the real awww built, these are skipped.
-RUN set -eux; \
-    if [ ! -x /usr/bin/awww ]; then \
-      printf '%s\n' '#!/usr/bin/env bash' \
-        '# APEX-OS swaybg shim for `awww img … <path>` (real awww absent). apex-logs 39.' \
-        'sub="${1:-}"; shift || true' \
-        '[ "$sub" = "img" ] || exit 0' \
-        'img=""; for a in "$@"; do [ -f "$a" ] && img="$a"; done' \
-        '[ -n "$img" ] || exit 0' \
-        'pkill -x swaybg >/dev/null 2>&1 || true' \
-        'setsid -f swaybg -i "$img" -m fill >/dev/null 2>&1; exit 0' \
-        > /usr/bin/awww; \
-      printf '%s\n' '#!/usr/bin/env bash' \
-        '# APEX-OS swaybg shim for awww-daemon (restore last wallpaper, stay as swaybg). apex-logs 39.' \
-        'wall=""; [ -e "$HOME/.curr_wall" ] && wall="$(readlink -f "$HOME/.curr_wall" 2>/dev/null)"' \
-        'if [ -z "$wall" ] || [ ! -f "$wall" ]; then wall="/usr/share/backgrounds/apex/default.jpg"; fi' \
-        '[ -f "$wall" ] || exit 0' \
-        'pkill -x swaybg >/dev/null 2>&1 || true' \
-        'exec swaybg -i "$wall" -m fill' \
-        > /usr/bin/awww-daemon; \
-      chmod 0755 /usr/bin/awww /usr/bin/awww-daemon; \
-      echo "awww: real binary absent — installed swaybg shims"; \
-    else echo "awww: real binary present"; fi
-COPY config/sysprofiles/ /usr/share/apexos/sysprofiles/
-COPY apexd/apexd/apexd.service /usr/lib/systemd/system/apexd.service
-COPY files/system/dbus-1/system-services/org.apexos.Apexd1.service \
-     /usr/share/dbus-1/system-services/org.apexos.Apexd1.service
-COPY files/system/dbus-1/system.d/org.apexos.Apexd1.conf \
-     /usr/share/dbus-1/system.d/org.apexos.Apexd1.conf
-COPY files/system/polkit-1/actions/org.apexos.apexd.policy \
-     /usr/share/polkit-1/actions/org.apexos.apexd.policy
-COPY files/system/polkit-1/rules.d/49-apex-singbox.rules \
-     /usr/share/polkit-1/rules.d/49-apex-singbox.rules
-COPY files/system/units/sing-box.service /usr/lib/systemd/system/sing-box.service
-RUN systemctl enable apexd.service
-
-# sing-box official static binary (not in Fedora). Shipped DISABLED (unit gates
-# on the user's /etc/sing-box/config.json). Non-fatal: a fetch failure leaves the
-# VPN tab degraded but never aborts the image build.
-RUN set -eux; \
-    if ver="$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name | sed 's/^v//')" \
-       && [ -n "$ver" ] \
-       && curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-amd64.tar.gz" -o /tmp/sb.tgz \
-       && tar -xzf /tmp/sb.tgz -C /tmp; then \
-        install -Dm755 "/tmp/sing-box-${ver}-linux-amd64/sing-box" /usr/bin/sing-box; \
-        /usr/bin/sing-box version; echo "sing-box ${ver} installed"; \
-    else echo "sing-box: fetch FAILED (VPN tab degraded; non-fatal)"; fi; \
-    rm -rf /tmp/sb.tgz /tmp/sing-box-*-linux-amd64
-
-# ── Stage 5b2: zsh + starship as the default interactive shell ─────────────
-# zsh with the packaged plugins, plus the modern CLI tools the shipped .zshrc
-# aliases to. Every alias is guarded by `command -v`, so the config still works
-# in a rescue shell that has none of them — but on a real install they are here.
-#
-# NO framework (oh-my-zsh etc). A framework is a second config system with its
-# own update path and a slow startup; everything APEX needs is a zsh builtin or
-# one small package.
-RUN set -eux; \
-    dnf5 -y install \
-        zsh zsh-autosuggestions zsh-syntax-highlighting \
-        eza bat zoxide fzf ripgrep fd-find; \
-    dnf5 clean all
-
-# starship is NOT packaged in Fedora, and the COPRs offering it are unvetted
-# personal repos. Take the official static musl release, pinned by version AND
-# verified against its published sha256 — an unverified curl|tar into /usr/bin
-# is a supply-chain hole, not a convenience.
-ARG STARSHIP_VERSION=v1.26.0
-ARG STARSHIP_SHA256=b7c232b0e8249d8e55a40beb79c5c43a7d370f3f9408bd215deb0170daeaadf3
-RUN set -eux; \
-    url="https://github.com/starship/starship/releases/download/${STARSHIP_VERSION}/starship-x86_64-unknown-linux-musl.tar.gz"; \
-    curl -fsSL "$url" -o /tmp/starship.tgz; \
-    echo "${STARSHIP_SHA256}  /tmp/starship.tgz" | sha256sum -c -; \
-    tar xzf /tmp/starship.tgz -C /usr/bin starship; \
-    chmod 0755 /usr/bin/starship; \
-    rm -f /tmp/starship.tgz; \
-    starship --version
 
 # Templates seeded per-user by the provisioner (NOT /etc/skel: the provisioner
 # has to substitute the edition accent, and skel cannot).
@@ -928,13 +157,14 @@ COPY files/desktop/bash/apex-starship.sh /etc/profile.d/apex-starship.sh
 # two can never drift. Image-managed for the same reason as the prompt above.
 COPY files/desktop/shell/apex-greeting.sh /usr/share/apex/shell/greeting.sh
 
-# zsh becomes the default login shell for accounts created from here on. This
-# sets the DEFAULT in useradd's config rather than rewriting existing accounts —
-# changing a shell out from under an existing user is not ours to do.
+# Verify everything the three COPYs above just seeded, plus the pieces of the
+# shell story that core is responsible for. zsh being the default login shell,
+# and the starship binary itself, are set in Containerfile.core — this is the
+# half of that pair which can only run once the templates exist, and it
+# re-asserts core's side so a bad core can never reach a user unnoticed.
 RUN set -eux; \
-    sed -i 's|^SHELL=.*|SHELL=/bin/zsh|' /etc/default/useradd; \
     grep -q '^SHELL=/bin/zsh' /etc/default/useradd; \
-    grep -q '^/bin/zsh$' /etc/shells || echo /bin/zsh >> /etc/shells; \
+    grep -q '^/bin/zsh$' /etc/shells; \
     test -x /usr/bin/starship; \
     test -s /usr/share/apex/zsh/zshrc; \
     test -s /usr/share/apex/starship/starship.toml; \
@@ -1096,14 +326,14 @@ RUN set -eux; \
 # reads. Its comment also claimed a dedicated NOPASSWD sudoers rule existed;
 # none was ever shipped either. Both halves are fixed here (apex-logs 15).
 #
-# efibootmgr is made an EXPLICIT dependency. It was only ever present transitively
-# (via the shim/grub2-efi chain), and the button is now useless without it, so a
-# future base change dropping that chain must not silently break the feature.
+# efibootmgr is an EXPLICIT dependency, installed in Containerfile.core (it is a
+# dnf transaction, so it cannot live in this tier). It was only ever present
+# transitively via the shim/grub2-efi chain, and the button is useless without
+# it, so its presence is re-asserted here — where the feature actually lives —
+# rather than trusted.
 COPY files/system/libexec/apex-boot-windows /usr/libexec/apex-boot-windows
 COPY files/system/sudoers/apex-boot-windows /etc/sudoers.d/020-apex-boot-windows
 RUN set -eux; \
-    dnf5 -y install efibootmgr; \
-    dnf5 clean all; \
     test -x /usr/sbin/efibootmgr -o -x /usr/bin/efibootmgr; \
     chmod 0755 /usr/libexec/apex-boot-windows; \
     bash -n /usr/libexec/apex-boot-windows; \
@@ -1188,72 +418,6 @@ COPY files/system/libexec/apex-shell-firstrun /usr/libexec/apex-shell-firstrun
 COPY --chmod=0755 files/system/libexec/apex-shell-autostart \
      /usr/libexec/apex-shell-autostart
 RUN systemctl --global enable apex-shell-firstrun.service
-
-# ── NO unattended OS updates, and NO unattended reboots ─────────────────────
-# fedora-bootc ships bootc-fetch-apply-updates.timer, which on this machine was
-# ACTIVE despite being `preset: disabled` — nothing in this repo enabled it. It
-# fires roughly every 2h, runs `bootc upgrade --apply`, and then reboots the
-# machine on its own. Observed live (apex-logs 57):
-#
-#   systemd[1]: Stopped run-p147322-i134392.service - [systemd-run]
-#               /usr/bin/systemctl reboot "--message=Initiated by bootc"
-#
-# It rebooted a working desktop mid-session, with no prompt and no warning, to
-# pick up an image that had been pushed minutes earlier. On a server that is a
-# reasonable default. On a daily-driver laptop it is data loss waiting to happen:
-# anything unsaved in any application is simply gone.
-#
-# APEX-OS already has an explicit, user-driven update path — `apex update`
-# (bootc upgrade + fwupdmgr) — plus `apex rollback` and `apex pin`. An
-# unattended timer duplicating that while adding a surprise reboot is strictly
-# worse than the command the user chose to run.
-#
-# Masked rather than disabled: `disabled` was not enough here (it was disabled
-# AND active). Masking is the only state that cannot be silently re-activated by
-# a preset or a dependency. It lands in /etc, so it is 3-way-merged and any user
-# who WANTS unattended updates can opt back in with:
-#
-#     sudo systemctl unmask bootc-fetch-apply-updates.timer
-#     sudo systemctl enable --now bootc-fetch-apply-updates.timer
-#
-# Updates are still fully available — they are just always the user's decision.
-RUN set -eux; \
-    systemctl mask bootc-fetch-apply-updates.timer; \
-    systemctl mask bootc-fetch-apply-updates.service; \
-    test -L /etc/systemd/system/bootc-fetch-apply-updates.timer; \
-    test "$(readlink /etc/systemd/system/bootc-fetch-apply-updates.timer)" = /dev/null; \
-    echo "unattended bootc updates masked - 'apex update' is the update path"
-
-# ── Default locale: a REAL one, not systemd's C.UTF-8 fallback ──────────────
-# With no /etc/locale.conf, systemd falls back to LANG=C.UTF-8, which has no
-# collation rules (bytewise sorting) and C-style time/number formatting. Nothing
-# in the image set one, and the script installer (installer/apex-install) never
-# ran localectl either — so every install booted with the fallback. Shipping the
-# file here means EVERY install path gets a valid locale, including a bare
-# `bootc install` with no APEX installer involved.
-#
-# This is an /etc file, so ostree 3-way-merges it: a user who runs
-# `localectl set-locale ...` overrides it and their choice survives upgrades.
-# Requires glibc-langpack-en (installed in the desktop-stack layer above) —
-# without it this would name a locale that does not exist. See apex-logs 53.
-RUN printf '# APEX-OS default locale. Override with: localectl set-locale LANG=...\nLANG=en_US.UTF-8\n' \
-      > /etc/locale.conf; \
-    printf '# APEX-OS default console keymap. Override with: localectl set-keymap ...\nKEYMAP=us\n' \
-      > /etc/vconsole.conf
-
-# ── Default timezone ────────────────────────────────────────────────────────
-# /etc/localtime did not exist at all on the p6 install, so systemd fell back to
-# UTC: the clock read 13:45 while the wall clock said 21:45 (AWST is UTC+8).
-# Everything time-stamped was eight hours out — the bar clock, journal entries,
-# file mtimes, hypridle's timers. Neither the image nor installer/apex-install
-# ever wrote it; only the ISO kickstart did (`timezone Australia/Perth --utc`),
-# and this machine was installed via the script path.
-#
-# Australia/Perth matches installer/bib-config.toml so both install paths agree.
-# It is an /etc symlink, so ostree 3-way-merges it and
-# `timedatectl set-timezone <tz>` overrides it permanently.
-# See apex-logs 55 / apexlogs/09-timezone-utc.md.
-RUN ln -sfn ../usr/share/zoneinfo/Australia/Perth /etc/localtime
 
 # One-shot de-branding migration for systems installed from a PRE-branding image.
 # The BLS entry titles, the EFI NVRAM label and a hand-written /etc/os-release
@@ -1344,11 +508,77 @@ COPY files/branding/wallpapers/apex-wallpaper-default.jpg \
      /usr/share/backgrounds/apex/default.jpg
 COPY files/desktop/apex-greet/greetd-config.toml /etc/greetd/config.toml
 
+# ── Greeter wallpaper: the user's own, not the shipped default ─────────────
+# THE BUG: change your wallpaper in APEX Shell and the login/lock screen kept
+# showing the factory image forever. GreetSurface.qml hardcoded
+# file:///usr/share/backgrounds/apex/default.jpg, and nothing could ever have
+# changed that — /usr is a read-only ostree mount, so there was no writable
+# path for the greeter to read a per-user choice from.
+#
+# It cannot simply read ~/.curr_wall either: the greeter runs as the `greetd`
+# system user, long before (and after) any session exists, and home directories
+# are mode 0700. greetd has no business being able to read them.
+#
+# So the shell PUBLISHES its choice to a greeter-readable location, through a
+# root helper reached by a narrow NOPASSWD sudoers rule — the same pattern the
+# Windows-boot button uses above. The helper takes no caller-supplied path: it
+# resolves the caller from SUDO_UID, and reads that user's wallpaper WITH THE
+# CALLER'S OWN PRIVILEGES (setpriv --reuid), so it cannot be talked into
+# copying /etc/shadow into a world-readable directory. It then validates the
+# bytes really are a JPEG/PNG/WebP before publishing them. See the helper's
+# own header for the full threat model.
+#
+# Unlike the Windows helper this rule is ALL rather than %wheel: setting your
+# desktop wallpaper is not an administrative action, and a non-wheel user would
+# otherwise get a login screen that silently refuses to follow their choice.
+COPY files/system/libexec/apex-greet-wallpaper /usr/libexec/apex-greet-wallpaper
+COPY files/system/sudoers/apex-greet-wallpaper /etc/sudoers.d/030-apex-greet-wallpaper
+RUN set -eux; \
+    chmod 0755 /usr/libexec/apex-greet-wallpaper; \
+    bash -n /usr/libexec/apex-greet-wallpaper; \
+    chown root:root /etc/sudoers.d/030-apex-greet-wallpaper; \
+    chmod 0440 /etc/sudoers.d/030-apex-greet-wallpaper; \
+    # A syntax error or wrong mode makes sudo refuse the file at RUNTIME, which
+    # would mean a password prompt no compositor-spawned script can answer.
+    # visudo -c turns that into a build failure instead.
+    visudo -cf /etc/sudoers.d/030-apex-greet-wallpaper; \
+    # setpriv is what drops privileges for the read. It comes from util-linux
+    # (always present), but assert it: without setpriv the helper would have to
+    # read as root, which is exactly the escalation this design avoids.
+    command -v setpriv >/dev/null; \
+    # The greeter must actually consult the published copy. If an upstream edit
+    # ever reverts GreetSurface/GreetContext to the hardcoded default, this
+    # build fails instead of shipping the original bug back.
+    grep -q 'apex-greet/wallpapers' /usr/share/apex-greet/GreetContext.qml; \
+    grep -q 'ctx.wallpaper' /usr/share/apex-greet/GreetSurface.qml; \
+    # The publisher is invoked from the session launcher (image content, so this
+    # is always a hard failure) AND from the shell's wallpaper pipeline.
+    grep -q 'apex-greet-wallpaper' /usr/libexec/apex-shell-autostart; \
+    # The shell half lives in a DIFFERENT repository. On the default ref this
+    # must hold — a main that lost the call is a regression and shipping it
+    # would quietly restore the original bug. But APEX_SHELL_REF exists so an
+    # older release can be rebuilt reproducibly, and those refs legitimately
+    # predate the feature; failing that build would be obstructive. Same posture
+    # as the windows-check probe above.
+    if ! grep -q 'apex-greet-wallpaper' \
+            /usr/share/apex-shell/src/services/WallpaperService.qml; then \
+        if [ "${APEX_SHELL_REF}" = "main" ]; then \
+            echo "FATAL: apex-shell main no longer publishes the greeter wallpaper"; exit 1; \
+        else \
+            echo "WARN: pinned apex-shell (${APEX_SHELL_REF}) predates the greeter-wallpaper publisher — the login screen will only follow the wallpaper after the next login, not immediately"; \
+        fi; \
+    fi; \
+    echo "greeter wallpaper publisher installed and wired"
+
 # System wiring, one layer (no dnf):
 #   - Writable state dir for apex-greet's last-user/last-session memory, owned
 #     by the greetd session user (Fedora's greetd package provisions the
 #     `greetd` user via sysusers.d — there is NO `greeter` user); tmpfiles
 #     creates it at boot after systemd-sysusers has run.
+#   - Published-wallpaper dir underneath it, root-owned 0755: only the root
+#     helper writes there, everyone (including greetd) may read. It is a
+#     separate tmpfiles line rather than a subdirectory of the greetd-owned one
+#     because greetd must NOT be able to replace the files it renders.
 #   - Enable the flathub first-boot oneshot.
 #   - greetd as the display manager (enabling it creates the
 #     display-manager.service alias; graphical.target Wants it), so a graphical
@@ -1358,7 +588,7 @@ COPY files/desktop/apex-greet/greetd-config.toml /etc/greetd/config.toml
 # (Containerfile.daily / .gaming) own the os-release VARIANT/VARIANT_ID stamp,
 # which is what drives apex-greet's edition (gold/chartreuse) branding.
 RUN set -eux; \
-    printf 'd /var/lib/apex-greet 0755 greetd greetd -\n' \
+    printf 'd /var/lib/apex-greet 0755 greetd greetd -\nd /var/lib/apex-greet/wallpapers 0755 root root -\n' \
         > /usr/lib/tmpfiles.d/apex-greet.conf; \
     systemctl enable apex-flathub-setup.service; \
     systemctl enable greetd.service; \

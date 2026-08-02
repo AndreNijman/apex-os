@@ -287,21 +287,26 @@ RUN set -eux; \
 # VARIANT_ID=gaming boots the gold spark. Copy the theme, set it as the Plymouth
 # default, then rebuild the CachyOS initramfs (the initrd bootc boots from,
 # /usr/lib/modules/<kver>/initramfs.img) so the theme is present in it. Uses the
-# same dracut flags as the base's Stage 1; `--add plymouth` pulls in the daemon
+# same dracut flags as core's Stage 1; `--add plymouth` pulls in the daemon
 # + the default (gold) theme, which uses `ModuleName=script` (plymouth-plugin-
-# script). Own dnf transaction, `dnf5 clean all` at the end. This is the LAST
-# initramfs regeneration in the gaming build.
+# script). This is the LAST initramfs regeneration in the gaming build.
+#
+# The plymouth PACKAGES are installed in Containerfile.core, not here. Every dnf
+# transaction rewrites the ~200 MB sqlite rpmdb into its own layer, so doing it
+# per-edition cost an rpmdb-sized layer that moved on every build and shipped to
+# every user on every `apex update`. What remains is a theme switch plus a
+# --reproducible dracut run, which is byte-stable across rebuilds.
 COPY files/branding/plymouth/apex-os-gold \
      /usr/share/plymouth/themes/apex-os-gold
 RUN set -eux; \
-    dnf5 -y install plymouth plymouth-scripts plymouth-plugin-script; \
+    command -v plymouth-set-default-theme >/dev/null \
+        || { echo "FATAL: plymouth engine missing from core"; exit 1; }; \
     plymouth-set-default-theme apex-os-gold; \
     KVER="$(cat /usr/lib/apex-kver)"; \
     dracut --force --no-hostonly --reproducible --zstd \
         --add plymouth --kver "${KVER}" \
         "/usr/lib/modules/${KVER}/initramfs.img"; \
-    test -s "/usr/lib/modules/${KVER}/initramfs.img"; \
-    dnf5 clean all
+    test -s "/usr/lib/modules/${KVER}/initramfs.img"
 # Kernel args for the graphical splash. `quiet splash` per the theme's own
 # README (files/branding/plymouth/README.md). NOTE: `quiet` raises the console
 # loglevel, so it trims the verbose serial output the base's 10-apex-serial.toml
