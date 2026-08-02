@@ -143,7 +143,7 @@ jobs:
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
 
           # What upstream is at right now.
-          UP="$(skopeo inspect --format '{{.Digest}}' "docker://$UPSTREAM_BASE")"
+          UP="$(skopeo inspect --no-creds --format '{{.Digest}}' "docker://$UPSTREAM_BASE")"
           echo "upstream $UPSTREAM_BASE = $UP"
 
           # What the published core was built from. Missing image, missing label
@@ -235,7 +235,13 @@ jobs:
         id: upstream
         run: |
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
-          D="$(skopeo inspect --format '{{.Digest}}' "docker://$UPSTREAM_BASE")"
+          # --no-creds: fedora-bootc is public, so ask anonymously. Without it
+          # skopeo tries to resolve credentials and dies on
+          # /run/user/<uid>/containers/auth.json, which the earlier
+          # `sudo podman login` created ROOT-OWNED in this job's runtime dir —
+          # the same rootful/rootless split the cosign login step above exists
+          # for. It has nothing to log in to here anyway.
+          D="$(skopeo inspect --no-creds --format '{{.Digest}}' "docker://$UPSTREAM_BASE")"
           test -n "$D"
           echo "digest=$D" >> "$GITHUB_OUTPUT"
           echo "fedora-bootc digest: $D"
@@ -659,6 +665,11 @@ jobs:
         run: |
           set -euo pipefail
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+          # Same trap as the core job: `sudo podman login` above left a
+          # root-owned auth.json in this user's runtime dir, and skopeo reads it
+          # before honouring --creds. Point it at one we own.
+          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/skopeo-auth.json"
+          echo '{}' > "$REGISTRY_AUTH_FILE"
           creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
           new=$(skopeo inspect --raw --creds "$creds" \
                   "docker://$IMAGE@${{ steps.push.outputs.digest }}")
