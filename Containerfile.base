@@ -551,6 +551,12 @@ RUN set -eux; \
     # build fails instead of shipping the original bug back.
     grep -q 'apex-greet/wallpapers' /usr/share/apex-greet/GreetContext.qml; \
     grep -q 'ctx.wallpaper' /usr/share/apex-greet/GreetSurface.qml; \
+    # A returning user must land in the PASSWORD field, not the username one.
+    # That depends on re-applying focus when last-user resolves asynchronously;
+    # if the guard disappears, the greeter silently regresses to eating the
+    # first thing the user types into the wrong box.
+    grep -q 'initialFocusApplied' /usr/share/apex-greet/GreetSurface.qml; \
+    grep -q 'onTextEdited' /usr/share/apex-greet/GreetSurface.qml; \
     # The publisher is invoked from the session launcher (image content, so this
     # is always a hard failure) AND from the shell's wallpaper pipeline.
     grep -q 'apex-greet-wallpaper' /usr/libexec/apex-shell-autostart; \
