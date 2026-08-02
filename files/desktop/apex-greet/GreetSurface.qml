@@ -27,6 +27,15 @@ Item {
     property real shakeOffset: 0
     property bool capsOn:      false
 
+    // ── Initial-focus state ──────────────────────────────────────
+    // True once a human has actually typed in the username field. The
+    // last-user name arrives asynchronously, and it must never yank
+    // focus away from someone who is already mid-type.
+    property bool usernameEdited:     false
+    // The returning-user jump to the password field happens once, not on
+    // every subsequent change to the username.
+    property bool initialFocusApplied: false
+
     focus: true
     // Any stray keystroke lands in the password field.
     Keys.forwardTo: [passwordInput]
@@ -41,11 +50,31 @@ Item {
     }
 
     // Keep the username field in sync when the last-user file resolves
-    // asynchronously after this surface has already loaded.
+    // asynchronously after this surface has already loaded — and move focus
+    // to the password field when it does.
+    //
+    // THE BUG THIS FIXES: booting with a remembered username left the cursor
+    // in the USERNAME field, so the first thing a returning user typed went
+    // into the wrong box. focusInitial() has always had the right rule, but it
+    // runs at Component.onCompleted, and at that instant ctx.username is still
+    // "" — the last-user file is read by a Process that resolves a few
+    // milliseconds later. So the empty-username branch always won on a fresh
+    // boot, and nothing re-evaluated once the name actually arrived.
     Connections {
         target: root.ctx
         function onUsernameChanged() {
             if (!usernameInput.activeFocus) usernameInput.text = root.ctx.username
+
+            if (root.usernameEdited || root.initialFocusApplied) return
+            if (root.ctx.username.length === 0) return
+
+            root.initialFocusApplied = true
+            // Assign explicitly rather than relying on the guarded sync above:
+            // focusInitial() may already have focused this field, in which case
+            // that line is skipped and the pill would sit visibly empty while
+            // the context knows the name.
+            usernameInput.text = root.ctx.username
+            passwordInput.forceActiveFocus()
         }
     }
 
@@ -184,6 +213,10 @@ Item {
                 KeyNavigation.tab:     passwordInput
                 KeyNavigation.backtab: passwordInput
                 onTextChanged: root.ctx.username = text
+                // textEdited fires ONLY for human edits, not for programmatic
+                // assignment — which is exactly the distinction needed here, so
+                // the async last-user arrival cannot steal focus mid-type.
+                onTextEdited:  root.usernameEdited = true
                 onAccepted:    passwordInput.forceActiveFocus()
                 Component.onCompleted: text = root.ctx.username
 
@@ -409,11 +442,18 @@ Item {
     // username field when nothing is prefilled (fresh boot / no last-user)
     // so a username can be typed without a mouse; otherwise go straight to
     // the password field, matching the returning-user fast path.
+    // Note this is only half the story: on a fresh boot ctx.username is still
+    // empty here and the Connections block above applies the returning-user
+    // jump once last-user resolves. This branch covers the case where the name
+    // is already known by the time a surface appears (a re-show, or a second
+    // output mapping late).
     function focusInitial() {
-        if (root.ctx.username.length === 0)
+        if (root.ctx.username.length === 0) {
             usernameInput.forceActiveFocus()
-        else
+        } else {
+            root.initialFocusApplied = true
             passwordInput.forceActiveFocus()
+        }
     }
     Component.onCompleted: focusInitial()
     onVisibleChanged: if (visible) focusInitial()
