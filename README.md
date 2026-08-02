@@ -232,10 +232,22 @@ APEX-OS is image-based, so updates replace the whole OS atomically and can be
 rolled back:
 
 ```sh
-sudo bootc upgrade      # fetch and stage the newest image
-sudo systemctl reboot   # boot into it
-sudo bootc rollback     # go back to the previous image if anything broke
+sudo apex update          # pull the newest image, then check firmware
+sudo apex update --check  # report what is available, download nothing
+sudo systemctl reboot     # boot into it
+sudo apex rollback        # go back to the previous image if anything broke
 ```
+
+`apex update`, `apex rollback` and `apex pin` change the booted system and
+refuse to run without root — they tell you the exact `sudo` line to use instead
+of failing somewhere inside `bootc`. Everything else (`apex status`, `tier`,
+`battery`, `fan`, `doctor`) stays usable as your normal user, because the
+desktop drives those.
+
+Updates are incremental. The image is built in three tiers so that a typical
+release only moves the thin top ones; see
+[docs/update-cost.md](docs/update-cost.md) for how that works and why it
+matters (it used to be 5.3 GB, every time).
 
 Images are published to `ghcr.io/andrenijman/apex-os` and are public.
 
@@ -243,7 +255,8 @@ Images are published to `ghcr.io/andrenijman/apex-os` and are public.
 
 | Path | Contents |
 |------|----------|
-| `Containerfile.base` | Shared base image (bootc) |
+| `Containerfile.core` | Slow-moving foundation: kernel, desktop stack, apps (bootc) |
+| `Containerfile.base` | Thin per-commit tier on top of core: apexd, files/**, shell |
 | `Containerfile.daily` | Daily edition image (chartreuse) |
 | `Containerfile.gaming` | Gaming edition image (gold) |
 | `kernel/` | Custom kernel config / build inputs |
