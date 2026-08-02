@@ -48,12 +48,12 @@ enum Cmd {
     },
     /// Print the hardware fingerprint and layered profile selection.
     Fingerprint,
-    /// Pin the current deployment (ostree admin pin 0).
+    /// Pin the current deployment (ostree admin pin 0). Requires root.
     Pin,
-    /// Roll back to the previous deployment (bootc rollback).
+    /// Roll back to the previous deployment (bootc rollback). Requires root.
     Rollback,
-    /// Update the OS image (bootc upgrade) and firmware (fwupdmgr).
-    Update,
+    /// Update the OS image (bootc upgrade) and firmware (fwupdmgr). Requires root.
+    Update(UpdateArgs),
     /// Diagnose the power stack.
     Doctor,
     /// Show the booted image and its changelog labels.
@@ -94,6 +94,19 @@ enum GameCmd {
 }
 
 #[derive(Args)]
+struct UpdateArgs {
+    /// Report what is available without downloading or staging anything.
+    #[arg(long)]
+    check: bool,
+    /// Skip the firmware (fwupd) pass.
+    #[arg(long)]
+    skip_firmware: bool,
+    /// Only run the firmware pass; leave the OS image alone.
+    #[arg(long, conflicts_with = "skip_firmware")]
+    firmware_only: bool,
+}
+
+#[derive(Args)]
 struct BatteryArgs {
     /// Enable travel mode (tighten charge to a storage window).
     #[arg(long)]
@@ -109,6 +122,30 @@ struct BatteryArgs {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // Root-only verbs bail HERE — before any sysfs probe, D-Bus connect or
+    // subprocess — so an unprivileged `apex update` costs nothing and answers
+    // instantly with the command to run instead. See ops::require_root for why
+    // this covers exactly these four and not the whole CLI (the desktop's power
+    // tab drives `apex tier` as the session user).
+    let privileged = match &cli.command {
+        Cmd::Update(_) => Some("update"),
+        Cmd::Rollback => Some("rollback"),
+        Cmd::Pin => Some("pin"),
+        // `fan restore --local` writes sysfs directly instead of asking apexd;
+        // it is the crash-safety path (ExecStopPost=) and needs real privileges.
+        // Every other fan verb goes through the daemon and must stay usable.
+        Cmd::Fan {
+            cmd: Some(FanCmd::Restore { local: true }),
+        } => Some("fan restore --local"),
+        _ => None,
+    };
+    if let Some(verb) = privileged {
+        if let Err(code) = ops::require_root(verb) {
+            std::process::exit(code);
+        }
+    }
+
     let code = match cli.command {
         Cmd::Status => cmd_status().await,
         Cmd::Tier { name } => cmd_tier(name).await,
@@ -119,7 +156,11 @@ async fn main() {
         Cmd::Fingerprint => cmd_fingerprint(),
         Cmd::Pin => ops::pin(),
         Cmd::Rollback => ops::rollback(),
-        Cmd::Update => ops::update(),
+        Cmd::Update(args) => ops::update(ops::UpdateOptions {
+            check: args.check,
+            skip_firmware: args.skip_firmware,
+            firmware_only: args.firmware_only,
+        }),
         Cmd::Doctor => cmd_doctor().await,
         Cmd::Changelog => ops::changelog(),
     };
