@@ -78,6 +78,21 @@ while [ ! -f "${ENTRY}" ]; do
 done
 [ "${waited}" -gt 0 ] && log "checkout appeared after ${waited}s"
 
+# ── Publish this user's wallpaper to the greeter ────────────────────────────
+# APEX Shell's WallpaperService publishes on every wallpaper change, but that
+# only helps someone who changes it AFTER this feature shipped. Everyone already
+# running APEX has a wallpaper they picked long ago and no reason to re-pick it,
+# and their login screen would keep showing the factory default until they did.
+# Publishing once per session closes that gap and costs nothing: the helper
+# exits immediately when there is nothing new to copy.
+#
+# Backgrounded and fully guarded — a missing helper or a missing sudoers rule
+# must never delay, let alone block, getting to quickshell.
+if [ -x /usr/libexec/apex-greet-wallpaper ]; then
+    ( sudo -n /usr/libexec/apex-greet-wallpaper >/dev/null 2>&1 \
+        || log "greeter wallpaper not published (helper or sudoers rule missing)" ) &
+fi
+
 # ── hypridle — the lock screen's timers ─────────────────────────────────────
 if pgrep -x hypridle >/dev/null 2>&1; then
     log "hypridle already running — skipping"

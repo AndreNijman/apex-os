@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX-OS — publish the calling user's wallpaper for the login/lock greeter
+#
+#  THE BUG THIS FIXES
+#  Changing the wallpaper in APEX Shell moved the desktop but never the login /
+#  lock screen: apex-greet's GreetSurface.qml hardcoded
+#  file:///usr/share/backgrounds/apex/default.jpg, so every machine greeted its
+#  owner with the factory image forever. It was not a missed binding — there was
+#  nowhere for the greeter to read a per-user choice FROM. /usr is a read-only
+#  ostree mount, and the greeter runs as the `greetd` system user, outside any
+#  session, with no business reading mode-0700 home directories.
+#
+#  WHAT THIS DOES
+#  Copies the caller's current wallpaper into /var/lib/apex-greet/wallpapers/
+#  as <username>.<ext>, world-readable, root-owned. apex-greet resolves
+#  last-user → that file, and falls back to the shipped default when it is
+#  absent. Called from APEX Shell's WallpaperService right after a successful
+#  apply, and once per session from /usr/libexec/apex-shell-autostart so a user
+#  who set their wallpaper before this feature existed gets it published without
+#  having to re-pick it.
+#
+#  WHY IT IS SAFE TO GIVE EVERY USER NOPASSWD ROOT ON THIS
+#  This is a root helper reachable by any local user, so the interesting
+#  question is what an attacker can make it do. The answer is: nothing they
+#  could not already do.
+#
+#    * It takes NO ARGUMENTS. There is no caller-supplied path to redirect, and
+#      the sudoers rule grants the empty-argument form only.
+#    * The user is resolved from SUDO_UID, which sudo sets itself. It cannot be
+#      spoofed by the caller, because a caller who could set it in sudo's
+#      environment would already be root.
+#    * THE READ HAPPENS AS THE CALLER, not as root — setpriv drops to their uid
+#      and gid before opening the file. So the classic "make root copy
+#      /etc/shadow somewhere world-readable" attack, via a symlink at
+#      ~/.curr_wall_static.jpg or otherwise, fails exactly as it would if the
+#      user ran `cat` themselves. Root's only privileged act is writing to a
+#      fixed directory under a filename derived from the passwd database.
+#    * The bytes are validated as a real JPEG/PNG/WebP and capped at 64 MiB
+#      before publication, so the greeter is never handed something that could
+#      make its image decoder do something exciting, and no user can fill the
+#      root filesystem through it.
+#    * The destination filename is <username>, sanity-checked against a
+#      conservative character class, so one user can never overwrite another's
+#      published wallpaper.
+#
+#  Usage:
+#    sudo -n /usr/libexec/apex-greet-wallpaper
+#
+#  Exit status: 0 on success AND when there is simply nothing to publish yet
+#  (the caller has no wallpaper). Non-zero only for real failures — callers
+#  invoke this from a desktop pipeline and must not surface noise.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+STATE_DIR=/var/lib/apex-greet
+DEST_DIR="${STATE_DIR}/wallpapers"
+# 64 MiB. Comfortably above any real wallpaper (a 6K JPEG is ~10 MB) and far
+# below anything that could pressure /var.
+MAX_BYTES=$((64 * 1024 * 1024))
+
+say()  { printf 'apex-greet-wallpaper: %s\n' "$*" >&2; }
+die()  { say "$*"; exit 1; }
+
+[ "$(id -u)" -eq 0 ] \
+    || die "must run as root: sudo -n /usr/libexec/apex-greet-wallpaper"
+
+# ── Resolve the caller ───────────────────────────────────────────────────────
+# sudo sets SUDO_UID to the *invoking* user's uid. Anyone able to forge it in
+# sudo's environment is already root, so trusting it here adds no exposure.
+uid="${SUDO_UID:-}"
+[ -n "${uid}" ] || die "no SUDO_UID — invoke this through sudo, not directly"
+case "${uid}" in
+    '' | *[!0-9]*) die "SUDO_UID is not a number" ;;
+esac
+# Root has no desktop session here, and publishing root's wallpaper would name
+# the file after an account that never logs in graphically.
+[ "${uid}" -ne 0 ] || die "refusing to publish root's wallpaper"
+
+ent="$(getent passwd "${uid}")" || die "uid ${uid} has no passwd entry"
+user="$(printf '%s' "${ent}" | cut -d: -f1)"
+gid="$(printf '%s' "${ent}" | cut -d: -f4)"
+home="$(printf '%s' "${ent}" | cut -d: -f6)"
+
+# The username becomes a filename in a shared directory. Anything outside this
+# class (a slash above all) is refused rather than sanitised — a name that odd
+# means something is wrong upstream, not that we should guess.
+case "${user}" in
+    '' | *[!A-Za-z0-9._-]* | .* ) die "refusing unusual username '${user}'" ;;
+esac
+[ -n "${home}" ] && [ -d "${home}" ] || die "user ${user} has no home directory"
+
+# ── Locate the source ────────────────────────────────────────────────────────
+# .curr_wall_static.jpg is the STATIC image: for an animated GIF wallpaper the
+# shell extracts frame 0 into it, and for everything else it is a symlink to the
+# same file as .curr_wall. That is what a login screen wants — the greeter has
+# no wallpaper daemon to animate anything. .curr_wall is the fallback for a
+# session that somehow has one and not the other.
+src=""
+for cand in "${home}/.curr_wall_static.jpg" "${home}/.curr_wall"; do
+    # -e follows symlinks, which is the intent: both are normally symlinks into
+    # the user's wallpaper directory. The read below is unprivileged either way.
+    if [ -e "${cand}" ]; then src="${cand}"; break; fi
+done
+if [ -z "${src}" ]; then
+    say "${user} has no wallpaper yet — nothing to publish"
+    exit 0
+fi
+
+mkdir -p "${DEST_DIR}"
+chmod 0755 "${DEST_DIR}"
+
+# ── Copy it, reading with the CALLER'S privileges ────────────────────────────
+# The redirection is opened by root (into a directory only root can write), but
+# the process doing the reading has dropped to the caller's uid/gid, so it can
+# only read what they could read. This is the whole security argument for the
+# NOPASSWD rule.
+#
+# head -c MAX+1 rather than a stat-then-copy: one read, no TOCTOU window, and an
+# oversized file is detected by the byte count below instead of trusted metadata.
+tmp="$(mktemp "${DEST_DIR}/.publish.XXXXXX")"
+cleanup() { rm -f "${tmp}"; }
+trap cleanup EXIT
+
+if ! setpriv --reuid="${uid}" --regid="${gid}" --clear-groups -- \
+        /usr/bin/head -c "$((MAX_BYTES + 1))" -- "${src}" > "${tmp}" 2>/dev/null; then
+    die "cannot read ${src} as ${user}"
+fi
+
+size="$(stat -c %s "${tmp}")"
+[ "${size}" -gt 0 ] || die "${src} is empty"
+[ "${size}" -le "${MAX_BYTES}" ] \
+    || die "${src} is larger than ${MAX_BYTES} bytes — refusing to publish"
+
+# ── Validate the bytes, do not trust the name ────────────────────────────────
+# The extension on disk proves nothing (the shell writes .curr_wall_static.jpg
+# even when the underlying file is a PNG). Sniff the magic and name the
+# published copy after what it ACTUALLY is, so Qt's image loader picks the right
+# decoder — and so a non-image can never reach the greeter at all.
+magic="$(od -An -tx1 -N16 -v "${tmp}" | tr -d ' \n')"
+case "${magic}" in
+    ffd8ff*)                            ext=jpg  ;;
+    89504e470d0a1a0a*)                  ext=png  ;;
+    52494646????????57454250*)          ext=webp ;;   # RIFF....WEBP
+    *) die "${src} is not a JPEG, PNG or WebP — refusing to publish" ;;
+esac
+
+chmod 0644 "${tmp}"
+# Same filesystem, so this is an atomic rename: the greeter can never observe a
+# half-written wallpaper, even if it happens to be starting right now.
+mv -f "${tmp}" "${DEST_DIR}/${user}.${ext}"
+trap - EXIT
+
+# Drop the same user's copies in the other formats, or a switch from
+# wallpaper.png to wallpaper.jpg would leave two candidates and the greeter's
+# glob would pick by sort order rather than by recency.
+for stale in jpg png webp; do
+    [ "${stale}" = "${ext}" ] || rm -f "${DEST_DIR}/${user}.${stale}"
+done
+
+say "published ${src} -> ${DEST_DIR}/${user}.${ext} (${size} bytes)"

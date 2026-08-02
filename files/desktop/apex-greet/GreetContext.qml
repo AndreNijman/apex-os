@@ -223,6 +223,58 @@ Item {
         }
     }
 
+    // ── Wallpaper (the user's own, not the shipped default) ───────
+    // The greeter used to hardcode /usr/share/backgrounds/apex/default.jpg, so
+    // changing your wallpaper in APEX Shell moved the desktop and left the
+    // login screen on the factory image forever. It could not have worked: /usr
+    // is read-only and this process runs as the `greetd` user, which cannot
+    // read mode-0700 home directories.
+    //
+    // APEX Shell now publishes its choice to /var/lib/apex-greet/wallpapers/
+    // through a root helper (see /usr/libexec/apex-greet-wallpaper), and this
+    // resolves <username>.{jpg,png,webp} there, falling back to the shipped
+    // default. Resolution is by EXPLICIT extension rather than a glob so a
+    // leftover temp file from a crashed publish can never be selected.
+    readonly property string defaultWallpaper: "/usr/share/backgrounds/apex/default.jpg"
+    property string wallpaperPath: ctx.defaultWallpaper
+    readonly property url wallpaper: "file://" + ctx.wallpaperPath
+
+    // Re-resolve as the username field changes, so typing a different account
+    // greets you with THEIR wallpaper. Debounced: this spawns a process, and
+    // doing that per keystroke would be silly.
+    onUsernameChanged: wallpaperDebounce.restart()
+    Timer {
+        id: wallpaperDebounce
+        interval: 400
+        onTriggered: if (!wallpaperProc.running) wallpaperProc.running = true
+    }
+
+    Process {
+        id: wallpaperProc
+        running: true
+        // The username goes in as an environment variable, never spliced into
+        // the script — same rule as launch() below, and it applies here too
+        // because this value can come straight from the text field.
+        environment: ({ "AG_USER": ctx.username })
+        command: ["sh", "-c",
+            "d=/var/lib/apex-greet/wallpapers;" +
+            " u=\"${AG_USER:-}\";" +
+            " [ -n \"$u\" ] || u=\"$(cat /var/lib/apex-greet/last-user 2>/dev/null)\";" +
+            // Anything outside this class cannot be a published filename, so
+            // treat it as "no user" rather than letting it reach the glob.
+            " case \"$u\" in ''|.*|*[!A-Za-z0-9._-]*) u='' ;; esac;" +
+            " if [ -n \"$u\" ]; then for e in jpg png webp; do" +
+            "   if [ -f \"$d/$u.$e\" ]; then printf '%s\\n' \"$d/$u.$e\"; exit 0; fi;" +
+            " done; fi;" +
+            " printf '%s\\n' /usr/share/backgrounds/apex/default.jpg"]
+        stdout: SplitParser {
+            onRead: function(line) {
+                var p = line.trim()
+                if (p !== "") ctx.wallpaperPath = p
+            }
+        }
+    }
+
     // ── Last session (preselect once the list is parsed) ──────────
     Process {
         running: true
