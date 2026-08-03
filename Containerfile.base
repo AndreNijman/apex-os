@@ -109,6 +109,13 @@ COPY files/system/qt6ct/qt6ct.conf /etc/xdg/qt6ct/qt6ct.conf
 COPY files/system/dconf/00-apex-dark /etc/dconf/db/local.d/00-apex-dark
 COPY files/system/dconf/profile-user /etc/dconf/profile/user
 COPY files/system/firefox/policies.json /etc/firefox/policies/policies.json
+# Firefox default prefs, overriding Fedora's. `zz-` is load-bearing: files in
+# browser/defaults/preferences are read in SORTED order and later ones win, and
+# Fedora's is firefox-redhat-default-prefs.js. See the file's own header for what
+# it fixes (every new profile opened on a literal
+# `data:text/plain,browser.startup.homepage=https://start.fedoraproject.org/`).
+COPY files/system/firefox/apex-default-prefs.js \
+     /usr/lib64/firefox/browser/defaults/preferences/zz-apex-default-prefs.js
 COPY files/system/xdg/xdg-terminals.list /etc/xdg/xdg-terminals.list
 # XKB defaults generator: exports XKB_DEFAULT_LAYOUT/VARIANT/MODEL/OPTIONS from
 # the system keymap into the systemd manager environment, so greetd — and the
@@ -139,7 +146,30 @@ COPY files/branding/logos/chartreuse/apex-spark-chartreuse.svg     /usr/share/ic
 #     into the local database the freedesktop appearance portal reads.
 RUN set -eux; \
     gtk-update-icon-cache -qf /usr/share/icons/hicolor 2>/dev/null || true; \
-    dconf update
+    dconf update; \
+    # ── Firefox: prove the Fedora homepage override is actually overridden ────
+    # This is asserted rather than assumed because the whole fix rests on load
+    # ORDER, and a rename on either side silently restores the bug — a browser
+    # that opens on `data:text/plain,browser.startup.homepage=...` on a distro
+    # that is not Fedora.
+    D=/usr/lib64/firefox/browser/defaults/preferences; \
+    test -f "$D/zz-apex-default-prefs.js"; \
+    # Ours must sort LAST in that directory, which is what makes it win.
+    last="$(ls -1 "$D" | LC_ALL=C sort | tail -n1)"; \
+    [ "$last" = "zz-apex-default-prefs.js" ] \
+        || { echo "FATAL: $last sorts after zz-apex-default-prefs.js; the Fedora homepage would win"; exit 1; }; \
+    # And it must actually set the pref it exists to set.
+    grep -q '^pref("browser.startup.homepage", "about:home");' \
+        "$D/zz-apex-default-prefs.js"; \
+    # If Fedora ever stops shipping the bad pref, this override becomes dead
+    # weight — warn rather than fail, so a fixed upstream does not break builds.
+    grep -q 'start.fedoraproject.org' "$D/firefox-redhat-default-prefs.js" \
+        || echo "NOTE: Fedora no longer sets a start.fedoraproject.org homepage — zz-apex-default-prefs.js may be redundant"; \
+    # policies.json is parsed by Firefox at startup; invalid JSON is ignored
+    # SILENTLY, taking the dark-theme defaults down with it.
+    python3 -c "import json,sys; json.load(open('/etc/firefox/policies/policies.json'))"; \
+    python3 -c "import json; p=json.load(open('/etc/firefox/policies/policies.json'))['policies']['Preferences']; assert p['browser.startup.homepage']['Value']=='about:home', p"; \
+    echo "firefox: APEX prefs sort last; homepage override verified"
 
 # Templates seeded per-user by the provisioner (NOT /etc/skel: the provisioner
 # has to substitute the edition accent, and skel cannot).
