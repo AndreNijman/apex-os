@@ -383,6 +383,33 @@ jobs:
 
           echo "core image verified"
 
+      # Pushing a multi-gigabyte image to GHCR fails transiently. Observed on
+      # run 30771778274: gaming-nvidia built clean, verified its signed kernel,
+      # and then died with
+      #   Error: writing blob: uploading layer chunked:
+      #          received unexpected HTTP status: 502 Bad Gateway
+      # after eight minutes of upload. There was no retry, so a green ~50-minute
+      # build was thrown away by a registry hiccup. Three attempts with backoff.
+      - name: Push helper
+        run: |
+          cat > /tmp/push-retry.sh <<'SH'
+          #!/usr/bin/env bash
+          # push-retry <image-ref> [--digestfile <path>]
+          set -uo pipefail
+          ref="$1"; shift
+          for attempt in 1 2 3; do
+            if sudo podman push --compression-format zstd:chunked "$ref" "$@"; then
+              exit 0
+            fi
+            echo "::warning::push of $ref failed (attempt $attempt/3)"
+            [ "$attempt" = 3 ] && break
+            sleep $(( attempt * 30 ))
+          done
+          echo "::error::push of $ref failed after 3 attempts"
+          exit 1
+          SH
+          chmod +x /tmp/push-retry.sh
+
       - name: Push core + capture digest
         id: push
         run: |
@@ -395,10 +422,8 @@ jobs:
           # Requires an OCI manifest (podman already produces one here) and a
           # client that understands zstd; the fleet is bootc 1.16+/ostree 2026.2,
           # which does. `apex rollback` remains the escape hatch.
-          sudo podman push --compression-format zstd:chunked \
-            "$IMAGE_CORE:${{ github.sha }}" \
-            --digestfile=/tmp/core.digest
-          sudo podman push --compression-format zstd:chunked "$IMAGE_CORE:latest"
+          /tmp/push-retry.sh "$IMAGE_CORE:${{ github.sha }}" --digestfile=/tmp/core.digest
+          /tmp/push-retry.sh "$IMAGE_CORE:latest"
           DIGEST="$(cat /tmp/core.digest)"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Core digest: $DIGEST"
@@ -539,13 +564,38 @@ jobs:
 
           echo "base image verified"
 
+      # Pushing a multi-gigabyte image to GHCR fails transiently. Observed on
+      # run 30771778274: gaming-nvidia built clean, verified its signed kernel,
+      # and then died with
+      #   Error: writing blob: uploading layer chunked:
+      #          received unexpected HTTP status: 502 Bad Gateway
+      # after eight minutes of upload. There was no retry, so a green ~50-minute
+      # build was thrown away by a registry hiccup. Three attempts with backoff.
+      - name: Push helper
+        run: |
+          cat > /tmp/push-retry.sh <<'SH'
+          #!/usr/bin/env bash
+          # push-retry <image-ref> [--digestfile <path>]
+          set -uo pipefail
+          ref="$1"; shift
+          for attempt in 1 2 3; do
+            if sudo podman push --compression-format zstd:chunked "$ref" "$@"; then
+              exit 0
+            fi
+            echo "::warning::push of $ref failed (attempt $attempt/3)"
+            [ "$attempt" = 3 ] && break
+            sleep $(( attempt * 30 ))
+          done
+          echo "::error::push of $ref failed after 3 attempts"
+          exit 1
+          SH
+          chmod +x /tmp/push-retry.sh
+
       - name: Push base + capture digest
         id: push
         run: |
-          sudo podman push --compression-format zstd:chunked \
-            "$IMAGE_BASE:${{ github.sha }}" \
-            --digestfile=/tmp/base.digest
-          sudo podman push --compression-format zstd:chunked "$IMAGE_BASE:latest"
+          /tmp/push-retry.sh "$IMAGE_BASE:${{ github.sha }}" --digestfile=/tmp/base.digest
+          /tmp/push-retry.sh "$IMAGE_BASE:latest"
           DIGEST="$(cat /tmp/base.digest)"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Base digest: $DIGEST"
@@ -640,15 +690,40 @@ jobs:
             || { echo "::error::${{ matrix.flavor }} has no apex-mok.der — users would have nothing to enrol"; exit 1; }
           echo "${{ matrix.flavor }}: kernel signed and apex-mok.der present"
 
+      # Pushing a multi-gigabyte image to GHCR fails transiently. Observed on
+      # run 30771778274: gaming-nvidia built clean, verified its signed kernel,
+      # and then died with
+      #   Error: writing blob: uploading layer chunked:
+      #          received unexpected HTTP status: 502 Bad Gateway
+      # after eight minutes of upload. There was no retry, so a green ~50-minute
+      # build was thrown away by a registry hiccup. Three attempts with backoff.
+      - name: Push helper
+        run: |
+          cat > /tmp/push-retry.sh <<'SH'
+          #!/usr/bin/env bash
+          # push-retry <image-ref> [--digestfile <path>]
+          set -uo pipefail
+          ref="$1"; shift
+          for attempt in 1 2 3; do
+            if sudo podman push --compression-format zstd:chunked "$ref" "$@"; then
+              exit 0
+            fi
+            echo "::warning::push of $ref failed (attempt $attempt/3)"
+            [ "$attempt" = 3 ] && break
+            sleep $(( attempt * 30 ))
+          done
+          echo "::error::push of $ref failed after 3 attempts"
+          exit 1
+          SH
+          chmod +x /tmp/push-retry.sh
+
       - name: Push ${{ matrix.flavor }} + capture digest
         id: push
         run: |
           # zstd:chunked — see the note on the core push. This is the one users
           # actually pull, so it is where the download saving lands.
-          sudo podman push --compression-format zstd:chunked \
-            "$IMAGE:${{ matrix.flavor }}-${{ github.sha }}" \
-            --digestfile=/tmp/flavor.digest
-          sudo podman push --compression-format zstd:chunked "$IMAGE:${{ matrix.flavor }}"
+          /tmp/push-retry.sh "$IMAGE:${{ matrix.flavor }}-${{ github.sha }}" --digestfile=/tmp/flavor.digest
+          /tmp/push-retry.sh "$IMAGE:${{ matrix.flavor }}"
           DIGEST="$(cat /tmp/flavor.digest)"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "${{ matrix.flavor }} digest: $DIGEST"
