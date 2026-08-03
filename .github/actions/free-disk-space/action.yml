@@ -10,7 +10,9 @@ description: >-
 # cleanup is no longer enough on its own.
 #
 # Everything removed here is a preinstalled toolchain or cached image that no
-# APEX-OS job uses. Each `|| true` is deliberate: the exact set of preinstalled
+# APEX-OS job uses, and it is all done with `rm -rf` and a docker prune —
+# deliberately no `apt-get remove`, which took 2.1 min per job for space this
+# already reclaims. Each `|| true` is deliberate: the exact set of preinstalled
 # software changes between runner image releases, and a job must not fail
 # because a directory GitHub used to ship has been renamed or dropped.
 
@@ -35,11 +37,11 @@ runs:
         # The runner preloads several GB of Docker images (buildpack, node,
         # …). podman keeps its own store, so nothing here needs them.
         sudo docker image prune --all --force >/dev/null 2>&1 || true
-        # APT's cache and the preinstalled browsers/DB servers.
-        sudo apt-get remove -y -qq '^dotnet-.*' '^llvm-.*' 'php.*' \
-          google-chrome-stable firefox microsoft-edge-stable \
-          mongodb-* mysql-* postgresql-* azure-cli >/dev/null 2>&1 || true
-        sudo apt-get autoremove -y -qq >/dev/null 2>&1 || true
+        # NO `apt-get remove`. It was here and cost 2.1 minutes per job — in
+        # SEVEN jobs — to reclaim space the `rm -rf` above had largely already
+        # taken. apt has to resolve dependencies, run maintainer scripts and
+        # rebuild caches; deleting the directories outright does not. Just drop
+        # the package cache, which is instant.
         sudo apt-get clean
         echo "--- after ---"
         df -h /

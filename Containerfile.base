@@ -36,7 +36,7 @@
 # works; a tag would defeat the whole point in CI, because a tag that moves
 # gives no reuse guarantee at all.
 # ─────────────────────────────────────────────────────────────────────────
-ARG CORE=ghcr.io/andrenijman/apex-os-core:latest
+ARG CORE=ghcr.io/andrenijman/apex-os:core
 
 # ═══ apexd builder ═══════════════════════════════════════════════════════
 # Built FROM the core image rather than a bare fedora-bootc, on purpose: core
