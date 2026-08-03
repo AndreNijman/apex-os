@@ -113,7 +113,19 @@ jobs:
             core:
               - 'Containerfile.core'
               - 'kernel/**'
-              - '.github/workflows/build-image.yml'
+              # DELIBERATELY NOT build-image.yml. It was here at first, and the
+              # very next CI-only commit — adding a push retry — triggered a
+              # 55-minute core rebuild and reissued the whole ~5 GB image to
+              # every machine on the fleet, for a change that could not affect
+              # core's CONTENT by even one byte. Rebuilding core is the single
+              # most expensive thing this workflow can do, so it must be driven
+              # by core's actual inputs, not by edits to the file that drives it.
+              #
+              # The trade: a workflow change that genuinely alters how core is
+              # built (a new --build-arg, a different base tag) will NOT rebuild
+              # it on its own. Run the workflow with force_core=true for that —
+              # an explicit action for the rare case, instead of a multi-gigabyte
+              # download for the common one.
             base:
               - 'Containerfile.base'
               - 'apexd/**'

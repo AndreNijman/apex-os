@@ -93,6 +93,19 @@ the trigger. COPR or RPMFusion moving without a Fedora respin is not picked up
 until the next core-relevant change — run the workflow with `force_core=true` to
 take those immediately.
 
+### What must NOT be in the core path filter
+
+`build-image.yml` itself. It was, at first, and the next CI-only commit — adding
+a retry around `podman push` — rebuilt core and reissued the whole ~5 GB image to
+every machine, for a change that could not alter core's content by one byte.
+Rebuilding core is the most expensive thing this workflow can do, so it is driven
+by core's real inputs (`Containerfile.core`, `kernel/**`) and nothing else.
+
+A workflow change that genuinely alters *how* core is built — a new
+`--build-arg`, a different base tag — therefore will not rebuild it on its own.
+That is what `force_core=true` is for: an explicit action for the rare case
+instead of a multi-gigabyte download for the common one.
+
 ### Measuring it
 
 Every flavor push writes an update-cost table into the GitHub Actions run
