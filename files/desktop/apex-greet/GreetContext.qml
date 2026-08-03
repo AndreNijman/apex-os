@@ -63,10 +63,31 @@ Item {
         ctx._selectWanted()
     }
 
+    // The session that wins when this machine has no last-session memory yet.
+    //
+    // WHY THIS IS EXPLICIT AND NOT "index 0": sessions are enumerated by a
+    // sorted shell glob over /usr/share/wayland-sessions, and sessionIndex
+    // defaults to 0 — so the DEFAULT SESSION was whichever .desktop file sorted
+    // first alphabetically. Adding one is enough to silently change what every
+    // fresh install boots into. That already cost this project a lockout once:
+    // hyprland-uwsm.desktop sorted before hyprland.desktop, became the default,
+    // and bounce-looped at login on real hardware (see Containerfile.base).
+    //
+    // The Gaming edition now also ships apex-gaming.desktop, which sorts before
+    // BOTH of them. So the default is named, not positional, and adding a
+    // session can no longer change it by accident.
+    readonly property string defaultSession: "hyprland"
+
     function _selectWanted() {
-        if (ctx._wantSession === "") return
-        for (var i = 0; i < ctx.sessions.length; i++)
-            if (ctx.sessions[i].id === ctx._wantSession) { ctx.sessionIndex = i; return }
+        // A remembered session always wins.
+        if (ctx._wantSession !== "") {
+            for (var i = 0; i < ctx.sessions.length; i++)
+                if (ctx.sessions[i].id === ctx._wantSession) { ctx.sessionIndex = i; return }
+            return
+        }
+        // Otherwise fall back to the named default rather than glob position.
+        for (var j = 0; j < ctx.sessions.length; j++)
+            if (ctx.sessions[j].id === ctx.defaultSession) { ctx.sessionIndex = j; return }
     }
 
     // ── Live clock (local ticker, mirrors the Lockscreen) ─────────

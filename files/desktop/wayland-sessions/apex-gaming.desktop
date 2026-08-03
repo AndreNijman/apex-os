@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=APEX Gaming Mode
+Comment=Steam Big Picture in gamescope — no desktop, no compositing over the game
+Exec=/usr/libexec/apex-gaming-session
+Type=Application
+DesktopNames=gamescope
+Keywords=game;gaming;steam;bigpicture;gamescope;

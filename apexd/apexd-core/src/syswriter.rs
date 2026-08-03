@@ -253,6 +253,55 @@ impl RealWriter {
     /// Run `nvidia-smi` with `args`. A missing binary or a non-zero exit is a
     /// logged skip, never an error: a machine with no NVIDIA GPU must still be
     /// able to enter game mode.
+    /// `scxctl <args>`, best-effort.
+    ///
+    /// Deliberately never fatal, and for the same reason as nvidia-smi: a
+    /// scheduler swap is a performance nicety, and a machine without sched-ext
+    /// support, without scxctl, or whose scheduler refuses to load must still
+    /// enter game mode with its cpuset, IRQ and clock work applied. Failing the
+    /// whole plan because a scheduler would not attach would be strictly worse
+    /// than running on the kernel's own scheduler.
+    fn run_scxctl(&self, args: &[String]) -> Result<()> {
+        if self.dry_run {
+            eprintln!("apexd: [dry-run] scxctl {}", args.join(" "));
+            return Ok(());
+        }
+        // sched_ext has to exist in the kernel. On a kernel without it scxctl
+        // would fail confusingly, so say the useful thing instead.
+        if !Path::new("/sys/kernel/sched_ext").exists() {
+            eprintln!(
+                "apexd: skip (kernel has no sched_ext support) scxctl {}",
+                args.join(" ")
+            );
+            return Ok(());
+        }
+        // scx-tools installs into /usr/sbin, which is not always on PATH for a
+        // service; try both rather than depending on the unit's environment.
+        let bin = ["/usr/sbin/scxctl", "/usr/bin/scxctl"]
+            .into_iter()
+            .find(|p| Path::new(p).exists());
+        let Some(bin) = bin else {
+            eprintln!("apexd: skip (scxctl absent) scxctl {}", args.join(" "));
+            return Ok(());
+        };
+        match std::process::Command::new(bin).args(args).output() {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => {
+                eprintln!(
+                    "apexd: scxctl {} failed ({}): {}",
+                    args.join(" "),
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("apexd: cannot run scxctl {}: {e}", args.join(" "));
+                Ok(())
+            }
+        }
+    }
+
     fn run_nvidia_smi(&self, args: &[String]) -> Result<()> {
         if self.dry_run {
             eprintln!("apexd: [dry-run] nvidia-smi {}", args.join(" "));
@@ -501,6 +550,8 @@ impl SysWriter for RealWriter {
                 Ok(())
             }
             Action::CgroupRemove { path } => self.cgroup_remove(path),
+            Action::ScxSwitch { sched } => self.run_scxctl(&["switch".into(), "-s".into(), sched.clone()]),
+            Action::ScxStop => self.run_scxctl(&["stop".into()]),
         }
     }
 

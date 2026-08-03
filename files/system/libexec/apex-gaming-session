@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX-OS Gaming Mode — Steam Big Picture inside gamescope
+#
+#  This is the session greetd runs when "APEX Gaming Mode" is picked at the
+#  greeter, or when the shell's power menu switches to it. Hyprland and APEX
+#  Shell are NOT running: gamescope owns the display directly.
+#
+#  WHY A GAMESCOPE SESSION AT ALL (the performance argument)
+#  In the desktop session the bar and the three border strips are layer-shell
+#  surfaces on layer `top`, which the compositor draws ABOVE a fullscreen window
+#  — so a game paid to composite four extra surfaces every frame. The shell now
+#  unmaps them for a fullscreen window, which helps, but Hyprland is still a
+#  full compositor in the path.
+#
+#  The obvious next step looks like Hyprland's `render:direct_scanout`, and it is
+#  the wrong one. It is off by default upstream for good reason: black screens on
+#  native-Wayland games, HDR colours blowing out, cursor and VRR regressions, and
+#  crashes on `=2`. Not something to enable for everyone.
+#
+#  gamescope sidesteps the question. It is a tiny compositor that presents
+#  directly to KMS, so there is no desktop, no bar, no shell, and nothing to
+#  composite over the game — plus Steam Big Picture, controller-first, and
+#  per-game scaling for free.
+#
+#  FAIL-SAFE, BY DESIGN
+#  If anything essential is missing this exits NON-ZERO and immediately. greetd
+#  then re-displays the greeter, so a broken Gaming Mode is a bounce back to the
+#  login screen — never a black screen with no way out. That matters more than
+#  usual here: this session cannot be verified on the author's hardware yet.
+#
+#  Env overrides (for debugging, not for normal use):
+#    APEX_GAMESCOPE_ARGS   extra gamescope arguments
+#    APEX_STEAM_ARGS       replace the Steam argument list
+#    APEX_GAMING_NO_APEXD  set to 1 to skip `apex game start`
+# ─────────────────────────────────────────────────────────────────────────────
+# Deliberately NOT `set -e`: every optimisation below is best-effort, and none of
+# them may prevent the session from starting. The hard requirements are checked
+# explicitly instead.
+set -uo pipefail
+
+log() { printf '[apex-gaming-session] %s\n' "$*" >&2; }
+
+# ── Hard requirements ───────────────────────────────────────────────────────
+for bin in gamescope steam; do
+    command -v "$bin" >/dev/null 2>&1 || {
+        log "FATAL: '$bin' is not installed — this is not the Gaming edition?"
+        log "returning to the greeter rather than starting a broken session"
+        exit 1
+    }
+done
+
+# ── APEX game mode: cpuset, IRQ steering, GPU clocks, tier, sched-ext ───────
+# One call does all of it. `apex game start` goes through apexd's D-Bus API,
+# whose polkit action (manage-power) is allow_active=yes, so the session user
+# authorises without a prompt. The profile's `scx` field is what loads
+# scx_lavd — see config/sysprofiles/msi-katana-gf76.toml.
+#
+# Best-effort: on a machine whose profile disables game mode, or with apexd
+# down, gaming still works — it is just not tuned.
+if [ "${APEX_GAMING_NO_APEXD:-0}" != "1" ] && command -v apex >/dev/null 2>&1; then
+    if apex game start >/dev/null 2>&1; then
+        log "apexd game mode engaged (cpuset/IRQ/clocks/tier/sched-ext)"
+    else
+        log "apexd game mode unavailable — continuing untuned"
+    fi
+fi
+
+# Leaving Gaming Mode must always undo it, however the session ends.
+cleanup() {
+    if [ "${APEX_GAMING_NO_APEXD:-0}" != "1" ] && command -v apex >/dev/null 2>&1; then
+        apex game stop >/dev/null 2>&1 && log "apexd game mode released"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+# ── Realtime scheduling ─────────────────────────────────────────────────────
+# `--rt` needs a non-zero RLIMIT_RTPRIO; the image ships
+# /etc/security/limits.d/30-apex-gaming-rtprio.conf and pam_limits applies it.
+# Only pass the flag when the limit is actually there, so the log says something
+# true instead of gamescope quietly failing to acquire RT.
+# The SOFT limit is the one that bounds sched_setscheduler(), so that is what
+# gets checked. `ulimit -Hr` (the hard limit) would pass a limits.d file that
+# raised only the ceiling and left the soft limit at 0 — i.e. it would report
+# success for exactly the silent failure this is here to catch. The shipped
+# drop-in uses `-`, which sets both.
+RT_ARGS=()
+rtprio="$(ulimit -Sr 2>/dev/null || echo 0)"
+case "${rtprio}" in
+    unlimited)   RT_ARGS=(--rt) ;;
+    ''|*[!0-9]*) log "cannot read the soft RLIMIT_RTPRIO — not asking for realtime" ;;
+    *) if [ "${rtprio}" -gt 0 ]; then
+           RT_ARGS=(--rt)
+           log "soft RLIMIT_RTPRIO is ${rtprio} — requesting realtime scheduling"
+       else
+           log "soft RLIMIT_RTPRIO is 0 — realtime unavailable (is the user in @wheel?)"
+       fi ;;
+esac
+
+# ── VRR ─────────────────────────────────────────────────────────────────────
+# Only ask for adaptive sync if a connected output actually advertises it.
+# Passing it blindly is harmless on paper but muddies the failure diagnosis.
+VRR_ARGS=()
+for p in /sys/class/drm/card*-*/vrr_capable; do
+    [ -r "$p" ] || continue
+    if [ "$(cat "$p" 2>/dev/null)" = "1" ]; then
+        VRR_ARGS=(--adaptive-sync)
+        log "VRR-capable output found — enabling adaptive sync"
+        break
+    fi
+done
+
+# ── HDR ─────────────────────────────────────────────────────────────────────
+# Left OFF on purpose. gamescope's HDR path needs the WSI layer and a display
+# that genuinely supports it, and getting it wrong washes out every colour on
+# screen. Opt in per-machine with APEX_GAMESCOPE_ARGS="--hdr-enabled".
+
+# ── Steam ───────────────────────────────────────────────────────────────────
+# -gamepadui is Big Picture, the controller-first UI. NOT -steamdeck: that
+# switches Steam into Deck mode, which expects SteamOS-specific integration
+# (the steamos-* helpers, Deck hardware quirks) that APEX-OS does not ship.
+# ONLY -gamepadui. That is the documented flag for Big Picture and the only one
+# confirmed to exist; anything else added from memory would be an unrecognised
+# argument at session start, on the one path that cannot be tested from here.
+# Extra flags belong in APEX_STEAM_ARGS once tried on real hardware.
+STEAM_ARGS=(-gamepadui)
+if [ -n "${APEX_STEAM_ARGS:-}" ]; then
+    # shellcheck disable=SC2206 # intentional word-splitting of an override
+    STEAM_ARGS=(${APEX_STEAM_ARGS})
+fi
+
+# ── gamescope ───────────────────────────────────────────────────────────────
+#   -e/--steam        Steam integration (Big Picture keyboard/controller glue)
+#   -f                fullscreen; the output's native mode is used
+#   --expose-wayland  let native Wayland (xdg-shell) games in, not just X11
+#   --mangoapp        MangoHud via gamescope's own overlay, which upstream says
+#                     to use INSTEAD of wrapping the game in mangohud
+GS_ARGS=(-e -f --expose-wayland "${RT_ARGS[@]}" "${VRR_ARGS[@]}")
+command -v mangoapp >/dev/null 2>&1 && GS_ARGS+=(--mangoapp)
+if [ -n "${APEX_GAMESCOPE_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    GS_ARGS+=(${APEX_GAMESCOPE_ARGS})
+fi
+
+log "starting: gamescope ${GS_ARGS[*]} -- steam ${STEAM_ARGS[*]}"
+
+# Not exec'd: the EXIT trap has to run so game mode is released when Steam
+# quits. gamescope exiting is the signal that Gaming Mode is over, and greetd
+# then brings the greeter back.
+gamescope "${GS_ARGS[@]}" -- steam "${STEAM_ARGS[@]}"
+rc=$?
+log "gamescope exited with ${rc}"
+exit "${rc}"

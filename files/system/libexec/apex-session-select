@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX-OS — choose which session the greeter will preselect next
+#
+#  WHAT THIS IS FOR
+#  Entering Gaming Mode from the desktop (the shell's power menu) and leaving it
+#  again. Both directions come down to the same thing: remember which session
+#  should be preselected, then end the current one so greetd shows the greeter.
+#
+#  WHY IT NEEDS ROOT
+#  The greeter's memory lives in /var/lib/apex-greet, which tmpfiles creates
+#  0755 greetd:greetd — the greeter runs as `greetd` and a session user has no
+#  write access to it (nor should it). Exactly the same wall the wallpaper
+#  publisher hit, solved the same way: a narrow root helper behind a NOPASSWD
+#  rule, taking no caller-supplied paths.
+#
+#  WHY IT DOES NOT AUTO-LOGIN
+#  SteamOS and Bazzite hand you straight back into the new session because they
+#  configure display-manager autologin. APEX-OS deliberately does not: the end
+#  state for both machines is LUKS2 + TPM2 full-disk encryption, and quietly
+#  adding a passwordless graphical login to that is a security change nobody
+#  asked for. Switching modes costs one password entry at the greeter.
+#
+#  SAFETY
+#  The requested session is validated against the .desktop files actually
+#  installed in /usr/share/wayland-sessions — a caller cannot name something
+#  that is not a real session, and cannot smuggle a path. Terminating the
+#  session is something an unprivileged user can already do (loginctl,
+#  logging out of the desktop), so the only privileged effect here is writing
+#  one short, validated string into the greeter's state directory.
+#
+#  NOTE ON --switch: it uses `loginctl terminate-user`, which ends EVERY session
+#  belonging to the caller — including an SSH login. That is deliberate (a
+#  graphical session owns several logind sessions and terminating only the
+#  "current" one can leave the display half torn down), but it will surprise
+#  anyone driving this over SSH.
+#
+#  Usage:
+#    apex-session-select <session-id>          remember it, do NOT log out
+#    apex-session-select <session-id> --switch remember it, then end the session
+#    apex-session-select --list                print valid session ids
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+STATE_DIR=/var/lib/apex-greet
+SESSION_DIR=/usr/share/wayland-sessions
+
+say() { printf 'apex-session-select: %s\n' "$*" >&2; }
+die() { say "$*"; exit 1; }
+
+valid_sessions() {
+    for f in "${SESSION_DIR}"/*.desktop; do
+        [ -r "$f" ] || continue
+        basename "$f" .desktop
+    done
+}
+
+[ "$(id -u)" -eq 0 ] || die "must run as root (via sudo -n /usr/libexec/apex-session-select)"
+
+if [ "${1:-}" = "--list" ]; then
+    valid_sessions
+    exit 0
+fi
+
+want="${1:-}"
+[ -n "${want}" ] || die "no session given (try --list)"
+
+# Reject anything that is not a plain id BEFORE it is used in a path.
+case "${want}" in
+    '' | *[!A-Za-z0-9._-]* | .* | *--*) die "refusing suspicious session id '${want}'" ;;
+esac
+
+# And reject anything that is not actually installed. This is the check that
+# makes the sudoers grant safe to hand out: the only strings that reach the
+# state file are names of real, shipped sessions.
+found=0
+while read -r s; do
+    [ "$s" = "${want}" ] && { found=1; break; }
+done < <(valid_sessions)
+[ "${found}" = 1 ] || die "'${want}' is not an installed session (try --list)"
+
+mkdir -p "${STATE_DIR}"
+# Owned by greetd, because greetd rewrites this file itself on every successful
+# login; leaving it root-owned would break the greeter's own bookkeeping.
+printf '%s' "${want}" > "${STATE_DIR}/last-session"
+chown greetd:greetd "${STATE_DIR}/last-session" 2>/dev/null || true
+chmod 0644 "${STATE_DIR}/last-session"
+# Force it to disk BEFORE the session is torn down. Without this the write sits
+# in page cache while `loginctl terminate-user` below kills everything, and the
+# failure mode is "asked for Gaming Mode, got the desktop back" — intermittent,
+# and miserable to diagnose.
+sync "${STATE_DIR}/last-session" 2>/dev/null || sync
+say "next session: ${want}"
+
+[ "${2:-}" = "--switch" ] || exit 0
+
+# End the CALLER's session, not every session on the box. SUDO_UID is set by
+# sudo and cannot be forged by an unprivileged caller.
+uid="${SUDO_UID:-}"
+case "${uid}" in
+    '' | *[!0-9]*) die "no usable SUDO_UID; refusing to terminate anything" ;;
+esac
+say "ending session for uid ${uid} — the greeter will come back with ${want} selected"
+# terminate-user is the reliable one: a graphical session may own several
+# logind sessions (the compositor plus a lingering tty), and terminating only
+# the "current" one can leave the display in a half-torn-down state.
+exec loginctl terminate-user "${uid}"
