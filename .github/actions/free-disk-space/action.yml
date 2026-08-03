@@ -1,29 +1,55 @@
 name: Free disk space
 description: >-
-  Reclaim space on a GitHub-hosted runner so a multi-gigabyte bootc image build
-  has headroom. Shared by every job in build-image.yml.
+  Ensure a bootc image build has disk headroom on a GitHub-hosted runner.
+  Cheap by default; only actually cleans when space is genuinely short.
 
-# ubuntu-latest ships with roughly 14 GB free on /, and an APEX-OS image is
-# ~5 GB compressed / ~13 GB extracted. That was already tight when the base
-# built everything itself; since the core/base split the base job also has to
-# PULL the ~13 GB core before adding its own layers, so the old five-directory
-# cleanup is no longer enough on its own.
+# ── WHY THIS BARELY DOES ANYTHING ANY MORE ───────────────────────────────────
+# This step used to unconditionally delete every preinstalled toolchain, and for
+# a while also ran `apt-get remove` over a dozen package globs. It was written
+# against the old runner spec — "ubuntu-latest ships with ~14 GB free" — and that
+# is simply no longer true. Measured on the base job of run 30779542368:
 #
-# Everything removed here is a preinstalled toolchain or cached image that no
-# APEX-OS job uses, and it is all done with `rm -rf` and a docker prune —
-# deliberately no `apt-get remove`, which took 2.1 min per job for space this
-# already reclaims. Each `|| true` is deliberate: the exact set of preinstalled
-# software changes between runner image releases, and a job must not fail
-# because a directory GitHub used to ship has been renamed or dropped.
+#   --- before ---
+#   /dev/root  145G   58G   88G  40% /
+#   --- after ---
+#   /dev/root  145G   27G  119G  19% /
+#
+# 88 GB free BEFORE cleaning, for a job that needs ~13 GB of core plus a ~5 GB
+# base. The sweep reclaimed 31 GB nobody was going to use and cost 4.2 minutes,
+# in SEVEN jobs — and on the critical path (core -> base -> flavors) that is
+# ~12 minutes of wall clock spent making room that already existed.
+#
+# So: report the space, and sweep only if it is actually tight. The threshold is
+# deliberately generous — the point is to keep working if GitHub shrinks the
+# runners again, not to shave bytes.
+
+inputs:
+  required-gb:
+    description: Sweep only if fewer than this many GB are available on /.
+    default: "60"
 
 runs:
   using: composite
   steps:
     - shell: bash
+      env:
+        REQUIRED_GB: ${{ inputs.required-gb }}
       run: |
-        echo "--- before ---"
-        df -h /
-        # Language runtimes and SDKs: ~15 GB combined, none of them used here.
+        avail_gb() { df --output=avail -BG / | tail -1 | tr -dc '0-9'; }
+        before="$(avail_gb)"
+        echo "available on /: ${before} GB (want ${REQUIRED_GB} GB)"
+
+        if [ "$before" -ge "$REQUIRED_GB" ]; then
+          echo "plenty of room — skipping the cleanup entirely"
+          exit 0
+        fi
+
+        echo "::warning::only ${before} GB free — sweeping preinstalled toolchains"
+        # Directory deletes only. No `apt-get remove`: it resolves dependencies
+        # and runs maintainer scripts to reclaim space these `rm -rf`s already
+        # take. Every `|| true` is deliberate — the exact set of preinstalled
+        # software changes between runner images, and a job must not fail because
+        # a directory GitHub used to ship has been renamed or dropped.
         sudo rm -rf \
           /usr/share/dotnet \
           /usr/share/swift \
@@ -34,14 +60,14 @@ runs:
           /opt/ghc \
           /opt/hostedtoolcache \
           "$AGENT_TOOLSDIRECTORY" || true
-        # The runner preloads several GB of Docker images (buildpack, node,
-        # …). podman keeps its own store, so nothing here needs them.
         sudo docker image prune --all --force >/dev/null 2>&1 || true
-        # NO `apt-get remove`. It was here and cost 2.1 minutes per job — in
-        # SEVEN jobs — to reclaim space the `rm -rf` above had largely already
-        # taken. apt has to resolve dependencies, run maintainer scripts and
-        # rebuild caches; deleting the directories outright does not. Just drop
-        # the package cache, which is instant.
-        sudo apt-get clean
-        echo "--- after ---"
-        df -h /
+        sudo apt-get clean || true
+
+        after="$(avail_gb)"
+        echo "available on /: ${after} GB (reclaimed $(( after - before )) GB)"
+        # Fail loudly rather than letting the build die deep inside podman with a
+        # confusing ENOSPC.
+        if [ "$after" -lt 20 ]; then
+          echo "::error::only ${after} GB free after cleaning; this build needs more"
+          exit 1
+        fi

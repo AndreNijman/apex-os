@@ -151,6 +151,131 @@ fn fwupd_idle(code: i32) -> bool {
     code == FWUPD_NOTHING_TO_DO || code == FWUPD_NOT_FOUND
 }
 
+
+// ── ostree fsync during a pull ───────────────────────────────────────────────
+//
+// MEASURED ON THE AUTHOR'S L16, because "updates feel slow" deserved a number
+// rather than a guess:
+//
+//   single-stream download from GHCR ... 14.6 MiB/s   (51 ms RTT, curl)
+//   6 parallel streams ................. 49.8 MiB/s
+//   what `apex update` actually got ....  ~8 MiB/s
+//   disk write throughput .............. 999 MB/s
+//   fsync cost per small file ..........  2.98 ms   (131x slower than without)
+//   objects in the ostree repo ......... 179,365
+//
+// The network was never the limit and neither was the disk. `core.fsync` is
+// unset in the repo, which means ostree fsyncs EVERY object it writes, and
+// 179k objects x 2.98 ms is ~534 s of pure fsync serialised against ~372 s of
+// download. That models to 6.0 MiB/s against the ~8 observed — fsync is the
+// dominant cost of an update, not bandwidth.
+//
+// So it is turned off for the duration of the pull and restored afterwards.
+//
+// THE TRADE, stated plainly: fsync is what guarantees a written object survives
+// a power loss. With it off, losing power mid-pull can leave a corrupt object in
+// the repo. What that costs is bounded — the BOOTED deployment is never touched
+// by a pull, ostree checksums every object it reads, and the remedy is to pull
+// again (`ostree fsck` reports it, `apex update` re-fetches). Weighed against
+// halving the time the machine spends updating, on a laptop with a battery, that
+// is the right default. `apex update --fsync` keeps it on.
+const OSTREE_REPO: &str = "/ostree/repo";
+/// Records that a pull turned fsync off, so a run killed mid-pull can put it
+/// back rather than leaving the repo permanently unsafe and silent about it.
+/// Under /var so it survives the reboot a crash might cause.
+const FSYNC_MARKER: &str = "/var/lib/apexos/fsync-disabled";
+
+/// Reads `core.fsync`; `None` when unset (ostree's default, which is on).
+fn ostree_fsync_setting() -> Option<String> {
+    capture("ostree", &["config", "--repo", OSTREE_REPO, "get", "core.fsync"])
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn ostree_fsync_write(value: Option<&str>) -> bool {
+    let args: Vec<&str> = match value {
+        Some(v) => vec!["config", "--repo", OSTREE_REPO, "set", "core.fsync", v],
+        None => vec!["config", "--repo", OSTREE_REPO, "unset", "core.fsync"],
+    };
+    matches!(
+        Command::new("ostree").args(&args).output(),
+        Ok(o) if o.status.success()
+    )
+}
+
+/// Restores fsync if a previous run died with it disabled. Called before every
+/// pull, so the unsafe window can never outlive one update by more than one.
+fn recover_stale_fsync() {
+    if !Path::new(FSYNC_MARKER).exists() {
+        return;
+    }
+    let prior = std::fs::read_to_string(FSYNC_MARKER).unwrap_or_default();
+    let prior = prior.trim();
+    eprintln!(
+        "apex: a previous update was interrupted with ostree fsync disabled — restoring it"
+    );
+    let restored = if prior.is_empty() {
+        ostree_fsync_write(None)
+    } else {
+        ostree_fsync_write(Some(prior))
+    };
+    if restored {
+        let _ = std::fs::remove_file(FSYNC_MARKER);
+    } else {
+        eprintln!("apex: WARNING could not restore core.fsync — run: sudo ostree config --repo={OSTREE_REPO} unset core.fsync");
+    }
+}
+
+/// Disables `core.fsync` while alive, restores it on drop.
+struct FsyncGuard {
+    prior: Option<String>,
+    active: bool,
+}
+
+impl FsyncGuard {
+    /// `None` when fsync was left alone (asked not to, or ostree unavailable).
+    fn disable() -> FsyncGuard {
+        recover_stale_fsync();
+        let prior = ostree_fsync_setting();
+        // Already false — someone set it deliberately. Leave it, and leave no
+        // marker, so we never "restore" a choice that was not ours.
+        if prior.as_deref() == Some("false") {
+            return FsyncGuard { prior: None, active: false };
+        }
+        if let Some(dir) = Path::new(FSYNC_MARKER).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // The marker is written BEFORE the change, so a crash in between leaves
+        // a spurious marker (harmless: recovery just re-asserts the prior value)
+        // rather than a disabled fsync nobody knows about.
+        let _ = std::fs::write(FSYNC_MARKER, prior.clone().unwrap_or_default());
+        if ostree_fsync_write(Some("false")) {
+            eprintln!("apex: ostree fsync disabled for this pull (restored afterwards)");
+            FsyncGuard { prior, active: true }
+        } else {
+            let _ = std::fs::remove_file(FSYNC_MARKER);
+            eprintln!("apex: could not disable ostree fsync — the pull will be slower");
+            FsyncGuard { prior: None, active: false }
+        }
+    }
+}
+
+impl Drop for FsyncGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if ostree_fsync_write(self.prior.as_deref()) {
+            let _ = std::fs::remove_file(FSYNC_MARKER);
+            eprintln!("apex: ostree fsync restored");
+        } else {
+            eprintln!(
+                "apex: WARNING could not restore core.fsync — run: sudo ostree config --repo={OSTREE_REPO} unset core.fsync"
+            );
+        }
+    }
+}
+
 /// What `apex update` should do this run.
 #[derive(Default, Clone, Copy)]
 pub struct UpdateOptions {
@@ -160,6 +285,9 @@ pub struct UpdateOptions {
     pub skip_firmware: bool,
     /// Run only the firmware pass; leave the OS image alone.
     pub firmware_only: bool,
+    /// Keep ostree's per-object fsync on during the pull. Slower — see the
+    /// FsyncGuard notes — but durable against a power loss mid-update.
+    pub keep_fsync: bool,
 }
 
 /// `apex update` -> pull a newer OS image, then refresh firmware via fwupd.
@@ -202,6 +330,14 @@ pub fn update(opts: UpdateOptions) -> i32 {
     }
 
     if !opts.firmware_only {
+        // fsync off for the pull, restored when this drops — including on the
+        // error paths below. See FsyncGuard for the measurements and the trade.
+        let _fsync = if opts.keep_fsync {
+            recover_stale_fsync();
+            None
+        } else {
+            Some(FsyncGuard::disable())
+        };
         // Deliberately NOT preceded by `bootc upgrade --check`: bootc already
         // no-ops when the booted image is current, and checking first would add
         // a second registry round-trip to the exact path we are trying to make
