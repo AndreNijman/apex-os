@@ -85,9 +85,23 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_CORE: ghcr.io/andrenijman/apex-os-core
-  IMAGE_BASE: ghcr.io/andrenijman/apex-os-base
+  # ONE repository for every tier, distinguished by tag. core and base used to be
+  # separate repos (apex-os-core / apex-os-base), and that cost real time: a
+  # registry skips a blob it already holds only WITHIN a repository, so pushing
+  # :daily re-uploaded all ~4.7 GB of layers inherited from core even though the
+  # identical blobs were sitting in apex-os-core. Measured: 166 blobs uploaded
+  # per push, zero skipped.
+  #
+  # The user-facing tags (:daily, :gaming-mesa, :gaming-nvidia) are UNCHANGED, so
+  # every installed machine keeps tracking the same image reference.
   IMAGE: ghcr.io/andrenijman/apex-os
+  TAG_CORE: core
+  TAG_BASE: base
+  # Transitional: where core/base lived before the consolidation. The base job
+  # copies core across on the first run so this does NOT force a core rebuild —
+  # which would have meant 55 minutes of CI and a full ~5 GB download for every
+  # machine, to change a name.
+  LEGACY_CORE: ghcr.io/andrenijman/apex-os-core
   UPSTREAM_BASE: quay.io/fedora/fedora-bootc:43
 
 jobs:
@@ -161,10 +175,19 @@ jobs:
           # What the published core was built from. Missing image, missing label
           # or an unreadable registry all fall through to "rebuild" — failing
           # towards a rebuild is the safe direction for a security refresh.
-          HAVE="$(skopeo inspect \
-                    --creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
-                    --format '{{ index .Labels "org.apexos.fedora-bootc.digest" }}' \
-                    "docker://$IMAGE_CORE:latest" 2>/dev/null || echo '')"
+          label='{{ index .Labels "org.apexos.fedora-bootc.digest" }}'
+          creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
+          HAVE="$(skopeo inspect --creds "$creds" --format "$label" \
+                    "docker://$IMAGE:$TAG_CORE" 2>/dev/null || echo '')"
+          # Transitional fallback: before the repo consolidation core lived at
+          # $LEGACY_CORE:latest. Without this the first run after the rename would
+          # see "no published core", rebuild it for 55 minutes, and hand every
+          # machine a full ~5 GB download — to change a name.
+          if [ -z "$HAVE" ]; then
+            HAVE="$(skopeo inspect --creds "$creds" --format "$label" \
+                      "docker://$LEGACY_CORE:latest" 2>/dev/null || echo '')"
+            [ -n "$HAVE" ] && echo "(resolved from the legacy $LEGACY_CORE)"
+          fi
           echo "published core was built from = ${HAVE:-<none>}"
 
           [ -n "$HAVE" ] || decide true "no published core to reuse"
@@ -211,6 +234,12 @@ jobs:
   core:
     needs: changes
     runs-on: ubuntu-latest
+    # The push helper tags in-registry with skopeo, which needs its own
+    # credentials: `sudo podman login` is root's, and cosign's is the user's
+    # docker config, neither of which skopeo picks up here.
+    env:
+      GHCR_USER: ${{ github.actor }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     if: ${{ needs.changes.outputs.core == 'true' }}
     outputs:
       digest: ${{ steps.push.outputs.digest }}
@@ -319,8 +348,7 @@ jobs:
             --build-arg FEDORA_BOOTC_DIGEST="${{ steps.upstream.outputs.digest }}" \
             $SECRET_ARGS \
             -f Containerfile.core \
-            -t "$IMAGE_CORE:latest" \
-            -t "$IMAGE_CORE:${{ github.sha }}" \
+            -t "$IMAGE:$TAG_CORE-${{ github.sha }}" \
             .
 
           shred -u "$SECDIR"/apex-mok.* 2>/dev/null || rm -f "$SECDIR"/apex-mok.*
@@ -335,7 +363,7 @@ jobs:
         run: |
           set -euo pipefail
           fail() { echo "::error::$*"; exit 1; }
-          run() { sudo podman run --rm --entrypoint /bin/sh "$IMAGE_CORE:latest" -c "$1"; }
+          run() { sudo podman run --rm --entrypoint /bin/sh "$IMAGE:$TAG_CORE-${{ github.sha }}" -c "$1"; }
 
           # hyprland-qtutils, built from source against Qt 6.10 (the packaged
           # build links Qt 6.9 private API and cannot install here).
@@ -384,7 +412,7 @@ jobs:
               || fail "signing key is configured but the image is stamped '$state' — refusing to publish an unsigned kernel"
             run 'test -s /usr/share/apex-os/secureboot/apex-mok.der' \
               || fail "kernel-signed=signed but apex-mok.der is missing — users would have nothing to enrol"
-            sudo podman run --rm --entrypoint /bin/sh "$IMAGE_CORE:latest" -c \
+            sudo podman run --rm --entrypoint /bin/sh "$IMAGE:$TAG_CORE-${{ github.sha }}" -c \
               'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/apex-kver)/vmlinuz' \
               | grep -qi 'signature certificates\|image signature issuers\|APEX' \
               || fail "sbverify found no signature on the shipped vmlinuz"
@@ -395,29 +423,52 @@ jobs:
 
           echo "core image verified"
 
-      # Pushing a multi-gigabyte image to GHCR fails transiently. Observed on
-      # run 30771778274: gaming-nvidia built clean, verified its signed kernel,
-      # and then died with
-      #   Error: writing blob: uploading layer chunked:
-      #          received unexpected HTTP status: 502 Bad Gateway
-      # after eight minutes of upload. There was no retry, so a green ~50-minute
-      # build was thrown away by a registry hiccup. Three attempts with backoff.
+      # ── Push once, then tag in-registry ──────────────────────────────────
+      # Two problems this solves, both measured on run 30775672845.
+      #
+      # 1. Every image was uploaded TWICE. `podman push :x-<sha>` followed by
+      #    `podman push :x` re-sent the whole thing: 166 blobs, then 166 more,
+      #    with ZERO reported as already present. ~7 minutes per image thrown
+      #    away. So the friendly tag is now made with an in-registry copy, which
+      #    finds every blob already there and writes only a manifest.
+      # 2. Pushes fail transiently. Run 30771778274 lost a green 50-minute
+      #    gaming-nvidia build to `502 Bad Gateway` eight minutes into the
+      #    upload, with nothing retrying.
       - name: Push helper
         run: |
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           cat > /tmp/push-retry.sh <<'SH'
           #!/usr/bin/env bash
-          # push-retry <image-ref> [--digestfile <path>]
+          # push-and-tag <repo> <sha-tag> <friendly-tag> <digestfile>
           set -uo pipefail
-          ref="$1"; shift
+          repo="$1"; sha_tag="$2"; friendly="$3"; digestfile="$4"
           for attempt in 1 2 3; do
-            if sudo podman push --compression-format zstd:chunked "$ref" "$@"; then
-              exit 0
-            fi
-            echo "::warning::push of $ref failed (attempt $attempt/3)"
-            [ "$attempt" = 3 ] && break
+            sudo podman push --compression-format zstd:chunked \
+              "$repo:$sha_tag" --digestfile="$digestfile" && break
+            echo "::warning::push of $repo:$sha_tag failed (attempt $attempt/3)"
+            [ "$attempt" = 3 ] && { echo "::error::push failed after 3 attempts"; exit 1; }
             sleep $(( attempt * 30 ))
           done
-          echo "::error::push of $ref failed after 3 attempts"
+          digest="$(cat "$digestfile")"
+          # skopeo, not `podman push` again: same repository, so every blob is
+          # already present and this is a manifest write. `podman push` does not
+          # take that shortcut — it re-uploads.
+          #
+          # --creds explicitly, and REGISTRY_AUTH_FILE pointed somewhere we own:
+          # `sudo podman login` leaves a root-owned auth.json in this user's
+          # runtime dir, and skopeo reads it before honouring anything else.
+          export REGISTRY_AUTH_FILE="${RUNNER_TEMP}/skopeo-auth.json"
+          [ -f "$REGISTRY_AUTH_FILE" ] || echo '{}' > "$REGISTRY_AUTH_FILE"
+          for attempt in 1 2 3; do
+            skopeo copy --retry-times 3 \
+              --src-creds "$GHCR_USER:$GHCR_TOKEN" \
+              --dest-creds "$GHCR_USER:$GHCR_TOKEN" \
+              "docker://$repo@$digest" "docker://$repo:$friendly" && exit 0
+            echo "::warning::tagging $repo:$friendly failed (attempt $attempt/3)"
+            [ "$attempt" = 3 ] && break
+            sleep $(( attempt * 15 ))
+          done
+          echo "::error::could not tag $repo:$friendly"
           exit 1
           SH
           chmod +x /tmp/push-retry.sh
@@ -434,15 +485,14 @@ jobs:
           # Requires an OCI manifest (podman already produces one here) and a
           # client that understands zstd; the fleet is bootc 1.16+/ostree 2026.2,
           # which does. `apex rollback` remains the escape hatch.
-          /tmp/push-retry.sh "$IMAGE_CORE:${{ github.sha }}" --digestfile=/tmp/core.digest
-          /tmp/push-retry.sh "$IMAGE_CORE:latest"
+          /tmp/push-retry.sh "$IMAGE" "$TAG_CORE-${{ github.sha }}" "$TAG_CORE" /tmp/core.digest
           DIGEST="$(cat /tmp/core.digest)"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Core digest: $DIGEST"
 
       - name: Sign core (cosign keyless)
         run: |
-          cosign sign --yes "$IMAGE_CORE@${{ steps.push.outputs.digest }}"
+          cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
 
   # ── Job 3: base (thin) ────────────────────────────────────────────────────
   # Runs whenever core did not FAIL, so a base-only push (core skipped) still
@@ -457,6 +507,9 @@ jobs:
         && !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2)
       }}
     runs-on: ubuntu-latest
+    env:
+      GHCR_USER: ${{ github.actor }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
@@ -489,13 +542,33 @@ jobs:
           set -euo pipefail
           D="${{ needs.core.outputs.digest }}"
           if [ -z "$D" ]; then
-            echo "Core job skipped — resolving last-good $IMAGE_CORE:latest"
-            if ! sudo podman pull "$IMAGE_CORE:latest"; then
-              echo "::error::Cannot pull $IMAGE_CORE:latest and the core job did not run."
-              echo "::error::If this is the first build after the core/base split, re-run this workflow with force_core=true."
+            command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+            creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
+            export REGISTRY_AUTH_FILE="$RUNNER_TEMP/skopeo-auth.json"
+            [ -f "$REGISTRY_AUTH_FILE" ] || echo '{}' > "$REGISTRY_AUTH_FILE"
+
+            # ONE-TIME MIGRATION. core used to live at $LEGACY_CORE:latest. Copy
+            # it to $IMAGE:$TAG_CORE rather than rebuilding: a rebuild is 55
+            # minutes of CI and a full ~5 GB download for every machine, to change
+            # a name. Both refs are on the same registry, so this is a blob mount,
+            # not a transfer.
+            if ! skopeo inspect --creds "$creds" --format '{{.Digest}}' \
+                   "docker://$IMAGE:$TAG_CORE" >/dev/null 2>&1; then
+              echo "$IMAGE:$TAG_CORE absent — migrating from $LEGACY_CORE:latest"
+              skopeo copy --retry-times 3 --src-creds "$creds" --dest-creds "$creds" \
+                "docker://$LEGACY_CORE:latest" "docker://$IMAGE:$TAG_CORE" \
+                || { echo "::error::No core image at $IMAGE:$TAG_CORE and none to migrate from."
+                     echo "::error::Re-run this workflow with force_core=true to build one."
+                     exit 1; }
+            fi
+
+            echo "Core job skipped — resolving last-good $IMAGE:$TAG_CORE"
+            if ! sudo podman pull "$IMAGE:$TAG_CORE"; then
+              echo "::error::Cannot pull $IMAGE:$TAG_CORE and the core job did not run."
+              echo "::error::Re-run this workflow with force_core=true to build one."
               exit 1
             fi
-            D="$(sudo podman image inspect "$IMAGE_CORE:latest" \
+            D="$(sudo podman image inspect "$IMAGE:$TAG_CORE" \
                   --format '{{index .RepoDigests 0}}' | sed 's/.*@//')"
           fi
           if [ -z "$D" ]; then
@@ -508,18 +581,17 @@ jobs:
       - name: Build base
         run: |
           sudo podman build --isolation=chroot \
-            --build-arg CORE="$IMAGE_CORE@${{ steps.core.outputs.digest }}" \
+            --build-arg CORE="$IMAGE@${{ steps.core.outputs.digest }}" \
             --build-arg APEX_REVISION="${{ github.sha }}" \
             -f Containerfile.base \
-            -t "$IMAGE_BASE:latest" \
-            -t "$IMAGE_BASE:${{ github.sha }}" \
+            -t "$IMAGE:$TAG_BASE-${{ github.sha }}" \
             .
 
       - name: Verify base image
         run: |
           set -euo pipefail
           fail() { echo "::error::$*"; exit 1; }
-          run() { sudo podman run --rm --entrypoint /bin/sh "$IMAGE_BASE:latest" -c "$1"; }
+          run() { sudo podman run --rm --entrypoint /bin/sh "$IMAGE:$TAG_BASE-${{ github.sha }}" -c "$1"; }
 
           # M6 + the per-user provisioner race fix.
           run 'test -x /usr/bin/apexd && test -x /usr/bin/apex' || fail "apexd/apex missing"
@@ -538,7 +610,7 @@ jobs:
           # names sudo. The container runs as root, so assert the refusal by
           # dropping to a non-root uid — testing it as root would prove nothing.
           out=$(sudo podman run --rm --user 1000:1000 --entrypoint /bin/sh \
-                  "$IMAGE_BASE:latest" -c 'apex update --check 2>&1' || true)
+                  "$IMAGE:$TAG_BASE-${{ github.sha }}" -c 'apex update --check 2>&1' || true)
           echo "$out" | grep -q 'sudo apex update --check' \
             || fail "apex update does not tell an unprivileged caller to use sudo (got: $out)"
           # …and the verbs the desktop drives as the session user must NOT be gated.
@@ -576,29 +648,52 @@ jobs:
 
           echo "base image verified"
 
-      # Pushing a multi-gigabyte image to GHCR fails transiently. Observed on
-      # run 30771778274: gaming-nvidia built clean, verified its signed kernel,
-      # and then died with
-      #   Error: writing blob: uploading layer chunked:
-      #          received unexpected HTTP status: 502 Bad Gateway
-      # after eight minutes of upload. There was no retry, so a green ~50-minute
-      # build was thrown away by a registry hiccup. Three attempts with backoff.
+      # ── Push once, then tag in-registry ──────────────────────────────────
+      # Two problems this solves, both measured on run 30775672845.
+      #
+      # 1. Every image was uploaded TWICE. `podman push :x-<sha>` followed by
+      #    `podman push :x` re-sent the whole thing: 166 blobs, then 166 more,
+      #    with ZERO reported as already present. ~7 minutes per image thrown
+      #    away. So the friendly tag is now made with an in-registry copy, which
+      #    finds every blob already there and writes only a manifest.
+      # 2. Pushes fail transiently. Run 30771778274 lost a green 50-minute
+      #    gaming-nvidia build to `502 Bad Gateway` eight minutes into the
+      #    upload, with nothing retrying.
       - name: Push helper
         run: |
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           cat > /tmp/push-retry.sh <<'SH'
           #!/usr/bin/env bash
-          # push-retry <image-ref> [--digestfile <path>]
+          # push-and-tag <repo> <sha-tag> <friendly-tag> <digestfile>
           set -uo pipefail
-          ref="$1"; shift
+          repo="$1"; sha_tag="$2"; friendly="$3"; digestfile="$4"
           for attempt in 1 2 3; do
-            if sudo podman push --compression-format zstd:chunked "$ref" "$@"; then
-              exit 0
-            fi
-            echo "::warning::push of $ref failed (attempt $attempt/3)"
-            [ "$attempt" = 3 ] && break
+            sudo podman push --compression-format zstd:chunked \
+              "$repo:$sha_tag" --digestfile="$digestfile" && break
+            echo "::warning::push of $repo:$sha_tag failed (attempt $attempt/3)"
+            [ "$attempt" = 3 ] && { echo "::error::push failed after 3 attempts"; exit 1; }
             sleep $(( attempt * 30 ))
           done
-          echo "::error::push of $ref failed after 3 attempts"
+          digest="$(cat "$digestfile")"
+          # skopeo, not `podman push` again: same repository, so every blob is
+          # already present and this is a manifest write. `podman push` does not
+          # take that shortcut — it re-uploads.
+          #
+          # --creds explicitly, and REGISTRY_AUTH_FILE pointed somewhere we own:
+          # `sudo podman login` leaves a root-owned auth.json in this user's
+          # runtime dir, and skopeo reads it before honouring anything else.
+          export REGISTRY_AUTH_FILE="${RUNNER_TEMP}/skopeo-auth.json"
+          [ -f "$REGISTRY_AUTH_FILE" ] || echo '{}' > "$REGISTRY_AUTH_FILE"
+          for attempt in 1 2 3; do
+            skopeo copy --retry-times 3 \
+              --src-creds "$GHCR_USER:$GHCR_TOKEN" \
+              --dest-creds "$GHCR_USER:$GHCR_TOKEN" \
+              "docker://$repo@$digest" "docker://$repo:$friendly" && exit 0
+            echo "::warning::tagging $repo:$friendly failed (attempt $attempt/3)"
+            [ "$attempt" = 3 ] && break
+            sleep $(( attempt * 15 ))
+          done
+          echo "::error::could not tag $repo:$friendly"
           exit 1
           SH
           chmod +x /tmp/push-retry.sh
@@ -606,15 +701,14 @@ jobs:
       - name: Push base + capture digest
         id: push
         run: |
-          /tmp/push-retry.sh "$IMAGE_BASE:${{ github.sha }}" --digestfile=/tmp/base.digest
-          /tmp/push-retry.sh "$IMAGE_BASE:latest"
+          /tmp/push-retry.sh "$IMAGE" "$TAG_BASE-${{ github.sha }}" "$TAG_BASE" /tmp/base.digest
           DIGEST="$(cat /tmp/base.digest)"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Base digest: $DIGEST"
 
       - name: Sign base (cosign keyless)
         run: |
-          cosign sign --yes "$IMAGE_BASE@${{ steps.push.outputs.digest }}"
+          cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
 
   # ── Job 4: flavors ────────────────────────────────────────────────────────
   flavors:
@@ -633,6 +727,8 @@ jobs:
     # class of quietly-skipped check it exists to prevent.
     env:
       APEX_SB_CONFIGURED: ${{ secrets.APEX_SB_KEY_B64 != '' }}
+      GHCR_USER: ${{ github.actor }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -669,7 +765,7 @@ jobs:
       - name: Build ${{ matrix.flavor }}
         run: |
           sudo podman build --isolation=chroot \
-            --build-arg BASE="$IMAGE_BASE@${{ needs.base.outputs.digest }}" \
+            --build-arg BASE="$IMAGE@${{ needs.base.outputs.digest }}" \
             --build-arg APEX_REVISION="${{ github.sha }}" \
             ${{ matrix.build_args }} \
             -f "${{ matrix.containerfile }}" \
@@ -702,29 +798,52 @@ jobs:
             || { echo "::error::${{ matrix.flavor }} has no apex-mok.der — users would have nothing to enrol"; exit 1; }
           echo "${{ matrix.flavor }}: kernel signed and apex-mok.der present"
 
-      # Pushing a multi-gigabyte image to GHCR fails transiently. Observed on
-      # run 30771778274: gaming-nvidia built clean, verified its signed kernel,
-      # and then died with
-      #   Error: writing blob: uploading layer chunked:
-      #          received unexpected HTTP status: 502 Bad Gateway
-      # after eight minutes of upload. There was no retry, so a green ~50-minute
-      # build was thrown away by a registry hiccup. Three attempts with backoff.
+      # ── Push once, then tag in-registry ──────────────────────────────────
+      # Two problems this solves, both measured on run 30775672845.
+      #
+      # 1. Every image was uploaded TWICE. `podman push :x-<sha>` followed by
+      #    `podman push :x` re-sent the whole thing: 166 blobs, then 166 more,
+      #    with ZERO reported as already present. ~7 minutes per image thrown
+      #    away. So the friendly tag is now made with an in-registry copy, which
+      #    finds every blob already there and writes only a manifest.
+      # 2. Pushes fail transiently. Run 30771778274 lost a green 50-minute
+      #    gaming-nvidia build to `502 Bad Gateway` eight minutes into the
+      #    upload, with nothing retrying.
       - name: Push helper
         run: |
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           cat > /tmp/push-retry.sh <<'SH'
           #!/usr/bin/env bash
-          # push-retry <image-ref> [--digestfile <path>]
+          # push-and-tag <repo> <sha-tag> <friendly-tag> <digestfile>
           set -uo pipefail
-          ref="$1"; shift
+          repo="$1"; sha_tag="$2"; friendly="$3"; digestfile="$4"
           for attempt in 1 2 3; do
-            if sudo podman push --compression-format zstd:chunked "$ref" "$@"; then
-              exit 0
-            fi
-            echo "::warning::push of $ref failed (attempt $attempt/3)"
-            [ "$attempt" = 3 ] && break
+            sudo podman push --compression-format zstd:chunked \
+              "$repo:$sha_tag" --digestfile="$digestfile" && break
+            echo "::warning::push of $repo:$sha_tag failed (attempt $attempt/3)"
+            [ "$attempt" = 3 ] && { echo "::error::push failed after 3 attempts"; exit 1; }
             sleep $(( attempt * 30 ))
           done
-          echo "::error::push of $ref failed after 3 attempts"
+          digest="$(cat "$digestfile")"
+          # skopeo, not `podman push` again: same repository, so every blob is
+          # already present and this is a manifest write. `podman push` does not
+          # take that shortcut — it re-uploads.
+          #
+          # --creds explicitly, and REGISTRY_AUTH_FILE pointed somewhere we own:
+          # `sudo podman login` leaves a root-owned auth.json in this user's
+          # runtime dir, and skopeo reads it before honouring anything else.
+          export REGISTRY_AUTH_FILE="${RUNNER_TEMP}/skopeo-auth.json"
+          [ -f "$REGISTRY_AUTH_FILE" ] || echo '{}' > "$REGISTRY_AUTH_FILE"
+          for attempt in 1 2 3; do
+            skopeo copy --retry-times 3 \
+              --src-creds "$GHCR_USER:$GHCR_TOKEN" \
+              --dest-creds "$GHCR_USER:$GHCR_TOKEN" \
+              "docker://$repo@$digest" "docker://$repo:$friendly" && exit 0
+            echo "::warning::tagging $repo:$friendly failed (attempt $attempt/3)"
+            [ "$attempt" = 3 ] && break
+            sleep $(( attempt * 15 ))
+          done
+          echo "::error::could not tag $repo:$friendly"
           exit 1
           SH
           chmod +x /tmp/push-retry.sh
@@ -734,8 +853,7 @@ jobs:
         run: |
           # zstd:chunked — see the note on the core push. This is the one users
           # actually pull, so it is where the download saving lands.
-          /tmp/push-retry.sh "$IMAGE:${{ matrix.flavor }}-${{ github.sha }}" --digestfile=/tmp/flavor.digest
-          /tmp/push-retry.sh "$IMAGE:${{ matrix.flavor }}"
+          /tmp/push-retry.sh "$IMAGE" "${{ matrix.flavor }}-${{ github.sha }}" "${{ matrix.flavor }}" /tmp/flavor.digest
           DIGEST="$(cat /tmp/flavor.digest)"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "${{ matrix.flavor }} digest: $DIGEST"
@@ -763,7 +881,7 @@ jobs:
           # Layers shared with the parent core are the ones bootc will NOT
           # download; anything else is new bytes on every machine.
           core=$(skopeo inspect --raw --creds "$creds" \
-                  "docker://$IMAGE_CORE:latest" 2>/dev/null || echo '{}')
+                  "docker://$IMAGE:$TAG_CORE" 2>/dev/null || echo '{}')
           python3 - "$new" "$core" <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json, sys
           new, core = json.loads(sys.argv[1]), json.loads(sys.argv[2] or '{}')

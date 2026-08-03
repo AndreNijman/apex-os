@@ -53,7 +53,7 @@ The image is now built in three tiers instead of two:
 | **base** | `Containerfile.base` | apexd + apex CLI, sysprofiles, D-Bus/polkit/units, every `files/**` COPY, the vendored APEX Shell | `Containerfile.base`, `apexd/**`, `config/**`, `files/**` change, or core rebuilt |
 | **flavor** | `Containerfile.daily` / `.gaming` | edition stamp, mesa leg, Plymouth theme, GPU stack | every run |
 
-The base is built `FROM apex-os-core@sha256:…`. **A digest-pinned `FROM` reuses
+The base is built `FROM ghcr.io/andrenijman/apex-os:core@sha256:…`. **A digest-pinned `FROM` reuses
 the parent's layer descriptors verbatim** — the derived manifest lists the same
 digests, so `bootc` recognises blobs it already has and downloads none of them.
 
