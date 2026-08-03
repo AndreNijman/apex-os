@@ -95,6 +95,27 @@ irq = "away-from-game"
 irq_pin_to_game = ["nvidia"]
 cgroup = "/sys/fs/cgroup/apex-game"
 
+# sched-ext scheduler held for the duration of a game session, then stopped.
+#
+# The image has shipped a CachyOS kernel with CONFIG_SCHED_CLASS_EXT=y and
+# sixteen scx schedulers since M1, and nothing ever selected one — the sched-ext
+# half of the reason that kernel was chosen was dead weight. This turns it on.
+#
+# scx_lavd ("latency-aware virtual deadline") is the one that helps a game: it
+# is built for interactive/gaming latency, which is what the Katana is for, as
+# opposed to scx_rusty/scx_layered (throughput and datacentre shaping). It is
+# restored to the kernel's own scheduler on exit, so it applies only while a
+# game session is actually held.
+#
+# Stated explicitly here even though it is now also the built-in default, so the
+# reference gaming machine documents its own scheduler rather than inheriting it
+# silently. Set it to "" to opt a machine out.
+#
+# This does nothing on the Daily edition: scxctl drives scx_loader over D-Bus,
+# and scx_loader.service is enabled only in Containerfile.gaming, so on Daily
+# apexd logs a skip and carries on.
+scx = "scx_lavd"
+
 # RTX 3070 Laptop (GA104, 8 GB GDDR6). Values are clamped at runtime against
 # `nvidia-smi --query-gpu=clocks.max.graphics,clocks.max.memory`, so an
 # over-ambitious number here can never reach the driver.

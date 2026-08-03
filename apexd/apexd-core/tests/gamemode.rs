@@ -274,6 +274,15 @@ fn cpuset_off_plans_nothing_at_all() {
     let cfg = GameModeConfig {
         cpuset: "off".into(),
         cgroup: f.abs("sys/fs/cgroup/apex-game"),
+        // scx is explicitly cleared so this keeps asserting exactly what it was
+        // written to assert: with no cpuset work configured, the plan is EMPTY.
+        // sched-ext now defaults to scx_lavd, which is legitimately planned
+        // independently of cpuset (turning CPU pinning off is not the same as
+        // turning game mode off — `enabled = false` is), and that default has
+        // its own coverage in `the_default_scx_is_the_only_thing_planned_...`
+        // below. Clearing it here keeps the original guard intact instead of
+        // loosening it to accommodate the new action.
+        scx: String::new(),
         ..GameModeConfig::default()
     };
     assert_eq!(cfg.cpuset_policy(), CpusetPolicy::Off);
@@ -530,4 +539,128 @@ fn cgroup_mems_falls_back_to_node_zero() {
     assert_eq!(game::read_cgroup_mems(&f.path().join("sys/fs/cgroup")), "0");
     f.write("sys/fs/cgroup/cpuset.mems.effective", "0-1\n");
     assert_eq!(game::read_cgroup_mems(&f.path().join("sys/fs/cgroup")), "0-1");
+}
+
+// ── sched-ext (scx) ──────────────────────────────────────────────────────────
+// The kernel has shipped CONFIG_SCHED_CLASS_EXT=y and sixteen scx schedulers
+// since M1 with nothing selecting one. These pin the switch that fixes that:
+// that it is planned at all, that it is ORDERED correctly around the cpuset
+// work, and that it stays absent for every profile that does not ask.
+
+/// A plan built on the Katana fixture with `scx` set to whatever is under test.
+/// Uses the same fixture as the rest of this file so the surrounding cpuset/IRQ
+/// actions are real — the ordering assertions below only mean something against
+/// a plan that actually contains other work.
+fn scx_plan(scx: &str) -> (Fixture, game::GamePlan) {
+    let f = machine(&format!("scx{}", scx.trim().len()));
+    let cfg = GameModeConfig {
+        scx: scx.to_string(),
+        ..katana_cfg(&f)
+    };
+    let topo = CoreTopology::detect_from(&f.path().join("sys"));
+    let irqs = irq::enumerate(&f.path().join("proc/irq"));
+    let placements = vec![PidPlacement {
+        pid: 4242,
+        prior_cgroup: Some(f.abs("sys/fs/cgroup/user.slice")),
+    }];
+    let plan = game::plan(&GameInputs {
+        cfg: &cfg,
+        topo: &topo,
+        nvidia: &[],
+        irqs: &irqs,
+        pids: &placements,
+        mems: "0".into(),
+        irqbalance: false,
+    });
+    (f, plan)
+}
+
+#[test]
+fn scx_defaults_to_the_gaming_scheduler() {
+    // Every machine's game mode asks for scx_lavd, so Gaming Mode is tuned on
+    // hardware other than the author's. This is safe for Daily because
+    // scx_loader.service is only enabled in the Gaming image, which makes the
+    // switch a logged no-op there — see the field's docs.
+    assert_eq!(GameModeConfig::default().scx, "scx_lavd");
+}
+
+#[test]
+fn an_empty_scx_opts_out_entirely() {
+    // A profile must be able to say "leave the scheduler alone" and have
+    // NOTHING planned — not a switch, and not a stop on the way out.
+    let (_f, plan) = scx_plan("");
+    assert!(
+        !plan.enter.iter().any(|a| matches!(a, Action::ScxSwitch { .. })),
+        "scx = \"\" must plan no scheduler switch"
+    );
+    assert!(
+        !plan.exit.iter().any(|a| matches!(a, Action::ScxStop)),
+        "scx = \"\" must not plan a stop either"
+    );
+}
+
+#[test]
+fn scx_switches_on_enter_and_stops_on_exit() {
+    let (_f, plan) = scx_plan("scx_lavd");
+    assert!(plan.enter.contains(&Action::ScxSwitch {
+        sched: "scx_lavd".into()
+    }));
+    assert!(plan.exit.contains(&Action::ScxStop));
+}
+
+#[test]
+fn whitespace_only_scx_is_treated_as_unset() {
+    // A profile with `scx = "  "` means "no", not "load a scheduler called
+    // nothing" — scxctl would fail confusingly.
+    let (_f, plan) = scx_plan("   ");
+    assert!(!plan.enter.iter().any(|a| matches!(a, Action::ScxSwitch { .. })));
+}
+
+#[test]
+fn scx_is_first_on_enter_and_last_on_exit() {
+    // Ordering is the substance, not cosmetics: swapping the scheduler migrates
+    // every runnable task, so it must happen BEFORE the game is confined to its
+    // cpuset and be undone AFTER that confinement is unwound. Otherwise the swap
+    // shuffles tasks that are mid-move.
+    let (_f, plan) = scx_plan("scx_lavd");
+    assert!(
+        matches!(plan.enter.first(), Some(Action::ScxSwitch { .. })),
+        "scx must be the first enter action, got {:?}",
+        plan.enter.first()
+    );
+    assert!(
+        matches!(plan.exit.last(), Some(Action::ScxStop)),
+        "scx stop must be the last exit action, got {:?}",
+        plan.exit.last()
+    );
+}
+
+#[test]
+fn the_default_scx_is_the_only_thing_planned_when_cpuset_is_off() {
+    // The complement of cpuset_off_plans_nothing_at_all: with the shipped
+    // default, `cpuset = "off"` plans the scheduler switch and NOTHING else. If
+    // a future change starts planning cgroup work behind an off cpuset, this
+    // fails rather than hiding behind "well, the plan is non-empty now".
+    let f = machine("cpuset-off-scx");
+    let cfg = GameModeConfig {
+        cpuset: "off".into(),
+        cgroup: f.abs("sys/fs/cgroup/apex-game"),
+        ..GameModeConfig::default()
+    };
+    let topo = CoreTopology::detect_from(&f.path().join("sys"));
+    let plan = game::plan(&GameInputs {
+        cfg: &cfg,
+        topo: &topo,
+        nvidia: &[],
+        irqs: &irq::enumerate(&f.path().join("proc/irq")),
+        pids: &[],
+        mems: "0".into(),
+        irqbalance: false,
+    });
+    assert_eq!(
+        plan.enter,
+        vec![Action::ScxSwitch { sched: "scx_lavd".into() }],
+        "cpuset off must plan the scheduler switch and nothing else"
+    );
+    assert_eq!(plan.exit, vec![Action::ScxStop]);
 }

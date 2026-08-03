@@ -240,6 +240,24 @@ pub struct GameModeConfig {
     /// Interrupt handler names that belong *on* the game's cores.
     pub irq_pin_to_game: Vec<String>,
     pub nvidia: NvidiaConfig,
+    /// sched-ext scheduler to load for the duration of a game session.
+    /// Empty string = leave the kernel's own scheduler alone.
+    ///
+    /// The image ships a CachyOS kernel with CONFIG_SCHED_CLASS_EXT=y and
+    /// sixteen scx schedulers, and until now NOTHING selected one — the whole
+    /// sched-ext capability that kernel was chosen for sat unused.
+    ///
+    /// Defaults to `scx_lavd` (latency-aware virtual deadline: the scx
+    /// scheduler built for interactive/gaming latency, as opposed to
+    /// scx_rusty/scx_layered which target throughput). Defaulting it rather
+    /// than naming it per-profile is what makes Gaming Mode tuned on ANY
+    /// machine instead of only on the author's Katana.
+    ///
+    /// That is safe for the Daily edition by construction, not by luck:
+    /// `scxctl` is a D-Bus client for scx_loader, and scx_loader.service is
+    /// enabled ONLY in Containerfile.gaming. On Daily the switch is a logged
+    /// no-op. A profile can still opt out explicitly with `scx = ""`.
+    pub scx: String,
 }
 
 impl Default for GameModeConfig {
@@ -254,6 +272,7 @@ impl Default for GameModeConfig {
             irq: default_irq(),
             irq_pin_to_game: Vec::new(),
             nvidia: NvidiaConfig::default(),
+            scx: "scx_lavd".to_string(),
         }
     }
 }

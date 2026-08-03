@@ -174,6 +174,17 @@ pub enum Action {
     CgroupAttach { path: String, pid: u32 },
     /// Remove an emptied cgroup directory (best-effort).
     CgroupRemove { path: String },
+
+    // ── sched-ext (sched_ext / scx) ───────────────────────────────────────────
+    // The shipped CachyOS kernel has CONFIG_SCHED_CLASS_EXT=y and the image
+    // carries sixteen scx schedulers plus scxctl, and nothing ever selected one.
+    // These two actions are that missing switch, driven from the game profile so
+    // it applies on EVERY path into game mode: `apex game start`, gamemode.ini's
+    // hook, and the gamescope session.
+    /// `scxctl switch -s <sched>` — load or replace the running scx scheduler.
+    ScxSwitch { sched: String },
+    /// `scxctl stop` — hand scheduling back to the kernel's own class (EEVDF).
+    ScxStop,
 }
 
 impl Action {
@@ -225,6 +236,8 @@ impl Action {
             Action::NvidiaPersistence { gpu, enabled } => {
                 format!("nvidia-smi -i {gpu} -pm {}", u8::from(*enabled))
             }
+            Action::ScxSwitch { sched } => format!("sched-ext scheduler = {sched}"),
+            Action::ScxStop => "sched-ext stopped (back to the kernel scheduler)".to_string(),
             Action::NvidiaLockGraphics {
                 gpu,
                 min_mhz,

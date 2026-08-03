@@ -150,6 +150,30 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
     let mut enter = Vec::new();
     let mut exit = Vec::new();
 
+    // ── 0. sched-ext scheduler ───────────────────────────────────────────────
+    // FIRST on enter and LAST on exit, on purpose: swapping the scheduler
+    // migrates every runnable task, so do it before the game is pinned into its
+    // cpuset (and undo it after the pinning is unwound), rather than shuffling
+    // tasks that are mid-move.
+    //
+    // Empty `scx` = leave the kernel scheduler alone, which is the default for
+    // every profile that does not ask. The Gaming profiles opt in to scx_lavd:
+    // it is the latency-first sched-ext scheduler, which is the one that helps a
+    // game rather than a build farm.
+    if !cfg.scx.trim().is_empty() {
+        enter.push(Action::ScxSwitch {
+            sched: cfg.scx.trim().to_string(),
+        });
+        // NOTE the exit half is appended at the very END of this function, not
+        // here: pushing it now would make ScxStop the FIRST exit action, i.e.
+        // restore the scheduler while the game is still pinned. A test asserts
+        // the ordering, and it caught exactly that mistake.
+        notes.push(format!(
+            "sched-ext: {} for the session, kernel scheduler restored on exit",
+            cfg.scx.trim()
+        ));
+    }
+
     // ── 1. cpuset ────────────────────────────────────────────────────────────
     let pinning = !cpus.is_empty() && cpus.len() < inputs.topo.all.len().max(1);
     if !cpus.is_empty() && cfg.cpuset_policy() != CpusetPolicy::Off {
@@ -234,6 +258,12 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
         exit.push(Action::CgroupRemove {
             path: cfg.cgroup.clone(),
         });
+    }
+
+    // Hand scheduling back only after every cpuset/IRQ/clock action has been
+    // unwound — the mirror of loading it first on enter.
+    if !cfg.scx.trim().is_empty() {
+        exit.push(Action::ScxStop);
     }
 
     GamePlan {

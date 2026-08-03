@@ -1,0 +1,23 @@
+# APEX-OS — let the desktop switch into (and out of) Gaming Mode.
+#
+# The shell's power menu offers "Gaming Mode", which has to record the session
+# the greeter should preselect and then end the current session. The record lives
+# in /var/lib/apex-greet, which is 0755 greetd:greetd — a session user cannot
+# write it, and should not be able to.
+#
+# NOPASSWD because this is invoked from a compositor-spawned script, which has no
+# way to present a password prompt. The user still authenticates at the greeter
+# immediately afterwards: APEX-OS deliberately does NOT configure autologin the
+# way SteamOS and Bazzite do, because both target machines end up on LUKS2+TPM2
+# and a passwordless graphical login is not a change to make silently.
+#
+# Deliberately narrow. The helper takes no caller-supplied paths and validates
+# the session id against the .desktop files actually installed in
+# /usr/share/wayland-sessions, so the only strings that can reach the state file
+# are names of real shipped sessions. Terminating one's own session is already
+# available to any user via loginctl, so the sole privileged effect is that
+# validated write.
+#
+# %wheel, matching the Windows-boot rule: switching the machine's boot-to session
+# is an administrative act on shared state, unlike setting your own wallpaper.
+%wheel ALL=(root) NOPASSWD: /usr/libexec/apex-session-select *

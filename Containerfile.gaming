@@ -277,6 +277,82 @@ RUN set -eux; \
     dnf5 -y install --skip-unavailable dualsensectl openrgb; \
     dnf5 clean all
 
+# ── Gaming Mode: gamescope + Steam Big Picture as a first-class session ─────
+# Bazzite's model, built on APEX-OS's own pieces rather than vendoring
+# gamescope-session-plus (which is not published for F43 in any repo this image
+# already trusts, and which carries SteamOS-specific handling APEX does not need).
+#
+# WHAT THIS GIVES
+#   * a greeter entry, "APEX Gaming Mode", so you can boot straight into it;
+#   * a power-menu button in APEX Shell to switch into it from the desktop;
+#   * gamescope presenting directly to KMS — no Hyprland, no bar, no borders,
+#     nothing composited over the game;
+#   * `apex game start` on entry, which is what finally makes the CachyOS
+#     kernel's sched-ext support do something (scx_lavd), alongside the cpuset,
+#     IRQ steering, GPU clock locks and performance tier that already existed.
+#
+# THE SCHEDULER GAP THIS CLOSES
+# The image has shipped CONFIG_SCHED_CLASS_EXT=y, sixteen scx schedulers and
+# scxctl since M1 — and nothing ever selected one, so the sched-ext half of the
+# reason for running a CachyOS kernel was inert. `scxctl` is a D-Bus client for
+# scx_loader, so the loader has to be running for apexd to switch anything;
+# enabling it is what was missing.
+#
+# Enabled HERE and not in core on purpose: core is shared with Daily, whose
+# acceptance gate is idle drain and suspend behaviour, and a scheduler daemon is
+# not something to add to that image. Safe to enable because the shipped
+# /usr/share/scx_loader/config.toml leaves `default_sched` commented out — the
+# loader starts NO scheduler at boot and only acts when apexd asks it to.
+#
+# REALTIME: gamescope's --rt needs a non-zero RLIMIT_RTPRIO (verified: Fedora
+# sets no file capabilities on the binary, and the default hard limit is 0, so
+# --rt silently failed). The limits.d drop-in fixes that through pam_limits,
+# which greetd's PAM stack does run.
+COPY --chmod=0755 files/system/libexec/apex-gaming-session \
+     /usr/libexec/apex-gaming-session
+COPY --chmod=0755 files/system/libexec/apex-session-select \
+     /usr/libexec/apex-session-select
+COPY files/system/sudoers/apex-session-select \
+     /etc/sudoers.d/040-apex-session-select
+COPY files/system/limits/30-apex-gaming-rtprio.conf \
+     /etc/security/limits.d/30-apex-gaming-rtprio.conf
+COPY files/desktop/wayland-sessions/apex-gaming.desktop \
+     /usr/share/wayland-sessions/apex-gaming.desktop
+RUN set -eux; \
+    dnf5 -y install --skip-unavailable mangohud; \
+    dnf5 clean all; \
+    # scx_loader: the D-Bus service scxctl (and therefore apexd) drives.
+    systemctl enable scx_loader.service; \
+    test -x /usr/sbin/scxctl || test -x /usr/bin/scxctl; \
+    # The scheduler apexd asks for must actually be installed.
+    test -x /usr/bin/scx_lavd; \
+    # sudoers is parsed by a setuid binary: a syntax error or wrong mode is
+    # refused at RUNTIME, i.e. a password prompt no compositor can answer.
+    chown root:root /etc/sudoers.d/040-apex-session-select; \
+    chmod 0440 /etc/sudoers.d/040-apex-session-select; \
+    visudo -cf /etc/sudoers.d/040-apex-session-select; \
+    bash -n /usr/libexec/apex-gaming-session; \
+    bash -n /usr/libexec/apex-session-select; \
+    # Both binaries the session hard-requires. Without these it exits to the
+    # greeter, which is the safe failure — but it should never get that far.
+    command -v gamescope; \
+    command -v steam; \
+    # THE LOCKOUT GUARD. Sessions are enumerated by a sorted glob and the
+    # greeter's index defaults to 0, so `apex-gaming.desktop` sorts BEFORE
+    # hyprland/niri and would become the default session on every fresh Gaming
+    # install. That is precisely how hyprland-uwsm.desktop locked users out
+    # (see Containerfile.base). The greeter now picks its default BY NAME, and
+    # this asserts that it still does — a revert here means every new Gaming
+    # machine boots into an unverified gamescope session with no desktop.
+    grep -q 'defaultSession: "hyprland"' /usr/share/apex-greet/GreetContext.qml \
+        || { echo "FATAL: greeter no longer names its default session; apex-gaming would sort first and become the default"; exit 1; }; \
+    grep -q 'ctx.defaultSession' /usr/share/apex-greet/GreetContext.qml; \
+    # The three sessions Gaming offers, and no more.
+    test -f /usr/share/wayland-sessions/hyprland.desktop; \
+    test -f /usr/share/wayland-sessions/niri.desktop; \
+    test -f /usr/share/wayland-sessions/apex-gaming.desktop; \
+    echo "gaming mode: gamescope session + scx_loader + rtprio wired"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # M2 — edition branding (Plymouth). Shared M2 (provisioner, session curation) +
 # M3 (apexd) live in the BASE; this flavor only sets its gold Plymouth theme.
