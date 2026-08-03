@@ -164,3 +164,48 @@ shells out to `apex tier` as the session user, and mutations go through apexd's
 polkit-authorised D-Bus API — which is how an unprivileged desktop is supposed
 to change power state. Gating those would break the desktop's power controls in
 order to improve an error message.
+
+## CI build time — what was measured, and what actually helped
+
+Profiled rather than guessed (run 30775672845):
+
+| step | base | daily |
+|------|------|-------|
+| build | 21.9 min | 5.1 min |
+| **push** | **12.9 min** | **14.3 min** |
+| disk cleanup | 2.1 min | 1.6 min |
+
+Pushes dominate, and they are bandwidth-bound (~14 MB/s to GHCR), not CPU-bound.
+Counting blob operations found the waste: every image was uploaded **twice**,
+once as `:<tier>-<sha>` and again as the friendly tag — 166 blobs, then 166 more,
+zero reused.
+
+**What helped**
+
+- *Push once, then tag with a registry-to-registry copy.* A `docker://` →
+  `docker://` copy knows its blob digests up front, so it skips every layer and
+  writes only a manifest. Measured: base push 12.9 → **6.2 min**.
+- *Stop pre-emptively cleaning the runner disk.* The step was written when
+  runners had ~14 GB free. They now have 145 GB with **88 GB free before
+  cleaning**, so it was reclaiming 31 GB nobody needed at 4.2 min × 7 jobs. It
+  now only sweeps below a threshold.
+
+**What did not help, and why — recorded so it is not retried**
+
+Consolidating the tiers into one repository, in the hope the registry would skip
+inherited layers. It does not, and no client-side flag changes that:
+
+    push core (zstd:chunked) ............. 99 blobs copied,  0 skipped
+    push base into the SAME repo ........ 159 blobs copied,  0 skipped
+    push the IDENTICAL core ref again .... 99 blobs copied,  0 skipped
+    skopeo instead of podman ............. 159 blobs copied,  0 skipped
+    no --compression-format at all ....... 159 blobs copied,  0 skipped
+
+Compressing out of `containers-storage` only produces the blob digest *after*
+compression, so there is nothing to ask the registry about first. The remaining
+push cost is inherent: ~5 GB compressed and uploaded per image.
+
+Building the flavors inside the base job was also considered — it would remove
+one 5 GB upload and three downloads — and rejected: each flavor would build its
+own base, so the three editions would no longer be provably pinned to one
+identical, verified base image. That guarantee is worth more than the minutes.

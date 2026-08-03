@@ -104,6 +104,12 @@ struct UpdateArgs {
     /// Only run the firmware pass; leave the OS image alone.
     #[arg(long, conflicts_with = "skip_firmware")]
     firmware_only: bool,
+    /// Keep ostree's per-object fsync on during the pull. Roughly halves update
+    /// speed (measured: ~8 MiB/s with it, ~14.6 without, because 179k objects at
+    /// 2.98 ms of fsync each outweighs the download itself) in exchange for
+    /// durability if the machine loses power mid-update.
+    #[arg(long)]
+    fsync: bool,
 }
 
 #[derive(Args)]
@@ -160,6 +166,7 @@ async fn main() {
             check: args.check,
             skip_firmware: args.skip_firmware,
             firmware_only: args.firmware_only,
+            keep_fsync: args.fsync,
         }),
         Cmd::Doctor => cmd_doctor().await,
         Cmd::Changelog => ops::changelog(),

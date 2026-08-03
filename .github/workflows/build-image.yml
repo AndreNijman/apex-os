@@ -85,15 +85,30 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  # ONE repository for every tier, distinguished by tag. core and base used to be
-  # separate repos (apex-os-core / apex-os-base), and that cost real time: a
-  # registry skips a blob it already holds only WITHIN a repository, so pushing
-  # :daily re-uploaded all ~4.7 GB of layers inherited from core even though the
-  # identical blobs were sitting in apex-os-core. Measured: 166 blobs uploaded
-  # per push, zero skipped.
+  # ONE repository for every tier, distinguished by tag (core and base used to be
+  # separate repos: apex-os-core / apex-os-base).
   #
-  # The user-facing tags (:daily, :gaming-mesa, :gaming-nvidia) are UNCHANGED, so
-  # every installed machine keeps tracking the same image reference.
+  # HONEST NOTE ON WHY: this was done expecting the registry to skip blobs it
+  # already held — a registry dedups only WITHIN a repository, so pushing :daily
+  # was re-uploading ~4.7 GB of layers inherited from core while identical blobs
+  # sat in apex-os-core. That expectation was WRONG, and measuring it locally
+  # against a throwaway registry:2 showed why:
+  #
+  #   push core (zstd:chunked) ................. 99 blobs copied,  0 skipped
+  #   push base into the same repo ............ 159 blobs copied,  0 skipped
+  #   push the IDENTICAL core ref again ........ 99 blobs copied,  0 skipped
+  #   same with skopeo, and with no --compression-format at all: 0 skipped
+  #
+  # Nothing is ever reused, because compressing out of containers-storage only
+  # yields the blob digest AFTER compression — there is no digest to check the
+  # registry for beforehand. Only a registry-to-registry copy knows its digests
+  # up front and can skip, which is exactly why the tag step below is fast and
+  # the main push is not.
+  #
+  # The consolidation is kept anyway: it costs nothing, keeps every tier's tags
+  # in one place, and the user-facing tags (:daily, :gaming-mesa, :gaming-nvidia)
+  # are UNCHANGED so every installed machine keeps tracking the same reference.
+  # But it is NOT a speed optimisation, and should not be cited as one.
   IMAGE: ghcr.io/andrenijman/apex-os
   TAG_CORE: core
   TAG_BASE: base
