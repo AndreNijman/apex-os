@@ -1,0 +1,161 @@
+name: release-shell
+
+# Fast path for APEX Shell/config-only releases. The slow platform images keep
+# packages, Mesa, NVIDIA akmods and initramfs stable; this workflow adds only the
+# exact shell commit and republishes the existing user-facing tags.
+on:
+  workflow_dispatch:
+    inputs:
+      shell_ref:
+        description: "Exact apex-shell commit (blank resolves apex-shell/main)"
+        type: string
+        default: ""
+      target:
+        description: "Images to release"
+        type: choice
+        options:
+          - all
+          - daily-and-nvidia
+          - daily
+          - gaming-mesa
+          - gaming-nvidia
+        default: all
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  IMAGE: ghcr.io/andrenijman/apex-os
+  REGISTRY: ghcr.io
+  CACHE_PREFIX: ghcr.io/andrenijman/apex-os-build-cache
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      shell_sha: ${{ steps.shell.outputs.sha }}
+      matrix: ${{ steps.shell.outputs.matrix }}
+    steps:
+      - id: shell
+        env:
+          REQUESTED: ${{ inputs.shell_ref }}
+          TARGET: ${{ inputs.target }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="$REQUESTED"
+          if [ -z "$sha" ]; then
+            sha="$(gh api repos/AndreNijman/apex-shell/commits/main --jq .sha)"
+          fi
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::shell_ref must resolve to a full commit SHA"; exit 1; }
+          # Ensure a typo cannot produce a delayed clone failure in every matrix leg.
+          gh api "repos/AndreNijman/apex-shell/commits/$sha" --silent
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          case "$TARGET" in
+            all)              matrix='{"flavor":["daily","gaming-mesa","gaming-nvidia"]}' ;;
+            daily-and-nvidia) matrix='{"flavor":["daily","gaming-nvidia"]}' ;;
+            daily|gaming-mesa|gaming-nvidia)
+                              matrix="{\"flavor\":[\"$TARGET\"]}" ;;
+            *) echo "::error::Unknown target $TARGET"; exit 1 ;;
+          esac
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "Releasing apex-shell $sha"
+
+  release:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    runs-on: ubuntu-24.04
+    env:
+      GHCR_USER: ${{ github.actor }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/free-disk-space
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Log in to GHCR
+        run: |
+          echo "$GHCR_TOKEN" | sudo podman login "$REGISTRY" -u "$GHCR_USER" --password-stdin
+          echo "$GHCR_TOKEN" | docker login "$REGISTRY" -u "$GHCR_USER" --password-stdin
+          cosign login "$REGISTRY" -u "$GHCR_USER" -p "$GHCR_TOKEN"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve stable platform
+        id: platform
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/skopeo-auth.json"
+          echo '{}' > "$REGISTRY_AUTH_FILE"
+          creds="$GHCR_USER:$GHCR_TOKEN"
+          platform="$IMAGE:platform-${{ matrix.flavor }}"
+
+          # One-time migration: snapshot the last green user image. Future full
+          # platform builds refresh this tag explicitly.
+          if ! skopeo inspect --creds "$creds" "docker://$platform" >/dev/null 2>&1; then
+            echo "Initialising $platform from the current green $IMAGE:${{ matrix.flavor }}"
+            skopeo copy --retry-times 3 --src-creds "$creds" --dest-creds "$creds" \
+              "docker://$IMAGE:${{ matrix.flavor }}" "docker://$platform"
+          fi
+          digest="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$platform")"
+          test -n "$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Using $platform@$digest"
+
+      # BuildKit pushes directly to GHCR and preserves the platform's existing
+      # compressed blob descriptors. Hosted-runner Podman 4.9 cannot reliably
+      # do that for inherited zstd:chunked layers and may recompress all of them.
+      - name: Build and push staging image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile.release
+          provenance: false
+          build-args: |
+            PLATFORM=${{ env.IMAGE }}@${{ steps.platform.outputs.digest }}
+            APEX_SHELL_REF=${{ needs.resolve.outputs.shell_sha }}
+            APEX_REVISION=${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.CACHE_PREFIX }}-buildkit-release-${{ matrix.flavor }}
+          cache-to: type=registry,ref=${{ env.CACHE_PREFIX }}-buildkit-release-${{ matrix.flavor }},mode=max
+          outputs: type=image,name=${{ env.IMAGE }}:${{ matrix.flavor }}-release-${{ github.run_id }},push=true,compression=zstd,force-compression=false
+
+      - name: Verify inherited layers and promote
+        id: promote
+        run: |
+          set -euo pipefail
+          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/skopeo-auth.json"
+          echo '{}' > "$REGISTRY_AUTH_FILE"
+          creds="$GHCR_USER:$GHCR_TOKEN"
+          digest="${{ steps.build.outputs.digest }}"
+
+          platform_json="$(skopeo inspect --raw --creds "$creds" \
+            "docker://$IMAGE@${{ steps.platform.outputs.digest }}")"
+          final_json="$(skopeo inspect --raw --creds "$creds" "docker://$IMAGE@$digest")"
+          mapfile -t platform_layers < <(jq -r '.layers[].digest' <<<"$platform_json")
+          mapfile -t final_layers < <(jq -r '.layers[].digest' <<<"$final_json")
+          [ "${#final_layers[@]}" -ge "${#platform_layers[@]}" ]
+          for i in "${!platform_layers[@]}"; do
+            if [ "${platform_layers[$i]}" != "${final_layers[$i]}" ]; then
+              echo "::error::Inherited layer $i was recompressed or replaced; refusing a full-fleet download"
+              exit 1
+            fi
+          done
+
+          label='{{ index .Labels "org.apexos.apex-shell.ref" }}'
+          got="$(skopeo inspect --creds "$creds" --format "$label" "docker://$IMAGE@$digest")"
+          test "$got" = "${{ needs.resolve.outputs.shell_sha }}"
+
+          skopeo copy --retry-times 3 \
+            --src-creds "$creds" --dest-creds "$creds" \
+            "docker://$IMAGE@$digest" "docker://$IMAGE:${{ matrix.flavor }}"
+          cosign sign --yes "$IMAGE@$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "${{ matrix.flavor }} released at $digest"

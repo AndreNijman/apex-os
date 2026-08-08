@@ -1,0 +1,17 @@
+# Fast final composition layer. Slow package, driver, akmod, Mesa and initramfs
+# work lives in the platform image and is reused byte-for-byte.
+ARG PLATFORM=ghcr.io/andrenijman/apex-os:platform-daily
+FROM ${PLATFORM}
+
+ARG APEX_SHELL_REF
+ARG APEX_REVISION=dev
+
+COPY --chmod=0755 files/scripts/vendor-apex-shell /usr/libexec/vendor-apex-shell
+RUN /usr/libexec/vendor-apex-shell "${APEX_SHELL_REF}"
+
+LABEL org.opencontainers.image.revision="${APEX_REVISION}" \
+      org.apexos.apex-shell.ref="${APEX_SHELL_REF}"
+
+RUN test -s /usr/share/apex-shell/shell.qml; \
+    test "$(cat /usr/share/apex-shell/.apex-shell-commit)" = "${APEX_SHELL_REF}"; \
+    bootc container lint || true

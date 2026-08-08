@@ -70,6 +70,16 @@ on:
         description: "Force a full, cache-bypassing CORE rebuild (~45 min; makes the next update a full download for every user)"
         type: boolean
         default: false
+      target_platform:
+        description: "Platform flavors to rebuild (shell-only releases use release-shell instead)"
+        type: choice
+        options:
+          - all
+          - daily-and-nvidia
+          - daily
+          - gaming-mesa
+          - gaming-nvidia
+        default: all
   schedule:
     # Weekly (Mon 06:00 UTC) to pick up upstream fedora-bootc / COPR / RPMFusion
     # security updates. This only rebuilds core when the upstream base image has
@@ -110,6 +120,7 @@ env:
   # are UNCHANGED so every installed machine keeps tracking the same reference.
   # But it is NOT a speed optimisation, and should not be cited as one.
   IMAGE: ghcr.io/andrenijman/apex-os
+  CACHE_PREFIX: ghcr.io/andrenijman/apex-os-build-cache
   TAG_CORE: core
   TAG_BASE: base
   # Transitional: where core/base lived before the consolidation. The base job
@@ -122,17 +133,27 @@ env:
 jobs:
   # ── Job 0: what has to rebuild ────────────────────────────────────────────
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Skip on an ISO-only dispatch (installer-iso pulls the published :daily).
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2) }}
     outputs:
       core: ${{ steps.gate.outputs.core }}
       base: ${{ steps.filter.outputs.base }}
+      shell_sha: ${{ steps.shell.outputs.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
+
+      - name: Pin apex-shell
+        id: shell
+        run: |
+          set -euo pipefail
+          sha="$(git ls-remote https://github.com/AndreNijman/apex-shell refs/heads/main | awk '{print $1}')"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not resolve apex-shell/main"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Pinned apex-shell: $sha"
 
       - name: Path filter
         id: filter
@@ -215,7 +236,7 @@ jobs:
   # (the workspace has 100+ tests and CI ran none of them). This job takes ~2
   # min and blocks the base, so a broken CLI can never be published.
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2) }}
     defaults:
       run:
@@ -248,7 +269,7 @@ jobs:
   # ── Job 2: core (heavy, gated) ────────────────────────────────────────────
   core:
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The push helper tags in-registry with skopeo, which needs its own
     # credentials: `sudo podman login` is root's, and cosign's is the user's
     # docker config, neither of which skopeo picks up here.
@@ -521,7 +542,7 @@ jobs:
         && needs.core.result != 'failure'
         && !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2)
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       GHCR_USER: ${{ github.actor }}
       GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -595,9 +616,13 @@ jobs:
 
       - name: Build base
         run: |
-          sudo podman build --isolation=chroot \
+          sudo podman build --isolation=chroot --layers=true \
+            --cache-from "$CACHE_PREFIX-base" \
+            --cache-to "$CACHE_PREFIX-base" \
+            --cache-ttl=336h \
             --build-arg CORE="$IMAGE@${{ steps.core.outputs.digest }}" \
             --build-arg APEX_REVISION="${{ github.sha }}" \
+            --build-arg APEX_SHELL_REF="${{ needs.changes.outputs.shell_sha }}" \
             -f Containerfile.base \
             -t "$IMAGE:$TAG_BASE-${{ github.sha }}" \
             .
@@ -734,7 +759,7 @@ jobs:
         && needs.base.result == 'success'
         && !(github.event_name == 'workflow_dispatch' && inputs.build_iso && !inputs.build_qcow2)
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The `secrets` context is NOT available in a step-level `if:` — only in
     # job-level env — so surface "is signing configured?" as a plain boolean
     # here and let the verify step below branch on it. Without this the step
@@ -778,8 +803,18 @@ jobs:
 
       # FROM the base pinned by digest — the exact base job 3 pushed and signed.
       - name: Build ${{ matrix.flavor }}
+        if: >-
+          ${{
+            github.event_name != 'workflow_dispatch'
+            || inputs.target_platform == 'all'
+            || inputs.target_platform == matrix.flavor
+            || (inputs.target_platform == 'daily-and-nvidia' && matrix.flavor != 'gaming-mesa')
+          }}
         run: |
-          sudo podman build --isolation=chroot \
+          sudo podman build --isolation=chroot --layers=true \
+            --cache-from "$CACHE_PREFIX-${{ matrix.flavor }}" \
+            --cache-to "$CACHE_PREFIX-${{ matrix.flavor }}" \
+            --cache-ttl=336h \
             --build-arg BASE="$IMAGE@${{ needs.base.outputs.digest }}" \
             --build-arg APEX_REVISION="${{ github.sha }}" \
             ${{ matrix.build_args }} \
@@ -794,7 +829,14 @@ jobs:
       # is a claim written by the build, and this project has been bitten
       # repeatedly by trusting claims over measurements.
       - name: Verify ${{ matrix.flavor }} kernel signature
-        if: ${{ env.APEX_SB_CONFIGURED == 'true' }}
+        if: >-
+          ${{
+            env.APEX_SB_CONFIGURED == 'true'
+            && (github.event_name != 'workflow_dispatch'
+                || inputs.target_platform == 'all'
+                || inputs.target_platform == matrix.flavor
+                || (inputs.target_platform == 'daily-and-nvidia' && matrix.flavor != 'gaming-mesa'))
+          }}
         run: |
           set -euo pipefail
           state=$(sudo podman run --rm --entrypoint /bin/sh "$IMAGE:${{ matrix.flavor }}" \
@@ -825,6 +867,13 @@ jobs:
       #    gaming-nvidia build to `502 Bad Gateway` eight minutes into the
       #    upload, with nothing retrying.
       - name: Push helper
+        if: >-
+          ${{
+            github.event_name != 'workflow_dispatch'
+            || inputs.target_platform == 'all'
+            || inputs.target_platform == matrix.flavor
+            || (inputs.target_platform == 'daily-and-nvidia' && matrix.flavor != 'gaming-mesa')
+          }}
         run: |
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           cat > /tmp/push-retry.sh <<'SH'
@@ -865,6 +914,13 @@ jobs:
 
       - name: Push ${{ matrix.flavor }} + capture digest
         id: push
+        if: >-
+          ${{
+            github.event_name != 'workflow_dispatch'
+            || inputs.target_platform == 'all'
+            || inputs.target_platform == matrix.flavor
+            || (inputs.target_platform == 'daily-and-nvidia' && matrix.flavor != 'gaming-mesa')
+          }}
         run: |
           # zstd:chunked — see the note on the core push. This is the one users
           # actually pull, so it is where the download saving lands.
@@ -873,7 +929,16 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "${{ matrix.flavor }} digest: $DIGEST"
 
+          # Stable parent for fast shell-only releases. This is an in-registry
+          # manifest copy, not another multi-gigabyte upload.
+          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/skopeo-auth.json"
+          echo '{}' > "$REGISTRY_AUTH_FILE"
+          skopeo copy --retry-times 3 \
+            --src-creds "$GHCR_USER:$GHCR_TOKEN" --dest-creds "$GHCR_USER:$GHCR_TOKEN" \
+            "docker://$IMAGE@$DIGEST" "docker://$IMAGE:platform-${{ matrix.flavor }}"
+
       - name: Sign ${{ matrix.flavor }} (cosign keyless)
+        if: ${{ steps.push.outputs.digest != '' }}
         run: |
           cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
 
@@ -882,6 +947,7 @@ jobs:
       # turns "it should be small" into something anyone can check at a glance,
       # and what will make a regression obvious the week it happens.
       - name: Report update cost for ${{ matrix.flavor }}
+        if: ${{ steps.push.outputs.digest != '' }}
         run: |
           set -euo pipefail
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
@@ -925,7 +991,7 @@ jobs:
   # continue-on-error so bib flakiness never fails the image pipeline.
   qcow2:
     needs: flavors
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event_name == 'workflow_dispatch' && inputs.build_qcow2
     continue-on-error: true
     steps:
@@ -969,7 +1035,7 @@ jobs:
   # maintainer to write to a USB stick. Independent of core/base/flavors: it
   # pulls the already-published :daily, so it runs on an ISO-only dispatch.
   installer-iso:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event_name == 'workflow_dispatch' && inputs.build_iso
     steps:
       # Needed for installer/bib-config.toml (the interactive kickstart).

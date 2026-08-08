@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ref="${1:?usage: vendor-apex-shell REF [DEST]}"
+dest="${2:-/usr/share/apex-shell}"
+repo="https://github.com/AndreNijman/apex-shell"
+
+rm -rf "${dest}"
+if git clone --depth 1 --branch "${ref}" "${repo}" "${dest}" 2>/dev/null; then
+    :
+else
+    rm -rf "${dest}"
+    git clone --filter=blob:none "${repo}" "${dest}"
+    git -C "${dest}" checkout --detach "${ref}"
+fi
+
+sha="$(git -C "${dest}" rev-parse HEAD)"
+printf '%s\n' "${sha}" > "${dest}/.apex-shell-commit"
+test -s "${dest}/shell.qml"
+test -d "${dest}/src/services"
+rm -rf "${dest}/.git"
+
+# Redirect the remaining legacy writable/source-tree paths for immutable /usr.
+sed -i "s|output_path = '@SRCDIR@/src/config/colors.conf'|output_path = '@HOME@/.config/hypr/apex-shell-hyprlock-colors.conf'|" \
+    "${dest}/src/config/matugen.toml.in"
+grep -q "output_path = '@HOME@/.config/hypr/apex-shell-hyprlock-colors.conf'" \
+    "${dest}/src/config/matugen.toml.in"
+sed -i 's|^source = ~/.local/src/apex-shell/src/config/colors.conf|source = ~/.config/hypr/apex-shell-hyprlock-colors.conf|' \
+    "${dest}/src/config/hyprlock.conf"
+grep -rl '~/\.local/src/apex-shell' "${dest}" 2>/dev/null | while read -r file; do
+    sed -i 's|~/\.local/src/apex-shell|/usr/share/apex-shell|g' "${file}"
+done
+! grep -rn '~/\.local/src/apex-shell' "${dest}" 2>/dev/null
+
+# Compatibility for shell revisions predating the image-owned Windows helper.
+power="${dest}/src/scripts/PowerControl.sh"
+sed -i '/^[[:space:]]*#/!s|/usr/local/bin/caelestia-boot-windows|/usr/libexec/apex-boot-windows|g' "${power}"
+! grep -vE '^[[:space:]]*#' "${power}" | grep -q 'caelestia-boot-windows'
+grep -q '/usr/libexec/apex-boot-windows' "${power}"
+bash -n "${power}"
+
+# The image intentionally drops .git; keep the version field functional.
+misc="${dest}/src/services/config_tab/pages/MiscPage.qml"
+if grep -q 'describe --tags --always 2>/dev/null' "${misc}"; then
+    sed -i 's|describe --tags --always 2>/dev/null|describe --tags --always 2>/dev/null \|\| cut -c1-12 $1/.apex-shell-commit 2>/dev/null|' "${misc}"
+fi
+
+echo "vendored apex-shell ${sha} at ${dest}"

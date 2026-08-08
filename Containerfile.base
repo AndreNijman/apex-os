@@ -65,14 +65,6 @@ FROM ${CORE}
 # "image carries git SHA" rule (org.opencontainers.image.revision).
 ARG APEX_REVISION=dev
 ARG APEX_VERSION=43
-LABEL org.opencontainers.image.title="APEX-OS base" \
-      org.opencontainers.image.description="APEX-OS shared base: apex-os-core + apexd/apex + APEX Shell + greeter payload" \
-      org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \
-      org.opencontainers.image.revision="${APEX_REVISION}" \
-      org.opencontainers.image.version="${APEX_VERSION}" \
-      org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.vendor="APEX-OS"
-
 # ── apexd + apex CLI ────────────────────────────────────────────────────────
 # The two binaries from the builder stage above. awww/matugen/yazi are NOT here
 # — they are slow-moving third-party tools and ship in core.
@@ -632,3 +624,13 @@ RUN set -eux; \
 
 # ── Stage 7: bootc container sanity lint (informational) ───────────────────
 RUN bootc container lint || true
+
+# Volatile provenance belongs last so a new git SHA does not invalidate every
+# otherwise-cacheable payload layer above it.
+LABEL org.opencontainers.image.title="APEX-OS base" \
+      org.opencontainers.image.description="APEX-OS shared base: apex-os-core + apexd/apex + APEX Shell + greeter payload" \
+      org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \
+      org.opencontainers.image.revision="${APEX_REVISION}" \
+      org.opencontainers.image.version="${APEX_VERSION}" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="APEX-OS"
