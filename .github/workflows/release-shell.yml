@@ -21,6 +21,10 @@ on:
           - gaming-nvidia
         default: all
 
+concurrency:
+  group: apex-image-publish
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
@@ -29,13 +33,13 @@ permissions:
 env:
   IMAGE: ghcr.io/andrenijman/apex-os
   REGISTRY: ghcr.io
-  CACHE_PREFIX: ghcr.io/andrenijman/apex-os-build-cache
 
 jobs:
   resolve:
     runs-on: ubuntu-24.04
     outputs:
       shell_sha: ${{ steps.shell.outputs.sha }}
+      shell_strict: ${{ steps.shell.outputs.strict }}
       matrix: ${{ steps.shell.outputs.matrix }}
     steps:
       - id: shell
@@ -48,11 +52,15 @@ jobs:
           sha="$REQUESTED"
           if [ -z "$sha" ]; then
             sha="$(gh api repos/AndreNijman/apex-shell/commits/main --jq .sha)"
+            strict=1
+          else
+            strict=0
           fi
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::shell_ref must resolve to a full commit SHA"; exit 1; }
           # Ensure a typo cannot produce a delayed clone failure in every matrix leg.
           gh api "repos/AndreNijman/apex-shell/commits/$sha" --silent
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "strict=$strict" >> "$GITHUB_OUTPUT"
           case "$TARGET" in
             all)              matrix='{"flavor":["daily","gaming-mesa","gaming-nvidia"]}' ;;
             daily-and-nvidia) matrix='{"flavor":["daily","gaming-nvidia"]}' ;;
@@ -106,6 +114,10 @@ jobs:
           fi
           digest="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$platform")"
           test -n "$digest"
+          cosign verify \
+            --certificate-identity "https://github.com/AndreNijman/apex-os/.github/workflows/build-image.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$IMAGE@$digest" >/dev/null
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "Using $platform@$digest"
 
@@ -122,9 +134,8 @@ jobs:
           build-args: |
             PLATFORM=${{ env.IMAGE }}@${{ steps.platform.outputs.digest }}
             APEX_SHELL_REF=${{ needs.resolve.outputs.shell_sha }}
+            APEX_SHELL_STRICT=${{ needs.resolve.outputs.shell_strict }}
             APEX_REVISION=${{ github.sha }}
-          cache-from: type=registry,ref=${{ env.CACHE_PREFIX }}-buildkit-release-${{ matrix.flavor }}
-          cache-to: type=registry,ref=${{ env.CACHE_PREFIX }}-buildkit-release-${{ matrix.flavor }},mode=max
           outputs: type=image,name=${{ env.IMAGE }}:${{ matrix.flavor }}-release-${{ github.run_id }},push=true,compression=zstd,force-compression=false
 
       - name: Verify inherited layers and promote
@@ -153,9 +164,29 @@ jobs:
           got="$(skopeo inspect --creds "$creds" --format "$label" "docker://$IMAGE@$digest")"
           test "$got" = "${{ needs.resolve.outputs.shell_sha }}"
 
+          new_bytes="$(jq --argjson n "${#platform_layers[@]}" \
+            '[.layers[$n:][]?.size] | add // 0' <<<"$final_json")"
+          if [ "$new_bytes" -gt 157286400 ]; then
+            echo "::error::Shell release adds $new_bytes compressed bytes; refusing an unexpectedly large update"
+            exit 1
+          fi
+
+          # Sign before moving the user-facing tag: a signing failure must leave
+          # every installed machine on the previous signed image.
+          cosign sign --yes "$IMAGE@$digest"
           skopeo copy --retry-times 3 \
             --src-creds "$creds" --dest-creds "$creds" \
             "docker://$IMAGE@$digest" "docker://$IMAGE:${{ matrix.flavor }}"
-          cosign sign --yes "$IMAGE@$digest"
+
+          revision_label='{{ index .Labels "org.opencontainers.image.revision" }}'
+          platform_revision="$(skopeo inspect --creds "$creds" --format "$revision_label" \
+            "docker://$IMAGE@${{ steps.platform.outputs.digest }}")"
+          {
+            echo "### ${{ matrix.flavor }} shell release"
+            echo "- Platform: \`${{ steps.platform.outputs.digest }}\` (revision \`$platform_revision\`)"
+            echo "- Shell: \`${{ needs.resolve.outputs.shell_sha }}\`"
+            echo "- New compressed bytes: \`$new_bytes\`"
+            echo "- Final image: \`$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "${{ matrix.flavor }} released at $digest"

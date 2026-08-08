@@ -10,18 +10,19 @@ rebuilding Mesa, NVIDIA modules, package transactions, or initramfs images.
 1. `core` contains the kernel and slow-moving third-party dependencies.
 2. `base` contains APEX system services and shared OS configuration.
 3. The flavor matrix builds Daily, Gaming Mesa, and Gaming NVIDIA.
-4. Each green flavor is also promoted to `platform-<flavor>`.
+4. Each green flavor is also promoted to moving and revision-pinned
+   `platform-<flavor>` tags.
 
 Platform builds run for OS source changes and the weekly upstream refresh. A
-manual run can target one flavor or Daily plus Gaming NVIDIA. Registry-backed
-Buildah caches are split per tier and expire from lookup after 14 days.
+manual run can target one flavor or Daily plus Gaming NVIDIA. The reusable base
+tier uses a registry-backed Buildah cache with a 14-day lookup lifetime.
 
 ## Shell releases
 
 `.github/workflows/release-shell.yml` owns the fast path. It resolves an exact
 40-character `apex-shell` commit, builds a final layer on the selected stable
-platform images, verifies that every inherited layer digest is unchanged, then
-promotes and signs the existing user-facing tags:
+platform images, verifies that every inherited layer digest is unchanged, signs
+the result, then promotes the existing user-facing tags:
 
 - `daily`
 - `gaming-mesa`
@@ -31,6 +32,11 @@ BuildKit pushes directly to GHCR for this path. The hosted runner's older Podman
 cannot reliably preserve inherited `zstd:chunked` descriptors; recompressing
 those layers would turn a small shell update into a full fleet download. The
 digest-prefix gate blocks promotion if that ever happens.
+
+Both workflows share one non-cancelling publication lock, so a shell release
+cannot overwrite a newer full platform build. A shell release also verifies the
+platform's keyless signature and refuses to promote more than 150 MiB of new
+compressed layers.
 
 The first shell release initializes a missing `platform-<flavor>` tag by taking
 an in-registry snapshot of the last green user image. No blobs are rebuilt or

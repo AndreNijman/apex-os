@@ -86,6 +86,10 @@ on:
     # actually moved — see the gate in job 0.
     - cron: "0 6 * * 1"
 
+concurrency:
+  group: apex-image-publish
+  cancel-in-progress: false
+
 # Least privilege. id-token:write is required for cosign keyless (OIDC) signing;
 # packages:write is required to push to GHCR.
 permissions:
@@ -623,6 +627,7 @@ jobs:
             --build-arg CORE="$IMAGE@${{ steps.core.outputs.digest }}" \
             --build-arg APEX_REVISION="${{ github.sha }}" \
             --build-arg APEX_SHELL_REF="${{ needs.changes.outputs.shell_sha }}" \
+            --build-arg APEX_SHELL_STRICT=1 \
             -f Containerfile.base \
             -t "$IMAGE:$TAG_BASE-${{ github.sha }}" \
             .
@@ -812,9 +817,6 @@ jobs:
           }}
         run: |
           sudo podman build --isolation=chroot --layers=true \
-            --cache-from "$CACHE_PREFIX-${{ matrix.flavor }}" \
-            --cache-to "$CACHE_PREFIX-${{ matrix.flavor }}" \
-            --cache-ttl=336h \
             --build-arg BASE="$IMAGE@${{ needs.base.outputs.digest }}" \
             --build-arg APEX_REVISION="${{ github.sha }}" \
             ${{ matrix.build_args }} \
@@ -936,6 +938,9 @@ jobs:
           skopeo copy --retry-times 3 \
             --src-creds "$GHCR_USER:$GHCR_TOKEN" --dest-creds "$GHCR_USER:$GHCR_TOKEN" \
             "docker://$IMAGE@$DIGEST" "docker://$IMAGE:platform-${{ matrix.flavor }}"
+          skopeo copy --retry-times 3 \
+            --src-creds "$GHCR_USER:$GHCR_TOKEN" --dest-creds "$GHCR_USER:$GHCR_TOKEN" \
+            "docker://$IMAGE@$DIGEST" "docker://$IMAGE:platform-${{ matrix.flavor }}-${{ github.sha }}"
 
       - name: Sign ${{ matrix.flavor }} (cosign keyless)
         if: ${{ steps.push.outputs.digest != '' }}
@@ -992,7 +997,14 @@ jobs:
   qcow2:
     needs: flavors
     runs-on: ubuntu-24.04
-    if: github.event_name == 'workflow_dispatch' && inputs.build_qcow2
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch'
+        && inputs.build_qcow2
+        && (inputs.target_platform == 'all'
+            || inputs.target_platform == 'daily'
+            || inputs.target_platform == 'daily-and-nvidia')
+      }}
     continue-on-error: true
     steps:
       - name: Checkout

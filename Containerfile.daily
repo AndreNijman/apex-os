@@ -14,7 +14,6 @@
 ARG BASE=localhost/apex-base:latest
 FROM ${BASE}
 
-ARG APEX_REVISION=dev
 # ── Edition stamp ──────────────────────────────────────────────────────────
 # os-release VARIANT_ID=daily is what apex-greet reads to pick the chartreuse
 # spark + accent. /etc/os-release is a symlink into /usr/lib/os-release, so
@@ -122,6 +121,7 @@ RUN set -eux; \
 # Informational lint.
 RUN bootc container lint || true
 
+ARG APEX_REVISION=dev
 LABEL org.opencontainers.image.title="APEX-OS Daily" \
       org.opencontainers.image.description="APEX-OS Daily edition (chartreuse) — general-purpose daily driver" \
       org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \

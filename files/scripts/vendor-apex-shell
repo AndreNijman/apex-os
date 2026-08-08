@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ref="${1:?usage: vendor-apex-shell REF [DEST]}"
+ref="${1:?usage: vendor-apex-shell REF [DEST] [STRICT]}"
 dest="${2:-/usr/share/apex-shell}"
+strict="${3:-0}"
 repo="https://github.com/AndreNijman/apex-shell"
+
+[[ "${strict}" = 0 || "${strict}" = 1 ]] || {
+    echo "strict must be 0 or 1" >&2
+    exit 2
+}
 
 rm -rf "${dest}"
 if git clone --depth 1 --branch "${ref}" "${repo}" "${dest}" 2>/dev/null; then
@@ -15,6 +21,9 @@ else
 fi
 
 sha="$(git -C "${dest}" rev-parse HEAD)"
+if [[ "${ref}" =~ ^[0-9a-f]{40}$ ]]; then
+    test "${sha}" = "${ref}"
+fi
 printf '%s\n' "${sha}" > "${dest}/.apex-shell-commit"
 test -s "${dest}/shell.qml"
 test -d "${dest}/src/services"
@@ -27,22 +36,48 @@ grep -q "output_path = '@HOME@/.config/hypr/apex-shell-hyprlock-colors.conf'" \
     "${dest}/src/config/matugen.toml.in"
 sed -i 's|^source = ~/.local/src/apex-shell/src/config/colors.conf|source = ~/.config/hypr/apex-shell-hyprlock-colors.conf|' \
     "${dest}/src/config/hyprlock.conf"
-grep -rl '~/\.local/src/apex-shell' "${dest}" 2>/dev/null | while read -r file; do
+{ grep -rl '~/\.local/src/apex-shell' "${dest}" 2>/dev/null || true; } | while read -r file; do
     sed -i 's|~/\.local/src/apex-shell|/usr/share/apex-shell|g' "${file}"
 done
 ! grep -rn '~/\.local/src/apex-shell' "${dest}" 2>/dev/null
+grep -q 'lock_cmd = qs -c /usr/share/apex-shell ipc call lockscreen lock' \
+    "${dest}/src/config/hypridle.conf"
 
 # Compatibility for shell revisions predating the image-owned Windows helper.
 power="${dest}/src/scripts/PowerControl.sh"
+pre_probe=0
+if grep -vE '^[[:space:]]*#' "${power}" | grep -q 'caelestia-boot-windows'; then
+    pre_probe=1
+fi
 sed -i '/^[[:space:]]*#/!s|/usr/local/bin/caelestia-boot-windows|/usr/libexec/apex-boot-windows|g' "${power}"
 ! grep -vE '^[[:space:]]*#' "${power}" | grep -q 'caelestia-boot-windows'
 grep -q '/usr/libexec/apex-boot-windows' "${power}"
+if ! grep -q 'windows-check' "${power}"; then
+    if [[ "${pre_probe}" = 1 && "${strict}" = 0 ]]; then
+        echo "WARN: shell predates the windows-check probe; the Windows row will stay hidden"
+    else
+        echo "FATAL: PowerControl.sh has no windows-check action" >&2
+        exit 1
+    fi
+else
+    grep -q 'windows-check' "${dest}/src/services/PowerMenu.qml"
+fi
 bash -n "${power}"
 
 # The image intentionally drops .git; keep the version field functional.
 misc="${dest}/src/services/config_tab/pages/MiscPage.qml"
 if grep -q 'describe --tags --always 2>/dev/null' "${misc}"; then
     sed -i 's|describe --tags --always 2>/dev/null|describe --tags --always 2>/dev/null \|\| cut -c1-12 $1/.apex-shell-commit 2>/dev/null|' "${misc}"
+    awk '/describe --tags/{n=gsub(/"/,"\""); exit (n%2)}' "${misc}"
+fi
+
+wallpaper="${dest}/src/services/WallpaperService.qml"
+if ! grep -q 'apex-greet-wallpaper' "${wallpaper}"; then
+    if [[ "${strict}" = 1 ]]; then
+        echo "FATAL: current apex-shell no longer publishes the greeter wallpaper" >&2
+        exit 1
+    fi
+    echo "WARN: pinned shell predates the greeter-wallpaper publisher"
 fi
 
 echo "vendored apex-shell ${sha} at ${dest}"
