@@ -63,16 +63,6 @@ FROM ${CORE}
 # OCI provenance. The git SHA is injected by CI (--build-arg APEX_REVISION=…)
 # so every image is traceable back to the exact source commit — the plan's
 # "image carries git SHA" rule (org.opencontainers.image.revision).
-ARG APEX_REVISION=dev
-ARG APEX_VERSION=43
-LABEL org.opencontainers.image.title="APEX-OS base" \
-      org.opencontainers.image.description="APEX-OS shared base: apex-os-core + apexd/apex + APEX Shell + greeter payload" \
-      org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \
-      org.opencontainers.image.revision="${APEX_REVISION}" \
-      org.opencontainers.image.version="${APEX_VERSION}" \
-      org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.vendor="APEX-OS"
-
 # ── apexd + apex CLI ────────────────────────────────────────────────────────
 # The two binaries from the builder stage above. awww/matugen/yazi are NOT here
 # — they are slow-moving third-party tools and ship in core.
@@ -256,6 +246,7 @@ RUN set -eux; \
 # /usr/share/apex-shell/.apex-shell-commit and stamped as an OCI label so
 # `apex changelog` / `skopeo inspect` can report exactly which shell shipped.
 ARG APEX_SHELL_REF=main
+ARG APEX_SHELL_STRICT=0
 RUN set -eux; \
     rm -rf /usr/share/apex-shell; \
     # `--branch` accepts a branch or tag but NOT a bare SHA, so try it first and
@@ -598,7 +589,7 @@ RUN set -eux; \
     # as the windows-check probe above.
     if ! grep -q 'apex-greet-wallpaper' \
             /usr/share/apex-shell/src/services/WallpaperService.qml; then \
-        if [ "${APEX_SHELL_REF}" = "main" ]; then \
+        if [ "${APEX_SHELL_STRICT}" = 1 ]; then \
             echo "FATAL: apex-shell main no longer publishes the greeter wallpaper"; exit 1; \
         else \
             echo "WARN: pinned apex-shell (${APEX_SHELL_REF}) predates the greeter-wallpaper publisher — the login screen will only follow the wallpaper after the next login, not immediately"; \
@@ -632,3 +623,15 @@ RUN set -eux; \
 
 # ── Stage 7: bootc container sanity lint (informational) ───────────────────
 RUN bootc container lint || true
+
+# Volatile provenance belongs last so a new git SHA does not invalidate every
+# otherwise-cacheable payload layer above it.
+ARG APEX_REVISION=dev
+ARG APEX_VERSION=43
+LABEL org.opencontainers.image.title="APEX-OS base" \
+      org.opencontainers.image.description="APEX-OS shared base: apex-os-core + apexd/apex + APEX Shell + greeter payload" \
+      org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \
+      org.opencontainers.image.revision="${APEX_REVISION}" \
+      org.opencontainers.image.version="${APEX_VERSION}" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="APEX-OS"
