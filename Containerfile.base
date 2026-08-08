@@ -497,6 +497,44 @@ RUN set -eux; \
     systemctl enable apex-sysext-rebuild.service; \
     test -L /etc/systemd/system/multi-user.target.wants/apex-sysext-rebuild.service
 
+# ── Console setup must not be able to report the machine as broken ──────────
+# systemd-vconsole-setup runs loadkeys/setfont with whatever /etc/vconsole.conf
+# names. If that keymap or font is not installed the tool exits non-zero, the
+# unit FAILS, and systemd puts the machine into "degraded" state — which is what
+# the user is then told about every time they open a terminal, over a virtual
+# console setting that has no effect on their graphical session.
+#
+# /etc/vconsole.conf is machine-local, so it survives every image update: once a
+# machine has a bad value it stays broken forever and no OS update can fix it.
+# The guard repairs the file in place at boot instead (falling back to `us`,
+# keeping the original beside it), which is the only layer that CAN fix it.
+COPY --chmod=0755 files/system/libexec/apex-vconsole-guard \
+     /usr/libexec/apex-vconsole-guard
+COPY files/system/units/10-apex-vconsole-guard.conf \
+     /usr/lib/systemd/system/systemd-vconsole-setup.service.d/10-apex-vconsole-guard.conf
+RUN set -eux; \
+    bash -n /usr/libexec/apex-vconsole-guard; \
+    # The fallback keymap the guard relies on has to exist in THIS image, or the
+    # repair would swap one unloadable keymap for another.
+    find /usr/lib/kbd/keymaps -name 'us.map.gz' -print -quit | grep -q .; \
+    cp /etc/vconsole.conf /tmp/vconsole.orig; \
+    # A bad keymap must be repaired and the original preserved...
+    printf 'KEYMAP=definitely-not-a-keymap\nFONT=definitely-not-a-font\n' > /etc/vconsole.conf; \
+    /usr/libexec/apex-vconsole-guard; \
+    grep -qx 'KEYMAP=us' /etc/vconsole.conf; \
+    ! grep -q '^FONT=' /etc/vconsole.conf; \
+    test -s /etc/vconsole.conf.apex-invalid; \
+    rm -f /etc/vconsole.conf.apex-invalid; \
+    # ...and a good one must be left completely alone, because this runs on
+    # every boot and must never churn a working machine's configuration.
+    printf 'KEYMAP=us\n' > /etc/vconsole.conf; \
+    /usr/libexec/apex-vconsole-guard; \
+    grep -qx 'KEYMAP=us' /etc/vconsole.conf; \
+    test ! -e /etc/vconsole.conf.apex-invalid; \
+    cp /tmp/vconsole.orig /etc/vconsole.conf; \
+    rm -f /tmp/vconsole.orig; \
+    echo "vconsole guard verified (bad config repaired, good config untouched)"
+
 # One-shot de-branding migration for systems installed from a PRE-branding image.
 # The BLS entry titles, the EFI NVRAM label and a hand-written /etc/os-release
 # all live OUTSIDE the ostree deployment, so `bootc upgrade` never replaces them.
