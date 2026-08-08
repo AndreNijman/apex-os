@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# apex-vconsole-guard — stop a bad /etc/vconsole.conf from marking the whole
+# system degraded.
+#
+# THE BUG THIS FIXES
+# systemd-vconsole-setup runs loadkeys/setfont with the KEYMAP and FONT named in
+# /etc/vconsole.conf. If either names something that is not installed, the tool
+# exits non-zero and the unit FAILS:
+#
+#   $ /usr/lib/systemd/systemd-vconsole-setup
+#   loadkeys: Unable to open file: <keymap>: No such file or directory
+#   /usr/bin/loadkeys failed with exit status 1.        -> unit failed
+#
+# That single failed unit puts systemd into "degraded" state, which is what the
+# user then sees reported every time they open a terminal — for a virtual
+# console setting that has no effect on their graphical session at all.
+#
+# /etc/vconsole.conf is machine-local: it survives every image update, so the
+# machine stays broken forever and no OS update can ever fix it. The value gets
+# there from an install-time keyboard selection or a later `localectl`, where an
+# X11/XKB layout name (which may have no console keymap of the same name) is an
+# easy way to end up with something loadkeys cannot open.
+#
+# WHAT THIS DOES
+# Runs as ExecStartPre of systemd-vconsole-setup. If the configured keymap or
+# font does not exist, it repairs the file — keymap falls back to `us`, an
+# unusable font falls back to the kernel default — keeps the original at
+# /etc/vconsole.conf.apex-invalid, and says so loudly in the journal.
+#
+# It is deliberately conservative: a valid config is left byte-for-byte alone,
+# and any unexpected problem exits 0 rather than taking the boot down with it.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+readonly CONF=/etc/vconsole.conf
+readonly BACKUP=/etc/vconsole.conf.apex-invalid
+readonly KEYMAP_DIR=/usr/lib/kbd/keymaps
+readonly FONT_DIR=/usr/lib/kbd/consolefonts
+
+log() { printf 'apex-vconsole-guard: %s\n' "$*" >&2; }
+
+[ -f "$CONF" ] || exit 0
+
+# Read a value WITHOUT sourcing the file: this runs as root at early boot, and
+# `.` on a config file would execute whatever it contains.
+value_of() {
+    sed -n "s/^[[:space:]]*${1}=[\"']\?\([^\"'#]*\).*/\1/p" "$CONF" | tail -n1 | tr -d '[:space:]'
+}
+
+# loadkeys searches KEYMAP_DIR recursively for <name>.map[.gz]; mirror that
+# rather than inventing a stricter rule than the tool actually applies.
+keymap_installed() {
+    [ -d "$KEYMAP_DIR" ] || return 1
+    find "$KEYMAP_DIR" -type f \
+        \( -name "${1}.map.gz" -o -name "${1}.map" \
+           -o -name "${1}.kmap.gz" -o -name "${1}.kmap" \) \
+        -print -quit 2>/dev/null | grep -q .
+}
+
+font_installed() {
+    [ -d "$FONT_DIR" ] || return 1
+    find "$FONT_DIR" -type f -name "${1}.*" -print -quit 2>/dev/null | grep -q .
+}
+
+keymap="$(value_of KEYMAP)"
+font="$(value_of FONT)"
+
+bad_keymap=0
+bad_font=0
+[ -n "$keymap" ] && ! keymap_installed "$keymap" && bad_keymap=1
+[ -n "$font" ]   && ! font_installed   "$font"   && bad_font=1
+
+# The overwhelmingly common case: nothing to do, touch nothing.
+if [ "$bad_keymap" = 0 ] && [ "$bad_font" = 0 ]; then
+    exit 0
+fi
+
+tmp="$(mktemp /etc/.vconsole.conf.apex.XXXXXX 2>/dev/null)" || {
+    log "cannot write to /etc (read-only?) — leaving ${CONF} untouched"
+    exit 0
+}
+cp -a "$CONF" "$tmp" 2>/dev/null || { rm -f "$tmp"; exit 0; }
+
+if [ "$bad_keymap" = 1 ]; then
+    if keymap_installed us; then
+        log "keymap '${keymap}' is not installed — falling back to 'us'"
+        log "set a real one with:  sudo localectl set-keymap <name>   (list: localectl list-keymaps)"
+        sed -i "s/^[[:space:]]*KEYMAP=.*/KEYMAP=us/" "$tmp"
+    else
+        log "keymap '${keymap}' is not installed and 'us' is missing too — dropping KEYMAP"
+        sed -i "/^[[:space:]]*KEYMAP=/d" "$tmp"
+    fi
+fi
+
+if [ "$bad_font" = 1 ]; then
+    # No console font is a working state — the kernel's built-in font is used.
+    log "console font '${font}' is not installed — dropping FONT so the kernel default is used"
+    sed -i "/^[[:space:]]*FONT=/d" "$tmp"
+fi
+
+if cp -a "$CONF" "$BACKUP" 2>/dev/null; then
+    log "original saved as ${BACKUP}"
+fi
+
+if mv -f "$tmp" "$CONF" 2>/dev/null; then
+    log "repaired ${CONF}"
+else
+    rm -f "$tmp"
+    log "could not replace ${CONF} — leaving it untouched"
+fi
+
+exit 0
