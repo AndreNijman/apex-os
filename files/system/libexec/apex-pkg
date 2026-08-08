@@ -1,0 +1,811 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# apex-pkg — the APEX-OS package engine.
+#
+# WHY THIS EXISTS
+# APEX is a bootc image. The supported way to add software to such a system used
+# to be `rpm-ostree install`, and that has one fatal property for a daily driver:
+# ANY layered package puts the deployment into "local modifications" state, and
+# from that moment `bootc upgrade` refuses to run:
+#
+#   error: Deployment contains local rpm-ostree modifications; cannot upgrade
+#
+# So the moment a user installed one CLI tool, their OS stopped updating —
+# silently, until someone read the error. Telling users "use Flatpak for apps,
+# Homebrew for CLI, Distrobox for dev, and never rpm-ostree" is not a product;
+# it is a list of excuses.
+#
+# WHAT THIS DOES INSTEAD
+# Packages are installed into a systemd SYSTEM EXTENSION: a squashfs image in
+# /var/lib/extensions that systemd overlays onto /usr at boot. That means:
+#
+#   * the bootc deployment is never modified          -> `bootc upgrade` keeps working
+#   * binaries land in the real /usr/bin              -> no PATH games, no wrappers
+#   * .desktop files, icons, systemd units, udev rules and man pages all work,
+#     because they are at the paths the rest of the OS already looks in
+#   * removal is deleting one file                    -> no dependency rot in /usr
+#   * an OS upgrade cannot half-apply: the extension declares the OS version it
+#     was built for, and systemd simply refuses to merge a mismatched one, which
+#     this tool then rebuilds (apex-sysext-rebuild.service)
+#
+# ONE IMAGE, NOT ONE PER PACKAGE
+# Everything the user asked for is resolved and built into a SINGLE extension
+# (apex-user.raw), rebuilt from the requested-package list on every change. Two
+# overlapping extensions would fight over shared dependency files and removing
+# one could delete files the other still needs; one image makes dnf's own
+# dependency resolution the single source of truth and makes removal exact.
+#
+# WHAT IT DELIBERATELY REFUSES
+#   * anything already provided by the image (that is an image update, not a
+#     package install)
+#   * anything that would SHADOW an image package with a different version —
+#     overlaying a second glibc/systemd onto a running system is how you brick it
+#   * kernels, kernel modules and akmods — those need an initramfs and a real
+#     deployment, so they belong in the image
+#
+# Fedora's signed repositories are the package source; there is no APEX registry
+# to trust, run or keep online. Every RPM is signature-checked before extraction.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+readonly PKG_ROOT=/var/lib/apex/pkg
+readonly EXT_DIR=/var/lib/extensions
+readonly EXT_NAME=apex-user
+# systemd accepts a system extension as either a squashfs image or a plain
+# directory. Squashfs is preferred (compact, read-only, one file to checksum),
+# but mksquashfs reaches the image only as a weak dependency of dracut-squash —
+# so the directory form is a first-class fallback rather than a hard failure.
+readonly EXT_IMAGE="${EXT_DIR}/${EXT_NAME}.raw"
+readonly EXT_TREE="${EXT_DIR}/${EXT_NAME}"
+readonly REQUESTED="${PKG_ROOT}/requested"
+readonly STATE="${PKG_ROOT}/state.json"
+readonly ETC_SAVE="${PKG_ROOT}/etc"
+readonly ETC_LIST="${PKG_ROOT}/etc.list"
+readonly VAR_LIST="${PKG_ROOT}/var.list"
+readonly ROLLBACK_DIR="${PKG_ROOT}/rollback"
+# Staging lives under /var/lib, NOT /var/tmp: rpm cannot take its transaction
+# lock inside a tmp-labelled tree under SELinux, and the resulting "can't create
+# transaction lock" error would be printed on every single install.
+readonly WORK_ROOT="${PKG_ROOT}/work"
+readonly LOCK="${PKG_ROOT}/.lock"
+
+# Packages that must never come from an extension. The first group needs an
+# initramfs/deployment; the second is the running userspace ABI floor — shadowing
+# any of it with a second copy on an overlay is unrecoverable without a rollback.
+readonly REFUSE_RE='^(kernel|kernel-core|kernel-modules(-.*)?|kernel-devel(-.*)?|kernel-cachyos.*|kmod-.*|akmod-.*|.*-kmod|glibc|glibc-common|systemd|systemd-libs|systemd-udev|rpm|rpm-libs|librpm.*|dnf5?|libdnf5.*|bootc|ostree|libostree.*|rpm-ostree|filesystem|setup|shadow-utils|bash|coreutils|selinux-policy.*|grub2-.*|shim.*|dracut.*|plymouth.*)$'
+
+# Progress goes to stderr, never stdout: stdout is reserved for data (paths,
+# listings) and functions like build_payload return their result through it.
+msg()  { printf 'apex-pkg: %s\n' "$*" >&2; }
+warn() { printf 'apex-pkg: warning: %s\n' "$*" >&2; }
+die()  { printf 'apex-pkg: error: %s\n' "$*" >&2; exit 1; }
+
+need_root() {
+    [ "$(id -u)" = 0 ] || die "this needs root; try: sudo apex ${1:-install} ..."
+}
+
+# Serialise every mutation. A second `apex install` racing a rebuild would
+# publish an image built from a half-written requested list.
+take_lock() {
+    mkdir -p "$PKG_ROOT"
+    exec 9>"$LOCK"
+    flock -n 9 || die "another apex package operation is in progress"
+}
+
+os_id()      { . /usr/lib/os-release; printf '%s' "$ID"; }
+os_version() { . /usr/lib/os-release; printf '%s' "$VERSION_ID"; }
+
+json_string_array() {
+    # stdin: one item per line -> compact JSON array
+    jq -R -s 'split("\n") | map(select(length > 0))'
+}
+
+# ── requested-package list ───────────────────────────────────────────────────
+load_requested() {
+    [ -f "$REQUESTED" ] || return 0
+    grep -vE '^\s*(#|$)' "$REQUESTED" || true
+}
+
+save_requested() {
+    mkdir -p "$PKG_ROOT"
+    printf '%s\n' "$@" | awk 'NF' | sort -u > "${REQUESTED}.tmp"
+    mv -f "${REQUESTED}.tmp" "$REQUESTED"
+}
+
+# ── build ────────────────────────────────────────────────────────────────────
+
+# Download the requested packages plus every dependency the IMAGE does not
+# already provide. `--resolve` without `--alldeps` is the whole trick: dnf
+# resolves against the host rpmdb, so an extension carries only the delta.
+download_rpms() {
+    local destdir="$1"; shift
+    local -a args=(-y --setopt=keepcache=True download --resolve --destdir "$destdir")
+    [ "${NO_WEAK_DEPS:-0}" = 1 ] && args+=(--setopt=install_weak_deps=False)
+    local repo
+    for repo in ${ENABLE_REPOS:-}; do args+=(--enable-repo "$repo"); done
+    msg "resolving against the installed image (only missing dependencies are fetched)"
+    dnf5 "${args[@]}" "$@" >&2 || die "dependency resolution failed"
+    compgen -G "${destdir}/*.rpm" >/dev/null || die "nothing to download — is the package name right?"
+}
+
+# Everything that must be true BEFORE we extract a single file.
+guard_rpms() {
+    local destdir="$1"
+    local rpmfile name evr installed bad=0
+
+    for rpmfile in "$destdir"/*.rpm; do
+        name="$(rpm -qp --nosignature --qf '%{NAME}' "$rpmfile" 2>/dev/null)" \
+            || die "cannot read $rpmfile"
+        evr="$(rpm -qp --nosignature --qf '%{EVR}' "$rpmfile" 2>/dev/null)"
+
+        if [[ "$name" =~ $REFUSE_RE ]]; then
+            warn "refusing '${name}': kernel- or core-system packages must ship in the APEX image, not an extension"
+            bad=1
+            continue
+        fi
+
+        # Already in the image? Then this is a REPLACEMENT, and an overlay
+        # carrying a second copy of an installed package is exactly the class of
+        # change that breaks a running system.
+        if installed="$(rpm -q --qf '%{EVR}' "$name" 2>/dev/null)"; then
+            if [ "$installed" = "$evr" ]; then
+                warn "skipping '${name}-${evr}': already provided by APEX-OS"
+            else
+                warn "refusing '${name}': needs ${evr} but the image ships ${installed} — that requires an OS update, not a package install"
+                bad=1
+            fi
+            rm -f "$rpmfile"
+            continue
+        fi
+    done
+
+    [ "$bad" = 0 ] || die "refused one or more packages (see above); nothing was changed"
+    compgen -G "${destdir}/*.rpm" >/dev/null \
+        || die "every requested package is already part of APEX-OS — nothing to install"
+
+    # Signature check. Fedora/RPMFusion/COPR keys are already in the image rpmdb;
+    # an unsigned or unknown-key package is a hard stop, never a prompt.
+    local out
+    for rpmfile in "$destdir"/*.rpm; do
+        out="$(rpmkeys --checksig "$rpmfile" 2>&1)" || die "signature check failed: $out"
+        case "$out" in
+            *"digests signatures OK"*) : ;;
+            *) die "unsigned or untrusted package: $out" ;;
+        esac
+    done
+    msg "$(ls -1 "$destdir"/*.rpm | wc -l) package(s) verified against the repository keys"
+}
+
+extract_rpms() {
+    local destdir="$1" root="$2"
+    mkdir -p "$root"
+    # --noscripts: scriptlets assume a live system and a writable /usr. The ones
+    #   that matter (ldconfig, sysusers, tmpfiles, schema/desktop/mime caches) are
+    #   emulated below against the union of image + extension.
+    # --noplugins: the selinux/systemd-inhibit plugins target the running system;
+    #   labelling is done explicitly with setfiles once the tree is complete.
+    # --nosignature: every package was already checked against the SYSTEM keyring
+    # in guard_rpms. This throwaway root has an empty keyring, so leaving it on
+    # would print a NOKEY warning per package that means nothing.
+    rpm --root "$root" --initdb
+    rpm --root "$root" -Uvh --nodeps --noscripts --notriggers --noplugins \
+        --nosignature --replacefiles --replacepkgs --excludepath /boot \
+        "$destdir"/*.rpm >&2 || die "extraction failed"
+    rm -rf "${root}/usr/share/rpm" "${root}/var/lib/rpm" "${root}/usr/lib/sysimage/rpm"
+}
+
+# Caches that are a SINGLE file describing a whole directory are the one real
+# hazard of overlaying /usr: the extension's copy hides the image's copy, so a
+# cache built only from extension content makes the image's own applications
+# disappear. Each one is therefore rebuilt from the UNION of image + extension,
+# or deleted when the consumer can safely fall back to scanning.
+fix_caches() {
+    local root="$1" tmp
+
+    if compgen -G "${root}/usr/share/glib-2.0/schemas/*.xml" >/dev/null; then
+        tmp="$(mktemp -d)"
+        cp -a /usr/share/glib-2.0/schemas/. "$tmp"/ 2>/dev/null || true
+        rm -f "${tmp}/gschemas.compiled"
+        cp -a "${root}"/usr/share/glib-2.0/schemas/. "$tmp"/
+        if glib-compile-schemas --targetdir "$tmp" "$tmp" >/dev/null 2>&1; then
+            install -Dm0644 "${tmp}/gschemas.compiled" \
+                "${root}/usr/share/glib-2.0/schemas/gschemas.compiled"
+            msg "rebuilt GSettings schema cache (image + extension)"
+        fi
+        rm -rf "$tmp"
+    fi
+
+    if compgen -G "${root}/usr/share/applications/*.desktop" >/dev/null; then
+        tmp="$(mktemp -d)"
+        cp -a /usr/share/applications/. "$tmp"/ 2>/dev/null || true
+        cp -a "${root}"/usr/share/applications/. "$tmp"/
+        if update-desktop-database "$tmp" >/dev/null 2>&1; then
+            install -Dm0644 "${tmp}/mimeinfo.cache" \
+                "${root}/usr/share/applications/mimeinfo.cache"
+        fi
+        rm -rf "$tmp"
+    fi
+
+    if compgen -G "${root}/usr/share/mime/packages/*.xml" >/dev/null; then
+        tmp="$(mktemp -d)"
+        cp -a /usr/share/mime/. "${tmp}/" 2>/dev/null || true
+        cp -a "${root}"/usr/share/mime/. "${tmp}/"
+        if update-mime-database "$tmp" >/dev/null 2>&1; then
+            rm -rf "${root}/usr/share/mime"
+            mkdir -p "${root}/usr/share/mime"
+            cp -a "${tmp}/." "${root}/usr/share/mime/"
+        fi
+        rm -rf "$tmp"
+    fi
+
+    local libdir
+    for libdir in lib64 lib; do
+        if compgen -G "${root}/usr/${libdir}/gio/modules/*.so" >/dev/null \
+           && command -v gio-querymodules >/dev/null; then
+            tmp="$(mktemp -d)"
+            cp -a "/usr/${libdir}/gio/modules/." "$tmp"/ 2>/dev/null || true
+            cp -a "${root}/usr/${libdir}/gio/modules/." "$tmp"/
+            rm -f "${tmp}/giomodule.cache"
+            gio-querymodules "$tmp" >/dev/null 2>&1 || true
+            if [ -f "${tmp}/giomodule.cache" ]; then
+                install -Dm0644 "${tmp}/giomodule.cache" \
+                    "${root}/usr/${libdir}/gio/modules/giomodule.cache"
+            fi
+            rm -rf "$tmp"
+        fi
+    done
+
+    # Consumers of these re-scan when the directory is newer than the cache, so
+    # shipping no cache is correct and strictly safer than shipping a partial one.
+    find "$root" -name 'icon-theme.cache' -delete 2>/dev/null || true
+    rm -rf "${root}/usr/lib/fontconfig/cache"
+    rm -f  "${root}/usr/share/info/dir"
+}
+
+# A sysext may only carry /usr and /opt. Configuration and state are machine-
+# local and must land on the real, writable filesystem.
+split_out_of_image() {
+    local root="$1" etcroot="$2"
+    if [ -d "${root}/etc" ]; then
+        mkdir -p "$etcroot"
+        cp -a "${root}/etc/." "${etcroot}/"
+        rm -rf "${root}/etc"
+    fi
+    if [ -d "${root}/var" ]; then
+        ( cd "${root}/var" && find . -mindepth 1 -type d -printf '/var/%P\n' ) \
+            > "${WORK}/var.dirs" || true
+        rm -rf "${root}/var"
+    fi
+    : > "${WORK}/refused.paths"
+    local d
+    for d in boot srv run root home; do
+        [ -d "${root}/${d}" ] && find "${root}/${d}" -mindepth 1 -print >> "${WORK}/refused.paths" 2>/dev/null || true
+        rm -rf "${root:?}/${d}"
+    done
+    if [ -s "${WORK}/refused.paths" ]; then
+        warn "ignored files outside /usr, /opt, /etc and /var:"
+        sed 's/^/  /' "${WORK}/refused.paths" >&2
+    fi
+    if [ -d "${root}/usr/lib/modules" ]; then
+        die "package ships kernel modules — that needs an image build, not an extension"
+    fi
+}
+
+write_extension_release() {
+    local root="$1"
+    mkdir -p "${root}/usr/lib/extension-release.d"
+    # systemd refuses to merge unless ID and VERSION_ID match the running OS.
+    # That refusal is a FEATURE: it is what stops a Fedora 43 extension from
+    # being overlaid onto a Fedora 44 deployment after an OS upgrade.
+    cat > "${root}/usr/lib/extension-release.d/extension-release.${EXT_NAME}" <<EOF
+ID=$(os_id)
+VERSION_ID=$(os_version)
+ARCHITECTURE=$(uname -m | sed 's/^x86_64$/x86-64/')
+SYSEXT_SCOPE=system
+APEX_EXTENSION=user-packages
+APEX_BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+}
+
+label_tree() {
+    local root="$1"
+    local fc=/etc/selinux/targeted/contexts/files/file_contexts
+    [ -f "$fc" ] || { warn "no SELinux file_contexts — extension will be unlabelled"; return 0; }
+    command -v setfiles >/dev/null || return 0
+    # Labels must be baked into the image: overlayfs serves the xattrs it finds,
+    # and an unlabelled binary is denied execution under enforcing SELinux.
+    setfiles -m -r "$root" "$fc" "${root}/usr" >/dev/null 2>&1 || \
+        warn "SELinux labelling reported problems"
+    if [ -d "${root}/opt" ]; then
+        setfiles -m -r "$root" "$fc" "${root}/opt" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# Emit the extension payload and print its path. Squashfs when the tools are
+# there, the staging tree itself when they are not — systemd merges either.
+build_payload() {
+    local root="$1" outdir="$2"
+    if [ "${APEX_PKG_FORMAT:-auto}" != tree ] && command -v mksquashfs >/dev/null 2>&1; then
+        msg "building the extension image (squashfs)"
+        if mksquashfs "$root" "${outdir}/${EXT_NAME}.raw" -noappend -no-progress -quiet \
+               -comp zstd -Xcompression-level 8 -xattrs -processors "$(nproc)" >&2; then
+            printf '%s' "${outdir}/${EXT_NAME}.raw"
+            return 0
+        fi
+        warn "mksquashfs failed — falling back to a directory extension"
+    fi
+    msg "building the extension tree"
+    mv "$root" "${outdir}/${EXT_NAME}"
+    printf '%s' "${outdir}/${EXT_NAME}"
+}
+
+# Whichever form is currently installed, if any.
+current_payload() {
+    if [ -f "$EXT_IMAGE" ]; then
+        printf '%s' "$EXT_IMAGE"
+    elif [ -d "$EXT_TREE" ]; then
+        printf '%s' "$EXT_TREE"
+    fi
+}
+
+payload_bytes() {
+    local p="$1"
+    [ -n "$p" ] || { printf '0'; return 0; }
+    if [ -f "$p" ]; then
+        stat -c %s "$p"
+    else
+        du -sb "$p" 2>/dev/null | cut -f1
+    fi
+}
+
+# ── /etc and /var placement ──────────────────────────────────────────────────
+sha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+
+install_etc() {
+    local etcroot="$1"
+    local -a kept=()
+    if [ -d "$etcroot" ]; then
+        local rel target saved
+        while IFS= read -r rel; do
+            target="/etc/${rel}"
+            saved="${ETC_SAVE}/${rel}"
+            if [ -d "${etcroot}/${rel}" ]; then
+                mkdir -p "$target"
+                continue
+            fi
+            if [ -e "$target" ] && [ -f "$saved" ] && [ "$(sha "$target")" != "$(sha "$saved")" ]; then
+                # The user edited it. Their file wins; the new one is left beside it.
+                install -Dm0644 "${etcroot}/${rel}" "${target}.apexnew"
+                warn "kept your edited ${target}; new version saved as ${target}.apexnew"
+            elif [ -e "$target" ] && [ ! -f "$saved" ]; then
+                install -Dm0644 "${etcroot}/${rel}" "${target}.apexnew"
+                warn "${target} already exists and is not ours; new version saved as ${target}.apexnew"
+            else
+                mkdir -p "$(dirname "$target")"
+                cp -a "${etcroot}/${rel}" "$target"
+            fi
+            mkdir -p "$(dirname "$saved")"
+            cp -a "${etcroot}/${rel}" "$saved"
+            kept+=("$rel")
+        done < <( cd "$etcroot" && find . -mindepth 1 -printf '%P\n' | sort )
+    fi
+
+    # Anything we installed last time and no longer ship is removed, but only if
+    # the user has not touched it.
+    if [ -f "$ETC_LIST" ]; then
+        local old
+        while IFS= read -r old; do
+            [ -n "$old" ] || continue
+            if printf '%s\n' "${kept[@]:-}" | grep -qxF "$old"; then
+                continue
+            fi
+            local t="/etc/${old}" s="${ETC_SAVE}/${old}"
+            if [ -f "$t" ] && [ -f "$s" ] && [ "$(sha "$t")" = "$(sha "$s")" ]; then
+                rm -f "$t"
+            fi
+            rm -f "$s"
+        done < "$ETC_LIST"
+    fi
+    printf '%s\n' "${kept[@]:-}" | awk 'NF' > "$ETC_LIST"
+}
+
+install_var_dirs() {
+    local list="$1"
+    : > "${VAR_LIST}.new"
+    [ -f "$list" ] || { mv -f "${VAR_LIST}.new" "$VAR_LIST"; return 0; }
+    local d
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        mkdir -p "$d"
+        printf '%s\n' "$d" >> "${VAR_LIST}.new"
+    done < "$list"
+    mv -f "${VAR_LIST}.new" "$VAR_LIST"
+}
+
+# ── activation ───────────────────────────────────────────────────────────────
+post_merge() {
+    # Everything here writes OUTSIDE the extension, on the real filesystem, and
+    # is what turns "files are present" into "the system knows about them".
+    ldconfig 2>/dev/null || true
+    systemd-sysusers 2>/dev/null || true
+    systemd-tmpfiles --create 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    if command -v udevadm >/dev/null; then
+        udevadm control --reload 2>/dev/null || true
+        udevadm trigger --subsystem-match=usb 2>/dev/null || true
+    fi
+}
+
+# The extension-release file exists ONLY inside the image, so seeing it at its
+# merged path in /usr is proof the overlay is live — no parsing, no version skew.
+merged() {
+    [ -f "/usr/lib/extension-release.d/extension-release.${EXT_NAME}" ]
+}
+
+restore_previous() {
+    rm -rf "$EXT_IMAGE" "$EXT_TREE"
+    if [ -e "${ROLLBACK_DIR}/${EXT_NAME}.raw" ]; then
+        mv -f "${ROLLBACK_DIR}/${EXT_NAME}.raw" "$EXT_IMAGE"
+    elif [ -e "${ROLLBACK_DIR}/${EXT_NAME}" ]; then
+        mv -f "${ROLLBACK_DIR}/${EXT_NAME}" "$EXT_TREE"
+    fi
+}
+
+activate_payload() {
+    local new="$1"
+    # Refuse before touching the installed extension: everything below is
+    # destructive, and a bad path here would uninstall a working system's
+    # packages to install nothing.
+    [ -n "$new" ] && [ -e "$new" ] || die "internal error: no extension payload at '${new}'"
+    mkdir -p "$EXT_DIR" "$ROLLBACK_DIR"
+    rm -rf "${ROLLBACK_DIR}/${EXT_NAME}.raw" "${ROLLBACK_DIR}/${EXT_NAME}"
+    if [ -f "$EXT_IMAGE" ]; then
+        mv -f "$EXT_IMAGE" "${ROLLBACK_DIR}/${EXT_NAME}.raw"
+    elif [ -d "$EXT_TREE" ]; then
+        mv -f "$EXT_TREE" "${ROLLBACK_DIR}/${EXT_NAME}"
+    fi
+    if [ -f "$STATE" ]; then
+        cp -a "$STATE" "${ROLLBACK_DIR}/state.json"
+    fi
+
+    case "$new" in
+        *.raw) mv -f "$new" "$EXT_IMAGE" ;;
+        *)     mv -f "$new" "$EXT_TREE" ;;
+    esac
+
+    msg "activating"
+    if ! systemd-sysext refresh >&2; then
+        warn "merge failed — restoring the previous extension"
+        restore_previous
+        systemd-sysext refresh >&2 || true
+        die "the new extension could not be merged; nothing changed"
+    fi
+    post_merge
+}
+
+write_state() {
+    local destdir="$1"
+    mkdir -p "$PKG_ROOT"
+    local resolved requested
+    resolved="$(for f in "$destdir"/*.rpm; do
+                    rpm -qp --nosignature --qf '%{NAME}-%{EVR}.%{ARCH}\n' "$f" 2>/dev/null
+                done | sort | json_string_array)"
+    requested="$(load_requested | json_string_array)"
+    local payload; payload="$(current_payload)"
+    jq -n \
+        --argjson requested "$requested" \
+        --argjson resolved "$resolved" \
+        --arg os_id "$(os_id)" \
+        --arg os_version "$(os_version)" \
+        --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg image "$payload" \
+        --arg sha "$([ -f "$payload" ] && sha "$payload" || echo '')" \
+        --arg size "$(payload_bytes "$payload")" \
+        '{requested:$requested, resolved:$resolved, os_id:$os_id,
+          os_version_id:$os_version, built:$built, image:$image,
+          image_sha256:$sha, image_bytes:($size|tonumber)}' > "${STATE}.tmp"
+    mv -f "${STATE}.tmp" "$STATE"
+}
+
+# Build the one extension from the requested list. Every mutation funnels here,
+# so install, remove, upgrade and rebuild can never drift apart.
+# Takes the desired package set as arguments. The on-disk requested list is
+# written only once the build has actually succeeded, so a failed install (a
+# typo, a refused package, no network) cannot leave the machine permanently
+# asking for something that can never be built. This matters because `die`
+# exits the process outright — a caller cannot "catch" it and undo the list.
+rebuild_extension() {
+    local -a want=()
+    local a
+    for a in "$@"; do
+        if [ -n "$a" ]; then
+            want+=("$a")
+        fi
+    done
+
+    if [ "${#want[@]}" -eq 0 ]; then
+        msg "no packages requested — removing the extension"
+        rm -rf "$EXT_IMAGE" "$EXT_TREE"
+        systemd-sysext refresh >&2 || true
+        install_etc ""
+        install_var_dirs /dev/null
+        rm -f "$STATE"
+        save_requested
+        post_merge
+        return 0
+    fi
+
+    WORK="$(mktemp -d "${WORK_ROOT}.XXXXXX")"
+    trap 'rm -rf "$WORK"' RETURN
+    local rpms="${WORK}/rpms" root="${WORK}/root" etcroot="${WORK}/etc"
+    mkdir -p "$rpms" "$root"
+
+    download_rpms "$rpms" "${want[@]}"
+    guard_rpms "$rpms"
+
+    # `apex update` calls this on every run. Rebuilding an identical extension
+    # would burn minutes and, worse, re-merge /usr underneath a running desktop
+    # for no reason — so an unchanged package set stops here.
+    local new_set old_set
+    new_set="$(for f in "$rpms"/*.rpm; do
+                   rpm -qp --nosignature --qf '%{NAME}-%{EVR}.%{ARCH}\n' "$f" 2>/dev/null
+               done | sort)"
+    if [ -f "$STATE" ] && merged && [ -n "$(current_payload)" ] \
+       && [ "$(jq -r '.os_version_id // empty' "$STATE")" = "$(os_version)" ]; then
+        old_set="$(jq -r '.resolved[]?' "$STATE" | sort)"
+        if [ "$new_set" = "$old_set" ]; then
+            msg "already up to date"
+            save_requested "${want[@]}"
+            write_state "$rpms"
+            return 0
+        fi
+    fi
+
+    extract_rpms "$rpms" "$root"
+    fix_caches "$root"
+    split_out_of_image "$root" "$etcroot"
+    write_extension_release "$root"
+    label_tree "$root"
+    local payload
+    payload="$(build_payload "$root" "$WORK")"
+
+    install_etc "$etcroot"
+    install_var_dirs "${WORK}/var.dirs"
+    activate_payload "$payload"
+    # Only now is this set the truth about the machine.
+    save_requested "${want[@]}"
+    write_state "$rpms"
+
+    msg "done — $(jq -r '.resolved | length' "$STATE") package(s), $(numfmt --to=iec "$(jq -r .image_bytes "$STATE")")B extension"
+}
+
+# ── verbs ────────────────────────────────────────────────────────────────────
+cmd_install() {
+    [ "$#" -gt 0 ] || die "usage: apex install <package>..."
+    need_root install
+    take_lock
+    local -a want=()
+    mapfile -t want < <(load_requested)
+    want+=("$@")
+    rebuild_extension "${want[@]}"
+}
+
+cmd_remove() {
+    [ "$#" -gt 0 ] || die "usage: apex remove <package>..."
+    need_root remove
+    take_lock
+    local -a current=() keep=()
+    mapfile -t current < <(load_requested)
+    local c p found
+    for c in "${current[@]:-}"; do
+        [ -n "$c" ] || continue
+        found=0
+        for p in "$@"; do
+            if [ "$c" = "$p" ]; then
+                found=1
+            fi
+        done
+        if [ "$found" = 0 ]; then
+            keep+=("$c")
+        fi
+    done
+    if [ "${#keep[@]}" -eq "${#current[@]}" ]; then
+        die "not installed by apex: $*"
+    fi
+    rebuild_extension "${keep[@]:-}"
+}
+
+cmd_upgrade() {
+    need_root upgrade
+    take_lock
+    local -a want=()
+    mapfile -t want < <(load_requested)
+    if [ "${#want[@]}" -eq 0 ]; then
+        msg "no packages installed"
+        return 0
+    fi
+    msg "refreshing extension packages from the repositories"
+    rebuild_extension "${want[@]}"
+}
+
+cmd_rebuild() {
+    local if_needed=0
+    if [ "${1:-}" = "--if-needed" ]; then
+        if_needed=1
+    fi
+    need_root pkg
+    take_lock
+    if [ ! -f "$STATE" ]; then
+        if [ "$if_needed" = 0 ]; then
+            msg "no packages installed"
+        fi
+        return 0
+    fi
+    if [ "$if_needed" = 1 ]; then
+        local built_for
+        built_for="$(jq -r '.os_version_id // empty' "$STATE")"
+        if [ "$built_for" = "$(os_version)" ] && merged; then
+            return 0
+        fi
+        msg "extension was built for $(os_id) ${built_for}, this system is $(os_id) $(os_version) — rebuilding"
+    fi
+
+    local -a want=()
+    mapfile -t want < <(load_requested)
+    if [ "${#want[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    # In a SUBSHELL on purpose: this runs from apex-sysext-rebuild.service at
+    # boot, and `die` would otherwise exit straight out of the script and mark
+    # the unit failed. An unreachable mirror is not a boot failure — the
+    # packages simply get rebuilt on the next attempt.
+    if [ "$if_needed" = 1 ]; then
+        if ! ( rebuild_extension "${want[@]}" ); then
+            warn "rebuild failed (offline?); run 'sudo apex pkg rebuild' when convenient"
+        fi
+        return 0
+    fi
+    rebuild_extension "${want[@]}"
+}
+
+cmd_list() {
+    [ -f "$STATE" ] || { echo "no packages installed"; return 0; }
+    echo "requested:"
+    jq -r '.requested[]' "$STATE" | sed 's/^/  /'
+    printf '\npulled in as dependencies: %s\n' \
+        "$(( $(jq -r '.resolved | length' "$STATE") - $(jq -r '.requested | length' "$STATE") ))"
+}
+
+cmd_info() {
+    [ -f "$STATE" ] || { echo "no packages installed"; return 0; }
+    jq . "$STATE"
+}
+
+cmd_status() {
+    local payload; payload="$(current_payload)"
+    printf 'extension       : %s\n' "${payload:-(none)}"
+    if [ -f "$STATE" ]; then
+        printf 'built for       : %s %s\n' "$(jq -r .os_id "$STATE")" "$(jq -r .os_version_id "$STATE")"
+        printf 'running         : %s %s\n' "$(os_id)" "$(os_version)"
+        printf 'packages        : %s requested, %s total\n' \
+            "$(jq -r '.requested|length' "$STATE")" "$(jq -r '.resolved|length' "$STATE")"
+        printf 'size            : %sB\n' "$(numfmt --to=iec "$(jq -r .image_bytes "$STATE")")"
+    fi
+    printf 'merged now      : %s\n' "$(merged && echo yes || echo no)"
+    systemd-sysext status 2>/dev/null || true
+}
+
+cmd_verify() {
+    [ -f "$STATE" ] || { echo "no packages installed"; return 0; }
+    local payload want have
+    payload="$(current_payload)"
+    [ -n "$payload" ] || die "the extension recorded in state.json is missing"
+    if [ -f "$payload" ]; then
+        want="$(jq -r .image_sha256 "$STATE")"
+        have="$(sha "$payload")"
+        [ "$want" = "$have" ] || die "extension image checksum mismatch"
+    fi
+    merged || warn "extension is not currently merged"
+    msg "extension intact"
+}
+
+cmd_rollback() {
+    need_root pkg
+    take_lock
+    if [ ! -e "${ROLLBACK_DIR}/${EXT_NAME}.raw" ] && [ ! -e "${ROLLBACK_DIR}/${EXT_NAME}" ]; then
+        die "no previous extension to roll back to"
+    fi
+    restore_previous
+    if [ -f "${ROLLBACK_DIR}/state.json" ]; then
+        mv -f "${ROLLBACK_DIR}/state.json" "$STATE"
+    fi
+    jq -r '.requested[]' "$STATE" > "$REQUESTED" 2>/dev/null || true
+    systemd-sysext refresh >&2 || die "could not merge the previous extension"
+    post_merge
+    msg "rolled back"
+}
+
+# Convert an existing rpm-ostree layered deployment into extension packages and
+# hand the OS back its ability to update. This is the migration path for every
+# machine that layered something before this tool existed.
+cmd_adopt() {
+    need_root pkg
+    command -v rpm-ostree >/dev/null || die "rpm-ostree is not available"
+    local -a layered=()
+    mapfile -t layered < <(rpm-ostree status --json 2>/dev/null \
+        | jq -r '.deployments[0]["requested-packages"][]?' | sort -u)
+    if [ "${#layered[@]}" -eq 0 ]; then
+        msg "no rpm-ostree layered packages to adopt"
+        return 0
+    fi
+    msg "adopting layered packages: ${layered[*]}"
+    take_lock
+    local -a want=()
+    mapfile -t want < <(load_requested)
+    want+=("${layered[@]}")
+    rebuild_extension "${want[@]}"
+    flock -u 9
+    msg "removing the rpm-ostree layer that blocks OS updates"
+    rpm-ostree reset >&2 || die "rpm-ostree reset failed"
+    msg "adopted. Reboot to drop the layered deployment, after which 'apex update' works again."
+}
+
+cmd_search() {
+    [ "$#" -gt 0 ] || die "usage: apex search <term>..."
+    dnf5 search "$@"
+}
+
+usage() {
+    cat <<'EOF'
+usage: apex-pkg <command> [args]
+
+  install <pkg>...     add packages (rebuilds the APEX extension)
+  remove  <pkg>...     remove packages
+  upgrade              refresh all extension packages from the repositories
+  rebuild [--if-needed] rebuild for the running OS version
+  rollback             restore the previous extension
+  adopt                convert rpm-ostree layered packages into the extension
+  list | info | status | verify | search <term>...
+EOF
+}
+
+main() {
+    local cmd="${1:-}"; shift || true
+    NO_WEAK_DEPS=0
+    ENABLE_REPOS=""
+    local -a rest=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --no-weak-deps) NO_WEAK_DEPS=1 ;;
+            --enable-repo=*) ENABLE_REPOS="${ENABLE_REPOS} ${1#*=}" ;;
+            --enable-repo) shift || true; ENABLE_REPOS="${ENABLE_REPOS} ${1:-}" ;;
+            *) rest+=("$1") ;;
+        esac
+        shift || true
+    done
+    if [ "${#rest[@]}" -gt 0 ]; then
+        set -- "${rest[@]}"
+    else
+        set --
+    fi
+
+    case "$cmd" in
+        install)  cmd_install "$@" ;;
+        remove)   cmd_remove "$@" ;;
+        upgrade)  cmd_upgrade ;;
+        rebuild)  cmd_rebuild "${1:-}" ;;
+        rollback) cmd_rollback ;;
+        adopt)    cmd_adopt ;;
+        list)     cmd_list ;;
+        info)     cmd_info ;;
+        status)   cmd_status ;;
+        verify)   cmd_verify ;;
+        search)   cmd_search "$@" ;;
+        ""|-h|--help|help) usage ;;
+        *) die "unknown command '$cmd' (try --help)" ;;
+    esac
+}
+
+main "$@"
