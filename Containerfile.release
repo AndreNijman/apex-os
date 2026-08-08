@@ -7,11 +7,13 @@ ARG APEX_SHELL_REF
 ARG APEX_SHELL_STRICT=0
 
 COPY --chmod=0644 files/scripts/vendor-apex-shell /tmp/vendor-apex-shell
-RUN bash /tmp/vendor-apex-shell \
+RUN set -eux; \
+    bash /tmp/vendor-apex-shell \
         "${APEX_SHELL_REF}" /usr/share/apex-shell "${APEX_SHELL_STRICT}"; \
     rm -f /tmp/vendor-apex-shell
 
-RUN test -s /usr/share/apex-shell/shell.qml; \
+RUN set -eux; \
+    test -s /usr/share/apex-shell/shell.qml; \
     test "$(cat /usr/share/apex-shell/.apex-shell-commit)" = "${APEX_SHELL_REF}"; \
     grep -q '^VARIANT_ID=' /usr/lib/os-release; \
     test -s "/usr/lib/modules/$(cat /usr/lib/apex-kver)/initramfs.img"; \
@@ -20,4 +22,5 @@ RUN test -s /usr/share/apex-shell/shell.qml; \
 
 ARG APEX_REVISION=dev
 LABEL org.opencontainers.image.revision="${APEX_REVISION}" \
-      org.apexos.apex-shell.ref="${APEX_SHELL_REF}"
+      org.apexos.apex-shell.ref="${APEX_SHELL_REF}" \
+      org.apexos.release.kind="shell"

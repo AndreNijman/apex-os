@@ -29,14 +29,21 @@ the result, then promotes the existing user-facing tags:
 - `gaming-nvidia`
 
 BuildKit pushes directly to GHCR for this path. The hosted runner's older Podman
-cannot reliably preserve inherited `zstd:chunked` descriptors; recompressing
+cannot reliably preserve inherited `zstd:chunked` blob digests; recompressing
 those layers would turn a small shell update into a full fleet download. The
-digest-prefix gate blocks promotion if that ever happens.
+digest-prefix gate blocks promotion if that ever happens. BuildKit regenerates
+the OCI manifest, so inherited `zstd:chunked` seek-table annotations may be lost,
+but bootc's whole-layer reuse remains intact because the blob digests are equal.
 
 Both workflows share one non-cancelling publication lock, so a shell release
 cannot overwrite a newer full platform build. A shell release also verifies the
 platform's keyless signature and refuses to promote more than 150 MiB of new
 compressed layers.
+
+Stable platforms must be built by `build-image.yml` on `main`. The shell path
+verifies that exact keyless workflow identity and also requires the platform's
+signed-kernel marker; feature-branch platform builds and unsigned development
+images are intentionally not eligible for fleet promotion.
 
 The first shell release initializes a missing `platform-<flavor>` tag by taking
 an in-registry snapshot of the last green user image. No blobs are rebuilt or

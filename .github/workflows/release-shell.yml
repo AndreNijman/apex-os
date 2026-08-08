@@ -108,6 +108,13 @@ jobs:
           # One-time migration: snapshot the last green user image. Future full
           # platform builds refresh this tag explicitly.
           if ! skopeo inspect --creds "$creds" "docker://$platform" >/dev/null 2>&1; then
+            kind_label='{{ index .Labels "org.apexos.release.kind" }}'
+            existing_kind="$(skopeo inspect --creds "$creds" --format "$kind_label" \
+              "docker://$IMAGE:${{ matrix.flavor }}" 2>/dev/null || true)"
+            if [ "$existing_kind" = shell ]; then
+              echo "::error::$platform is missing and the user tag is already a shell release; refusing to stack shell layers"
+              exit 1
+            fi
             echo "Initialising $platform from the current green $IMAGE:${{ matrix.flavor }}"
             skopeo copy --retry-times 3 --src-creds "$creds" --dest-creds "$creds" \
               "docker://$IMAGE:${{ matrix.flavor }}" "docker://$platform"
@@ -136,7 +143,7 @@ jobs:
             APEX_SHELL_REF=${{ needs.resolve.outputs.shell_sha }}
             APEX_SHELL_STRICT=${{ needs.resolve.outputs.shell_strict }}
             APEX_REVISION=${{ github.sha }}
-          outputs: type=image,name=${{ env.IMAGE }}:${{ matrix.flavor }}-release-${{ github.run_id }},push=true,compression=zstd,force-compression=false
+          outputs: type=image,name=${{ env.IMAGE }}:${{ matrix.flavor }}-release-${{ github.run_id }},push=true,oci-mediatypes=true,compression=zstd,force-compression=false
 
       - name: Verify inherited layers and promote
         id: promote
@@ -150,8 +157,13 @@ jobs:
           platform_json="$(skopeo inspect --raw --creds "$creds" \
             "docker://$IMAGE@${{ steps.platform.outputs.digest }}")"
           final_json="$(skopeo inspect --raw --creds "$creds" "docker://$IMAGE@$digest")"
+          jq -e '.layers as $layers | ($layers | type == "array") and ($layers | length > 0)' \
+            <<<"$platform_json" >/dev/null
+          jq -e '.layers as $layers | ($layers | type == "array") and ($layers | length > 0)' \
+            <<<"$final_json" >/dev/null
           mapfile -t platform_layers < <(jq -r '.layers[].digest' <<<"$platform_json")
           mapfile -t final_layers < <(jq -r '.layers[].digest' <<<"$final_json")
+          [ "${#platform_layers[@]}" -gt 0 ]
           [ "${#final_layers[@]}" -ge "${#platform_layers[@]}" ]
           for i in "${!platform_layers[@]}"; do
             if [ "${platform_layers[$i]}" != "${final_layers[$i]}" ]; then

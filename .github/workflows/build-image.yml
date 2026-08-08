@@ -880,9 +880,10 @@ jobs:
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           cat > /tmp/push-retry.sh <<'SH'
           #!/usr/bin/env bash
-          # push-and-tag <repo> <sha-tag> <friendly-tag> <digestfile>
-          set -uo pipefail
-          repo="$1"; sha_tag="$2"; friendly="$3"; digestfile="$4"
+          # push-image <repo> <sha-tag> <digestfile>
+          set -euo pipefail
+          repo="$1"; sha_tag="$2"; digestfile="$3"
+          rm -f "$digestfile"
           for attempt in 1 2 3; do
             sudo podman push --compression-format zstd:chunked \
               "$repo:$sha_tag" --digestfile="$digestfile" && break
@@ -890,27 +891,7 @@ jobs:
             [ "$attempt" = 3 ] && { echo "::error::push failed after 3 attempts"; exit 1; }
             sleep $(( attempt * 30 ))
           done
-          digest="$(cat "$digestfile")"
-          # skopeo, not `podman push` again: same repository, so every blob is
-          # already present and this is a manifest write. `podman push` does not
-          # take that shortcut — it re-uploads.
-          #
-          # --creds explicitly, and REGISTRY_AUTH_FILE pointed somewhere we own:
-          # `sudo podman login` leaves a root-owned auth.json in this user's
-          # runtime dir, and skopeo reads it before honouring anything else.
-          export REGISTRY_AUTH_FILE="${RUNNER_TEMP}/skopeo-auth.json"
-          [ -f "$REGISTRY_AUTH_FILE" ] || echo '{}' > "$REGISTRY_AUTH_FILE"
-          for attempt in 1 2 3; do
-            skopeo copy --retry-times 3 \
-              --src-creds "$GHCR_USER:$GHCR_TOKEN" \
-              --dest-creds "$GHCR_USER:$GHCR_TOKEN" \
-              "docker://$repo@$digest" "docker://$repo:$friendly" && exit 0
-            echo "::warning::tagging $repo:$friendly failed (attempt $attempt/3)"
-            [ "$attempt" = 3 ] && break
-            sleep $(( attempt * 15 ))
-          done
-          echo "::error::could not tag $repo:$friendly"
-          exit 1
+          test -s "$digestfile"
           SH
           chmod +x /tmp/push-retry.sh
 
@@ -926,26 +907,33 @@ jobs:
         run: |
           # zstd:chunked — see the note on the core push. This is the one users
           # actually pull, so it is where the download saving lands.
-          /tmp/push-retry.sh "$IMAGE" "${{ matrix.flavor }}-${{ github.sha }}" "${{ matrix.flavor }}" /tmp/flavor.digest
+          /tmp/push-retry.sh "$IMAGE" "${{ matrix.flavor }}-${{ github.sha }}" /tmp/flavor.digest
           DIGEST="$(cat /tmp/flavor.digest)"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "${{ matrix.flavor }} digest: $DIGEST"
-
-          # Stable parent for fast shell-only releases. This is an in-registry
-          # manifest copy, not another multi-gigabyte upload.
-          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/skopeo-auth.json"
-          echo '{}' > "$REGISTRY_AUTH_FILE"
-          skopeo copy --retry-times 3 \
-            --src-creds "$GHCR_USER:$GHCR_TOKEN" --dest-creds "$GHCR_USER:$GHCR_TOKEN" \
-            "docker://$IMAGE@$DIGEST" "docker://$IMAGE:platform-${{ matrix.flavor }}"
-          skopeo copy --retry-times 3 \
-            --src-creds "$GHCR_USER:$GHCR_TOKEN" --dest-creds "$GHCR_USER:$GHCR_TOKEN" \
-            "docker://$IMAGE@$DIGEST" "docker://$IMAGE:platform-${{ matrix.flavor }}-${{ github.sha }}"
 
       - name: Sign ${{ matrix.flavor }} (cosign keyless)
         if: ${{ steps.push.outputs.digest != '' }}
         run: |
           cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
+
+      - name: Promote signed ${{ matrix.flavor }}
+        if: ${{ steps.push.outputs.digest != '' }}
+        run: |
+          set -euo pipefail
+          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/skopeo-auth.json"
+          echo '{}' > "$REGISTRY_AUTH_FILE"
+          creds="$GHCR_USER:$GHCR_TOKEN"
+          digest="${{ steps.push.outputs.digest }}"
+          promote() {
+            skopeo copy --retry-times 3 --src-creds "$creds" --dest-creds "$creds" \
+              "docker://$IMAGE@$digest" "docker://$IMAGE:$1"
+          }
+          # Move the user-facing tag last. Any earlier registry failure leaves
+          # installed machines on the previous signed release.
+          promote "platform-${{ matrix.flavor }}-${{ github.sha }}"
+          promote "platform-${{ matrix.flavor }}"
+          promote "${{ matrix.flavor }}"
 
       # How much this push actually costs the fleet. The point of the core tier
       # is that this number is small; printing it into the run summary is what
