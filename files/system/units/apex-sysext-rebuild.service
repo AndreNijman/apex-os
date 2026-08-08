@@ -1,0 +1,29 @@
+[Unit]
+Description=Rebuild APEX user packages for the booted OS version
+Documentation=man:systemd-sysext(8)
+# A system extension declares the OS it was built against, and systemd REFUSES
+# to merge one that does not match. That refusal is the safety property which
+# makes user packages compatible with atomic OS updates — but on its own it
+# would mean "you updated the OS, your packages silently vanished". This unit is
+# the other half: it notices the mismatch and rebuilds the extension against the
+# OS that is now running.
+#
+# Nothing here runs on a normal boot: `rebuild --if-needed` exits immediately
+# when the extension already matches and is merged.
+ConditionPathExists=/var/lib/apex/pkg/state.json
+After=network-online.target systemd-sysext.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/apex-pkg rebuild --if-needed
+# Rebuilding means re-downloading and re-extracting every user package, which on
+# a slow link can take a while; it must never race a boot timeout into failure.
+TimeoutStartSec=infinity
+# This is background maintenance competing with a desktop that is starting up.
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
