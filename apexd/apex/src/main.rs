@@ -58,6 +58,60 @@ enum Cmd {
     Doctor,
     /// Show the booted image and its changelog labels.
     Changelog,
+    /// Install packages from the Fedora repositories. Requires root.
+    ///
+    /// Packages go into a systemd system extension, NOT an rpm-ostree layer, so
+    /// the OS keeps updating normally and `apex rollback` still works.
+    Install {
+        #[arg(required = true, value_name = "PACKAGE")]
+        packages: Vec<String>,
+        /// Skip weak dependencies (smaller install, fewer optional features).
+        #[arg(long)]
+        no_weak_deps: bool,
+        /// Also consider a repository that is disabled by default.
+        #[arg(long, value_name = "REPO")]
+        enable_repo: Vec<String>,
+    },
+    /// Remove packages installed with `apex install`. Requires root.
+    Remove {
+        #[arg(required = true, value_name = "PACKAGE")]
+        packages: Vec<String>,
+    },
+    /// Search the Fedora repositories.
+    Search {
+        #[arg(required = true, value_name = "TERM")]
+        terms: Vec<String>,
+    },
+    /// Manage installed packages: list, status, rebuild, rollback, adopt.
+    Pkg {
+        #[command(subcommand)]
+        cmd: PkgCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum PkgCmd {
+    /// What is installed, and what came in as a dependency.
+    List,
+    /// Extension state: what it was built for, whether it is merged.
+    Status,
+    /// The full machine-readable record of the last build.
+    Info,
+    /// Re-resolve every package against the repositories. Requires root.
+    Upgrade,
+    /// Rebuild for the running OS version. Requires root.
+    Rebuild {
+        /// Do nothing unless the extension no longer matches the booted OS.
+        #[arg(long)]
+        if_needed: bool,
+    },
+    /// Restore the previous extension. Requires root.
+    Rollback,
+    /// Check the installed extension against its recorded checksum.
+    Verify,
+    /// Convert rpm-ostree layered packages into APEX packages, so that OS
+    /// updates work again without losing the software. Requires root.
+    Adopt,
 }
 
 #[derive(Subcommand)]
@@ -104,6 +158,9 @@ struct UpdateArgs {
     /// Only run the firmware pass; leave the OS image alone.
     #[arg(long, conflicts_with = "skip_firmware")]
     firmware_only: bool,
+    /// Skip refreshing packages installed with `apex install`.
+    #[arg(long)]
+    skip_packages: bool,
     /// Keep ostree's per-object fsync on during the pull. Roughly halves update
     /// speed (measured: ~8 MiB/s with it, ~14.6 without, because 179k objects at
     /// 2.98 ms of fsync each outweighs the download itself) in exchange for
@@ -138,6 +195,23 @@ async fn main() {
         Cmd::Update(_) => Some("update"),
         Cmd::Rollback => Some("rollback"),
         Cmd::Pin => Some("pin"),
+        // Package verbs that write: they build an extension into /var/lib and
+        // ask systemd to re-merge /usr. The read-only ones (list/status/info/
+        // verify) and `search` stay usable as an ordinary user on purpose.
+        Cmd::Install { .. } => Some("install"),
+        Cmd::Remove { .. } => Some("remove"),
+        Cmd::Pkg {
+            cmd: PkgCmd::Upgrade,
+        } => Some("pkg upgrade"),
+        Cmd::Pkg {
+            cmd: PkgCmd::Rebuild { .. },
+        } => Some("pkg rebuild"),
+        Cmd::Pkg {
+            cmd: PkgCmd::Rollback,
+        } => Some("pkg rollback"),
+        Cmd::Pkg {
+            cmd: PkgCmd::Adopt,
+        } => Some("pkg adopt"),
         // `fan restore --local` writes sysfs directly instead of asking apexd;
         // it is the crash-safety path (ExecStopPost=) and needs real privileges.
         // Every other fan verb goes through the daemon and must stay usable.
@@ -167,9 +241,54 @@ async fn main() {
             skip_firmware: args.skip_firmware,
             firmware_only: args.firmware_only,
             keep_fsync: args.fsync,
+            skip_packages: args.skip_packages,
         }),
         Cmd::Doctor => cmd_doctor().await,
         Cmd::Changelog => ops::changelog(),
+        Cmd::Install {
+            packages,
+            no_weak_deps,
+            enable_repo,
+        } => {
+            let mut argv = vec!["install".to_string()];
+            argv.extend(packages);
+            if no_weak_deps {
+                argv.push("--no-weak-deps".to_string());
+            }
+            for repo in enable_repo {
+                argv.push(format!("--enable-repo={repo}"));
+            }
+            ops::pkg(&argv)
+        }
+        Cmd::Remove { packages } => {
+            let mut argv = vec!["remove".to_string()];
+            argv.extend(packages);
+            ops::pkg(&argv)
+        }
+        Cmd::Search { terms } => {
+            let mut argv = vec!["search".to_string()];
+            argv.extend(terms);
+            ops::pkg(&argv)
+        }
+        Cmd::Pkg { cmd } => {
+            let argv: Vec<String> = match cmd {
+                PkgCmd::List => vec!["list".into()],
+                PkgCmd::Status => vec!["status".into()],
+                PkgCmd::Info => vec!["info".into()],
+                PkgCmd::Upgrade => vec!["upgrade".into()],
+                PkgCmd::Rebuild { if_needed } => {
+                    let mut a = vec!["rebuild".to_string()];
+                    if if_needed {
+                        a.push("--if-needed".into());
+                    }
+                    a
+                }
+                PkgCmd::Rollback => vec!["rollback".into()],
+                PkgCmd::Verify => vec!["verify".into()],
+                PkgCmd::Adopt => vec!["adopt".into()],
+            };
+            ops::pkg(&argv)
+        }
     };
     std::process::exit(code);
 }

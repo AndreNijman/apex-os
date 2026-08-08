@@ -66,12 +66,24 @@ fn sudo_reinvocation(argv: &[String]) -> String {
 }
 
 /// The refusal text for a root-only verb.
+///
+/// The parenthetical is verb-specific because the generic one used to explain
+/// package installs in terms of bootc writing to /ostree and /boot, which is
+/// simply not what happens — `apex install` never touches either.
 fn root_required_message(verb: &str, argv: &[String]) -> String {
+    let why = if verb.starts_with("install")
+        || verb.starts_with("remove")
+        || verb.starts_with("pkg")
+    {
+        "it writes the system extension under /var/lib and asks systemd to \
+         re-merge /usr"
+    } else {
+        "bootc writes to /ostree and /boot"
+    };
     format!(
         "apex: '{verb}' changes the booted system and must run as root.\n\
          \x20      try:  {}\n\
-         \x20      (being in the wheel group is not enough — bootc writes to \
-         /ostree and /boot,\n\
+         \x20      (being in the wheel group is not enough — {why},\n\
          \x20       so the command itself has to run with privileges.)",
         sudo_reinvocation(argv)
     )
@@ -288,6 +300,58 @@ pub struct UpdateOptions {
     /// Keep ostree's per-object fsync on during the pull. Slower — see the
     /// FsyncGuard notes — but durable against a power loss mid-update.
     pub keep_fsync: bool,
+    /// Skip refreshing user packages (`apex install`) from the repositories.
+    pub skip_packages: bool,
+}
+
+/// The system-extension package engine behind `apex install`/`remove`/`pkg`.
+/// A constant so the CLI, `apex update` and apex-sysext-rebuild.service can
+/// never disagree about where it lives.
+pub const PKG_ENGINE: &str = "/usr/libexec/apex-pkg";
+
+/// State file written by the engine. Its absence means "this machine has no
+/// user packages", which is the common case and must cost nothing.
+const PKG_STATE: &str = "/var/lib/apex/pkg/state.json";
+
+/// `apex install` / `apex remove` / `apex search` / `apex pkg …`.
+///
+/// Deliberately a thin pass-through: the engine owns dependency resolution,
+/// signature checking and the extension lifecycle, and duplicating any of that
+/// here would just create two implementations to keep in sync.
+pub fn pkg(args: &[String]) -> i32 {
+    // No "apex: running: …" banner here, unlike the bootc/fwupd verbs: the
+    // engine narrates its own work, and echoing the invocation on top of that
+    // made read-only verbs like `apex pkg list` print noise before their output.
+    match Command::new(PKG_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the package engine: {e}");
+            eprintln!(
+                "apex: no package engine on this system — it predates `apex install`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
+/// Refresh user packages during `apex update`.
+///
+/// User packages are ordinary Fedora RPMs, so they carry ordinary Fedora
+/// security fixes. Updating the OS while leaving them pinned at whatever was
+/// current on install day would quietly turn "the system is up to date" into a
+/// half-truth.
+fn packages_pass() -> i32 {
+    if !Path::new(PKG_STATE).exists() {
+        return 0;
+    }
+    match run(PKG_ENGINE, &["upgrade"]) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("apex: user packages skipped: {e}");
+            0
+        }
+    }
 }
 
 /// `apex update` -> pull a newer OS image, then refresh firmware via fwupd.
@@ -343,12 +407,23 @@ pub fn update(opts: UpdateOptions) -> i32 {
         // a second registry round-trip to the exact path we are trying to make
         // faster.
         match run("bootc", &["upgrade"]) {
-            Ok(code) => worst = worst.max(code),
+            Ok(0) => {}
+            Ok(code) => {
+                // bootc's own wording for this case names rpm-ostree and offers
+                // `rpm-ostree reset`, which throws the user's software away.
+                // APEX can do strictly better: keep the packages, drop the layer.
+                advise_on_layering();
+                worst = worst.max(code);
+            }
             Err(e) => {
                 eprintln!("apex: OS update failed: {e}");
                 worst = 1;
             }
         }
+    }
+
+    if !opts.skip_packages && !opts.firmware_only {
+        worst = worst.max(packages_pass());
     }
 
     if !opts.skip_firmware {
@@ -360,6 +435,33 @@ pub fn update(opts: UpdateOptions) -> i32 {
         started.elapsed().as_secs_f64()
     );
     worst
+}
+
+/// Packages layered into the deployment with rpm-ostree, if any.
+///
+/// Text output rather than `--json`: this runs on the failure path of an update,
+/// where the goal is one clear sentence, not a parser that can itself fail.
+fn layered_packages() -> Option<String> {
+    let out = capture("rpm-ostree", &["status"])?;
+    out.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("LayeredPackages:"))
+        .map(|l| l.trim_start_matches("LayeredPackages:").trim().to_string())
+        .filter(|p| !p.is_empty())
+}
+
+/// Explain the one failure that stops an APEX machine updating, and the fix
+/// that does not cost the user their software.
+fn advise_on_layering() {
+    if let Some(pkgs) = layered_packages() {
+        eprintln!(
+            "\napex: this deployment has rpm-ostree layered packages, which block OS updates:\n\
+             \x20       {pkgs}\n\
+             \x20     APEX can move them into a system extension instead — same programs,\n\
+             \x20     no layering, and updates start working again:\n\n\
+             \x20       sudo apex pkg adopt\n"
+        );
+    }
 }
 
 /// The firmware half of `apex update`. Best-effort throughout: a machine may
