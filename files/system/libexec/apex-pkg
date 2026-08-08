@@ -76,6 +76,18 @@ readonly REFUSE_RE='^(kernel|kernel-core|kernel-modules(-.*)?|kernel-devel(-.*)?
 
 # Progress goes to stderr, never stdout: stdout is reserved for data (paths,
 # listings) and functions like build_payload return their result through it.
+# ── Flatpak routing ─────────────────────────────────────────────────────────
+# A reverse-DNS application ID (org.gimp.GIMP, io.github.foo.Bar) is routed to
+# Flatpak; anything else is an RPM. The rule is unambiguous rather than clever:
+# Flathub IDs are always three or more dot-separated segments each starting with
+# a letter, and no RPM is named that way — `python3.12` has two segments and
+# `java-1.8.0-openjdk` has segments starting with digits, so neither matches.
+is_flatpak_id() {
+    [[ "$1" =~ ^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z][A-Za-z0-9_-]*){2,}$ ]]
+}
+
+have_flatpak() { command -v flatpak >/dev/null 2>&1; }
+
 msg()  { printf 'apex-pkg: %s\n' "$*" >&2; }
 warn() { printf 'apex-pkg: warning: %s\n' "$*" >&2; }
 die()  { printf 'apex-pkg: error: %s\n' "$*" >&2; exit 1; }
@@ -580,20 +592,81 @@ rebuild_extension() {
     msg "done — $(jq -r '.resolved | length' "$STATE") package(s), $(numfmt --to=iec "$(jq -r .image_bytes "$STATE")")B extension"
 }
 
+# ── flatpak verbs ────────────────────────────────────────────────────────────
+# Flatpak keeps its own database, so there is no state to mirror here: flatpak
+# itself is the source of truth for what is installed.
+flatpak_install() {
+    have_flatpak || die "flatpak is not installed"
+    local remote=""
+    if flatpak remotes --system --columns=name 2>/dev/null | grep -qx flathub; then
+        remote=flathub
+    fi
+    msg "installing ${#} Flatpak app(s)"
+    # shellcheck disable=SC2086
+    flatpak install --system -y --noninteractive ${remote} "$@" >&2
+}
+
+flatpak_remove() {
+    have_flatpak || die "flatpak is not installed"
+    msg "removing ${#} Flatpak app(s)"
+    flatpak uninstall --system -y --noninteractive "$@" >&2
+}
+
+# Updates the system installation, then the invoking user's own installation.
+# Both matter: `flatpak install --user` is what a desktop store does by default
+# on many systems, and updating only one silently leaves the other stale.
+cmd_flatpak_upgrade() {
+    have_flatpak || return 0
+    need_root "pkg flatpak-upgrade"
+    msg "updating Flatpak applications"
+    flatpak update --system -y --noninteractive >&2 || warn "system Flatpak update failed"
+    local u="${SUDO_USER:-}"
+    if [ -n "$u" ] && [ "$u" != root ]; then
+        if runuser -u "$u" -- flatpak --user remotes --columns=name 2>/dev/null | grep -q .; then
+            runuser -u "$u" -- flatpak update --user -y --noninteractive >&2 \
+                || warn "user Flatpak update failed for ${u}"
+        fi
+    fi
+}
+
 # ── verbs ────────────────────────────────────────────────────────────────────
 cmd_install() {
     [ "$#" -gt 0 ] || die "usage: apex install <package>..."
     need_root install
+
+    local -a rpms=() flatpaks=() p
+    for p in "$@"; do
+        if is_flatpak_id "$p"; then flatpaks+=("$p"); else rpms+=("$p"); fi
+    done
+
+    if [ "${#flatpaks[@]}" -gt 0 ]; then
+        flatpak_install "${flatpaks[@]}"
+    fi
+    # A Flatpak-only request must not rebuild the extension: that would cost
+    # minutes and re-merge /usr to change nothing.
+    [ "${#rpms[@]}" -gt 0 ] || return 0
+
     take_lock
     local -a want=()
     mapfile -t want < <(load_requested)
-    want+=("$@")
+    want+=("${rpms[@]}")
     rebuild_extension "${want[@]}"
 }
 
 cmd_remove() {
     [ "$#" -gt 0 ] || die "usage: apex remove <package>..."
     need_root remove
+
+    local -a rpms=() flatpaks=() q
+    for q in "$@"; do
+        if is_flatpak_id "$q"; then flatpaks+=("$q"); else rpms+=("$q"); fi
+    done
+    if [ "${#flatpaks[@]}" -gt 0 ]; then
+        flatpak_remove "${flatpaks[@]}"
+    fi
+    [ "${#rpms[@]}" -gt 0 ] || return 0
+    set -- "${rpms[@]}"
+
     take_lock
     local -a current=() keep=()
     mapfile -t current < <(load_requested)
@@ -671,11 +744,23 @@ cmd_rebuild() {
 }
 
 cmd_list() {
-    [ -f "$STATE" ] || { echo "no packages installed"; return 0; }
-    echo "requested:"
-    jq -r '.requested[]' "$STATE" | sed 's/^/  /'
-    printf '\npulled in as dependencies: %s\n' \
-        "$(( $(jq -r '.resolved | length' "$STATE") - $(jq -r '.requested | length' "$STATE") ))"
+    if [ -f "$STATE" ]; then
+        echo "packages (system extension):"
+        jq -r '.requested[]' "$STATE" | sed 's/^/  /'
+        printf '  (+%s pulled in as dependencies)\n' \
+            "$(( $(jq -r '.resolved | length' "$STATE") - $(jq -r '.requested | length' "$STATE") ))"
+    else
+        echo "packages (system extension): none"
+    fi
+    if have_flatpak; then
+        local apps
+        apps="$(flatpak list --app --columns=application 2>/dev/null || true)"
+        if [ -n "$apps" ]; then
+            echo
+            echo "flatpak applications:"
+            printf '%s\n' "$apps" | sed 's/^/  /'
+        fi
+    fi
 }
 
 cmd_info() {
@@ -761,9 +846,10 @@ usage() {
     cat <<'EOF'
 usage: apex-pkg <command> [args]
 
-  install <pkg>...     add packages (rebuilds the APEX extension)
-  remove  <pkg>...     remove packages
+  install <pkg>...     add packages; a reverse-DNS id (org.gimp.GIMP) is a Flatpak
+  remove  <pkg>...     remove packages or Flatpak apps
   upgrade              refresh all extension packages from the repositories
+  flatpak-upgrade      update Flatpak apps (system + invoking user)
   rebuild [--if-needed] rebuild for the running OS version
   rollback             restore the previous extension
   adopt                convert rpm-ostree layered packages into the extension
@@ -795,6 +881,7 @@ main() {
         install)  cmd_install "$@" ;;
         remove)   cmd_remove "$@" ;;
         upgrade)  cmd_upgrade ;;
+        flatpak-upgrade) cmd_flatpak_upgrade ;;
         rebuild)  cmd_rebuild "${1:-}" ;;
         rollback) cmd_rollback ;;
         adopt)    cmd_adopt ;;
