@@ -4,14 +4,20 @@ ARG PLATFORM=ghcr.io/andrenijman/apex-os:platform-daily
 FROM ${PLATFORM}
 
 ARG APEX_SHELL_REF
-ARG APEX_REVISION=dev
+ARG APEX_SHELL_STRICT=0
 
-COPY --chmod=0755 files/scripts/vendor-apex-shell /usr/libexec/vendor-apex-shell
-RUN /usr/libexec/vendor-apex-shell "${APEX_SHELL_REF}"
-
-LABEL org.opencontainers.image.revision="${APEX_REVISION}" \
-      org.apexos.apex-shell.ref="${APEX_SHELL_REF}"
+COPY --chmod=0644 files/scripts/vendor-apex-shell /tmp/vendor-apex-shell
+RUN bash /tmp/vendor-apex-shell \
+        "${APEX_SHELL_REF}" /usr/share/apex-shell "${APEX_SHELL_STRICT}"; \
+    rm -f /tmp/vendor-apex-shell
 
 RUN test -s /usr/share/apex-shell/shell.qml; \
     test "$(cat /usr/share/apex-shell/.apex-shell-commit)" = "${APEX_SHELL_REF}"; \
+    grep -q '^VARIANT_ID=' /usr/lib/os-release; \
+    test -s "/usr/lib/modules/$(cat /usr/lib/apex-kver)/initramfs.img"; \
+    test "$(cat /usr/share/apex-os/secureboot/kernel-signed)" = signed; \
     bootc container lint || true
+
+ARG APEX_REVISION=dev
+LABEL org.opencontainers.image.revision="${APEX_REVISION}" \
+      org.apexos.apex-shell.ref="${APEX_SHELL_REF}"

@@ -20,7 +20,6 @@
 ARG BASE=localhost/apex-base:latest
 FROM ${BASE}
 
-ARG APEX_REVISION=dev
 ARG GPU=nvidia
 # ── Edition stamp ──────────────────────────────────────────────────────────
 # VARIANT_ID=gaming drives apex-greet's gold spark + accent.
@@ -387,6 +386,7 @@ RUN set -eux; \
 
 RUN bootc container lint || true
 
+ARG APEX_REVISION=dev
 LABEL org.opencontainers.image.title="APEX-OS Gaming" \
       org.opencontainers.image.description="APEX-OS Gaming edition (gold) — performance-tuned desktop; GPU=nvidia|mesa" \
       org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \
