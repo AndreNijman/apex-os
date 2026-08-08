@@ -22,14 +22,6 @@ FROM ${BASE}
 
 ARG APEX_REVISION=dev
 ARG GPU=nvidia
-LABEL org.opencontainers.image.title="APEX-OS Gaming" \
-      org.opencontainers.image.description="APEX-OS Gaming edition (gold) — performance-tuned desktop; GPU=nvidia|mesa" \
-      org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \
-      org.opencontainers.image.revision="${APEX_REVISION}" \
-      org.opencontainers.image.version="gaming" \
-      org.opencontainers.image.vendor="APEX-OS" \
-      org.apex-os.gpu="${GPU}"
-
 # ── Edition stamp ──────────────────────────────────────────────────────────
 # VARIANT_ID=gaming drives apex-greet's gold spark + accent.
 RUN set -eux; \
@@ -394,3 +386,11 @@ RUN set -eux; \
         > /usr/lib/bootc/kargs.d/20-apex-plymouth.toml
 
 RUN bootc container lint || true
+
+LABEL org.opencontainers.image.title="APEX-OS Gaming" \
+      org.opencontainers.image.description="APEX-OS Gaming edition (gold) — performance-tuned desktop; GPU=nvidia|mesa" \
+      org.opencontainers.image.source="https://github.com/AndreNijman/apex-os" \
+      org.opencontainers.image.revision="${APEX_REVISION}" \
+      org.opencontainers.image.version="gaming" \
+      org.opencontainers.image.vendor="APEX-OS" \
+      org.apex-os.gpu="${GPU}"
