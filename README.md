@@ -255,6 +255,7 @@ Images are published to `ghcr.io/andrenijman/apex-os` and are public.
 
 ```sh
 sudo apex install android-tools   # any Fedora package
+sudo apex install org.gimp.GIMP   # a reverse-DNS id installs the Flatpak
 sudo apex remove  android-tools
 apex search wireshark
 apex pkg list
