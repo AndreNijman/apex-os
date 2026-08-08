@@ -512,6 +512,13 @@ COPY --chmod=0755 files/system/libexec/apex-vconsole-guard \
      /usr/libexec/apex-vconsole-guard
 COPY files/system/units/10-apex-vconsole-guard.conf \
      /usr/lib/systemd/system/systemd-vconsole-setup.service.d/10-apex-vconsole-guard.conf
+# Same class of problem, different unit: rpm-ostree's weekly "Count Me"
+# telemetry pings the Fedora mirrors, and if the machine is offline when that
+# timer fires the unit fails and the system reads as degraded for up to a week.
+# Anonymous statistics are allowed to fail; they are not allowed to report the
+# machine as broken. See the drop-in for why ExecStart is reset and re-added.
+COPY files/system/units/10-apex-countme-nonfatal.conf \
+     /usr/lib/systemd/system/rpm-ostree-countme.service.d/10-apex-countme-nonfatal.conf
 RUN set -eux; \
     bash -n /usr/libexec/apex-vconsole-guard; \
     # The fallback keymap the guard relies on has to exist in THIS image, or the

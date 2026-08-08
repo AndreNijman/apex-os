@@ -302,6 +302,8 @@ pub struct UpdateOptions {
     pub keep_fsync: bool,
     /// Skip refreshing user packages (`apex install`) from the repositories.
     pub skip_packages: bool,
+    /// Skip updating Flatpak applications.
+    pub skip_flatpak: bool,
 }
 
 /// The system-extension package engine behind `apex install`/`remove`/`pkg`.
@@ -426,6 +428,10 @@ pub fn update(opts: UpdateOptions) -> i32 {
         worst = worst.max(packages_pass());
     }
 
+    if !opts.skip_flatpak && !opts.firmware_only {
+        worst = worst.max(flatpak_pass());
+    }
+
     if !opts.skip_firmware {
         worst = worst.max(firmware_pass());
     }
@@ -435,6 +441,27 @@ pub fn update(opts: UpdateOptions) -> i32 {
         started.elapsed().as_secs_f64()
     );
     worst
+}
+
+/// Update Flatpak applications as part of `apex update`.
+///
+/// Flatpak is where APEX puts sandboxed desktop apps, so leaving them out of
+/// the one update command meant a machine could report itself fully up to date
+/// while every graphical application on it was months stale — the user had no
+/// way to know they were also supposed to run `flatpak update` by hand.
+///
+/// Never fatal: a flatpak that cannot reach Flathub must not fail an OS update.
+fn flatpak_pass() -> i32 {
+    if !Path::new("/usr/bin/flatpak").exists() {
+        return 0;
+    }
+    match run(PKG_ENGINE, &["flatpak-upgrade"]) {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("apex: Flatpak update skipped: {e}");
+            0
+        }
+    }
 }
 
 /// Packages layered into the deployment with rpm-ostree, if any.
