@@ -251,6 +251,26 @@ matters (it used to be 5.3 GB, every time).
 
 Images are published to `ghcr.io/andrenijman/apex-os` and are public.
 
+## Installing software
+
+```sh
+sudo apex install android-tools   # any Fedora package
+sudo apex remove  android-tools
+apex search wireshark
+apex pkg list
+```
+
+Packages are built into a systemd system extension overlaid on `/usr`, **not**
+layered with `rpm-ostree`. That distinction is the whole point: a single
+`rpm-ostree` layer puts the deployment into "local modifications" state and
+`bootc upgrade` refuses to run from then on, so installing one CLI tool used to
+silently stop the machine updating. Extensions leave the deployment untouched,
+so software and OS updates stop being mutually exclusive — while programs still
+land in the real `/usr/bin` with working `.desktop` files, units and udev rules.
+
+Already have layered packages? `sudo apex pkg adopt` converts them and restores
+updates. See [docs/packages.md](docs/packages.md).
+
 ## Repository layout
 
 | Path | Contents |

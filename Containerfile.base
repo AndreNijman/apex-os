@@ -440,6 +440,63 @@ COPY --chmod=0755 files/system/libexec/apex-shell-autostart \
      /usr/libexec/apex-shell-autostart
 RUN systemctl --global enable apex-shell-firstrun.service
 
+# ── Stage 5d: user packages, WITHOUT breaking OS updates ────────────────────
+# The supported way to add software to a bootc system used to be `rpm-ostree
+# install`, and it has one property that makes it unusable as the answer for a
+# daily driver: a single layered package puts the deployment into "local
+# modifications" state, and from then on
+#
+#   bootc upgrade  ->  error: Deployment contains local rpm-ostree modifications
+#
+# i.e. installing one CLI tool silently stops the OS from ever updating again.
+# Worse, `--apply-live` layers are transient: a reboot threw the package away and
+# the user was left with neither the tool nor a working update path.
+#
+# `apex install` instead builds a systemd SYSTEM EXTENSION — a squashfs image (or
+# plain tree) in /var/lib/extensions that systemd overlays onto /usr. The bootc
+# deployment is never touched, so updates keep working, while binaries, .desktop
+# files, icons, man pages, systemd units and udev rules all land at the real /usr
+# paths the rest of the OS already searches. Fedora's signed repositories are the
+# package source, so there is no APEX registry to run, sign or keep online.
+#
+# The extension records the OS version it was built for and systemd refuses to
+# merge a mismatched one; apex-sysext-rebuild.service turns that refusal into an
+# automatic rebuild after an OS upgrade instead of vanished packages.
+COPY --chmod=0755 files/system/libexec/apex-pkg /usr/libexec/apex-pkg
+COPY files/system/units/apex-sysext-rebuild.service \
+     /usr/lib/systemd/system/apex-sysext-rebuild.service
+RUN set -eux; \
+    bash -n /usr/libexec/apex-pkg; \
+    # Every external tool the engine drives. These are asserted rather than
+    # trusted because a missing one turns `apex install` into a confusing
+    # runtime failure on the user's machine instead of a failed build here.
+    for t in rpm rpmkeys rpm2cpio dnf5 jq setfiles systemd-sysext \
+             systemd-sysusers systemd-tmpfiles ldconfig; do \
+        command -v "$t" >/dev/null || { echo "FATAL: apex-pkg needs $t"; exit 1; }; \
+    done; \
+    # mksquashfs is preferred but genuinely optional: it reaches this image only
+    # as a weak dependency of dracut-squash, so the engine falls back to a
+    # directory extension. Note it rather than failing the build, and note it
+    # LOUDLY so the fallback is a decision and not a surprise.
+    if command -v mksquashfs >/dev/null; then \
+        echo "apex-pkg: squashfs extensions available"; \
+    else \
+        echo "NOTE: mksquashfs absent — apex-pkg will build uncompressed directory extensions"; \
+    fi; \
+    # /var is machine-local and empty in the image; the engine's state and the
+    # directory systemd scans for extensions have to be created on first boot.
+    printf '%s\n' \
+        'd /var/lib/extensions 0755 root root -' \
+        'd /var/lib/apex 0755 root root -' \
+        'd /var/lib/apex/pkg 0700 root root -' \
+        > /usr/lib/tmpfiles.d/apex-pkg.conf; \
+    # systemd-sysext.service is what merges the extension at boot. It is enabled
+    # by preset today, which is exactly the kind of upstream default that can
+    # change under us and would silently un-install every user package.
+    systemctl enable systemd-sysext.service; \
+    systemctl enable apex-sysext-rebuild.service; \
+    test -L /etc/systemd/system/multi-user.target.wants/apex-sysext-rebuild.service
+
 # One-shot de-branding migration for systems installed from a PRE-branding image.
 # The BLS entry titles, the EFI NVRAM label and a hand-written /etc/os-release
 # all live OUTSIDE the ostree deployment, so `bootc upgrade` never replaces them.
