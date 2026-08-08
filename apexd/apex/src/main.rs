@@ -161,6 +161,9 @@ struct UpdateArgs {
     /// Skip refreshing packages installed with `apex install`.
     #[arg(long)]
     skip_packages: bool,
+    /// Skip updating Flatpak applications.
+    #[arg(long)]
+    skip_flatpak: bool,
     /// Keep ostree's per-object fsync on during the pull. Roughly halves update
     /// speed (measured: ~8 MiB/s with it, ~14.6 without, because 179k objects at
     /// 2.98 ms of fsync each outweighs the download itself) in exchange for
@@ -242,6 +245,7 @@ async fn main() {
             firmware_only: args.firmware_only,
             keep_fsync: args.fsync,
             skip_packages: args.skip_packages,
+            skip_flatpak: args.skip_flatpak,
         }),
         Cmd::Doctor => cmd_doctor().await,
         Cmd::Changelog => ops::changelog(),

@@ -120,12 +120,33 @@ to be useful, it belongs in the image — open an issue.
 
 Read-only verbs work as an ordinary user; anything that writes needs `sudo`.
 
+## Flatpak
+
+`apex install` also speaks Flatpak, chosen by the name you give it:
+
+```bash
+sudo apex install org.gimp.GIMP     # reverse-DNS id -> Flatpak (Flathub)
+sudo apex install gimp              # plain name     -> RPM (system extension)
+```
+
+The rule is unambiguous rather than clever: Flathub ids are three or more
+dot-separated segments each starting with a letter, and no RPM is named that way
+(`python3.12` has two segments, `java-1.8.0-openjdk` has segments starting with
+digits). `apex remove` follows the same rule, and `apex pkg list` shows both.
+
+A Flatpak-only install never rebuilds the extension, so it costs nothing.
+
+`apex update` now updates Flatpak apps too — system-wide and for the invoking
+user — because otherwise a machine could report itself fully up to date while
+every graphical application on it was months stale. Skip it with
+`--skip-flatpak`; a Flathub outage can never fail an OS update.
+
 ## Notes
 
-* Flatpak remains the right choice for sandboxed desktop applications, and
-  Bazaar is still the graphical store. `apex install` is for the things Flatpak
-  is a poor fit for: CLI tools, libraries, headers, drivers' userspace, anything
-  that must exist in `/usr`.
+* Flatpak is still the better choice for sandboxed desktop applications, and
+  Bazaar is still the graphical store. The RPM side of `apex install` is for
+  what Flatpak is a poor fit for: CLI tools, libraries, headers, drivers'
+  userspace — anything that must exist in `/usr`.
 * Set `APEX_PKG_FORMAT=tree` to build an uncompressed directory extension
   instead of squashfs. The engine falls back to this automatically if
   `mksquashfs` is unavailable.
