@@ -27,6 +27,8 @@ fi
 printf '%s\n' "${sha}" > "${dest}/.apex-shell-commit"
 test -s "${dest}/shell.qml"
 test -d "${dest}/src/services"
+test -x "${dest}/src/scripts/screenshot.sh"
+bash -n "${dest}/src/scripts/screenshot.sh"
 rm -rf "${dest}/.git"
 
 # Redirect the remaining legacy writable/source-tree paths for immutable /usr.
