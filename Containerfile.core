@@ -52,11 +52,11 @@
 # rule, applied throughout this tree: keep every heavy dnf transaction in its
 # OWN `RUN … && dnf5 clean all` layer.
 #
-# ── Base tag: fedora-bootc:43 (NOT 44) ──
-# solopasha/hyprland ships aquamarine-0.9.5 linked against libdisplay-info.so.2;
-# F44 moved to libdisplay-info 0.3 (soname .so.3), so hyprland is currently
-# uninstallable there. F43 ships libdisplay-info 0.2 (.so.2) and the whole stack
-# resolves. Revisit F44 once the COPR rebuilds aquamarine. (M0 spike A.)
+# ── Base tag: fedora-bootc:43 ──
+# APEX stays on Fedora 43 until the image's kernel, desktop, and installer stack
+# are deliberately migrated and tested together. The original solopasha
+# Hyprland COPR was retired after M0; sdegler's maintained fork follows Fedora
+# branching and currently publishes the complete stack for F43 and F44.
 # ─────────────────────────────────────────────────────────────────────────
 # ═══ Tool builder — third-party Rust programs, toolchain kept out of /usr ═══
 #   • awww + awww-daemon (the swww fork APEX Shell's WallpaperService drives;
@@ -319,7 +319,7 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
     fi
 
 # ── Stage 2: desktop + greeter stack ───────────────────────────────────────
-# hyprland (solopasha COPR 0.51.x) + quickshell (errornointernet COPR 0.3.0 —
+# hyprland (sdegler COPR) + quickshell (errornointernet COPR 0.3.0 —
 # the exact version apex-greet targets) + greetd. The greeter's compositor host
 # is moving OFF cage: M0 spike A found cage 0.2.0 does not serve wlr-layer-shell
 # to quickshell 0.3.0, so the greeter never paints under it. sway 1.11 and labwc
@@ -346,7 +346,7 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
 #     zstd) — the same default the other Fedora atomic desktops carry.
 # Own transaction, `dnf5 clean all` at the end.
 RUN set -eux; \
-    dnf5 -y copr enable solopasha/hyprland; \
+    dnf5 -y copr enable sdegler/hyprland; \
     dnf5 -y copr enable errornointernet/quickshell; \
     dnf5 -y install \
         hyprland quickshell greetd sway labwc cage xwayland-satellite foot \
@@ -359,16 +359,16 @@ RUN set -eux; \
         gammastep geoclue2 jq dconf \
         NetworkManager-wifi wpa_supplicant wireless-regdb iw \
         glibc-langpack-en zram-generator-defaults; \
-    dnf5 -y copr disable solopasha/hyprland; \
+    dnf5 -y copr disable sdegler/hyprland; \
     dnf5 -y copr disable errornointernet/quickshell; \
     dnf5 clean all
 
 # ── hyprland-qtutils, built HERE against the desktop stack ──────────────────
 # Hyprland warns at every startup without it, and CAsyncDialogBox cannot create
 # dialogs at all — the ANR manager never starts either. hyprland *recommends*
-# the package but it is uninstallable: solopasha's hyprland-qt-support links
-# Qt 6.9 PRIVATE API while this image ships Qt 6.10.3, and private-API symbol
-# versions match exactly. So it is built from source.
+# the packaged build may link against a different Qt PRIVATE API than the image,
+# whose private-API symbol versions must match exactly. So it is built from
+# source against the Qt version actually shipping here.
 #
 # It is built in THIS stage, not a separate builder, and that is deliberate. A
 # builder starting from bare fedora-bootc resolves hyprutils-devel to FEDORA's
@@ -389,7 +389,7 @@ ARG HYPR_QT_SUPPORT_TAG=v0.1.0
 # fails and this commit configures cleanly, both against the real desktop stack.
 ARG HYPR_QTUTILS_REF=56d993aced40a9058350d24ff4a7fb4eb961f89b
 RUN set -eux; \
-    dnf5 -y copr enable solopasha/hyprland; \
+    dnf5 -y copr enable sdegler/hyprland; \
     dnf5 -y install cmake ninja-build gcc-c++ git-core pkgconf \
         qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel \
         qt6-qtwayland-devel qt6-qtbase-private-devel \
@@ -419,7 +419,7 @@ RUN set -eux; \
     rm -rf /b; \
     dnf5 -y remove cmake ninja-build gcc-c++ pkgconf \
         'qt6-*-devel' 'hypr*-devel' || true; \
-    dnf5 -y copr disable solopasha/hyprland; \
+    dnf5 -y copr disable sdegler/hyprland; \
     dnf5 clean all; \
     command -v hyprland-dialog; \
     echo "hyprland-qtutils: built against the shipping Qt and hypr libraries"

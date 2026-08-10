@@ -81,6 +81,25 @@ fi
 APEX_HYPR_TMPL="/usr/share/apex/hypr/hyprland.conf"
 HYPR_CONF="${HOME}/.config/hypr/hyprland.conf"
 
+# Hyprland 0.54/0.55 removed syntax shipped by older APEX images. Migrate only
+# those exact directives in place so upgrades keep user customizations while the
+# compositor and generated keybind file become valid for the new parser.
+hypr_migrated=0
+for conf in "${HYPR_CONF}" "${HOME}/.config/apex-shell/ApexShellKeybinds.conf"; do
+    [ -f "$conf" ] || continue
+    if grep -qE 'pseudotile[[:space:]]*=|,[[:space:]]*togglesplit([[:space:]]*$|[[:space:]]*#)|suppressevent maximize|nofocus,class:\^\$' "$conf"; then
+        sed -Ei \
+            -e '/^[[:space:]]*pseudotile[[:space:]]*=[[:space:]]*(true|yes|1)[[:space:]]*$/d' \
+            -e 's/,[[:space:]]*togglesplit([[:space:]]*(#.*)?)$/, layoutmsg, togglesplit\1/' \
+            -e 's/windowrule = suppressevent maximize, class:\.\*/windowrule = suppress_event maximize, match:class .*/' \
+            -e 's/windowrule = nofocus,class:\^\$,title:\^\$,xwayland:1,floating:1,fullscreen:0,pinned:0/windowrule = match:class ^$, match:title ^$, match:xwayland 1, match:float 1, match:fullscreen 0, match:pin 0, no_focus on/' \
+            "$conf"
+        log "migrated removed Hyprland directives in ${conf}"
+        hypr_migrated=1
+    fi
+done
+[ "$hypr_migrated" = 0 ] || hyprctl reload >/dev/null 2>&1 || true
+
 # ── Keyboard layout: take the SYSTEM keymap, never a hardcoded one ───────────
 # The template ships @KB_LAYOUT@/@KB_VARIANT@ instead of a literal `us` so a
 # non-US user does not silently get a US layout in their session (and then have

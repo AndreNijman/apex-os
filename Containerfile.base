@@ -567,12 +567,25 @@ COPY files/desktop/hypr/hyprland.conf /usr/share/apex/hypr/hyprland.conf
 #      even inside a comment — made a correct, brand-new install fail its own
 #      provisioning check. The check strips comments now; this keeps the string
 #      out of the file so neither half of the bug can return.
+#   3. parse the seeded form with the Hyprland version in this image. Hyprland
+#      regularly removes config directives, and a valid old template otherwise
+#      turns an image update into a login-blocking compositor failure.
 RUN set -eux; \
     grep -q '^exec-once = /usr/libexec/apex-shell-autostart' /usr/share/apex/hypr/hyprland.conf; \
     ! grep -q 'local/bin/apex-shell-autostart' /usr/share/apex/hypr/hyprland.conf; \
     ! grep -q '(unset)' /usr/share/apex/hypr/hyprland.conf; \
     grep -q '@KB_LAYOUT@' /usr/share/apex/hypr/hyprland.conf; \
-    grep -q '@HOME@' /usr/share/apex/hypr/hyprland.conf
+    grep -q '@HOME@' /usr/share/apex/hypr/hyprland.conf; \
+    config="$(mktemp)"; keybinds="$(mktemp)"; runtime="$(mktemp -d)"; \
+    chmod 0700 "$runtime"; \
+    sed -e 's|@HOME@|/tmp/apex-home|g' \
+        -e 's|@KB_LAYOUT@|us|g' \
+        -e 's|@KB_VARIANT@||g' \
+        -e "s|^source = .*ApexShellKeybinds.conf$|source = ${keybinds}|" \
+        /usr/share/apex/hypr/hyprland.conf > "$config"; \
+    XDG_RUNTIME_DIR="$runtime" Hyprland --i-am-really-stupid \
+        --verify-config --config "$config" | grep -q 'config ok'; \
+    rm -rf "$config" "$keybinds" "$runtime"
 
 # Greeter session picker: offer Hyprland + niri only. sway/labwc are the greeter
 # HOST compositor, not user sessions — strip their wayland-session files so they
