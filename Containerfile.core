@@ -355,7 +355,7 @@ RUN set -eux; \
         pipewire pipewire-pulseaudio wireplumber rtkit \
         playerctl brightnessctl wl-clipboard slurp wtype cliphist \
         upower libnotify lm_sensors cava wf-recorder ImageMagick \
-        qt6ct mpv-mpris xdg-user-dirs polkit gnome-keyring \
+        qt6ct qt6-qtwebengine mpv-mpris xdg-user-dirs polkit gnome-keyring \
         gammastep geoclue2 jq dconf \
         NetworkManager-wifi wpa_supplicant wireless-regdb iw \
         glibc-langpack-en zram-generator-defaults; \
@@ -388,6 +388,7 @@ ARG HYPR_QT_SUPPORT_TAG=v0.1.0
 # Qt6::WaylandClientPrivate but the target was not found". Verified: v0.1.5
 # fails and this commit configures cleanly, both against the real desktop stack.
 ARG HYPR_QTUTILS_REF=56d993aced40a9058350d24ff4a7fb4eb961f89b
+COPY files/system/src/quickshell-argc-shim.c /tmp/quickshell-argc-shim.c
 RUN set -eux; \
     dnf5 -y copr enable sdegler/hyprland; \
     dnf5 -y install cmake ninja-build gcc-c++ git-core pkgconf \
@@ -416,7 +417,14 @@ RUN set -eux; \
     ! ldd /usr/bin/hyprland-dialog | grep 'not found'; \
     test -d /usr/lib64/qt6/qml/org/hyprland/style; \
     test ! -d /usr/usr; \
+    mkdir -p /usr/lib64/apex; \
+    gcc -shared -fPIC -O2 -Wl,-z,relro,-z,now \
+        /tmp/quickshell-argc-shim.c -ldl \
+        -o /usr/lib64/apex/libapex-quickshell-argc.so; \
+    nm -D /usr/lib64/apex/libapex-quickshell-argc.so \
+        | grep -q '_ZN15QGuiApplicationC1ERiPPci'; \
     rm -rf /b; \
+    rm -f /tmp/quickshell-argc-shim.c; \
     dnf5 -y remove cmake ninja-build gcc-c++ pkgconf \
         'qt6-*-devel' 'hypr*-devel' || true; \
     dnf5 -y copr disable sdegler/hyprland; \
