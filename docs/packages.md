@@ -35,9 +35,9 @@ so the user lost both the software and the update path.
 * removing a package is deleting a file; nothing rots in `/usr`
 * `apex rollback` (the OS) and `apex pkg rollback` (packages) are independent
 
-Fedora's signed repositories are the package source. There is no APEX package
-registry to host, sign or keep online, and every RPM is checked against the
-system keyring before a single file is extracted.
+Fedora, RPM Fusion, and explicitly enabled COPRs are the package sources. There
+is no APEX package registry to host, sign or keep online, and every RPM is
+checked against a trusted RPM keyring before a single file is extracted.
 
 ## What actually happens
 
@@ -73,6 +73,12 @@ onto Fedora 44.
 version change it rebuilds the extension against the new OS. It does nothing on a
 normal boot, and if the machine is offline it says so and leaves the packages to
 be rebuilt later rather than failing the boot.
+
+APEX also records a package compatibility level. When an image starts baking a
+package that users may already have in their extension, the level changes and
+triggers one rebuild even if the Fedora version is unchanged. Requested packages
+now provided by the image are removed automatically, so an older extension copy
+cannot shadow the OS package.
 
 `apex update` also re-resolves user packages, so they receive Fedora security
 fixes instead of staying pinned at whatever was current on install day. If
@@ -110,6 +116,9 @@ to be useful, it belongs in the image — open an issue.
 | `apex install PKG…` | add packages (`--no-weak-deps`, `--enable-repo=REPO`) |
 | `apex remove PKG…` | remove packages |
 | `apex search TERM…` | search the repositories |
+| `apex repo list` | list enabled and disabled RPM repositories |
+| `apex repo enable-copr OWNER/PROJECT` | opt into a Fedora COPR for search/install/upgrade |
+| `apex repo disable-copr OWNER/PROJECT` | disable an opted-in COPR |
 | `apex pkg list` | requested packages and dependency count |
 | `apex pkg status` | extension state, what it was built for, whether merged |
 | `apex pkg upgrade` | re-resolve everything against the repositories |
@@ -119,6 +128,24 @@ to be useful, it belongs in the image — open an issue.
 | `apex pkg adopt` | convert rpm-ostree layers into APEX packages |
 
 Read-only verbs work as an ordinary user; anything that writes needs `sudo`.
+
+RPM Fusion Free and Nonfree are enabled in every APEX image, so their packages
+work with `apex search` and `apex install` without extra setup. For software from
+a Fedora COPR, enable the project once and then use the normal commands:
+
+```bash
+sudo apex repo enable-copr OWNER/PROJECT
+apex search PACKAGE
+sudo apex install PACKAGE
+sudo apex repo disable-copr OWNER/PROJECT
+```
+
+COPRs are third-party repositories, not Fedora or APEX. Enabling one trusts its
+owner to publish RPMs for that repository until it is disabled. Enabling stores
+that COPR's signing key in APEX's writable keyring under `/var/lib/apex/pkg`
+(the OS keyring is immutable); APEX still verifies every downloaded RPM against
+a trusted key and still refuses kernel/core-system replacements in an extension.
+Disabling the COPR also removes its key from the APEX keyring.
 
 ## Flatpak
 

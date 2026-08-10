@@ -58,7 +58,7 @@ enum Cmd {
     Doctor,
     /// Show the booted image and its changelog labels.
     Changelog,
-    /// Install packages from the Fedora repositories. Requires root.
+    /// Install packages from enabled Fedora, RPM Fusion, or COPR repositories. Requires root.
     ///
     /// Packages go into a systemd system extension, NOT an rpm-ostree layer, so
     /// the OS keeps updating normally and `apex rollback` still works.
@@ -77,10 +77,15 @@ enum Cmd {
         #[arg(required = true, value_name = "PACKAGE")]
         packages: Vec<String>,
     },
-    /// Search the Fedora repositories.
+    /// Search all enabled package repositories.
     Search {
         #[arg(required = true, value_name = "TERM")]
         terms: Vec<String>,
+    },
+    /// Manage additional package repositories.
+    Repo {
+        #[command(subcommand)]
+        cmd: RepoCmd,
     },
     /// Manage installed packages: list, status, rebuild, rollback, adopt.
     Pkg {
@@ -112,6 +117,22 @@ enum PkgCmd {
     /// Convert rpm-ostree layered packages into APEX packages, so that OS
     /// updates work again without losing the software. Requires root.
     Adopt,
+}
+
+#[derive(Subcommand)]
+enum RepoCmd {
+    /// List enabled and disabled repositories.
+    List,
+    /// Enable a Fedora COPR project (OWNER/PROJECT). Requires root.
+    EnableCopr {
+        #[arg(value_name = "OWNER/PROJECT")]
+        project: String,
+    },
+    /// Disable a previously enabled Fedora COPR project. Requires root.
+    DisableCopr {
+        #[arg(value_name = "OWNER/PROJECT")]
+        project: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -272,6 +293,14 @@ async fn main() {
         Cmd::Search { terms } => {
             let mut argv = vec!["search".to_string()];
             argv.extend(terms);
+            ops::pkg(&argv)
+        }
+        Cmd::Repo { cmd } => {
+            let argv = match cmd {
+                RepoCmd::List => vec!["repo-list".into()],
+                RepoCmd::EnableCopr { project } => vec!["repo-enable-copr".into(), project],
+                RepoCmd::DisableCopr { project } => vec!["repo-disable-copr".into(), project],
+            };
             ops::pkg(&argv)
         }
         Cmd::Pkg { cmd } => {
