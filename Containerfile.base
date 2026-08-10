@@ -456,8 +456,9 @@ RUN systemctl --global enable apex-shell-firstrun.service
 # plain tree) in /var/lib/extensions that systemd overlays onto /usr. The bootc
 # deployment is never touched, so updates keep working, while binaries, .desktop
 # files, icons, man pages, systemd units and udev rules all land at the real /usr
-# paths the rest of the OS already searches. Fedora's signed repositories are the
-# package source, so there is no APEX registry to run, sign or keep online.
+# paths the rest of the OS already searches. Fedora, RPM Fusion, and explicitly
+# enabled COPRs are the package sources, so there is no APEX registry to run,
+# sign or keep online.
 #
 # The extension records the OS version it was built for and systemd refuses to
 # merge a mismatched one; apex-sysext-rebuild.service turns that refusal into an
@@ -470,10 +471,11 @@ RUN set -eux; \
     # Every external tool the engine drives. These are asserted rather than
     # trusted because a missing one turns `apex install` into a confusing
     # runtime failure on the user's machine instead of a failed build here.
-    for t in rpm rpmkeys rpm2cpio dnf5 jq setfiles systemd-sysext \
+    for t in rpm rpmkeys rpm2cpio dnf5 curl jq setfiles systemd-sysext \
              systemd-sysusers systemd-tmpfiles ldconfig; do \
         command -v "$t" >/dev/null || { echo "FATAL: apex-pkg needs $t"; exit 1; }; \
     done; \
+    dnf5 copr --help >/dev/null; \
     # mksquashfs is preferred but genuinely optional: it reaches this image only
     # as a weak dependency of dracut-squash, so the engine falls back to a
     # directory extension. Note it rather than failing the build, and note it

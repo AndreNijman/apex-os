@@ -43,8 +43,9 @@
 #   * kernels, kernel modules and akmods — those need an initramfs and a real
 #     deployment, so they belong in the image
 #
-# Fedora's signed repositories are the package source; there is no APEX registry
-# to trust, run or keep online. Every RPM is signature-checked before extraction.
+# Fedora, RPM Fusion, and explicitly enabled COPRs are the package sources; there
+# is no APEX registry to trust, run or keep online. Every RPM is signature-checked
+# before extraction.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -63,11 +64,16 @@ readonly ETC_SAVE="${PKG_ROOT}/etc"
 readonly ETC_LIST="${PKG_ROOT}/etc.list"
 readonly VAR_LIST="${PKG_ROOT}/var.list"
 readonly ROLLBACK_DIR="${PKG_ROOT}/rollback"
+readonly COPR_KEY_DB="${PKG_ROOT}/copr-keyring"
+readonly COPR_KEYS="${PKG_ROOT}/copr-keys"
 # Staging lives under /var/lib, NOT /var/tmp: rpm cannot take its transaction
 # lock inside a tmp-labelled tree under SELinux, and the resulting "can't create
 # transaction lock" error would be printed on every single install.
 readonly WORK_ROOT="${PKG_ROOT}/work"
 readonly LOCK="${PKG_ROOT}/.lock"
+# Increment whenever a newly baked image package may overlap existing user
+# extensions. A mismatch triggers one rebuild even within the same VERSION_ID.
+readonly PKG_COMPAT_LEVEL=1
 
 # Packages that must never come from an extension. The first group needs an
 # initramfs/deployment; the second is the running userspace ABI floor — shadowing
@@ -131,7 +137,8 @@ save_requested() {
 # resolves against the host rpmdb, so an extension carries only the delta.
 download_rpms() {
     local destdir="$1"; shift
-    local -a args=(-y --setopt=keepcache=True download --resolve --destdir "$destdir")
+    local -a args=(-y --setopt=keepcache=True download --resolve \
+        --arch="$(uname -m)" --arch=noarch --destdir "$destdir")
     [ "${NO_WEAK_DEPS:-0}" = 1 ] && args+=(--setopt=install_weak_deps=False)
     local repo
     for repo in ${ENABLE_REPOS:-}; do args+=(--enable-repo "$repo"); done
@@ -175,15 +182,22 @@ guard_rpms() {
     compgen -G "${destdir}/*.rpm" >/dev/null \
         || die "every requested package is already part of APEX-OS — nothing to install"
 
-    # Signature check. Fedora/RPMFusion/COPR keys are already in the image rpmdb;
-    # an unsigned or unknown-key package is a hard stop, never a prompt.
+    # Signature check. Image repositories use the immutable system rpmdb. COPRs
+    # opted into with `apex repo enable-copr` use APEX's writable keyring under
+    # /var because a bootc deployment's /usr/lib/sysimage/rpm cannot be modified.
+    # An unsigned or unknown-key package is a hard stop, never a prompt.
     local out
     for rpmfile in "$destdir"/*.rpm; do
-        out="$(rpmkeys --checksig "$rpmfile" 2>&1)" || die "signature check failed: $out"
-        case "$out" in
-            *"digests signatures OK"*) : ;;
-            *) die "unsigned or untrusted package: $out" ;;
-        esac
+        if out="$(rpmkeys --checksig "$rpmfile" 2>&1)" \
+           && [[ "$out" = *"digests signatures OK"* ]]; then
+            continue
+        fi
+        if [ -d "$COPR_KEY_DB" ] \
+           && out="$(rpmkeys --dbpath "$COPR_KEY_DB" --checksig "$rpmfile" 2>&1)" \
+           && [[ "$out" = *"digests signatures OK"* ]]; then
+            continue
+        fi
+        die "unsigned or untrusted package: $out"
     done
     msg "$(ls -1 "$destdir"/*.rpm | wc -l) package(s) verified against the repository keys"
 }
@@ -514,9 +528,11 @@ write_state() {
         --arg image "$payload" \
         --arg sha "$([ -f "$payload" ] && sha "$payload" || echo '')" \
         --arg size "$(payload_bytes "$payload")" \
+        --argjson compat_level "$PKG_COMPAT_LEVEL" \
         '{requested:$requested, resolved:$resolved, os_id:$os_id,
           os_version_id:$os_version, built:$built, image:$image,
-          image_sha256:$sha, image_bytes:($size|tonumber)}' > "${STATE}.tmp"
+          image_sha256:$sha, image_bytes:($size|tonumber),
+          pkg_compat_level:$compat_level}' > "${STATE}.tmp"
     mv -f "${STATE}.tmp" "$STATE"
 }
 
@@ -535,6 +551,19 @@ rebuild_extension() {
             want+=("$a")
         fi
     done
+
+    # An image update may bake something that used to live in the user
+    # extension. Drop it before resolving so an older extension copy can never
+    # shadow the image's package.
+    local -a missing=()
+    for a in "${want[@]}"; do
+        if rpm -q -- "$a" >/dev/null 2>&1; then
+            msg "dropping '$a' from the extension: now provided by APEX-OS"
+        else
+            missing+=("$a")
+        fi
+    done
+    want=("${missing[@]}")
 
     if [ "${#want[@]}" -eq 0 ]; then
         msg "no packages requested — removing the extension"
@@ -716,12 +745,14 @@ cmd_rebuild() {
         return 0
     fi
     if [ "$if_needed" = 1 ]; then
-        local built_for
+        local built_for built_level
         built_for="$(jq -r '.os_version_id // empty' "$STATE")"
-        if [ "$built_for" = "$(os_version)" ] && merged; then
+        built_level="$(jq -r '.pkg_compat_level // 0' "$STATE")"
+        if [ "$built_for" = "$(os_version)" ] \
+           && [ "$built_level" = "$PKG_COMPAT_LEVEL" ] && merged; then
             return 0
         fi
-        msg "extension was built for $(os_id) ${built_for}, this system is $(os_id) $(os_version) — rebuilding"
+        msg "extension compatibility changed (OS ${built_for}, level ${built_level} -> OS $(os_version), level ${PKG_COMPAT_LEVEL}) — rebuilding"
     fi
 
     local -a want=()
@@ -842,6 +873,66 @@ cmd_search() {
     dnf5 search "$@"
 }
 
+valid_copr_project() {
+    [[ "$1" =~ ^@?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+}
+
+refresh_copr_keyring() {
+    rm -rf "$COPR_KEY_DB"
+    install -d -m0700 "$COPR_KEY_DB"
+    rpm --dbpath "$COPR_KEY_DB" --initdb
+    [ -d "$COPR_KEYS" ] || return 0
+
+    local -a keys=()
+    local key
+    mapfile -d '' -t keys < <(find "$COPR_KEYS" -type f -name '*.gpg' -print0 | sort -z)
+    for key in "${keys[@]}"; do
+        rpm --dbpath "$COPR_KEY_DB" --import "$key"
+    done
+}
+
+cmd_repo_list() {
+    dnf5 repolist --all
+}
+
+cmd_repo_enable_copr() {
+    [ "$#" = 1 ] || die "usage: apex repo enable-copr OWNER/PROJECT"
+    need_root repo
+    valid_copr_project "$1" || die "COPR project must be OWNER/PROJECT"
+    dnf5 -y copr enable "$1" >&2 || die "could not enable COPR '$1'"
+    local owner="${1%%/*}" project="${1#*/}" keyfile
+    local key="https://download.copr.fedorainfracloud.org/results/${owner}/${project}/pubkey.gpg"
+    keyfile="$(mktemp)"
+    if ! curl --fail --silent --show-error --location \
+              --proto '=https' --tlsv1.2 "$key" -o "$keyfile"; then
+        dnf5 -y copr disable "$1" >&2 || true
+        rm -f "$keyfile"
+        die "could not download the signing key for COPR '$1'; repository disabled"
+    fi
+    install -Dm0600 "$keyfile" "${COPR_KEYS}/${owner}/${project}.gpg"
+    if ! refresh_copr_keyring; then
+        dnf5 -y copr disable "$1" >&2 || true
+        rm -f "${COPR_KEYS}/${owner}/${project}.gpg"
+        refresh_copr_keyring || true
+        rm -f "$keyfile"
+        die "could not import the signing key for COPR '$1'; repository disabled"
+    fi
+    rm -f "$keyfile"
+    msg "enabled COPR '$1'; apex search/install will now use it"
+}
+
+cmd_repo_disable_copr() {
+    [ "$#" = 1 ] || die "usage: apex repo disable-copr OWNER/PROJECT"
+    need_root repo
+    valid_copr_project "$1" || die "COPR project must be OWNER/PROJECT"
+    dnf5 -y copr disable "$1" >&2 || die "could not disable COPR '$1'"
+    local owner="${1%%/*}" project="${1#*/}"
+    rm -f "${COPR_KEYS}/${owner}/${project}.gpg"
+    find "$COPR_KEYS" -depth -type d -empty -delete 2>/dev/null || true
+    refresh_copr_keyring || die "repository disabled, but its key could not be removed from the APEX keyring"
+    msg "disabled COPR '$1'"
+}
+
 usage() {
     cat <<'EOF'
 usage: apex-pkg <command> [args]
@@ -853,6 +944,11 @@ usage: apex-pkg <command> [args]
   rebuild [--if-needed] rebuild for the running OS version
   rollback             restore the previous extension
   adopt                convert rpm-ostree layered packages into the extension
+  repo-list            list enabled and disabled package repositories
+  repo-enable-copr OWNER/PROJECT
+                       enable a COPR for search, install, and upgrades
+  repo-disable-copr OWNER/PROJECT
+                       disable a previously enabled COPR
   list | info | status | verify | search <term>...
 EOF
 }
@@ -890,6 +986,9 @@ main() {
         status)   cmd_status ;;
         verify)   cmd_verify ;;
         search)   cmd_search "$@" ;;
+        repo-list) cmd_repo_list ;;
+        repo-enable-copr) cmd_repo_enable_copr "$@" ;;
+        repo-disable-copr) cmd_repo_disable_copr "$@" ;;
         ""|-h|--help|help) usage ;;
         *) die "unknown command '$cmd' (try --help)" ;;
     esac
