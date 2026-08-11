@@ -39,8 +39,8 @@ jobs:
           if [ -n "$review" ]; then
             review_id="$(jq -r .id <<<"$review")"
             body="$(jq -r '.body // "" | ascii_downcase' <<<"$review")"
-            findings="$(gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PR_NUMBER/comments" \
-              --jq "[flatten[] | select(.pull_request_review_id == $review_id and (.user.login | ascii_downcase | contains(\"copilot\")))] | length")"
+            comments="$(gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PR_NUMBER/comments")"
+            findings="$(jq "[flatten[] | select(.pull_request_review_id == $review_id and (.user.login | ascii_downcase | contains(\"copilot\")))] | length" <<<"$comments")"
 
             if grep -Eq 'unable to review|quota|could not review|cannot review|failed to review' <<<"$body"; then
               description="Copilot did not complete its review"
