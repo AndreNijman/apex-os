@@ -1,7 +1,3 @@
----
-applyTo: "apexd/**/*.rs,apexd/**/*.toml,config/sysprofiles/**,docs/apexd-dbus.md"
----
-
 # apexd, CLI, and policy review
 
 - `apexd` is a privileged system policy daemon. Validate every caller-controlled value before filesystem, process, sysfs, D-Bus, package, boot, fan, battery, or power operations. Authorization belongs in D-Bus/polkit policy as well as the CLI UX.
