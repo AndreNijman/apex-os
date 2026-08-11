@@ -1,7 +1,7 @@
-# Merge-policy files define the checks that protect main. Collaborators may use
-# them, but only the repository owner may approve changes to the policy itself.
+# Agent policy and merge checks protect the architecture and main. Collaborators
+# may use them, but only the repository owner may approve policy changes.
 /.github/CODEOWNERS @AndreNijman
-/.github/copilot-instructions.md @AndreNijman
-/.github/instructions/ @AndreNijman
-/.github/workflows/copilot-review-gate.yml @AndreNijman
+/AGENTS.md @AndreNijman
+/apexd/AGENTS.md @AndreNijman
+/installer/AGENTS.md @AndreNijman
 /.github/workflows/pr-validation.yml @AndreNijman

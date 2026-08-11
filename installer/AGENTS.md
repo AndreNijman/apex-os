@@ -1,7 +1,3 @@
----
-applyTo: "installer/**,files/scripts/spike-e/**,docs/m4-install-runbook.md"
----
-
 # Installer and disk-safety review
 
 Installer regressions can destroy a user's existing OS. Review every path adversarially and fail closed.
