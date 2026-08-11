@@ -1,0 +1,7 @@
+# Merge-policy files define the checks that protect main. Collaborators may use
+# them, but only the repository owner may approve changes to the policy itself.
+/.github/CODEOWNERS @AndreNijman
+/.github/copilot-instructions.md @AndreNijman
+/.github/instructions/ @AndreNijman
+/.github/workflows/copilot-review-gate.yml @AndreNijman
+/.github/workflows/pr-validation.yml @AndreNijman
