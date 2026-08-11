@@ -1,0 +1,128 @@
+name: PR validation
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Select tests
+    runs-on: ubuntu-24.04
+    outputs:
+      rust: ${{ steps.paths.outputs.rust }}
+      installer: ${{ steps.paths.outputs.installer }}
+    steps:
+      - name: Checkout history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          printf '%s\n' "$files"
+
+          rust=false
+          installer=false
+          grep -Eq '^(apexd/|config/sysprofiles/)' <<<"$files" && rust=true
+          grep -Eq '^installer/' <<<"$files" && installer=true
+
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "installer=$installer" >> "$GITHUB_OUTPUT"
+
+  static:
+    name: Static validation
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # These checks are cheap enough to run over the complete tree. That avoids
+      # path-filter blind spots when an included or copied file changes.
+      - name: Validate shell and Python syntax
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            bash -n "$file"
+          done < <(find . -type f \( -name '*.sh' -o -path './installer/apex-install' -o -path './installer/apex-installer-launch' \) -print0)
+          python3 -m py_compile installer/apex-installer-gui
+
+      - name: Validate TOML
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import tomllib
+
+          for path in pathlib.Path('.').rglob('*.toml'):
+              if '.git' not in path.parts and 'target' not in path.parts:
+                  with path.open('rb') as file:
+                      tomllib.load(file)
+          PY
+
+  rust:
+    name: Rust validation
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apexd
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup component add clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apexd/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('apexd/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked
+
+  installer:
+    name: Installer safety and UI
+    needs: changes
+    if: needs.changes.outputs.installer == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # This is intentionally the complete suite when installer code changes:
+      # pre-write guards plus measured renders of every GUI page at both minimum
+      # panel sizes. Its container setup is too expensive for unrelated PRs.
+      - name: Run installer safety suite
+        working-directory: installer
+        run: ./test-installer.sh
+
+  result:
+    name: PR validation
+    if: always()
+    needs: [changes, static, rust, installer]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every applicable test
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<<"$RESULTS" \
+            || { echo "One or more PR validation jobs failed or were cancelled"; exit 1; }
