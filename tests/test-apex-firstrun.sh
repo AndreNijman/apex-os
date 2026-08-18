@@ -35,10 +35,15 @@ extract() {
 }
 
 extract '# Repair an already-seeded ~\/.zshrc' "${WORK}/zshrc-block.sh" ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE
+extract '# Touchpad tap behaviour for a hyprland.conf' "${WORK}/touchpad-block.sh" tap_button_map
 
 # The blocks log through the script's own helper and read HOME/HYPR_CONF, so the
 # harness supplies exactly those and nothing else.
 run_zshrc()   { HOME="$1" bash -c 'set -euo pipefail; log() { :; }; source "$1"' -- "${WORK}/zshrc-block.sh"; }
+run_touchpad() {
+    HOME="$1" HYPR_CONF="$1/.config/hypr/hyprland.conf" \
+        bash -c 'set -euo pipefail; log() { :; }; source "$1"' -- "${WORK}/touchpad-block.sh"
+}
 
 section "zsh autosuggestion colour"
 # The bug: zle lower-cases a colour spec when it stores the highlight, and
@@ -77,6 +82,50 @@ h="${WORK}/zsh-none"; mkdir -p "$h"
 run_zshrc "$h"
 [ ! -e "${h}/.zshrc" ] \
     && ok "no ~/.zshrc is invented" || bad "no ~/.zshrc is invented"
+
+section "touchpad tap defaults"
+# Appended only to a config that states no tap preference at all: in Hyprland the
+# last assignment wins, so appending over a user's setting would silently
+# override it.
+h="${WORK}/hypr-bare"; mkdir -p "${h}/.config/hypr"
+printf '%s\n' 'monitor = , preferred, auto, 1' > "${h}/.config/hypr/hyprland.conf"
+run_touchpad "$h"
+grep -q 'tap_button_map = lrm' "${h}/.config/hypr/hyprland.conf" \
+    && ok "tap defaults are seeded when the config states none" \
+    || bad "tap defaults are seeded when the config states none"
+grep -q 'tap-to-click   = true' "${h}/.config/hypr/hyprland.conf" \
+    && ok "tap-to-click is stated with the map" || bad "tap-to-click is stated with the map"
+run_touchpad "$h"
+[ "$(grep -c 'tap_button_map = lrm' "${h}/.config/hypr/hyprland.conf")" = 1 ] \
+    && ok "re-running appends nothing" || bad "re-running appends nothing"
+
+h="${WORK}/hypr-user"; mkdir -p "${h}/.config/hypr"
+printf '%s\n' 'input {' '    touchpad {' '        tap-to-click = false' '    }' '}' \
+    > "${h}/.config/hypr/hyprland.conf"
+cp "${h}/.config/hypr/hyprland.conf" "${WORK}/hypr-user.orig"
+run_touchpad "$h"
+cmp -s "${h}/.config/hypr/hyprland.conf" "${WORK}/hypr-user.orig" \
+    && ok "a user who disabled tapping keeps it disabled" \
+    || bad "a user who disabled tapping keeps it disabled"
+
+h="${WORK}/hypr-mapped"; mkdir -p "${h}/.config/hypr"
+printf '%s\n' 'input { touchpad { tap_button_map = lmr } }' > "${h}/.config/hypr/hyprland.conf"
+cp "${h}/.config/hypr/hyprland.conf" "${WORK}/hypr-mapped.orig"
+run_touchpad "$h"
+cmp -s "${h}/.config/hypr/hyprland.conf" "${WORK}/hypr-mapped.orig" \
+    && ok "a user's own tap map is left alone" || bad "a user's own tap map is left alone"
+
+h="${WORK}/hypr-commented"; mkdir -p "${h}/.config/hypr"
+printf '%s\n' '# tap-to-click = true' > "${h}/.config/hypr/hyprland.conf"
+run_touchpad "$h"
+grep -q 'tap_button_map = lrm' "${h}/.config/hypr/hyprland.conf" \
+    && ok "a commented-out setting does not count as a preference" \
+    || bad "a commented-out setting does not count as a preference"
+
+h="${WORK}/hypr-none"; mkdir -p "${h}/.config/hypr"
+run_touchpad "$h"
+[ ! -e "${h}/.config/hypr/hyprland.conf" ] \
+    && ok "no hyprland.conf is invented" || bad "no hyprland.conf is invented"
 
 printf '\napex-shell-firstrun: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
