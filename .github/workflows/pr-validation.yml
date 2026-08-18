@@ -153,6 +153,13 @@ jobs:
       - name: Run package-engine assertions
         run: ./tests/test-apex-pkg.sh
 
+      # The per-login provisioner edits files that belong to the user. These
+      # extract its self-healing blocks from the shipped script and run them
+      # against throwaway HOMEs, asserting the repairs happen once and nothing
+      # the user wrote is touched.
+      - name: Run user-provisioner assertions
+        run: ./tests/test-apex-firstrun.sh
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail
@@ -163,7 +170,8 @@ jobs:
           # review — unquoted expansions and recursive deletes that an empty
           # variable turns into a path on the live system. The file is clean at
           # this level today, so any finding is one this PR introduced.
-          shellcheck -S warning files/system/libexec/apex-pkg tests/test-apex-pkg.sh
+          shellcheck -S warning files/system/libexec/apex-pkg \
+            tests/test-apex-pkg.sh tests/test-apex-firstrun.sh
 
   result:
     name: PR validation
