@@ -648,36 +648,6 @@ HYPRAPEX
     log "seeded Hyprland autostart -> ${HYPR_CONF}"
 fi
 
-# Touchpad tap behaviour for a hyprland.conf that predates the APEX template, or
-# that came from one of the fallback branches above (the distro default and the
-# minimal base both carry no input block at all). Hyprland's own defaults do
-# enable tap-to-click, but nothing then states the tap-to-button map, so a device
-# whose quirks changed it is left alone silently.
-#
-# Appended only when the file states NEITHER setting, i.e. the user has never
-# expressed a touchpad preference; a config that already has one is not touched,
-# because in Hyprland the last assignment wins and appending would override it.
-# `^[^#]*` rather than an anchored keyword: the setting may be indented, may sit
-# on a line with its enclosing braces, and may carry a trailing comment — but a
-# commented-out line is not a preference and must not suppress the seed.
-if [ -f "${HYPR_CONF}" ] \
-   && ! grep -qE '^[^#]*(tap-to-click|tap_button_map)[[:space:]]*=' "${HYPR_CONF}"; then
-    cat >> "${HYPR_CONF}" <<'HYPRTOUCH'
-
-# ── APEX touchpad defaults (seeded by apex-shell-firstrun) ──
-# lrm = 1/2/3 fingers -> left/right/middle click, so a two-finger tap is a right
-# click. Needs a touchpad the kernel exposes with multitouch slots; `apex doctor`
-# reports whether this machine has one.
-input {
-    touchpad {
-        tap-to-click   = true
-        tap_button_map = lrm
-    }
-}
-HYPRTOUCH
-    log "seeded touchpad tap defaults -> ${HYPR_CONF}"
-fi
-
 # ── 6. niri autostart (APEX-OS addition; the shell supports niri) ────────────
 # The shell's own installer only covers Hyprland, but APEX Shell auto-detects
 # niri (NiriService.qml) and the greeter offers a niri session, so seed a niri
