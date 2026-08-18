@@ -129,9 +129,8 @@ if pgrep -f "quickshell -c ${SHELL_DIR}" >/dev/null 2>&1 \
 fi
 
 log "starting quickshell -c ${SHELL_DIR}"
-ARGV_SHIM=/usr/lib64/apex/libapex-quickshell-argc.so
-if [ -r "${ARGV_SHIM}" ]; then
-    exec env LD_PRELOAD="${ARGV_SHIM}" quickshell -c "${SHELL_DIR}"
-fi
-log "WebEngine compatibility shim missing — starting without inline web support"
+# No LD_PRELOAD: the argc shim existed only because Chromium treats Quickshell's
+# argc=0 as fatal, and the shell no longer loads Qt WebEngine. The library is
+# still in the image (removing it rebuilds the core tier and costs the fleet a
+# full-size update) but nothing loads it any more.
 exec quickshell -c "${SHELL_DIR}"
