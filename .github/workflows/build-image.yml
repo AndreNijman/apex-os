@@ -662,6 +662,38 @@ jobs:
           run 'apex tier >/dev/null' \
             || fail "apex tier broke — APEX Shell's power tab calls it as the session user"
 
+          # The package engine is a shell script, so a broken code path shows up
+          # only when a user runs it. These assert, in the image that will
+          # actually ship, that `apex install` advertises the local-.rpm form and
+          # enforces it — the advertisement matters because a feature nobody can
+          # discover is not shipped, and the refusal matters because it is the
+          # step that runs before anything is copied into /var.
+          run 'apex install --help | grep -q "\.rpm"' \
+            || fail "apex install --help does not mention installing a local .rpm file"
+          run 'apex install --help | grep -q allow-unsigned' \
+            || fail "apex install --help does not offer the unverified-RPM opt-in"
+          run '/usr/libexec/apex-pkg --help | grep -q allow-unsigned' \
+            || fail "apex-pkg --help does not mention --allow-unsigned"
+          # The container is root, so this reaches the engine's real argument
+          # handling. It must refuse by name and exit non-zero without creating
+          # any state — a silent success here would mean a rebuild later failing
+          # on a cached file that was never written.
+          out=$(run '/usr/libexec/apex-pkg install /nonexistent/apex-ci.rpm 2>&1; echo "rc=$?"')
+          grep -q 'no such file: /nonexistent/apex-ci.rpm' <<<"$out" \
+            || fail "apex-pkg does not refuse a missing .rpm path by name (got: $out)"
+          grep -q 'rc=1' <<<"$out" \
+            || fail "apex-pkg exits 0 on a missing .rpm path (got: $out)"
+          # A reverse-DNS id ending in .rpm is a FILE, not a Flatpak. Getting this
+          # order wrong sends a file the user pointed at to Flathub.
+          run '/usr/libexec/apex-pkg install org.foo.Bar.rpm 2>&1 | grep -q "no such file"' \
+            || fail "apex-pkg routes org.foo.Bar.rpm to Flatpak instead of treating it as a file"
+          run 'test ! -e /var/lib/apex/pkg/requested' \
+            || fail "a refused install wrote to the requested list"
+          # The dependency resolution for a local file is the one thing that is
+          # neither rpm nor a shell builtin; losing it would break only that path.
+          run 'dnf5 repoquery --installed --whatprovides bash --qf "%{name}\n" | grep -q bash' \
+            || fail "dnf5 repoquery --installed --whatprovides is unavailable — local .rpm dependency resolution would fail"
+
           # Greeter wallpaper: the helper, its sudoers rule, and both ends of the
           # wiring. This is the fix for "the lock screen keeps the default
           # wallpaper", and every part of it is silently skippable at runtime,

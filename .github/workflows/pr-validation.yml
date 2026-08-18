@@ -14,6 +14,7 @@ jobs:
     outputs:
       rust: ${{ steps.paths.outputs.rust }}
       installer: ${{ steps.paths.outputs.installer }}
+      engine: ${{ steps.paths.outputs.engine }}
     steps:
       - name: Checkout history
         uses: actions/checkout@v4
@@ -32,11 +33,17 @@ jobs:
 
           rust=false
           installer=false
+          engine=false
           grep -Eq '^(apexd/|config/sysprofiles/)' <<<"$files" && rust=true
           grep -Eq '^installer/' <<<"$files" && installer=true
+          # files/** is the whole runtime payload of the image — the package
+          # engine, session launchers, guards. A PR touching only that used to
+          # run nothing but a syntax check that did not even reach it.
+          grep -Eq '^(files/|tests/)' <<<"$files" && engine=true
 
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
           echo "installer=$installer" >> "$GITHUB_OUTPUT"
+          echo "engine=$engine" >> "$GITHUB_OUTPUT"
 
   static:
     name: Static validation
@@ -127,10 +134,41 @@ jobs:
         working-directory: installer
         run: ./test-installer.sh
 
+  engine:
+    name: Package engine
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Runs the shipped /usr/libexec/apex-pkg itself: argument classification,
+      # the local-.rpm validation refusals, the package-name guard that keeps an
+      # untrusted RPM header out of a root-owned path, the cache identifiers a
+      # rebuild depends on, and the unsigned-package policy. No root, no network,
+      # nothing built or merged — every case is reached before the engine's root
+      # gate or is a pure function. Cases needing `rpm` skip out loud here and
+      # run for real in the image smoke test in build-image.yml.
+      - name: Run package-engine assertions
+        run: ./tests/test-apex-pkg.sh
+
+      - name: ShellCheck the privileged helpers
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          # A hard gate, not advisory: these run as root, and the warning class
+          # shellcheck catches here is exactly the class that is invisible in
+          # review — unquoted expansions and recursive deletes that an empty
+          # variable turns into a path on the live system. The file is clean at
+          # this level today, so any finding is one this PR introduced.
+          shellcheck -S warning files/system/libexec/apex-pkg tests/test-apex-pkg.sh
+
   result:
     name: PR validation
     if: always()
-    needs: [changes, static, rust, installer]
+    needs: [changes, static, rust, installer, engine]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every applicable test

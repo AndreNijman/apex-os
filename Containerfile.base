@@ -457,8 +457,9 @@ RUN systemctl --global enable apex-shell-firstrun.service
 # deployment is never touched, so updates keep working, while binaries, .desktop
 # files, icons, man pages, systemd units and udev rules all land at the real /usr
 # paths the rest of the OS already searches. Fedora, RPM Fusion, and explicitly
-# enabled COPRs are the package sources, so there is no APEX registry to run,
-# sign or keep online.
+# enabled COPRs are the repository sources, so there is no APEX registry to run,
+# sign or keep online; a path to a local .rpm installs that file through the same
+# pipeline, with its dependencies still resolved from the repositories.
 #
 # The extension records the OS version it was built for and systemd refuses to
 # merge a mismatched one; apex-sysext-rebuild.service turns that refusal into an
@@ -471,11 +472,16 @@ RUN set -eux; \
     # Every external tool the engine drives. These are asserted rather than
     # trusted because a missing one turns `apex install` into a confusing
     # runtime failure on the user's machine instead of a failed build here.
-    for t in rpm rpmkeys rpm2cpio dnf5 curl jq setfiles systemd-sysext \
-             systemd-sysusers systemd-tmpfiles ldconfig; do \
+    for t in rpm rpmkeys dnf5 curl jq setfiles systemd-sysext \
+             systemd-sysusers systemd-tmpfiles ldconfig od readlink sha256sum; do \
         command -v "$t" >/dev/null || { echo "FATAL: apex-pkg needs $t"; exit 1; }; \
     done; \
     dnf5 copr --help >/dev/null; \
+    # Installing a local .rpm resolves its dependencies by asking libdnf5 which
+    # requirements the running image already satisfies. That subcommand is a hard
+    # dependency of the local-file path, and losing it would break only that
+    # path — silently, on the user's machine — so it is asserted here.
+    dnf5 repoquery --help >/dev/null; \
     # mksquashfs is preferred but genuinely optional: it reaches this image only
     # as a weak dependency of dracut-squash, so the engine falls back to a
     # directory extension. Note it rather than failing the build, and note it
@@ -491,6 +497,7 @@ RUN set -eux; \
         'd /var/lib/extensions 0755 root root -' \
         'd /var/lib/apex 0755 root root -' \
         'd /var/lib/apex/pkg 0700 root root -' \
+        'd /var/lib/apex/pkg/local 0700 root root -' \
         > /usr/lib/tmpfiles.d/apex-pkg.conf; \
     # systemd-sysext.service is what merges the extension at boot. It is enabled
     # by preset today, which is exactly the kind of upstream default that can
