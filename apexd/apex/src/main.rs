@@ -58,12 +58,18 @@ enum Cmd {
     Doctor,
     /// Show the booted image and its changelog labels.
     Changelog,
-    /// Install packages from enabled Fedora, RPM Fusion, or COPR repositories. Requires root.
+    /// Install packages from the enabled repositories, a Flatpak id, or a local
+    /// .rpm file. Requires root.
+    ///
+    /// Each argument is a package name from Fedora/RPM Fusion/an enabled COPR, a
+    /// reverse-DNS Flatpak id (org.gimp.GIMP), or a path to an .rpm file. A local
+    /// file is copied into /var/lib/apex/pkg/local so later rebuilds no longer
+    /// need the original; its dependencies still come from the repositories.
     ///
     /// Packages go into a systemd system extension, NOT an rpm-ostree layer, so
     /// the OS keeps updating normally and `apex rollback` still works.
     Install {
-        #[arg(required = true, value_name = "PACKAGE")]
+        #[arg(required = true, value_name = "PACKAGE|FILE.rpm")]
         packages: Vec<String>,
         /// Skip weak dependencies (smaller install, fewer optional features).
         #[arg(long)]
@@ -71,6 +77,12 @@ enum Cmd {
         /// Also consider a repository that is disabled by default.
         #[arg(long, value_name = "REPO")]
         enable_repo: Vec<String>,
+        /// Install a local .rpm file that no trusted key covers. Applies only to
+        /// the files named on this command line, never to repository packages,
+        /// and the decision is recorded per file so `apex pkg list` and
+        /// `apex pkg verify` keep reporting it.
+        #[arg(long)]
+        allow_unsigned: bool,
     },
     /// Remove packages installed with `apex install`. Requires root.
     Remove {
@@ -274,17 +286,13 @@ async fn main() {
             packages,
             no_weak_deps,
             enable_repo,
-        } => {
-            let mut argv = vec!["install".to_string()];
-            argv.extend(packages);
-            if no_weak_deps {
-                argv.push("--no-weak-deps".to_string());
-            }
-            for repo in enable_repo {
-                argv.push(format!("--enable-repo={repo}"));
-            }
-            ops::pkg(&argv)
-        }
+            allow_unsigned,
+        } => ops::pkg(&install_argv(
+            packages,
+            no_weak_deps,
+            enable_repo,
+            allow_unsigned,
+        )),
         Cmd::Remove { packages } => {
             let mut argv = vec!["remove".to_string()];
             argv.extend(packages);
@@ -324,6 +332,32 @@ async fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// Build the engine argv for `apex install`.
+///
+/// Split out of `main` so the mapping can be pinned by a test: the engine is a
+/// separate process, so a dropped or misspelled flag here is not a compile error
+/// — it is a silent policy change. `--allow-unsigned` in particular decides
+/// whether an unverifiable RPM is refused or installed.
+fn install_argv(
+    packages: Vec<String>,
+    no_weak_deps: bool,
+    enable_repo: Vec<String>,
+    allow_unsigned: bool,
+) -> Vec<String> {
+    let mut argv = vec!["install".to_string()];
+    argv.extend(packages);
+    if no_weak_deps {
+        argv.push("--no-weak-deps".to_string());
+    }
+    for repo in enable_repo {
+        argv.push(format!("--enable-repo={repo}"));
+    }
+    if allow_unsigned {
+        argv.push("--allow-unsigned".to_string());
+    }
+    argv
 }
 
 fn cmd_fingerprint() -> i32 {
@@ -998,4 +1032,100 @@ fn read_sys(rel: &str) -> Option<String> {
 
 fn read_abs(path: &str) -> Option<String> {
     std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+// `apex install` hands its arguments to a separate process, so nothing here is
+// type-checked against the engine. These pin the two things that would fail
+// silently: that a path is accepted where a package name goes, and that the
+// unverified-RPM opt-in is off unless asked for and reaches the engine when it
+// is asked for.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn install(argv: &[&str]) -> (Vec<String>, bool, Vec<String>, bool) {
+        match Cli::try_parse_from(argv).expect("parses").command {
+            Cmd::Install {
+                packages,
+                no_weak_deps,
+                enable_repo,
+                allow_unsigned,
+            } => (packages, no_weak_deps, enable_repo, allow_unsigned),
+            _ => panic!("not an install"),
+        }
+    }
+
+    #[test]
+    fn the_cli_definition_is_internally_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn install_takes_a_local_rpm_path_as_a_package() {
+        // The engine decides what is a file and what is a package name; the CLI
+        // must not filter, reorder or reject either form.
+        let (packages, ..) = install(&[
+            "apex",
+            "install",
+            "/media/usb/google-chrome-stable.rpm",
+            "htop",
+            "org.gimp.GIMP",
+        ]);
+        assert_eq!(
+            packages,
+            vec![
+                "/media/usb/google-chrome-stable.rpm".to_string(),
+                "htop".to_string(),
+                "org.gimp.GIMP".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_path_with_spaces_survives_as_one_argument() {
+        let (packages, ..) = install(&["apex", "install", "/media/My Stick/an app.rpm"]);
+        assert_eq!(packages, vec!["/media/My Stick/an app.rpm".to_string()]);
+    }
+
+    #[test]
+    fn the_unverified_opt_in_is_off_unless_asked_for() {
+        let (_, _, _, allow_unsigned) = install(&["apex", "install", "./x.rpm"]);
+        assert!(!allow_unsigned);
+        assert!(!install_argv(vec!["./x.rpm".into()], false, vec![], false)
+            .contains(&"--allow-unsigned".to_string()));
+    }
+
+    #[test]
+    fn every_flag_reaches_the_engine_argv() {
+        let (packages, no_weak_deps, enable_repo, allow_unsigned) = install(&[
+            "apex",
+            "install",
+            "--allow-unsigned",
+            "--no-weak-deps",
+            "--enable-repo",
+            "extra",
+            "./x.rpm",
+        ]);
+        assert!(allow_unsigned && no_weak_deps);
+        assert_eq!(
+            install_argv(packages, no_weak_deps, enable_repo, allow_unsigned),
+            vec![
+                "install".to_string(),
+                "./x.rpm".to_string(),
+                "--no-weak-deps".to_string(),
+                "--enable-repo=extra".to_string(),
+                "--allow-unsigned".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn install_is_still_a_root_only_verb() {
+        // Adding a flag must not accidentally move `install` out of the
+        // privileged set: it writes an extension and re-merges /usr.
+        let cli = Cli::try_parse_from(["apex", "install", "--allow-unsigned", "./x.rpm"]).unwrap();
+        assert!(matches!(cli.command, Cmd::Install { .. }));
+    }
 }

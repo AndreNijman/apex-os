@@ -43,9 +43,21 @@
 #   * kernels, kernel modules and akmods — those need an initramfs and a real
 #     deployment, so they belong in the image
 #
-# Fedora, RPM Fusion, and explicitly enabled COPRs are the package sources; there
-# is no APEX registry to trust, run or keep online. Every RPM is signature-checked
-# before extraction.
+# WHERE PACKAGES COME FROM
+# Fedora, RPM Fusion, and explicitly enabled COPRs are the repository sources;
+# there is no APEX registry to trust, run or keep online. In addition, a path to
+# a local .rpm file installs THAT file through the same pipeline — vendor RPMs
+# (the ones downloaded from a website) are the reason this exists. Such a file is
+# copied into ${PKG_ROOT}/local at install time and every later rebuild reads the
+# COPY, because `apex update` and the post-OS-upgrade rebuild must still work
+# when the USB stick the file came from is long gone. Its dependencies still come
+# from the repositories.
+#
+# Every RPM is signature-checked before extraction and an unverifiable one is
+# refused. A local file that no trusted key covers can be installed only by
+# repeating the command with --allow-unsigned, which records the decision against
+# that file's exact bytes so `apex pkg list` and `apex pkg verify` keep telling
+# the truth about where the software came from.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -60,6 +72,12 @@ readonly EXT_IMAGE="${EXT_DIR}/${EXT_NAME}.raw"
 readonly EXT_TREE="${EXT_DIR}/${EXT_NAME}"
 readonly REQUESTED="${PKG_ROOT}/requested"
 readonly STATE="${PKG_ROOT}/state.json"
+# Local .rpm files the user installed by path, kept as <NAME>.rpm so the
+# requested-list entry `local:<NAME>` round-trips to exactly one file and
+# `apex remove <NAME>` can find it. The EVR is deliberately NOT in the file name:
+# NEVRA cannot be split back into a name unambiguously (is `foo-bar-1.0-1` the
+# package `foo-bar` or `foo`?), and the EVR is in the RPM header anyway.
+readonly LOCAL_DIR="${PKG_ROOT}/local"
 readonly ETC_SAVE="${PKG_ROOT}/etc"
 readonly ETC_LIST="${PKG_ROOT}/etc.list"
 readonly VAR_LIST="${PKG_ROOT}/var.list"
@@ -72,8 +90,13 @@ readonly COPR_KEYS="${PKG_ROOT}/copr-keys"
 readonly WORK_ROOT="${PKG_ROOT}/work"
 readonly LOCK="${PKG_ROOT}/.lock"
 # Increment whenever a newly baked image package may overlap existing user
-# extensions. A mismatch triggers one rebuild even within the same VERSION_ID.
-readonly PKG_COMPAT_LEVEL=1
+# extensions, or whenever the on-disk layout under PKG_ROOT changes. A mismatch
+# triggers one rebuild even within the same VERSION_ID.
+#   1 -> 2: added ${PKG_ROOT}/local (cached local .rpm files) and the
+#           `local:<NAME>` requested-list form. A level-1 state.json has neither,
+#           so its requested list rebuilds unchanged; the only effect is one
+#           extra rebuild on the first boot after the update.
+readonly PKG_COMPAT_LEVEL=2
 
 # Packages that must never come from an extension. The first group needs an
 # initramfs/deployment; the second is the running userspace ABI floor — shadowing
@@ -82,14 +105,70 @@ readonly REFUSE_RE='^(kernel|kernel-core|kernel-modules(-.*)?|kernel-devel(-.*)?
 
 # Progress goes to stderr, never stdout: stdout is reserved for data (paths,
 # listings) and functions like build_payload return their result through it.
-# ── Flatpak routing ─────────────────────────────────────────────────────────
+# ── argument routing ────────────────────────────────────────────────────────
+# Each argument is one of three things, decided in this order:
+#
+#   1. a local .rpm FILE   — a path, or a name ending in .rpm
+#   2. a Flatpak ID        — reverse-DNS, three or more segments
+#   3. a repository package name
+#
+# The order is not cosmetic: the Flatpak regex also matches `org.foo.Bar.rpm`,
+# so testing it first would route a file the user pointed at straight to Flathub.
+#
 # A reverse-DNS application ID (org.gimp.GIMP, io.github.foo.Bar) is routed to
-# Flatpak; anything else is an RPM. The rule is unambiguous rather than clever:
-# Flathub IDs are always three or more dot-separated segments each starting with
-# a letter, and no RPM is named that way — `python3.12` has two segments and
-# `java-1.8.0-openjdk` has segments starting with digits, so neither matches.
+# Flatpak. The rule is unambiguous rather than clever: Flathub IDs are always
+# three or more dot-separated segments each starting with a letter, and no RPM is
+# named that way — `python3.12` has two segments and `java-1.8.0-openjdk` has
+# segments starting with digits, so neither matches.
 is_flatpak_id() {
     [[ "$1" =~ ^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z][A-Za-z0-9_-]*){2,}$ ]]
+}
+
+# The four bytes every RPM starts with (the lead magic, 0xedabeedb). Checked
+# before rpm is asked to read the header so "you gave me a .zip" is reported as
+# that, not as an unexplained rpm error.
+rpm_magic_ok() {
+    local magic
+    magic="$(head -c4 -- "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    [ "$magic" = edabeedb ]
+}
+
+# Is this argument meant to be a local RPM file rather than a package name?
+#
+# Deliberately three narrow rules instead of a bare `[ -e "$1" ]`: a plain
+# `apex install htop` run in a directory that happens to contain a file called
+# `htop` must still install the repository package, so a bare name only counts as
+# a file when it really is an RPM.
+is_local_rpm_arg() {
+    case "$1" in
+        *.rpm) return 0 ;;   # named as a file, whether or not it exists yet
+        */*)   return 0 ;;   # a path is never a package name
+    esac
+    [ -f "$1" ] && rpm_magic_ok "$1"
+}
+
+# RPM package names, restricted to what rpm itself allows. This is a security
+# check, not a nicety: the NAME out of an untrusted file's header is used to
+# build a path under LOCAL_DIR, and this engine runs as root.
+valid_pkg_name() {
+    [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9_.+-]*$ ]]
+}
+
+# ── local-file identifiers ──────────────────────────────────────────────────
+# One package installed from a local file is one line `local:<NAME>` in the
+# requested list, one cached RPM, and (only if the user opted into an
+# unverifiable file) one trust marker. Everything else derives from those.
+local_id()     { printf 'local:%s' "$1"; }
+is_local_id()  { case "$1" in local:?*) return 0 ;; esac; return 1; }
+local_name()   { printf '%s' "${1#local:}"; }
+local_cache()  { printf '%s/%s.rpm'   "$LOCAL_DIR" "$(local_name "$1")"; }
+local_marker() { printf '%s/%s.trust' "$LOCAL_DIR" "$(local_name "$1")"; }
+
+# Does requested-list entry $1 name the same package the user typed as $2?
+# `apex remove chrome` has to match the entry `local:chrome`, because the user
+# installed it by path and a path is not what ends up in the list.
+requested_matches() {
+    [ "$1" = "$2" ] || [ "$1" = "local:${2}" ]
 }
 
 have_flatpak() { command -v flatpak >/dev/null 2>&1; }
@@ -130,6 +209,126 @@ save_requested() {
     mv -f "${REQUESTED}.tmp" "$REQUESTED"
 }
 
+# ── local .rpm files ─────────────────────────────────────────────────────────
+
+# Everything that can be wrong with a file the user pointed at is decided here,
+# once, BEFORE anything is copied, downloaded or built. Sets LR_PATH, LR_NAME,
+# LR_EVR and LR_ARCH; dies otherwise.
+#
+# It sets globals rather than printing them because `die` inside a command
+# substitution only kills the subshell — the caller would carry on with an empty
+# value, which is exactly the fail-open shape this file must not have.
+inspect_local_rpm() {
+    local arg="$1" hdr installed
+    [ -e "$arg" ] || die "no such file: ${arg}"
+    [ -f "$arg" ] || die "not a regular file: ${arg}"
+    [ -r "$arg" ] || die "cannot read ${arg} (permission denied)"
+    # The user may well have typed a relative path, and nothing after this point
+    # can rely on the working directory: the rebuild that runs at boot has none.
+    LR_PATH="$(readlink -f -- "$arg")" || die "cannot resolve the path ${arg}"
+    [ -f "$LR_PATH" ] || die "not a regular file: ${arg}"
+    rpm_magic_ok "$LR_PATH" || die "${arg} is not an RPM package (no RPM header)"
+
+    hdr="$(rpm -qp --nosignature --qf '%{NAME}|%{EVR}|%{ARCH}' -- "$LR_PATH" 2>/dev/null)" \
+        || die "cannot read the RPM header of ${arg}"
+    LR_NAME="${hdr%%|*}"
+    LR_ARCH="${hdr##*|}"
+    LR_EVR="${hdr#*|}"; LR_EVR="${LR_EVR%|*}"
+
+    [ -n "$LR_NAME" ] && [ -n "$LR_EVR" ] && [ -n "$LR_ARCH" ] \
+        || die "the RPM header of ${arg} has no name/version/architecture"
+    valid_pkg_name "$LR_NAME" \
+        || die "refusing ${arg}: its package name '${LR_NAME}' is not a valid RPM name"
+
+    case "$LR_ARCH" in
+        noarch|"$(uname -m)") ;;
+        *) die "refusing ${arg}: it is built for ${LR_ARCH}, this machine is $(uname -m)" ;;
+    esac
+
+    if [[ "$LR_NAME" =~ $REFUSE_RE ]]; then
+        die "refusing ${arg}: '${LR_NAME}' is a kernel or core-system package, which must ship in the APEX image, not an extension"
+    fi
+    if installed="$(rpm -q --qf '%{EVR}' -- "$LR_NAME" 2>/dev/null)"; then
+        die "refusing ${arg}: APEX-OS already ships ${LR_NAME}-${installed}. Replacing an image package from an extension is an OS update, not a package install"
+    fi
+}
+
+# True when the RPM verifies against a keyring APEX already trusts: the immutable
+# system rpmdb (Fedora, RPM Fusion) or the writable COPR keyring under /var.
+# Leaves rpmkeys' own words in RPM_SIGSTATUS so the refusal can quote them.
+rpm_signature_ok() {
+    local rpmfile="$1"
+    if RPM_SIGSTATUS="$(rpmkeys --checksig -- "$rpmfile" 2>&1)" \
+       && [[ "$RPM_SIGSTATUS" = *"digests signatures OK"* ]]; then
+        return 0
+    fi
+    if [ -d "$COPR_KEY_DB" ]; then
+        local copr
+        if copr="$(rpmkeys --dbpath "$COPR_KEY_DB" --checksig -- "$rpmfile" 2>&1)" \
+           && [[ "$copr" = *"digests signatures OK"* ]]; then
+            RPM_SIGSTATUS="$copr"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Has the user explicitly accepted THIS package as unverifiable, and are these
+# still the exact bytes they accepted? The marker holds the checksum of the
+# cached file, so swapping the cache for different content revokes the decision
+# instead of inheriting it.
+trusted_unsigned() {
+    local marker; marker="$(local_marker "$1")"
+    [ -f "$marker" ] || return 1
+    [ "$(cat "$marker" 2>/dev/null)" = "$(sha "$2")" ]
+}
+
+# The refusal a user sees for a file no trusted key covers. It has to name the
+# file, quote rpmkeys, and give the exact command that would proceed — a bare
+# "unsigned package" leaves them with nothing to do but give up or find a worse
+# tool. It is never a prompt: this runs from `apex update` and from a boot-time
+# unit, where there is no terminal to answer one.
+refuse_unsigned() {
+    local file="$1"
+    printf 'apex-pkg: error: %s\n' \
+        "cannot verify ${file}" \
+        "rpmkeys says: ${RPM_SIGSTATUS:-no signature}" \
+        "" \
+        "APEX checks every RPM against a trusted key before extracting it. This" \
+        "file is signed by a key APEX does not have (typical for vendor RPMs" \
+        "downloaded from a website) or is not signed at all, so installing it" \
+        "means trusting whoever gave it to you and nothing else." \
+        "" \
+        "If the vendor's own site is where it came from and you accept that:" \
+        "  sudo apex install --allow-unsigned ${file}" \
+        "" \
+        "If it is meant to come from a COPR, add the repository instead — that" \
+        "keeps signature checking on:" \
+        "  sudo apex repo enable-copr OWNER/PROJECT" >&2
+    exit 1
+}
+
+# Copy the file into PKG_ROOT so every later rebuild has it. This is what makes
+# `apex update` and the post-OS-upgrade rebuild work after the original file (a
+# download, a USB stick, a network share) is gone.
+cache_local_rpm() {
+    local src="$1" name="$2" unsigned="$3" dest marker
+    install -d -m0700 "$LOCAL_DIR"
+    dest="$(local_cache "$name")"
+    marker="$(local_marker "$name")"
+    # Written aside and renamed: an interrupted copy must never leave a truncated
+    # RPM that the next rebuild would try to extract.
+    cp -f -- "$src" "${dest}.tmp"
+    mv -f "${dest}.tmp" "$dest"
+    if [ "$unsigned" = 1 ]; then
+        sha "$dest" > "${marker}.tmp"
+        mv -f "${marker}.tmp" "$marker"
+    else
+        # A file that verifies now must not inherit an old trust decision.
+        rm -f "$marker"
+    fi
+}
+
 # ── build ────────────────────────────────────────────────────────────────────
 
 # Download the requested packages plus every dependency the IMAGE does not
@@ -143,8 +342,118 @@ download_rpms() {
     local repo
     for repo in ${ENABLE_REPOS:-}; do args+=(--enable-repo "$repo"); done
     msg "resolving against the installed image (only missing dependencies are fetched)"
-    dnf5 "${args[@]}" "$@" >&2 || die "dependency resolution failed"
+    # Only names and capabilities ever reach this function. A filesystem path is
+    # not a package spec — `dnf5 download --resolve /path/to.rpm` answers
+    # `No package "/path/to.rpm" available` (measured) — so local files are
+    # staged separately, by stage_local_rpms, after this has run.
+    dnf5 "${args[@]}" "$@" >&2 || die "dependency resolution failed for: $*"
     compgen -G "${destdir}/*.rpm" >/dev/null || die "nothing to download — is the package name right?"
+}
+
+# Does the machine, as it is right now, satisfy this requirement? Asked of
+# libdnf5 because it honours version ranges and rich ("(a or b)") dependencies,
+# which `rpm -q --whatprovides` does not: on rpm 6.0.2 that reports
+# "no package provides python3 >= 3.9" with python3-3.14.6 installed (measured).
+# --installed keeps it on the rpmdb, so it costs no network.
+installed_provides() {
+    dnf5 repoquery --installed --whatprovides "$1" --qf '%{name}\n' 2>/dev/null | grep -q .
+}
+
+# Write, one per line into $1, the dependencies of the local RPM files $2.. that
+# this machine cannot already satisfy.
+#
+# WHY THIS IS NOT `dnf5 install /path/to.rpm`: the resolver needs repository
+# metadata for the file, and building that needs createrepo_c, which is not in
+# the image. Adding it to Containerfile.core would rebuild the slow tier and cost
+# the whole fleet a multi-gigabyte update for one command.
+#
+# So the file's own Requires are filtered against what the image provides and
+# what the other files in the same request provide, and the remainder is handed
+# to the ordinary repository path as capabilities. `dnf5 download --resolve`
+# resolves a capability to its provider and pulls that provider's own missing
+# dependencies, so one pass covers the whole transitive closure.
+#
+# Weak dependencies of the local file are NOT pulled in: `rpm -qpR` lists hard
+# Requires only. That is the honest reading of "this file must work", and it is
+# what keeps a vendor RPM from dragging in a desktop's worth of Recommends.
+local_missing_requires() {
+    local out="$1"; shift
+    local f req cap provides pkgname
+    : > "$out"
+
+    # What this request itself provides: explicit Provides plus every file it
+    # ships, because a Requires may name either.
+    provides="$( { for f in "$@"; do
+                       rpm -qp --nosignature --provides -- "$f" 2>/dev/null | awk 'NF{print $1}'
+                       rpm -qp --nosignature -l -- "$f" 2>/dev/null
+                   done; } | sort -u )"
+
+    for f in "$@"; do
+        pkgname="$(rpm -qp --nosignature --qf '%{NAME}' -- "$f" 2>/dev/null)" || pkgname="$f"
+        # Read through a process substitution, NOT a pipe: the loop must stay in
+        # this shell so that `die` below ends the run instead of ending a
+        # subshell and letting a half-resolved package set continue.
+        while IFS= read -r req; do
+            [ -n "$req" ] || continue
+            # rpmlib(...) describes the archive format, not a package; nothing
+            # provides it and the rpm doing the extraction already implements it.
+            case "$req" in rpmlib\(*) continue ;; esac
+
+            cap="${req%% *}"
+            if printf '%s\n' "$provides" | grep -qxF -- "$cap"; then
+                continue
+            fi
+
+            case "$req" in
+                '('*)
+                    # A rich dependency. libdnf5 can evaluate one against the
+                    # installed set, but `dnf5 download` cannot accept one as a
+                    # package spec, so an unsatisfied one stops the install
+                    # rather than producing an extension that is missing a
+                    # library the moment it is launched.
+                    installed_provides "$req" && continue
+                    die "'${pkgname}' needs '${req}', which APEX cannot resolve for a local file. Install something that satisfies it from the repositories first (apex search …), then retry"
+                    ;;
+            esac
+
+            if rpm -q --whatprovides -- "$cap" >/dev/null 2>&1; then
+                # The capability NAME is present. An unversioned requirement is
+                # therefore satisfied; a versioned one still has to be checked
+                # by something that understands the range.
+                [ "$req" = "$cap" ] && continue
+                installed_provides "$req" && continue
+            fi
+            printf '%s\n' "$req" >> "$out"
+        done < <(rpm -qpR --nosignature -- "$f" 2>/dev/null)
+    done
+    sort -u -o "$out" "$out"
+}
+
+# Put the cached local files into the download directory, so that from here on
+# the pipeline cannot tell them apart from repository packages — which is the
+# whole point: guard_rpms, extract_rpms, fix_caches, split_out_of_image,
+# label_tree and build_payload then give a local RPM the same PATH binaries,
+# .desktop entry, icons, MIME associations and SELinux labels as any other.
+stage_local_rpms() {
+    local destdir="$1"; shift
+    local f n other oname
+    for f in "$@"; do
+        n="$(rpm -qp --nosignature --qf '%{NAME}' -- "$f" 2>/dev/null)" \
+            || die "cannot read the cached RPM ${f}"
+        valid_pkg_name "$n" || die "cached RPM ${f} has an invalid package name '${n}'"
+        # A dependency chain can pull the repository's build of the same package.
+        # The file the user handed us is the one they asked for, so it wins — and
+        # says so, because the two versions need not match.
+        for other in "$destdir"/*.rpm; do
+            [ -e "$other" ] || continue
+            oname="$(rpm -qp --nosignature --qf '%{NAME}' -- "$other" 2>/dev/null)" || continue
+            if [ "$oname" = "$n" ]; then
+                warn "'${n}' also came from a repository; using your local file instead"
+                rm -f -- "$other"
+            fi
+        done
+        cp -f -- "$f" "${destdir}/${n}.rpm"
+    done
 }
 
 # Everything that must be true BEFORE we extract a single file.
@@ -186,20 +495,31 @@ guard_rpms() {
     # opted into with `apex repo enable-copr` use APEX's writable keyring under
     # /var because a bootc deployment's /usr/lib/sysimage/rpm cannot be modified.
     # An unsigned or unknown-key package is a hard stop, never a prompt.
-    local out
+    #
+    # The ONE exception is a local file the user explicitly accepted with
+    # --allow-unsigned, and it is not a bypass: the acceptance is a marker under
+    # LOCAL_DIR holding that file's checksum, so it covers those exact bytes and
+    # nothing else. Repository packages can never reach it, because nothing ever
+    # writes a marker for them.
+    local verified=0 trusted=0
     for rpmfile in "$destdir"/*.rpm; do
-        if out="$(rpmkeys --checksig "$rpmfile" 2>&1)" \
-           && [[ "$out" = *"digests signatures OK"* ]]; then
+        if rpm_signature_ok "$rpmfile"; then
+            verified=$((verified + 1))
             continue
         fi
-        if [ -d "$COPR_KEY_DB" ] \
-           && out="$(rpmkeys --dbpath "$COPR_KEY_DB" --checksig "$rpmfile" 2>&1)" \
-           && [[ "$out" = *"digests signatures OK"* ]]; then
+        name="$(rpm -qp --nosignature --qf '%{NAME}' -- "$rpmfile" 2>/dev/null)" || name=""
+        if [ -n "$name" ] && trusted_unsigned "$name" "$rpmfile"; then
+            warn "'${name}': installed from a local file you accepted with --allow-unsigned — its signature is NOT verified"
+            trusted=$((trusted + 1))
             continue
         fi
-        die "unsigned or untrusted package: $out"
+        die "unsigned or untrusted package: ${RPM_SIGSTATUS:-no signature}"
     done
-    msg "$(ls -1 "$destdir"/*.rpm | wc -l) package(s) verified against the repository keys"
+    if [ "$trusted" -gt 0 ]; then
+        msg "${verified} package(s) verified against trusted keys, ${trusted} accepted unverified by you"
+    else
+        msg "${verified} package(s) verified against the repository keys"
+    fi
 }
 
 extract_rpms() {
@@ -295,12 +615,14 @@ split_out_of_image() {
     if [ -d "${root}/etc" ]; then
         mkdir -p "$etcroot"
         cp -a "${root}/etc/." "${etcroot}/"
-        rm -rf "${root}/etc"
+        # ${root:?} on every recursive delete in this function: an empty $root
+        # would make these `rm -rf /etc` and `rm -rf /var` on the live system.
+        rm -rf "${root:?}/etc"
     fi
     if [ -d "${root}/var" ]; then
         ( cd "${root}/var" && find . -mindepth 1 -type d -printf '/var/%P\n' ) \
             > "${WORK}/var.dirs" || true
-        rm -rf "${root}/var"
+        rm -rf "${root:?}/var"
     fi
     : > "${WORK}/refused.paths"
     local d
@@ -469,6 +791,48 @@ merged() {
     [ -f "/usr/lib/extension-release.d/extension-release.${EXT_NAME}" ]
 }
 
+# Cached local RPMs whose package is no longer requested are MOVED into the
+# rollback slot, not deleted. `apex pkg rollback` restores the previous requested
+# list, and a restored `local:<NAME>` that points at a file someone deleted would
+# be a package the machine can never rebuild again. One generation kept, exactly
+# like the extension image itself.
+#
+# Runs only after save_requested has committed a successful build, so a failed
+# install can never take a user's cached RPM with it.
+gc_local_cache() {
+    [ -d "$LOCAL_DIR" ] || return 0
+    local -a keep=()
+    mapfile -t keep < <(load_requested | sed -n 's/^local://p')
+    install -d -m0700 "${ROLLBACK_DIR}/local"
+    find "${ROLLBACK_DIR}/local" -mindepth 1 -maxdepth 1 -delete 2>/dev/null || true
+    local f base name k found
+    for f in "$LOCAL_DIR"/*.rpm "$LOCAL_DIR"/*.trust; do
+        [ -e "$f" ] || continue
+        base="${f##*/}"
+        name="${base%.rpm}"; name="${name%.trust}"
+        found=0
+        for k in "${keep[@]:-}"; do
+            [ "$k" = "$name" ] && found=1
+        done
+        [ "$found" = 1 ] && continue
+        mv -f "$f" "${ROLLBACK_DIR}/local/${base}"
+    done
+}
+
+# The other half of gc_local_cache, and deliberately NOT part of
+# restore_previous: a failed merge undoes the extension while the requested list
+# and the cache are still untouched, so putting the previous generation back
+# there would resurrect packages nobody asked for.
+restore_local_cache() {
+    [ -d "${ROLLBACK_DIR}/local" ] || return 0
+    install -d -m0700 "$LOCAL_DIR"
+    local f
+    for f in "${ROLLBACK_DIR}/local"/*; do
+        [ -e "$f" ] || continue
+        mv -f "$f" "${LOCAL_DIR}/${f##*/}"
+    done
+}
+
 restore_previous() {
     rm -rf "$EXT_IMAGE" "$EXT_TREE"
     if [ -e "${ROLLBACK_DIR}/${EXT_NAME}.raw" ]; then
@@ -485,7 +849,7 @@ activate_payload() {
     # packages to install nothing.
     [ -n "$new" ] && [ -e "$new" ] || die "internal error: no extension payload at '${new}'"
     mkdir -p "$EXT_DIR" "$ROLLBACK_DIR"
-    rm -rf "${ROLLBACK_DIR}/${EXT_NAME}.raw" "${ROLLBACK_DIR}/${EXT_NAME}"
+    rm -rf "${ROLLBACK_DIR:?}/${EXT_NAME}.raw" "${ROLLBACK_DIR:?}/${EXT_NAME}"
     if [ -f "$EXT_IMAGE" ]; then
         mv -f "$EXT_IMAGE" "${ROLLBACK_DIR}/${EXT_NAME}.raw"
     elif [ -d "$EXT_TREE" ]; then
@@ -518,10 +882,22 @@ write_state() {
                     rpm -qp --nosignature --qf '%{NAME}-%{EVR}.%{ARCH}\n' "$f" 2>/dev/null
                 done | sort | json_string_array)"
     requested="$(load_requested | json_string_array)"
+    # Provenance, recorded so `apex pkg list` and `apex pkg verify` can say where
+    # each package came from instead of presenting a vendor RPM as if a Fedora
+    # mirror had signed it.
+    local locals unsigned n
+    locals="$(load_requested | sed -n 's/^local://p' | sort | json_string_array)"
+    unsigned="$(load_requested | sed -n 's/^local://p' | sort | while IFS= read -r n; do
+                    [ -n "$n" ] || continue
+                    [ -f "$(local_marker "$n")" ] && printf '%s\n' "$n"
+                    true
+                done | json_string_array)"
     local payload; payload="$(current_payload)"
     jq -n \
         --argjson requested "$requested" \
         --argjson resolved "$resolved" \
+        --argjson local_files "$locals" \
+        --argjson unsigned "$unsigned" \
         --arg os_id "$(os_id)" \
         --arg os_version "$(os_version)" \
         --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -529,7 +905,8 @@ write_state() {
         --arg sha "$([ -f "$payload" ] && sha "$payload" || echo '')" \
         --arg size "$(payload_bytes "$payload")" \
         --argjson compat_level "$PKG_COMPAT_LEVEL" \
-        '{requested:$requested, resolved:$resolved, os_id:$os_id,
+        '{requested:$requested, resolved:$resolved, local_files:$local_files,
+          unsigned_accepted:$unsigned, os_id:$os_id,
           os_version_id:$os_version, built:$built, image:$image,
           image_sha256:$sha, image_bytes:($size|tonumber),
           pkg_compat_level:$compat_level}' > "${STATE}.tmp"
@@ -554,11 +931,15 @@ rebuild_extension() {
 
     # An image update may bake something that used to live in the user
     # extension. Drop it before resolving so an older extension copy can never
-    # shadow the image's package.
+    # shadow the image's package. A local file is checked by its package NAME,
+    # which is exactly why the requested list stores the name and not a path.
     local -a missing=()
+    local probe
     for a in "${want[@]}"; do
-        if rpm -q -- "$a" >/dev/null 2>&1; then
-            msg "dropping '$a' from the extension: now provided by APEX-OS"
+        probe="$a"
+        is_local_id "$a" && probe="$(local_name "$a")"
+        if rpm -q -- "$probe" >/dev/null 2>&1; then
+            msg "dropping '$probe' from the extension: now provided by APEX-OS"
         else
             missing+=("$a")
         fi
@@ -573,6 +954,7 @@ rebuild_extension() {
         install_var_dirs /dev/null
         rm -f "$STATE"
         save_requested
+        gc_local_cache
         post_merge
         return 0
     fi
@@ -582,7 +964,42 @@ rebuild_extension() {
     local rpms="${WORK}/rpms" root="${WORK}/root" etcroot="${WORK}/etc"
     mkdir -p "$rpms" "$root"
 
-    download_rpms "$rpms" "${want[@]}"
+    # Split the desired set into repository specs and cached local files. The
+    # cache is the ONLY source for a local package here: the path the user
+    # originally typed may have been a USB stick, and this same function runs
+    # from `apex update` and from apex-sysext-rebuild.service after an OS
+    # upgrade, long after that path stopped existing.
+    local -a specs=() cached=()
+    local cachefile
+    for a in "${want[@]}"; do
+        if is_local_id "$a"; then
+            cachefile="$(local_cache "$a")"
+            [ -f "$cachefile" ] || die "the cached copy of local package '$(local_name "$a")' is missing (${cachefile}); reinstall it from the .rpm file, or drop it with: sudo apex remove $(local_name "$a")"
+            cached+=("$cachefile")
+        else
+            specs+=("$a")
+        fi
+    done
+
+    if [ "${#cached[@]}" -gt 0 ]; then
+        local -a deps=()
+        local_missing_requires "${WORK}/local.deps" "${cached[@]}"
+        mapfile -t deps < "${WORK}/local.deps"
+        if [ "${#deps[@]}" -gt 0 ]; then
+            msg "local file(s) need ${#deps[@]} dependenc(y|ies) from the repositories"
+            specs+=("${deps[@]}")
+        fi
+    fi
+
+    # Skipped entirely when everything requested is a local file whose
+    # dependencies the image already satisfies — there is then nothing to fetch,
+    # and download_rpms would refuse an empty argument list.
+    if [ "${#specs[@]}" -gt 0 ]; then
+        download_rpms "$rpms" "${specs[@]}"
+    fi
+    if [ "${#cached[@]}" -gt 0 ]; then
+        stage_local_rpms "$rpms" "${cached[@]}"
+    fi
     guard_rpms "$rpms"
 
     # `apex update` calls this on every run. Rebuilding an identical extension
@@ -598,6 +1015,7 @@ rebuild_extension() {
         if [ "$new_set" = "$old_set" ]; then
             msg "already up to date"
             save_requested "${want[@]}"
+            gc_local_cache
             write_state "$rpms"
             return 0
         fi
@@ -616,6 +1034,7 @@ rebuild_extension() {
     activate_payload "$payload"
     # Only now is this set the truth about the machine.
     save_requested "${want[@]}"
+    gc_local_cache
     write_state "$rpms"
 
     msg "done — $(jq -r '.resolved | length' "$STATE") package(s), $(numfmt --to=iec "$(jq -r .image_bytes "$STATE")")B extension"
@@ -660,25 +1079,94 @@ cmd_flatpak_upgrade() {
 
 # ── verbs ────────────────────────────────────────────────────────────────────
 cmd_install() {
-    [ "$#" -gt 0 ] || die "usage: apex install <package>..."
-    need_root install
+    [ "$#" -gt 0 ] || die "usage: apex install <package|/path/to/file.rpm>..."
 
-    local -a rpms=() flatpaks=() p
+    # Route first, then validate every named file — both BEFORE the root check.
+    # A mistyped path is not a privileged question, and answering it after a sudo
+    # round trip instead of before one costs the user a second attempt for
+    # nothing. Nothing here writes; the root gate still comes before every
+    # mutation below.
+    local -a files=() flatpaks=() names=() p
     for p in "$@"; do
-        if is_flatpak_id "$p"; then flatpaks+=("$p"); else rpms+=("$p"); fi
+        if is_local_rpm_arg "$p"; then
+            files+=("$p")
+        elif is_flatpak_id "$p"; then
+            flatpaks+=("$p")
+        else
+            names+=("$p")
+        fi
     done
+
+    local -a lpath=() lname=()
+    for p in "${files[@]:-}"; do
+        [ -n "$p" ] || continue
+        inspect_local_rpm "$p"
+        lpath+=("$LR_PATH")
+        lname+=("$LR_NAME")
+        msg "local file: ${LR_NAME}-${LR_EVR}.${LR_ARCH} (${LR_PATH})"
+    done
+
+    need_root install
 
     if [ "${#flatpaks[@]}" -gt 0 ]; then
         flatpak_install "${flatpaks[@]}"
     fi
     # A Flatpak-only request must not rebuild the extension: that would cost
     # minutes and re-merge /usr to change nothing.
-    [ "${#rpms[@]}" -gt 0 ] || return 0
+    [ "${#names[@]}" -gt 0 ] || [ "${#lpath[@]}" -gt 0 ] || return 0
 
     take_lock
-    local -a want=()
-    mapfile -t want < <(load_requested)
-    want+=("${rpms[@]}")
+
+    # The signature decision happens here, under the lock and as root, because
+    # the COPR keyring lives in a 0700 directory an ordinary user cannot read —
+    # deciding it earlier would report a COPR-signed file as untrusted.
+    #
+    # Decided for EVERY file before ANY file is copied: refusing the second of
+    # two files must not leave the first one cached, because the requested list
+    # is not updated on a refusal and the cache would then hold a package nothing
+    # asks for until the next successful operation retires it.
+    local -a want=() unsigned=()
+    local i f n
+    for i in "${!lpath[@]}"; do
+        f="${lpath[$i]}"
+        if rpm_signature_ok "$f"; then
+            unsigned+=(0)
+        else
+            [ "${ALLOW_UNSIGNED:-0}" = 1 ] || refuse_unsigned "$f"
+            warn "accepting ${f} unverified because you passed --allow-unsigned"
+            unsigned+=(1)
+        fi
+    done
+    for i in "${!lpath[@]}"; do
+        f="${lpath[$i]}"; n="${lname[$i]}"
+        cache_local_rpm "$f" "$n" "${unsigned[$i]}"
+        want+=("$(local_id "$n")")
+    done
+
+    if [ "${#names[@]}" -gt 0 ]; then
+        want+=("${names[@]}")
+    fi
+
+    # Carry the existing list forward, minus anything this request supersedes.
+    # `apex install ./foo.rpm` after `apex install foo` must REPLACE the
+    # repository request, not sit beside it — otherwise the next rebuild resolves
+    # both and stage_local_rpms has to throw one away on every single build.
+    local -a existing=()
+    mapfile -t existing < <(load_requested)
+    local e t superseded
+    for e in "${existing[@]:-}"; do
+        [ -n "$e" ] || continue
+        superseded=0
+        for t in "${lname[@]:-}" "${names[@]:-}"; do
+            [ -n "$t" ] || continue
+            if requested_matches "$e" "$t"; then
+                superseded=1
+            fi
+        done
+        if [ "$superseded" = 0 ]; then
+            want+=("$e")
+        fi
+    done
     rebuild_extension "${want[@]}"
 }
 
@@ -686,8 +1174,19 @@ cmd_remove() {
     [ "$#" -gt 0 ] || die "usage: apex remove <package>..."
     need_root remove
 
-    local -a rpms=() flatpaks=() q
+    # A package installed from a local file is removed by its package NAME.
+    # `apex remove ./chrome.rpm` is accepted too and means the same thing — the
+    # name is read back out of the file — so that re-running the install line
+    # with `remove` does what it looks like it does.
+    local -a rpms=() flatpaks=() q n
     for q in "$@"; do
+        if is_local_rpm_arg "$q" && [ -f "$q" ] && rpm_magic_ok "$q"; then
+            n="$(rpm -qp --nosignature --qf '%{NAME}' -- "$q" 2>/dev/null)" || n=""
+            if [ -n "$n" ] && valid_pkg_name "$n"; then
+                rpms+=("$n")
+                continue
+            fi
+        fi
         if is_flatpak_id "$q"; then flatpaks+=("$q"); else rpms+=("$q"); fi
     done
     if [ "${#flatpaks[@]}" -gt 0 ]; then
@@ -704,7 +1203,7 @@ cmd_remove() {
         [ -n "$c" ] || continue
         found=0
         for p in "$@"; do
-            if [ "$c" = "$p" ]; then
+            if requested_matches "$c" "$p"; then
                 found=1
             fi
         done
@@ -715,6 +1214,8 @@ cmd_remove() {
     if [ "${#keep[@]}" -eq "${#current[@]}" ]; then
         die "not installed by apex: $*"
     fi
+    # rebuild_extension calls gc_local_cache once the new set is committed, which
+    # is what actually retires the cached .rpm and its trust marker.
     rebuild_extension "${keep[@]:-}"
 }
 
@@ -777,7 +1278,16 @@ cmd_rebuild() {
 cmd_list() {
     if [ -f "$STATE" ]; then
         echo "packages (system extension):"
-        jq -r '.requested[]' "$STATE" | sed 's/^/  /'
+        # Provenance is shown, not hidden: a package that came from a file the
+        # user vouched for personally must not read like one Fedora signed.
+        jq -r '
+            ((.unsigned_accepted // []) | map({(.): true}) | add // {}) as $u
+            | .requested[]
+            | if startswith("local:") then
+                  ltrimstr("local:") as $n
+                  | "  \($n)  [local file" + (if $u[$n] then ", signature not verified]" else "]" end)
+              else "  \(.)"
+              end' "$STATE"
         printf '  (+%s pulled in as dependencies)\n' \
             "$(( $(jq -r '.resolved | length' "$STATE") - $(jq -r '.requested | length' "$STATE") ))"
     else
@@ -824,6 +1334,14 @@ cmd_verify() {
         [ "$want" = "$have" ] || die "extension image checksum mismatch"
     fi
     merged || warn "extension is not currently merged"
+    # `verify` answers "is this what APEX built", so it also has to answer "and
+    # how much of it did APEX actually vouch for".
+    local unverified
+    unverified="$(jq -r '(.unsigned_accepted // [])[]' "$STATE" 2>/dev/null || true)"
+    if [ -n "$unverified" ]; then
+        warn "contains package(s) you accepted with --allow-unsigned; their signatures were never verified:"
+        printf '%s\n' "$unverified" | sed 's/^/  /' >&2
+    fi
     msg "extension intact"
 }
 
@@ -834,6 +1352,9 @@ cmd_rollback() {
         die "no previous extension to roll back to"
     fi
     restore_previous
+    # The previous requested list is about to come back, so the cached local
+    # RPMs it names have to come back with it.
+    restore_local_cache
     if [ -f "${ROLLBACK_DIR}/state.json" ]; then
         mv -f "${ROLLBACK_DIR}/state.json" "$STATE"
     fi
@@ -937,8 +1458,16 @@ usage() {
     cat <<'EOF'
 usage: apex-pkg <command> [args]
 
-  install <pkg>...     add packages; a reverse-DNS id (org.gimp.GIMP) is a Flatpak
-  remove  <pkg>...     remove packages or Flatpak apps
+  install <pkg|file.rpm>...
+                       add packages. A reverse-DNS id (org.gimp.GIMP) is a
+                       Flatpak; a path or a name ending in .rpm is a local RPM
+                       file, which is copied into /var/lib/apex/pkg/local so
+                       later rebuilds no longer need the original file. Its
+                       dependencies still come from the repositories.
+                       --allow-unsigned accepts one local file that no trusted
+                       key covers; the decision is recorded per file.
+  remove  <pkg>...     remove packages or Flatpak apps (a local file is removed
+                       by its package name)
   upgrade              refresh all extension packages from the repositories
   flatpak-upgrade      update Flatpak apps (system + invoking user)
   rebuild [--if-needed] rebuild for the running OS version
@@ -957,10 +1486,15 @@ main() {
     local cmd="${1:-}"; shift || true
     NO_WEAK_DEPS=0
     ENABLE_REPOS=""
+    # Off unless asked for, every run: an unverifiable package is never the
+    # default and the opt-in is never remembered as a global setting. What IS
+    # remembered is the per-file decision, in LOCAL_DIR.
+    ALLOW_UNSIGNED=0
     local -a rest=()
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --no-weak-deps) NO_WEAK_DEPS=1 ;;
+            --allow-unsigned) ALLOW_UNSIGNED=1 ;;
             --enable-repo=*) ENABLE_REPOS="${ENABLE_REPOS} ${1#*=}" ;;
             --enable-repo) shift || true; ENABLE_REPOS="${ENABLE_REPOS} ${1:-}" ;;
             *) rest+=("$1") ;;

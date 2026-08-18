@@ -256,6 +256,7 @@ Images are published to `ghcr.io/andrenijman/apex-os` and are public.
 ```sh
 sudo apex install android-tools   # any Fedora package
 sudo apex install org.gimp.GIMP   # a reverse-DNS id installs the Flatpak
+sudo apex install ~/app.rpm       # a path installs that RPM file
 sudo apex remove  android-tools
 apex search wireshark
 apex pkg list
@@ -268,6 +269,15 @@ layered with `rpm-ostree`. That distinction is the whole point: a single
 silently stop the machine updating. Extensions leave the deployment untouched,
 so software and OS updates stop being mutually exclusive — while programs still
 land in the real `/usr/bin` with working `.desktop` files, units and udev rules.
+
+A local `.rpm` file goes through that same pipeline, so it lands in the launcher
+with its icons and MIME types like any other application. The file is copied into
+`/var/lib/apex/pkg/local` and the copy is what every later rebuild uses, so
+`apex update` and the rebuild after an OS upgrade keep working once the original
+file is gone; its dependencies still come from the repositories. APEX refuses any
+RPM it cannot verify against a trusted key — accepting one anyway takes an
+explicit `--allow-unsigned` for that file, and `apex pkg list` says so afterwards.
+`%post` scriptlets are not executed.
 
 Already have layered packages? `sudo apex pkg adopt` converts them and restores
 updates. See [docs/packages.md](docs/packages.md).

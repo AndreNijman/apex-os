@@ -1,15 +1,16 @@
 # Installing software on APEX-OS
 
 ```bash
-sudo apex install android-tools
+sudo apex install android-tools           # a package from the repositories
+sudo apex install ~/Downloads/vendor.rpm  # an .rpm file you downloaded
 sudo apex remove android-tools
 apex search wireshark
 apex pkg list
 ```
 
 That is the whole interface. It works for ordinary Fedora packages — CLI tools,
-libraries, development toolchains, GUI applications, fonts, services — and it
-does **not** stop the OS from updating.
+libraries, development toolchains, GUI applications, fonts, services — and for a
+local `.rpm` file, and it does **not** stop the OS from updating.
 
 ## Why this is not `rpm-ostree install`
 
@@ -35,14 +36,16 @@ so the user lost both the software and the update path.
 * removing a package is deleting a file; nothing rots in `/usr`
 * `apex rollback` (the OS) and `apex pkg rollback` (packages) are independent
 
-Fedora, RPM Fusion, and explicitly enabled COPRs are the package sources. There
-is no APEX package registry to host, sign or keep online, and every RPM is
-checked against a trusted RPM keyring before a single file is extracted.
+Fedora, RPM Fusion, and explicitly enabled COPRs are the repository sources, and
+a path to an `.rpm` file installs that file. There is no APEX package registry to
+host, sign or keep online, and every RPM is checked against a trusted RPM keyring
+before a single file is extracted.
 
 ## What actually happens
 
 1. `dnf5 download --resolve` resolves against the **installed image**, so only
-   dependencies APEX does not already ship are downloaded.
+   dependencies APEX does not already ship are downloaded. A local `.rpm` file is
+   copied in from its cache at this point instead (see below).
 2. Every RPM's signature is verified with `rpmkeys`.
 3. The packages are extracted into a staging tree (`--noscripts`; the scriptlets
    that matter are emulated below).
@@ -61,6 +64,88 @@ checked against a trusted RPM keyring before a single file is extracted.
 Everything the user requested lives in **one** extension, rebuilt from the
 requested list on every change. Separate per-package images would fight over
 shared dependencies and removal could delete files another package still needs.
+
+## Installing a local `.rpm` file
+
+Some software is only published as an RPM on a website — vendor browsers,
+conferencing clients, editors. Point `apex install` at the file:
+
+```bash
+sudo apex install ~/Downloads/some-app.rpm
+```
+
+An argument is treated as a file when it ends in `.rpm`, when it contains a `/`,
+or when it is an existing file that really starts with an RPM header. That test
+runs **before** the Flatpak rule, because `org.foo.Bar.rpm` matches both.
+
+It goes through the same pipeline as a repository package, so it produces the
+same result: programs in the real `/usr/bin`, a `.desktop` entry in the app
+launcher, icons, MIME associations, systemd units, udev rules and SELinux labels.
+Its dependencies are still resolved from the repositories — the file's own
+`Requires` are compared against what the image already provides, and only the
+remainder is downloaded.
+
+### The file is copied, and the copy is what gets rebuilt
+
+The extension is rebuilt from scratch whenever it has to change: on `apex
+update`, and on the first boot after an OS version change. If a rebuild needed
+the path you typed, it would fail the moment the USB stick was unplugged or the
+download was cleaned up.
+
+So the file is copied into `/var/lib/apex/pkg/local/<NAME>.rpm` at install time,
+and **every later rebuild reads that copy**. The requested list records
+`local:<NAME>`, not a path.
+
+Consequences worth knowing:
+
+* Reinstalling from a newer file of the same package replaces the cached copy —
+  that is how you update it.
+* `apex update` re-resolves the file's **dependencies** against the repositories,
+  but it cannot update the file itself; there is no repository to check. A local
+  package stays at the version you installed until you install a newer file.
+* `sudo apex remove NAME` uses the package name, not the path. The cached copy is
+  retired at the same time (kept for one generation, so `apex pkg rollback` still
+  works).
+
+### Signatures: refused by default, opt-in per file
+
+Vendor RPMs are signed by keys APEX has no reason to trust, and some are not
+signed at all. APEX refuses them:
+
+```text
+apex-pkg: error: cannot verify /home/you/Downloads/some-app.rpm
+apex-pkg: error: rpmkeys says: some-app.rpm: DIGESTS SIGNATURES NOT OK
+...
+apex-pkg: error: If the vendor's own site is where it came from and you accept that:
+apex-pkg: error:   sudo apex install --allow-unsigned /home/you/Downloads/some-app.rpm
+```
+
+`--allow-unsigned` applies **only** to the files named on that command line.
+Repository packages are never affected by it, and it is not a mode the engine
+remembers — what it remembers is that one decision, recorded against that file's
+exact checksum. Replace the cached file with different content and the decision
+no longer applies.
+
+Because the decision is recorded, the system keeps telling the truth about it:
+
+```text
+$ apex pkg list
+packages (system extension):
+  htop
+  some-app  [local file, signature not verified]
+```
+
+`apex pkg verify` names them too. If the software is also published in a COPR,
+enable that instead — signature checking then stays on.
+
+### What a local RPM does not get
+
+`%post` and friends are **not executed** (see below). For most packages that
+changes nothing, but some vendor RPMs create their `/usr/bin` launcher symlink or
+register a repository in `%post`, and those steps simply do not happen: the
+program is installed under `/opt` with a working `.desktop` entry, but the short
+command name may be missing from `PATH`. Check with `apex pkg info` what was
+installed and call the real path, or use the Flatpak if the vendor ships one.
 
 ## OS upgrades
 
@@ -104,17 +189,28 @@ so the OS can update again. Reboot afterwards to drop the layered deployment.
 | `glibc`, `systemd`, `rpm`, `dnf`, `bootc`, `filesystem`, … | overlaying a second copy of the running userspace ABI is unrecoverable without a rollback |
 | A **newer** version of something the image ships | that is an OS update, not a package install |
 | Anything already in the image | already provided; nothing to do |
+| An `.rpm` built for another architecture | it cannot run here |
+| An `.rpm` no trusted key covers | unless you pass `--allow-unsigned` for that file |
+| A file that is not an RPM, is unreadable, or is a directory | refused by name, before anything is copied |
 
 Packages with custom scriptlets install their files correctly, but APEX does not
-execute arbitrary `%post` scripts against a live system. If a package needs one
-to be useful, it belongs in the image — open an issue.
+execute arbitrary `%post` scripts against a live system: extraction runs with
+`--noscripts --notriggers`. The scriptlets that matter in practice are emulated
+against the union of image and extension — `ldconfig`, `systemd-sysusers`,
+`systemd-tmpfiles`, the GSettings/desktop/MIME/GIO caches, `udevadm` — so
+libraries resolve, users and directories exist, and applications appear in the
+launcher. What does not happen is anything a package invents for itself: creating
+symlinks, registering an external repository, generating keys, running a
+first-time setup. If a package needs one of those to be useful, it belongs in the
+image — open an issue.
 
 ## Commands
 
 | Command | Does |
 |---|---|
 | `apex install PKG…` | add packages (`--no-weak-deps`, `--enable-repo=REPO`) |
-| `apex remove PKG…` | remove packages |
+| `apex install FILE.rpm` | add a local RPM file (`--allow-unsigned` if no trusted key covers it) |
+| `apex remove PKG…` | remove packages (a local one by its package name) |
 | `apex search TERM…` | search the repositories |
 | `apex repo list` | list enabled and disabled RPM repositories |
 | `apex repo enable-copr OWNER/PROJECT` | opt into a Fedora COPR for search/install/upgrade |
@@ -154,12 +250,14 @@ Disabling the COPR also removes its key from the APEX keyring.
 ```bash
 sudo apex install org.gimp.GIMP     # reverse-DNS id -> Flatpak (Flathub)
 sudo apex install gimp              # plain name     -> RPM (system extension)
+sudo apex install ./gimp.rpm        # a path         -> that RPM file
 ```
 
 The rule is unambiguous rather than clever: Flathub ids are three or more
 dot-separated segments each starting with a letter, and no RPM is named that way
 (`python3.12` has two segments, `java-1.8.0-openjdk` has segments starting with
-digits). `apex remove` follows the same rule, and `apex pkg list` shows both.
+digits). The file test runs first, so `org.foo.Bar.rpm` is a file and not a
+Flathub id. `apex remove` follows the same rules, and `apex pkg list` shows both.
 
 A Flatpak-only install never rebuilds the extension, so it costs nothing.
 
@@ -177,5 +275,10 @@ every graphical application on it was months stale. Skip it with
 * Set `APEX_PKG_FORMAT=tree` to build an uncompressed directory extension
   instead of squashfs. The engine falls back to this automatically if
   `mksquashfs` is unavailable.
-* State lives in `/var/lib/apex/pkg` (`requested`, `state.json`, rollback copy).
-  The extension itself is `/var/lib/extensions/apex-user.raw`.
+* State lives in `/var/lib/apex/pkg` (`requested`, `state.json`, `local/` with
+  the cached local RPM files and their trust markers, and a one-generation
+  rollback copy of all of it). The extension itself is
+  `/var/lib/extensions/apex-user.raw`.
+* `state.json` records `local_files` and `unsigned_accepted` so provenance
+  survives a reboot and is not something only the person who typed the command
+  knows.
