@@ -50,9 +50,22 @@ jobs:
       - name: Validate shell and Python syntax
         run: |
           set -euo pipefail
+          # Selected by SHEBANG, not by suffix. The old list was `*.sh` plus two
+          # installer files named one by one, which checked 25 of the 34 shell
+          # scripts in the tree and missed every extensionless one that the image
+          # installs into /usr/libexec — including the package engine. A named
+          # list also rots silently: a new helper is simply never checked.
+          checked=0
           while IFS= read -r -d '' file; do
+            head -n1 -- "$file" | grep -qE '^#!.*(bash|/bin/sh)' || continue
             bash -n "$file"
-          done < <(find . -type f \( -name '*.sh' -o -path './installer/apex-install' -o -path './installer/apex-installer-launch' \) -print0)
+            checked=$((checked + 1))
+          done < <(find . -type f -not -path './.git/*' -not -path './apexd/target/*' -print0)
+          echo "bash -n: $checked shell scripts"
+          # The engine is the one that must never be missed again, so its
+          # presence in that set is asserted rather than assumed.
+          test -f files/system/libexec/apex-pkg
+          bash -n files/system/libexec/apex-pkg
           python3 -m py_compile installer/apex-installer-gui
 
       - name: Validate TOML
