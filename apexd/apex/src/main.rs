@@ -6,6 +6,7 @@
 
 mod ops;
 mod proxy;
+mod touchpad;
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
@@ -918,6 +919,10 @@ async fn cmd_doctor() -> i32 {
         );
     }
 
+    for (ok, what) in touchpad::doctor_lines() {
+        line(ok, &what);
+    }
+
     let s2idle = read_sys("power/mem_sleep").map(|s| s.contains("[s2idle]")).unwrap_or(false);
     line(s2idle, "s2idle is the active suspend mode");
 
@@ -1128,4 +1133,5 @@ mod tests {
         let cli = Cli::try_parse_from(["apex", "install", "--allow-unsigned", "./x.rpm"]).unwrap();
         assert!(matches!(cli.command, Cmd::Install { .. }));
     }
+
 }
