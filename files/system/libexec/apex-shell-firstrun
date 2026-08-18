@@ -278,6 +278,29 @@ if [ -f "${ZSHRC_TMPL}" ]; then
         log "  open a new terminal to pick up starship and the completion setup"
     fi
 fi
+
+# Repair an already-seeded ~/.zshrc that still carries the upper-case
+# autosuggestion colour. zle lower-cases a colour spec when it stores the
+# highlight in region_highlight, and zsh-autosuggestions removes its highlight by
+# comparing that stored entry against the string it built from the variable, so
+# with 'fg=#4A5162' the removal never matched and text stayed grey after being
+# accepted (measured on zsh 5.9 / zsh-autosuggestions 0.7.1: the entry survives
+# as '6 29 fg=#4a5162'). The file belongs to the user once seeded, so exactly one
+# line is rewritten, only when it is still byte-for-byte the line APEX wrote.
+ZSHRC_BAD_STYLE="ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=#4A5162'"
+ZSHRC_GOOD_STYLE="ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=#4a5162'"
+if [ -f "${HOME}/.zshrc" ] && grep -qxF "${ZSHRC_BAD_STYLE}" "${HOME}/.zshrc"; then
+    ZSHRC_TMP="$(mktemp "${HOME}/.zshrc.apex.XXXXXX")"
+    if awk -v bad="${ZSHRC_BAD_STYLE}" -v good="${ZSHRC_GOOD_STYLE}" \
+           '$0 == bad { print good; next } { print }' "${HOME}/.zshrc" > "${ZSHRC_TMP}" \
+       && [ -s "${ZSHRC_TMP}" ]; then
+        # Copied back into the existing file rather than renamed over it: the
+        # user's ~/.zshrc keeps its inode, mode and any ACL it carries.
+        cat "${ZSHRC_TMP}" > "${HOME}/.zshrc"
+        log "fixed the autosuggestion colour in ~/.zshrc — accepted suggestions stayed grey"
+    fi
+    rm -f "${ZSHRC_TMP}"
+fi
 # Re-render when absent, and also when a previous run left the placeholder behind:
 # an unsubstituted @ACCENT@ is not a valid starship colour, so the prompt would
 # lose its edition accent with no error anywhere.

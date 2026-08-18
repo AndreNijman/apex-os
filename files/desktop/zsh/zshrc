@@ -106,7 +106,14 @@ bindkey '^[[B' down-line-or-beginning-search
 # widgets the other plugins define.
 [[ -r /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]] && \
     source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
-ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=#4A5162'
+# The hex MUST be lower case. zle lower-cases a colour spec when it stores an
+# entry in region_highlight, and zsh-autosuggestions removes its own highlight by
+# comparing the stored entry against the string it built from this variable. With
+# 'fg=#4A5162' the comparison never matches, so accepting a suggestion (right
+# arrow) leaves the text grey even though it is now real input. Measured on
+# zsh 5.9 with zsh-autosuggestions 0.7.1: the stale entry survives as
+# '6 29 fg=#4a5162'.
+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=#4a5162'
 ZSH_AUTOSUGGEST_STRATEGY=(history completion)
 
 # ── aliases ──────────────────────────────────────────────────────────────────
