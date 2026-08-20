@@ -17,7 +17,8 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::ops::LocalView;
 use crate::proxy::{
-    connect, daemon_running, BatteryProxy, FanProxy, GameModeProxy, PowerProxy, ProfileProxy,
+    connect, daemon_running, BatteryProxy, FanProxy, GameModeProxy, MetricsProxy, PowerProxy,
+    ProfileProxy,
 };
 
 #[derive(Parser)]
@@ -55,6 +56,13 @@ enum Cmd {
     Rollback,
     /// Update the OS image (bootc upgrade) and firmware (fwupdmgr). Requires root.
     Update(UpdateArgs),
+    /// Read the telemetry snapshot: tier, AC state, package power, battery
+    /// charge and thermal zones.
+    ///
+    /// Values come from apexd's `org.apexos.Apexd1.Metrics.Snapshot`, the same
+    /// source as the Prometheus endpoint on 127.0.0.1:9723. Read-only, so it
+    /// needs no root.
+    Metrics(MetricsArgs),
     /// Diagnose the power stack.
     Doctor,
     /// Show the booted image and its changelog labels.
@@ -207,6 +215,19 @@ struct UpdateArgs {
 }
 
 #[derive(Args)]
+struct MetricsArgs {
+    /// Emit machine-readable JSON instead of an aligned table.
+    #[arg(long)]
+    json: bool,
+    /// Keep printing a new sample every INTERVAL seconds until interrupted.
+    ///
+    /// With --json this produces one JSON object per line (JSON Lines), which is
+    /// the shape a log shipper or `jq --unbuffered` wants.
+    #[arg(long, value_name = "INTERVAL", num_args = 0..=1, default_missing_value = "2")]
+    stream: Option<f64>,
+}
+
+#[derive(Args)]
 struct BatteryArgs {
     /// Enable travel mode (tighten charge to a storage window).
     #[arg(long)]
@@ -281,6 +302,7 @@ async fn main() {
             skip_packages: args.skip_packages,
             skip_flatpak: args.skip_flatpak,
         }),
+        Cmd::Metrics(args) => cmd_metrics(args).await,
         Cmd::Doctor => cmd_doctor().await,
         Cmd::Changelog => ops::changelog(),
         Cmd::Install {
@@ -870,6 +892,176 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
     }
 }
 
+/// `apex metrics` — read apexd's telemetry snapshot.
+///
+/// The data already existed in two places apexd exposes: the
+/// `org.apexos.Apexd1.Metrics.Snapshot` property and the Prometheus endpoint on
+/// 127.0.0.1:9723. Neither was reachable from the CLI, so checking package power
+/// or a thermal zone meant hand-writing a `busctl get-property` invocation or
+/// curling a port. This is purely additive to the frozen D-Bus contract: it adds
+/// a proxy and a verb, and changes nothing daemon-side.
+///
+/// Read-only, so deliberately absent from the privileged-command match: it must
+/// stay usable without root.
+async fn cmd_metrics(args: MetricsArgs) -> i32 {
+    let Some(conn) = connect().await else {
+        eprintln!("apex: cannot reach the system bus.");
+        return 1;
+    };
+
+    if !daemon_running(&conn).await {
+        eprintln!("apex: apexd not running — no metrics to read.");
+        return 1;
+    }
+
+    let proxy = match MetricsProxy::new(&conn).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("apex: cannot reach the Metrics interface: {e}");
+            return 1;
+        }
+    };
+
+    // Clamp the interval: a zero or negative period would spin the daemon.
+    let interval = args
+        .stream
+        .map(|s| Duration::from_secs_f64(if s.is_finite() && s >= 0.1 { s } else { 0.1 }));
+
+    loop {
+        match proxy.snapshot().await {
+            Ok(snap) => {
+                if args.json {
+                    println!("{}", snapshot_to_json(&snap));
+                } else {
+                    print_snapshot_table(&snap);
+                }
+            }
+            Err(e) => {
+                eprintln!("apex: reading the snapshot failed: {e}");
+                // A one-shot read reports the failure; a stream keeps trying, so
+                // a daemon restart does not end a long-running collector.
+                if interval.is_none() {
+                    return 1;
+                }
+            }
+        }
+
+        match interval {
+            Some(d) => {
+                // Without this a piped consumer sees nothing until the pipe
+                // buffer fills, which for one small sample per interval can be
+                // minutes.
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                tokio::time::sleep(d).await;
+            }
+            None => return 0,
+        }
+    }
+}
+
+/// Stable, human-sensible key order: the headline fields first in a fixed order,
+/// then everything else (the `temp_<zone>` set, whose membership is per-machine)
+/// alphabetically so successive samples line up.
+fn snapshot_key_order(snap: &std::collections::HashMap<String, zvariant::OwnedValue>) -> Vec<String> {
+    const PREFERRED: [&str; 4] = ["tier", "on_ac", "ppt_watts", "battery_uwh"];
+
+    let mut out: Vec<String> = PREFERRED
+        .iter()
+        .filter(|k| snap.contains_key(**k))
+        .map(|k| (*k).to_string())
+        .collect();
+
+    let mut rest: Vec<String> = snap
+        .keys()
+        .filter(|k| !PREFERRED.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    rest.sort();
+    out.extend(rest);
+    out
+}
+
+fn print_snapshot_table(snap: &std::collections::HashMap<String, zvariant::OwnedValue>) {
+    let keys = snapshot_key_order(snap);
+    let width = keys.iter().map(|k| k.len()).max().unwrap_or(0);
+    for k in keys {
+        if let Some(v) = snap.get(&k) {
+            println!("{:<width$}  {}", k, render_value(v), width = width);
+        }
+    }
+}
+
+/// Minimal JSON encoder for the snapshot.
+///
+/// Hand-rolled rather than pulling serde_json in: `apex` ships in a signed image
+/// and this is the only place in the CLI that needs JSON, so a few lines of
+/// escaping is a better trade than another dependency in the tree.
+fn snapshot_to_json(snap: &std::collections::HashMap<String, zvariant::OwnedValue>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for k in snapshot_key_order(snap) {
+        if let Some(v) = snap.get(&k) {
+            parts.push(format!("{}:{}", json_string(&k), json_value(v)));
+        }
+    }
+    format!("{{{}}}", parts.join(","))
+}
+
+fn json_value(v: &zvariant::OwnedValue) -> String {
+    fn inner(v: &zvariant::Value<'_>) -> String {
+        use zvariant::Value;
+        match v {
+            Value::Str(s) => json_string(s.as_str()),
+            Value::Bool(b) => b.to_string(),
+            Value::U8(n) => n.to_string(),
+            Value::U16(n) => n.to_string(),
+            Value::U32(n) => n.to_string(),
+            Value::U64(n) => n.to_string(),
+            Value::I16(n) => n.to_string(),
+            Value::I32(n) => n.to_string(),
+            Value::I64(n) => n.to_string(),
+            // Non-finite floats have no JSON representation; null is the only
+            // honest answer and parsers accept it.
+            Value::F64(n) => {
+                if n.is_finite() {
+                    format!("{n}")
+                } else {
+                    "null".to_string()
+                }
+            }
+            Value::Array(a) => format!(
+                "[{}]",
+                a.iter().map(inner).collect::<Vec<_>>().join(",")
+            ),
+            Value::Value(b) => inner(b),
+            other => json_string(&format!("{other:?}")),
+        }
+    }
+    inner(v)
+}
+
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // JSON requires escaping everything below 0x20.
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 async fn cmd_doctor() -> i32 {
     let v = LocalView::detect();
     let conn = connect().await;
@@ -1065,6 +1257,129 @@ mod tests {
     #[test]
     fn the_cli_definition_is_internally_consistent() {
         Cli::command().debug_assert();
+    }
+
+    fn metrics(argv: &[&str]) -> MetricsArgs {
+        match Cli::try_parse_from(argv).expect("parses").command {
+            Cmd::Metrics(a) => a,
+            _ => panic!("not metrics"),
+        }
+    }
+
+    #[test]
+    fn metrics_defaults_to_a_single_human_readable_sample() {
+        let a = metrics(&["apex", "metrics"]);
+        assert!(!a.json);
+        assert!(a.stream.is_none(), "must not stream unless asked");
+    }
+
+    #[test]
+    fn metrics_stream_has_a_default_interval_but_takes_one() {
+        // Bare --stream is the common case and must not require a number.
+        assert_eq!(metrics(&["apex", "metrics", "--stream"]).stream, Some(2.0));
+        assert_eq!(
+            metrics(&["apex", "metrics", "--stream", "0.5"]).stream,
+            Some(0.5)
+        );
+        assert!(metrics(&["apex", "metrics", "--json", "--stream", "1"]).json);
+    }
+
+    #[test]
+    fn snapshot_keys_are_ordered_stably_for_diffing() {
+        use std::collections::HashMap;
+        use zvariant::Value;
+
+        let mut m: HashMap<String, zvariant::OwnedValue> = HashMap::new();
+        for k in [
+            "temp_k10temp",
+            "battery_uwh",
+            "temp_acpitz",
+            "on_ac",
+            "tier",
+            "ppt_watts",
+        ] {
+            m.insert(
+                k.to_string(),
+                zvariant::OwnedValue::try_from(Value::from(1u32)).unwrap(),
+            );
+        }
+
+        // Headline fields in a fixed order, then the per-machine temp_* set
+        // alphabetically so successive samples line up column-wise.
+        assert_eq!(
+            snapshot_key_order(&m),
+            vec![
+                "tier",
+                "on_ac",
+                "ppt_watts",
+                "battery_uwh",
+                "temp_acpitz",
+                "temp_k10temp"
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_key_order_omits_fields_the_machine_cannot_report() {
+        use std::collections::HashMap;
+        use zvariant::Value;
+
+        let mut m: HashMap<String, zvariant::OwnedValue> = HashMap::new();
+        m.insert(
+            "tier".to_string(),
+            zvariant::OwnedValue::try_from(Value::from("balanced")).unwrap(),
+        );
+        // A desktop reports no battery and no ppt; those keys must simply be
+        // absent rather than rendered empty.
+        assert_eq!(snapshot_key_order(&m), vec!["tier"]);
+    }
+
+    #[test]
+    fn json_strings_are_escaped() {
+        assert_eq!(json_string("plain"), "\"plain\"");
+        assert_eq!(json_string("a\"b"), "\"a\\\"b\"");
+        assert_eq!(json_string("a\\b"), "\"a\\\\b\"");
+        assert_eq!(json_string("a\nb"), "\"a\\nb\"");
+        // Control characters must be \u-escaped or the output is not JSON.
+        assert_eq!(json_string("a\u{1}b"), "\"a\\u0001b\"");
+    }
+
+    #[test]
+    fn json_snapshot_is_well_formed_and_typed() {
+        use std::collections::HashMap;
+        use zvariant::Value;
+
+        let mut m: HashMap<String, zvariant::OwnedValue> = HashMap::new();
+        m.insert(
+            "tier".to_string(),
+            zvariant::OwnedValue::try_from(Value::from("ultra")).unwrap(),
+        );
+        m.insert(
+            "on_ac".to_string(),
+            zvariant::OwnedValue::try_from(Value::from(true)).unwrap(),
+        );
+        m.insert(
+            "ppt_watts".to_string(),
+            zvariant::OwnedValue::try_from(Value::from(15.5f64)).unwrap(),
+        );
+
+        let js = snapshot_to_json(&m);
+        assert_eq!(js, r#"{"tier":"ultra","on_ac":true,"ppt_watts":15.5}"#);
+    }
+
+    #[test]
+    fn non_finite_floats_become_null_not_invalid_json() {
+        use std::collections::HashMap;
+        use zvariant::Value;
+
+        let mut m: HashMap<String, zvariant::OwnedValue> = HashMap::new();
+        m.insert(
+            "ppt_watts".to_string(),
+            zvariant::OwnedValue::try_from(Value::from(f64::NAN)).unwrap(),
+        );
+        // NaN has no JSON representation; emitting a bare NaN would produce
+        // output no parser accepts.
+        assert_eq!(snapshot_to_json(&m), r#"{"ppt_watts":null}"#);
     }
 
     #[test]
