@@ -59,6 +59,20 @@ pub trait Profile {
 }
 
 #[proxy(
+    interface = "org.apexos.Apexd1.Metrics",
+    default_service = "org.apexos.Apexd1",
+    default_path = "/org/apexos/Apexd1"
+)]
+pub trait Metrics {
+    /// The `a{sv}` telemetry snapshot: `tier`, `on_ac`, and whichever of
+    /// `ppt_watts`, `battery_uwh` and `temp_<zone>` this machine can report.
+    #[zbus(property)]
+    fn snapshot(
+        &self,
+    ) -> zbus::Result<std::collections::HashMap<String, zbus::zvariant::OwnedValue>>;
+}
+
+#[proxy(
     interface = "org.apexos.Apexd1.Fan",
     default_service = "org.apexos.Apexd1",
     default_path = "/org/apexos/Apexd1"

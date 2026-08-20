@@ -60,6 +60,21 @@ They match the apex-shell picker IDs verbatim (`PowerProfileService.qml`).
 |---|---|---|---|
 | `Snapshot` | property (r) | `a{sv}` | Best-effort telemetry: `tier`(s), `on_ac`(b), `ppt_watts`(d), `battery_uwh`(t), `temp_<zone>`(d) |
 
+Read it from the CLI with `apex metrics`:
+
+```
+apex metrics                        # aligned table, one sample
+apex metrics --json                 # one JSON object
+apex metrics --stream               # resample every 2s until interrupted
+apex metrics --stream 0.5           # ... every 500ms
+apex metrics --json --stream 1      # JSON Lines, flushed per sample
+```
+
+Read-only, so it needs no root. Keys the machine cannot report (no battery, no
+hwmon power source) are omitted rather than rendered empty, and a one-shot read
+exits non-zero if the daemon is unreachable while `--stream` keeps retrying so a
+daemon restart does not end a long-running collector.
+
 ## `org.apexos.Apexd1.Fan` (real since M6)
 
 `Mode` and `SetMode` keep their M3 signatures; everything else is additive.
@@ -124,6 +139,8 @@ Prometheus text exposition on `http://127.0.0.1:9723/metrics` (any path):
 ```
 apexd_tier{tier="ultra-max|ultra|performance|balanced|power-saver"}  0|1
 apexd_ac_online                                                      0|1
+apexd_dry_run                                                        0|1
+apexd_machine_info{vendor,product,cpu_vendor,scaling_driver,profile,batteries}  1
 apexd_ppt_watts                          <watts>        (if a hwmon source exists)
 apexd_battery_uwh                        <microwatt-hours>  (if BAT*/energy_now exists)
 apexd_temp_celsius{zone="<thermal-zone-type>"}  <celsius>  (per thermal zone)
