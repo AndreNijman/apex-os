@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  APEX-OS — labwc root menu (seeded per-user by apex-shell-firstrun).
+
+  labwc shows this on a right-click of the desktop. Kept short on purpose: APEX
+  Shell owns the launcher, the settings pages and the power menu, so this is a
+  fallback path rather than the primary UI — it is what rescues you when the
+  shell is not running.
+-->
+<openbox_menu>
+  <menu id="root-menu" label="APEX">
+    <item label="Terminal">
+      <action name="Execute" command="alacritty"/>
+    </item>
+    <item label="App launcher">
+      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call dashboard-launcher toggle"/>
+    </item>
+    <item label="Settings">
+      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call dashboard-config toggle"/>
+    </item>
+    <separator/>
+    <item label="Restart APEX Shell">
+      <action name="Execute" command="/usr/libexec/apex-shell-autostart"/>
+    </item>
+    <item label="Reload labwc config">
+      <action name="Reconfigure"/>
+    </item>
+    <separator/>
+    <item label="Lock">
+      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call lockscreen lock"/>
+    </item>
+    <item label="Log out">
+      <action name="Exit"/>
+    </item>
+  </menu>
+</openbox_menu>

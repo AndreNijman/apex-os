@@ -1,0 +1,286 @@
+<?xml version="1.0"?>
+<!--
+  ─────────────────────────────────────────────────────────────────────────────
+   APEX-OS — labwc configuration (seeded per-user by apex-shell-firstrun).
+
+   The labwc counterpart of files/desktop/hypr/hyprland.conf, kept deliberately
+   in step with it: same modifier, same app keys, same screenshot bindings, same
+   shell popups over the same IPC entry point.
+
+   Two structural differences from the Hyprland session, both inherent to labwc:
+
+     * labwc is a STACKING compositor, not a tiler. There is no split, no
+       pseudo-tile and no layout cycling, so those binds have no equivalent and
+       are deliberately absent rather than mapped to something approximate.
+
+     * labwc has NO IPC of any kind — no D-Bus interface, no sway/i3 socket, no
+       hyprctl. Everything the shell needs from the compositor arrives over
+       Wayland protocols instead (labwc implements ext-workspace, session-lock,
+       layer-shell, foreign-toplevel, idle-notify and gamma control). In the
+       other direction, the shell is driven from here by invoking its IPC
+       client, which is what every `qs -p ... ipc call` line below does.
+
+   Decorations are server-side and borderless-ish on purpose: APEX Shell draws
+   the frame (bar, borders, rounded notch), so a second titlebar would sit inside
+   its border. Rounded corners are left to the shell.
+  ─────────────────────────────────────────────────────────────────────────────
+-->
+<labwc_config>
+
+  <core>
+    <!-- APEX Shell draws the window frame; labwc should not draw a second one.
+         `client` would hand decoration to the app, which most Wayland apps
+         decline, leaving nothing draggable. `server` with a minimal theme keeps
+         a thin grab handle without competing with the shell. -->
+    <decoration>server</decoration>
+    <gap>6</gap>
+    <adaptiveSync>no</adaptiveSync>
+    <reuseOutputMode>no</reuseOutputMode>
+  </core>
+
+  <!-- Virtual desktops. These are what the shell's workspace dots reflect: labwc
+       advertises them over ext-workspace-v1, and the bar reads them through
+       Quickshell's WindowManager. Ten to match the Hyprland session's 1..10. -->
+  <desktops>
+    <popupTime>0</popupTime>
+    <names>
+      <name>1</name>
+      <name>2</name>
+      <name>3</name>
+      <name>4</name>
+      <name>5</name>
+      <name>6</name>
+      <name>7</name>
+      <name>8</name>
+      <name>9</name>
+      <name>10</name>
+    </names>
+  </desktops>
+
+  <focus>
+    <followMouse>no</followMouse>
+    <raiseOnFocus>yes</raiseOnFocus>
+  </focus>
+
+  <theme>
+    <cornerRadius>0</cornerRadius>
+    <keepBorder>no</keepBorder>
+    <font place="ActiveWindow">
+      <name>JetBrainsMono Nerd Font</name>
+      <size>10</size>
+    </font>
+    <font place="InactiveWindow">
+      <name>JetBrainsMono Nerd Font</name>
+      <size>10</size>
+    </font>
+  </theme>
+
+  <libinput>
+    <device category="touchpad">
+      <naturalScroll>yes</naturalScroll>
+      <tapToClick>yes</tapToClick>
+      <!-- Two-finger tap = right click, matching the Hyprland session's
+           tap-to-click behaviour on the same hardware. -->
+      <tapAndDrag>yes</tapAndDrag>
+      <accelProfile>adaptive</accelProfile>
+    </device>
+  </libinput>
+
+  <resistance>
+    <screenEdgeStrength>20</screenEdgeStrength>
+  </resistance>
+
+  <keyboard>
+    <!-- ── APEX Shell popups (IPC) ──────────────────────────────────────────
+         The shell's own keybind editor writes Hyprland syntax, which labwc
+         cannot consume, so the shell popups are bound here directly. Keep these
+         in step with the defaults in the shell's keybinds.json. -->
+    <keybind key="W-Space">
+      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call dashboard-launcher toggle"/>
+    </keybind>
+    <keybind key="W-d">
+      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call dashboard-home toggle"/>
+    </keybind>
+    <keybind key="W-s">
+      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call dashboard-stats toggle"/>
+    </keybind>
+    <keybind key="W-k">
+      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call dashboard-kanban toggle"/>
+    </keybind>
+    <keybind key="W-c">
+      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call dashboard-config toggle"/>
+    </keybind>
+    <keybind key="W-n">
+      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call notification-toggle toggle"/>
+    </keybind>
+    <keybind key="W-v">
+      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call clipboard-toggle toggle"/>
+    </keybind>
+    <keybind key="W-S-w">
+      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call wallpaper-toggle toggle"/>
+    </keybind>
+    <keybind key="W-l">
+      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call lockscreen lock"/>
+    </keybind>
+
+    <!-- ── Apps ─────────────────────────────────────────────────────────── -->
+    <keybind key="W-t">
+      <action name="Execute" command="alacritty"/>
+    </keybind>
+    <keybind key="W-w">
+      <action name="Execute" command="firefox"/>
+    </keybind>
+    <keybind key="W-e">
+      <action name="Execute" command="thunar"/>
+    </keybind>
+
+    <!-- ── Screenshots ──────────────────────────────────────────────────── -->
+    <keybind key="Print">
+      <action name="Execute" command="bash /usr/share/apex-shell/src/scripts/screenshot.sh area"/>
+    </keybind>
+    <keybind key="W-Print">
+      <action name="Execute" command="bash /usr/share/apex-shell/src/scripts/screenshot.sh screen"/>
+    </keybind>
+
+    <!-- ── Window management ────────────────────────────────────────────── -->
+    <keybind key="W-q">
+      <action name="Close"/>
+    </keybind>
+    <keybind key="W-f">
+      <action name="ToggleFullscreen"/>
+    </keybind>
+    <keybind key="W-S-space">
+      <action name="ToggleAlwaysOnTop"/>
+    </keybind>
+    <keybind key="A-Tab">
+      <action name="NextWindow"/>
+    </keybind>
+    <keybind key="A-S-Tab">
+      <action name="PreviousWindow"/>
+    </keybind>
+
+    <!-- The Hyprland session binds W-arrow to movefocus (move focus between
+         tiles). labwc has NO directional-focus action at all — `Focus` takes no
+         arguments, because in a stacking compositor there is no spatial grid to
+         move through. Alt-Tab / Alt-Shift-Tab above is the stacking equivalent
+         and is bound accordingly.
+         W-arrow therefore moves the WINDOW to an edge instead, which is the
+         closest useful meaning for the same keys. -->
+    <keybind key="W-Left">
+      <action name="MoveToEdge" direction="left"/>
+    </keybind>
+    <keybind key="W-Right">
+      <action name="MoveToEdge" direction="right"/>
+    </keybind>
+    <keybind key="W-Up">
+      <action name="MoveToEdge" direction="up"/>
+    </keybind>
+    <keybind key="W-Down">
+      <action name="MoveToEdge" direction="down"/>
+    </keybind>
+
+    <!-- Snap to half/quarter, the stacking analogue of moving a tile. -->
+    <keybind key="W-S-Left">
+      <action name="SnapToEdge" direction="left"/>
+    </keybind>
+    <keybind key="W-S-Right">
+      <action name="SnapToEdge" direction="right"/>
+    </keybind>
+    <keybind key="W-S-Up">
+      <action name="SnapToEdge" direction="up"/>
+    </keybind>
+    <keybind key="W-S-Down">
+      <action name="SnapToEdge" direction="down"/>
+    </keybind>
+
+    <!-- ── Desktops 1..10 ──────────────────────────────────────────────── -->
+    <keybind key="W-1"><action name="GoToDesktop" to="1"/></keybind>
+    <keybind key="W-2"><action name="GoToDesktop" to="2"/></keybind>
+    <keybind key="W-3"><action name="GoToDesktop" to="3"/></keybind>
+    <keybind key="W-4"><action name="GoToDesktop" to="4"/></keybind>
+    <keybind key="W-5"><action name="GoToDesktop" to="5"/></keybind>
+    <keybind key="W-6"><action name="GoToDesktop" to="6"/></keybind>
+    <keybind key="W-7"><action name="GoToDesktop" to="7"/></keybind>
+    <keybind key="W-8"><action name="GoToDesktop" to="8"/></keybind>
+    <keybind key="W-9"><action name="GoToDesktop" to="9"/></keybind>
+    <keybind key="W-0"><action name="GoToDesktop" to="10"/></keybind>
+
+    <keybind key="W-S-1"><action name="SendToDesktop" to="1"/></keybind>
+    <keybind key="W-S-2"><action name="SendToDesktop" to="2"/></keybind>
+    <keybind key="W-S-3"><action name="SendToDesktop" to="3"/></keybind>
+    <keybind key="W-S-4"><action name="SendToDesktop" to="4"/></keybind>
+    <keybind key="W-S-5"><action name="SendToDesktop" to="5"/></keybind>
+    <keybind key="W-S-6"><action name="SendToDesktop" to="6"/></keybind>
+    <keybind key="W-S-7"><action name="SendToDesktop" to="7"/></keybind>
+    <keybind key="W-S-8"><action name="SendToDesktop" to="8"/></keybind>
+    <keybind key="W-S-9"><action name="SendToDesktop" to="9"/></keybind>
+    <keybind key="W-S-0"><action name="SendToDesktop" to="10"/></keybind>
+
+    <!-- ── Media / brightness keys ──────────────────────────────────────── -->
+    <!-- Volume goes through wpctl, matching the Hyprland session. Brightness
+         goes through brightnessctl, whose sysfs write the shell's
+         BrightnessService picks up over inotify — so the OSD appears without
+         the compositor needing to tell the shell anything. -->
+    <keybind key="XF86AudioRaiseVolume">
+      <action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"/>
+    </keybind>
+    <keybind key="XF86AudioLowerVolume">
+      <action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"/>
+    </keybind>
+    <keybind key="XF86AudioMute">
+      <action name="Execute" command="wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"/>
+    </keybind>
+    <keybind key="XF86AudioMicMute">
+      <action name="Execute" command="wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"/>
+    </keybind>
+    <keybind key="XF86MonBrightnessUp">
+      <action name="Execute" command="brightnessctl set 5%+"/>
+    </keybind>
+    <keybind key="XF86MonBrightnessDown">
+      <action name="Execute" command="brightnessctl set 5%-"/>
+    </keybind>
+    <keybind key="XF86AudioPlay">
+      <action name="Execute" command="playerctl play-pause"/>
+    </keybind>
+    <keybind key="XF86AudioNext">
+      <action name="Execute" command="playerctl next"/>
+    </keybind>
+    <keybind key="XF86AudioPrev">
+      <action name="Execute" command="playerctl previous"/>
+    </keybind>
+
+    <!-- Reload this file after editing it. -->
+    <keybind key="W-S-r">
+      <action name="Reconfigure"/>
+    </keybind>
+  </keyboard>
+
+  <mouse>
+    <context name="Frame">
+      <mousebind button="W-Left" action="Press">
+        <action name="Focus"/>
+        <action name="Raise"/>
+      </mousebind>
+      <mousebind button="W-Left" action="Drag">
+        <action name="Move"/>
+      </mousebind>
+      <mousebind button="W-Right" action="Press">
+        <action name="Focus"/>
+        <action name="Raise"/>
+      </mousebind>
+      <mousebind button="W-Right" action="Drag">
+        <action name="Resize"/>
+      </mousebind>
+    </context>
+  </mouse>
+
+  <windowRules>
+    <!-- APEX Shell's own surfaces are layer-shell, not toplevels, so they are
+         not matched here. This rule keeps dialogs centred rather than
+         cascading into the shell's border. -->
+    <windowRule identifier="*">
+      <action name="AutoPlace"/>
+    </windowRule>
+  </windowRules>
+
+</labwc_config>

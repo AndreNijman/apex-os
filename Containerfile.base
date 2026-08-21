@@ -630,6 +630,38 @@ RUN set -eux; \
       printf '[Desktop Entry]\nName=Hyprland\nComment=Dynamic tiling Wayland compositor\nExec=Hyprland\nType=Application\nDesktopNames=Hyprland\n' \
         > /usr/share/wayland-sessions/hyprland.desktop
 
+# labwc as a THIRD user session, offered alongside Hyprland and niri.
+#
+# It is copied AFTER the rm above, and named apex-labwc.desktop rather than
+# labwc.desktop, for two reasons that must not be collapsed: the stock
+# labwc.desktop launches labwc bare (no APEX Shell, no config) and has to stay
+# deleted, and labwc is simultaneously the greeter's fallback HOST compositor, so
+# the stock entry existing at all is a login hazard.
+#
+# The config templates are installed read-only and seeded per-user by
+# apex-shell-firstrun, matching how the Hyprland config is handled.
+COPY files/desktop/wayland-sessions/apex-labwc.desktop \
+     /usr/share/wayland-sessions/apex-labwc.desktop
+COPY files/desktop/labwc/ /usr/share/apex/labwc/
+RUN set -eux; \
+    test -f /usr/share/wayland-sessions/apex-labwc.desktop; \
+    test ! -f /usr/share/wayland-sessions/labwc.desktop; \
+    command -v labwc >/dev/null; \
+    for f in rc.xml menu.xml autostart environment; do \
+        test -s "/usr/share/apex/labwc/$f"; \
+    done; \
+    # labwc has no --verify-config, so the XML is validated structurally at build
+    # time instead. A malformed rc.xml makes labwc fall back to defaults
+    # SILENTLY: the session would still start, but with no keybinds and no APEX
+    # Shell, which is a far worse failure than a build error.
+    xmllint --noout /usr/share/apex/labwc/rc.xml; \
+    xmllint --noout /usr/share/apex/labwc/menu.xml; \
+    # The shell's compositor detection depends on this being set, and labwc
+    # publishes no socket or signature variable of its own.
+    grep -q '^XDG_CURRENT_DESKTOP=labwc' /usr/share/apex/labwc/environment; \
+    # The session is worthless if the shell never starts.
+    grep -q 'apex-shell-autostart' /usr/share/apex/labwc/autostart
+
 # ── Stage 6: flathub remote (first-boot) + greeter payload + config ────────
 # Flathub CANNOT reliably be added at build time on bootc: `flatpak remote-add
 # --system` writes to /var/lib/flatpak, and bootc treats /var as machine-local
