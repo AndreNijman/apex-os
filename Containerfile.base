@@ -660,7 +660,15 @@ RUN set -eux; \
     # publishes no socket or signature variable of its own.
     grep -q '^XDG_CURRENT_DESKTOP=labwc' /usr/share/apex/labwc/environment; \
     # The session is worthless if the shell never starts.
-    grep -q 'apex-shell-autostart' /usr/share/apex/labwc/autostart
+    grep -q 'apex-shell-autostart' /usr/share/apex/labwc/autostart; \
+    # The keybinds invoke `apex shell`, so that verb has to exist in the image
+    # or every popup binding in the labwc session is a silent no-op.
+    command -v apex >/dev/null; \
+    apex shell list >/dev/null; \
+    grep -q 'apex shell' /usr/share/apex/labwc/rc.xml; \
+    grep -q 'apex shell' /usr/share/apex/labwc/menu.xml; \
+    # `qs` is what `apex shell` actually calls; without it the wrapper is inert.
+    command -v qs >/dev/null
 
 # ── Stage 6: flathub remote (first-boot) + greeter payload + config ────────
 # Flathub CANNOT reliably be added at build time on bootc: `flatpak remote-add

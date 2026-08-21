@@ -131,6 +131,13 @@ else
     done
     grep -q 'apex-shell-autostart' "${h}/.config/labwc/autostart" \
         && ok "autostart starts APEX Shell" || bad "autostart starts APEX Shell"
+    # The keybinds must not hardcode the shell's install path: `apex shell`
+    # exists so a renamed IPC target is fixed once in the CLI rather than in
+    # every seeded config on every machine.
+    grep -q 'command="apex shell' "${h}/.config/labwc/rc.xml" \
+        && ok "keybinds go through apex shell" || bad "keybinds go through apex shell"
+    ! grep -q 'command="qs -p' "${h}/.config/labwc/rc.xml" \
+        && ok "no raw qs invocation in keybinds" || bad "no raw qs invocation in keybinds"
     # A session that cannot be detected by the shell is a session with a bar that
     # thinks it is on an unknown compositor.
     grep -q '^XDG_CURRENT_DESKTOP=labwc' "${h}/.config/labwc/environment" \
@@ -185,8 +192,14 @@ if command -v labwc >/dev/null 2>&1; then
     d="${WORK}/labwc-parse"; mkdir -p "$d"
     cp "${TMPL}/rc.xml" "${TMPL}/menu.xml" "$d/"
     sed -e 's|@KB_LAYOUT@|us|g' -e 's|@KB_VARIANT@||g' "${TMPL}/environment" > "${d}/environment"
-    parse_out="$(timeout 6 env -u HYPRLAND_INSTANCE_SIGNATURE -u WAYLAND_DISPLAY \
-                     labwc -C "$d" 2>&1 | grep -iE 'error|invalid' || true)"
+    # Grep for CONFIG diagnostics specifically, not any error. labwc will also
+    # fail to open a backend here (no seat in CI, and X11 fallback complains in a
+    # Wayland session), which is expected and irrelevant: config parsing happens
+    # first and is the only thing under test.
+    parse_out="$(timeout 6 env -u HYPRLAND_INSTANCE_SIGNATURE \
+                     labwc -C "$d" 2>&1 \
+                 | grep -iE 'invalid argument for action|invalid action|unexpected element' \
+                 || true)"
     if [ -z "$parse_out" ]; then
         ok "labwc parses rc.xml with no errors"
     else
