@@ -248,10 +248,15 @@ enum ShellCmd {
         #[arg(value_name = "PAGE")]
         page: Option<String>,
         /// Print the page names the running shell actually offers.
-        #[arg(long)]
+        ///
+        /// Conflicts with PAGE and --close rather than silently taking
+        /// precedence: `settings --close --list` had no obvious meaning, and
+        /// quietly honouring one of them is how a script ends up doing the
+        /// opposite of what it says.
+        #[arg(long, conflicts_with_all = ["page", "close"])]
         list: bool,
         /// Close it instead of toggling.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "page")]
         close: bool,
     },
     /// Lock the session.
@@ -1017,13 +1022,64 @@ fn shell_targets() -> Vec<(&'static str, &'static str, &'static str)> {
     ]
 }
 
-/// Invoke one IPC function on the running shell.
+/// Why an IPC call did not succeed.
+///
+/// Distinguished rather than collapsed into one error because they call for
+/// completely different responses: "you are not in a graphical session", "your
+/// shell predates this CLI" and "the shell is not running" have nothing to do
+/// with each other.
+#[derive(Debug, PartialEq, Eq)]
+enum IpcFailure {
+    /// `qs` is not installed — not a graphical session.
+    QsMissing,
+    /// No shell config at the addressed path.
+    MissingConfig,
+    /// The shell answered, but exposes no such target (or function).
+    MissingHandler { function: bool },
+    /// No shell instance is running.
+    NotRunning,
+    /// Anything else, carrying whatever the tool said.
+    Other(String),
+}
+
+/// Classify a completed `qs ipc call`.
+///
+/// Shared by both callers, deliberately. `qs ipc call` exits ZERO for "Target
+/// not found.", "Function not found." and "Could not open config file" — it only
+/// fails properly (255) when no instance is running. Trusting the exit status
+/// reports success for a call that did nothing, which from a keybind is
+/// indistinguishable from a dead key.
+///
+/// Applying this in only ONE of the two callers is exactly the bug this function
+/// exists to prevent: the query path previously treated "Target not found." as a
+/// successful result and printed it as data, so `settings --list` against an
+/// older shell listed "Target", "not" and "found." as pages and exited 0.
+fn classify_qs(code: i32, stdout: &str, stderr: &str) -> Option<IpcFailure> {
+    let combined = format!("{stdout}{stderr}");
+
+    if combined.contains("Could not open config file") {
+        return Some(IpcFailure::MissingConfig);
+    }
+    if combined.contains("Target not found") {
+        return Some(IpcFailure::MissingHandler { function: false });
+    }
+    if combined.contains("Function not found") {
+        return Some(IpcFailure::MissingHandler { function: true });
+    }
+    if combined.contains("No running instances") {
+        return Some(IpcFailure::NotRunning);
+    }
+    if code != 0 {
+        return Some(IpcFailure::Other(combined));
+    }
+    None
+}
+
+/// Run one IPC call, returning `(stdout, stderr)` on success.
 ///
 /// `qs` is Quickshell's own CLI and is what actually speaks the protocol; there
-/// is no D-Bus route to the shell to use instead. A missing `qs` or a shell that
-/// is not running are reported distinctly, because "you are not in a graphical
-/// session" and "the shell crashed" call for very different responses.
-fn shell_ipc(target: &str, function: &str, args: &[String]) -> i32 {
+/// is no D-Bus route to the shell to use instead.
+fn qs_call(target: &str, function: &str, args: &[String]) -> Result<(String, String), IpcFailure> {
     use std::process::Command;
 
     let mut argv: Vec<String> = vec![
@@ -1036,94 +1092,83 @@ fn shell_ipc(target: &str, function: &str, args: &[String]) -> i32 {
     ];
     argv.extend(args.iter().cloned());
 
-    match Command::new("qs").args(&argv).output() {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            let combined = format!("{stdout}{stderr}");
+    let out = match Command::new("qs").args(&argv).output() {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(IpcFailure::QsMissing),
+        Err(e) => return Err(IpcFailure::Other(format!("could not run qs: {e}"))),
+    };
 
-            // `qs ipc call` exits ZERO for "Target not found.", "Function not
-            // found." and "Could not open config file" — it only fails properly
-            // when no instance is running (255). Trusting the exit status alone
-            // therefore reports success for a call that did nothing at all,
-            // which from a keybind is indistinguishable from a broken key. So
-            // the output is inspected.
-            let missing_target = combined.contains("Target not found");
-            let missing_function = combined.contains("Function not found");
-            let missing_config = combined.contains("Could not open config file");
-            let not_running = combined.contains("No running instances");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
-            let code = out.status.code().unwrap_or(1);
+    match classify_qs(out.status.code().unwrap_or(1), &stdout, &stderr) {
+        Some(f) => Err(f),
+        None => Ok((stdout, stderr)),
+    }
+}
 
-            if code == 0 && !(missing_target || missing_function || missing_config) {
-                // Handlers return strings ("nexus open at appearance"); pass
-                // them through so scripting can read them.
-                if !stdout.trim().is_empty() {
-                    print!("{stdout}");
-                }
-                if !stderr.trim().is_empty() {
-                    eprint!("{stderr}");
-                }
-                return 0;
-            }
-
-            if missing_config {
-                eprintln!(
-                    "apex: no shell config at {}. Set APEX_SHELL_DIR to point at \
-                     a checkout, or reinstall the image copy.",
-                    shell_dir()
-                );
-            } else if missing_target || missing_function {
-                let what = if missing_target { "target" } else { "function" };
-                eprintln!(
-                    "apex: the running APEX Shell does not expose {what} \
-                     '{target} {function}'.\n\
-                     This usually means the shell is older than this CLI — \
-                     `apex update` and log back in.\n\
-                     `apex shell list` shows what this wrapper knows about."
-                );
-            } else if not_running {
-                eprintln!(
-                    "apex: APEX Shell is not running (addressing {}).\n\
-                     Start or repair it with: /usr/libexec/apex-shell-autostart",
-                    shell_dir()
-                );
-            } else {
-                eprintln!("apex: shell IPC '{target} {function}' failed.");
-                if !combined.trim().is_empty() {
-                    eprint!("{combined}");
-                }
-            }
-            1
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+fn report_ipc_failure(f: &IpcFailure, target: &str, function: &str) {
+    match f {
+        IpcFailure::QsMissing => eprintln!(
+            "apex: `qs` (Quickshell) not found. `apex shell` drives the running \
+             shell over its IPC, so it only works inside a graphical session."
+        ),
+        IpcFailure::MissingConfig => eprintln!(
+            "apex: no shell config at {}. Set APEX_SHELL_DIR to point at a \
+             checkout, or reinstall the image copy.",
+            shell_dir()
+        ),
+        IpcFailure::MissingHandler { function: is_fn } => {
+            let what = if *is_fn { "function" } else { "target" };
             eprintln!(
-                "apex: `qs` (Quickshell) not found. `apex shell` drives the \
-                 running shell over its IPC, so it only works inside a graphical \
-                 session."
+                "apex: the running APEX Shell does not expose {what} \
+                 '{target} {function}'.\n\
+                 This usually means the shell is older than this CLI — \
+                 `apex update` and log back in.\n\
+                 `apex shell list` shows what this wrapper knows about."
             );
-            1
         }
-        Err(e) => {
-            eprintln!("apex: could not run qs: {e}");
+        IpcFailure::NotRunning => eprintln!(
+            "apex: APEX Shell is not running (addressing {}).\n\
+             Start or repair it with: /usr/libexec/apex-shell-autostart",
+            shell_dir()
+        ),
+        IpcFailure::Other(msg) => {
+            eprintln!("apex: shell IPC '{target} {function}' failed.");
+            if !msg.trim().is_empty() {
+                eprint!("{msg}");
+            }
+        }
+    }
+}
+
+/// Fire and forget: forward whatever the handler returned.
+fn shell_ipc(target: &str, function: &str, args: &[String]) -> i32 {
+    match qs_call(target, function, args) {
+        Ok((stdout, stderr)) => {
+            // Handlers return strings ("nexus open at appearance"); pass them
+            // through so scripting can read them.
+            if !stdout.trim().is_empty() {
+                print!("{stdout}");
+            }
+            if !stderr.trim().is_empty() {
+                eprint!("{stderr}");
+            }
+            0
+        }
+        Err(f) => {
+            report_ipc_failure(&f, target, function);
             1
         }
     }
 }
 
-/// Capture IPC output instead of forwarding it, for the queries.
-fn shell_ipc_capture(target: &str, function: &str) -> Option<String> {
-    use std::process::Command;
-
-    let out = Command::new("qs")
-        .args(["-p", &shell_dir(), "ipc", "call", target, function])
-        .output()
-        .ok()?;
-
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+/// Capture a handler's return value, for the queries.
+///
+/// Uses the same classification as `shell_ipc`, so a failure can never be
+/// mistaken for data.
+fn shell_ipc_query(target: &str, function: &str) -> Result<String, IpcFailure> {
+    qs_call(target, function, &[]).map(|(stdout, _)| stdout.trim().to_string())
 }
 
 fn cmd_shell(cmd: ShellCmd) -> i32 {
@@ -1149,15 +1194,19 @@ fn cmd_shell(cmd: ShellCmd) -> i32 {
             if list {
                 // Ask the shell rather than hardcoding: the page set lives in
                 // the shell's PageRegistry and this must not drift from it.
-                return match shell_ipc_capture("nexus", "pages") {
-                    Some(s) if !s.is_empty() => {
+                return match shell_ipc_query("nexus", "pages") {
+                    Ok(s) if !s.is_empty() => {
                         for p in s.split_whitespace() {
                             println!("{p}");
                         }
                         0
                     }
-                    _ => {
-                        eprintln!("apex: could not query the shell for its settings pages.");
+                    Ok(_) => {
+                        eprintln!("apex: the shell returned no settings pages.");
+                        1
+                    }
+                    Err(f) => {
+                        report_ipc_failure(&f, "nexus", "pages");
                         1
                     }
                 };
@@ -1657,6 +1706,63 @@ mod tests {
             shell_cmd(&["apex", "shell", "settings", "--close"]),
             ShellCmd::Settings { close: true, .. }
         ));
+    }
+
+    #[test]
+    fn contradictory_settings_flags_are_rejected_not_guessed() {
+        // Silently letting one win is how a script ends up doing the opposite of
+        // what it reads as.
+        for argv in [
+            vec!["apex", "shell", "settings", "--list", "--close"],
+            vec!["apex", "shell", "settings", "keybinds", "--list"],
+            vec!["apex", "shell", "settings", "keybinds", "--close"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "{argv:?} should have been rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn qs_silent_failures_are_classified_despite_a_zero_exit() {
+        // The whole point: `qs ipc call` exits 0 for these, so a caller trusting
+        // the exit status treats a call that did nothing as a success. The query
+        // path once printed "Target not found." as if it were page data.
+        assert_eq!(
+            classify_qs(0, "Target not found.\n", ""),
+            Some(IpcFailure::MissingHandler { function: false })
+        );
+        assert_eq!(
+            classify_qs(0, "Function not found.\n", ""),
+            Some(IpcFailure::MissingHandler { function: true })
+        );
+        assert_eq!(
+            classify_qs(0, "Could not open config file at \"/nope\"\n", ""),
+            Some(IpcFailure::MissingConfig)
+        );
+        // This one does exit non-zero (255), but must still be named rather
+        // than lumped into Other.
+        assert_eq!(
+            classify_qs(255, "No running instances for \"/x/shell.qml\"\n", ""),
+            Some(IpcFailure::NotRunning)
+        );
+    }
+
+    #[test]
+    fn a_real_handler_reply_is_not_mistaken_for_a_failure() {
+        assert_eq!(classify_qs(0, "nexus open at keybinds\n", ""), None);
+        assert_eq!(classify_qs(0, "appearance layout data keybinds misc\n", ""), None);
+        // Empty output with a clean exit is a valid void handler.
+        assert_eq!(classify_qs(0, "", ""), None);
+    }
+
+    #[test]
+    fn an_unexplained_nonzero_exit_is_still_a_failure() {
+        match classify_qs(3, "", "something went wrong") {
+            Some(IpcFailure::Other(msg)) => assert!(msg.contains("something went wrong")),
+            other => panic!("expected Other, got {other:?}"),
+        }
     }
 
     #[test]
