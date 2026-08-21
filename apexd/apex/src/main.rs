@@ -56,6 +56,17 @@ enum Cmd {
     Rollback,
     /// Update the OS image (bootc upgrade) and firmware (fwupdmgr). Requires root.
     Update(UpdateArgs),
+    /// Drive APEX Shell: open the launcher, dashboard, settings window, lock
+    /// screen and the quick toggles.
+    ///
+    /// A thin wrapper over the shell's Quickshell IPC. It exists so compositor
+    /// configs and scripts have one stable, readable command instead of
+    /// spelling out `qs -p /usr/share/apex-shell ipc call <target> <fn>`, and so
+    /// the shell's install path is not hardcoded in every keybind.
+    Shell {
+        #[command(subcommand)]
+        cmd: ShellCmd,
+    },
     /// Read the telemetry snapshot: tier, AC state, package power, battery
     /// charge and thermal zones.
     ///
@@ -214,6 +225,75 @@ struct UpdateArgs {
     fsync: bool,
 }
 
+/// `apex shell <verb>` — the surfaces APEX Shell exposes over IPC.
+///
+/// Each variant maps to one `(target, function)` pair. Names are the
+/// user-facing vocabulary ("launcher", "settings"), not the shell's internal
+/// target strings, so the IPC surface can be renamed without breaking every
+/// keybind on every machine.
+#[derive(Subcommand)]
+enum ShellCmd {
+    /// Toggle the app launcher.
+    Launcher,
+    /// Toggle the dashboard. Optionally on a specific page.
+    Dashboard {
+        /// home | stats | kanban | launcher | config
+        #[arg(value_name = "PAGE")]
+        page: Option<String>,
+    },
+    /// Open the settings window, optionally at a page (appearance, layout,
+    /// data, keybinds, misc). Run `apex shell settings --list` for the live
+    /// list.
+    Settings {
+        #[arg(value_name = "PAGE")]
+        page: Option<String>,
+        /// Print the page names the running shell actually offers.
+        #[arg(long)]
+        list: bool,
+        /// Close it instead of toggling.
+        #[arg(long)]
+        close: bool,
+    },
+    /// Lock the session.
+    Lock,
+    /// Toggle the notification centre.
+    Notifications,
+    /// Toggle clipboard history.
+    Clipboard,
+    /// Toggle the wallpaper picker.
+    Wallpaper,
+    /// Toggle the power menu.
+    Power,
+    /// Toggle the audio panel (output, input or the app mixer).
+    Audio {
+        /// out | in | mixer
+        #[arg(value_name = "WHICH", default_value = "out")]
+        which: String,
+    },
+    /// Toggle the network panel on a given tab.
+    Network {
+        /// wifi | bluetooth | vpn | hotspot
+        #[arg(value_name = "TAB", default_value = "wifi")]
+        tab: String,
+    },
+    /// Toggle focus mode.
+    Focus,
+    /// Start the screen-recorder setup strip.
+    Record,
+    /// List every target this wrapper knows, with the IPC call behind it.
+    List,
+    /// Call an arbitrary target/function, for anything not covered above.
+    Ipc {
+        #[arg(value_name = "TARGET")]
+        target: String,
+        #[arg(value_name = "FUNCTION", default_value = "toggle")]
+        function: String,
+        /// Extra positional arguments passed through to the handler.
+        #[arg(value_name = "ARG")]
+        args: Vec<String>,
+    },
+}
+
 #[derive(Args)]
 struct MetricsArgs {
     /// Emit machine-readable JSON instead of an aligned table.
@@ -302,6 +382,7 @@ async fn main() {
             skip_packages: args.skip_packages,
             skip_flatpak: args.skip_flatpak,
         }),
+        Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Metrics(args) => cmd_metrics(args).await,
         Cmd::Doctor => cmd_doctor().await,
         Cmd::Changelog => ops::changelog(),
@@ -892,6 +973,262 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
     }
 }
 
+/// Where the shell is vendored inside the image.
+const SHELL_DIR_DEFAULT: &str = "/usr/share/apex-shell";
+
+/// The shell config directory to address over IPC.
+///
+/// `APEX_SHELL_DIR` overrides it, matching the convention
+/// /usr/libexec/apex-shell-autostart already uses. That is what makes it
+/// possible to drive a working-tree checkout during development instead of only
+/// the copy baked into the image.
+fn shell_dir() -> String {
+    std::env::var("APEX_SHELL_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| SHELL_DIR_DEFAULT.to_string())
+}
+
+/// The mapping from `apex shell <verb>` to the shell's IPC surface.
+///
+/// Verb names are deliberately the user's vocabulary rather than the shell's
+/// internal target strings: "settings" rather than "nexus", "power" rather than
+/// "PowerMenu-toggle". That indirection is the point of the wrapper — the IPC
+/// names can change without every keybind on every machine breaking.
+fn shell_targets() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        ("launcher", "dashboard-launcher", "toggle"),
+        ("dashboard", "dashboard-home", "toggle"),
+        ("settings", "nexus", "toggle"),
+        ("lock", "lockscreen", "lock"),
+        ("notifications", "notification-toggle", "toggle"),
+        ("clipboard", "clipboard-toggle", "toggle"),
+        ("wallpaper", "wallpaper-toggle", "toggle"),
+        ("power", "PowerMenu-toggle", "toggle"),
+        ("audio out", "audioOut-toggle", "toggle"),
+        ("audio in", "audioIn-toggle", "toggle"),
+        ("audio mixer", "audioMix-toggle", "toggle"),
+        ("network wifi", "wifi-toggle", "toggle"),
+        ("network bluetooth", "bluetooth-toggle", "toggle"),
+        ("network vpn", "vpn-toggle", "toggle"),
+        ("network hotspot", "hotspot-toggle", "toggle"),
+        ("focus", "focus-toggle", "toggle"),
+        ("record", "screenrec-on", "toggle"),
+    ]
+}
+
+/// Invoke one IPC function on the running shell.
+///
+/// `qs` is Quickshell's own CLI and is what actually speaks the protocol; there
+/// is no D-Bus route to the shell to use instead. A missing `qs` or a shell that
+/// is not running are reported distinctly, because "you are not in a graphical
+/// session" and "the shell crashed" call for very different responses.
+fn shell_ipc(target: &str, function: &str, args: &[String]) -> i32 {
+    use std::process::Command;
+
+    let mut argv: Vec<String> = vec![
+        "-p".into(),
+        shell_dir(),
+        "ipc".into(),
+        "call".into(),
+        target.into(),
+        function.into(),
+    ];
+    argv.extend(args.iter().cloned());
+
+    match Command::new("qs").args(&argv).output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let combined = format!("{stdout}{stderr}");
+
+            // `qs ipc call` exits ZERO for "Target not found.", "Function not
+            // found." and "Could not open config file" — it only fails properly
+            // when no instance is running (255). Trusting the exit status alone
+            // therefore reports success for a call that did nothing at all,
+            // which from a keybind is indistinguishable from a broken key. So
+            // the output is inspected.
+            let missing_target = combined.contains("Target not found");
+            let missing_function = combined.contains("Function not found");
+            let missing_config = combined.contains("Could not open config file");
+            let not_running = combined.contains("No running instances");
+
+            let code = out.status.code().unwrap_or(1);
+
+            if code == 0 && !(missing_target || missing_function || missing_config) {
+                // Handlers return strings ("nexus open at appearance"); pass
+                // them through so scripting can read them.
+                if !stdout.trim().is_empty() {
+                    print!("{stdout}");
+                }
+                if !stderr.trim().is_empty() {
+                    eprint!("{stderr}");
+                }
+                return 0;
+            }
+
+            if missing_config {
+                eprintln!(
+                    "apex: no shell config at {}. Set APEX_SHELL_DIR to point at \
+                     a checkout, or reinstall the image copy.",
+                    shell_dir()
+                );
+            } else if missing_target || missing_function {
+                let what = if missing_target { "target" } else { "function" };
+                eprintln!(
+                    "apex: the running APEX Shell does not expose {what} \
+                     '{target} {function}'.\n\
+                     This usually means the shell is older than this CLI — \
+                     `apex update` and log back in.\n\
+                     `apex shell list` shows what this wrapper knows about."
+                );
+            } else if not_running {
+                eprintln!(
+                    "apex: APEX Shell is not running (addressing {}).\n\
+                     Start or repair it with: /usr/libexec/apex-shell-autostart",
+                    shell_dir()
+                );
+            } else {
+                eprintln!("apex: shell IPC '{target} {function}' failed.");
+                if !combined.trim().is_empty() {
+                    eprint!("{combined}");
+                }
+            }
+            1
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "apex: `qs` (Quickshell) not found. `apex shell` drives the \
+                 running shell over its IPC, so it only works inside a graphical \
+                 session."
+            );
+            1
+        }
+        Err(e) => {
+            eprintln!("apex: could not run qs: {e}");
+            1
+        }
+    }
+}
+
+/// Capture IPC output instead of forwarding it, for the queries.
+fn shell_ipc_capture(target: &str, function: &str) -> Option<String> {
+    use std::process::Command;
+
+    let out = Command::new("qs")
+        .args(["-p", &shell_dir(), "ipc", "call", target, function])
+        .output()
+        .ok()?;
+
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn cmd_shell(cmd: ShellCmd) -> i32 {
+    match cmd {
+        ShellCmd::Launcher => shell_ipc("dashboard-launcher", "toggle", &[]),
+
+        ShellCmd::Dashboard { page } => {
+            // The dashboard exposes one target per page rather than a target
+            // taking an argument, so the page becomes part of the target name.
+            let page = page.unwrap_or_else(|| "home".into());
+            const PAGES: [&str; 5] = ["home", "stats", "kanban", "launcher", "config"];
+            if !PAGES.contains(&page.as_str()) {
+                eprintln!(
+                    "apex: unknown dashboard page '{page}' (try: {})",
+                    PAGES.join(", ")
+                );
+                return 1;
+            }
+            shell_ipc(&format!("dashboard-{page}"), "toggle", &[])
+        }
+
+        ShellCmd::Settings { page, list, close } => {
+            if list {
+                // Ask the shell rather than hardcoding: the page set lives in
+                // the shell's PageRegistry and this must not drift from it.
+                return match shell_ipc_capture("nexus", "pages") {
+                    Some(s) if !s.is_empty() => {
+                        for p in s.split_whitespace() {
+                            println!("{p}");
+                        }
+                        0
+                    }
+                    _ => {
+                        eprintln!("apex: could not query the shell for its settings pages.");
+                        1
+                    }
+                };
+            }
+            if close {
+                return shell_ipc("nexus", "close", &[]);
+            }
+            match page {
+                Some(p) => shell_ipc("nexus", "toggle", &[p]),
+                None => shell_ipc("nexus", "toggle", &[]),
+            }
+        }
+
+        ShellCmd::Lock => shell_ipc("lockscreen", "lock", &[]),
+        ShellCmd::Notifications => shell_ipc("notification-toggle", "toggle", &[]),
+        ShellCmd::Clipboard => shell_ipc("clipboard-toggle", "toggle", &[]),
+        ShellCmd::Wallpaper => shell_ipc("wallpaper-toggle", "toggle", &[]),
+        ShellCmd::Power => shell_ipc("PowerMenu-toggle", "toggle", &[]),
+        ShellCmd::Focus => shell_ipc("focus-toggle", "toggle", &[]),
+        ShellCmd::Record => shell_ipc("screenrec-on", "toggle", &[]),
+
+        ShellCmd::Audio { which } => {
+            let target = match which.as_str() {
+                "out" | "output" | "sink" => "audioOut-toggle",
+                "in" | "input" | "source" | "mic" => "audioIn-toggle",
+                "mixer" | "mix" | "apps" => "audioMix-toggle",
+                other => {
+                    eprintln!("apex: unknown audio panel '{other}' (try: out, in, mixer)");
+                    return 1;
+                }
+            };
+            shell_ipc(target, "toggle", &[])
+        }
+
+        ShellCmd::Network { tab } => {
+            let target = match tab.as_str() {
+                "wifi" | "wlan" => "wifi-toggle",
+                "bluetooth" | "bt" => "bluetooth-toggle",
+                "vpn" => "vpn-toggle",
+                "hotspot" | "ap" => "hotspot-toggle",
+                other => {
+                    eprintln!(
+                        "apex: unknown network tab '{other}' \
+                         (try: wifi, bluetooth, vpn, hotspot)"
+                    );
+                    return 1;
+                }
+            };
+            shell_ipc(target, "toggle", &[])
+        }
+
+        ShellCmd::List => {
+            let rows = shell_targets();
+            let width = rows.iter().map(|(v, ..)| v.len()).max().unwrap_or(0);
+            println!("{:<width$}  IPC CALL", "apex shell …", width = width);
+            for (verb, target, func) in rows {
+                println!("{verb:<width$}  {target} {func}", width = width);
+            }
+            println!();
+            println!("Anything else: apex shell ipc <target> <function> [args…]");
+            0
+        }
+
+        ShellCmd::Ipc {
+            target,
+            function,
+            args,
+        } => shell_ipc(&target, &function, &args),
+    }
+}
+
 /// `apex metrics` — read apexd's telemetry snapshot.
 ///
 /// The data already existed in two places apexd exposes: the
@@ -1257,6 +1594,130 @@ mod tests {
     #[test]
     fn the_cli_definition_is_internally_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn shell_is_not_a_privileged_verb() {
+        // `apex shell` drives the user's own session over IPC. Requiring root
+        // would be both wrong and useless: root has no WAYLAND_DISPLAY, so the
+        // call could not reach the shell anyway.
+        let cli = Cli::try_parse_from(["apex", "shell", "launcher"]).expect("parses");
+        assert!(
+            !matches!(cli.command, Cmd::Update(_) | Cmd::Pin | Cmd::Rollback),
+            "shell must not be classified with the root-only verbs"
+        );
+    }
+
+    fn shell_cmd(argv: &[&str]) -> ShellCmd {
+        match Cli::try_parse_from(argv).expect("parses").command {
+            Cmd::Shell { cmd } => cmd,
+            _ => panic!("not a shell command"),
+        }
+    }
+
+    #[test]
+    fn shell_verbs_parse() {
+        assert!(matches!(shell_cmd(&["apex", "shell", "launcher"]), ShellCmd::Launcher));
+        assert!(matches!(shell_cmd(&["apex", "shell", "lock"]), ShellCmd::Lock));
+        assert!(matches!(shell_cmd(&["apex", "shell", "list"]), ShellCmd::List));
+    }
+
+    #[test]
+    fn dashboard_page_is_optional() {
+        match shell_cmd(&["apex", "shell", "dashboard"]) {
+            ShellCmd::Dashboard { page } => assert_eq!(page, None),
+            _ => panic!("wrong variant"),
+        }
+        match shell_cmd(&["apex", "shell", "dashboard", "stats"]) {
+            ShellCmd::Dashboard { page } => assert_eq!(page.as_deref(), Some("stats")),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn settings_takes_a_page_or_a_query_or_a_close() {
+        // A bare `apex shell settings` must work as a single keybind.
+        match shell_cmd(&["apex", "shell", "settings"]) {
+            ShellCmd::Settings { page, list, close } => {
+                assert_eq!(page, None);
+                assert!(!list);
+                assert!(!close);
+            }
+            _ => panic!("wrong variant"),
+        }
+        match shell_cmd(&["apex", "shell", "settings", "keybinds"]) {
+            ShellCmd::Settings { page, .. } => assert_eq!(page.as_deref(), Some("keybinds")),
+            _ => panic!("wrong variant"),
+        }
+        assert!(matches!(
+            shell_cmd(&["apex", "shell", "settings", "--list"]),
+            ShellCmd::Settings { list: true, .. }
+        ));
+        assert!(matches!(
+            shell_cmd(&["apex", "shell", "settings", "--close"]),
+            ShellCmd::Settings { close: true, .. }
+        ));
+    }
+
+    #[test]
+    fn audio_and_network_default_to_their_common_case() {
+        match shell_cmd(&["apex", "shell", "audio"]) {
+            ShellCmd::Audio { which } => assert_eq!(which, "out"),
+            _ => panic!("wrong variant"),
+        }
+        match shell_cmd(&["apex", "shell", "network"]) {
+            ShellCmd::Network { tab } => assert_eq!(tab, "wifi"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn ipc_passes_arguments_through_verbatim() {
+        // The escape hatch must not filter or reorder: it exists precisely for
+        // handlers this wrapper does not know about.
+        match shell_cmd(&["apex", "shell", "ipc", "nexus", "open", "keybinds", "extra"]) {
+            ShellCmd::Ipc {
+                target,
+                function,
+                args,
+            } => {
+                assert_eq!(target, "nexus");
+                assert_eq!(function, "open");
+                assert_eq!(args, vec!["keybinds".to_string(), "extra".to_string()]);
+            }
+            _ => panic!("wrong variant"),
+        }
+        // Function defaults to toggle, which is what most handlers expose.
+        match shell_cmd(&["apex", "shell", "ipc", "focus-toggle"]) {
+            ShellCmd::Ipc { function, .. } => assert_eq!(function, "toggle"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn the_target_table_is_self_consistent() {
+        let rows = shell_targets();
+        assert!(!rows.is_empty());
+        let mut seen = std::collections::HashSet::new();
+        for (verb, target, func) in &rows {
+            assert!(!verb.is_empty() && !target.is_empty() && !func.is_empty());
+            assert!(seen.insert(*verb), "duplicate verb in the table: {verb}");
+        }
+        // `apex shell list` is documentation, so it must actually cover the
+        // verbs that exist rather than drifting from them.
+        for expect in ["launcher", "settings", "lock", "power", "focus", "record"] {
+            assert!(
+                rows.iter().any(|(v, ..)| *v == expect),
+                "{expect} missing from the target table"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_dir_is_overridable_for_development() {
+        // Not asserting the env var here (tests share a process); asserting the
+        // default, which is the contract keybinds rely on.
+        assert_eq!(SHELL_DIR_DEFAULT, "/usr/share/apex-shell");
     }
 
     fn metrics(argv: &[&str]) -> MetricsArgs {

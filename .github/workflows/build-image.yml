@@ -671,6 +671,20 @@ jobs:
             || fail "labwc autostart does not start APEX Shell"
           run 'grep -q "^XDG_CURRENT_DESKTOP=labwc" /usr/share/apex/labwc/environment' \
             || fail "labwc environment does not identify the compositor to the shell"
+
+          # ── apex shell wrapper ─────────────────────────────────────────
+          # The labwc keybinds and root menu invoke `apex shell <verb>`. If that
+          # verb is missing, or qs is not installed, every popup binding in the
+          # session is a silent no-op that looks like a broken keyboard.
+          run 'apex shell list >/dev/null' \
+            || fail "apex shell is missing; labwc keybinds would silently do nothing"
+          run 'command -v qs >/dev/null' \
+            || fail "qs missing; apex shell has nothing to call"
+          run 'grep -q "apex shell" /usr/share/apex/labwc/rc.xml' \
+            || fail "labwc rc.xml no longer uses apex shell"
+          # A read-only session verb must not have become root-only.
+          run 'apex shell list >/dev/null' \
+            || fail "apex shell list requires privileges it should not need"
           # labwc is the only authority on whether an action name and its
           # arguments are real: xmllint cannot know that `Focus` takes no
           # `direction`, and labwc answers a bad action by logging it and

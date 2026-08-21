@@ -13,10 +13,10 @@
       <action name="Execute" command="alacritty"/>
     </item>
     <item label="App launcher">
-      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call dashboard-launcher toggle"/>
+      <action name="Execute" command="apex shell launcher"/>
     </item>
     <item label="Settings">
-      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call dashboard-config toggle"/>
+      <action name="Execute" command="apex shell settings"/>
     </item>
     <separator/>
     <item label="Restart APEX Shell">
@@ -27,7 +27,7 @@
     </item>
     <separator/>
     <item label="Lock">
-      <action name="Execute" command="qs -p /usr/share/apex-shell ipc call lockscreen lock"/>
+      <action name="Execute" command="apex shell lock"/>
     </item>
     <item label="Log out">
       <action name="Exit"/>
