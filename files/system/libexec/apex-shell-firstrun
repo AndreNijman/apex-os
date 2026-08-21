@@ -680,6 +680,63 @@ NIRIAPEX
     fi
 fi
 
+# ── 6b. labwc config (APEX-OS addition; labwc is offered as a third session) ─
+# labwc is installed in the base as the greeter's fallback host compositor, and
+# apex-labwc.desktop offers it as a user session. Unlike Hyprland and niri it has
+# NO IPC of any kind, so everything the compositor does for the shell has to be
+# declared in rc.xml up front — which makes seeding a correct config the whole
+# difference between a working session and a bare grey screen.
+#
+# Seeded per-user (not run from /usr/share) so it stays editable, matching the
+# Hyprland and niri handling. Marker-guarded on the autostart file so a user's
+# own edits are never overwritten.
+if command -v labwc >/dev/null 2>&1 || [ -x /usr/bin/labwc ]; then
+    LABWC_TMPL_DIR=/usr/share/apex/labwc
+    LABWC_DIR="${HOME}/.config/labwc"
+
+    if [ -d "${LABWC_TMPL_DIR}" ]; then
+        mkdir -p "${LABWC_DIR}"
+
+        # rc.xml / menu.xml: copy verbatim, they need no substitution.
+        for f in rc.xml menu.xml; do
+            if [ ! -f "${LABWC_DIR}/${f}" ] && [ -f "${LABWC_TMPL_DIR}/${f}" ]; then
+                cp "${LABWC_TMPL_DIR}/${f}" "${LABWC_DIR}/${f}"
+                log "seeded labwc ${f} -> ${LABWC_DIR}/${f}"
+            fi
+        done
+
+        # autostart / environment carry @HOME@ and @KB_*@ placeholders, so they
+        # go through the same renderer the Hyprland template uses.
+        for f in autostart environment; do
+            if [ ! -f "${LABWC_DIR}/${f}" ] && [ -f "${LABWC_TMPL_DIR}/${f}" ]; then
+                render_hypr_tmpl "${LABWC_TMPL_DIR}/${f}" > "${LABWC_DIR}/${f}"
+                log "seeded labwc ${f} -> ${LABWC_DIR}/${f}"
+            fi
+        done
+
+        # labwc requires autostart to be executable; it is sourced, but labwc
+        # execs it on some versions and a non-executable file silently yields a
+        # session with no shell.
+        [ -f "${LABWC_DIR}/autostart" ] && chmod 0755 "${LABWC_DIR}/autostart"
+
+        # Self-heal an existing config that predates APEX Shell, or one a user
+        # created by hand: without this line the session starts with no bar and
+        # no way to discover why.
+        if [ -f "${LABWC_DIR}/autostart" ] \
+           && ! grep -q 'apex-shell-autostart' "${LABWC_DIR}/autostart" 2>/dev/null; then
+            cat >> "${LABWC_DIR}/autostart" <<'LABWCAPEX'
+
+# ── APEX Shell autostarts (appended by apex-shell-firstrun) ──
+awww-daemon &
+/usr/libexec/apex-shell-autostart &
+wl-paste --type text  --watch cliphist store &
+wl-paste --type image --watch cliphist store &
+LABWCAPEX
+            log "appended APEX Shell autostarts -> ${LABWC_DIR}/autostart"
+        fi
+    fi
+fi
+
 # ── 7. Recover the CURRENT session, which almost certainly missed the clone ──
 # greetd execs the compositor in PARALLEL with this unit, so by the time we get
 # here the compositor has long since fired its autostarts — against a $SRC_DIR

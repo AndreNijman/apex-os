@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX-OS — labwc environment (seeded per-user by apex-shell-firstrun;
+#  @KB_LAYOUT@ / @KB_VARIANT@ are substituted at seed time).
+#
+#  labwc reads this file BEFORE starting, as KEY=VALUE pairs — no `export`, no
+#  shell syntax, no expansion. It is the labwc equivalent of the `env =` lines in
+#  hyprland.conf.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Keyboard layout. labwc has no rc.xml equivalent for this; XKB_DEFAULT_* is the
+# supported route, and it must be set here rather than in autostart because the
+# compositor reads it during input setup.
+XKB_DEFAULT_LAYOUT=@KB_LAYOUT@
+XKB_DEFAULT_VARIANT=@KB_VARIANT@
+
+# Cursor size, matching the Hyprland session.
+XCURSOR_SIZE=24
+
+# Qt applications: use the Wayland backend and let qt6ct theme them, so GUI apps
+# match the shell rather than falling back to XCB with a default palette.
+QT_QPA_PLATFORM=wayland;xcb
+QT_QPA_PLATFORMTHEME=qt6ct
+
+# Firefox and other Gecko apps on Wayland.
+MOZ_ENABLE_WAYLAND=1
+
+# Tell toolkits and portals which desktop this is. The shell detects labwc from
+# XDG_CURRENT_DESKTOP — labwc publishes no socket or signature variable of its
+# own, so this is the only signal available, and the shell's compositor
+# detection depends on it being set.
+XDG_CURRENT_DESKTOP=labwc:wlroots
+XDG_SESSION_TYPE=wayland
+
+# Xwayland apps: keep them on the same scale as native clients.
+GDK_BACKEND=wayland,x11

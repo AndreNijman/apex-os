@@ -1,0 +1,36 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX-OS — labwc autostart (seeded per-user by apex-shell-firstrun; @HOME@ is
+#  substituted with the user's home at seed time).
+#
+#  This is the labwc equivalent of the `exec-once` block in hyprland.conf and is
+#  kept deliberately in step with it. labwc sources this file with /bin/sh, so
+#  every line is a plain shell command and must be backgrounded itself.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The greetd-launched session PATH does not include ~/.local/bin, which is where
+# the awww/awww-daemon wallpaper shims live. labwc has no `env` directive for the
+# session (that is what the `environment` file is for), but exporting here covers
+# everything this script starts.
+PATH="@HOME@/.local/bin:/usr/local/bin:/usr/bin:/usr/local/sbin"
+export PATH
+
+# Wallpaper daemon, by absolute-ish name so it resolves regardless of PATH
+# timing, exactly as the Hyprland session does.
+awww-daemon &
+
+# hypridle + APEX Shell. The helper resolves hypridle's config and is idempotent,
+# so it is also safe to run by hand to repair a live session. It is shared with
+# the Hyprland and niri sessions — the shell does not care which compositor
+# started it.
+/usr/libexec/apex-shell-autostart &
+
+/usr/libexec/polkit-mate-authentication-agent-1 &
+
+# Clipboard history, feeding the shell's clipboard manager.
+wl-paste --type text  --watch cliphist store &
+wl-paste --type image --watch cliphist store &
+
+# Input method. greetd execs the compositor directly, so nothing processes
+# /etc/xdg/autostart — without this, CJK/Indic/Cyrillic users cannot type at all.
+# Guarded so the line is a silent no-op if fcitx5 is ever absent.
+command -v fcitx5 >/dev/null && fcitx5 -d -r &
