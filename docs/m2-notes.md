@@ -167,6 +167,11 @@ accent are selected automatically.
   ship a `/usr/share/wayland-sessions/*.desktop`, which would wrongly appear as
   logins. The flavors `rm -f` `sway.desktop` + `labwc.desktop`. (Removing the
   session files does not touch the sway binary the greeter host uses.)
+  > **SUPERSEDED for labwc.** labwc is now offered as a first-class user session
+  > via `apex-labwc.desktop`, with its own APEX config seeded per-user. The
+  > *stock* `labwc.desktop` is still removed for exactly the reason above — it
+  > launches labwc bare, with no APEX Shell — so both statements hold: the stock
+  > entry stays deleted, and a separate APEX entry is added after it.
 - **Hyprland session** — the `hyprland` package ships its own
   `hyprland.desktop`; the flavors keep it and, defensively, write a minimal one
   if it is somehow absent.
@@ -260,6 +265,8 @@ What to check in the VM:
   plymouth` should show the theme + script plugin baked in.
 - **Greeter:** apex-greet paints with the edition spark/accent; the `‹ Session ›`
   picker offers **Hyprland + niri** and **not** sway/labwc.
+  > **SUPERSEDED.** The picker now also offers **labwc (APEX)**. sway remains
+  > greeter-host only.
   (The base's open item — live layer-shell render under sway on real GL — is
   unchanged and still a HW-verify item; see `docs/m1-notes.md`.)
 - **Provisioner:** on first login `~/.local/src/apex-shell` is cloned,

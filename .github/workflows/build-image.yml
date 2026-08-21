@@ -646,6 +646,45 @@ jobs:
           run 'test ! -e /usr/share/wayland-sessions/hyprland-uwsm.desktop' \
             || fail "hyprland-uwsm.desktop present; it sorts first and bounce-loops"
 
+          # ── labwc as a third user session ──────────────────────────────
+          # The stock labwc.desktop must stay deleted: it launches labwc bare,
+          # with no APEX Shell and no config, and labwc is simultaneously the
+          # greeter's fallback HOST compositor, so offering the stock entry is a
+          # login hazard. Ours is a separate file.
+          run 'test -e /usr/share/wayland-sessions/apex-labwc.desktop' \
+            || fail "apex-labwc.desktop missing; labwc session not offered"
+          run 'test ! -e /usr/share/wayland-sessions/labwc.desktop' \
+            || fail "stock labwc.desktop present; it starts labwc with no shell"
+          run 'command -v labwc >/dev/null' \
+            || fail "labwc binary missing but a labwc session is offered"
+
+          # The session is worthless without its config: labwc has no IPC, so
+          # everything the compositor does for the shell is declared in rc.xml
+          # up front, and a missing or malformed file yields a bare grey screen.
+          for f in rc.xml menu.xml autostart environment; do
+            run "test -s /usr/share/apex/labwc/$f" \
+              || fail "labwc template $f missing from the image"
+          done
+          run 'xmllint --noout /usr/share/apex/labwc/rc.xml' \
+            || fail "labwc rc.xml is not well-formed; labwc would silently use defaults"
+          run 'grep -q apex-shell-autostart /usr/share/apex/labwc/autostart' \
+            || fail "labwc autostart does not start APEX Shell"
+          run 'grep -q "^XDG_CURRENT_DESKTOP=labwc" /usr/share/apex/labwc/environment' \
+            || fail "labwc environment does not identify the compositor to the shell"
+          # labwc is the only authority on whether an action name and its
+          # arguments are real: xmllint cannot know that `Focus` takes no
+          # `direction`, and labwc answers a bad action by logging it and
+          # carrying on with that binding silently dropped.
+          #
+          # It parses rc.xml BEFORE trying to open a backend, so this works in a
+          # container with no seat and no display — verified: an invalid action
+          # still reports, and a valid config prints nothing at all. The
+          # non-zero exit from failing to start a compositor is expected and
+          # deliberately ignored; only config diagnostics are inspected.
+          run 'out=$(labwc -C /usr/share/apex/labwc 2>&1 || true); \
+               ! printf "%s\n" "$out" | grep -qiE "invalid argument for action|invalid action|unexpected element"' \
+            || fail "labwc rejected something in rc.xml; that binding would be silently dropped"
+
           # The greeter must tolerate NVIDIA: sway exits(1) on nvidia-drm without
           # this flag, which means no login at all on a hybrid-graphics machine.
           run 'grep -q -- --unsupported-gpu /etc/greetd/config.toml' \

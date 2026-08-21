@@ -1,0 +1,17 @@
+[Desktop Entry]
+Name=labwc (APEX)
+Comment=Stacking Wayland compositor with APEX Shell
+# Deliberately NOT `labwc -C /usr/share/apex/labwc`: the config is seeded into
+# ~/.config/labwc by apex-shell-firstrun so it is the user's own file and stays
+# editable, exactly as the Hyprland and niri sessions work. Bare `labwc` reads
+# ~/.config/labwc, falling back to the shipped defaults only if seeding somehow
+# did not run.
+#
+# This file is named apex-labwc.desktop rather than labwc.desktop because the
+# base image deletes the stock labwc.desktop — labwc is also the greeter's
+# fallback HOST compositor, and the stock entry would launch it bare, with no
+# APEX Shell and no config.
+Exec=labwc
+Type=Application
+DesktopNames=labwc
+Keywords=stacking;wayland;compositor;openbox;
