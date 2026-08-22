@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Cross-check the labwc keybinds against APEX Shell's own defaults.
+
+The shell's keybind editor generates Hyprland `.conf`/`.lua` and niri `.kdl`,
+but NOT labwc XML: labwc has no IPC to push bindings over and no include
+mechanism to append a generated file to. So the labwc bindings are maintained by
+hand in rc.xml, which means they can silently drift from what the other two
+sessions do — and drift is invisible until someone presses a key and nothing
+happens.
+
+This runs at image build time, where both the shell and the labwc config exist,
+and fails the build on any disagreement.
+
+It exists because they DID drift: the labwc config shipped SUPER+SPACE for the
+launcher when every other session used ALT+SPACE, along with two other wrong
+combos and eleven bindings that were simply missing.
+
+usage: check-labwc-keybinds [SHELL_DIR] [RC_XML]
+"""
+
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+# shell action id -> the `apex shell` verb bound to it in rc.xml
+VERBS = {
+    "dashboard-launcher": "launcher",
+    "dashboard-home": "dashboard home",
+    "dashboard-stats": "dashboard stats",
+    "dashboard-kanban": "dashboard kanban",
+    "dashboard-config": "settings",
+    "PowerMenu-toggle": "power",
+    "notification-toggle": "notifications",
+    "clipboard-toggle": "clipboard",
+    "wallpaper-toggle": "wallpaper",
+    "session-lock": "lock",
+    "focus-toggle": "focus",
+    "screenrec-on": "record",
+    "audioOut-toggle": "audio out",
+    "audioIn-toggle": "audio in",
+    "audioMix-toggle": "audio mixer",
+    "wifi-toggle": "network wifi",
+    "bluetooth-toggle": "network bluetooth",
+    "vpn-toggle": "network vpn",
+    "hotspot-toggle": "network hotspot",
+}
+
+MODS = {"SUPER": "W", "ALT": "A", "CTRL": "C", "SHIFT": "S"}
+# labwc writes modifiers in this order.
+MOD_ORDER = ["W", "C", "A", "S"]
+
+# Keys whose labwc/xkb spelling is not simply the lowercased shell name.
+KEYNAMES = {
+    "SPACE": "space",
+    "ESCAPE": "Escape",
+    "PRINT": "Print",
+    "TAB": "Tab",
+    "RETURN": "Return",
+    "LEFT": "Left",
+    "RIGHT": "Right",
+    "UP": "Up",
+    "DOWN": "Down",
+}
+
+
+def to_labwc(mods: str, key: str) -> str:
+    """Translate a shell "SUPER + SHIFT"/"W" pair into labwc's "W-S-w"."""
+    parts = [MODS[m.strip()] for m in mods.split("+") if m.strip() in MODS]
+    parts.sort(key=lambda m: MOD_ORDER.index(m))
+
+    key = key.strip()
+    if key.upper() in KEYNAMES:
+        k = KEYNAMES[key.upper()]
+    elif re.fullmatch(r"F\d+", key.upper()):
+        k = key.upper()
+    elif len(key) == 1:
+        k = key.lower()
+    else:
+        k = key
+    return "-".join(parts + [k])
+
+
+def shell_defaults(path: str) -> dict:
+    src = open(path, encoding="utf-8").read()
+    # Only the _defaults block; the file also contains examples in comments.
+    start = src.index("_defaults")
+    out = {}
+    for m in re.finditer(
+        r'"([A-Za-z-]+)":\s*\{\s*mods:\s*"([^"]*)",\s*key:\s*"([^"]*)"', src[start:]
+    ):
+        action, mods, key = m.groups()
+        if key:
+            out[action] = to_labwc(mods, key)
+    return out
+
+
+def labwc_binds(path: str) -> dict:
+    """verb -> key, for bindings that invoke `apex shell`."""
+    root = ET.parse(path).getroot()
+    out = {}
+    for kb in root.iter("keybind"):
+        key = kb.get("key")
+        for act in kb.iter("action"):
+            cmd = (act.get("command") or "").strip()
+            if cmd.startswith("apex shell "):
+                out[cmd[len("apex shell "):].strip()] = key
+    return out
+
+
+def main() -> int:
+    shell_dir = sys.argv[1] if len(sys.argv) > 1 else "/usr/share/apex-shell"
+    rc = sys.argv[2] if len(sys.argv) > 2 else "/usr/share/apex/labwc/rc.xml"
+    kbs = f"{shell_dir}/src/services/config_tab/KeybindService.qml"
+
+    defaults = shell_defaults(kbs)
+    binds = labwc_binds(rc)
+
+    problems = []
+    for action, verb in sorted(VERBS.items()):
+        want = defaults.get(action)
+        if want is None:
+            # The shell dropped or renamed an action; the labwc bind is now
+            # pointing at nothing real.
+            problems.append(f"  {action}: not in the shell's defaults any more")
+            continue
+        got = binds.get(verb)
+        if got is None:
+            problems.append(f"  {action}: missing from rc.xml (expected {want} -> apex shell {verb})")
+        elif got != want:
+            problems.append(f"  {action}: rc.xml has {got}, shell default is {want}")
+
+    if problems:
+        print("labwc keybinds disagree with APEX Shell's defaults:", file=sys.stderr)
+        print("\n".join(problems), file=sys.stderr)
+        print(
+            "\nSource of truth: "
+            f"{kbs} (_defaults).\n"
+            "Fix files/desktop/labwc/rc.xml to match.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"labwc keybinds agree with the shell's defaults ({len(VERBS)} checked)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

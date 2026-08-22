@@ -670,6 +670,20 @@ RUN set -eux; \
     # `qs` is what `apex shell` actually calls; without it the wrapper is inert.
     command -v qs >/dev/null
 
+# The labwc bindings are maintained by hand — the shell's keybind editor emits
+# Hyprland .conf/.lua and niri .kdl, and labwc has neither an IPC to push
+# bindings over nor an include mechanism to append a generated file to. So they
+# can drift from what the other two sessions do, and drift is invisible until
+# someone presses a key and nothing happens.
+#
+# They DID drift: the launcher shipped as SUPER+SPACE when every other session
+# used ALT+SPACE, plus two more wrong combos and eleven missing bindings. This is
+# the gate that would have caught it. Both trees exist at this point in the
+# build, so the comparison is exact rather than assumed.
+COPY --chmod=0755 files/scripts/check-labwc-keybinds /tmp/check-labwc-keybinds
+RUN /tmp/check-labwc-keybinds /usr/share/apex-shell /usr/share/apex/labwc/rc.xml \
+    && rm -f /tmp/check-labwc-keybinds
+
 # ── Stage 6: flathub remote (first-boot) + greeter payload + config ────────
 # Flathub CANNOT reliably be added at build time on bootc: `flatpak remote-add
 # --system` writes to /var/lib/flatpak, and bootc treats /var as machine-local

@@ -210,5 +210,32 @@ else
     printf 'SKIP  labwc unavailable; cannot validate action names\n'
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  labwc keybinds vs the shell's own defaults
+#
+#  Maintained by hand (labwc has no IPC to push bindings over and no include
+#  mechanism), so they can drift silently. Only runnable where a shell tree is
+#  available; the image build runs the same script against the vendored copy.
+# ─────────────────────────────────────────────────────────────────────────────
+section "labwc keybinds match the shell defaults"
+CHECK="${ROOT}/files/scripts/check-labwc-keybinds"
+SHELL_TREE=""
+for cand in /usr/share/apex-shell "${ROOT}/../apex-shell"; do
+    [ -f "${cand}/src/services/config_tab/KeybindService.qml" ] && { SHELL_TREE="$cand"; break; }
+done
+
+if [ -z "$SHELL_TREE" ]; then
+    printf 'SKIP  no apex-shell tree available to compare against\n'
+elif ! command -v python3 >/dev/null 2>&1; then
+    printf 'SKIP  python3 unavailable\n'
+else
+    if python3 "$CHECK" "$SHELL_TREE" "${TMPL}/rc.xml" >/dev/null 2>&1; then
+        ok "every shell popup bind matches KeybindService"
+    else
+        python3 "$CHECK" "$SHELL_TREE" "${TMPL}/rc.xml" 2>&1 | head -12
+        bad "every shell popup bind matches KeybindService"
+    fi
+fi
+
 printf '\napex-shell-firstrun: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
