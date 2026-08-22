@@ -74,8 +74,16 @@
   </focus>
 
   <theme>
+    <!-- Keep native labwc controls explicit. APEX Shell reserves the top bar's
+         complete height in the labwc session, so these no longer sit beneath a
+         transparent layer-shell input surface. -->
+    <titlebar>
+      <layout>icon:iconify,max,close</layout>
+      <showTitle>yes</showTitle>
+    </titlebar>
     <cornerRadius>0</cornerRadius>
     <keepBorder>no</keepBorder>
+    <maximizedDecoration>titlebar</maximizedDecoration>
     <font place="ActiveWindow">
       <name>JetBrainsMono Nerd Font</name>
       <size>10</size>
