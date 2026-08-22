@@ -19,3 +19,8 @@ node_modules/
 # agent worktrees (transient)
 .claude/
 output/
+
+# Byte-compiled artefacts. check-labwc-keybinds is run with py_compile during
+# development; its cache must never ship in the image build context.
+__pycache__/
+*.pyc
