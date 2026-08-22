@@ -21,18 +21,17 @@
        which wraps its IPC client so neither the install path nor the internal
        target names appear in this file.
 
-   Decorations are server-side and borderless-ish on purpose: APEX Shell draws
-   the frame (bar, borders, rounded notch), so a second titlebar would sit inside
-   its border. Rounded corners are left to the shell.
+   Decorations are server-side on purpose: labwc supplies the application
+   titlebar, drag area and native window controls below APEX Shell's reserved
+   top bar. APEX Shell still owns the outer frame and rounded screen corners.
   ─────────────────────────────────────────────────────────────────────────────
 -->
 <labwc_config>
 
   <core>
-    <!-- APEX Shell draws the window frame; labwc should not draw a second one.
-         `client` would hand decoration to the app, which most Wayland apps
-         decline, leaving nothing draggable. `server` with a minimal theme keeps
-         a thin grab handle without competing with the shell. -->
+    <!-- `client` would hand decoration to the app, which many Wayland clients
+         decline, leaving no controls or draggable titlebar. `server` keeps
+         those native controls while APEX Shell reserves non-overlapping space. -->
     <decoration>server</decoration>
     <gap>6</gap>
     <adaptiveSync>no</adaptiveSync>
