@@ -138,6 +138,10 @@ else
         && ok "keybinds go through apex shell" || bad "keybinds go through apex shell"
     ! grep -q 'command="qs -p' "${h}/.config/labwc/rc.xml" \
         && ok "no raw qs invocation in keybinds" || bad "no raw qs invocation in keybinds"
+    grep -q '<layout>icon:iconify,max,close</layout>' "${h}/.config/labwc/rc.xml" \
+        && grep -q '<maximizedDecoration>titlebar</maximizedDecoration>' "${h}/.config/labwc/rc.xml" \
+        && ok "native window controls remain available" \
+        || bad "native window controls remain available"
     # A session that cannot be detected by the shell is a session with a bar that
     # thinks it is on an unknown compositor.
     grep -q '^XDG_CURRENT_DESKTOP=labwc' "${h}/.config/labwc/environment" \
