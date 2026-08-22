@@ -59,8 +59,18 @@
   </desktops>
 
   <focus>
-    <followMouse>no</followMouse>
-    <raiseOnFocus>yes</raiseOnFocus>
+    <!-- Focus follows the pointer. Hyprland's own APEX config uses
+         follow_mouse=1, so this matches the other session rather than diverging
+         from it, and it means focus never depends on a click landing on the
+         right surface. -->
+    <followMouse>yes</followMouse>
+    <!-- Require actual pointer MOVEMENT before refocusing. Without this, a
+         window appearing or closing under a stationary cursor steals focus,
+         which is maddening when typing. -->
+    <followMouseRequiresMovement>yes</followMouseRequiresMovement>
+    <!-- Focus follows the mouse, but stacking does not: auto-raising on hover
+         makes windows pop over each other as the pointer crosses them. -->
+    <raiseOnFocus>no</raiseOnFocus>
   </focus>
 
   <theme>
@@ -313,14 +323,5 @@
       </mousebind>
     </context>
   </mouse>
-
-  <windowRules>
-    <!-- APEX Shell's own surfaces are layer-shell, not toplevels, so they are
-         not matched here. This rule keeps dialogs centred rather than
-         cascading into the shell's border. -->
-    <windowRule identifier="*">
-      <action name="AutoPlace"/>
-    </windowRule>
-  </windowRules>
 
 </labwc_config>
