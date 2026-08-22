@@ -21,18 +21,17 @@
        which wraps its IPC client so neither the install path nor the internal
        target names appear in this file.
 
-   Decorations are server-side and borderless-ish on purpose: APEX Shell draws
-   the frame (bar, borders, rounded notch), so a second titlebar would sit inside
-   its border. Rounded corners are left to the shell.
+   Decorations are server-side on purpose: labwc supplies the application
+   titlebar, drag area and native window controls below APEX Shell's reserved
+   top bar. APEX Shell still owns the outer frame and rounded screen corners.
   ─────────────────────────────────────────────────────────────────────────────
 -->
 <labwc_config>
 
   <core>
-    <!-- APEX Shell draws the window frame; labwc should not draw a second one.
-         `client` would hand decoration to the app, which most Wayland apps
-         decline, leaving nothing draggable. `server` with a minimal theme keeps
-         a thin grab handle without competing with the shell. -->
+    <!-- `client` would hand decoration to the app, which many Wayland clients
+         decline, leaving no controls or draggable titlebar. `server` keeps
+         those native controls while APEX Shell reserves non-overlapping space. -->
     <decoration>server</decoration>
     <gap>6</gap>
     <adaptiveSync>no</adaptiveSync>
@@ -59,13 +58,31 @@
   </desktops>
 
   <focus>
-    <followMouse>no</followMouse>
-    <raiseOnFocus>yes</raiseOnFocus>
+    <!-- Focus follows the pointer. Hyprland's own APEX config uses
+         follow_mouse=1, so this matches the other session rather than diverging
+         from it, and it means focus never depends on a click landing on the
+         right surface. -->
+    <followMouse>yes</followMouse>
+    <!-- Require actual pointer MOVEMENT before refocusing. Without this, a
+         window appearing or closing under a stationary cursor steals focus,
+         which is maddening when typing. -->
+    <followMouseRequiresMovement>yes</followMouseRequiresMovement>
+    <!-- Focus follows the mouse, but stacking does not: auto-raising on hover
+         makes windows pop over each other as the pointer crosses them. -->
+    <raiseOnFocus>no</raiseOnFocus>
   </focus>
 
   <theme>
+    <!-- Keep native labwc controls explicit. APEX Shell reserves the top bar's
+         complete height in the labwc session, so these no longer sit beneath a
+         transparent layer-shell input surface. -->
+    <titlebar>
+      <layout>icon:iconify,max,close</layout>
+      <showTitle>yes</showTitle>
+    </titlebar>
     <cornerRadius>0</cornerRadius>
     <keepBorder>no</keepBorder>
+    <maximizedDecoration>titlebar</maximizedDecoration>
     <font place="ActiveWindow">
       <name>JetBrainsMono Nerd Font</name>
       <size>10</size>
@@ -313,14 +330,5 @@
       </mousebind>
     </context>
   </mouse>
-
-  <windowRules>
-    <!-- APEX Shell's own surfaces are layer-shell, not toplevels, so they are
-         not matched here. This rule keeps dialogs centred rather than
-         cascading into the shell's border. -->
-    <windowRule identifier="*">
-      <action name="AutoPlace"/>
-    </windowRule>
-  </windowRules>
 
 </labwc_config>
