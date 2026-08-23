@@ -306,6 +306,37 @@
       <action name="Execute" command="playerctl previous"/>
     </keybind>
 
+    <!-- ── Media keys on CTRL+SUPER ────────────────────────────────────────
+         Kept in step with the Media group in the shell's KeybindService, which
+         is what the Hyprland session binds. A keyboard with no dedicated media
+         keys otherwise cannot drive playback at all. The commands are the same
+         ones the XF86 keys above use, so the shell's OSD still reacts to volume
+         and brightness. `equal` and `minus` are the unshifted +/- keys. -->
+    <keybind key="W-C-space">
+      <action name="Execute" command="playerctl play-pause"/>
+    </keybind>
+    <keybind key="W-C-Right">
+      <action name="Execute" command="playerctl next"/>
+    </keybind>
+    <keybind key="W-C-Left">
+      <action name="Execute" command="playerctl previous"/>
+    </keybind>
+    <keybind key="W-C-equal">
+      <action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"/>
+    </keybind>
+    <keybind key="W-C-minus">
+      <action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"/>
+    </keybind>
+    <keybind key="W-C-0">
+      <action name="Execute" command="wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"/>
+    </keybind>
+    <keybind key="W-C-Up">
+      <action name="Execute" command="brightnessctl set 5%+"/>
+    </keybind>
+    <keybind key="W-C-Down">
+      <action name="Execute" command="brightnessctl set 5%-"/>
+    </keybind>
+
     <!-- Reload this file after editing it. -->
     <keybind key="W-S-r">
       <action name="Reconfigure"/>
