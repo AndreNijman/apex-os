@@ -45,6 +45,23 @@ VERBS = {
     "hotspot-toggle": "network hotspot",
 }
 
+# Shell action id -> the exact command rc.xml must run for it.
+#
+# These are not `apex shell` verbs: media control is a plain command in every
+# session, so the check is that both sessions agree on WHICH KEY runs it. The
+# hardware XF86 keys run the same commands and are deliberately not checked
+# here — only the CTRL+SUPER equivalents have a shell default to compare to.
+MEDIA = {
+    "media-play-pause": "playerctl play-pause",
+    "media-next": "playerctl next",
+    "media-previous": "playerctl previous",
+    "volume-up": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+",
+    "volume-down": "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-",
+    "volume-mute": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle",
+    "brightness-up": "brightnessctl set 5%+",
+    "brightness-down": "brightnessctl set 5%-",
+}
+
 MODS = {"SUPER": "W", "ALT": "A", "CTRL": "C", "SHIFT": "S"}
 # labwc writes modifiers in this order.
 MOD_ORDER = ["W", "C", "A", "S"]
@@ -60,6 +77,10 @@ KEYNAMES = {
     "RIGHT": "Right",
     "UP": "Up",
     "DOWN": "Down",
+    # The unshifted +/- keys. Hyprland accepts the upper-case spelling the
+    # shell stores; labwc/xkb wants the keysym name.
+    "EQUAL": "equal",
+    "MINUS": "minus",
 }
 
 
@@ -107,6 +128,23 @@ def labwc_binds(path: str) -> dict:
     return out
 
 
+def labwc_commands(path: str) -> dict:
+    """command -> every key bound to it.
+
+    A list rather than a single key because the media commands are bound twice
+    on purpose: once on the XF86 hardware key and once on CTRL+SUPER.
+    """
+    root = ET.parse(path).getroot()
+    out: dict = {}
+    for kb in root.iter("keybind"):
+        key = kb.get("key")
+        for act in kb.iter("action"):
+            cmd = (act.get("command") or "").strip()
+            if cmd:
+                out.setdefault(cmd, []).append(key)
+    return out
+
+
 def main() -> int:
     shell_dir = sys.argv[1] if len(sys.argv) > 1 else "/usr/share/apex-shell"
     rc = sys.argv[2] if len(sys.argv) > 2 else "/usr/share/apex/labwc/rc.xml"
@@ -114,8 +152,23 @@ def main() -> int:
 
     defaults = shell_defaults(kbs)
     binds = labwc_binds(rc)
+    commands = labwc_commands(rc)
 
     problems = []
+    for action, command in sorted(MEDIA.items()):
+        want = defaults.get(action)
+        if want is None:
+            problems.append(f"  {action}: not in the shell's defaults any more")
+            continue
+        got = commands.get(command)
+        if not got:
+            problems.append(f"  {action}: rc.xml never runs `{command}`")
+        elif want not in got:
+            problems.append(
+                f"  {action}: rc.xml runs `{command}` on {', '.join(got)}, "
+                f"shell default is {want}"
+            )
+
     for action, verb in sorted(VERBS.items()):
         want = defaults.get(action)
         if want is None:
@@ -140,7 +193,10 @@ def main() -> int:
         )
         return 1
 
-    print(f"labwc keybinds agree with the shell's defaults ({len(VERBS)} checked)")
+    print(
+        "labwc keybinds agree with the shell's defaults "
+        f"({len(VERBS)} popup + {len(MEDIA)} media checked)"
+    )
     return 0
 
 
