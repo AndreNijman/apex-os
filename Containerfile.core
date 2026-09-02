@@ -344,6 +344,20 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
 #     leaves OOM handling abrupt instead of graduated. This package ships
 #     Fedora's standard /usr/lib/systemd/zram-generator.conf (min(ram/2, 8G),
 #     zstd) — the same default the other Fedora atomic desktops carry.
+#
+# kanshi + wlr-randr are the display-settings backend. wlr-randr applies a
+# change live; kanshi holds the persistent per-arrangement profiles and reapplies
+# them on hotplug. Both speak wlr-output-management, so they serve the labwc and
+# niri sessions directly; Hyprland does not implement that protocol and is driven
+# through hyprctl by the same APEX settings model.
+#
+# bubblewrap is the agent sandbox. It was already present as a flatpak
+# dependency and Containerfile.base asserts it, deliberately, so that the
+# security boundary did not force a core rebuild on its own. This transaction is
+# rebuilding core anyway for kanshi, so the dependency is now explicit at no
+# additional cost — a security primitive should not rest on another package
+# happening to pull it in. The base assertion stays: it is what catches the
+# package being dropped again.
 # Own transaction, `dnf5 clean all` at the end.
 RUN set -eux; \
     dnf5 -y copr enable sdegler/hyprland; \
@@ -357,6 +371,8 @@ RUN set -eux; \
         upower libnotify lm_sensors cava wf-recorder ImageMagick \
         qt6ct qt6-qtwebengine mpv-mpris xdg-user-dirs polkit gnome-keyring \
         gammastep geoclue2 jq dconf \
+        kanshi wlr-randr \
+        bubblewrap \
         NetworkManager-wifi wpa_supplicant wireless-regdb iw \
         glibc-langpack-en zram-generator-defaults; \
     dnf5 -y copr disable sdegler/hyprland; \
