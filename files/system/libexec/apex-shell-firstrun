@@ -81,20 +81,36 @@ fi
 APEX_HYPR_TMPL="/usr/share/apex/hypr/hyprland.conf"
 HYPR_CONF="${HOME}/.config/hypr/hyprland.conf"
 
-# Hyprland 0.54/0.55 removed syntax shipped by older APEX images. Migrate only
-# those exact directives in place so upgrades keep user customizations while the
-# compositor and generated keybind file become valid for the new parser.
+# Migrate directives that the SHIPPED Hyprland does not accept, in place, so an
+# upgrade keeps the user's customizations while their config stays valid.
+#
+# THE WINDOW-RULE MIGRATION RAN THE WRONG WAY. It rewrote `suppressevent` /
+# `nofocus` into `suppress_event` / `match:class`, on the stated premise that
+# "Hyprland 0.54/0.55 removed syntax shipped by older APEX images". APEX does
+# not ship 0.54 or 0.55: Containerfile.core pins the sdegler COPR, which serves
+# hyprland 0.51.1 — verified in the built core image and against the live COPR.
+#
+# On 0.51.1 the `match:` forms are the ones that do not exist. Hyprland reports
+# "Invalid rulev2 found" and then carries on starting, so this migration was
+# silently disabling two real rules on every login: apps could auto-maximize,
+# and empty XWayland surfaces could steal focus.
+#
+# Reversed, so it converts the newer-syntax forms to the ones the pinned
+# compositor accepts. If core ever moves to a Hyprland where `match:` is
+# correct, this block and the shipped template flip together — and the build
+# assertion that runs `Hyprland --verify-config` against the image's own
+# Hyprland is what forces that to happen at the same time.
 hypr_migrated=0
 for conf in "${HYPR_CONF}" "${HOME}/.config/apex-shell/ApexShellKeybinds.conf"; do
     [ -f "$conf" ] || continue
-    if grep -qE 'pseudotile[[:space:]]*=|,[[:space:]]*togglesplit([[:space:]]*$|[[:space:]]*#)|suppressevent maximize|nofocus,class:\^\$' "$conf"; then
+    if grep -qE 'pseudotile[[:space:]]*=|,[[:space:]]*togglesplit([[:space:]]*$|[[:space:]]*#)|suppress_event maximize|match:class \^\$' "$conf"; then
         sed -Ei \
             -e '/^[[:space:]]*pseudotile[[:space:]]*=[[:space:]]*(true|yes|1)[[:space:]]*$/d' \
             -e 's/,[[:space:]]*togglesplit([[:space:]]*(#.*)?)$/, layoutmsg, togglesplit\1/' \
-            -e 's/windowrule = suppressevent maximize, class:\.\*/windowrule = suppress_event maximize, match:class .*/' \
-            -e 's/windowrule = nofocus,class:\^\$,title:\^\$,xwayland:1,floating:1,fullscreen:0,pinned:0/windowrule = match:class ^$, match:title ^$, match:xwayland 1, match:float 1, match:fullscreen 0, match:pin 0, no_focus on/' \
+            -e 's/windowrule = suppress_event maximize, match:class \.\*/windowrule = suppressevent maximize, class:.*/' \
+            -e 's/windowrule = match:class \^\$, match:title \^\$, match:xwayland 1, match:float 1, match:fullscreen 0, match:pin 0, no_focus on/windowrule = nofocus, class:^$, title:^$, xwayland:1, floating:1, fullscreen:0, pinned:0/' \
             "$conf"
-        log "migrated removed Hyprland directives in ${conf}"
+        log "migrated Hyprland directives in ${conf} to the pinned compositor's syntax"
         hypr_migrated=1
     fi
 done
@@ -470,6 +486,20 @@ for _variant in conf kdl lua; do
     [ -f "${CFG_DIR}/ApexShellKeybinds.${_variant}" ] \
         || : > "${CFG_DIR}/ApexShellKeybinds.${_variant}"
 done
+
+# apex-input.conf is the same story, one file along: the seeded hyprland.conf
+# `source=`s the generated input settings, and Hyprland treats a source with no
+# match as a FATAL config error — verified against the image's own Hyprland,
+# which reports "source= globbing error: found no match" and refuses the whole
+# config. That would take every keybind and window rule down with it on boot #1.
+#
+# Empty is the correct placeholder, not a generated default: an empty file means
+# "no overrides", so the input block already in hyprland.conf applies. The
+# generator (/usr/libexec/apex-input-apply, driven by APEX Settings) overwrites
+# it with real values the first time the user changes anything.
+mkdir -p "${HOME}/.config/hypr"
+[ -f "${HOME}/.config/hypr/apex-input.conf" ] \
+    || : > "${HOME}/.config/hypr/apex-input.conf"
 
 [ -f "${HOME}/.cache/apex-shell/colors.json" ] || \
     : > "${HOME}/.cache/apex-shell/colors.json"
