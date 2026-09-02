@@ -150,17 +150,36 @@ section "restore rebuilds a terminal with its directory"
 # it verbatim opens a terminal in the wrong place.
 out="$(cd "$PROJ" && TERMINAL=foot "$APEX" project layout restore --dry-run 2>&1)"
 printf '%s\n' "$out" | sed 's/^/      /'
-if command -v foot >/dev/null 2>&1; then
-    printf '%s' "$out" | grep -q -- "--working-directory ${PROJ}" \
-        && ok "a terminal is restored with the project directory" \
-        || bad "a terminal is restored with the project directory"
-else
-    # foot is not installed, so choose_terminal falls through to whatever is —
-    # the assertion is that SOME emulator plus the directory is emitted, not
-    # which one.
+
+# Three cases, all real, and the third is the one only CI reaches — a runner
+# has no terminal emulator installed at all. Skipping it would leave the
+# documented fallback untested everywhere.
+have_term=no
+for t in foot alacritty ghostty kitty wezterm xterm; do
+    command -v "$t" >/dev/null 2>&1 && { have_term=yes; break; }
+done
+
+if [ "$have_term" = yes ]; then
+    # Whichever emulator is present, the working directory must be passed —
+    # a terminal's stored argv does not carry it, so replaying it verbatim
+    # opens a terminal in the wrong place.
     printf '%s' "$out" | grep -qF "${PROJ}" \
         && ok "a terminal is restored with the project directory" \
         || bad "a terminal is restored with the project directory"
+    if command -v foot >/dev/null 2>&1; then
+        printf '%s' "$out" | grep -q -- "--working-directory ${PROJ}" \
+            && ok "\$TERMINAL wins and gets its own flag" \
+            || bad "\$TERMINAL wins and gets its own flag"
+    fi
+else
+    # No emulator: the documented fallback is to replay the stored argv and
+    # SAY so, rather than inventing a command that cannot run.
+    printf '%s' "$out" | grep -q "no terminal emulator found" \
+        && ok "no emulator is reported rather than guessed at" \
+        || { bad "no emulator is reported rather than guessed at"; }
+    printf '%s' "$out" | grep -q "would run (ws 2): sleep 600" \
+        && ok "the stored argv is replayed when there is no emulator" \
+        || bad "the stored argv is replayed when there is no emulator"
 fi
 printf '%s' "$out" | grep -q "1 window(s) would be restored" \
     && ok "the dry run reports what it would do" || bad "the dry run reports what it would do"
