@@ -87,6 +87,26 @@ jobs:
                       tomllib.load(file)
           PY
 
+      - name: Validate Containerfile layer order
+        run: |
+          set -euo pipefail
+          # Two mistakes that otherwise surface only hours into an image build,
+          # on a runner with a six-hour ceiling:
+          #
+          #   * a RUN that reads a path above the COPY which creates it — the
+          #     build fails at that layer, and on this image that is hours in;
+          #   * volatile content copied early — `podman build --cache-to`
+          #     pushes each intermediate layer to the registry separately, so a
+          #     cache miss near the top costs a rebuild AND a push for every
+          #     layer beneath it. That is what killed the post-agent-runtime
+          #     build at step 76 of 83 after six hours, where the previous
+          #     successful build took 3h16m.
+          #
+          # A static check, so both are caught in seconds on the PR instead.
+          python3 files/scripts/check-containerfile-order \
+            Containerfile.base Containerfile.core \
+            Containerfile.daily Containerfile.gaming
+
   rust:
     name: Rust validation
     needs: changes
