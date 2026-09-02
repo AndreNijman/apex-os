@@ -295,15 +295,25 @@ pub fn create(dir: &Path, label: &str, session: Option<u32>) -> Result<Checkpoin
             ],
         )?;
 
-        let created_ms = now_ms();
-        let created = created_ms / 1000;
         let short = &commit[..commit.len().min(8)];
+
+        // Milliseconds, not seconds, and first: the id is fixed-width for the
+        // next few centuries, so it sorts chronologically on its own.
+        //
+        // The commit hash alone is not unique. `git commit-tree` stamps with
+        // one-second granularity, so capturing an identical tree twice with the
+        // same label and parent inside one second yields the *same* commit —
+        // and then the same id, and one metadata file overwriting the other.
+        // The millisecond makes that vanishingly unlikely rather than
+        // impossible, so claim the id by taking the next free one. A capture
+        // takes several git subprocesses and so several milliseconds, which is
+        // why this is expected to spin zero times; it exists so the guarantee
+        // does not rest on that being true.
+        let (id, created_ms) = claim_id(&meta_dir(&root), now_ms(), short);
+        let created = created_ms / 1000;
+
         let cp = Checkpoint {
-            // Milliseconds, not seconds, and first: the id is fixed-width for
-            // the next few centuries, so it sorts chronologically on its own
-            // and two checkpoints of an identical tree in the same second no
-            // longer collide on one metadata file.
-            id: format!("{created_ms}-{short}"),
+            id,
             label: label.to_string(),
             project: root.to_string_lossy().into_owned(),
             commit: commit.clone(),
@@ -324,6 +334,31 @@ pub fn create(dir: &Path, label: &str, session: Option<u32>) -> Result<Checkpoin
 
     let _ = std::fs::remove_file(&tmp_index);
     result
+}
+
+/// Pick an id no existing checkpoint has taken, and the stamp that goes with it.
+///
+/// The commit hash alone is not unique. `git commit-tree` stamps with
+/// one-second granularity, so capturing an identical tree twice with the same
+/// label and parent inside one second yields the *same commit* — and then, with
+/// only the commit in the id, the same id, and one metadata file silently
+/// overwriting the other. The millisecond makes that unlikely; stepping to the
+/// next free stamp makes it impossible.
+///
+/// A capture runs several git subprocesses and so takes several milliseconds,
+/// which is why this is expected to step zero times in practice. It exists so
+/// the guarantee does not rest on that remaining true.
+///
+/// Stepping forward rather than back keeps the ordering invariant: a later
+/// capture always gets a strictly larger key than an earlier one.
+fn claim_id(meta: &Path, mut created_ms: u64, short: &str) -> (String, u64) {
+    loop {
+        let id = format!("{created_ms}-{short}");
+        if !meta.join(format!("{id}.json")).exists() {
+            return (id, created_ms);
+        }
+        created_ms += 1;
+    }
 }
 
 fn write_meta(cp: &Checkpoint) -> Result<()> {
@@ -555,6 +590,43 @@ mod tests {
             d.undo_command().as_deref(),
             Some("sudo apex remove clang cmake")
         );
+    }
+
+    #[test]
+    fn an_id_already_on_disk_is_stepped_over() {
+        // The case the clock cannot be forced into: an identical tree captured
+        // twice within one millisecond produces the same commit AND the same
+        // stamp, so without this the second record overwrites the first.
+        let base = std::env::temp_dir().join(format!("apex-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("create");
+
+        let (first, ms1) = claim_id(&base, 1_756_800_000_000, "abc12345");
+        assert_eq!(first, "1756800000000-abc12345");
+        assert_eq!(ms1, 1_756_800_000_000);
+
+        // Nothing written yet, so the same inputs still yield the same id.
+        let (again, _) = claim_id(&base, 1_756_800_000_000, "abc12345");
+        assert_eq!(again, first);
+
+        // Now the record exists: the next claim must not reuse it.
+        std::fs::write(base.join(format!("{first}.json")), "{}").expect("write");
+        let (second, ms2) = claim_id(&base, 1_756_800_000_000, "abc12345");
+        assert_ne!(second, first, "the taken id was handed out twice");
+        assert!(ms2 > ms1, "the stamp must move forward, not back");
+        assert_eq!(second, "1756800000001-abc12345");
+
+        // And it steps as far as it needs to.
+        std::fs::write(base.join(format!("{second}.json")), "{}").expect("write");
+        let (third, ms3) = claim_id(&base, 1_756_800_000_000, "abc12345");
+        assert_eq!(third, "1756800000002-abc12345");
+        assert!(ms3 > ms2);
+
+        // A different commit at the same instant is already distinct.
+        let (other, _) = claim_id(&base, 1_756_800_000_000, "def67890");
+        assert_eq!(other, "1756800000000-def67890");
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
