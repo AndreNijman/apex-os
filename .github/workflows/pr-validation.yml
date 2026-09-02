@@ -278,6 +278,24 @@ jobs:
       # Needs no root: every approval uses --no-run, so the suite records
       # decisions without performing operations and never raises an
       # authentication prompt.
+      # bubblewrap, so the sandbox boundary is actually exercised on CI rather
+      # than skipped. The secret broker's central claim — that a CONFINED
+      # session cannot read the credential file — is only testable with a real
+      # sandbox, and a runner has no bwrap by default. Without this the one
+      # assertion that matters most is the one that never runs.
+      - name: Install bubblewrap
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          bwrap --version
+          # The runtime also refuses to confine a session when the kernel still
+          # honours the legacy TIOCSTI ioctl, because keystroke injection into
+          # the controlling terminal would make confinement meaningless. Report
+          # it rather than letting the suite fail with a less obvious message.
+          sysctl dev.tty.legacy_tiocsti 2>/dev/null || \
+            echo "note: dev.tty.legacy_tiocsti knob absent (compiled out — fine)"
+
       - name: Run privilege-request assertions
         run: ./tests/test-privilege-requests.sh
 
