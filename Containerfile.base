@@ -528,6 +528,13 @@ COPY --chmod=0755 files/system/libexec/apex-shell-autostart \
 #                          than leaving the user with no menu at all
 #   apex-compositor-reload labwc --reconfigure / hyprctl reload / niri validate
 #   apex-session-logout    loginctl first, compositor exit verb as the fallback
+# Input settings generator: one APEX model -> Hyprland conf + niri KDL + the
+# <libinput> element inside labwc's rc.xml, each validated before it replaces
+# anything. labwc has no include mechanism, which is why its half is an
+# in-place span replacement rather than a generated file.
+COPY --chmod=0755 files/system/libexec/apex-input-apply \
+     /usr/libexec/apex-input-apply
+
 COPY --chmod=0755 files/system/libexec/apex-desktop-menu \
      /usr/libexec/apex-desktop-menu
 COPY --chmod=0755 files/system/libexec/apex-compositor-reload \
@@ -543,6 +550,13 @@ RUN set -eux; \
         test -x "/usr/libexec/$h"; \
         bash -n "/usr/libexec/$h"; \
     done; \
+    test -x /usr/libexec/apex-input-apply; \
+    python3 -c 'import ast,sys; ast.parse(open("/usr/libexec/apex-input-apply").read())'; \
+    # The generator's own self-test runs every installed compositor's validator
+    # over its output. Names are verified rather than remembered because labwc
+    # ignores an unknown element in silence — which is how <tapToClick> shipped
+    # doing nothing at all.
+    /usr/libexec/apex-input-apply --self-test; \
     # Every verb the helpers dispatch to has to exist in the image.
     command -v labwc >/dev/null; \
     command -v niri >/dev/null; \

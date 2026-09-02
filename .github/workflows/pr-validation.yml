@@ -180,6 +180,9 @@ jobs:
       - name: Run user-provisioner assertions
         run: ./tests/test-apex-firstrun.sh
 
+      - name: Run input-settings assertions
+        run: ./tests/test-apex-input.sh
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail
