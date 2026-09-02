@@ -107,6 +107,46 @@ jobs:
             Containerfile.base Containerfile.core \
             Containerfile.daily Containerfile.gaming
 
+      - name: Only the daemon may run host commands
+        run: |
+          set -euo pipefail
+          # `RealWriter::for_daemon` is the one constructor permitted to shell
+          # out to scxctl and nvidia-smi. Every other caller — tests above all
+          # — gets a writer that logs and skips, because a process spawn is not
+          # redirected by the fixture `sys_root` the way a sysfs write is.
+          #
+          # This is a static check because the symptom was remote from the
+          # cause: running the game-mode tests fired a burst of polkit prompts
+          # ("Authentication is required to ... switch sched-ext schedulers") on
+          # the developer's own desktop and then BLOCKED for 177 seconds waiting
+          # on a password, which read as a slow test suite rather than as a test
+          # reaching the host.
+          # Two allowed files: the daemon that opts in, and syswriter.rs where
+          # the constructor is defined and unit-tested. Comment lines are
+          # stripped so prose about it does not trip the check. Anywhere else —
+          # a tests/ directory, the `apex` CLI, a future binary — is a failure.
+          found="$(grep -rn 'RealWriter::for_daemon' apexd --include='*.rs' \
+                   | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+          echo "$found"
+          outside="$(printf '%s\n' "$found" \
+                     | grep -vE '^apexd/(apexd/src/main\.rs|apexd-core/src/syswriter\.rs):' || true)"
+          if [ -n "$outside" ]; then
+            echo "FATAL: only the daemon may opt into host commands; found:" >&2
+            printf '%s\n' "$outside" >&2
+            exit 1
+          fi
+          # No integration test may construct one, whatever the path.
+          if grep -rn 'RealWriter::for_daemon' apexd --include='*.rs' \
+             | grep -E '/tests/'; then
+            echo "FATAL: a test must never opt into host commands (see above)" >&2
+            exit 1
+          fi
+          # And the daemon must still use it, or game mode has silently stopped
+          # switching the scheduler — the failure mode of fixing this lazily.
+          printf '%s\n' "$found" | grep -q '^apexd/apexd/src/main\.rs:' \
+            || { echo "FATAL: the daemon no longer opts in; game mode would never switch the scheduler" >&2; exit 1; }
+          echo "host commands: only the daemon opts in"
+
   rust:
     name: Rust validation
     needs: changes

@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     );
 
     // Writer: real sysfs, gated by dry-run.
-    let writer: Arc<dyn SysWriter> = Arc::new(RealWriter::new(dry_run));
+    let writer: Arc<dyn SysWriter> = Arc::new(RealWriter::for_daemon(dry_run));
 
     // Initial state.
     let on_ac = read_ac_online(Path::new("/sys"));

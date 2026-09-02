@@ -16,6 +16,8 @@
 //! predictable than an async runtime — and the blocking `read` on a PTY is
 //! exactly what the kernel is good at.
 
+mod peer;
+mod privilege;
 mod pty;
 mod registry;
 mod session;
@@ -32,6 +34,7 @@ use apex_agent_core::paths;
 use apex_agent_core::protocol::{
     ErrorKind, Request, Response, SessionInfo, PROTOCOL_VERSION,
 };
+use apex_agent_core::request;
 
 use crate::registry::Registry;
 
@@ -69,6 +72,7 @@ fn run() -> Result<()> {
         .context("the control socket path has no parent directory")?;
     paths::ensure_private_dir(dir)?;
     paths::ensure_private_dir(&paths::state_dir())?;
+    privilege::ensure_dirs();
 
     // Sessions never outlive the daemon that owned their PTYs, so any record
     // left claiming to be running is from a previous life.
@@ -188,6 +192,12 @@ fn shutdown(daemon: &Daemon, socket: &Path) {
 /// Serve one control connection: newline-delimited JSON requests until the
 /// client goes away, or until an `Attach` turns it into a raw PTY pipe.
 fn serve(daemon: &Arc<Daemon>, stream: UnixStream) -> Result<()> {
+    // Read the peer credentials ONCE, from the accepted socket, before any
+    // request is parsed. The kernel filled them in at connect(2) and they
+    // cannot change for the life of the connection — whereas anything read out
+    // of a request line is whatever the client chose to send.
+    let creds = peer::credentials(&stream);
+
     let mut reader = BufReader::new(stream.try_clone().context("cloning the connection")?);
     let mut writer = stream;
 
@@ -226,7 +236,7 @@ fn serve(daemon: &Arc<Daemon>, stream: UnixStream) -> Result<()> {
             return session::handle_attach(daemon, writer, reader, id, cols, rows, replay);
         }
 
-        let response = dispatch(daemon, request);
+        let response = dispatch(daemon, request, creds);
         respond(&mut writer, &response)?;
     }
 }
@@ -240,7 +250,11 @@ fn respond(writer: &mut UnixStream, response: &Response) -> Result<()> {
 }
 
 /// Handle every verb except `Attach`.
-fn dispatch(daemon: &Arc<Daemon>, request: Request) -> Response {
+///
+/// `creds` is the connection's peer credentials, or `None` when the kernel
+/// would not report them. It is passed rather than looked up so that no handler
+/// can accidentally consult the request for identity instead.
+fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -> Response {
     match request {
         Request::Hello => {
             let cfg = daemon.config.lock().expect("config lock");
@@ -401,6 +415,31 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request) -> Response {
                 registry::forget_record(id);
             }
             Response::Ok
+        }
+
+        // ── privilege requests ──────────────────────────────────────────────
+        // Every one of these takes `creds` and none of them takes a session id
+        // from the wire.
+        Request::PrivilegeRequest { verb, args, reason } => {
+            privilege::file(daemon, creds, &verb, &args, &reason)
+        }
+
+        Request::Requests => privilege::list(),
+
+        Request::Decide { id, decision } => match request::Decision::parse(&decision) {
+            Some(d) => privilege::decide(daemon, creds, id, d),
+            None => Response::error(
+                ErrorKind::BadRequest,
+                format!("'{decision}' is not a decision; use once, project or deny"),
+            ),
+        },
+
+        Request::RequestExecuted { id, exit_code } => privilege::executed(id, exit_code),
+
+        Request::Grants => privilege::grants(),
+
+        Request::Revoke { project, key } => {
+            privilege::revoke(daemon, creds, &project, key.as_deref())
         }
     }
 }
