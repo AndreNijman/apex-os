@@ -551,6 +551,23 @@ COPY --chmod=0755 files/system/libexec/apex-input-apply \
      /usr/libexec/apex-input-apply
 COPY --chmod=0755 files/system/libexec/apex-display-apply \
      /usr/libexec/apex-display-apply
+
+# Agent Center helpers. Both exist so APEX Shell never has to know which
+# compositor is running (§6's adapter-layer rule) and never has to decide
+# anything about privilege (§4).
+#
+#   apex-agent-focus   session id -> the terminal attached to it, focused.
+#                      Resolved through the process tree, because a session has
+#                      no window: agentd owns the PTY and a terminal merely
+#                      attaches. Opens one when there is none.
+#   apex-agent-review  opens a terminal on one privilege request. Approving
+#                      performs the operation with the reviewing human's own
+#                      root, so it must happen where sudo can authenticate and
+#                      the whole prompt is visible — never behind a button.
+COPY --chmod=0755 files/system/libexec/apex-agent-focus \
+     /usr/libexec/apex-agent-focus
+COPY --chmod=0755 files/system/libexec/apex-agent-review \
+     /usr/libexec/apex-agent-review
 # Only what exists at this point in the build. The cross-checks against
 # /usr/share/apex/labwc/rc.xml live in the labwc section that populates it —
 # asserting a path before its COPY is a build failure, and this block did
@@ -581,7 +598,19 @@ RUN set -eux; \
     # apex-display-apply dispatches to these for the two wlroots sessions.
     command -v wlr-randr >/dev/null; \
     command -v kanshi >/dev/null; \
-    echo "context menu + settings generators: installed, self-tested, verbs present"
+    # Agent Center helpers.
+    test -x /usr/libexec/apex-agent-focus; \
+    python3 -c 'import ast,sys; ast.parse(open("/usr/libexec/apex-agent-focus").read())'; \
+    test -x /usr/libexec/apex-agent-review; \
+    bash -n /usr/libexec/apex-agent-review; \
+    # Both refuse a bad argument rather than guessing, and the usage text is
+    # what a caller sees when the shell passes something wrong.
+    ! /usr/libexec/apex-agent-focus 2>/dev/null; \
+    ! /usr/libexec/apex-agent-review not-a-number 2>/dev/null; \
+    # `ps` is how apex-agent-focus maps a session to a process; without it the
+    # helper silently never finds a terminal and always opens a new one.
+    command -v ps >/dev/null; \
+    echo "context menu + settings generators + agent helpers: installed and self-tested"
 RUN systemctl --global enable apex-shell-firstrun.service
 
 # ── Stage 5d: user packages, WITHOUT breaking OS updates ────────────────────

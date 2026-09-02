@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""Bring an agent session's terminal to the front, or open one for it.
+
+Roadmap §3: "Focus the existing terminal when the user clicks an agent in APEX
+Shell", and "notifications should take users back to the real TUI". §6 adds that
+compositor-specific window handling must sit behind an adapter layer — which is
+what this script is. APEX Shell calls
+
+    apex-agent-focus <session-id>
+
+and never learns which compositor is running.
+
+HOW A SESSION MAPS TO A WINDOW
+------------------------------
+It does not, directly. `apex-agentd` owns the PTY; a terminal merely *attaches*
+to it, so there is no window associated with a session in any compositor's eyes.
+What is discoverable is the process: an attached terminal has an
+`apex agent attach <id>` somewhere in its process tree. So:
+
+  1. find every `apex agent attach <id>` process for this session;
+  2. walk each one UP to a pid the compositor knows as a window;
+  3. focus that window.
+
+Step 2 matters. The attach process is a grandchild of the terminal emulator
+(terminal -> shell -> apex), and compositors report the window's own pid — the
+emulator's. Matching only the attach pid finds nothing.
+
+WHEN THERE IS NO WINDOW
+-----------------------
+If the session has no attached terminal — nobody has attached, or the terminal
+was closed, which a persistent session survives by design — the useful answer is
+not an error. It is to open a terminal on it. That is what `--no-spawn`
+suppresses for callers that only want to know.
+
+COMPOSITORS
+-----------
+  hyprland  hyprctl -j clients   (has `pid`)      -> dispatch focuswindow
+  niri      niri msg --json windows (has `pid`)   -> action focus-window
+  labwc     no IPC and no window query at all, by design. There is nothing to
+            enumerate, so labwc always takes the spawn path. Saying so is more
+            honest than pretending a lookup failed.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+TIMEOUT = 5
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, **kw)
+
+
+def compositor():
+    if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return "hyprland"
+    if os.environ.get("NIRI_SOCKET"):
+        return "niri"
+    desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
+    if "hyprland" in desktop:
+        return "hyprland"
+    if "niri" in desktop:
+        return "niri"
+    if "labwc" in desktop:
+        return "labwc"
+    return ""
+
+
+# ── the process side ────────────────────────────────────────────────────────
+
+
+def attach_pids(session):
+    """Every `apex agent attach <session>` process, as pids.
+
+    Matched on the argv rather than with `pgrep -f`, because a pattern loose
+    enough to catch the real thing also catches this script's own command line
+    and any editor with the string open.
+    """
+    out = run(["ps", "-eo", "pid=,args="])
+    if out.returncode != 0:
+        return []
+    want = str(session)
+    pids = []
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid, _, args = line.partition(" ")
+        fields = args.split()
+        # apex agent attach <id> [--no-replay]
+        if len(fields) < 4:
+            continue
+        if os.path.basename(fields[0]) != "apex":
+            continue
+        if fields[1] != "agent" or fields[2] != "attach":
+            continue
+        if fields[3] != want:
+            continue
+        try:
+            pids.append(int(pid))
+        except ValueError:
+            pass
+    return pids
+
+
+def ancestry(pid, limit=32):
+    """`pid` and its parents, closest first, stopping at pid 1."""
+    chain = []
+    current = pid
+    for _ in range(limit):
+        if current <= 1:
+            break
+        chain.append(current)
+        try:
+            with open(f"/proc/{current}/status", encoding="utf-8") as fh:
+                parent = None
+                for line in fh:
+                    if line.startswith("PPid:"):
+                        parent = int(line.split()[1])
+                        break
+        except (OSError, ValueError):
+            break
+        if parent is None or parent == current:
+            break
+        current = parent
+    return chain
+
+
+# ── the window side ─────────────────────────────────────────────────────────
+
+
+def hyprland_windows():
+    if not shutil.which("hyprctl"):
+        return []
+    out = run(["hyprctl", "-j", "clients"])
+    if out.returncode != 0:
+        return []
+    try:
+        clients = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        return []
+    return [
+        (c.get("pid"), c.get("address"))
+        for c in clients
+        if isinstance(c.get("pid"), int) and c.get("address")
+    ]
+
+
+def hyprland_focus(handle):
+    return run(["hyprctl", "dispatch", "focuswindow", f"address:{handle}"]).returncode == 0
+
+
+def niri_windows():
+    if not shutil.which("niri"):
+        return []
+    out = run(["niri", "msg", "--json", "windows"])
+    if out.returncode != 0:
+        return []
+    try:
+        windows = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        return []
+    return [
+        (w.get("pid"), w.get("id"))
+        for w in windows
+        if isinstance(w.get("pid"), int) and w.get("id") is not None
+    ]
+
+
+def niri_focus(handle):
+    return run(["niri", "msg", "action", "focus-window", "--id", str(handle)]).returncode == 0
+
+
+BACKENDS = {
+    "hyprland": (hyprland_windows, hyprland_focus),
+    "niri": (niri_windows, niri_focus),
+}
+
+
+def find_window(session, which):
+    """The window handle showing this session's terminal, or None."""
+    backend = BACKENDS.get(which)
+    if backend is None:
+        # labwc, or an unknown compositor. Nothing to enumerate.
+        return None
+    enumerate_windows, _ = backend
+    windows = enumerate_windows()
+    if not windows:
+        return None
+    by_pid = {pid: handle for pid, handle in windows}
+    for pid in attach_pids(session):
+        # Closest ancestor wins: with nested terminals the innermost window
+        # holding this attach is the one the user means.
+        for candidate in ancestry(pid):
+            if candidate in by_pid:
+                return by_pid[candidate]
+    return None
+
+
+# ── spawning ────────────────────────────────────────────────────────────────
+
+
+def terminal_argv():
+    """How to run a command in a new terminal window.
+
+    `apex` seeds `$terminal` in the compositor config, but this may run from a
+    notification action with a bare environment, so the list is tried in order.
+    Each entry is (binary, exec-flag): the flag differs, and getting it wrong
+    silently opens an empty terminal.
+    """
+    candidates = [
+        (os.environ.get("TERMINAL") or "", "-e"),
+        ("alacritty", "-e"),
+        ("ghostty", "-e"),
+        ("foot", "-e"),
+        ("kitty", "-e"),
+        ("wezterm", "start"),
+        ("xterm", "-e"),
+    ]
+    for binary, flag in candidates:
+        if binary and shutil.which(binary):
+            return [binary, flag]
+    return []
+
+
+def spawn(session):
+    term = terminal_argv()
+    if not term:
+        print(
+            "apex-agent-focus: no terminal emulator found; attach with "
+            f"`apex agent attach {session}`",
+            file=sys.stderr,
+        )
+        return 3
+    apex = shutil.which("apex") or "/usr/bin/apex"
+    argv = term + [apex, "agent", "attach", str(session)]
+    try:
+        # Detached: this process exits immediately and the terminal must not
+        # die with it. start_new_session gives the terminal its own session, so
+        # it survives the shell's notification handler going away.
+        subprocess.Popen(
+            argv,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as e:
+        print(f"apex-agent-focus: cannot start {argv[0]}: {e}", file=sys.stderr)
+        return 3
+    print(f"apex-agent-focus: opened a terminal on session {session}")
+    return 0
+
+
+# ── entry point ─────────────────────────────────────────────────────────────
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    no_spawn = "--no-spawn" in argv
+    argv = [a for a in argv if a != "--no-spawn"]
+    if len(argv) != 1 or not argv[0].isdigit():
+        print(
+            "usage: apex-agent-focus [--no-spawn] <session-id>\n"
+            "\n"
+            "Focuses the terminal attached to an agent session. With no\n"
+            "attached terminal, opens one — unless --no-spawn.",
+            file=sys.stderr,
+        )
+        return 2
+    session = int(argv[0])
+
+    which = compositor()
+    handle = find_window(session, which)
+    if handle is not None:
+        _, focus = BACKENDS[which]
+        if focus(handle):
+            print(f"apex-agent-focus: focused the terminal for session {session}")
+            return 0
+        # The window was there a moment ago and the focus call failed. Falling
+        # through to spawn would open a SECOND terminal on the same session,
+        # which is worse than reporting it.
+        print(
+            f"apex-agent-focus: found the window for session {session} but could "
+            "not focus it",
+            file=sys.stderr,
+        )
+        return 1
+
+    if no_spawn:
+        print(f"apex-agent-focus: session {session} has no attached terminal", file=sys.stderr)
+        return 1
+    if which == "labwc":
+        # Not a failure. labwc exposes no window query, so there is no lookup
+        # to have failed.
+        print(
+            "apex-agent-focus: labwc has no window query; opening a terminal instead",
+            file=sys.stderr,
+        )
+    return spawn(session)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -162,6 +162,19 @@ pub struct SessionInfo {
     pub state: AgentState,
     /// Free-text detail attached to the current state by a published event.
     pub detail: Option<String>,
+    /// Whether the session is stopped (`apex agent pause`).
+    ///
+    /// A separate field rather than a value inside `detail`, which is where it
+    /// started. `detail` is free text that any cooperating client can write
+    /// with `apex agent event --detail`, so an agent could set it to "paused"
+    /// and make the Agent Center offer Resume on a running session — a control
+    /// that reads the wrong state is worse than no control. This one only the
+    /// runtime writes, and only when it has actually delivered the signal.
+    ///
+    /// `#[serde(default)]` so a record written by an older daemon still loads;
+    /// the default is "not paused", which is what an absent field meant.
+    #[serde(default)]
+    pub paused: bool,
     pub sandbox: SandboxPolicy,
     /// PID of the session leader (the sandbox wrapper when confined).
     pub pid: i32,
@@ -542,6 +555,7 @@ mod tests {
             worktree: None,
             state: AgentState::Working,
             detail: None,
+            paused: false,
             sandbox: SandboxPolicy::Project,
             pid: 42,
             started: 1,
@@ -602,6 +616,37 @@ mod tests {
             let _: Response = serde_json::from_str(&text)
                 .unwrap_or_else(|e| panic!("{v:?} does not round-trip: {e} from {text}"));
         }
+    }
+
+    #[test]
+    fn the_pause_flag_is_its_own_field_and_defaults_to_not_paused() {
+        // It began life as `detail: Some("paused")`, which any cooperating
+        // client can write with `apex agent event --detail` — so an agent could
+        // make the Agent Center show Resume on a running session. This is the
+        // field the UI branches on, and only the runtime writes it.
+        let mut s = sample_session();
+        assert!(!s.paused, "a fresh session is not paused");
+
+        s.paused = true;
+        let text = serde_json::to_string(&s).expect("serialise");
+        let back: SessionInfo = serde_json::from_str(&text).expect("deserialise");
+        assert!(back.paused, "{text}");
+
+        // A record from an older daemon has no such key. It must load as
+        // not-paused rather than failing, which is what `#[serde(default)]`
+        // buys — asserted, because dropping the attribute would make every
+        // pre-existing session record unreadable.
+        let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        v.as_object_mut().unwrap().remove("paused");
+        let old: SessionInfo = serde_json::from_value(v).expect("an old record still loads");
+        assert!(!old.paused);
+
+        // And `detail` cannot set it.
+        let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        v["paused"] = serde_json::json!(false);
+        v["detail"] = serde_json::json!("paused");
+        let spoofed: SessionInfo = serde_json::from_value(v).unwrap();
+        assert!(!spoofed.paused, "detail must not be able to claim paused");
     }
 
     #[test]
@@ -729,6 +774,7 @@ mod tests {
             worktree: None,
             state: AgentState::Working,
             detail: None,
+            paused: false,
             sandbox: SandboxPolicy::Project,
             pid: 123,
             started: 0,

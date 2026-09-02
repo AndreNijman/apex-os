@@ -174,6 +174,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
         worktree: worktree_name,
         state: AgentState::Starting,
         detail: None,
+        paused: false,
         sandbox: req.sandbox,
         pid: spawned.pid,
         started: now_secs(),
