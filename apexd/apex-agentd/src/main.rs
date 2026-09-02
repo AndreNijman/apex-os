@@ -16,6 +16,7 @@
 //! predictable than an async runtime — and the blocking `read` on a PTY is
 //! exactly what the kernel is good at.
 
+mod broker;
 mod peer;
 mod privilege;
 mod pty;
@@ -445,6 +446,32 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
         Request::Revoke { project, key } => {
             privilege::revoke(daemon, creds, &project, key.as_deref())
         }
+
+        // ── the secret broker ───────────────────────────────────────────────
+        Request::SecretUse {
+            service,
+            capability,
+            remote,
+            branch,
+            project,
+        } => broker::use_capability(
+            daemon,
+            creds,
+            &service,
+            &capability,
+            &remote,
+            branch.as_deref(),
+            project.as_deref(),
+        ),
+
+        Request::SecretGrant {
+            project,
+            service,
+            capability,
+            revoke,
+        } => broker::grant(daemon, creds, &project, &service, &capability, revoke),
+
+        Request::SecretGrants => broker::grants(),
     }
 }
 

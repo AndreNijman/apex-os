@@ -77,6 +77,18 @@ _apex_agent_names() {
     apex agent adapters 2>/dev/null | awk 'NR>1 {print $1}' | tr -d '*'
 }
 
+# Stored secret services, and the capabilities that can be granted. Both asked
+# of the CLI: the capability set is a security boundary, and a stale copy of it
+# in a completion list misrepresents what the broker accepts.
+_apex_secret_services() {
+    apex secret list --json 2>/dev/null \
+        | sed -n 's/.*"service"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+_apex_secret_capabilities() {
+    apex secret capabilities 2>/dev/null | awk '/^  [a-z]/ {print $1}'
+}
+
 # Privilege-request ids, for `apex request approve|deny|show`.
 _apex_request_ids() {
     apex request list --all --json 2>/dev/null \
@@ -147,7 +159,29 @@ if [ -n "${BASH_VERSION}" ]; then
         esac
     }
 
+    _apex_secret_complete() {
+        local cur="${COMP_WORDS[COMP_CWORD]}" verb="${COMP_WORDS[2]}"
+        if [ "$COMP_CWORD" -eq 2 ]; then
+            COMPREPLY=($(compgen -W "add list remove capabilities grant revoke \
+                grants use audit" -- "$cur"))
+            return
+        fi
+        case "$verb" in
+            # Service names, from the CLI rather than a hardcoded list.
+            remove|grant|revoke|use)
+                if [ "$COMP_CWORD" -eq 3 ]; then
+                    COMPREPLY=($(compgen -W "$(_apex_secret_services)" -- "$cur"))
+                elif [ "$COMP_CWORD" -eq 4 ]; then
+                    COMPREPLY=($(compgen -W "$(_apex_secret_capabilities)" -- "$cur"))
+                fi ;;
+        esac
+    }
+
     _apex_complete() {
+        if [ "${COMP_WORDS[1]}" = "secret" ]; then
+            _apex_secret_complete
+            return
+        fi
         if [ "${COMP_WORDS[1]}" = "project" ]; then
             _apex_project_complete
             return
@@ -236,6 +270,27 @@ if [ -n "${ZSH_VERSION}" ]; then
                 _describe 'request' ids ;;
         esac
     }
+    _apex_secret_zsh() {
+        local -a verbs
+        verbs=(add list remove capabilities grant revoke grants use audit)
+        if (( CURRENT == 3 )); then
+            _describe 'secret verb' verbs
+            return
+        fi
+        case "${words[3]}" in
+            remove|grant|revoke|use)
+                if (( CURRENT == 4 )); then
+                    local -a svcs
+                    svcs=(${(f)"$(_apex_secret_services)"})
+                    _describe 'service' svcs
+                elif (( CURRENT == 5 )); then
+                    local -a caps
+                    caps=(${(f)"$(_apex_secret_capabilities)"})
+                    _describe 'capability' caps
+                fi ;;
+        esac
+    }
+
     _apex_project_zsh() {
         local -a verbs
         verbs=(list info worktrees checkpoints remove forget layout)
@@ -253,5 +308,6 @@ if [ -n "${ZSH_VERSION}" ]; then
         compdef _apex_agent_zsh 'apex agent'
         compdef _apex_request_zsh 'apex request'
         compdef _apex_project_zsh 'apex project'
+        compdef _apex_secret_zsh 'apex secret'
     fi
 fi
