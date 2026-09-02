@@ -81,39 +81,32 @@ fi
 APEX_HYPR_TMPL="/usr/share/apex/hypr/hyprland.conf"
 HYPR_CONF="${HOME}/.config/hypr/hyprland.conf"
 
-# Migrate directives that the SHIPPED Hyprland does not accept, in place, so an
-# upgrade keeps the user's customizations while their config stays valid.
+# Hyprland 0.54+ removed syntax shipped by older APEX images. Migrate only
+# those exact directives in place, so an upgrade keeps the user's customizations
+# while their config becomes valid for the new parser.
 #
-# THE WINDOW-RULE MIGRATION RAN THE WRONG WAY. It rewrote `suppressevent` /
-# `nofocus` into `suppress_event` / `match:class`, on the stated premise that
-# "Hyprland 0.54/0.55 removed syntax shipped by older APEX images". APEX does
-# not ship 0.54 or 0.55: Containerfile.core pins the sdegler COPR, which serves
-# hyprland 0.51.1 — verified in the built core image and against the live COPR.
-#
-# On 0.51.1 the `match:` forms are the ones that do not exist. Hyprland reports
-# "Invalid rulev2 found" and then carries on starting, so this migration was
-# silently disabling two real rules on every login: apps could auto-maximize,
-# and empty XWayland surfaces could steal focus.
-#
-# Reversed, so it converts the newer-syntax forms to the ones the pinned
-# compositor accepts. If core ever moves to a Hyprland where `match:` is
-# correct, this block and the shipped template flip together — and the build
-# assertion that runs `Hyprland --verify-config` against the image's own
-# Hyprland is what forces that to happen at the same time.
+# Direction matters and was briefly reversed here. The reasoning at the time was
+# that the core image served Hyprland 0.51.1, which rejects the `match:` forms —
+# true of the PUBLISHED core, which was stale, but not of what
+# Containerfile.core builds: a local rebuild produced 0.56.2, where `match:` is
+# the only accepted form. The authority is the compositor in the image, and the
+# `Hyprland --verify-config` assertion in Containerfile.base is what enforces
+# that this block, the shipped template and the compositor all move together.
 hypr_migrated=0
 for conf in "${HYPR_CONF}" "${HOME}/.config/apex-shell/ApexShellKeybinds.conf"; do
     [ -f "$conf" ] || continue
-    if grep -qE 'pseudotile[[:space:]]*=|,[[:space:]]*togglesplit([[:space:]]*$|[[:space:]]*#)|suppress_event maximize|match:class \^\$' "$conf"; then
+    if grep -qE 'pseudotile[[:space:]]*=|,[[:space:]]*togglesplit([[:space:]]*$|[[:space:]]*#)|suppressevent maximize|nofocus,[[:space:]]*class:\^\$' "$conf"; then
         sed -Ei \
             -e '/^[[:space:]]*pseudotile[[:space:]]*=[[:space:]]*(true|yes|1)[[:space:]]*$/d' \
             -e 's/,[[:space:]]*togglesplit([[:space:]]*(#.*)?)$/, layoutmsg, togglesplit\1/' \
-            -e 's/windowrule = suppress_event maximize, match:class \.\*/windowrule = suppressevent maximize, class:.*/' \
-            -e 's/windowrule = match:class \^\$, match:title \^\$, match:xwayland 1, match:float 1, match:fullscreen 0, match:pin 0, no_focus on/windowrule = nofocus, class:^$, title:^$, xwayland:1, floating:1, fullscreen:0, pinned:0/' \
+            -e 's/windowrule = suppressevent maximize, class:\.\*/windowrule = suppress_event maximize, match:class .*/' \
+            -e 's/windowrule = nofocus,[[:space:]]*class:\^\$,[[:space:]]*title:\^\$,[[:space:]]*xwayland:1,[[:space:]]*floating:1,[[:space:]]*fullscreen:0,[[:space:]]*pinned:0/windowrule = match:class ^$, match:title ^$, match:xwayland 1, match:float 1, match:fullscreen 0, match:pin 0, no_focus on/' \
             "$conf"
-        log "migrated Hyprland directives in ${conf} to the pinned compositor's syntax"
+        log "migrated removed Hyprland directives in ${conf}"
         hypr_migrated=1
     fi
 done
+
 [ "$hypr_migrated" = 0 ] || hyprctl reload >/dev/null 2>&1 || true
 
 # ── Keyboard layout: take the SYSTEM keymap, never a hardcoded one ───────────

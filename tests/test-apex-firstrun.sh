@@ -89,6 +89,12 @@ run_zshrc "$h"
 # ─────────────────────────────────────────────────────────────────────────────
 extract '# ── 6b\. labwc config' "${WORK}/labwc-block.sh" 'apex-shell-autostart'
 
+# The Hyprland rule migration, extracted so the assertion below drives the real
+# sed rather than a copy of it that can drift.
+sed -n '/^# Hyprland 0\.54+ removed syntax/,/^done$/p' "$SRC" > "${WORK}/hypr-mig-block.sh"
+grep -q 'suppress_event maximize' "${WORK}/hypr-mig-block.sh" \
+    || { printf 'could not extract the Hyprland migration block\n' >&2; exit 1; }
+
 # The block hardcodes the INSTALLED template directory, which does not exist in a
 # checkout. Redirect that single path at the repo copies so the real logic runs
 # against the real templates. (That the install path itself exists is asserted at
@@ -240,6 +246,59 @@ fi
 #  So the check is against the NAMES labwc actually implements, taken from the
 #  package's own exhaustive reference rather than from memory.
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  Hyprland window-rule migration
+#
+#  The migration and the shipped template must agree, because they configure the
+#  same compositor. They did not, twice, in opposite directions: the template was
+#  once "corrected" to Hyprland 0.51.1 syntax after checking the PUBLISHED core
+#  image, which was stale — Containerfile.core builds 0.56.2, where only the
+#  `match:` forms parse.
+#
+#  So this asserts the migration's OUTPUT equals what the template ships. That is
+#  the invariant; which syntax is currently right is the Containerfile's
+#  `Hyprland --verify-config` assertion to decide.
+# ─────────────────────────────────────────────────────────────────────────────
+section "Hyprland rule migration agrees with the template"
+
+HYPR_TMPL="${ROOT}/files/desktop/hypr/hyprland.conf"
+if [ ! -f "$HYPR_TMPL" ]; then
+    bad "the Hyprland template is present"
+else
+    mig="${WORK}/mig.conf"
+    # The pre-0.54 spellings an upgrading user would still have on disk.
+    {
+        printf 'windowrule = suppressevent maximize, class:.*\n'
+        printf 'windowrule = nofocus, class:^$, title:^$, xwayland:1, floating:1, fullscreen:0, pinned:0\n'
+    } > "$mig"
+
+    # Run the real block against it, not a copy of the sed.
+    HOME="${WORK}/mighome" bash -c '
+        set -euo pipefail
+        log() { :; }
+        KB_LAYOUT=us; KB_VARIANT=; APEX_ACCENT="#D9F99D"
+        render_hypr_tmpl() { cat "$1"; }
+        HYPR_CONF="$2"
+        mkdir -p "$(dirname "$2")"
+        source "$1"
+    ' -- "${WORK}/hypr-mig-block.sh" "$mig" >/dev/null 2>&1 || true
+
+    for want in 'suppress_event maximize, match:class' 'no_focus on'; do
+        grep -qF "$want" "$mig" \
+            && ok "migration produces: ${want}" || bad "migration produces: ${want}"
+    done
+    # And the produced spelling is the one the template actually ships.
+    for want in 'suppress_event maximize, match:class' 'no_focus on'; do
+        grep -qF "$want" "$HYPR_TMPL" \
+            && ok "the template ships the same: ${want}" \
+            || bad "the template ships the same: ${want}"
+    done
+    # Nothing may still carry the pre-0.54 spelling after migrating.
+    grep -qE 'suppressevent|nofocus,' "$mig" \
+        && bad "no pre-0.54 spelling survives migration" \
+        || ok "no pre-0.54 spelling survives migration"
+fi
+
 section "labwc input settings"
 
 # labwc ships rc.xml.all as its complete annotated reference. Preferring it over
