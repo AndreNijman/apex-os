@@ -128,12 +128,29 @@
     <osd show="yes" style="thumbnail" output="focused" />
   </windowSwitcher>
 
+  <!-- Touchpad behaviour, kept in step with the Hyprland session's input block.
+
+       `tap`, NOT `tapToClick`. The element was `<tapToClick>` here, which labwc
+       does not implement: it appears zero times in labwc-config(5) and zero
+       times in the labwc package's own exhaustive rc.xml.all, whose libinput
+       section spells it `<tap>yes</tap>`. labwc ignores an unrecognised element
+       in silence, so the line did nothing.
+
+       It LOOKED like it worked because tap-to-click is enabled by default for
+       every device category. The intent was met by accident, and anyone who had
+       tried to write `<tapToClick>no</tapToClick>` to turn tapping OFF would
+       have found the setting simply ignored. The element-name guard in
+       tests/test-apex-firstrun.sh now catches this whole class.
+
+       Not set here, deliberately, because both are already labwc's defaults and
+       writing them would be decoration rather than configuration:
+         tapButtonMap  lrm  — one/two/three-finger tap = left/right/middle, so
+                              two-finger tap is already right-click
+         scrollMethod  twofinger -->
   <libinput>
     <device category="touchpad">
       <naturalScroll>yes</naturalScroll>
-      <tapToClick>yes</tapToClick>
-      <!-- Two-finger tap = right click, matching the Hyprland session's
-           tap-to-click behaviour on the same hardware. -->
+      <tap>yes</tap>
       <tapAndDrag>yes</tapAndDrag>
       <accelProfile>adaptive</accelProfile>
     </device>
