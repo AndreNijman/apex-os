@@ -107,6 +107,10 @@ run_labwc() {
         log() { :; }
         KB_LAYOUT=us
         KB_VARIANT=
+        # The real script derives this from VARIANT_ID before reaching the
+        # labwc block (chartreuse on Daily, gold on Gaming). The block only
+        # consumes it, so the harness supplies the Daily value.
+        APEX_ACCENT="#D9F99D"
         render_hypr_tmpl() {
             sed -e "s|@HOME@|${HOME}|g" \
                 -e "s|@KB_LAYOUT@|${KB_LAYOUT}|g" \
@@ -212,6 +216,94 @@ if command -v labwc >/dev/null 2>&1; then
     fi
 else
     printf 'SKIP  labwc unavailable; cannot validate action names\n'
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  labwc window chrome (APEX Floating)
+#
+#  themerc-override is the first-boot default; matugen overwrites this exact
+#  path from the live palette once the user changes wallpaper. labwc IGNORES an
+#  unrecognised theme key in silence, so a typo here does not fail a session, it
+#  just quietly leaves that element on the built-in grey — which is exactly the
+#  Openbox-fallback look the Floating pass exists to remove. Hence a key-name
+#  check rather than a parse check.
+# ─────────────────────────────────────────────────────────────────────────────
+section "labwc window chrome"
+THEMERC="${TMPL}/themerc-override"
+if [ ! -f "$THEMERC" ]; then
+    bad "themerc-override is shipped"
+else
+    ok "themerc-override is shipped"
+
+    # The accent placeholder must be present in the template and gone after
+    # seeding: an unsubstituted @ACCENT@ is not a colour, and labwc drops the
+    # line, leaving the active border on the default.
+    grep -q '@ACCENT@' "$THEMERC" \
+        && ok "themerc-override carries the @ACCENT@ placeholder" \
+        || bad "themerc-override carries the @ACCENT@ placeholder"
+
+    # The seeding half only has an answer where the block actually ran. The
+    # seeding block is guarded on labwc being installed, so on a runner without
+    # it there is no seeded file to inspect and asserting one would be checking
+    # the guard, not the behaviour.
+    if ! command -v labwc >/dev/null 2>&1 && [ ! -x /usr/bin/labwc ]; then
+        printf 'SKIP  labwc not installed; nothing was seeded to inspect\n'
+    elif [ -f "${h}/.config/labwc/themerc-override" ]; then
+        ok "themerc-override is seeded into the user config"
+        grep -q '@ACCENT@' "${h}/.config/labwc/themerc-override" \
+            && bad "seeded themerc-override has no unsubstituted placeholder" \
+            || ok "seeded themerc-override has no unsubstituted placeholder"
+        grep -qE '^window\.active\.border\.color: #[0-9A-Fa-f]{6}$' \
+             "${h}/.config/labwc/themerc-override" \
+            && ok "the seeded accent is a real hex colour" \
+            || bad "the seeded accent is a real hex colour"
+    else
+        bad "themerc-override is seeded into the user config"
+    fi
+
+    # Every key must be one labwc actually knows. The man page is the only
+    # authority; without it this is unverifiable and skipping is honest.
+    if man 5 labwc-theme >/dev/null 2>&1; then
+        man 5 labwc-theme 2>/dev/null | col -b \
+            | grep -oE "^ {3,7}[a-z][a-z0-9.*-]+" | tr -d ' ' | sort -u \
+            > "${WORK}/labwc-theme-keys"
+        unknown=""
+        while IFS= read -r key; do
+            grep -qxF "$key" "${WORK}/labwc-theme-keys" || unknown="${unknown} ${key}"
+        done <<EOF
+$(grep -vE '^\s*#|^\s*$' "$THEMERC" | sed 's/:.*//' | tr -d ' ' | sort -u)
+EOF
+        if [ -z "$unknown" ]; then
+            ok "every themerc-override key is one labwc documents"
+        else
+            printf '  unknown keys:%s\n' "$unknown"
+            bad "every themerc-override key is one labwc documents"
+        fi
+    else
+        printf 'SKIP  labwc-theme(5) unavailable; cannot validate theme key names\n'
+    fi
+
+    # Geometry has to stay in step with rc.xml: labwc derives titlebar height
+    # from the font, so the 36-40 px target only holds for this pairing.
+    grep -q '<name>Noto Sans</name>' "${TMPL}/rc.xml" \
+        && ok "rc.xml uses a proportional face for window chrome" \
+        || bad "rc.xml uses a proportional face for window chrome"
+    grep -qE '<cornerRadius>1[0-2]</cornerRadius>' "${TMPL}/rc.xml" \
+        && ok "rc.xml sets a 10-12 px corner radius" \
+        || bad "rc.xml sets a 10-12 px corner radius"
+    grep -qE '^window\.titlebar\.padding\.height: 11$' "$THEMERC" \
+        && ok "titlebar padding matches the 36-40 px target" \
+        || bad "titlebar padding matches the 36-40 px target"
+    # Both dimensions, and the hover radius that has to be half of them for the
+    # highlight to be a circle. An `(width|height)` alternation here would pass
+    # with one of the two wrong.
+    if grep -qE '^window\.button\.width: 30$' "$THEMERC" \
+       && grep -qE '^window\.button\.height: 30$' "$THEMERC" \
+       && grep -qE '^window\.button\.hover\.bg\.corner-radius: 15$' "$THEMERC"; then
+        ok "window buttons are 30x30 with a circular hover"
+    else
+        bad "window buttons are 30x30 with a circular hover"
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

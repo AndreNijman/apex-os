@@ -1,0 +1,75 @@
+# APEX-OS — labwc window chrome (first-boot default).
+#
+# Seeded per-user by apex-shell-firstrun, and replaced by matugen the first
+# time the wallpaper changes: APEX Shell renders the same values from the live
+# Material You palette into this exact path, so the floating session, the shell
+# and the Hyprland borders all move together.
+#
+# This file exists so that a FRESH boot already looks right. Without it labwc
+# falls back to its built-in theme, and the first impression of APEX Floating
+# would be the grey Openbox-descended chrome that the whole Floating-mode pass
+# exists to get rid of — before the user has changed any wallpaper.
+#
+# @ACCENT@ is substituted at seed time: chartreuse on Daily, gold on Gaming,
+# the same rule the prompt and the greeter follow (docs/branding.md).
+#
+# Geometry matches the Floating-mode spec and must stay in step with rc.xml:
+# an 11 pt Noto Sans face plus 11 px of titlebar padding lands the titlebar in
+# the 36-40 px band, and 30x30 buttons with a 15 px hover radius give a
+# circular hover highlight rather than a rounded oblong.
+
+# ── borders ──────────────────────────────────────────────────────────────────
+border.width: 1
+window.active.border.color: @ACCENT@
+window.inactive.border.color: #3A3A3A
+
+# ── titlebar ─────────────────────────────────────────────────────────────────
+window.active.title.bg.color: #1E1E1E
+window.inactive.title.bg.color: #161616
+window.active.label.text.color: #F2F2F2
+window.inactive.label.text.color: #9A9A9A
+window.label.text.justify: center
+window.titlebar.padding.height: 11
+window.titlebar.padding.width: 10
+
+# ── window buttons ───────────────────────────────────────────────────────────
+window.button.width: 30
+window.button.height: 30
+window.button.spacing: 4
+window.button.hover.bg.corner-radius: 15
+window.active.button.unpressed.image.color: #F2F2F2
+window.inactive.button.unpressed.image.color: #9A9A9A
+window.button.hover.bg.color: #333333
+
+# ── shadows ──────────────────────────────────────────────────────────────────
+window.active.shadow.size: 36
+window.inactive.shadow.size: 24
+window.active.shadow.color: #00000090
+window.inactive.shadow.color: #00000060
+
+# ── menus (menu.xml is the emergency fallback when the shell is not running) ─
+menu.border.width: 1
+menu.border.color: #3A3A3A
+menu.items.bg.color: #1E1E1E
+menu.items.text.color: #F2F2F2
+menu.items.active.bg.color: #333333
+menu.items.active.text.color: #FFFFFF
+menu.items.padding.x: 12
+menu.items.padding.y: 7
+menu.title.bg.color: #242424
+menu.title.text.color: #F2F2F2
+menu.separator.color: #3A3A3A
+menu.separator.width: 1
+menu.separator.padding.height: 6
+
+# ── on-screen display / window switcher ──────────────────────────────────────
+osd.bg.color: #1E1E1E
+osd.border.color: #3A3A3A
+osd.border.width: 1
+osd.label.text.color: #F2F2F2
+
+# ── snapping overlays ────────────────────────────────────────────────────────
+snapping.overlay.region.bg.enabled: yes
+snapping.overlay.region.bg.color: #FFFFFF20
+snapping.overlay.edge.bg.enabled: yes
+snapping.overlay.edge.bg.color: #FFFFFF20
