@@ -223,6 +223,23 @@ fn checkpoints_are_listed_newest_first_and_found_by_prefix() {
 
     let list = checkpoint::list(&dir).expect("list");
     assert!(list.len() >= 2);
+
+    // Distinct ordering keys, whatever the clock did. With second precision
+    // both of these landed on the same value on a fast runner and the sort
+    // fell through to comparing commit hashes — an arbitrary order.
+    assert_ne!(
+        first.order_key(),
+        second.order_key(),
+        "two checkpoints share an ordering key; ordering is decided by the commit hash"
+    );
+    assert!(second.order_key() > first.order_key());
+
+    // And the listing is genuinely sorted, not merely correct at the head.
+    let keys: Vec<u64> = list.iter().map(|c| c.order_key()).collect();
+    let mut sorted = keys.clone();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    assert_eq!(keys, sorted, "listing is not newest-first");
+
     assert_eq!(list[0].id, second.id, "newest checkpoint is not first");
 
     let found = checkpoint::find(&dir, &first.id).expect("find by full id");
@@ -232,6 +249,39 @@ fn checkpoints_are_listed_newest_first_and_found_by_prefix() {
         checkpoint::latest(&dir).expect("latest").map(|c| c.id),
         Some(second.id)
     );
+}
+
+#[test]
+fn two_identical_captures_do_not_share_one_metadata_file() {
+    // `git commit-tree` stamps with one-second granularity, so capturing an
+    // unchanged tree twice with the same label and parent inside a second
+    // produces the *same commit*. Nothing about the content distinguishes
+    // them, so the id must.
+    let dir = repo("identical-captures");
+    let a = checkpoint::create(&dir, "same label", None).expect("first");
+    let b = checkpoint::create(&dir, "same label", None).expect("second");
+
+    assert_ne!(a.id, b.id, "identical captures collided on one id");
+    assert_ne!(
+        a.order_key(),
+        b.order_key(),
+        "identical captures share an ordering key"
+    );
+
+    // Both survive as separate records, and both refs resolve.
+    let list = checkpoint::list(&dir).expect("list");
+    let ids: Vec<&str> = list.iter().map(|c| c.id.as_str()).collect();
+    assert!(ids.contains(&a.id.as_str()), "first record lost: {ids:?}");
+    assert!(ids.contains(&b.id.as_str()), "second record lost: {ids:?}");
+
+    for cp in [&a, &b] {
+        assert_eq!(
+            git(&dir, &["rev-parse", "--verify", &cp.git_ref()]),
+            cp.commit,
+            "{} does not resolve",
+            cp.git_ref()
+        );
+    }
 }
 
 #[test]
