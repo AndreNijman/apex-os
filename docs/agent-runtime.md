@@ -251,6 +251,77 @@ inferred states.
 
 ---
 
+## Project layouts
+
+§6 asks APEX to remember the windows and terminals of a project and restore
+them after a reboot.
+
+```
+apex project layout save              # capture what is open in this project
+apex project layout show              # what would come back
+apex project layout restore           # reopen it
+apex project layout restore --dry-run # print, start nothing
+apex project layout forget
+```
+
+### What is remembered
+
+Not window handles. A Hyprland address and a niri window id are both
+meaningless after a restart, so a layout naming them would be restorable
+exactly zero times. What is stored is how to *recreate* each window: its argv,
+its working directory, and the workspace it was on.
+
+### Which windows belong to a project
+
+Decided from the working directory of the process tree behind each window,
+never from the title — a title is whatever the application chose to print, and
+matching on it would capture an unrelated editor that happens to have the
+project name on a tab.
+
+The subtlety is that a terminal's own working directory is where it was
+*launched*, usually `$HOME`; the shell inside it is what moved into the project.
+So the resolver checks the window's process and then its descendants,
+breadth-first, and takes the first directory under the project root. Breadth
+first on purpose: the shell directly inside a terminal is the directory a user
+thinks of as "where that window is", not whatever a nested build step last
+`cd`-ed into.
+
+A window with no pid is skipped. labwc reports none — it exposes no IPC and no
+window-management protocol beyond the standard Wayland ones by design — so on
+labwc `save` reports that it cannot match windows to a project rather than
+guessing.
+
+### Restoring
+
+A terminal is *not* restored with its stored argv. That argv is typically the
+bare emulator name, because it inherited its working directory from whatever
+launched it, so replaying it opens a terminal in the wrong place — the most
+useless possible outcome of "restore my project". Instead the working directory
+is passed explicitly, with the flag that emulator actually uses (they all
+differ, and a wrong flag is usually treated as a command to run, so the window
+opens, fails and closes).
+
+An application *is* restored verbatim, because its argv carries its own
+arguments.
+
+Restore is a command and not a login hook, deliberately: a session that reopens
+fourteen windows nobody asked for is worse than one that reopens none.
+
+Placement onto workspaces is best-effort. A window cannot be moved before it
+exists, and it does not exist until its process has mapped a surface — which is
+asynchronous and unbounded — so `restore` reports the intended split rather than
+holding the terminal open for seconds guessing at startup times.
+
+### It runs stored command lines
+
+Worth being plain about: the layout file is a list of argv vectors that
+`apex project restore` executes. It lives under `$XDG_STATE_HOME` at `0700` and
+is written only by your own runtime. It is executed as an argv **vector**, never
+through a shell, so nothing in a stored entry can be interpreted as a shell
+metacharacter — there is no shell to interpret it.
+
+---
+
 ## Privilege requests
 
 An agent has no sudo, no root shell, and a sandbox that cannot reach the system
@@ -342,6 +413,7 @@ approval and the execution.
 | `$XDG_STATE_HOME/apex/agent/checkpoints/` | checkpoint metadata |
 | `$XDG_STATE_HOME/apex/agent/requests/` | privilege requests, one JSON file each |
 | `$XDG_STATE_HOME/apex/agent/grants.json` | per-project "allow for project" grants |
+| `$XDG_STATE_HOME/apex/agent/layouts/` | saved project window layouts |
 | `$XDG_STATE_HOME/apex/agent/privilege-audit.jsonl` | append-only privilege audit |
 | `$XDG_CONFIG_HOME/apex/agent.json` | default agent, sandbox, detach key |
 | `/tmp/apex-agent/<id>/` | per-session scratch, removed with the session |
@@ -373,8 +445,9 @@ Named because the roadmap asks for them and this does not do them:
   runs with nobody present. That would need a privileged executor reachable
   from an agent's request, and minting a new root surface is not something to
   do casually. See below.
-- **Terminal layouts**, tmux/zellij integration, and restoring a project's
-  windows after reboot.
+- **Terminal layouts** as a designed grid (§3's editor/agent split), and
+  tmux/zellij integration. Restoring a project's windows now exists — see
+  *Project layouts* — but choosing a layout template does not.
 - **Remote sessions.** `--host` does not exist.
 - **Fish and nushell** shell integration. Bash and zsh are covered.
 - **Disposable environments** and capsules.
