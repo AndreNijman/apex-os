@@ -8,6 +8,7 @@ mod agent;
 mod ops;
 mod proxy;
 mod request;
+mod secret;
 mod touchpad;
 
 use std::net::{SocketAddr, TcpStream};
@@ -154,6 +155,16 @@ enum Cmd {
     Request {
         #[command(subcommand)]
         cmd: request::RequestCmd,
+    },
+    /// The secret broker: let an agent USE a credential without holding it.
+    ///
+    /// The broker performs the operation and returns the result; the token
+    /// stays in a process the agent cannot see. A git credential helper cannot
+    /// do this — git runs inside the sandbox, so whatever the helper prints is
+    /// readable by the agent.
+    Secret {
+        #[command(subcommand)]
+        cmd: secret::SecretCmd,
     },
 }
 
@@ -412,6 +423,7 @@ async fn main() {
         Cmd::Agent { cmd } => agent::agent(cmd),
         Cmd::Project { cmd } => agent::project_cmd(cmd),
         Cmd::Request { cmd } => request::main(cmd),
+        Cmd::Secret { cmd } => secret::main(cmd),
         Cmd::Tier { name } => cmd_tier(name).await,
         Cmd::Profile => cmd_profile().await,
         Cmd::Battery(args) => cmd_battery(args).await,

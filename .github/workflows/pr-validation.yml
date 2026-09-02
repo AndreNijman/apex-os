@@ -288,6 +288,15 @@ jobs:
       - name: Run project-layout assertions
         run: ./tests/test-project-layout.sh
 
+      # §4's whole claim is "agents use credentials without receiving the raw
+      # secret". This stores a sentinel token, uses a capability from inside a
+      # real CONFINED session, and asserts the sentinel appears in neither
+      # stdout, stderr, the session's PTY transcript, nor the audit log — while
+      # the git operation is genuinely attempted against 127.0.0.1:1, which
+      # refuses instantly, so no network is used and the token goes nowhere.
+      - name: Run secret-broker assertions
+        run: ./tests/test-secret-broker.sh
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail

@@ -797,6 +797,69 @@ mod tests {
     }
 
     #[test]
+    fn the_ssh_agent_socket_is_unreachable() {
+        // §4: "protect SSH keys and API credentials from arbitrary file reads."
+        // A reachable ssh-agent is as good as the key: a confined session could
+        // sign anything with it without ever reading ~/.ssh.
+        //
+        // It is unreachable because SSH_AUTH_SOCK conventionally lives under
+        // $XDG_RUNTIME_DIR, which is masked — and now also under /run, which is
+        // masked too. Asserted rather than assumed, because the /run tmpfs was
+        // added AFTER the runtime-dir one and the ordering had to be gone
+        // through again; a reordering that put the runtime-dir mask first would
+        // have left this hole open with no visible symptom.
+        let mut s = spec();
+        // The two shapes an agent socket really takes.
+        for sock in [
+            "/run/user/1000/keyring/ssh",
+            "/run/user/1000/gcr/ssh",
+            "/tmp/ssh-XXXX/agent.1234",
+        ] {
+            let a = argv(&s);
+            assert!(
+                !a.join(" ").contains(sock),
+                "{sock} must not be bound: {a:?}"
+            );
+        }
+        // And the directories they live in are masked, not merely unmentioned.
+        let a = argv(&s);
+        assert!(a.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == "/run"));
+        assert!(a
+            .windows(2)
+            .any(|w| w[0] == "--tmpfs" && w[1] == "/run/user/1000"));
+        assert!(a.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == "/tmp"));
+
+        // The one thing bound back under the runtime dir is the control socket,
+        // by exact path. Nothing else in $XDG_RUNTIME_DIR is reachable.
+        s.control_socket = PathBuf::from("/run/user/1000/apex-agentd/control.sock");
+        let a = argv(&s);
+        let bound: Vec<&str> = a
+            .windows(3)
+            .filter(|w| (w[0] == "--bind-try" || w[0] == "--bind") && w[1].starts_with("/run/user/"))
+            .map(|w| w[1].as_str())
+            .collect();
+        assert_eq!(
+            bound,
+            vec!["/run/user/1000/apex-agentd/control.sock"],
+            "only the control socket may be bound back under the runtime dir"
+        );
+    }
+
+    #[test]
+    fn the_secret_store_is_unreachable() {
+        // The broker's credential file lives under $XDG_STATE_HOME, i.e. inside
+        // $HOME, which is masked. This is the property that lets the broker
+        // keep a token in a plain 0600 file at all.
+        let a = argv(&spec()).join(" ");
+        for path in [
+            "/home/tester/.local/state/apex/agent/secrets",
+            "/home/tester/.local/state",
+        ] {
+            assert!(!a.contains(path), "{path} must not be bound: {a}");
+        }
+    }
+
+    #[test]
     fn secrets_are_never_bound_back() {
         // The point of default-deny: no allowlist entry mentions these, so no
         // bind for them can appear anywhere in the argv.

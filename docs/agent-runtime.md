@@ -403,6 +403,84 @@ approval and the execution.
 
 ---
 
+## The secret broker
+
+§4: *"Agents should be able to use credentials without receiving the raw
+secret… Expose usage permission, not necessarily secret value."*
+
+```
+printf %s "$TOKEN" | apex secret add github --host github.com
+apex secret grant github git-push        # per project
+apex secret use github git-push origin   # run by the agent
+apex secret audit
+```
+
+### Why the broker performs the operation
+
+The obvious implementation is a git credential helper the sandbox can reach. It
+does not work, and the reason is worth writing down: **git runs inside the
+sandbox**, so whatever the helper prints is on git's stdin, inside the agent's
+own namespace, readable by the agent. A credential helper hands over the token
+by construction.
+
+So the broker performs the operation instead. The agent asks for
+`git-push origin`; `apex-agentd`, which runs *outside* the sandbox, runs the
+push and returns git's output. The token only ever exists in the environment of
+a process the agent cannot see — the sandbox uses `--unshare-pid`, so the
+daemon's children are not in the agent's `/proc` at all.
+
+That is a **namespace** boundary, not a privilege one. The daemon is
+unprivileged and runs as the same user; what it has that the session does not is
+a view of the filesystem and the process table. For "the agent must not learn
+the token", that is exactly the boundary required.
+
+### The agent cannot name a URL
+
+`git-push` takes a remote **name**, and the daemon resolves it against the
+repository's own configuration. Accepting a URL would let a session ask the
+broker to push a branch to `https://attacker.example/` with your token attached
+— and the broker would, because it was told to.
+
+The remote's host is then checked against the credential's host, so a grant for
+GitHub cannot push to GitLab. An `ssh://` remote is refused with an explanation:
+a token is not how ssh authenticates, and the ssh-agent socket is masked with
+`$XDG_RUNTIME_DIR` by design.
+
+### Where the secret lives, and why not the keyring
+
+A `0600` file inside a `0700` directory under `$XDG_STATE_HOME`. That path is
+inside `$HOME`, which a confined session masks with a tmpfs, so a
+`project`-policy agent cannot read it — asserted both in the sandbox unit tests
+and end-to-end from inside a real session.
+
+The keyring is supported (`--keyring`) but is **not** the default, and that was
+decided by measurement rather than principle: `secret-tool store` on APEX blocks
+on a `gcr-prompter` "Unlock Keyring" dialog — it hung until it was killed — and
+`gnome-keyring-daemon` ships disabled. A broker an agent calls must never hang
+and must never raise a prompt in front of somebody who is not watching. Every
+keyring call is bounded by a timeout for the same reason.
+
+An `unrestricted` session can read the file, as it can read everything else.
+That is what the escape hatch means.
+
+### Order of checks
+
+Peer credentials → project → grant → remote name → remote host → **then** the
+token is read. Every step before the last can refuse, so a refusal cannot leak
+the credential through an error path. Output returned to the caller is scrubbed
+of the token as well: git does not normally print credentials, but some error
+messages include a `https://user:token@host/…` URL.
+
+### What is not built
+
+Only `git-push` and `git-fetch`. `gh`-style API capabilities (read issues,
+create a PR) are a second vocabulary with a second validation surface, and are
+not needed to demonstrate the property. Scoped-token *issuance* — asking GitHub
+for a narrower token per task — is also not here; the broker uses the token it
+was given.
+
+---
+
 ## Files
 
 | path | what |
@@ -414,6 +492,9 @@ approval and the execution.
 | `$XDG_STATE_HOME/apex/agent/requests/` | privilege requests, one JSON file each |
 | `$XDG_STATE_HOME/apex/agent/grants.json` | per-project "allow for project" grants |
 | `$XDG_STATE_HOME/apex/agent/layouts/` | saved project window layouts |
+| `$XDG_STATE_HOME/apex/agent/secrets/` | brokered credentials, `0600` each |
+| `$XDG_STATE_HOME/apex/agent/secret-grants.json` | per-project capability grants |
+| `$XDG_STATE_HOME/apex/agent/secret-audit.jsonl` | append-only capability audit |
 | `$XDG_STATE_HOME/apex/agent/privilege-audit.jsonl` | append-only privilege audit |
 | `$XDG_CONFIG_HOME/apex/agent.json` | default agent, sandbox, detach key |
 | `/tmp/apex-agent/<id>/` | per-session scratch, removed with the session |
@@ -438,8 +519,11 @@ By design, none of this is compulsory:
 
 Named because the roadmap asks for them and this does not do them:
 
-- **Secret broker.** Credentials are passed as environment variables the adapter
-  declares, not brokered as capabilities. Scoped-token issuance is not here.
+- **Scoped-token issuance.** The broker uses the token it is given; it does not
+  ask a provider for a narrower one per task. The brokering itself exists — see
+  *The secret broker* — with `git-push` and `git-fetch` as its vocabulary.
+- **`gh`-style API capabilities** (read issues, create a PR). A second
+  vocabulary with a second validation surface.
 - **Unattended execution of a granted request.** "Allow for project" means the
   next identical request needs no decision; it does not yet mean the operation
   runs with nobody present. That would need a privileged executor reachable

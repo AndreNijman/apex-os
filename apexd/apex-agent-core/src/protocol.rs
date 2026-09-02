@@ -291,6 +291,43 @@ pub enum Request {
         #[serde(default)]
         key: Option<String>,
     },
+
+    // ── the secret broker (§4) ──────────────────────────────────────────────
+    //
+    // Note what `SecretUse` does NOT carry: a session id, and a remote URL.
+    // The session comes from the connection's peer credentials, and the remote
+    // is a NAME the daemon resolves against the repository — a URL would let a
+    // session choose where its token gets sent.
+    /// Ask the broker to perform a capability. The token never comes back.
+    SecretUse {
+        service: String,
+        capability: String,
+        remote: String,
+        #[serde(default)]
+        branch: Option<String>,
+        /// The caller's project root.
+        ///
+        /// Honoured ONLY when the peer is not a managed session. A session's
+        /// project is whatever the daemon recorded when it forked it, and this
+        /// field is ignored for one — otherwise a confined agent could claim
+        /// to be in a project whose capabilities it was never granted.
+        ///
+        /// It has to be sent because the daemon cannot see the caller's
+        /// working directory: resolving it from `current_dir()` gave the
+        /// DAEMON's cwd, so every grant silently failed to match.
+        #[serde(default)]
+        project: Option<String>,
+    },
+    /// Allow or withdraw a capability for a project.
+    SecretGrant {
+        project: String,
+        service: String,
+        capability: String,
+        #[serde(default)]
+        revoke: bool,
+    },
+    /// Per-project capability grants.
+    SecretGrants,
 }
 
 fn default_replay() -> usize {
@@ -370,6 +407,20 @@ pub enum Response {
     },
     /// Per-project grants: project root -> grant keys.
     Grants {
+        projects: std::collections::BTreeMap<String, Vec<String>>,
+    },
+    /// A brokered capability ran. Carries the RESULT, never the credential.
+    Brokered {
+        service: String,
+        capability: String,
+        /// The operation in words, for the log and the transcript.
+        detail: String,
+        exit_code: i32,
+        /// git's own output, with the token scrubbed out.
+        output: String,
+    },
+    /// Per-project capability grants: project root -> `service:capability`.
+    SecretGrants {
         projects: std::collections::BTreeMap<String, Vec<String>>,
     },
     /// Verb succeeded and has nothing to say.
@@ -605,6 +656,18 @@ mod tests {
                     .into_iter()
                     .collect(),
             },
+            Response::Brokered {
+                service: "github".into(),
+                capability: "git-push".into(),
+                detail: "git push origin feat/x".into(),
+                exit_code: 0,
+                output: "Everything up-to-date".into(),
+            },
+            Response::SecretGrants {
+                projects: [("/home/t/p".to_string(), vec!["github:git-push".to_string()])]
+                    .into_iter()
+                    .collect(),
+            },
             Response::Ok,
             Response::error(ErrorKind::Internal, "boom"),
         ];
@@ -705,6 +768,20 @@ mod tests {
                 project: "/home/t/p".into(),
                 key: Some("install:clang".into()),
             },
+            Request::SecretUse {
+                service: "github".into(),
+                capability: "git-push".into(),
+                remote: "origin".into(),
+                branch: Some("feat/x".into()),
+                project: Some("/home/t/p".into()),
+            },
+            Request::SecretGrant {
+                project: "/home/t/p".into(),
+                service: "github".into(),
+                capability: "git-push".into(),
+                revoke: false,
+            },
+            Request::SecretGrants,
             Request::Info { id: 1 },
             Request::Attach {
                 id: 1,

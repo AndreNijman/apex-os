@@ -23,7 +23,8 @@
 //!         ├─ projects + worktrees          project.rs
 //!         ├─ project window layouts        layout.rs
 //!         ├─ checkpoints                   checkpoint.rs
-//!         └─ privilege requests            request.rs
+//!         ├─ privilege requests            request.rs
+//!         └─ secret broker                 secret.rs
 //!         ▲
 //!         │  newline-delimited JSON on a Unix socket    protocol.rs
 //! apex agent … / APEX Shell
@@ -46,6 +47,7 @@ pub mod project;
 pub mod protocol;
 pub mod request;
 pub mod sandbox;
+pub mod secret;
 pub mod session;
 pub mod term;
 
