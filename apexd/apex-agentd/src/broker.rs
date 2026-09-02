@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use apex_agent_core::protocol::{ErrorKind, Response};
-use apex_agent_core::secret::{self, Capability, SecretError, SecretGrants};
+use apex_agent_core::secret::{self, AuditEntry, Capability, SecretError, SecretGrants};
 
 use crate::peer::Peer;
 use crate::privilege;
@@ -94,13 +94,15 @@ pub fn use_capability(
     if !grants.allows(Some(&project), service, cap.name()) {
         let _ = secret::audit(
             &secret::audit_log(),
-            "refused",
-            service,
-            &cap,
-            who.session,
-            who.agent.as_deref(),
-            Some(&project),
-            None,
+            &AuditEntry {
+                event: "refused",
+                service,
+                capability: &cap,
+                session: who.session,
+                agent: who.agent.as_deref(),
+                project: Some(&project),
+                exit_code: None,
+            },
         );
         return refuse(SecretError::NotGranted {
             service: service.to_string(),
@@ -118,13 +120,15 @@ pub fn use_capability(
     if let Err(e) = secret::check_remote(cap.remote(), &remotes, &info.host) {
         let _ = secret::audit(
             &secret::audit_log(),
-            "refused",
-            service,
-            &cap,
-            who.session,
-            who.agent.as_deref(),
-            Some(&project),
-            None,
+            &AuditEntry {
+                event: "refused",
+                service,
+                capability: &cap,
+                session: who.session,
+                agent: who.agent.as_deref(),
+                project: Some(&project),
+                exit_code: None,
+            },
         );
         return refuse(e);
     }
@@ -144,13 +148,15 @@ pub fn use_capability(
 
     let _ = secret::audit(
         &secret::audit_log(),
-        "used",
-        service,
-        &cap,
-        who.session,
-        who.agent.as_deref(),
-        Some(&project),
-        Some(code),
+        &AuditEntry {
+            event: "used",
+            service,
+            capability: &cap,
+            session: who.session,
+            agent: who.agent.as_deref(),
+            project: Some(&project),
+            exit_code: Some(code),
+        },
     );
 
     Response::Brokered {

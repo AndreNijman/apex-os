@@ -173,7 +173,7 @@ fn list(json: bool) -> Result<i32> {
         println!("no credentials stored");
         return Ok(0);
     }
-    println!("{:<16} {:<22} {:<10} {}", "SERVICE", "HOST", "BACKEND", "USERNAME");
+    println!("{:<16} {:<22} {:<10} USERNAME", "SERVICE", "HOST", "BACKEND");
     for i in &all {
         println!(
             "{:<16} {:<22} {:<10} {}",

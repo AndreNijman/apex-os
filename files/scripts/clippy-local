@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  Run clippy exactly as CI does, without needing rustup on this machine.
+#
+#  WHY THIS EXISTS
+#
+#  APEX-OS is an atomic image: `rustup` is not installed and `cargo clippy` is
+#  not available, so `cargo test` passing locally says nothing about the Clippy
+#  job. Five findings reached a PR that way — two `-D warnings` errors in one
+#  push and three more in the fix for them.
+#
+#  So clippy runs in the same container image CI uses. Slower than a native run
+#  and much faster than a round trip through GitHub.
+#
+#  THE REPO ROOT IS MOUNTED, NOT apexd/
+#
+#  apexd-core `include_str!`s ../../../config/sysprofiles/*.toml. Mounting only
+#  the workspace gives six "couldn't read" errors that look like a code problem
+#  and are not.
+#
+#      ./files/scripts/clippy-local            # the workspace
+#      ./files/scripts/clippy-local --fix      # and apply what it can
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+IMAGE="${CLIPPY_IMAGE:-docker.io/library/rust:1.97}"
+
+command -v podman >/dev/null 2>&1 || {
+    echo "clippy-local: podman is required" >&2
+    exit 1
+}
+
+# The same invocation as .github/workflows/pr-validation.yml, so a pass here
+# means a pass there. Kept as one string so the two cannot drift silently.
+CI_ARGS='--all-targets --locked -- -D warnings'
+grep -q "cargo clippy ${CI_ARGS}" "${ROOT}/.github/workflows/pr-validation.yml" || {
+    echo "clippy-local: CI's clippy invocation has changed; update CI_ARGS" >&2
+    grep -n "cargo clippy" "${ROOT}/.github/workflows/pr-validation.yml" >&2
+    exit 1
+}
+
+FIX=""
+[ "${1:-}" = "--fix" ] && FIX="--fix --allow-dirty --allow-staged"
+
+echo "clippy-local: ${IMAGE}"
+exec podman run --rm \
+    -v "${ROOT}":/repo:z \
+    -w /repo/apexd \
+    "${IMAGE}" \
+    bash -c "
+        set -e
+        rustup component add clippy >/dev/null 2>&1
+        cargo clippy ${FIX} ${CI_ARGS}
+    "

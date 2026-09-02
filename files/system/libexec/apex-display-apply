@@ -63,8 +63,34 @@ HYPR_TRANSFORM = {
 }
 
 
+class _Failed:
+    """Stand-in result for a command that could not be run at all."""
+
+    returncode = 127
+    stdout = ""
+    stderr = ""
+
+
 def run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=30, **kw)
+    """Run a command, treating "not installed" and "hung" as failures.
+
+    Every caller already branches on `returncode`, so a missing binary must
+    look like a non-zero exit rather than raising — otherwise one absent tool
+    takes the whole program down with a traceback.
+
+    That is not hypothetical. `compositor()` falls back to `pgrep` when the
+    environment gives no hint, and on a machine without `pgrep` on PATH
+    `apex-display-apply save` died with a FileNotFoundError instead of writing
+    the layout. It reached CI, where the runner has no compositor and the test
+    replaces PATH, and it would equally have hit any minimal container.
+
+    The timeout is caught for the same reason: a compositor query that hangs
+    must fail, not block a settings page forever.
+    """
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=30, **kw)
+    except (OSError, subprocess.SubprocessError):
+        return _Failed()
 
 
 def compositor():

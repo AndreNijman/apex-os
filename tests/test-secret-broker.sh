@@ -25,6 +25,14 @@
 #      ./tests/test-secret-broker.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# `set +e` is deliberate and load-bearing. This suite COUNTS failures rather
+# than aborting on them, and several assertions run commands that exit non-zero
+# on purpose — a refusal, a guard firing, a bad argument. GitHub Actions invokes
+# a script as `bash -e {0}`, and under `-e` a `x="$(cmd)"` assignment whose
+# command exits non-zero terminates the whole script. That is exactly what
+# happened: the suite passed locally, and on CI it died part-way through with
+# the remaining assertions reported as failures.
+set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
