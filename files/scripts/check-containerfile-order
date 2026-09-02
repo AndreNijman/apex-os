@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Catch two Containerfile ordering mistakes that only surface hours into a build.
+
+1. An assertion that reads a path before the COPY that creates it.
+
+   `RUN ... test -s /usr/share/apex/labwc/rc.xml` placed above
+   `COPY files/desktop/labwc/ /usr/share/apex/labwc/` fails the build — but only
+   once the builder reaches that layer, which on this image is hours in. This
+   shipped exactly once: the context-menu assertions read rc.xml about 240 lines
+   above the COPY that provides it.
+
+2. Volatile content copied early.
+
+   `podman build --cache-to` pushes every intermediate layer to the registry
+   separately, so a cache miss near the top costs a rebuild AND a push for each
+   of the ~90 layers below it. The build after the agent-runtime merge did
+   exactly that and was killed at GitHub's six-hour ceiling at step 76 of 83,
+   where the previous successful build had taken 3h16m. The compiled binaries
+   are the most volatile artefacts in the image, so they belong at the end.
+
+## Precision
+
+Only paths a COPY *demonstrably* provides are considered, and the provided set
+is computed by walking the COPY's source in the repository. That matters: a
+naive prefix match treats `COPY --from=builder /out/usr/bin/ /usr/bin/` as the
+provider of every `/usr/bin/*` file in the image and then flags `bwrap`,
+`starship` and `efibootmgr`, which come from packages. Cross-stage COPYs have
+no readable source, so they contribute nothing to the read-before-COPY check —
+they are only checked for position.
+
+Stage boundaries are respected: a RUN in one `FROM` cannot depend on a COPY in
+another.
+
+usage: check-containerfile-order [CONTAINERFILE ...]
+"""
+import os
+import re
+import sys
+
+FROM_RE = re.compile(r"^FROM\s", re.I)
+COPY_RE = re.compile(r"^COPY\s+(.*)$", re.I)
+RUN_RE = re.compile(r"^RUN\s", re.I)
+LAYER_RE = re.compile(r"^(RUN|COPY|ADD|ENV|LABEL|ARG|WORKDIR|USER)\s", re.I)
+
+IGNORE_PREFIXES = ("/proc", "/sys", "/dev", "/tmp", "/var/tmp", "/run")
+
+VOLATILE_MARKERS = ("--from=apex-builder",)
+VOLATILE_MIN_POSITION = 0.75
+
+
+def logical_lines(path):
+    """Yield (first_physical_line_number, joined_logical_line)."""
+    with open(path, encoding="utf-8") as fh:
+        raw = fh.read().splitlines()
+
+    out, buf, start = [], "", None
+    for n, line in enumerate(raw, 1):
+        stripped = line.rstrip()
+        # The Dockerfile parser removes comment-only lines BEFORE joining
+        # continuations, which is why `RUN foo; \` followed by a `# note` line
+        # with no trailing backslash still continues to the command after it.
+        # Joining first and stripping later truncates the logical line at the
+        # comment — and this repo comments inside almost every RUN, so getting
+        # this backwards made the read-before-COPY check silently see nothing.
+        if re.match(r"^\s*#", line):
+            continue
+        if start is None:
+            start = n
+        buf += " " + stripped.rstrip("\\")
+        if stripped.endswith("\\"):
+            continue
+        out.append((start, buf.strip()))
+        buf, start = "", None
+    if buf.strip():
+        out.append((start, buf.strip()))
+    return out
+
+
+def copy_args(line):
+    """(flags, sources, destination) for a COPY, or None."""
+    m = COPY_RE.match(line)
+    if not m:
+        return None
+    toks = m.group(1).split()
+    flags = [t for t in toks if t.startswith("--")]
+    rest = [t for t in toks if not t.startswith("--")]
+    if len(rest) < 2:
+        return None
+    return flags, rest[:-1], rest[-1]
+
+
+def provided_paths(sources, dest, repo_root):
+    """Absolute destination paths this COPY demonstrably creates.
+
+    Walks the source in the repository, so a directory COPY contributes exactly
+    the files it actually carries rather than claiming its whole destination
+    subtree.
+    """
+    provided = set()
+    dest_is_dir = dest.endswith("/")
+    dest_clean = dest.rstrip("/")
+
+    for src in sources:
+        abs_src = os.path.join(repo_root, src.rstrip("/"))
+        if os.path.isdir(abs_src):
+            provided.add(dest_clean)
+            for root, _dirs, files in os.walk(abs_src):
+                rel_root = os.path.relpath(root, abs_src)
+                for f in files:
+                    rel = f if rel_root == "." else os.path.join(rel_root, f)
+                    provided.add(f"{dest_clean}/{rel}")
+        elif os.path.isfile(abs_src):
+            if dest_is_dir or "." not in os.path.basename(dest_clean):
+                provided.add(f"{dest_clean}/{os.path.basename(abs_src)}")
+                provided.add(dest_clean)
+            else:
+                provided.add(dest_clean)
+        else:
+            # Unreadable source (a glob, or a cross-stage path). Claim only the
+            # exact destination, never a subtree.
+            provided.add(dest_clean)
+    return provided
+
+
+def referenced_paths(line):
+    """Absolute paths a RUN mentions literally."""
+    found = set()
+    for tok in re.findall(r"/(?:usr|etc|var|opt)[A-Za-z0-9_./@+-]*", line):
+        tok = tok.rstrip(".,;:'\")")
+        if tok.startswith(IGNORE_PREFIXES) or "$" in tok:
+            continue
+        found.add(tok)
+    return found
+
+
+def check(path, repo_root):
+    logical = logical_lines(path)
+    problems = []
+
+    # path -> earliest line that provides it, per stage
+    stage = 0
+    providers = {}
+    for n, line in logical:
+        if FROM_RE.match(line):
+            stage += 1
+            continue
+        args = copy_args(line)
+        if not args:
+            continue
+        flags, sources, dest = args
+        if any(f.startswith("--from=") for f in flags):
+            # Contents unknowable from the repository; position-checked only.
+            continue
+        for p in provided_paths(sources, dest, repo_root):
+            providers.setdefault((stage, p), n)
+
+    stage = 0
+    for n, line in logical:
+        if FROM_RE.match(line):
+            stage += 1
+            continue
+        if not RUN_RE.match(line):
+            continue
+        for ref in referenced_paths(line):
+            hit = providers.get((stage, ref))
+            if hit is not None and n < hit:
+                problems.append(
+                    f"{path}:{n}: RUN reads {ref}, but the COPY that creates it "
+                    f"is at line {hit} — the build fails at this layer"
+                )
+
+    layers = [(n, l) for n, l in logical if LAYER_RE.match(l)]
+    total = len(layers)
+    for idx, (n, line) in enumerate(layers, 1):
+        for marker in VOLATILE_MARKERS:
+            if marker in line:
+                pos = idx / total
+                if pos < VOLATILE_MIN_POSITION:
+                    problems.append(
+                        f"{path}:{n}: volatile content ({marker}) is layer "
+                        f"{idx} of {total} ({pos:.0%} in). Everything below it "
+                        f"rebuilds AND re-pushes when it changes; keep it past "
+                        f"{VOLATILE_MIN_POSITION:.0%}."
+                    )
+    return problems, total
+
+
+def main(argv):
+    paths = argv[1:] or ["Containerfile.base"]
+    repo_root = os.path.dirname(os.path.abspath(paths[0])) or "."
+    failures = []
+    for p in paths:
+        try:
+            problems, total = check(p, repo_root)
+        except FileNotFoundError:
+            print(f"skip: {p} not found")
+            continue
+        if problems:
+            print(f"{p}: {len(problems)} ordering problem(s) [{total} layers]")
+            for msg in problems:
+                print(f"  {msg}")
+            failures += problems
+        else:
+            print(f"{p}: layer order OK [{total} layers]")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

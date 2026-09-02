@@ -64,11 +64,25 @@ FROM ${CORE}
 # OCI provenance. The git SHA is injected by CI (--build-arg APEX_REVISION=…)
 # so every image is traceable back to the exact source commit — the plan's
 # "image carries git SHA" rule (org.opencontainers.image.revision).
-# ── apexd + apex CLI + apex-agentd ──────────────────────────────────────────
-# The three binaries from the builder stage above. awww/matugen/yazi are NOT
-# here — they are slow-moving third-party tools and ship in core.
-COPY --from=apex-builder /out/usr/bin/ /usr/bin/
-
+# ── apexd + apex CLI + apex-agentd: static payload only ─────────────────────
+# The BINARIES are deliberately NOT copied here. They are the most volatile
+# content in the image — every apexd commit changes them — and this is layer 1
+# of roughly eighty, so copying them here made any `apexd/` change invalidate
+# the entire base image.
+#
+# That is not theoretical: the build after the agent-runtime merge rebuilt and
+# re-pushed every layer below this point and was killed at GitHub's six-hour job
+# limit, having reached step 76 of 83. The previous successful build took 3h16m.
+# `podman build --cache-to` pushes each intermediate layer to the registry
+# separately, so a cache miss here costs ~80 rebuilds AND ~80 registry pushes.
+#
+# The binaries now land at the very END of this file, after everything static.
+# An apexd-only change therefore rebuilds the last two layers instead of eighty.
+# Everything below that needs them at build time was moved down with them.
+#
+# What stays here is the static payload: unit files, D-Bus policy, polkit rules
+# and the sysprofiles. Those are repository files that change rarely, so they
+# keep their cheap early position.
 COPY config/sysprofiles/ /usr/share/apexos/sysprofiles/
 COPY apexd/apexd/apexd.service /usr/lib/systemd/system/apexd.service
 COPY files/system/dbus-1/system-services/org.apexos.Apexd1.service \
@@ -98,22 +112,19 @@ COPY files/system/units/apex-agentd.service /usr/lib/systemd/user/apex-agentd.se
 # rather than shipping an image where every confined `apex agent run` refuses
 # to start. Same reasoning as the kernel/akmod postconditions above: tolerate
 # the indirect source, then hard-gate on the artifact.
+# Everything here is independent of the apexd binaries, so it keeps its cheap
+# early position. The binary-dependent half of these assertions moved to the end
+# of the file, next to the COPY that provides them.
 RUN set -eux; \
     test -x /usr/bin/bwrap; \
     rpm -q bubblewrap; \
     /usr/bin/bwrap --ro-bind / / --dev /dev --unshare-all --die-with-parent /bin/true; \
-    # The runtime itself, and the unit that starts it. A CLI whose every verb
-    # can only print "the runtime is not running" is worse than no CLI.
-    test -x /usr/bin/apex-agentd; \
     test -s /usr/lib/systemd/user/apex-agentd.service; \
     grep -q '^ExecStart=/usr/bin/apex-agentd$' /usr/lib/systemd/user/apex-agentd.service; \
-    /usr/bin/apex --help >/dev/null; \
-    /usr/bin/apex agent --help >/dev/null; \
-    /usr/bin/apex project --help >/dev/null; \
     # Opt-in by design: a per-user daemon holding PTYs must not be enabled for
     # users who never run an agent. Assert it is NOT wired into any target.
     test ! -e /usr/lib/systemd/user/default.target.wants/apex-agentd.service; \
-    echo "agent runtime: bwrap functional, apex-agentd installed, unit present and opt-in"
+    echo "agent sandbox: bwrap functional; agentd unit present and opt-in"
 
 # Default browser (system-wide XDG): Firefox is the only baked browser, but set
 # the http/https/html handlers explicitly so any "open link" honours it without
@@ -510,24 +521,20 @@ COPY --chmod=0755 files/system/libexec/apex-compositor-reload \
      /usr/libexec/apex-compositor-reload
 COPY --chmod=0755 files/system/libexec/apex-session-logout \
      /usr/libexec/apex-session-logout
+# Only what exists at this point in the build. The cross-checks against
+# /usr/share/apex/labwc/rc.xml live in the labwc section that populates it —
+# asserting a path before its COPY is a build failure, and this block did
+# exactly that until it was caught by reading the layer order.
 RUN set -eux; \
     for h in apex-desktop-menu apex-compositor-reload apex-session-logout; do \
         test -x "/usr/libexec/$h"; \
         bash -n "/usr/libexec/$h"; \
     done; \
-    # The right-click binding names this exact path; a rename that misses the
-    # config would leave the desktop with no menu and no error anywhere.
-    grep -q '/usr/libexec/apex-desktop-menu' /usr/share/apex/labwc/rc.xml; \
-    # menu.xml must survive as the emergency path, still reachable on a
-    # modifier. Losing it means a dead shell leaves no way back.
-    grep -q 'ShowMenu' /usr/share/apex/labwc/rc.xml; \
-    test -s /usr/share/apex/labwc/menu.xml; \
-    # Every verb the helpers call has to exist in the image.
+    # Every verb the helpers dispatch to has to exist in the image.
     command -v labwc >/dev/null; \
     command -v niri >/dev/null; \
     command -v loginctl >/dev/null; \
-    /usr/bin/apex shell list | grep -qw menu; \
-    echo "context menu: helpers installed, right-click bound, menu.xml fallback intact"
+    echo "context menu: helpers installed and their compositor verbs present"
 RUN systemctl --global enable apex-shell-firstrun.service
 
 # ── Stage 5d: user packages, WITHOUT breaking OS updates ────────────────────
@@ -777,12 +784,17 @@ RUN set -eux; \
     grep -q '^XDG_CURRENT_DESKTOP=labwc' /usr/share/apex/labwc/environment; \
     # The session is worthless if the shell never starts.
     grep -q 'apex-shell-autostart' /usr/share/apex/labwc/autostart; \
-    # The keybinds invoke `apex shell`, so that verb has to exist in the image
-    # or every popup binding in the labwc session is a silent no-op.
-    command -v apex >/dev/null; \
-    apex shell list >/dev/null; \
+    # The keybinds invoke `apex shell`. That the VERB exists is asserted at the
+    # end of this file, where the binaries are copied in; here we only check the
+    # configs reference it, which is all this layer can see.
     grep -q 'apex shell' /usr/share/apex/labwc/rc.xml; \
     grep -q 'apex shell' /usr/share/apex/labwc/menu.xml; \
+    # Desktop right-click must reach the APEX menu, and menu.xml must survive as
+    # the modifier-reachable emergency path. Checked here rather than beside the
+    # helper COPYs, because rc.xml does not exist until this layer.
+    grep -q '/usr/libexec/apex-desktop-menu' /usr/share/apex/labwc/rc.xml; \
+    grep -q 'ShowMenu' /usr/share/apex/labwc/rc.xml; \
+    test -s /usr/share/apex/labwc/menu.xml; \
     # `qs` is what `apex shell` actually calls; without it the wrapper is inert.
     command -v qs >/dev/null; \
     # ── APEX Floating window chrome ─────────────────────────────────────────
@@ -935,6 +947,42 @@ RUN set -eux; \
     systemctl enable apex-flathub-setup.service; \
     systemctl enable greetd.service; \
     systemctl set-default graphical.target
+
+# ── Stage 6z: apexd, apex and apex-agentd ───────────────────────────────────
+# LAST, and deliberately so. These are the most volatile artefacts in the image
+# — every apexd commit changes them — and `podman build --cache-to` pushes each
+# intermediate layer to the registry separately, so a cache miss high in this
+# file costs both a rebuild AND a registry push for every layer beneath it.
+#
+# They used to be layer 1 of about eighty. The build after the agent-runtime
+# merge therefore rebuilt and re-pushed the whole image and was killed at
+# GitHub's six-hour job ceiling at step 76 of 83; the previous successful build
+# took 3h16m. Down here, an apexd-only change invalidates these two layers and
+# nothing else.
+#
+# Same reasoning the git-SHA labels below already follow: volatile content last.
+#
+# awww/matugen/yazi are NOT here — slow-moving third-party tools ship in core.
+COPY --from=apex-builder /out/usr/bin/ /usr/bin/
+
+# Every assertion that needs one of those binaries to exist, gathered here so
+# the binaries have exactly one dependent layer.
+RUN set -eux; \
+    test -x /usr/bin/apexd; \
+    test -x /usr/bin/apex; \
+    test -x /usr/bin/apex-agentd; \
+    # The CLI must actually run in the image it ships in, not merely be present:
+    # a dynamic-link or glibc mismatch against core is exactly the failure that
+    # a file-existence check misses.
+    /usr/bin/apex --help >/dev/null; \
+    /usr/bin/apex agent --help >/dev/null; \
+    /usr/bin/apex project --help >/dev/null; \
+    # The compositor keybinds and the labwc root-menu replacement both invoke
+    # `apex shell <verb>`; a renamed verb makes every one of them a silent
+    # no-op, which is why the verb table is asserted and not just the binary.
+    /usr/bin/apex shell list >/dev/null; \
+    /usr/bin/apex shell list | grep -qw menu; \
+    echo "apexd/apex/apex-agentd installed, runnable, and the shell verb table is intact"
 
 # ── Stage 7: bootc container sanity lint (informational) ───────────────────
 RUN bootc container lint || true
