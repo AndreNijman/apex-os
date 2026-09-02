@@ -1,0 +1,63 @@
+# APEX-OS — agent runtime (systemd USER service).
+#
+# Owns the PTYs that coding-agent sessions run on, the sandbox each session is
+# confined by, and the project/checkpoint state around them. One instance per
+# logged-in user.
+#
+# WHY THIS IS A USER SERVICE AND NOT PART OF apexd
+# apexd is privileged and owns system policy. Agent orchestration must never
+# live there: it handles untrusted model output, spawns arbitrary user
+# programs, and is driven by whatever an agent decides to do next. Running it
+# unprivileged, as the user, means the worst case is confined to that user's
+# own session — and a session can already do nothing its owner could not.
+# Nothing here talks to apexd; when a session needs a system change, the user's
+# own `apex` invocation makes that request through the frozen D-Bus surface.
+#
+# WHY IT IS NOT SOCKET-ACTIVATED
+# Sessions must outlive the terminal that started them, which means the daemon
+# must outlive the last client that disconnects. Socket activation with an idle
+# timeout would kill running agents; without one it buys nothing over a plain
+# service.
+#
+# NOT enabled by default. A user opts in with:
+#   systemctl --user enable --now apex-agentd
+# `apex agent` says exactly that when the socket is absent. It is opt-in
+# because a per-user daemon holding PTYs is not something a Daily install
+# should start for users who never run an agent.
+
+[Unit]
+Description=APEX-OS agent runtime (PTY sessions, sandboxing, checkpoints)
+Documentation=man:apex(1)
+# The runtime is useful in a bare TTY as well as a desktop session, so it does
+# not depend on graphical-session.target.
+
+# A crash loop must not spin: five restarts in a minute and it stays down,
+# where `apex agent status` reports it plainly.
+#
+# These are [Unit] directives, not [Service] ones (systemd.unit(5)). Under
+# [Service] systemd parses them but they do not apply, so the rate limiting
+# reads as configured while doing nothing.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/apex-agentd
+# The daemon reaps its own children and stops sessions on SIGTERM; give it time
+# to signal every process group before systemd escalates.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=2
+
+# Hardening. Deliberately mild compared with a system unit, because this daemon
+# exists to launch the user's own programs — locking down its filesystem view
+# would lock down every agent it starts. The confinement that matters is the
+# per-session bubblewrap sandbox, which is built per session and is far
+# narrower than anything expressible here.
+NoNewPrivileges=yes
+# ProtectSystem/ProtectHome are NOT set: sessions inherit this namespace, and a
+# read-only home here would break every agent writing to its own project.
+
+[Install]
+WantedBy=default.target

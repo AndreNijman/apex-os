@@ -172,6 +172,16 @@ command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init zsh --cmd cd)"
 [[ -r /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]] && \
     source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 
+# ── agent runtime ────────────────────────────────────────────────────────────
+# The universal `a` command and its siblings, plus completion for sessions and
+# agent names. Shared verbatim with bash (/etc/bashrc sources the same file) so
+# the two can never drift, exactly like the greeting below.
+#
+# BEFORE the local overrides on purpose: everything it defines is a plain shell
+# function, so ~/.zshrc.local can redefine `a` or set APEX_NO_AGENT_ALIASES=1
+# and have it actually take effect.
+[[ -r /usr/share/apex/shell/agent.sh ]] && source /usr/share/apex/shell/agent.sh
+
 # ── local overrides ──────────────────────────────────────────────────────────
 # Anything you want that should NOT be touched by APEX. Sourced last so it wins.
 [[ -r "$HOME/.zshrc.local" ]] && source "$HOME/.zshrc.local"

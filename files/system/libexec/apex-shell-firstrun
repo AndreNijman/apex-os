@@ -705,6 +705,18 @@ if command -v labwc >/dev/null 2>&1 || [ -x /usr/bin/labwc ]; then
             fi
         done
 
+        # themerc-override carries only @ACCENT@, and is seeded so a FRESH boot
+        # already has APEX window chrome instead of labwc's built-in grey. Once
+        # the user changes wallpaper, matugen rewrites this same path from the
+        # live Material You palette; the [ ! -f ] guard above is what stops a
+        # later login from reverting that back to this static default.
+        if [ ! -f "${LABWC_DIR}/themerc-override" ] \
+           && [ -f "${LABWC_TMPL_DIR}/themerc-override" ]; then
+            sed "s|@ACCENT@|${APEX_ACCENT}|g" \
+                "${LABWC_TMPL_DIR}/themerc-override" > "${LABWC_DIR}/themerc-override"
+            log "seeded labwc themerc-override (accent ${APEX_ACCENT})"
+        fi
+
         # autostart / environment carry @HOME@ and @KB_*@ placeholders, so they
         # go through the same renderer the Hyprland template uses.
         for f in autostart environment; do

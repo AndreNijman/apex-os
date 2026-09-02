@@ -54,8 +54,9 @@ ENV CARGO_HOME=/build/.cargo
 COPY apexd/ /build/apexd/
 COPY config/ /build/config/
 RUN set -eux; cd /build/apexd; cargo build --release --locked; \
-    install -Dm755 target/release/apexd /out/usr/bin/apexd; \
-    install -Dm755 target/release/apex  /out/usr/bin/apex
+    install -Dm755 target/release/apexd       /out/usr/bin/apexd; \
+    install -Dm755 target/release/apex        /out/usr/bin/apex; \
+    install -Dm755 target/release/apex-agentd /out/usr/bin/apex-agentd
 
 # ─────────────────────────────────────────────────────────────────────────
 FROM ${CORE}
@@ -63,9 +64,9 @@ FROM ${CORE}
 # OCI provenance. The git SHA is injected by CI (--build-arg APEX_REVISION=…)
 # so every image is traceable back to the exact source commit — the plan's
 # "image carries git SHA" rule (org.opencontainers.image.revision).
-# ── apexd + apex CLI ────────────────────────────────────────────────────────
-# The two binaries from the builder stage above. awww/matugen/yazi are NOT here
-# — they are slow-moving third-party tools and ship in core.
+# ── apexd + apex CLI + apex-agentd ──────────────────────────────────────────
+# The three binaries from the builder stage above. awww/matugen/yazi are NOT
+# here — they are slow-moving third-party tools and ship in core.
 COPY --from=apex-builder /out/usr/bin/ /usr/bin/
 
 COPY config/sysprofiles/ /usr/share/apexos/sysprofiles/
@@ -80,6 +81,39 @@ COPY files/system/polkit-1/rules.d/49-apex-singbox.rules \
      /usr/share/polkit-1/rules.d/49-apex-singbox.rules
 COPY files/system/units/sing-box.service /usr/lib/systemd/system/sing-box.service
 RUN systemctl enable apexd.service
+
+# ── agent runtime (apex-agentd) ─────────────────────────────────────────────
+# A USER unit, and deliberately NOT `systemctl --global enable`d: a per-user
+# daemon holding PTYs should not start for people who never run an agent. The
+# CLI prints the enable command when the socket is absent.
+COPY files/system/units/apex-agentd.service /usr/lib/systemd/user/apex-agentd.service
+
+# bubblewrap is the agent sandbox. It is already in the image as a flatpak
+# dependency, so it is NOT added to Containerfile.core: a package transaction
+# there rebuilds core and costs the whole fleet a multi-gigabyte update to
+# install something that is already present.
+#
+# What that trades away is an explicit dependency, so this asserts the result
+# instead. If flatpak ever stops pulling bubblewrap in, the build fails here
+# rather than shipping an image where every confined `apex agent run` refuses
+# to start. Same reasoning as the kernel/akmod postconditions above: tolerate
+# the indirect source, then hard-gate on the artifact.
+RUN set -eux; \
+    test -x /usr/bin/bwrap; \
+    rpm -q bubblewrap; \
+    /usr/bin/bwrap --ro-bind / / --dev /dev --unshare-all --die-with-parent /bin/true; \
+    # The runtime itself, and the unit that starts it. A CLI whose every verb
+    # can only print "the runtime is not running" is worse than no CLI.
+    test -x /usr/bin/apex-agentd; \
+    test -s /usr/lib/systemd/user/apex-agentd.service; \
+    grep -q '^ExecStart=/usr/bin/apex-agentd$' /usr/lib/systemd/user/apex-agentd.service; \
+    /usr/bin/apex --help >/dev/null; \
+    /usr/bin/apex agent --help >/dev/null; \
+    /usr/bin/apex project --help >/dev/null; \
+    # Opt-in by design: a per-user daemon holding PTYs must not be enabled for
+    # users who never run an agent. Assert it is NOT wired into any target.
+    test ! -e /usr/lib/systemd/user/default.target.wants/apex-agentd.service; \
+    echo "agent runtime: bwrap functional, apex-agentd installed, unit present and opt-in"
 
 # Default browser (system-wide XDG): Firefox is the only baked browser, but set
 # the http/https/html handlers explicitly so any "open link" honours it without
@@ -177,6 +211,14 @@ COPY files/desktop/bash/apex-starship.sh /etc/profile.d/apex-starship.sh
 # two can never drift. Image-managed for the same reason as the prompt above.
 COPY files/desktop/shell/apex-greeting.sh /usr/share/apex/shell/greeting.sh
 
+# The agent shortcuts (`a`, `aa`, `al`, `ad`, `aw`, `ap`) and completion, shared
+# between bash and zsh the same way the greeting is. The zsh side is sourced
+# from the seeded ~/.zshrc; the bash side is appended to /etc/bashrc here rather
+# than in core, because a core edit rebuilds the whole image tier.
+COPY files/desktop/shell/agent.sh /usr/share/apex/shell/agent.sh
+RUN set -eux; \
+    printf '\n# APEX-OS agent shortcuts. One file shared with zsh (see the seeded\n# ~/.zshrc), so bash and zsh can never drift. Guarded so a partial image\n# cannot break bash, and skippable with APEX_NO_AGENT_ALIASES=1.\n[ -r /usr/share/apex/shell/agent.sh ] && . /usr/share/apex/shell/agent.sh\n' >> /etc/bashrc
+
 # Verify everything the three COPYs above just seeded, plus the pieces of the
 # shell story that core is responsible for. zsh being the default login shell,
 # and the starship binary itself, are set in Containerfile.core — this is the
@@ -202,6 +244,21 @@ RUN set -eux; \
     sh -n   /usr/share/apex/shell/greeting.sh; \
     bash -n /usr/share/apex/shell/greeting.sh; \
     zsh -n  /usr/share/apex/shell/greeting.sh; \
+    # agent.sh is sourced by EVERY login shell, so a syntax error in it is a
+    # broken shell for every user. It carries both a bash and a zsh completion
+    # block, each guarded at runtime, so all three parsers must accept the whole
+    # file — not just the one whose block is live.
+    test -s /usr/share/apex/shell/agent.sh; \
+    sh -n   /usr/share/apex/shell/agent.sh; \
+    bash -n /usr/share/apex/shell/agent.sh; \
+    zsh -n  /usr/share/apex/shell/agent.sh; \
+    grep -q 'agent.sh' /etc/bashrc; \
+    grep -q 'agent.sh' /usr/share/apex/zsh/zshrc; \
+    grep -q 'APEX_NO_AGENT_ALIASES' /usr/share/apex/shell/agent.sh; \
+    # The sourced file must define the universal `a` command and must not blow
+    # up when the runtime is absent, which is its state on every fresh boot.
+    bash -c 'set -e; . /usr/share/apex/shell/agent.sh; [ "$(type -t a)" = function ]'; \
+    zsh -fc 'set -e; . /usr/share/apex/shell/agent.sh; [ "$(whence -w al)" = "al: function" ]'; \
     ! grep -q '\[\[' /usr/share/apex/shell/greeting.sh; \
     grep -q 'greeting.sh' /etc/bashrc; \
     grep -q 'greeting.sh' /usr/share/apex/zsh/zshrc; \
@@ -647,7 +704,7 @@ RUN set -eux; \
     test -f /usr/share/wayland-sessions/apex-labwc.desktop; \
     test ! -f /usr/share/wayland-sessions/labwc.desktop; \
     command -v labwc >/dev/null; \
-    for f in rc.xml menu.xml autostart environment; do \
+    for f in rc.xml menu.xml autostart environment themerc-override; do \
         test -s "/usr/share/apex/labwc/$f"; \
     done; \
     # labwc has no --verify-config, so the XML is validated structurally at build
@@ -668,7 +725,28 @@ RUN set -eux; \
     grep -q 'apex shell' /usr/share/apex/labwc/rc.xml; \
     grep -q 'apex shell' /usr/share/apex/labwc/menu.xml; \
     # `qs` is what `apex shell` actually calls; without it the wrapper is inert.
-    command -v qs >/dev/null
+    command -v qs >/dev/null; \
+    # ── APEX Floating window chrome ─────────────────────────────────────────
+    # labwc IGNORES an unrecognised theme key in silence, so a typo does not
+    # break a session, it just leaves that element on the built-in grey — the
+    # Openbox-fallback look this theme exists to remove. Assert the shape here
+    # and the key names in tests/test-apex-firstrun.sh, which has labwc-theme(5)
+    # available.
+    grep -q '@ACCENT@' /usr/share/apex/labwc/themerc-override; \
+    grep -qE '^window\.titlebar\.padding\.height: 11$' /usr/share/apex/labwc/themerc-override; \
+    grep -qE '^window\.button\.width: 30$' /usr/share/apex/labwc/themerc-override; \
+    grep -qE '^border\.width: 1$' /usr/share/apex/labwc/themerc-override; \
+    # Window chrome must use a PROPORTIONAL face, and the font it names must
+    # actually be installed: fontconfig silently substitutes a missing family,
+    # so naming a font the image does not ship is invisible until someone looks
+    # at a titlebar. Noto Sans comes from google-noto-sans-fonts in core.
+    grep -q '<name>Noto Sans</name>' /usr/share/apex/labwc/rc.xml; \
+    ! grep -qE '<name>[^<]*Mono[^<]*</name>' /usr/share/apex/labwc/rc.xml; \
+    fc-match --format='%{family}\n' 'Noto Sans' | grep -qi 'noto sans'; \
+    grep -qE '<cornerRadius>1[0-2]</cornerRadius>' /usr/share/apex/labwc/rc.xml; \
+    grep -q '<dropShadows>yes</dropShadows>' /usr/share/apex/labwc/rc.xml; \
+    grep -q 'style="thumbnail"' /usr/share/apex/labwc/rc.xml; \
+    echo "APEX Floating: chrome theme, proportional font and thumbnail switcher verified"
 
 # The labwc bindings are maintained by hand — the shell's keybind editor emits
 # Hyprland .conf/.lua and niri .kdl, and labwc has neither an IPC to push

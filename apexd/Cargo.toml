@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apexd-core", "apexd", "apex"]
+members = ["apexd-core", "apexd", "apex", "apex-agent-core", "apex-agentd"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,8 @@ rust-version = "1.75"
 [workspace.dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
 toml = "0.8"
 zbus = { version = "4", default-features = false, features = ["tokio"] }
 zvariant = "4"

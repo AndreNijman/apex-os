@@ -33,7 +33,10 @@
          decline, leaving no controls or draggable titlebar. `server` keeps
          those native controls while APEX Shell reserves non-overlapping space. -->
     <decoration>server</decoration>
-    <gap>6</gap>
+    <!-- 8 px, matching the Floating-mode spec. Was 6: close enough to look
+         accidental rather than chosen, which is the difference this whole
+         pass is about. -->
+    <gap>8</gap>
     <adaptiveSync>no</adaptiveSync>
     <reuseOutputMode>no</reuseOutputMode>
   </core>
@@ -80,18 +83,50 @@
       <layout>icon:iconify,max,close</layout>
       <showTitle>yes</showTitle>
     </titlebar>
-    <cornerRadius>0</cornerRadius>
+    <!-- Rounded corners. APEX Floating is presented as the traditional
+         overlapping-window mode, not a fallback, and square corners under a
+         rounded shell were the single clearest tell that it was one. -->
+    <cornerRadius>10</cornerRadius>
     <keepBorder>no</keepBorder>
     <maximizedDecoration>titlebar</maximizedDecoration>
+    <!-- Soft drop shadows, sized in themerc-override. -->
+    <dropShadows>yes</dropShadows>
+
+    <!-- Window chrome is UI text, so it gets a PROPORTIONAL face. Monospace
+         belongs in terminals and editors; using it for titlebars is what made
+         the session read as an Openbox theme.
+         Noto Sans rather than Inter: google-noto-sans-fonts is installed by
+         Containerfile.core, so it is guaranteed present on every image, and a
+         font that is not installed silently falls back to whatever fontconfig
+         picks. Size 11, the low end of the 11-12 pt target, because labwc
+         derives titlebar height from the font and 11 pt + the padding set in
+         themerc-override lands inside the 36-40 px band. -->
     <font place="ActiveWindow">
-      <name>JetBrainsMono Nerd Font</name>
-      <size>10</size>
+      <name>Noto Sans</name>
+      <size>11</size>
     </font>
     <font place="InactiveWindow">
-      <name>JetBrainsMono Nerd Font</name>
-      <size>10</size>
+      <name>Noto Sans</name>
+      <size>11</size>
+    </font>
+    <font place="MenuItem">
+      <name>Noto Sans</name>
+      <size>11</size>
+    </font>
+    <font place="OnScreenDisplay">
+      <name>Noto Sans</name>
+      <size>11</size>
     </font>
   </theme>
+
+  <!-- Thumbnail window switcher. labwc ships this and it is a large, free step
+       up from the classic text list; the roadmap asks for it as the baseline
+       now, with a full APEX Shell overview as the longer-term replacement.
+       Scoped to the focused output so a switcher does not appear on every
+       monitor at once. -->
+  <windowSwitcher preview="yes" outlines="yes">
+    <osd show="yes" style="thumbnail" output="focused" />
+  </windowSwitcher>
 
   <libinput>
     <device category="touchpad">
