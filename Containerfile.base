@@ -118,7 +118,18 @@ COPY files/system/units/apex-agentd.service /usr/lib/systemd/user/apex-agentd.se
 RUN set -eux; \
     test -x /usr/bin/bwrap; \
     rpm -q bubblewrap; \
-    /usr/bin/bwrap --ro-bind / / --dev /dev --unshare-all --die-with-parent /bin/true; \
+    # --version, not a real sandbox. Executing bwrap needs to create a mount
+    # namespace, and an image build runs under --isolation=chroot where that is
+    # legitimately denied ("Can't mount tmpfs on /newroot/dev"). So the build
+    # asserts what a build can actually know — the binary is present, owned by
+    # the expected package, and runs far enough to report itself, which is what
+    # catches a broken dynamic link against core.
+    #
+    # Whether confinement genuinely WORKS is a runtime property and is checked
+    # where it can be: sandbox::preflight() refuses to start a confined session
+    # if bwrap is unusable, and the apex-agent-core tests assert the argv and
+    # the measured properties on a real kernel.
+    /usr/bin/bwrap --version; \
     test -s /usr/lib/systemd/user/apex-agentd.service; \
     grep -q '^ExecStart=/usr/bin/apex-agentd$' /usr/lib/systemd/user/apex-agentd.service; \
     # Opt-in by design: a per-user daemon holding PTYs must not be enabled for
