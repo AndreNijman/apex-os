@@ -1,0 +1,955 @@
+//! `apex agent` and `apex project` — the user-facing half of the agent runtime.
+//!
+//! Every verb here is a thin client over `apex-agentd`'s control socket. The
+//! CLI never spawns an agent itself and never holds session state, so the
+//! runtime remains the single owner of every PTY and `apex agent list` says the
+//! same thing whether it is asked by the terminal, by a keybind or by APEX
+//! Shell.
+
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{bail, Context, Result};
+use apex_agent_core::client::{self, Client};
+use apex_agent_core::protocol::{
+    AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo,
+};
+use apex_agent_core::term::{self, RawMode, WinSize};
+use apex_agent_core::{adapter, checkpoint, config, git, project};
+use clap::{Args, Subcommand};
+
+/// `apex agent <verb>`.
+#[derive(Subcommand)]
+pub enum AgentCmd {
+    /// Start an agent on a managed terminal and attach to it.
+    ///
+    /// The real upstream binary runs in a real PTY; APEX owns the terminal so
+    /// the session survives this window closing. Detach with the detach key
+    /// (ctrl-] by default) and reattach later with `apex agent attach`.
+    Run(RunArgs),
+    /// List sessions.
+    List {
+        /// Include sessions that have already finished.
+        #[arg(long, short)]
+        all: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reattach to a session's terminal.
+    Attach {
+        id: u32,
+        /// Do not repaint the scrollback first.
+        #[arg(long)]
+        no_replay: bool,
+    },
+    /// Suspend a session and everything it started.
+    Pause { id: u32 },
+    /// Resume a paused session.
+    Resume { id: u32 },
+    /// Stop a session.
+    Kill {
+        id: u32,
+        /// int | term | kill. Default term, which lets the agent clean up.
+        #[arg(long, default_value = "term")]
+        signal: String,
+    },
+    /// Print a session's transcript.
+    Logs {
+        id: u32,
+        /// How many bytes of the tail to show.
+        #[arg(long, default_value_t = 64 * 1024)]
+        bytes: usize,
+    },
+    /// Show one session in detail, or the runtime's own status.
+    Status { id: Option<u32> },
+    /// Show or set the agent that `a` and an unqualified run use.
+    Default { agent: Option<String> },
+    /// List the agents this runtime can launch.
+    Adapters,
+    /// What an agent changed since its checkpoint.
+    Diff {
+        /// Session id. Defaults to the most recent session in this project.
+        id: Option<u32>,
+        /// Names only, no patch.
+        #[arg(long)]
+        stat: bool,
+    },
+    /// Restore the project to a session's checkpoint.
+    Undo {
+        /// Session id. Defaults to the most recent session in this project.
+        id: Option<u32>,
+        /// Undo to a specific checkpoint instead.
+        #[arg(long, conflicts_with = "id")]
+        checkpoint: Option<String>,
+        /// Do not ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Capture a checkpoint of the current project now.
+    Checkpoint {
+        /// What this checkpoint is for.
+        label: Option<String>,
+    },
+    /// Publish a state change for a session.
+    ///
+    /// This is the open agent event protocol. A process running inside a
+    /// session already knows its id from `$APEX_AGENT_SESSION`, so an agent
+    /// hook needs no arguments beyond the state.
+    Event {
+        /// working | waiting_for_user | permission_request | complete | failed
+        state: String,
+        /// Session id. Defaults to `$APEX_AGENT_SESSION`.
+        #[arg(long)]
+        session: Option<u32>,
+        /// Text shown alongside the state.
+        #[arg(long)]
+        detail: Option<String>,
+    },
+    /// Forget a finished session and delete its transcript.
+    Rm { id: u32 },
+    /// Forget every finished session.
+    Prune,
+}
+
+#[derive(Args)]
+pub struct RunArgs {
+    /// Opening instruction for the agent.
+    pub prompt: Option<String>,
+    /// Which agent to run. Defaults to the configured one.
+    #[arg(long, short)]
+    pub agent: Option<String>,
+    /// strict | project | unrestricted. Defaults to the configured policy.
+    #[arg(long, short)]
+    pub sandbox: Option<String>,
+    /// Run in a dedicated git worktree, creating it if needed.
+    #[arg(long, short)]
+    pub worktree: Option<String>,
+    /// Capture a checkpoint first, so `apex agent undo` can put it back.
+    #[arg(long, short)]
+    pub checkpoint: bool,
+    /// Where to run. Defaults to the current directory.
+    #[arg(long)]
+    pub cwd: Option<PathBuf>,
+    /// Start it and return, instead of attaching.
+    #[arg(long, short)]
+    pub detach: bool,
+    /// Arguments passed straight to the agent binary. With `--agent generic`
+    /// the first one is the program to run.
+    #[arg(last = true)]
+    pub args: Vec<String>,
+}
+
+/// `apex project <verb>`.
+#[derive(Subcommand)]
+pub enum ProjectCmd {
+    /// Projects the runtime has seen, most recent first.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Describe the project containing the current directory.
+    Info,
+    /// Agent worktrees of the current project.
+    Worktrees,
+    /// Checkpoints recorded for the current project.
+    Checkpoints,
+    /// Remove an agent worktree and its branch.
+    Remove {
+        name: String,
+        /// Keep the branch.
+        #[arg(long)]
+        keep_branch: bool,
+    },
+    /// Stop tracking a project. The checkout is never touched.
+    Forget { slug: String },
+}
+
+// ── agent verbs ─────────────────────────────────────────────────────────────
+
+pub fn agent(cmd: AgentCmd) -> i32 {
+    let result = match cmd {
+        AgentCmd::Run(args) => run(args),
+        AgentCmd::List { all, json } => list(all, json),
+        AgentCmd::Attach { id, no_replay } => attach(id, !no_replay),
+        AgentCmd::Pause { id } => signal(id, "stop", "paused"),
+        AgentCmd::Resume { id } => signal(id, "cont", "resumed"),
+        AgentCmd::Kill { id, signal: sig } => signal(id, &sig, "signalled"),
+        AgentCmd::Logs { id, bytes } => logs(id, bytes),
+        AgentCmd::Status { id } => status(id),
+        AgentCmd::Default { agent } => default_agent(agent),
+        AgentCmd::Adapters => adapters(),
+        AgentCmd::Diff { id, stat } => diff(id, stat),
+        AgentCmd::Undo {
+            id,
+            checkpoint: cp,
+            yes,
+        } => undo(id, cp, yes),
+        AgentCmd::Checkpoint { label } => make_checkpoint(label),
+        AgentCmd::Event {
+            state,
+            session,
+            detail,
+        } => event(state, session, detail),
+        AgentCmd::Rm { id } => remove(id),
+        AgentCmd::Prune => prune(),
+    };
+    report(result)
+}
+
+fn report(result: Result<i32>) -> i32 {
+    match result {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("apex: {e:#}");
+            1
+        }
+    }
+}
+
+fn run(args: RunArgs) -> Result<i32> {
+    let cfg = config::Config::load();
+    let cwd = match args.cwd {
+        Some(dir) => dir
+            .canonicalize()
+            .with_context(|| format!("{} does not exist", dir.display()))?,
+        None => std::env::current_dir().context("reading the current directory")?,
+    };
+
+    let sandbox = match args.sandbox.as_deref() {
+        Some(name) => SandboxPolicy::parse(name).with_context(|| {
+            format!("unknown sandbox policy {name:?}; use strict, project or unrestricted")
+        })?,
+        None => cfg.sandbox,
+    };
+
+    let size = term::stdout_window_size();
+    let request = RunRequest {
+        agent: args.agent.clone(),
+        prompt: args.prompt.clone(),
+        args: args.args.clone(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        sandbox,
+        worktree: args.worktree.clone(),
+        checkpoint: args.checkpoint,
+        cols: size.cols,
+        rows: size.rows,
+        env: Vec::new(),
+    };
+
+    let mut c = Client::connect()?;
+    let info = match c.call(&Request::Run(request))? {
+        Response::Session(info) => *info,
+        other => bail!("unexpected reply: {other:?}"),
+    };
+
+    if let Some(wt) = &info.worktree {
+        eprintln!("apex: worktree {wt} at {}", info.cwd);
+    }
+    if let Some(cp) = &info.checkpoint {
+        eprintln!("apex: checkpoint {cp} — undo with `apex agent undo {}`", info.id);
+    }
+
+    if args.detach {
+        println!(
+            "session {} — {} in {}",
+            info.id,
+            info.agent,
+            short_path(&info.cwd)
+        );
+        println!("attach with: apex agent attach {}", info.id);
+        return Ok(0);
+    }
+
+    eprintln!(
+        "apex: session {} ({}, sandbox {}) — detach with {}",
+        info.id, info.agent, info.sandbox, cfg.detach_key
+    );
+    attach_session(info.id, true, &cfg)
+}
+
+fn list(all: bool, json: bool) -> Result<i32> {
+    let sessions = client::sessions()?;
+    let shown: Vec<&SessionInfo> = sessions
+        .iter()
+        .filter(|s| all || s.is_live())
+        .collect();
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&shown)?);
+        return Ok(0);
+    }
+
+    if shown.is_empty() {
+        println!(
+            "no {}sessions. start one with `apex agent run`",
+            if all { "" } else { "running " }
+        );
+        return Ok(0);
+    }
+
+    println!(
+        "{:>3}  {:<10} {:<20} {:<22} {:<12} {}",
+        "ID", "AGENT", "STATE", "PROJECT", "SANDBOX", "WHERE"
+    );
+    for s in shown {
+        let state = match s.exit_summary() {
+            Some(summary) if !s.is_live() => summary,
+            _ => s.state.to_string(),
+        };
+        let project = s
+            .project_name
+            .clone()
+            .or_else(|| s.worktree.clone())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:>3}  {:<10} {:<20} {:<22} {:<12} {}",
+            s.id,
+            truncate(&s.agent, 10),
+            // 20 fits the longest real value, "killed by signal 15".
+            truncate(&state, 20),
+            truncate(&project, 22),
+            s.sandbox,
+            short_path(&s.cwd)
+        );
+    }
+    Ok(0)
+}
+
+fn attach(id: u32, replay: bool) -> Result<i32> {
+    let cfg = config::Config::load();
+    attach_session(id, replay, &cfg)
+}
+
+/// Take over a session's terminal until the user detaches or it ends.
+fn attach_session(id: u32, replay: bool, cfg: &config::Config) -> Result<i32> {
+    let size = term::stdout_window_size();
+    let replay_bytes = if replay {
+        apex_agent_core::session::SCROLLBACK_BYTES
+    } else {
+        0
+    };
+
+    let mut c = Client::connect()?;
+    match c.call(&Request::Attach {
+        id,
+        cols: size.cols,
+        rows: size.rows,
+        replay: replay_bytes,
+    })? {
+        Response::Attached { .. } => {}
+        other => bail!("unexpected reply: {other:?}"),
+    }
+    c.clear_timeouts();
+
+    // Anything the daemon sent alongside the response line is already session
+    // output and must be printed before the live stream.
+    let prelude = c.take_buffered();
+    let read_half = c.try_clone_stream()?;
+    let write_half = c.into_raw()?;
+
+    // Raw mode for the duration, restored by the guard however this exits.
+    let _raw = RawMode::enter(libc::STDIN_FILENO)?;
+    install_winch_forwarder(id, size);
+
+    let detached = client::relay(read_half, write_half, &prelude, cfg.detach_byte())?;
+
+    // Leave the cursor somewhere sane: a TUI that was mid-repaint when the user
+    // detached would otherwise leave the shell prompt in the middle of a line.
+    print!("\r\n");
+    std::io::stdout().flush().ok();
+
+    if detached {
+        eprintln!("apex: detached from session {id} (still running — `apex agent attach {id}`)");
+        return Ok(0);
+    }
+
+    match client::session(id) {
+        Ok(info) => {
+            if let Some(summary) = info.exit_summary() {
+                eprintln!("apex: session {id} {summary}");
+            }
+            Ok(info.exit_code.unwrap_or(0))
+        }
+        Err(_) => Ok(0),
+    }
+}
+
+/// Forward terminal resizes to the session on their own short-lived
+/// connections, so the raw PTY stream stays byte-transparent.
+fn install_winch_forwarder(id: u32, initial: WinSize) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    static RESIZED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn on_winch(_sig: libc::c_int) {
+        // Async-signal-safe: one relaxed atomic store and nothing else.
+        RESIZED.store(true, Ordering::Relaxed);
+    }
+    // Safe: installing a handler that only touches an atomic. Cast through a
+    // function pointer rather than straight from the function item, which is
+    // what `fn_to_numeric_cast_any` warns about.
+    let handler = on_winch as extern "C" fn(libc::c_int);
+    unsafe {
+        libc::signal(libc::SIGWINCH, handler as libc::sighandler_t);
+    }
+
+    let last = Arc::new(std::sync::Mutex::new(initial));
+    std::thread::Builder::new()
+        .name("apex-winch".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            if !RESIZED.swap(false, Ordering::Relaxed) {
+                continue;
+            }
+            let size = term::stdout_window_size();
+            {
+                let mut guard = last.lock().expect("winch lock");
+                if *guard == size {
+                    continue;
+                }
+                *guard = size;
+            }
+            if let Ok(mut c) = Client::connect() {
+                let _ = c.request(&Request::Resize {
+                    id,
+                    cols: size.cols,
+                    rows: size.rows,
+                });
+            }
+        })
+        .ok();
+}
+
+fn signal(id: u32, name: &str, past_tense: &str) -> Result<i32> {
+    client::call(&Request::Signal {
+        id,
+        signal: name.to_string(),
+    })?;
+    eprintln!("apex: session {id} {past_tense}");
+    Ok(0)
+}
+
+fn logs(id: u32, bytes: usize) -> Result<i32> {
+    let text = client::logs(id, bytes)?;
+    print!("{text}");
+    if !text.ends_with('\n') {
+        println!();
+    }
+    Ok(0)
+}
+
+fn status(id: Option<u32>) -> Result<i32> {
+    match id {
+        Some(id) => {
+            let s = client::session(id)?;
+            print_session(&s);
+            Ok(0)
+        }
+        None => {
+            let cfg = config::Config::load();
+            let running = Client::is_running();
+            println!("runtime      {}", if running { "running" } else { "stopped" });
+            println!("socket       {}", client::socket_path().display());
+            println!("default      {}", cfg.default_agent);
+            println!("sandbox      {}", cfg.sandbox);
+            println!("detach key   {}", cfg.detach_key);
+            if !running {
+                println!();
+                println!("start it with: systemctl --user start apex-agentd");
+                return Ok(1);
+            }
+            let sessions = client::sessions()?;
+            let live = sessions.iter().filter(|s| s.is_live()).count();
+            println!("sessions     {live} running, {} recorded", sessions.len());
+            Ok(0)
+        }
+    }
+}
+
+fn print_session(s: &SessionInfo) {
+    println!("session      {}", s.id);
+    println!("agent        {}", s.agent);
+    println!(
+        "command      {} {}",
+        s.program,
+        s.args.join(" ")
+    );
+    println!("state        {}", s.state);
+    if let Some(detail) = &s.detail {
+        println!("detail       {detail}");
+    }
+    println!("sandbox      {}", s.sandbox);
+    println!("cwd          {}", s.cwd);
+    if let Some(p) = &s.project_name {
+        println!("project      {p}");
+    }
+    if let Some(w) = &s.worktree {
+        println!("worktree     {w}");
+    }
+    if let Some(c) = &s.checkpoint {
+        println!("checkpoint   {c}");
+    }
+    println!("pid          {}", s.pid);
+    println!("terminal     {}x{}", s.cols, s.rows);
+    println!("attached     {}", s.attached);
+    if let Some(summary) = s.exit_summary() {
+        println!("outcome      {summary}");
+    }
+}
+
+fn default_agent(agent: Option<String>) -> Result<i32> {
+    let (mut cfg, notes) = config::load_reporting();
+    for note in &notes {
+        eprintln!("apex: {note}");
+    }
+    let Some(agent) = agent else {
+        println!("{}", cfg.default_agent);
+        return Ok(0);
+    };
+    if adapter::by_id(&agent).is_none() {
+        bail!(
+            "no agent named {agent:?}. known agents: {}",
+            adapter::ids().join(", ")
+        );
+    }
+    cfg.default_agent = agent.clone();
+    cfg.save()?;
+    println!("default agent is now {agent}");
+    Ok(0)
+}
+
+fn adapters() -> Result<i32> {
+    let cfg = config::Config::load();
+    println!("{:<10} {:<16} {:<12} {}", "ID", "AGENT", "INSTALLED", "PROGRAM");
+    for a in adapter::ADAPTERS {
+        let installed = if a.program.is_empty() {
+            "n/a".to_string()
+        } else if which(a.program).is_some() {
+            "yes".to_string()
+        } else {
+            "no".to_string()
+        };
+        let marker = if a.id == cfg.default_agent { "*" } else { " " };
+        println!(
+            "{marker}{:<9} {:<16} {:<12} {}",
+            a.id,
+            a.display,
+            installed,
+            if a.program.is_empty() {
+                "(caller supplies)"
+            } else {
+                a.program
+            }
+        );
+    }
+    Ok(0)
+}
+
+fn which(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(program))
+        .find(|p| p.is_file())
+}
+
+fn event(state: String, session: Option<u32>, detail: Option<String>) -> Result<i32> {
+    let id = session
+        .or_else(client::current_session)
+        .context("no session id: pass --session, or run this inside an agent session")?;
+    if AgentState::parse(&state).is_none() {
+        bail!(
+            "unknown state {state:?}; use working, waiting_for_user, \
+             permission_request, complete or failed"
+        );
+    }
+    client::publish_event(id, &state, detail)?;
+    Ok(0)
+}
+
+fn remove(id: u32) -> Result<i32> {
+    client::call(&Request::Remove { id })?;
+    eprintln!("apex: session {id} removed");
+    Ok(0)
+}
+
+fn prune() -> Result<i32> {
+    client::call(&Request::Prune)?;
+    eprintln!("apex: finished sessions removed");
+    Ok(0)
+}
+
+// ── checkpoints ─────────────────────────────────────────────────────────────
+
+/// The directory a checkpoint verb operates on, and the session it came from.
+fn session_context(id: Option<u32>) -> Result<(PathBuf, Option<SessionInfo>)> {
+    let cwd = std::env::current_dir().context("reading the current directory")?;
+    match id {
+        Some(id) => {
+            let s = client::session(id)?;
+            Ok((PathBuf::from(&s.cwd), Some(s)))
+        }
+        None => {
+            // The most recent session whose working directory is this project.
+            let root = git::toplevel(&cwd);
+            let latest = client::sessions()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| match &root {
+                    Some(r) => Path::new(&s.cwd).starts_with(r),
+                    None => false,
+                })
+                .next_back();
+            Ok((cwd, latest))
+        }
+    }
+}
+
+fn make_checkpoint(label: Option<String>) -> Result<i32> {
+    let cwd = std::env::current_dir()?;
+    let label = label.unwrap_or_else(|| "manual".to_string());
+    let cp = checkpoint::create(&cwd, &label, None)?;
+    println!("checkpoint {} ({})", cp.id, cp.short_commit());
+    println!("restore with: apex agent undo --checkpoint {}", cp.id);
+    Ok(0)
+}
+
+fn diff(id: Option<u32>, stat: bool) -> Result<i32> {
+    let (dir, session) = session_context(id)?;
+    let root = git::toplevel(&dir)
+        .with_context(|| format!("{} is not inside a git repository", dir.display()))?;
+
+    // Prefer the session's own checkpoint; fall back to the newest one.
+    let base = match session.as_ref().and_then(|s| s.checkpoint.clone()) {
+        Some(cp_id) => Some(checkpoint::find(&root, &cp_id)?),
+        None => checkpoint::latest(&root)?,
+    };
+
+    let Some(base) = base else {
+        eprintln!(
+            "apex: no checkpoint for this project — showing uncommitted changes instead.\n\
+             apex: run agents with `--checkpoint` to get a precise before-and-after."
+        );
+        return run_git(&root, &["diff", "--"]);
+    };
+
+    eprintln!(
+        "apex: diff against checkpoint {} ({})",
+        base.id, base.label
+    );
+
+    // Diff tree-against-tree, not tree-against-working-tree. `git diff <commit>`
+    // only considers tracked paths, so a file the agent created would be
+    // missing from the diff of what the agent did — which is precisely the
+    // question being asked.
+    let now = checkpoint::current_tree(&root)?;
+    if stat {
+        run_git(&root, &["diff", "--stat", &base.commit, &now, "--"])
+    } else {
+        run_git(&root, &["diff", &base.commit, &now, "--"])
+    }
+}
+
+fn run_git(dir: &Path, args: &[&str]) -> Result<i32> {
+    let status = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .status()
+        .context("running git")?;
+    Ok(status.code().unwrap_or(1))
+}
+
+fn undo(id: Option<u32>, explicit: Option<String>, yes: bool) -> Result<i32> {
+    let (dir, session) = session_context(id)?;
+    let root = git::toplevel(&dir)
+        .with_context(|| format!("{} is not inside a git repository", dir.display()))?;
+
+    let target = match explicit {
+        Some(cp_id) => checkpoint::find(&root, &cp_id)?,
+        None => match session.as_ref().and_then(|s| s.checkpoint.clone()) {
+            Some(cp_id) => checkpoint::find(&root, &cp_id)?,
+            None => checkpoint::latest(&root)?.context(
+                "no checkpoint for this project.\n\
+                 run agents with `apex agent run --checkpoint`, or capture one now with \
+                 `apex agent checkpoint`",
+            )?,
+        },
+    };
+
+    if !yes {
+        eprintln!(
+            "apex: restore {} to checkpoint {} ({}) taken {}?",
+            root.display(),
+            target.id,
+            target.label,
+            format_age(target.created)
+        );
+        eprintln!("apex: uncommitted work since then will be replaced. A safety checkpoint is taken first.");
+        if !confirm()? {
+            eprintln!("apex: nothing changed");
+            return Ok(1);
+        }
+    }
+
+    let report = checkpoint::restore(&root, &target)?;
+    println!("restored to checkpoint {}", report.restored.id);
+    println!("safety checkpoint {} — `apex agent undo --checkpoint {}` puts it back",
+        report.safety.id, report.safety.id);
+    if !report.removed.is_empty() {
+        println!(
+            "removed {} file(s) created after the checkpoint:",
+            report.removed.len()
+        );
+        for f in report.removed.iter().take(20) {
+            println!("  - {f}");
+        }
+        if report.removed.len() > 20 {
+            println!("  … and {} more", report.removed.len() - 20);
+        }
+    }
+    if report.head_moved {
+        println!(
+            "HEAD moved back to {}",
+            &report.restored.head.clone().unwrap_or_default()[..12.min(
+                report.restored.head.as_ref().map(|h| h.len()).unwrap_or(0)
+            )]
+        );
+    }
+    if !report.packages.is_empty() {
+        println!();
+        println!("packages changed since the checkpoint (not undone automatically):");
+        for p in &report.packages.added {
+            println!("  + {p}");
+        }
+        for p in &report.packages.removed {
+            println!("  - {p}");
+        }
+        if let Some(cmd) = report.packages.undo_command() {
+            println!("to remove the added ones: {cmd}");
+        }
+    }
+    Ok(0)
+}
+
+/// Ask for a yes/no on the terminal. A non-interactive caller must pass
+/// `--yes`; assuming consent from a script would be how somebody loses work.
+fn confirm() -> Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        bail!("not a terminal; pass --yes to confirm non-interactively");
+    }
+    eprint!("apex: type 'yes' to continue: ");
+    std::io::stderr().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim().eq_ignore_ascii_case("yes"))
+}
+
+// ── project verbs ───────────────────────────────────────────────────────────
+
+pub fn project_cmd(cmd: ProjectCmd) -> i32 {
+    let result = match cmd {
+        ProjectCmd::List { json } => project_list(json),
+        ProjectCmd::Info => project_info(),
+        ProjectCmd::Worktrees => project_worktrees(),
+        ProjectCmd::Checkpoints => project_checkpoints(),
+        ProjectCmd::Remove { name, keep_branch } => project_remove(name, !keep_branch),
+        ProjectCmd::Forget { slug } => {
+            project::forget(&slug).map(|()| {
+                println!("forgot {slug}");
+                0
+            })
+        }
+    };
+    report(result)
+}
+
+fn current_project() -> Result<project::Project> {
+    let cwd = std::env::current_dir()?;
+    project::detect(&cwd)
+        .with_context(|| format!("{} is not inside a git repository", cwd.display()))
+}
+
+fn project_list(json: bool) -> Result<i32> {
+    let projects = project::list();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&projects)?);
+        return Ok(0);
+    }
+    if projects.is_empty() {
+        println!("no projects yet — they are recorded the first time an agent runs in one");
+        return Ok(0);
+    }
+    println!("{:<24} {:<20} {}", "NAME", "TOOLCHAINS", "PATH");
+    for p in projects {
+        println!(
+            "{:<24} {:<20} {}",
+            truncate(&p.name, 24),
+            truncate(&p.languages.join(","), 20),
+            short_path(&p.root)
+        );
+    }
+    Ok(0)
+}
+
+fn project_info() -> Result<i32> {
+    let p = current_project()?;
+    println!("name         {}", p.name);
+    println!("root         {}", p.root);
+    println!("slug         {}", p.slug);
+    println!(
+        "toolchains   {}",
+        if p.languages.is_empty() {
+            "-".to_string()
+        } else {
+            p.languages.join(", ")
+        }
+    );
+    if let Some(branch) = git::current_branch(Path::new(&p.root)) {
+        println!("branch       {branch}");
+    }
+    let worktrees = project::worktrees(&p).unwrap_or_default();
+    println!("worktrees    {}", worktrees.iter().filter(|w| w.is_agent).count());
+    println!(
+        "checkpoints  {}",
+        checkpoint::list(Path::new(&p.root)).unwrap_or_default().len()
+    );
+    let sessions = client::sessions().unwrap_or_default();
+    let mine = sessions
+        .iter()
+        .filter(|s| s.is_live() && Path::new(&s.cwd).starts_with(&p.root))
+        .count();
+    println!("sessions     {mine} running");
+    Ok(0)
+}
+
+fn project_worktrees() -> Result<i32> {
+    let p = current_project()?;
+    let worktrees = project::worktrees(&p)?;
+    println!("{:<24} {:<28} {}", "NAME", "BRANCH", "PATH");
+    for w in worktrees {
+        println!(
+            "{:<24} {:<28} {}",
+            truncate(&w.name, 24),
+            truncate(w.branch.as_deref().unwrap_or("(detached)"), 28),
+            short_path(&w.path.to_string_lossy())
+        );
+    }
+    Ok(0)
+}
+
+fn project_checkpoints() -> Result<i32> {
+    let p = current_project()?;
+    let list = checkpoint::list(Path::new(&p.root))?;
+    if list.is_empty() {
+        println!("no checkpoints — capture one with `apex agent checkpoint`");
+        return Ok(0);
+    }
+    println!("{:<24} {:<14} {:<12} {}", "ID", "COMMIT", "AGE", "LABEL");
+    for cp in list {
+        println!(
+            "{:<24} {:<14} {:<12} {}",
+            cp.id,
+            cp.short_commit(),
+            format_age(cp.created),
+            cp.label
+        );
+    }
+    Ok(0)
+}
+
+fn project_remove(name: String, delete_branch: bool) -> Result<i32> {
+    let p = current_project()?;
+    project::remove_worktree(&p, &name, delete_branch)?;
+    println!(
+        "removed worktree {name}{}",
+        if delete_branch { " and its branch" } else { "" }
+    );
+    Ok(0)
+}
+
+// ── formatting ──────────────────────────────────────────────────────────────
+
+fn truncate(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    let keep = width.saturating_sub(1);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
+/// Replace the home prefix with `~`, the way every other listing does.
+fn short_path(path: &str) -> String {
+    let home = apex_agent_core::paths::home();
+    let home = home.to_string_lossy();
+    if !home.is_empty() && path.starts_with(home.as_ref()) {
+        return format!("~{}", &path[home.len()..]);
+    }
+    path.to_string()
+}
+
+/// A coarse age, which is all a listing needs.
+fn format_age(unix_secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let delta = now.saturating_sub(unix_secs);
+    match delta {
+        0..=59 => format!("{delta}s ago"),
+        60..=3599 => format!("{}m ago", delta / 60),
+        3600..=86_399 => format!("{}h ago", delta / 3600),
+        _ => format!("{}d ago", delta / 86_400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncation_keeps_the_column_width() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("exactlyten", 10), "exactlyten");
+        assert_eq!(truncate("waytoolongforthis", 10).chars().count(), 10);
+        assert!(truncate("waytoolongforthis", 10).ends_with('…'));
+    }
+
+    #[test]
+    fn truncation_does_not_split_a_multibyte_character() {
+        // Slicing by bytes here would panic on a non-ASCII project name.
+        let s = "проектснадлиннымименем";
+        let out = truncate(s, 8);
+        assert_eq!(out.chars().count(), 8);
+    }
+
+    #[test]
+    fn ages_read_in_the_largest_sensible_unit() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(format_age(now).ends_with("s ago"));
+        assert!(format_age(now - 120).starts_with('2'));
+        assert!(format_age(now - 120).ends_with("m ago"));
+        assert!(format_age(now - 7200).ends_with("h ago"));
+        assert!(format_age(now - 172_800).ends_with("d ago"));
+    }
+
+    #[test]
+    fn a_future_timestamp_does_not_underflow() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(format_age(now + 10_000), "0s ago");
+    }
+
+    #[test]
+    fn paths_outside_home_are_left_alone() {
+        assert_eq!(short_path("/usr/share/apex"), "/usr/share/apex");
+    }
+}

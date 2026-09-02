@@ -4,6 +4,7 @@
 //! tier planning work even when `apexd` is not running. Every D-Bus verb
 //! degrades gracefully — a clear message, a non-zero exit, never a panic.
 
+mod agent;
 mod ops;
 mod proxy;
 mod touchpad;
@@ -123,6 +124,23 @@ enum Cmd {
     Pkg {
         #[command(subcommand)]
         cmd: PkgCmd,
+    },
+    /// Run and supervise coding agents on managed terminals.
+    ///
+    /// APEX owns the PTY, the sandbox and the project state; the agent itself
+    /// is the ordinary upstream binary (`claude`, `opencode`, `codex`, …) in an
+    /// ordinary terminal. Sessions outlive the window they were started from,
+    /// so a closed terminal never kills a running task.
+    ///
+    /// Needs the per-user runtime: `systemctl --user start apex-agentd`.
+    Agent {
+        #[command(subcommand)]
+        cmd: agent::AgentCmd,
+    },
+    /// Projects, agent worktrees and checkpoints.
+    Project {
+        #[command(subcommand)]
+        cmd: agent::ProjectCmd,
     },
 }
 
@@ -371,6 +389,11 @@ async fn main() {
 
     let code = match cli.command {
         Cmd::Status => cmd_status().await,
+        // The agent verbs are a blocking client over the per-user runtime's
+        // Unix socket, not a D-Bus call, and `attach` deliberately blocks for
+        // as long as the user stays attached.
+        Cmd::Agent { cmd } => agent::agent(cmd),
+        Cmd::Project { cmd } => agent::project_cmd(cmd),
         Cmd::Tier { name } => cmd_tier(name).await,
         Cmd::Profile => cmd_profile().await,
         Cmd::Battery(args) => cmd_battery(args).await,
