@@ -367,7 +367,16 @@ fn approve(id: u32, for_project: bool, no_run: bool) -> Result<i32> {
     // Show what is being approved and confirm, when a human is watching. The
     // §4 prompt is the point of this whole subsystem; skipping it because the
     // command line already named an id would mean approving by muscle memory.
-    if std::io::stdin().is_terminal() && !confirm(&req)? {
+    //
+    // Not asked inside a managed session. A session's stdin IS a terminal — it
+    // is a PTY — so the terminal check alone made an agent running this sit
+    // forever on a prompt no human would ever see, never reaching the daemon's
+    // refusal. Using $APEX_AGENT_SESSION here is safe precisely because it
+    // decides nothing: it suppresses a prompt. The daemon still resolves the
+    // caller from the connection's peer credentials and still refuses, so
+    // clearing the variable buys an agent a pointless prompt, not an approval.
+    let in_session = std::env::var_os("APEX_AGENT_SESSION").is_some();
+    if !in_session && std::io::stdin().is_terminal() && !confirm(&req)? {
         println!("left request {id} pending");
         return Ok(1);
     }
@@ -434,18 +443,22 @@ fn confirm(req: &PrivilegeRequest) -> Result<bool> {
 fn verbs() {
     println!("Privileged operations an agent may request:\n");
     for name in Verb::names() {
-        let sample = if name.starts_with("install") || name.starts_with("remove") {
-            vec!["<package>…".to_string()]
-        } else {
-            vec![]
-        };
-        // Built from the vocabulary itself, so this list cannot drift out of
-        // step with what the daemon accepts.
-        let effect = Verb::parse(name, &["placeholder".to_string()])
+        // Parsed from the vocabulary itself, so this list cannot drift out of
+        // step with what the daemon accepts. `kind_summary` describes the
+        // operation without its arguments — using `effect` here printed the
+        // dummy package name this parse needs.
+        let takes_packages = matches!(*name, "install" | "remove");
+        let Ok(verb) = Verb::parse(name, &["placeholder".to_string()])
             .or_else(|_| Verb::parse(name, &[]))
-            .map(|v| v.effect())
-            .unwrap_or_default();
-        println!("  {:<14} {}", format!("{name} {}", sample.join(" ")), effect);
+        else {
+            continue;
+        };
+        let shown = if takes_packages {
+            format!("{name} <package>…")
+        } else {
+            name.to_string()
+        };
+        println!("  {:<20} {}", shown, verb.kind_summary());
     }
     println!(
         "\nThere is deliberately no verb for running an arbitrary command: a human\n\
@@ -545,7 +558,15 @@ mod tests {
             let parsed = Verb::parse(name, &["placeholder".to_string()])
                 .or_else(|_| Verb::parse(name, &[]));
             assert!(parsed.is_ok(), "{name} parses with neither form");
-            assert!(!parsed.unwrap().effect().is_empty(), "{name} has no effect");
+            let v = parsed.unwrap();
+            assert!(!v.effect().is_empty(), "{name} has no effect");
+            // The listing uses kind_summary, so that is what must be present —
+            // and it must not leak the dummy package the parse above needs.
+            assert!(!v.kind_summary().is_empty(), "{name} has no summary");
+            assert!(
+                !v.kind_summary().contains("placeholder"),
+                "{name}'s summary leaks the parse placeholder"
+            );
         }
     }
 

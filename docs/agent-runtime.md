@@ -117,11 +117,25 @@ Measured on APEX-OS 43, kernel 7.1.5, bubblewrap 0.11.0:
 
 ### Default-deny, not a blocklist
 
-`$HOME` and `$XDG_RUNTIME_DIR` are replaced with empty tmpfs mounts and only an
-explicit allowlist is bound back. `~/.ssh`, `~/.gnupg`, `~/.aws`, browser
-profiles and the ssh-agent and gpg-agent sockets are unreachable because
+`$HOME`, `/run` and `$XDG_RUNTIME_DIR` are replaced with empty tmpfs mounts and
+only an explicit allowlist is bound back. `~/.ssh`, `~/.gnupg`, `~/.aws`,
+browser profiles and the ssh-agent and gpg-agent sockets are unreachable because
 *nothing bound them* — not because something listed them. A blocklist would be
 a hole every time a tool invented a new credential store.
+
+`/run` is masked for a specific reason. `--ro-bind / /` made
+`/run/dbus/system_bus_socket` visible, and it is mode `0666`. `apexd` lives on
+that bus, and its mutating methods are gated by polkit actions that ship
+`allow_active = yes` — passwordless for the logged-in local user. A confined
+session *is* that user, so `SetTier`, `SetChargeThresholds`, `Fan.SetPwm` and
+`GameMode.StartForPid` were all reachable from inside the sandbox. Measured, not
+theorised: `SetTier` returned success from confinement.
+
+A denylist of known sockets could not fix that. `/run` is a tmpfs on the host
+and `--ro-bind / /` binds the same filesystem, so a socket created *after* the
+sandbox starts appears inside it — anything computed at spawn time is stale by
+construction. The one thing bound back is the `/etc/resolv.conf` link target,
+read-only, without which every session loses DNS.
 
 The environment works the same way: cleared, then rebuilt from locale, terminal
 identity, and the specific variables the chosen adapter declares. A
@@ -152,7 +166,9 @@ apex agent run --sandbox unrestricted …
 - Ordinary terminal processes are never sandboxed. Policy applies to sessions
   the runtime manages and to nothing else.
 - Wayland and D-Bus session sockets are masked with the rest of
-  `$XDG_RUNTIME_DIR`, so a confined agent cannot open GUI applications.
+  `$XDG_RUNTIME_DIR`, so a confined agent cannot open GUI applications. The
+  *system* bus is masked with `/run`, so it cannot reach `apexd` either — a
+  system change has to go through `apex request` (below).
 
 ---
 
@@ -235,6 +251,87 @@ inferred states.
 
 ---
 
+## Privilege requests
+
+An agent has no sudo, no root shell, and a sandbox that cannot reach the system
+bus. When it genuinely needs a system change, it asks:
+
+```
+apex request install clang --reason "Required to compile the project"
+```
+
+and blocks. You see it, and decide:
+
+```
+apex request pending
+sudo apex request approve 3                 # allow once, and run it
+sudo apex request approve 3 --for-project   # …and stop asking for this one
+apex request deny 3
+```
+
+### The vocabulary is closed
+
+`apex request verbs` lists everything askable: `install`, `remove`,
+`pkg-upgrade`, `pkg-rebuild`, `pkg-rollback`, `pin`, `rollback`, `update`. Each
+maps to an `apex` subcommand that already declares itself root-only.
+
+There is deliberately **no verb for running a command**. An `exec` variant would
+be sudo with a confirmation dialog: nobody can meaningfully review an arbitrary
+shell line, and approving `sh -c '…'` once is equivalent to granting permanent
+root. The request type is a Rust enum, so this is a property of the type and not
+of a validation function somebody can bypass.
+
+Package names are checked against rpm's own rule, which excludes `/`, a leading
+`-`, and every control character. That is not politeness — the approval prompt
+is what you read to decide, so a name able to embed a newline or an escape
+sequence could show you an operation other than the one being requested.
+
+### Who is asking
+
+The daemon resolves the asking session from the connection's **peer
+credentials** (`SO_PEERCRED`), then walks that pid's `/proc` parent chain until
+it meets a pid the daemon itself recorded when it forked a session.
+
+It never reads `$APEX_AGENT_SESSION`. That variable is set inside each session
+and is fine for `apex agent event`, where the worst a lying client achieves is a
+wrong status label — but anything *authorised* by a client-supplied id is
+authorised by the agent itself. Ancestry rather than process group, because a
+process may `setpgid` itself and cannot choose its parent.
+
+Consequently a session cannot approve its own request, cannot deny it, and
+cannot alter its own grants. `tests/test-privilege-requests.sh` asserts all
+three against a real daemon, and its negative control is a session that files a
+request while claiming `APEX_AGENT_SESSION=99999` and is still attributed
+correctly.
+
+### Where the privilege comes from
+
+`apex-agentd` is unprivileged and stays that way — §2's rule is that agent
+orchestration must not live inside the privileged daemon. The daemon records,
+validates and remembers; it never executes. The operation runs inside
+`apex request approve`, under the same root gate as `apex install` itself, so
+the privilege exercised is **yours**.
+
+That is why a grant does not yet mean unattended execution: with nobody
+present there is no privilege to borrow. Closing that gap means a privileged
+executor reachable from an agent's request, and that is a new root surface — so
+it is named in *Not implemented* rather than quietly added.
+
+### The audit trail
+
+Every filing, decision and execution appends one JSON line to
+`privilege-audit.jsonl`, which is never rewritten:
+
+```
+apex request audit
+```
+
+The `argv` recorded is rebuilt from the typed verb, not stored as a string, so a
+hand-edited request file cannot smuggle an extra argument in between the
+approval and the execution.
+
+---
+
 ## Files
 
 | path | what |
@@ -243,6 +340,9 @@ inferred states.
 | `$XDG_STATE_HOME/apex/agent/sessions/` | session records |
 | `$XDG_STATE_HOME/apex/agent/logs/` | transcripts, `0600`, capped at 32 MiB |
 | `$XDG_STATE_HOME/apex/agent/checkpoints/` | checkpoint metadata |
+| `$XDG_STATE_HOME/apex/agent/requests/` | privilege requests, one JSON file each |
+| `$XDG_STATE_HOME/apex/agent/grants.json` | per-project "allow for project" grants |
+| `$XDG_STATE_HOME/apex/agent/privilege-audit.jsonl` | append-only privilege audit |
 | `$XDG_CONFIG_HOME/apex/agent.json` | default agent, sandbox, detach key |
 | `/tmp/apex-agent/<id>/` | per-session scratch, removed with the session |
 
@@ -268,8 +368,11 @@ Named because the roadmap asks for them and this does not do them:
 
 - **Secret broker.** Credentials are passed as environment variables the adapter
   declares, not brokered as capabilities. Scoped-token issuance is not here.
-- **Privilege requests.** There is no structured "the agent asks to install
-  clang" flow yet; a session simply cannot install anything.
+- **Unattended execution of a granted request.** "Allow for project" means the
+  next identical request needs no decision; it does not yet mean the operation
+  runs with nobody present. That would need a privileged executor reachable
+  from an agent's request, and minting a new root surface is not something to
+  do casually. See below.
 - **Terminal layouts**, tmux/zellij integration, and restoring a project's
   windows after reboot.
 - **Remote sessions.** `--host` does not exist.
