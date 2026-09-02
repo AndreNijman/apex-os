@@ -458,7 +458,7 @@ fn status(id: Option<u32>) -> Result<i32> {
             println!("detach key   {}", cfg.detach_key);
             if !running {
                 println!();
-                println!("start it with: systemctl --user start apex-agentd");
+                println!("start it with: systemctl --user enable --now apex-agentd");
                 return Ok(1);
             }
             let sessions = client::sessions()?;

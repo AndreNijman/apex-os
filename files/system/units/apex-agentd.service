@@ -31,6 +31,15 @@ Documentation=man:apex(1)
 # The runtime is useful in a bare TTY as well as a desktop session, so it does
 # not depend on graphical-session.target.
 
+# A crash loop must not spin: five restarts in a minute and it stays down,
+# where `apex agent status` reports it plainly.
+#
+# These are [Unit] directives, not [Service] ones (systemd.unit(5)). Under
+# [Service] systemd parses them but they do not apply, so the rate limiting
+# reads as configured while doing nothing.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
 [Service]
 Type=simple
 ExecStart=/usr/bin/apex-agentd
@@ -40,11 +49,6 @@ KillSignal=SIGTERM
 TimeoutStopSec=20
 Restart=on-failure
 RestartSec=2
-
-# A crash loop must not spin: five restarts in a minute and it stays down,
-# where `apex agent status` reports it plainly.
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 # Hardening. Deliberately mild compared with a system unit, because this daemon
 # exists to launch the user's own programs — locking down its filesystem view

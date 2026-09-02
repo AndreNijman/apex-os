@@ -44,7 +44,7 @@ impl Client {
             {
                 anyhow!(
                     "the agent runtime is not running.\n\
-                     start it with: systemctl --user start apex-agentd"
+                     start it with: systemctl --user enable --now apex-agentd"
                 )
             } else {
                 anyhow!("cannot reach the agent runtime at {}: {e}", path.display())
@@ -299,7 +299,10 @@ mod tests {
         let err = Client::connect_at(Path::new("/nonexistent/apex-agentd.sock")).unwrap_err();
         let text = err.to_string();
         assert!(text.contains("not running"), "{text}");
-        assert!(text.contains("systemctl --user start apex-agentd"), "{text}");
+        assert!(
+            text.contains("systemctl --user enable --now apex-agentd"),
+            "{text}"
+        );
     }
 
     #[test]

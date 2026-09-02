@@ -104,7 +104,12 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
 
     let id = daemon.registry.lock().expect("registry lock").allocate();
     let scratch = paths::scratch_dir(id);
-    paths::ensure_private_dir(&scratch).ok();
+    // Not best-effort: the sandbox binds this path read-write and sets TMPDIR
+    // to it. If it cannot be created, or cannot be made private, the session
+    // would start with an unexpected scratch directory and fail later in a much
+    // harder place to diagnose.
+    paths::ensure_private_dir(&scratch)
+        .with_context(|| format!("preparing the session scratch directory {}", scratch.display()))?;
 
     let args = adapter.build_args(req.prompt.as_deref(), &extra);
     let size = WinSize {

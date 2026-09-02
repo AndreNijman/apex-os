@@ -130,7 +130,15 @@ if [ -n "${BASH_VERSION}" ]; then
         esac
     }
     complete -F _a_complete a
-    complete -W "$(: )" -F _apex_agent_complete aa 2>/dev/null || true
+
+    # `aa`, `ad` and friends take a session id as their first argument. They
+    # cannot reuse _apex_agent_complete: that reads the verb from
+    # COMP_WORDS[2], which for `aa 4` is not a verb at all.
+    _apex_session_complete() {
+        COMPREPLY=($(compgen -W "$(_apex_session_ids)" -- "${COMP_WORDS[COMP_CWORD]}"))
+    }
+    complete -F _apex_session_complete aa
+    complete -F _apex_session_complete ad
 fi
 
 # ── zsh completion ──────────────────────────────────────────────────────────

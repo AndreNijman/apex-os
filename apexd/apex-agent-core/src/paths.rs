@@ -56,22 +56,45 @@ pub fn home() -> PathBuf {
 
 fn passwd_home() -> Option<PathBuf> {
     use std::ffi::CStr;
-    // Safe: getpwuid returns a pointer into a static buffer owned by libc, and
-    // we copy out of it before returning. Single-threaded use at startup.
-    unsafe {
-        let pw = libc::getpwuid(libc::getuid());
-        if pw.is_null() {
+
+    // getpwuid_r, not getpwuid. The plain form returns a pointer into a static
+    // buffer shared by the whole process, so two threads resolving the home
+    // directory at once can each get the other's result — and this is reached
+    // from request handling in a multi-threaded daemon, not only at startup.
+    // The reentrant form writes into a buffer we own.
+    let mut buf = vec![0 as libc::c_char; 1024];
+    loop {
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        // Safe: getpwuid_r writes only into `pwd` and `buf`, both owned here,
+        // and reports the buffer being too small rather than overrunning it.
+        let rc = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        if rc == libc::ERANGE && buf.len() < 64 * 1024 {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if rc != 0 || result.is_null() {
+            // No entry, or an error. Either way there is no home to report.
             return None;
         }
-        let dir = (*pw).pw_dir;
-        if dir.is_null() {
+        if pwd.pw_dir.is_null() {
             return None;
         }
-        let bytes = CStr::from_ptr(dir).to_bytes();
+        // Safe: pw_dir points into `buf`, which is still alive here, and the
+        // bytes are copied out before returning.
+        let bytes = unsafe { CStr::from_ptr(pwd.pw_dir) }.to_bytes();
         if bytes.is_empty() {
             return None;
         }
-        Some(PathBuf::from(String::from_utf8_lossy(bytes).into_owned()))
+        return Some(PathBuf::from(String::from_utf8_lossy(bytes).into_owned()));
     }
 }
 
@@ -151,6 +174,35 @@ mod tests {
         let fallback = PathBuf::from(format!("/run/user/{uid}"));
         assert!(fallback.is_absolute());
         assert!(fallback.starts_with("/run/user"));
+    }
+
+    #[test]
+    fn the_passwd_lookup_resolves_and_is_safe_to_call_concurrently() {
+        // The fallback used when $HOME is unset. getpwuid_r writes into a
+        // caller-owned buffer; the non-reentrant getpwuid it replaced returned
+        // a pointer into one static buffer shared by the whole process, so two
+        // threads could each receive the other's answer.
+        let expected = passwd_home();
+        assert!(
+            expected.as_ref().is_none_or(|p| p.is_absolute()),
+            "{expected:?}"
+        );
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(passwd_home))
+            .collect();
+        for h in handles {
+            assert_eq!(
+                h.join().expect("thread panicked"),
+                expected,
+                "concurrent lookups disagreed"
+            );
+        }
+    }
+
+    #[test]
+    fn home_is_always_absolute() {
+        assert!(home().is_absolute());
     }
 
     #[test]

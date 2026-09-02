@@ -132,7 +132,7 @@ enum Cmd {
     /// ordinary terminal. Sessions outlive the window they were started from,
     /// so a closed terminal never kills a running task.
     ///
-    /// Needs the per-user runtime: `systemctl --user start apex-agentd`.
+    /// Needs the per-user runtime: `systemctl --user enable --now apex-agentd`.
     Agent {
         #[command(subcommand)]
         cmd: agent::AgentCmd,
