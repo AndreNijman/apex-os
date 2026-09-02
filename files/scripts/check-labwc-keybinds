@@ -33,6 +33,7 @@ VERBS = {
     "notification-toggle": "notifications",
     "clipboard-toggle": "clipboard",
     "wallpaper-toggle": "wallpaper",
+    "context-menu": "menu",
     "session-lock": "lock",
     "focus-toggle": "focus",
     "screenrec-on": "record",

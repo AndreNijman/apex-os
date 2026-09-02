@@ -495,6 +495,39 @@ COPY files/system/libexec/apex-shell-firstrun /usr/libexec/apex-shell-firstrun
 # the provisioner safely re-invoke it to repair a live session).
 COPY --chmod=0755 files/system/libexec/apex-shell-autostart \
      /usr/libexec/apex-shell-autostart
+
+# Desktop context-menu helpers. The menu itself is one QML surface shared by all
+# three sessions; these three scripts are where the per-compositor differences
+# live, so the QML never has to know which compositor it is running under.
+#
+#   apex-desktop-menu      right-click entry point; restarts a dead shell rather
+#                          than leaving the user with no menu at all
+#   apex-compositor-reload labwc --reconfigure / hyprctl reload / niri validate
+#   apex-session-logout    loginctl first, compositor exit verb as the fallback
+COPY --chmod=0755 files/system/libexec/apex-desktop-menu \
+     /usr/libexec/apex-desktop-menu
+COPY --chmod=0755 files/system/libexec/apex-compositor-reload \
+     /usr/libexec/apex-compositor-reload
+COPY --chmod=0755 files/system/libexec/apex-session-logout \
+     /usr/libexec/apex-session-logout
+RUN set -eux; \
+    for h in apex-desktop-menu apex-compositor-reload apex-session-logout; do \
+        test -x "/usr/libexec/$h"; \
+        bash -n "/usr/libexec/$h"; \
+    done; \
+    # The right-click binding names this exact path; a rename that misses the
+    # config would leave the desktop with no menu and no error anywhere.
+    grep -q '/usr/libexec/apex-desktop-menu' /usr/share/apex/labwc/rc.xml; \
+    # menu.xml must survive as the emergency path, still reachable on a
+    # modifier. Losing it means a dead shell leaves no way back.
+    grep -q 'ShowMenu' /usr/share/apex/labwc/rc.xml; \
+    test -s /usr/share/apex/labwc/menu.xml; \
+    # Every verb the helpers call has to exist in the image.
+    command -v labwc >/dev/null; \
+    command -v niri >/dev/null; \
+    command -v loginctl >/dev/null; \
+    /usr/bin/apex shell list | grep -qw menu; \
+    echo "context menu: helpers installed, right-click bound, menu.xml fallback intact"
 RUN systemctl --global enable apex-shell-firstrun.service
 
 # ── Stage 5d: user packages, WITHOUT breaking OS updates ────────────────────
