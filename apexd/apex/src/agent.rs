@@ -290,8 +290,8 @@ fn list(all: bool, json: bool) -> Result<i32> {
     }
 
     println!(
-        "{:>3}  {:<10} {:<20} {:<22} {:<12} {}",
-        "ID", "AGENT", "STATE", "PROJECT", "SANDBOX", "WHERE"
+        "{:>3}  {:<10} {:<20} {:<22} {:<12} WHERE",
+        "ID", "AGENT", "STATE", "PROJECT", "SANDBOX"
     );
     for s in shown {
         let state = match s.exit_summary() {
@@ -523,7 +523,7 @@ fn default_agent(agent: Option<String>) -> Result<i32> {
 
 fn adapters() -> Result<i32> {
     let cfg = config::Config::load();
-    println!("{:<10} {:<16} {:<12} {}", "ID", "AGENT", "INSTALLED", "PROGRAM");
+    println!("{:<10} {:<16} {:<12} PROGRAM", "ID", "AGENT", "INSTALLED");
     for a in adapter::ADAPTERS {
         let installed = if a.program.is_empty() {
             "n/a".to_string()
@@ -597,11 +597,10 @@ fn session_context(id: Option<u32>) -> Result<(PathBuf, Option<SessionInfo>)> {
             let latest = client::sessions()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|s| match &root {
+                .rfind(|s| match &root {
                     Some(r) => Path::new(&s.cwd).starts_with(r),
                     None => false,
-                })
-                .next_back();
+                });
             Ok((cwd, latest))
         }
     }
@@ -781,7 +780,7 @@ fn project_list(json: bool) -> Result<i32> {
         println!("no projects yet — they are recorded the first time an agent runs in one");
         return Ok(0);
     }
-    println!("{:<24} {:<20} {}", "NAME", "TOOLCHAINS", "PATH");
+    println!("{:<24} {:<20} PATH", "NAME", "TOOLCHAINS");
     for p in projects {
         println!(
             "{:<24} {:<20} {}",
@@ -827,7 +826,7 @@ fn project_info() -> Result<i32> {
 fn project_worktrees() -> Result<i32> {
     let p = current_project()?;
     let worktrees = project::worktrees(&p)?;
-    println!("{:<24} {:<28} {}", "NAME", "BRANCH", "PATH");
+    println!("{:<24} {:<28} PATH", "NAME", "BRANCH");
     for w in worktrees {
         println!(
             "{:<24} {:<28} {}",
@@ -846,7 +845,7 @@ fn project_checkpoints() -> Result<i32> {
         println!("no checkpoints — capture one with `apex agent checkpoint`");
         return Ok(0);
     }
-    println!("{:<24} {:<14} {:<12} {}", "ID", "COMMIT", "AGE", "LABEL");
+    println!("{:<24} {:<14} {:<12} LABEL", "ID", "COMMIT", "AGE");
     for cp in list {
         println!(
             "{:<24} {:<14} {:<12} {}",

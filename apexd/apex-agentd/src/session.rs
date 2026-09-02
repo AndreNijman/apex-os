@@ -212,11 +212,11 @@ impl std::error::Error for SandboxRefused {}
 /// Map a `start` failure to a response, keeping the sandbox distinction the
 /// client needs in order to explain the escape hatch.
 pub fn run_error(e: anyhow::Error) -> Response {
+    // The whole chain, not just the innermost error: the sandbox refusal
+    // carries the remedy ("re-run with --sandbox unrestricted") and the outer
+    // context says which step was refused.
     if e.downcast_ref::<SandboxRefused>().is_some() {
         return Response::error(ErrorKind::SandboxUnavailable, format!("{e:#}"));
-    }
-    if let Some(inner) = e.downcast_ref::<SandboxRefused>() {
-        return Response::error(ErrorKind::SandboxUnavailable, inner.to_string());
     }
     Response::error(ErrorKind::BadRequest, format!("{e:#}"))
 }
@@ -446,10 +446,7 @@ fn detach(handle: &Handle, stream: &UnixStream) {
     let mut s = handle.lock().expect("session lock");
     // Compare by the peer's identity rather than by index: another client may
     // have detached while this one was reading.
-    s.attachers.retain(|a| {
-        let keep = !same_peer(a.as_raw_fd(), target);
-        keep
-    });
+    s.attachers.retain(|a| !same_peer(a.as_raw_fd(), target));
     s.info.attached = s.attachers.len() as u32;
 }
 

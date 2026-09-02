@@ -190,6 +190,11 @@ pub fn parse_detach_key(spec: &str) -> Option<u8> {
 /// quite true.
 pub const DEFAULT_DETACH_KEY: &str = "ctrl-]";
 
+/// Convenience for callers that hold a typed handle rather than a raw fd.
+pub fn fd_of<T: AsRawFd>(t: &T) -> RawFd {
+    t.as_raw_fd()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,9 +291,4 @@ mod tests {
             libc::close(fds[1]);
         }
     }
-}
-
-/// Convenience for callers that hold a typed handle rather than a raw fd.
-pub fn fd_of<T: AsRawFd>(t: &T) -> RawFd {
-    t.as_raw_fd()
 }
