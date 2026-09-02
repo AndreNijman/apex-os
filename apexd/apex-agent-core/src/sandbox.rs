@@ -10,17 +10,35 @@
 //!
 //! ## Default-deny, not blocklist
 //!
-//! `$HOME` and `$XDG_RUNTIME_DIR` are replaced with empty tmpfs mounts and only
-//! an explicit allowlist is bound back. A blocklist ("hide `~/.ssh`, hide
-//! `~/.mozilla`") is unmaintainable — every new credential store a tool invents
-//! is a hole until someone notices. Default-deny means `~/.ssh`, `~/.gnupg`,
-//! `~/.aws`, browser profiles and the ssh-agent and gpg-agent sockets in
-//! `$XDG_RUNTIME_DIR` are all unreachable because nothing bound them, not
-//! because anything listed them.
+//! `$HOME`, `/run` and `$XDG_RUNTIME_DIR` are replaced with empty tmpfs mounts
+//! and only an explicit allowlist is bound back. A blocklist ("hide `~/.ssh`,
+//! hide `~/.mozilla`") is unmaintainable — every new credential store a tool
+//! invents is a hole until someone notices. Default-deny means `~/.ssh`,
+//! `~/.gnupg`, `~/.aws`, browser profiles and the ssh-agent and gpg-agent
+//! sockets in `$XDG_RUNTIME_DIR` are all unreachable because nothing bound
+//! them, not because anything listed them.
 //!
 //! The environment is treated the same way: `--clearenv` and then an explicit
 //! set, so an `ANTHROPIC_API_KEY` or `GITHUB_TOKEN` sitting in the user's shell
 //! does not leak into a session that never asked for it.
+//!
+//! ## Why `/run` is masked, and why a socket denylist would not do
+//!
+//! `--ro-bind / /` made the whole of `/run` visible, including
+//! `/run/dbus/system_bus_socket`, which is mode `0666`. The system bus is where
+//! `org.apexos.Apexd1` lives, and its mutating methods are gated by polkit
+//! actions that ship `allow_active = yes` — passwordless for the logged-in
+//! local user. A confined session runs as that user, in that session, so polkit
+//! authorised it: `SetTier`, `SetChargeThresholds`, `Fan.SetPwm` and
+//! `GameMode.StartForPid` were all reachable from inside the sandbox. Measured,
+//! not theorised — `SetTier` returned success from confinement.
+//!
+//! A denylist of known sockets cannot fix this. `/run` is a tmpfs on the host
+//! and `--ro-bind / /` is a bind of that same filesystem, so a socket created
+//! *after* the sandbox starts appears inside it. Anything computed at spawn
+//! time is stale by construction. Masking the directory and binding back the
+//! one thing a build genuinely needs — the resolver configuration — is the only
+//! form of this that stays correct.
 //!
 //! ## Verified properties
 //!
@@ -33,6 +51,15 @@
 //! | `/dev/snd` nodes | 14 | 0 |
 //! | `~/.ssh` readable | yes | no |
 //! | project readable/writable | yes | yes |
+//! | system bus reachable | yes | **no** |
+//! | `org.apexos.Apexd1` callable | yes | **no** |
+//! | DNS resolution | yes | yes |
+//!
+//! The last three are what the `/run` tmpfs changed. DNS is in the table
+//! because masking `/run` breaks it by default: `/etc/resolv.conf` is a symlink
+//! into `/run`, so the target has to be bound back or every confined session
+//! loses name resolution — which is the kind of regression that gets a security
+//! fix reverted.
 //!
 //! Exit status propagates through `bwrap --unshare-pid` unchanged, and
 //! `killpg` on the session's process group still stops, continues and kills the
@@ -77,6 +104,38 @@ const ENV_BASE: &[&str] = &[
 /// (`$HOME`), or make the image-owned base mutable (`/usr`, `/etc`), which is
 /// the one thing an atomic OS must not allow a confined process to do.
 const NEVER_WRITABLE: &[&str] = &["/", "/usr", "/etc", "/boot", "/sysroot", "/var/lib/apex"];
+
+/// The runtime directory masked for every confined session.
+const RUN_DIR: &str = "/run";
+
+/// Paths under [`RUN_DIR`] that must be bound back for a confined session to
+/// resolve names.
+///
+/// `/etc/resolv.conf` is a symlink on every systemd-resolved machine
+/// (`../run/systemd/resolve/stub-resolv.conf` here), and masking `/run` breaks
+/// the link. This follows the link and returns the target when it lands under
+/// `/run`.
+///
+/// Resolved rather than hardcoded, deliberately. On a machine using
+/// NetworkManager's own `resolv.conf`, or a plain file, the systemd path does
+/// not exist — and because the bind is a `-try`, a hardcoded path would
+/// silently no-op and ship every session with broken DNS. A target outside
+/// `/run` needs no bind at all, since `--ro-bind / /` still covers it.
+///
+/// Errors are not propagated: an unreadable link means "nothing to bind", and
+/// the caller has nothing useful to do with the distinction.
+pub fn resolv_binds() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let run = Path::new(RUN_DIR);
+    // canonicalize, not read_link: the link is relative ("../run/...") and can
+    // point at another link. This resolves the whole chain to a real path.
+    if let Ok(target) = std::fs::canonicalize("/etc/resolv.conf") {
+        if target.starts_with(run) {
+            out.push(target);
+        }
+    }
+    out
+}
 
 /// Why a sandbox could not be built. Every variant is fatal: a session is never
 /// silently downgraded to a weaker policy than the one that was asked for.
@@ -128,6 +187,14 @@ pub struct SandboxSpec {
     /// `$XDG_RUNTIME_DIR`. Masked, so the ssh-agent and gpg-agent sockets go
     /// with it.
     pub runtime_dir: PathBuf,
+    /// Paths under `/run` bound back read-only after `/run` is masked.
+    ///
+    /// In practice this is the resolver configuration and nothing else. It is a
+    /// field rather than a constant because the path is machine-dependent —
+    /// [`resolv_binds`] resolves it — and keeping the I/O out of
+    /// [`build_argv`] is what lets the argv builder stay a pure function with
+    /// exhaustive tests.
+    pub run_ro: Vec<PathBuf>,
     /// The agentd control socket, bound back writable so a session can publish
     /// its own state through the open event protocol.
     pub control_socket: PathBuf,
@@ -163,6 +230,7 @@ impl SandboxSpec {
             policy,
             home,
             runtime_dir,
+            run_ro: Vec::new(),
             control_socket: PathBuf::new(),
             scratch: PathBuf::new(),
             cwd: PathBuf::from("/"),
@@ -264,25 +332,51 @@ pub fn build_argv(
         push(&spec.scratch.to_string_lossy());
     }
 
-    // 4. Mask the home and the runtime directory, then bind back only what was
-    //    asked for. This is the default-deny core of the policy.
+    // 4. Mask the home, /run, and the runtime directory, then bind back only
+    //    what was asked for. This is the default-deny core of the policy.
+    //
+    //    /run carries the system bus socket, which is world-writable and is how
+    //    a confined session reached apexd's polkit-gated methods and changed OS
+    //    state. See the module docs: this must be a tmpfs and not a denylist,
+    //    because /run is a host tmpfs that keeps growing new sockets after the
+    //    sandbox has started.
+    //
+    //    $XDG_RUNTIME_DIR is normally /run/user/<uid>, i.e. already inside the
+    //    /run tmpfs. The separate mount is kept anyway: the variable is not
+    //    required to point under /run, and a session whose runtime dir sits
+    //    somewhere else must still have it masked.
     push("--tmpfs");
     push(&spec.home.to_string_lossy());
+    push("--tmpfs");
+    push(RUN_DIR);
     if !spec.runtime_dir.as_os_str().is_empty() {
         push("--tmpfs");
         push(&spec.runtime_dir.to_string_lossy());
     }
 
-    // 5. The control socket, so the session can publish its own events. Bound
-    //    after the runtime-dir tmpfs, and writable because connecting to a Unix
-    //    socket needs write access to it.
+    // 5. Bound back into the masked /run: the resolver configuration, and
+    //    nothing else. Without this every confined session loses DNS, because
+    //    /etc/resolv.conf is a symlink into /run.
+    for p in &spec.run_ro {
+        if p.as_os_str().is_empty() {
+            continue;
+        }
+        push("--ro-bind-try");
+        push(&p.to_string_lossy());
+        push(&p.to_string_lossy());
+    }
+
+    // 6. The control socket, so the session can publish its own events. Bound
+    //    after BOTH tmpfs mounts above — it lives under $XDG_RUNTIME_DIR, so
+    //    masking either one after this point would erase it — and writable
+    //    because connecting to a Unix socket needs write access to it.
     if !spec.control_socket.as_os_str().is_empty() {
         push("--bind-try");
         push(&spec.control_socket.to_string_lossy());
         push(&spec.control_socket.to_string_lossy());
     }
 
-    // 6. The allowlists. `-try` variants throughout: a toolchain cache that
+    // 7. The allowlists. `-try` variants throughout: a toolchain cache that
     //    does not exist yet must not stop the session from starting.
     for p in &spec.ro {
         if p.as_os_str().is_empty() {
@@ -301,7 +395,7 @@ pub fn build_argv(
         push(&p.to_string_lossy());
     }
 
-    // 7. Blank out credential files that sit inside an allowlisted directory.
+    // 8. Blank out credential files that sit inside an allowlisted directory.
     //    Last, so nothing bound above can bring one back.
     for p in &spec.mask {
         if p.as_os_str().is_empty() {
@@ -312,7 +406,7 @@ pub fn build_argv(
         push(&p.to_string_lossy());
     }
 
-    // 8. Namespaces. PID isolation is what stops an agent signalling the
+    // 9. Namespaces. PID isolation is what stops an agent signalling the
     //    user's other processes; the host still reaches the session's process
     //    group, so pause/resume/kill keep working.
     push("--unshare-pid");
@@ -327,7 +421,7 @@ pub fn build_argv(
     // run confined when `dev.tty.legacy_tiocsti` is enabled, which is what
     // `--new-session` would otherwise be protecting against.
 
-    // 9. Environment: clear, then set exactly what was allowed.
+    // 10. Environment: clear, then set exactly what was allowed.
     push("--clearenv");
     for (k, v) in resolved_env(spec) {
         push("--setenv");
@@ -473,6 +567,233 @@ mod tests {
         assert!(a
             .windows(2)
             .any(|w| w[0] == "--tmpfs" && w[1] == "/run/user/1000"));
+    }
+
+    #[test]
+    fn run_is_masked_so_the_system_bus_is_unreachable() {
+        // The escalation this closes: /run/dbus/system_bus_socket is mode 0666,
+        // apexd is on that bus, and its mutating methods are passwordless for
+        // an active local user. A confined session is an active local user.
+        let a = argv(&spec());
+        assert!(
+            a.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == "/run"),
+            "/run must be masked, got {a:?}"
+        );
+        // And nothing binds the socket back. Asserted by absence, because the
+        // whole point is that no code path mentions it.
+        assert!(!a.join(" ").contains("system_bus_socket"));
+    }
+
+    #[test]
+    fn the_run_mask_comes_before_everything_bound_back_into_it() {
+        // $XDG_RUNTIME_DIR and the control socket both live under /run, so a
+        // /run tmpfs emitted after either one silently erases it — and the
+        // symptom is a session that cannot publish its own events, far from
+        // the cause.
+        let mut s = spec();
+        s.run_ro = vec![PathBuf::from("/run/systemd/resolve/stub-resolv.conf")];
+        let a = argv(&s);
+        let run = a
+            .windows(2)
+            .position(|w| w[0] == "--tmpfs" && w[1] == "/run")
+            .expect("run tmpfs");
+        let sock = a
+            .windows(3)
+            .position(|w| {
+                w[0] == "--bind-try" && w[1] == "/run/user/1000/apex-agentd/control.sock"
+            })
+            .expect("control socket bind");
+        let resolv = a
+            .windows(3)
+            .position(|w| {
+                w[0] == "--ro-bind-try" && w[1] == "/run/systemd/resolve/stub-resolv.conf"
+            })
+            .expect("resolv bind");
+        assert!(run < sock, "the /run tmpfs would erase the control socket");
+        assert!(run < resolv, "the /run tmpfs would erase the resolver bind");
+    }
+
+    #[test]
+    fn the_resolver_is_bound_back_read_only_and_only_when_it_is_under_run() {
+        // Read-only: a session that can rewrite the resolver configuration can
+        // redirect every name lookup the rest of the machine makes.
+        let mut s = spec();
+        s.run_ro = vec![PathBuf::from("/run/systemd/resolve/stub-resolv.conf")];
+        let a = argv(&s);
+        assert!(has_bind(
+            &a,
+            "--ro-bind-try",
+            "/run/systemd/resolve/stub-resolv.conf"
+        ));
+        assert!(!has_bind(
+            &a,
+            "--bind-try",
+            "/run/systemd/resolve/stub-resolv.conf"
+        ));
+
+        // A machine whose /etc/resolv.conf is a plain file needs no bind: the
+        // read-only root still covers /etc.
+        let mut s = spec();
+        s.run_ro = Vec::new();
+        let a = argv(&s);
+        assert!(!a.join(" ").contains("resolv.conf"));
+    }
+
+    /// Whether a real sandbox can be built and probed on this machine.
+    ///
+    /// Skipped rather than faked in CI, where there is no system bus. An argv
+    /// assertion proves the flag is emitted; only running it proves the flag
+    /// works, and those are different claims.
+    fn can_probe_the_bus() -> Option<&'static str> {
+        let busctl = "/usr/bin/busctl";
+        if !bwrap_path().exists() {
+            return None;
+        }
+        if !Path::new(busctl).exists() {
+            return None;
+        }
+        if !Path::new("/run/dbus/system_bus_socket").exists() {
+            return None;
+        }
+        Some(busctl)
+    }
+
+    /// A spec rooted in this machine's real paths, so bwrap can actually mount
+    /// it. `cwd` is `/` because a per-session workdir does not exist here.
+    fn live_spec() -> SandboxSpec {
+        let home = crate::paths::home();
+        let mut s = SandboxSpec::new(SandboxPolicy::Project, home, crate::paths::runtime_dir());
+        s.run_ro = resolv_binds();
+        s.cwd = PathBuf::from("/");
+        s
+    }
+
+    #[test]
+    fn the_masked_run_really_does_block_the_system_bus() {
+        let Some(busctl) = can_probe_the_bus() else {
+            eprintln!("SKIP: no bwrap, no busctl, or no system bus on this machine");
+            return;
+        };
+
+        // The probe is READ-ONLY: `busctl list` enumerates bus names and
+        // changes nothing. A test that called a mutating method to prove
+        // reachability would be the same mistake as the display suite applying
+        // a layout to the live desktop — it succeeded, and that was the bug.
+        let probe = ["--system", "--no-pager", "list"];
+
+        // 1. The negative control FIRST, so a broken probe cannot masquerade
+        //    as a working guard. This is the pre-fix shape: everything the real
+        //    argv has except the /run tmpfs.
+        let mut before: Vec<String> = [
+            bwrap_path().to_string_lossy().as_ref(),
+            "--ro-bind", "/", "/",
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--tmpfs", "/tmp",
+            "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+            "--die-with-parent",
+            "--",
+            busctl,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        before.extend(probe.iter().map(|s| s.to_string()));
+
+        let control = std::process::Command::new(&before[0])
+            .args(&before[1..])
+            .output()
+            .expect("running the negative control");
+        assert!(
+            control.status.success(),
+            "WITHOUT the /run mask the bus must be reachable, or this test proves \
+             nothing about the mask. stderr: {}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+
+        // 2. The real argv. Same probe, same machine, one mount different.
+        let argv = build_argv(&live_spec(), busctl, &probe.map(String::from)).expect("build");
+        let confined = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("running the confined probe");
+        let stderr = String::from_utf8_lossy(&confined.stderr);
+        assert!(
+            !confined.status.success(),
+            "the system bus was REACHABLE from inside the sandbox — this is the \
+             apexd escalation path. stdout: {}",
+            String::from_utf8_lossy(&confined.stdout)
+        );
+        assert!(
+            stderr.contains("Failed to connect") || stderr.contains("No such file"),
+            "expected a connect failure, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn a_confined_session_can_still_resolve_names() {
+        // The regression that would get the fix above reverted. Masking /run
+        // breaks /etc/resolv.conf, which is a symlink into it, and a sandbox
+        // with no DNS is a sandbox nobody will keep switched on.
+        //
+        // `getent hosts` is used rather than a network request: it exercises
+        // the resolver path this bind exists for without needing the machine to
+        // be online, and localhost always resolves.
+        if !bwrap_path().exists() || !Path::new("/usr/bin/getent").exists() {
+            eprintln!("SKIP: no bwrap or no getent");
+            return;
+        }
+        let argv = build_argv(
+            &live_spec(),
+            "/usr/bin/getent",
+            &["hosts".to_string(), "localhost".to_string()],
+        )
+        .expect("build");
+        let out = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("running getent");
+        assert!(
+            out.status.success(),
+            "name resolution broke inside the sandbox. stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn strict_policy_still_builds_a_sandbox_that_runs() {
+        // strict adds --unshare-net on top of the /run mask. A `-try` bind
+        // against a path that cannot be resolved in a network-isolated
+        // namespace fails differently from the project case, so this asserts
+        // the sandbox still STARTS rather than anything about the network.
+        if !bwrap_path().exists() {
+            eprintln!("SKIP: no bwrap");
+            return;
+        }
+        let mut s = live_spec();
+        s.policy = SandboxPolicy::Strict;
+        let argv = build_argv(&s, "/usr/bin/true", &[]).expect("build");
+        let out = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("running true");
+        assert!(
+            out.status.success(),
+            "a strict sandbox failed to start. stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn resolv_binds_returns_only_paths_under_run() {
+        // Whatever this machine's configuration is, the contract holds: every
+        // returned path is absolute and under /run, because a target elsewhere
+        // is already covered by the read-only root and binding it would be a
+        // second, unnecessary hole.
+        for p in resolv_binds() {
+            assert!(p.is_absolute(), "{p:?}");
+            assert!(p.starts_with("/run"), "{p:?}");
+        }
     }
 
     #[test]
