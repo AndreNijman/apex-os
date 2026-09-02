@@ -60,7 +60,7 @@ const AUTHOR_EMAIL: &str = "agent-runtime@apex-os.localhost";
 /// A captured project state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
-    /// Sortable identifier, `<unix-seconds>-<short-commit>`.
+    /// Sortable identifier, `<unix-milliseconds>-<short-commit>`.
     pub id: String,
     pub label: String,
     /// Absolute project root.
@@ -71,7 +71,17 @@ pub struct Checkpoint {
     pub head: Option<String>,
     /// Branch at capture time, absent when detached.
     pub branch: Option<String>,
+    /// Unix seconds, for display.
     pub created: u64,
+    /// Unix milliseconds, and the ordering key.
+    ///
+    /// Seconds are not enough to order checkpoints. Two taken in the same
+    /// second sorted by id, which tiebreaks on the commit hash — an arbitrary
+    /// order, so `apex agent undo` with no argument could pick the older of
+    /// the two. Defaulted so a record written before this field existed still
+    /// parses and falls back to second precision.
+    #[serde(default)]
+    pub created_ms: u64,
     /// Session that triggered the capture, when one did.
     pub session: Option<u32>,
     /// The user's requested-package list at capture time.
@@ -84,6 +94,18 @@ impl Checkpoint {
     /// The git ref holding this checkpoint's tree.
     pub fn git_ref(&self) -> String {
         format!("{REF_PREFIX}/{}", self.id)
+    }
+
+    /// The value checkpoints are ordered by, newest largest.
+    ///
+    /// Falls back to second precision for a record written before `created_ms`
+    /// existed, so old and new records still order sensibly against each other.
+    pub fn order_key(&self) -> u64 {
+        if self.created_ms > 0 {
+            self.created_ms
+        } else {
+            self.created.saturating_mul(1000)
+        }
     }
 
     /// Short form for listings.
@@ -156,10 +178,12 @@ pub fn parse_package_list(text: &str) -> Vec<String> {
     out
 }
 
-fn now_secs() -> u64 {
+/// Unix milliseconds. The only clock read here: `created` is derived from it,
+/// so the seconds shown and the milliseconds ordered by can never disagree.
+fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
@@ -271,16 +295,32 @@ pub fn create(dir: &Path, label: &str, session: Option<u32>) -> Result<Checkpoin
             ],
         )?;
 
-        let created = now_secs();
         let short = &commit[..commit.len().min(8)];
+
+        // Milliseconds, not seconds, and first: the id is fixed-width for the
+        // next few centuries, so it sorts chronologically on its own.
+        //
+        // The commit hash alone is not unique. `git commit-tree` stamps with
+        // one-second granularity, so capturing an identical tree twice with the
+        // same label and parent inside one second yields the *same* commit —
+        // and then the same id, and one metadata file overwriting the other.
+        // The millisecond makes that vanishingly unlikely rather than
+        // impossible, so claim the id by taking the next free one. A capture
+        // takes several git subprocesses and so several milliseconds, which is
+        // why this is expected to spin zero times; it exists so the guarantee
+        // does not rest on that being true.
+        let (id, created_ms) = claim_id(&meta_dir(&root), now_ms(), short);
+        let created = created_ms / 1000;
+
         let cp = Checkpoint {
-            id: format!("{created}-{short}"),
+            id,
             label: label.to_string(),
             project: root.to_string_lossy().into_owned(),
             commit: commit.clone(),
             head,
             branch,
             created,
+            created_ms,
             session,
             packages: current_packages(),
             dirty,
@@ -294,6 +334,31 @@ pub fn create(dir: &Path, label: &str, session: Option<u32>) -> Result<Checkpoin
 
     let _ = std::fs::remove_file(&tmp_index);
     result
+}
+
+/// Pick an id no existing checkpoint has taken, and the stamp that goes with it.
+///
+/// The commit hash alone is not unique. `git commit-tree` stamps with
+/// one-second granularity, so capturing an identical tree twice with the same
+/// label and parent inside one second yields the *same commit* — and then, with
+/// only the commit in the id, the same id, and one metadata file silently
+/// overwriting the other. The millisecond makes that unlikely; stepping to the
+/// next free stamp makes it impossible.
+///
+/// A capture runs several git subprocesses and so takes several milliseconds,
+/// which is why this is expected to step zero times in practice. It exists so
+/// the guarantee does not rest on that remaining true.
+///
+/// Stepping forward rather than back keeps the ordering invariant: a later
+/// capture always gets a strictly larger key than an earlier one.
+fn claim_id(meta: &Path, mut created_ms: u64, short: &str) -> (String, u64) {
+    loop {
+        let id = format!("{created_ms}-{short}");
+        if !meta.join(format!("{id}.json")).exists() {
+            return (id, created_ms);
+        }
+        created_ms += 1;
+    }
 }
 
 fn write_meta(cp: &Checkpoint) -> Result<()> {
@@ -339,7 +404,13 @@ pub fn list(dir: &Path) -> Result<Vec<Checkpoint>> {
             out.push(cp);
         }
     }
-    out.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
+    // Millisecond precision first, then the id (which itself begins with the
+    // millisecond stamp) so the order is total and deterministic.
+    out.sort_by(|a, b| {
+        b.order_key()
+            .cmp(&a.order_key())
+            .then_with(|| b.id.cmp(&a.id))
+    });
     Ok(out)
 }
 
@@ -522,6 +593,88 @@ mod tests {
     }
 
     #[test]
+    fn an_id_already_on_disk_is_stepped_over() {
+        // The case the clock cannot be forced into: an identical tree captured
+        // twice within one millisecond produces the same commit AND the same
+        // stamp, so without this the second record overwrites the first.
+        let base = std::env::temp_dir().join(format!("apex-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("create");
+
+        let (first, ms1) = claim_id(&base, 1_756_800_000_000, "abc12345");
+        assert_eq!(first, "1756800000000-abc12345");
+        assert_eq!(ms1, 1_756_800_000_000);
+
+        // Nothing written yet, so the same inputs still yield the same id.
+        let (again, _) = claim_id(&base, 1_756_800_000_000, "abc12345");
+        assert_eq!(again, first);
+
+        // Now the record exists: the next claim must not reuse it.
+        std::fs::write(base.join(format!("{first}.json")), "{}").expect("write");
+        let (second, ms2) = claim_id(&base, 1_756_800_000_000, "abc12345");
+        assert_ne!(second, first, "the taken id was handed out twice");
+        assert!(ms2 > ms1, "the stamp must move forward, not back");
+        assert_eq!(second, "1756800000001-abc12345");
+
+        // And it steps as far as it needs to.
+        std::fs::write(base.join(format!("{second}.json")), "{}").expect("write");
+        let (third, ms3) = claim_id(&base, 1_756_800_000_000, "abc12345");
+        assert_eq!(third, "1756800000002-abc12345");
+        assert!(ms3 > ms2);
+
+        // A different commit at the same instant is already distinct.
+        let (other, _) = claim_id(&base, 1_756_800_000_000, "def67890");
+        assert_eq!(other, "1756800000000-def67890");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn ordering_separates_checkpoints_taken_in_the_same_second() {
+        // The regression CI caught: with second precision both of these had the
+        // same `created`, so the sort fell through to comparing commit hashes —
+        // an arbitrary order, and `apex agent undo` with no argument follows it.
+        let mut older = sample();
+        older.created = 1_756_800_000;
+        older.created_ms = 1_756_800_000_120;
+        let mut newer = sample();
+        newer.created = 1_756_800_000;
+        newer.created_ms = 1_756_800_000_880;
+
+        assert_eq!(older.created, newer.created, "same second, by construction");
+        assert!(newer.order_key() > older.order_key());
+    }
+
+    #[test]
+    fn a_record_without_millisecond_precision_still_orders() {
+        let mut legacy = sample();
+        legacy.created = 1_756_800_000;
+        legacy.created_ms = 0;
+        assert_eq!(legacy.order_key(), 1_756_800_000_000);
+
+        let mut newer = sample();
+        newer.created = 1_756_800_001;
+        newer.created_ms = 1_756_800_001_000;
+        assert!(newer.order_key() > legacy.order_key());
+    }
+
+    fn sample() -> Checkpoint {
+        Checkpoint {
+            id: "1756800000000-abc12345".into(),
+            label: "s".into(),
+            project: "/p".into(),
+            commit: "abc12345def67890".into(),
+            head: None,
+            branch: None,
+            created: 1_756_800_000,
+            created_ms: 1_756_800_000_000,
+            session: None,
+            packages: vec![],
+            dirty: false,
+        }
+    }
+
+    #[test]
     fn checkpoint_refs_live_outside_refs_heads() {
         // A checkpoint that appeared as a branch would be pushed by a default
         // `git push` and would clutter every branch listing.
@@ -532,31 +685,33 @@ mod tests {
     #[test]
     fn a_checkpoint_ref_is_built_from_its_id() {
         let cp = Checkpoint {
-            id: "1756800000-abc12345".into(),
+            id: "1756800000000-abc12345".into(),
             label: "before task".into(),
             project: "/home/tester/p".into(),
             commit: "abc12345def67890".into(),
             head: Some("deadbeef".into()),
             branch: Some("main".into()),
             created: 1_756_800_000,
+            created_ms: 1_756_800_000_000,
             session: Some(3),
             packages: vec![],
             dirty: true,
         };
-        assert_eq!(cp.git_ref(), "refs/apex/checkpoints/1756800000-abc12345");
+        assert_eq!(cp.git_ref(), "refs/apex/checkpoints/1756800000000-abc12345");
         assert_eq!(cp.short_commit(), "abc12345def6");
     }
 
     #[test]
     fn a_short_commit_does_not_panic_on_a_short_string() {
         let cp = Checkpoint {
-            id: "1-ab".into(),
+            id: "1000-ab".into(),
             label: String::new(),
             project: "/p".into(),
             commit: "ab".into(),
             head: None,
             branch: None,
             created: 1,
+            created_ms: 1_000,
             session: None,
             packages: vec![],
             dirty: false,
