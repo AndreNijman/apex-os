@@ -77,6 +77,20 @@ _apex_agent_names() {
     apex agent adapters 2>/dev/null | awk 'NR>1 {print $1}' | tr -d '*'
 }
 
+# Privilege-request ids, for `apex request approve|deny|show`.
+_apex_request_ids() {
+    apex request list --all --json 2>/dev/null \
+        | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p'
+}
+
+# The requestable verbs, asked of the CLI rather than duplicated here. The
+# vocabulary is a security boundary, so a completion list that drifts out of
+# step with it would offer operations the daemon refuses — or, worse, stop
+# offering one it accepts and make it look unsupported.
+_apex_request_verbs() {
+    apex request verbs 2>/dev/null | awk '/^  [a-z]/ {print $1}'
+}
+
 # ── bash completion ─────────────────────────────────────────────────────────
 if [ -n "${BASH_VERSION}" ]; then
     _apex_agent_complete() {
@@ -107,15 +121,33 @@ if [ -n "${BASH_VERSION}" ]; then
         esac
     }
 
+    _apex_request_complete() {
+        local cur="${COMP_WORDS[COMP_CWORD]}" verb="${COMP_WORDS[2]}"
+        if [ "$COMP_CWORD" -eq 2 ]; then
+            COMPREPLY=($(compgen -W "ask list pending show approve deny verbs \
+                grants revoke audit" -- "$cur"))
+            return
+        fi
+        case "$verb" in
+            ask)      COMPREPLY=($(compgen -W "$(_apex_request_verbs)" -- "$cur")) ;;
+            show|approve|deny)
+                      COMPREPLY=($(compgen -W "$(_apex_request_ids)" -- "$cur")) ;;
+        esac
+    }
+
     _apex_complete() {
         if [ "${COMP_WORDS[1]}" = "agent" ]; then
             _apex_agent_complete
             return
         fi
+        if [ "${COMP_WORDS[1]}" = "request" ]; then
+            _apex_request_complete
+            return
+        fi
         if [ "$COMP_CWORD" -eq 1 ]; then
             COMPREPLY=($(compgen -W "status tier profile battery fan game agent project \
-                fingerprint pin rollback update shell metrics doctor image install remove \
-                search repo pkg" -- "${COMP_WORDS[1]}"))
+                request fingerprint pin rollback update shell metrics doctor image install \
+                remove search repo pkg" -- "${COMP_WORDS[1]}"))
         fi
     }
     complete -F _apex_complete apex
@@ -170,7 +202,26 @@ if [ -n "${ZSH_VERSION}" ]; then
     }
     # Only register when the completion system is actually loaded; sourcing this
     # from a non-interactive shell must not error.
+    _apex_request_zsh() {
+        local -a verbs
+        verbs=(ask list pending show approve deny verbs grants revoke audit)
+        if (( CURRENT == 3 )); then
+            _describe 'request verb' verbs
+            return
+        fi
+        case "${words[3]}" in
+            ask)
+                local -a ops
+                ops=(${(f)"$(_apex_request_verbs)"})
+                _describe 'operation' ops ;;
+            show|approve|deny)
+                local -a ids
+                ids=(${(f)"$(_apex_request_ids)"})
+                _describe 'request' ids ;;
+        esac
+    }
     if whence compdef >/dev/null 2>&1; then
         compdef _apex_agent_zsh 'apex agent'
+        compdef _apex_request_zsh 'apex request'
     fi
 fi

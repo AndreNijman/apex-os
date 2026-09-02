@@ -234,6 +234,18 @@ jobs:
           APEX_DISPLAY_NO_LIVE: "1"
         run: ./tests/test-apex-display.sh
 
+      # End-to-end, against a real daemon on an isolated socket: that the
+      # daemon resolves the asking session from the connection's PEER
+      # CREDENTIALS and not from anything the client sent. The negative control
+      # is a session that files a request while claiming
+      # APEX_AGENT_SESSION=99999 and is still attributed correctly.
+      #
+      # Needs no root: every approval uses --no-run, so the suite records
+      # decisions without performing operations and never raises an
+      # authentication prompt.
+      - name: Run privilege-request assertions
+        run: ./tests/test-privilege-requests.sh
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail

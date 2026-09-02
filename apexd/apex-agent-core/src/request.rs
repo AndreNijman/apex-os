@@ -206,8 +206,30 @@ impl Verb {
         }
     }
 
-    /// One line describing the effect, for the approval prompt. Written for
-    /// somebody deciding whether to allow it, not for a log.
+    /// One line describing the KIND of operation, without its arguments.
+    ///
+    /// Used by `apex request verbs`, which is describing the vocabulary rather
+    /// than any particular request. Separate from [`Verb::effect`] because that
+    /// one names the actual packages — listing the vocabulary through it meant
+    /// parsing a dummy package name and printing "(placeholder)" at the user.
+    ///
+    /// Both are one `match` over the same enum, so neither can drift away from
+    /// the set of verbs that exists.
+    pub fn kind_summary(&self) -> &'static str {
+        match self {
+            Verb::Install { .. } => "add packages to the system extension",
+            Verb::Remove { .. } => "remove packages from the system extension",
+            Verb::PkgUpgrade => "re-resolve every installed package against the repositories",
+            Verb::PkgRebuild => "rebuild the system extension for the running OS version",
+            Verb::PkgRollback => "restore the previous system extension",
+            Verb::Pin => "pin the current deployment so an update cannot garbage-collect it",
+            Verb::Rollback => "boot the previous deployment on the next restart",
+            Verb::Update => "update the OS image and firmware",
+        }
+    }
+
+    /// One line describing the effect of THIS request, for the approval prompt.
+    /// Written for somebody deciding whether to allow it, not for a log.
     pub fn effect(&self) -> String {
         match self {
             Verb::Install { packages } => format!(
