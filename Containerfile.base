@@ -528,19 +528,29 @@ COPY --chmod=0755 files/system/libexec/apex-shell-autostart \
 #                          than leaving the user with no menu at all
 #   apex-compositor-reload labwc --reconfigure / hyprctl reload / niri validate
 #   apex-session-logout    loginctl first, compositor exit verb as the fallback
-# Input settings generator: one APEX model -> Hyprland conf + niri KDL + the
-# <libinput> element inside labwc's rc.xml, each validated before it replaces
-# anything. labwc has no include mechanism, which is why its half is an
-# in-place span replacement rather than a generated file.
-COPY --chmod=0755 files/system/libexec/apex-input-apply \
-     /usr/libexec/apex-input-apply
-
 COPY --chmod=0755 files/system/libexec/apex-desktop-menu \
      /usr/libexec/apex-desktop-menu
 COPY --chmod=0755 files/system/libexec/apex-compositor-reload \
      /usr/libexec/apex-compositor-reload
 COPY --chmod=0755 files/system/libexec/apex-session-logout \
      /usr/libexec/apex-session-logout
+
+# Settings generators. Each takes ONE APEX model and writes whatever the three
+# compositors need, so a settings page never has to know which one is running.
+#
+#   apex-input-apply    -> Hyprland conf + niri KDL + the <libinput> element
+#                          inside labwc's rc.xml. labwc has no include
+#                          mechanism, which is why its half is an in-place span
+#                          replacement rather than a generated file.
+#   apex-display-apply  -> Hyprland monitor conf + a kanshi profile, applied
+#                          live through hyprctl or wlr-randr. Two actions on
+#                          purpose: `save` writes persistence only, `apply`
+#                          also reaches the RUNNING compositor. Only `apply`
+#                          touches hardware.
+COPY --chmod=0755 files/system/libexec/apex-input-apply \
+     /usr/libexec/apex-input-apply
+COPY --chmod=0755 files/system/libexec/apex-display-apply \
+     /usr/libexec/apex-display-apply
 # Only what exists at this point in the build. The cross-checks against
 # /usr/share/apex/labwc/rc.xml live in the labwc section that populates it —
 # asserting a path before its COPY is a build failure, and this block did
@@ -550,18 +560,28 @@ RUN set -eux; \
         test -x "/usr/libexec/$h"; \
         bash -n "/usr/libexec/$h"; \
     done; \
-    test -x /usr/libexec/apex-input-apply; \
-    python3 -c 'import ast,sys; ast.parse(open("/usr/libexec/apex-input-apply").read())'; \
-    # The generator's own self-test runs every installed compositor's validator
-    # over its output. Names are verified rather than remembered because labwc
-    # ignores an unknown element in silence — which is how <tapToClick> shipped
-    # doing nothing at all.
+    for g in apex-input-apply apex-display-apply; do \
+        test -x "/usr/libexec/$g"; \
+        python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "/usr/libexec/$g"; \
+    done; \
+    # The input generator's self-test runs every installed compositor's own
+    # validator over its output. Names are verified rather than remembered
+    # because labwc ignores an unknown element in silence — which is how
+    # <tapToClick> shipped doing nothing at all.
     /usr/libexec/apex-input-apply --self-test; \
+    # The display generators are pure functions of the model, so this asserts
+    # the emitted syntax without needing outputs. APEX_DISPLAY_NO_LIVE is
+    # belt-and-braces: there is no compositor in a build container, but `apply`
+    # must never be reachable from a build even by accident.
+    APEX_DISPLAY_NO_LIVE=1 /usr/libexec/apex-display-apply --self-test; \
     # Every verb the helpers dispatch to has to exist in the image.
     command -v labwc >/dev/null; \
     command -v niri >/dev/null; \
     command -v loginctl >/dev/null; \
-    echo "context menu: helpers installed and their compositor verbs present"
+    # apex-display-apply dispatches to these for the two wlroots sessions.
+    command -v wlr-randr >/dev/null; \
+    command -v kanshi >/dev/null; \
+    echo "context menu + settings generators: installed, self-tested, verbs present"
 RUN systemctl --global enable apex-shell-firstrun.service
 
 # ── Stage 5d: user packages, WITHOUT breaking OS updates ────────────────────
@@ -707,22 +727,34 @@ RUN set -eux; \
     ! grep -q '(unset)' /usr/share/apex/hypr/hyprland.conf; \
     grep -q '@KB_LAYOUT@' /usr/share/apex/hypr/hyprland.conf; \
     grep -q '@HOME@' /usr/share/apex/hypr/hyprland.conf; \
+    # Each generated file the template sources must actually be sourced — a
+    # generator whose output nothing reads is worse than no generator, because
+    # the settings page appears to work.
     grep -q '^source = @HOME@/.config/hypr/apex-input.conf$' /usr/share/apex/hypr/hyprland.conf; \
-    # Both generated files get a real temp path. Hyprland treats a `source=`
-    # with no match as a FATAL config error, so leaving either one pointing at
-    # an unwritten user path fails the whole verification for a reason that has
-    # nothing to do with the template being tested.
-    config="$(mktemp)"; keybinds="$(mktemp)"; inputconf="$(mktemp)"; runtime="$(mktemp -d)"; \
+    grep -q '^source = @HOME@/.config/hypr/apex-display.conf$' /usr/share/apex/hypr/hyprland.conf; \
+    grep -q '^source = @HOME@/.config/apex-shell/ApexShellKeybinds.conf$' /usr/share/apex/hypr/hyprland.conf; \
+    # Every generated file needs a path that EXISTS for the verify run. Hyprland
+    # treats a `source=` with no match as a FATAL config error, so one left
+    # pointing at an unwritten user path fails the whole verification for a
+    # reason that has nothing to do with the template being tested.
+    #
+    # Stubbing is generic rather than one sed per file, and then asserted: the
+    # named-file version fell behind the template the first time a second source
+    # line was added, and this cannot. They can share one empty stub — sourcing
+    # nothing twice is fine.
+    config="$(mktemp)"; stub="$(mktemp)"; runtime="$(mktemp -d)"; \
     chmod 0700 "$runtime"; \
-    sed -e 's|@HOME@|/tmp/apex-home|g' \
+    sed -e "s|^source = @HOME@/.*$|source = ${stub}|" \
+        -e 's|@HOME@|/tmp/apex-home|g' \
         -e 's|@KB_LAYOUT@|us|g' \
         -e 's|@KB_VARIANT@||g' \
-        -e "s|^source = .*ApexShellKeybinds.conf$|source = ${keybinds}|" \
-        -e "s|^source = .*apex-input.conf$|source = ${inputconf}|" \
         /usr/share/apex/hypr/hyprland.conf > "$config"; \
+    # The stubbing kept up: no per-user source line survived into the file being
+    # verified. This is what makes the guard self-maintaining.
+    ! grep -qE '^source = (@HOME@|/tmp/apex-home)' "$config"; \
     XDG_RUNTIME_DIR="$runtime" Hyprland --i-am-really-stupid \
         --verify-config --config "$config" | grep -q 'config ok'; \
-    rm -rf "$config" "$keybinds" "$inputconf" "$runtime"
+    rm -rf "$config" "$stub" "$runtime"
 
 # Greeter session picker: offer Hyprland + niri only. sway/labwc are the greeter
 # HOST compositor, not user sessions — strip their wayland-session files so they

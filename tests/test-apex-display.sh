@@ -33,6 +33,41 @@ printf '%s\n' "$st" | sed 's/^/      /'
 printf '%s\n' "$st" | grep -q '^FAIL' \
     && bad "the generator self-test passes" || ok "the generator self-test passes"
 
+# Fake compositor tools, each recording its invocation. Two jobs:
+#   * determinism — kanshi profiles are keyed on the CONNECTED outputs, so a
+#     real enumeration would make these assertions depend on how many monitors
+#     the host has plugged in;
+#   * proof of isolation — see the section further down.
+# They print nothing, so enumeration yields no outputs and the generator falls
+# back to the model, which is what makes the expected output fixed.
+#
+# `pkill` is faked too, and that one is not about determinism. `save` ends with
+#     pkill -HUP -x kanshi
+# so that a written profile takes effect, and pkill does not care what HOME is:
+# an unfaked run signals the REAL kanshi on the developer's live session. Same
+# class of bug as the one this file exists because of, one process along.
+FAKE="${WORK}/fakebin"; mkdir -p "$FAKE"
+for tool in hyprctl wlr-randr pkill; do
+    printf '#!/bin/sh\necho "$0 $*" >> "%s/called"\nexit 0\n' "$WORK" > "${FAKE}/${tool}"
+    chmod +x "${FAKE}/${tool}"
+done
+
+# PATH is REPLACED, not prefixed. Prefixing leaves the real tools reachable, so
+# a typo in a fake name silently falls through to the live compositor — the
+# failure mode has to be "no tool at all", never "the real one". That means
+# python3 has to be named absolutely, since it can no longer be found on PATH.
+PY="$(command -v python3)"
+[ -x "$PY" ] || { printf 'no python3\n' >&2; exit 1; }
+for tool in hyprctl wlr-randr pkill; do
+    [ -x "${FAKE}/${tool}" ] || { printf 'fake %s missing\n' "$tool" >&2; exit 1; }
+done
+
+# Every invocation below goes through one of these two. Nothing in this file
+# calls the generator with the real PATH, so no assertion can reach a real
+# compositor even if a future edit forgets which action it is using.
+run_save() { PATH="$FAKE" HOME="$1" APEX_DISPLAY_NO_LIVE=1 "$PY" "$GEN" save; }
+run_gen()  { local h="$1"; shift; PATH="$FAKE" HOME="$h" APEX_DISPLAY_NO_LIVE=1 "$PY" "$GEN" "$@"; }
+
 section "the model is validated, not trusted"
 H="${WORK}/home"; mkdir -p "$H/.config/apex-shell" "$H/.config/hypr" "$H/.config/kanshi"
 cat > "$H/.config/apex-shell/display.json" <<'JSON'
@@ -40,27 +75,15 @@ cat > "$H/.config/apex-shell/display.json" <<'JSON'
   { "name": "eDP-1", "enabled": true, "scale": 99, "transform": "sideways" },
   { "enabled": true, "scale": 1 } ] }
 JSON
-notes="$(HOME="$H" APEX_DISPLAY_NO_LIVE=1 python3 "$GEN" apply --dry-run 2>&1)"
+# The validation notes are printed before the action branch is reached, so they
+# are readable even though the guard then refuses this `apply`.
+notes="$(run_gen "$H" apply --dry-run 2>&1)"
 printf '%s\n' "$notes" | grep -q 'scale 99' \
     && ok "an out-of-range scale is corrected and reported" || bad "an out-of-range scale is corrected and reported"
 printf '%s\n' "$notes" | grep -q "unknown transform" \
     && ok "an unknown transform is corrected and reported" || bad "an unknown transform is corrected and reported"
 printf '%s\n' "$notes" | grep -q 'no name' \
     && ok "an entry with no output name is skipped and reported" || bad "an entry with no output name is skipped and reported"
-
-# Fake compositor tools, first on PATH, each recording its invocation. Two jobs:
-#   * determinism — kanshi profiles are keyed on the CONNECTED outputs, so a
-#     real enumeration would make these assertions depend on how many monitors
-#     the host has plugged in;
-#   * proof of isolation — see the section further down.
-# They print nothing, so enumeration yields no outputs and the generator falls
-# back to the model, which is what makes the expected output fixed.
-FAKE="${WORK}/fakebin"; mkdir -p "$FAKE"
-for tool in hyprctl wlr-randr; do
-    printf '#!/bin/sh\necho "$0 $*" >> "%s/called"\nexit 0\n' "$WORK" > "${FAKE}/${tool}"
-    chmod +x "${FAKE}/${tool}"
-done
-run_save() { PATH="${FAKE}:$PATH" HOME="$1" APEX_DISPLAY_NO_LIVE=1 python3 "$GEN" save; }
 
 section "persistence is written for both backends"
 H2="${WORK}/home2"; mkdir -p "$H2/.config/apex-shell" "$H2/.config/hypr" "$H2/.config/kanshi"
@@ -100,6 +123,13 @@ if [ -s "$D" ]; then
         && ok "hyprland: a disabled output is disabled" || bad "hyprland: a disabled output is disabled"
 fi
 
+# A written kanshi profile does nothing until kanshi re-reads it, so `save` has
+# to signal it. Asserted because the failure is silent: the file is correct, the
+# layout just never changes.
+grep -q 'pkill .*-HUP.*kanshi' "${WORK}/called" 2>/dev/null \
+    && ok "save signals kanshi to re-read the profile" \
+    || bad "save signals kanshi to re-read the profile"
+
 section "idempotence"
 cp "$K" "${WORK}/k.1"; cp "$D" "${WORK}/d.1"
 run_save "$H2" >/dev/null 2>&1
@@ -109,7 +139,7 @@ cmp -s "$K" "${WORK}/k.1" && cmp -s "$D" "${WORK}/d.1" \
 section "an empty model does nothing"
 H3="${WORK}/home3"; mkdir -p "$H3/.config/apex-shell"
 echo '{"outputs":[]}' > "$H3/.config/apex-shell/display.json"
-HOME="$H3" APEX_DISPLAY_NO_LIVE=1 python3 "$GEN" save 2>&1 | grep -q 'nothing to do' \
+run_gen "$H3" save 2>&1 | grep -q 'nothing to do' \
     && ok "an empty model is a no-op and says so" || bad "an empty model is a no-op and says so"
 [ ! -e "$H3/.config/kanshi/config" ] \
     && ok "an empty model writes no persistence" || bad "an empty model writes no persistence"
@@ -117,13 +147,13 @@ HOME="$H3" APEX_DISPLAY_NO_LIVE=1 python3 "$GEN" save 2>&1 | grep -q 'nothing to
 section "a corrupt model is refused, not guessed at"
 H4="${WORK}/home4"; mkdir -p "$H4/.config/apex-shell"
 printf '{ not json' > "$H4/.config/apex-shell/display.json"
-HOME="$H4" APEX_DISPLAY_NO_LIVE=1 python3 "$GEN" save 2>&1 | grep -q 'not usable' \
+run_gen "$H4" save 2>&1 | grep -q 'not usable' \
     && ok "a corrupt model is reported" || bad "a corrupt model is reported"
 
 section "a test can never reach the live compositor"
-# Not a comment but a proof: a fake hyprctl and wlr-randr are put FIRST on PATH,
-# each recording that it was called. If `save` invokes either, the marker exists
-# and this fails.
+# Not a comment but a proof: the fake hyprctl/wlr-randr/pkill are the ONLY
+# things on PATH, each recording that it was called. If `save` invokes a
+# mutating one, the marker exists and this fails.
 # The property is that no MUTATING call is made. `save` does enumerate — kanshi
 # profiles are keyed on the connected outputs — and `hyprctl -j monitors` /
 # `wlr-randr --json` are read-only, so those are expected and fine. What must
@@ -144,7 +174,7 @@ else
 fi
 
 rm -f "${WORK}/called"
-out="$(PATH="${FAKE}:$PATH" HOME="$H5" APEX_DISPLAY_NO_LIVE=1 python3 "$GEN" apply 2>&1)"
+out="$(PATH="$FAKE" HOME="$H5" APEX_DISPLAY_NO_LIVE=1 "$PY" "$GEN" apply 2>&1)"
 printf '%s' "$out" | grep -q 'refusing to touch the live compositor' \
     && ok "apply refuses when APEX_DISPLAY_NO_LIVE is set" \
     || bad "apply refuses when APEX_DISPLAY_NO_LIVE is set"
@@ -153,8 +183,15 @@ mutating \
     || ok "the refusal prevents every mutating call"
 
 # And without the guard it WOULD mutate — otherwise the guard proves nothing.
+#
+# `env -u` rather than just leaving the variable out: this is the one call in
+# the file that deliberately disables the safety, so it must not depend on the
+# ambient environment being clean. CI exports APEX_DISPLAY_NO_LIVE for the whole
+# step, which would otherwise turn this assertion into a false failure — and a
+# negative control that fails for an unrelated reason gets deleted, taking the
+# proof with it.
 rm -f "${WORK}/called"
-PATH="${FAKE}:$PATH" HOME="$H5" python3 "$GEN" apply >/dev/null 2>&1
+env -u APEX_DISPLAY_NO_LIVE PATH="$FAKE" HOME="$H5" "$PY" "$GEN" apply >/dev/null 2>&1
 mutating \
     && ok "without the guard, apply does mutate (so the guard is load-bearing)" \
     || bad "without the guard, apply does mutate (so the guard is load-bearing)"

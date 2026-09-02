@@ -183,6 +183,17 @@ jobs:
       - name: Run input-settings assertions
         run: ./tests/test-apex-input.sh
 
+      # The display engine is the one generator that can reach hardware, so its
+      # suite asserts that it does not: fake hyprctl/wlr-randr first on PATH
+      # record every call, and the run fails if a MUTATING one appears. There is
+      # no compositor on the runner, but the guard is set anyway — the bug it
+      # exists for was a test that reconfigured the live desktop it ran on, and
+      # a developer running this locally is exactly that situation.
+      - name: Run display-settings assertions
+        env:
+          APEX_DISPLAY_NO_LIVE: "1"
+        run: ./tests/test-apex-display.sh
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail

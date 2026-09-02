@@ -299,6 +299,52 @@ else
         || ok "no pre-0.54 spelling survives migration"
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Every per-user file the Hyprland template `source=`s must be pre-created.
+#
+#  Hyprland treats a `source =` with no matching file as a FATAL config error —
+#  "source= globbing error: found no match" — and refuses the ENTIRE config. On
+#  boot #1 none of these files exists yet, because the shell and the settings
+#  generators write them later, so a source line without a matching pre-create
+#  means a first login with no keybinds and no window rules at all.
+#
+#  This derives the list from the template instead of hardcoding it. Adding a
+#  new generated source line and forgetting the pre-create is the exact mistake
+#  this catches, and it has already happened once per file added.
+# ─────────────────────────────────────────────────────────────────────────────
+section "every sourced per-user file is pre-created"
+
+awk '/^for _variant in conf kdl lua/{f=1} f{print} /^for _gen in/{g=1} g&&/^done$/{exit}' \
+    "$SRC" > "${WORK}/precreate-block.sh"
+
+if [ ! -s "${WORK}/precreate-block.sh" ]; then
+    bad "the pre-create block was found in the provisioner"
+elif [ ! -f "$HYPR_TMPL" ]; then
+    bad "the Hyprland template is present"
+else
+    ok "the pre-create block was found in the provisioner"
+    PH="${WORK}/precreate-home"
+    mkdir -p "$PH/.config/apex-shell"
+    # The real block, run against a throwaway HOME, with only the two variables
+    # it reads supplied from the provisioner's own definitions.
+    HOME="$PH" CFG_DIR="$PH/.config/apex-shell" \
+        bash -c 'set -eu; source "$1"' -- "${WORK}/precreate-block.sh" >/dev/null 2>&1
+
+    # Every @HOME@-rooted source line in the template, as a path under HOME.
+    srcs="$(sed -n 's|^source = @HOME@/\(.*\)$|\1|p' "$HYPR_TMPL")"
+    if [ -z "$srcs" ]; then
+        bad "the template has at least one per-user source line"
+    else
+        ok "the template has at least one per-user source line"
+        while IFS= read -r rel; do
+            [ -n "$rel" ] || continue
+            [ -f "${PH}/${rel}" ] \
+                && ok "pre-created: ${rel}" \
+                || bad "pre-created: ${rel} (Hyprland would refuse the whole config)"
+        done <<< "$srcs"
+    fi
+fi
+
 section "labwc input settings"
 
 # labwc ships rc.xml.all as its complete annotated reference. Preferring it over

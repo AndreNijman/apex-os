@@ -480,19 +480,28 @@ for _variant in conf kdl lua; do
         || : > "${CFG_DIR}/ApexShellKeybinds.${_variant}"
 done
 
-# apex-input.conf is the same story, one file along: the seeded hyprland.conf
-# `source=`s the generated input settings, and Hyprland treats a source with no
+# The generated settings files are the same story, one file along: the seeded
+# hyprland.conf `source=`s each of them, and Hyprland treats a source with no
 # match as a FATAL config error — verified against the image's own Hyprland,
 # which reports "source= globbing error: found no match" and refuses the whole
 # config. That would take every keybind and window rule down with it on boot #1.
 #
-# Empty is the correct placeholder, not a generated default: an empty file means
-# "no overrides", so the input block already in hyprland.conf applies. The
-# generator (/usr/libexec/apex-input-apply, driven by APEX Settings) overwrites
-# it with real values the first time the user changes anything.
+# Empty is the correct placeholder, not a generated default:
+#   apex-input.conf     empty means "no overrides", so the input block already
+#                       in hyprland.conf applies.
+#   apex-display.conf   empty means "no saved layout", so Hyprland keeps its own
+#                       automatic output placement. Writing a guessed monitor
+#                       line here would override the compositor's detection with
+#                       a layout the user never chose.
+#
+# The generators (/usr/libexec/apex-{input,display}-apply, driven by APEX
+# Settings) overwrite these with real values the first time the user changes
+# anything.
 mkdir -p "${HOME}/.config/hypr"
-[ -f "${HOME}/.config/hypr/apex-input.conf" ] \
-    || : > "${HOME}/.config/hypr/apex-input.conf"
+for _gen in apex-input apex-display; do
+    [ -f "${HOME}/.config/hypr/${_gen}.conf" ] \
+        || : > "${HOME}/.config/hypr/${_gen}.conf"
+done
 
 [ -f "${HOME}/.cache/apex-shell/colors.json" ] || \
     : > "${HOME}/.cache/apex-shell/colors.json"
