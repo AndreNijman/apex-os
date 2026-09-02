@@ -123,43 +123,43 @@ else
     say primary fail
 fi
 
+# The three probes below are long-running clients: they connect, bind their
+# protocol, and then keep running until stopped. So the healthy outcome is
+# \`timeout\` killing them (124), and a *quick* non-zero exit is the failure.
+#
+# Judged on EXIT STATUS, not on stderr text. Matching a list of
+# unsupported-protocol phrases meant any other startup failure — no connection,
+# bad environment, a permission problem — produced a green capability result,
+# which is precisely the "green on nothing" this file is supposed to avoid.
+# stderr is still captured, but only to explain a failure.
+probe_client() {
+    local key="\$1" seconds="\$2"; shift 2
+    if ! command -v "\$1" >/dev/null 2>&1; then
+        say "\$key" skip
+        return
+    fi
+    local err="${WORK}/\${key}.err" rc=0
+    timeout "\$seconds" "\$@" >/dev/null 2>"\$err" || rc=\$?
+    case "\$rc" in
+        # 124: still running when we stopped it, which is what success looks
+        # like for a client that never exits on its own.
+        124) say "\$key" ok ;;
+        # 0: exited cleanly. swaylock -f daemonises and returns 0 on success.
+        0)   say "\$key" ok ;;
+        *)   say "\$key" "fail(rc=\$rc)" ;;
+    esac
+}
+
 # wlr-layer-shell. APEX Shell is a layer-shell client, so this is the single
 # protocol the whole desktop depends on; swaybg is the smallest client that
 # exercises it.
-if command -v swaybg >/dev/null 2>&1; then
-    timeout 3 swaybg -c '#112233' 2>"${WORK}/bg.err"
-    if grep -qiE 'layer.shell|not supported|unsupported' "${WORK}/bg.err" 2>/dev/null; then
-        say layer_shell fail
-    else
-        say layer_shell ok
-    fi
-else
-    say layer_shell skip
-fi
+probe_client layer_shell 3 swaybg -c '#112233'
 
-# ext-session-lock: the lock screen path.
-if command -v swaylock >/dev/null 2>&1; then
-    timeout 3 swaylock -f -c 000000 2>"${WORK}/lock.err"
-    if grep -qiE 'does not support|unsupported|ext-session-lock' "${WORK}/lock.err" 2>/dev/null; then
-        say session_lock fail
-    else
-        say session_lock ok
-    fi
-else
-    say session_lock skip
-fi
+# ext-session-lock: the lock screen path. -f daemonises after locking.
+probe_client session_lock 3 swaylock -f -c 000000
 
 # ext-idle-notify: idle handling without a compositor-specific daemon.
-if command -v swayidle >/dev/null 2>&1; then
-    timeout 3 swayidle -w timeout 1 true 2>"${WORK}/idle.err"
-    if grep -qiE 'not supported|unsupported' "${WORK}/idle.err" 2>/dev/null; then
-        say idle fail
-    else
-        say idle ok
-    fi
-else
-    say idle skip
-fi
+probe_client idle 3 swayidle -w timeout 1 true
 PROBE
 
 run_nested "${WORK}/probe.sh" 40 >/dev/null 2>&1
@@ -169,10 +169,10 @@ report() {
     local v
     v="$(sed -n "s/^${key}=//p" "${WORK}/results" 2>/dev/null | head -1)"
     case "${v:-missing}" in
-        ok)   ok "$label" ;;
-        skip) skp "$label (probe client not installed)" ;;
-        fail) bad "$label" ;;
-        *)    bad "$label (probe produced no result)" ;;
+        ok)     ok "$label" ;;
+        skip)   skp "$label (probe client not installed)" ;;
+        fail*)  bad "$label [$v]" ;;
+        *)      bad "$label (probe produced no result)" ;;
     esac
 }
 

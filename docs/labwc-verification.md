@@ -92,9 +92,16 @@ blur, and windows that cannot be dragged.
 - [ ] The thumbnail window switcher (`alt-tab`) — previews render, and the OSD
       appears only on the focused output
 - [ ] Desktop right-click opens the APEX context menu, not the Openbox one
-- [ ] With the shell stopped (`systemctl --user stop apex-shell` or kill
-      quickshell), right-click falls back to `menu.xml` rather than doing
-      nothing
+- [ ] With the shell killed, a plain right-click **restarts it** and then opens
+      the APEX menu — that is what `apex-desktop-menu` does before giving up
+- [ ] With the shell killed and unable to start (e.g. rename
+      `/usr/libexec/apex-shell-autostart`), a plain right-click shows a
+      notification naming the fallback, and **SUPER+right-click** opens the
+      `menu.xml` emergency menu
+
+  A plain right-click does *not* fall back to `menu.xml` on its own. A labwc
+  mousebind is a fixed action and cannot branch, so the fallback is on a
+  modifier rather than silently substituted.
 
 ---
 

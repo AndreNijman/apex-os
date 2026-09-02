@@ -252,7 +252,6 @@ done
 
 if [ -z "$LABWC_REF" ]; then
     printf 'SKIP  labwc rc.xml.all unavailable; cannot check libinput element names\n'
-    skip=$((skip + 1))
 else
     ok "labwc's own element reference is available"
 
