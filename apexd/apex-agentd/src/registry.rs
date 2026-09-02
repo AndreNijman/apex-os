@@ -378,6 +378,7 @@ mod tests {
             worktree: None,
             state: AgentState::Starting,
             detail: None,
+            paused: false,
             sandbox: SandboxPolicy::Project,
             pid: 0,
             started: 0,

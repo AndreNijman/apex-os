@@ -333,10 +333,14 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
                 Ok(()) => {
                     // A stopped session is neither working nor waiting on the
                     // user, and nothing will produce output to correct the
-                    // state later, so record it now.
+                    // state later, so record it now. Recorded AFTER the signal
+                    // succeeded: a flag set before the kill would claim a
+                    // session was paused when the signal failed.
                     if number == libc::SIGSTOP {
+                        s.info.paused = true;
                         s.info.detail = Some("paused".to_string());
                     } else if number == libc::SIGCONT {
+                        s.info.paused = false;
                         s.info.detail = None;
                     }
                     Response::Ok
