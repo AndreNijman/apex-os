@@ -284,20 +284,37 @@ else
     logs="$("$APEX" agent logs "$sid" 2>/dev/null)"
     printf '%s\n' "$logs" | sed 's/^/      | /' | head -20
 
-    printf '%s' "$logs" | grep -q "$SENTINEL" \
-        && bad "the session's transcript does not contain the token" \
-        || ok "the session's transcript does not contain the token"
-    printf '%s' "$logs" | grep -qE "No such file|Permission denied|cannot open" \
-        && ok "the credential file is unreachable from inside the sandbox" \
-        || bad "the credential file is unreachable from inside the sandbox"
-    printf '%s' "$logs" | grep -q "cannot change its own capabilities" \
-        && ok "the session cannot grant itself a capability" \
-        || bad "the session cannot grant itself a capability"
+    # THE SCRIPT MUST HAVE RUN. Without this gate every assertion below passes
+    # vacuously when the sandbox fails to build — which is exactly what
+    # happened on a runner where bubblewrap installed but could not create a
+    # user namespace ("setting up uid map: Permission denied"). The session
+    # record existed, so "started" passed; the script never executed, so
+    # "the credential file is unreachable" passed because nothing tried to
+    # read it. A test that passes for the wrong reason is worse than one that
+    # fails.
+    if ! printf '%s' "$logs" | grep -q DONE; then
+        bad "the session's script actually ran"
+        printf '      the sandbox did not come up, so nothing below was tested\n'
+        printf '      (a "uid map: Permission denied" here means unprivileged\n'
+        printf '       user namespaces are blocked — see the CI sysctl)\n'
+    else
+        ok "the session's script actually ran"
 
-    # And the grant it attempted was not recorded.
-    "$APEX" secret grants 2>/dev/null | grep -q "git-push" \
-        && bad "the session's self-grant was not recorded" \
-        || ok "the session's self-grant was not recorded"
+        printf '%s' "$logs" | grep -q "$SENTINEL" \
+            && bad "the session's transcript does not contain the token" \
+            || ok "the session's transcript does not contain the token"
+        printf '%s' "$logs" | grep -qE "No such file|Permission denied|cannot open" \
+            && ok "the credential file is unreachable from inside the sandbox" \
+            || bad "the credential file is unreachable from inside the sandbox"
+        printf '%s' "$logs" | grep -q "cannot change its own capabilities" \
+            && ok "the session cannot grant itself a capability" \
+            || bad "the session cannot grant itself a capability"
+
+        # And the grant it attempted was not recorded.
+        "$APEX" secret grants 2>/dev/null | grep -q "git-push" \
+            && bad "the session's self-grant was not recorded" \
+            || ok "the session's self-grant was not recorded"
+    fi
 fi
 
 # ── revoke ───────────────────────────────────────────────────────────────────
