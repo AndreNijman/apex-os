@@ -123,11 +123,21 @@ def provided_paths(sources, dest, repo_root):
 
 
 def referenced_paths(line):
-    """Absolute paths a RUN mentions literally."""
+    """Absolute paths a RUN mentions literally.
+
+    `$`, `{` and `}` are inside the character class on purpose. Without them the
+    match stops at the brace, so `/usr/lib/modules/${KVER}/build` was captured
+    as the literal `/usr/lib/modules/` and the "contains $" filter below never
+    saw anything to reject — turning a variable path into a confident claim
+    about a fixed one. Capturing the expansion is what lets it be discarded.
+    """
     found = set()
-    for tok in re.findall(r"/(?:usr|etc|var|opt)[A-Za-z0-9_./@+-]*", line):
+    for tok in re.findall(r"/(?:usr|etc|var|opt)[A-Za-z0-9_./@+${}-]*", line):
         tok = tok.rstrip(".,;:'\")")
-        if tok.startswith(IGNORE_PREFIXES) or "$" in tok:
+        if tok.startswith(IGNORE_PREFIXES):
+            continue
+        # Any expansion makes the path unknowable at parse time.
+        if "$" in tok or "{" in tok or "}" in tok:
             continue
         found.add(tok)
     return found
@@ -193,7 +203,12 @@ def main(argv):
         try:
             problems, total = check(p, repo_root)
         except FileNotFoundError:
-            print(f"skip: {p} not found")
+            # A named-but-missing input is a failure, not a skip. CI passes
+            # these paths explicitly, so a rename or move would otherwise
+            # silently stop validating a whole image variant while still
+            # reporting green.
+            print(f"{p}: MISSING — named on the command line but not on disk")
+            failures.append(f"{p}: missing")
             continue
         if problems:
             print(f"{p}: {len(problems)} ordering problem(s) [{total} layers]")
