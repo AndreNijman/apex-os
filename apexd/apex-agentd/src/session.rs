@@ -82,7 +82,16 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
     }
 
     if let Some(proj) = detected.as_ref() {
-        let _ = project::remember(proj);
+        // Reported, not swallowed. `let _ =` here is how a bug in
+        // project::remember stayed invisible for as long as it did: every real
+        // project slug contained slashes, remember failed on the missing
+        // parent directories for all of them, and nothing ever said so — so
+        // `apex project list` was simply always empty. Failing to remember a
+        // project must not stop a session from starting, but it must be
+        // audible.
+        if let Err(e) = project::remember(proj) {
+            eprintln!("apex-agentd: could not record project {}: {e:#}", proj.name);
+        }
     }
 
     // The checkpoint is taken against the directory the agent will actually

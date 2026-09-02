@@ -307,6 +307,21 @@ arguments.
 Restore is a command and not a login hook, deliberately: a session that reopens
 fourteen windows nobody asked for is worse than one that reopens none.
 
+### Switching by project
+
+```
+apex project switch            # this project
+apex project switch apex-os    # by name, from anywhere
+```
+
+§6's "allow switching by project, not only by numeric workspace". It needs a
+saved layout, because that is what records which workspace a project lives on —
+a project does not own a workspace, it merely has windows that were on one.
+
+Where a layout spans several workspaces the most populated one wins. That is a
+choice rather than an obvious truth (the alternative is the first one captured),
+and it is the one that matches what people mean by "where the project is".
+
 Placement onto workspaces is best-effort. A window cannot be moved before it
 exists, and it does not exist until its process has mapped a surface — which is
 asynchronous and unbounded — so `restore` reports the intended split rather than
@@ -533,5 +548,14 @@ Named because the roadmap asks for them and this does not do them:
   tmux/zellij integration. Restoring a project's windows now exists — see
   *Project layouts* — but choosing a layout template does not.
 - **Remote sessions.** `--host` does not exist.
-- **Fish and nushell** shell integration. Bash and zsh are covered.
+- **Fish and nushell** shell integration. Bash and zsh are covered, including
+  the `a`/`aa`/`al`/`ad`/`aw`/`ap` shortcuts, completion, and the optional
+  prompt indicator (`apex_agent_prompt`, which is fork-free: it reads the
+  session records the daemon already writes, at about 0.25 ms per prompt).
+- **Screenshots and drag-and-drop into an agent** (§3's clipboard section).
+- **tmux and zellij integration**, and layout TEMPLATES (§3's editor/agent
+  grid). Restoring a project's own windows exists; choosing a layout shape does
+  not.
+- **Test status and merge conflicts per worktree** in the Agent Center (§7).
+  The worktree a session is on is shown; whether its tests pass is not.
 - **Disposable environments** and capsules.

@@ -179,6 +179,58 @@ printf '%s' "$out" | grep -q "would run (ws 3): sleep 600" \
     && ok "an application keeps its own argv" \
     || { bad "an application keeps its own argv"; printf '      %s\n' "$out"; }
 
+section "switch by project, not by workspace number"
+# §6's "allow switching by project, not only by numeric workspace". The fake
+# adapter records what it was asked to do, so the assertion is on the ACTION and
+# not on a real compositor moving.
+SWITCHLOG="${WORK}/switched"
+cat > "$FAKE" <<EOF
+#!/bin/sh
+case "\$1" in
+    list)       cat "${WORK}/windows.json" ;;
+    workspace)  echo "\$2" >> "${SWITCHLOG}" ;;
+    compositor) echo fake ;;
+    *)          echo "fake adapter: \$1 unsupported" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$FAKE"
+
+# Two windows on ws 7 and one on ws 3, so "most populated wins" is testable
+# rather than coincidental.
+windows "$(cat <<EOF
+[
+  { "handle": null, "pid": ${MINE_PID}, "app_id": "Alacritty", "title": "a", "workspace": "7", "floating": false },
+  { "handle": null, "pid": ${MINE_PID}, "app_id": "Alacritty", "title": "b", "workspace": "7", "floating": false },
+  { "handle": null, "pid": ${MINE_PID}, "app_id": "firefox",   "title": "c", "workspace": "3", "floating": false }
+]
+EOF
+)"
+(cd "$PROJ" && "$APEX" project layout save >/dev/null 2>&1)
+out="$(cd "$PROJ" && "$APEX" project switch 2>&1)"
+printf '%s' "$out" | grep -q "workspace 7" \
+    && ok "switch picks the workspace with the most windows" \
+    || { bad "switch picks the workspace with the most windows"; printf '      %s\n' "$out"; }
+[ "$(tail -1 "$SWITCHLOG" 2>/dev/null)" = "7" ] \
+    && ok "the compositor was actually asked to switch" \
+    || bad "the compositor was actually asked to switch"
+
+# By name, from outside the project — the point of switching BY PROJECT.
+out="$(cd "${WORK}" && "$APEX" project switch mine 2>&1)"
+printf '%s' "$out" | grep -q "workspace 7" \
+    && ok "a project can be switched to by name from anywhere" \
+    || { bad "a project can be switched to by name from anywhere"; printf '      %s\n' "$out"; }
+
+out="$(cd "${WORK}" && "$APEX" project switch no-such-project 2>&1)"
+printf '%s' "$out" | grep -q "no known project" \
+    && ok "an unknown project name is refused" || bad "an unknown project name is refused"
+
+# No layout means no recorded workspace, and that is said plainly.
+(cd "$OTHER" && "$APEX" project layout forget >/dev/null 2>&1)
+out="$(cd "$OTHER" && "$APEX" project switch 2>&1)"
+printf '%s' "$out" | grep -q "no layout saved" \
+    && ok "switching without a layout explains what is missing" \
+    || { bad "switching without a layout explains what is missing"; printf '      %s\n' "$out"; }
+
 section "forget"
 # Output is captured and THEN matched, never piped straight into grep. Under
 # `set -o pipefail` a command that exits non-zero fails the whole pipeline even

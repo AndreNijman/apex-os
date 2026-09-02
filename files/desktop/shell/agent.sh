@@ -77,6 +77,66 @@ _apex_agent_names() {
     apex agent adapters 2>/dev/null | awk 'NR>1 {print $1}' | tr -d '*'
 }
 
+# ── prompt indicator ────────────────────────────────────────────────────────
+# §3: "Optional prompt indicator showing active agent state for the current
+# project."
+#
+# Opt-in, and FORK-FREE, which is the only way a prompt hook is acceptable: it
+# runs before every single command. So this reads the session records the daemon
+# already writes on each state change, with `$(<file)` and parameter expansion —
+# no `apex`, no socket round trip, no `git`, no `sed`. A prompt that costs three
+# forks per command is a prompt people turn off, and then the feature does not
+# exist.
+#
+# Relevance is decided from $PWD against each session's recorded project root,
+# so there is no need to ask git where we are.
+#
+# Usage — add to ~/.zshrc.local or ~/.bashrc:
+#     PS1='$(apex_agent_prompt)'"$PS1"      # bash
+#     setopt PROMPT_SUBST                    # zsh
+#     PROMPT='$(apex_agent_prompt)'"$PROMPT"
+apex_agent_prompt() {
+    local dir="${XDG_STATE_HOME:-$HOME/.local/state}/apex/agent/sessions"
+    [ -d "$dir" ] || return 0
+
+    local working=0 waiting=0 attention=0 f text root state exited
+    for f in "$dir"/*.json; do
+        [ -f "$f" ] || continue
+        text="$(<"$f")"
+
+        # Only sessions whose project contains $PWD. A session with no project
+        # is skipped rather than shown everywhere.
+        root="${text#*\"project\": \"}"
+        [ "$root" = "$text" ] && continue
+        root="${root%%\"*}"
+        [ -n "$root" ] || continue
+        case "$PWD" in
+            "$root"|"$root"/*) ;;
+            *) continue ;;
+        esac
+
+        # A finished session is not worth a prompt indicator.
+        exited="${text#*\"exit_code\": }"
+        exited="${exited%%,*}"
+        [ "$exited" = "null" ] || continue
+
+        state="${text#*\"state\": \"}"
+        state="${state%%\"*}"
+        case "$state" in
+            working)                      working=$((working + 1)) ;;
+            waiting_for_user)             waiting=$((waiting + 1)) ;;
+            permission_request)           attention=$((attention + 1)) ;;
+        esac
+    done
+
+    local out=""
+    [ "$working"   -gt 0 ] && out="${out}󰜎${working}"
+    [ "$waiting"   -gt 0 ] && out="${out}󰅺${waiting}"
+    [ "$attention" -gt 0 ] && out="${out}󰌾${attention}"
+    [ -n "$out" ] && printf '%s ' "$out"
+    return 0
+}
+
 # Stored secret services, and the capabilities that can be granted. Both asked
 # of the CLI: the capability set is a security boundary, and a stale copy of it
 # in a completion list misrepresents what the broker accepts.
@@ -151,7 +211,7 @@ if [ -n "${BASH_VERSION}" ]; then
         local cur="${COMP_WORDS[COMP_CWORD]}" verb="${COMP_WORDS[2]}"
         if [ "$COMP_CWORD" -eq 2 ]; then
             COMPREPLY=($(compgen -W "list info worktrees checkpoints remove \
-                forget layout" -- "$cur"))
+                forget layout switch" -- "$cur"))
             return
         fi
         case "$verb" in
@@ -293,7 +353,7 @@ if [ -n "${ZSH_VERSION}" ]; then
 
     _apex_project_zsh() {
         local -a verbs
-        verbs=(list info worktrees checkpoints remove forget layout)
+        verbs=(list info worktrees checkpoints remove forget layout switch)
         if (( CURRENT == 3 )); then
             _describe 'project verb' verbs
             return

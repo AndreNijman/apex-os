@@ -164,6 +164,16 @@ pub enum ProjectCmd {
     },
     /// Stop tracking a project. The checkout is never touched.
     Forget { slug: String },
+    /// Go to a project: switch to the workspace its windows are on.
+    ///
+    /// §6's "allow switching by project, not only by numeric workspace". Needs
+    /// a saved layout, because that is what records which workspace a project
+    /// lives on — `apex project layout save` first.
+    Switch {
+        /// Project name or slug. Defaults to the one containing the current
+        /// directory.
+        name: Option<String>,
+    },
     /// Remember or restore the windows and terminals of a project (§6).
     ///
     /// A saved layout stores how to RECREATE each window — its argv, its
@@ -803,6 +813,7 @@ pub fn project_cmd(cmd: ProjectCmd) -> i32 {
                 0
             })
         }
+        ProjectCmd::Switch { name } => project_switch(name),
         ProjectCmd::Layout { cmd } => match cmd {
             LayoutCmd::Save => layout_save(),
             LayoutCmd::Show { json } => layout_show(json),
@@ -858,6 +869,12 @@ fn layout_save() -> Result<i32> {
         return Ok(1);
     }
     layout::save(&p.slug, &captured)?;
+    // Register the project too. Saving a layout is a strong statement that this
+    // is somewhere you work, and without it the project is absent from
+    // `apex project list` — which makes `apex project switch <name>` unable to
+    // find it, i.e. the §6 feature this layout exists for does not work from
+    // anywhere but inside the project.
+    project::remember(&p)?;
     println!(
         "saved {} window(s) across workspace(s) {} for {}",
         captured.entries.len(),
@@ -964,6 +981,76 @@ fn layout_restore(dry_run: bool) -> Result<i32> {
         );
     }
     if failed > 0 { Ok(1) } else { Ok(0) }
+}
+
+/// Go to a project's workspace.
+///
+/// The workspace comes from the saved layout, not from anything live: a project
+/// does not own a workspace, it merely has windows that were on one. Which
+/// means this needs a layout, and says so rather than guessing at the current
+/// workspace.
+///
+/// Where a layout spans several workspaces, the one with the most windows wins.
+/// That is a choice, not an obvious truth — the alternative is the first one
+/// captured — and the most-populated one is what a person means by "where the
+/// project is".
+fn project_switch(name: Option<String>) -> Result<i32> {
+    let p = match name {
+        Some(n) => project::list()
+            .into_iter()
+            .find(|p| p.name == n || p.slug == n)
+            .with_context(|| format!("no known project called {n:?}"))?,
+        None => current_project()?,
+    };
+
+    let Some(l) = layout::load(&p.slug) else {
+        bail!(
+            "no layout saved for {}, so there is nothing recording which \n\
+             workspace it lives on. Capture one with `apex project layout save` \n\
+             while its windows are open.",
+            p.name
+        );
+    };
+
+    // Count windows per workspace, then take the most populated. BTreeMap so
+    // ties break on the workspace name rather than on hash order — a command
+    // that sends you somewhere different each time it is run is worse than one
+    // that sends you somewhere arguable.
+    let mut counts: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    for e in &l.entries {
+        if !e.workspace.is_empty() {
+            *counts.entry(e.workspace.as_str()).or_default() += 1;
+        }
+    }
+    let Some((workspace, count)) = counts.iter().max_by_key(|(_, n)| **n).map(|(w, n)| (*w, *n))
+    else {
+        bail!(
+            "the saved layout for {} records no workspace — the compositor it \n\
+             was captured under does not report one (labwc does not)",
+            p.name
+        );
+    };
+
+    let adapter = window_adapter();
+    let status = Command::new(&adapter)
+        .args(["workspace", workspace])
+        .status()
+        .with_context(|| format!("running {adapter} workspace {workspace}"))?;
+    if !status.success() {
+        bail!(
+            "could not switch to workspace {workspace}: this compositor has no \n\
+             workspace-switch verb (labwc exposes no IPC at all)"
+        );
+    }
+    println!(
+        "{} — workspace {} ({} of {} window(s))",
+        p.name,
+        workspace,
+        count,
+        l.entries.len()
+    );
+    Ok(0)
 }
 
 fn layout_forget() -> Result<i32> {
