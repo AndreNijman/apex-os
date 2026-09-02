@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#
+# APEX-OS — reload the running compositor's configuration.
+#
+# Each compositor has its own verb and none of them share a name, so the APEX
+# context menu asks for "reload" and this decides what that means. Keeping the
+# knowledge here rather than in the QML is what lets one menu serve all three
+# sessions.
+#
+# Detection is by XDG_CURRENT_DESKTOP, which every APEX session sets, with a
+# process check as the fallback for a session started outside the normal path.
+
+set -uo pipefail
+
+desktop="$(printf '%s' "${XDG_CURRENT_DESKTOP:-}" | tr '[:upper:]' '[:lower:]')"
+
+reload_labwc()   { labwc --reconfigure; }
+reload_hypr()    { hyprctl reload; }
+# niri re-reads its config automatically on change and offers no reload verb;
+# `validate` at least surfaces a broken config instead of doing nothing silently.
+reload_niri()    { niri validate; }
+
+case "$desktop" in
+    *labwc*)    reload_labwc ;;
+    *hyprland*) reload_hypr ;;
+    *niri*)     reload_niri ;;
+    *)
+        if   pgrep -x labwc    >/dev/null 2>&1; then reload_labwc
+        elif pgrep -x Hyprland >/dev/null 2>&1; then reload_hypr
+        elif pgrep -x niri     >/dev/null 2>&1; then reload_niri
+        else
+            echo "apex: no known compositor is running (XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-unset})" >&2
+            exit 1
+        fi
+        ;;
+esac

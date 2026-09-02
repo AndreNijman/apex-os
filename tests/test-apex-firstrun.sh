@@ -228,6 +228,72 @@ fi
 #  Openbox-fallback look the Floating pass exists to remove. Hence a key-name
 #  check rather than a parse check.
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  labwc input settings
+#
+#  labwc ignores an unrecognised element in SILENCE — no warning, no error, the
+#  session starts fine and the setting simply does not exist. That is how
+#  `<tapToClick>yes</tapToClick>` shipped: not a labwc element (it is `<tap>`),
+#  so the line did nothing, and it looked correct because tap-to-click is on by
+#  default anyway.
+#
+#  So the check is against the NAMES labwc actually implements, taken from the
+#  package's own exhaustive reference rather than from memory.
+# ─────────────────────────────────────────────────────────────────────────────
+section "labwc input settings"
+
+# labwc ships rc.xml.all as its complete annotated reference. Preferring it over
+# a hardcoded list means the check tracks the installed labwc rather than
+# whatever was true when this test was written.
+LABWC_REF=""
+for cand in /usr/share/doc/labwc/rc.xml.all /usr/share/doc/labwc-*/rc.xml.all; do
+    [ -f "$cand" ] && { LABWC_REF="$cand"; break; }
+done
+
+if [ -z "$LABWC_REF" ]; then
+    printf 'SKIP  labwc rc.xml.all unavailable; cannot check libinput element names\n'
+else
+    ok "labwc's own element reference is available"
+
+    # Every element name labwc documents inside <libinput>, commented or not.
+    sed -n '/<libinput>/,/<\/libinput>/p' "$LABWC_REF" \
+        | grep -oE '<[a-zA-Z]+>' | tr -d '<>' | sort -u > "${WORK}/labwc-input-known"
+
+    # Every element name the shipped config actually uses.
+    sed -n '/<libinput>/,/<\/libinput>/p' "${TMPL}/rc.xml" \
+        | grep -vE '^\s*<!--' \
+        | grep -oE '<[a-zA-Z]+>' | tr -d '<>' | sort -u > "${WORK}/labwc-input-used"
+
+    unknown=""
+    while IFS= read -r el; do
+        case "$el" in libinput|device) continue ;; esac
+        grep -qxF "$el" "${WORK}/labwc-input-known" || unknown="${unknown} ${el}"
+    done < "${WORK}/labwc-input-used"
+
+    if [ -z "$unknown" ]; then
+        ok "every <libinput> element is one labwc implements"
+    else
+        printf '  not implemented by labwc:%s\n' "$unknown"
+        printf '  (labwc ignores these silently, so the setting does nothing)\n'
+        bad "every <libinput> element is one labwc implements"
+    fi
+
+    # The specific regression, named, so it cannot come back quietly.
+    #
+    # Non-comment lines only: the comment above the block explains what went
+    # wrong and therefore contains the string "<tapToClick>". Grepping the whole
+    # file made the documentation trip the check on the fixed config.
+    live_libinput() {
+        sed -n '/<libinput>/,/<\/libinput>/p' "${TMPL}/rc.xml" | grep -vE '^\s*<!--|^\s*[a-zA-Z]'
+    }
+    live_libinput | grep -q '<tapToClick>' \
+        && bad "tap-to-click uses labwc's own element name" \
+        || ok "tap-to-click uses labwc's own element name"
+    live_libinput | grep -q '<tap>yes</tap>' \
+        && ok "tap-to-click is enabled with <tap>" \
+        || bad "tap-to-click is enabled with <tap>"
+fi
+
 section "labwc window chrome"
 THEMERC="${TMPL}/themerc-override"
 if [ ! -f "$THEMERC" ]; then
@@ -316,7 +382,13 @@ fi
 section "labwc keybinds match the shell defaults"
 CHECK="${ROOT}/files/scripts/check-labwc-keybinds"
 SHELL_TREE=""
-for cand in /usr/share/apex-shell "${ROOT}/../apex-shell"; do
+# The CHECKOUT first, then the installed copy. The image build calls the checker
+# with an explicit /usr/share/apex-shell path (Containerfile.base), so this
+# ordering only affects a local run — and there, the vendored copy on the machine
+# is whatever the last image shipped, which lags the tree being tested. Checking
+# a change against a stale source of truth fails for a reason that has nothing
+# to do with the change.
+for cand in "${ROOT}/../apex-shell" /usr/share/apex-shell; do
     [ -f "${cand}/src/services/config_tab/KeybindService.qml" ] && { SHELL_TREE="$cand"; break; }
 done
 

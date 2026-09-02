@@ -495,6 +495,39 @@ COPY files/system/libexec/apex-shell-firstrun /usr/libexec/apex-shell-firstrun
 # the provisioner safely re-invoke it to repair a live session).
 COPY --chmod=0755 files/system/libexec/apex-shell-autostart \
      /usr/libexec/apex-shell-autostart
+
+# Desktop context-menu helpers. The menu itself is one QML surface shared by all
+# three sessions; these three scripts are where the per-compositor differences
+# live, so the QML never has to know which compositor it is running under.
+#
+#   apex-desktop-menu      right-click entry point; restarts a dead shell rather
+#                          than leaving the user with no menu at all
+#   apex-compositor-reload labwc --reconfigure / hyprctl reload / niri validate
+#   apex-session-logout    loginctl first, compositor exit verb as the fallback
+COPY --chmod=0755 files/system/libexec/apex-desktop-menu \
+     /usr/libexec/apex-desktop-menu
+COPY --chmod=0755 files/system/libexec/apex-compositor-reload \
+     /usr/libexec/apex-compositor-reload
+COPY --chmod=0755 files/system/libexec/apex-session-logout \
+     /usr/libexec/apex-session-logout
+RUN set -eux; \
+    for h in apex-desktop-menu apex-compositor-reload apex-session-logout; do \
+        test -x "/usr/libexec/$h"; \
+        bash -n "/usr/libexec/$h"; \
+    done; \
+    # The right-click binding names this exact path; a rename that misses the
+    # config would leave the desktop with no menu and no error anywhere.
+    grep -q '/usr/libexec/apex-desktop-menu' /usr/share/apex/labwc/rc.xml; \
+    # menu.xml must survive as the emergency path, still reachable on a
+    # modifier. Losing it means a dead shell leaves no way back.
+    grep -q 'ShowMenu' /usr/share/apex/labwc/rc.xml; \
+    test -s /usr/share/apex/labwc/menu.xml; \
+    # Every verb the helpers call has to exist in the image.
+    command -v labwc >/dev/null; \
+    command -v niri >/dev/null; \
+    command -v loginctl >/dev/null; \
+    /usr/bin/apex shell list | grep -qw menu; \
+    echo "context menu: helpers installed, right-click bound, menu.xml fallback intact"
 RUN systemctl --global enable apex-shell-firstrun.service
 
 # ── Stage 5d: user packages, WITHOUT breaking OS updates ────────────────────
@@ -697,6 +730,32 @@ RUN set -eux; \
 #
 # The config templates are installed read-only and seeded per-user by
 # apex-shell-firstrun, matching how the Hyprland config is handled.
+# Portal backends for the labwc session. See the file for why the packaged
+# `default=wlr;*` is not good enough. /etc overrides /usr/share per
+# portals.conf(5) without conflicting with the labwc package on upgrade.
+COPY files/system/xdg-desktop-portal/labwc-portals.conf \
+     /etc/xdg-desktop-portal/labwc-portals.conf
+RUN set -eux; \
+    test -s /etc/xdg-desktop-portal/labwc-portals.conf; \
+    # The backends this config names must actually be installed, or the session
+    # silently loses screen sharing and file dialogs. A portal that is merely
+    # *configured* is not a portal that answers.
+    test -f /usr/share/xdg-desktop-portal/portals/wlr.portal; \
+    test -f /usr/share/xdg-desktop-portal/portals/gtk.portal; \
+    test -x /usr/libexec/xdg-desktop-portal-wlr; \
+    test -x /usr/libexec/xdg-desktop-portal-gtk; \
+    # wlr genuinely implements the two capture interfaces we point at it.
+    grep -q 'org.freedesktop.impl.portal.ScreenCast' /usr/share/xdg-desktop-portal/portals/wlr.portal; \
+    grep -q 'org.freedesktop.impl.portal.Screenshot' /usr/share/xdg-desktop-portal/portals/wlr.portal; \
+    # ...and gtk implements the one that the wildcard used to leave to chance.
+    grep -q 'org.freedesktop.impl.portal.FileChooser' /usr/share/xdg-desktop-portal/portals/gtk.portal; \
+    # No wildcard survives: that is the whole point of overriding the packaged
+    # file, so a regression that reintroduces it must fail the build.
+    ! grep -qE '^\s*default=.*\*' /etc/xdg-desktop-portal/labwc-portals.conf; \
+    grep -qE '^default=gtk$' /etc/xdg-desktop-portal/labwc-portals.conf; \
+    grep -qE '^org\.freedesktop\.impl\.portal\.ScreenCast=wlr$' /etc/xdg-desktop-portal/labwc-portals.conf; \
+    echo "portals: labwc pinned to wlr capture + gtk desktop interfaces"
+
 COPY files/desktop/wayland-sessions/apex-labwc.desktop \
      /usr/share/wayland-sessions/apex-labwc.desktop
 COPY files/desktop/labwc/ /usr/share/apex/labwc/

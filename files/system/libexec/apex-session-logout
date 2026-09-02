@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+#
+# APEX-OS — end the graphical session.
+#
+# Same reasoning as apex-compositor-reload: the exit verb differs per
+# compositor, so the APEX context menu asks for "logout" and this resolves it.
+#
+# systemd's loginctl is tried FIRST and is the right answer wherever the session
+# is registered with logind: it tears the session down properly, so user units
+# stop and the greeter comes back. Killing the compositor directly leaves that
+# to chance, so it is the fallback rather than the default.
+
+set -uo pipefail
+
+if command -v loginctl >/dev/null 2>&1 && [ -n "${XDG_SESSION_ID:-}" ]; then
+    loginctl terminate-session "${XDG_SESSION_ID}" && exit 0
+fi
+
+desktop="$(printf '%s' "${XDG_CURRENT_DESKTOP:-}" | tr '[:upper:]' '[:lower:]')"
+case "$desktop" in
+    *labwc*)    exec labwc --exit ;;
+    *hyprland*) exec hyprctl dispatch exit ;;
+    *niri*)     exec niri msg action quit --skip-confirmation ;;
+esac
+
+if   pgrep -x labwc    >/dev/null 2>&1; then exec labwc --exit
+elif pgrep -x Hyprland >/dev/null 2>&1; then exec hyprctl dispatch exit
+elif pgrep -x niri     >/dev/null 2>&1; then exec niri msg action quit --skip-confirmation
+fi
+
+echo "apex: could not determine how to end this session" >&2
+exit 1
