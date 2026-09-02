@@ -578,7 +578,7 @@ impl SecretGrants {
         let key = grant_key(service, capability);
         self.projects
             .get(project)
-            .is_some_and(|keys| keys.iter().any(|k| *k == key))
+            .is_some_and(|keys| keys.contains(&key))
     }
 
     pub fn allow(&mut self, project: &str, service: &str, capability: &str) {
@@ -611,21 +611,40 @@ impl SecretGrants {
 
 // ── audit ───────────────────────────────────────────────────────────────────
 
+/// One capability use, as it goes into the audit log.
+///
+/// A struct rather than eight positional arguments — which is what this was,
+/// and which clippy was right about for a better reason than argument count:
+/// four of them are `Option`s and two are `&str`, so transposing a pair
+/// compiles cleanly and silently writes the wrong audit record. Named fields
+/// make that a type error at the call site.
+#[derive(Debug, Clone)]
+pub struct AuditEntry<'a> {
+    pub event: &'a str,
+    pub service: &'a str,
+    pub capability: &'a Capability,
+    pub session: Option<u32>,
+    pub agent: Option<&'a str>,
+    pub project: Option<&'a str>,
+    pub exit_code: Option<i32>,
+}
+
 /// §4: "audit which agent used which capability and when."
 ///
 /// Append-only. The token never appears — the record names the capability and
 /// the remote, which is the whole point of brokering rather than handing over.
-pub fn audit(
-    path: &Path,
-    event: &str,
-    service: &str,
-    capability: &Capability,
-    session: Option<u32>,
-    agent: Option<&str>,
-    project: Option<&str>,
-    exit_code: Option<i32>,
-) -> std::io::Result<()> {
+pub fn audit(path: &Path, entry: &AuditEntry<'_>) -> std::io::Result<()> {
     use std::io::Write;
+
+    let AuditEntry {
+        event,
+        service,
+        capability,
+        session,
+        agent,
+        project,
+        exit_code,
+    } = entry;
 
     if let Some(parent) = path.parent() {
         crate::paths::ensure_private_dir(parent)?;
@@ -976,10 +995,25 @@ mod tests {
             remote: "origin".into(),
             branch: Some("feat/x".into()),
         };
-        audit(&log, "used", "github", &cap, Some(4), Some("claude"),
-              Some("/p/demo"), Some(0)).expect("audit");
-        audit(&log, "refused", "github", &cap, Some(4), Some("claude"),
-              Some("/p/demo"), None).expect("audit");
+        let base = AuditEntry {
+            event: "used",
+            service: "github",
+            capability: &cap,
+            session: Some(4),
+            agent: Some("claude"),
+            project: Some("/p/demo"),
+            exit_code: Some(0),
+        };
+        audit(&log, &base).expect("audit");
+        audit(
+            &log,
+            &AuditEntry {
+                event: "refused",
+                exit_code: None,
+                ..base
+            },
+        )
+        .expect("audit");
 
         let text = std::fs::read_to_string(&log).unwrap();
         assert_eq!(text.lines().count(), 2, "appends must not overwrite");

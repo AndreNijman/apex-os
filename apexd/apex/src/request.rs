@@ -271,10 +271,7 @@ fn list(all: bool, json: bool) -> Result<i32> {
         );
         return Ok(0);
     }
-    println!(
-        "{:<4} {:<18} {:<10} {}",
-        "ID", "STATE", "AGENT", "OPERATION"
-    );
+    println!("{:<4} {:<18} {:<10} OPERATION", "ID", "STATE", "AGENT");
     for r in &requests {
         println!(
             "{:<4} {:<18} {:<10} apex {}",

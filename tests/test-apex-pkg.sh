@@ -37,6 +37,12 @@
 #  Run from anywhere: ./tests/test-apex-pkg.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# `set +e`, for the same reason as every other suite here: this one COUNTS
+# failures instead of aborting, and many assertions run commands that exit
+# non-zero on purpose. GitHub Actions invokes a script as `bash -e {0}`, and
+# under `-e` the first such command ends the script — silently truncating the
+# run rather than reporting anything, which is worse than a failure.
+set +e
 cd "$(dirname "$0")" || exit 2
 
 ENGINE=../files/system/libexec/apex-pkg

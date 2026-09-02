@@ -10,6 +10,14 @@
 #      ./tests/test-apex-display.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# `set +e` is deliberate and load-bearing. This suite COUNTS failures rather
+# than aborting on them, and several assertions run commands that exit non-zero
+# on purpose — a refusal, a guard firing, a bad argument. GitHub Actions invokes
+# a script as `bash -e {0}`, and under `-e` a `x="$(cmd)"` assignment whose
+# command exits non-zero terminates the whole script. That is exactly what
+# happened: the suite passed locally, and on CI it died part-way through with
+# the remaining assertions reported as failures.
+set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GEN="${ROOT}/files/system/libexec/apex-display-apply"
@@ -135,6 +143,24 @@ cp "$K" "${WORK}/k.1"; cp "$D" "${WORK}/d.1"
 run_save "$H2" >/dev/null 2>&1
 cmp -s "$K" "${WORK}/k.1" && cmp -s "$D" "${WORK}/d.1" \
     && ok "re-applying changes nothing" || bad "re-applying changes nothing"
+
+section "a missing helper is a failure, not a traceback"
+# The generator falls back to `pgrep` to identify the compositor when the
+# environment gives no hint. `run()` did not tolerate a missing binary, so on a
+# machine without pgrep on PATH `save` died with a FileNotFoundError instead of
+# writing the layout — which is what happens on a CI runner and in any minimal
+# container. PATH here holds ONLY the fakes, so pgrep is genuinely absent.
+H6="${WORK}/home6"; mkdir -p "$H6/.config/apex-shell" "$H6/.config/hypr" "$H6/.config/kanshi"
+cp "$H2/.config/apex-shell/display.json" "$H6/.config/apex-shell/display.json"
+out="$(env -u HYPRLAND_INSTANCE_SIGNATURE -u NIRI_SOCKET -u XDG_CURRENT_DESKTOP \
+        -u WAYLAND_DISPLAY PATH="$FAKE" HOME="$H6" APEX_DISPLAY_NO_LIVE=1 \
+        "$PY" "$GEN" save 2>&1)"
+printf '%s' "$out" | grep -qE "Traceback|FileNotFoundError" \
+    && { bad "no traceback when a helper is missing"; printf '      %s\n' "$out" | head -3; } \
+    || ok "no traceback when a helper is missing"
+[ -s "$H6/.config/kanshi/config" ] \
+    && ok "the layout is still written with no compositor and no pgrep" \
+    || bad "the layout is still written with no compositor and no pgrep"
 
 section "an empty model does nothing"
 H3="${WORK}/home3"; mkdir -p "$H3/.config/apex-shell"

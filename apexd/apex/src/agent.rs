@@ -898,7 +898,7 @@ fn layout_show(json: bool) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&l)?);
         return Ok(0);
     }
-    println!("{:<4} {:<14} {:<10} {}", "WS", "APP", "KIND", "COMMAND");
+    println!("{:<4} {:<14} {:<10} COMMAND", "WS", "APP", "KIND");
     for e in &l.entries {
         println!(
             "{:<4} {:<14} {:<10} {}",
