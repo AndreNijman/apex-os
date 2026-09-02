@@ -100,7 +100,7 @@ pub fn detect(dir: &Path) -> Option<Project> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.to_string_lossy().into_owned());
     Some(Project {
-        slug: git::slugify(&root.to_string_lossy()),
+        slug: git::path_slug(&root.to_string_lossy()),
         languages: detect_languages(&root),
         root: root.to_string_lossy().into_owned(),
         name,

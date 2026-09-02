@@ -219,6 +219,29 @@ pub fn refs_under(dir: &Path, prefix: &str) -> Result<Vec<(String, String)>> {
 /// `*`, `[`, `\`, a trailing `.lock`, a leading or trailing `/`). Rather than
 /// enumerate the rules, reduce to a conservative alphabet that satisfies all of
 /// them.
+/// A slug for a filesystem PATH: [`slugify`] with the separators flattened.
+///
+/// `slugify` keeps `/` on purpose, because it also names worktree branches
+/// (`agent/issue-217`) where a slash is meaningful. For a path that is wrong,
+/// and it was wrong for a long time in a way nothing reported:
+///
+///   * `/var/home/andre/Projects/apex/apex-os` slugged to
+///     `var/home/andre/projects/apex/apex-os`;
+///   * the project record path became
+///     `projects/var/home/andre/projects/apex/apex-os.json`;
+///   * `project::remember` did not create those intermediate directories, so
+///     it returned an error for EVERY real project;
+///   * the daemon called it as `let _ = project::remember(proj)`, so the error
+///     went nowhere;
+///   * and `project::list` reads only the top level, so even a record that had
+///     been written would have been invisible.
+///
+/// Net effect: `apex project list` never listed anything, on any machine, and
+/// no test noticed because every fixture path was also nested.
+pub fn path_slug(path: &str) -> String {
+    slugify(&path.replace('/', "-"))
+}
+
 pub fn slugify(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut last_dash = false;
@@ -397,5 +420,44 @@ detached
     fn slugify_collapses_runs_of_separators() {
         assert_eq!(slugify("a   b"), "a-b");
         assert_eq!(slugify("a---b"), "a-b");
+    }
+}
+
+#[cfg(test)]
+mod path_slug_tests {
+    use super::*;
+
+    #[test]
+    fn a_path_slug_is_flat() {
+        // The bug: a slug containing `/` becomes a nested record path, whose
+        // parent directories nothing created and whose contents `list` never
+        // read. Every real project path is nested, so this affected all of them.
+        for path in [
+            "/var/home/andre/Projects/apex/apex-os",
+            "/home/andre/Projects/demo",
+            "/tmp/tmp.XXXX/mine",
+        ] {
+            let slug = path_slug(path);
+            assert!(!slug.contains('/'), "{path} -> {slug}");
+            assert!(!slug.is_empty(), "{path}");
+            assert!(!slug.starts_with('-'), "{path} -> {slug}");
+        }
+    }
+
+    #[test]
+    fn distinct_paths_keep_distinct_slugs() {
+        // Flattening must not collide two projects into one record.
+        let a = path_slug("/home/me/Projects/apex");
+        let b = path_slug("/home/me/Projects/apex-os");
+        let c = path_slug("/home/me/other/apex");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn slugify_still_keeps_slashes_for_branch_names() {
+        // The other caller wants them: worktree branches are `agent/<name>`.
+        assert!(slugify("agent/issue-217").contains('/'));
     }
 }
