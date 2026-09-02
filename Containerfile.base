@@ -277,10 +277,12 @@ RUN set -eux; \
     grep -q 'agent.sh' /etc/bashrc; \
     grep -q 'agent.sh' /usr/share/apex/zsh/zshrc; \
     grep -q 'APEX_NO_AGENT_ALIASES' /usr/share/apex/shell/agent.sh; \
-    # The sourced file must define the universal `a` command and must not blow
-    # up when the runtime is absent, which is its state on every fresh boot.
-    bash -c 'set -e; . /usr/share/apex/shell/agent.sh; [ "$(type -t a)" = function ]'; \
-    zsh -fc 'set -e; . /usr/share/apex/shell/agent.sh; [ "$(whence -w al)" = "al: function" ]'; \
+    # Sourcing it and asserting `a` is defined happens in the apexd stage at the
+    # end of this file, NOT here: agent.sh opens with
+    # `command -v apex >/dev/null || return 0`, so with the binaries not yet
+    # copied in it correctly defines nothing and the check would fail for the
+    # wrong reason.
+
     ! grep -q '\[\[' /usr/share/apex/shell/greeting.sh; \
     grep -q 'greeting.sh' /etc/bashrc; \
     grep -q 'greeting.sh' /usr/share/apex/zsh/zshrc; \
@@ -993,7 +995,12 @@ RUN set -eux; \
     # no-op, which is why the verb table is asserted and not just the binary.
     /usr/bin/apex shell list >/dev/null; \
     /usr/bin/apex shell list | grep -qw menu; \
-    echo "apexd/apex/apex-agentd installed, runnable, and the shell verb table is intact"
+    # The shell integration gates itself on `apex` being on PATH, so this is the
+    # first point in the build where sourcing it can define anything. Checked in
+    # both shells because the file carries a bash and a zsh completion block.
+    bash -c 'set -e; . /usr/share/apex/shell/agent.sh; [ "$(type -t a)" = function ]'; \
+    zsh -fc 'set -e; . /usr/share/apex/shell/agent.sh; [ "$(whence -w al)" = "al: function" ]'; \
+    echo "apexd/apex/apex-agentd installed and runnable; shell verbs and `a` intact"
 
 # ── Stage 7: bootc container sanity lint (informational) ───────────────────
 RUN bootc container lint || true

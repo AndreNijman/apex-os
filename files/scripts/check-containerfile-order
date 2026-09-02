@@ -147,6 +147,13 @@ def check(path, repo_root):
     logical = logical_lines(path)
     problems = []
 
+    # What any stage declares it produces, via `install -D<mode> src DEST`.
+    # These are the only cross-stage artefacts knowable from the file itself.
+    staged_outputs = set()
+    for _n, line in logical:
+        for dest in re.findall(r"install\s+-D\S*\s+\S+\s+(/[^\s;&|]+)", line):
+            staged_outputs.add(dest.rstrip("/"))
+
     # path -> earliest line that provides it, per stage
     stage = 0
     providers = {}
@@ -158,8 +165,24 @@ def check(path, repo_root):
         if not args:
             continue
         flags, sources, dest = args
-        if any(f.startswith("--from=") for f in flags):
-            # Contents unknowable from the repository; position-checked only.
+        from_flag = next((f for f in flags if f.startswith("--from=")), None)
+        if from_flag:
+            # A cross-stage COPY has no source in the repository, so walking it
+            # is impossible. But an earlier stage that does
+            # `install -D... /out/usr/bin/apex` has TOLD us what it produces, so
+            # map those staged paths through this COPY's source prefix.
+            #
+            # This is not a nicety. Moving the binaries to the end of the file
+            # left an assertion that sources a script which self-gates on `apex`
+            # being on PATH; it silently defined nothing and the check failed for
+            # the wrong reason. Blind cross-stage COPYs could not see that.
+            for staged in staged_outputs:
+                for src in sources:
+                    src_clean = src.rstrip("/")
+                    if staged == src_clean or staged.startswith(src_clean + "/"):
+                        rel = staged[len(src_clean):].lstrip("/")
+                        mapped = f"{dest.rstrip('/')}/{rel}" if rel else dest.rstrip("/")
+                        providers.setdefault((stage, mapped), n)
             continue
         for p in provided_paths(sources, dest, repo_root):
             providers.setdefault((stage, p), n)
