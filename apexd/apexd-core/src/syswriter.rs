@@ -44,24 +44,66 @@ pub trait SysWriter: Send + Sync {
 pub struct RealWriter {
     dry_run: bool,
     sys_root: PathBuf,
+    /// Whether actions that run a HOST COMMAND may actually run it.
+    ///
+    /// Off by default, and that default is the whole point. Most actions are
+    /// sysfs writes, which `sys_root` redirects into a fixture — so a test can
+    /// use a live writer safely. Two actions are not writes at all:
+    /// `ScxSwitch`/`ScxStop` shell out to `scxctl`, and the NVIDIA clock locks
+    /// shell out to `nvidia-smi`. No fixture root can redirect a process
+    /// spawn, so a test applying those reaches the real machine.
+    ///
+    /// It did. `scxctl` is a D-Bus client for `scx_loader`, whose polkit action
+    /// is not passwordless, so running the game-mode tests raised a burst of
+    /// "Authentication is required to start, stop, or switch sched-ext
+    /// schedulers" prompts on the developer's desktop — and, once
+    /// authenticated, would have swapped the scheduler of the machine running
+    /// the tests.
+    ///
+    /// So the daemon opts in explicitly ([`RealWriter::for_daemon`]) and
+    /// everything else, tests included, gets a writer that logs and skips.
+    host_commands: bool,
 }
 
 impl RealWriter {
-    /// A writer rooted at real `/sys`.
+    /// A writer rooted at real `/sys` that will NOT run host commands.
+    ///
+    /// This is the constructor for anything that is not the daemon.
     pub fn new(dry_run: bool) -> RealWriter {
         RealWriter {
             dry_run,
             sys_root: PathBuf::from("/sys"),
+            host_commands: false,
+        }
+    }
+
+    /// The daemon's writer: real `/sys`, and permitted to run `scxctl` and
+    /// `nvidia-smi`.
+    ///
+    /// Separate from [`RealWriter::new`] so that opting into host commands is
+    /// one visible call in one place, rather than the default that every
+    /// caller silently inherits.
+    pub fn for_daemon(dry_run: bool) -> RealWriter {
+        RealWriter {
+            dry_run,
+            sys_root: PathBuf::from("/sys"),
+            host_commands: true,
         }
     }
 
     /// A writer rooted at an explicit sysfs path (for a sandbox/fixture). Still
-    /// gated by `dry_run`.
+    /// gated by `dry_run`, and never runs host commands.
     pub fn with_root(dry_run: bool, sys_root: impl Into<PathBuf>) -> RealWriter {
         RealWriter {
             dry_run,
             sys_root: sys_root.into(),
+            host_commands: false,
         }
+    }
+
+    /// Whether this writer may run host commands.
+    pub fn runs_host_commands(&self) -> bool {
+        self.host_commands
     }
 
     pub fn is_dry_run(&self) -> bool {
@@ -266,6 +308,16 @@ impl RealWriter {
             eprintln!("apexd: [dry-run] scxctl {}", args.join(" "));
             return Ok(());
         }
+        // Checked BEFORE anything else, because this is the guard that keeps a
+        // test off the host's scheduler. `sys_root` cannot redirect a process
+        // spawn, so `dry_run` is not enough on its own.
+        if !self.host_commands {
+            eprintln!(
+                "apexd: skip (host commands not enabled for this writer) scxctl {}",
+                args.join(" ")
+            );
+            return Ok(());
+        }
         // sched_ext has to exist in the kernel. On a kernel without it scxctl
         // would fail confusingly, so say the useful thing instead.
         if !Path::new("/sys/kernel/sched_ext").exists() {
@@ -305,6 +357,16 @@ impl RealWriter {
     fn run_nvidia_smi(&self, args: &[String]) -> Result<()> {
         if self.dry_run {
             eprintln!("apexd: [dry-run] nvidia-smi {}", args.join(" "));
+            return Ok(());
+        }
+        // Same guard as scxctl: a process spawn is not redirected by
+        // `sys_root`, so a test with a live writer would lock the clocks of the
+        // GPU it is running on.
+        if !self.host_commands {
+            eprintln!(
+                "apexd: skip (host commands not enabled for this writer) nvidia-smi {}",
+                args.join(" ")
+            );
             return Ok(());
         }
         if !crate::gpu::nvidia_smi_available() {
@@ -663,5 +725,63 @@ impl SysWriter for MockWriter {
     fn apply(&self, action: &Action) -> Result<()> {
         self.actions.lock().unwrap().push(action.clone());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod host_command_tests {
+    use super::*;
+
+    // The guard these assert exists because running the game-mode tests raised
+    // a burst of polkit prompts on the developer's desktop: `scxctl` is a D-Bus
+    // client for `scx_loader`, whose action is not passwordless, and a test
+    // applying `ScxSwitch` through a live writer invoked it for real. `sys_root`
+    // could not prevent it — a process spawn has no root to redirect.
+
+    #[test]
+    fn a_writer_does_not_run_host_commands_unless_it_is_the_daemons() {
+        assert!(
+            !RealWriter::new(false).runs_host_commands(),
+            "the default must be OFF: this is the constructor tests reach for"
+        );
+        assert!(!RealWriter::new(true).runs_host_commands());
+        assert!(!RealWriter::with_root(false, "/tmp/fixture").runs_host_commands());
+        assert!(!RealWriter::with_root(true, "/tmp/fixture").runs_host_commands());
+    }
+
+    #[test]
+    fn the_daemons_writer_does_run_them() {
+        // Otherwise the guard has quietly disabled game mode in production,
+        // which is the failure mode of fixing this the lazy way.
+        assert!(RealWriter::for_daemon(false).runs_host_commands());
+        assert!(RealWriter::for_daemon(true).runs_host_commands());
+    }
+
+    #[test]
+    fn dry_run_is_still_independent_of_host_commands() {
+        // Two separate axes: dry-run says "plan only", host-commands says "you
+        // may leave this process". A daemon in dry-run must do neither.
+        let d = RealWriter::for_daemon(true);
+        assert!(d.is_dry_run());
+        assert!(d.runs_host_commands());
+        let live = RealWriter::for_daemon(false);
+        assert!(!live.is_dry_run());
+    }
+
+    #[test]
+    fn scx_and_nvidia_actions_are_accepted_and_skipped_rather_than_failing() {
+        // A skipped host command must not abort a plan: the rest of game mode
+        // (cpuset, IRQ affinity) is the part that matters, and a restore plan
+        // that aborts half way is worse than one that logs a skip.
+        //
+        // This runs on the test host with host commands OFF, so it is also the
+        // assertion that these two actions cannot touch it.
+        let w = RealWriter::new(false);
+        assert!(w
+            .apply(&Action::ScxSwitch {
+                sched: "scx_lavd".into()
+            })
+            .is_ok());
+        assert!(w.apply(&Action::ScxStop).is_ok());
     }
 }

@@ -7,6 +7,7 @@
 mod agent;
 mod ops;
 mod proxy;
+mod request;
 mod touchpad;
 
 use std::net::{SocketAddr, TcpStream};
@@ -141,6 +142,18 @@ enum Cmd {
     Project {
         #[command(subcommand)]
         cmd: agent::ProjectCmd,
+    },
+    /// Structured privilege requests: how a sandboxed agent asks for a system
+    /// change, and how you decide.
+    ///
+    /// An agent has no sudo, no root shell, and a sandbox that cannot reach the
+    /// system bus. It files a request naming one of a closed set of operations
+    /// and a reason; you review it and either refuse or approve, and approving
+    /// runs the operation with YOUR privilege. There is deliberately no verb
+    /// for an arbitrary command.
+    Request {
+        #[command(subcommand)]
+        cmd: request::RequestCmd,
     },
 }
 
@@ -398,6 +411,7 @@ async fn main() {
         // as long as the user stays attached.
         Cmd::Agent { cmd } => agent::agent(cmd),
         Cmd::Project { cmd } => agent::project_cmd(cmd),
+        Cmd::Request { cmd } => request::main(cmd),
         Cmd::Tier { name } => cmd_tier(name).await,
         Cmd::Profile => cmd_profile().await,
         Cmd::Battery(args) => cmd_battery(args).await,

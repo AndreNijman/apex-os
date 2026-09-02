@@ -21,16 +21,18 @@
 //!         ├─ sandbox policy                sandbox.rs
 //!         ├─ adapters                      adapter.rs
 //!         ├─ projects + worktrees          project.rs
-//!         └─ checkpoints                   checkpoint.rs
+//!         ├─ checkpoints                   checkpoint.rs
+//!         └─ privilege requests            request.rs
 //!         ▲
 //!         │  newline-delimited JSON on a Unix socket    protocol.rs
 //! apex agent … / APEX Shell
 //! ```
 //!
 //! Nothing here is privileged, and nothing here talks to `apexd`. Agent
-//! orchestration in the privileged daemon is exactly what the roadmap forbids;
-//! when a session eventually needs a system change it will be a narrow,
-//! audited request to `org.apexos.Apexd1`, not this process gaining rights.
+//! orchestration in the privileged daemon is exactly what the roadmap forbids.
+//! A session that needs a system change files a structured request
+//! (`request.rs`) which a human approves, and the operation then runs with that
+//! human's own privilege — this process never gains rights.
 
 pub mod adapter;
 pub mod checkpoint;
@@ -40,6 +42,7 @@ pub mod git;
 pub mod paths;
 pub mod project;
 pub mod protocol;
+pub mod request;
 pub mod sandbox;
 pub mod session;
 pub mod term;

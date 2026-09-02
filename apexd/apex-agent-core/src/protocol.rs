@@ -248,6 +248,36 @@ pub enum Request {
     Remove { id: u32 },
     /// Forget every exited session.
     Prune,
+
+    // ── privilege requests (§4) ─────────────────────────────────────────────
+    //
+    // Note what is absent: no session id. The daemon resolves the asking
+    // session from the connection's peer credentials, because
+    // `$APEX_AGENT_SESSION` lives inside a sandbox the agent controls and
+    // anything authorised by a client-supplied id is authorised by the agent.
+    /// Ask for a privileged operation. `verb` must name one of
+    /// [`crate::request::Verb::names`]; the daemon parses and validates it.
+    PrivilegeRequest {
+        verb: String,
+        #[serde(default)]
+        args: Vec<String>,
+        reason: String,
+    },
+    /// Every privilege request on record.
+    Requests,
+    /// Record a human's decision on one. Refused when the connection belongs
+    /// to a session — an agent may not approve itself.
+    Decide { id: u32, decision: String },
+    /// Report that an approved request has been run, with its exit status.
+    RequestExecuted { id: u32, exit_code: i32 },
+    /// Per-project grants.
+    Grants,
+    /// Drop a grant, or every grant for the project when `key` is absent.
+    Revoke {
+        project: String,
+        #[serde(default)]
+        key: Option<String>,
+    },
 }
 
 fn default_replay() -> usize {
@@ -314,6 +344,21 @@ pub enum Response {
         /// UTF-8 lossy transcript tail.
         text: String,
     },
+    /// A privilege request was filed, decided or executed.
+    Request(Box<crate::request::PrivilegeRequest>),
+    /// A list of privilege requests.
+    ///
+    /// A struct variant for the same reason as `Sessions`: serde's
+    /// internally-tagged representation cannot serialize a newtype variant
+    /// wrapping a sequence, and it fails at runtime rather than at compile
+    /// time.
+    Requests {
+        requests: Vec<crate::request::PrivilegeRequest>,
+    },
+    /// Per-project grants: project root -> grant keys.
+    Grants {
+        projects: std::collections::BTreeMap<String, Vec<String>>,
+    },
     /// Verb succeeded and has nothing to say.
     Ok,
     /// Verb failed. `kind` is stable enough to branch on; `message` is for
@@ -335,6 +380,11 @@ pub enum ErrorKind {
     BadRequest,
     /// The sandbox could not be built as requested. Never downgraded silently.
     SandboxUnavailable,
+    /// No privilege request with that id.
+    NoSuchRequest,
+    /// The caller is not allowed to do this — notably, a session trying to
+    /// decide its own privilege request.
+    PermissionDenied,
     /// Anything else, including OS errors.
     Internal,
 }
@@ -462,6 +512,24 @@ mod tests {
         );
     }
 
+    fn sample_request() -> crate::request::PrivilegeRequest {
+        crate::request::PrivilegeRequest {
+            id: 7,
+            verb: crate::request::Verb::Install {
+                packages: vec!["clang".into(), "cmake".into()],
+            },
+            reason: "Required to compile the project".into(),
+            session: Some(4),
+            agent: Some("claude".into()),
+            project: Some("/home/t/p".into()),
+            decision: crate::request::Decision::Pending,
+            created_ms: 1_700_000_000_000,
+            decided_ms: None,
+            executed_ms: None,
+            exit_code: None,
+        }
+    }
+
     fn sample_session() -> SessionInfo {
         SessionInfo {
             id: 1,
@@ -508,6 +576,21 @@ mod tests {
                 id: 3,
                 text: "output\n".into(),
             },
+            // Response::Request is the riskiest shape in this enum: an
+            // internally-tagged variant wrapping a struct that itself
+            // #[serde(flatten)]s an internally-tagged enum. Both layers use a
+            // map representation, which is the one case internal tagging
+            // supports — but it is supported at RUNTIME, not by the type
+            // system, so it is asserted rather than assumed.
+            Response::Request(Box::new(sample_request())),
+            Response::Requests {
+                requests: vec![sample_request(), sample_request()],
+            },
+            Response::Grants {
+                projects: [("/home/t/p".to_string(), vec!["install:clang".to_string()])]
+                    .into_iter()
+                    .collect(),
+            },
             Response::Ok,
             Response::error(ErrorKind::Internal, "boom"),
         ];
@@ -519,6 +602,29 @@ mod tests {
             let _: Response = serde_json::from_str(&text)
                 .unwrap_or_else(|e| panic!("{v:?} does not round-trip: {e} from {text}"));
         }
+    }
+
+    #[test]
+    fn a_privilege_request_survives_the_wire_with_its_verb_intact() {
+        // Not just "it round-trips": the flattened verb must come back as the
+        // same typed value, because the argv that eventually runs is built from
+        // it. A shape that serialises but loses the packages would approve one
+        // operation and run another.
+        let original = sample_request();
+        let wire = serde_json::to_string(&Response::Request(Box::new(original.clone())))
+            .expect("serialise");
+        let back: Response = serde_json::from_str(&wire).expect("deserialise");
+        let Response::Request(r) = back else {
+            panic!("wrong variant from {wire}");
+        };
+        assert_eq!(r.verb, original.verb, "{wire}");
+        assert_eq!(r.argv(), original.argv());
+        assert_eq!(r.reason, original.reason);
+        assert_eq!(r.session, original.session);
+        // And the tag lands where the protocol says it does.
+        let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(v["reply"], "request");
+        assert_eq!(v["verb"], "install");
     }
 
     #[test]
@@ -538,6 +644,22 @@ mod tests {
                 env: vec![("K".into(), "V".into())],
             }),
             Request::List,
+            Request::PrivilegeRequest {
+                verb: "install".into(),
+                args: vec!["clang".into()],
+                reason: "Required to compile the project".into(),
+            },
+            Request::Requests,
+            Request::Decide {
+                id: 1,
+                decision: "once".into(),
+            },
+            Request::RequestExecuted { id: 1, exit_code: 0 },
+            Request::Grants,
+            Request::Revoke {
+                project: "/home/t/p".into(),
+                key: Some("install:clang".into()),
+            },
             Request::Info { id: 1 },
             Request::Attach {
                 id: 1,
