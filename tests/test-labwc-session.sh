@@ -81,16 +81,34 @@ out="${WORK}/results"
 : > "\$out"
 say() { printf '%s=%s\n' "\$1" "\$2" >> "\$out"; }
 
+# Wait for the compositor to actually have a configured output before probing.
+# --startup fires as soon as labwc is up, which is BEFORE the first frame: a
+# capture attempted then fails for lack of a rendered buffer, not for lack of
+# protocol support. Without this the capture probe failed roughly one run in
+# three, and a flaky check is worse than no check because it teaches people to
+# ignore the result.
+for _ in \$(seq 1 40); do
+    wlr-randr 2>/dev/null | grep -q 'Enabled: yes' && break
+    sleep 0.1
+done
+
 # wlr-output-management. The display-settings page is built on this, so if it
 # does not answer here, monitor arrangement cannot work in this session.
 if wlr-randr >/dev/null 2>&1; then say output_management ok; else say output_management fail; fi
 
-# wlr-screencopy: screenshots and the screen recorder.
-if grim "${WORK}/shot.png" >/dev/null 2>&1 && [ -s "${WORK}/shot.png" ]; then
-    say screencopy ok
-else
-    say screencopy fail
-fi
+# wlr-screencopy: screenshots and the screen recorder. Retried, for the same
+# first-frame reason — the question is whether capture works at all, not
+# whether it works on the first attempt after startup.
+screencopy=fail
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    rm -f "${WORK}/shot.png"
+    if grim "${WORK}/shot.png" >/dev/null 2>&1 && [ -s "${WORK}/shot.png" ]; then
+        screencopy=ok
+        break
+    fi
+    sleep 0.3
+done
+say screencopy "\$screencopy"
 
 # Clipboard and primary selection are separate mechanisms; a compositor can
 # serve one and not the other, and middle-click paste is the one people notice.
