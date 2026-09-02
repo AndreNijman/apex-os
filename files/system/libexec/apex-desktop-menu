@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+#
+# APEX-OS — desktop right-click handler.
+#
+# Bound to a right-click on the desktop root in every compositor's config. Opens
+# the APEX QML context menu, which replaces the compositor's own root menu.
+#
+# WHY A HELPER AND NOT A DIRECT `apex shell` CALL
+# The compositor cannot express "open the APEX menu, or the built-in one if the
+# shell is down" — labwc mousebinds are a fixed action, not a conditional. So the
+# decision lives here, where it can actually be made:
+#
+#   shell reachable        -> APEX menu
+#   shell not reachable    -> try to restart it once, then retry
+#   still not reachable    -> tell the user how to get the fallback menu
+#
+# The restart attempt is the useful part. The single most likely reason the
+# desktop has no menu is that the shell died, and right-clicking the desktop is
+# exactly what somebody does when they notice.
+#
+# The emergency path remains `menu.xml`, reachable with SUPER+right-click on
+# labwc — see the Root mousebind comment in rc.xml.
+
+set -uo pipefail
+
+readonly AUTOSTART=/usr/libexec/apex-shell-autostart
+readonly LOG_TAG=apex-desktop-menu
+
+log() { command -v systemd-cat >/dev/null 2>&1 && printf '%s\n' "$*" | systemd-cat -t "$LOG_TAG" -p info || true; }
+
+# Ask the shell to open the menu. `apex shell` wraps the Quickshell IPC call and
+# returns non-zero when the shell is not answering.
+open_menu() {
+    apex shell ipc context-menu open >/dev/null 2>&1
+}
+
+if open_menu; then
+    exit 0
+fi
+
+log "APEX Shell did not answer; attempting a restart before giving up"
+
+if [ -x "$AUTOSTART" ]; then
+    # Idempotent by design: it refuses to start a second instance, so calling it
+    # when the shell is actually alive is harmless.
+    "$AUTOSTART" >/dev/null 2>&1 || true
+
+    # The shell needs a moment to claim its IPC socket. Poll briefly rather than
+    # sleeping a fixed amount, so the common case stays fast.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.25
+        if open_menu; then
+            log "APEX Shell restarted and the menu opened"
+            exit 0
+        fi
+    done
+fi
+
+# Out of options. Say so somewhere the user can see rather than failing mutely.
+log "APEX Shell is not running; use the compositor fallback menu"
+if command -v notify-send >/dev/null 2>&1; then
+    notify-send -u critical "APEX Shell is not running" \
+        "The desktop menu is unavailable. Super+right-click gives the fallback menu." \
+        >/dev/null 2>&1 || true
+fi
+exit 1

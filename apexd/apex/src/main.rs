@@ -287,6 +287,10 @@ enum ShellCmd {
     Wallpaper,
     /// Toggle the power menu.
     Power,
+    /// Toggle the desktop context menu (what a right-click on the desktop
+    /// opens). Replaces the compositor's own root menu; the same QML surface
+    /// serves all three sessions.
+    Menu,
     /// Toggle the audio panel (output, input or the app mixer).
     Audio {
         /// out | in | mixer
@@ -1032,6 +1036,7 @@ fn shell_targets() -> Vec<(&'static str, &'static str, &'static str)> {
         ("notifications", "notification-toggle", "toggle"),
         ("clipboard", "clipboard-toggle", "toggle"),
         ("wallpaper", "wallpaper-toggle", "toggle"),
+        ("menu", "context-menu", "toggle"),
         ("power", "PowerMenu-toggle", "toggle"),
         ("audio out", "audioOut-toggle", "toggle"),
         ("audio in", "audioIn-toggle", "toggle"),
@@ -1247,6 +1252,7 @@ fn cmd_shell(cmd: ShellCmd) -> i32 {
         ShellCmd::Notifications => shell_ipc("notification-toggle", "toggle", &[]),
         ShellCmd::Clipboard => shell_ipc("clipboard-toggle", "toggle", &[]),
         ShellCmd::Wallpaper => shell_ipc("wallpaper-toggle", "toggle", &[]),
+        ShellCmd::Menu => shell_ipc("context-menu", "toggle", &[]),
         ShellCmd::Power => shell_ipc("PowerMenu-toggle", "toggle", &[]),
         ShellCmd::Focus => shell_ipc("focus-toggle", "toggle", &[]),
         ShellCmd::Record => shell_ipc("screenrec-on", "toggle", &[]),

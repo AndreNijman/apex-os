@@ -2,10 +2,15 @@
 <!--
   APEX-OS — labwc root menu (seeded per-user by apex-shell-firstrun).
 
-  labwc shows this on a right-click of the desktop. Kept short on purpose: APEX
-  Shell owns the launcher, the settings pages and the power menu, so this is a
-  fallback path rather than the primary UI — it is what rescues you when the
-  shell is not running.
+  This is the EMERGENCY menu, not the desktop menu. A plain right-click on the
+  desktop opens the APEX QML context menu (see the Root mousebind in rc.xml);
+  this one is reached with SUPER+right-click and exists for exactly one case:
+  APEX Shell is not running and could not be restarted, so the QML menu cannot
+  appear.
+
+  Kept short on purpose. APEX Shell owns the launcher, the settings pages and
+  the power menu; every entry here is either a way to get the shell back or a
+  way to leave the session.
 -->
 <openbox_menu>
   <menu id="root-menu" label="APEX">

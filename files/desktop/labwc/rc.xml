@@ -128,12 +128,29 @@
     <osd show="yes" style="thumbnail" output="focused" />
   </windowSwitcher>
 
+  <!-- Touchpad behaviour, kept in step with the Hyprland session's input block.
+
+       `tap`, NOT `tapToClick`. The element was `<tapToClick>` here, which labwc
+       does not implement: it appears zero times in labwc-config(5) and zero
+       times in the labwc package's own exhaustive rc.xml.all, whose libinput
+       section spells it `<tap>yes</tap>`. labwc ignores an unrecognised element
+       in silence, so the line did nothing.
+
+       It LOOKED like it worked because tap-to-click is enabled by default for
+       every device category. The intent was met by accident, and anyone who had
+       tried to write `<tapToClick>no</tapToClick>` to turn tapping OFF would
+       have found the setting simply ignored. The element-name guard in
+       tests/test-apex-firstrun.sh now catches this whole class.
+
+       Not set here, deliberately, because both are already labwc's defaults and
+       writing them would be decoration rather than configuration:
+         tapButtonMap  lrm  — one/two/three-finger tap = left/right/middle, so
+                              two-finger tap is already right-click
+         scrollMethod  twofinger -->
   <libinput>
     <device category="touchpad">
       <naturalScroll>yes</naturalScroll>
-      <tapToClick>yes</tapToClick>
-      <!-- Two-finger tap = right click, matching the Hyprland session's
-           tap-to-click behaviour on the same hardware. -->
+      <tap>yes</tap>
       <tapAndDrag>yes</tapAndDrag>
       <accelProfile>adaptive</accelProfile>
     </device>
@@ -178,6 +195,12 @@
     </keybind>
     <keybind key="W-S-w">
       <action name="Execute" command="apex shell wallpaper"/>
+    </keybind>
+    <!-- The same menu a desktop right-click opens, on a key, so it is reachable
+         from a tiled session with no visible desktop. Matches the Hyprland and
+         niri bindings the shell generates for them. -->
+    <keybind key="W-S-m">
+      <action name="Execute" command="apex shell menu"/>
     </keybind>
     <keybind key="W-l">
       <action name="Execute" command="apex shell lock"/>
@@ -379,6 +402,30 @@
   </keyboard>
 
   <mouse>
+    <!-- Desktop right-click opens the APEX QML context menu instead of the
+         Openbox-derived root menu. That menu is the single loudest "this is a
+         fallback" signal left in the Floating session, and the same QML surface
+         serves the Hyprland and niri sessions, so the menu is one object rather
+         than three that drift.
+
+         The helper is what makes this safe: a mousebind is a fixed action and
+         cannot express "…or the built-in menu if the shell is down", so the
+         decision lives in /usr/libexec/apex-desktop-menu, which also tries to
+         restart a dead shell — the most likely reason the desktop has no menu
+         is that the shell died, and right-clicking is what people do when they
+         notice.
+
+         menu.xml is NOT removed. Super+right-click still shows it, which is the
+         documented emergency path when the shell cannot be revived. -->
+    <context name="Root">
+      <mousebind button="Right" action="Press">
+        <action name="Execute" command="/usr/libexec/apex-desktop-menu"/>
+      </mousebind>
+      <mousebind button="W-Right" action="Press">
+        <action name="ShowMenu" menu="root-menu"/>
+      </mousebind>
+    </context>
+
     <context name="Frame">
       <mousebind button="W-Left" action="Press">
         <action name="Focus"/>
