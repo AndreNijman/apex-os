@@ -242,7 +242,13 @@ else
         && ok "themerc-override carries the @ACCENT@ placeholder" \
         || bad "themerc-override carries the @ACCENT@ placeholder"
 
-    if [ -f "${h}/.config/labwc/themerc-override" ]; then
+    # The seeding half only has an answer where the block actually ran. The
+    # seeding block is guarded on labwc being installed, so on a runner without
+    # it there is no seeded file to inspect and asserting one would be checking
+    # the guard, not the behaviour.
+    if ! command -v labwc >/dev/null 2>&1 && [ ! -x /usr/bin/labwc ]; then
+        printf 'SKIP  labwc not installed; nothing was seeded to inspect\n'
+    elif [ -f "${h}/.config/labwc/themerc-override" ]; then
         ok "themerc-override is seeded into the user config"
         grep -q '@ACCENT@' "${h}/.config/labwc/themerc-override" \
             && bad "seeded themerc-override has no unsubstituted placeholder" \
