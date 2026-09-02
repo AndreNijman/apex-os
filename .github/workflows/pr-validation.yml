@@ -289,6 +289,21 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq bubblewrap
           bwrap --version
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor,
+          # so bwrap installs fine and then fails with "setting up uid map:
+          # Permission denied" the moment it runs. Without this the sandbox
+          # section reports a session that "started" and then asserts nothing,
+          # because the script inside never executed.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
+            echo "note: no apparmor userns restriction on this kernel"
+          # Prove it actually works HERE, so a failure is one clear line at
+          # install time rather than a confusing assertion later.
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid \
+                /bin/true || {
+            echo "::error::bubblewrap cannot create a namespace on this runner"
+            exit 1
+          }
+          echo "bubblewrap works: a confined session can be built" 
           # The runtime also refuses to confine a session when the kernel still
           # honours the legacy TIOCSTI ioctl, because keystroke injection into
           # the controlling terminal would make confinement meaningless. Report
