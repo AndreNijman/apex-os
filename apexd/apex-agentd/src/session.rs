@@ -120,6 +120,9 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
 
     // Build the sandbox.
     let mut spec = SandboxSpec::new(req.sandbox, paths::home(), paths::runtime_dir());
+    // /run is masked, which takes the resolv.conf symlink target with it. Bind
+    // the target back or the session has no DNS at all.
+    spec.run_ro = sandbox::resolv_binds();
     spec.control_socket = paths::control_socket();
     spec.scratch = scratch.clone();
     spec.cwd = workdir.clone();
