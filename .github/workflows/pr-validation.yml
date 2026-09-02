@@ -107,6 +107,41 @@ jobs:
             Containerfile.base Containerfile.core \
             Containerfile.daily Containerfile.gaming
 
+      - name: Input page and generator agree
+        run: |
+          set -euo pipefail
+          # The settings page writes a JSON model; the generator reads it.
+          # Nothing connects the two but a shared understanding of the key
+          # names, and both failure modes are silent:
+          #
+          #   * a key the page offers and the generator ignores — the control
+          #     writes the model, the generator runs, success is reported, and
+          #     nothing changes. InputService's first draft invented
+          #     `numlock_on_boot` exactly this way.
+          #   * a default that differs — the generator's defaults are asserted
+          #     to reproduce what the shipped compositor configs already set, so
+          #     a page that disagrees changes behaviour the first time anyone
+          #     touches any single control.
+          #
+          # Neither shows up in a test of either side alone, because each is
+          # internally consistent.
+          #
+          # apex-shell is a separate repository, so it is checked out here. The
+          # checker exits 77 (skip) when it is absent, which keeps this from
+          # failing for a reason that is nothing to do with the change.
+          git clone --depth 1 -q https://github.com/AndreNijman/apex-shell \
+            /tmp/apex-shell-parity || true
+          set +e
+          python3 files/scripts/check-input-parity \
+            --service /tmp/apex-shell-parity/src/services/config_tab/InputService.qml
+          rc=$?
+          set -e
+          case "$rc" in
+            0)  echo "input parity holds" ;;
+            77) echo "::notice::apex-shell unavailable; input parity not checked" ;;
+            *)  exit "$rc" ;;
+          esac
+
       - name: Only the daemon may run host commands
         run: |
           set -euo pipefail

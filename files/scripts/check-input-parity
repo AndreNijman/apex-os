@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Assert that APEX Shell's Input page and apex-input-apply agree.
+
+WHY THIS EXISTS
+
+The settings page writes a JSON model; the generator reads it. Nothing connects
+the two but a shared understanding of the key names, and the failure modes are
+both silent:
+
+  * a key in the PAGE that the generator does not read — the switch writes the
+    model, runs the generator, reports success, and changes nothing. The first
+    draft of InputService.qml invented `numlock_on_boot` exactly this way.
+  * a key in the GENERATOR that the page does not offer — a setting that exists
+    and is unreachable, which looks like a missing feature rather than a
+    missing control.
+
+And a DEFAULT that differs is worse than either: the generator's defaults are
+asserted to reproduce what the shipped compositor configs already set, so a
+page whose defaults disagree changes behaviour the first time somebody touches
+any single control.
+
+None of that shows up in a test of either side alone, because each is
+internally consistent. So it is checked here, across both repositories.
+
+USAGE
+
+    check-input-parity [--generator PATH] [--service PATH]
+
+Defaults to this repository's generator and a sibling apex-shell checkout.
+Exits 0 when they agree, 1 when they do not, and 77 (skip) when the shell
+checkout cannot be found — CI for apex-os alone must not fail because the other
+repository is not present.
+"""
+
+import argparse
+import ast
+import json
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OS_ROOT = os.path.dirname(os.path.dirname(HERE))
+DEFAULT_GENERATOR = os.path.join(OS_ROOT, "files/system/libexec/apex-input-apply")
+DEFAULT_SERVICE = os.path.join(
+    os.path.dirname(OS_ROOT), "apex-shell/src/services/config_tab/InputService.qml"
+)
+
+# Keys the generator reads but the page deliberately does not offer, with the
+# reason. Kept short and justified: an entry here is a control a user cannot
+# reach, so each one needs an argument, not a shrug.
+INTENTIONALLY_UNEXPOSED = {
+    # (section, key): why
+}
+
+
+def generator_defaults(path):
+    """apex-input-apply's DEFAULTS dict, read from the source.
+
+    Parsed with `ast` rather than imported: importing runs module-level code,
+    and rather than reason about whether that is safe today it is simpler never
+    to execute the file being inspected.
+    """
+    with open(path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "DEFAULTS" not in names:
+            continue
+        return ast.literal_eval(node.value)
+    raise SystemExit(f"could not find DEFAULTS in {path}")
+
+
+def service_schema(path):
+    """The `schema` table out of InputService.qml, as {(section, key): default}.
+
+    The QML is not parsed — the table is deliberately written as one flat block
+    of `"prop": { s: "...", k: "...", d: ... },` lines precisely so a regex can
+    read it, and so that adding a key to the UI without adding it here is
+    impossible rather than merely discouraged.
+    """
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+
+    start = text.find("readonly property var schema:")
+    if start < 0:
+        raise SystemExit(f"could not find the schema table in {path}")
+
+    entry = re.compile(
+        r'"(?P<prop>\w+)"\s*:\s*\{\s*'
+        r's:\s*"(?P<section>\w+)"\s*,\s*'
+        r'k:\s*"(?P<key>\w+)"\s*,\s*'
+        r"d:\s*(?P<default>true|false|-?[\d.]+|\"[^\"]*\")\s*\}"
+    )
+    out = {}
+    props = {}
+    for m in entry.finditer(text, start):
+        raw = m.group("default")
+        if raw == "true":
+            value = True
+        elif raw == "false":
+            value = False
+        elif raw.startswith('"'):
+            value = raw.strip('"')
+        else:
+            value = float(raw) if "." in raw else int(raw)
+        out[(m.group("section"), m.group("key"))] = value
+        props[m.group("prop")] = (m.group("section"), m.group("key"))
+    if not out:
+        raise SystemExit(f"the schema table in {path} parsed to nothing")
+
+    # Every property in the table must also be declared as a property, or the
+    # binding silently reads undefined.
+    for prop in props:
+        if not re.search(rf"^\s*property\s+\w+\s+{re.escape(prop)}\s*:", text, re.M):
+            raise SystemExit(f"{prop} is in the schema table but is not a declared property")
+    return out
+
+
+def flatten(defaults):
+    out = {}
+    for section, keys in defaults.items():
+        for key, value in keys.items():
+            out[(section, key)] = value
+    return out
+
+
+def same(a, b):
+    """Compare defaults across a Python/JSON boundary.
+
+    0.0 and 0 are the same default; True and 1 are not. `bool` is checked
+    first because in Python `True == 1`, which would let a boolean default
+    match a numeric one.
+    """
+    if isinstance(a, bool) != isinstance(b, bool):
+        return False
+    if isinstance(a, bool):
+        return a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(float(a) - float(b)) < 1e-9
+    return a == b
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--generator", default=DEFAULT_GENERATOR)
+    ap.add_argument("--service", default=DEFAULT_SERVICE)
+    ap.add_argument("--json", action="store_true", help="print both key sets and exit 0")
+    args = ap.parse_args(argv)
+
+    if not os.path.exists(args.generator):
+        print(f"check-input-parity: no generator at {args.generator}", file=sys.stderr)
+        return 1
+    if not os.path.exists(args.service):
+        print(
+            f"check-input-parity: SKIP — no apex-shell checkout at {args.service}",
+            file=sys.stderr,
+        )
+        return 77
+
+    gen = flatten(generator_defaults(args.generator))
+    svc = service_schema(args.service)
+
+    if args.json:
+        print(json.dumps({
+            "generator": {f"{s}.{k}": v for (s, k), v in sorted(gen.items())},
+            "service": {f"{s}.{k}": v for (s, k), v in sorted(svc.items())},
+        }, indent=2))
+        return 0
+
+    problems = []
+
+    for pair in sorted(svc.keys() - gen.keys()):
+        problems.append(
+            f"the page offers {pair[0]}.{pair[1]}, which the generator does not read "
+            "— the control would do nothing"
+        )
+
+    for pair in sorted(gen.keys() - svc.keys()):
+        if pair in INTENTIONALLY_UNEXPOSED:
+            continue
+        problems.append(
+            f"the generator reads {pair[0]}.{pair[1]}, which the page does not offer "
+            "— add it to InputService's schema, or to INTENTIONALLY_UNEXPOSED with a reason"
+        )
+
+    for pair in sorted(svc.keys() & gen.keys()):
+        if not same(svc[pair], gen[pair]):
+            problems.append(
+                f"{pair[0]}.{pair[1]} defaults disagree: page {svc[pair]!r}, "
+                f"generator {gen[pair]!r} — opening the page would change behaviour"
+            )
+
+    if problems:
+        print("check-input-parity: the Input page and the generator disagree\n", file=sys.stderr)
+        for p in problems:
+            print(f"  * {p}", file=sys.stderr)
+        return 1
+
+    print(f"input parity: {len(svc)} settings, identical keys and defaults")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
