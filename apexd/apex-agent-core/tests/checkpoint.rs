@@ -223,6 +223,23 @@ fn checkpoints_are_listed_newest_first_and_found_by_prefix() {
 
     let list = checkpoint::list(&dir).expect("list");
     assert!(list.len() >= 2);
+
+    // Distinct ordering keys, whatever the clock did. With second precision
+    // both of these landed on the same value on a fast runner and the sort
+    // fell through to comparing commit hashes — an arbitrary order.
+    assert_ne!(
+        first.order_key(),
+        second.order_key(),
+        "two checkpoints share an ordering key; ordering is decided by the commit hash"
+    );
+    assert!(second.order_key() > first.order_key());
+
+    // And the listing is genuinely sorted, not merely correct at the head.
+    let keys: Vec<u64> = list.iter().map(|c| c.order_key()).collect();
+    let mut sorted = keys.clone();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    assert_eq!(keys, sorted, "listing is not newest-first");
+
     assert_eq!(list[0].id, second.id, "newest checkpoint is not first");
 
     let found = checkpoint::find(&dir, &first.id).expect("find by full id");
