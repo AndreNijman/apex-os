@@ -21,6 +21,7 @@
 //!         ├─ sandbox policy                sandbox.rs
 //!         ├─ adapters                      adapter.rs
 //!         ├─ projects + worktrees          project.rs
+//!         ├─ project window layouts        layout.rs
 //!         ├─ checkpoints                   checkpoint.rs
 //!         └─ privilege requests            request.rs
 //!         ▲
@@ -39,6 +40,7 @@ pub mod checkpoint;
 pub mod client;
 pub mod config;
 pub mod git;
+pub mod layout;
 pub mod paths;
 pub mod project;
 pub mod protocol;

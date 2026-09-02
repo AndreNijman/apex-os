@@ -135,7 +135,23 @@ if [ -n "${BASH_VERSION}" ]; then
         esac
     }
 
+    _apex_project_complete() {
+        local cur="${COMP_WORDS[COMP_CWORD]}" verb="${COMP_WORDS[2]}"
+        if [ "$COMP_CWORD" -eq 2 ]; then
+            COMPREPLY=($(compgen -W "list info worktrees checkpoints remove \
+                forget layout" -- "$cur"))
+            return
+        fi
+        case "$verb" in
+            layout) COMPREPLY=($(compgen -W "save show restore forget" -- "$cur")) ;;
+        esac
+    }
+
     _apex_complete() {
+        if [ "${COMP_WORDS[1]}" = "project" ]; then
+            _apex_project_complete
+            return
+        fi
         if [ "${COMP_WORDS[1]}" = "agent" ]; then
             _apex_agent_complete
             return
@@ -220,8 +236,22 @@ if [ -n "${ZSH_VERSION}" ]; then
                 _describe 'request' ids ;;
         esac
     }
+    _apex_project_zsh() {
+        local -a verbs
+        verbs=(list info worktrees checkpoints remove forget layout)
+        if (( CURRENT == 3 )); then
+            _describe 'project verb' verbs
+            return
+        fi
+        if [[ "${words[3]}" == layout ]]; then
+            local -a acts
+            acts=(save show restore forget)
+            _describe 'layout verb' acts
+        fi
+    }
     if whence compdef >/dev/null 2>&1; then
         compdef _apex_agent_zsh 'apex agent'
         compdef _apex_request_zsh 'apex request'
+        compdef _apex_project_zsh 'apex project'
     fi
 fi

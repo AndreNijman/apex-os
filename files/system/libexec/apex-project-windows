@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Enumerate and place windows, compositor-neutrally (roadmap §6).
+
+§6 asks APEX to "remember the windows and terminals associated with a project"
+and to "restore the project after reboot", with the note that compositor-specific
+window placement must stay "behind an adapter layer". This script IS that layer.
+Everything above it — `apex project layout` — speaks only the JSON below.
+
+    apex-project-windows list                    what is open, as JSON
+    apex-project-windows workspace <name|num>    switch to a workspace
+    apex-project-windows place <handle> <ws>     move one window to a workspace
+    apex-project-windows compositor              which backend is in use
+
+WHAT A WINDOW REPORT CONTAINS
+
+    {
+      "handle":    opaque, compositor-specific, valid only this session
+      "pid":       the process that owns the surface
+      "app_id":    Wayland app id / Hyprland class
+      "title":     current title
+      "workspace": name or number, as a string
+      "floating":  bool or null when the compositor does not say
+    }
+
+`handle` is deliberately opaque and deliberately NOT stored in a layout: a
+Hyprland address and a niri window id are both invalid after a restart. What
+gets stored is how to recreate a window, which is the caller's job to work out
+from `pid` and `app_id`.
+
+COMPOSITORS
+
+    hyprland  hyprctl -j clients / dispatch     — full support
+    niri      niri msg --json windows / action  — full support
+    labwc     ext-foreign-toplevel gives titles but NO pid and no placement
+              verb, so `list` reports what it can and `place` refuses. Saying
+              so beats silently restoring a layout that ends up stacked on one
+              workspace.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+TIMEOUT = 5
+
+
+def run(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
+
+
+def compositor():
+    if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return "hyprland"
+    if os.environ.get("NIRI_SOCKET"):
+        return "niri"
+    desktop = (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
+    for name in ("hyprland", "niri", "labwc"):
+        if name in desktop:
+            return name
+    return ""
+
+
+# ── hyprland ────────────────────────────────────────────────────────────────
+
+
+def hyprland_list():
+    if not shutil.which("hyprctl"):
+        return []
+    out = run(["hyprctl", "-j", "clients"])
+    if out.returncode != 0:
+        return []
+    try:
+        clients = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        return []
+    windows = []
+    for c in clients:
+        ws = c.get("workspace") or {}
+        windows.append({
+            "handle": c.get("address"),
+            "pid": c.get("pid"),
+            "app_id": c.get("class") or "",
+            "title": c.get("title") or "",
+            # Hyprland names special workspaces ("special:magic"); the name is
+            # the addressable form, so it is preferred over the numeric id.
+            "workspace": str(ws.get("name") if ws.get("name") else ws.get("id", "")),
+            "floating": bool(c.get("floating")),
+        })
+    return windows
+
+
+def hyprland_place(handle, workspace):
+    r = run(["hyprctl", "dispatch", "movetoworkspacesilent",
+             f"{workspace},address:{handle}"])
+    return r.returncode == 0
+
+
+def hyprland_workspace(workspace):
+    return run(["hyprctl", "dispatch", "workspace", str(workspace)]).returncode == 0
+
+
+# ── niri ────────────────────────────────────────────────────────────────────
+
+
+def niri_list():
+    if not shutil.which("niri"):
+        return []
+    out = run(["niri", "msg", "--json", "windows"])
+    if out.returncode != 0:
+        return []
+    try:
+        wins = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        return []
+    windows = []
+    for w in wins:
+        windows.append({
+            "handle": w.get("id"),
+            "pid": w.get("pid"),
+            "app_id": w.get("app_id") or "",
+            "title": w.get("title") or "",
+            "workspace": str(w.get("workspace_id", "")),
+            "floating": w.get("is_floating"),
+        })
+    return windows
+
+
+def niri_place(handle, workspace):
+    r = run(["niri", "msg", "action", "move-window-to-workspace",
+             "--window-id", str(handle), str(workspace)])
+    return r.returncode == 0
+
+
+def niri_workspace(workspace):
+    return run(["niri", "msg", "action", "focus-workspace",
+                str(workspace)]).returncode == 0
+
+
+# ── labwc ───────────────────────────────────────────────────────────────────
+# By design labwc exposes no IPC socket and no window-management protocol
+# beyond the standard Wayland ones. `lswt` (if installed) can list
+# foreign-toplevels, which gives titles and app ids but NO pid — and without a
+# pid a window cannot be matched to a project, because the project is
+# determined from the process's working directory.
+#
+# So labwc gets an honest partial answer rather than a plausible wrong one.
+
+
+def labwc_list():
+    if not shutil.which("lswt"):
+        return []
+    out = run(["lswt", "-j"])
+    if out.returncode != 0:
+        return []
+    try:
+        data = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        return []
+    toplevels = data if isinstance(data, list) else data.get("toplevels", [])
+    windows = []
+    for t in toplevels:
+        windows.append({
+            "handle": None,
+            "pid": None,          # not available: see the note above
+            "app_id": t.get("app-id") or t.get("app_id") or "",
+            "title": t.get("title") or "",
+            "workspace": "",
+            "floating": None,
+        })
+    return windows
+
+
+BACKENDS = {
+    "hyprland": (hyprland_list, hyprland_place, hyprland_workspace),
+    "niri": (niri_list, niri_place, niri_workspace),
+    "labwc": (labwc_list, None, None),
+}
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        print(__doc__.strip().splitlines()[0], file=sys.stderr)
+        print("\nusage: apex-project-windows list|workspace|place|compositor",
+              file=sys.stderr)
+        return 2
+
+    action = argv[0]
+    which = compositor()
+
+    if action == "compositor":
+        print(which)
+        return 0
+
+    backend = BACKENDS.get(which)
+
+    if action == "list":
+        if backend is None:
+            # An empty list, not an error: "no compositor I can query" and "no
+            # windows" are different, so the distinction goes on stderr and the
+            # exit status, and stdout stays valid JSON for the caller.
+            print("[]")
+            print(f"apex-project-windows: no window query for {which or 'this compositor'}",
+                  file=sys.stderr)
+            return 1
+        windows = backend[0]()
+        print(json.dumps(windows, indent=2))
+        if which == "labwc" and windows:
+            print(
+                "apex-project-windows: labwc reports no pid per window, so these "
+                "cannot be matched to a project",
+                file=sys.stderr,
+            )
+        return 0
+
+    if action == "workspace":
+        if len(argv) != 2:
+            print("usage: apex-project-windows workspace <name|number>", file=sys.stderr)
+            return 2
+        if backend is None or backend[2] is None:
+            print(f"apex-project-windows: {which or 'this compositor'} has no "
+                  "workspace-switch verb", file=sys.stderr)
+            return 1
+        return 0 if backend[2](argv[1]) else 1
+
+    if action == "place":
+        if len(argv) != 3:
+            print("usage: apex-project-windows place <handle> <workspace>", file=sys.stderr)
+            return 2
+        if backend is None or backend[1] is None:
+            print(f"apex-project-windows: {which or 'this compositor'} cannot move "
+                  "a window between workspaces", file=sys.stderr)
+            return 1
+        return 0 if backend[1](argv[1], argv[2]) else 1
+
+    print(f"apex-project-windows: unknown action {action!r}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

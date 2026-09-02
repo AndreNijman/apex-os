@@ -281,6 +281,13 @@ jobs:
       - name: Run privilege-request assertions
         run: ./tests/test-privilege-requests.sh
 
+      # The compositor adapter is faked through APEX_WINDOW_ADAPTER, so this
+      # runs with no compositor at all — which is the whole reason the adapter
+      # is a separate program. `restore` is only ever called with --dry-run, so
+      # the suite cannot start a window.
+      - name: Run project-layout assertions
+        run: ./tests/test-project-layout.sh
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail

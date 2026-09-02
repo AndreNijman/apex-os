@@ -568,6 +568,12 @@ COPY --chmod=0755 files/system/libexec/apex-agent-focus \
      /usr/libexec/apex-agent-focus
 COPY --chmod=0755 files/system/libexec/apex-agent-review \
      /usr/libexec/apex-agent-review
+
+# Project window layouts (§6). The only compositor-specific input to
+# `apex project layout`, which is why it is a separate program: replacing it is
+# how the layout suite becomes deterministic and runnable with no compositor.
+COPY --chmod=0755 files/system/libexec/apex-project-windows \
+     /usr/libexec/apex-project-windows
 # Only what exists at this point in the build. The cross-checks against
 # /usr/share/apex/labwc/rc.xml live in the labwc section that populates it —
 # asserting a path before its COPY is a build failure, and this block did
@@ -610,6 +616,17 @@ RUN set -eux; \
     # `ps` is how apex-agent-focus maps a session to a process; without it the
     # helper silently never finds a terminal and always opens a new one.
     command -v ps >/dev/null; \
+    # Project window layouts.
+    test -x /usr/libexec/apex-project-windows; \
+    python3 -c 'import ast,sys; ast.parse(open("/usr/libexec/apex-project-windows").read())'; \
+    # `list` must emit valid JSON even where the compositor cannot be queried —
+    # there is no compositor in a build container, which is exactly that case.
+    # The caller parses stdout, so a bare error message there would be a parse
+    # failure rather than an empty layout.
+    /usr/libexec/apex-project-windows list 2>/dev/null | python3 -c \
+        'import json,sys; assert json.load(sys.stdin) == [], "expected an empty list"'; \
+    /usr/libexec/apex-project-windows compositor >/dev/null; \
+    ! /usr/libexec/apex-project-windows nonsense-action 2>/dev/null; \
     echo "context menu + settings generators + agent helpers: installed and self-tested"
 RUN systemctl --global enable apex-shell-firstrun.service
 

@@ -16,7 +16,7 @@ use apex_agent_core::protocol::{
     AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo,
 };
 use apex_agent_core::term::{self, RawMode, WinSize};
-use apex_agent_core::{adapter, checkpoint, config, git, project};
+use apex_agent_core::{adapter, checkpoint, config, git, layout, project};
 use clap::{Args, Subcommand};
 
 /// `apex agent <verb>`.
@@ -164,6 +164,42 @@ pub enum ProjectCmd {
     },
     /// Stop tracking a project. The checkout is never touched.
     Forget { slug: String },
+    /// Remember or restore the windows and terminals of a project (§6).
+    ///
+    /// A saved layout stores how to RECREATE each window — its argv, its
+    /// working directory and the workspace it was on — not a window handle,
+    /// which no compositor honours after a restart.
+    ///
+    /// Which windows count is decided from the working directory of the
+    /// process tree behind each one, never from the title: a title is whatever
+    /// an application chose to print.
+    Layout {
+        #[command(subcommand)]
+        cmd: LayoutCmd,
+    },
+}
+
+/// `apex project layout <verb>`.
+#[derive(Subcommand)]
+pub enum LayoutCmd {
+    /// Capture the windows currently working inside this project.
+    Save,
+    /// Show the saved layout.
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reopen the saved layout.
+    ///
+    /// Deliberately a command and not a login hook: a session that reopens
+    /// fourteen windows nobody asked for is worse than one that reopens none.
+    Restore {
+        /// Print what would be started, and start nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Discard the saved layout.
+    Forget,
 }
 
 // ── agent verbs ─────────────────────────────────────────────────────────────
@@ -549,6 +585,13 @@ fn adapters() -> Result<i32> {
 }
 
 fn which(program: &str) -> Option<PathBuf> {
+    // A name containing a slash is a path, not something to look up: $TERMINAL
+    // is frequently set to /usr/bin/something, and searching PATH for a string
+    // with a slash in it never matches.
+    if program.contains('/') {
+        let p = PathBuf::from(program);
+        return p.is_file().then_some(p);
+    }
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|d| d.join(program))
@@ -760,8 +803,174 @@ pub fn project_cmd(cmd: ProjectCmd) -> i32 {
                 0
             })
         }
+        ProjectCmd::Layout { cmd } => match cmd {
+            LayoutCmd::Save => layout_save(),
+            LayoutCmd::Show { json } => layout_show(json),
+            LayoutCmd::Restore { dry_run } => layout_restore(dry_run),
+            LayoutCmd::Forget => layout_forget(),
+        },
     };
     report(result)
+}
+
+// ── project layouts (§6) ────────────────────────────────────────────────────
+
+/// Where the compositor adapter lives. A fixed path, like the sandbox's bwrap:
+/// resolving it through `PATH` would let a shadowing script decide what "the
+/// windows of this project" means.
+const WINDOW_ADAPTER: &str = "/usr/libexec/apex-project-windows";
+
+fn window_adapter() -> String {
+    // Overridable for development only, and named so it is obvious in a process
+    // list. The image installs the real one.
+    std::env::var("APEX_WINDOW_ADAPTER").unwrap_or_else(|_| WINDOW_ADAPTER.to_string())
+}
+
+fn layout_save() -> Result<i32> {
+    let p = current_project()?;
+    let adapter = window_adapter();
+    let out = Command::new(&adapter)
+        .arg("list")
+        .output()
+        .with_context(|| format!("running {adapter} list"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        bail!(
+            "cannot enumerate windows: {}",
+            if err.is_empty() { "the compositor has no window query".into() } else { err }
+        );
+    }
+    let reports: Vec<layout::WindowReport> = serde_json::from_slice(&out.stdout)
+        .context("parsing the window list")?;
+
+    let children = layout::child_map();
+    let captured = layout::capture(&reports, Path::new(&p.root), &children);
+    if captured.is_empty() {
+        // Not an error, and not silently overwriting the previous layout with
+        // nothing: a capture that found no windows is far more likely to mean
+        // "the adapter reported no pids" than "this project genuinely has no
+        // windows open right now".
+        println!(
+            "no windows are working inside {} — nothing saved, and the previous \n\
+             layout (if any) is untouched",
+            p.name
+        );
+        return Ok(1);
+    }
+    layout::save(&p.slug, &captured)?;
+    println!(
+        "saved {} window(s) across workspace(s) {} for {}",
+        captured.entries.len(),
+        captured.workspaces().join(", "),
+        p.name
+    );
+    Ok(0)
+}
+
+fn layout_show(json: bool) -> Result<i32> {
+    let p = current_project()?;
+    let Some(l) = layout::load(&p.slug) else {
+        if json {
+            println!("null");
+        } else {
+            println!("no layout saved for {} — capture one with `apex project layout save`", p.name);
+        }
+        return Ok(0);
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&l)?);
+        return Ok(0);
+    }
+    println!("{:<4} {:<14} {:<10} {}", "WS", "APP", "KIND", "COMMAND");
+    for e in &l.entries {
+        println!(
+            "{:<4} {:<14} {:<10} {}",
+            if e.workspace.is_empty() { "-" } else { &e.workspace },
+            e.app_id,
+            if e.terminal { "terminal" } else { "app" },
+            e.argv.join(" ")
+        );
+    }
+    Ok(0)
+}
+
+fn layout_restore(dry_run: bool) -> Result<i32> {
+    let p = current_project()?;
+    let Some(l) = layout::load(&p.slug) else {
+        println!("no layout saved for {}", p.name);
+        return Ok(1);
+    };
+
+    let term = layout::choose_terminal(
+        std::env::var("TERMINAL").ok().as_deref(),
+        |name| which(name).is_some(),
+    );
+    if term.is_none() {
+        eprintln!(
+            "apex: no terminal emulator found; terminal windows will be restored \n\
+             with the command they were originally started by"
+        );
+    }
+    let term = term.unwrap_or_default();
+
+    let mut started = 0;
+    let mut failed = 0;
+    for e in &l.entries {
+        let argv = layout::restore_argv(e, &term);
+        if argv.is_empty() {
+            continue;
+        }
+        if dry_run {
+            println!("would run (ws {}): {}", e.workspace, argv.join(" "));
+            started += 1;
+            continue;
+        }
+        // No shell, ever. A layout file is a list of argv vectors that this
+        // executes, so it is executed as a vector — nothing in a stored entry
+        // can be a shell metacharacter because nothing parses it as one.
+        let spawned = Command::new(&argv[0])
+            .args(&argv[1..])
+            .current_dir(&e.cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(_) => started += 1,
+            Err(err) => {
+                eprintln!("apex: cannot start {}: {err}", argv[0]);
+                failed += 1;
+            }
+        }
+    }
+
+    if dry_run {
+        println!("{started} window(s) would be restored");
+        return Ok(0);
+    }
+    println!("started {started} window(s){}", if failed > 0 { format!(", {failed} failed") } else { String::new() });
+    // Placement is best-effort and deliberately not fatal. A window has to
+    // exist before it can be moved, and it does not exist until its process
+    // has mapped a surface — which is asynchronous and unbounded. Restoring
+    // the windows is the valuable part; getting them onto the right workspaces
+    // is a nicety that would otherwise hold the command open for seconds
+    // guessing at startup times.
+    let workspaces = l.workspaces();
+    if !workspaces.is_empty() {
+        println!(
+            "workspaces in this layout: {} — windows open where the compositor \n\
+             puts them; run `apex project layout show` to see the intended split",
+            workspaces.join(", ")
+        );
+    }
+    if failed > 0 { Ok(1) } else { Ok(0) }
+}
+
+fn layout_forget() -> Result<i32> {
+    let p = current_project()?;
+    layout::forget(&p.slug)?;
+    println!("discarded the saved layout for {}", p.name);
+    Ok(0)
 }
 
 fn current_project() -> Result<project::Project> {
