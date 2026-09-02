@@ -704,7 +704,7 @@ RUN set -eux; \
     test -f /usr/share/wayland-sessions/apex-labwc.desktop; \
     test ! -f /usr/share/wayland-sessions/labwc.desktop; \
     command -v labwc >/dev/null; \
-    for f in rc.xml menu.xml autostart environment; do \
+    for f in rc.xml menu.xml autostart environment themerc-override; do \
         test -s "/usr/share/apex/labwc/$f"; \
     done; \
     # labwc has no --verify-config, so the XML is validated structurally at build
@@ -725,7 +725,28 @@ RUN set -eux; \
     grep -q 'apex shell' /usr/share/apex/labwc/rc.xml; \
     grep -q 'apex shell' /usr/share/apex/labwc/menu.xml; \
     # `qs` is what `apex shell` actually calls; without it the wrapper is inert.
-    command -v qs >/dev/null
+    command -v qs >/dev/null; \
+    # ── APEX Floating window chrome ─────────────────────────────────────────
+    # labwc IGNORES an unrecognised theme key in silence, so a typo does not
+    # break a session, it just leaves that element on the built-in grey — the
+    # Openbox-fallback look this theme exists to remove. Assert the shape here
+    # and the key names in tests/test-apex-firstrun.sh, which has labwc-theme(5)
+    # available.
+    grep -q '@ACCENT@' /usr/share/apex/labwc/themerc-override; \
+    grep -qE '^window\.titlebar\.padding\.height: 11$' /usr/share/apex/labwc/themerc-override; \
+    grep -qE '^window\.button\.width: 30$' /usr/share/apex/labwc/themerc-override; \
+    grep -qE '^border\.width: 1$' /usr/share/apex/labwc/themerc-override; \
+    # Window chrome must use a PROPORTIONAL face, and the font it names must
+    # actually be installed: fontconfig silently substitutes a missing family,
+    # so naming a font the image does not ship is invisible until someone looks
+    # at a titlebar. Noto Sans comes from google-noto-sans-fonts in core.
+    grep -q '<name>Noto Sans</name>' /usr/share/apex/labwc/rc.xml; \
+    ! grep -qE '<name>[^<]*Mono[^<]*</name>' /usr/share/apex/labwc/rc.xml; \
+    fc-match --format='%{family}\n' 'Noto Sans' | grep -qi 'noto sans'; \
+    grep -qE '<cornerRadius>1[0-2]</cornerRadius>' /usr/share/apex/labwc/rc.xml; \
+    grep -q '<dropShadows>yes</dropShadows>' /usr/share/apex/labwc/rc.xml; \
+    grep -q 'style="thumbnail"' /usr/share/apex/labwc/rc.xml; \
+    echo "APEX Floating: chrome theme, proportional font and thumbnail switcher verified"
 
 # The labwc bindings are maintained by hand — the shell's keybind editor emits
 # Hyprland .conf/.lua and niri .kdl, and labwc has neither an IPC to push
