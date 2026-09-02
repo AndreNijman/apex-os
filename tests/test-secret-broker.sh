@@ -251,13 +251,28 @@ EOF
 chmod +x "${PROJ}/inside.sh"
 
 # `project` policy, so $HOME really is masked — that is the property under test.
-sid="$("$APEX" agent run --agent generic --sandbox project --cwd "$PROJ" -d \
-        -- /bin/sh "${PROJ}/inside.sh" 2>"${WORK}/run.err" \
-        | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1)"
-if [ -z "$sid" ]; then
-    # A confined session needs bwrap and a kernel without legacy TIOCSTI. If it
-    # cannot start, that is reported rather than passed over: this is the one
-    # section that tests the actual boundary.
+# A confined session needs bubblewrap. Where it is genuinely absent this
+# section is SKIPPED — loudly, and only for that reason — because the boundary
+# cannot be tested without a sandbox and reporting "failed" would be a lie
+# about what was checked. CI installs bwrap precisely so this does not skip
+# there; a skip in CI is itself a signal that the install step was lost.
+if [ ! -x /usr/bin/bwrap ]; then
+    printf 'SKIP  a confined session needs bubblewrap, which is not installed\n'
+    printf '      (the sandbox-boundary assertions below cannot run here)\n'
+    sid=""
+    SKIPPED_SANDBOX=1
+else
+    SKIPPED_SANDBOX=0
+    sid="$("$APEX" agent run --agent generic --sandbox project --cwd "$PROJ" -d \
+            -- /bin/sh "${PROJ}/inside.sh" 2>"${WORK}/run.err" \
+            | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1)"
+fi
+
+if [ "$SKIPPED_SANDBOX" = 1 ]; then
+    :
+elif [ -z "$sid" ]; then
+    # bwrap IS present and the session still did not start. That is a real
+    # failure, not an environment limitation.
     bad "a confined session started"
     sed 's/^/      /' "${WORK}/run.err"
 else
