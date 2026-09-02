@@ -707,16 +707,22 @@ RUN set -eux; \
     ! grep -q '(unset)' /usr/share/apex/hypr/hyprland.conf; \
     grep -q '@KB_LAYOUT@' /usr/share/apex/hypr/hyprland.conf; \
     grep -q '@HOME@' /usr/share/apex/hypr/hyprland.conf; \
-    config="$(mktemp)"; keybinds="$(mktemp)"; runtime="$(mktemp -d)"; \
+    grep -q '^source = @HOME@/.config/hypr/apex-input.conf$' /usr/share/apex/hypr/hyprland.conf; \
+    # Both generated files get a real temp path. Hyprland treats a `source=`
+    # with no match as a FATAL config error, so leaving either one pointing at
+    # an unwritten user path fails the whole verification for a reason that has
+    # nothing to do with the template being tested.
+    config="$(mktemp)"; keybinds="$(mktemp)"; inputconf="$(mktemp)"; runtime="$(mktemp -d)"; \
     chmod 0700 "$runtime"; \
     sed -e 's|@HOME@|/tmp/apex-home|g' \
         -e 's|@KB_LAYOUT@|us|g' \
         -e 's|@KB_VARIANT@||g' \
         -e "s|^source = .*ApexShellKeybinds.conf$|source = ${keybinds}|" \
+        -e "s|^source = .*apex-input.conf$|source = ${inputconf}|" \
         /usr/share/apex/hypr/hyprland.conf > "$config"; \
     XDG_RUNTIME_DIR="$runtime" Hyprland --i-am-really-stupid \
         --verify-config --config "$config" | grep -q 'config ok'; \
-    rm -rf "$config" "$keybinds" "$runtime"
+    rm -rf "$config" "$keybinds" "$inputconf" "$runtime"
 
 # Greeter session picker: offer Hyprland + niri only. sway/labwc are the greeter
 # HOST compositor, not user sessions — strip their wayland-session files so they
