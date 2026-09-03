@@ -324,6 +324,27 @@ jobs:
             || { echo "FATAL: \`game profile\` must be routed before cmd_game, which connects to the bus first" >&2; exit 1; }
           echo "§12: one shared guard, a pure planner, a read-only probe"
 
+      # §22 boot v2. THIS RUNS IN THE `static` JOB ON PURPOSE, and the reason is
+      # the one docs/p1-progress.md already records twice: `rust` fires on
+      # ^(apexd/|config/sysprofiles/|tests/) and `engine` on ^(files/|tests/),
+      # so a check in either specialised job is skipped by a PR that changes
+      # only the other side — and a skipped job counts as success.
+      #
+      # A boot-v2 PR is exactly that kind of PR. The units and the health
+      # helper are under files/, `apex boot status` is under apexd/, and the
+      # single most important assertion here spans both: that every unit this
+      # image enables is conditioned on systemd-boot's LoaderBootCountPath, so
+      # the systemd-boot path stays opt-in and GRUB stays the default for
+      # daily, gaming-mesa and gaming-nvidia (AGENTS.md boot-path rule 5). A
+      # PR that quietly removed that condition from a unit file would have
+      # skipped the `rust` job entirely.
+      #
+      # No argument, so no `apex` binary is needed. The binary-driven half runs
+      # in `rust` below, where the toolchain is, and dies rather than skipping
+      # if the binary is missing.
+      - name: §22 boot v2 — the opt-in is structural, and nothing shipped touches a boot path
+        run: ./tests/test-boot-v2.sh
+
   rust:
     name: Rust validation
     needs: changes
@@ -416,6 +437,32 @@ jobs:
       - name: Run per-game profile and boot-to-game assertions
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-gaming.sh
+
+      # §22's `apex boot status`, driven against fixture roots that stand in
+      # for a GRUB machine and for a systemd-boot machine mid-rollback. The
+      # sd-boot fixture's entry list is the document `bootctl list --json`
+      # produced from an ESP a VM had actually booted four times, so the field
+      # shapes — including triesLeft being ABSENT rather than 0 on a blessed
+      # entry — are measured rather than invented.
+      #
+      # `--with-binary` re-runs the toolchain-free half too. That is
+      # deliberate: it costs a second and it means a PR touching apexd/ gets
+      # the unit-file assertions as well, rather than relying on the `static`
+      # job being the only place they exist.
+      #
+      # APEX_BOOT_ROOT relocates every path the command READS. No program name
+      # comes from the environment: bootctl is a fixed absolute path and under
+      # a fixture root it is not executed at all.
+      - name: §22 boot v2 — apex boot status against GRUB and systemd-boot fixtures
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          # A missing binary must be a hard failure, not a skip.
+          test -x "$APEX_BIN"
+          ./tests/test-boot-v2.sh --with-binary
 
       # §20's trusted devices. A fake `ssh` first on PATH records every argv,
       # which is the only way to assert the things that matter here: that
