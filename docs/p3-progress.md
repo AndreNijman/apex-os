@@ -256,3 +256,116 @@ height changes — a follow-up, not blind churn.
 
 Shared-component migration was not attempted, by instruction: it is a large
 refactor with real regression risk, and the reported defect was not caused by it.
+
+## The §24 audit, and what it changed
+
+APEX was audited against the roadmap's own definition of done — §24's ten user
+rows and §25's non-negotiable rules — deliberately looking for claims that were
+true for the wrong reason. Verdict: **2 of 10 rows met, 6 partly, 2 not met**,
+and one §25 rule broken outright. The audit is at
+`scratchpad/section24-audit.md`.
+
+An audit that found nothing would have been worth nothing. This one found the
+following, all since fixed.
+
+### `apex game status` was reporting the plan, not the outcome
+
+`irqs_steered` was `steer.len()`, computed **before any write**. The applier
+threw every error to stderr and `write_tolerant`'s landed/refused bool was
+discarded. On a machine that refuses every affinity write, status still said
+"N IRQs steered" — the only place in the system that stated something untrue.
+
+`SysWriter::apply` now returns `Outcome::Landed | Refused(reason)`. Tolerance is
+unchanged: a refused knob is still `Ok` and still must not abort a plan.
+`irqs_steered` now means landed, alongside `irqs_attempted` and `irqs_refused`
+and a note carrying the kernel's reason. Four mutants, all caught.
+
+The fix also exposed why no test existed: game mode enumerated from a hardcoded
+`/proc/irq` inside an otherwise fixture-rooted daemon, so any test of it could
+only read the host's real interrupts. `Ctx` gained `proc_irq_root`.
+
+**The audit was wrong on one detail and the fix says so**: "every caller
+discards" the bool was false — `fan_safe_restore` consumed it to drive its
+safety ladder.
+
+### Three CI-wired suites skipped and exited 0
+
+`test-privilege-requests.sh`, `test-project-layout.sh` and
+`test-secret-broker.sh` each printed `0 passed, 0 failed (skipped)` and exited 0
+when `cargo` was missing. They now exit 2 naming the tool, matching the rule
+their sibling suites already state: a missing prerequisite is a failure, never a
+skip.
+
+Two things fell out of that. None of the three checked for `python3` despite
+parsing JSON with it. And `test-project-layout.sh`'s "a dry run starts nothing"
+compared `pgrep -c -x sleep || echo 0` on both sides — with no `pgrep` both read
+`"0"` and the assertion passed **having measured nothing**. A second vacuous
+pass, found while fixing the first.
+
+`test-secret-broker.sh` keeps one honest skip — without bubblewrap a confined
+session cannot be built at all — but `APEX_REQUIRE_SANDBOX` is now set on its CI
+step, so the job cannot be green having skipped §4's central assertion.
+
+The aggregate gate itself was examined and left alone, with the reasoning
+recorded: a *job* marked skipped comes from this workflow's own path filters and
+is legitimately success; a *suite* that skipped reaches the gate as a successful
+step inside a successful job and is invisible to it. The fix belonged in the
+suites.
+
+### A niri user changed a setting and nothing happened
+
+`apex-input-apply` told the user, **in a comment**, to hand-add an include line.
+No `files/desktop/niri/` existed at all, while Hyprland's include ships as real
+config. So a niri user changed a touchpad setting, the UI reported success, and
+nothing happened. §24's niri row is *"equal shell/settings parity"*.
+
+niri does support `include` (top level, since 25.11; the image ships 26.04), so
+nothing had to be invented — the line was simply never written. A missing
+include target is a hard parse error that rejects the whole config, the same
+fatality Hyprland's `source =` has, which is why the write is append-only,
+backed up, and validated before *and* after.
+
+Two things it corrected on the way: the suspected
+`move-window-to-workspace "special:magic"` booby trap is not one on either leg —
+dispatch binds are never emitted to KDL, and `niri validate` accepts it anyway.
+And the existing guard admitted a niri that is installed but off `PATH`, so a
+bare `niri validate` would exit 127, `!` would read that as "invalid", and the
+includes would never be written — silently, every login, forever.
+
+### The terminal-developer row named six programs; the image shipped two
+
+fish, nushell and tmux joined the existing `dnf5` transaction rather than a new
+one — every dnf transaction rewrites the ~200 MB sqlite rpmdb into its own
+layer. **This is a `core` rebuild, and the next fleet update is therefore
+multi-gigabyte.** That is the documented cost of the tier rule, taken
+deliberately.
+
+`zellij` is not in Fedora 43, so it is a pinned static musl release with its
+sha256 verified and its single tar member confirmed before extraction — not the
+non-fatal `|| true` shape used elsewhere.
+
+Installed is not usable: `chsh` refuses a shell absent from `/etc/shells`. fish
+and tmux register themselves from their own rpm scriptlets; **nushell's does
+not**, so `nu` is added explicitly, and the scriptlet-registered entries are
+asserted rather than trusted.
+
+## Two process hazards worth recording
+
+**Parallel agents on one worktree contaminated each other's commits.** Two used
+`git add -A`/`git commit -a` while a sibling had uncommitted work, so `0e7eab0`
+and `4e5e974` carry files belonging to another change under their messages.
+Nothing was lost and the tree content is correct, but it violates
+`AGENTS.md`'s one-logical-change-per-commit rule. Neither agent rebased to split
+them, which was the right call: rewriting history across another agent's
+in-flight edits risked destroying work to fix attribution.
+
+**A verb can vanish from the binary without breaking the build.** One agent's
+commit, built from a copy of `main.rs` taken before another's landed, removed
+`mod task;` and the `Cmd::Task` arm. Nothing failed to compile — removing the
+`mod` also stops the file being compiled, so there is no orphaned reference, no
+dead-code warning and no test failure. `apex task` was simply gone, and it was
+caught by a person re-reading a diff.
+
+`tests/test-apex-verbs.sh` now asks the built binary what it can do: 44 verbs
+enumerated by name. Proven against the real failure — removing `mod task;`
+compiles with zero errors and turns this suite red.
