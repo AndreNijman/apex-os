@@ -94,6 +94,39 @@ COPY files/system/polkit-1/actions/org.apexos.apexd.policy \
 COPY files/system/polkit-1/rules.d/49-apex-singbox.rules \
      /usr/share/polkit-1/rules.d/49-apex-singbox.rules
 COPY files/system/units/sing-box.service /usr/lib/systemd/system/sing-box.service
+
+# ── MT7925 Wi-Fi: survive a suspend ──────────────────────────────────────────
+# The L16's mt7925e comes back from s2idle with its receive path wedged. The
+# link looks healthy and is not: -45 dBm signal, tx negotiated at 156 Mbit/s,
+# rx pinned to VHT-MCS 0 (7.2 Mbit/s), and two thirds of packets to the local
+# gateway lost. TCP connects and then stalls, so it reads as "the internet is
+# slow" rather than as a driver fault, and the standing workaround was to
+# reboot.
+#
+# Measured on the machine, in order of increasing violence:
+#   power save off      66% loss -> 50%
+#   re-associate        50% loss -> 33%, rx still MCS 0
+#   reload mt7925e      0% loss, rx 144 Mbit/s
+#
+# So both ship. The sleep hook is CONDITIONAL — it pings the gateway and only
+# reloads when the link is actually failing — because an unconditional reload
+# would add ~15 s of no network to every lid-open, and most of them are fine.
+# It also refuses to act unless the driver really is mt7925e: these images run
+# on more than one machine, and cycling the radio on hardware without this fault
+# would be a regression invented by a fix for someone else's laptop.
+COPY files/system/NetworkManager/20-apex-wifi-powersave.conf \
+     /etc/NetworkManager/conf.d/20-apex-wifi-powersave.conf
+COPY --chmod=0755 files/system/system-sleep/apex-wifi-resume \
+     /usr/lib/systemd/system-sleep/apex-wifi-resume
+RUN set -eux; \
+    test -x /usr/lib/systemd/system-sleep/apex-wifi-resume; \
+    bash -n /usr/lib/systemd/system-sleep/apex-wifi-resume; \
+    # A hook that fires on the wrong phase, or on the wrong hardware, is worse
+    # than no hook: it would cycle the radio of every APEX machine on every
+    # resume. Both guards are asserted here rather than assumed.
+    grep -qF '= "post" ]' /usr/lib/systemd/system-sleep/apex-wifi-resume; \
+    grep -qF 'mt7925e' /usr/lib/systemd/system-sleep/apex-wifi-resume; \
+    grep -qF 'wifi.powersave = 2' /etc/NetworkManager/conf.d/20-apex-wifi-powersave.conf
 RUN systemctl enable apexd.service
 
 # ── agent runtime (apex-agentd) ─────────────────────────────────────────────
