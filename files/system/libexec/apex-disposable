@@ -1,0 +1,696 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# apex-disposable — §19's disposable execution: an environment that is deleted
+# when you close it.
+#
+# WHAT THIS IS, AND WHAT IT IS NOT
+# It is a MODE of APEX Capsules, not a second environment mechanism. Every
+# disposable environment here is an ordinary capsule created through
+# /usr/libexec/apex-env, so `apex env list` sees it, `podman ps` sees it, and
+# APEX has not grown a second container runtime — which AGENTS.md forbids and
+# which would leave two things to keep correct. What this file adds is the
+# three things a capsule does not have:
+#
+#   1. a THROWAWAY HOME, so the environment's filesystem is not the user's;
+#   2. an explicit COPY-IN / COPY-OUT boundary, default-deny at both ends;
+#   3. a TEARDOWN that removes the container and the directory together, on
+#      every exit path including Ctrl-C.
+#
+# IT IS NOT A SECURITY BOUNDARY, AND THIS IS THE IMPORTANT SENTENCE
+# distrobox mounts the host's root filesystem at /run/host inside every
+# capsule — that is how `distrobox-export` reaches back out to write a .desktop
+# file into the host's home, which apex-env documents and depends on. There is
+# no distrobox flag that removes it. So a program running in a disposable
+# capsule can read and write the user's files through /run/host, and it runs as
+# the user's own uid.
+#
+# The word "disposable" here therefore means the ENVIRONMENT is disposable —
+# its packages, its home, its state — and nothing more. §19 asks to "run
+# untrusted GitHub projects in disposable capsules", and that is satisfied on
+# the axis of throwing the environment away; it is NOT satisfied on the axis of
+# containing hostile code, and pretending otherwise would be the most dangerous
+# thing this file could do. `plan` prints the boundary in full, including
+# /run/host, before anything starts.
+#
+# For confinement — $HOME masked, ~/.ssh unreachable, the system bus
+# unreachable, the environment cleared and rebuilt from an allowlist — the
+# mechanism that exists and fails closed is the agent sandbox
+# (`apex agent`, apexd/apex-agent-core/src/sandbox.rs). The two compose: an
+# agent session confined by that sandbox can be started from inside a
+# disposable capsule, and then the environment is thrown away as well.
+#
+# TEARDOWN IS A RECURSIVE REMOVAL DRIVEN BY A NAME
+# Which makes it the most dangerous line in the file, so it is fenced four
+# ways: the name must match a narrow allowlist, the final component must not be
+# a symlink, the path is resolved with realpath, and the resolved path must
+# equal exactly "<resolved disposable root>/<name>". Anything else HARD-EXITS
+# without removing a thing — never a warning, never a best-effort continue.
+# tests/test-apex-plugin.sh established the shape for a suite; this is the same
+# shape for a shipped program.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+# ── paths ───────────────────────────────────────────────────────────────────
+# APEX_DISPOSABLE_ROOT exists so the test suite can point the whole tool at a
+# throwaway directory. Read once, here, and never re-derived: a helper that
+# recomputed it from $HOME would quietly operate on the real one.
+#
+# NOT /tmp, and that is a decision rather than a default. This repository has
+# already had /tmp wiped mid-session (docs/p1-progress.md), taking five agent
+# worktrees with it; they survived only because everything in them was pushed.
+# A disposable environment's ~/out has to live long enough for copy-out to run,
+# and a tmpfiles sweep between `run` and its teardown would take the one
+# directory the user asked to keep. $XDG_STATE_HOME is where state that
+# outlives a process but not a machine belongs, and teardown deletes it anyway.
+DATA_STATE="${XDG_STATE_HOME:-${HOME:-/nonexistent}/.local/state}"
+DISP_ROOT="${APEX_DISPOSABLE_ROOT:-${DATA_STATE}/apex/disposable}"
+
+# The capsule engine. Overridable for the same reason and in the same way
+# apex-env makes $PODMAN and $DISTROBOX overridable: it is what lets the suite
+# assert the exact argv without a container runtime. Unprivileged either way —
+# this program never runs as root and refuses to.
+ENV_ENGINE="${APEX_DISPOSABLE_ENV_ENGINE:-/usr/libexec/apex-env}"
+
+# The default image for a disposable environment. The capsule engine's own
+# `fedora` alias resolves to the host's release, which is the right base for
+# "look at this project for ten minutes": the libraries and the package manager
+# are the ones the user already knows.
+DEFAULT_IMAGE_ALIAS='fedora'
+
+msg()  { printf 'apex-disposable: %s\n' "$*" >&2; }
+warn() { printf 'apex-disposable: warning: %s\n' "$*" >&2; }
+die()  { printf 'apex-disposable: error: %s\n' "$*" >&2; exit 1; }
+
+# A refusal that must never be a warning. Used only where continuing would mean
+# removing something this program cannot prove it owns.
+refuse() {
+    printf 'apex-disposable: REFUSING TO REMOVE ANYTHING: %s\n' "$*" >&2
+    printf 'apex-disposable: this is a safety check failing, not a transient error.\n' >&2
+    exit 2
+}
+
+# ── names ───────────────────────────────────────────────────────────────────
+# A disposable name becomes a container name AND the final component of a path
+# that is removed recursively, so this is a security check and is written as
+# one. The `disp-` prefix is mandatory and is not decoration: it is what makes
+# `purge` unable to touch a capsule the user created by hand, and what makes an
+# entry under the disposable root recognisable as ours.
+#
+# Deliberately narrower than apex-env's capsule names, which allow `.` and `_`.
+# Nothing here needs them, and every character not in the set is a character
+# that cannot appear in a path this file deletes.
+valid_disposable_name() {
+    [ -n "${1:-}" ] || return 1
+    [ "${#1}" -le 29 ] || return 1
+    [[ "$1" =~ ^disp-[a-z0-9]{1,24}$ ]] || return 1
+    return 0
+}
+
+# The user-supplied half of a name, before the prefix is added.
+valid_name_suffix() {
+    [ -n "${1:-}" ] || return 1
+    [[ "$1" =~ ^[a-z0-9]{1,24}$ ]] || return 1
+    return 0
+}
+
+new_name() {
+    local suffix
+    # /dev/urandom rather than $RANDOM or the pid: two `apex disposable run`
+    # calls started in the same second by the same script must not collide, and
+    # a collision here means one run's teardown deletes the other's home.
+    suffix="$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 10)"
+    [ "${#suffix}" -eq 10 ] || die "cannot generate a name (no usable /dev/urandom)"
+    printf 'disp-%s' "$suffix"
+}
+
+# ── the copy boundary ───────────────────────────────────────────────────────
+# A host path named by --copy-in. It is COPIED, never bound, and that is the
+# whole design: a copy means whatever happens inside the environment cannot
+# change the host original, which is a stronger and far easier property to
+# prove than a read-only bind mount. It also means the boundary is visible as a
+# number — "3 paths copied in, 41 MB" — rather than as a mount table.
+valid_copy_in() {
+    local src="$1"
+    case "$src" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "$src" in *$'\n'*) return 1 ;; esac
+    [ -e "$src" ] || return 1
+    return 0
+}
+
+# The name a copied-in path takes inside. Derived from the basename and
+# re-validated, because it becomes a path component under the environment's
+# home.
+copy_in_target_name() {
+    local base
+    base="$(basename -- "$1")"
+    case "$base" in ""|"."|".."|*/*) return 1 ;; esac
+    printf '%s' "$base"
+}
+
+# --copy-out's destination. Absolute, and refused if it is inside the
+# disposable root: a destination that teardown deletes is a destination that
+# reports success and produces nothing.
+valid_copy_out() {
+    local dest="$1" root
+    case "$dest" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "$dest" in *$'\n'*) return 1 ;; esac
+    root="$(realpath -m -- "$DISP_ROOT" 2>/dev/null)" || return 1
+    local d; d="$(realpath -m -- "$dest" 2>/dev/null)" || return 1
+    case "$d" in
+        "$root"|"$root"/*) return 1 ;;
+    esac
+    return 0
+}
+
+# A git URL to clone INSIDE the environment. https only: an ssh remote would
+# need the user's key, and a disposable environment that can reach the user's
+# ssh agent is one that can push with their identity. The clone runs inside, so
+# the host's git configuration and credential helpers are never used for it.
+valid_git_url() {
+    local url="$1"
+    case "$url" in
+        https://*) ;;
+        *) return 1 ;;
+    esac
+    case "$url" in *[[:space:]]*) return 1 ;; esac
+    case "$url" in *..*) return 1 ;; esac
+    return 0
+}
+
+# ── layout ──────────────────────────────────────────────────────────────────
+# One directory per environment. `home` is what the capsule gets as $HOME, and
+# `in`/`out` inside it are the two ends of the boundary — inside the home
+# rather than beside it, so the environment reaches them at ~/in and ~/out with
+# no extra mount and no path the user has to be told twice.
+env_dir()   { printf '%s/%s' "$DISP_ROOT" "$1"; }
+env_home()  { printf '%s/%s/home' "$DISP_ROOT" "$1"; }
+env_in()    { printf '%s/%s/home/in' "$DISP_ROOT" "$1"; }
+env_out()   { printf '%s/%s/home/out' "$DISP_ROOT" "$1"; }
+
+# ── teardown: the recursive removal, and its four fences ────────────────────
+# Read this whole function before changing any of it. It removes a directory
+# tree chosen by a name, and every check below exists because removing the
+# wrong tree is not recoverable.
+#
+#   1. the name must match the allowlist — no traversal, no separator, and the
+#      mandatory `disp-` prefix;
+#   2. the final component must not be a symlink. `realpath` on a symlink
+#      returns its TARGET, so a prefix check alone would resolve
+#      <root>/disp-x -> /home/user and then happily conclude that /home/user is
+#      "inside" itself. symlink_metadata is the only reading that catches it,
+#      and `[ -L ]` is that reading in shell;
+#   3. the path is resolved with `realpath -e`, so a symlinked ancestor is
+#      followed once and compared honestly rather than assumed away;
+#   4. the resolved path must equal EXACTLY "<resolved root>/<name>" — string
+#      equality, not a prefix test. A prefix test passes for
+#      "<root>-elsewhere/x"; equality cannot.
+#
+# Any failure is a hard exit with nothing removed.
+remove_env_dir() {
+    local name="$1" dir root_real real
+    valid_disposable_name "$name" \
+        || refuse "'${name}' is not a disposable environment name"
+    dir="$(env_dir "$name")"
+
+    # Nothing there: a successful no-op, so `rm` on an already-torn-down
+    # environment is not an error.
+    [ -e "$dir" ] || [ -L "$dir" ] || return 0
+
+    [ -L "$dir" ] \
+        && refuse "${dir} is a symlink; a symlink here would make this delete its target"
+
+    [ -d "$dir" ] \
+        || refuse "${dir} exists but is not a directory"
+
+    root_real="$(realpath -e -- "$DISP_ROOT" 2>/dev/null)" \
+        || refuse "the disposable root ${DISP_ROOT} could not be resolved"
+    real="$(realpath -e -- "$dir" 2>/dev/null)" \
+        || refuse "${dir} could not be resolved"
+
+    case "$root_real" in
+        ""|"/"|"/home"|"/var/home"|"/usr"|"/etc"|"/var") \
+            refuse "the disposable root resolves to ${root_real}, which is never a disposable root" ;;
+    esac
+
+    [ "$real" = "${root_real}/${name}" ] \
+        || refuse "${dir} resolves to ${real}, which is not ${root_real}/${name}"
+
+    rm -rf -- "$real" \
+        || die "could not remove ${real}"
+    return 0
+}
+
+# The container half. Driven through the capsule engine, so a disposable
+# environment is removed by exactly the code path that removes any capsule.
+remove_env_container() {
+    local name="$1"
+    valid_disposable_name "$name" || refuse "'${name}' is not a disposable environment name"
+    # `rm` on a capsule APEX has no record of is refused by the engine unless
+    # --force, and that refusal is correct here too: a container called
+    # disp-<x> that APEX did not create is not ours to destroy.
+    "$ENV_ENGINE" rm "$name" >&2 \
+        || warn "the capsule engine could not remove the container '${name}'; the container may survive"
+}
+
+teardown() {
+    local name="$1" copy_out="${2:-}" force="${3:-0}"
+    # Copy out FIRST. The whole point of the boundary is that the one directory
+    # the user asked to keep leaves before everything is deleted.
+    if [ -n "$copy_out" ]; then
+        do_copy_out "$name" "$copy_out" "$force" || warn "copy-out did not complete"
+    fi
+    remove_env_container "$name"
+    remove_env_dir "$name"
+    msg "environment '${name}' and everything in it is gone"
+}
+
+do_copy_out() {
+    local name="$1" dest="$2" force="$3" out
+    out="$(env_out "$name")"
+    if [ ! -d "$out" ]; then
+        warn "nothing to copy out: ${out} does not exist"
+        return 0
+    fi
+    # An empty ~/out is the normal case and is not a failure: it means the
+    # environment produced nothing the user asked to keep.
+    if [ -z "$(ls -A -- "$out" 2>/dev/null)" ]; then
+        msg "nothing to copy out: ~/out is empty"
+        return 0
+    fi
+    mkdir -p -- "$dest" || { warn "cannot create ${dest}"; return 1; }
+
+    # Collisions are found BEFORE anything is written, and refuse the whole
+    # copy rather than half of it. `apex send` has the same rule for the same
+    # reason: a copy that replaced something on the far side is not
+    # recoverable from this end.
+    if [ "$force" != 1 ]; then
+        local -a clash=()
+        local rel
+        while IFS= read -r rel; do
+            [ -n "$rel" ] || continue
+            [ -e "${dest}/${rel}" ] && clash+=("$rel")
+        done < <(cd -- "$out" && find . -mindepth 1 -printf '%P\n' 2>/dev/null)
+        if [ "${#clash[@]}" -gt 0 ]; then
+            warn "refusing to overwrite ${#clash[@]} existing path(s) in ${dest}:"
+            printf '  %s\n' "${clash[@]}" >&2
+            warn "nothing was copied out. Pass --force to overwrite, or choose another destination."
+            return 1
+        fi
+    fi
+
+    cp -a -- "$out/." "$dest/" || { warn "copy-out failed"; return 1; }
+    msg "copied ~/out to ${dest}"
+    return 0
+}
+
+# ── preflight ───────────────────────────────────────────────────────────────
+require_rootless() {
+    if [ "$(id -u)" = 0 ]; then
+        printf 'apex-disposable: error: %s\n' \
+            "disposable environments are per-user and must not be created as root" \
+            "" \
+            "A root capsule stores its images under /var/lib/containers, is shared" \
+            "by every account on the machine, and needs sudo to enter. Worse, an" \
+            "environment that survives in root's storage is not disposable." \
+            "" \
+            "Run it as yourself:" \
+            "  apex disposable run" >&2
+        exit 1
+    fi
+}
+
+require_engine() {
+    [ -x "$ENV_ENGINE" ] \
+        || die "the capsule engine is not at ${ENV_ENGINE}; disposable environments are a mode of `\
+`APEX Capsules and cannot work without it"
+}
+
+# ── the boundary report ─────────────────────────────────────────────────────
+# §19: "expose clear copy-in/copy-out boundaries for files". Clear means the
+# user can see, BEFORE running, exactly which host paths are readable and which
+# are writable, and that nothing else is — so this is printed by `plan` and
+# again by `run` before the environment is created.
+#
+# It says /run/host out loud. A boundary report that listed only the paths APEX
+# arranged would be describing an isolation this does not provide.
+print_boundary() {
+    local name="$1" image="$2" copy_out="$3" force="$4" git_url="$5"
+    shift 5
+    local -a copy_in=("$@")
+
+    printf 'disposable environment\n'
+    printf '  name        : %s\n' "$name"
+    printf '  image       : %s\n' "$image"
+    printf '  home        : %s\n' "$(env_home "$name")"
+    printf '  device access: none — a disposable capsule is never given a GPU or a\n'
+    printf '                USB bus. A capsule holding a device open is one that stops\n'
+    printf '                the machine suspending, and nothing disposable needs one.\n'
+    printf '\n'
+    printf 'READABLE AND WRITABLE INSIDE\n'
+    printf '  ~ (%s)\n' "$(env_home "$name")"
+    printf '      the environment'"'"'s own home. Deleted at teardown.\n'
+    printf '  /run/host\n'
+    printf '      EVERYTHING ON THIS MACHINE, read-write, as your own user.\n'
+    printf '      distrobox mounts the host root there in every capsule and there is\n'
+    printf '      no flag that removes it. This is a disposable ENVIRONMENT, not a\n'
+    printf '      security boundary: do not run code here that you would not run in\n'
+    printf '      your own shell. For confinement, use `apex agent` — its sandbox\n'
+    printf '      masks $HOME and fails closed.\n'
+    printf '\n'
+    printf 'COPIED IN (a copy: the host original cannot be changed from inside)\n'
+    if [ "${#copy_in[@]}" -eq 0 ]; then
+        printf '  (nothing)\n'
+    else
+        local p base
+        for p in "${copy_in[@]}"; do
+            base="$(copy_in_target_name "$p")" || base='?'
+            printf '  %s\n      -> ~/in/%s\n' "$p" "$base"
+        done
+    fi
+    if [ -n "$git_url" ]; then
+        printf '  %s\n      -> cloned into ~/in INSIDE the environment, so your git\n' "$git_url"
+        printf '         configuration and credential helpers are not used for it\n'
+    fi
+    printf '\n'
+    printf 'LEAVES THE ENVIRONMENT\n'
+    if [ -z "$copy_out" ]; then
+        printf '  nothing. Without --copy-out, everything written inside is deleted\n'
+        printf '  with the environment.\n'
+    else
+        printf '  ~/out -> %s\n' "$copy_out"
+        if [ "$force" = 1 ]; then
+            printf '  --force: existing files at the destination WILL be overwritten.\n'
+        else
+            printf '  An existing file at the destination is never overwritten; a\n'
+            printf '  collision refuses the whole copy-out.\n'
+        fi
+    fi
+    printf '\n'
+    printf 'DELETED WHEN IT CLOSES\n'
+    printf '  the container   %s (via %s rm)\n' "$name" "$ENV_ENGINE"
+    printf '  the directory   %s\n' "$(env_dir "$name")"
+    printf '  including ~/in, ~/out and anything installed inside.\n'
+}
+
+# ── argument parsing, shared by plan and run ────────────────────────────────
+# One parser for both verbs, so `plan` cannot describe a different run from the
+# one `run` performs. The suite asserts they produce identical output apart
+# from the verb.
+P_NAME=''; P_IMAGE=''; P_COPY_OUT=''; P_FORCE=0; P_GIT=''
+declare -a P_COPY_IN=()
+declare -a P_COMMAND=()
+
+parse_run_args() {
+    P_NAME=''; P_IMAGE=''; P_COPY_OUT=''; P_FORCE=0; P_GIT=''
+    P_COPY_IN=(); P_COMMAND=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --image)    shift; P_IMAGE="${1:-}" ;;
+            --image=*)  P_IMAGE="${1#*=}" ;;
+            --copy-in)  shift; P_COPY_IN+=("${1:-}") ;;
+            --copy-in=*) P_COPY_IN+=("${1#*=}") ;;
+            --copy-out) shift; P_COPY_OUT="${1:-}" ;;
+            --copy-out=*) P_COPY_OUT="${1#*=}" ;;
+            --force)    P_FORCE=1 ;;
+            --git)      shift; P_GIT="${1:-}" ;;
+            --git=*)    P_GIT="${1#*=}" ;;
+            --name)     shift; P_NAME="${1:-}" ;;
+            --name=*)   P_NAME="${1#*=}" ;;
+            --)         shift; P_COMMAND=("$@"); break ;;
+            -*)         die "unknown option '$1' (try: apex disposable --help)" ;;
+            *)          die "unexpected argument '$1'; a command goes after --" ;;
+        esac
+        shift || true
+    done
+
+    if [ -n "$P_NAME" ]; then
+        valid_name_suffix "$P_NAME" \
+            || die "'${P_NAME}' is not a usable name (lowercase letters and digits, at most 24 characters)"
+        P_NAME="disp-${P_NAME}"
+    else
+        P_NAME="$(new_name)"
+    fi
+    valid_disposable_name "$P_NAME" || die "generated an unusable name; refusing to continue"
+
+    [ -n "$P_IMAGE" ] || P_IMAGE="$DEFAULT_IMAGE_ALIAS"
+    case "$P_IMAGE" in
+        *[[:space:]]*|-*) die "'${P_IMAGE}' is not a usable image reference" ;;
+    esac
+
+    local p
+    for p in "${P_COPY_IN[@]:-}"; do
+        [ -n "$p" ] || continue
+        valid_copy_in "$p" \
+            || die "--copy-in needs an absolute path to something that exists, got '${p}'"
+        copy_in_target_name "$p" >/dev/null \
+            || die "--copy-in '${p}' has no usable final component"
+    done
+
+    if [ -n "$P_COPY_OUT" ]; then
+        valid_copy_out "$P_COPY_OUT" \
+            || die "--copy-out needs an absolute path outside ${DISP_ROOT} (a destination inside it is deleted at teardown), got '${P_COPY_OUT}'"
+    fi
+    if [ -n "$P_GIT" ]; then
+        valid_git_url "$P_GIT" \
+            || die "--git needs an https:// URL with no whitespace, got '${P_GIT}'"
+    fi
+}
+
+# ── verbs ───────────────────────────────────────────────────────────────────
+cmd_plan() {
+    parse_run_args "$@"
+    print_boundary "$P_NAME" "$P_IMAGE" "$P_COPY_OUT" "$P_FORCE" "$P_GIT" "${P_COPY_IN[@]:-}"
+    printf '\nNothing has been created. To do it: apex disposable run %s\n' "$*"
+}
+
+# The capsule-engine argv that creates the environment.
+#
+# A pure function, printing one argument per line, for the same reason
+# apex-env's create_argv() is one: `create` pulls hundreds of megabytes and can
+# never run end to end in CI, so the argv IS the behaviour and the suite pins
+# it exactly.
+#
+# --home is what makes it disposable. Without it a capsule shares the user's
+# real home, and "delete the entire environment when closed" would mean
+# deleting the user's home — which is why this flag is not optional here even
+# though it is optional in apex-env.
+create_argv() {
+    local name="$1" image="$2"
+    printf '%s\n' create "$name" "--image=${image}" "--home=$(env_home "$name")" --gpu=none
+}
+
+cmd_run() {
+    require_rootless
+    parse_run_args "$@"
+    require_engine
+
+    local dir in_dir out_dir
+    dir="$(env_dir "$P_NAME")"
+    in_dir="$(env_in "$P_NAME")"
+    out_dir="$(env_out "$P_NAME")"
+
+    [ -e "$dir" ] && die "an environment called '${P_NAME}' already exists at ${dir}"
+
+    print_boundary "$P_NAME" "$P_IMAGE" "$P_COPY_OUT" "$P_FORCE" "$P_GIT" "${P_COPY_IN[@]:-}"
+    printf '\n' >&2
+
+    mkdir -p -- "$in_dir" "$out_dir" || die "cannot create ${dir}"
+    chmod 0700 -- "$dir" 2>/dev/null || true
+
+    # The trap is armed BEFORE the container is created, so a failure during
+    # creation still tears the directory down. "Delete the entire environment
+    # when closed" has to include "closed because it never opened".
+    #
+    # INT and TERM as well as EXIT: a user who presses Ctrl-C in an interactive
+    # capsule shell is closing the environment, and a teardown that only ran on
+    # a clean exit would leave exactly the environments people abandon.
+    # shellcheck disable=SC2064  # $P_NAME et al are expanded NOW on purpose:
+    # the trap must name this environment even if a later parse resets them.
+    trap "teardown '$P_NAME' '$P_COPY_OUT' '$P_FORCE'" EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    # Copy in, before the container exists: a copy that failed must not leave a
+    # running environment the user believes has their data.
+    local p base
+    for p in "${P_COPY_IN[@]:-}"; do
+        [ -n "$p" ] || continue
+        base="$(copy_in_target_name "$p")" || die "cannot name the copy of '${p}'"
+        [ -e "${in_dir}/${base}" ] \
+            && die "two --copy-in paths would both land at ~/in/${base}; rename one"
+        cp -a -- "$p" "${in_dir}/${base}" \
+            || die "could not copy ${p} into the environment"
+        msg "copied in: ${p} -> ~/in/${base}"
+    done
+
+    local -a argv=()
+    local argv_text
+    # Built into a string first and split afterwards: `mapfile < <(f)` reports
+    # mapfile's own exit status, never f's, so a failure inside create_argv
+    # would come back as success and create a capsule from a truncated argv.
+    argv_text="$(create_argv "$P_NAME" "$P_IMAGE")" || die "cannot build the capsule command"
+    mapfile -t argv <<<"$argv_text"
+
+    msg "creating disposable capsule '${P_NAME}'"
+    "$ENV_ENGINE" "${argv[@]}" >&2 || die "the capsule engine could not create '${P_NAME}'"
+
+    if [ -n "$P_GIT" ]; then
+        msg "cloning ${P_GIT} inside the environment"
+        # `git -C <dir> clone` so the clone lands in ~/in whatever the
+        # capsule's working directory is, and `--` so a URL can never be read
+        # as an option. --depth 1: a disposable environment does not need the
+        # history, and the download is the slowest part of this verb.
+        "$ENV_ENGINE" exec "$P_NAME" -- git -C "$in_dir" clone --depth 1 -- "$P_GIT" \
+            || die "the clone failed inside the environment"
+    fi
+
+    local rc=0
+    if [ "${#P_COMMAND[@]}" -gt 0 ]; then
+        "$ENV_ENGINE" exec "$P_NAME" -- "${P_COMMAND[@]}"
+        rc=$?
+    else
+        msg "entering '${P_NAME}'. Everything here is deleted when this shell exits."
+        "$ENV_ENGINE" enter "$P_NAME"
+        rc=$?
+    fi
+    # The EXIT trap performs the teardown. Returning the inner status keeps
+    # `apex disposable run -- make test` usable as a check.
+    return "$rc"
+}
+
+cmd_list() {
+    local json=0
+    [ "${1:-}" = --json ] && json=1
+    local -a names=()
+    if [ -d "$DISP_ROOT" ]; then
+        mapfile -t names < <(find "$DISP_ROOT" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' \
+            2>/dev/null | sort)
+    fi
+    # Only ones matching the allowlist are ever listed. A directory under the
+    # disposable root that is not a disposable name is reported as a stranger
+    # rather than offered to `rm`, because `rm` would refuse it anyway and a
+    # list that shows what cannot be acted on is a list that misleads.
+    local -a ours=() strangers=()
+    local n
+    for n in "${names[@]:-}"; do
+        [ -n "$n" ] || continue
+        if valid_disposable_name "$n"; then ours+=("$n"); else strangers+=("$n"); fi
+    done
+
+    if [ "$json" = 1 ]; then
+        printf '['
+        local first=1
+        for n in "${ours[@]:-}"; do
+            [ -n "$n" ] || continue
+            [ "$first" = 1 ] || printf ','
+            first=0
+            printf '{"name":"%s","dir":"%s","created":%s}' \
+                "$n" "$(env_dir "$n")" "$(stat -c %Y -- "$(env_dir "$n")" 2>/dev/null || echo 0)"
+        done
+        printf ']\n'
+        return 0
+    fi
+
+    if [ "${#ours[@]}" -eq 0 ] || [ -z "${ours[0]:-}" ]; then
+        msg "no disposable environments — which is the normal state: a run deletes its own"
+    else
+        printf '%-30s  %s\n' NAME DIRECTORY
+        for n in "${ours[@]}"; do
+            printf '%-30s  %s\n' "$n" "$(env_dir "$n")"
+        done
+        printf '\nThese survived a teardown that did not finish. `apex disposable purge` removes them.\n'
+    fi
+    if [ "${#strangers[@]}" -gt 0 ] && [ -n "${strangers[0]:-}" ]; then
+        warn "${#strangers[@]} director(ies) under ${DISP_ROOT} are not disposable environments and will not be touched:"
+        printf '  %s\n' "${strangers[@]}" >&2
+    fi
+}
+
+cmd_rm() {
+    [ "$#" -ge 1 ] || die "usage: apex disposable rm <name>"
+    local name="$1"
+    # Accept both the bare suffix and the full name, but validate the full one.
+    case "$name" in disp-*) ;; *) name="disp-${name}" ;; esac
+    valid_disposable_name "$name" || die "'${1}' is not a disposable environment name"
+    require_engine
+    remove_env_container "$name"
+    remove_env_dir "$name"
+    msg "removed '${name}'"
+}
+
+cmd_purge() {
+    require_engine
+    local -a names=()
+    if [ -d "$DISP_ROOT" ]; then
+        mapfile -t names < <(find "$DISP_ROOT" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' \
+            2>/dev/null | sort)
+    fi
+    local n removed=0
+    for n in "${names[@]:-}"; do
+        [ -n "$n" ] || continue
+        # Re-validated on the way out, exactly as apex-env re-validates a
+        # .desktop name read back from a record: something under this directory
+        # that is not a disposable name is not ours, and purge is the one verb
+        # where that distinction is load-bearing.
+        valid_disposable_name "$n" || { warn "not a disposable environment, left alone: ${n}"; continue; }
+        remove_env_container "$n"
+        remove_env_dir "$n"
+        removed=$((removed + 1))
+    done
+    msg "purged ${removed} environment(s)"
+}
+
+usage() {
+    cat <<'EOF'
+usage: apex-disposable <command> [args]
+
+  plan [options]       print exactly what a run would create, mount, copy and
+                       delete — and change nothing
+  run [options] [-- command...]
+                       create a disposable capsule, run in it, and delete the
+                       whole thing when it closes
+  list [--json]        environments that exist right now (normally none)
+  rm <name>            remove one
+  purge                remove every disposable environment
+
+options for plan and run:
+  --image REF          the container image (default: the fedora alias, i.e.
+                       this host's own release)
+  --copy-in PATH       copy a host path in, readable at ~/in/<name>. A copy,
+                       so the host original cannot be changed from inside.
+                       Repeatable. Nothing is copied in by default.
+  --copy-out DIR       copy ~/out to DIR when the environment closes. Without
+                       it, NOTHING leaves. An existing file is never
+                       overwritten unless --force.
+  --force              let --copy-out overwrite existing files
+  --git URL            clone a repository into ~/in INSIDE the environment
+  --name NAME          name it instead of generating one (prefixed disp-)
+
+A disposable environment is an ordinary APEX Capsule with a throwaway home, so
+`apex env list` and `podman ps` both see it. It is a disposable ENVIRONMENT,
+not a security boundary: distrobox mounts the host filesystem at /run/host in
+every capsule. `apex disposable plan` prints that in full. For confinement, use
+`apex agent` — its sandbox masks $HOME and fails closed.
+EOF
+}
+
+main() {
+    local cmd="${1:-}"; shift || true
+    case "$cmd" in
+        plan)   cmd_plan "$@" ;;
+        run)    cmd_run "$@" ;;
+        list)   cmd_list "$@" ;;
+        rm)     cmd_rm "$@" ;;
+        purge)  cmd_purge "$@" ;;
+        ""|-h|--help|help) usage ;;
+        *) die "unknown command '$cmd' (try --help)" ;;
+    esac
+}
+
+main "$@"

@@ -964,6 +964,45 @@ RUN set -eux; \
     grep -q '^readonly ENV_ENGINE=/usr/libexec/apex-env$' /usr/libexec/apex-pkg; \
     /usr/libexec/apex-pkg --help | grep -q -- '--source rpm|flatpak|capsule'
 
+# ── Disposable environments (§19) ───────────────────────────────────────────
+# A MODE of the capsule engine above, not a second environment mechanism: every
+# disposable environment is an ordinary capsule created through
+# /usr/libexec/apex-env with a throwaway home, so `apex env list` and
+# `podman ps` both see it and AGENTS.md's "do not create another package/
+# environment mechanism" holds.
+#
+# The assertions below are the safety claims, checked here so that being wrong
+# is a failed build rather than a recursive delete on a user's machine.
+COPY --chmod=0755 files/system/libexec/apex-disposable /usr/libexec/apex-disposable
+RUN set -eux; \
+    bash -n /usr/libexec/apex-disposable; \
+    # It drives the capsule engine by an absolute path that must exist. A
+    # disposable environment with no engine behind it is a verb that fails at
+    # the moment the user needs it.
+    grep -q '^ENV_ENGINE="${APEX_DISPOSABLE_ENV_ENGINE:-/usr/libexec/apex-env}"$' \
+        /usr/libexec/apex-disposable; \
+    test -x /usr/libexec/apex-env; \
+    # Teardown is a recursive removal driven by a name, so the four fences that
+    # make it safe are build-time facts. Each `grep` is anchored to an
+    # EXECUTABLE line (`^[^#]*`), because this file's comments discuss every
+    # one of these checks at length and a check its own comments can satisfy is
+    # a check that proves nothing — this repository has shipped five of those.
+    grep -qE '^[^#]*\[\[ "\$1" =~ \^disp-\[a-z0-9\]\{1,24\}\$ \]\]' /usr/libexec/apex-disposable; \
+    grep -qE '^[^#]*\[ -L "\$dir" \]' /usr/libexec/apex-disposable; \
+    grep -qE '^[^#]*realpath -e -- "\$dir"' /usr/libexec/apex-disposable; \
+    grep -qE '^[^#]*\[ "\$real" = "\$\{root_real\}/\$\{name\}" \]' /usr/libexec/apex-disposable; \
+    # --home is what makes an environment disposable. Without it a capsule
+    # shares the user's real home and the teardown would be deleting that.
+    grep -qE '^[^#]*--home=' /usr/libexec/apex-disposable; \
+    # Unprivileged, like `apex env`, and asserted because "disposable
+    # environments are per-user" is a security claim rather than a preference.
+    test ! -u /usr/libexec/apex-disposable; \
+    test ! -g /usr/libexec/apex-disposable; \
+    # The CLI's own constant is checked in the `apex` binary block near the end
+    # of this file, because the binary is not copied in until then.
+    /usr/libexec/apex-disposable --help | grep -q 'not a security boundary'; \
+    /usr/libexec/apex-disposable --help | grep -q -- '--copy-out'
+
 # ── The plugin CLI (§16) ────────────────────────────────────────────────────
 # apex-shell's plugin platform ships the manifest, the permission model and the
 # loader; this is the OS-side CLI it deliberately left out.
@@ -1485,6 +1524,55 @@ RUN set -eux; \
     for v in models pull rm run unload status serve; do \
         /usr/bin/apex ai "$v" --help >/dev/null || { echo "FATAL: apex ai $v is gone"; exit 1; }; \
     done; \
+    # §19. Same rule, same reason: a renamed verb is a silent no-op in every
+    # script, keybind and settings page that calls it.
+    for v in status repair reset; do \
+        /usr/bin/apex recover "$v" --help >/dev/null \
+            || { echo "FATAL: apex recover $v is gone"; exit 1; }; \
+    done; \
+    for v in plan run list rm purge; do \
+        /usr/bin/apex disposable "$v" --help >/dev/null \
+            || { echo "FATAL: apex disposable $v is gone"; exit 1; }; \
+    done; \
+    # The CLI holds the disposable engine's path as a constant, exactly as
+    # `apex install --source capsule` holds the capsule engine's, and for the
+    # same reason: a caller-controlled variable naming a program is a hole. The
+    # two files agree only by both being right, so the built binary is checked
+    # against the path that was actually installed.
+    grep -qa '/usr/libexec/apex-disposable' /usr/bin/apex; \
+    test -x /usr/libexec/apex-disposable; \
+    # §19's "expose apex doctor results graphically" is this flag and nothing
+    # else on the OS side. Losing it silently turns the settings page into a
+    # screen that renders no diagnostics.
+    /usr/bin/apex doctor --help | grep -q -- '--json'; \
+    # `reset` refuses to run as root. Root's home is not the user's, so a
+    # `sudo apex recover reset` would reset root's desktop and leave the user's
+    # exactly as it is — while reporting success. This build runs as root, so
+    # the refusal is checkable directly, and it is checked for the REASON as
+    # well as the exit status: "it refused" has been true here while "it
+    # refused for the reason under test" was false.
+    ! /usr/bin/apex recover reset --scope desktop >/dev/null 2>&1; \
+    /usr/bin/apex recover reset --scope desktop 2>&1 | grep -q 'must not run as root'; \
+    # `reset` is a dry run without --commit. This is the single most important
+    # runtime property in §19, so it is proven against the shipped binary
+    # rather than reasoned about: a throwaway HOME owned by an ordinary uid, a
+    # file the plan names, and that file still present afterwards.
+    command -v setpriv >/dev/null; \
+    APEX_RESET_PROBE="$(mktemp -d)"; \
+    mkdir -p "$APEX_RESET_PROBE/.config/apex-shell"; \
+    echo '{}' > "$APEX_RESET_PROBE/.config/apex-shell/input.json"; \
+    chown -R 1000:1000 "$APEX_RESET_PROBE"; \
+    setpriv --reuid=1000 --regid=1000 --clear-groups \
+        env HOME="$APEX_RESET_PROBE" /usr/bin/apex recover reset --scope desktop >/dev/null; \
+    test -f "$APEX_RESET_PROBE/.config/apex-shell/input.json" \
+        || { echo "FATAL: apex recover reset deleted a file without --commit"; exit 1; }; \
+    # And --commit without --confirm must also change nothing.
+    ! setpriv --reuid=1000 --regid=1000 --clear-groups \
+        env HOME="$APEX_RESET_PROBE" /usr/bin/apex recover reset --scope desktop --commit \
+        >/dev/null 2>&1; \
+    test -f "$APEX_RESET_PROBE/.config/apex-shell/input.json" \
+        || { echo "FATAL: apex recover reset deleted a file without --confirm"; exit 1; }; \
+    rm -rf "$APEX_RESET_PROBE"; \
     # The daemon must RUN in the image it ships in, not merely exist: a dynamic
     # link or glibc mismatch against core is exactly what a file-existence check
     # misses. `--help` is a pure print and binds no socket.
