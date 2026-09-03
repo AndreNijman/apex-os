@@ -34,7 +34,14 @@ jobs:
           rust=false
           installer=false
           engine=false
-          grep -Eq '^(apexd/|config/sysprofiles/)' <<<"$files" && rust=true
+          # `tests/` is in the Rust selector as well as the engine one because
+          # tests/test-apex-modes.sh runs the built `apex` binary and therefore
+          # lives in the `rust` job, which is the only one with a toolchain. A
+          # PR touching only that file used to set engine=true and rust=false,
+          # so the suite never ran — and the `result` job passed anyway,
+          # because a skipped job counts as success. A check required on every
+          # PR must always report.
+          grep -Eq '^(apexd/|config/sysprofiles/|tests/)' <<<"$files" && rust=true
           grep -Eq '^installer/' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
@@ -213,6 +220,20 @@ jobs:
       - name: Tests
         run: cargo test --locked
 
+      # §11/§12/§13's shell-level suite. It lives HERE rather than in the
+      # `engine` job because it runs the real built `apex` binary, and this is
+      # the only job with a Rust toolchain and a warm cargo cache.
+      #
+      # It is also the suite that must never reach the host. The area has form:
+      # an earlier game-mode suite shelled out to `scxctl`, raised a burst of
+      # polkit prompts on the developer's desktop and blocked 177 seconds on a
+      # password. So this one invokes only read-only and --dry-run verbs, puts
+      # fake scxctl/nvidia-smi/systemctl first on PATH, fails if any of them is
+      # called, and proves that tripwire is armed with a negative control.
+      - name: Run mode, workload and Performance Lab assertions
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-modes.sh
+
   installer:
     name: Installer safety and UI
     needs: changes
@@ -371,7 +392,7 @@ jobs:
           # this level today, so any finding is one this PR introduced.
           shellcheck -S warning files/system/libexec/apex-pkg \
             tests/test-apex-pkg.sh tests/test-apex-firstrun.sh \
-            tests/test-labwc-keybinds.sh
+            tests/test-labwc-keybinds.sh tests/test-apex-modes.sh
 
   result:
     name: PR validation
