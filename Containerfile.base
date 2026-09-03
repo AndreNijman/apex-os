@@ -56,7 +56,8 @@ COPY config/ /build/config/
 RUN set -eux; cd /build/apexd; cargo build --release --locked; \
     install -Dm755 target/release/apexd       /out/usr/bin/apexd; \
     install -Dm755 target/release/apex        /out/usr/bin/apex; \
-    install -Dm755 target/release/apex-agentd /out/usr/bin/apex-agentd
+    install -Dm755 target/release/apex-agentd /out/usr/bin/apex-agentd; \
+    install -Dm755 target/release/apex-aid    /out/usr/bin/apex-aid
 
 # ─────────────────────────────────────────────────────────────────────────
 FROM ${CORE}
@@ -134,6 +135,73 @@ RUN systemctl enable apexd.service
 # daemon holding PTYs should not start for people who never run an agent. The
 # CLI prints the enable command when the socket is absent.
 COPY files/system/units/apex-agentd.service /usr/lib/systemd/user/apex-agentd.service
+
+# ── local inference service (apex-aid, §14) ─────────────────────────────────
+# A USER unit, and — exactly like apex-agentd — deliberately NOT
+# `systemctl --global enable`d. A per-user daemon that will hold gigabytes of
+# VRAM must not start for people who never ask for local inference; `apex ai`
+# prints the enable command when the socket is absent.
+#
+# NO INFERENCE RUNTIME IS INSTALLED HERE, AND NONE MAY BE.
+# llama.cpp with CUDA is gigabytes, and Fedora's own `llama-cpp` links hipblas
+# and rocblas (checked: `dnf5 repoquery --requires llama-cpp` on f43 lists
+# libamdhip64.so.6, libhipblas.so.2 and librocblas.so.4). Adding either to
+# Containerfile.core — the only tier where a package transaction is allowed —
+# would cost the whole fleet a multi-gigabyte update. P1 already built the two
+# mechanisms that serve this properly and AGENTS.md forbids a third:
+#   sudo apex install llama-cpp        a system extension overlaid on /usr
+#   apex env create cuda               a capsule with the driver passed through
+# `apex ai status` prints whichever of those applies. Nothing in apexd-core,
+# apex or apex-aid downloads a runtime.
+COPY files/system/units/apex-aid.service /usr/lib/systemd/user/apex-aid.service
+COPY config/ai/catalogue.toml /usr/share/apexos/ai/catalogue.toml
+RUN set -eux; \
+    test -s /usr/lib/systemd/user/apex-aid.service; \
+    grep -q '^ExecStart=/usr/bin/apex-aid$' /usr/lib/systemd/user/apex-aid.service; \
+    # Opt-in by design, asserted the same way the agent runtime's is.
+    test ! -e /usr/lib/systemd/user/default.target.wants/apex-aid.service; \
+    # The store must never be writable by the service or anything it starts.
+    # The 0444 blobs are the first reason; this directive is the second, and a
+    # unit that lost it would leave the inference process — which loads
+    # untrusted weights and speaks HTTP — able to rewrite every user's models.
+    grep -q '^ReadOnlyPaths=/var/lib/apex/ai$' /usr/lib/systemd/user/apex-aid.service; \
+    # THE security invariant of §14, asserted on the shipped unit rather than
+    # trusted: no polkit action, no system-bus name, no system unit. AGENTS.md
+    # forbids all three, and a `WantedBy=multi-user.target` slipped in here is
+    # exactly how a per-user daemon becomes a system one by accident.
+    ! grep -q 'multi-user.target' /usr/lib/systemd/user/apex-aid.service; \
+    test ! -e /usr/lib/systemd/system/apex-aid.service; \
+    test ! -e /usr/share/polkit-1/actions/org.apexos.apex-aid.policy; \
+    test ! -e /usr/share/dbus-1/system.d/org.apexos.ApexAid1.conf; \
+    # The shared model store. Root-owned, world-readable, created on first boot
+    # because /var is machine-local and empty in the image. Staging is 0700: a
+    # partially written blob must not be readable by the account that will use
+    # it, and it is where `apex ai pull` verifies a digest before the atomic
+    # rename into blobs/.
+    printf '%s\n' \
+        'd /var/lib/apex 0755 root root -' \
+        'd /var/lib/apex/ai 0755 root root -' \
+        'd /var/lib/apex/ai/models 0755 root root -' \
+        'd /var/lib/apex/ai/models/blobs 0755 root root -' \
+        'd /var/lib/apex/ai/models/manifests 0755 root root -' \
+        'd /var/lib/apex/ai/staging 0700 root root -' \
+        > /usr/lib/tmpfiles.d/apex-ai.conf; \
+    # systemd-tmpfiles applies the policy's default context for each path, and
+    # on a real APEX host that is `var_lib_t` for all of these — checked with
+    # `matchpathcon /var/lib/apex/ai/models/blobs` on the katana with SELinux
+    # enforcing. So no new type and no policy module: the store is ordinary
+    # var_lib_t content read by an unconfined user process. Assert the rules
+    # parse, because a malformed line is skipped silently at boot and the
+    # symptom is a store that does not exist.
+    systemd-tmpfiles --dry-run --create /usr/lib/tmpfiles.d/apex-ai.conf; \
+    # The catalogue is the ONLY place a model name becomes a digest, and it is
+    # image content precisely so that its integrity is the image's. A build that
+    # shipped an unparseable one would leave `apex ai pull <name>` refusing
+    # every model on every machine.
+    test -s /usr/share/apexos/ai/catalogue.toml; \
+    python3 -c 'import sys,tomllib; tomllib.load(open(sys.argv[1],"rb"))' \
+        /usr/share/apexos/ai/catalogue.toml; \
+    echo "apex-aid: user unit present and opt-in, store rules valid, no system surface"
 
 # bubblewrap is the agent sandbox. It is already in the image as a flatpak
 # dependency, so it is NOT added to Containerfile.core: a package transaction
@@ -1403,12 +1471,30 @@ RUN set -eux; \
     test -x /usr/bin/apexd; \
     test -x /usr/bin/apex; \
     test -x /usr/bin/apex-agentd; \
+    test -x /usr/bin/apex-aid; \
     # The CLI must actually run in the image it ships in, not merely be present:
     # a dynamic-link or glibc mismatch against core is exactly the failure that
     # a file-existence check misses.
     /usr/bin/apex --help >/dev/null; \
     /usr/bin/apex agent --help >/dev/null; \
     /usr/bin/apex project --help >/dev/null; \
+    /usr/bin/apex ai --help >/dev/null; \
+    # Every §14 verb, by name. `apex ai --help` passing proves the subcommand
+    # exists; it does not prove `run` was not renamed, and a renamed verb is a
+    # silent no-op in every script and shell integration that calls it.
+    for v in models pull rm run status serve; do \
+        /usr/bin/apex ai "$v" --help >/dev/null || { echo "FATAL: apex ai $v is gone"; exit 1; }; \
+    done; \
+    # The daemon must RUN in the image it ships in, not merely exist: a dynamic
+    # link or glibc mismatch against core is exactly what a file-existence check
+    # misses. `--help` is a pure print and binds no socket.
+    /usr/bin/apex-aid --help >/dev/null; \
+    # And the refusal that carries §14's central security decision has to be
+    # live in the shipped binary, not just in the source. Asserted on both the
+    # daemon and the CLI, because each has its own argument parser.
+    ! /usr/bin/apex-aid --listen 127.0.0.1:11434 >/dev/null 2>&1; \
+    /usr/bin/apex-aid --listen 127.0.0.1:11434 2>&1 | grep -q SO_PEERCRED; \
+    /usr/bin/apex ai serve --listen 127.0.0.1:11434 2>&1 | grep -q SO_PEERCRED; \
     # The compositor keybinds and the labwc root-menu replacement both invoke
     # `apex shell <verb>`; a renamed verb makes every one of them a silent
     # no-op, which is why the verb table is asserted and not just the binary.
@@ -1419,7 +1505,7 @@ RUN set -eux; \
     # both shells because the file carries a bash and a zsh completion block.
     bash -c 'set -e; . /usr/share/apex/shell/agent.sh; [ "$(type -t a)" = function ]'; \
     zsh -fc 'set -e; . /usr/share/apex/shell/agent.sh; [ "$(whence -w al)" = "al: function" ]'; \
-    echo "apexd/apex/apex-agentd installed and runnable; shell verbs and `a` intact"
+    echo "apexd/apex/apex-agentd/apex-aid installed and runnable; shell verbs and `a` intact"
 
 # ── Stage 7: bootc container sanity lint (informational) ───────────────────
 RUN bootc container lint || true

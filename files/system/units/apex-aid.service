@@ -1,0 +1,103 @@
+# APEX-OS — local inference service (systemd USER service, roadmap §14).
+#
+# Owns the endpoint applications and agent clients use for local model
+# inference, the lifetime of the backend process behind it, and the VRAM that
+# process holds. One instance per logged-in user.
+#
+# WHY THIS IS A USER SERVICE AND NOT PART OF apexd
+# §14 asks for "a shared system service similar in spirit to PipeWire", and it
+# is worth noticing that PipeWire is itself a `systemd --user` unit. What makes
+# PipeWire feel like a system service is being THE endpoint every application
+# talks to and arbitrating a contended device — neither of which requires
+# running as root or serving every account from one process.
+#
+# This daemon's entire job is turning the user's prompts into generated text.
+# A single privileged process doing that for several accounts would put every
+# user's prompts in one address space, making "user A's context reached user B"
+# one routing mistake away rather than impossible; per-user, the kernel enforces
+# the boundary and no code of ours has to be right for it to hold. It is also
+# the same argument AGENTS.md already records for apex-agentd, one step earlier
+# in the pipeline: that daemon stays unprivileged because it HANDLES untrusted
+# model output, and this one generates it.
+#
+# Nothing here talks to apexd. It has no polkit action, no system-bus name and
+# no setuid helper, and AGENTS.md forbids it acquiring any of them.
+#
+# WHAT IS SHARED INSTEAD
+# The weights, which are the only genuinely large and genuinely shareable part.
+# /var/lib/apex/ai is root-owned and world-readable (0444 blobs), written only
+# by `sudo apex ai pull`. One copy of a multi-gigabyte file for every account,
+# and no session able to alter a model — including its own.
+#
+# WHY IT IS NOT SOCKET-ACTIVATED
+# The API socket is exactly the shape socket activation wants, and unlike
+# apex-agentd this daemon holds no PTY. It still is not, for one reason: its
+# whole job is keeping a model resident BETWEEN requests, and its own idle
+# policy — measured against the machine's power source — is what decides when
+# to stop. Handing that to systemd's idle timer would mean two things could
+# unload the model and neither would know why the other did.
+#
+# NOT enabled by default. A user opts in with:
+#   systemctl --user enable --now apex-aid
+# `apex ai` prints exactly that when the socket is absent. It is opt-in for the
+# same reason apex-agentd is: a per-user daemon that will hold gigabytes of
+# VRAM must not start for people who never ask for local inference.
+#
+# SELINUX
+# No policy module, and that is a measured conclusion rather than an omission.
+# Checked on the katana, a real APEX host with SELinux enforcing (targeted):
+#   /var/lib/apex/ai            system_u:object_r:var_lib_t:s0
+#   /var/lib/apex/ai/models     system_u:object_r:var_lib_t:s0
+#   /dev/nvidia*                system_u:object_r:xserver_misc_device_t:s0
+#   /dev/dri/renderD*           system_u:object_r:dri_device_t:s0
+# The store is ordinary var_lib_t content read by a user process, the sockets
+# live in $XDG_RUNTIME_DIR, and the device nodes are the ones every GPU-using
+# desktop program already opens. A user unit inherits the login session's
+# context, so there is no new domain to write and no new transition to allow.
+# If that ever changes, the fix is a narrow module — never permissive mode.
+
+[Unit]
+Description=APEX-OS local inference service (model store, VRAM and idle policy)
+Documentation=man:apex(1)
+# Deliberately no dependency on graphical-session.target: local inference is as
+# useful over ssh in a bare TTY as it is on a desktop.
+
+# A crash loop must not spin. Five restarts in a minute and it stays down,
+# where `apex ai status` reports it plainly.
+#
+# These are [Unit] directives, not [Service] ones (systemd.unit(5)). Under
+# [Service] systemd parses them and they do not apply, so the rate limiting
+# reads as configured while doing nothing — the same trap apex-agentd.service
+# records.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/apex-aid
+# The daemon stops its backend on SIGTERM and waits for the VRAM to be released
+# before exiting. Give it room: a daemon that exits leaving llama-server holding
+# six gigabytes would make the next start fail to load anything, with no visible
+# cause.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=2
+
+# Hardening. Deliberately mild, for the same reason apex-agentd's is: this
+# daemon exists to launch a program that needs a GPU device, a model file and a
+# socket, and locking down its filesystem view would lock down the backend it
+# starts. The confinement that matters is applied per backend and is far
+# narrower than anything expressible here — `bwrap --unshare-net` with a
+# read-only /usr, the model bound read-only, and the socket directory as the
+# only writable path.
+NoNewPrivileges=yes
+# The model store must never be writable by this process or its children. It is
+# already root-owned with 0444 blobs; this is the second, independent reason.
+ReadOnlyPaths=/var/lib/apex/ai
+# ProtectSystem/ProtectHome are NOT set: the backend inherits this namespace
+# before bwrap re-creates it, and a runtime installed as a system extension
+# lives under the /usr that ProtectSystem would restrict.
+
+[Install]
+WantedBy=default.target
