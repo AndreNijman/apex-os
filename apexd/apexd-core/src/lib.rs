@@ -31,6 +31,11 @@
 //! does the probing and the converging, exactly as the daemon does for
 //! [`Action`]s.
 //!
+//! [`task`] is that pattern for §21: it owns the task record's format and
+//! validation and turns a task plus one observation of the machine into an
+//! ordered resume plan. It performs no I/O, references no other subsystem's
+//! state, and grants nothing.
+//!
 //! The daemon and CLI are thin shells over this crate.
 
 pub mod ai;
@@ -51,6 +56,12 @@ pub mod perf;
 pub mod profile;
 pub mod select;
 pub mod syswriter;
+// §21's Task. Deliberately NOT re-exported at the crate root: its `Observed`
+// would collide with `blueprint::Observed`, which is re-exported below, and
+// both names are unambiguous at their own module path — `apexd_core::task::
+// Observed` says which kind of observation it is, which a bare `Observed`
+// hoisted under an alias would not. Same rule as `Step`, immediately below.
+pub mod task;
 pub mod tier;
 pub mod topology;
 pub mod workload;
