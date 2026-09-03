@@ -528,6 +528,25 @@ ids="$(jget "$(apex_in "$H" game profile list --json)" \
       'import json,sys; print(" ".join(g["id"] for g in json.load(sys.stdin)["profiles"]))')"
 is "remove deletes only the named profile" "730" "$ids"
 
+# Removing the LAST profile leaves a file that exists and holds no profiles —
+# just the header and the schema version. That is correct rather than tidy, and
+# it is asserted because the two states are easy to conflate: "no file" and "a
+# file with nothing in it" must both read as nothing stored, or a user who
+# removed their last profile would see a listing failure instead of an empty
+# one.
+apex_in "$H" game profile remove 730 >/dev/null
+out="$(apex_in "$H" game profile list)"; rc=$?
+is "listing after the last removal still exits 0" 0 "$rc"
+want "…and reports nothing stored" "No per-game profiles" "$out"
+if [ -f "${H}/.config/apex/games.toml" ]; then
+    ok "…even though the file itself remains"
+else
+    bad "…even though the file itself remains" "remove deleted the file"
+fi
+is "…and the emptied file still parses" "0" \
+   "$(jget "$(apex_in "$H" game profile list --json)" \
+      'import json,sys; print(len(json.load(sys.stdin)["profiles"]))')"
+
 # ─────────────────────────────────────────────────────────────────────────────
 section "§12 readiness — measured against fixture machines"
 # ─────────────────────────────────────────────────────────────────────────────
