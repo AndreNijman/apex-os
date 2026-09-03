@@ -469,6 +469,43 @@ enum EnvCmd {
     },
     /// The image aliases and what they resolve to on this release.
     Images,
+    /// Put a GUI application from a capsule into the host's launcher (§8).
+    ///
+    /// `distrobox-export` runs INSIDE the capsule and writes the .desktop file
+    /// into your own `~/.local/share/applications`, so this needs no root and
+    /// cannot raise an authentication prompt. `apex env rm` takes the launcher
+    /// entry with it.
+    Export {
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// The application as the capsule knows it — a bare name, not a path.
+        #[arg(value_name = "APPLICATION")]
+        app: String,
+    },
+    /// Take an exported application back out of the host's launcher.
+    Unexport {
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(value_name = "APPLICATION")]
+        app: String,
+    },
+    /// What a capsule has exported, as distrobox sees it and as APEX recorded it.
+    Exports {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// Make a capsule that provides a language, and record that it does.
+    ///
+    /// This is what `apex apply` runs for the blueprint's `[development]
+    /// languages`. A toolchain goes into a capsule, never onto the read-only
+    /// host — that is the whole point of §8. The language is recorded only
+    /// after the toolchain answers from inside the capsule.
+    Provision {
+        #[arg(value_name = "LANGUAGE")]
+        language: String,
+    },
+    /// The language table: which capsule provides what, and from which packages.
+    Languages,
 }
 
 #[derive(Subcommand)]
@@ -943,6 +980,11 @@ fn env_argv(cmd: EnvCmd) -> Vec<String> {
             a
         }
         EnvCmd::Images => vec!["images".to_string()],
+        EnvCmd::Export { name, app } => vec!["export".to_string(), name, app],
+        EnvCmd::Unexport { name, app } => vec!["unexport".to_string(), name, app],
+        EnvCmd::Exports { name } => vec!["exports".to_string(), name],
+        EnvCmd::Provision { language } => vec!["provision".to_string(), language],
+        EnvCmd::Languages => vec!["languages".to_string()],
     }
 }
 
@@ -2678,16 +2720,55 @@ mod tests {
     }
 
     #[test]
+    fn the_gui_export_reaches_the_engine_with_both_halves() {
+        // §8's launcher integration. The application name is a positional, not
+        // a flag, and the engine refuses anything that is not a bare name — so
+        // a dropped argument here would become a usage error rather than an
+        // export of something else.
+        assert_eq!(
+            env(&["apex", "env", "export", "py", "gimp"]),
+            vec!["export", "py", "gimp"]
+        );
+        assert_eq!(
+            env(&["apex", "env", "unexport", "py", "gimp"]),
+            vec!["unexport", "py", "gimp"]
+        );
+        assert_eq!(env(&["apex", "env", "exports", "py"]), vec!["exports", "py"]);
+    }
+
+    #[test]
+    fn provisioning_a_language_names_the_language_and_not_a_capsule() {
+        // The capsule a language lives in is the ENGINE's decision — c and cpp
+        // share one, javascript and typescript share one — so the CLI must not
+        // pass a capsule name here or it would be a second answer to the same
+        // question.
+        assert_eq!(
+            env(&["apex", "env", "provision", "rust"]),
+            vec!["provision", "rust"]
+        );
+        assert_eq!(env(&["apex", "env", "languages"]), vec!["languages"]);
+    }
+
+    #[test]
     fn capsules_are_never_a_privileged_verb() {
         // Capsules are rootless per-user containers. If `apex env` ever landed
         // in the privileged set it would create them under
         // /var/lib/containers, shared by every account, and need an
         // authentication prompt to enter a shell.
+        //
+        // `export` and `provision` are in this list for a sharper reason than
+        // the others: both are reachable from `apex apply`, and the blueprint's
+        // whole claim to never raising an authentication prompt is that it
+        // converges the privilege domain it is already in. A privileged capsule
+        // verb would break that claim from the outside.
         for argv in [
             vec!["apex", "env", "create", "fedora"],
             vec!["apex", "env", "rm", "fedora"],
             vec!["apex", "env", "install", "fedora", "htop"],
             vec!["apex", "env", "enter", "fedora"],
+            vec!["apex", "env", "export", "fedora", "gimp"],
+            vec!["apex", "env", "unexport", "fedora", "gimp"],
+            vec!["apex", "env", "provision", "rust"],
         ] {
             assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
         }
