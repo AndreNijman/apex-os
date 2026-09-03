@@ -15,8 +15,13 @@ it replaces anything.
 
 ## Why labwc is edited in place
 
-Hyprland has `source` and niri has `include`, so both get a generated file they
-pull in. labwc has neither: rc.xml is the only file it reads. So the `<libinput>`
+Hyprland has `source` and niri has `include` (25.11+; the image ships 26.04), so
+both get a generated file they pull in. Neither line is added by this script:
+apex-shell-firstrun puts `source =` in the seeded hyprland.conf and appends
+`include` to the seeded niri config.kdl, and pre-creates both targets because
+both compositors treat a missing one as a fatal config error.
+
+labwc has neither: rc.xml is the only file it reads. So the `<libinput>`
 element is replaced inside it, with ElementTree rather than a regex, and the
 result is parsed before it is moved into place. Everything else in rc.xml —
 keybinds, theme, window rules — is preserved untouched, which a whole-file
@@ -211,12 +216,14 @@ def gen_niri(model):
     lines = [
         f"// {GENERATED_BANNER}",
         "//",
-        "// niri has supported config includes since v25.11. Add this at the TOP",
-        "// LEVEL of ~/.config/niri/config.kdl (it live-reloads):",
+        "// Nothing to do by hand: apex-shell-firstrun appends",
         "//",
         f'//     include "{NIRI_OUT}"',
         "//",
-        "// Place it AFTER your own input { } block so these win on conflicts.",
+        "// to ~/.config/niri/config.kdl, after every other section. niri",
+        "// includes are positional and later definitions win, so these values",
+        "// override the seeded config above them; niri watches this file and",
+        "// live-reloads, so a change applies without a logout.",
         "",
         "input {",
         "    keyboard {",
