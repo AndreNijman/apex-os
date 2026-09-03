@@ -1557,3 +1557,89 @@ Newest last. One line per pushed commit that changes the state above.
   `AGENTS.md` the same day. The suite hard-exits if its plugin directory
   resolves outside the temp tree, because `~/.config/apex-shell/plugins` is real
   on the developer's machine.
+
+---
+
+## P1 close-out state — 2026-09-03
+
+Everything in rows 5–8 of §23 is written, reviewed and green. What is *not*
+done is the one step Andre reserved: merging `p1/integration-2` and running the
+single image build. The distinction below is deliberate — code-complete and
+CI-complete is not the same as shipped, and this file should not blur it.
+
+**The merge target is PR #35 (`p1/integration-2`) and nothing else.** Every
+other open apex-os PR is an ancestor of it; verified with
+`git merge-base --is-ancestor` against all eleven. The only commit that had
+been outside it was this file's own last update, cherry-picked here so the
+merge target carries its own tracker.
+
+### The nine-minute staleness, and why it is cosmetic
+
+#35's checks passed at 11:37:44Z. apex-shell #13 and #14 merged at 11:46:18Z
+and 11:46:23Z — *after*. So the green tick was earned against the previous
+shell main, and the question is whether anything in the OS tree is coupled to
+the shell tree.
+
+Two things are, and both were re-run by hand against shell main `6f2e55d`:
+
+| suite | coupling | result |
+| --- | --- | --- |
+| `tests/test-labwc-keybinds.sh` | clones shell main in CI; `APEX_REQUIRE_SHELL_TREE=1` | 37 passed, 0 failed |
+| `tests/test-apex-firstrun.sh` | reads `${ROOT}/../apex-shell` for the keybind check | 51 passed, 0 failed |
+
+`test-apex-display.sh` and `test-apex-input.sh` mention `apex-shell` only as
+`~/.config/apex-shell` paths they create themselves — no coupling.
+
+The firstrun one matters more than it looks: with no shell tree beside the
+checkout it prints `SKIP  no apex-shell tree available` and still exits 0. Run
+it from a bare checkout and the assertion that the seeded `rc.xml` matches the
+shell's defaults silently does not run. It was made to run here by cloning
+apex-shell next to the worktree, and it printed PASS rather than SKIP.
+
+**The image does not need a refresh commit either way.** `build-image.yml`'s
+`shell` step resolves the ref at build time —
+`git ls-remote https://github.com/AndreNijman/apex-shell refs/heads/main` — and
+passes it as `APEX_SHELL_REF` with `APEX_SHELL_STRICT=1`. The build pins
+whatever main is at the moment it starts, so #35 picks up #13 and #14 with no
+action. There is no vendored SHA in the repo to bump.
+
+### No image has been built from any of this
+
+Last successful `build-image`: **2026-08-23**. Since then:
+
+| when | result | cause |
+| --- | --- | --- |
+| Aug 24 | failure | — |
+| Aug 31 | failure | `core` job; the de-branding symlinks — **fixed by #31, which is in #35** |
+| Sep 2 | failure | `rust`; `checkpoints_are_listed_newest_first_and_found_by_prefix` — **fixed by #21, already on main** |
+| Sep 2 ×3 | cancelled | deliberate, under the one-build rule |
+
+Both known causes have fixes. Neither fix has run in a real image build —
+#21's has only been proven by the `rust` job, and #31's by the weekly `core`
+build, not by the full three-tier path. The first `build-image` after the merge
+is therefore a genuine test, not a formality, and it is the most likely place
+for P1 to surface a problem that no suite here can catch.
+
+### Deliberately unfixed, carried forward
+
+- **8.1's ordering bug.** `apex mode set gaming` re-asserts the sysprofile's
+  tier and fan *after* `GameMode.SetActive`. Invisible only because every
+  shipped sysprofile uses `performance` for both. It is 8.1's code, not 8.4's.
+- **`measure-idle-inhibit.sh hyprland` reports MISMATCH** on the layer-surface
+  arm. That is the measurement being right: Hyprland ignores idle inhibitors on
+  layer-shell surfaces. The fix was to stop relying on it, not to make the
+  number agree.
+- **No per-game launch wrapper.** Needs a real Steam install to verify, and an
+  unverified exec path where every game starts is worse than none.
+
+### If P2 starts before the merge
+
+Rows 9 and 10 of §23 are P2: Local AI service + remote compute, and Boot v2
+(composefs + systemd-boot + UKIs + measured boot).
+
+`apex-os/main` is at `4e3c490` and carries **no P1 content**. A P2 branch cut
+from `main` would develop and run CI against a tree with no capsules, no
+resolver, no blueprint and no modes — which §14's local-AI service needs for
+model storage and for VRAM/power handling. Branch from `p1/integration-2`, or
+merge #35 first. Boot v2 is close to independent of P1 and could be cut from
+`main` without that problem.
