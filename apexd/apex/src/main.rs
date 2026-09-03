@@ -182,6 +182,43 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BlueprintCmd,
     },
+
+    /// Converge this machine toward its blueprint.
+    ///
+    /// Idempotent: running it twice does nothing the second time, because the
+    /// plan is recomputed from a fresh measurement of the machine every time
+    /// rather than from a record of what was done last.
+    ///
+    /// It converges only the privilege domain it is already running in and
+    /// reports the other. `apex apply` sets your desktop colour scheme and
+    /// agent defaults; `sudo apex apply` selects the session and installs
+    /// applications. Nothing here ever calls sudo itself, so `apply` cannot
+    /// raise an authentication prompt — and a root run can never write
+    /// root-owned files into your ~/.config.
+    ///
+    /// Applications are added, never removed. A package missing from the
+    /// blueprint is left alone: reading a deleted line as "uninstall it" turns
+    /// an edit into data loss.
+    ///
+    /// Setting APEX_BLUEPRINT_NO_APPLY to any non-empty value makes this refuse
+    /// to change anything. --dry-run keeps working with it set.
+    Apply(ApplyArgs),
+}
+
+#[derive(Args)]
+struct ApplyArgs {
+    /// Read this blueprint instead of the usual search path.
+    #[arg(long, value_name = "PATH")]
+    file: Option<PathBuf>,
+    /// Report exactly what would change and perform none of it.
+    ///
+    /// The plan is computed once, so this prints the same steps a live run
+    /// executes — it is a report, not a rehearsal of a different code path.
+    #[arg(long)]
+    dry_run: bool,
+    /// Emit the plan as JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -483,6 +520,13 @@ async fn main() {
             BlueprintCmd::Diff { file, json } => blueprint::cmd_diff(file.as_deref(), json),
             BlueprintCmd::Init { force } => blueprint::cmd_init(force),
         },
+        // Deliberately NOT in the root-only list above. `apply` is a mixed
+        // verb: it converges the domain it is in and reports the other, so
+        // gating the whole command on root would make the user half — colour
+        // scheme, agent defaults — reachable only by running it as the wrong
+        // user, which is precisely the mistake the domain split exists to
+        // prevent.
+        Cmd::Apply(args) => blueprint::cmd_apply(args.file.as_deref(), args.dry_run, args.json),
         Cmd::Tier { name } => cmd_tier(name).await,
         Cmd::Profile => cmd_profile().await,
         Cmd::Battery(args) => cmd_battery(args).await,
