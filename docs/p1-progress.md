@@ -130,7 +130,7 @@ Where each branch actually stands:
 
 | Branch | State |
 |--------|-------|
-| `p1/compositor-adapter` (apex-shell #8) | **done** — 5.1–5.3, CI green |
+| `p1/compositor-adapter` (apex-shell #8) | **MERGED to apex-shell/main** as `30d1801` |
 | `p1/compositor-and-plugins` (apex-os #25) | **done** — 5.3 OS side, CI green |
 | `fix/mt7925-resume` (apex-os #26) | **done** — wifi fix, applied live and verified |
 | `p1/plugin-platform` (apex-shell) | substantial: manifest, permissions, loader, crash isolation, bar-widget point, example plugin. Not finished, no PR yet |
@@ -210,15 +210,36 @@ sysext engine — phase 6 extends that, it does not replace it.
       canonical choice, keep explicit source selection.
 - [ ] **6.4** Tests.
 
-## Phase 7 — blueprint + sync
+## Phase 7 — blueprint + sync — DONE
 
-Not started.
+apex-os **PR #28**, branch `p1/blueprint-and-sync`. 105 shell assertions against
+the compiled binary, 43 Rust unit tests, two static CI checks.
 
-- [ ] **7.1** Blueprint schema and `apex blueprint show/diff`.
-- [ ] **7.2** `apex apply` convergence, idempotent with a real dry run.
-- [ ] **7.3** `apex sync` between machines.
-- [ ] **7.4** GUI editing in the shell.
-- [ ] **7.5** Tests.
+- [x] **7.1** Schema + a **pure** planner in `apexd-core/src/blueprint.rs`.
+      `plan(desired, observed)` does no I/O, so the dry run and the live apply
+      are the *same computation* — which is the only way a dry run is real
+      rather than a plan the apply then ignores.
+- [x] **7.2** `apex apply`, idempotent by construction (replanned from a fresh
+      measurement each run) and re-measuring afterwards to report residual drift.
+- [x] **7.3** `apex sync export / show / import`. Import converges nothing and
+      will not clobber an existing blueprint without `--force`.
+- [ ] **7.4** GUI editing — deferred; it is apex-shell work. The schema
+      round-trips losslessly so the editor has something to write.
+- [x] **7.5** Tests.
+
+**`apply` never runs `sudo`.** It converges the privilege domain it is already
+in and reports the other. That is the structural answer to "never cause a polkit
+prompt" — there is no escalation path to prompt from — and it also kills the
+silent `sudo apex apply` bug that writes user config into `/root`.
+
+Three sections are deliberately observed-but-not-converged: `[gaming] enabled`
+(gaming provisioning is an image; a gaming package set on Daily is the edition
+leakage `AGENTS.md` forbids), `[development] languages` (deferred to phase 6's
+capsules, to avoid a conflicting language→package table at integration), and
+removing applications (`apply` is additive).
+
+**Untested:** every run was non-root, so `sudo apex apply` actually driving the
+package engine has only been exercised as a refusal.
 
 ## Phase 8 — modes + gaming + workload manager
 
