@@ -69,13 +69,32 @@ sudo bootc switch --transport containers-storage localhost/apex-os:daily-local
 sudo systemctl reboot
 ```
 
-## 4. Factory-reset without losing $HOME
+## 4. Factory reset, and what it preserves
 
-`apex reset --keep-home` (M3) re-runs the first-boot provisioner against the
-current image: reprovisions `/etc` defaults and re-clones the Brain_Shell
-checkout, leaving `/var/home` intact. The manual equivalent is a fresh
-`bootc switch` to the pristine image tag plus re-running
-`/usr/libexec/apex-firstboot`.
+`apex recover reset` (§19 — `docs/recovery.md` is the reference). Two scopes:
+`--scope desktop` removes APEX Shell's settings, keybinds and caches for the
+invoking account; `--scope user` adds the blueprint, per-game profiles,
+trusted-device registry, local-model settings and recorded agent sessions.
+Neither touches a document, a checkout, a credential, a capsule, an installed
+package or the booted deployment.
+
+It is a **dry run** unless given both `--commit` and a `--confirm` token
+derived from the plan it printed, it refuses to run as root, and it copies
+everything it removes to `~/apex-reset-backup-<timestamp>` first.
+
+```bash
+apex recover reset --scope desktop          # prints the loss list, changes nothing
+apex recover reset --scope user             # a wider one, still a dry run
+```
+
+A **full** factory reset — user accounts removed, `/etc` restored to image
+state, disks repartitioned — is the installer's job, not a verb on a running
+system. `docs/recovery.md` says why: `/etc` holds `passwd`, `fstab` and
+`crypttab`, ostree three-way-merges it against the deployment, and there is no
+runtime operation that restores it without deploying.
+
+An earlier version of this document claimed `apex reset --keep-home` shipped in
+M3. It never did; the verb above is what exists.
 
 ## Status of this drill
 
