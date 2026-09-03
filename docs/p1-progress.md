@@ -484,10 +484,13 @@ free as a top-level verb — the existing `Mode` is `apex fan mode`.
 ## Phase 8.4 — per-game profiles + boot-to-game readiness — DONE
 
 Branch `p1/gaming-profiles`, off `p1/integration` (the only base with all four
-P1 phases built and tested together). 36 + 39 Rust assertions, 109 in
-`tests/test-apex-gaming.sh`, and a four-part static CI check. Every one of them
-was mutation-verified — see the end of this section, because the mutation pass
-is what found the real bug.
+P1 phases built and tested together). 36 + 39 Rust assertions, 113 in
+`tests/test-apex-gaming.sh`, and a four-part static CI check — and the check is
+verified to sit in the `static` job, which is ungated and therefore always
+runs, rather than only to be *correct* (a step in the wrong job, or a workflow
+that stops parsing, surfaces on GitHub as a missing check rather than a red
+one). Every assertion was mutation-verified — see the end of this section,
+because the mutation pass is what found the real bug.
 
 ### The storage decision, and why it is not the blueprint
 
@@ -613,9 +616,9 @@ by the 32-bit test failing.
 
 ### The mutation pass, and the bug it found
 
-Eleven source mutations and four static-check mutations, each verified to
-differ from the original and to compile before any red was believed. All
-fifteen were caught.
+Twelve source mutations and four static-check mutations, each verified to
+differ from the original, to change the line count by exactly the amount
+intended, and to compile, before any red was believed. All sixteen were caught.
 
 **One of them found a vacuous assertion, which is the whole reason to do this.**
 A mutant that accepted *every* game id reddened only two assertions and left
