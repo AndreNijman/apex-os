@@ -144,6 +144,25 @@ was clean — only building the result finds that.
 Verified on the merged tree: builds, 246 Rust tests, shell suites 35 / 154 / 88
 / 105 / 67 / 54, clippy and shellcheck clean.
 
+Two integration lessons worth keeping:
+
+- **`test-labwc-keybinds.sh` failed three assertions for a reason unrelated to
+  the code.** Its shell-tree discovery tries `$ROOT/../apex-shell` and otherwise
+  falls back to the installed `/usr/share/apex-shell` — and in a git worktree the
+  fallback is always taken, where the installed shell is whatever the last image
+  shipped. It was silent about that, so staleness read as regression. It now
+  prints which tree it picked and warns when that tree is the installed one.
+- **I committed conflict markers into `pr-validation.yml`.** The final merge
+  conflicted in three places there as well as in `main.rs` and this file; I read
+  the merge output through `tail -5`, saw only the last two, fixed those, and
+  then "verified" with a grep over exactly the files I had just fixed. `git add
+  -A` did the rest. GitHub rejected the workflow outright — a 0-second run with
+  "likely a workflow file issue" — which is the only reason it was caught.
+
+  The rule that would have caught it: after resolving a merge, grep the WHOLE
+  TREE for markers, not the files you remember touching. `git diff --check` and
+  `git status` both say so plainly and neither was consulted.
+
 ### The one unfinished thread: the weekly `core` build
 
 Red every Monday since ~2026-08-24 on
