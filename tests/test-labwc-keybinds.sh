@@ -47,6 +47,21 @@ for cand in "${ROOT}/../apex-shell" /usr/share/apex-shell; do
 done
 
 if [ -z "$SHELL_TREE" ]; then
+    # A suite that skips proves nothing, and this one skipped its ENTIRE self on
+    # CI the first time it ran there: no apex-shell checkout next to the repo, no
+    # /usr/share/apex-shell in the runner, `passed=0 failed=0`, green tick. That
+    # is indistinguishable from working.
+    #
+    # So CI sets APEX_REQUIRE_SHELL_TREE=1 and the skip becomes a failure. A
+    # developer running this locally without a shell checkout still gets a skip,
+    # because there the absence is obvious and the alternative is a suite nobody
+    # can run.
+    if [ "${APEX_REQUIRE_SHELL_TREE:-0}" = "1" ]; then
+        printf 'FAIL  an apex-shell tree is required here and none was found\n' >&2
+        printf '      looked in: %s/../apex-shell and /usr/share/apex-shell\n' "$ROOT" >&2
+        printf '\npassed=0 failed=1\n'
+        exit 1
+    fi
     printf 'no apex-shell tree available; nothing here can run\n' >&2
     printf '\npassed=0 failed=0 (skipped: no shell tree)\n'
     exit 0
