@@ -713,10 +713,14 @@ pub fn perf_main(args: PerfArgs) -> i32 {
 
     println!();
     println!("── Power and thermals ──");
-    kv(
-        "package",
-        &show(&snap.package_watts, |v| format!("{v:.2} W")),
-    );
+    match snap.power_sources.value() {
+        Some(sources) => {
+            for r in sources {
+                kv(&format!("  {}", r.name()), &format!("{:.2} W", r.watts));
+            }
+        }
+        None => kv("power", &show(&snap.power_sources, |_| String::new())),
+    }
     kv(
         "battery",
         &show(&snap.battery_watts, |v| format!("{v:.2} W")),
@@ -837,12 +841,17 @@ fn perf_json(s: &PerfSnapshot) -> String {
         s.gpu.vram.source(),
         s.gpu.vram.reason(),
     ));
-    parts.push(num(
-        "package_watts",
-        s.package_watts.value().map(|v| format!("{v}")),
-        s.package_watts.source(),
-        s.package_watts.reason(),
-    ));
+    // An object keyed by chip/label, never a bare "package_watts": the figure is
+    // only meaningful alongside which sensor produced it.
+    let power = match s.power_sources.value() {
+        Some(v) => v
+            .iter()
+            .map(|r| format!("{}:{}", js(&r.name()), r.watts))
+            .collect::<Vec<_>>()
+            .join(","),
+        None => String::new(),
+    };
+    parts.push(format!("\"power_watts\":{{{power}}}"));
     parts.push(num(
         "battery_watts",
         s.battery_watts.value().map(|v| format!("{v}")),
