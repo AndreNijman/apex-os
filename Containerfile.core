@@ -898,6 +898,51 @@ RUN set -eux; \
 #     it as "Fedora release 43 (Forty Three)" is why the firmware boot menu said
 #     "Fedora". Content is rewritten in place — the file is NOT renamed, the
 #     symlink chain and `[ -f /etc/fedora-release ]` probes must keep working.
+#
+#     Writing /usr/lib and TRUSTING the /etc symlinks is what broke: every
+#     weekly `core` build from 2026-08-17 on failed CI's
+#     `grep "^APEX-OS release" /etc/system-release` while /usr/lib/fedora-release
+#     itself was branded correctly. fedora-release-common ships those three /etc
+#     entries as hardlinked symlinks inherited from the base layer
+#     (`/etc/system-release` and `/etc/redhat-release` share one inode, nlink=3);
+#     nothing in this file, and no package in any repo we enable, owns or
+#     rewrites them — verified with `dnf5 repoquery --whatprovides`, which names
+#     only fedora-release-common and generic-release-common.
+#
+#     What moved was the BUILDER. GitHub's ubuntu-24.04 runner image
+#     20260810.271 (published 2026-08-11) replaced the distro podman 4.9.3 with
+#     a bundled 5.8.4 — precisely the gap between the last green scheduled core
+#     (2026-08-03, image 20260720.247) and the first red one (2026-08-17, image
+#     20260810.271.1). GitHub withdrew it again in 20260831.293, citing
+#     "unexpected container storage behavior and reports of corrupted images"
+#     and "conflicts between the bundled and distribution-provided Podman
+#     installations" (actions/runner-images#14642). An /etc entry that this
+#     image only ever INHERITS and never writes is at the mercy of whatever the
+#     day's builder does when it flattens 45 layers.
+#
+#     That rollback also means the cron may go green on its own — which is the
+#     reason to fix it properly rather than wait: nothing here would have
+#     changed, and the next builder that mishandles an inherited symlink would
+#     ship a firmware boot entry labelled "Fedora" all over again.
+#
+#     So re-create the links here instead of assuming they survived. `ln -sfn`
+#     is a no-op against the correct state, and against a flattened one it puts
+#     a fresh symlink in THIS layer — written after the content it points at,
+#     by us, rather than carried through 40 layers of somebody else's copy-up.
+#     ALL SEVEN are re-created, not just the one CI happened to check: every
+#     file this block brands lives in /usr/lib and is only ever read through
+#     /etc, so os-release, the release trio, the CPE and issue{,.net} are the
+#     same bug waiting for a different symptom. A flattened /etc/os-release is
+#     the worst of them — /usr/lib/os-release would still pass every assertion
+#     while the whole system read Fedora's.
+#
+#     Then assert through /etc, which is the side that is actually consumed.
+#     This block checked /usr/lib/os-release three ways and checked nothing at
+#     all through /etc, which is why a wrong image built cleanly and only died
+#     45 minutes later in the CI verify — and only on the Monday cron, because
+#     push builds skip this tier. The verify check stays: it is the backstop
+#     for anything that goes wrong AFTER this RUN commits, which is exactly the
+#     class of bug that caused this.
 #   - /usr/lib/issue{,.net}: agetty expands \S to PRETTY_NAME (so the VT login
 #     banner brands itself), but the stock "Kernel \r on \m" line prints
 #     7.1.3-cachyos1.fc43.x86_64. Drop that line — the kernel release string
@@ -941,6 +986,18 @@ RUN set -eux; \
     printf '%s\n' 'cpe:/o:apexos:apex_os:43' > /usr/lib/system-release-cpe; \
     printf '%s\n\n' '\S' > /usr/lib/issue; \
     printf '%s\n' '\S' > /usr/lib/issue.net; \
+    ln -sfn ../usr/lib/os-release         /etc/os-release; \
+    ln -sfn ../usr/lib/fedora-release     /etc/fedora-release; \
+    ln -sfn fedora-release                /etc/system-release; \
+    ln -sfn fedora-release                /etc/redhat-release; \
+    ln -sfn ../usr/lib/system-release-cpe /etc/system-release-cpe; \
+    ln -sfn ../usr/lib/issue              /etc/issue; \
+    ln -sfn ../usr/lib/issue.net          /etc/issue.net; \
+    grep -q '^APEX-OS release' /etc/system-release; \
+    grep -q '^APEX-OS release' /etc/redhat-release; \
+    grep -q '^APEX-OS release' /etc/fedora-release; \
+    grep -q '^PRETTY_NAME="APEX-OS"$' /etc/os-release; \
+    grep -qx 'cpe:/o:apexos:apex_os:43' /etc/system-release-cpe; \
     systemctl mask serial-getty@ttyS0.service; \
     systemctl mask systemd-remount-fs.service; \
     rm -rf /usr/local && ln -s ../var/usrlocal /usr/local; \
