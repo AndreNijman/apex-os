@@ -39,6 +39,7 @@ pub mod select;
 pub mod syswriter;
 pub mod tier;
 pub mod topology;
+pub mod workload;
 
 pub use battery::{Battery, BatteryInventory, ThresholdSupport};
 pub use fan::{FanInventory, FanMode, FanSnapshot, UnknownFanMode};
@@ -54,6 +55,7 @@ pub use select::{select, Selection};
 pub use syswriter::{MockWriter, RealWriter, SysWriter};
 pub use tier::{Action, Tier, UnknownTier};
 pub use topology::{CoreSource, CoreTopology};
+pub use workload::{Assessment, Signal, Signals, Vram, Workload};
 
 /// The default on-disk override directory for profiles. If present it wins
 /// over the embedded set.
