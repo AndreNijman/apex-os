@@ -422,8 +422,16 @@ impl GameModeIface {
     }
 
     /// Session detail: `active`(b), `cpus`(s), `core_source`(s),
-    /// `irqs_steered`(u), `gpus_locked`(au), `pids`(au), `prior_tier`(s),
-    /// `tier`(s), `cgroup`(s), `notes`(as) — plus `pcores`/`ecores` when idle.
+    /// `irqs_steered`(u), `irqs_attempted`(u), `irqs_refused`(u),
+    /// `gpus_locked`(au), `pids`(au), `prior_tier`(s), `tier`(s), `cgroup`(s),
+    /// `notes`(as) — plus `pcores`/`ecores` when idle.
+    ///
+    /// `irqs_steered` counts the affinity writes the KERNEL ACCEPTED. It
+    /// previously carried the number the plan intended, which made it a lie on
+    /// any machine that refuses affinity writes; `irqs_attempted` now carries
+    /// the plan's number and `irqs_refused` the difference, so a partial result
+    /// (normal — kernel-managed interrupts are unmovable) reads as a partial
+    /// result rather than as a smaller success.
     #[zbus(property)]
     async fn status(&self) -> HashMap<String, OwnedValue> {
         self.ctx.game_status().await
