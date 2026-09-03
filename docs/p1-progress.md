@@ -72,8 +72,13 @@ is the technical debt §17 names.
 Not started. `apex install` / `search` / `repo` / `pkg` already ship on the
 sysext engine — phase 6 extends that, it does not replace it.
 
-- [ ] **6.1** `apex env` capsules (create/list/enter/exec/rm), GPU and device
-      profiles, GUI export to the host desktop.
+- [x] **6.1** `apex env` capsules. `files/system/libexec/apex-env` +
+      `apex env` in the CLI, 149 assertions in `tests/test-apex-env.sh`.
+      Rootless distrobox/podman, records under `${XDG_DATA_HOME}/apex/env`,
+      image aliases (fedora, ubuntu, arch, debian, python, cuda, rocm) and
+      device profiles (nvidia, amd, hw, none). **GUI export via
+      `distrobox-export` is deliberately not done** — §8 says "when useful",
+      and it needs a real desktop session to verify, which CI does not have.
 - [ ] **6.2** Project ↔ capsule binding, wired into the agent runtime.
 - [ ] **6.3** Universal resolver: rank across dnf / flatpak / capsule, present a
       canonical choice, keep explicit source selection.
@@ -128,6 +133,20 @@ Newest last. One line per pushed commit that changes the state above.
   the shipped config, and 4 bindings genuinely have no labwc equivalent
   (scratchpad ×2, pseudo-tiling, split) so they are reported rather than mapped
   onto something approximate.
+- 2026-09-03 — **6.1 done.** `files/system/libexec/apex-env` + `apex env` in
+  the CLI + 149 assertions. Three things worth knowing. (1) `cuda` and `rocm`
+  are **device profiles on an Ubuntu LTS base**, not the vendor images:
+  `nvidia/cuda` and `rocm/dev-ubuntu` are 5–20 GB carrying a toolchain most
+  users replace, and §8 asks for the *access profile*, which is the part APEX
+  has to get right. `--image` still takes a vendor image. (2) The `python`
+  alias is fedora-toolbox plus the Python toolchain, **not**
+  `docker.io/library/python` — that image has no user and is not a
+  distrobox-compatible base, so the host integration this exists for does not
+  work in it. (3) ROCm needs `--group-add keep-groups` as well as `/dev/kfd`:
+  rootless podman drops the user's supplementary groups, so without it the
+  device node is present and unopenable, which reads as a driver bug. The
+  suite pins the exact argv per profile, because `create` can never run for
+  real in CI.
 - 2026-09-03 — noted for whoever picks this up: an early draft of the facade
   test called `setGaps(0, 0)` to check that a *capable* action returns true, and
   set the live Hyprland gaps to zero on the developer's desktop. Suites here run
