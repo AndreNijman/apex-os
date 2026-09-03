@@ -81,8 +81,8 @@ enum Cmd {
     Doctor,
     /// Show the booted image and its changelog labels.
     Changelog,
-    /// Install packages from the enabled repositories, a Flatpak id, or a local
-    /// .rpm file. Requires root.
+    /// Install packages from the enabled repositories, Flathub, a capsule, or
+    /// a local .rpm file. Requires root, except `--source capsule`.
     ///
     /// Each argument is a package name from Fedora/RPM Fusion/an enabled COPR, a
     /// reverse-DNS Flatpak id (org.gimp.GIMP), or a path to an .rpm file. A local
@@ -106,13 +106,39 @@ enum Cmd {
         /// `apex pkg verify` keep reporting it.
         #[arg(long)]
         allow_unsigned: bool,
+        /// Pick the source yourself instead of letting APEX rank them:
+        /// rpm (the system extension), flatpak, or capsule.
+        ///
+        /// Applies to bare names only. A path is always an RPM and an
+        /// application id is always a Flatpak, so naming a source that
+        /// contradicts one of those is refused rather than quietly resolved.
+        /// `apex resolve <name>` shows what would happen without it.
+        #[arg(long, value_name = "SOURCE")]
+        source: Option<String>,
+        /// Which capsule `--source capsule` installs into. Defaults to your
+        /// first one.
+        #[arg(long, value_name = "CAPSULE")]
+        env: Option<String>,
+    },
+    /// Show which source APEX would install a name from, and why.
+    ///
+    /// Prints every candidate across the repositories, Flathub and your
+    /// capsules, what vouches for each one, the choice APEX would make, and
+    /// the exact command for every alternative. Read-only, so it needs no
+    /// root — "what would this do" should never cost a password.
+    Resolve {
+        #[arg(value_name = "NAME")]
+        name: String,
     },
     /// Remove packages installed with `apex install`. Requires root.
     Remove {
         #[arg(required = true, value_name = "PACKAGE")]
         packages: Vec<String>,
     },
-    /// Search all enabled package repositories.
+    /// Search every package source: the enabled repositories and Flathub.
+    ///
+    /// `apex resolve <name>` then says which of them APEX would actually use
+    /// for a given name, and why.
     Search {
         #[arg(required = true, value_name = "TERM")]
         terms: Vec<String>,
@@ -126,6 +152,21 @@ enum Cmd {
     Pkg {
         #[command(subcommand)]
         cmd: PkgCmd,
+    },
+    /// APEX Capsules: development environments that leave the host alone.
+    ///
+    /// /usr is read-only and packages come from a system extension, which is
+    /// the right shape for an operating system and the wrong one for
+    /// ecosystems that expect a mutable userspace — `pip install --user`,
+    /// `npm -g`, an SDK that wants /opt, a package manager that wants
+    /// /etc/apt. A capsule gives each of those its own rootless container
+    /// that still sees your home, your terminal and your devices.
+    ///
+    /// Unprivileged: capsules belong to you, not to the machine, so none of
+    /// these verbs needs (or accepts) root.
+    Env {
+        #[command(subcommand)]
+        cmd: EnvCmd,
     },
     /// Run and supervise coding agents on managed terminals.
     ///
@@ -191,6 +232,85 @@ enum PkgCmd {
     /// Convert rpm-ostree layered packages into APEX packages, so that OS
     /// updates work again without losing the software. Requires root.
     Adopt,
+}
+
+/// `apex env <verb>` — the capsule surface (§8).
+///
+/// A separate enum rather than a raw argument passthrough so that `apex env
+/// --help` documents the real thing and a typo is caught before a process is
+/// spawned. The engine still owns every decision; this only builds its argv.
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// Create a capsule.
+    ///
+    /// A name that is also an image alias (fedora, ubuntu, arch, debian,
+    /// python, cuda, rocm) brings that alias's image and device profile with
+    /// it, so `apex env create cuda` is a capsule that can see the GPU.
+    Create {
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Any container image reference, instead of the alias's default.
+        #[arg(long, value_name = "REF")]
+        image: Option<String>,
+        /// Device access: nvidia (host driver passthrough), amd (/dev/kfd and
+        /// the render group, for ROCm), hw (USB buses, for hardware work), or
+        /// none. Defaults to none — a capsule holding a device open is a
+        /// capsule that stops the machine suspending.
+        #[arg(long, value_name = "PROFILE")]
+        gpu: Option<String>,
+        /// Give the capsule its own home directory instead of sharing yours.
+        /// For ecosystems whose caches litter $HOME badly enough to contain.
+        #[arg(long, value_name = "DIR")]
+        home: Option<String>,
+    },
+    /// Capsules on this machine, with their image and device profile.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// The full record for one capsule: image, digest, profile, package manager.
+    Info {
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// Open an interactive shell in a capsule.
+    Enter {
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Run this instead of a login shell.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Run one command in a capsule with no TTY. For scripts and agents.
+    Exec {
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Install packages with the capsule's own package manager.
+    ///
+    /// This is what `apex install --source capsule` routes to: software that
+    /// exists only as a package for a distribution APEX is not.
+    Install {
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(required = true, value_name = "PACKAGE")]
+        packages: Vec<String>,
+    },
+    /// Remove a capsule. Only ones APEX created, unless --force.
+    Rm {
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Say where a custom home directory is rather than reporting it gone.
+        #[arg(long)]
+        keep_home: bool,
+        /// Remove a container APEX has no record of.
+        #[arg(long)]
+        force: bool,
+    },
+    /// The image aliases and what they resolve to on this release.
+    Images,
 }
 
 #[derive(Subcommand)]
@@ -371,22 +491,31 @@ struct BatteryArgs {
     calibrate: bool,
 }
 
-#[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
-
-    // Root-only verbs bail HERE — before any sysfs probe, D-Bus connect or
-    // subprocess — so an unprivileged `apex update` costs nothing and answers
-    // instantly with the command to run instead. See ops::require_root for why
-    // this covers exactly these four and not the whole CLI (the desktop's power
-    // tab drives `apex tier` as the session user).
-    let privileged = match &cli.command {
+/// Which verbs refuse to run without root, and under what name.
+///
+/// A function rather than a `match` inside `main` so the privilege set is an
+/// assertion instead of a reading exercise. It covers exactly these and not
+/// the whole CLI: the desktop's power tab drives `apex tier` as the session
+/// user, and every read-only verb has to stay usable without a password.
+/// See `ops::require_root` for what the refusal says.
+fn privileged_verb(cmd: &Cmd) -> Option<&'static str> {
+    match cmd {
         Cmd::Update(_) => Some("update"),
         Cmd::Rollback => Some("rollback"),
         Cmd::Pin => Some("pin"),
+        // `--source capsule` writes nothing the system owns: it installs into
+        // a rootless per-user container. Demanding root for it would be worse
+        // than pointless — root has no capsules, so `sudo apex install
+        // --source capsule` reports an empty list on every machine, and the
+        // user who typed sudo because the CLI asked for it gets a refusal from
+        // the engine instead of a package.
+        Cmd::Install {
+            source: Some(s), ..
+        } if s == "capsule" => None,
         // Package verbs that write: they build an extension into /var/lib and
         // ask systemd to re-merge /usr. The read-only ones (list/status/info/
-        // verify) and `search` stay usable as an ordinary user on purpose.
+        // verify), `search` and `resolve` stay usable as an ordinary user on
+        // purpose.
         Cmd::Install { .. } => Some("install"),
         Cmd::Remove { .. } => Some("remove"),
         Cmd::Pkg {
@@ -407,9 +536,22 @@ async fn main() {
         Cmd::Fan {
             cmd: Some(FanCmd::Restore { local: true }),
         } => Some("fan restore --local"),
+        // `apex env` is deliberately absent: capsules are rootless per-user
+        // containers, and running one as root would put its images under
+        // /var/lib/containers, share it between every account, and need an
+        // authentication prompt to open a shell.
         _ => None,
-    };
-    if let Some(verb) = privileged {
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+
+    // Root-only verbs bail HERE — before any sysfs probe, D-Bus connect or
+    // subprocess — so an unprivileged `apex update` costs nothing and answers
+    // instantly with the command to run instead.
+    if let Some(verb) = privileged_verb(&cli.command) {
         if let Err(code) = ops::require_root(verb) {
             std::process::exit(code);
         }
@@ -449,12 +591,17 @@ async fn main() {
             no_weak_deps,
             enable_repo,
             allow_unsigned,
+            source,
+            env,
         } => ops::pkg(&install_argv(
             packages,
             no_weak_deps,
             enable_repo,
             allow_unsigned,
+            source,
+            env,
         )),
+        Cmd::Resolve { name } => ops::pkg(&["resolve".to_string(), name]),
         Cmd::Remove { packages } => {
             let mut argv = vec!["remove".to_string()];
             argv.extend(packages);
@@ -492,6 +639,7 @@ async fn main() {
             };
             ops::pkg(&argv)
         }
+        Cmd::Env { cmd } => ops::env(&env_argv(cmd)),
     };
     std::process::exit(code);
 }
@@ -507,6 +655,8 @@ fn install_argv(
     no_weak_deps: bool,
     enable_repo: Vec<String>,
     allow_unsigned: bool,
+    source: Option<String>,
+    env: Option<String>,
 ) -> Vec<String> {
     let mut argv = vec!["install".to_string()];
     argv.extend(packages);
@@ -519,7 +669,91 @@ fn install_argv(
     if allow_unsigned {
         argv.push("--allow-unsigned".to_string());
     }
+    // The engine validates the value and refuses an unknown one. Not
+    // re-validated here: two lists of legal sources would be one list too
+    // many, and the engine's is the one that decides.
+    if let Some(s) = source {
+        argv.push(format!("--source={s}"));
+    }
+    if let Some(e) = env {
+        argv.push(format!("--env={e}"));
+    }
     argv
+}
+
+/// Build the engine argv for `apex env`.
+///
+/// Split out for the same reason `install_argv` is: the engine is a separate
+/// process, so a dropped flag is not a compile error but a silent policy
+/// change. `--gpu` decides whether a capsule can see the GPU at all, and
+/// `--force` decides whether `rm` will destroy a container APEX did not
+/// create.
+///
+/// The `--` before a trailing command is not cosmetic. Without it the engine
+/// cannot tell `apex env exec box -- ls -l` (run `ls -l`) from a flag of its
+/// own, and clap has already stripped the separator the user typed.
+fn env_argv(cmd: EnvCmd) -> Vec<String> {
+    match cmd {
+        EnvCmd::Create {
+            name,
+            image,
+            gpu,
+            home,
+        } => {
+            let mut a = vec!["create".to_string(), name];
+            if let Some(i) = image {
+                a.push(format!("--image={i}"));
+            }
+            if let Some(g) = gpu {
+                a.push(format!("--gpu={g}"));
+            }
+            if let Some(h) = home {
+                a.push(format!("--home={h}"));
+            }
+            a
+        }
+        EnvCmd::List { json } => {
+            let mut a = vec!["list".to_string()];
+            if json {
+                a.push("--json".to_string());
+            }
+            a
+        }
+        EnvCmd::Info { name } => vec!["info".to_string(), name],
+        EnvCmd::Enter { name, command } => {
+            let mut a = vec!["enter".to_string(), name];
+            if !command.is_empty() {
+                a.push("--".to_string());
+                a.extend(command);
+            }
+            a
+        }
+        EnvCmd::Exec { name, command } => {
+            let mut a = vec!["exec".to_string(), name, "--".to_string()];
+            a.extend(command);
+            a
+        }
+        EnvCmd::Install { name, packages } => {
+            let mut a = vec!["install".to_string(), name];
+            a.extend(packages);
+            a
+        }
+        EnvCmd::Rm {
+            name,
+            keep_home,
+            force,
+        } => {
+            let mut a = vec!["rm".to_string(), name];
+            if keep_home {
+                a.push("--keep-home".to_string());
+            }
+            if force {
+                a.push("--force".to_string());
+            }
+            a
+        }
+        EnvCmd::Images => vec!["images".to_string()],
+    }
 }
 
 fn cmd_fingerprint() -> i32 {
@@ -1683,16 +1917,49 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
-    fn install(argv: &[&str]) -> (Vec<String>, bool, Vec<String>, bool) {
+    /// The parsed pieces of an `apex install`, in the order `install_argv`
+    /// takes them.
+    struct Install {
+        packages: Vec<String>,
+        no_weak_deps: bool,
+        enable_repo: Vec<String>,
+        allow_unsigned: bool,
+        source: Option<String>,
+        env: Option<String>,
+    }
+
+    fn install(argv: &[&str]) -> Install {
         match Cli::try_parse_from(argv).expect("parses").command {
             Cmd::Install {
                 packages,
                 no_weak_deps,
                 enable_repo,
                 allow_unsigned,
-            } => (packages, no_weak_deps, enable_repo, allow_unsigned),
+                source,
+                env,
+            } => Install {
+                packages,
+                no_weak_deps,
+                enable_repo,
+                allow_unsigned,
+                source,
+                env,
+            },
             _ => panic!("not an install"),
         }
+    }
+
+    /// The engine argv an `apex install` command line produces.
+    fn install_engine_argv(argv: &[&str]) -> Vec<String> {
+        let i = install(argv);
+        install_argv(
+            i.packages,
+            i.no_weak_deps,
+            i.enable_repo,
+            i.allow_unsigned,
+            i.source,
+            i.env,
+        )
     }
 
     #[test]
@@ -2008,7 +2275,7 @@ mod tests {
     fn install_takes_a_local_rpm_path_as_a_package() {
         // The engine decides what is a file and what is a package name; the CLI
         // must not filter, reorder or reject either form.
-        let (packages, ..) = install(&[
+        let i = install(&[
             "apex",
             "install",
             "/media/usb/google-chrome-stable.rpm",
@@ -2016,7 +2283,7 @@ mod tests {
             "org.gimp.GIMP",
         ]);
         assert_eq!(
-            packages,
+            i.packages,
             vec![
                 "/media/usb/google-chrome-stable.rpm".to_string(),
                 "htop".to_string(),
@@ -2027,32 +2294,29 @@ mod tests {
 
     #[test]
     fn a_path_with_spaces_survives_as_one_argument() {
-        let (packages, ..) = install(&["apex", "install", "/media/My Stick/an app.rpm"]);
-        assert_eq!(packages, vec!["/media/My Stick/an app.rpm".to_string()]);
+        let i = install(&["apex", "install", "/media/My Stick/an app.rpm"]);
+        assert_eq!(i.packages, vec!["/media/My Stick/an app.rpm".to_string()]);
     }
 
     #[test]
     fn the_unverified_opt_in_is_off_unless_asked_for() {
-        let (_, _, _, allow_unsigned) = install(&["apex", "install", "./x.rpm"]);
-        assert!(!allow_unsigned);
-        assert!(!install_argv(vec!["./x.rpm".into()], false, vec![], false)
+        assert!(!install(&["apex", "install", "./x.rpm"]).allow_unsigned);
+        assert!(!install_engine_argv(&["apex", "install", "./x.rpm"])
             .contains(&"--allow-unsigned".to_string()));
     }
 
     #[test]
     fn every_flag_reaches_the_engine_argv() {
-        let (packages, no_weak_deps, enable_repo, allow_unsigned) = install(&[
-            "apex",
-            "install",
-            "--allow-unsigned",
-            "--no-weak-deps",
-            "--enable-repo",
-            "extra",
-            "./x.rpm",
-        ]);
-        assert!(allow_unsigned && no_weak_deps);
         assert_eq!(
-            install_argv(packages, no_weak_deps, enable_repo, allow_unsigned),
+            install_engine_argv(&[
+                "apex",
+                "install",
+                "--allow-unsigned",
+                "--no-weak-deps",
+                "--enable-repo",
+                "extra",
+                "./x.rpm",
+            ]),
             vec![
                 "install".to_string(),
                 "./x.rpm".to_string(),
@@ -2063,12 +2327,179 @@ mod tests {
         );
     }
 
+    // ── §9: the resolver's escape hatch ─────────────────────────────────────
+
+    #[test]
+    fn no_source_is_named_unless_the_user_named_one() {
+        // The empty case is the one that matters: `apex install htop` must
+        // reach the engine exactly as it did before the resolver existed, or
+        // this is a behaviour change on a shipped command.
+        assert_eq!(
+            install_engine_argv(&["apex", "install", "htop"]),
+            vec!["install".to_string(), "htop".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_chosen_source_reaches_the_engine() {
+        assert_eq!(
+            install_engine_argv(&["apex", "install", "--source", "flatpak", "discord"]),
+            vec![
+                "install".to_string(),
+                "discord".to_string(),
+                "--source=flatpak".to_string(),
+            ]
+        );
+        assert_eq!(
+            install_engine_argv(&[
+                "apex", "install", "--source", "capsule", "--env", "arch", "yay",
+            ]),
+            vec![
+                "install".to_string(),
+                "yay".to_string(),
+                "--source=capsule".to_string(),
+                "--env=arch".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_capsule_install_does_not_demand_root() {
+        // Root has no capsules. Demanding root here would make the CLI ask for
+        // a password and the engine then refuse the privileged invocation —
+        // the user gets two refusals and no package.
+        assert_eq!(
+            privilege(&["apex", "install", "--source", "capsule", "htop"]),
+            None
+        );
+        // Every other source still writes something the system owns.
+        assert_eq!(
+            privilege(&["apex", "install", "--source", "rpm", "htop"]),
+            Some("install")
+        );
+        assert_eq!(
+            privilege(&["apex", "install", "--source", "flatpak", "discord"]),
+            Some("install")
+        );
+    }
+
+    #[test]
+    fn asking_what_would_happen_never_needs_a_password() {
+        assert_eq!(privilege(&["apex", "resolve", "discord"]), None);
+        match Cli::try_parse_from(["apex", "resolve", "discord"])
+            .expect("parses")
+            .command
+        {
+            Cmd::Resolve { name } => assert_eq!(name, "discord"),
+            _ => panic!("not a resolve"),
+        }
+    }
+
+    fn privilege(argv: &[&str]) -> Option<&'static str> {
+        privileged_verb(&Cli::try_parse_from(argv).expect("parses").command)
+    }
+
     #[test]
     fn install_is_still_a_root_only_verb() {
         // Adding a flag must not accidentally move `install` out of the
         // privileged set: it writes an extension and re-merges /usr.
-        let cli = Cli::try_parse_from(["apex", "install", "--allow-unsigned", "./x.rpm"]).unwrap();
-        assert!(matches!(cli.command, Cmd::Install { .. }));
+        assert_eq!(
+            privilege(&["apex", "install", "--allow-unsigned", "./x.rpm"]),
+            Some("install")
+        );
+        assert_eq!(privilege(&["apex", "remove", "htop"]), Some("remove"));
+        assert_eq!(privilege(&["apex", "pkg", "upgrade"]), Some("pkg upgrade"));
     }
 
+    #[test]
+    fn reading_never_needs_a_password() {
+        // Each of these is driven from the desktop as the session user. A
+        // password prompt here is not a security improvement, it is a shell
+        // that stops working.
+        for argv in [
+            vec!["apex", "search", "htop"],
+            vec!["apex", "pkg", "list"],
+            vec!["apex", "pkg", "verify"],
+            vec!["apex", "status"],
+            vec!["apex", "tier"],
+            vec!["apex", "fan", "status"],
+        ] {
+            assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
+        }
+    }
+
+    // ── apex env (§8 capsules) ──────────────────────────────────────────────
+
+    fn env(argv: &[&str]) -> Vec<String> {
+        match Cli::try_parse_from(argv).expect("parses").command {
+            Cmd::Env { cmd } => env_argv(cmd),
+            _ => panic!("not an env verb"),
+        }
+    }
+
+    #[test]
+    fn env_create_passes_the_name_and_nothing_it_was_not_given() {
+        assert_eq!(env(&["apex", "env", "create", "fedora"]), vec!["create", "fedora"]);
+    }
+
+    #[test]
+    fn the_device_profile_reaches_the_engine() {
+        // The one flag that decides whether a capsule can see the GPU. A
+        // silently dropped `--gpu` produces a capsule that looks right and
+        // cannot compute, which is a bug report about drivers.
+        assert_eq!(
+            env(&["apex", "env", "create", "ml", "--gpu", "amd"]),
+            vec!["create", "ml", "--gpu=amd"]
+        );
+        assert_eq!(
+            env(&["apex", "env", "create", "box", "--image", "docker.io/library/ubuntu:24.04"]),
+            vec!["create", "box", "--image=docker.io/library/ubuntu:24.04"]
+        );
+    }
+
+    #[test]
+    fn a_trailing_command_is_separated_from_the_engines_own_flags() {
+        // Without the `--` the engine cannot tell a command's flags from its
+        // own, and clap has already consumed the separator the user typed.
+        assert_eq!(
+            env(&["apex", "env", "exec", "box", "ls", "-l"]),
+            vec!["exec", "box", "--", "ls", "-l"]
+        );
+        assert_eq!(
+            env(&["apex", "env", "enter", "box", "--", "bash", "-lc", "echo hi"]),
+            vec!["enter", "box", "--", "bash", "-lc", "echo hi"]
+        );
+    }
+
+    #[test]
+    fn entering_without_a_command_asks_for_a_login_shell() {
+        // `enter box --` with an empty command must not reach the engine, or it
+        // would report a usage error for a request that is perfectly valid.
+        assert_eq!(env(&["apex", "env", "enter", "box"]), vec!["enter", "box"]);
+    }
+
+    #[test]
+    fn removing_a_capsule_does_not_inherit_force() {
+        assert_eq!(env(&["apex", "env", "rm", "box"]), vec!["rm", "box"]);
+        assert_eq!(
+            env(&["apex", "env", "rm", "box", "--force", "--keep-home"]),
+            vec!["rm", "box", "--keep-home", "--force"]
+        );
+    }
+
+    #[test]
+    fn capsules_are_never_a_privileged_verb() {
+        // Capsules are rootless per-user containers. If `apex env` ever landed
+        // in the privileged set it would create them under
+        // /var/lib/containers, shared by every account, and need an
+        // authentication prompt to enter a shell.
+        for argv in [
+            vec!["apex", "env", "create", "fedora"],
+            vec!["apex", "env", "rm", "fedora"],
+            vec!["apex", "env", "install", "fedora", "htop"],
+            vec!["apex", "env", "enter", "fedora"],
+        ] {
+            assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
+        }
+    }
 }

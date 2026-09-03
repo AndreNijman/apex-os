@@ -315,6 +315,35 @@ pub const PKG_ENGINE: &str = "/usr/libexec/apex-pkg";
 /// user packages", which is the common case and must cost nothing.
 const PKG_STATE: &str = "/var/lib/apex/pkg/state.json";
 
+/// The capsule engine behind `apex env` (§8). Same shape as `PKG_ENGINE`: the
+/// policy lives in one shipped program so the CLI, the resolver and anything
+/// the shell drives cannot disagree about what a capsule is.
+pub const ENV_ENGINE: &str = "/usr/libexec/apex-env";
+
+/// `apex env …`.
+///
+/// Unprivileged on purpose, and it must stay that way: capsules are rootless
+/// per-user podman containers. Routing this through sudo would put their images
+/// under /var/lib/containers, share one environment between every account on
+/// the machine, and need an authentication prompt to enter a shell.
+///
+/// `enter` replaces this process rather than waiting on a child, so an
+/// interactive capsule shell gets the terminal, the signals and the exit status
+/// directly.
+pub fn env(args: &[String]) -> i32 {
+    match Command::new(ENV_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the capsule engine: {e}");
+            eprintln!(
+                "apex: no capsule engine on this system — it predates `apex env`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
 /// `apex install` / `apex remove` / `apex search` / `apex pkg …`.
 ///
 /// Deliberately a thin pass-through: the engine owns dependency resolution,
