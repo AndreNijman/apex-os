@@ -146,27 +146,69 @@ scenario_signed_uki() {
 scenario_reproducible() {
     log "reproducible: the same inputs and SOURCE_DATE_EPOCH give the same bytes"
     fixtures
-    # §22 wants UKIs "produced reproducibly". Two builds, one fixed
-    # SOURCE_DATE_EPOCH, byte-identical output — or this reports the difference
-    # rather than claiming a property it does not have.
+
+    # ── The UKI PAYLOAD is reproducible. The SIGNATURE is not, and cannot be ──
+    #
+    # This scenario used to build two SIGNED UKIs and assert byte equality. It
+    # passed, then failed on a later CI run whose only changes were to
+    # documentation — because `sbsign` records a signing time in the PKCS#7
+    # structure, so two signings of identical input match only when they land
+    # in the same second.
+    #
+    # Measured directly rather than inferred: signing one unmodified
+    # linuxx64.efi.stub twice, two seconds apart, with one key, produced
+    # sha256 c266048303a17056… and 66d64b06a66db973…. There is no sbsign flag
+    # that removes the timestamp.
+    #
+    # So the assertion moves to the artifact whose bytes SOURCE_DATE_EPOCH
+    # actually controls — the unsigned UKI — and the signature gets the
+    # assertion that is true of it: that it verifies, every time. Claiming
+    # byte-identical signed output would be claiming a property Authenticode
+    # does not have.
     local a="$WORK/repro-1.efi" b="$WORK/repro-2.efi"
-    SOURCE_DATE_EPOCH=1700000000 mkuki "$a" repro
-    SOURCE_DATE_EPOCH=1700000000 mkuki "$b" repro
+    SOURCE_DATE_EPOCH=1700000000 mkuki "$a" repro --unsigned
+    SOURCE_DATE_EPOCH=1700000000 mkuki "$b" repro --unsigned
     local ha hb
     ha="$(sha256sum <"$a" | cut -d' ' -f1)"
     hb="$(sha256sum <"$b" | cut -d' ' -f1)"
-    assert_eq "$ha" "$hb" "sha256 of two identical UKI builds"
+    assert_eq "$ha" "$hb" "sha256 of two identical UNSIGNED UKI builds"
 
     # And a different epoch must produce different bytes, otherwise the check
     # above would pass even if SOURCE_DATE_EPOCH were being ignored and the
     # timestamp were hardcoded.
     local c="$WORK/repro-3.efi" hc
-    SOURCE_DATE_EPOCH=1600000000 mkuki "$c" repro
+    SOURCE_DATE_EPOCH=1600000000 mkuki "$c" repro --unsigned
     hc="$(sha256sum <"$c" | cut -d' ' -f1)"
     if [[ "$ha" == "$hc" ]]; then
         bad "SOURCE_DATE_EPOCH has no effect on the output — reproducibility is not being controlled"
     else
         ok "a different SOURCE_DATE_EPOCH changes the bytes"
+    fi
+
+    # The signed artifact: two independent builds, both of which must verify.
+    # This is what "produced reproducibly" can mean for a signed PE, and it is
+    # not weaker than it sounds — the payload equality above plus a valid
+    # signature over it is the whole of what a verifier checks.
+    local s1="$WORK/repro-signed-1.efi" s2="$WORK/repro-signed-2.efi"
+    SOURCE_DATE_EPOCH=1700000000 mkuki "$s1" repro
+    SOURCE_DATE_EPOCH=1700000000 mkuki "$s2" repro
+    local vok=1
+    for s in "$s1" "$s2"; do
+        sbverify --cert "$KEYS/sb/cert.pem" "$s" >/dev/null 2>&1 || vok=0
+    done
+    if [[ "$vok" == 1 ]]; then
+        ok "both signed builds verify against the APEX certificate"
+    else
+        bad "both signed builds verify against the APEX certificate"
+    fi
+
+    # And say out loud whether the signed bytes matched this time, without
+    # asserting it either way — a run where they happen to match must not be
+    # read as evidence that they always will.
+    if [[ "$(sha256sum <"$s1" | cut -d' ' -f1)" == "$(sha256sum <"$s2" | cut -d' ' -f1)" ]]; then
+        log "  (the two signed builds happened to land in the same second)"
+    else
+        log "  (the two signed builds differ, as expected: sbsign timestamps)"
     fi
 }
 
