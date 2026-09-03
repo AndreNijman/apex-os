@@ -79,7 +79,10 @@ sysext engine — phase 6 extends that, it does not replace it.
       device profiles (nvidia, amd, hw, none). **GUI export via
       `distrobox-export` is deliberately not done** — §8 says "when useful",
       and it needs a real desktop session to verify, which CI does not have.
-- [ ] **6.2** Project ↔ capsule binding, wired into the agent runtime.
+- [x] **6.2** Project ↔ capsule binding. `Project.capsule` (serde-default so
+      every existing record still parses), `apex project env [NAME|--clear]`,
+      shown by `apex project info` and carried in `list --json`. 8 assertions
+      in `apexd/apex-agent-core/tests/capsule_binding.rs`.
 - [ ] **6.3** Universal resolver: rank across dnf / flatpak / capsule, present a
       canonical choice, keep explicit source selection.
 - [ ] **6.4** Tests.
@@ -147,6 +150,18 @@ Newest last. One line per pushed commit that changes the state above.
   device node is present and unopenable, which reads as a driver bug. The
   suite pins the exact argv per profile, because `create` can never run for
   real in CI.
+- 2026-09-03 — **6.2 done.** The binding is one optional field, and the whole
+  difficulty is one line in `remember`: it runs on every `apex agent run` and
+  every layout save with a project detected from the filesystem, and the
+  filesystem does not know which capsule the user chose. A plain replace would
+  have unbound the project the first time an agent started, silently — the
+  record would still be there and still valid. `remember` now keeps an
+  existing binding when the incoming one is `None`, and `apex project env
+  --clear` writes directly instead of going back through it, or the merge
+  would undo the clear. Both have their own assertion. A second thing found by
+  the suite rather than by reading: `project::list` DELETES the record of any
+  project whose checkout has gone, so a test using a root that does not exist
+  loses its record the moment another case runs a listing.
 - 2026-09-03 — noted for whoever picks this up: an early draft of the facade
   test called `setGaps(0, 0)` to check that a *capable* action returns true, and
   set the live Hyprland gaps to zero on the developer's desktop. Suites here run
