@@ -154,7 +154,21 @@ nothing would report as converged forever.
       After converging, `apply` **re-measures** and reports residual drift, per
       `apexd/AGENTS.md`: a command that reports success must verify the
       requested state, and a step can exit 0 having changed nothing.
-- [ ] **7.3** `apex sync` between machines.
+- [x] **7.3** `apex sync export` / `show` / `import`. One bundle file carries
+      the blueprint, which projects exist and where they came from — and no
+      credentials of any kind, because this is a file people put in a git
+      repository. Three deliberate refusals:
+      - `import` **converges nothing**. It writes the blueprint and records
+        projects; `diff` and `apply` stay separate decisions, so a user who
+        has just pulled in someone else's file gets to read it first.
+      - `import` never creates a directory or clones anything. A project path
+        that is not present is reported with its remote, not acted on.
+      - An existing blueprint is only replaced with `--force`, and the old one
+        is kept as `blueprint.toml.previous`.
+      `export` round-trips its own output through `Bundle::parse` before
+      writing, and validates each project entry through the same door `import`
+      uses — otherwise a bad bundle only fails on the *other* machine, hours
+      later, with no way to tell which end was wrong.
 - [ ] **7.4** GUI editing in the shell. **Deferred out of this phase** — §10's
       last bullet, and it is apex-shell work, not apex-os work. The schema
       round-trips through TOML losslessly so the editor has something to write.
