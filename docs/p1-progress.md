@@ -114,6 +114,41 @@ is the technical debt §17 names.
       directory but enforced only textually, so a symlinked subdirectory escaped
       it with no `..` and no absolute path. Discovery now refuses any plugin
       containing a symlink at any depth.
+
+      **Extended by apex-shell PR #12** (`p1/plugin-points`): two more points,
+      `launcher-provider` and `quick-settings-tile`, each with a host, a working
+      example and coverage in both suite halves. API 1.0 → 1.1, additively.
+      275 headless / 98 static / 94 behavioural assertions.
+
+      The finding that mattered: `bar-widget` lets a plugin *paint*, but both new
+      points are inverted — the plugin returns data and the shell draws it. That
+      is a smaller capability and a much larger checking burden, because
+      `AppLauncher.activate()` dispatches on fields it finds on a row (`entry`
+      runs a DesktopEntry, `exec` reaches `bash -c`). A row carrying either would
+      be arbitrary execution granted to a plugin declaring **no** permissions —
+      the refused `system` permission through the back door. So results are built
+      from an **allowlist** into a fresh object, never a pass-through with bad
+      keys deleted, and the suite asserts the surviving key set *exactly* so it
+      holds for row fields the launcher does not have yet. A behavioural fixture
+      returns hostile rows whose `exec` is `touch /tmp/apex-plugin-breach`; the
+      file's absence is the assertion.
+
+      **The notification handler was declined, deliberately.** Reading
+      notification summaries and bodies — 2FA codes, message previews, reset
+      links — maps to nothing in the closed permission vocabulary. `secrets` is
+      nearest and is defined as a broker the plugin never sees through, the
+      opposite arrangement. Shipping it would need an invented sixth permission
+      or the shell's most sensitive stream with no declaration at all. Recorded
+      rather than invented. (*Emitting* a notification is a much smaller
+      capability and could be added under its own name.)
+
+      And a check that was green for the wrong reason: renaming the tile host's
+      `Loader.Error` handler kept the suite passing, because the file's own
+      header sentence satisfied the grep. Every host here documents its
+      invariants at length, so any check for a construct these files also
+      *discuss* was satisfiable by prose — the crash isolation could have been
+      deleted with CI still green. Comment lines are stripped before matching
+      now, across 14 assertions, **4 of them inherited from PR #9**.
 - [x] **5.5** Tests — covered by each item above rather than as a separate step.
 
 ### Phase 5 review — nine defects, seven fixed here
@@ -242,14 +277,27 @@ Branches in flight, all pushed:
 
 **Still not merged to `apex-os/main`, so no image has been built.**
 
-### Known, unfixed, and outside what was asked
+### Fixed: niri had no application keybinds — apex-shell PR #13
 
-**On niri, SUPER+W / SUPER+T / SUPER+E do not exist.** `KeybindService._genKdl`
+**On niri, SUPER+W / SUPER+T / SUPER+E did not exist.** `KeybindService._genKdl`
 has `if (e.type) continue`, commented "native compositor actions remain in
 niri's own config" — which also skips every `type: "exec"` app-launch bind. So
-niri users get the shell popups and no application shortcuts at all. An app
-launch is a `spawn`, which niri supports, so the `continue` is catching more
-than it meant to. Pre-existing; raised with Andre, not yet fixed.
+niri users got the shell popups and no application shortcuts at all.
+
+Fixed on `p1/niri-app-keybinds`. Applications become `spawn` with one argv token
+each — niri execs without a shell, so `$browser` had to be resolved or `execvp`
+would take it as a literal filename. Window actions map onto niri's column
+model; what niri genuinely lacks (pseudo-tiling, toggle-split, scratchpad) is
+emitted as a comment naming the dispatcher rather than vanishing. All 13 action
+names were verified against the installed `niri msg action --help` before being
+written, and the suite re-verifies them — niri rejects a bad include
+**wholesale**, so one wrong verb costs the user every binding in the file.
+
+Two of my own test bugs in that work, both the same family as PR #12's: a check
+for "the blanket `if (e.type) continue` is gone" **failed** against a file where
+it is gone, because the comment explaining the removal quotes it; and
+`sed -n '/_niriActions: ({/,/})/p'` stopped at the first `})` — a nested map —
+so it checked 7 of 13 names and the other 6 were never verified at all.
 
 ## Two gaps the tracker did not show — 2026-09-03
 
@@ -602,10 +650,51 @@ assertions + 67 in `tests/test-apex-modes.sh` against the built binary.
       taken literally.
 - [x] **8.3** `apex perf` — clocks, power, temps, VRAM, sched-ext state. Frame
       time is reported unavailable *with the reason* rather than substituted.
-- [ ] **8.4** Controller-first / per-game profiles — deferred, and it was the
-      stated lowest priority. `apex-gaming-session` already gives boot-to-game;
-      per-game profile *storage* wants a schema decision that belongs with
-      phase 7's blueprint.
+- [x] **8.4** Controller-first / per-game profiles — apex-os **PR #33**, all
+      checks green.
+
+      **Storage: `~/.config/apex/games.toml`, a separate user-owned file, not a
+      blueprint section.** The deciding argument is the blueprint's own stated
+      contract — "the only file a person or a future GUI edits… nothing in APEX
+      ever rewrites it behind the user's back" — and `apex game profile set` is
+      a program that writes. It is still *desired* state on the test that
+      matters: only an explicit user command causes a write, never a reconcile
+      or a probe, and nothing reads it back as a measurement. `apex sync`
+      deliberately does not carry it.
+
+      **A latent bug in 8.1 that 8.4 does not inherit.** Read out of
+      `game_enter` rather than assumed: the daemon applies the *sysprofile's*
+      `[game] tier` and `fan_mode` **after** `GameMode.SetActive`, so a
+      per-title tier must be re-asserted afterwards and the fan step must be
+      last. `apex mode set gaming` has the same exposure and is invisible only
+      because every shipped sysprofile uses `performance` for both. Left alone
+      on purpose — it is 8.1's code — but it is real and it is written down.
+
+      Per-game `scheduler`/`gpu` are **refused, not accepted and ignored**: no
+      D-Bus member sets either per title, so the keys exist only to say where
+      the setting really lives.
+
+      Controller-first was already built, so it was not rebuilt. What was
+      missing is that nothing could answer "will Gaming Mode start here?"
+      without rebooting into it; `apex gaming` measures what the session checks
+      and separates blockers from warnings using the session's own list.
+
+      **The mutation pass found a real bug in its own suite:** seven hostile-id
+      assertions were passing on a *clap usage error*, not the id check —
+      `--fan` after the `--` makes clap exit 2 for every id, legal ones
+      included. Fixed twice over: the option moved before the `--`, and a
+      refusal must now match its message, since 2 is also clap's usage code.
+      Two process errors also worth naming: a static-check run reported all four
+      mutations "caught" when the check script did not exist (bash exit 127),
+      and a final verification failed against a **stale binary**, because
+      reverting source does not rebuild.
+
+      **Left undone, with reasons:** no launch wrapper — it needs a real Steam
+      install to verify, and an unverified exec path where every game starts is
+      worse than none. Nothing restores on exit, and `show` says so. No real
+      controller, no real Steam, and `apply` against a live daemon is exercised
+      only as a refusal. A gamepad still cannot pick the session at the greeter,
+      which is apex-shell work.
 - [x] **8.5** Tests.
 
 **A real bug, found by running it rather than reading it:** `apex perf` printed
