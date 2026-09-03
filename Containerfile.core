@@ -84,7 +84,19 @@ RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
         wayland-protocols-devel wayland-devel libxkbcommon-devel >/dev/null \
     && dnf5 clean all
 
+# `mkdir -p /out` first, and it is load-bearing rather than tidy. Nothing else
+# creates /out: on the success path `install -D` makes /out/usr/bin as a side
+# effect, so the status write that follows happens to work. On the FAILURE path
+# nothing has created /out, so `echo … > /out/awww-status` fails with "No such
+# file or directory" and `set -e` kills the build — which means the branch
+# labelled "non-fatal" was only ever non-fatal when the build had succeeded.
+#
+# It cost a real build. Codeberg returned 504 during the final image build, the
+# clone failed exactly as this branch anticipates, and the step exited 1 anyway.
+# Reproduced in a Fedora 43 container before fixing: `if false; then …; else
+# echo x > /out/awww-status; fi` under `set -eux` fails on the redirect.
 RUN set -eux; \
+    mkdir -p /out; \
     if git clone --depth 1 https://codeberg.org/LGFae/awww /build/awww \
        && cd /build/awww && cargo build --release; then \
         for b in target/release/awww target/release/awww-daemon; do \
