@@ -41,7 +41,15 @@ jobs:
           # engine=true and rust=false, so the suite never ran — and `result`
           # passed anyway, because a skipped job counts as success. A check
           # required on every PR must always report.
-          grep -Eq '^(apexd/|config/sysprofiles/|tests/)' <<<"$files" && rust=true
+          # `config/` and not `config/sysprofiles/`: test-apex-ai.sh reads
+          # config/ai/catalogue.toml, so a PR that changed ONLY the catalogue
+          # — adding a model, or correcting a digest — set every selector false
+          # and skipped this job, and a skipped job counts as success. That is
+          # the third instance of this bug in this file, and a catalogue edit is
+          # exactly the change most likely to introduce an id `apex ai pull`
+          # would refuse. `config/` is small and every file in it is read by the
+          # binary this job builds.
+          grep -Eq '^(apexd/|config/|tests/)' <<<"$files" && rust=true
           grep -Eq '^installer/' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
