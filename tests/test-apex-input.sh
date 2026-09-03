@@ -239,6 +239,23 @@ fi
     && ok "ApexShellInput.kdl has a pre-create in the provisioner" \
     || bad "ApexShellInput.kdl has a pre-create in the provisioner"
 
+# Order is the whole safety argument, not a detail. The append refuses to write
+# an include whose target is missing, and the pre-create is what guarantees it
+# is not — so a pre-create that ran AFTER the append would leave the include
+# permanently unwritten, and moving the append earlier would be the booby trap
+# this change exists to remove. Nothing between them exits early.
+pre_ln="$(grep -n '^\[ -f "${CFG_DIR}/ApexShellInput.kdl" \]' "$FIRSTRUN" | cut -d: -f1)"
+inc_ln="$(grep -n '# ── 6a\. the generated configs must actually be INCLUDED' "$FIRSTRUN" | cut -d: -f1)"
+if [ -n "$pre_ln" ] && [ -n "$inc_ln" ] && [ "$pre_ln" -lt "$inc_ln" ]; then
+    ok "the pre-create runs before the include is appended (${pre_ln} < ${inc_ln})"
+else
+    bad "the pre-create runs before the include is appended (${pre_ln:-?} < ${inc_ln:-?})"
+fi
+[ -z "$(awk -v a="${pre_ln:-0}" -v b="${inc_ln:-0}" \
+        'NR>a && NR<b && /^[[:space:]]*exit[[:space:]]/' "$FIRSTRUN")" ] \
+    && ok "nothing between them exits the provisioner early" \
+    || bad "nothing between them exits the provisioner early"
+
 # ── path agreement, derived from source on both sides ────────────────────────
 # Hardcoding the two paths here would pass forever after a rename on either
 # side. The Hyprland equivalent of this check in test-apex-firstrun.sh carries
