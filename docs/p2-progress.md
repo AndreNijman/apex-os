@@ -145,7 +145,7 @@ verb should do by default.
 | Run local-model inference there | `apex ai run --on <host>` | forwarder built; wired when §14 lands |
 | Send clipboard and files between devices | `apex send <host> [paths…] \| --clipboard` | done |
 | Open a browser tab or project on another device | `apex open <host> <target>` | done |
-| Show remote agent status in APEX Shell | apex-shell branch | in progress |
+| Show remote agent status in APEX Shell | apex-shell `p2/remote-agent-status` | done |
 
 `apex host run <host> -- <argv>` remains the general escape hatch §24 asks APEX
 to keep, and the specific verbs are thin over it.
@@ -310,3 +310,52 @@ rather than read off its own header comment:
 The permissions line is the load-bearing part. A workflow that merely *does
 not* push today can start pushing with one careless step; one that has no
 `packages: write` token cannot.
+
+## 9.3's shell half — apex-shell `p2/remote-agent-status`
+
+Four commits off `origin/main` (`6f2e55d`), 10 files, +2718/-8. Pushed, not
+merged. Counts re-run here rather than taken on trust:
+
+| suite | result |
+| --- | --- |
+| `remote-agents-test.js` | 89, all pass |
+| `check-remote-agents.sh` | 48 assertions, plus 12 mutants (all confirmed applied) and 13 self-test verdicts |
+| `run-remote-agent-smoke.sh` | 18 |
+| pre-existing suites | 864, unchanged and green — `check-compositor-backends` 28, `check-plugin-platform` 98, `check-blueprint-editor` 75, `check-idle-inhibit` 17 all match |
+
+### Two defects it avoided that would have shipped quietly
+
+**`apex host list --json` returns an object keyed by host name, not an array.**
+The pattern immediately next door in `AgentService` is
+`if (Array.isArray(fresh))`, used twice. Copying it reflexively would have left
+the remote section permanently empty *with nothing logged* — the worst kind of
+failure, because it looks like "no remote agents". `parseHostList` now rejects a
+top-level array by name, so a future CLI change fails loudly instead.
+
+**Reusing `SessionRow` for remote sessions would have killed local agents.** Its
+controls call `AgentService.kill(session.id)`, and a remote id belongs to
+another machine's runtime — so Stop on a remote row would have terminated an
+unrelated *local* agent. Remote rows are read-only, and the page prints the
+`apex host run -t …` line instead.
+
+### Where it went, and why not the top bar
+
+The fourth section of the Agent Center, below the local sessions. The argument
+against a bar indicator is a constraint rather than taste: a bar item should
+appear only when there is something to show, but *knowing* whether there is
+costs an ssh — so any always-present indicator must poll at idle, which is the
+defect. Conditional appearance is kept where it is free: the section exists iff
+a device is registered, and reading the registry is a local file read.
+
+**Zero remote queries at idle, measured** — 22 s with the page closed against a
+15 s sweep interval produced 0 registry reads and 0 device queries, counted by a
+shim `apex` that logs every invocation. A device whose `caps.agentd` is false,
+and one that has never been probed, were queried 0 times.
+
+### Stated as reasoned, not observed
+
+Nothing rendered was seen — zero Qt ERROR and zero WARN with every delegate
+instantiated against real `SessionInfo` records is not the same as "the rows
+look right". Real ssh was never exercised either: the shim exits instantly
+where a dead host takes ~8 s, so "a dead host delays those behind it" is
+reasoned. Both are the agent's own words, and they are the right words.
