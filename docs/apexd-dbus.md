@@ -103,7 +103,7 @@ the other. Fan writes go through the same `SysWriter` as everything else, so
 |---|---|---|---|
 | `Active` | property (r) | `b` | A session is running |
 | `Supported` | property (r) | `b` | The active profile permits game mode |
-| `Status` | property (r) | `a{sv}` | `active`(b), `supported`(b), `tier`(s), `cgroup`(s), `cpuset_policy`(s), `irq_policy`(s); while active also `cpus`(s), `core_source`(s), `prior_tier`(s), `irqs_steered`(u), `gpus_locked`(au), `pids`(au), `notes`(as); while idle also `pcores`(s), `ecores`(s), `nvidia_smi`(b) |
+| `Status` | property (r) | `a{sv}` | `active`(b), `supported`(b), `tier`(s), `cgroup`(s), `cpuset_policy`(s), `irq_policy`(s); while active also `cpus`(s), `core_source`(s), `prior_tier`(s), `irqs_steered`(u), `irqs_attempted`(u), `irqs_refused`(u), `gpus_locked`(au), `pids`(au), `notes`(as); while idle also `pcores`(s), `ecores`(s), `nvidia_smi`(b) |
 | `SetActive` | method | `b → ()` | Enter/leave; idempotent both ways; polkit `manage-power` |
 | `StartForPid` | method | `u → ()` | Enter and pin a PID (its children inherit the cgroup); polkit `manage-power` |
 | `AttachPid` | method | `u → ()` | Attach another PID to a running session; `Failed` when inactive; polkit `manage-power` |
@@ -112,6 +112,15 @@ the other. Fan writes go through the same `SysWriter` as everything else, so
 Entering also moves the tier (to the profile's `[gamemode] tier`) and disables
 auto-switching for the duration; both are restored on exit, and `Power.Tier` +
 `TierChanged` are emitted so `.Power` consumers stay in step.
+
+`irqs_steered` counts the affinity writes the **kernel accepted**, not the ones
+the plan contained. It carried the plan's number until it was corrected, which
+made it a lie on any machine that refuses affinity writes — kernel-managed
+MSI-X queues answer `-EIO`, so a session could report "12 IRQs steered" having
+steered none. The plan's number now has its own key, `irqs_attempted`, and
+`irqs_refused` is the difference; a partial result is the normal case on real
+hardware, and `notes` carries the kernel's reason when there is one. Consumers
+that render `irqs_steered` need no change and now render a measurement.
 
 ## Authorization
 
