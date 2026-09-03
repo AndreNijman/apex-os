@@ -45,16 +45,34 @@ is the technical debt §17 names.
       `p1/compositor-adapter`. 37 live assertions + 23 headless static ones.
       The facade selects its backend by URL so `Quickshell.Hyprland` is never
       parsed off Hyprland. Nothing is rewired yet; consumers move in 5.2.
-- [~] **5.2** Migrate consumers onto the facade. **Nearly done.** No file
-      outside `src/services/compositor/` imports `Quickshell.Hyprland` any
-      more. Migrated: CenterContent, IpcManager, ScreenRecService,
-      WallpaperService, QuickSettings (focus mode), ShellState (keybind
-      interception), PopupDismiss, Workspaces, LayoutDisplayer.
-      **Left:** `QuickSettings` screen shader + night light (both genuinely
-      Hyprland-only features, needing a `screenShader` capability), and
-      `SystemStats`' `hyprctl version` line. Keybind and display config
-      generation are 5.3, not 5.2. Compositor *name* checks that remain are
-      about appearance — labwc borders, the labwc dock — which §17 permits.
+- [x] **5.2** Migrate consumers onto the facade — **DONE**, apex-shell **PR #11**
+      (`p1/finish-5.2`), CI green. No file outside `src/services/compositor/`
+      imports `Quickshell.Hyprland`, and none spawns `hyprctl`.
+
+      The last two consumers became capabilities in `HyprlandBackend`:
+      `screenShader` (with the `.conf`/lua dialect split and the DPMS damage
+      cycle) and `nightLight` (hyprsunset, including adopting an
+      already-running one). Both tiles hide on `can.*`. niri and labwc declare
+      `false` with a reason — hyprsunset works through
+      `hyprland-ctm-control-v1`, so `wlsunset` would be the wlroots equivalent
+      and is not shipped; one line to flip later.
+
+      **A real bug fixed on the way:** the shader path was re-`find`ed at apply
+      time with the chosen name spliced into a `-name` pattern, so the name
+      reached a shell as code and an empty second `find` failed silently. It is
+      resolved once at list time and passed as an absolute path.
+
+      `SystemStats` gained per-backend `displayName` + `versionCommand` (argv
+      only), which **fixed labwc**: no branch matched there, so the row read
+      `WM: labwc:wlroots`. It now reads `WM: labwc 0.9.6`.
+
+      **The boundary is enforced rather than claimed.**
+      `check-compositor-backends.sh` scans `src/` *plus* `shell.qml` and fails
+      on any `hyprctl` spawn. Three files are allowlisted with reasons, each
+      asserted to *still* need it, and the matching is command-shaped rather
+      than "contains the word" — the Display page's own error text mentions
+      hyprctl in prose.
+
 - [x] **5.3** One settings model → generated compositor config. The gap was
       **labwc, not niri** — the shell already wrote Hyprland `.conf`/`.lua` and
       niri `.kdl`, while labwc's bindings were hand-maintained in `rc.xml`. That
@@ -109,10 +127,40 @@ severe ones, all introduced by this branch:
 - One settle timer served both state helpers, so a fast failure could settle a
   slow success as `(false, null)`.
 
-Still open, both low severity: `focusedmon` was added to the focus events, so
-with `follow_mouse` crossing a monitor boundary now closes popups (unflagged
-behaviour change); and the facade suite encodes Hyprland's refcount semantics as
-universal, so it would fail on niri or labwc.
+Both of the remaining review items are now closed by PR #11:
+
+**`focusedmon` is kept, deliberately**, and recorded in the event list, the
+signal contract and `PopupDismiss`. `CompositorService` defines `focusMoved` as
+including "a different monitor", and niri and labwc already honour that half —
+dropping it would make Hyprland the one backend narrowing its own contract.
+
+And a correction to what I wrote: **`activemonitor` was never a Hyprland event.**
+`focusedmon`/`focusedmonv2` are in the binary; the only `activemonitor` string is
+`workspace.activemonitor`, a Lua hook. So the monitor half of `focusMoved` was
+simply unimplemented until `focusedmon` landed — the opposite of the "unflagged
+behaviour change" I recorded here.
+
+**The facade suite is honest now.** Backends declare `windowsPolled` /
+`titlePolled` — deliberately NOT capabilities, because the capability map answers
+"what can it do" and these answer "what does it cost". Each flat assertion became
+two, chosen by that flag. 48/48 on live Hyprland *and* 48/48 staged into nested
+labwc. "At least one toplevel" is an explicit precondition:
+`run-nested-labwc.sh` starts a filler window and fails if it dies, so an empty
+session goes red instead of passing vacuously.
+
+### Two things PR #11 surfaced that are NOT fixed
+
+- **`SystemStats` is registered in `src/services/qmldir` and instantiated
+  nowhere** — verified with a throwaway probe. It is dead code: wire it into an
+  About panel or delete it. Andre's call, not an agent's.
+- **`ShellState.qml:55` still branches on `Compositor.isLabwc`** for the caffeine
+  inhibitor (systemd-inhibit vs Wayland idle-inhibit). That is genuine behaviour
+  keyed on a compositor *name*, and an `idleInhibit` capability would finish what
+  §17 started. Out of 5.2's scope; the next obvious candidate.
+- Also flagged rather than changed, per its brief: the lua dialect interpolates
+  the shader path into a lua string as `'$1'`, so an apostrophe in a filename
+  would make `hyprctl eval` error. Not a shell injection — it is a bash argument
+  — and inherited verbatim.
 
 ## `/tmp` was wiped mid-session, and it cost nothing
 
