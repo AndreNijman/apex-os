@@ -83,9 +83,14 @@ sysext engine — phase 6 extends that, it does not replace it.
       every existing record still parses), `apex project env [NAME|--clear]`,
       shown by `apex project info` and carried in `list --json`. 8 assertions
       in `apexd/apex-agent-core/tests/capsule_binding.rs`.
-- [ ] **6.3** Universal resolver: rank across dnf / flatpak / capsule, present a
-      canonical choice, keep explicit source selection.
-- [ ] **6.4** Tests.
+- [x] **6.3** Universal resolver. `apex resolve <name>`, `apex install
+      --source rpm|flatpak|capsule [--env NAME]`, `apex search` across
+      repositories and Flathub, provenance printed on every install. Built
+      into `apex-pkg`, not beside it.
+- [x] **6.4** Tests. 149 (`test-apex-env.sh`) + 88 (`test-apex-resolve.sh`)
+      + 8 (`capsule_binding.rs`) + the CLI unit tests, all wired into
+      `pr-validation.yml` and all shellcheck-gated. Every assertion was proven
+      able to fail by mutating the shipped file and re-running.
 
 ## Phase 7 — blueprint + sync
 
@@ -162,6 +167,47 @@ Newest last. One line per pushed commit that changes the state above.
   the suite rather than by reading: `project::list` DELETES the record of any
   project whose checkout has gone, so a test using a root that does not exist
   loses its record the moment another case runs a listing.
+- 2026-09-03 — **6.3 and 6.4 done.** The resolver extends `apex-pkg`; there is
+  still exactly one package engine. The design question was what
+  `apex install <bare-name>` should do now, and the answer is **the same thing
+  it did before**: that command ships, and silently re-routing a name which
+  installs an RPM today would be a behaviour change on a shipped command. So
+  an exact-name repository package still wins — it puts the command on `$PATH`,
+  its signature is checked against keys APEX already trusts, and it rolls back
+  with the extension — and the resolver's job is to SAY what it chose, print
+  the alternative as a runnable command, and take `--source` when the user
+  disagrees. The one thing that can move a name is a curated table, currently
+  **one entry** (discord: the RPM Fusion package is the vendor tarball
+  repackaged and refuses to start once it considers itself stale, which on an
+  image-based system it regularly does). Every entry carries its reason in the
+  file and prints it at install time. Two notes for later: an earlier draft
+  tried to pick GUI-vs-CLI from `repoquery --file '/usr/share/applications/*'`
+  to decide Flatpak-vs-RPM automatically — it classifies neovim as graphical,
+  costs a multi-MB filelists fetch on the install hot path, and was dropped.
+  And mutation testing found a real hole: the `provenance:` line on the RPM
+  install path sits behind the root gate, so no runnable assertion could reach
+  it; it is covered by a static check over `cmd_install`, labelled as such.
+- 2026-09-03 — for the record, because it cost an hour: a mid-session sweep
+  committed the half-finished resolver as `wip(pkg)` and reported it as "DOES
+  NOT PARSE", having run `python3 -m ast` over `files/system/libexec/apex-pkg`.
+  That file is bash. `bash -n` passes, and CI selects the syntax checker BY
+  SHEBANG — only `installer/apex-installer-gui` is fed to Python. The cited
+  line 124 is `is_flatpak_id`, untouched upstream code. Nothing was broken. The
+  commit has been squashed into the finished §9 commit, so the false claim is
+  not in the branch history.
+- 2026-09-03 — **what CI will say about the labwc suite, measured.** Running
+  the suites locally is misleading here: they look for an apex-shell tree at
+  `../apex-shell` and fall back to `/usr/share/apex-shell`, which is whatever
+  the booted image shipped and lags the tree under test. Reproducing what CI
+  actually vendors (a worktree of `apex-shell` `origin/main` at
+  `../apex-shell`): `test-apex-firstrun.sh` **passes, 51/0** — the local
+  failure was purely the stale fallback. `test-labwc-keybinds.sh` **fails on
+  two assertions** ("KeybindService invokes the generator", "it checks the
+  helper exists before spawning it") and fails identically at the branch point
+  4c4fc62 with none of phase 6 present. That is 5.3 waiting on
+  `apex-shell/p1/compositor-adapter` to land on `apex-shell/main` — the
+  documented merge order (shell before or with the OS) doing its job, not a
+  phase 6 regression.
 - 2026-09-03 — noted for whoever picks this up: an early draft of the facade
   test called `setGaps(0, 0)` to check that a *capable* action returns true, and
   set the live Hyprland gaps to zero on the developer's desktop. Suites here run

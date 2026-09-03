@@ -308,6 +308,13 @@ has "apt takes -y too"          "-y"              "$(call pm_install_argv apt ht
 has "pacman is non-interactive" "--noconfirm"     "$(call pm_install_argv pacman htop)"
 has "zypper is non-interactive" "--non-interactive" "$(call pm_install_argv zypper htop)"
 has "several packages survive"  "curl"            "$(call pm_install_argv dnf htop curl)"
+# Every one of these runs through `distrobox enter --no-tty`. A sudo that
+# decides to ask for a password there has no terminal to ask on, so it hangs
+# rather than failing — which reads as "APEX froze", not as a permissions
+# problem. `-n` turns it into an immediate refusal.
+for pm in dnf apt pacman zypper apk; do
+    has "$pm cannot stop on a password prompt" "-n" "$(call pm_install_argv "$pm" htop)"
+done
 
 echo "── the rootless preflight refuses before anything is downloaded ───────"
 # `id` is faked so the root refusal is reachable without being root. The

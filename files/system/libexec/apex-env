@@ -291,14 +291,21 @@ pm_for_image() {
 # argument per line. Non-interactive matters: this is driven from `apex
 # install`, which may be running from a keybind with no terminal to answer a
 # y/n prompt.
+#
+# `sudo -n` for the same reason, and it is the part that is easy to get wrong.
+# Distrobox normally configures NOPASSWD inside the capsule, so a bare `sudo`
+# works — right up until it does not, and then a command run through
+# `distrobox enter --no-tty` sits forever on a password prompt that has no
+# terminal to appear on. That is a hang, which reads as "APEX froze"; `-n`
+# makes it an immediate, readable refusal instead.
 pm_install_argv() {
     local pm="$1"; shift
     case "$pm" in
-        dnf)    printf '%s\n' sudo dnf -y install "$@" ;;
-        apt)    printf '%s\n' sudo env DEBIAN_FRONTEND=noninteractive apt-get -y install "$@" ;;
-        pacman) printf '%s\n' sudo pacman -S --needed --noconfirm "$@" ;;
-        zypper) printf '%s\n' sudo zypper --non-interactive install "$@" ;;
-        apk)    printf '%s\n' sudo apk add "$@" ;;
+        dnf)    printf '%s\n' sudo -n dnf -y install "$@" ;;
+        apt)    printf '%s\n' sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -y install "$@" ;;
+        pacman) printf '%s\n' sudo -n pacman -S --needed --noconfirm "$@" ;;
+        zypper) printf '%s\n' sudo -n zypper --non-interactive install "$@" ;;
+        apk)    printf '%s\n' sudo -n apk add "$@" ;;
         *)      return 1 ;;
     esac
     return 0

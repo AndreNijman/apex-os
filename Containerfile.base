@@ -734,6 +734,11 @@ RUN set -eux; \
     # help text is the only place a shipped distrobox states them.
     distrobox create --help 2>&1 | grep -q -- '--nvidia'; \
     distrobox create --help 2>&1 | grep -q -- '--additional-flags'; \
+    # `enter --no-tty` is the same class of dependency: `apex env exec` and
+    # `apex install --source capsule` both run through it, and both are meant
+    # for scripts and agents with no terminal. Losing the flag would make them
+    # allocate a TTY and hang instead of returning.
+    distrobox enter --help 2>&1 | grep -q -- '--no-tty'; \
     # The alias table has to resolve on THIS release: the fedora and python
     # aliases derive their tag from /usr/lib/os-release, so a missing or
     # renamed VERSION_ID would produce `fedora-toolbox:` with nothing after it.
@@ -743,7 +748,16 @@ RUN set -eux; \
     # setuid, has no polkit action and gets no unit. Asserted because "capsules
     # are per-user" is a security claim, not a preference.
     test ! -u /usr/libexec/apex-env; \
-    test ! -g /usr/libexec/apex-env
+    test ! -g /usr/libexec/apex-env; \
+    # §9's resolver offers a capsule as a package source and execs this exact
+    # path. The engine holds it as a constant rather than an overridable
+    # variable — `apex install` runs as root, and a caller-controlled variable
+    # naming a program a root process executes is a hole — so the two files
+    # agree only by both being right. Checked here, where being wrong is a
+    # failed build rather than an `apex install --source capsule` that reports
+    # "no capsule engine" on a machine that has one.
+    grep -q '^readonly ENV_ENGINE=/usr/libexec/apex-env$' /usr/libexec/apex-pkg; \
+    /usr/libexec/apex-pkg --help | grep -q -- '--source rpm|flatpak|capsule'
 
 # ── Console setup must not be able to report the machine as broken ──────────
 # systemd-vconsole-setup runs loadkeys/setfont with whatever /etc/vconsole.conf
