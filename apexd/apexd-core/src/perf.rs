@@ -85,8 +85,9 @@ pub struct SchedulerState {
 pub struct PerfSnapshot {
     pub cpu: CpuPerf,
     pub gpu: GpuPerf,
-    /// Package power draw, watts.
-    pub package_watts: Signal<f64>,
+    /// Every hwmon power sensor, each naming the chip it came from. Not a
+    /// single "package power" figure — see [`read_power_sources`] for why.
+    pub power_sources: Signal<Vec<PowerReading>>,
     /// Battery power draw, watts. Negative would be charging, so only the
     /// discharge magnitude is reported.
     pub battery_watts: Signal<f64>,
@@ -339,27 +340,80 @@ pub fn read_gpu_busy(sys: &Path) -> Signal<f64> {
     Signal::unavailable("no driver here publishes gpu_busy_percent", src)
 }
 
-/// Package power in watts, from any hwmon `power1_average`.
-pub fn read_package_watts(sys: &Path) -> Signal<f64> {
+/// One power sensor, named by the chip that owns it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PowerReading {
+    /// The hwmon chip `name` (`amdgpu`, `k10temp`, `power_meter`).
+    pub chip: String,
+    /// The sensor's own label (`PPT`, `SVI2_P_Core`), when it publishes one.
+    pub label: Option<String>,
+    pub watts: f64,
+}
+
+impl PowerReading {
+    /// `amdgpu/PPT` — what the reading actually is.
+    pub fn name(&self) -> String {
+        match &self.label {
+            Some(l) => format!("{}/{l}", self.chip),
+            None => self.chip.clone(),
+        }
+    }
+}
+
+/// Every hwmon power sensor, each named by its chip and label.
+///
+/// **This deliberately does not return one number called "package power".** It
+/// used to, by taking the first hwmon that published `power1_*` — and on the
+/// development ThinkPad that is `hwmon4`, which belongs to `BAT0`. The lab
+/// therefore printed the battery's 20.5 W discharge as "package: 20.47 W", with
+/// the battery row underneath showing the identical figure from the identical
+/// sensor. Both numbers were real and the label was a fabrication.
+///
+/// So: every source is reported, each says which chip and which sensor it came
+/// from, and hwmon devices that hang off a `power_supply` (a battery or a mains
+/// adapter) are skipped here because [`read_battery_watts`] already covers them.
+/// Whether a given chip's figure is "the package" is a question the reader can
+/// now answer from the label, which is more than this function could honestly
+/// decide on their behalf.
+pub fn read_power_sources(sys: &Path) -> Signal<Vec<PowerReading>> {
     let base = sys.join("class/hwmon");
-    let src = base.join("hwmon*/power1_average").display().to_string();
+    let src = base.join("hwmon*/power*_input").display().to_string();
+    let mut out: Vec<PowerReading> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&base) {
         let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
         dirs.sort();
         for d in dirs {
-            for attr in ["power1_average", "power1_input"] {
-                let p = d.join(attr);
-                if let Some(uw) = read_trim(&p).and_then(|s| s.parse::<f64>().ok()) {
-                    return Signal::measured(uw / 1_000_000.0, p.display().to_string());
-                }
+            // A hwmon hanging off a power_supply is the battery or the charger.
+            // `device/type` is how the power_supply class identifies itself, and
+            // is the same attribute the AC detection keys on.
+            if read_trim(&d.join("device/type")).is_some() {
+                continue;
+            }
+            let chip = read_trim(&d.join("name")).unwrap_or_else(|| "hwmon".to_string());
+            for n in 1..=4u32 {
+                // `_average` is the smoothed figure where the driver offers it;
+                // `_input` is the instantaneous one.
+                let uw = read_trim(&d.join(format!("power{n}_average")))
+                    .or_else(|| read_trim(&d.join(format!("power{n}_input"))))
+                    .and_then(|s| s.parse::<f64>().ok());
+                let Some(uw) = uw else { continue };
+                out.push(PowerReading {
+                    chip: chip.clone(),
+                    label: read_trim(&d.join(format!("power{n}_label"))),
+                    watts: uw / 1_000_000.0,
+                });
             }
         }
     }
-    Signal::unavailable(
-        "no hwmon device reports package power (RAPL exposes energy counters, \
-         which need two samples over an interval rather than one read)",
-        src,
-    )
+    if out.is_empty() {
+        return Signal::unavailable(
+            "no hwmon device outside the power supplies reports power (RAPL exposes \
+             energy counters, which need two samples over an interval rather than \
+             one read, so they are not surfaced here)",
+            src,
+        );
+    }
+    Signal::measured(out, src)
 }
 
 /// Battery discharge in watts.
@@ -514,7 +568,7 @@ pub fn snapshot(roots: &Roots, smi: &dyn NvidiaSmi) -> PerfSnapshot {
             busy_percent: read_gpu_busy(sys),
             vram: read_vram(roots, smi),
         },
-        package_watts: read_package_watts(sys),
+        power_sources: read_power_sources(sys),
         battery_watts: read_battery_watts(sys),
         temps: read_temps(sys),
         scheduler: read_scheduler(sys),

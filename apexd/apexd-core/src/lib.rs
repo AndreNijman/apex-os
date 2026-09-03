@@ -48,7 +48,7 @@ pub use fingerprint::{CpuInfo, CpuVendor, Fingerprint, GpuInfo, GpuVendor};
 pub use game::{GameInputs, GamePlan, PidPlacement};
 pub use gpu::{NvidiaGpu, NvidiaSmi, RealNvidiaSmi};
 pub use mode::{Mode, ModeId, ModeMatch, ModeState, PolicyIntent, Step, TierPolicy, UnknownMode};
-pub use perf::{CpuPerf, GpuPerf, PerfSnapshot, SchedulerState, Temp};
+pub use perf::{CpuPerf, GpuPerf, PerfSnapshot, PowerReading, SchedulerState, Temp};
 pub use profile::{
     ChargeConfig, CpusetPolicy, FanConfig, GameModeConfig, IrqPolicy, NvidiaConfig, Profile,
     ProfileKind, ProfileSet, TierSettings,

@@ -15,7 +15,8 @@ use std::path::PathBuf;
 use apexd_core::gpu::MockNvidiaSmi;
 use apexd_core::perf::{
     parse_pp_dpm, read_battery_watts, read_cpu_clocks, read_frame_time, read_game_cpuset,
-    read_gpu_busy, read_gpu_clock, read_policy_attr, read_scheduler, read_temps, snapshot,
+    read_gpu_busy, read_gpu_clock, read_policy_attr, read_power_sources, read_scheduler, read_temps,
+    snapshot,
 };
 use apexd_core::workload::Roots;
 
@@ -224,6 +225,66 @@ fn battery_power_falls_back_to_current_times_voltage() {
 }
 
 #[test]
+fn the_batterys_own_hwmon_is_never_reported_as_chip_power() {
+    // A REAL BUG, found by running `apex perf` on the development ThinkPad.
+    // The reader took the first hwmon publishing `power1_*`, which there is
+    // hwmon4 — owned by BAT0. The lab printed "package: 20.47 W" above a
+    // battery row showing the identical figure from the identical sensor.
+    // Both numbers were real; the word "package" was invented.
+    //
+    // The discriminator is `device/type`, the same attribute the AC detection
+    // keys on: a hwmon hanging off a power_supply has one, a chip does not.
+    let f = Fixture::new("battshadow");
+    // The battery's hwmon sorts FIRST, exactly as on the real machine.
+    f.write("sys/class/hwmon/hwmon0/name", "BAT0\n")
+        .write("sys/class/hwmon/hwmon0/device/type", "Battery\n")
+        .write("sys/class/hwmon/hwmon0/power1_input", "20472000\n")
+        // The mains adapter, likewise skipped.
+        .write("sys/class/hwmon/hwmon1/name", "AC\n")
+        .write("sys/class/hwmon/hwmon1/device/type", "Mains\n")
+        .write("sys/class/hwmon/hwmon1/power1_input", "45000000\n")
+        // The actual chip sensor.
+        .write("sys/class/hwmon/hwmon9/name", "amdgpu\n")
+        .write("sys/class/hwmon/hwmon9/power1_average", "10000000\n")
+        .write("sys/class/hwmon/hwmon9/power1_label", "PPT\n");
+
+    let p = read_power_sources(&f.sys());
+    let sources = p.value().expect("the amdgpu sensor is readable");
+    let names: Vec<String> = sources.iter().map(|r| r.name()).collect();
+    assert_eq!(names, vec!["amdgpu/PPT".to_string()], "{names:?}");
+    assert_eq!(sources[0].watts, 10.0);
+    assert!(
+        !names.iter().any(|n| n.contains("BAT") || n.contains("AC")),
+        "a power-supply sensor leaked into the chip power list: {names:?}"
+    );
+}
+
+#[test]
+fn a_power_sensor_without_a_label_still_names_its_chip() {
+    // The figure is only meaningful alongside which sensor produced it, so a
+    // reading may never be anonymous.
+    let f = Fixture::new("nolabel");
+    f.write("sys/class/hwmon/hwmon0/name", "power_meter\n")
+        .write("sys/class/hwmon/hwmon0/power1_average", "35500000\n");
+    let p = read_power_sources(&f.sys());
+    let s = p.value().unwrap();
+    assert_eq!(s[0].name(), "power_meter");
+    assert_eq!(s[0].watts, 35.5);
+}
+
+#[test]
+fn a_machine_whose_only_power_sensor_is_the_battery_reports_a_gap() {
+    // Not zero watts, and not the battery's figure under another name.
+    let f = Fixture::new("onlybatt");
+    f.write("sys/class/hwmon/hwmon0/name", "BAT0\n")
+        .write("sys/class/hwmon/hwmon0/device/type", "Battery\n")
+        .write("sys/class/hwmon/hwmon0/power1_input", "20472000\n");
+    let p = read_power_sources(&f.sys());
+    assert!(!p.is_measured());
+    assert!(p.reason().unwrap().contains("power supplies"));
+}
+
+#[test]
 fn a_desktop_with_no_battery_reports_a_gap() {
     let f = Fixture::new("nobatt");
     f.write("sys/class/power_supply/AC/type", "Mains\n");
@@ -316,7 +377,7 @@ fn an_empty_machine_produces_a_snapshot_of_gaps_rather_than_zeroes() {
     assert!(!s.gpu.clock_mhz.is_measured());
     assert!(!s.gpu.busy_percent.is_measured());
     assert!(!s.gpu.vram.is_measured());
-    assert!(!s.package_watts.is_measured());
+    assert!(!s.power_sources.is_measured());
     assert!(!s.battery_watts.is_measured());
     assert!(!s.temps.is_measured());
     assert!(!s.scheduler.is_measured());
@@ -327,7 +388,7 @@ fn an_empty_machine_produces_a_snapshot_of_gaps_rather_than_zeroes() {
         ("governor", s.cpu.governor.reason()),
         ("gpu clock", s.gpu.clock_mhz.reason()),
         ("vram", s.gpu.vram.reason()),
-        ("power", s.package_watts.reason()),
+        ("power", s.power_sources.reason()),
         ("temps", s.temps.reason()),
         ("scheduler", s.scheduler.reason()),
         ("frame time", s.frame_time.reason()),
