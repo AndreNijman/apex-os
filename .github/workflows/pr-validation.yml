@@ -500,6 +500,25 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-dispatch.sh
 
+      # §14's local inference service, driven as a process.
+      #
+      # Every invocation in it redirects stdin from /dev/null, and that is
+      # load-bearing rather than tidiness: `apex ai run` accepts a piped
+      # prompt, so with no arguments and an open stdin it waits for EOF the way
+      # `cat` does. Measured while writing the suite — an invocation without the
+      # redirection hung for two minutes. A suite that forgets it does not fail,
+      # it hangs, and a hung job is worse than a red one because nobody can
+      # tell it from a slow one.
+      #
+      # It points APEX_AI_CATALOGUE at config/ai/catalogue.toml, because the
+      # catalogue is image content installed to /usr/share/apexos/ai by the
+      # build and does not exist on a checkout — the same coupling
+      # test-labwc-keybinds.sh documents for the shell tree. The suite hard
+      # exits if the repository copy is missing rather than falling back.
+      - name: Run local inference assertions
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-ai.sh
+
   installer:
     name: Installer safety and UI
     needs: changes
@@ -699,7 +718,8 @@ jobs:
             tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
             tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
             tests/test-apex-modes.sh tests/test-apex-plugin.sh \
-            tests/test-apex-host.sh tests/test-apex-dispatch.sh
+            tests/test-apex-host.sh tests/test-apex-dispatch.sh \
+            tests/test-apex-ai.sh
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
       # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
