@@ -135,7 +135,7 @@ Where each branch actually stands:
 | `fix/mt7925-resume` (apex-os #26) | **done** — wifi fix, applied live and verified |
 | `p1/plugin-platform` (apex-shell) | substantial: manifest, permissions, loader, crash isolation, bar-widget point, example plugin. Not finished, no PR yet |
 | `p1/modes-and-workloads` | mode catalogue, workload signals, perf readers, then a `wip` commit — `cargo check` clean, verbs not all wired, nothing tested |
-| `p1/capsules-and-packages` | capsules + project binding landed; then a `wip` commit that **does not parse** — bash spliced into `apex-pkg` at line 124. Fix that first |
+| `p1/capsules-and-packages` | capsules + project binding landed, then a `wip` checkpoint. **The claim recorded here that it "does not parse" was WRONG** — see the correction below |
 | `p1/blueprint-and-sync` | schema, pure planner, `show`/`diff`/`init`. Clean tree. `apex sync` not started |
 
 ### Katana build of `p1/compositor-and-plugins` — PASSED, 96/96
@@ -198,17 +198,45 @@ that file is the expected merge conflict at integration. Each branch is
 independently complete and independently tested; integration is a separate step
 and belongs to whoever picks this up.
 
-## Phase 6 — capsules + universal package resolver
+## Phase 6 — capsules + universal package resolver — DONE
 
-Not started. `apex install` / `search` / `repo` / `pkg` already ship on the
-sysext engine — phase 6 extends that, it does not replace it.
+apex-os **PR #29**, branch `p1/capsules-and-packages`. All CI green.
+154 + 88 shell assertions, 8 Rust integration tests, 78 CLI unit tests.
 
-- [ ] **6.1** `apex env` capsules (create/list/enter/exec/rm), GPU and device
-      profiles, GUI export to the host desktop.
-- [ ] **6.2** Project ↔ capsule binding, wired into the agent runtime.
-- [ ] **6.3** Universal resolver: rank across dnf / flatpak / capsule, present a
-      canonical choice, keep explicit source selection.
-- [ ] **6.4** Tests.
+- [x] **6.1** `apex env create|list|info|enter|exec|install|rm|images` —
+      rootless podman via distrobox. Each record holds the image, **the digest
+      its tag resolved to at create time**, and the device profile.
+- [x] **6.2** `Project.capsule` + `apex project env`, surfaced in `project info`
+      and `list --json`.
+- [x] **6.3** Resolver built *into* `apex-pkg` rather than beside it:
+      `apex resolve`, `apex install --source rpm|flatpak|capsule [--env NAME]`,
+      `apex search` across repos and Flathub, provenance on every install.
+- [ ] GUI export via `distrobox-export` — §8 says "when useful"; needs a real
+      desktop to verify. Deferred.
+- [x] **6.4** Tests.
+
+`apex install <bare-name>` behaves exactly as before: an exact-name RPM still
+wins, and only a one-entry curated table re-routes, saying why and staying
+overridable. `cuda`/`rocm` are **device profiles on Ubuntu LTS**, not the 5–20 GB
+vendor images.
+
+**Not verified:** in-capsule GPU visibility, a real `distrobox create/enter/rm`,
+and the resolver against live dnf5 or Flathub metadata — probes run against
+fixtures.
+
+### A correction I owe this file
+
+During the pause I recorded that the phase 6 checkpoint "does not parse", quoted
+a bash line, and amended a commit message to say so. **That was wrong.** I ran
+`python3 -m ast` over `files/system/libexec/apex-pkg`, which is
+`#!/usr/bin/env bash`. `bash -n` accepts it. CI picks its syntax checker **by
+shebang** — a rule explained in a comment in `pr-validation.yml` that I had
+written myself a few hours earlier.
+
+The cost was not zero: the resumed agent was told to fix a line that was never
+broken. Recorded rather than quietly deleted, because "I used the wrong checker
+and then asserted the result confidently" is the more useful lesson than the
+line number.
 
 ## Phase 7 — blueprint + sync — DONE
 
