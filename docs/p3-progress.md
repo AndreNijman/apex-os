@@ -460,3 +460,51 @@ apex-os final verification before merge:
 | core image rebuilt with the new shells | fish 4.2.0, nu 0.99.1, tmux 3.7c, zellij 0.45.1, all registered in `/etc/shells` |
 
 Merging `p3/base` to `main` fires `build-image.yml`. That is the final build.
+
+## Merged, and what the first real build found
+
+**apex-shell** merged first at `9141ea7` (PR #16) — mandatory, because
+`Containerfile.base` resolves the shell with `git ls-remote refs/heads/main` at
+build time.
+
+**apex-os** merged at `dd1fed8`, 179 commits, P1 + P2 + P3 together. Merge
+commits and rebase are both disallowed on the repository, and squashing would
+have collapsed 179 commit messages into one; `main` was an unprotected ancestor,
+so a fast-forward preserved the history exactly. PR #37 shows MERGED.
+
+### The first build failed, and the cause was a fallback that had never worked
+
+Codeberg returned **HTTP 504** while cloning `awww`, the wallpaper daemon. That
+step is written to tolerate exactly this — it has an else branch that records
+"BUILD FAILED (wallpaper daemon absent; non-fatal)". The branch ran. The build
+died anyway.
+
+Nothing in `Containerfile.core` creates `/out`. On the **success** path
+`install -D` makes `/out/usr/bin` as a side effect, so the status write that
+follows happens to work. On the **failure** path nothing has created `/out`, so
+`echo … > /out/awww-status` fails with "No such file or directory" and `set -e`
+kills the build.
+
+So the branch labelled *non-fatal* was only ever non-fatal when the build had
+succeeded — it had never once worked in the circumstance it exists for, and a
+transient outage at a third-party forge could fail the entire image build at any
+time.
+
+Reproduced in a Fedora 43 container before fixing, and the fix verified the same
+way:
+
+```
+$ set -eux; if false; then :; else echo x > /out/awww-status; fi
+bash: line 4: /out/awww-status: No such file or directory     # before
+$ set -eux; mkdir -p /out; if false; then :; else echo x > /out/awww-status; fi
+awww: BUILD FAILED (wallpaper daemon absent; non-fatal)        # after
+```
+
+`yazi`'s equivalent block was checked and is genuinely non-fatal — its else
+branch echoes to stdout rather than redirecting into `/out`.
+
+This is the fifth time in this run that a green-looking path was wrong for a
+reason no test could see, and the fourth where the *measurement* rather than the
+code was at fault. It is also the clearest argument for the local build: the
+same class of defect, found on the Katana in minutes, would have burned an hour
+of runner time each attempt.
