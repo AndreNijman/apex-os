@@ -3,16 +3,37 @@
 #  apex-mkesp — author a guest ESP: systemd-boot at APEX-owned paths, UKIs, and
 #  the boot-counting tallies systemd-boot decrements.
 #
-#  ── the layout, and the one part of it that is not APEX-named ──
+#  ── the layout, and why the UKIs are not under /EFI/APEX ──
 #
-#  §22 asks for "APEX-owned EFI paths, not Fedora-named paths", and this is
-#  where that requirement collides with the mechanism §22 also asks for. The
-#  directory systemd-boot scans for type #2 entries — Unified Kernel Images —
-#  is hardcoded in the bootloader as \EFI\Linux. Move the UKIs to \EFI\APEX and
-#  automatic discovery stops, which takes the native +N-M boot counting with
-#  it. That would read as satisfying §22 while quietly removing step 4.
+#  §22 asks for "APEX-owned EFI paths, not Fedora-named paths". The naive read
+#  is "put the UKIs in \EFI\APEX", and the naive fear is that doing so breaks
+#  systemd-boot's native +N-M boot counting, which §22 also asks for. Both were
+#  tested rather than assumed; scenario `entry-layout` in run-scenarios is the
+#  measurement, and it found something more specific:
 #
-#  So:
+#    type #2  /EFI/Linux/apex-<id>+3-0.efi                  counted
+#    type #1  .conf with `efi /EFI/APEX/uki/apex-<id>.efi`   NOT counted
+#    type #1  .conf with `linux /EFI/APEX/uki/apex-<id>.efi` counted
+#
+#  So a fully APEX-named UKI path IS available, with the `linux` key. It is not
+#  the default here, and the reason is not aesthetics:
+#
+#    * `apex boot status` reads `bootctl list --json`, and bootctl only reports
+#      the tally, the .osrel-derived title and the embedded kernel version for
+#      entries it recognises as UKIs. A type #1 `linux` entry pointing at a UKI
+#      is reported as a plain type #1 entry, so the state APEX is supposed to
+#      surface in Settings would have to be re-derived by parsing PE sections
+#      off the ESP — a second implementation of something the bootloader
+#      already does.
+#    * A type #1 layout needs APEX to author and maintain an entry file per
+#      deployment, in the ESP, in addition to the UKI. Two artifacts that must
+#      agree is exactly the drift the UKI exists to remove.
+#    * `linux` is documented as naming a kernel image, and sd-boot appends the
+#      entry's `options` to it. That works with a UKI only because sd-stub
+#      ignores a bootloader-supplied command line under Secure Boot. Relying on
+#      that is relying on a coincidence.
+#
+#  What ships, then:
 #    /EFI/APEX/systemd-bootx64.efi   the loader, at an APEX-owned path. This is
 #                                    the binary an APEX NVRAM entry points at
 #                                    ("APEX-OS", not "Fedora").
@@ -21,15 +42,15 @@
 #                                    an NVRAM entry would mean efibootmgr and
 #                                    AGENTS.md forbids that near a real machine.
 #    /EFI/Linux/apex-<id>+N-M.efi    the UKIs. \EFI\Linux is the systemd-boot
-#                                    interface, not a Fedora name; APEX owns
-#                                    the FILENAMES, which is what appears in
-#                                    the boot menu and in `bootctl list`.
-#    /loader/entries/apex-<id>+N-M.conf  type #1 entries, only with --type1.
-#
-#  --type1 exists because "does systemd-boot 258 also count type #1 entries?"
-#  is a question the suite answers by measurement rather than by reading the
-#  source: scenario `entry-layout` builds one of each and reports which
-#  filename the bootloader renamed.
+#                                    interface — a spec path, not a vendor
+#                                    name, unlike the \EFI\fedora that §22 is
+#                                    reacting to. APEX owns the FILENAMES,
+#                                    which is what the menu, `bootctl list`
+#                                    and `apex boot status` display.
+#    /loader/entries/apex-<id>+N-M.conf  type #1 entries; --type1/--type1-linux
+#                                    only, kept so the alternative stays
+#                                    exercised rather than becoming a claim in
+#                                    a comment.
 #
 #  Nothing here can touch a host ESP: the target is always an image file, the
 #  FAT filesystem is built with mtools (no loop device, no mount, no root), and
@@ -40,7 +61,7 @@ set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 DISK="" SIZE_MIB=256 SB_KEY="" SB_CERT="" DEFAULT="" TIMEOUT_S=0
-declare -a UKIS=() TYPE1=()
+declare -a UKIS=() TYPE1=() TYPE1_LINUX=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --disk)     DISK="$2"; shift 2;;
@@ -51,13 +72,18 @@ while [[ $# -gt 0 ]]; do
         --uki)      UKIS+=("$2"); shift 2;;
         # id:tries:path — the same UKI reached through a type #1 loader entry
         --type1)    TYPE1+=("$2"); shift 2;;
+        # As --type1, but reached with the `linux` key instead of `efi`. Only
+        # the entry-layout scenario uses this; it exists to tell "type #1 is
+        # not counted" apart from "`efi` entries are not counted".
+        --type1-linux) TYPE1_LINUX+=("$2"); shift 2;;
         --default)  DEFAULT="$2"; shift 2;;
         --menu-timeout) TIMEOUT_S="$2"; shift 2;;
         *) die "unknown argument: $1";;
     esac
 done
 [[ -n "$DISK" ]] || die "usage: apex-mkesp --disk DISK.img --uki id:tries:path ... [--type1 id:tries:path]"
-(( ${#UKIS[@]} + ${#TYPE1[@]} > 0 )) || die "at least one --uki or --type1 is required"
+(( ${#UKIS[@]} + ${#TYPE1[@]} + ${#TYPE1_LINUX[@]} > 0 )) \
+    || die "at least one --uki, --type1 or --type1-linux is required"
 
 case "$(readlink -m "$DISK")" in
     /boot|/boot/*|/efi|/efi/*|/sys/*|/usr|/usr/*|/dev/*)
@@ -128,7 +154,9 @@ for spec in "${UKIS[@]}"; do
     info "type #2  /EFI/Linux/$n.efi"
 done
 
-for spec in "${TYPE1[@]}"; do
+place_type1() {
+    local spec="$1" key="$2"
+    local id tries path conf
     IFS=: read -r id tries path <<<"$spec"
     [[ -f "$path" ]] || die "no such UKI: $path"
     esp_mkdir_p "$ESP" /EFI/APEX/uki
@@ -137,16 +165,19 @@ for spec in "${TYPE1[@]}"; do
     [[ "$tries" != "0" && -n "$tries" ]] && conf="apex-$id+$tries-0"
     {
         printf 'title APEX-OS (%s)\n' "$id"
-        # An `efi` entry hands the whole PE to LoadImage, so the firmware
-        # verifies it against db exactly as it would a type #2 UKI, and the
-        # command line comes from inside the image. No `options` line: sd-stub
-        # ignores a bootloader-supplied cmdline under Secure Boot anyway, so
-        # writing one here would document a lie.
-        printf 'efi /EFI/APEX/uki/apex-%s.efi\n' "$id"
+        # Either key hands the whole PE to LoadImage, so the firmware verifies
+        # it against db exactly as it would a type #2 UKI, and the command line
+        # comes from inside the image. No `options` line: sd-stub ignores a
+        # bootloader-supplied cmdline under Secure Boot anyway, so writing one
+        # here would document a lie.
+        printf '%s /EFI/APEX/uki/apex-%s.efi\n' "$key" "$id"
     } > "$WORK/$conf.conf"
     mcopy -o -i "$ESP" "$WORK/$conf.conf" "::/loader/entries/$conf.conf"
-    info "type #1  /loader/entries/$conf.conf -> /EFI/APEX/uki/apex-$id.efi"
-done
+    info "type #1 ($key)  /loader/entries/$conf.conf -> /EFI/APEX/uki/apex-$id.efi"
+}
+
+for spec in "${TYPE1[@]}";       do place_type1 "$spec" efi;   done
+for spec in "${TYPE1_LINUX[@]}"; do place_type1 "$spec" linux; done
 
 esp_disk_flush "$DISK"
 
@@ -167,8 +198,9 @@ $LIST"
 n_uki="$(grep -c '^::/EFI/Linux/.*\.efi$' <<<"$LIST" || true)"
 assert_n() { [[ "$1" == "$2" ]] || die "expected $2 $3, staged $1"; }
 assert_n "$n_uki" "${#UKIS[@]}" "type #2 UKIs in /EFI/Linux"
-if (( ${#TYPE1[@]} )); then
+n_t1=$(( ${#TYPE1[@]} + ${#TYPE1_LINUX[@]} ))
+if (( n_t1 )); then
     n_conf="$(grep -c '^::/loader/entries/.*\.conf$' <<<"$LIST" || true)"
-    assert_n "$n_conf" "${#TYPE1[@]}" "type #1 entries in /loader/entries"
+    assert_n "$n_conf" "$n_t1" "type #1 entries in /loader/entries"
 fi
-info "staged $n_uki type#2 + ${#TYPE1[@]} type#1 entries"
+info "staged $n_uki type#2 + $n_t1 type#1 entries"

@@ -262,11 +262,31 @@ scenario_entry_layout() {
     log "entry-layout: which entry types does systemd-boot 258 apply the tally to?"
     fixtures
     # §22 asks for APEX-owned EFI paths; systemd-boot hardcodes \\EFI\\Linux for
-    # UKI discovery. This scenario measures whether a type #1 entry pointing at
-    # /EFI/APEX/uki/ gets counted too, so the layout decision in apex-mkesp
-    # rests on an observation rather than on a reading of the source.
+    # UKI discovery. Rather than read that out of the source, this scenario
+    # measures it, because the boot-counting deliverable rests on the answer:
+    # a layout that satisfies "APEX-owned paths" and loses the tally would read
+    # as implementing §22 while removing its step 4.
+    #
+    # MEASURED, systemd-boot 258.10-1.fc43, OVMF secboot, 2026-09-03:
+    #   type #2  /EFI/Linux/apex-t2+3-0.efi         -> renamed to +2-1   ✓
+    #   type #1  /loader/entries/apex-t1+3-0.conf   -> NOT renamed
+    #            with `efi /EFI/APEX/uki/apex-t1.efi`  (the entry booted fine)
+    #   type #1  /loader/entries/apex-t3+3-0.conf   -> renamed to +2-1   ✓
+    #            with `linux /EFI/APEX/uki/apex-t3.efi`
+    #
+    # So the tally is not a property of the entry type: it is skipped for
+    # entries whose target is named with the `efi` key, and applied for `linux`
+    # and for type #2 UKIs. Both working layouts are therefore available, and
+    # the choice is a real decision rather than a constraint. apex-mkesp
+    # defaults to type #2 — see the header comment there for why, and for what
+    # the type #1 alternative would cost.
+    #
+    # All three halves are asserted, including the negative one. If a future
+    # systemd starts counting `efi` entries, this fails and whoever sees it
+    # re-reads this comment instead of rediscovering the difference.
     mkuki "$WORK/uki-t2.efi" t2
     mkuki "$WORK/uki-t1.efi" t1
+    mkuki "$WORK/uki-t3.efi" t3
     local disk="$WORK/disk-layout.img" vars="$WORK/vars-layout.fd"
 
     # (a) type #2, /EFI/Linux, tally 3
@@ -274,21 +294,37 @@ scenario_entry_layout() {
         --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
         --uki "t2:3:$WORK/uki-t2.efi" --default 'apex-t2*' >/dev/null
     fresh_vars "$vars"
+    local rc=0
     vm_boot --disk "$disk" --vars "$vars" --name layout-t2 \
-            --serial "$WORK/serial-layout-t2.log" --timeout 120 || true
-    local got; got="$(esp_linux_entries "$disk" | tr '\n' ' ')"
-    assert_eq "apex-t2+2-1.efi " "$got" "type #2 filename after one boot"
+            --serial "$WORK/serial-layout-t2.log" --timeout 120 || rc=$?
+    assert_eq 0 "$rc" "type #2 entry: clean poweroff"
+    assert_serial_has "$WORK/serial-layout-t2.log" "apex.bootlab.entry=t2"
+    assert_eq "apex-t2+2-1.efi " "$(esp_linux_entries "$disk" | tr '\n' ' ')" \
+              "type #2 filename after one boot"
 
-    # (b) type #1, /loader/entries -> /EFI/APEX/uki, tally 3
-    "$HERE/apex-mkesp" --disk "$disk" --size 96 \
-        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
-        --type1 "t1:3:$WORK/uki-t1.efi" --default 'apex-t1*' >/dev/null
-    fresh_vars "$vars"
-    vm_boot --disk "$disk" --vars "$vars" --name layout-t1 \
-            --serial "$WORK/serial-layout-t1.log" --timeout 120 || true
-    assert_serial_has "$WORK/serial-layout-t1.log" "apex.bootlab.entry=t1"
-    got="$(esp_loader_entries "$disk" | tr '\n' ' ')"
-    assert_eq "apex-t1+2-1.conf " "$got" "type #1 filename after one boot"
+    # (b) and (c) type #1 -> /EFI/APEX/uki/, with each of the two keys that can
+    # name a PE image. Both must boot (so the APEX-owned path is reachable) and
+    # neither is expected to be counted.
+    local key
+    for key in efi linux; do
+        local id flag want
+        if [[ "$key" == efi ]]; then
+            id=t1; flag=--type1;       want="apex-t1+3-0.conf "   # not counted
+        else
+            id=t3; flag=--type1-linux; want="apex-t3+2-1.conf "   # counted
+        fi
+        "$HERE/apex-mkesp" --disk "$disk" --size 96 \
+            --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+            "$flag" "$id:3:$WORK/uki-$id.efi" --default "apex-$id*" >/dev/null
+        fresh_vars "$vars"
+        rc=0
+        vm_boot --disk "$disk" --vars "$vars" --name "layout-$key" \
+                --serial "$WORK/serial-layout-$key.log" --timeout 120 || rc=$?
+        assert_eq 0 "$rc" "type #1 ($key) entry: clean poweroff"
+        assert_serial_has "$WORK/serial-layout-$key.log" "apex.bootlab.entry=$id"
+        assert_eq "$want" "$(esp_loader_entries "$disk" | tr '\n' ' ')" \
+                  "type #1 ($key) filename after one boot"
+    done
 }
 
 scenario_boot_counting() {
