@@ -40,11 +40,14 @@ pub mod fingerprint;
 pub mod game;
 pub mod gpu;
 pub mod irq;
+pub mod mode;
+pub mod perf;
 pub mod profile;
 pub mod select;
 pub mod syswriter;
 pub mod tier;
 pub mod topology;
+pub mod workload;
 
 pub use battery::{Battery, BatteryInventory, ThresholdSupport};
 pub use blueprint::{
@@ -54,6 +57,8 @@ pub use fan::{FanInventory, FanMode, FanSnapshot, UnknownFanMode};
 pub use fingerprint::{CpuInfo, CpuVendor, Fingerprint, GpuInfo, GpuVendor};
 pub use game::{GameInputs, GamePlan, PidPlacement};
 pub use gpu::{NvidiaGpu, NvidiaSmi, RealNvidiaSmi};
+pub use mode::{Mode, ModeId, ModeMatch, ModeState, PolicyIntent, Step, TierPolicy, UnknownMode};
+pub use perf::{CpuPerf, GpuPerf, PerfSnapshot, PowerReading, SchedulerState, Temp};
 pub use profile::{
     ChargeConfig, CpusetPolicy, FanConfig, GameModeConfig, IrqPolicy, NvidiaConfig, Profile,
     ProfileKind, ProfileSet, TierSettings,
@@ -62,6 +67,7 @@ pub use select::{select, Selection};
 pub use syswriter::{MockWriter, RealWriter, SysWriter};
 pub use tier::{Action, Tier, UnknownTier};
 pub use topology::{CoreSource, CoreTopology};
+pub use workload::{Assessment, Signal, Signals, Vram, Workload};
 
 /// The default on-disk override directory for profiles. If present it wins
 /// over the embedded set.

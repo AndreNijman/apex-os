@@ -6,6 +6,7 @@
 
 mod agent;
 mod blueprint;
+mod mode;
 mod ops;
 mod proxy;
 mod request;
@@ -52,6 +53,29 @@ enum Cmd {
         #[command(subcommand)]
         cmd: GameCmd,
     },
+    /// Named operating modes: daily, gaming, development, creator, ai, battery,
+    /// couch, server.
+    ///
+    /// A mode is a named combination of things `apex tier` and `apex game`
+    /// already do — it is not another image, and it adds no new hardware lever.
+    /// The active mode is derived from what apexd reports rather than stored,
+    /// so it cannot go stale and needs no root.
+    Mode {
+        #[command(subcommand)]
+        cmd: Option<mode::ModeCmd>,
+    },
+    /// What the machine is measured to be doing, and what that suggests.
+    ///
+    /// Reports the workload, the signals behind it, and the signals this
+    /// hardware cannot produce. Applies nothing: acting on it is an explicit
+    /// `apex mode set --auto`, and APEX ships no timer that does it for you.
+    Workload(mode::WorkloadArgs),
+    /// Performance Lab: CPU/GPU clocks, power, temperatures, VRAM, scheduler.
+    ///
+    /// Read-only and root-free. Frame time is reported as unavailable with the
+    /// reason, because no generic source for it exists and APEX will not
+    /// substitute a number it did not measure.
+    Perf(mode::PerfArgs),
     /// Print the hardware fingerprint and layered profile selection.
     Fingerprint,
     /// Pin the current deployment (ostree admin pin 0). Requires root.
@@ -731,6 +755,12 @@ async fn main() {
         Cmd::Battery(args) => cmd_battery(args).await,
         Cmd::Fan { cmd } => cmd_fan(cmd.unwrap_or(FanCmd::Status)).await,
         Cmd::Game { cmd } => cmd_game(cmd).await,
+        // Read-only by default and deliberately absent from the privileged set:
+        // `mode set` mutates through apexd's polkit-authorised D-Bus API as the
+        // session user, exactly as `apex tier` does.
+        Cmd::Mode { cmd } => mode::main(cmd.unwrap_or(mode::ModeCmd::Status)).await,
+        Cmd::Workload(args) => mode::workload_main(args),
+        Cmd::Perf(args) => mode::perf_main(args),
         Cmd::Fingerprint => cmd_fingerprint(),
         Cmd::Pin => ops::pin(),
         Cmd::Rollback => ops::rollback(),
@@ -1875,7 +1905,7 @@ fn json_value(v: &zvariant::OwnedValue) -> String {
     inner(v)
 }
 
-fn json_string(s: &str) -> String {
+pub(crate) fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
