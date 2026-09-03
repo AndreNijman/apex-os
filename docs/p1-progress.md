@@ -55,9 +55,14 @@ is the technical debt §17 names.
       `SystemStats`' `hyprctl version` line. Keybind and display config
       generation are 5.3, not 5.2. Compositor *name* checks that remain are
       about appearance — labwc borders, the labwc dock — which §17 permits.
-- [ ] **5.3** One settings model → generated compositor config, with per-
-      compositor emitters (Hyprland and labwc exist; niri is missing). Done
-      when a keybind set round-trips to all three.
+- [x] **5.3** One settings model → generated compositor config. The gap was
+      **labwc, not niri** — the shell already wrote Hyprland `.conf`/`.lua` and
+      niri `.kdl`, while labwc's bindings were hand-maintained in `rc.xml`. That
+      made the Keybinds page inert on labwc: rebind, UI confirms, nothing
+      happens. `apex-labwc-keybinds` now generates and splices them, and
+      `check-labwc-keybinds` became an assertion that the seeded config IS the
+      generator's output rather than a comparison of two hand-written lists.
+      32 assertions; input and display already emitted for all three.
 - [ ] **5.4** Plugin platform: manifest + permission model, loader, extension
       points, crash isolation, `apex plugin` CLI, one real example plugin.
 - [ ] **5.5** Tests: shell CI invariants + an OS-side plugin suite.
@@ -114,6 +119,15 @@ Newest last. One line per pushed commit that changes the state above.
   `specialWorkspaceOpen`, and the tiling-layout surface. 42 live assertions,
   23 static. The whole shell loads under a nested labwc session with zero
   errors, which exercises the labwc backend for real.
+- 2026-09-03 — **5.3 done.** `files/system/libexec/apex-labwc-keybinds` +
+  32 assertions in `tests/test-labwc-keybinds.sh`; the seeded `rc.xml` now
+  carries a generated, marker-delimited region and 44 previously hand-written
+  bindings came out of it byte-identical. Two things worth knowing: the reading
+  path and the substitution path for `root._shellDir` must be separate inputs
+  (`--shell-dir` vs `--shell-path`) or the build bakes a build-host path into
+  the shipped config, and 4 bindings genuinely have no labwc equivalent
+  (scratchpad ×2, pseudo-tiling, split) so they are reported rather than mapped
+  onto something approximate.
 - 2026-09-03 — noted for whoever picks this up: an early draft of the facade
   test called `setGaps(0, 0)` to check that a *capable* action returns true, and
   set the live Hyprland gaps to zero on the developer's desktop. Suites here run

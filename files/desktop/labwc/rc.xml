@@ -169,106 +169,22 @@
          these are maintained here by hand and cross-checked against
          KeybindService at image build time. Do not "tidy" them into a tidier
          set; they are a contract with the other two sessions. -->
-    <keybind key="A-space">
-      <action name="Execute" command="apex shell launcher"/>
-    </keybind>
-    <keybind key="W-d">
-      <action name="Execute" command="apex shell dashboard home"/>
-    </keybind>
-    <keybind key="C-S-Escape">
-      <action name="Execute" command="apex shell dashboard stats"/>
-    </keybind>
-    <keybind key="W-z">
-      <action name="Execute" command="apex shell dashboard kanban"/>
-    </keybind>
-    <keybind key="W-c">
-      <action name="Execute" command="apex shell settings"/>
-    </keybind>
-    <keybind key="W-Escape">
-      <action name="Execute" command="apex shell power"/>
-    </keybind>
-    <keybind key="W-n">
-      <action name="Execute" command="apex shell notifications"/>
-    </keybind>
-    <keybind key="W-v">
-      <action name="Execute" command="apex shell clipboard"/>
-    </keybind>
-    <keybind key="W-S-w">
-      <action name="Execute" command="apex shell wallpaper"/>
-    </keybind>
     <!-- The same menu a desktop right-click opens, on a key, so it is reachable
          from a tiled session with no visible desktop. Matches the Hyprland and
          niri bindings the shell generates for them. -->
-    <keybind key="W-S-m">
-      <action name="Execute" command="apex shell menu"/>
-    </keybind>
-    <keybind key="W-l">
-      <action name="Execute" command="apex shell lock"/>
-    </keybind>
-    <keybind key="W-b">
-      <action name="Execute" command="apex shell focus"/>
-    </keybind>
-    <keybind key="A-F9">
-      <action name="Execute" command="apex shell record"/>
-    </keybind>
 
     <!-- Audio panels -->
-    <keybind key="W-a">
-      <action name="Execute" command="apex shell audio out"/>
-    </keybind>
-    <keybind key="W-A-i">
-      <action name="Execute" command="apex shell audio in"/>
-    </keybind>
-    <keybind key="W-m">
-      <action name="Execute" command="apex shell audio mixer"/>
-    </keybind>
 
     <!-- Network panels -->
-    <keybind key="W-A-w">
-      <action name="Execute" command="apex shell network wifi"/>
-    </keybind>
-    <keybind key="W-A-b">
-      <action name="Execute" command="apex shell network bluetooth"/>
-    </keybind>
-    <keybind key="W-A-g">
-      <action name="Execute" command="apex shell network vpn"/>
-    </keybind>
-    <keybind key="W-A-h">
-      <action name="Execute" command="apex shell network hotspot"/>
-    </keybind>
 
     <!-- ── Apps ─────────────────────────────────────────────────────────── -->
-    <keybind key="W-t">
-      <action name="Execute" command="alacritty"/>
-    </keybind>
-    <keybind key="W-w">
-      <action name="Execute" command="firefox"/>
-    </keybind>
-    <keybind key="W-e">
-      <action name="Execute" command="thunar"/>
-    </keybind>
 
     <!-- ── Screenshots ──────────────────────────────────────────────────── -->
-    <keybind key="Print">
-      <action name="Execute" command="bash /usr/share/apex-shell/src/scripts/screenshot.sh area"/>
-    </keybind>
-    <keybind key="W-Print">
-      <action name="Execute" command="bash /usr/share/apex-shell/src/scripts/screenshot.sh screen"/>
-    </keybind>
 
     <!-- ── Window management ────────────────────────────────────────────── -->
-    <keybind key="W-q">
-      <action name="Close"/>
-    </keybind>
-    <keybind key="W-f">
-      <action name="ToggleFullscreen"/>
-    </keybind>
     <!-- SUPER+SHIFT+SPACE is "toggle floating" on Hyprland. labwc stacks, so
          every window already floats and there is nothing to toggle; the key is
          kept on the nearest useful behaviour rather than left dead. -->
-    <keybind key="W-S-space">
-      <action name="ToggleAlwaysOnTop"/>
-    </keybind>
     <keybind key="A-Tab">
       <action name="NextWindow"/>
     </keybind>
@@ -280,33 +196,9 @@
          focus action — `Focus` takes no arguments, because a stacking
          compositor has no spatial grid to traverse. Alt-Tab above is the
          equivalent, so the arrows move the window instead. -->
-    <keybind key="W-Left">
-      <action name="MoveToEdge" direction="left"/>
-    </keybind>
-    <keybind key="W-Right">
-      <action name="MoveToEdge" direction="right"/>
-    </keybind>
-    <keybind key="W-Up">
-      <action name="MoveToEdge" direction="up"/>
-    </keybind>
-    <keybind key="W-Down">
-      <action name="MoveToEdge" direction="down"/>
-    </keybind>
 
     <!-- SUPER+SHIFT+arrows is "move window" on Hyprland; snapping to an edge is
          the stacking analogue. -->
-    <keybind key="W-S-Left">
-      <action name="SnapToEdge" direction="left"/>
-    </keybind>
-    <keybind key="W-S-Right">
-      <action name="SnapToEdge" direction="right"/>
-    </keybind>
-    <keybind key="W-S-Up">
-      <action name="SnapToEdge" direction="up"/>
-    </keybind>
-    <keybind key="W-S-Down">
-      <action name="SnapToEdge" direction="down"/>
-    </keybind>
 
     <!-- ── Desktops 1..10 ──────────────────────────────────────────────── -->
     <keybind key="W-1"><action name="GoToDesktop" to="1"/></keybind>
@@ -370,17 +262,116 @@
          keys otherwise cannot drive playback at all. The commands are the same
          ones the XF86 keys above use, so the shell's OSD still reacts to volume
          and brightness. `equal` and `minus` are the unshifted +/- keys. -->
-    <keybind key="W-C-space">
-      <action name="Execute" command="playerctl play-pause"/>
+
+    <!-- Reload this file after editing it. -->
+    <keybind key="W-S-r">
+      <action name="Reconfigure"/>
+    </keybind>
+    <!-- APEX-KEYBINDS-BEGIN — generated by apex-labwc-keybinds. Do not edit. -->
+    <keybind key="W-Escape">
+      <action name="Execute" command="apex shell power"/>
+    </keybind>
+    <keybind key="W-w">
+      <action name="Execute" command="firefox"/>
+    </keybind>
+    <keybind key="W-e">
+      <action name="Execute" command="thunar"/>
+    </keybind>
+    <keybind key="W-t">
+      <action name="Execute" command="alacritty"/>
+    </keybind>
+    <keybind key="W-A-i">
+      <action name="Execute" command="apex shell audio in"/>
+    </keybind>
+    <keybind key="W-m">
+      <action name="Execute" command="apex shell audio mixer"/>
+    </keybind>
+    <keybind key="W-a">
+      <action name="Execute" command="apex shell audio out"/>
+    </keybind>
+    <keybind key="W-A-b">
+      <action name="Execute" command="apex shell network bluetooth"/>
+    </keybind>
+    <keybind key="W-C-Down">
+      <action name="Execute" command="brightnessctl set 5%-"/>
+    </keybind>
+    <keybind key="W-C-Up">
+      <action name="Execute" command="brightnessctl set 5%+"/>
+    </keybind>
+    <keybind key="W-v">
+      <action name="Execute" command="apex shell clipboard"/>
+    </keybind>
+    <keybind key="W-S-m">
+      <action name="Execute" command="apex shell menu"/>
+    </keybind>
+    <keybind key="W-c">
+      <action name="Execute" command="apex shell settings"/>
+    </keybind>
+    <keybind key="W-d">
+      <action name="Execute" command="apex shell dashboard home"/>
+    </keybind>
+    <keybind key="W-z">
+      <action name="Execute" command="apex shell dashboard kanban"/>
+    </keybind>
+    <keybind key="A-space">
+      <action name="Execute" command="apex shell launcher"/>
+    </keybind>
+    <keybind key="C-S-Escape">
+      <action name="Execute" command="apex shell dashboard stats"/>
+    </keybind>
+    <keybind key="W-Down">
+      <action name="MoveToEdge" direction="down"/>
+    </keybind>
+    <keybind key="W-Left">
+      <action name="MoveToEdge" direction="left"/>
+    </keybind>
+    <keybind key="W-Right">
+      <action name="MoveToEdge" direction="right"/>
+    </keybind>
+    <keybind key="W-b">
+      <action name="Execute" command="apex shell focus"/>
+    </keybind>
+    <keybind key="W-Up">
+      <action name="MoveToEdge" direction="up"/>
+    </keybind>
+    <keybind key="W-A-h">
+      <action name="Execute" command="apex shell network hotspot"/>
     </keybind>
     <keybind key="W-C-Right">
       <action name="Execute" command="playerctl next"/>
     </keybind>
+    <keybind key="W-C-space">
+      <action name="Execute" command="playerctl play-pause"/>
+    </keybind>
     <keybind key="W-C-Left">
       <action name="Execute" command="playerctl previous"/>
     </keybind>
-    <keybind key="W-C-equal">
-      <action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"/>
+    <keybind key="W-S-Down">
+      <action name="SnapToEdge" direction="down"/>
+    </keybind>
+    <keybind key="W-S-Left">
+      <action name="SnapToEdge" direction="left"/>
+    </keybind>
+    <keybind key="W-S-Right">
+      <action name="SnapToEdge" direction="right"/>
+    </keybind>
+    <keybind key="W-S-Up">
+      <action name="SnapToEdge" direction="up"/>
+    </keybind>
+    <keybind key="W-n">
+      <action name="Execute" command="apex shell notifications"/>
+    </keybind>
+    <keybind key="A-F9">
+      <action name="Execute" command="apex shell record"/>
+    </keybind>
+    <keybind key="Print">
+      <action name="Execute" command="bash /usr/share/apex-shell/src/scripts/screenshot.sh area"/>
+    </keybind>
+    <keybind key="W-Print">
+      <action name="Execute" command="bash /usr/share/apex-shell/src/scripts/screenshot.sh screen"/>
+    </keybind>
+    <keybind key="W-l">
+      <action name="Execute" command="apex shell lock"/>
     </keybind>
     <keybind key="W-C-minus">
       <action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"/>
@@ -388,17 +379,28 @@
     <keybind key="W-C-0">
       <action name="Execute" command="wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"/>
     </keybind>
-    <keybind key="W-C-Up">
-      <action name="Execute" command="brightnessctl set 5%+"/>
+    <keybind key="W-C-equal">
+      <action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"/>
     </keybind>
-    <keybind key="W-C-Down">
-      <action name="Execute" command="brightnessctl set 5%-"/>
+    <keybind key="W-A-g">
+      <action name="Execute" command="apex shell network vpn"/>
     </keybind>
-
-    <!-- Reload this file after editing it. -->
-    <keybind key="W-S-r">
-      <action name="Reconfigure"/>
+    <keybind key="W-S-w">
+      <action name="Execute" command="apex shell wallpaper"/>
     </keybind>
+    <keybind key="W-A-w">
+      <action name="Execute" command="apex shell network wifi"/>
+    </keybind>
+    <keybind key="W-q">
+      <action name="Close"/>
+    </keybind>
+    <keybind key="W-S-space">
+      <action name="ToggleAlwaysOnTop"/>
+    </keybind>
+    <keybind key="W-f">
+      <action name="ToggleFullscreen"/>
+    </keybind>
+    <!-- APEX-KEYBINDS-END -->
   </keyboard>
 
   <mouse>

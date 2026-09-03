@@ -547,10 +547,18 @@ COPY --chmod=0755 files/system/libexec/apex-session-logout \
 #                          purpose: `save` writes persistence only, `apply`
 #                          also reaches the RUNNING compositor. Only `apply`
 #                          touches hardware.
+#   apex-labwc-keybinds -> the <keybind> region of labwc's rc.xml, generated
+#                          from the same model the shell writes Hyprland .conf
+#                          and niri .kdl from. Before it, a labwc user could
+#                          rebind a shortcut, watch the UI confirm it, and get
+#                          nothing: the three files the shell writes are all
+#                          read by compositors labwc is not.
 COPY --chmod=0755 files/system/libexec/apex-input-apply \
      /usr/libexec/apex-input-apply
 COPY --chmod=0755 files/system/libexec/apex-display-apply \
      /usr/libexec/apex-display-apply
+COPY --chmod=0755 files/system/libexec/apex-labwc-keybinds \
+     /usr/libexec/apex-labwc-keybinds
 
 # Agent Center helpers. Both exist so APEX Shell never has to know which
 # compositor is running (§6's adapter-layer rule) and never has to decide
@@ -583,7 +591,7 @@ RUN set -eux; \
         test -x "/usr/libexec/$h"; \
         bash -n "/usr/libexec/$h"; \
     done; \
-    for g in apex-input-apply apex-display-apply; do \
+    for g in apex-input-apply apex-display-apply apex-labwc-keybinds; do \
         test -x "/usr/libexec/$g"; \
         python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "/usr/libexec/$g"; \
     done; \
@@ -940,6 +948,12 @@ RUN set -eux; \
 # used ALT+SPACE, plus two more wrong combos and eleven missing bindings. This is
 # the gate that would have caught it. Both trees exist at this point in the
 # build, so the comparison is exact rather than assumed.
+#
+# They are GENERATED now — /usr/libexec/apex-labwc-keybinds owns the marked
+# region of rc.xml — so this no longer compares two hand-written lists. It
+# asserts the seeded file is byte-for-byte what the generator produces from the
+# shell's defaults, which is a stronger statement and one that cannot be
+# satisfied by editing the config alone.
 COPY --chmod=0755 files/scripts/check-labwc-keybinds /tmp/check-labwc-keybinds
 RUN /tmp/check-labwc-keybinds /usr/share/apex-shell /usr/share/apex/labwc/rc.xml \
     && rm -f /tmp/check-labwc-keybinds
