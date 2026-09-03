@@ -737,6 +737,16 @@ jobs:
           run 'grep -q "^DesktopNames=niri$" /usr/share/wayland-sessions/niri.desktop' \
             || fail "niri.desktop no longer announces DesktopNames=niri; niri-portals.conf is inert"
 
+          # The power menu and the idle timer both source apex-shell's
+          # src/scripts/compositor.sh and run every action through its
+          # apex_run(). A vendored tree that has the source line but not the
+          # file is a power menu where nothing works at all — worse than the
+          # labwc no-ops the adapter exists to fix, and silent.
+          run 'P=/usr/share/apex-shell/src/scripts/PowerControl.sh;
+               grep -qE "^[[:space:]]*\.[[:space:]].*compositor\.sh" "$P" || exit 0;
+               test -s /usr/share/apex-shell/src/scripts/compositor.sh' \
+            || fail "apex-shell sources compositor.sh but the vendored tree has no such file"
+
           # The greeter must tolerate NVIDIA: sway exits(1) on nvidia-drm without
           # this flag, which means no login at all on a hybrid-graphics machine.
           run 'grep -q -- --unsupported-gpu /etc/greetd/config.toml' \

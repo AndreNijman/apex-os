@@ -693,6 +693,33 @@ RUN set -eux; \
         grep -q 'windows-check' /usr/share/apex-shell/src/services/PowerMenu.qml; \
     fi; \
     bash -n "$P"; \
+    # ── the shell scripts' compositor adapter must arrive with them ─────────
+    # PowerControl.sh and DpmsControl.sh SOURCE src/scripts/compositor.sh, and
+    # every action in both runs through its apex_run(). A tree that carries the
+    # source line without the file has a power menu where NOTHING works —
+    # strictly worse than the three labwc no-ops the adapter was added to fix,
+    # and invisible to every check above, which only ever named PowerControl.sh.
+    #
+    # Keyed on the source line, not on the words "compositor.sh": both scripts
+    # discuss the adapter in comments, and a check a comment can satisfy is a
+    # check this repo has already shipped five times.
+    #
+    # A ref pinned from before the adapter simply has no source line and is left
+    # alone with a warning — APEX_SHELL_REF exists so an old release can be
+    # rebuilt, and labwc's logout and idle screen-off were already dead there.
+    if grep -qE '^[[:space:]]*\.[[:space:]].*compositor\.sh' "$P"; then \
+        C="${P%/*}/compositor.sh"; \
+        test -s "$C" \
+            || { echo "FATAL: PowerControl.sh sources compositor.sh but the vendored tree has no such file"; exit 1; }; \
+        bash -n "$C"; \
+        grep -qE '^apex_run\(\)' "$C" \
+            || { echo "FATAL: vendored compositor.sh defines no apex_run; every power-menu action would call an undefined function"; exit 1; }; \
+        grep -qE '^[[:space:]]*\.[[:space:]].*compositor\.sh' "${P%/*}/DpmsControl.sh" \
+            || { echo "FATAL: DpmsControl.sh does not use the compositor adapter; idle screen-off would be compositor-blind again"; exit 1; }; \
+        echo "shell-script compositor adapter vendored and sourced by both consumers"; \
+    else \
+        echo "WARN: pinned apex-shell predates src/scripts/compositor.sh — the labwc session has no working Log Out and no idle screen-off in this image"; \
+    fi; \
     echo "windows boot helper installed; PowerControl.sh + PowerMenu probe verified"
 
 # The config UI shows the shell version via `git -C <shellDir> describe`, which
