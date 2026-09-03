@@ -38,6 +38,8 @@ pub mod blueprint;
 pub mod fan;
 pub mod fingerprint;
 pub mod game;
+pub mod gameprofile;
+pub mod gaming;
 pub mod gpu;
 pub mod irq;
 pub mod mode;
@@ -64,6 +66,10 @@ pub use blueprint::{
 pub use fan::{FanInventory, FanMode, FanSnapshot, UnknownFanMode};
 pub use fingerprint::{CpuInfo, CpuVendor, Fingerprint, GpuInfo, GpuVendor};
 pub use game::{GameInputs, GamePlan, PidPlacement};
+// §12's two halves. `Step` stays behind its module path for the reason given
+// above; `Resolution` and `Readiness` are unambiguous.
+pub use gameprofile::{GameProfile, GameProfiles, Resolution};
+pub use gaming::{Probe, Readiness};
 pub use gpu::{NvidiaGpu, NvidiaSmi, RealNvidiaSmi};
 pub use mode::{Mode, ModeId, ModeMatch, ModeState, PolicyIntent, TierPolicy, UnknownMode};
 pub use perf::{CpuPerf, GpuPerf, PerfSnapshot, PowerReading, SchedulerState, Temp};

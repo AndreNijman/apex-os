@@ -228,7 +228,11 @@ fn cmd_show(name: &str) -> i32 {
 }
 
 /// Read the three observable facts a mode is matched against.
-async fn observe() -> Result<mode::ModeState, String> {
+///
+/// `pub(crate)` because `apex game profile` matches against exactly the same
+/// three facts and must not grow a second reader — two readers is how the two
+/// verbs come to disagree about which mode the machine is in.
+pub(crate) async fn observe() -> Result<mode::ModeState, String> {
     let Some(conn) = connect().await else {
         return Err("cannot reach the system bus".to_string());
     };
@@ -401,7 +405,12 @@ async fn cmd_set(name: Option<String>, auto: bool, dry_run: bool) -> i32 {
 }
 
 /// True when the apply guard is set to anything truthy.
-fn guard_set() -> bool {
+///
+/// `pub(crate)` for the same reason [`observe`] is: `apex game profile apply`
+/// moves the same levers, so it must obey the same guard read the same way. A
+/// second variable would split one invariant across two names and oblige a
+/// third static check in `pr-validation.yml`.
+pub(crate) fn guard_set() -> bool {
     matches!(
         std::env::var(NO_APPLY_ENV).ok().as_deref(),
         Some("1") | Some("true") | Some("yes")
