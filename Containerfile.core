@@ -764,11 +764,31 @@ RUN set -eux; \
 # NO framework (oh-my-zsh etc). A framework is a second config system with its
 # own update path and a slow startup; everything APEX needs is a zsh builtin or
 # one small package.
+#
+# fish, nushell and tmux ride in this SAME transaction rather than a new RUN,
+# and that is not tidiness: every dnf transaction rewrites the ~200 MB sqlite
+# rpmdb into its own layer (the reason the Plymouth engine moved here from the
+# flavors, documented below). One transaction instead of two is one rpmdb-sized
+# layer instead of two, on the tier where a rebuild already costs the fleet a
+# multi-gigabyte update.
+#
+# Why they are here at all: APEX claims the terminal developer's toolchain is
+# "unrestricted and excellent", naming bash/zsh/fish/nushell, tmux/zellij and
+# TUI agents. Four of those six were not in any Containerfile — the claim was a
+# claim about packages nobody had installed. zellij is not in Fedora and is
+# handled separately below.
 RUN set -eux; \
     dnf5 -y install \
         zsh zsh-autosuggestions zsh-syntax-highlighting \
+        fish nushell tmux \
         eza bat zoxide fzf ripgrep fd-find; \
-    dnf5 clean all
+    dnf5 clean all; \
+    # nushell's binary is `nu`, NOT `nushell`. A postcondition that assumed
+    # otherwise would fail a build that was fine; one that checked the package
+    # name instead of the binary would pass a build that shipped nothing.
+    command -v fish; \
+    command -v nu; \
+    command -v tmux
 
 # starship is NOT packaged in Fedora, and the COPRs offering it are unvetted
 # personal repos. Take the official static musl release, pinned by version AND
@@ -784,6 +804,29 @@ RUN set -eux; \
     chmod 0755 /usr/bin/starship; \
     rm -f /tmp/starship.tgz; \
     starship --version
+
+# zellij is likewise NOT packaged in Fedora 43 — `dnf search zellij` returns no
+# matches, and naming it in a transaction fails to RESOLVE, taking every other
+# package in that transaction down with it. So it gets the starship treatment:
+# the official static musl release, pinned by version AND verified against its
+# published sha256, because an unverified curl into /usr/bin is a supply-chain
+# hole rather than a convenience. The tarball has a single `zellij` member,
+# checked with `tar tzf` before this line was written.
+#
+# Deliberately NOT the `|| echo "fetch FAILED (non-fatal)"` shape the sing-box
+# block above uses. sing-box degrades one optional tab; a silently missing
+# zellij would reinstate exactly the defect this is closing — a product claim
+# naming a program the image does not ship.
+ARG ZELLIJ_VERSION=v0.45.1
+ARG ZELLIJ_SHA256=40bcc2e03f5d5ae8e054e39f676081fe12ab70871506996ba595834c3718eefc
+RUN set -eux; \
+    url="https://github.com/zellij-org/zellij/releases/download/${ZELLIJ_VERSION}/zellij-x86_64-unknown-linux-musl.tar.gz"; \
+    curl -fsSL "$url" -o /tmp/zellij.tgz; \
+    echo "${ZELLIJ_SHA256}  /tmp/zellij.tgz" | sha256sum -c -; \
+    tar xzf /tmp/zellij.tgz -C /usr/bin zellij; \
+    chmod 0755 /usr/bin/zellij; \
+    rm -f /tmp/zellij.tgz; \
+    zellij --version
 
 # ── Plymouth engine (theme + default are set per EDITION, in the flavors) ──
 # The plymouth packages moved here from Containerfile.daily/.gaming, and the
@@ -1013,7 +1056,21 @@ RUN set -eux; \
 RUN set -eux; \
     sed -i 's|^SHELL=.*|SHELL=/bin/zsh|' /etc/default/useradd; \
     grep -q '^SHELL=/bin/zsh' /etc/default/useradd; \
-    grep -q '^/bin/zsh$' /etc/shells || echo /bin/zsh >> /etc/shells
+    grep -q '^/bin/zsh$' /etc/shells || echo /bin/zsh >> /etc/shells; \
+    # Installed is not the same as usable. `chsh` refuses a shell that is not
+    # listed in /etc/shells when a non-root user runs it, so an unlisted shell
+    # is one a user cannot actually switch to. fish and tmux add themselves
+    # from their own %post scriptlets (both write the /usr/bin and /bin forms);
+    # nushell's package does not, so APEX registers it.
+    for s in /usr/bin/nu /bin/nu; do \
+        grep -qx "$s" /etc/shells || echo "$s" >> /etc/shells; \
+    done; \
+    # Assert the scriptlet-registered entries actually landed. Checking only
+    # the lines written above would never notice a scriptlet that silently did
+    # not run, which is the failure mode worth catching here.
+    grep -qx /usr/bin/fish /etc/shells; \
+    grep -qx /usr/bin/tmux /etc/shells; \
+    grep -qx /usr/bin/nu /etc/shells
 
 # ── NO unattended OS updates, and NO unattended reboots ─────────────────────
 # fedora-bootc ships bootc-fetch-apply-updates.timer, which on this machine was
