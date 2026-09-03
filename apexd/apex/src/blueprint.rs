@@ -1100,6 +1100,279 @@ fn plural(n: usize) -> &'static str {
     }
 }
 
+// ── sync ─────────────────────────────────────────────────────────────────────
+
+/// `apex sync export`.
+///
+/// Writes a bundle: the blueprint, plus which projects exist, plus enough
+/// provenance to know where it came from. What it deliberately leaves out is
+/// documented on [`apexd_core::blueprint::Bundle`] — no credentials of any
+/// kind, because this is a file people put in a git repository.
+pub fn cmd_sync_export(file: Option<&Path>, output: Option<&Path>, no_projects: bool) -> i32 {
+    let (bp, _source) = match load(file) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("apex sync: {e}");
+            return EXIT_ERROR;
+        }
+    };
+
+    let projects = if no_projects { Vec::new() } else { collect_projects() };
+    let bundle = blueprint::Bundle {
+        bundle: blueprint::BundleMeta {
+            schema: SCHEMA_VERSION,
+            created: now_secs(),
+            source_host: read_trimmed(Path::new("/etc/hostname")),
+            source_variant: Host::new().observe().variant_id,
+        },
+        blueprint: bp,
+        projects,
+    };
+
+    // Round-trip our own output before writing it. A bundle that cannot be
+    // re-read is worse than a refusal: the failure would surface on the OTHER
+    // machine, hours later, with no way to tell which end was wrong.
+    let text = match bundle.to_toml() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("apex sync: cannot render the bundle: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    if let Err(e) = blueprint::Bundle::parse(&text) {
+        eprintln!("apex sync: refusing to write a bundle this build cannot read back: {e}");
+        return EXIT_ERROR;
+    }
+
+    match output {
+        None => print!("{text}"),
+        Some(path) => {
+            if let Err(e) = write_atomic(path, &text) {
+                eprintln!("apex sync: {e}");
+                return EXIT_ERROR;
+            }
+            eprintln!(
+                "apex sync: wrote {} ({} project{})",
+                path.display(),
+                bundle.projects.len(),
+                plural(bundle.projects.len())
+            );
+        }
+    }
+    0
+}
+
+/// Projects as `apex project` knows them, with their git remote.
+///
+/// A project whose path fails the bundle's own validation is dropped with a
+/// note rather than written out — `export` must not produce a file its own
+/// `import` would refuse.
+fn collect_projects() -> Vec<blueprint::ProjectRef> {
+    let mut out = Vec::new();
+    for p in apex_agent_core::project::list() {
+        let path = PathBuf::from(&p.root);
+        let candidate = blueprint::ProjectRef {
+            slug: p.slug.clone(),
+            path: p.root.clone(),
+            remote: apex_agent_core::git::git_opt(&path, &["remote", "get-url", "origin"]),
+        };
+        // Validate through the same door `import` uses, by building a
+        // one-project bundle and parsing it. One implementation of the rule,
+        // not two.
+        let probe = blueprint::Bundle {
+            bundle: blueprint::BundleMeta {
+                schema: SCHEMA_VERSION,
+                created: 0,
+                source_host: None,
+                source_variant: None,
+            },
+            blueprint: Blueprint::default(),
+            projects: vec![candidate.clone()],
+        };
+        match probe.to_toml().map_err(|e| e.to_string()).and_then(|t| {
+            blueprint::Bundle::parse(&t).map_err(|e| e.to_string())
+        }) {
+            Ok(_) => out.push(candidate),
+            Err(why) => eprintln!(
+                "apex sync: skipping project {:?}: {why}",
+                candidate.slug
+            ),
+        }
+    }
+    out
+}
+
+/// `apex sync show` — read a bundle without importing it.
+pub fn cmd_sync_show(path: &Path) -> i32 {
+    let bundle = match read_bundle(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("apex sync: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    println!("bundle     {}", path.display());
+    println!("schema     {}", bundle.bundle.schema);
+    println!("created    {} ago", ago(bundle.bundle.created));
+    println!(
+        "from       {} ({})",
+        bundle.bundle.source_host.as_deref().unwrap_or("an unnamed host"),
+        bundle.bundle.source_variant.as_deref().unwrap_or("unknown edition")
+    );
+    println!("digest     {}", bundle.blueprint.digest());
+    println!();
+    match bundle.blueprint.to_toml() {
+        Ok(t) => print!("{t}"),
+        Err(e) => {
+            eprintln!("apex sync: {e}");
+            return EXIT_ERROR;
+        }
+    }
+    if !bundle.projects.is_empty() {
+        println!();
+        println!("projects ({})", bundle.projects.len());
+        for p in &bundle.projects {
+            println!(
+                "  {}  {}{}",
+                p.slug,
+                p.path,
+                p.remote
+                    .as_deref()
+                    .map(|r| format!("  <- {r}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    0
+}
+
+/// `apex sync import`.
+///
+/// Writes the blueprint and records the projects, and **never converges
+/// anything**. Keeping `apply` out of this verb is deliberate: importing a file
+/// from another machine and changing this one are two decisions, and a user who
+/// has just pulled in someone else's blueprint should get to read
+/// `apex blueprint diff` before anything happens.
+pub fn cmd_sync_import(path: &Path, force: bool) -> i32 {
+    let bundle = match read_bundle(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("apex sync: {e}");
+            return EXIT_ERROR;
+        }
+    };
+
+    let target = user_blueprint_path();
+    // An existing blueprint is the user's own work. Overwriting it because a
+    // file arrived from elsewhere is the one unrecoverable thing this command
+    // could do, so it takes an explicit --force and still keeps a copy.
+    if target.exists() {
+        let existing = std::fs::read_to_string(&target).ok().and_then(|t| Blueprint::parse(&t).ok());
+        if existing.as_ref() == Some(&bundle.blueprint) {
+            println!("{} already matches the bundle.", target.display());
+        } else if !force {
+            eprintln!(
+                "apex sync: {} exists and differs from the bundle.\n\
+                 Compare them with `apex sync show {}` and `apex blueprint show`,\n\
+                 then re-run with --force. The current file is kept as {}.previous.",
+                target.display(),
+                path.display(),
+                target.display()
+            );
+            return EXIT_ERROR;
+        } else {
+            let backup = target.with_extension("toml.previous");
+            if let Err(e) = std::fs::copy(&target, &backup) {
+                eprintln!("apex sync: cannot keep a copy of the current blueprint: {e}");
+                return EXIT_ERROR;
+            }
+            eprintln!("apex sync: kept the previous blueprint as {}", backup.display());
+        }
+    }
+
+    let text = match bundle.blueprint.to_toml() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("apex sync: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    if let Some(parent) = target.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("apex sync: cannot create {}: {e}", parent.display());
+            return EXIT_ERROR;
+        }
+    }
+    if let Err(e) = write_atomic(&target, &text) {
+        eprintln!("apex sync: {e}");
+        return EXIT_ERROR;
+    }
+    println!("blueprint  {}", target.display());
+
+    // Projects are RECORDED, never created. `import` does not clone a
+    // repository, make a directory or write anything inside one — a bundle is
+    // a description, and acting on a path that arrived in a file from another
+    // machine is not something this command should ever do.
+    let mut recorded = 0;
+    let mut absent = Vec::new();
+    for p in &bundle.projects {
+        let dir = PathBuf::from(&p.path);
+        if !dir.is_dir() {
+            absent.push(p);
+            continue;
+        }
+        match apex_agent_core::project::detect(&dir) {
+            Some(project) => match apex_agent_core::project::remember(&project) {
+                Ok(()) => recorded += 1,
+                Err(e) => eprintln!("apex sync: cannot record {:?}: {e}", p.slug),
+            },
+            None => {
+                // `detect` returns None outside a git repository, and refuses to
+                // invent a project from a bare directory. Report rather than
+                // work around it.
+                eprintln!(
+                    "apex sync: {} is not a git repository; not recording it as a project",
+                    p.path
+                );
+            }
+        }
+    }
+    if recorded > 0 {
+        println!("projects   {recorded} recorded");
+    }
+    if !absent.is_empty() {
+        println!();
+        println!(
+            "{} project{} in the bundle {} not on this machine. Clone {} and they will be \
+             picked up the first time you use them:",
+            absent.len(),
+            plural(absent.len()),
+            if absent.len() == 1 { "is" } else { "are" },
+            if absent.len() == 1 { "it" } else { "them" }
+        );
+        for p in absent {
+            println!(
+                "  {}  {}{}",
+                p.slug,
+                p.path,
+                p.remote
+                    .as_deref()
+                    .map(|r| format!("  <- {r}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+
+    println!();
+    println!("Nothing has been converged. `apex blueprint diff` shows what would change.");
+    0
+}
+
+fn read_bundle(path: &Path) -> Result<blueprint::Bundle, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    blueprint::Bundle::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Seconds since the epoch, or 0 if the clock is before 1970.
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()

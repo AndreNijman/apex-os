@@ -203,6 +203,52 @@ enum Cmd {
     /// Setting APEX_BLUEPRINT_NO_APPLY to any non-empty value makes this refuse
     /// to change anything. --dry-run keeps working with it set.
     Apply(ApplyArgs),
+
+    /// Carry settings, applications and projects to another APEX machine.
+    ///
+    /// `apex sync export` writes one file; `apex sync import` reads it on the
+    /// other machine. The bundle carries the blueprint, which projects exist
+    /// and where they came from, and nothing else — no credentials of any
+    /// kind, because this is a file people put in a git repository.
+    ///
+    /// `import` never converges anything. It writes the blueprint and records
+    /// the projects, and leaves `apex blueprint diff` and `apex apply` as
+    /// separate decisions.
+    Sync {
+        #[command(subcommand)]
+        cmd: SyncCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncCmd {
+    /// Write a bundle for another machine. Prints to stdout without --output.
+    Export {
+        /// Where to write it. Omit to print to stdout.
+        #[arg(long, short, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Export this blueprint rather than the one on the search path.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Leave projects out. A project entry carries a local path and a git
+        /// remote, which is the only machine-specific data in a bundle.
+        #[arg(long)]
+        no_projects: bool,
+    },
+    /// Print a bundle without importing it.
+    Show {
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
+    /// Install a bundle's blueprint and record its projects. Converges nothing.
+    Import {
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        /// Replace an existing blueprint that differs. The current one is kept
+        /// alongside it as blueprint.toml.previous.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Args)]
@@ -527,6 +573,17 @@ async fn main() {
         // user, which is precisely the mistake the domain split exists to
         // prevent.
         Cmd::Apply(args) => blueprint::cmd_apply(args.file.as_deref(), args.dry_run, args.json),
+        // `sync` writes only the user's own blueprint and project records, so
+        // it needs no privilege and must not ask for any.
+        Cmd::Sync { cmd } => match cmd {
+            SyncCmd::Export {
+                output,
+                file,
+                no_projects,
+            } => blueprint::cmd_sync_export(file.as_deref(), output.as_deref(), no_projects),
+            SyncCmd::Show { path } => blueprint::cmd_sync_show(&path),
+            SyncCmd::Import { path, force } => blueprint::cmd_sync_import(&path, force),
+        },
         Cmd::Tier { name } => cmd_tier(name).await,
         Cmd::Profile => cmd_profile().await,
         Cmd::Battery(args) => cmd_battery(args).await,
