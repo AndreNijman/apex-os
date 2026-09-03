@@ -114,6 +114,41 @@ with `follow_mouse` crossing a monitor boundary now closes popups (unflagged
 behaviour change); and the facade suite encodes Hyprland's refcount semantics as
 universal, so it would fail on niri or labwc.
 
+## PAUSED (second time) — 2026-09-03, P1 complete
+
+All four P1 phases are done and pushed. Nothing is uncommitted and nothing is
+unpushed, in either repo, verified by sweeping every worktree.
+
+| Work | Where | State |
+|------|-------|-------|
+| Phase 5 §17 compositor adapter | apex-shell — **merged to main** as `30d1801` | done |
+| Phase 5 §16 plugin platform | apex-shell **#9** (rebased onto main) | done |
+| Phase 5.3 OS side | apex-os **#25** | done |
+| Phase 6 capsules + resolver | apex-os **#29** | done |
+| Phase 7 blueprint + sync | apex-os **#28** | done |
+| Phase 8 modes + workloads | apex-os **#27** | done |
+| MT7925 wifi resume fix | apex-os **#26** | done |
+
+**Nothing is merged to `apex-os/main`, so no image has been built.** The four
+branches are stacked and all touch `apexd/apex/src/main.rs`; integration is a
+real step, not a formality. Merging only the tip lands everything and produces
+one build.
+
+### The one unfinished thread: the weekly `core` build
+
+Red every Monday since ~2026-08-24 on
+`/etc/system-release not branded (bootupd derives the EFI label from it)`.
+Nothing was pushed for it — the work was live probing on the Katana. The one
+finding worth keeping, from the agent's last report:
+
+> The branding layer itself is correct on Katana (probe 029 =
+> `APEX-OS release 43`). The question is now whether the committed image keeps
+> it.
+
+So the debranding step *works*; the suspicion has moved to a later layer
+undoing it, or to the assertion running against a different filesystem view than
+the one the branding wrote to. That is where to resume.
+
 ## Paused, then resumed — 2026-09-03
 
 Andre paused the session and unpaused it shortly after; all seven agents were
