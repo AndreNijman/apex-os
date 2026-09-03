@@ -335,13 +335,39 @@ pub fn start(
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
 
-    // Its own process group, so stopping it signals `bwrap` and everything
-    // beneath rather than only the direct child.
-    // Safe: setpgid(0, 0) in the forked child is async-signal-safe and touches
-    // nothing this process owns.
+    // Two things in the forked child, both async-signal-safe and both
+    // load-bearing.
+    //
+    // 1. Its own process group, so stopping it signals `bwrap` and everything
+    //    beneath rather than only the direct child.
+    //
+    // 2. THE SIGNAL MASK IS CLEARED, and this one was a real bug found by
+    //    timing a shutdown on the katana. The daemon blocks SIGTERM, SIGINT and
+    //    SIGHUP process-wide so that only its signal thread receives them
+    //    (`block_termination_signals`). A signal mask is inherited across
+    //    `fork(2)` and — unlike handler dispositions — is NOT reset by
+    //    `execve(2)`. So every backend inherited a mask with SIGTERM blocked
+    //    and could not receive it at all: `stop()` signalled correctly, nothing
+    //    happened, the five-second grace elapsed, and the backend was SIGKILLed
+    //    on every single stop. Measured before the fix:
+    //
+    //        apex-aid: signal 15, stopping the backend
+    //        apex-aid: backend did not stop within 5s; killing it
+    //
+    //    What that cost is not the five seconds. It is that a real runtime
+    //    holding several gigabytes of VRAM never got the chance to release it
+    //    itself — every `systemctl --user restart`, every logout and every idle
+    //    unload tore the allocation down with SIGKILL instead.
+    // Safe: setpgid and sigprocmask in the forked child touch nothing this
+    // process owns, and both are on the async-signal-safe list.
     unsafe {
         cmd.pre_exec(|| {
             if libc::setpgid(0, 0) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut empty: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut empty);
+            if libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()) != 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
