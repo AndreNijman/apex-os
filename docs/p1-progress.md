@@ -129,10 +129,20 @@ unpushed, in either repo, verified by sweeping every worktree.
 | Phase 8 modes + workloads | apex-os **#27** | done |
 | MT7925 wifi resume fix | apex-os **#26** | done |
 
-**Nothing is merged to `apex-os/main`, so no image has been built.** The four
-branches are stacked and all touch `apexd/apex/src/main.rs`; integration is a
-real step, not a formality. Merging only the tip lands everything and produces
+**Nothing is merged to `apex-os/main`, so no image has been built.**
+
+**Integration is done: `p1/integration`, PR #30.** That is the branch to merge
+when the final build is wanted — it lands all four phases and produces exactly
 one build.
+
+Integrating early paid for itself. Git saw two conflicts, both trivial. The one
+that mattered was invisible to it: phase 7's blueprint and phase 8's modes each
+export a type called `Step`, both re-exported at the crate root, so the merged
+workspace did not compile (E0252). Every branch was green alone and the merge
+was clean — only building the result finds that.
+
+Verified on the merged tree: builds, 246 Rust tests, shell suites 35 / 154 / 88
+/ 105 / 67 / 54, clippy and shellcheck clean.
 
 ### The one unfinished thread: the weekly `core` build
 
