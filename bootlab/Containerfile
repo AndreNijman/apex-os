@@ -33,6 +33,26 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         ostree rpm-ostree \
         python3 python3-pefile \
         jq file findutils procps-ng iproute socat \
+        `# ── added for boot v2; every one of these was resolved by probing ──` \
+        `# virt-fw-vars authors an OVMF varstore off-line: it is how the APEX` \
+        `# certificate becomes PK/KEK/db with SecureBoot=on without an` \
+        `# interactive firmware UI. signing/spike-d/enroll-vars.sh already` \
+        `# depends on it; it was simply missing from this image.` \
+        python3-virt-firmware \
+        `# busybox is Fedora's statically linked build, so a cpio containing` \
+        `# one file boots as a real userspace. The boot-counting scenarios run` \
+        `# five sequential guests; a 386 MB APEX initramfs would make that` \
+        `# minutes of I/O to prove a filename rename.` \
+        busybox \
+        `# cpio/zstd assemble and inspect initramfs images. gzip is in the` \
+        `# base image; zstd is what dracut actually emits on Fedora 43.` \
+        cpio zstd \
+        `# A kernel and dracut so this image can produce a UKI with no APEX` \
+        `# machine in reach — GitHub runners have neither an ostree deployment` \
+        `# nor 5 GB of patience for an apex-os-core pull. The APEX-image path` \
+        `# (apex-mkuki --from-root) stays the primary one and is what the` \
+        `# katana runs; this is the CI stand-in, and docs/boot-v2.md says so.` \
+        kernel-core dracut \
     && dnf clean all
 
 # The guest firmware paths differ between Fedora releases often enough that
@@ -44,7 +64,31 @@ RUN set -eux; \
     command -v ukify; \
     command -v sbsign; \
     command -v swtpm; \
-    command -v qemu-system-x86_64
+    command -v qemu-system-x86_64; \
+    \
+    : '── Secure Boot needs the secboot firmware build, not just any OVMF.'; \
+    : 'F43 ships the 2 MB raw pair here and only qcow2 for the 4 MB layout;'; \
+    : 'virt-fw-vars edits raw .fd, so the raw pair is the one that matters.'; \
+    test -f /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd; \
+    test -f /usr/share/edk2/ovmf/OVMF_VARS.secboot.fd; \
+    \
+    : '── the boot-v2 additions, asserted rather than assumed present ──'; \
+    command -v virt-fw-vars; \
+    command -v busybox; \
+    command -v cpio; \
+    command -v dracut; \
+    test -x /usr/lib/systemd/systemd-measure; \
+    test -x /usr/bin/systemd-cryptenroll; \
+    test -f /usr/lib/systemd/boot/efi/systemd-bootx64.efi; \
+    test -f /usr/lib/systemd/boot/efi/linuxx64.efi.stub; \
+    \
+    : '── exactly one kernel, and record which one. A second kernel would'; \
+    : 'make "the kernel under test" ambiguous for every scenario below.'; \
+    test "$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1; \
+    find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+        > /etc/apex-bootlab-kver; \
+    test -s /etc/apex-bootlab-kver; \
+    test -f "/usr/lib/modules/$(cat /etc/apex-bootlab-kver)/vmlinuz"
 
 WORKDIR /work
 ENTRYPOINT ["/bin/bash"]

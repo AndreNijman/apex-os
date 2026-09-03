@@ -33,6 +33,7 @@
 //!
 //! The daemon and CLI are thin shells over this crate.
 
+pub mod ai;
 pub mod battery;
 pub mod blueprint;
 pub mod fan;
@@ -52,6 +53,12 @@ pub mod tier;
 pub mod topology;
 pub mod workload;
 
+// §14's local inference service. `Store`, `Settings` and `Manifest` are
+// unambiguous at the crate root; `Backend`, `Runtime`, `Listen` and the two
+// `plan_*` functions deliberately stay behind `ai::` — a bare `Backend` in a
+// call site would not say whether it meant a compute backend or something
+// else, and `apexd-core` already learned that lesson with `Step`.
+pub use ai::{AiError, Manifest as AiManifest, Settings as AiSettings, Store as AiStore};
 pub use battery::{Battery, BatteryInventory, ThresholdSupport};
 // `Step` is deliberately NOT re-exported here from either module. Phase 7's
 // blueprint and phase 8's modes each have a type called `Step` — a convergence

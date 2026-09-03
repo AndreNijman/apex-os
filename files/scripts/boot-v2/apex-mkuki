@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-mkuki — build one APEX Unified Kernel Image.
+#
+#  §22's diagram: kernel + initramfs + kernel command line + microcode + APEX
+#  metadata, in a single PE binary that Secure Boot verifies as one object.
+#  That is the whole point of a UKI and the reason §22 wants one: today a
+#  GRUB/BLS boot verifies the kernel and nothing else, so the command line and
+#  the initramfs — which is where the root device, the composefs digest and the
+#  disk-unlock policy live — are unmeasured and unsigned. A UKI makes them part
+#  of the signed object.
+#
+#  This is build-time tooling. It runs inside the boot lab container (see
+#  bootlab/Containerfile), never as packages on an APEX host: `ukify` and
+#  `sbsign` arriving via `rpm-ostree install` on the build box is exactly the
+#  machine drift AGENTS.md prohibits.
+#
+#  Two input modes, both real, because the two call sites genuinely differ:
+#
+#    --from-root DIR   Extract the kernel and initramfs from an APEX image or a
+#                      mounted APEX deployment: DIR/usr/lib/modules/<kver>/
+#                      {vmlinuz,initramfs.img}. This is the primary mode and
+#                      the one the katana runs — a real APEX kernel and the
+#                      real APEX initramfs, which is already composefs-aware
+#                      and already built --no-hostonly because a bootc image
+#                      has to boot arbitrary hardware.
+#
+#    --kernel/--initrd Explicit paths. GitHub runners have no APEX deployment
+#                      and pulling apex-os-core to get one would cost a
+#                      multi-gigabyte download for a file the boot lab already
+#                      has, so CI passes the lab's own kernel. Same builder,
+#                      same assertions, a different kernel — and
+#                      docs/boot-v2.md says which proof came from which.
+#
+#  Signing is optional here and separate on purpose (--sb-key/--sb-cert). An
+#  unsigned UKI is a legitimate intermediate artifact; what must never happen
+#  is a private key reaching the repository or a real machine's firmware, so
+#  keys are always paths the caller supplies from outside the tree.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+# shellcheck source=files/scripts/boot-v2/lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+usage() {
+    cat >&2 <<'EOF'
+usage: apex-mkuki --output UKI.efi
+                  { --from-root DIR | --kernel FILE --initrd FILE }
+                  [--cmdline TEXT] [--deployment ID] [--variant ID]
+                  [--os-release FILE] [--ucode FILE] [--allow-no-ucode]
+                  [--extra-initrd FILE ...]
+                  [--sb-key KEY --sb-cert CERT]
+                  [--pcr-key KEY] [--pcr-pubkey PUB]
+                  [--source-revision SHA] [--image-digest DIGEST]
+EOF
+    exit 2
+}
+
+OUTPUT="" FROM_ROOT="" KERNEL="" INITRD="" UCODE="" ALLOW_NO_UCODE=0
+CMDLINE="" DEPLOYMENT="" VARIANT="" OSRELEASE=""
+SB_KEY="" SB_CERT="" PCR_KEY="" PCR_PUBKEY=""
+SOURCE_REVISION="" IMAGE_DIGEST=""
+EXTRA_INITRDS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --output)          OUTPUT="$2"; shift 2;;
+        --from-root)       FROM_ROOT="$2"; shift 2;;
+        --kernel)          KERNEL="$2"; shift 2;;
+        --initrd)          INITRD="$2"; shift 2;;
+        --ucode)           UCODE="$2"; shift 2;;
+        --allow-no-ucode)  ALLOW_NO_UCODE=1; shift;;
+        --cmdline)         CMDLINE="$2"; shift 2;;
+        --deployment)      DEPLOYMENT="$2"; shift 2;;
+        --variant)         VARIANT="$2"; shift 2;;
+        --os-release)      OSRELEASE="$2"; shift 2;;
+        --extra-initrd)    EXTRA_INITRDS+=("$2"); shift 2;;
+        --sb-key)          SB_KEY="$2"; shift 2;;
+        --sb-cert)         SB_CERT="$2"; shift 2;;
+        --pcr-key)         PCR_KEY="$2"; shift 2;;
+        --pcr-pubkey)      PCR_PUBKEY="$2"; shift 2;;
+        --source-revision) SOURCE_REVISION="$2"; shift 2;;
+        --image-digest)    IMAGE_DIGEST="$2"; shift 2;;
+        -h|--help)         usage;;
+        *) die "unknown argument: $1";;
+    esac
+done
+
+[[ -n "$OUTPUT" ]] || usage
+
+# ── resolve the kernel, initramfs and os-release ────────────────────────────
+KVER=""
+if [[ -n "$FROM_ROOT" ]]; then
+    [[ -z "$KERNEL$INITRD" ]] || die "--from-root and --kernel/--initrd are mutually exclusive"
+    [[ -d "$FROM_ROOT/usr/lib/modules" ]] \
+        || die "$FROM_ROOT does not look like an APEX/bootc root: no usr/lib/modules"
+    # An APEX image carries exactly one kernel. Two would make "the kernel this
+    # UKI contains" ambiguous, and picking the newest silently is how a UKI
+    # ends up paired with the wrong out-of-tree modules.
+    mapfile -t KVERS < <(find "$FROM_ROOT/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+    (( ${#KVERS[@]} == 1 )) \
+        || die "expected exactly 1 kernel under $FROM_ROOT/usr/lib/modules, found ${#KVERS[@]}: ${KVERS[*]}"
+    KVER="${KVERS[0]}"
+    KERNEL="$FROM_ROOT/usr/lib/modules/$KVER/vmlinuz"
+    INITRD="$FROM_ROOT/usr/lib/modules/$KVER/initramfs.img"
+    [[ -f "$KERNEL" ]] || die "no vmlinuz at $KERNEL"
+    [[ -f "$INITRD" ]] || die "no initramfs.img at $INITRD — run dracut for $KVER first"
+    [[ -n "$OSRELEASE" ]] || OSRELEASE="$FROM_ROOT/usr/lib/os-release"
+else
+    [[ -n "$KERNEL" && -n "$INITRD" ]] || usage
+    [[ -f "$KERNEL" ]] || die "no such kernel: $KERNEL"
+    [[ -f "$INITRD" ]] || die "no such initramfs: $INITRD"
+fi
+[[ -n "$OSRELEASE" ]] || OSRELEASE=/usr/lib/os-release
+[[ -f "$OSRELEASE" ]] || die "no os-release at $OSRELEASE"
+
+# `uname -r` for the .uname section. Take it from the kernel image itself
+# rather than from the directory name: a directory can be renamed, and the
+# .uname section is what `bootctl list` and APEX Settings report as the kernel
+# version, so it must come from the bytes that will actually run.
+if [[ -z "$KVER" ]] || [[ -n "$FROM_ROOT" ]]; then
+    embedded="$(python3 - "$KERNEL" <<'PY'
+import re, sys, gzip, io
+# The Linux x86 boot protocol stores a pointer to the version string at
+# offset 0x20e (kernel_version), relative to 0x200. Reading it is exact;
+# grepping the whole file finds strings from the embedded config too.
+with open(sys.argv[1], 'rb') as f:
+    head = f.read(0x1000)
+    if head[0x202:0x206] != b'HdrS':
+        sys.exit('not a bzImage: HdrS magic missing')
+    off = int.from_bytes(head[0x20e:0x210], 'little') + 0x200
+    f.seek(off)
+    raw = f.read(256)
+ver = raw.split(b'\x00', 1)[0].decode('utf-8', 'replace').split(' ', 1)[0]
+if not re.match(r'^\d+\.\d+', ver):
+    sys.exit(f'implausible kernel version {ver!r} at offset {off:#x}')
+print(ver)
+PY
+)" || die "could not read the kernel version out of $KERNEL"
+    if [[ -n "$KVER" && "$KVER" != "$embedded" ]]; then
+        die "kernel version mismatch: directory says '$KVER', $KERNEL says '$embedded'"
+    fi
+    KVER="$embedded"
+fi
+
+# ── microcode ───────────────────────────────────────────────────────────────
+# §22's diagram lists microcode as part of the UKI, and it belongs there: early
+# microcode has to be loaded before the kernel touches the CPU, which means it
+# must be inside the signed object or it is not covered at all.
+#
+# On Fedora, dracut already prepends an UNCOMPRESSED cpio containing
+# kernel/x86/microcode/* to the front of initramfs.img. Handing ukify the same
+# bytes again via --microcode would duplicate them. So: detect it, and only
+# demand a separate --ucode when the initramfs does not already carry one.
+UCODE_STATE="unknown"
+if [[ -n "$UCODE" ]]; then
+    [[ -f "$UCODE" ]] || die "no such microcode cpio: $UCODE"
+    UCODE_STATE="separate-section"
+else
+    # cpio -t on the head of the file lists the leading uncompressed archive and
+    # then errors on the compressed remainder; the listing is what we want and
+    # the error is expected, so the exit status is deliberately not consulted
+    # here. The postcondition is the grep below, not cpio's rc.
+    if cpio -t --quiet < "$INITRD" 2>/dev/null | grep -q '^kernel/x86/microcode/'; then
+        UCODE_STATE="embedded-in-initrd"
+    elif (( ALLOW_NO_UCODE )); then
+        UCODE_STATE="absent-allowed"
+    else
+        die "no microcode: $INITRD has no leading kernel/x86/microcode cpio and no --ucode was given.
+    §22 puts microcode inside the UKI. Pass --ucode CPIO, or --allow-no-ucode
+    for a synthetic test guest where there is no firmware to update."
+    fi
+fi
+
+# ── kernel command line ─────────────────────────────────────────────────────
+# A UKI's command line is inside the signed image, and sd-stub ignores the one
+# the bootloader passes when Secure Boot is enabled. That is the feature: it is
+# also the reason an APEX UKI must be built with the command line it needs, and
+# cannot be "fixed up" at the boot menu the way a GRUB entry can.
+if [[ -z "$CMDLINE" ]]; then
+    die "--cmdline is required: a UKI's command line is signed into the image and
+    cannot be edited at boot, so defaulting it silently would ship whatever
+    this script's author happened to think an APEX root looks like."
+fi
+
+# ── APEX metadata ───────────────────────────────────────────────────────────
+# The section is called `.apexinf` and not `.apexmeta` because a PE section
+# name is 8 bytes including the leading dot. It is a plain extra section: the
+# stub does not read it and does not measure it, but Authenticode covers the
+# whole image, so the metadata is signed and cannot be edited without breaking
+# the Secure Boot signature. That makes it the right place for the
+# image-digest/source-revision pair AGENTS.md requires to be traceable.
+: "${SOURCE_DATE_EPOCH:=$(date -u +%s)}"
+export SOURCE_DATE_EPOCH
+META_JSON="$(python3 - <<PY
+import json, sys
+print(json.dumps({
+    "apexUkiVersion": 1,
+    "kernelVersion": "$KVER",
+    "deployment": "${DEPLOYMENT:-unknown}",
+    "variant": "${VARIANT:-unknown}",
+    "sourceRevision": "${SOURCE_REVISION:-unknown}",
+    "imageDigest": "${IMAGE_DIGEST:-unknown}",
+    "microcode": "$UCODE_STATE",
+    "builtFrom": "${FROM_ROOT:-explicit-kernel-and-initrd}",
+    "sourceDateEpoch": int("$SOURCE_DATE_EPOCH"),
+}, indent=2, sort_keys=True))
+PY
+)"
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+printf '%s\n' "$META_JSON" > "$WORK/apexinf.json"
+printf '%s\n' "$KVER" > "$WORK/uname"
+
+# ── assemble ────────────────────────────────────────────────────────────────
+UKIFY_ARGS=(
+    build
+    --linux="$KERNEL"
+    --initrd="$INITRD"
+    --cmdline="$CMDLINE"
+    --os-release="@$OSRELEASE"
+    --uname="$KVER"
+    --stub="$(sd_stub_efi)"
+    --section=".apexinf:@$WORK/apexinf.json"
+    --output="$OUTPUT"
+)
+# Order matters: the kernel concatenates initramfs archives in the order they
+# appear, and later archives overlay earlier ones. --extra-initrd is how a test
+# guest drops a dracut hook into the real APEX initramfs without rebuilding it.
+for e in "${EXTRA_INITRDS[@]}"; do
+    [[ -f "$e" ]] || die "no such extra initrd: $e"
+    UKIFY_ARGS+=("--initrd=$e")
+done
+[[ "$UCODE_STATE" == "separate-section" ]] && UKIFY_ARGS+=("--microcode=$UCODE")
+
+# Measured boot: --pcr-private-key makes ukify compute the PCR 11 values this
+# image will produce in each boot phase and sign them into a .pcrsig section,
+# and --pcrpkey embeds the public half. See docs/boot-v2.md for why APEX binds
+# LUKS2 to that public key instead of to a PCR value.
+if [[ -n "$PCR_KEY" ]]; then
+    [[ -f "$PCR_KEY" ]] || die "no such PCR signing key: $PCR_KEY"
+    UKIFY_ARGS+=("--pcr-private-key=$PCR_KEY" "--measure")
+    if [[ -n "$PCR_PUBKEY" ]]; then
+        [[ -f "$PCR_PUBKEY" ]] || die "no such PCR public key: $PCR_PUBKEY"
+        UKIFY_ARGS+=("--pcrpkey=$PCR_PUBKEY")
+    fi
+    UKIFY_ARGS+=(--phases=enter-initrd --phases=enter-initrd:leave-initrd
+                 --phases=enter-initrd:leave-initrd:sysinit
+                 --phases=enter-initrd:leave-initrd:sysinit:ready)
+fi
+
+if [[ -n "$SB_KEY" ]]; then
+    [[ -n "$SB_CERT" ]] || die "--sb-key needs --sb-cert"
+    [[ -f "$SB_KEY"  ]] || die "no such Secure Boot key: $SB_KEY"
+    [[ -f "$SB_CERT" ]] || die "no such Secure Boot certificate: $SB_CERT"
+    UKIFY_ARGS+=(
+        --signtool=sbsign
+        --secureboot-private-key="$SB_KEY"
+        --secureboot-certificate="$SB_CERT"
+    )
+fi
+
+mkdir -p "$(dirname "$OUTPUT")"
+ukify "${UKIFY_ARGS[@]}" >&2
+
+# ── postconditions ─────────────────────────────────────────────────────────
+# ukify exiting 0 is not proof the image is usable. Every section §22's diagram
+# names is checked by reading the PE section table back out of the artifact,
+# and the signature is checked with sbverify against the certificate we claim
+# signed it — a marker file or a zero exit status is not evidence.
+[[ -s "$OUTPUT" ]] || die "ukify produced no output at $OUTPUT"
+
+python3 - "$OUTPUT" "$UCODE_STATE" "${PCR_KEY:+yes}" <<'PY' >&2
+import sys, pefile, json
+path, ucode_state, want_pcr = sys.argv[1], sys.argv[2], sys.argv[3]
+pe = pefile.PE(path, fast_load=True)
+names = [s.Name.rstrip(b'\x00').decode() for s in pe.sections]
+required = ['.linux', '.initrd', '.cmdline', '.osrel', '.uname', '.apexinf']
+if ucode_state == 'separate-section':
+    required.append('.ucode')
+if want_pcr:
+    required += ['.pcrsig', '.pcrpkey']
+missing = [r for r in required if r not in names]
+if missing:
+    sys.exit(f'UKI {path} is missing required sections: {missing} (has {names})')
+
+# The APEX metadata must be parseable JSON carrying the fields the CLI and
+# APEX Settings read. A section that exists but holds garbage is worse than
+# a missing one, because nothing downstream would notice.
+sec = next(s for s in pe.sections if s.Name.rstrip(b'\x00') == b'.apexinf')
+blob = sec.get_data()[:sec.Misc_VirtualSize].rstrip(b'\x00')
+meta = json.loads(blob)
+for key in ('apexUkiVersion', 'kernelVersion', 'deployment', 'variant',
+            'sourceRevision', 'imageDigest', 'microcode'):
+    if key not in meta:
+        sys.exit(f'.apexinf is missing {key}: {meta}')
+print(f'    sections: {" ".join(names)}')
+print(f'    .apexinf: kernel={meta["kernelVersion"]} deployment={meta["deployment"]} '
+      f'variant={meta["variant"]} microcode={meta["microcode"]}')
+PY
+
+if [[ -n "$SB_KEY" ]]; then
+    sbverify --cert "$SB_CERT" "$OUTPUT" >&2 \
+        || die "sbverify says $OUTPUT is NOT signed by $SB_CERT"
+fi
+
+printf '%s\n' "$OUTPUT"
