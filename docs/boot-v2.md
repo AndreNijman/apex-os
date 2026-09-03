@@ -204,9 +204,24 @@ mutant is proven to exist and to differ from the original before the boot, and
 the foreign one is proven to be *validly* signed by a key that is not in `db` —
 "unsigned is refused" would be a much weaker claim.
 
-**Reproducibility.** Two builds with the same `SOURCE_DATE_EPOCH` are
-byte-identical; a different epoch changes the bytes, so the property is being
-controlled rather than accidentally true.
+**Reproducibility — of the payload, not of the signature.** Two *unsigned*
+builds with the same `SOURCE_DATE_EPOCH` are byte-identical, and a different
+epoch changes the bytes, so the property is controlled rather than accidentally
+true.
+
+The **signed** UKI is not byte-reproducible and cannot be: `sbsign` records a
+signing time in the PKCS#7 structure, and there is no flag to omit it. Measured
+directly — one unmodified `linuxx64.efi.stub` signed twice, two seconds apart,
+with one key, gave `c266048303a17056…` and `66d64b06a66db973…`.
+
+This was found the hard way. The scenario originally asserted that two *signed*
+builds were byte-identical. It passed repeatedly, then failed on a CI run whose
+only changes were to documentation — because two signings match exactly when
+they land in the same second. So the assertion now covers the unsigned payload,
+the signed artifact is asserted to *verify* rather than to be identical, and the
+harness reports whether the signed bytes happened to match without asserting it
+either way: a lucky run must not read as evidence of a property that does not
+hold.
 
 **Boot counting.** Four boots walked `apex-new+3-0.efi` →`+2-1` →`+1-2`
 →`+0-3`, the fifth selected the unsuffixed `apex-good.efi`, and a sixth stayed
