@@ -54,6 +54,18 @@ pub trait NvidiaSmi: Send + Sync {
     fn vram_mib(&self) -> Vec<(u32, u64, u64)> {
         Vec::new()
     }
+
+    /// Per-GPU *current* clocks as `(index, graphics_mhz, memory_mhz)`.
+    ///
+    /// [`NvidiaGpu::max_graphics_mhz`] is the ceiling a lock is clamped
+    /// against; this is what the GPU is doing right now, which is what the
+    /// Performance Lab (§12) asks for. Defaulted to empty for the same reason
+    /// as [`NvidiaSmi::vram_mib`]: amdgpu publishes its live clocks in sysfs,
+    /// NVIDIA publishes none, so the honest answer from an implementation that
+    /// cannot read them is nothing at all.
+    fn clocks_mhz(&self) -> Vec<(u32, u64, u64)> {
+        Vec::new()
+    }
 }
 
 /// True when `nvidia-smi` resolves on `PATH`.
@@ -110,18 +122,37 @@ impl NvidiaSmi for RealNvidiaSmi {
             ])
             .output();
         match out {
-            Ok(o) if o.status.success() => parse_vram(&String::from_utf8_lossy(&o.stdout)),
+            Ok(o) if o.status.success() => parse_indexed_pair(&String::from_utf8_lossy(&o.stdout)),
             // Read-only and non-critical: a driver that refuses the query must
             // leave the Performance Lab reporting "unavailable", not fail.
             _ => Vec::new(),
         }
     }
+
+    fn clocks_mhz(&self) -> Vec<(u32, u64, u64)> {
+        if !self.available() {
+            return Vec::new();
+        }
+        let out = std::process::Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=index,clocks.current.graphics,clocks.current.memory",
+                "--format=csv,noheader,nounits",
+            ])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => parse_indexed_pair(&String::from_utf8_lossy(&o.stdout)),
+            _ => Vec::new(),
+        }
+    }
 }
 
-/// Parse `index,memory.used,memory.total` CSV. A row missing either figure is
-/// dropped rather than defaulted to zero — "0 MiB used" and "we could not read
-/// it" mean completely different things to someone sizing a model.
-pub fn parse_vram(text: &str) -> Vec<(u32, u64, u64)> {
+/// Parse a three-column `index,a,b` CSV from `nvidia-smi --format=csv`.
+///
+/// Shared by the memory and clock queries because both have exactly that shape.
+/// A row missing either figure is DROPPED rather than defaulted to zero: "0 MiB
+/// used" and "we could not read it" mean completely different things to someone
+/// sizing a model against the free VRAM.
+pub fn parse_indexed_pair(text: &str) -> Vec<(u32, u64, u64)> {
     let mut out = Vec::new();
     for line in text.lines() {
         let f: Vec<&str> = line.trim().split(',').map(|s| s.trim()).collect();
@@ -147,6 +178,8 @@ pub struct MockNvidiaSmi {
     pub gpus: Vec<NvidiaGpu>,
     /// `(index, used_mib, total_mib)`, as `vram_mib` should return it.
     pub vram: Vec<(u32, u64, u64)>,
+    /// `(index, graphics_mhz, memory_mhz)`, as `clocks_mhz` should return it.
+    pub clocks: Vec<(u32, u64, u64)>,
 }
 
 impl NvidiaSmi for MockNvidiaSmi {
@@ -163,6 +196,13 @@ impl NvidiaSmi for MockNvidiaSmi {
     fn vram_mib(&self) -> Vec<(u32, u64, u64)> {
         if self.available {
             self.vram.clone()
+        } else {
+            Vec::new()
+        }
+    }
+    fn clocks_mhz(&self) -> Vec<(u32, u64, u64)> {
+        if self.available {
+            self.clocks.clone()
         } else {
             Vec::new()
         }
