@@ -463,29 +463,6 @@ jobs:
           APEX_REQUIRE_SHELL_TREE: "1"
         run: ./tests/test-labwc-keybinds.sh
 
-      # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
-      # comes from apex-shell's own src/services/plugins/manifest.js, through
-      # node, because two implementations of a permission model drift and the
-      # failure mode is a CLI that tells a user their plugin is fine while the
-      # shell refuses it. The suite proves that differentially — it asks
-      # manifest.js directly for each fixture and compares the reason code —
-      # which is only meaningful because the CLI really does call that file.
-      #
-      # It reuses the apex-shell tree vendored above, and it must never touch
-      # the real ~/.config/apex-shell: `disable` MOVES a directory, so the
-      # suite points both plugin directories at a temp tree and HARD-EXITS if
-      # either resolves outside it.
-      #
-      # EXPECT THIS RED UNTIL apex-shell PR #9 MERGES. manifest.js is on
-      # apex-shell's `p1/plugin-platform` branch and not on `main`, which is
-      # what the vendor step above clones — the documented merge order (the
-      # shell lands before or with the OS) doing its job, exactly as it did for
-      # 5.3's keybind suite on PRs #27 and #28. The suite reports it as ONE
-      # labelled assertion naming PR #9 and still runs its other 61, rather
-      # than refusing at the top and reporting passed=0 with a red tick.
-      - name: Run plugin CLI assertions
-        run: ./tests/test-apex-plugin.sh
-
       # End-to-end, against a real daemon on an isolated socket: that the
       # daemon resolves the asking session from the connection's PEER
       # CREDENTIALS and not from anything the client sent. The negative control
@@ -564,6 +541,40 @@ jobs:
             tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
             tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
             tests/test-apex-modes.sh tests/test-apex-plugin.sh
+
+      # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
+      # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
+      # comes from apex-shell's own src/services/plugins/manifest.js, through
+      # node, because two implementations of a permission model drift and the
+      # failure mode is a CLI that tells a user their plugin is fine while the
+      # shell refuses it. The suite proves that differentially — it asks
+      # manifest.js directly for each fixture and compares the reason code —
+      # which is only meaningful because the CLI really does call that file.
+      #
+      # It reuses the apex-shell tree vendored earlier in this job, and it must
+      # never touch the real ~/.config/apex-shell: `disable` MOVES a directory,
+      # so the suite points both plugin directories at a temp tree and
+      # HARD-EXITS if either resolves outside it.
+      #
+      # EXPECT THIS RED UNTIL apex-shell PR #9 MERGES. manifest.js is on
+      # apex-shell's `p1/plugin-platform` branch and not on `main`, which is
+      # what the vendor step clones — the documented merge order (the shell
+      # lands before or with the OS) doing its job, exactly as it did for 5.3's
+      # keybind suite on PRs #27 and #28. The suite reports it as ONE labelled
+      # assertion naming PR #9 and still runs its other 61, rather than
+      # refusing at the top and reporting passed=0 with a red tick.
+      #
+      # WHY IT IS THE LAST STEP: a failed step skips every step BELOW it in the
+      # same job. Placed mid-job — where it was first written — a known-red
+      # step would silently disable the bubblewrap install, the
+      # privilege-request, project-layout and secret-broker suites, and the
+      # ShellCheck gate above, for every PR until the shell landed. That is the
+      # "a skipped check counts as success" shape this repository has been
+      # bitten by, and it would have switched off the shellcheck gate on the
+      # very files this branch adds. Anything expected to be red belongs at the
+      # bottom of its job.
+      - name: Run plugin CLI assertions
+        run: ./tests/test-apex-plugin.sh
 
   result:
     name: PR validation

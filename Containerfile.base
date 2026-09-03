@@ -350,6 +350,21 @@ RUN set -eux; \
     # a silently-empty /usr/share/apex-shell would mean no UI on every machine.
     test -s /usr/share/apex-shell/shell.qml; \
     test -d /usr/share/apex-shell/src/services; \
+    # ── THE CROSS-REPO MERGE ORDER, ASSERTED HERE AND NOT 60 LAYERS LATER ────
+    # `apex plugin` gets every verdict from this file — it deliberately
+    # reimplements none of the plugin rules — so an apex-shell ref without the
+    # §16 platform produces an image whose plugin CLI cannot answer anything.
+    # The apex-plugin layer near the bottom of this file checks the same
+    # condition, but that is ~60 layers and several hours in, and this
+    # repository has already lost a six-hour build at step 76 of 83. Same
+    # assertion, minutes in, and it reads as the merge-order rule it is:
+    # apex-shell lands before or with the OS.
+    test -f /usr/share/apex-shell/src/services/plugins/manifest.js \
+        || { echo "FATAL: apex-shell ref ${APEX_SHELL_REF} has no src/services/plugins/manifest.js."; \
+             echo "The §16 plugin platform is not in this ref, so \`apex plugin\` would ship unable"; \
+             echo "to give any verdict. apex-shell must land before or with the OS — check that"; \
+             echo "PR #9 (branch p1/plugin-platform) is merged to apex-shell main."; \
+             exit 1; }; \
     # Drop .git: this is no longer a live checkout, and its presence would invite
     # the in-app updater to try to fetch into a read-only /usr.
     rm -rf /usr/share/apex-shell/.git; \

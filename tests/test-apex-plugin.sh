@@ -127,18 +127,27 @@ case "$DISABLED" in
     "$WORK"/*) ok "the disabled directory under test is inside the temp tree" ;;
     *) echo "FATAL: DISABLED=$DISABLED is outside $WORK" >&2; exit 2 ;;
 esac
-# And prove the engine really honours the overrides rather than deriving the
-# path from $HOME anyway — which is the single mistake that would put every
-# case below on the developer's live configuration.
-resolved="$(env -i PATH=/usr/bin:/bin HOME="$FAKEHOME" \
-    APEX_PLUGIN_DIR="$PLUGINS" APEX_PLUGIN_DISABLED_DIR="$DISABLED" \
-    APEX_PLUGIN_MANIFEST_JS="$WORK/absent.js" APEX_PLUGIN_VERDICT_JS="$VERDICT" \
-    bash "$ENGINE" list 2>&1)"
-hasnt "…and the engine never mentions a path outside it" "$FAKEHOME/.config" "$resolved"
-
 # node is REQUIRED, not optional. The plugin rules live in the shell's own
 # JavaScript, so a runner without node cannot verify anything — and the failure
 # must be a refusal rather than a section that quietly does not run.
+#
+# ── Resolved here and THREADED into every invocation ────────────────────────
+# The cases below reduce PATH so nothing on the developer's shell can change a
+# result. That is a trap for this particular dependency: `node` is at
+# /usr/bin/node on Fedora, but on GitHub's ubuntu-24.04 runner it comes from the
+# toolcache and `command -v node` returns /usr/local/bin/node — /usr/bin/node
+# need not exist at all. A suite whose reduced PATH happened to contain node
+# would pass here and produce fifty "node is not available" failures on CI that
+# read as a broken feature rather than a wrong assumption.
+#
+# So the real path is found once, with the ambient PATH, and passed in as
+# APEX_PLUGIN_NODE — and the reduced PATH every case runs on contains NO node
+# at all. That makes the threading load-bearing in every invocation rather than
+# only in the one case written to check it: remove it anywhere and the suite
+# fails here, not on the runner.
+#
+# The engine's own default stays a plain `node` off PATH, which is right in the
+# image, where node is a package.
 node_path="$(command -v node 2>/dev/null || true)"
 if [ -z "$node_path" ]; then
     echo "FATAL: node is not available. The plugin rules live in apex-shell's own" >&2
@@ -147,6 +156,36 @@ if [ -z "$node_path" ]; then
     exit 2
 fi
 ok "node is available at $node_path"
+
+# Prove the engine really honours the directory overrides rather than deriving
+# them from $HOME anyway — the single mistake that would put every case below
+# on the developer's live configuration.
+resolved="$(env -i PATH=/usr/bin:/bin HOME="$FAKEHOME" \
+    APEX_PLUGIN_DIR="$PLUGINS" APEX_PLUGIN_DISABLED_DIR="$DISABLED" \
+    APEX_PLUGIN_MANIFEST_JS="$WORK/absent.js" APEX_PLUGIN_VERDICT_JS="$VERDICT" \
+    APEX_PLUGIN_NODE="$node_path" \
+    bash "$ENGINE" list 2>&1)"
+hasnt "…and the engine never mentions a path outside it" "$FAKEHOME/.config" "$resolved"
+
+# And prove APEX_PLUGIN_NODE is really what makes the verdict path work, by
+# running the engine with a PATH that deliberately does NOT contain node.
+#
+# This is the CI-runner situation reproduced rather than reasoned about: on
+# ubuntu-24.04 node comes from the toolcache, so a suite that assumed
+# /usr/bin/node would fail every verdict assertion. Building a PATH with the
+# handful of programs the engine needs — and no node — is the only control that
+# distinguishes "the threading works" from "node happens to be in /usr/bin".
+NODELESS="$WORK/nodeless"
+mkdir -p "$NODELESS"
+for t in bash jq find awk grep sed cat mkdir mv rm wc sort dirname sha256sum ln cp; do
+    src="$(command -v "$t" 2>/dev/null || true)"
+    [ -n "$src" ] && ln -sf "$src" "$NODELESS/$t"
+done
+if [ -e "$NODELESS/node" ]; then
+    bad "the nodeless PATH really has no node" "a node symlink got in"
+else
+    ok "the nodeless PATH really has no node"
+fi
 if "$node_path" --check "$VERDICT" 2>/dev/null; then
     ok "the shipped node shim parses"
 else
@@ -161,12 +200,13 @@ fi
 MJS="$MANIFEST_JS"
 run_plugin() {
     env -i \
-        PATH=/usr/bin:/bin \
+        PATH="$NODELESS" \
         HOME="$FAKEHOME" \
         APEX_PLUGIN_DIR="$PLUGINS" \
         APEX_PLUGIN_DISABLED_DIR="$DISABLED" \
         APEX_PLUGIN_MANIFEST_JS="$MJS" \
         APEX_PLUGIN_VERDICT_JS="$VERDICT" \
+        APEX_PLUGIN_NODE="$node_path" \
         bash "$ENGINE" "$@" 2>&1 </dev/null
 }
 
@@ -174,9 +214,10 @@ run_plugin() {
 # with no arguments, which prints usage and returns 0, leaving every function
 # and constant defined exactly as the image has them.
 call() {
-    env -i PATH=/usr/bin:/bin HOME="$FAKEHOME" \
+    env -i PATH="$NODELESS" HOME="$FAKEHOME" \
         APEX_PLUGIN_DIR="$PLUGINS" APEX_PLUGIN_DISABLED_DIR="$DISABLED" \
         APEX_PLUGIN_MANIFEST_JS="$MJS" APEX_PLUGIN_VERDICT_JS="$VERDICT" \
+        APEX_PLUGIN_NODE="$node_path" \
         bash -c '
         e=$1; f=$2; shift 2; a=("$@"); set --
         source "$e" >/dev/null 2>&1
@@ -185,9 +226,10 @@ call() {
     ' _ "$ENGINE" "$@"
 }
 predicate() {
-    env -i PATH=/usr/bin:/bin HOME="$FAKEHOME" \
+    env -i PATH="$NODELESS" HOME="$FAKEHOME" \
         APEX_PLUGIN_DIR="$PLUGINS" APEX_PLUGIN_DISABLED_DIR="$DISABLED" \
         APEX_PLUGIN_MANIFEST_JS="$MJS" APEX_PLUGIN_VERDICT_JS="$VERDICT" \
+        APEX_PLUGIN_NODE="$node_path" \
         bash -c '
         e=$1; f=$2; shift 2; a=("$@"); set --
         source "$e" >/dev/null 2>&1
@@ -422,6 +464,29 @@ if [ -z "$MANIFEST_JS" ] || [ ! -f "$MANIFEST_JS" ]; then
 fi
 ok "apex-shell's plugin validator is present"
 MJS="$MANIFEST_JS"
+
+# The control for the PATH threading set up at the top of this file: a real
+# verdict, produced with a PATH that contains no node at all. If the engine
+# resolved node off PATH rather than honouring APEX_PLUGIN_NODE, this is the
+# assertion that fails — and it is what stands between "passes on Fedora" and
+# "passes on a runner where node is in the toolcache".
+make_plugin "$PLUGINS" pathcheck "$(manifest_for pathcheck)"
+nodeless_out="$(env -i PATH="$NODELESS" HOME="$FAKEHOME" \
+    APEX_PLUGIN_DIR="$PLUGINS" APEX_PLUGIN_DISABLED_DIR="$DISABLED" \
+    APEX_PLUGIN_MANIFEST_JS="$MJS" APEX_PLUGIN_VERDICT_JS="$VERDICT" \
+    APEX_PLUGIN_NODE="$node_path" \
+    bash "$ENGINE" list 2>&1)"
+has "a verdict is produced with no node on PATH at all" "pathcheck" "$nodeless_out"
+hasnt "…and it is not the node-is-missing refusal" "node is not available" "$nodeless_out"
+# The other half: without the override, the same PATH must produce the refusal
+# rather than a wrong answer. Otherwise the assertion above proves nothing —
+# node could simply be reachable some other way.
+nodeless_bare="$(env -i PATH="$NODELESS" HOME="$FAKEHOME" \
+    APEX_PLUGIN_DIR="$PLUGINS" APEX_PLUGIN_DISABLED_DIR="$DISABLED" \
+    APEX_PLUGIN_MANIFEST_JS="$MJS" APEX_PLUGIN_VERDICT_JS="$VERDICT" \
+    bash "$ENGINE" list 2>&1)"
+has "…and without the override it refuses, naming node" "node is not available" "$nodeless_bare"
+rm -rf "$PLUGINS/pathcheck"
 
 # ── the tripwire on the duplication this feature could not avoid ────────────
 # Four refusals live in PluginService.qml rather than manifest.js, because they
