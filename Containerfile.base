@@ -1060,6 +1060,55 @@ COPY files/system/flatpak/flathub.flatpakrepo /etc/flatpak/flathub.flatpakrepo
 COPY files/system/units/apex-flathub-setup.service \
      /usr/lib/systemd/system/apex-flathub-setup.service
 
+# ── Zen Browser, shipped but not imposed ────────────────────────────────────
+# Zen is a Firefox fork with an opinionated interface. Every image gets it, and
+# it tracks latest stable for free: `apex update` already runs
+# `flatpak update --system`, so there is no APEX-specific updater to write.
+#
+# It cannot be installed at build time — `flatpak install` needs a running
+# system, the same constraint that makes the Flathub remote a first-boot unit —
+# so it is a first-boot oneshot that runs after the remote exists.
+#
+# FIREFOX REMAINS THE DEFAULT BROWSER. That is a decision, not an oversight:
+# someone who dislikes Zen should not have to undo a choice the image made for
+# them. The assertion below is the part that matters — a Flatpak's exported
+# .desktop can win the http/https handler depending on XDG data directory
+# ordering, which would make Zen the default by accident on every machine.
+# SUPER+W opens the DEFAULT browser, not a named one. `$browser = firefox` in
+# hyprland.conf meant the keybind contradicted the user's own setting the moment
+# a second browser existed — which shipping Zen guarantees. The helper resolves
+# the http/https handler at press time, so it follows the user to any browser,
+# including ones APEX has never heard of.
+COPY --chmod=0755 files/system/libexec/apex-open-browser \
+     /usr/libexec/apex-open-browser
+COPY files/system/units/apex-flatpak-preinstall.service \
+     /usr/lib/systemd/system/apex-flatpak-preinstall.service
+RUN set -eux; \
+    systemctl enable apex-flatpak-preinstall.service; \
+    # The unit must name the app and must not run before the remote exists;
+    # both are the difference between installing Zen and failing quietly.
+    grep -q 'app.zen_browser.zen' /usr/lib/systemd/system/apex-flatpak-preinstall.service; \
+    grep -q 'After=.*apex-flathub-setup.service' /usr/lib/systemd/system/apex-flatpak-preinstall.service; \
+    grep -q 'Requires=apex-flathub-setup.service' /usr/lib/systemd/system/apex-flatpak-preinstall.service; \
+    # FIREFOX, NOT ZEN, owns the web handlers in the shipped defaults. If this
+    # ever fails, an image has silently changed every user's default browser —
+    # which is the one thing shipping a second browser must not do.
+    grep -q '^x-scheme-handler/http=firefox.desktop$'  /etc/xdg/mimeapps.list; \
+    grep -q '^x-scheme-handler/https=firefox.desktop$' /etc/xdg/mimeapps.list; \
+    # And Zen must not be shipped a second time as a system .desktop, which
+    # would put it in the handler race at build time rather than at install.
+    test ! -e /usr/share/applications/app.zen_browser.zen.desktop; \
+    # The browser keybind must name no browser. A regression here is invisible
+    # until someone changes their default and wonders why SUPER+W ignores it.
+    test -x /usr/libexec/apex-open-browser; \
+    bash -n /usr/libexec/apex-open-browser; \
+    grep -q '^\$browser     = /usr/libexec/apex-open-browser$' \
+        /usr/share/apex/hypr/hyprland.conf \
+        || grep -q 'browser.*= /usr/libexec/apex-open-browser' \
+           /usr/share/apex/hypr/hyprland.conf; \
+    ! grep -qE '^\$browser\s*=\s*(firefox|zen)' /usr/share/apex/hypr/hyprland.conf; \
+    echo "zen: first-boot flatpak; firefox keeps the web handlers; SUPER+W follows the default"
+
 # The whole apex-greet tree lands at /usr/share/apex-greet so the QML's
 # Qt.resolvedUrl("assets/…") resolves in place; the wallpaper is dropped where
 # GreetSurface.qml expects it; greetd-config.toml becomes the live greetd
