@@ -156,6 +156,21 @@ pub fn confine_argv(plan: &LaunchPlan, exposed: &Exposed<'_>) -> Vec<String> {
             .map(|s| s.to_string()),
     );
 
+    // A runtime that is not under /usr needs its own directory bound, or the
+    // sandbox cannot see the program it is being asked to exec. That is the
+    // case for a build tree, and for the shell suite's fake backend; a
+    // system-extension install lands at /usr/bin and is already covered.
+    //
+    // READ-ONLY, and that is the point rather than an oversight: this must not
+    // become a way to hand the backend a writable path. The directory is bound
+    // rather than the file because a program's loader may need siblings next to
+    // it — a build tree's shared objects, a script's interpreter shim.
+    if let Some(dir) = program_dir_to_bind(&plan.program) {
+        a.push("--ro-bind".into());
+        a.push(dir.clone());
+        a.push(dir);
+    }
+
     // The two paths that are this backend's job.
     a.push("--ro-bind".into());
     a.push(exposed.model.display().to_string());
@@ -175,6 +190,42 @@ pub fn confine_argv(plan: &LaunchPlan, exposed: &Exposed<'_>) -> Vec<String> {
     a.push(plan.program.clone());
     a.extend(plan.argv.iter().cloned());
     a
+}
+
+/// The directory to bind so the sandbox can see `program`, or `None` when it
+/// is already inside a path the sandbox has.
+///
+/// Refuses to bind anything that would widen the sandbox meaningfully:
+///
+/// * a program under `/usr` needs nothing — `--ro-bind /usr /usr` covers it;
+/// * a bare name (no `/`) is resolved by the sandbox's own `PATH`, which is
+///   `/usr/bin:/usr/sbin`, so it is also covered;
+/// * `/`, `/home`, `/var` and the other broad roots are refused, because
+///   binding one of those would undo the confinement rather than complete it.
+///   A runtime sitting directly in such a directory is not a case worth
+///   supporting; put it in a subdirectory.
+fn program_dir_to_bind(program: &str) -> Option<String> {
+    let path = Path::new(program);
+    if !path.is_absolute() {
+        return None;
+    }
+    if program.starts_with("/usr/") {
+        return None;
+    }
+    let dir = path.parent()?;
+    let dir_str = dir.to_string_lossy().to_string();
+    // The roots that must never be bound wholesale.
+    const TOO_BROAD: &[&str] = &[
+        "/", "/home", "/var", "/var/home", "/etc", "/opt", "/run", "/tmp", "/srv", "/mnt",
+    ];
+    if TOO_BROAD.contains(&dir_str.as_str()) {
+        eprintln!(
+            "apex-aid: refusing to bind {dir_str} into the sandbox — it is too broad. \
+             Put the runtime in a subdirectory, or install it with `apex install`."
+        );
+        return None;
+    }
+    Some(dir_str)
 }
 
 /// A running backend.
@@ -480,6 +531,67 @@ mod tests {
         let dd = argv.iter().position(|a| a == "--").expect("--");
         assert_eq!(argv[dd + 1], plan.program);
         assert_eq!(&argv[dd + 2..], &plan.argv[..]);
+    }
+
+    #[test]
+    fn a_runtime_under_usr_needs_no_extra_bind() {
+        // The shipped case: `sudo apex install llama-cpp` lands at /usr/bin,
+        // which `--ro-bind /usr /usr` already covers. An extra bind here would
+        // be noise in every real launch.
+        assert_eq!(program_dir_to_bind("/usr/bin/llama-server"), None);
+        assert_eq!(program_dir_to_bind("/usr/local/bin/llama-server"), None);
+        // A bare name is resolved by the sandbox's own PATH, which is
+        // /usr/bin:/usr/sbin.
+        assert_eq!(program_dir_to_bind("llama-server"), None);
+    }
+
+    #[test]
+    fn a_runtime_outside_usr_gets_its_directory_bound_read_only() {
+        // A build tree, or the shell suite's fake backend. Without this the
+        // sandbox cannot see the program it is asked to exec, and the symptom
+        // is "the runtime will not start" three layers from its cause — which
+        // is how this case was found, running against the katana.
+        assert_eq!(
+            program_dir_to_bind("/opt/llama/bin/llama-server"),
+            Some("/opt/llama/bin".to_string())
+        );
+
+        let plan = LaunchPlan {
+            program: "/opt/llama/bin/llama-server".to_string(),
+            argv: vec!["--model".into(), "/m.gguf".into()],
+            env: vec![],
+            listen: Listen::Unix(PathBuf::from("/run/x/b.sock")),
+            notes: vec![],
+        };
+        let argv = confine_argv(&plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
+        assert!(
+            argv.windows(3)
+                .any(|w| w == ["--ro-bind", "/opt/llama/bin", "/opt/llama/bin"]),
+            "{argv:?}"
+        );
+        // Read-only, never writable: this must not become a way to hand the
+        // backend a writable path.
+        assert!(
+            !argv.windows(2).any(|w| w[0] == "--bind" && w[1].starts_with("/opt/")),
+            "the runtime directory was bound writable: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn a_runtime_sitting_in_a_broad_root_is_refused_rather_than_bound() {
+        // Binding /home or /var wholesale would undo the confinement rather
+        // than complete it, so the answer is None and the backend fails to
+        // start with a message — not a sandbox that sees everything.
+        for p in [
+            "/llama-server",
+            "/home/llama-server",
+            "/var/llama-server",
+            "/tmp/llama-server",
+            "/etc/llama-server",
+            "/opt/llama-server",
+        ] {
+            assert_eq!(program_dir_to_bind(p), None, "{p} was bound");
+        }
     }
 
     #[test]
