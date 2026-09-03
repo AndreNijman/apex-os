@@ -591,6 +591,96 @@ pub fn cmd_init(force: bool) -> i32 {
     0
 }
 
+/// Replace the user's blueprint with one supplied as JSON on stdin.
+///
+/// This exists so the GUI editor (§10's last bullet, "allow GUI editing of the
+/// blueprint without requiring users to hand-edit TOML") has a write path that
+/// is not "author TOML in QML". A second implementation of the schema in the
+/// shell would drift from this one the first time a field is added, and the
+/// round-trip would stop being lossless — which is the property the whole
+/// design rests on.
+///
+/// The JSON goes through exactly the same `normalise()` + `validate()` as a
+/// hand-edited file, then `to_toml()` and the same atomic write. So a blueprint
+/// the editor produces is indistinguishable from one a human typed, and an
+/// invalid one is refused with the same messages.
+///
+/// Three things it deliberately does NOT do:
+///
+///   * converge anything. Writing desired state and changing the machine are
+///     separate verbs, and `apply` is the one that changes things.
+///   * touch the applied-state file. That is generated state, in a different
+///     directory, and the rule that keeps `diff` honest is that the two are
+///     never written by the same code.
+///   * escalate. It writes one file the invoking user already owns.
+pub fn cmd_set(from_stdin: bool) -> i32 {
+    if !from_stdin {
+        eprintln!("apex blueprint set: reads JSON on stdin; pass --json -");
+        return EXIT_ERROR;
+    }
+
+    let mut text = String::new();
+    if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut text) {
+        eprintln!("apex blueprint set: cannot read stdin: {e}");
+        return EXIT_ERROR;
+    }
+
+    // An empty stdin is a caller bug — a pipe that produced nothing, a shell
+    // redirect from a missing file — and writing an empty blueprint would
+    // silently unmanage everything the user had declared.
+    if text.trim().is_empty() {
+        eprintln!("apex blueprint set: stdin was empty; refusing to write an empty blueprint");
+        return EXIT_ERROR;
+    }
+
+    let bp: Blueprint = match serde_json::from_str(&text) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("apex blueprint set: not a valid blueprint: {e}");
+            return EXIT_ERROR;
+        }
+    };
+
+    // Round-trip through the TOML parser rather than trusting the JSON path:
+    // `normalise()` and `validate()` live behind `Blueprint::parse`, and calling
+    // them from two places is how the two paths drift.
+    let toml_text = match bp.to_toml() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("apex blueprint set: cannot render: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    let checked = match Blueprint::parse(&toml_text) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("apex blueprint set: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    let out = match checked.to_toml() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("apex blueprint set: cannot render: {e}");
+            return EXIT_ERROR;
+        }
+    };
+
+    let path = user_blueprint_path();
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("apex blueprint set: cannot create {}: {e}", parent.display());
+            return EXIT_ERROR;
+        }
+    }
+    if let Err(e) = write_atomic(&path, &out) {
+        eprintln!("apex blueprint set: {e}");
+        return EXIT_ERROR;
+    }
+    println!("wrote {}", path.display());
+    0
+}
+
 /// Render a plan as a table. `verb` is how the steps are introduced, so the
 /// same renderer serves `diff` ("would change") and `apply --dry-run`.
 pub fn print_plan(plan: &Plan, source: &Source, verb: &str) {
