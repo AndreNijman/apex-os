@@ -29,6 +29,15 @@
 #      subordinate uid range is refused BEFORE anything is downloaded
 #    * that `rm` will not remove a container APEX did not create
 #    * the per-capsule package-manager mapping §9 routes `--source capsule` to
+#    * §8's GUI export: the exact `distrobox enter -- distrobox-export` argv,
+#      that the host-side .desktop filename is RECORDED rather than derived,
+#      and that `rm` deletes it by that recorded name and never by a
+#      `<capsule>-*.desktop` glob — capsule `shell` and capsule `shell-x` are
+#      both valid names and the glob for the first matches the second's entries
+#    * §10's `[development] languages`: the language → capsule table, and that
+#      `provision` records a language only after the toolchain answers from
+#      INSIDE the capsule, because `dnf -y install` exits 0 for a package set
+#      that puts nothing on PATH
 #
 #  ── What it deliberately does NOT do ────────────────────────────────────────
 #  No container is created, no image is pulled, no network is used, and nothing
@@ -90,6 +99,21 @@ mkdir -p "$BIN" "$FAKEHOME"
 cat > "$BIN/distrobox" <<EOF
 #!/usr/bin/env bash
 { printf 'distrobox'; printf ' <%s>' "\$@"; printf '\n'; } >> "$CALLS"
+# §8's GUI export is the one operation whose SIDE EFFECT the engine reads back:
+# it snapshots the host launcher directory before and after, so it can record
+# the exact .desktop filename distrobox produced rather than guessing it. With
+# an inert stub that diff is always empty and every export assertion would pass
+# vacuously, so the stub writes the file the real distrobox-export would.
+# FAKE_EXPORT_FILE is only set by the cases that want it.
+if [ -n "\${FAKE_EXPORT_FILE:-}" ] && [ -n "\${FAKE_EXPORT_DIR:-}" ]; then
+    case " \$* " in
+        *" --delete "*)
+            rm -f "\${FAKE_EXPORT_DIR}/\${FAKE_EXPORT_FILE}" ;;
+        *" distrobox-export "*)
+            mkdir -p "\$FAKE_EXPORT_DIR"
+            printf '[Desktop Entry]\n' > "\${FAKE_EXPORT_DIR}/\${FAKE_EXPORT_FILE}" ;;
+    esac
+fi
 exit \${FAKE_DISTROBOX_RC:-0}
 EOF
 
@@ -133,10 +157,18 @@ run_env() {
         APEX_ENV_HOME="$WORK/records" \
         APEX_ENV_SUBUID_FILE="$WORK/subuid" \
         APEX_ENV_SUBGID_FILE="$WORK/subgid" \
+        APEX_ENV_HOST_APPS="$HOSTAPPS" \
         "${EXTRA_ENV[@]}" \
         bash "$ENGINE" "$@" 2>&1 </dev/null
 }
 EXTRA_ENV=()
+
+# The host launcher directory §8's export writes into. Pointed away from the
+# fake HOME on purpose: "the fake HOME is still empty" at the end of this file
+# is a real safety property — it is how a path derived from $HOME instead of
+# APEX_ENV_HOME gets caught — and relaxing it to make room for .desktop files
+# would throw that away.
+HOSTAPPS="$WORK/hostapps"
 
 # Source the shipped engine and call one of its functions. Sourcing runs main()
 # with no arguments, which prints usage and returns 0, leaving every function
@@ -146,6 +178,7 @@ call() {
         APEX_ENV_HOME="$WORK/records" \
         APEX_ENV_SUBUID_FILE="$WORK/subuid" \
         APEX_ENV_SUBGID_FILE="$WORK/subgid" \
+        APEX_ENV_HOST_APPS="$HOSTAPPS" \
         "${EXTRA_ENV[@]}" \
         bash -c '
         e=$1; f=$2; shift 2; a=("$@"); set --
@@ -159,6 +192,7 @@ predicate() {
         APEX_ENV_HOME="$WORK/records" \
         APEX_ENV_SUBUID_FILE="$WORK/subuid" \
         APEX_ENV_SUBGID_FILE="$WORK/subgid" \
+        APEX_ENV_HOST_APPS="$HOSTAPPS" \
         "${EXTRA_ENV[@]}" \
         bash -c '
         e=$1; f=$2; shift 2; a=("$@"); set --
@@ -452,6 +486,228 @@ is "installing into an unknown capsule fails" 1 "$rc"
 out=$(run_env install cuda); rc=$?
 is "installing nothing is a usage error" 1 "$rc"
 
+echo "── §8's GUI export: the argv, built once and pinned here ──────────────"
+# `distrobox-export` runs INSIDE the container — it refuses to start anywhere
+# else — and reaches back through /run/host to write the host .desktop file.
+# So there is no host-side program to call, and the whole behaviour is this
+# argv. It cannot be exercised for real without a container, which is exactly
+# why it is a pure function.
+argv=$(call export_argv work gimp add)
+has "export enters the capsule"        "enter"  "$argv"
+has "…without a TTY"                   "--no-tty" "$argv"
+has "…and runs distrobox-export there" "distrobox-export" "$argv"
+has "…for the named application"       "gimp"   "$argv"
+hasnt "…and does not delete"           "--delete" "$argv"
+# enter, --no-tty, <name>, --, distrobox-export, --app, <app>. One per line is
+# the contract mapfile depends on; a joined argument would reach distrobox as a
+# single word it does not recognise.
+is  "every argument is its own line"   7 "$(wc -l <<<"$argv")"
+
+argv=$(call export_argv work gimp delete)
+has "unexport passes --delete" "--delete" "$argv"
+is  "…as an eighth argument"   8 "$(wc -l <<<"$argv")"
+call export_argv work gimp sideways >/dev/null 2>&1
+is "an unknown export action is an error" 1 "$?"
+
+argv=$(call list_exports_argv work)
+has "exports asks distrobox itself" "--list-apps" "$argv"
+
+echo "── an application name is a name, not a path ──────────────────────────"
+# It crosses into the container and comes back as a filename in the user's own
+# ~/.local/share/applications. An absolute path would name a .desktop file
+# this script cannot predict the host-side name of.
+is "an ordinary name"        true  "$(predicate valid_app_name gimp)"
+is "a reverse-DNS name"      true  "$(predicate valid_app_name org.gimp.GIMP)"
+is "a name with a suffix"    true  "$(predicate valid_app_name gimp.desktop)"
+is "an absolute path"        false "$(predicate valid_app_name /usr/share/applications/gimp.desktop)"
+is "a traversal"             false "$(predicate valid_app_name ../../etc/passwd)"
+is "an embedded .."          false "$(predicate valid_app_name 'a..b')"
+is "a leading dash"          false "$(predicate valid_app_name --delete)"
+is "a space"                 false "$(predicate valid_app_name 'gimp --sudo')"
+is "empty"                   false "$(predicate valid_app_name '')"
+# The reverse direction: a filename read back OUT of a record, on the way to
+# being deleted by `rm`. A hand-edited record must not become an arbitrary
+# delete.
+is "a plain desktop file"    true  "$(predicate valid_desktop_file py-gimp.desktop)"
+is "no suffix"               false "$(predicate valid_desktop_file py-gimp)"
+is "a path"                  false "$(predicate valid_desktop_file ../../.bashrc.desktop)"
+is "a dotfile"               false "$(predicate valid_desktop_file .hidden.desktop)"
+
+echo "── export drives distrobox and records the file it produced ────────────"
+# The fixture filename deliberately does NOT equal "<capsule>-<app>.desktop".
+# distrobox names the file after the .desktop it found inside the capsule, and
+# `gimp` ships `org.gimp.GIMP.desktop` — so a naive derivation produces
+# `py-gimp.desktop` and the real export produces `py-org.gimp.GIMP.desktop`.
+# With a fixture that matched the derivation, "recorded rather than derived"
+# would be untestable and a derived implementation would pass.
+EXTRA_ENV=(FAKE_EXPORT_DIR="$HOSTAPPS" FAKE_EXPORT_FILE=py-org.gimp.GIMP.desktop)
+out=$(run_env export py gimp); rc=$?
+calls=$(cat "$CALLS")
+is  "export succeeds" 0 "$rc"
+has "…through distrobox enter"  "distrobox <enter>" "$calls"
+has "…with --no-tty"            "<--no-tty>"        "$calls"
+has "…running distrobox-export" "<distrobox-export>" "$calls"
+has "…for the application"      "<--app> <gimp>"    "$calls"
+has "…and says where the entry landed" "$HOSTAPPS" "$out"
+
+# The exact filename, recorded rather than derived. distrobox names the file
+# after the .desktop it found inside the capsule, which need not resemble the
+# name the user typed — `apex env export py gimp` can produce
+# `py-org.gimp.GIMP.desktop`.
+is "the record names the exported file" "py-org.gimp.GIMP.desktop" \
+    "$(jq -r '.exports[0] // empty' "$WORK/records/py.json")"
+is "…and only that one" 1 "$(jq -r '.exports | length' "$WORK/records/py.json")"
+
+# Idempotent: re-exporting rewrites the same file, so nothing new appears and
+# the record must not grow a duplicate.
+run_env export py gimp >/dev/null
+is "re-exporting does not duplicate the record" 1 \
+    "$(jq -r '.exports | length' "$WORK/records/py.json")"
+
+out=$(run_env unexport py gimp); rc=$?
+is  "unexport succeeds" 0 "$rc"
+has "…with --delete" "<--delete>" "$(cat "$CALLS")"
+is  "…and the record is emptied" 0 "$(jq -r '.exports | length' "$WORK/records/py.json")"
+if [ -e "$HOSTAPPS/py-org.gimp.GIMP.desktop" ]; then
+    bad "…and the launcher entry is gone" "still there"
+else ok "…and the launcher entry is gone"; fi
+EXTRA_ENV=()
+
+out=$(run_env export nosuch gimp); rc=$?
+is  "export refuses an unknown capsule" 1 "$rc"
+hasnt "…without calling distrobox" "distrobox" "$(cat "$CALLS")"
+out=$(run_env export py /usr/share/applications/x.desktop); rc=$?
+is  "export refuses a path as the application" 1 "$rc"
+hasnt "…without calling distrobox" "distrobox" "$(cat "$CALLS")"
+out=$(run_env export py); rc=$?
+is  "export with no application is a usage error" 1 "$rc"
+
+# distrobox failing must not leave a record claiming the export happened.
+EXTRA_ENV=(FAKE_DISTROBOX_RC=1)
+out=$(run_env export py gimp); rc=$?
+EXTRA_ENV=()
+is "a failed export is a failure" 1 "$rc"
+has "…that says where to look"   "apex env enter py" "$out"
+is  "…and records nothing"        0 "$(jq -r '.exports | length' "$WORK/records/py.json")"
+
+echo "── removing a capsule takes its launcher entries with it ──────────────"
+# A .desktop pointing at a container that no longer exists is a menu item that
+# does nothing, and the user cannot guess which file to delete.
+run_env create shell >/dev/null 2>&1
+EXTRA_ENV=(FAKE_EXPORT_DIR="$HOSTAPPS" FAKE_EXPORT_FILE=shell-editor.desktop)
+run_env export shell editor >/dev/null
+EXTRA_ENV=()
+# A capsule whose name is a PREFIX of the one being removed. `shell-*.desktop`
+# matches this file, which is why the deletion goes by recorded name and never
+# by a glob.
+printf '[Desktop Entry]\n' > "$HOSTAPPS/shell-x-other.desktop"
+out=$(run_env rm shell); rc=$?
+is "rm succeeds" 0 "$rc"
+if [ -e "$HOSTAPPS/shell-editor.desktop" ]; then
+    bad "the recorded launcher entry is deleted" "still there"
+else ok "the recorded launcher entry is deleted"; fi
+if [ -e "$HOSTAPPS/shell-x-other.desktop" ]; then
+    ok "a same-prefix entry APEX did not record survives"
+else
+    bad "a same-prefix entry APEX did not record survives" \
+        "a glob deleted another capsule's launcher entry"
+fi
+has "…and says which entry went" "shell-editor.desktop" "$out"
+rm -f "$HOSTAPPS/shell-x-other.desktop"
+
+echo "── §10's [development] languages converge through a capsule ───────────"
+# The point of §8 is that the bootc host stays read-only, so a declared
+# language becomes a CAPSULE that provides it, never an RPM overlay on the
+# host. This is the table `apex apply` drives.
+table=$(run_env languages)
+for l in c cpp go javascript python rust shell typescript; do
+    has "the table covers $l" "$l" "$table"
+done
+# One capsule can provide two languages — c/cpp are one toolchain and
+# javascript/typescript are one runtime — so a capsule per language would
+# download two identical containers.
+is "c and cpp share a capsule" "$(call lang_capsule cpp)" "$(call lang_capsule c)"
+is "javascript and typescript share a capsule" \
+    "$(call lang_capsule typescript)" "$(call lang_capsule javascript)"
+is "python reuses the python alias" "python" "$(call lang_capsule python)"
+is "rust has its own"               "rust"   "$(call lang_capsule rust)"
+call lang_capsule cobol >/dev/null 2>&1
+is "an unknown language is an error, not a guess" 1 "$?"
+is "…and is refused as a language" false "$(predicate valid_language cobol)"
+# Every language must have all three: a capsule, packages and a probe. A
+# language with no probe would be recorded on the strength of dnf's exit code.
+for l in c cpp go javascript python rust shell typescript; do
+    if [ -n "$(call lang_capsule "$l")" ] \
+       && [ -n "$(call lang_packages "$l")" ] \
+       && [ -n "$(call lang_probe "$l")" ]; then
+        ok "$l has a capsule, packages and a probe"
+    else
+        bad "$l has a capsule, packages and a probe" "one is empty"
+    fi
+done
+has "the rust packages carry cargo" "cargo" "$(call lang_packages rust)"
+has "the go packages carry golang"  "golang" "$(call lang_packages go)"
+
+out=$(run_env provision cobol); rc=$?
+is  "provisioning an unknown language is refused" 1 "$rc"
+has "…listing the ones that exist" "typescript" "$out"
+hasnt "…without touching distrobox" "distrobox" "$(cat "$CALLS")"
+
+out=$(run_env provision rust); rc=$?
+calls=$(cat "$CALLS")
+is  "provisioning rust succeeds" 0 "$rc"
+has "…by creating the capsule"   "<--name> <rust>" "$calls"
+has "…from the host's own release" "fedora-toolbox" "$calls"
+has "…then installing with dnf"  "<dnf>" "$calls"
+has "…the toolchain packages"    "<cargo>" "$calls"
+# The verification that makes the record trustworthy: `dnf -y install` can exit
+# 0 for a package set that does not put the promised program on PATH.
+has "…and probing INSIDE the capsule" "<command> <-v> <cargo>" "$calls"
+is  "the record says rust is provided" "rust" \
+    "$(jq -r '.languages[0] // empty' "$WORK/records/rust.json")"
+
+# Idempotency is the property `apex apply` depends on: run twice, the second
+# run does nothing. Not "does nothing harmful" — literally starts nothing.
+out=$(run_env provision rust); rc=$?
+is  "a second provision is a no-op" 0 "$rc"
+has "…and says which capsule has it" "apex env enter rust" "$out"
+hasnt "…without creating anything"   "<create>" "$(cat "$CALLS")"
+hasnt "…and without installing anything" "<dnf>" "$(cat "$CALLS")"
+
+# The probe is the gate. A capsule whose toolchain did not land must not be
+# recorded as providing the language, or `apex blueprint diff` reports
+# converged forever against a capsule with no compiler.
+cat > "$BIN/distrobox" <<EOF
+#!/usr/bin/env bash
+{ printf 'distrobox'; printf ' <%s>' "\$@"; printf '\n'; } >> "$CALLS"
+case " \$* " in
+    *" command "*) exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$BIN/distrobox"
+out=$(run_env provision go); rc=$?
+is  "a toolchain that did not land is a failure" 1 "$rc"
+has "…naming the program that is missing" "'go'" "$out"
+is  "…and the language is NOT recorded" 0 \
+    "$(jq -r '.languages | length' "$WORK/records/go.json")"
+# Restore the recording stub for the rest of the suite.
+cat > "$BIN/distrobox" <<EOF
+#!/usr/bin/env bash
+{ printf 'distrobox'; printf ' <%s>' "\$@"; printf '\n'; } >> "$CALLS"
+exit \${FAKE_DISTROBOX_RC:-0}
+EOF
+chmod +x "$BIN/distrobox"
+
+# A capsule the user built from another base is theirs. APEX only knows the
+# Fedora package names, and guessing apt's would install the wrong thing and
+# report success.
+run_env create node --image docker.io/library/ubuntu:24.04 >/dev/null 2>&1
+out=$(run_env provision javascript); rc=$?
+is  "a non-dnf capsule is refused, not guessed at" 1 "$rc"
+has "…naming its package manager" "apt-based" "$out"
+has "…and the command that would work" "apex env install node" "$out"
+
 echo "── rm only removes what APEX created ──────────────────────────────────"
 out=$(run_env rm mybox); rc=$?
 is  "rm refuses a container it has no record of" 1 "$rc"
@@ -471,9 +727,17 @@ is "--force removes a foreign container" 0 "$rc"
 echo "── the engine advertises what it does ─────────────────────────────────"
 help=$(run_env --help)
 for want in 'create <name>' 'enter <name>' 'exec <name>' 'rm <name>' \
-            '--gpu nvidia|amd|hw|none' 'rootless' 'cuda, rocm'; do
+            '--gpu nvidia|amd|hw|none' 'rootless' 'cuda, rocm' \
+            'export <name> <app>' 'unexport <name> <app>' 'exports <name>' \
+            'provision <language>' 'languages'; do
     has "--help mentions: $want" "$want" "$help"
 done
+# The two claims a user has to be able to check from --help alone, because both
+# are the reason these verbs are safe to run: the export writes into the user's
+# own data directory (no root, no polkit), and a language toolchain goes into a
+# capsule instead of onto the read-only host.
+has "--help says the export needs no root" "nothing here needs root" "$help"
+has "--help says a toolchain never touches the host" "never onto the read-only host" "$help"
 out=$(run_env frobnicate); rc=$?
 is "an unknown verb is an error" 1 "$rc"
 

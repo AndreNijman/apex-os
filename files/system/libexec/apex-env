@@ -73,6 +73,14 @@ SUBGID_FILE="${APEX_ENV_SUBGID_FILE:-/etc/subgid}"
 PODMAN="${APEX_ENV_PODMAN:-podman}"
 DISTROBOX="${APEX_ENV_DISTROBOX:-distrobox}"
 
+# Where a GUI export lands on the host. NOT ${XDG_DATA_HOME}: distrobox-export
+# writes to "${host_home}/.local/share/applications" unconditionally — it reads
+# the host home out of the container's /run/host mount and does not consult
+# XDG_DATA_HOME for the .desktop case. Following it exactly matters, because
+# this path is what `rm` deletes from; deriving it differently would leave the
+# launcher entries behind while reporting them removed.
+HOST_APPS="${APEX_ENV_HOST_APPS:-${HOME:-/nonexistent}/.local/share/applications}"
+
 msg()  { printf 'apex-env: %s\n' "$*" >&2; }
 warn() { printf 'apex-env: warning: %s\n' "$*" >&2; }
 die()  { printf 'apex-env: error: %s\n' "$*" >&2; exit 1; }
@@ -231,6 +239,123 @@ valid_home_path() {
     return 0
 }
 
+# ── application names, for the GUI export ───────────────────────────────────
+# `distrobox-export --app` accepts either a bare application name or an
+# absolute path to a .desktop file. APEX accepts only the bare name, and that
+# is a deliberate narrowing rather than an oversight.
+#
+# The argument crosses into the container and comes back out as a file written
+# into the host's ~/.local/share/applications. An absolute path would let a
+# caller name any .desktop file inside the capsule, including one the capsule's
+# own tooling generated, and the host-side filename that results is not
+# something this script can predict or check. A bare name keeps the whole
+# operation to "an application this capsule advertises", which is what §8's
+# "when useful" is about.
+#
+# `..` is refused even though there is no path separator: `distrobox-export`
+# globs the name against the capsule's application directories, and a name that
+# resolves through a parent is not a name.
+valid_app_name() {
+    [ -n "$1" ] || return 1
+    [ "${#1}" -le 128 ] || return 1
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || return 1
+    case "$1" in *..*) return 1 ;; esac
+    return 0
+}
+
+# A .desktop file name recorded as exported. Read back out of a JSON record and
+# then deleted, so it is re-validated on the way out: a record edited by hand
+# must not turn `apex env rm` into a delete of an arbitrary path.
+valid_desktop_file() {
+    [ -n "$1" ] || return 1
+    case "$1" in *.desktop) ;; *) return 1 ;; esac
+    case "$1" in */*|*..*|.*) return 1 ;; esac
+    return 0
+}
+
+# ── languages → capsules (§10's [development] section) ──────────────────────
+# `[development] languages` in the blueprint is converged HERE, through a
+# capsule, and not by a language → package table on the host. That is the whole
+# point of §8: the bootc host stays read-only and unmodified, so the answer to
+# "I need a Rust toolchain" is a container that has one, not an RPM overlay.
+#
+# One capsule can provide several languages, which is why this is a mapping and
+# not a name derivation: `c` and `cpp` are one toolchain, and `javascript` and
+# `typescript` are one runtime. A capsule per language would make
+# `languages = ["c", "cpp"]` download two identical containers.
+LANGUAGES='c cpp go javascript python rust shell typescript'
+
+lang_capsule() {
+    case "$1" in
+        c|cpp)                 printf 'cdev' ;;
+        go)                    printf 'go' ;;
+        javascript|typescript) printf 'node' ;;
+        python)                printf 'python' ;;
+        rust)                  printf 'rust' ;;
+        shell)                 printf 'shell' ;;
+        *)                     return 1 ;;
+    esac
+}
+
+# What to install inside the capsule for a language. Fedora package names,
+# because a language capsule is created from the `fedora` alias — the host's
+# own release, so the toolchain matches the libraries the user already knows.
+#
+# `provision` REFUSES to touch a capsule whose base is not dnf-managed rather
+# than guessing at apt or pacman names for it. A capsule the user built from
+# another base is theirs, and inventing a package list for it is the kind of
+# guess that installs the wrong thing and reports success.
+lang_packages() {
+    case "$1" in
+        c)          printf 'gcc make gdb' ;;
+        cpp)        printf 'gcc-c++ make gdb' ;;
+        go)         printf 'golang' ;;
+        javascript) printf 'nodejs npm' ;;
+        python)     printf 'python3 python3-pip python3-virtualenv python3-devel' ;;
+        rust)       printf 'rust cargo' ;;
+        shell)      printf 'bash shellcheck' ;;
+        typescript) printf 'nodejs npm nodejs-typescript' ;;
+        *)          return 1 ;;
+    esac
+}
+
+# The program whose presence INSIDE the capsule means the language is really
+# there. `provision` runs this after the install and records the language only
+# if it answers, because `dnf -y install` can exit 0 having installed a package
+# that does not carry the compiler the user was promised — the "exited 0 having
+# changed nothing" case apexd/AGENTS.md forbids reporting as success.
+lang_probe() {
+    case "$1" in
+        c)          printf 'gcc' ;;
+        cpp)        printf 'g++' ;;
+        go)         printf 'go' ;;
+        javascript) printf 'node' ;;
+        python)     printf 'python3' ;;
+        rust)       printf 'cargo' ;;
+        shell)      printf 'bash' ;;
+        typescript) printf 'tsc' ;;
+        *)          return 1 ;;
+    esac
+}
+
+valid_language() { lang_capsule "$1" >/dev/null 2>&1; }
+
+# ── why `create` records no language, not even for the `python` alias ────────
+# The obvious shortcut is a table saying "the python alias provides python", so
+# `apex env create python` is observed as satisfying `[development] languages =
+# ["python"]` straight away. It is wrong, and the reason is the same one the
+# blueprint's own design note gives for refusing to cache observed state:
+# `create` does not VERIFY the toolchain. Distrobox installs
+# `--additional-packages` during container setup, and a setup that partly
+# failed leaves the container present and the toolchain absent. A record
+# claiming the language on the strength of the alias would then report
+# converged forever.
+#
+# So only `provision` writes `languages`, and only after running the probe
+# inside the capsule. `apex env create python` followed by `apex apply` is
+# still cheap — provision finds the capsule, the packages are already there,
+# the probe answers, and the language is recorded.
+
 # What the host looks like it has. Used only to print a hint — never to change
 # the profile behind the user's back, because a capsule that grabs a GPU
 # because one was detected is exactly the "device-risky default" the daemon
@@ -311,6 +436,59 @@ pm_install_argv() {
     return 0
 }
 
+# ── the GUI export argv (§8's "when useful") ────────────────────────────────
+# §8 asks for GUI applications from a capsule to appear in the host's launcher.
+# distrobox already implements it, and the shape is unusual enough to be worth
+# writing down: `distrobox-export` runs INSIDE the container. It refuses to run
+# anywhere else — it checks for /run/.containerenv — and it reaches back out
+# through the container's /run/host mount to write the .desktop file into the
+# host's ~/.local/share/applications.
+#
+# So the host side of this is `distrobox enter --no-tty <capsule> --
+# distrobox-export --app <name>`, and there is no host-side program to call
+# instead. --no-tty for the same reason `apex env exec` uses it: this may run
+# from `apex apply`, from a keybind or from an agent, with no terminal for a
+# prompt to appear on.
+#
+# A pure function, printing one argument per line, for the same reason
+# create_argv() is one: nothing here can be exercised end to end without a
+# container, so the argv IS the behaviour and the suite pins it exactly.
+#
+# NOT root, and no polkit action. The file lands in the user's own data
+# directory and `update-desktop-database` is run by distrobox against that same
+# per-user directory, so nothing in this path can raise an authentication
+# prompt.
+export_argv() {
+    local name="$1" app="$2" action="${3:-add}"
+    printf '%s\n' enter --no-tty "$name" -- distrobox-export --app "$app"
+    case "$action" in
+        add) ;;
+        delete) printf '%s\n' --delete ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+list_exports_argv() {
+    printf '%s\n' enter --no-tty "$1" -- distrobox-export --list-apps
+}
+
+# The .desktop files present in the host's launcher directory right now, sorted.
+# Used as a before/after pair around an export so the exact filename distrobox
+# produced can be recorded.
+#
+# The filename is NOT derived. distrobox names it "<container>-<basename of the
+# desktop file it found>", and the basename is whatever the application ships —
+# `apex env export py gimp` can produce `py-org.gimp.GIMP.desktop`. Deriving it
+# would be a guess, and a guessed name is one `rm` would fail to delete while
+# reporting that it had. A prefix glob is not the answer either: capsule `a`
+# and capsule `a-b` are both valid names, and `a-*` matches both.
+host_desktop_files() {
+    [ -d "$HOST_APPS" ] || return 0
+    find "$HOST_APPS" -maxdepth 1 -type f -name '*.desktop' -printf '%f\n' \
+        2>/dev/null | sort
+}
+
 # ── records ─────────────────────────────────────────────────────────────────
 record_path() { printf '%s/%s.json' "$ENV_ROOT" "$1"; }
 has_record()  { [ -f "$(record_path "$1")" ]; }
@@ -326,15 +504,55 @@ write_record() {
     tmp="${path}.tmp"
     mkdir -p "$ENV_ROOT" || die "cannot create ${ENV_ROOT}"
     chmod 0700 "$ENV_ROOT" 2>/dev/null || true
+    # `languages` and `exports` are always present, even when empty. A consumer
+    # reading them — `apex blueprint diff` reads `languages` to decide whether
+    # `[development]` is converged — must not have to tell "no languages" from
+    # "a record written by an older APEX", because those mean different things
+    # and only one of them is safe to act on.
     jq -n \
         --arg name "$name" --arg image "$image" --arg gpu "$gpu" \
         --arg alias "$alias_used" --arg digest "$digest" --arg home "$home" \
         --arg pm "$(pm_for_image "$image" || printf 'unknown')" \
         --argjson created "$(date +%s)" \
         '{name:$name, image:$image, image_digest:$digest, gpu:$gpu,
-          alias:$alias, package_manager:$pm, home:$home, created:$created}' \
+          alias:$alias, package_manager:$pm, home:$home, created:$created,
+          languages:[], exports:[]}' \
         > "$tmp" || die "cannot write the capsule record"
     mv -f "$tmp" "$path"
+}
+
+# Add one entry to a list-valued field of a record, atomically and without
+# duplicates. Read-modify-write through jq rather than an append, because the
+# record is JSON and a shell append would produce a file nothing can parse —
+# including the next run of this function.
+record_add() {
+    local name="$1" field="$2" value="$3" path tmp
+    path="$(record_path "$name")"
+    [ -f "$path" ] || return 1
+    tmp="${path}.tmp"
+    jq --arg f "$field" --arg v "$value" \
+        '.[$f] = ((.[$f] // []) + [$v] | unique)' "$path" > "$tmp" \
+        || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$path"
+}
+
+record_remove() {
+    local name="$1" field="$2" value="$3" path tmp
+    path="$(record_path "$name")"
+    [ -f "$path" ] || return 1
+    tmp="${path}.tmp"
+    jq --arg f "$field" --arg v "$value" \
+        '.[$f] = ((.[$f] // []) | map(select(. != $v)))' "$path" > "$tmp" \
+        || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$path"
+}
+
+# Entries of a list-valued field, one per line.
+read_record_list() {
+    local name="$1" field="$2" path
+    path="$(record_path "$name")"
+    [ -f "$path" ] || return 1
+    jq -r --arg f "$field" '(.[$f] // [])[]' "$path" 2>/dev/null
 }
 
 read_record_field() {
@@ -596,6 +814,170 @@ cmd_pkg_install() {
     msg "installed in '${name}': $*"
 }
 
+# ── GUI export ──────────────────────────────────────────────────────────────
+# §8: "GUI applications from a capsule appear in the host launcher when
+# useful." One verb per direction, and the record remembers what was exported
+# so `rm` can take the launcher entries with it.
+cmd_export() {
+    [ "$#" -ge 2 ] || die "usage: apex env export <name> <application>"
+    local name="$1" app="$2"
+    require_capsule "$name"
+    valid_app_name "$app" \
+        || die "'${app}' is not a usable application name (letters, digits and . _ + - ; a bare name, not a path)"
+    require_tools
+
+    local argv_text
+    argv_text="$(export_argv "$name" "$app" add)" || die "cannot build the export command"
+    local -a argv=()
+    mapfile -t argv <<<"$argv_text"
+
+    # Snapshot the whole directory, not just this capsule's prefix. See
+    # host_desktop_files() for why a prefix is wrong.
+    local before after
+    before="$(host_desktop_files)"
+    msg "exporting '${app}' from capsule '${name}' to the host launcher"
+    "$DISTROBOX" "${argv[@]}" >&2 \
+        || die "distrobox-export could not export '${app}' from '${name}'; 'apex env enter ${name}' and check the application is installed there"
+    after="$(host_desktop_files)"
+
+    # Everything that appeared. Usually one file; more than one is possible
+    # when a .desktop carries several actions, and recording all of them is
+    # what makes the removal exact.
+    local new f recorded=0
+    new="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") 2>/dev/null || true)"
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        valid_desktop_file "$f" || continue
+        record_add "$name" exports "$f" || warn "could not record the export of ${f}"
+        recorded=$((recorded + 1))
+    done <<<"$new"
+
+    if [ "$recorded" = 0 ]; then
+        # distrobox exited 0 and no new file appeared. Either it was already
+        # exported (re-running is idempotent and writes the same filename) or
+        # the host directory is not where this script thinks it is. Say so
+        # rather than reporting an export that may not have happened.
+        warn "no new launcher entry appeared in ${HOST_APPS}; if '${app}' was already exported this is expected, otherwise 'apex env exports ${name}' will say what the capsule thinks it exported"
+    fi
+    msg "'${app}' should appear in the launcher shortly; the .desktop file is in ${HOST_APPS}"
+}
+
+cmd_unexport() {
+    [ "$#" -ge 2 ] || die "usage: apex env unexport <name> <application>"
+    local name="$1" app="$2"
+    require_capsule "$name"
+    valid_app_name "$app" || die "'${app}' is not a usable application name"
+    require_tools
+
+    local argv_text
+    argv_text="$(export_argv "$name" "$app" delete)" || die "cannot build the export command"
+    local -a argv=()
+    mapfile -t argv <<<"$argv_text"
+
+    local before after
+    before="$(host_desktop_files)"
+    "$DISTROBOX" "${argv[@]}" >&2 \
+        || die "distrobox-export could not un-export '${app}' from '${name}'"
+    after="$(host_desktop_files)"
+
+    local gone f
+    gone="$(comm -23 <(printf '%s\n' "$before") <(printf '%s\n' "$after") 2>/dev/null || true)"
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        record_remove "$name" exports "$f" || true
+    done <<<"$gone"
+    msg "'${app}' is no longer exported from '${name}'"
+}
+
+# What the CAPSULE says it has exported, from distrobox itself, plus what APEX
+# recorded. Both, because they answer different questions and can legitimately
+# disagree: a user who ran `distrobox-export` by hand inside the capsule has an
+# export APEX never saw, and saying so beats pretending the record is complete.
+cmd_exports() {
+    [ "$#" -ge 1 ] || die "usage: apex env exports <name>"
+    local name="$1"
+    require_capsule "$name"
+    require_tools
+    local argv_text
+    argv_text="$(list_exports_argv "$name")"
+    local -a argv=()
+    mapfile -t argv <<<"$argv_text"
+    printf 'exported from the capsule, as distrobox sees it:\n'
+    "$DISTROBOX" "${argv[@]}" || warn "the capsule could not be asked; it may not be running"
+    printf '\nlauncher entries APEX recorded for this capsule:\n'
+    local any=0 f
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        any=1
+        printf '  %s/%s\n' "$HOST_APPS" "$f"
+    done < <(read_record_list "$name" exports)
+    [ "$any" = 1 ] || printf '  (none)\n'
+}
+
+# ── [development] convergence (§10) ─────────────────────────────────────────
+# One language in, one capsule that provides it out. Idempotent: a capsule that
+# already exists is reused, and a language already recorded is a no-op, so
+# `apex apply` running twice does nothing the second time.
+cmd_provision() {
+    [ "$#" -ge 1 ] || die "usage: apex env provision <language>"
+    local language="$1"
+    valid_language "$language" \
+        || die "'${language}' is not a language APEX provisions (${LANGUAGES// /, })"
+    local capsule packages probe
+    capsule="$(lang_capsule "$language")"
+    packages="$(lang_packages "$language")"
+    probe="$(lang_probe "$language")"
+
+    require_rootless "$capsule"
+    require_tools
+
+    if ! has_record "$capsule"; then
+        msg "provisioning ${language}: creating capsule '${capsule}'"
+        cmd_create "$capsule"
+    fi
+
+    # Already provided: nothing to do, and say so with the capsule's name so a
+    # user reading `apex apply` output can go and use it.
+    if read_record_list "$capsule" languages 2>/dev/null | grep -qxF "$language"; then
+        msg "capsule '${capsule}' already provides ${language}:  apex env enter ${capsule}"
+        return 0
+    fi
+
+    # The capsule's base decides the package names, and APEX only knows dnf's.
+    # A capsule the user built from another base is theirs; guessing apt or
+    # pacman names for it would install the wrong thing and report success.
+    local pm
+    pm="$(read_record_field "$capsule" package_manager)"
+    if [ "$pm" != dnf ]; then
+        die "capsule '${capsule}' is ${pm}-based, and APEX only knows the Fedora package names for ${language}; install it yourself with: apex env install ${capsule} <packages>"
+    fi
+
+    # shellcheck disable=SC2086  # a space-separated list from a closed table
+    cmd_pkg_install "$capsule" $packages
+
+    # Verify, then record. In that order, and it is the whole reason this verb
+    # is not just "create and install": `dnf -y install` exits 0 for a package
+    # set that does not put the promised program on PATH, and recording the
+    # language on the strength of that exit code would make `apex blueprint
+    # diff` report converged forever on a capsule with no toolchain.
+    local -a probe_argv=(enter --no-tty "$capsule" -- command -v "$probe")
+    if ! "$DISTROBOX" "${probe_argv[@]}" >/dev/null 2>&1; then
+        die "installed the ${language} packages in '${capsule}' but '${probe}' is still not on PATH inside it; not recording the language"
+    fi
+    record_add "$capsule" languages "$language" \
+        || die "cannot record ${language} on capsule '${capsule}'"
+    msg "${language} is provided by capsule '${capsule}':  apex env enter ${capsule}"
+}
+
+cmd_languages() {
+    local l
+    printf '%-11s  %-8s  %-6s  %s\n' LANGUAGE CAPSULE PROBE PACKAGES
+    for l in $LANGUAGES; do
+        printf '%-11s  %-8s  %-6s  %s\n' \
+            "$l" "$(lang_capsule "$l")" "$(lang_probe "$l")" "$(lang_packages "$l")"
+    done
+}
+
 cmd_rm() {
     local name="" keep_home=0 force=0
     while [ "$#" -gt 0 ]; do
@@ -618,6 +1000,27 @@ cmd_rm() {
     # command fails on exactly the capsule the user is most likely to be
     # removing: the one they just used.
     "$DISTROBOX" rm --force "$name" >&2 || warn "distrobox could not remove the container '${name}'"
+
+    # Launcher entries go with the container. A .desktop pointing at a capsule
+    # that no longer exists is a menu item that does nothing, and the user has
+    # no way to guess which file to delete.
+    #
+    # Deleted BY NAME, from the record, never by a `<name>-*.desktop` glob:
+    # capsule `a` and capsule `a-b` are both valid names and the glob for the
+    # first matches the second's entries. Every name is re-validated on the way
+    # out, so a hand-edited record cannot turn this into a delete of an
+    # arbitrary path.
+    local f
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        if ! valid_desktop_file "$f"; then
+            warn "the record lists an export APEX will not delete: ${f}"
+            continue
+        fi
+        rm -f -- "${HOST_APPS}/${f}" \
+            && msg "removed the launcher entry ${HOST_APPS}/${f}"
+    done < <(read_record_list "$name" exports 2>/dev/null || true)
+
     local home
     home="$(read_record_field "$name" home 2>/dev/null || true)"
     rm -f "$(record_path "$name")"
@@ -646,8 +1049,21 @@ usage: apex-env <command> [args]
   install <name> <pkg>...
                        install with the capsule's own package manager
   rm <name> [--keep-home] [--force]
-                       remove the container; the record goes with it
+                       remove the container; the record and any launcher
+                       entries it exported go with it
   images               the image aliases and what they resolve to
+  export <name> <app>  put a GUI application from the capsule into the host
+                       launcher (§8). Runs distrobox-export inside the capsule;
+                       the .desktop file lands in your own data directory, so
+                       nothing here needs root.
+  unexport <name> <app>
+                       take it back out again
+  exports <name>       what this capsule has exported, and where
+  provision <language> make a capsule that provides a language, and record it.
+                       This is what `apex apply` runs for the blueprint's
+                       [development] languages — a toolchain goes in a capsule,
+                       never onto the read-only host.
+  languages            the language table: capsule, probe and packages
 
 Capsules are rootless per-user podman containers driven through distrobox.
 They see your home directory, your terminal and your devices, and the bootc
@@ -666,6 +1082,11 @@ main() {
         install) cmd_pkg_install "$@" ;;
         rm)      cmd_rm "$@" ;;
         images)  cmd_images ;;
+        export)   cmd_export "$@" ;;
+        unexport) cmd_unexport "$@" ;;
+        exports)  cmd_exports "$@" ;;
+        provision) cmd_provision "$@" ;;
+        languages) cmd_languages ;;
         ""|-h|--help|help) usage ;;
         *) die "unknown command '$cmd' (try --help)" ;;
     esac
