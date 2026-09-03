@@ -195,19 +195,18 @@ Newest last. One line per pushed commit that changes the state above.
   line 124 is `is_flatpak_id`, untouched upstream code. Nothing was broken. The
   commit has been squashed into the finished §9 commit, so the false claim is
   not in the branch history.
-- 2026-09-03 — **what CI will say about the labwc suite, measured.** Running
-  the suites locally is misleading here: they look for an apex-shell tree at
-  `../apex-shell` and fall back to `/usr/share/apex-shell`, which is whatever
-  the booted image shipped and lags the tree under test. Reproducing what CI
-  actually vendors (a worktree of `apex-shell` `origin/main` at
-  `../apex-shell`): `test-apex-firstrun.sh` **passes, 51/0** — the local
-  failure was purely the stale fallback. `test-labwc-keybinds.sh` **fails on
-  two assertions** ("KeybindService invokes the generator", "it checks the
-  helper exists before spawning it") and fails identically at the branch point
-  4c4fc62 with none of phase 6 present. That is 5.3 waiting on
-  `apex-shell/p1/compositor-adapter` to land on `apex-shell/main` — the
-  documented merge order (shell before or with the OS) doing its job, not a
-  phase 6 regression.
+- 2026-09-03 — **do not judge these suites by a local run.** They look for an
+  apex-shell tree at `../apex-shell` and fall back to `/usr/share/apex-shell`,
+  which is whatever the booted image shipped and therefore lags the tree under
+  test — the file says so itself, and it is still easy to forget.
+  `test-apex-firstrun.sh` fails against that stale copy and passes (24/0) in
+  CI. I then predicted, from a worktree of the local `origin/main` ref, that
+  `test-labwc-keybinds.sh` would fail on two assertions; **that prediction was
+  wrong** — the local ref was behind, the phase-5 shell work is on
+  `apex-shell/main`, and CI reports 32/0. PR #29 is green in full. Recorded
+  because the mistake is repeatable: a stale `origin/main` in the sibling
+  apex-shell clone looks exactly like an unmerged shell branch. `git fetch`
+  there before drawing any conclusion about the merge order.
 - 2026-09-03 — noted for whoever picks this up: an early draft of the facade
   test called `setGaps(0, 0)` to check that a *capable* action returns true, and
   set the live Hyprland gaps to zero on the developer's desktop. Suites here run
