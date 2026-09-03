@@ -114,6 +114,25 @@ with `follow_mouse` crossing a monitor boundary now closes popups (unflagged
 behaviour change); and the facade suite encodes Hyprland's refcount semantics as
 universal, so it would fail on niri or labwc.
 
+## Finishing the deferred items — 2026-09-03
+
+The four phases are done and integrated (PR #30). Five things were deferred
+along the way, and Andre asked for all of P1 finished, so they are now in flight
+in parallel worktrees:
+
+| Work | Branch | Repo |
+|------|--------|------|
+| finish 5.2 (screen shader, night light, SystemStats) + the two open review items | `p1/finish-5.2` | apex-shell |
+| §16 more extension points (launcher provider, quick-settings tile) | `p1/plugin-points` | apex-shell |
+| §10 GUI blueprint editor (7.4) | `p1/blueprint-editor` | apex-shell |
+| §12 controller-first gaming + per-game profiles (8.4) | `p1/gaming-profiles` | apex-os |
+| §8 GUI export, §10 `[development] languages` convergence, §16 `apex plugin` CLI | `p1/deferred-items` | apex-os |
+
+The two apex-os branches are off `p1/integration`, so they already contain all
+four phases — which is what unblocks two of them: 8.4 needed phase 7's schema
+for per-game profile storage, and the languages convergence needed phase 6's
+capsules.
+
 ## PAUSED (second time) — 2026-09-03, P1 complete
 
 All four P1 phases are done and pushed. Nothing is uncommitted and nothing is
