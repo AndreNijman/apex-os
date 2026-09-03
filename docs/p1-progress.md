@@ -218,7 +218,9 @@ with the OS) doing its job, exactly as it did for 5.3's keybind suite on PRs #27
 and #28. **Check apex-shell `main` before looking anywhere else in this repo.**
 
 It is deliberately one labelled assertion rather than a refusal at the top of
-the file: 61 of the 113 assertions do not need manifest.js and run regardless.
+the file: **62 of the 117** assertions do not need manifest.js and run
+regardless — measured, not estimated, by running the suite against a checkout
+of apex-shell `main`.
 A suite that hard-exited would report `passed=0` with a red tick, which is the
 same vacuous shape this repository has been bitten by, only inverted.
 
@@ -228,7 +230,7 @@ same vacuous shape this repository has been bitten by, only inverted.
 |-------|--------|-------|
 | `tests/test-apex-env.sh` | 149 | 253 |
 | `tests/test-apex-blueprint.sh` | 105 | 129 |
-| `tests/test-apex-plugin.sh` | — | 113 (61 without the shell tree) |
+| `tests/test-apex-plugin.sh` | — | **117** (62 without the shell tree) |
 
 Plus 35 planner unit tests in `apexd-core`, 108 in the `apex` crate, and two new
 static CI checks (`check-language-parity`, `node --check` on the shim).
