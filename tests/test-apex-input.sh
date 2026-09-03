@@ -151,8 +151,13 @@ if command -v niri >/dev/null 2>&1; then
     niri validate --config "$N" >/dev/null 2>&1 \
         && ok "niri validates the generated file with non-default values" \
         || bad "niri validates the generated file with non-default values"
+elif [ -n "${APEX_REQUIRE_NIRI:-}" ]; then
+    # Same escalation as the reachability section at the end of this file, so
+    # the flag means what its name says rather than covering only one of the
+    # two places niri is needed.
+    bad "niri is present (APEX_REQUIRE_NIRI is set)"
 else
-    skp "niri unavailable"
+    skp "niri unavailable: the generated file is not validated with non-default values"
 fi
 
 section "bad input is corrected, not obeyed"
@@ -233,6 +238,21 @@ else
     bash -n "$INC_BLOCK" \
         && ok "the extracted block is self-contained bash" \
         || bad "the extracted block is self-contained bash"
+
+    # Step 6's own guard is `command -v niri || [ -x /usr/bin/niri ]`, so it
+    # admits a niri that exists but is not on PATH — which is ordinary for a
+    # per-user systemd unit. A bare `niri` there exits 127, `! niri validate`
+    # reads 127 as "invalid", and the block takes its refusal branch and never
+    # writes the includes: silently, on every login, forever. Every validate
+    # call must therefore go through the resolved binary, and this counts them
+    # rather than trusting one to have been noticed in review.
+    nb="$(grep -c '"${NIRI_BIN}" validate --config' "$INC_BLOCK")"
+    va="$(grep -c 'validate --config' "$INC_BLOCK")"
+    if [ "$nb" = "$va" ] && [ "$nb" -ge 2 ]; then
+        ok "all ${nb} validate calls resolve the binary instead of assuming PATH"
+    else
+        bad "all validate calls resolve the binary instead of assuming PATH (${nb}/${va})"
+    fi
 fi
 
 [ -s "$PRE_BLOCK" ] \
@@ -431,6 +451,30 @@ section "niri: the compositor really reads what the generator wrote"
 # needs the real binary; there is none on the CI runner, so this skips there and
 # runs on any APEX machine and in the image build (Containerfile.base).
 if ! command -v niri >/dev/null 2>&1; then
+    # A legitimate skip, of the same kind test-secret-broker.sh keeps for
+    # bubblewrap: without the real binary this property cannot be tested at
+    # all, and reporting "failed" would misdescribe what was checked. niri is
+    # not installable on the ubuntu-24.04 runner these suites run on.
+    #
+    # But a skip that nothing can escalate is how a green tick comes to sit
+    # over an assertion that never ran, so APEX_REQUIRE_NIRI refuses it. Set it
+    # anywhere niri IS expected — an APEX machine, the image build — and a lost
+    # niri becomes a failure instead of three silent skips.
+    #
+    # What still holds without it: Containerfile.base runs
+    # `apex-input-apply --self-test`, which since this change validates the
+    # generated file THROUGH an `include` against the image's own niri, and the
+    # base guard next to it proves that niri has includes and that a missing
+    # target is fatal. What is NOT covered anywhere else is the part below —
+    # the provisioner appending to a real config.kdl, and a broken include
+    # being rejected.
+    if [ -n "${APEX_REQUIRE_NIRI:-}" ]; then
+        bad "niri is present (APEX_REQUIRE_NIRI is set)"
+        printf '      niri is missing, so whether config.kdl actually READS the\n'
+        printf '      generated file cannot be tested. Refusing to skip.\n'
+        printf '\napex-input: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
+        exit 1
+    fi
     skp "niri unavailable: the include-reachability proof did not run"
     skp "niri unavailable: a broken include is not proven to be rejected"
     skp "niri unavailable: the generated input values are not proven reachable"

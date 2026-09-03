@@ -743,6 +743,14 @@ NIRIAPEX
     # already has the autostart block predates these includes and still needs
     # them. This block only ever APPENDS — there is no substitution here, so
     # there is no regex that can eat the file.
+    # Resolved, not assumed on PATH. Step 6's own guard is
+    # `command -v niri || [ -x /usr/bin/niri ]`, and the second half is there
+    # because a per-user systemd unit is exactly where a binary is installed but
+    # not on PATH. A bare `niri` there exits 127, `! niri validate` reads that
+    # as "invalid", and the block would take the refusal branch and never add
+    # the includes — silently, on every login, forever. That is the failure this
+    # whole section exists to remove, so it must not be reintroduced inside it.
+    NIRI_BIN="$(command -v niri 2>/dev/null || echo /usr/bin/niri)"
     NIRI_INC_MARKER='APEX generated configs (apex-shell-firstrun)'
     if [ -f "${NIRI_CONF}" ] && ! grep -qF "${NIRI_INC_MARKER}" "${NIRI_CONF}"; then
         if [ ! -f "${CFG_DIR}/ApexShellInput.kdl" ] || \
@@ -753,7 +761,7 @@ NIRIAPEX
             # precisely so this branch is unreachable in practice; it stays
             # because "unreachable" is not "cannot happen".
             log "WARN: niri include targets are missing; not adding include lines"
-        elif ! niri validate --config "${NIRI_CONF}" >/dev/null 2>&1; then
+        elif ! "${NIRI_BIN}" validate --config "${NIRI_CONF}" >/dev/null 2>&1; then
             # Already broken before we got here. Appending would make this
             # provisioner look like the cause of a failure it did not create,
             # and would bury the user's real error under ours.
@@ -787,7 +795,7 @@ NIRIINC
                [ "${_niri_now}" -ne "$((_niri_lines + 6))" ]; then
                 cp -a "${NIRI_CONF}.pre-include.bak" "${NIRI_CONF}"
                 log "ERROR: ${NIRI_CONF} changed in a way this block did not intend; restored the backup"
-            elif ! niri validate --config "${NIRI_CONF}" >/dev/null 2>&1; then
+            elif ! "${NIRI_BIN}" validate --config "${NIRI_CONF}" >/dev/null 2>&1; then
                 # It validated a moment ago and does not now, so the includes
                 # are what broke it. Never leave a niri user with a config
                 # their compositor refuses.
