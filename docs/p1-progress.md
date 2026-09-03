@@ -110,15 +110,60 @@ Not started.
 
 ## Phase 8 — modes + gaming + workload manager
 
-Not started. `apex mode` is free as a top-level verb — the existing `Mode` is
-`apex fan mode`.
+**8.1, 8.2, 8.3 and 8.5 are done; 8.4 is deliberately not.** `apex mode` was
+free as a top-level verb — the existing `Mode` is `apex fan mode`.
 
-- [ ] **8.1** `apex mode` composing existing primitives (tier, profile, game,
-      services, sysext).
-- [ ] **8.2** Workload-aware policy: measured signals, visible and overrideable.
-- [ ] **8.3** Performance Lab.
-- [ ] **8.4** Controller-first gaming mode and per-game profiles.
-- [ ] **8.5** Tests.
+- [x] **8.1** `apex mode list/show/set/status`. Eight modes composing tier,
+      apexd's AC/battery auto-switch and game mode. No new D-Bus member, no
+      daemon change, no state file: the active mode is **derived** from what
+      apexd reports, so it cannot go stale and `set` needs no root.
+      `apexd-core/src/mode.rs` is pure — no I/O, no writer — and carries the
+      ordering rules, 22 unit assertions.
+- [x] **8.2** `apex workload`. Signals carry provenance (`Measured` with the
+      path, or `Unavailable` with the reason); a process name never decides
+      anything without corroboration from PSI or load; the battery row of §13 is
+      a constraint layered on top, and it does **not** unwind a running game
+      session. 24 assertions.
+- [x] **8.3** `apex perf` — CPU/GPU clocks, power, temperatures, VRAM, sched-ext
+      state, game cpuset. **Frame time is reported as unavailable with the
+      reason** and nothing is substituted for it. 20 assertions.
+- [ ] **8.4** Controller-first boot-to-game and per-game profiles. **Not done**,
+      and it was the explicitly lowest-priority item. The gamescope session
+      (`files/system/libexec/apex-gaming-session`) already gives a
+      controller-first boot-to-game path; what is missing is per-game profile
+      storage and selection, which wants a schema decision that belongs with
+      phase 7's blueprint rather than being invented here.
+- [x] **8.5** `tests/test-apex-modes.sh` — 58 assertions against the built
+      binary, wired into the **`rust`** job (the only one with a toolchain).
+      `tests/` was added to that job's path selector: a PR touching only the
+      suite set `engine=true`/`rust=false`, so it would never have run, and
+      `result` would have passed anyway because a skipped job counts as success.
+
+### Deliberately not shipped
+
+- **No timer, no daemon loop, no background auto-apply.** §13 permits automatic
+  policy "where safe" but is emphatic that automatic choices must be visible and
+  overrideable. `apex workload` reports and `apex mode set --auto` applies once,
+  explicitly. A shipped-but-disabled unit was considered and rejected: the root
+  `AGENTS.md` treats aspirational-language-as-implemented as a defect, and this
+  is the phase that has already burned the developer twice.
+- **Service sets and system extensions are reported, not executed.** They are
+  modelled so `apex mode show` can state the full intent. Merging a sysext on a
+  mode switch is a heavyweight lever with its own rebuild service, and
+  `Containerfile.gaming` already masks `irqbalance` permanently, so a mode
+  toggling it would fight the image.
+- **`docs/apexd-dbus.md` is untouched** — this phase adds no D-Bus member. Note
+  for whoever picks it up: that file is stale on a separate point, still listing
+  five tier IDs including `ultra-max`/`ultra`, which `tier.rs` removed.
+
+### The safety rule this phase is built around
+
+`apexd-core::mode`, `::workload` and `::perf` construct **no `SysWriter` of any
+kind**, and the shell suite puts fake `scxctl`/`nvidia-smi`/`systemctl` first on
+PATH and fails if any is called — with a negative control proving the fakes were
+really there. That is a direct response to the earlier game-mode suite, which
+shelled out to `scxctl`, raised polkit prompts on the developer's desktop and
+blocked 177 seconds on a password.
 
 ## Log
 
@@ -147,6 +192,19 @@ Newest last. One line per pushed commit that changes the state above.
   the shipped config, and 4 bindings genuinely have no labwc equivalent
   (scratchpad ×2, pseudo-tiling, split) so they are reported rather than mapped
   onto something approximate.
+- 2026-09-03 — **Phase 8 done bar 8.4** on `p1/modes-and-workloads`: `apex
+  mode`, `apex workload`, `apex perf`, 66 new Rust assertions and a 58-assertion
+  shell suite. Two things worth carrying forward. First, `apex perf` shipped a
+  real bug that only running it exposed — it reported "package: 20.47 W" and
+  "battery: 20.47 W", the same sensor twice, because the package reader took the
+  first hwmon publishing `power1_*` and on this ThinkPad that is `hwmon4`, owned
+  by `BAT0`. There is now no single "package power" figure at all: every sensor
+  is reported with its chip and label, and hwmon devices hanging off a
+  `power_supply` are skipped. Second, the ordering rules in `mode::plan` are not
+  cosmetic — game mode must be left *before* the new tier is set, because
+  `apex game stop` restores the pre-session tier and would otherwise overwrite
+  it, and auto-switch must go off *before* a tier is pinned, because enabling it
+  reconciles immediately. Both are mutation-verified.
 - 2026-09-03 — noted for whoever picks this up: an early draft of the facade
   test called `setGaps(0, 0)` to check that a *capable* action returns true, and
   set the live Hyprland gaps to zero on the developer's desktop. Suites here run
