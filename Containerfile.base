@@ -1297,6 +1297,81 @@ RUN set -eux; \
     grep -qE '^org\.freedesktop\.impl\.portal\.ScreenCast=wlr$' /etc/xdg-desktop-portal/labwc-portals.conf; \
     echo "portals: labwc pinned to wlr capture + gtk desktop interfaces"
 
+# Portal backends for the niri session. Same reason as labwc's, a different
+# defect: the niri package DOES ship a config (so this is not the wildcard case),
+# but its `default=gnome;gtk` hands FileChooser, AppChooser, Print and Settings
+# to xdg-desktop-portal-gnome, so "Open File" is a GNOME dialog on niri and a GTK
+# one on the other two sessions this image offers. §24 asks niri for parity with
+# Hyprland, and a different file chooser is not parity. See the file.
+#
+# The filename is load-bearing: portals.conf(5) resolves
+# xdg-desktop-portal/<desktop>-portals.conf for each name in XDG_CURRENT_DESKTOP,
+# lower-cased. niri sets XDG_CURRENT_DESKTOP=niri in `--session` mode (and
+# niri.desktop carries DesktopNames=niri), which is the same premise on which the
+# niri package ships its own niri-portals.conf. /etc beats /usr/share by
+# DIRECTORY precedence, so this file wins over the packaged one without
+# conflicting with it on upgrade.
+COPY files/system/xdg-desktop-portal/niri-portals.conf \
+     /etc/xdg-desktop-portal/niri-portals.conf
+RUN set -eux; \
+    test -s /etc/xdg-desktop-portal/niri-portals.conf; \
+    # The session this config is named for must exist, and must still announce
+    # the desktop name the filename depends on. A rename on either side makes
+    # this file silently inert — xdg-desktop-portal would fall back to the
+    # packaged config and nothing would report it.
+    test -f /usr/share/wayland-sessions/niri.desktop; \
+    grep -q '^DesktopNames=niri$' /usr/share/wayland-sessions/niri.desktop; \
+    # The backends this config names must actually be installed. gnome is not
+    # optional here: niri implements the Mutter ScreenCast API, not
+    # wlr-screencopy-backed portal capture, so without xdg-desktop-portal-gnome
+    # a niri session has no screen sharing at all.
+    test -f /usr/share/xdg-desktop-portal/portals/gnome.portal; \
+    test -f /usr/share/xdg-desktop-portal/portals/gtk.portal; \
+    test -f /usr/share/xdg-desktop-portal/portals/gnome-keyring.portal; \
+    test -x /usr/libexec/xdg-desktop-portal-gnome; \
+    test -x /usr/libexec/xdg-desktop-portal-gtk; \
+    # ...and each named backend genuinely implements what it is pointed at.
+    grep -q 'org.freedesktop.impl.portal.ScreenCast' /usr/share/xdg-desktop-portal/portals/gnome.portal; \
+    grep -q 'org.freedesktop.impl.portal.Screenshot' /usr/share/xdg-desktop-portal/portals/gnome.portal; \
+    grep -q 'org.freedesktop.impl.portal.FileChooser' /usr/share/xdg-desktop-portal/portals/gtk.portal; \
+    grep -q 'org.freedesktop.impl.portal.Secret' /usr/share/xdg-desktop-portal/portals/gnome-keyring.portal; \
+    # No wildcard, and gtk leads the default list — that ordering IS the fix, so
+    # a regression back to `default=gnome;gtk` must fail the build.
+    ! grep -qE '^\s*default=.*\*' /etc/xdg-desktop-portal/niri-portals.conf; \
+    grep -qE '^default=gtk;gnome$' /etc/xdg-desktop-portal/niri-portals.conf; \
+    grep -qE '^org\.freedesktop\.impl\.portal\.ScreenCast=gnome$' /etc/xdg-desktop-portal/niri-portals.conf; \
+    grep -qE '^org\.freedesktop\.impl\.portal\.Screenshot=gnome$' /etc/xdg-desktop-portal/niri-portals.conf; \
+    grep -qE '^org\.freedesktop\.impl\.portal\.Secret=gnome-keyring$' /etc/xdg-desktop-portal/niri-portals.conf; \
+    # ── Every desktop session this image offers, BY NAME ────────────────────
+    # Enumerated, never counted: niri went three releases with no APEX portal
+    # configuration at all while labwc's was build-verified, and no assertion
+    # here could see it, because nothing asked "and what about the other
+    # sessions". A `-ge 2` would pass with one of these missing.
+    #
+    # For each, the desktop name that portals.conf(5) will look up must resolve
+    # to a config SOMEWHERE — /etc for the two APEX pins, /usr/share for
+    # Hyprland, whose packaged `default=hyprland;gtk` already reaches gtk for the
+    # desktop interfaces because hyprland.portal implements only capture and
+    # shortcuts — and none of them may resolve through a wildcard.
+    #
+    # apex-gaming (DesktopNames=gamescope) is deliberately NOT in this list:
+    # it is Steam Big Picture inside gamescope with no desktop session, no
+    # Flatpak file dialogs and no portal story. Named as excluded rather than
+    # silently absent, because "absent" is what this whole block exists to
+    # catch. It is also a Gaming-flavor file and does not exist in base.
+    for d in hyprland niri labwc; do \
+        c=""; \
+        for p in "/etc/xdg-desktop-portal/${d}-portals.conf" "/usr/share/xdg-desktop-portal/${d}-portals.conf"; do \
+            if [ -s "$p" ]; then c="$p"; break; fi; \
+        done; \
+        [ -n "$c" ] || { echo "FATAL: no portals.conf resolves for XDG_CURRENT_DESKTOP=${d}"; exit 1; }; \
+        if grep -qE '^\s*default=.*\*' "$c"; then \
+            echo "FATAL: ${c} resolves backends through a wildcard"; exit 1; \
+        fi; \
+        echo "portals: ${d} -> ${c}"; \
+    done; \
+    echo "portals: niri pinned to gnome capture + gtk desktop interfaces"
+
 COPY files/desktop/wayland-sessions/apex-labwc.desktop \
      /usr/share/wayland-sessions/apex-labwc.desktop
 COPY files/desktop/labwc/ /usr/share/apex/labwc/

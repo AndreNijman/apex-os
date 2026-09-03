@@ -699,6 +699,39 @@ jobs:
                ! printf "%s\n" "$out" | grep -qiE "invalid argument for action|invalid action|unexpected element"' \
             || fail "labwc rejected something in rc.xml; that binding would be silently dropped"
 
+          # ── portal backends, per session, BY NAME ──────────────────────
+          # Screen sharing, file pickers and screenshots all route through
+          # portals, so a session whose backends are decided by resolution order
+          # is a user-visible failure that looks like flakiness. niri shipped for
+          # three releases with no APEX configuration at all — its packaged
+          # `default=gnome;gtk` handed FileChooser to the GNOME implementation
+          # while labwc and Hyprland both reached gtk — and no assertion here
+          # could see it, because nothing enumerated the other sessions.
+          #
+          # portals.conf(5) looks up xdg-desktop-portal/<desktop>-portals.conf
+          # for each name in XDG_CURRENT_DESKTOP, lower-cased, /etc before
+          # /usr/share. So the check is per DESKTOP NAME, not per file.
+          for d in hyprland niri labwc; do
+            out=$(run "c=; for p in /etc/xdg-desktop-portal/$d-portals.conf /usr/share/xdg-desktop-portal/$d-portals.conf; do if [ -s \"\$p\" ]; then c=\$p; break; fi; done; [ -n \"\$c\" ] || exit 1; echo \"\$c\"; grep -qE '^[[:space:]]*default=.*[*]' \"\$c\" && exit 2; exit 0") \
+              || fail "$d has no portals.conf, or resolves its backends through a wildcard (got: $out)"
+            echo "portals: $d -> $out"
+          done
+          # The two APEX pins specifically, so a silent revert to the packaged
+          # file fails rather than passing the loop above.
+          run 'grep -qE "^default=gtk$" /etc/xdg-desktop-portal/labwc-portals.conf' \
+            || fail "labwc portal config lost its gtk pin"
+          run 'grep -qE "^default=gtk;gnome$" /etc/xdg-desktop-portal/niri-portals.conf' \
+            || fail "niri portal config lost its gtk-first ordering"
+          # niri drives capture through the Mutter API, so the gnome backend is
+          # not interchangeable with the wlroots one labwc uses.
+          run 'grep -qE "^org\.freedesktop\.impl\.portal\.ScreenCast=gnome$" /etc/xdg-desktop-portal/niri-portals.conf' \
+            || fail "niri ScreenCast is no longer pinned to the gnome backend"
+          run 'test -x /usr/libexec/xdg-desktop-portal-gnome' \
+            || fail "xdg-desktop-portal-gnome missing; the niri session would have no screen sharing"
+          # The filename is only matched because the session announces this name.
+          run 'grep -q "^DesktopNames=niri$" /usr/share/wayland-sessions/niri.desktop' \
+            || fail "niri.desktop no longer announces DesktopNames=niri; niri-portals.conf is inert"
+
           # The greeter must tolerate NVIDIA: sway exits(1) on nvidia-drm without
           # this flag, which means no login at all on a hybrid-graphics machine.
           run 'grep -q -- --unsupported-gpu /etc/greetd/config.toml' \
