@@ -156,6 +156,21 @@ free as a top-level verb — the existing `Mode` is `apex fan mode`.
   for whoever picks it up: that file is stale on a separate point, still listing
   five tier IDs including `ultra-max`/`ultra`, which `tier.rs` removed.
 
+### Known-red on this branch, inherited not caused
+
+PR #27's **`Package engine`** job fails on two assertions in
+`tests/test-labwc-keybinds.sh`: "KeybindService invokes the generator" and "it
+checks the helper exists before spawning it". Both grep
+`src/services/config_tab/KeybindService.qml` in an **apex-shell** tree cloned
+from remote `main`, and that shell-side change is still on the unmerged
+apex-shell PR #8 (`p1/compositor-adapter`) — `main` has zero occurrences of
+`apex-labwc-keybinds` today.
+
+That is the documented merge order working, not a broken check: the suite's own
+CI comment says a shell change "fails here until it lands". Phase 8 does not
+touch that file, that suite, or apex-shell. `Rust validation` — which is where
+this phase's own tests run — passes.
+
 ### The safety rule this phase is built around
 
 `apexd-core::mode`, `::workload` and `::perf` construct **no `SysWriter` of any
