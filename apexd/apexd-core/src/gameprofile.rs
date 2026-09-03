@@ -533,6 +533,43 @@ pub fn plan(id: &str, profile: &GameProfile, state: &ModeState) -> Resolution {
     }
 }
 
+/// Every step the profile can ever ask for, regardless of what the machine is
+/// doing now — the profile's **full intent**, as opposed to [`plan`]'s delta.
+///
+/// This exists so `apex game profile show` is useful on a machine where apexd
+/// is not running. The delta needs a measurement; the intent does not, and
+/// refusing to print anything without a daemon would make the one verb whose
+/// job is "tell me what I stored" the one that cannot answer.
+///
+/// It is **derived, not invented**: the intent is [`plan`] evaluated against a
+/// machine that differs from the profile in every respect it can, which is by
+/// construction the complete step list. So it cannot drift from the real plan —
+/// there is one planner, and this calls it. A hand-written second list is
+/// exactly how the printed intent and the executed plan come to disagree.
+pub fn intent(id: &str, profile: &GameProfile) -> Resolution {
+    let mode_id = profile.mode_id();
+    let base = mode_id.spec();
+    let want = profile
+        .tier_override()
+        .map(TierPolicy::Pinned)
+        .unwrap_or(base.tier);
+
+    let contrary = ModeState {
+        // Any tier other than the one wanted, so a pinned tier is always
+        // emitted. Irrelevant under `Auto`, which emits no `SetTier` at all.
+        tier: match want {
+            TierPolicy::Pinned(Tier::Performance) => Tier::PowerSaver,
+            _ => Tier::Performance,
+        },
+        // Contrary, so the switch is always emitted whichever way it goes.
+        auto_switch: !matches!(want, TierPolicy::Auto),
+        // Contrary, so `GameMode(..)` is always emitted — including the
+        // `false` a non-gaming profile means.
+        game_active: !base.game,
+    };
+    plan(id, profile, &contrary)
+}
+
 /// Render a tier policy the way `apex mode` does.
 fn describe_policy(p: TierPolicy) -> String {
     match p {
@@ -935,6 +972,91 @@ mod tests {
                         };
                         let r = plan("620", &p, &state(tier, auto, game));
                         assert_eq!(r.mode, id);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── the intent ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_intent_of_a_gaming_profile_names_every_lever_it_touches() {
+        let p = GameProfile {
+            mode: Some("gaming".to_string()),
+            tier: Some("balanced".to_string()),
+            fan: Some("max".to_string()),
+            ..Default::default()
+        };
+        let r = intent("620", &p);
+        let s: Vec<String> = r.steps.iter().map(Step::describe).collect();
+        assert_eq!(
+            s,
+            vec![
+                "auto-switch off (so nothing re-derives the tier underneath us)".to_string(),
+                "tier -> balanced".to_string(),
+                "game mode on (cpuset, IRQ steering, GPU clocks, sched-ext)".to_string(),
+                "tier -> balanced".to_string(),
+                "fan mode -> max".to_string(),
+            ],
+            "the full intent must include the post-game-mode tier re-assert"
+        );
+    }
+
+    #[test]
+    fn the_intent_of_a_daily_profile_says_it_leaves_game_mode() {
+        let p = GameProfile {
+            mode: Some("daily".to_string()),
+            ..Default::default()
+        };
+        let r = intent("620", &p);
+        let joined = r.steps.iter().map(Step::describe).collect::<Vec<_>>().join("; ");
+        assert!(joined.contains("game mode off"), "{joined}");
+        assert!(joined.contains("auto-switch on"), "{joined}");
+        assert!(
+            !joined.contains("tier ->"),
+            "daily hands the tier to auto-switch and must not also pin one: {joined}"
+        );
+    }
+
+    #[test]
+    fn an_intent_is_never_empty_for_any_mode() {
+        // The property that makes it usable without a daemon: there is always
+        // something to print, whatever the profile says.
+        for id in ModeId::all_ids() {
+            let p = GameProfile {
+                mode: Some(id.clone()),
+                ..Default::default()
+            };
+            assert!(!intent("620", &p).is_noop(), "mode {id} produced no intent");
+        }
+    }
+
+    #[test]
+    fn the_intent_is_a_superset_of_any_real_plan() {
+        // The claim that keeps the two from drifting: whatever the machine is
+        // doing, every step `plan` emits appears in `intent`.
+        let p = GameProfile {
+            mode: Some("gaming".to_string()),
+            tier: Some("balanced".to_string()),
+            fan: Some("max".to_string()),
+            ..Default::default()
+        };
+        let full = intent("620", &p);
+        for tier in Tier::ALL {
+            for auto in [true, false] {
+                for game in [true, false] {
+                    for step in &plan("620", &p, &state(tier, auto, game)).steps {
+                        // `GameMode(false)` is the one exception and only for a
+                        // gaming profile, which never asks to leave.
+                        if matches!(step, Step::Policy(ModeStep::GameMode(false))) {
+                            continue;
+                        }
+                        assert!(
+                            full.steps.contains(step),
+                            "plan emitted {} which the intent never names",
+                            step.describe()
+                        );
                     }
                 }
             }
