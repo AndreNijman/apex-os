@@ -15,6 +15,45 @@ P1 is rows 5–8 of the roadmap's own implementation order
 | 7 | §10 declarative blueprint + sync | `p1/blueprint-and-sync` |
 | 8 | §11 modes, §12 gaming mode, §13 workload manager | `p1/modes-and-workloads` |
 
+## apex-shell is landing on `main` — 2026-09-03
+
+Merging apex-shell triggers no image build (`release-shell` is dispatch-only,
+`build-image` lives in apex-os), so the shell half of P1 lands as it is
+finished. `Containerfile.base` vendors the shell from remote `main`, so this is
+the documented merge order rather than a shortcut.
+
+| PR | What | State |
+|----|------|-------|
+| #8  | §17 compositor adapter | merged `30d1801` |
+| #9  | §16 plugin platform | merged `f2908f9` |
+| #10 | §10 blueprint GUI editor | merged `3434c66` |
+| #12 | two more extension points | merged `099c44c` |
+| #11 | 5.2 finished + review leftovers | green, **held** |
+| #13 | niri application keybinds | green, **held** |
+
+#11 and #13 are held only because `p1/idle-and-stats` is still being built on
+top of #11. Merging a base mid-flight orphans the branch above it — that already
+cost one rebase today when #9 landed under #12.
+
+**Merging #9 immediately unblocked apex-os PR #34**, whose `Package engine` job
+failed on a single labelled assertion: the CLI takes its plugin verdicts from
+apex-shell's `manifest.js`, and CI clones the shell from `main`, where it did not
+yet exist. The agent predicted that precisely, and the job went green on re-run
+with no change on either side. The vendoring coupling working as designed.
+
+## Standing instruction from Andre — 2026-09-03
+
+> "for the rest never ask questions just finish autonomously"
+
+Combined with an explicit "add whatever you want" for the idle-inhibit work and
+"put system stats wherever you think it should be". So: **make the judgement
+calls, do not stop to ask.** Report decisions and their reasoning afterwards
+rather than seeking approval beforehand.
+
+The two things that remain non-negotiable regardless, because both have already
+cost him something real: never mutate his live session or anything under his
+`~/.config`, and never let a suite pass without being able to fail.
+
 ## Working rules for this stack
 
 - **Every branch is stacked on the previous one**, and the bottom of the stack
@@ -45,16 +84,34 @@ is the technical debt §17 names.
       `p1/compositor-adapter`. 37 live assertions + 23 headless static ones.
       The facade selects its backend by URL so `Quickshell.Hyprland` is never
       parsed off Hyprland. Nothing is rewired yet; consumers move in 5.2.
-- [~] **5.2** Migrate consumers onto the facade. **Nearly done.** No file
-      outside `src/services/compositor/` imports `Quickshell.Hyprland` any
-      more. Migrated: CenterContent, IpcManager, ScreenRecService,
-      WallpaperService, QuickSettings (focus mode), ShellState (keybind
-      interception), PopupDismiss, Workspaces, LayoutDisplayer.
-      **Left:** `QuickSettings` screen shader + night light (both genuinely
-      Hyprland-only features, needing a `screenShader` capability), and
-      `SystemStats`' `hyprctl version` line. Keybind and display config
-      generation are 5.3, not 5.2. Compositor *name* checks that remain are
-      about appearance — labwc borders, the labwc dock — which §17 permits.
+- [x] **5.2** Migrate consumers onto the facade — **DONE**, apex-shell **PR #11**
+      (`p1/finish-5.2`), CI green. No file outside `src/services/compositor/`
+      imports `Quickshell.Hyprland`, and none spawns `hyprctl`.
+
+      The last two consumers became capabilities in `HyprlandBackend`:
+      `screenShader` (with the `.conf`/lua dialect split and the DPMS damage
+      cycle) and `nightLight` (hyprsunset, including adopting an
+      already-running one). Both tiles hide on `can.*`. niri and labwc declare
+      `false` with a reason — hyprsunset works through
+      `hyprland-ctm-control-v1`, so `wlsunset` would be the wlroots equivalent
+      and is not shipped; one line to flip later.
+
+      **A real bug fixed on the way:** the shader path was re-`find`ed at apply
+      time with the chosen name spliced into a `-name` pattern, so the name
+      reached a shell as code and an empty second `find` failed silently. It is
+      resolved once at list time and passed as an absolute path.
+
+      `SystemStats` gained per-backend `displayName` + `versionCommand` (argv
+      only), which **fixed labwc**: no branch matched there, so the row read
+      `WM: labwc:wlroots`. It now reads `WM: labwc 0.9.6`.
+
+      **The boundary is enforced rather than claimed.**
+      `check-compositor-backends.sh` scans `src/` *plus* `shell.qml` and fails
+      on any `hyprctl` spawn. Three files are allowlisted with reasons, each
+      asserted to *still* need it, and the matching is command-shaped rather
+      than "contains the word" — the Display page's own error text mentions
+      hyprctl in prose.
+
 - [x] **5.3** One settings model → generated compositor config. The gap was
       **labwc, not niri** — the shell already wrote Hyprland `.conf`/`.lua` and
       niri `.kdl`, while labwc's bindings were hand-maintained in `rc.xml`. That
@@ -83,6 +140,41 @@ is the technical debt §17 names.
       directory but enforced only textually, so a symlinked subdirectory escaped
       it with no `..` and no absolute path. Discovery now refuses any plugin
       containing a symlink at any depth.
+
+      **Extended by apex-shell PR #12** (`p1/plugin-points`): two more points,
+      `launcher-provider` and `quick-settings-tile`, each with a host, a working
+      example and coverage in both suite halves. API 1.0 → 1.1, additively.
+      275 headless / 98 static / 94 behavioural assertions.
+
+      The finding that mattered: `bar-widget` lets a plugin *paint*, but both new
+      points are inverted — the plugin returns data and the shell draws it. That
+      is a smaller capability and a much larger checking burden, because
+      `AppLauncher.activate()` dispatches on fields it finds on a row (`entry`
+      runs a DesktopEntry, `exec` reaches `bash -c`). A row carrying either would
+      be arbitrary execution granted to a plugin declaring **no** permissions —
+      the refused `system` permission through the back door. So results are built
+      from an **allowlist** into a fresh object, never a pass-through with bad
+      keys deleted, and the suite asserts the surviving key set *exactly* so it
+      holds for row fields the launcher does not have yet. A behavioural fixture
+      returns hostile rows whose `exec` is `touch /tmp/apex-plugin-breach`; the
+      file's absence is the assertion.
+
+      **The notification handler was declined, deliberately.** Reading
+      notification summaries and bodies — 2FA codes, message previews, reset
+      links — maps to nothing in the closed permission vocabulary. `secrets` is
+      nearest and is defined as a broker the plugin never sees through, the
+      opposite arrangement. Shipping it would need an invented sixth permission
+      or the shell's most sensitive stream with no declaration at all. Recorded
+      rather than invented. (*Emitting* a notification is a much smaller
+      capability and could be added under its own name.)
+
+      And a check that was green for the wrong reason: renaming the tile host's
+      `Loader.Error` handler kept the suite passing, because the file's own
+      header sentence satisfied the grep. Every host here documents its
+      invariants at length, so any check for a construct these files also
+      *discuss* was satisfiable by prose — the crash isolation could have been
+      deleted with CI still green. Comment lines are stripped before matching
+      now, across 14 assertions, **4 of them inherited from PR #9**.
 - [x] **5.5** Tests — covered by each item above rather than as a separate step.
 
 ### Phase 5 review — nine defects, seven fixed here
@@ -109,10 +201,169 @@ severe ones, all introduced by this branch:
 - One settle timer served both state helpers, so a fast failure could settle a
   slow success as `(false, null)`.
 
-Still open, both low severity: `focusedmon` was added to the focus events, so
-with `follow_mouse` crossing a monitor boundary now closes popups (unflagged
-behaviour change); and the facade suite encodes Hyprland's refcount semantics as
-universal, so it would fail on niri or labwc.
+Both of the remaining review items are now closed by PR #11:
+
+**`focusedmon` is kept, deliberately**, and recorded in the event list, the
+signal contract and `PopupDismiss`. `CompositorService` defines `focusMoved` as
+including "a different monitor", and niri and labwc already honour that half —
+dropping it would make Hyprland the one backend narrowing its own contract.
+
+And a correction to what I wrote: **`activemonitor` was never a Hyprland event.**
+`focusedmon`/`focusedmonv2` are in the binary; the only `activemonitor` string is
+`workspace.activemonitor`, a Lua hook. So the monitor half of `focusMoved` was
+simply unimplemented until `focusedmon` landed — the opposite of the "unflagged
+behaviour change" I recorded here.
+
+**The facade suite is honest now.** Backends declare `windowsPolled` /
+`titlePolled` — deliberately NOT capabilities, because the capability map answers
+"what can it do" and these answer "what does it cost". Each flat assertion became
+two, chosen by that flag. 48/48 on live Hyprland *and* 48/48 staged into nested
+labwc. "At least one toplevel" is an explicit precondition:
+`run-nested-labwc.sh` starts a filler window and fails if it dies, so an empty
+session goes red instead of passing vacuously.
+
+### Two things PR #11 surfaced that are NOT fixed
+
+- **`SystemStats` is registered in `src/services/qmldir` and instantiated
+  nowhere** — verified with a throwaway probe. It is dead code: wire it into an
+  About panel or delete it. Andre's call, not an agent's.
+- **`ShellState.qml:55` still branches on `Compositor.isLabwc`** for the caffeine
+  inhibitor — **now in flight** on `p1/idle-and-stats`, together with placing
+  `SystemStats`. Andre's constraint on the first: he must still be able to stop
+  idle with something, so a capability that makes the Caffeine tile disappear is
+  a regression, not a migration. If every backend can inhibit idle by some
+  route, the capability's job is to choose the *mechanism*, not gate the
+  feature.
+- Also flagged rather than changed, per its brief: the lua dialect interpolates
+  the shader path into a lua string as `'$1'`, so an apostrophe in a filename
+  would make `hyprctl eval` error. Not a shell injection — it is a bash argument
+  — and inherited verbatim.
+
+## `/tmp` was wiped mid-session, and it cost nothing
+
+Four of the coordinator's worktrees and one agent's vanished when `/tmp` was
+cleared. **Every branch they held was pushed and matched its remote**, so the
+loss was a `git worktree prune` and nothing else.
+
+This is the "commit and push every logical step" rule collecting on its premium.
+Worktrees under `/tmp` are convenient and disposable *only* while that holds — a
+single unpushed commit in one of them would have been gone with no warning and
+no way to tell what had been in it.
+
+## Resumed — and one hard rule added
+
+Restarted after the third pause. Every agent carries a new rule, now in the
+repo's root `AGENTS.md` (branch `docs/live-config-edit-rule`), because breaking
+it destroyed Andre's live desktop mid-session:
+
+A one-line substitution using Python `re.S` deleted **217 of 256 lines** from his
+live `~/.config/hypr/hyprland.conf` — under DOTALL a trailing `.*$` matches to
+the end of the FILE, not the line. Every `exec-once` went with it: next reboot,
+no shell, no wallpaper daemon, no polkit agent, no clipboard, no input method.
+
+The check I ran afterwards could not have caught it. I grepped for the line I had
+just added, found it, and moved on — **grepping for what you added cannot detect
+what you deleted.** `Hyprland --verify-config` and `hyprctl reload` both said
+`ok`, because a truncated config is still a valid one.
+
+Recovery took two minutes only because a `.pre-browser-fix` backup existed.
+`hyprctl reload` re-reads config but does **not** re-run `exec-once`, so each
+dead service had to be restarted with `hyprctl dispatch exec`. And `pgrep -f`
+reported five of them as running when none were, because it matched this shell's
+own command line.
+
+Full write-up in the memory vault at
+`errors-and-fixes/re-dotall-truncated-the-live-hyprland-config`.
+
+## PAUSED (third time) — 2026-09-03
+
+All work stopped at Andre's request. **Nothing uncommitted, nothing unpushed**,
+verified by sweeping every worktree in both repos.
+
+One worktree was dirty and is now checkpointed: `p1/gaming-profiles` held a
+complete 109-assertion `tests/test-apex-gaming.sh` plus its CI wiring, none of
+it committed. It passes and is shellcheck-clean, **but no assertion has been
+mutation-checked**, so 109/0 is not yet evidence of anything. That is the next
+step on that branch and the commit says so.
+
+Branches in flight, all pushed:
+
+| Branch | Repo | State |
+|--------|------|-------|
+| `p1/finish-5.2` | apex-shell | pushed, unreported |
+| `p1/plugin-points` | apex-shell | pushed, unreported |
+| `p1/blueprint-editor` | apex-shell | **PR #10 open**, unreported |
+| `p1/gaming-profiles` | apex-os | suite checkpointed, mutation pass owed |
+| `p1/deferred-items` | apex-os | pushed, was on the `apex plugin` CLI when stopped |
+| `p1/blueprint-write` | apex-os | done — `apex blueprint set` |
+| `feat/zen-browser` | apex-os | done — **PR #32** |
+| `feat/labwc-default-browser` | apex-os | done |
+| `fix/core-system-release-branding` | apex-os | done — **PR #31** |
+| `p1/integration` | apex-os | done — **PR #30**, all four phases |
+
+**Still not merged to `apex-os/main`, so no image has been built.**
+
+### Fixed: niri had no application keybinds — apex-shell PR #13
+
+**On niri, SUPER+W / SUPER+T / SUPER+E did not exist.** `KeybindService._genKdl`
+has `if (e.type) continue`, commented "native compositor actions remain in
+niri's own config" — which also skips every `type: "exec"` app-launch bind. So
+niri users got the shell popups and no application shortcuts at all.
+
+Fixed on `p1/niri-app-keybinds`. Applications become `spawn` with one argv token
+each — niri execs without a shell, so `$browser` had to be resolved or `execvp`
+would take it as a literal filename. Window actions map onto niri's column
+model; what niri genuinely lacks (pseudo-tiling, toggle-split, scratchpad) is
+emitted as a comment naming the dispatcher rather than vanishing. All 13 action
+names were verified against the installed `niri msg action --help` before being
+written, and the suite re-verifies them — niri rejects a bad include
+**wholesale**, so one wrong verb costs the user every binding in the file.
+
+Two of my own test bugs in that work, both the same family as PR #12's: a check
+for "the blanket `if (e.type) continue` is gone" **failed** against a file where
+it is gone, because the comment explaining the removal quotes it; and
+`sed -n '/_niriActions: ({/,/})/p'` stopped at the first `})` — a nested map —
+so it checked 7 of 13 names and the other 6 were never verified at all.
+
+## Two gaps the tracker did not show — 2026-09-03
+
+Auditing P1 against the roadmap rather than against this file turned up two
+things nothing had recorded:
+
+**§10 had no write verb.** `blueprint show/diff/init`, `apply`, `sync
+export/show/import` — read, compare, seed, converge, transfer. Nothing wrote a
+blueprint. The agent sent to build §10's GUI editor stopped before implementing
+and said so, which was correct: the only write-shaped verb was `sync import`,
+which consumes a *bundle*, so the shell would have had to author bundle TOML —
+the schema reimplemented with extra steps. `apex blueprint set --json -` now
+exists (`p1/blueprint-write`), reusing the same normalise + validate + to_toml +
+atomic write a hand-edited file goes through.
+
+**Every P1 verb is missing from the shell completions.** `files/desktop/shell/agent.sh`
+completes `agent`, `project`, `request` and `secret` — the P0 verbs — and its
+top-level list has none of `env resolve blueprint apply sync mode workload perf`.
+The CLI shipped; its shell integration did not follow.
+
+## Finishing the deferred items — 2026-09-03
+
+The four phases are done and integrated (PR #30). Five things were deferred
+along the way, and Andre asked for all of P1 finished, so they are now in flight
+in parallel worktrees:
+
+| Work | Branch | Repo |
+|------|--------|------|
+| finish 5.2 (screen shader, night light, SystemStats) + the two open review items | `p1/finish-5.2` | apex-shell |
+| §16 more extension points (launcher provider, quick-settings tile) | `p1/plugin-points` | apex-shell |
+| §10 GUI blueprint editor (7.4) | `p1/blueprint-editor` | apex-shell |
+| §10 `apex blueprint set` — the write verb the editor needs | `p1/blueprint-write` | apex-os |
+| shell completions for every P1 verb | `p1/completions` | apex-os |
+| §12 controller-first gaming + per-game profiles (8.4) | `p1/gaming-profiles` | apex-os |
+| §8 GUI export, §10 `[development] languages` convergence, §16 `apex plugin` CLI | `p1/deferred-items` | apex-os |
+
+The two apex-os branches are off `p1/integration`, so they already contain all
+four phases — which is what unblocks two of them: 8.4 needed phase 7's schema
+for per-game profile storage, and the languages convergence needed phase 6's
+capsules.
 
 ## PAUSED (second time) — 2026-09-03, P1 complete
 
@@ -129,10 +380,80 @@ unpushed, in either repo, verified by sweeping every worktree.
 | Phase 8 modes + workloads | apex-os **#27** | done |
 | MT7925 wifi resume fix | apex-os **#26** | done |
 
-**Nothing is merged to `apex-os/main`, so no image has been built.** The four
-branches are stacked and all touch `apexd/apex/src/main.rs`; integration is a
-real step, not a formality. Merging only the tip lands everything and produces
+**Nothing is merged to `apex-os/main`, so no image has been built.**
+
+**Integration is done: `p1/integration`, PR #30.** That is the branch to merge
+when the final build is wanted — it lands all four phases and produces exactly
 one build.
+
+Integrating early paid for itself. Git saw two conflicts, both trivial. The one
+that mattered was invisible to it: phase 7's blueprint and phase 8's modes each
+export a type called `Step`, both re-exported at the crate root, so the merged
+workspace did not compile (E0252). Every branch was green alone and the merge
+was clean — only building the result finds that.
+
+Verified on the merged tree: builds, 246 Rust tests, shell suites 35 / 154 / 88
+/ 105 / 67 / 54, clippy and shellcheck clean.
+
+Two integration lessons worth keeping:
+
+- **`test-labwc-keybinds.sh` failed three assertions for a reason unrelated to
+  the code.** Its shell-tree discovery tries `$ROOT/../apex-shell` and otherwise
+  falls back to the installed `/usr/share/apex-shell` — and in a git worktree the
+  fallback is always taken, where the installed shell is whatever the last image
+  shipped. It was silent about that, so staleness read as regression. It now
+  prints which tree it picked and warns when that tree is the installed one.
+- **I committed conflict markers into `pr-validation.yml`.** The final merge
+  conflicted in three places there as well as in `main.rs` and this file; I read
+  the merge output through `tail -5`, saw only the last two, fixed those, and
+  then "verified" with a grep over exactly the files I had just fixed. `git add
+  -A` did the rest. GitHub rejected the workflow outright — a 0-second run with
+  "likely a workflow file issue" — which is the only reason it was caught.
+
+  The rule that would have caught it: after resolving a merge, grep the WHOLE
+  TREE for markers, not the files you remember touching. `git diff --check` and
+  `git status` both say so plainly and neither was consulted.
+
+### The weekly `core` build — FIXED, PR #31
+
+Red every Monday since ~2026-08-24 on `/etc/system-release not branded`.
+
+**Root cause.** `Containerfile.core` de-brands by writing `/usr/lib/fedora-release`
+and *inheriting* the `/etc` entries that point at it. In the base image those are
+not ordinary symlinks — they are hardlinked ones carried out of the ostree commit
+(`/etc/system-release` and `/etc/redhat-release` share an inode, nlink=3). The
+image never wrote them; it hoped the builder would carry them through 45 layer
+commits intact.
+
+In the failing builds `/etc/system-release` existed and was readable but still
+said `Fedora release 43`, while `/usr/lib/fedora-release`, written in the same
+layer, said `APEX-OS release 43`. That is a flattened symlink: content snapshotted
+at copy-up, no longer tracking its target.
+
+**What moved.** GitHub's `ubuntu-24.04` runner image `20260810.271` (2026-08-11)
+replaced distro podman 4.9.3 with a bundled 5.8.4 — exactly the gap between the
+last green fresh `core` (08-03, runner `20260720.247`) and the first red one
+(08-17, runner `20260810.271.1`). GitHub withdrew it in `20260831.293` citing
+"unexpected container storage behavior… corrupted images" and "conflicts between
+the bundled and distribution-provided Podman installations".
+
+The corruption could not be reproduced on a clean host, and the report says so
+rather than overclaiming. What *is* established: the Containerfile is correct on
+a healthy builder, the package graph is clean, and the only thing that changed in
+the window is the runner's podman.
+
+**The fix** re-creates the seven `/etc` entries and — the part that matters —
+**asserts through `/etc`**. The old block asserted `/usr/lib/os-release` three
+ways and asserted nothing through `/etc`, which is why a wrong image built green
+and only died 45 minutes later in verify, on a cron nobody watches. Same shape as
+the `-ge 30` assertion in the labwc suite: the check pointed at something other
+than the thing that could break.
+
+Verified with real layered builds on the Katana under podman 5.8.4, including two
+controls: flattening `/etc/system-release` makes the check FAIL (so it can still
+catch an unbranded file), and the OLD de-branding code applied to that broken
+image also FAILS — which is what shows the fix does real work rather than riding
+on GitHub's podman rollback.
 
 ### The one unfinished thread: the weekly `core` build
 
@@ -246,8 +567,26 @@ apex-os **PR #29**, branch `p1/capsules-and-packages`. All CI green.
 - [x] **6.3** Resolver built *into* `apex-pkg` rather than beside it:
       `apex resolve`, `apex install --source rpm|flatpak|capsule [--env NAME]`,
       `apex search` across repos and Flathub, provenance on every install.
-- [ ] GUI export via `distrobox-export` — §8 says "when useful"; needs a real
-      desktop to verify. Deferred.
+- [x] GUI export via `distrobox-export` — apex-os **PR #34**, now fully green.
+      `apex env export / unexport / exports`. `distrobox-export` only runs
+      *inside* a container and reaches back through `/run/host`, so there is no
+      host-side program to call: the host side is
+      `distrobox enter --no-tty <capsule> -- distrobox-export --app <name>`.
+      No root, no polkit.
+
+      The host `.desktop` filename is **recorded, not derived**, and `unexport`
+      deletes recorded names — never a `<capsule>-*.desktop` glob, because
+      capsule `shell` and capsule `shell-x` are both valid names.
+
+      That distinction survived only because of a mutation: the assertion
+      "recorded, not derived" **passed against a deriving implementation**, since
+      the fixture's name happened to equal what derivation produces. Only
+      mutating the code exposed it.
+
+      Two more process findings from that PR worth carrying: the known-red step
+      was originally mid-job, where it would have silently skipped four suites
+      and the ShellCheck gate below it; and the suite assumed `/usr/bin/node`,
+      which would have produced ~50 spurious failures on the runner.
 - [x] **6.4** Tests.
 
 `apex install <bare-name>` behaves exactly as before: an exact-name RPM still
@@ -396,8 +735,41 @@ the compiled binary, 43 Rust unit tests, two static CI checks.
       measurement each run) and re-measuring afterwards to report residual drift.
 - [x] **7.3** `apex sync export / show / import`. Import converges nothing and
       will not clobber an existing blueprint without `--force`.
-- [ ] **7.4** GUI editing — deferred; it is apex-shell work. The schema
-      round-trips losslessly so the editor has something to write.
+- [x] **7.4** GUI editing — apex-shell **PR #10**, branch `p1/blueprint-editor`.
+      CI green, and the job log confirms the suites *executed* rather than
+      skipping (75 assertions on CI, 80 locally — the 5-assertion gap is a
+      vocabulary-parity block needing apex-os checked out beside the shell, and
+      it is deliberately **not** a skip: the Node suite asserts the vocabularies
+      regardless).
+
+      Config → Blueprint reads with `blueprint show --json`, stages edits in
+      memory, writes back through `blueprint set --json -`. **No TOML is
+      authored anywhere.** The TOML shown is the CLI rendering the *saved* file;
+      there is no preview of unsaved state, because no verb renders a draft and
+      writing one would be the schema implemented twice.
+
+      Nine mutation-tested assertions pin the write path: exactly one write
+      command, entered from exactly one place (inside the digest re-read handler,
+      so the stale guard cannot be bypassed), no plan command may name a writing
+      verb, and no `sed -i` / `tee` / `truncate` / shell redirection anywhere. A
+      `sed -i` writer and a `printf > "$1"` writer both go red.
+
+      **A bug found in its own review:** `available` gated every section
+      including Reload, and the plan path latched it false on any `diff` exit > 1
+      — so one transient failure collapsed the page to a false "not available"
+      with no escape. Cause worth remembering: DisplayService's flag was copied
+      without the property that `refresh()` clears it.
+
+      **Known and accepted:** the first GUI save reformats inline arrays, because
+      `to_toml()` is `toml::to_string_pretty`. Semantically lossless — same
+      blueprint, same digest, no invented `version` — and the digest surviving it
+      is load-bearing, since a moved digest would trip the stale guard on the
+      page's own write. Fixing the formatting in QML would be the forbidden
+      second TOML writer.
+
+      **Not verified: the QML page has never been rendered.** `qmllint` clean and
+      statically checked, but the round trip is proven at the JSON/CLI boundary,
+      not through the GUI. Inert until apex-os `p1/blueprint-write` merges.
 - [x] **7.5** Tests.
 
 **`apply` never runs `sudo`.** It converges the privilege domain it is already
@@ -432,10 +804,51 @@ assertions + 67 in `tests/test-apex-modes.sh` against the built binary.
       taken literally.
 - [x] **8.3** `apex perf` — clocks, power, temps, VRAM, sched-ext state. Frame
       time is reported unavailable *with the reason* rather than substituted.
-- [ ] **8.4** Controller-first / per-game profiles — deferred, and it was the
-      stated lowest priority. `apex-gaming-session` already gives boot-to-game;
-      per-game profile *storage* wants a schema decision that belongs with
-      phase 7's blueprint.
+- [x] **8.4** Controller-first / per-game profiles — apex-os **PR #33**, all
+      checks green.
+
+      **Storage: `~/.config/apex/games.toml`, a separate user-owned file, not a
+      blueprint section.** The deciding argument is the blueprint's own stated
+      contract — "the only file a person or a future GUI edits… nothing in APEX
+      ever rewrites it behind the user's back" — and `apex game profile set` is
+      a program that writes. It is still *desired* state on the test that
+      matters: only an explicit user command causes a write, never a reconcile
+      or a probe, and nothing reads it back as a measurement. `apex sync`
+      deliberately does not carry it.
+
+      **A latent bug in 8.1 that 8.4 does not inherit.** Read out of
+      `game_enter` rather than assumed: the daemon applies the *sysprofile's*
+      `[game] tier` and `fan_mode` **after** `GameMode.SetActive`, so a
+      per-title tier must be re-asserted afterwards and the fan step must be
+      last. `apex mode set gaming` has the same exposure and is invisible only
+      because every shipped sysprofile uses `performance` for both. Left alone
+      on purpose — it is 8.1's code — but it is real and it is written down.
+
+      Per-game `scheduler`/`gpu` are **refused, not accepted and ignored**: no
+      D-Bus member sets either per title, so the keys exist only to say where
+      the setting really lives.
+
+      Controller-first was already built, so it was not rebuilt. What was
+      missing is that nothing could answer "will Gaming Mode start here?"
+      without rebooting into it; `apex gaming` measures what the session checks
+      and separates blockers from warnings using the session's own list.
+
+      **The mutation pass found a real bug in its own suite:** seven hostile-id
+      assertions were passing on a *clap usage error*, not the id check —
+      `--fan` after the `--` makes clap exit 2 for every id, legal ones
+      included. Fixed twice over: the option moved before the `--`, and a
+      refusal must now match its message, since 2 is also clap's usage code.
+      Two process errors also worth naming: a static-check run reported all four
+      mutations "caught" when the check script did not exist (bash exit 127),
+      and a final verification failed against a **stale binary**, because
+      reverting source does not rebuild.
+
+      **Left undone, with reasons:** no launch wrapper — it needs a real Steam
+      install to verify, and an unverified exec path where every game starts is
+      worse than none. Nothing restores on exit, and `show` says so. No real
+      controller, no real Steam, and `apply` against a live daemon is exercised
+      only as a refusal. A gamepad still cannot pick the session at the greeter,
+      which is apex-shell work.
 - [x] **8.5** Tests.
 
 **A real bug, found by running it rather than reading it:** `apex perf` printed
