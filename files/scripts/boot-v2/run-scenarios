@@ -42,7 +42,11 @@ done
 
 ALL=(prereq signed-uki reproducible negative-unsigned negative-foreign
      negative-tampered entry-layout boot-counting)
-if (( LIST )); then printf '%s\n' "${ALL[@]}"; exit 0; fi
+# Scenarios needing something the container cannot produce for itself. Kept OUT
+# of ALL so a default run cannot silently skip them and still report success:
+# they are requested by name and hard-fail when their input is missing.
+STAGED=(apex-image)
+if (( LIST )); then printf '%s\n' "${ALL[@]}" "${STAGED[@]}"; exit 0; fi
 (( ${#SCENARIOS[@]} )) || SCENARIOS=("${ALL[@]}")
 
 KVER="$(cat /etc/apex-bootlab-kver 2>/dev/null || true)"
@@ -391,6 +395,141 @@ scenario_boot_counting() {
     vm_boot --disk "$disk" --vars "$vars" --name count-fallback2 \
             --serial "$WORK/serial-count-fallback2.log" --timeout 120 || true
     assert_serial_has "$WORK/serial-count-fallback2.log" "apex.bootlab.entry=good"
+}
+
+# ── scenarios needing a staged APEX root (see apex-stage-root) ──────────────
+
+scenario_apex_image() {
+    log "apex-image: a UKI built from a real APEX kernel and the real APEX initramfs"
+    fixtures
+    local root="$WORK/apex-root"
+    # Hard-fail rather than skip. This is the scenario that substantiates
+    # "produced reproducibly from an APEX image"; a version of it that quietly
+    # passed without the image would be worse than not having it.
+    [[ -d "$root" ]] || die "no staged APEX root at $root.
+    Run, on an APEX host:
+      sudo files/scripts/boot-v2/apex-stage-root --output <workdir>/out/apex-root
+    Reading /usr/lib/modules/<kver>/initramfs.img needs root; it is mode 0600."
+
+    local kver
+    kver="$(find "$root/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')"
+    info "staged kernel $kver"
+
+    # A dracut hook, delivered as a second initramfs archive rather than by
+    # rebuilding the APEX initramfs. The kernel concatenates initrd images and
+    # later archives overlay earlier ones, so this adds one file to a 369 MB
+    # image the boot lab never has to regenerate — and, more importantly, the
+    # image under test stays byte-identical to the one on the machine.
+    #
+    # The path is var/lib/dracut/hooks/pre-mount and NOT usr/lib/dracut/hooks:
+    # in this initramfs the latter is a symlink to ../../../var/lib/dracut/hooks,
+    # and a cpio that created usr/lib/dracut/hooks as a real directory would
+    # shadow the symlink and lose every hook already in it.
+    local hookdir="$WORK/hook/var/lib/dracut/hooks/pre-mount"
+    rm -rf "$WORK/hook"; mkdir -p "$hookdir"
+    cat > "$hookdir/50-apex-vmprobe.sh" <<'HOOK'
+#!/bin/sh
+# APEX boot-lab probe. Runs inside the REAL APEX initramfs, at dracut's
+# pre-mount hook point — after udev has settled and the modules are loaded,
+# before it tries to find a root filesystem the boot lab's disk does not have.
+#
+# Getting a line out of a dracut hook onto the serial port took three
+# attempts, and each failure looked like "the UKI did not boot":
+#
+#   1. `echo` — dracut-pre-mount.service is StandardOutput=syslog, so it
+#      landed in the journal of a machine that was about to power off.
+#   2. /dev/kmsg with no priority prefix — Fedora builds the kernel with
+#      CONFIG_CONSOLE_LOGLEVEL_DEFAULT=4, so an unprefixed (KERN_WARNING)
+#      message is filtered off the console. The same filtering is why the
+#      kernel's own KERN_INFO "Command line:" line is absent from the log.
+#   3. Both of the below.
+#
+# /dev/console goes through the tty layer to every registered console with no
+# printk filtering; the `<0>` kmsg write is the belt to that braces, and also
+# timestamps the marker in the log so the ordering is legible.
+say() {
+    printf 'APEX-BOOTLAB: %s\n' "$*" > /dev/console 2>/dev/null || true
+    printf '<0>APEX-BOOTLAB: %s\n' "$*" > /dev/kmsg 2>/dev/null || true
+}
+say "apex-initramfs-reached"
+say "cmdline=$(cat /proc/cmdline)"
+say "initramfs-release=$(tr '\n' ' ' < /etc/initrd-release 2>/dev/null)"
+say "clean-poweroff"
+# The guest must power off rather than continue into a root-device search that
+# would time out: a timeout kill is not a successful boot, and this harness
+# refuses to count one.
+poweroff -f 2>/dev/null || reboot -f -p 2>/dev/null || echo o > /proc/sysrq-trigger
+HOOK
+    chmod 0755 "$hookdir/50-apex-vmprobe.sh"
+    ( cd "$WORK/hook" && find . -print0 | cpio --null -o -H newc --quiet ) \
+        > "$WORK/apex-hook.cpio"
+    [[ -s "$WORK/apex-hook.cpio" ]] || { bad "the hook cpio is empty"; return; }
+    ok "built a $(stat -c %s "$WORK/apex-hook.cpio")-byte dracut pre-mount addendum"
+
+    # No --allow-no-ucode. A dracut initramfs prepends an uncompressed cpio of
+    # kernel/x86/microcode/*, and apex-mkuki must find it: this is the
+    # assertion that §22's "microcode in the UKI" is satisfied on the real
+    # image rather than waved through.
+    local uki="$WORK/uki-apex.efi"
+    "$HERE/apex-mkuki" --output "$uki" --from-root "$root" \
+        --cmdline "$CMDLINE_BASE apex.bootlab.entry=apeximage rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+        --deployment apeximage --variant gaming \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --extra-initrd "$WORK/apex-hook.cpio" >/dev/null \
+        || { bad "apex-mkuki failed on the real APEX root"; return; }
+
+    # The metadata must describe the APEX image, not the lab. Read back out of
+    # the PE section table of the signed artifact.
+    local meta
+    meta="$(python3 "$HERE/pe-section.py" "$uki" .apexinf)"
+    local got
+    got="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["kernelVersion"])' "$meta")"
+    assert_eq "$kver" "$got" ".apexinf kernelVersion matches the staged APEX kernel"
+    got="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["microcode"])' "$meta")"
+    assert_eq "embedded-in-initrd" "$got" ".apexinf microcode state"
+    got="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["variant"])' "$meta")"
+    assert_eq "gaming" "$got" ".apexinf variant"
+    # The .osrel section comes from the APEX image, which is what makes the
+    # boot menu and `bootctl list` say APEX-OS instead of Fedora.
+    if python3 "$HERE/pe-section.py" "$uki" .osrel | grep -qi 'APEX'; then
+        ok ".osrel names APEX rather than the boot lab's own os-release"
+    else
+        bad ".osrel does not mention APEX — the wrong os-release was embedded"
+    fi
+
+    local disk="$WORK/disk-apex.img" vars="$WORK/vars-apex-image.fd"
+    local ser="$WORK/serial-apex-image.log"
+    # 1 GiB: the UKI is ~390 MB, and an ESP too small fails at mcopy rather
+    # than at boot, which is at least an honest failure.
+    "$HERE/apex-mkesp" --disk "$disk" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "apeximage:0:$uki" --default 'apex-apeximage*' >/dev/null
+    fresh_vars "$vars"
+    local rc=0
+    # More RAM and a longer timeout than the micro guest: this initramfs is
+    # 369 MB and the kernel copies it before it runs.
+    vm_boot --disk "$disk" --vars "$vars" --name apex-image --serial "$ser" \
+            --mem 4096 --timeout 240 || rc=$?
+    assert_eq 0 "$rc" "qemu exit status (clean guest poweroff)"
+    assert_serial_has "$ser" "APEX-BOOTLAB: apex-initramfs-reached"
+    assert_serial_has "$ser" "APEX-BOOTLAB: clean-poweroff"
+    assert_serial_has "$ser" "apex.bootlab.entry=apeximage"
+    # sd-stub's own banner, printed by the stub before it hands control to the
+    # kernel. This is stronger evidence than reading the StubInfo EFI variable
+    # back from userspace — that assertion belongs to the micro guest, which
+    # mounts efivarfs itself; here the line is emitted by the stub, and it
+    # names the image, so it proves both that a UKI stub ran AND that the
+    # .osrel inside it came from APEX.
+    assert_serial_has "$ser" "Booting initrd of "
+    if grep -aq 'Booting initrd of.*APEX-OS' "$ser"; then
+        ok "sd-stub announced an APEX-OS initrd"
+    else
+        bad "sd-stub's banner does not name APEX-OS: $(grep -ao 'Booting initrd of[^\r]*' "$ser" | head -1)"
+    fi
+    # The real initramfs identifies itself. A synthetic guest could not produce
+    # this line, so it is what distinguishes "the APEX initramfs ran" from "an
+    # initramfs ran".
+    assert_serial_has "$ser" 'APEX-BOOTLAB: initramfs-release=NAME="APEX-OS"'
 }
 
 # ── run ─────────────────────────────────────────────────────────────────────
