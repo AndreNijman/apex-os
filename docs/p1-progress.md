@@ -432,10 +432,9 @@ assertions + 67 in `tests/test-apex-modes.sh` against the built binary.
       taken literally.
 - [x] **8.3** `apex perf` — clocks, power, temps, VRAM, sched-ext state. Frame
       time is reported unavailable *with the reason* rather than substituted.
-- [ ] **8.4** Controller-first / per-game profiles — deferred, and it was the
-      stated lowest priority. `apex-gaming-session` already gives boot-to-game;
-      per-game profile *storage* wants a schema decision that belongs with
-      phase 7's blueprint.
+- [x] **8.4** Controller-first / per-game profiles — **DONE**, on branch
+      `p1/gaming-profiles`, off `p1/integration`. Phase 7 landing is what
+      unblocked it: the schema decision it was waiting on is recorded below.
 - [x] **8.5** Tests.
 
 **A real bug, found by running it rather than reading it:** `apex perf` printed
@@ -473,17 +472,176 @@ free as a top-level verb — the existing `Mode` is `apex fan mode`.
 - [x] **8.3** `apex perf` — CPU/GPU clocks, power, temperatures, VRAM, sched-ext
       state, game cpuset. **Frame time is reported as unavailable with the
       reason** and nothing is substituted for it. 20 assertions.
-- [ ] **8.4** Controller-first boot-to-game and per-game profiles. **Not done**,
-      and it was the explicitly lowest-priority item. The gamescope session
-      (`files/system/libexec/apex-gaming-session`) already gives a
-      controller-first boot-to-game path; what is missing is per-game profile
-      storage and selection, which wants a schema decision that belongs with
-      phase 7's blueprint rather than being invented here.
+- [x] **8.4** Controller-first boot-to-game and per-game profiles. **DONE** —
+      see "Phase 8.4" below for the storage decision, the two ordering rules,
+      and what is left undone on purpose.
 - [x] **8.5** `tests/test-apex-modes.sh` — 58 assertions against the built
       binary, wired into the **`rust`** job (the only one with a toolchain).
       `tests/` was added to that job's path selector: a PR touching only the
       suite set `engine=true`/`rust=false`, so it would never have run, and
       `result` would have passed anyway because a skipped job counts as success.
+
+## Phase 8.4 — per-game profiles + boot-to-game readiness — DONE
+
+Branch `p1/gaming-profiles`, off `p1/integration` (the only base with all four
+P1 phases built and tested together). 36 + 39 Rust assertions, 109 in
+`tests/test-apex-gaming.sh`, and a four-part static CI check. Every one of them
+was mutation-verified — see the end of this section, because the mutation pass
+is what found the real bug.
+
+### The storage decision, and why it is not the blueprint
+
+Per-game profiles live in **`~/.config/apex/games.toml`**, beside the blueprint
+and not inside it. The deciding argument is the blueprint's own stated
+contract, quoted from `apexd-core/src/blueprint.rs`:
+
+> **Desired** — `Blueprint`. Hand-written, user-owned, the only file a person
+> or a future GUI edits […] Nothing in APEX ever rewrites it behind the user's
+> back.
+
+`apex game profile set` is a program that writes. Putting a program-written
+table inside the one file whose contract is that no program writes it breaks
+that contract directly — and for every user who runs the convenience verb
+rather than hand-editing TOML, which is most of them.
+
+Two supporting reasons: a blueprint describes one *machine* and is meant to
+stay short and hand-readable, while a games file grows one entry per title; and
+every blueprint section is either converged or carries a `blocked` reason,
+whereas a game profile is *selected* when a game runs and would have to become
+a third kind of section. §10 already pays for two.
+
+**It is still desired state, not generated state**, on the test that matters —
+what causes a write. It is written only in response to an explicit user
+command, never by a reconcile, a timer or a probe, and nothing reads it back as
+a measurement (applying re-reads the machine over D-Bus, as `apex mode set`
+does). So it keeps `deny_unknown_fields` and stays hand-editable.
+
+`apex sync` does **not** carry it, and that is a decision rather than an
+oversight: it would need the no-credentials assertion extended to plant a
+sentinel in a profile and prove it does not travel. The requirement was that
+the storage round-trip losslessly, which it does; sync is a separate question.
+
+### What a profile can set, and what is refused
+
+Executable, all three behind `manage-power`, which ships `allow_active = yes` —
+verified against `files/system/polkit-1/actions/org.apexos.apexd.policy` and
+the daemon's `authorize(..., ACTION_POWER)` calls **before** any step was
+emitted, because a per-game lever behind an `auth_admin` action would be a
+password prompt in the area that has burned this repository twice:
+
+- `mode` — a §11 mode, itself tier + auto-switch + game mode;
+- `tier` — an override of that mode's tier, for one title;
+- `fan` — `Fan.SetMode`, the one lever `apex mode` models and never touched.
+
+**A per-game `scheduler` or `gpu` is refused, not accepted and ignored.** Both
+already exist and both are chosen by the *sysprofile*'s `[game]` section and
+applied by the daemon when game mode starts; there is no D-Bus member that sets
+either per title. So the keys exist in the schema for the sole purpose of
+producing a message that says where the setting really lives. That follows
+5.4's precedent (refuse a permission rather than ship one that grants nothing)
+over §11's (model a service set and report it), because the failure here is a
+user believing their game runs under `scx_rusty` when it does not. They are
+still composed at mode granularity: `mode = "gaming"` is what turns them on.
+
+### Two ordering rules, from reading the daemon rather than guessing
+
+`apexd/src/game.rs::game_enter` applies the **sysprofile's** `[game] tier` and
+`[game] fan_mode` *after* entering game mode. So:
+
+1. **A pinned tier is set again after `GameMode.SetActive`.** Without it, a
+   profile asking for `balanced` on a machine whose sysprofile pins
+   `performance` reports success and lands on performance. The CLI cannot read
+   that value — it is daemon-side — so re-asserting is the only correct move.
+2. **The fan step is last of all**, for the same reason one lever along.
+
+**This is a latent bug in 8.1 that 8.4 did not inherit.** `apex mode set
+gaming` sets the tier and then enters game mode, so `game_enter` overwrites it
+with `cfg.tier`. It is invisible today only because every shipped sysprofile
+uses `performance` for both. `mode::plan` was deliberately left alone — changing
+phase 8's frozen semantics on this branch is scope creep — but whoever touches
+`apex mode` next should fix it there.
+
+### `apex gaming` — what was genuinely missing
+
+§12's Desktop/Gaming split is **already built** and was not rebuilt:
+`apex-gaming.desktop`, `apex-gaming-session` (gamescope straight to KMS, Steam
+`-gamepadui`, fail-safe bounce to the greeter) and `apex-session-select` with
+its NOPASSWD rule. What nothing could do was answer *"will Gaming Mode start
+here?"* before rebooting into it — the session's only preflight is a `FATAL` at
+start-up that bounces to the greeter and guesses at the cause in a log nobody
+sees. `apex gaming` measures every requirement the session checks, with the
+path measured or a reason it could not be, and separates blockers from warnings
+using the session's own hard-requirement list so it cannot report "ready" about
+a session that would then FATAL.
+
+`Probe` takes a root **and** a separate `probe_programs` switch, for the reason
+`RealWriter` needs `sys_root` and `host_commands` separately: no fixture root
+redirects a PATH lookup. Gamepads are read from
+`/sys/class/input/*/capabilities/key`, never `/dev/input/event*` — `/dev` is
+not under a fixture root, so a `/dev` probe would collapse the assertion into
+"is a controller plugged in right now". Two things about that bitmap that a
+fixture would have hidden: the kernel **elides leading zero words**, so words
+must be indexed from the right; and the word width belongs to the **reading**
+process, because `input_bits_to_string` splits each long under
+`in_compat_syscall`. An earlier draft guessed the width from the string's
+length, which is wrong for any 64-bit device whose top word is small — caught
+by the 32-bit test failing.
+
+### Left undone, deliberately
+
+- **No launch wrapper.** The honest equivalent of SteamOS's per-game
+  application is `apex game launch -- %command%`: resolve the AppID from
+  Steam's environment, apply, spawn, restore on exit. It needs a real Steam
+  install, a real title and real launch options to verify, none of which this
+  machine has, and an unverified exec path in the position where *every* game
+  starts is worse than none — its failure mode is "the game does not launch"
+  and the user cannot tell whether APEX or Proton broke it. What ships is
+  `apex game profile launch-command`, which prints
+  `apex game profile apply <id> && %command%`, built only from verbs that
+  exist. `show` states plainly that applying does not undo itself.
+- **Nothing restores on exit**, following from the above. `apex mode set daily`
+  or `apex game stop` is the explicit leave step. `apex-gaming-session` has the
+  same exposure and accepts it with a trap.
+- **Not verified on hardware:** a real controller, a real Steam install, and
+  `apply` against a live daemon. Every `apply` in the suite runs against a
+  redirected D-Bus address, so the executed path is proven only as a refusal;
+  the plan → step mapping is proven by unit tests over all 48
+  start-state/mode combinations.
+- **A gamepad cannot pick the session at the greeter.** That is apex-shell's
+  greeter UI, not apex-os, so "controller-first" is true of the session and not
+  yet of the login screen.
+
+### The mutation pass, and the bug it found
+
+Eleven source mutations and four static-check mutations, each verified to
+differ from the original and to compile before any red was believed. All
+fifteen were caught.
+
+**One of them found a vacuous assertion, which is the whole reason to do this.**
+A mutant that accepted *every* game id reddened only two assertions and left
+green the seven that name specific hostile ids. The cause was argument order:
+`game profile set -- "$badid" --fan max` puts `--fan` after the `--`, so clap
+rejects it as an unexpected positional and exits 2 — for every id, legal ones
+included. Verified directly: a legal `620` took the same path and produced the
+same exit code, so the loop asserted nothing about ids at all. Fixed twice
+over, because the first fix alone leaves the trap re-armable: the option moved
+before the `--`, and a refusal must now be identified by its message as well as
+its exit code, since 2 is also clap's usage-error code.
+
+A second, smaller lesson: an early run of the static-check mutations reported
+all four "caught" when the check script did not exist — bash exited 127 and a
+driver that only looked for "non-zero" believed it. The driver now runs the
+control first and refuses to credit a red that arrives without the check's own
+`FATAL`.
+
+### The safety record for this branch
+
+Zero polkit or keyring prompt events, `sched_ext` still `disabled`, no `scx_`
+process, and the platform profile unchanged — checked after the fact, with
+`ps -eo comm=` rather than `pgrep -f`, which would have matched the checking
+command's own arguments. The suite's tripwire does not use process matching at
+all: forbidden tools are fake executables that append to a log, and three
+self-tests prove that log still records.
 
 ### Deliberately not shipped
 
@@ -648,6 +806,24 @@ Newest last. One line per pushed commit that changes the state above.
   `apex game stop` restores the pre-session tier and would otherwise overwrite
   it, and auto-switch must go off *before* a tier is pinned, because enabling it
   reconciles immediately. Both are mutation-verified.
+- 2026-09-03 — **8.4 done**, closing the last deferred P1 item, on
+  `p1/gaming-profiles` off `p1/integration`. Per-game profiles in
+  `~/.config/apex/games.toml` (a separate user-owned file — the blueprint's own
+  contract is that no program rewrites it, and `profile set` is a program that
+  writes), `apex game profile list/show/set/remove/apply/launch-command/path`,
+  and `apex gaming` for boot-to-game readiness. Three things worth carrying
+  forward. First, `game_enter` applies the SYSPROFILE's `[game] tier` and
+  `fan_mode` after `GameMode.SetActive`, so a per-title tier has to be
+  re-asserted afterwards and the fan step has to be last — and that means
+  `apex mode set gaming` has the same latent bug, invisible only because every
+  shipped sysprofile uses `performance` for both. Second, an input device's
+  `capabilities/key` bitmap must be indexed from the RIGHT (the kernel elides
+  leading zero words) and its word width belongs to the READING process, not
+  the kernel; guessing the width from the string's length is wrong for any
+  64-bit device whose top word is small. Third, the mutation pass earned its
+  keep: it found seven hostile-id assertions passing on a clap usage error
+  rather than on the id check, because `--fan` sat after the `--` and clap
+  exited 2 for every id including legal ones.
 - 2026-09-03 — noted for whoever picks this up: an early draft of the facade
   test called `setGaps(0, 0)` to check that a *capable* action returns true, and
   set the live Hyprland gaps to zero on the developer's desktop. Suites here run
