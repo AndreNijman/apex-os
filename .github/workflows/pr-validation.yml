@@ -275,6 +275,25 @@ jobs:
       - name: Run capsule assertions
         run: ./tests/test-apex-env.sh
 
+      # §9's resolver, which is the same engine as the package suite above and
+      # a separate file because it is a separate claim: that engine INSTALLS,
+      # this one CHOOSES. A choice is a policy, and the policy is invisible
+      # until someone reads the source.
+      #
+      # `dnf5` and `flatpak` are faked from fixture files — again with a hard
+      # exit if they do not resolve to the fakes, so the failure mode is a
+      # refusal rather than a run that queries Fedora's mirrors and the
+      # developer's own Flatpak remotes. That makes the ranking testable at
+      # all: both "this exists" and "this does not" are reachable.
+      #
+      # The load-bearing assertion is that an exact-name repository package
+      # still wins, because `apex install <name>` already ships and a silent
+      # re-route would be a behaviour change on a shipped command. The one
+      # exception is the curated table, and the suite checks that it explains
+      # itself and stays overridable with --source.
+      - name: Run resolver assertions
+        run: ./tests/test-apex-resolve.sh
+
       # The display engine is the one generator that can reach hardware, so its
       # suite asserts that it does not: fake hyprctl/wlr-randr first on PATH
       # record every call, and the run fails if a MUTATING one appears. There is
@@ -389,7 +408,8 @@ jobs:
           shellcheck -S warning files/system/libexec/apex-pkg \
             files/system/libexec/apex-env \
             tests/test-apex-pkg.sh tests/test-apex-firstrun.sh \
-            tests/test-labwc-keybinds.sh tests/test-apex-env.sh
+            tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
+            tests/test-apex-resolve.sh
 
   result:
     name: PR validation
