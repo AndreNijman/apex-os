@@ -50,14 +50,22 @@ pub mod topology;
 pub mod workload;
 
 pub use battery::{Battery, BatteryInventory, ThresholdSupport};
+// `Step` is deliberately NOT re-exported here from either module. Phase 7's
+// blueprint and phase 8's modes each have a type called `Step` — a convergence
+// step and a mode-application step — and re-exporting both at the crate root is
+// an E0252 collision. Neither is ambiguous at its own module path, and both
+// consumers already import it that way (`apexd_core::blueprint::Step`,
+// `apexd_core::mode::Step`), so nothing is lost by leaving the name where it is
+// unambiguous. Hoisting one under an alias would just make the call sites lie
+// about which kind of step they mean.
 pub use blueprint::{
-    AppliedState, Blueprint, Bundle, Change, Domain, Observed, Plan, ProjectRef, Step,
+    AppliedState, Blueprint, Bundle, Change, Domain, Observed, Plan, ProjectRef,
 };
 pub use fan::{FanInventory, FanMode, FanSnapshot, UnknownFanMode};
 pub use fingerprint::{CpuInfo, CpuVendor, Fingerprint, GpuInfo, GpuVendor};
 pub use game::{GameInputs, GamePlan, PidPlacement};
 pub use gpu::{NvidiaGpu, NvidiaSmi, RealNvidiaSmi};
-pub use mode::{Mode, ModeId, ModeMatch, ModeState, PolicyIntent, Step, TierPolicy, UnknownMode};
+pub use mode::{Mode, ModeId, ModeMatch, ModeState, PolicyIntent, TierPolicy, UnknownMode};
 pub use perf::{CpuPerf, GpuPerf, PerfSnapshot, PowerReading, SchedulerState, Temp};
 pub use profile::{
     ChargeConfig, CpusetPolicy, FanConfig, GameModeConfig, IrqPolicy, NvidiaConfig, Profile,

@@ -67,6 +67,26 @@ if [ -z "$SHELL_TREE" ]; then
     exit 0
 fi
 
+# Which tree was picked, said out loud. Falling back to the installed shell is
+# legitimate on a machine with no checkout, but it means testing against
+# whatever the LAST IMAGE shipped — and when that lags the tree under test, the
+# failures look like real regressions in the code you just wrote. That happened
+# while integrating the P1 branches: three assertions failed in a git worktree
+# purely because the worktree has no sibling apex-shell, and the fallback was
+# silent about it.
+case "$SHELL_TREE" in
+    /usr/share/apex-shell)
+        printf 'NOTE  no apex-shell checkout beside this repo; testing against the
+'
+        printf '      INSTALLED shell at %s, which is whatever the last image
+' "$SHELL_TREE"
+        printf '      shipped. Failures here may be staleness, not regressions.
+
+'
+        ;;
+    *)  printf 'using apex-shell tree: %s\n\n' "$SHELL_TREE" ;;
+esac
+
 # What root._shellDir resolves to on a booted system. Fixed even though the
 # model is read from a checkout — the seeded rc.xml is written for the installed
 # location, not for whatever path this test happens to run from.
