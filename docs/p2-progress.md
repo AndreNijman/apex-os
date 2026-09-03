@@ -256,3 +256,38 @@ cached probe came from the portable shell fallback, which cannot report an
 not absent", by design. The alternative would be refusing dispatch to any host
 whose `apex` is too old to self-describe, which is worse: it would refuse the
 very machines that most need probing again.
+
+## Open items found by review, not by a test
+
+Both of these are recorded here so they cannot be quietly forgotten.
+
+1. **`docs/boot-v2.md` is a 14-byte placeholder** (`# placeholder`) and
+   `Containerfile.base` ships it to `/usr/share/doc/apex/boot-v2.md` while
+   claiming, in the comment directly above the `COPY`, that enrollment is "a
+   documented, user-initiated procedure in docs/boot-v2.md, not a script".
+   The document is the whole safety argument for the boot work — enrollment
+   being a human procedure rather than a script is *why* it is safe — so a
+   placeholder there is a hole in exactly the place where a mistake is
+   unrecoverable. `AGENTS.md` also forbids it directly: documentation must
+   state current behaviour, not aspiration.
+
+2. **`tests/test-apex-ai.sh` does not exist.** §14's unit tests are in the 944,
+   but nothing drives `apex ai` as a process the way `host` and `dispatch` are
+   driven, which is what `AGENTS.md` asks for.
+
+## Independent verification of the boot scripts' safety, done here
+
+`AGENTS.md`'s boot-path rules are the reason this was checked directly rather
+than read off the commit messages:
+
+| check | result |
+| --- | --- |
+| `bootctl install/update`, `bootupctl`, `grub2-install`, `grub2-mkconfig`, `efibootmgr` on any executable line of `files/scripts/boot-v2/*` | none |
+| writes to `/boot`, `/boot/efi` or `/efi` on any executable line | none |
+| how a guest ESP is written | `mcopy -i "$ESP"` — mtools into a **FAT image file** |
+
+The last one is stronger than the rule required. The rule asked for a
+loopback-mounted image; mtools does not mount anything at all, so there is no
+mountpoint that could resolve to the host's ESP even by mistake. Entries land
+under `/EFI/APEX/`, which is §22's own requirement for an APEX identity rather
+than a Fedora-named path.
