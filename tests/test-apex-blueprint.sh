@@ -37,6 +37,16 @@
 #  dry run that is never compared against a real run is just a second opinion
 #  from the same code.
 #
+#  ── The one step that reaches a program by absolute path ────────────────────
+#  `[development] languages` converges by running `/usr/libexec/apex-env
+#  provision <language>`. That is an ABSOLUTE path, so the PATH fakes above
+#  cannot intercept it — the same hole the root-domain steps have, except a
+#  user-domain step has no domain filtering to fall back on. `APEX_ENV_ENGINE`
+#  is what closes it: the language section points it at a recording stub, which
+#  is what makes the live convergence path testable without a container. See
+#  its doc comment in apexd/apex/src/blueprint.rs for why it is safe to be
+#  overridable when apex-pkg's own ENV_ENGINE deliberately is not.
+#
 #  ── What it deliberately does NOT do ────────────────────────────────────────
 #  No root, no network, no polkit, no keyring, no package installs, no session
 #  changes. Every `apex apply` here runs as the ordinary user against a HOME
@@ -415,6 +425,253 @@ g=[c for c in d['changes'] if c['what'].startswith('[gaming]')]
 sys.exit(0 if g and g[0]['step'] is None else 1)
 "; then ok "[gaming] produces no step, only a reason"
 else bad "[gaming] produces no step, only a reason"; fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "[development] languages converge through a capsule"
+
+# ── why PATH is reduced to the fake directory for this section ───────────────
+# `Host::languages()` probes PATH for gcc, python3, cargo, bash and the rest,
+# and both this developer's machine and the CI runner have most of them. A
+# planning assertion made against the ambient PATH would therefore pass or fail
+# depending on whose machine it ran on. With PATH holding only the fakes, none
+# of the probe programs resolve, so "no language is on the host" is a fact
+# rather than a hope — and the two ways a language can be satisfied can be
+# exercised one at a time.
+H_LANG="$(newhome languages)"
+writes_blueprint "$H_LANG" <<'BP'
+[development]
+languages = ["rust", "typescript"]
+BP
+
+lang_diff() { apex_env "$H_LANG" PATH="$BIN" -- "$@" 2>&1 </dev/null; }
+
+out="$(lang_diff blueprint diff)"
+for want in "[development] rust" "[development] typescript" \
+            "provision a capsule for rust" "THIS USER"; do
+    if grep -qF -- "$want" <<<"$out"; then ok "diff reports: $want"
+    else bad "diff reports: $want" "$(head -6 <<<"$out" | tr '\n' ' ')"; fi
+done
+if grep -q "CANNOT CONVERGE" <<<"$out"; then
+    bad "[development] no longer reports itself blocked" \
+        "still printing a CANNOT CONVERGE section"
+else
+    ok "[development] no longer reports itself blocked"
+fi
+
+# A BEHAVIOUR CHANGE on a shipped command, asserted deliberately. Phase 7
+# shipped this section with `step: None`, so a machine missing a language
+# reported CANNOT CONVERGE and `diff` exited 0 forever. Now there is a step, so
+# it exits 1 like every other closeable drift. That looks identical to "the
+# feature working" in a self-check, which is why it has its own assertion.
+apex_env "$H_LANG" PATH="$BIN" -- blueprint diff >/dev/null 2>&1 </dev/null; rc=$?
+if [ "$rc" = 1 ]; then ok "diff now exits 1 for a missing language (was 0)"
+else bad "diff now exits 1 for a missing language (was 0)" "exit $rc"; fi
+
+# A step per language, never one for the list: each language maps to its own
+# capsule and a partial failure has to leave the others converged.
+# Captured first rather than piped: `diff --json` exits 1 when there is drift,
+# and under `pipefail` that would fail the pipeline before python3 said anything.
+lang_json="$(lang_diff blueprint diff --json)"
+if python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+dev=[c for c in d['changes'] if c['what'].startswith('[development]')]
+sys.exit(0 if len(dev) == 2
+         and all(c['step'] and c['domain'] == 'user' and c['blocked'] is None
+                 for c in dev)
+         else 1)
+" "$lang_json"; then ok "one user-domain step per language, none blocked"
+else bad "one user-domain step per language, none blocked" "$lang_json"; fi
+
+# Capsules are ROOTLESS. `apex-env` refuses to run as root and says so, and a
+# root-domain step here would need an authentication prompt to enter the
+# capsule afterwards — which is the thing this whole command promises not to
+# do. So `sudo apex apply` must have nothing to do for this section.
+if python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+sys.exit(0 if not [c for c in d['changes']
+                   if c['what'].startswith('[development]')
+                   and c['domain'] == 'root'] else 1)
+" "$lang_json"; then ok "no language step is ever root-domain"
+else bad "no language step is ever root-domain" \
+        "a rootless capsule must never be provisioned by a root apply"; fi
+
+# ── satisfied way 1: a capsule records that it provides the language ─────────
+# This is the mechanism §8 asks for and the reason phase 7 deferred the
+# section. The record is the same file `apex env provision` writes, in the same
+# directory the engine resolves — if the writer and the observer disagreed
+# about that path, `apply` would provision a capsule the next `diff` could not
+# see.
+mkdir -p "${H_LANG}/.local/share/apex/env"
+printf '{"name":"rust","languages":["rust"],"exports":[]}\n' \
+    > "${H_LANG}/.local/share/apex/env/rust.json"
+out="$(lang_diff blueprint diff)"
+if grep -qF "[development] rust" <<<"$out"; then
+    bad "a capsule providing a language satisfies it" "rust is still reported as drift"
+else
+    ok "a capsule providing a language satisfies it"
+fi
+if grep -qF "[development] typescript" <<<"$out"; then
+    ok "…and the other language still drifts"
+else
+    bad "…and the other language still drifts" "both went quiet, which is a false converge"
+fi
+
+# A record that does not parse must contribute nothing and INVENT nothing: one
+# hand-edited capsule record must neither take the whole observation down nor
+# silently satisfy a language.
+printf '{not json\n' > "${H_LANG}/.local/share/apex/env/broken.json"
+out="$(lang_diff blueprint diff)"
+if grep -qF "[development] typescript" <<<"$out"; then
+    ok "a broken capsule record does not break the observation"
+else
+    bad "a broken capsule record does not break the observation" \
+        "$(head -4 <<<"$out" | tr '\n' ' ')"
+fi
+rm -f "${H_LANG}/.local/share/apex/env/broken.json"
+
+# ── satisfied way 2: the toolchain is already on the host's PATH ─────────────
+# The APEX images ship a full dev stack — gcc, g++, python3, node, cargo,
+# golang, bash — so this is the COMMON case. Reading it as drift would
+# provision gigabytes of capsule to duplicate software the image already has,
+# which is the "reformats a machine the first time it runs" failure the
+# blueprint type is written to avoid. Proved with a fake `tsc` rather than by
+# hoping the runner has one.
+cat > "${BIN}/tsc" <<'FAKE'
+#!/bin/sh
+exit 0
+FAKE
+chmod +x "${BIN}/tsc"
+out="$(lang_diff blueprint diff)"
+if grep -qF "[development] typescript" <<<"$out"; then
+    bad "a toolchain on PATH satisfies the language" "typescript still reported as drift"
+else
+    ok "a toolchain on PATH satisfies the language"
+fi
+exits "…and the whole section is then converged" 0 "$H_LANG" \
+      blueprint diff 2>/dev/null || true
+rm -f "${BIN}/tsc"
+
+# ── the live convergence path ───────────────────────────────────────────────
+# The step reaches `/usr/libexec/apex-env` by ABSOLUTE path, so no amount of
+# PATH faking intercepts it — the same hole the root-domain steps have, except
+# a user-domain step has no domain filtering to fall back on. APEX_ENV_ENGINE
+# is what makes the live path testable at all; see its doc comment for why it
+# is safe to be overridable when apex-pkg's ENV_ENGINE deliberately is not.
+H_PROV="$(newhome provision)"
+writes_blueprint "$H_PROV" <<'BP'
+[development]
+languages = ["go"]
+BP
+STUB="${WORK}/env-engine-stub"
+# The stub writes the capsule record a real `apex env provision` writes, and
+# that is the point of it rather than a convenience: `apply` re-measures after
+# converging, so this assertion only passes if the ENGINE's record directory
+# and the PLANNER's are the same directory. The engine resolves
+# ${APEX_ENV_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/apex/env}; if the two
+# halves disagreed, `apply` would report residual drift for a capsule it had
+# just created, and the symptom would look like a broken test.
+#
+# Shell BUILTINS only. PATH here holds nothing but the fakes, so `mkdir` does
+# not resolve — a stub that called it would exit 0 having written nothing, and
+# then the assertion below would fail for a reason that has nothing to do with
+# the code under test. The suite creates the directory instead, and the stub
+# fails loudly if its one write does not land.
+cat > "$STUB" <<'FAKE'
+#!/bin/sh
+echo "env-engine $*" >> "$APEX_TEST_CALLS"
+[ "${1:-}" = provision ] || exit 1
+printf '{"name":"%s","languages":["%s"],"exports":[]}\n' "$2" "$2" \
+    > "${HOME}/.local/share/apex/env/$2.json" || exit 1
+exit 0
+FAKE
+chmod +x "$STUB"
+mkdir -p "${H_PROV}/.local/share/apex/env"
+
+out="$(apex_env "$H_PROV" PATH="$BIN" APEX_ENV_ENGINE="$STUB" -- apply 2>&1 </dev/null)"; rc=$?
+if [ "$rc" = 0 ]; then ok "a live apply converges a language"
+else bad "a live apply converges a language" "exit $rc: $(tail -3 <<<"$out" | tr '\n' ' ')"; fi
+if grep -q '^env-engine provision go$' "$CALLS"; then
+    ok "…by handing the ENGINE the language and nothing else"
+else
+    bad "…by handing the ENGINE the language and nothing else" \
+        "calls: $(grep env-engine "$CALLS" | tr '\n' ' ')"
+fi
+# The capsule a language lives in is the engine's decision. A capsule name in
+# the argv would be a second answer to the same question, which is exactly what
+# phase 7 deferred this section to avoid.
+if grep -qE '^env-engine provision (cdev|go|node|python|rust|shell) ' "$CALLS"; then
+    bad "the CLI never names a capsule" "the argv carries more than the language"
+else
+    ok "the CLI never names a capsule"
+fi
+if grep -q '^FORBIDDEN' "$CALLS"; then
+    bad "provisioning escalates nothing" "$(grep '^FORBIDDEN' "$CALLS" | head -2 | tr '\n' ' ')"
+else
+    ok "provisioning escalates nothing"
+fi
+# The assertion the stub exists for: `apply` re-measured afterwards and found
+# the language provided. That can only be true if the engine wrote the record
+# where the planner looks for it.
+if grep -q "Still not converged" <<<"$out"; then
+    bad "the engine's record directory is the one the planner reads" \
+        "apply provisioned a capsule and could not then see it"
+else
+    ok "the engine's record directory is the one the planner reads"
+fi
+exits "…so a second diff is converged" 0 "$H_PROV" blueprint diff
+
+# A dry run must reach the engine not at all. The steps are printed; nothing is
+# spawned, because a dry run never constructs a converger.
+: > "$CALLS"
+H_PDRY="$(newhome provision-dry)"
+# The record directory exists here too, so "the engine never ran" cannot pass
+# because a stub that DID run would have failed to write anyway.
+mkdir -p "${H_PDRY}/.local/share/apex/env"
+writes_blueprint "$H_PDRY" <<'BP'
+[development]
+languages = ["go"]
+BP
+out="$(apex_env "$H_PDRY" PATH="$BIN" APEX_ENV_ENGINE="$STUB" -- apply --dry-run 2>&1 </dev/null)"
+if grep -q "provision a capsule for go" <<<"$out"; then ok "a dry run prints the step"
+else bad "a dry run prints the step" "$(head -6 <<<"$out" | tr '\n' ' ')"; fi
+if grep -q env-engine "$CALLS"; then
+    bad "…and never runs the engine" "$(grep env-engine "$CALLS" | tr '\n' ' ')"
+else
+    ok "…and never runs the engine"
+fi
+
+# An engine that refuses must be reported as a failure, with the re-measurement
+# still showing the drift. Reporting success on the strength of an exit code is
+# how a converger comes to believe in a machine that does not exist.
+: > "$CALLS"
+cat > "$STUB" <<'FAKE'
+#!/bin/sh
+echo "env-engine $*" >> "$APEX_TEST_CALLS"
+echo "apex-env: error: no capsule engine here" >&2
+exit 1
+FAKE
+chmod +x "$STUB"
+H_PFAIL="$(newhome provision-failing)"
+writes_blueprint "$H_PFAIL" <<'BP'
+[development]
+languages = ["go"]
+BP
+out="$(apex_env "$H_PFAIL" PATH="$BIN" APEX_ENV_ENGINE="$STUB" -- apply 2>&1 </dev/null)"; rc=$?
+if [ "$rc" = 1 ]; then ok "an engine that refuses makes apply exit non-zero"
+else bad "an engine that refuses makes apply exit non-zero" "exit $rc"; fi
+if grep -q "FAILED provision a capsule for go" <<<"$out"; then
+    ok "the failure is reported as a failure"
+else
+    bad "the failure is reported as a failure" "$(tail -4 <<<"$out" | tr '\n' ' ')"
+fi
+if grep -q "re-measured, not assumed" <<<"$out"; then
+    ok "apply re-measures and still reports the language missing"
+else
+    bad "apply re-measures and still reports the language missing"
+fi
+: > "$CALLS"
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "the blueprint classifies apps exactly as the shipped engine does"

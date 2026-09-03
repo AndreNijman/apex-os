@@ -81,6 +81,12 @@ jobs:
           test -f files/system/libexec/apex-pkg
           bash -n files/system/libexec/apex-pkg
           python3 -m py_compile installer/apex-installer-gui
+          # The plugin CLI's node shim. Nothing else in the tree is JavaScript,
+          # so it would otherwise be the one shipped program with no syntax
+          # check at all — and it is the file that asks apex-shell's validator
+          # for every verdict `apex plugin` gives.
+          test -f files/system/libexec/apex-plugin-verdict.js
+          node --check files/system/libexec/apex-plugin-verdict.js
 
       - name: Validate TOML
         run: |
@@ -148,6 +154,27 @@ jobs:
             77) echo "::notice::apex-shell unavailable; input parity not checked" ;;
             *)  exit "$rc" ;;
           esac
+
+      - name: The blueprint and the capsule engine agree on the languages
+        run: |
+          set -euo pipefail
+          # `[development] languages` is validated by apexd-core's LANGUAGES
+          # const and converged by apex-env's own LANGUAGES table. The split is
+          # deliberate — the planner needs the vocabulary and must NOT have the
+          # language -> package table, because a table on the host is what §8
+          # exists to avoid — but two lists in two files drift silently, and
+          # each side is internally consistent so neither suite catches it.
+          #
+          # THIS RUNS IN THE `static` JOB ON PURPOSE. The path selectors would
+          # otherwise hide it: `rust` fires on ^(apexd/|…) and `engine` on
+          # ^(files/|tests/), so a PR touching only apex-env's table never runs
+          # the Rust job and a PR touching only the const never runs the engine
+          # job — and a skipped job counts as success. That is the exact bug
+          # this repository already recorded once with test-apex-modes.sh.
+          #
+          # Needs no toolchain and no container: it parses one Rust const and
+          # runs `apex-env languages`, which is a pure print.
+          python3 files/scripts/check-language-parity
 
       - name: Only the daemon may run host commands
         run: |
@@ -509,10 +536,45 @@ jobs:
           # this level today, so any finding is one this PR introduced.
           shellcheck -S warning files/system/libexec/apex-pkg \
             files/system/libexec/apex-env \
+            files/system/libexec/apex-plugin \
             tests/test-apex-pkg.sh tests/test-apex-firstrun.sh \
             tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
             tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
-            tests/test-apex-modes.sh
+            tests/test-apex-modes.sh tests/test-apex-plugin.sh
+
+      # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
+      # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
+      # comes from apex-shell's own src/services/plugins/manifest.js, through
+      # node, because two implementations of a permission model drift and the
+      # failure mode is a CLI that tells a user their plugin is fine while the
+      # shell refuses it. The suite proves that differentially — it asks
+      # manifest.js directly for each fixture and compares the reason code —
+      # which is only meaningful because the CLI really does call that file.
+      #
+      # It reuses the apex-shell tree vendored earlier in this job, and it must
+      # never touch the real ~/.config/apex-shell: `disable` MOVES a directory,
+      # so the suite points both plugin directories at a temp tree and
+      # HARD-EXITS if either resolves outside it.
+      #
+      # EXPECT THIS RED UNTIL apex-shell PR #9 MERGES. manifest.js is on
+      # apex-shell's `p1/plugin-platform` branch and not on `main`, which is
+      # what the vendor step clones — the documented merge order (the shell
+      # lands before or with the OS) doing its job, exactly as it did for 5.3's
+      # keybind suite on PRs #27 and #28. The suite reports it as ONE labelled
+      # assertion naming PR #9 and still runs its other 62, rather than
+      # refusing at the top and reporting passed=0 with a red tick.
+      #
+      # WHY IT IS THE LAST STEP: a failed step skips every step BELOW it in the
+      # same job. Placed mid-job — where it was first written — a known-red
+      # step would silently disable the bubblewrap install, the
+      # privilege-request, project-layout and secret-broker suites, and the
+      # ShellCheck gate above, for every PR until the shell landed. That is the
+      # "a skipped check counts as success" shape this repository has been
+      # bitten by, and it would have switched off the shellcheck gate on the
+      # very files this branch adds. Anything expected to be red belongs at the
+      # bottom of its job.
+      - name: Run plugin CLI assertions
+        run: ./tests/test-apex-plugin.sh
 
   result:
     name: PR validation

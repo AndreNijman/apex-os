@@ -26,7 +26,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use apexd_core::blueprint::{
-    self, AppliedState, Blueprint, Change, Domain, Observed, Plan, Step, SCHEMA_VERSION,
+    self, AppliedState, Blueprint, CapsuleLanguage, Change, Domain, Observed, Plan, Step,
+    SCHEMA_VERSION,
 };
 
 /// `/var/lib/apex-greet/last-session` — the session id the greeter preselects.
@@ -50,6 +51,24 @@ const REQUESTED_LIST: &str = "var/lib/apex/pkg/requested";
 /// `[desktop] theme` is APEX Shell's matugen scheme, and this is where the
 /// shell keeps it.
 const WALLPAPER_JSON: &str = ".config/apex-shell/src/user_data/wallpaper.json";
+
+/// Where `apex-env` keeps one JSON record per capsule, relative to the data
+/// home.
+///
+/// **The precedence has to match the engine's, not merely resemble it.**
+/// `apex-env` resolves `${APEX_ENV_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/apex/env}`
+/// once, at the top of the file, with a comment explaining that a helper which
+/// recomputed the path from `$HOME` would quietly write to the real one. The
+/// same trap applies from this side: if the writer and the observer disagree
+/// about the directory, `apply` provisions a capsule and the next `diff` cannot
+/// see it — and the disagreement shows up first in the isolated-HOME test,
+/// which is exactly where it looks like a broken test rather than a broken
+/// path.
+const CAPSULE_RECORDS: &str = "apex/env";
+
+/// The capsule engine's own override for that directory. Honoured here so the
+/// suite can point both halves at one throwaway tree.
+const CAPSULE_HOME_ENV: &str = "APEX_ENV_HOME";
 
 /// The shell's own fallback when `wallpaper.json` has no `scheme`, from
 /// `WallpaperService.qml`'s `property string scheme: "content"`. An absent file
@@ -88,8 +107,10 @@ const STARTER: &str = r#"# APEX Blueprint — what this machine should be.
 # install = ["firefox", "md.obsidian.Obsidian"]
 
 # [development]
-# Recorded and diffed. Toolchain installation is phase 6 (`apex env` capsules);
-# until then `apex apply` reports this section rather than guessing.
+# A language is satisfied by a toolchain already on PATH — the APEX images ship
+# a full dev stack — or by an `apex env` capsule that provides it. Anything
+# neither is provisioned as a capsule, never installed onto the read-only host.
+# `apex env languages` is the table.
 # languages = ["python", "rust", "typescript"]
 
 # [agent]
@@ -276,6 +297,7 @@ impl Host {
             packages: self.requested_packages(),
             flatpaks: self.installed_flatpaks(),
             languages: self.languages(),
+            capsule_languages: self.capsule_languages(),
             agent_default: self.agent_config().map(|(a, _)| a),
             agent_sandbox: self.agent_config().map(|(_, s)| s),
             variant_id: self.variant_id(),
@@ -387,6 +409,82 @@ impl Host {
             .filter(|(_, bins)| bins.iter().any(|b| on_path(b)))
             .map(|(lang, _)| (*lang).to_string())
             .collect()
+    }
+
+    /// Where `apex-env` keeps its capsule records.
+    ///
+    /// The engine's precedence, in the engine's order. `APEX_ENV_HOME` is
+    /// honoured only on a real root, because a fixture root cannot redirect an
+    /// environment variable and a unit test that read the developer's own
+    /// `APEX_ENV_HOME` would answer from their machine — the same reason
+    /// `probe_programs` is a separate switch from `root`.
+    fn capsule_record_dir(&self) -> PathBuf {
+        if self.root == Path::new("/") {
+            if let Some(dir) = std::env::var_os(CAPSULE_HOME_ENV) {
+                if !dir.is_empty() {
+                    return PathBuf::from(dir);
+                }
+            }
+            if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
+                if !dir.is_empty() {
+                    return PathBuf::from(dir).join(CAPSULE_RECORDS);
+                }
+            }
+        }
+        self.home().join(".local/share").join(CAPSULE_RECORDS)
+    }
+
+    /// Which languages the capsules on this machine record themselves as
+    /// providing.
+    ///
+    /// A file read, deliberately, and not `apex env list --json`: a probe must
+    /// not depend on a process, and the record is the state — `apex env
+    /// provision` writes the language into it only after the toolchain answers
+    /// from inside the capsule, so reading the file is reading a measurement
+    /// somebody already made properly.
+    ///
+    /// A record that does not parse contributes nothing and is not an error.
+    /// The alternative — failing the whole observation — would make one
+    /// hand-edited capsule record break `apex blueprint diff` for every
+    /// section.
+    fn capsule_languages(&self) -> Vec<CapsuleLanguage> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(self.capsule_record_dir()) else {
+            return out;
+        };
+        let mut files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect();
+        // Sorted, so the order a diff reports is the same on every run
+        // regardless of what readdir happens to hand back.
+        files.sort();
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            // The capsule's name comes out of the record rather than off the
+            // filename: they are the same today, and the record is the thing
+            // `apex env info` prints, so a user told "capsule rust provides
+            // rust" can act on it.
+            let Some(capsule) = value.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(langs) = value.get("languages").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for lang in langs.iter().filter_map(|v| v.as_str()) {
+                out.push(CapsuleLanguage {
+                    language: lang.to_string(),
+                    capsule: capsule.to_string(),
+                });
+            }
+        }
+        out
     }
 
     /// `default_agent` and `sandbox` from the agent runtime's own config.
@@ -930,7 +1028,24 @@ impl RealConverger {
             Step::InstallFlatpaks { ids } => self.install(ids),
             Step::SetAgentDefault { agent } => self.set_agent(Some(agent), None),
             Step::SetAgentSandbox { policy } => self.set_agent(None, Some(policy)),
+            Step::ProvisionLanguage { language } => self.provision(language),
         }
+    }
+
+    /// Make a capsule that provides a language.
+    ///
+    /// The whole decision — which capsule, which packages, which program proves
+    /// the toolchain landed — belongs to the shipped engine, and this hands it
+    /// the language and nothing else. A language -> package table on this side
+    /// would be the second, conflicting answer phase 7 deferred the section to
+    /// avoid.
+    ///
+    /// `apex-env` refuses to run as root, and this step is user-domain, so the
+    /// domain check in [`RealConverger::perform`] has already established that
+    /// the process is not root before this is reached. No `sudo`, no `pkexec`,
+    /// nothing that can prompt.
+    fn provision(&self, language: &str) -> Result<(), String> {
+        run(&env_engine(), &["provision", language])
     }
 
     /// Point the greeter at a session, without ending anyone's session.
@@ -1026,6 +1141,35 @@ impl RealConverger {
             ));
         }
         cfg.save().map_err(|e| format!("saving the agent configuration: {e}"))
+    }
+}
+
+/// Overrides which capsule engine `Step::ProvisionLanguage` drives.
+///
+/// **Why this one is overridable when `apex-pkg`'s `ENV_ENGINE` deliberately is
+/// not.** `Containerfile.base` asserts that the package engine holds
+/// `readonly ENV_ENGINE=/usr/libexec/apex-env`, with the reasoning that
+/// `apex install` runs as root and a caller-controlled variable naming a
+/// program a root process executes is a hole. That reasoning is exactly right
+/// there and does not apply here, for a structural reason rather than a
+/// judgement call: `Step::ProvisionLanguage` is [`Domain::User`], and
+/// [`RealConverger::perform`] refuses a step from the other domain *before* it
+/// builds any path or spawns anything. A root `apex apply` never reaches this
+/// code, so the variable can only ever name a program the invoking user could
+/// already have run themselves.
+///
+/// What it buys is the one thing the suite otherwise could not have: a LIVE
+/// `apex apply` that exercises the real convergence path. The engine is reached
+/// by absolute path, so no amount of `PATH` faking intercepts it — the same
+/// hole the root-domain steps have, except there is no domain filtering to fall
+/// back on for a user-domain step. This is the sibling of `APEX_WINDOW_ADAPTER`,
+/// which exists so `apex project restore` can be tested with no compositor.
+const ENV_ENGINE_ENV: &str = "APEX_ENV_ENGINE";
+
+fn env_engine() -> String {
+    match std::env::var(ENV_ENGINE_ENV) {
+        Ok(p) if !p.is_empty() => p,
+        _ => crate::ops::ENV_ENGINE.to_string(),
     }
 }
 
@@ -1640,6 +1784,93 @@ mod tests {
         assert!(obs.flatpaks.is_empty());
         assert!(obs.languages.is_empty());
         assert!(obs.agent_default.is_none());
+        // The capsule side is a FILE read, so it is measured under a fixture
+        // root rather than suppressed — which is the point of reading the
+        // records instead of running `apex env list --json`.
+        assert!(obs.capsule_languages.is_empty(), "no records, no languages");
+    }
+
+    #[test]
+    fn a_capsule_records_which_languages_it_provides() {
+        let f = Fixture::new("capsule-langs");
+        f.write(
+            "home/.local/share/apex/env/rust.json",
+            r#"{"name":"rust","languages":["rust"],"exports":[]}"#,
+        )
+        .write(
+            "home/.local/share/apex/env/node.json",
+            r#"{"name":"node","languages":["javascript","typescript"]}"#,
+        )
+        // A capsule that provides nothing must not contribute a phantom entry.
+        .write(
+            "home/.local/share/apex/env/plain.json",
+            r#"{"name":"plain","languages":[]}"#,
+        );
+        let obs = f.host().observe();
+        assert_eq!(obs.capsule_for("rust"), Some("rust"));
+        assert_eq!(obs.capsule_for("typescript"), Some("node"));
+        assert_eq!(obs.capsule_for("go"), None);
+        assert_eq!(obs.capsule_languages.len(), 3);
+    }
+
+    #[test]
+    fn a_broken_capsule_record_does_not_break_the_whole_observation() {
+        // One hand-edited record must not take `apex blueprint diff` down for
+        // every other section. Nothing is invented for it either — an
+        // unparseable record contributes no language, so a blueprint that
+        // names one still reports drift rather than silent convergence.
+        let f = Fixture::new("capsule-broken");
+        f.write("home/.local/share/apex/env/broken.json", "{not json")
+            .write("home/.local/share/apex/env/nameless.json", r#"{"languages":["go"]}"#)
+            .write(
+                "home/.local/share/apex/env/rust.json",
+                r#"{"name":"rust","languages":["rust"]}"#,
+            )
+            // Not a .json: a stray editor backup must be skipped, not parsed.
+            .write("home/.local/share/apex/env/rust.json.bak", "{not json");
+        let obs = f.host().observe();
+        assert_eq!(obs.capsule_for("rust"), Some("rust"));
+        assert_eq!(obs.capsule_for("go"), None, "a record with no name grants nothing");
+        assert_eq!(obs.capsule_languages.len(), 1);
+    }
+
+    #[test]
+    fn the_capsule_record_directory_matches_the_engines_own_precedence() {
+        // The writer and the observer have to agree on the directory or
+        // `apply` provisions a capsule the next `diff` cannot see. The engine
+        // resolves ${APEX_ENV_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/apex/env}.
+        let f = Fixture::new("capsule-dir");
+        assert_eq!(
+            f.host().capsule_record_dir(),
+            f.dir.join("home/.local/share/apex/env"),
+            "under a fixture root the fixture's own home wins, because a fixture \
+             root cannot redirect an environment variable"
+        );
+    }
+
+    #[test]
+    fn the_capsule_engine_defaults_to_the_shipped_path() {
+        // The override exists for the suite. If it became the only way to
+        // reach the engine — a default of "apex-env", say, resolved through
+        // PATH — then `apex apply` on a real machine would provision through
+        // whatever happened to be on the user's PATH, and the suite would
+        // still be green because it always sets the variable.
+        let restore = std::env::var(ENV_ENGINE_ENV).ok();
+        std::env::remove_var(ENV_ENGINE_ENV);
+        assert_eq!(env_engine(), crate::ops::ENV_ENGINE);
+        assert!(env_engine().starts_with('/'), "an absolute path, not a PATH lookup");
+
+        // Empty is not an override, matching the guard's own truthiness rule.
+        std::env::set_var(ENV_ENGINE_ENV, "");
+        assert_eq!(env_engine(), crate::ops::ENV_ENGINE);
+
+        std::env::set_var(ENV_ENGINE_ENV, "/tmp/somewhere-else");
+        assert_eq!(env_engine(), "/tmp/somewhere-else");
+
+        match restore {
+            Some(v) => std::env::set_var(ENV_ENGINE_ENV, v),
+            None => std::env::remove_var(ENV_ENGINE_ENV),
+        }
     }
 
     #[test]
@@ -1766,16 +1997,46 @@ mod tests {
             Step::SetAgentSandbox {
                 policy: "strict".into(),
             },
+            Step::ProvisionLanguage {
+                language: "rust".into(),
+            },
         ]
+    }
+
+    #[test]
+    fn every_step_variant_is_in_all_steps() {
+        // `all_steps()` is what the inert-converger and domain assertions
+        // iterate, so a variant missing from it is silently uncovered — the
+        // list looks complete and the new step is never exercised. Compared
+        // against `Step`'s own count via a match that will not compile if a
+        // variant is added without being handled here.
+        fn tag(s: &Step) -> u8 {
+            match s {
+                Step::SelectSession { .. } => 0,
+                Step::SetTheme { .. } => 1,
+                Step::InstallPackages { .. } => 2,
+                Step::InstallFlatpaks { .. } => 3,
+                Step::SetAgentDefault { .. } => 4,
+                Step::SetAgentSandbox { .. } => 5,
+                Step::ProvisionLanguage { .. } => 6,
+            }
+        }
+        let mut tags: Vec<u8> = all_steps().iter().map(tag).collect();
+        tags.sort_unstable();
+        assert_eq!(
+            tags,
+            (0..=6).collect::<Vec<u8>>(),
+            "all_steps() must carry exactly one of every Step variant"
+        );
     }
 
     #[test]
     fn an_inert_converger_performs_every_step_and_changes_nothing() {
         // The mirror of syswriter's
         // `scx_and_nvidia_actions_are_accepted_and_skipped_rather_than_failing`:
-        // this runs on the test host, so it is also the assertion that these
-        // six steps cannot touch it. A step that returned Err here would abort
-        // a whole apply on a machine that simply lacks one primitive.
+        // this runs on the test host, so it is also the assertion that no step
+        // can touch it. A step that returned Err here would abort a whole
+        // apply on a machine that simply lacks one primitive.
         let c = RealConverger::inert();
         assert!(!c.has_effects());
         for step in all_steps() {
