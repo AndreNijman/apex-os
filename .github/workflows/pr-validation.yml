@@ -811,6 +811,14 @@ jobs:
       # the git operation is genuinely attempted against 127.0.0.1:1, which
       # refuses instantly, so no network is used and the token goes nowhere.
       - name: Run secret-broker assertions
+        env:
+          # The suite's one legitimate skip is its sandbox section: without
+          # bubblewrap a confined session cannot be built, so the boundary
+          # cannot be tested and reporting "failed" would be a lie about what
+          # was checked. bwrap is installed two steps up, so a skip HERE means
+          # that install was lost — and this turns that into a failure rather
+          # than a green job that never ran §4's central assertion.
+          APEX_REQUIRE_SANDBOX: "1"
         run: ./tests/test-secret-broker.sh
 
       - name: ShellCheck the privileged helpers
@@ -875,6 +883,22 @@ jobs:
     needs: [changes, static, rust, installer, engine]
     runs-on: ubuntu-24.04
     steps:
+      # `skipped` counts as success HERE and only here, and the distinction is
+      # worth stating because the two meanings of "skipped" are not the same
+      # thing.
+      #
+      # A job result of `skipped` comes from this workflow's own path filters:
+      # `rust`, `installer` and `engine` each carry
+      # `if: needs.changes.outputs.X == 'true'`, so a documentation-only PR
+      # legitimately does not run them and must not be blocked by them.
+      # `changes` itself is in `needs`, so a FAILURE there is caught rather than
+      # cascading into skips that pass, and `cancelled` fails the `all` too.
+      #
+      # What must never reach this gate is a SUITE that skipped: a script that
+      # printed "0 passed, 0 failed (skipped)" and exited 0 arrives here as a
+      # successful step in a successful job, and no aggregate gate can see the
+      # difference. That is why the fix for it belongs in the suites — a missing
+      # prerequisite is a failure there, never a skip.
       - name: Require every applicable test
         env:
           RESULTS: ${{ toJSON(needs) }}
