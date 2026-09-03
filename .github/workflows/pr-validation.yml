@@ -550,6 +550,15 @@ jobs:
       # case compares the developer's real ~/.config/apex/hosts.toml before and
       # after: if `apex host` ever resolved paths from $HOME instead of
       # XDG_CONFIG_HOME, the cost of not catching it is someone's device list.
+      # A verb can vanish from the binary without breaking the build. Two
+      # agents editing main.rs in parallel silently dropped `mod task;`, which
+      # also stopped task.rs being compiled — so there was no orphaned
+      # reference, no dead-code warning and no test failure. `apex task` was
+      # simply gone. Only asking the built artifact what it can do catches it.
+      - name: Every verb is in the binary
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-verbs.sh
+
       - name: Run trusted-device assertions
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-host.sh
