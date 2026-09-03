@@ -182,6 +182,47 @@ Two integration lessons worth keeping:
   TREE for markers, not the files you remember touching. `git diff --check` and
   `git status` both say so plainly and neither was consulted.
 
+### The weekly `core` build — FIXED, PR #31
+
+Red every Monday since ~2026-08-24 on `/etc/system-release not branded`.
+
+**Root cause.** `Containerfile.core` de-brands by writing `/usr/lib/fedora-release`
+and *inheriting* the `/etc` entries that point at it. In the base image those are
+not ordinary symlinks — they are hardlinked ones carried out of the ostree commit
+(`/etc/system-release` and `/etc/redhat-release` share an inode, nlink=3). The
+image never wrote them; it hoped the builder would carry them through 45 layer
+commits intact.
+
+In the failing builds `/etc/system-release` existed and was readable but still
+said `Fedora release 43`, while `/usr/lib/fedora-release`, written in the same
+layer, said `APEX-OS release 43`. That is a flattened symlink: content snapshotted
+at copy-up, no longer tracking its target.
+
+**What moved.** GitHub's `ubuntu-24.04` runner image `20260810.271` (2026-08-11)
+replaced distro podman 4.9.3 with a bundled 5.8.4 — exactly the gap between the
+last green fresh `core` (08-03, runner `20260720.247`) and the first red one
+(08-17, runner `20260810.271.1`). GitHub withdrew it in `20260831.293` citing
+"unexpected container storage behavior… corrupted images" and "conflicts between
+the bundled and distribution-provided Podman installations".
+
+The corruption could not be reproduced on a clean host, and the report says so
+rather than overclaiming. What *is* established: the Containerfile is correct on
+a healthy builder, the package graph is clean, and the only thing that changed in
+the window is the runner's podman.
+
+**The fix** re-creates the seven `/etc` entries and — the part that matters —
+**asserts through `/etc`**. The old block asserted `/usr/lib/os-release` three
+ways and asserted nothing through `/etc`, which is why a wrong image built green
+and only died 45 minutes later in verify, on a cron nobody watches. Same shape as
+the `-ge 30` assertion in the labwc suite: the check pointed at something other
+than the thing that could break.
+
+Verified with real layered builds on the Katana under podman 5.8.4, including two
+controls: flattening `/etc/system-release` makes the check FAIL (so it can still
+catch an unbranded file), and the OLD de-branding code applied to that broken
+image also FAILS — which is what shows the fix does real work rather than riding
+on GitHub's podman rollback.
+
 ### The one unfinished thread: the weekly `core` build
 
 Red every Monday since ~2026-08-24 on
