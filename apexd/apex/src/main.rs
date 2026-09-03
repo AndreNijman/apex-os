@@ -5,6 +5,7 @@
 //! degrades gracefully — a clear message, a non-zero exit, never a panic.
 
 mod agent;
+mod blueprint;
 mod ops;
 mod proxy;
 mod request;
@@ -12,7 +13,7 @@ mod secret;
 mod touchpad;
 
 use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use apexd_core::tier::Tier;
@@ -165,6 +166,56 @@ enum Cmd {
     Secret {
         #[command(subcommand)]
         cmd: secret::SecretCmd,
+    },
+
+    /// The declarative APEX Blueprint: what this machine should be.
+    ///
+    /// One TOML file — `~/.config/apex/blueprint.toml` — describes the desktop,
+    /// applications, development languages, agent defaults and gaming. `apex
+    /// blueprint diff` shows how the machine differs from it and `apex apply`
+    /// converges it.
+    ///
+    /// The blueprint is yours: nothing in APEX rewrites it. `apex apply` writes
+    /// its own record somewhere else (`apex blueprint show` prints where), so
+    /// generated state and the file you edit never share a path.
+    Blueprint {
+        #[command(subcommand)]
+        cmd: BlueprintCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum BlueprintCmd {
+    /// Print the blueprint, where it came from, and when it was last applied.
+    Show {
+        /// Read this file instead of the usual search path.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// How the machine currently differs from the blueprint.
+    ///
+    /// Exits 0 when converged and 1 when there is drift `apex apply` could
+    /// close, so it reads like `diff(1)` in a script. Changes that cannot be
+    /// converged at all — a Gaming edition asked of a Daily machine — are
+    /// reported but do not set the exit code, because no number of `apply`
+    /// runs would ever clear them.
+    Diff {
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a commented starting blueprint to ~/.config/apex/blueprint.toml.
+    ///
+    /// Every section arrives commented out, so the new file manages nothing
+    /// until it is edited.
+    Init {
+        /// Overwrite an existing blueprint.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -424,6 +475,14 @@ async fn main() {
         Cmd::Project { cmd } => agent::project_cmd(cmd),
         Cmd::Request { cmd } => request::main(cmd),
         Cmd::Secret { cmd } => secret::main(cmd),
+        // Read-only, so no root gate: seeing what the machine should be must
+        // not require privilege. `apex apply` is the verb that changes things,
+        // and it converges only the privilege domain it is already in.
+        Cmd::Blueprint { cmd } => match cmd {
+            BlueprintCmd::Show { file, json } => blueprint::cmd_show(file.as_deref(), json),
+            BlueprintCmd::Diff { file, json } => blueprint::cmd_diff(file.as_deref(), json),
+            BlueprintCmd::Init { force } => blueprint::cmd_init(force),
+        },
         Cmd::Tier { name } => cmd_tier(name).await,
         Cmd::Profile => cmd_profile().await,
         Cmd::Battery(args) => cmd_battery(args).await,

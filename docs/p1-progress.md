@@ -114,11 +114,22 @@ Collapsing observed into a cached file is the trap: `diff` would then agree with
 `apply` by construction instead of by measurement, and a step that silently did
 nothing would report as converged forever.
 
-- [~] **7.1** Blueprint schema and `apex blueprint show/diff`. **Schema done**
-      — `apexd-core/src/blueprint.rs`: the §10 shape, `deny_unknown_fields`
-      throughout, closed vocabularies, hostile-input checks on app names and on
-      bundle project paths, and the pure `plan(desired, observed)`. 22 unit
-      tests. `show`/`diff` next.
+- [x] **7.1** Blueprint schema and `apex blueprint show/diff/init`.
+      `apexd-core/src/blueprint.rs` is the §10 shape with
+      `deny_unknown_fields` throughout, closed vocabularies, hostile-input
+      checks on app names and bundle project paths, and the pure
+      `plan(desired, observed)`. `apex/src/blueprint.rs` is the other half:
+      path resolution, the `Host` probes, and the renderers. 24 + 13 tests.
+      Two things worth knowing:
+      - `Host` takes a fixture `root` **and** a separate `probe_programs`
+        switch, for exactly the reason `RealWriter` needs `sys_root` and
+        `host_commands` separately — a fixture root redirects a file read and
+        cannot redirect a process spawn, so a fixture host that ran
+        `flatpak list` would answer from the developer's machine.
+      - observed `[apps]` comes from the engine's `requested` list, not
+        `state.json`. `state.json` records the resolved transaction including
+        every dependency, so diffing against it reports convergence based on
+        packages nobody asked for.
 - [ ] **7.2** `apex apply` convergence, idempotent with a real dry run.
 - [ ] **7.3** `apex sync` between machines.
 - [ ] **7.4** GUI editing in the shell. **Deferred out of this phase** — §10's
