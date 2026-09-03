@@ -138,6 +138,23 @@ pub fn config_home() -> PathBuf {
     home().join(".config")
 }
 
+/// `$XDG_DATA_HOME`, or `~/.local/share` per the base-directory spec.
+///
+/// Here rather than in a caller because this is the module that implements the
+/// spec, and a second resolver would be a second thing to get wrong. It exists
+/// for one reader: `apex task` checks whether a capsule still exists, and the
+/// capsule engine keeps one JSON record per capsule under
+/// `${XDG_DATA_HOME}/apex/env/` — see `files/system/libexec/apex-env`, which
+/// resolves the same path the same way.
+pub fn data_home() -> PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    home().join(".local/share")
+}
+
 /// The scratch directory a sandboxed session may write to. Deliberately under
 /// `/tmp` and not `$XDG_RUNTIME_DIR`: agents generate build output here and
 /// `XDG_RUNTIME_DIR` is a small tmpfs that other software depends on.
@@ -211,6 +228,20 @@ mod tests {
         assert!(state_dir().is_absolute());
         assert!(config_file().is_absolute());
         assert!(scratch_dir(1).is_absolute());
+        assert!(data_home().is_absolute());
+    }
+
+    #[test]
+    fn data_home_reads_its_own_variable_and_falls_back_to_the_spec() {
+        // Written against whatever the environment actually is, rather than by
+        // setting a variable: `std::env::set_var` is process-global and races
+        // the other tests in this crate. What it catches is the copy-paste bug
+        // — a resolver that read XDG_STATE_HOME, or fell back to
+        // `.local/state`, would fail one branch or the other here.
+        match std::env::var_os("XDG_DATA_HOME") {
+            Some(v) if !v.is_empty() => assert_eq!(data_home(), PathBuf::from(v)),
+            _ => assert_eq!(data_home(), home().join(".local/share")),
+        }
     }
 
     #[test]
