@@ -547,6 +547,41 @@ if [ "$before" = "$after" ]; then ok "a second apply leaves the files byte-ident
 else bad "a second apply leaves the files byte-identical"; fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+section "a step that cannot complete is reported, not swallowed"
+
+# The one branch of `apply` the success path never reaches. A user step can
+# legitimately fail — `wallpaper.json` is the user's file and can be anything —
+# and the failure must be visible in three ways: a non-zero exit, a message
+# naming the file, and the re-measurement still reporting the drift. The last
+# is the one that matters: reporting success on the strength of an exit code
+# is how a converger comes to believe in a machine that does not exist.
+H_FAIL="$(newhome failing)"
+mkdir -p "${H_FAIL}/.config/apex-shell/src/user_data"
+printf '{not json' > "${H_FAIL}/.config/apex-shell/src/user_data/wallpaper.json"
+writes_blueprint "$H_FAIL" <<'BP'
+[desktop]
+theme = "neutral"
+BP
+out="$(apex_in "$H_FAIL" apply 2>&1)"; rc=$?
+if [ "$rc" = 1 ]; then ok "a failed step makes apply exit non-zero"
+else bad "a failed step makes apply exit non-zero" "exit $rc"; fi
+if grep -q "FAILED set colour scheme" <<<"$out"; then ok "the failure is reported as a failure"
+else bad "the failure is reported as a failure" "$(tail -3 <<<"$out" | tr '\n' ' ')"; fi
+if grep -q "wallpaper.json is not valid JSON" <<<"$out"; then ok "the message names the file and why"
+else bad "the message names the file and why"; fi
+if grep -q "Applied 0 of 1 step" <<<"$out"; then ok "the count reflects what actually happened"
+else bad "the count reflects what actually happened"; fi
+if grep -q "re-measured, not assumed" <<<"$out"; then ok "apply re-measures and still reports the drift"
+else bad "apply re-measures and still reports the drift"; fi
+# The user's unreadable file must be left exactly as it was. Overwriting it to
+# make a step succeed would destroy whatever the user was in the middle of.
+if [ "$(cat "${H_FAIL}/.config/apex-shell/src/user_data/wallpaper.json")" = '{not json' ]; then
+    ok "a file apply could not parse is left untouched"
+else
+    bad "a file apply could not parse is left untouched"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
 section "user-owned and generated state stay separate"
 
 # §10's own bullet. `apply` writes a record; it must never write the blueprint.
@@ -685,6 +720,18 @@ if grep -q "$SENTINEL" "${WORK}/bundle.toml" 2>/dev/null; then
 else
     ok "a bundle carries no credentials"
 fi
+
+# The headline flow on a machine that has only run `blueprint init`: every
+# section is commented out, so the blueprint is EMPTY. Each section table is
+# elided on the way out, and a bundle whose `[blueprint]` table lost its header
+# too would fail on the receiving machine with "missing field `blueprint`" —
+# the far end, hours later, with no way to tell which side was wrong.
+H_EMPTY="$(newhome sync-empty)"
+apex_in "$H_EMPTY" blueprint init >/dev/null 2>&1
+exits "an empty blueprint exports" 0 "$H_EMPTY" \
+      sync export --output "${WORK}/empty.toml" --no-projects
+exits "…and the bundle reads back on the other machine" 0 "$H_B" \
+      sync show "${WORK}/empty.toml"
 
 exits "sync show reads a bundle without importing it" 0 "$H_B" sync show "${WORK}/bundle.toml"
 if [ ! -e "${H_B}/.config/apex/blueprint.toml" ]; then ok "sync show writes nothing"
