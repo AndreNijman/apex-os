@@ -518,6 +518,42 @@ Transcripts are a record of your work and are readable only by you.
 
 ---
 
+## Remote sessions
+
+`--host` exists on three of these verbs, and each one means something
+different:
+
+| | what it does |
+| --- | --- |
+| `apex agent run --host <device>` | forwards the WHOLE invocation to that device's own `apex agent run` |
+| `apex agent list --host <device>` | the sessions over there, not here |
+| `apex agent attach --host <device>` | a view onto a session that keeps running there |
+
+The run form forwards rather than reimplements. The remote applies its own
+sandbox policy, its own default agent and its own checkpointing, because that
+is where the agent actually runs — reconstructing those decisions locally
+would be two implementations of one policy, and the wrong one would be the
+local copy. `RunArgs::forward_argv` rebuilds the flags from the parsed struct
+rather than from `std::env::args`, so a flag clap normalised is forwarded
+normalised, and the three local-only flags (`--host`, `--remote-path`,
+`--allow-dirty`) cannot leak into the remote command and make it dispatch
+again.
+
+`--remote-path` names the project directory on the far side when it is not the
+same absolute path, and skips the same-repository check. `--allow-dirty` runs
+despite uncommitted changes here; they are NOT sent, because the remote works
+from its own checkout.
+
+The id an attach takes is the REMOTE's, which is why the list form exists.
+`apex task resume` deliberately passes `host: None`: a resume attaches to a
+session on this machine, and continuing one elsewhere stays explicit.
+
+Devices come from `apex host` (§20's trusted devices), and the ssh argv —
+including the `--` before the destination and the per-argument quoting — is
+owned there. `tests/test-apex-dispatch.sh` covers these forms.
+
+---
+
 ## Escape hatches
 
 By design, none of this is compulsory:
@@ -547,7 +583,6 @@ Named because the roadmap asks for them and this does not do them:
 - **Terminal layouts** as a designed grid (§3's editor/agent split), and
   tmux/zellij integration. Restoring a project's windows now exists — see
   *Project layouts* — but choosing a layout template does not.
-- **Remote sessions.** `--host` does not exist.
 - **Fish and nushell** shell integration. Bash and zsh are covered, including
   the `a`/`aa`/`al`/`ad`/`aw`/`ap` shortcuts, completion, and the optional
   prompt indicator (`apex_agent_prompt`, which is fork-free: it reads the

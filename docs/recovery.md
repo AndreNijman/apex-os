@@ -398,6 +398,14 @@ a UI painting an invented judgement red is worse than one showing two states.
   exposing it as a general "run this one program confined" command is a real
   feature that does not exist yet. Offering a three-item menu where one item
   does nothing different would be worse than reporting the gap.
-* **No GUI.** §19's action list is a UI, and the OS side of it is
-  `apex recover status --json` plus `apex doctor --json`. APEX Shell renders
-  them; nothing in this repository writes QML for it.
+* **No GUI in THIS repository.** §19's action list is a UI, and the OS side of
+  it is `apex recover status --json` plus `apex doctor --json`. Nothing here
+  writes QML.
+
+  That sentence used to end "APEX Shell renders them", which was a plan rather
+  than a fact — the consumer this `--help` text advertises as "safe for APEX
+  Settings to poll" did not exist on any apex-shell branch. It does now:
+  `src/services/RecoveryService.qml` polls those two verbs and nothing else,
+  and `src/services/config_tab/pages/RecoveryPage.qml` is Config → Recovery.
+  The row ids above are what it keys on, which is what makes them the
+  compatibility surface this document already said they were.
