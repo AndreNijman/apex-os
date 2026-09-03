@@ -54,6 +54,25 @@ if ! command -v labwc >/dev/null 2>&1; then
 fi
 ok "labwc is installed ($(labwc --version 2>&1 | head -1))"
 
+# ── OPT-IN, because this suite opens windows on your desktop ────────────────
+#
+# It starts real nested labwc sessions with real clients, which is the only way
+# to answer what it asks — and on a live desktop those are visible windows that
+# take focus. No CI workflow runs this file (checked: it appears in no
+# workflow), and it exits early without a parent display, so the ONLY machine it
+# ever executes on is a developer's, in the middle of whatever they were doing.
+#
+# It did exactly that: a blanket `tests/*.sh` sweep launched nested compositors
+# on the developer's active workspace and interrupted their work. So it now
+# requires saying so on purpose. A sweep skips it; a person who wants the
+# session matrix runs it deliberately.
+if [ "${APEX_LABWC_SESSION_TESTS:-0}" != "1" ]; then
+    skp "opt-in: this suite opens nested compositor windows on your desktop"
+    printf '      run it deliberately with APEX_LABWC_SESSION_TESTS=1 %s\n' "$0"
+    printf '\nlabwc-session: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
+    exit 0
+fi
+
 # A nested compositor needs a parent display. Without one there is no session to
 # probe and pretending otherwise would report green on nothing.
 if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then

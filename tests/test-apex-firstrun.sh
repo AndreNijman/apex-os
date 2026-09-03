@@ -200,17 +200,37 @@ else
     printf 'SKIP  xmllint unavailable\n'
 fi
 
+# ── the developer's own session must be untouched ────────────────────────────
+# Counted before the labwc block below, compared after. A nested compositor
+# creates a new wayland-N socket in $XDG_RUNTIME_DIR, so this is a direct
+# measurement of the thing that went wrong rather than a proxy for it.
+_socks_before=$(find "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" -maxdepth 1 \
+                     -name 'wayland-*' -type s 2>/dev/null | wc -l)
+
 # labwc itself is the only authority on whether an action name and its arguments
 # are valid; xmllint cannot know that `Focus direction=...` is not a thing.
 if command -v labwc >/dev/null 2>&1; then
     d="${WORK}/labwc-parse"; mkdir -p "$d"
     cp "${TMPL}/rc.xml" "${TMPL}/menu.xml" "$d/"
     sed -e 's|@KB_LAYOUT@|us|g' -e 's|@KB_VARIANT@||g' "${TMPL}/environment" > "${d}/environment"
-    # Grep for CONFIG diagnostics specifically, not any error. labwc will also
-    # fail to open a backend here (no seat in CI, and X11 fallback complains in a
-    # Wayland session), which is expected and irrelevant: config parsing happens
-    # first and is the only thing under test.
+    # Grep for CONFIG diagnostics specifically, not any error: config parsing
+    # happens before the backend comes up and is the only thing under test.
+    #
+    # WLR_BACKENDS=headless, and WAYLAND_DISPLAY and DISPLAY removed, and that
+    # is not tidiness — it is a bug fix. The previous version unset only
+    # HYPRLAND_INSTANCE_SIGNATURE and reasoned that labwc "will fail to open a
+    # backend here (no seat in CI)". True in CI; false on a developer's
+    # machine, where there IS a seat and a live session, so labwc succeeded and
+    # opened a NESTED COMPOSITOR WINDOW on whatever workspace the developer was
+    # using — for six seconds, once per run of this file. It interrupted real
+    # work.
+    #
+    # "Safe because CI has no display" is the mirror image of "works on my
+    # machine", and it is the more dangerous of the two: the failure lands on a
+    # person rather than on a build.
     parse_out="$(timeout 6 env -u HYPRLAND_INSTANCE_SIGNATURE \
+                     -u WAYLAND_DISPLAY -u DISPLAY \
+                     WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 \
                      labwc -C "$d" 2>&1 \
                  | grep -iE 'invalid argument for action|invalid action|unexpected element' \
                  || true)"
@@ -222,6 +242,17 @@ if command -v labwc >/dev/null 2>&1; then
     fi
 else
     printf 'SKIP  labwc unavailable; cannot validate action names\n'
+fi
+
+# The assertion that keeps the fix above from being undone. If a future change
+# lets labwc attach to the developer's session again, this fails here instead
+# of putting a window on someone's workspace mid-task.
+_socks_after=$(find "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" -maxdepth 1 \
+                    -name 'wayland-*' -type s 2>/dev/null | wc -l)
+if [ "$_socks_before" = "$_socks_after" ]; then
+    ok "no compositor was started on the session running the tests"
+else
+    bad "no compositor was started on the session running the tests"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
