@@ -40,11 +40,11 @@ underneath; §16 asks for a plugin platform with permissions. The shell today
 branches on `Compositor.isHyprland` / `.isNiri` / `.isLabwc` in 33 files, which
 is the technical debt §17 names.
 
-- [ ] **5.1** `CompositorService` facade + capability map, with Hyprland, niri,
-      labwc and null backends. Done when the facade answers `windows`,
-      `workspaces`, `focus`, `moveWindow`, `overview`, `screenshot`,
-      `outputState` and `inputState` on every backend, reporting unsupported
-      rather than failing.
+- [x] **5.1** `CompositorService` facade + capability map, with Hyprland, niri,
+      labwc and null backends. — apex-shell PR #8, branch
+      `p1/compositor-adapter`. 37 live assertions + 23 headless static ones.
+      The facade selects its backend by URL so `Quickshell.Hyprland` is never
+      parsed off Hyprland. Nothing is rewired yet; consumers move in 5.2.
 - [ ] **5.2** Migrate consumers onto the facade, a file (or small group) per
       commit. Done when no module outside `src/services/compositor/` spawns
       `hyprctl` or `niri msg`.
@@ -95,3 +95,13 @@ Newest last. One line per pushed commit that changes the state above.
 
 - 2026-09-03 — tracker created; `p1/compositor-and-plugins` branched off
   `feat/input-display-parity`.
+- 2026-09-03 — **5.1 done.** apex-shell PR #8 (`p1/compositor-adapter`): the
+  `CompositorService` facade, four backends, a shared picker-script library, and
+  both halves of its test coverage. niri and labwc gained output-box screenshot
+  picking that nobody had wired up, and `NiriService` gained a window list off
+  its existing event stream.
+- 2026-09-03 — noted for whoever picks this up: an early draft of the facade
+  test called `setGaps(0, 0)` to check that a *capable* action returns true, and
+  set the live Hyprland gaps to zero on the developer's desktop. Suites here run
+  against the real session. Assert refusal on the actions a backend cannot
+  perform; check the capable ones by shape and never invoke them.
