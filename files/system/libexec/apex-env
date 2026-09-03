@@ -504,11 +504,16 @@ write_record() {
     tmp="${path}.tmp"
     mkdir -p "$ENV_ROOT" || die "cannot create ${ENV_ROOT}"
     chmod 0700 "$ENV_ROOT" 2>/dev/null || true
-    # `languages` and `exports` are always present, even when empty. A consumer
-    # reading them — `apex blueprint diff` reads `languages` to decide whether
-    # `[development]` is converged — must not have to tell "no languages" from
-    # "a record written by an older APEX", because those mean different things
-    # and only one of them is safe to act on.
+    # `languages` and `exports` are always present, even when empty, so the
+    # record has one shape for every consumer — `apex env info` prints it
+    # verbatim and `apex blueprint diff` reads `languages` out of it with jq.
+    #
+    # A record written by an OLDER apex-env has neither key, and both readers
+    # treat that as "provides nothing" rather than as an error. That is the
+    # right answer and not merely a lenient one: an older record was written
+    # without the in-capsule probe `provision` now runs, so there is no
+    # verified claim in it to honour. `apex env provision` on such a capsule
+    # installs, probes and then records — cheap, and it measures.
     jq -n \
         --arg name "$name" --arg image "$image" --arg gpu "$gpu" \
         --arg alias "$alias_used" --arg digest "$digest" --arg home "$home" \
