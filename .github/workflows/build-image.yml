@@ -657,6 +657,11 @@ jobs:
             || fail "stock labwc.desktop present; it starts labwc with no shell"
           run 'command -v labwc >/dev/null' \
             || fail "labwc binary missing but a labwc session is offered"
+          # labwc has no IPC socket, so zwlr-output-power-management-v1 (wlopm)
+          # is the only way the idle timer can turn the display off there. The
+          # listener used to fire into nothing and report success.
+          run 'command -v wlopm >/dev/null' \
+            || fail "wlopm missing; idle screen-off is a silent no-op on the labwc session"
 
           # The session is worthless without its config: labwc has no IPC, so
           # everything the compositor does for the shell is declared in rc.xml
