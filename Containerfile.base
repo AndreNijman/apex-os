@@ -481,6 +481,86 @@ RUN set -eux; \
 # transitively via the shim/grub2-efi chain, and the button is useless without
 # it, so its presence is re-asserted here — where the feature actually lives —
 # rather than trusted.
+# ── §22 boot v2: the health gate, the recovery notice, and NOTHING ELSE ────
+#
+# What ships here is the OS-side half of §22's migration step 4 — the
+# definition of "this boot worked", plus the notice a rollback leaves behind.
+#
+# What does NOT ship, deliberately:
+#
+#   * No bootloader installation. Nothing in this image runs `bootctl install`,
+#     `bootctl update`, `bootupctl` or `efibootmgr -c`. GRUB stays the default
+#     for daily, gaming-mesa and gaming-nvidia in this generation (AGENTS.md
+#     boot-path rule 5; §22's own recommendation is to keep it while the
+#     OSTree/bootc install path depends on it, and to keep it for legacy BIOS
+#     regardless). Enrolling a machine on the systemd-boot path is a
+#     documented, user-initiated procedure in docs/boot-v2.md, not a script —
+#     there is no rollback for an ESP a script overwrote.
+#   * No systemd-boot binary and no ukify. Both would be dnf transactions and
+#     therefore belong in Containerfile.core, and neither is needed by the two
+#     units below: boot counting is decremented by the bootloader in the ESP
+#     and blessed by systemd-bless-boot, which is already in the systemd
+#     package this image has. `apex boot status` reads `bootctl list`, which
+#     ships in systemd-udev — asserted below rather than assumed.
+#
+# Both units carry ConditionPathExists on systemd-boot's LoaderBootCountPath
+# EFI variable, which is the same switch systemd-bless-boot-generator uses. On
+# a GRUB machine that variable does not exist, so neither unit starts, and a
+# failed condition counts as a skip rather than a failure — enabling them here
+# cannot affect a GRUB boot. tests/test-boot-v2.sh asserts that condition is
+# present on every unit this block enables, because an enabled unit without it
+# would be the exact way "opt-in" silently becomes "default".
+COPY files/system/libexec/apex-boot-health /usr/libexec/apex-boot-health
+COPY files/system/units/apex-boot-health.service \
+     /usr/lib/systemd/system/apex-boot-health.service
+COPY files/system/units/apex-boot-notice.service \
+     /usr/lib/systemd/system/apex-boot-notice.service
+COPY docs/boot-v2.md /usr/share/doc/apex/boot-v2.md
+RUN set -eux; \
+    chmod 0755 /usr/libexec/apex-boot-health; \
+    bash -n /usr/libexec/apex-boot-health; \
+    \
+    : '── the upstream mechanism must actually be in this image ──'; \
+    : 'systemd-bless-boot is what strips the +N-M suffix. Without it the'; \
+    : 'health gate would gate nothing and a deployment would never be'; \
+    : 'blessed, so every systemd-boot boot would eventually roll back.'; \
+    test -f /usr/lib/systemd/system/systemd-bless-boot.service; \
+    test -f /usr/lib/systemd/system/boot-complete.target; \
+    test -x /usr/lib/systemd/systemd-bless-boot; \
+    test -x /usr/lib/systemd/system-generators/systemd-bless-boot-generator; \
+    : 'apex boot status shells out to bootctl for the entry tally.'; \
+    test -x /usr/bin/bootctl; \
+    \
+    : '── /var/lib/apex/boot is machine-local state, so tmpfiles owns it ──'; \
+    : '/var is not part of the ostree deployment; a directory created at'; \
+    : 'build time would not exist on an installed machine.'; \
+    printf 'd /var/lib/apex/boot 0755 root root -\n' \
+        > /usr/lib/tmpfiles.d/apex-boot.conf; \
+    systemd-tmpfiles --dry-run --create /usr/lib/tmpfiles.d/apex-boot.conf; \
+    \
+    systemctl enable apex-boot-health.service; \
+    systemctl enable apex-boot-notice.service; \
+    \
+    : '── postconditions on the enablement, not just on the enable command ──'; \
+    : 'RequiredBy vs WantedBy is the difference between "a failed health'; \
+    : 'check blocks the blessing" and "a failed health check is a warning",'; \
+    : 'so the symlink systemctl actually created is what gets checked.'; \
+    test -L /etc/systemd/system/boot-complete.target.requires/apex-boot-health.service; \
+    test -L /etc/systemd/system/boot-complete.target.wants/apex-boot-notice.service; \
+    : 'And each enabled unit must be inert without systemd-boot counting.'; \
+    for u in apex-boot-health apex-boot-notice; do \
+        grep -q '^ConditionPathExists=/sys/firmware/efi/efivars/LoaderBootCountPath-' \
+            "/usr/lib/systemd/system/$u.service"; \
+    done; \
+    : 'Nothing in the shipped payload may touch a real boot path. Matched on'; \
+    : 'the executable lines only: a comment naming the command it refuses to'; \
+    : 'run must not fail this, and the units and helper both contain such'; \
+    : 'comments on purpose.'; \
+    ! grep -nE '^[^#]*\b(bootctl[[:space:]]+(install|update)|bootupctl|grub2-install|efibootmgr[[:space:]]+-[cBo])' \
+        /usr/libexec/apex-boot-health \
+        /usr/lib/systemd/system/apex-boot-health.service \
+        /usr/lib/systemd/system/apex-boot-notice.service
+
 COPY files/system/libexec/apex-boot-windows /usr/libexec/apex-boot-windows
 COPY files/system/sudoers/apex-boot-windows /etc/sudoers.d/020-apex-boot-windows
 RUN set -eux; \

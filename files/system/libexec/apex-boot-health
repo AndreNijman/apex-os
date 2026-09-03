@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-boot-health — the health gate systemd-boot's boot counter waits on, and
+#  the recovery notice a rollback leaves behind. Roadmap §22, migration step 4.
+#
+#  ── it is a gate, not a counter ──
+#
+#  §22 asks for "boot counting and health-based automatic rollback", and the
+#  tempting shape is an APEX counter in /var: increment on boot, roll back at
+#  three. That shape cannot work, and the reason is structural rather than a
+#  matter of taste. The boots that need counting are the ones that never reach
+#  userspace — a kernel that panics, an initramfs that cannot find its root, a
+#  GPU driver that hangs before the display comes up. Nothing in userspace can
+#  increment a counter for a boot that never got there.
+#
+#  systemd-boot decrements the count BEFORE the kernel starts, by renaming the
+#  entry file in the ESP: `apex-<deployment>+3-0.efi` becomes `+2-1`, `+1-2`,
+#  `+0-3`, and at zero the entry sorts last so the next-best entry — the
+#  previous deployment, which has no suffix because it was blessed — is
+#  selected instead. Measured end to end in files/scripts/boot-v2's
+#  `boot-counting` scenario: four boots to exhaust the tally, the fifth lands
+#  on the previous entry, and it stays there.
+#
+#  So APEX writes no counter. What it contributes is the definition of "this
+#  boot worked", and it contributes it through the upstream extension point:
+#
+#    systemd-bless-boot.service    Requires=boot-complete.target
+#                                  ExecStart=systemd-bless-boot good
+#                                    -> strips the +N-M suffix entirely
+#    boot-complete.target          reached only when every unit ordered
+#                                  Before= it and required by it succeeded
+#    apex-boot-health.service      Before=boot-complete.target
+#                                  RequiredBy=boot-complete.target
+#                                  ExecStart=this script, `check`
+#
+#  If `check` fails, boot-complete.target is not reached, bless-boot never
+#  runs, the suffix is not stripped, and the next boot burns another try. That
+#  is the whole rollback mechanism, and every moving part of it is upstream's.
+#
+#  ── inert on a GRUB machine, which is every published image ──
+#
+#  GRUB stays the default for `daily`, `gaming-mesa` and `gaming-nvidia` in
+#  this generation (AGENTS.md boot-path rule 5, and §22's own recommendation).
+#  This script therefore has to be a no-op there, and the condition it uses is
+#  the same one systemd-bless-boot-generator uses: the `LoaderBootCountPath`
+#  EFI variable, which only exists when systemd-boot booted this machine WITH
+#  boot counting in effect. No APEX-invented marker, no VARIANT_ID check, no
+#  configuration file — the presence of the mechanism is the switch.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+readonly LOADER_GUID=4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+readonly EFIVARS=/sys/firmware/efi/efivars
+readonly STATE_DIR=/var/lib/apex/boot
+
+# `bootctl` is named by absolute path and is NOT overridable. A caller-supplied
+# variable naming a program that a root unit executes is a hole, and this unit
+# runs as root; the same reasoning Containerfile.base asserts for apex-pkg's
+# readonly ENV_ENGINE. Read paths are prefixed for testing instead, below.
+readonly BOOTCTL=/usr/bin/bootctl
+
+# Read paths are relocatable so tests/test-boot-v2.sh can drive this script
+# against a fixture tree. Only paths move: no program name comes from the
+# environment, and every write still goes to the real STATE_DIR unless the
+# caller also moved that.
+EFIVARS_DIR="${APEX_BOOT_EFIVARS:-$EFIVARS}"
+STATE="${APEX_BOOT_STATE:-$STATE_DIR}"
+# A pre-rendered `bootctl list --json=short` document. Set only by the test
+# suite; when unset, bootctl is executed.
+BOOTCTL_JSON="${APEX_BOOT_BOOTCTL_JSON:-}"
+
+msg() { printf 'apex-boot-health: %s\n' "$*"; }
+
+# ── is boot counting in effect at all? ──────────────────────────────────────
+counting_in_effect() { [[ -e "$EFIVARS_DIR/LoaderBootCountPath-$LOADER_GUID" ]]; }
+
+# EFI variable payloads are a 4-byte attribute prefix followed by UTF-16LE.
+# `tr -d '\0'` after dropping the prefix is correct for the ASCII values sd-boot
+# and sd-stub write, and avoids depending on iconv in an early-boot unit.
+efivar_str() {
+    local name="$1" f="$EFIVARS_DIR/$1-$LOADER_GUID"
+    [[ -r "$f" ]] || return 1
+    tail -c +5 "$f" | tr -d '\0'
+}
+
+bootctl_entries() {
+    if [[ -n "$BOOTCTL_JSON" ]]; then
+        cat "$BOOTCTL_JSON"
+        return 0
+    fi
+    [[ -x "$BOOTCTL" ]] || return 1
+    # Reading the ESP needs root. A failure here is reported by the caller as
+    # "unavailable, and why" rather than swallowed: an empty entry list would
+    # look identical to "no failed deployment", which is the answer that
+    # suppresses the recovery notice.
+    "$BOOTCTL" list --json=short 2>/dev/null
+}
+
+# ── the health definition ───────────────────────────────────────────────────
+# §22: "reaches graphical desktop and critical services are healthy".
+#
+# Deliberately NOT `systemctl is-system-running` and NOT upstream's
+# systemd-boot-check-no-failures, which fail on ANY failed unit. AGENTS.md
+# requires that optional hardware and services fail without degrading the boot
+# transaction, so a machine can legitimately be `degraded` — a missing fan
+# controller, an absent GPU, a Bluetooth adapter that did not appear. Rolling
+# the OS back over one of those would be a worse outcome than the fault.
+#
+# So the list is explicit and short: the units without which the machine is not
+# usable at all.
+critical_units() {
+    printf '%s\n' \
+        apexd.service \
+        systemd-logind.service
+    # dbus is packaged as dbus-broker on Fedora and as dbus-daemon elsewhere.
+    # Name whichever this image actually has rather than guessing, and fail if
+    # neither exists — "the system bus is not running" must not be reported as
+    # healthy because the unit had a different name.
+    local d
+    for d in dbus-broker.service dbus.service; do
+        if systemctl cat "$d" >/dev/null 2>&1; then printf '%s\n' "$d"; return 0; fi
+    done
+    printf '%s\n' '@@no-dbus-unit@@'
+}
+
+default_target() { systemctl get-default 2>/dev/null || echo graphical.target; }
+
+do_check() {
+    if ! counting_in_effect; then
+        # Not an error. On a GRUB machine there is no boot counter to satisfy,
+        # so there is nothing for this gate to gate. The unit's
+        # ConditionPathExists means it does not even start there; this branch
+        # exists for someone running the script by hand.
+        msg "boot counting is not in effect (no LoaderBootCountPath) — nothing to check"
+        return 0
+    fi
+
+    local target failures=() u
+    target="$(default_target)"
+
+    # The desktop. `graphical.target` being ACTIVE is what "reached the
+    # graphical desktop" means to systemd; the greeter is checked separately
+    # below because graphical.target can be active with a dead display manager.
+    if [[ "$(systemctl is-active "$target" 2>/dev/null)" != active ]]; then
+        failures+=("$target is not active")
+    fi
+
+    mapfile -t units < <(critical_units)
+    for u in "${units[@]}"; do
+        if [[ "$u" == '@@no-dbus-unit@@' ]]; then
+            failures+=("no system D-Bus unit exists in this image")
+            continue
+        fi
+        if [[ "$(systemctl is-active "$u" 2>/dev/null)" != active ]]; then
+            failures+=("$u is not active")
+        fi
+    done
+
+    # The display manager, only when the machine is supposed to have one. On a
+    # `multi-user.target` default there is no desktop to reach and requiring a
+    # greeter would roll back a deliberately headless machine.
+    if [[ "$target" == graphical.target ]] && systemctl cat greetd.service >/dev/null 2>&1; then
+        if [[ "$(systemctl is-active greetd.service 2>/dev/null)" != active ]]; then
+            failures+=("greetd.service is not active")
+        fi
+    fi
+
+    local entry verdict
+    entry="$(efivar_str LoaderEntrySelected || echo unknown)"
+    if (( ${#failures[@]} == 0 )); then verdict=good; else verdict=bad; fi
+
+    mkdir -p "$STATE"
+    # Atomic replacement: a half-written verdict read by `apex boot status`
+    # during shutdown would be worse than a stale one.
+    local tmp="$STATE/.last-health.json.$$"
+    {
+        printf '{\n'
+        printf '  "verdict": "%s",\n' "$verdict"
+        printf '  "entry": "%s",\n' "$entry"
+        printf '  "target": "%s",\n' "$target"
+        printf '  "checkedAt": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '  "failures": ['
+        local first=1 f
+        for f in ${failures[@]+"${failures[@]}"}; do
+            (( first )) || printf ', '
+            printf '"%s"' "${f//\"/\\\"}"
+            first=0
+        done
+        printf ']\n}\n'
+    } > "$tmp"
+    mv -f "$tmp" "$STATE/last-health.json"
+
+    if [[ "$verdict" == good ]]; then
+        msg "healthy: $target active, ${#units[@]} critical units active, entry $entry"
+        return 0
+    fi
+    # Exiting non-zero is the entire point. boot-complete.target does not get
+    # reached, systemd-bless-boot does not run, the +N-M suffix survives, and
+    # the next boot spends another try. Do NOT convert this into a warning.
+    for f in "${failures[@]}"; do msg "UNHEALTHY: $f"; done
+    msg "refusing to bless this boot; the boot counter keeps its remaining tries"
+    return 1
+}
+
+# ── the recovery notice ─────────────────────────────────────────────────────
+# §22: "show recovery notification after a successful boot". This runs after
+# boot-complete.target, so by construction the boot it reports on is one that
+# passed the health gate — telling a user "you were rolled back" while the
+# machine is still failing would be noise.
+#
+# A deployment whose tally reached +0-3 was attempted three times and never
+# blessed. If such an entry exists and it is not the one running, this boot IS
+# the automatic rollback, and that is the fact to surface.
+do_notice() {
+    if ! counting_in_effect; then
+        msg "boot counting is not in effect — no rollback notice to write"
+        return 0
+    fi
+    local json selected
+    if ! json="$(bootctl_entries)" || [[ -z "$json" ]]; then
+        # Fail closed and say so. An empty list would be indistinguishable
+        # from "nothing failed", which is exactly the answer that hides a
+        # rollback the user needs to know about.
+        msg "could not read boot entries; not writing a notice (needs root)"
+        return 1
+    fi
+    selected="$(efivar_str LoaderEntrySelected || echo '')"
+
+    mkdir -p "$STATE"
+    local tmp="$STATE/.rollback-notice.json.$$"
+    # The entry list goes to a FILE and its path is passed as an argument.
+    # `printf ... | python3 - <<'PY'` looks like it works and cannot: the
+    # heredoc is python's stdin, so the pipe is discarded and json.load(stdin)
+    # reads the script. That produced an unconditional failure — which the
+    # suite caught only because it asserts the notice is WRITTEN, not merely
+    # that the command returned non-zero for some reason.
+    local feed="$STATE/.entries.json.$$"
+    printf '%s' "$json" > "$feed"
+    # `if ! python3 ...; then rc=$?` would capture the status of the NEGATION
+    # (0 or 1), not python's. That is how the "nothing to report" exit 10 came
+    # back as 1 and the stale notice was never cleared. Capture first, branch
+    # second.
+    local rc=0
+    python3 - "$selected" "$tmp" "$feed" <<'PY' || rc=$?
+import json, sys, datetime
+selected, out, feed = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(feed) as f:
+    entries = json.load(f)
+# An entry is "exhausted" when the bootloader spent every try on it. bootctl
+# omits triesLeft entirely for entries with no counter, so `.get` with a
+# sentinel is required: `entry.get("triesLeft", 0) == 0` would mark every
+# blessed entry as failed, which would fire the notice on a healthy machine.
+exhausted = [e for e in entries
+             if e.get("triesLeft") == 0
+             and e.get("id") != selected]
+if not exhausted:
+    sys.exit(10)   # nothing to report; the shell clears any stale notice
+payload = {
+    "rolledBack": True,
+    "runningEntry": selected,
+    "failedEntries": [
+        {"id": e.get("id"), "path": e.get("path"),
+         "triesDone": e.get("triesDone"), "title": e.get("title")}
+        for e in exhausted
+    ],
+    "noticedAt": datetime.datetime.now(datetime.timezone.utc)
+                  .strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+with open(out, "w") as f:
+    json.dump(payload, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+    if (( rc != 0 )); then
+        rm -f "$tmp" "$feed"
+        if (( rc == 10 )); then
+            # No failed deployment any more. Clear a stale notice rather than
+            # leaving the user with a warning about something already gone;
+            # there is no `apex boot ack` verb precisely so that the notice
+            # tracks reality instead of tracking whether someone dismissed it.
+            rm -f "$STATE/rollback-notice.json"
+            msg "no exhausted boot entries; cleared any previous rollback notice"
+            return 0
+        fi
+        msg "failed to evaluate boot entries (rc=$rc)"
+        return 1
+    fi
+    rm -f "$feed"
+    mv -f "$tmp" "$STATE/rollback-notice.json"
+    msg "wrote a rollback notice: $STATE/rollback-notice.json"
+}
+
+case "${1:-}" in
+    check)  do_check ;;
+    notice) do_notice ;;
+    *) printf 'usage: apex-boot-health {check|notice}\n' >&2; exit 2 ;;
+esac
