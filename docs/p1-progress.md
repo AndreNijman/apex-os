@@ -172,9 +172,9 @@ nothing would report as converged forever.
 - [ ] **7.4** GUI editing in the shell. **Deferred out of this phase** — §10's
       last bullet, and it is apex-shell work, not apex-os work. The schema
       round-trips through TOML losslessly so the editor has something to write.
-- [x] **7.5** Tests. `tests/test-apex-blueprint.sh` — 97 assertions against the
-      compiled binary — plus 27 planner unit tests in `apexd-core` and 15 in
-      the `apex` crate, and two static CI checks.
+- [x] **7.5** Tests. `tests/test-apex-blueprint.sh` — 105 assertions against
+      the compiled binary — plus 27 planner unit tests in `apexd-core` and 16
+      in the `apex` crate, and two static CI checks.
       The suite runs a **live** `apex apply`, deliberately. "The dry run prints
       the same steps" is only meaningful if it is compared against what a real
       run does; two identical printouts from the same unused code path prove
