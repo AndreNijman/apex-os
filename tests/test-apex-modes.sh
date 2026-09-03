@@ -297,6 +297,36 @@ n=$(jget "$j" 'import json,sys; print(len(json.load(sys.stdin)["gaps"]))')
 if [ "${n:-0}" -ge 3 ]; then ok "unavailable signals are enumerated as gaps"
 else bad "unavailable signals are enumerated as gaps" "only $n gap(s)"; fi
 
+echo "── §13: --auto turns a measurement into a mode, visibly ───────────────"
+# The guard must cover --auto exactly as it covers a named mode, or the one
+# verb that picks its own target would be the one that could still act.
+out=$(APEX_MODE_NO_APPLY=1 at "$BUILD" mode set --auto); rc=$?
+is "the guard covers --auto too" 2 "$rc"
+want "…for the guard's reason" "APEX_MODE_NO_APPLY is set" "$out"
+
+# With the bus redirected to nothing, --auto still resolves the recommendation
+# and prints its reasoning before failing to reach a daemon — which is what
+# proves the workload engine is actually wired to the mode selector.
+out=$(DBUS_SYSTEM_BUS_ADDRESS=unix:path=/nonexistent-apex-test-bus \
+      at "$BUILD" mode set --auto); rc=$?
+want "--auto names the measured workload" "compiling" "$out"
+want "--auto names the mode it chose" "development" "$out"
+want "--auto shows its reasoning before acting" "cc1plus" "$out"
+if [ "$rc" = 0 ]; then bad "--auto without a daemon still fails" "exited 0"
+else ok "--auto without a daemon still fails"; fi
+
+# And with nothing measurable, --auto refuses to guess rather than defaulting
+# to some mode. This is §13's "conservative defaults" as an executable claim.
+out=$(at "$BARE" mode set --auto); rc=$?
+if [ "$rc" = 0 ]; then bad "--auto refuses to guess when nothing is measurable" "exited 0"
+else ok "--auto refuses to guess when nothing is measurable"; fi
+# The substring must not straddle the wrap in that message, or the assertion
+# fails for a formatting reason rather than a behavioural one.
+want "…and says why rather than picking one" "will not guess" "$out"
+if grep -qE "^apex: that suggests mode" <<<"$out"; then
+    bad "--auto names no mode when it has no verdict" "it recommended one anyway"
+else ok "--auto names no mode when it has no verdict"; fi
+
 echo "── §12: the Performance Lab reports what it measured, and only that ───"
 j=$(at "$IDLE" perf --json)
 is "perf --json is valid JSON" "ok" \
