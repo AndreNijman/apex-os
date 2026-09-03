@@ -269,6 +269,18 @@ jobs:
           APEX_DISPLAY_NO_LIVE: "1"
         run: ./tests/test-apex-display.sh
 
+      # §17's fourth generator. The shell has written Hyprland .conf/.lua and
+      # niri .kdl on every keybind edit for a long time; labwc got nothing,
+      # because it has no IPC to push bindings over and no include mechanism to
+      # append a generated file to. So on labwc the Keybinds page was fully
+      # interactive and completely inert.
+      #
+      # The suite splices into fixture files only — it must never touch a real
+      # ~/.config/labwc/rc.xml, which is what the helper's own default would do
+      # if `apply` were ever called without --rc.
+      - name: Run labwc keybind generator assertions
+        run: ./tests/test-labwc-keybinds.sh
+
       # End-to-end, against a real daemon on an isolated socket: that the
       # daemon resolves the asking session from the connection's PEER
       # CREDENTIALS and not from anything the client sent. The negative control
@@ -341,7 +353,8 @@ jobs:
           # variable turns into a path on the live system. The file is clean at
           # this level today, so any finding is one this PR introduced.
           shellcheck -S warning files/system/libexec/apex-pkg \
-            tests/test-apex-pkg.sh tests/test-apex-firstrun.sh
+            tests/test-apex-pkg.sh tests/test-apex-firstrun.sh \
+            tests/test-labwc-keybinds.sh
 
   result:
     name: PR validation
