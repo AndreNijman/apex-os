@@ -282,3 +282,55 @@ every graphical application on it was months stale. Skip it with
 * `state.json` records `local_files` and `unsigned_accepted` so provenance
   survives a reboot and is not something only the person who typed the command
   knows.
+
+## Browsers — two shipped, one default
+
+Both editions ship **Firefox** (RPM, in `core`) and **Zen Browser** (Flatpak,
+installed on first boot).
+
+**Firefox is the default and stays the default.** Zen is a Firefox fork with an
+opinionated interface — vertical tabs, workspaces, a compact chrome — and someone
+who dislikes it should not have to undo a choice the image made for them. So Zen
+is installed and discoverable in the launcher, and `files/desktop/xdg/mimeapps.list`
+keeps `x-scheme-handler/http` and `https` pointed at `firefox.desktop`.
+
+The build asserts that, because it is not self-maintaining: a Flatpak's exported
+`.desktop` can win the handler race depending on XDG data directory ordering, so
+without the check an image could silently change every user's default browser.
+
+### Why Zen is a Flatpak
+
+Zen is not in Fedora's repositories and ships no Fedora RPM. The alternatives
+are a tarball in `/opt` or an AppImage, and both would need APEX to write and
+maintain its own updater to keep "always the latest stable" true.
+
+As a Flatpak it needs none: `apex update` already runs
+`flatpak update --system` (`cmd_flatpak_upgrade` in `apex-pkg`), so Zen tracks
+latest stable through the update path that already exists.
+
+It installs at **first boot**, not at build time, for the same reason the Flathub
+remote does — `flatpak install` needs a running system, and bootc seeds `/var`
+once and never updates it. `apex-flatpak-preinstall.service` runs after
+`apex-flathub-setup.service`, is idempotent, and stamps only on success so a
+first boot without network retries on the next one.
+
+### Making Zen your default, per machine
+
+A per-user choice, never an image one:
+
+```sh
+xdg-settings set default-web-browser app.zen_browser.zen.desktop
+```
+
+### Moving a Firefox profile into Zen
+
+Zen reads a Firefox profile directly — same Gecko, same layout — but there is one
+trap. Zen's **application** version is its own (`1.21.16b`), not the Gecko
+version it is built on (`154.0.1`). Gecko's downgrade protection compares the
+*application* version in `compatibility.ini`, so a profile last used by Firefox
+153 looks like a downgrade to Zen 1.21 no matter how new its Gecko is, and Zen
+opens with *"You've launched an older version of Zen Browser"*.
+
+Copy the profile, then **delete `compatibility.ini` from the copy.** Zen
+regenerates it and runs its normal profile-upgrade path. Do not delete the
+databases, and do not do any of this while the source browser is running.
