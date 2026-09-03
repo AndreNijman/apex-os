@@ -58,67 +58,6 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 /// `bubblewrap`. The same path the agent runtime asserts in `Containerfile.base`.
 const BWRAP: &str = "/usr/bin/bwrap";
 
-/// Where a runtime was found, and which one it is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Located {
-    /// Which runtime.
-    pub runtime: Runtime,
-    /// The program to execute.
-    pub path: PathBuf,
-}
-
-/// Find an inference runtime.
-///
-/// Search order, and every step is a mechanism that already exists:
-///
-/// 1. `$APEX_AI_RUNTIME` — an explicit override. It is what the shell suite
-///    points at a fake backend, and what a developer points at a build tree.
-/// 2. `/usr/bin/<program>` — where a system extension lands, so
-///    `sudo apex install llama-cpp` is all it takes.
-/// 3. `PATH` — for a runtime reached some other way.
-///
-/// A capsule runtime (`apex env create cuda`) is deliberately **not** searched.
-/// Spawning into a capsule would mean the store and the socket directory being
-/// visible inside the container and the GPU being passed through, and neither
-/// claim could be verified on this branch without downloading a multi-gigabyte
-/// CUDA image. So `apex ai status` names the command and stops there rather
-/// than shipping a spawn path nobody has run. That is a stated limitation, not
-/// an oversight.
-pub fn locate(runtime: Runtime) -> Option<Located> {
-    if let Some(p) = std::env::var_os("APEX_AI_RUNTIME") {
-        if !p.is_empty() {
-            let path = PathBuf::from(p);
-            if path.is_file() {
-                return Some(Located { runtime, path });
-            }
-            eprintln!(
-                "apex-aid: APEX_AI_RUNTIME names {}, which is not a file — ignoring it",
-                path.display()
-            );
-        }
-    }
-    let sysext = PathBuf::from("/usr/bin").join(runtime.program());
-    if sysext.is_file() {
-        return Some(Located { runtime, path: sysext });
-    }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|d| d.join(runtime.program()))
-        .find(|p| p.is_file())
-        .map(|path| Located { runtime, path })
-}
-
-/// The first runtime this machine can actually start, or `None`.
-///
-/// Only runtimes `apexd_core::ai` will launch are considered, so a machine with
-/// `ollama` installed does not report a runtime the daemon would then refuse.
-pub fn locate_any() -> Option<Located> {
-    Runtime::ALL
-        .into_iter()
-        .filter(|r| r.unsupported_because().is_none())
-        .find_map(locate)
-}
-
 /// Whether the backend will be confined.
 pub fn confinement_available() -> bool {
     Path::new(BWRAP).is_file()
@@ -548,48 +487,9 @@ mod tests {
         assert_eq!(confine_argv(&plan, &e), confine_argv(&plan, &e));
     }
 
-    #[test]
-    fn a_cpu_backend_needs_no_device_nodes() {
-        assert!(device_nodes(Backend::Cpu).is_empty());
-    }
 
-    #[test]
-    fn only_device_nodes_that_exist_are_requested() {
-        // bwrap fails outright on a --dev-bind of a missing path, so a CUDA
-        // node list must not be produced on a machine with no NVIDIA card.
-        for b in Backend::ALL {
-            for p in device_nodes(b) {
-                assert!(p.exists(), "{b} asked for {} which is absent", p.display());
-            }
-        }
-    }
 
-    #[test]
-    fn locate_prefers_the_explicit_override_and_ignores_a_nonexistent_one() {
-        // No `set_var` — that is process-global and races other tests. The
-        // property is asserted through the search order's own shape instead:
-        // the override is consulted first, and a path that is not a file is
-        // skipped rather than returned.
-        assert_eq!(locate(Runtime::LlamaCpp).map(|l| l.runtime), locate(Runtime::LlamaCpp).map(|l| l.runtime));
-        // Whatever this machine has, a located runtime must be an existing file
-        // and must be one apexd-core will actually launch.
-        if let Some(l) = locate_any() {
-            assert!(l.path.is_file(), "{}", l.path.display());
-            assert!(l.runtime.unsupported_because().is_none(), "{}", l.runtime);
-        }
-    }
 
-    #[test]
-    fn locate_any_never_offers_a_runtime_the_planner_would_refuse() {
-        // A machine with ollama installed must not report a runtime the daemon
-        // then refuses to start — that would be a status line contradicting the
-        // next command.
-        let offered: Vec<Runtime> = Runtime::ALL
-            .into_iter()
-            .filter(|r| r.unsupported_because().is_none())
-            .collect();
-        assert_eq!(offered, vec![Runtime::LlamaCpp]);
-    }
 
     #[test]
     fn signalling_group_zero_or_one_is_refused() {
