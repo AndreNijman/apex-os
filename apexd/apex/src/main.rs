@@ -7,6 +7,7 @@
 mod agent;
 mod blueprint;
 mod gaming;
+mod host;
 mod mode;
 mod ops;
 mod proxy;
@@ -86,6 +87,20 @@ enum Cmd {
     /// attached controllers. Exits non-zero when Gaming Mode would not start,
     /// so it is usable as a check.
     Gaming(gaming::GamingArgs),
+    /// Trusted APEX devices, and what each one can do (§20).
+    ///
+    /// A device is named by an ssh destination — normally an alias already in
+    /// `~/.ssh/config`, which is why there is no address, key or port to repeat
+    /// here. APEX generates no key and holds no passphrase: authentication,
+    /// host identity and transport are whatever `ssh <destination>` already
+    /// does, including a ProxyCommand or a Match exec that picks a route per
+    /// network.
+    ///
+    /// Capabilities are *probed*, never assumed. An APEX peer answers
+    /// `apex host describe --json` with the same struct this side parses; a
+    /// host that is not APEX gets a portable shell probe so `list` still says
+    /// something true about it.
+    Host(host::HostArgs),
     /// Print the hardware fingerprint and layered profile selection.
     Fingerprint,
     /// Pin the current deployment (ostree admin pin 0). Requires root.
@@ -904,6 +919,10 @@ async fn main() {
         // Read-only, like `perf` and `workload`, and for the same reason it is
         // not in the privileged set: it measures and reports.
         Cmd::Gaming(args) => gaming::gaming_main(args),
+        // Read-only except for `add`/`remove`/`probe`, which write only the
+        // registry and the probe cache in the user's own home. Nothing here
+        // touches apexd or needs root.
+        Cmd::Host(args) => host::run(args),
         Cmd::Fingerprint => cmd_fingerprint(),
         Cmd::Pin => ops::pin(),
         Cmd::Rollback => ops::rollback(),
