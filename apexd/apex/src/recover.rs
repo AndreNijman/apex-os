@@ -1053,7 +1053,7 @@ fn cmd_status(json: bool) -> i32 {
     println!("APEX recovery");
     println!("  bootloader : {}", s.bootloader);
     println!();
-    println!("{:<22}  {:<12}  {}", "COMPONENT", "STATE", "DETAIL");
+    println!("{:<22}  {:<12}  DETAIL", "COMPONENT", "STATE");
     for r in &s.rows {
         println!("{:<22}  {:<12}  {}", r.label, r.state.as_str(), wrap(&r.detail, 24));
         if let Some(a) = &r.action {

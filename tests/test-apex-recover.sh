@@ -96,6 +96,35 @@ command -v python3 >/dev/null 2>&1 || {
     echo "FATAL: python3 is required to validate the JSON output" >&2; exit 2; }
 command -v realpath >/dev/null 2>&1 || {
     echo "FATAL: realpath is required; the engine's teardown depends on it" >&2; exit 2; }
+# Deliberately NOT `diff`: it is diffutils, it is absent from this project's
+# `apex-rust` container, and the final comparison is done in the shell instead.
+
+# ── this suite cannot run as root, and refuses rather than half-running ─────
+# `apex disposable run` and `apex recover reset` both refuse root BY DESIGN —
+# a root capsule is stored under /var/lib/containers and shared by every
+# account, and root's home is not the user's, so a root reset would clear the
+# wrong account while reporting success. A suite running as root would
+# therefore exercise those refusals on every case that matters and report a
+# green run having tested nothing, which is the vacuous shape this repository
+# has been bitten by. Measured: under root in `apex-rust`, 18 cases failed and
+# every one of them failed because the program correctly refused.
+#
+# A refusal, not a skip, and not a privilege drop: dropping would leave the
+# --with-binary half unable to build. Both GitHub jobs that run this file
+# (`static` and `rust`) run as an ordinary user, so this never fires in CI. It
+# fires when someone runs it in a root container — exactly the case where the
+# behaviour change would otherwise be invisible.
+if [ "$(id -u)" = 0 ]; then
+    {
+        echo "FATAL: this suite must not run as root."
+        echo "  \`apex disposable run\` and \`apex recover reset\` refuse root by design,"
+        echo "  so every case that drives them would assert the refusal instead of the"
+        echo "  behaviour, and the run would be green having tested nothing."
+        echo "  Run it as an ordinary user; both CI jobs already do."
+        echo "  In a container:  podman run --user 1000 -e HOME=/tmp/h …"
+    } >&2
+    exit 2
+fi
 
 WORK=$(mktemp -d /tmp/apex-recover-test.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
@@ -257,6 +286,11 @@ check_exec_line "teardown resolves the path with realpath -e" \
     'realpath -e -- "\$dir"'
 check_exec_line "teardown asserts the resolved path EQUALS <root>/<name>" \
     '\[ "\$real" = "\$\{root_real\}/\$\{name\}" \]'
+# The suite refuses to run as root (see the top of this file), so it cannot
+# exercise this one directly. Asserted structurally here, and behaviourally in
+# Containerfile.base, which runs `apex recover reset` AS root during the build
+# and checks both the exit status and the reason.
+check_exec_line "run refuses to be executed as root" 'require_rootless'
 check_exec_line "the capsule is created with its own --home" '--home='
 check_exec_line "and with no device access" '--gpu=none'
 
@@ -913,11 +947,18 @@ else
     bad "the canaries outside every fixture are byte-identical" "THEY CHANGED"
 fi
 real_state_sum > "$WORK/real-state-after"
-if diff -q "$REAL_STATE_SUM" "$WORK/real-state-after" >/dev/null; then
+# Compared in the shell, not with diff(1). `diff` is diffutils and is NOT
+# installed in this project's `apex-rust` container: it exited 127, `diff -q`
+# reported "differ" for a missing tool rather than for a difference, and the
+# check went red on two byte-identical empty files. A dependency that turns a
+# clean run into a false alarm is worse than no check.
+before_state=$(cat "$REAL_STATE_SUM")
+after_state=$(cat "$WORK/real-state-after")
+if [ "$before_state" = "$after_state" ]; then
     ok "the developer's own ~/.config/apex, apex-shell, hypr and state are untouched"
 else
     bad "the developer's own configuration is untouched" \
-        "IT CHANGED — $(diff "$REAL_STATE_SUM" "$WORK/real-state-after" | head -3 | tr '\n' '|')"
+        "IT CHANGED — before:$(head -c 120 <<<"$before_state" | tr '\n' '|') after:$(head -c 120 <<<"$after_state" | tr '\n' '|')"
 fi
 
 printf '\napex recover / disposable: %d passed, %d failed%s\n' \
