@@ -15,6 +15,19 @@ P1 is rows 5–8 of the roadmap's own implementation order
 | 7 | §10 declarative blueprint + sync | `p1/blueprint-and-sync` |
 | 8 | §11 modes, §12 gaming mode, §13 workload manager | `p1/modes-and-workloads` |
 
+## Standing instruction from Andre — 2026-09-03
+
+> "for the rest never ask questions just finish autonomously"
+
+Combined with an explicit "add whatever you want" for the idle-inhibit work and
+"put system stats wherever you think it should be". So: **make the judgement
+calls, do not stop to ask.** Report decisions and their reasoning afterwards
+rather than seeking approval beforehand.
+
+The two things that remain non-negotiable regardless, because both have already
+cost him something real: never mutate his live session or anything under his
+`~/.config`, and never let a suite pass without being able to fail.
+
 ## Working rules for this stack
 
 - **Every branch is stacked on the previous one**, and the bottom of the stack
@@ -154,9 +167,12 @@ session goes red instead of passing vacuously.
   nowhere** — verified with a throwaway probe. It is dead code: wire it into an
   About panel or delete it. Andre's call, not an agent's.
 - **`ShellState.qml:55` still branches on `Compositor.isLabwc`** for the caffeine
-  inhibitor (systemd-inhibit vs Wayland idle-inhibit). That is genuine behaviour
-  keyed on a compositor *name*, and an `idleInhibit` capability would finish what
-  §17 started. Out of 5.2's scope; the next obvious candidate.
+  inhibitor — **now in flight** on `p1/idle-and-stats`, together with placing
+  `SystemStats`. Andre's constraint on the first: he must still be able to stop
+  idle with something, so a capability that makes the Caffeine tile disappear is
+  a regression, not a migration. If every backend can inhibit idle by some
+  route, the capability's job is to choose the *mechanism*, not gate the
+  feature.
 - Also flagged rather than changed, per its brief: the lua dialect interpolates
   the shader path into a lua string as `'$1'`, so an apostrophe in a filename
   would make `hyprctl eval` error. Not a shell injection — it is a bash argument
