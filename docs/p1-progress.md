@@ -114,6 +114,43 @@ with `follow_mouse` crossing a monitor boundary now closes popups (unflagged
 behaviour change); and the facade suite encodes Hyprland's refcount semantics as
 universal, so it would fail on niri or labwc.
 
+## PAUSED (third time) — 2026-09-03
+
+All work stopped at Andre's request. **Nothing uncommitted, nothing unpushed**,
+verified by sweeping every worktree in both repos.
+
+One worktree was dirty and is now checkpointed: `p1/gaming-profiles` held a
+complete 109-assertion `tests/test-apex-gaming.sh` plus its CI wiring, none of
+it committed. It passes and is shellcheck-clean, **but no assertion has been
+mutation-checked**, so 109/0 is not yet evidence of anything. That is the next
+step on that branch and the commit says so.
+
+Branches in flight, all pushed:
+
+| Branch | Repo | State |
+|--------|------|-------|
+| `p1/finish-5.2` | apex-shell | pushed, unreported |
+| `p1/plugin-points` | apex-shell | pushed, unreported |
+| `p1/blueprint-editor` | apex-shell | **PR #10 open**, unreported |
+| `p1/gaming-profiles` | apex-os | suite checkpointed, mutation pass owed |
+| `p1/deferred-items` | apex-os | pushed, was on the `apex plugin` CLI when stopped |
+| `p1/blueprint-write` | apex-os | done — `apex blueprint set` |
+| `feat/zen-browser` | apex-os | done — **PR #32** |
+| `feat/labwc-default-browser` | apex-os | done |
+| `fix/core-system-release-branding` | apex-os | done — **PR #31** |
+| `p1/integration` | apex-os | done — **PR #30**, all four phases |
+
+**Still not merged to `apex-os/main`, so no image has been built.**
+
+### Known, unfixed, and outside what was asked
+
+**On niri, SUPER+W / SUPER+T / SUPER+E do not exist.** `KeybindService._genKdl`
+has `if (e.type) continue`, commented "native compositor actions remain in
+niri's own config" — which also skips every `type: "exec"` app-launch bind. So
+niri users get the shell popups and no application shortcuts at all. An app
+launch is a `spawn`, which niri supports, so the `continue` is catching more
+than it meant to. Pre-existing; raised with Andre, not yet fixed.
+
 ## Two gaps the tracker did not show — 2026-09-03
 
 Auditing P1 against the roadmap rather than against this file turned up two
