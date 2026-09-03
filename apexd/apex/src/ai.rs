@@ -668,12 +668,11 @@ fn load_settings() -> Settings {
 /// opt-in, so "not running" is an ordinary state with one command as its
 /// answer, not an error to diagnose.
 fn not_running() -> String {
-    format!(
-        "the local inference service is not running.\n  \
-         Start it with:  systemctl --user enable --now apex-aid\n  \
-         It is opt-in on purpose — a per-user daemon holding a multi-gigabyte model \
-         resident should not start for people who never ask for one."
-    )
+    "the local inference service is not running.\n  \
+     Start it with:  systemctl --user enable --now apex-aid\n  \
+     It is opt-in on purpose — a per-user daemon holding a multi-gigabyte model \
+     resident should not start for people who never ask for one."
+        .to_string()
 }
 
 /// Send one control request and read one reply.
@@ -862,7 +861,7 @@ fn models(available: bool, json: bool) -> i32 {
 }
 
 fn print_models(list: &[ModelInfo]) {
-    println!("{:<20} {:>9}  {:<10} {:<8} {}", "MODEL", "SIZE", "RUNTIME", "CONTEXT", "STATE");
+    println!("{:<20} {:>9}  {:<10} {:<8} STATE", "MODEL", "SIZE", "RUNTIME", "CONTEXT");
     for m in list {
         let mut state = Vec::new();
         if m.loaded {
