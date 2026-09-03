@@ -15,6 +15,32 @@ P1 is rows 5–8 of the roadmap's own implementation order
 | 7 | §10 declarative blueprint + sync | `p1/blueprint-and-sync` |
 | 8 | §11 modes, §12 gaming mode, §13 workload manager | `p1/modes-and-workloads` |
 
+## apex-shell is landing on `main` — 2026-09-03
+
+Merging apex-shell triggers no image build (`release-shell` is dispatch-only,
+`build-image` lives in apex-os), so the shell half of P1 lands as it is
+finished. `Containerfile.base` vendors the shell from remote `main`, so this is
+the documented merge order rather than a shortcut.
+
+| PR | What | State |
+|----|------|-------|
+| #8  | §17 compositor adapter | merged `30d1801` |
+| #9  | §16 plugin platform | merged `f2908f9` |
+| #10 | §10 blueprint GUI editor | merged `3434c66` |
+| #12 | two more extension points | merged `099c44c` |
+| #11 | 5.2 finished + review leftovers | green, **held** |
+| #13 | niri application keybinds | green, **held** |
+
+#11 and #13 are held only because `p1/idle-and-stats` is still being built on
+top of #11. Merging a base mid-flight orphans the branch above it — that already
+cost one rebase today when #9 landed under #12.
+
+**Merging #9 immediately unblocked apex-os PR #34**, whose `Package engine` job
+failed on a single labelled assertion: the CLI takes its plugin verdicts from
+apex-shell's `manifest.js`, and CI clones the shell from `main`, where it did not
+yet exist. The agent predicted that precisely, and the job went green on re-run
+with no change on either side. The vendoring coupling working as designed.
+
 ## Standing instruction from Andre — 2026-09-03
 
 > "for the rest never ask questions just finish autonomously"
@@ -541,8 +567,26 @@ apex-os **PR #29**, branch `p1/capsules-and-packages`. All CI green.
 - [x] **6.3** Resolver built *into* `apex-pkg` rather than beside it:
       `apex resolve`, `apex install --source rpm|flatpak|capsule [--env NAME]`,
       `apex search` across repos and Flathub, provenance on every install.
-- [ ] GUI export via `distrobox-export` — §8 says "when useful"; needs a real
-      desktop to verify. Deferred.
+- [x] GUI export via `distrobox-export` — apex-os **PR #34**, now fully green.
+      `apex env export / unexport / exports`. `distrobox-export` only runs
+      *inside* a container and reaches back through `/run/host`, so there is no
+      host-side program to call: the host side is
+      `distrobox enter --no-tty <capsule> -- distrobox-export --app <name>`.
+      No root, no polkit.
+
+      The host `.desktop` filename is **recorded, not derived**, and `unexport`
+      deletes recorded names — never a `<capsule>-*.desktop` glob, because
+      capsule `shell` and capsule `shell-x` are both valid names.
+
+      That distinction survived only because of a mutation: the assertion
+      "recorded, not derived" **passed against a deriving implementation**, since
+      the fixture's name happened to equal what derivation produces. Only
+      mutating the code exposed it.
+
+      Two more process findings from that PR worth carrying: the known-red step
+      was originally mid-job, where it would have silently skipped four suites
+      and the ShellCheck gate below it; and the suite assumed `/usr/bin/node`,
+      which would have produced ~50 spurious failures on the runner.
 - [x] **6.4** Tests.
 
 `apex install <bare-name>` behaves exactly as before: an exact-name RPM still
