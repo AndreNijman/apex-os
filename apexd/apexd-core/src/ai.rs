@@ -2110,6 +2110,188 @@ impl Endpoints {
     }
 }
 
+// ── the control protocol ─────────────────────────────────────────────────────
+//
+// Two endpoints, and the split is the design rather than a convenience:
+//
+// * [`API_SOCKET`] carries the **backend's own HTTP API, unmodified**. The
+//   daemon relays bytes and parses nothing, which is what lets an
+//   OpenAI-compatible client — an editor plugin, an agent, `curl` — connect
+//   with no APEX-specific handshake. It is also why the daemon needs no HTTP
+//   implementation of its own: a proxy that parsed requests would be a second
+//   HTTP stack to keep correct, and every header it failed to forward would be
+//   a bug in somebody else's client.
+// * [`CONTROL_SOCKET`] carries the types below, one JSON object per line, in
+//   the same shape as `apex_agent_core::protocol`. It exists because "which
+//   model is loaded, on which backend, with how much VRAM" is an APEX question
+//   that no backend API answers.
+//
+// The framing is line-based, so a serialised request or response must never
+// contain a raw newline. `serde_json` escapes them inside strings, and
+// `no_message_can_contain_a_raw_newline` asserts it over a message built from
+// hostile text rather than trusting that.
+
+/// A request on the control socket.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum Request {
+    /// Version handshake. Always answered, even by a daemon that would refuse
+    /// everything else, so a client can report a skew rather than a timeout.
+    Hello,
+    /// Everything `apex ai status` prints.
+    Status,
+    /// Installed models, read from the store.
+    Models,
+    /// Make a model the one the next API connection loads. Unloads a different
+    /// one that is currently resident, because VRAM holds one at a time.
+    Select { model: String },
+    /// Stop the backend now, releasing VRAM.
+    Unload,
+}
+
+/// A response on the control socket.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "reply", rename_all = "snake_case")]
+pub enum Response {
+    /// Answer to [`Request::Hello`].
+    Hello { version: u32, api_socket: String },
+    /// Answer to [`Request::Status`]. Boxed because it is much larger than
+    /// every other variant and clippy's `large_enum_variant` is right.
+    Status(Box<Status>),
+    /// Answer to [`Request::Models`].
+    Models { models: Vec<ModelInfo> },
+    /// A request that succeeded and has nothing to report.
+    Ok,
+    /// A refusal, with a machine-readable kind so the CLI can choose an exit
+    /// code without matching on prose.
+    Error { kind: ErrorKind, message: String },
+}
+
+impl Response {
+    /// A refusal.
+    pub fn error(kind: ErrorKind, message: impl Into<String>) -> Response {
+        Response::Error { kind, message: message.into() }
+    }
+}
+
+/// Why a request was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    /// Unparseable, or a value that failed validation.
+    BadRequest,
+    /// The model is not in the store.
+    NoSuchModel,
+    /// No inference runtime is installed. Carries the install command in the
+    /// message, because the answer to this is always a command to type.
+    NoRuntime,
+    /// The backend would not start, or died.
+    BackendFailed,
+    /// A protocol version this daemon cannot speak.
+    Protocol,
+    /// Anything else, including an I/O failure.
+    Internal,
+}
+
+/// One installed model, as `apex ai models` prints it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ModelInfo {
+    /// The id.
+    pub id: String,
+    /// `sha256:<hex>`.
+    pub digest: String,
+    /// Size on disk.
+    pub weights_mib: u64,
+    /// Which runtime loads it.
+    pub runtime: String,
+    /// Largest context the weights support.
+    pub max_context: u32,
+    /// Whether the blob named by the manifest is actually present. A manifest
+    /// with no blob is what a half-finished `apex ai rm` leaves, and reporting
+    /// it beats printing a model that cannot load.
+    pub present: bool,
+    /// Whether the digest came from the person typing rather than the image.
+    pub user_supplied_digest: bool,
+    /// Whether this is the selected model.
+    pub selected: bool,
+    /// Whether it is resident right now.
+    pub loaded: bool,
+}
+
+/// One accelerator, as `apex ai status` prints it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DeviceInfo {
+    /// Index as the runtime numbers them.
+    pub index: u32,
+    /// Name.
+    pub name: String,
+    /// Total VRAM.
+    pub total_mib: u64,
+    /// VRAM in use.
+    pub used_mib: u64,
+    /// What [`Device::budget_mib`] leaves to spend.
+    pub budget_mib: u64,
+}
+
+impl From<&Device> for DeviceInfo {
+    fn from(d: &Device) -> DeviceInfo {
+        DeviceInfo {
+            index: d.index,
+            name: d.name.clone(),
+            total_mib: d.total_mib,
+            used_mib: d.used_mib,
+            budget_mib: d.budget_mib(),
+        }
+    }
+}
+
+/// The daemon's whole observable state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Status {
+    /// Protocol this daemon speaks.
+    pub protocol: u32,
+    /// Where applications connect.
+    pub api_socket: String,
+    /// The model store in use.
+    pub store: String,
+    /// The model the next connection would load.
+    pub selected: Option<String>,
+    /// The model resident now, if any.
+    pub loaded: Option<String>,
+    /// Resolved runtime program, when one was found.
+    pub runtime_path: Option<String>,
+    /// Which runtime that is.
+    pub runtime: Option<String>,
+    /// The command to type when no runtime is installed. `None` when one is.
+    pub install_hint: Option<String>,
+    /// Chosen compute backend.
+    pub backend: Option<String>,
+    /// Chosen device index.
+    pub device: Option<u32>,
+    /// Backends this machine can run, best first.
+    pub accel: Vec<String>,
+    /// Accelerators found.
+    pub devices: Vec<DeviceInfo>,
+    /// Clients attached to the API socket.
+    pub open_connections: u32,
+    /// Seconds since the last byte moved.
+    pub idle_secs: u64,
+    /// The timeout in force.
+    pub idle_timeout: u64,
+    /// Whether the machine is on battery.
+    pub on_battery: bool,
+    /// Layers planned on the GPU, and the model's total.
+    pub gpu_layers: Option<u32>,
+    /// Total layers.
+    pub total_layers: Option<u32>,
+    /// Context in force.
+    pub context: Option<u32>,
+    /// VRAM the resident model is expected to occupy.
+    pub vram_mib: Option<u64>,
+    /// Why the plan is what it is. Every selection and fit note, in order.
+    pub notes: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3239,6 +3421,93 @@ mod tests {
         for bad in ["../../etc/shadow", "a/b", "-rf", "", "Qwen3"] {
             assert!(parse_pull_spec(bad, None, None).is_err(), "{bad:?} was accepted");
         }
+    }
+
+    // ── the control protocol ─────────────────────────────────────────────────
+
+    #[test]
+    fn no_message_can_contain_a_raw_newline() {
+        // The framing is line-based, so one raw newline in a message desynchronises
+        // the stream — and every string in these types can come from a file or a
+        // command line. Asserted over hostile content rather than assumed.
+        let hostile = "line one\nline two\r\nthree";
+        let messages = vec![
+            serde_json::to_string(&Request::Select { model: hostile.to_string() }).unwrap(),
+            serde_json::to_string(&Response::error(ErrorKind::BadRequest, hostile)).unwrap(),
+            serde_json::to_string(&Response::Models {
+                models: vec![ModelInfo { id: hostile.to_string(), ..Default::default() }],
+            })
+            .unwrap(),
+            serde_json::to_string(&Response::Status(Box::new(Status {
+                notes: vec![hostile.to_string()],
+                api_socket: hostile.to_string(),
+                ..Default::default()
+            })))
+            .unwrap(),
+        ];
+        assert_eq!(messages.len(), 4);
+        for m in &messages {
+            assert!(!m.contains('\n'), "raw newline in {m}");
+            assert!(!m.contains('\r'), "raw carriage return in {m}");
+        }
+    }
+
+    #[test]
+    fn every_request_and_response_round_trips_through_json() {
+        let requests = vec![
+            Request::Hello,
+            Request::Status,
+            Request::Models,
+            Request::Select { model: "qwen3-coder".into() },
+            Request::Unload,
+        ];
+        // Exactly one case per variant. A variant added without a case here is
+        // a variant with no round-trip proof, which is how a rename ships.
+        assert_eq!(requests.len(), 5, "one case per Request variant");
+        for r in &requests {
+            let text = serde_json::to_string(r).unwrap();
+            assert_eq!(&serde_json::from_str::<Request>(&text).unwrap(), r, "{text}");
+        }
+
+        let responses = vec![
+            Response::Hello { version: PROTOCOL_VERSION, api_socket: "/run/x/api.sock".into() },
+            Response::Status(Box::default()),
+            Response::Models { models: vec![ModelInfo::default()] },
+            Response::Ok,
+            Response::error(ErrorKind::NoRuntime, "install it"),
+        ];
+        assert_eq!(responses.len(), 5, "one case per Response variant");
+        for r in &responses {
+            let text = serde_json::to_string(r).unwrap();
+            assert_eq!(&serde_json::from_str::<Response>(&text).unwrap(), r, "{text}");
+        }
+    }
+
+    #[test]
+    fn every_error_kind_round_trips() {
+        let kinds = [
+            ErrorKind::BadRequest,
+            ErrorKind::NoSuchModel,
+            ErrorKind::NoRuntime,
+            ErrorKind::BackendFailed,
+            ErrorKind::Protocol,
+            ErrorKind::Internal,
+        ];
+        assert_eq!(kinds.len(), 6);
+        for k in kinds {
+            let text = serde_json::to_string(&k).unwrap();
+            assert_eq!(serde_json::from_str::<ErrorKind>(&text).unwrap(), k);
+            // snake_case on the wire, so the CLI and shell can match on it.
+            assert!(text.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c == '"'), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_device_becomes_its_report_including_the_reserve() {
+        let d = dev(0, 8192, 52);
+        let info = DeviceInfo::from(&d);
+        assert_eq!(info.budget_mib, d.budget_mib());
+        assert_eq!(info.budget_mib, 8192 - 52 - VRAM_RESERVE_MIB);
     }
 
     #[test]

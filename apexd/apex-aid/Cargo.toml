@@ -1,0 +1,29 @@
+[package]
+name = "apex-aid"
+description = "APEX-OS local inference service: one per-user endpoint over llama.cpp, with a shared read-only model store, VRAM fit and idle unloading"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+# Eight characters, and that is deliberate: `ps -eo comm=` truncates at 15, and
+# a test that has to identify this process by name must not be reading a
+# truncated string. See AGENTS.md's note on `polkit-mate-aut`.
+name = "apex-aid"
+path = "src/main.rs"
+
+[dependencies]
+# Deliberately NOT apex-agent-core, even though it has the three path helpers
+# this daemon reproduces in src/paths.rs. Depending on it would make the
+# inference service link the agent runtime's sandbox policy, git checkpointing
+# and secret broker, and would say architecturally that one is built on the
+# other. They are siblings: both per-user, both unprivileged, neither aware of
+# the other.
+apexd-core = { path = "../apexd-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
