@@ -414,3 +414,49 @@ and `amd-zen` have none. That is a real limit on the Gamer and Creator rows,
 and closing it needs hardware nobody here has.
 
 Both are recorded as gaps rather than quietly counted as met.
+
+## A local build was vendoring a stale shell, and that is why the check mattered
+
+apex-shell merged first, deliberately: `Containerfile.base` resolves the shell
+with `git ls-remote refs/heads/main` **at build time**, so an OS build started
+before the shell lands vendors a shell without the work.
+
+Having merged it, the validation build was restarted — and its log showed
+`--> Using cache` on the shell clone layer. `git clone --branch main` is a cache
+hit forever: podman cannot know the remote moved. So **every local build after
+the first vendored whatever apex-shell was at that first build**, indefinitely,
+and the validation about to be trusted was against the pre-merge shell.
+
+`build-image.yml` never had this bug — it resolves the SHA and passes it, so the
+build-arg changes whenever the shell does. `build-local.sh` passed nothing and
+inherited the `main` default. It now resolves the same way, which additionally
+makes a local build reproduce what CI produces rather than something subtly
+older. A failure to reach the remote is fatal rather than a fallback to `main`,
+because quietly vendoring a stale shell is the thing being prevented.
+
+Confirmed by the restarted build's own first line:
+`== shell == vendoring apex-shell 9141ea7f05e71bf36610319e46478c2d3b073aa0` —
+the merge commit of apex-shell #16.
+
+This is the third time tonight a green result was produced against the wrong
+artifact: `diff` deciding a verdict in a container that has no `diff`, the
+rootless-versus-root podman store, and now the cached shell clone. In each case
+the code was correct and the *measurement* was not.
+
+## Merge state
+
+| repo | state |
+| --- | --- |
+| apex-shell | **merged** — PR #16 into `main` at `9141ea7`; #15 auto-closed, its commits contained |
+| apex-os | `p3/base`, 179 commits ahead of `main`, containing P1 (`p1/integration-2`) and P2 (`p2/base`) — verified with `merge-base --is-ancestor` |
+
+apex-os final verification before merge:
+
+| | result |
+| --- | --- |
+| `cargo test --locked` | **1064 passed, 0 failed** |
+| shell suites (22 files) | **1517 assertions, 0 failures** |
+| `cargo clippy --all-targets --locked -- -D warnings` | clean, six crates |
+| core image rebuilt with the new shells | fish 4.2.0, nu 0.99.1, tmux 3.7c, zellij 0.45.1, all registered in `/etc/shells` |
+
+Merging `p3/base` to `main` fires `build-image.yml`. That is the final build.
