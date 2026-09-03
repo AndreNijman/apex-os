@@ -130,7 +130,30 @@ nothing would report as converged forever.
         `state.json`. `state.json` records the resolved transaction including
         every dependency, so diffing against it reports convergence based on
         packages nobody asked for.
-- [ ] **7.2** `apex apply` convergence, idempotent with a real dry run.
+- [x] **7.2** `apex apply` convergence, idempotent with a real dry run.
+      Idempotency is a property, not a code path: the plan is recomputed from a
+      fresh measurement every run, so "twice changes nothing" *is* "observed ==
+      desired plans an empty list". The dry run is real for the same reason —
+      the plan is computed once and `--dry-run` prints exactly the steps a live
+      run executes; the only difference between the two is whether those steps
+      reach a converger.
+      **Three independent things keep `apply` away from a test machine:**
+      1. `RealConverger::for_apply()` is the only constructor with effects,
+         after `RealWriter::for_daemon`. CI has a static check with the same
+         three parts as the existing host-command one, including "the real
+         caller must still use it".
+      2. `APEX_BLUEPRINT_NO_APPLY` refuses, after `APEX_DISPLAY_NO_LIVE`. It
+         blocks only the *live* path, unlike the display guard — that is
+         deliberate, and it is what lets CI export it for a whole job as a
+         blanket net while every dry-run assertion still runs.
+      3. **`apply` never runs `sudo`.** It converges the privilege domain it is
+         already in and reports the other. That is the structural answer to
+         "never cause a polkit prompt", and it also removes the silent bug
+         where `sudo apex apply` writes user config into `/root` or leaves
+         root-owned files in `~/.config`.
+      After converging, `apply` **re-measures** and reports residual drift, per
+      `apexd/AGENTS.md`: a command that reports success must verify the
+      requested state, and a step can exit 0 having changed nothing.
 - [ ] **7.3** `apex sync` between machines.
 - [ ] **7.4** GUI editing in the shell. **Deferred out of this phase** — §10's
       last bullet, and it is apex-shell work, not apex-os work. The schema

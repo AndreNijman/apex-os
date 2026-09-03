@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use apexd_core::blueprint::{
-    self, AppliedState, Blueprint, Change, Domain, Observed, Plan, SCHEMA_VERSION,
+    self, AppliedState, Blueprint, Change, Domain, Observed, Plan, Step, SCHEMA_VERSION,
 };
 
 /// `/var/lib/apex-greet/last-session` — the session id the greeter preselects.
@@ -701,6 +701,405 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     })
 }
 
+// ── converging ───────────────────────────────────────────────────────────────
+
+/// Setting this to any non-empty value makes `apex apply` refuse to change the
+/// machine.
+///
+/// The sibling guard is `apex-display-apply`'s `APEX_DISPLAY_NO_LIVE`, which
+/// exists because a test with an isolated `HOME` still reconfigured the
+/// developer's live desktop — `hyprctl` does not care what `HOME` is. This one
+/// exists for the same class of accident one command along: `apex apply` runs
+/// the package engine and rewrites session state, and neither of those is
+/// redirected by any amount of environment isolation either.
+///
+/// **It differs from the display guard in one way, deliberately.** The display
+/// guard refuses `apply` outright, dry run or not. This one blocks only the
+/// live path, so `--dry-run` keeps working with the variable set — which is
+/// what lets CI export it for a whole job as a blanket net *and* still exercise
+/// every planning assertion. A dry run performs no writes at all (it never
+/// constructs a converger), so there is nothing for the guard to protect there.
+/// Read as a weakened copy it looks wrong; it is the stronger arrangement.
+///
+/// Emptiness is the off switch, matching the display guard's Python
+/// truthiness check: `APEX_BLUEPRINT_NO_APPLY=` is unset, anything else — `0`
+/// included — is set.
+pub const NO_APPLY_ENV: &str = "APEX_BLUEPRINT_NO_APPLY";
+
+/// The refusal message when the guard is set, or `None` when it is not.
+fn guard_reason() -> Option<String> {
+    let value = std::env::var(NO_APPLY_ENV).ok()?;
+    if value.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{NO_APPLY_ENV}={value} is set; refusing to change the machine. \
+         Use `apex apply --dry-run` or `apex blueprint diff` to see what would happen."
+    ))
+}
+
+/// Turns a [`Step`] into a real change.
+///
+/// Modelled on [`apexd_core::syswriter::RealWriter`], and for the same reason:
+/// there is exactly one constructor that is allowed to touch the machine, so
+/// opting in is one visible call in one place rather than a default every
+/// caller silently inherits. `RealWriter` learned that the hard way — a test
+/// applying `ScxSwitch` through a live writer raised a burst of polkit prompts
+/// on the developer's desktop and would have swapped the scheduler of the
+/// machine running the tests.
+///
+/// Nothing here ever runs `sudo`. A step is performed only when the process is
+/// already in the right privilege domain (see [`Domain`]); anything else is
+/// reported for the other domain to do. That is not a convenience — it is the
+/// reason `apex apply` cannot raise an authentication prompt at all.
+pub struct RealConverger {
+    /// Whether this converger may change anything. False for the inert one.
+    effects: bool,
+}
+
+impl RealConverger {
+    /// The one constructor that permits a change to the machine.
+    ///
+    /// Returns `Err` when [`NO_APPLY_ENV`] is set, so under the guard a live
+    /// converger cannot be built at all — the refusal is not a branch inside
+    /// the loop that someone can later reorder past.
+    pub fn for_apply() -> Result<RealConverger, String> {
+        match guard_reason() {
+            Some(why) => Err(why),
+            None => Ok(RealConverger { effects: true }),
+        }
+    }
+
+    /// A converger with no effects: every step is logged and skipped.
+    ///
+    /// The constructor for anything that is not `apex apply`, tests above all.
+    ///
+    /// `#[cfg(test)]`, like [`Host::with_root`] and for the same reason: `apex`
+    /// is a binary crate, so an unreferenced constructor is dead code under
+    /// CI's `-D warnings`. Gating it also states the intent — production has
+    /// exactly one converger and it is the live one.
+    #[cfg(test)]
+    pub fn inert() -> RealConverger {
+        RealConverger { effects: false }
+    }
+
+    /// Whether this converger may change the machine. The accessor the tests
+    /// assert the invariant through; see [`RealConverger::inert`] for why it is
+    /// gated.
+    #[cfg(test)]
+    pub fn has_effects(&self) -> bool {
+        self.effects
+    }
+
+    /// Perform one step.
+    pub fn perform(&self, step: &Step) -> Result<(), String> {
+        // Checked BEFORE any path is built or any process is spawned, exactly
+        // as `RealWriter::run_scxctl` checks `host_commands` first.
+        if !self.effects {
+            eprintln!("apex apply: skip (this converger has no effects) {step}");
+            return Ok(());
+        }
+        // Belt and braces. The guard is re-read here as well as in the
+        // constructor, so a converger built before the variable was set — or
+        // a future caller that finds another way to construct one — still
+        // cannot reach the machine.
+        if let Some(why) = guard_reason() {
+            return Err(why);
+        }
+        match step {
+            Step::SelectSession { session } => self.select_session(session),
+            Step::SetTheme { scheme } => self.set_theme(scheme),
+            // Packages and Flatpaks both go to the shipped engine, which does
+            // its own classification. The planner splits them for reporting;
+            // it must not become a second router, or a name could be reported
+            // under one source and installed from the other.
+            Step::InstallPackages { names } => self.install(names),
+            Step::InstallFlatpaks { ids } => self.install(ids),
+            Step::SetAgentDefault { agent } => self.set_agent(Some(agent), None),
+            Step::SetAgentSandbox { policy } => self.set_agent(None, Some(policy)),
+        }
+    }
+
+    /// Point the greeter at a session, without ending anyone's session.
+    ///
+    /// `apex-session-select` is called directly rather than through `sudo`:
+    /// this step is root-domain, so the process is already root. The helper
+    /// validates the id against the installed `.desktop` files itself, which
+    /// is what makes it safe to hand a name to.
+    fn select_session(&self, session: &str) -> Result<(), String> {
+        run("/usr/libexec/apex-session-select", &[session])
+    }
+
+    /// Hand the whole list to the package engine.
+    fn install(&self, names: &[String]) -> Result<(), String> {
+        let mut args: Vec<&str> = vec!["install"];
+        args.extend(names.iter().map(String::as_str));
+        run(crate::ops::PKG_ENGINE, &args)
+    }
+
+    /// Set APEX Shell's matugen scheme.
+    ///
+    /// Read, change one key, write atomically. Not "write a file containing the
+    /// scheme": `wallpaper.json` also holds the wallpaper directory and the
+    /// current wallpaper, and clobbering those to set a colour scheme would
+    /// lose the user's background.
+    ///
+    /// The running shell reads this file on startup, so a scheme set here takes
+    /// effect at the next login or the next time the wallpaper is applied. Said
+    /// plainly rather than pretended otherwise — there is no IPC to push it.
+    fn set_theme(&self, scheme: &str) -> Result<(), String> {
+        let path = apex_agent_core::paths::home().join(WALLPAPER_JSON);
+        let mut value: serde_json::Value = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text)
+                .map_err(|e| format!("{} is not valid JSON ({e}); refusing to overwrite it", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(e) => return Err(format!("reading {}: {e}", path.display())),
+        };
+        let Some(obj) = value.as_object_mut() else {
+            return Err(format!(
+                "{} is not a JSON object; refusing to overwrite it",
+                path.display()
+            ));
+        };
+        obj.insert("scheme".into(), serde_json::Value::String(scheme.to_string()));
+
+        let parent = path.parent().expect("the wallpaper path always has a parent");
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        let text = serde_json::to_string_pretty(&value)
+            .map_err(|e| format!("rendering {}: {e}", path.display()))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, format!("{text}\n"))
+            .map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("installing {}: {e}", path.display())
+        })?;
+        eprintln!(
+            "apex apply: colour scheme set to {scheme}; it applies at the next login \
+             or the next wallpaper change"
+        );
+        Ok(())
+    }
+
+    /// Set the agent runtime's preferences.
+    ///
+    /// Through `apex_agent_core::config::Config`, never by hand-editing the
+    /// JSON: that type carries `#[serde(flatten)] extra` precisely so a key
+    /// written by a newer APEX Shell survives a round-trip, and a
+    /// hand-rolled writer here would drop it.
+    fn set_agent(&self, default: Option<&str>, sandbox: Option<&str>) -> Result<(), String> {
+        use apex_agent_core::config::Config;
+        use apex_agent_core::protocol::SandboxPolicy;
+
+        let mut cfg = Config::load();
+        if let Some(agent) = default {
+            cfg.default_agent = agent.to_string();
+        }
+        if let Some(policy) = sandbox {
+            cfg.sandbox = SandboxPolicy::parse(policy)
+                .ok_or_else(|| format!("the agent runtime does not know sandbox policy {policy:?}"))?;
+        }
+        // normalise() silently turns an unknown agent id into the default. The
+        // blueprint has already been validated against the same vocabulary, so
+        // anything corrected here is a real disagreement between the two — the
+        // exact drift the parity test guards against — and must be reported
+        // rather than written out as a value the user did not ask for.
+        let notes = cfg.normalise();
+        if !notes.is_empty() {
+            return Err(format!(
+                "the agent runtime rejected the blueprint value: {}",
+                notes.join("; ")
+            ));
+        }
+        cfg.save().map_err(|e| format!("saving the agent configuration: {e}"))
+    }
+}
+
+/// Run a program, turning a non-zero exit into a message.
+fn run(program: &str, args: &[&str]) -> Result<(), String> {
+    if !Path::new(program).exists() {
+        return Err(format!("{program} is not installed on this machine"));
+    }
+    let out = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("cannot run {program}: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let last = stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("no output");
+    Err(format!("{program} failed ({}): {last}", out.status))
+}
+
+/// `apex apply`.
+///
+/// The plan is computed **once**. `--dry-run` prints exactly the steps a live
+/// run would perform, and a live run performs exactly the steps a dry run
+/// printed; the only difference between the two paths is whether those steps
+/// reach a [`RealConverger`]. That is what makes the dry run a report rather
+/// than a rehearsal of a different program.
+pub fn cmd_apply(file: Option<&Path>, dry_run: bool, json: bool) -> i32 {
+    let (bp, source) = match load(file) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("apex apply: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    let observed = Host::new().observe();
+    let plan = blueprint::plan(&bp, &observed);
+
+    // Which half of the plan this process is entitled to. Never assume root
+    // when the uid cannot be read: guessing high is the direction that hurts.
+    let ours = match crate::ops::effective_uid() {
+        Some(0) => Domain::Root,
+        _ => Domain::User,
+    };
+    let theirs = match ours {
+        Domain::Root => Domain::User,
+        Domain::User => Domain::Root,
+    };
+    let mine: Vec<Step> = plan.steps_for(ours).into_iter().cloned().collect();
+    let others = plan.steps_for(theirs).len();
+
+    if json {
+        println!("{}", plan_json(&bp, &source, &plan));
+    } else {
+        print_plan(&plan, &source, if dry_run { "would change" } else { "to change" });
+    }
+
+    if !json {
+        println!();
+        if others > 0 {
+            match ours {
+                Domain::User => println!(
+                    "{others} change{} need root. Run `sudo apex apply` for those.",
+                    plural(others)
+                ),
+                // Under sudo, HOME is root's, so the user-domain rows above were
+                // measured against the WRONG home. Saying so beats printing a
+                // confident diff of the wrong user's settings.
+                Domain::Root => println!(
+                    "{others} change{} belong to a login session, not to root, and were \
+                     measured against root's own home. Run `apex apply` as yourself for \
+                     those — not with sudo.",
+                    plural(others)
+                ),
+            }
+        }
+    }
+
+    if dry_run {
+        if !json {
+            println!(
+                "Dry run: nothing was changed, and no state file was written. \
+                 {} step{} would run as {}.",
+                mine.len(),
+                plural(mine.len()),
+                ours.as_str()
+            );
+        }
+        return 0;
+    }
+
+    if mine.is_empty() {
+        if !json {
+            println!("Nothing to do as {}.", ours.as_str());
+        }
+        return 0;
+    }
+
+    let converger = match RealConverger::for_apply() {
+        Ok(c) => c,
+        Err(why) => {
+            eprintln!("apex apply: {why}");
+            return EXIT_ERROR;
+        }
+    };
+
+    let mut done = Vec::new();
+    let mut failed = Vec::new();
+    for step in &mine {
+        eprintln!("apex apply: {step}");
+        match converger.perform(step) {
+            Ok(()) => done.push(step.to_string()),
+            Err(why) => {
+                eprintln!("apex apply: FAILED {step}: {why}");
+                failed.push(format!("{step}: {why}"));
+            }
+        }
+    }
+
+    // Re-measure. `apexd/AGENTS.md`: a command that reports success must verify
+    // the requested state. A step can exit 0 and change nothing — an engine
+    // that decided a package was already provided by the image, a helper that
+    // wrote to a path no longer read — and reporting success on the strength of
+    // an exit code alone is how a converger comes to believe in a machine that
+    // does not exist.
+    let after = blueprint::plan(&bp, &Host::new().observe());
+    let residual: Vec<&Step> = after.steps_for(ours);
+
+    if let Err(e) = record(&bp, ours, &done, &failed) {
+        // Losing the record is not losing the convergence.
+        eprintln!("apex apply: note: could not write the applied-state record: {e}");
+    }
+
+    println!();
+    println!(
+        "Applied {} of {} step{} as {}.",
+        done.len(),
+        mine.len(),
+        plural(mine.len()),
+        ours.as_str()
+    );
+    if !residual.is_empty() {
+        println!(
+            "Still not converged after applying ({}); re-measured, not assumed:",
+            residual.len()
+        );
+        for step in &residual {
+            println!("  {step}");
+        }
+    }
+    if failed.is_empty() && residual.is_empty() {
+        0
+    } else {
+        EXIT_DRIFT
+    }
+}
+
+/// Write the generated record of this run.
+fn record(bp: &Blueprint, domain: Domain, done: &[String], failed: &[String]) -> Result<(), String> {
+    let path = applied_state_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+    }
+    let state = AppliedState {
+        schema: SCHEMA_VERSION,
+        applied_at: now_secs(),
+        domain: domain.as_str().to_string(),
+        blueprint_digest: bp.digest(),
+        steps: done.to_vec(),
+        failures: failed.to_vec(),
+    };
+    let text = state.to_toml().map_err(|e| e.to_string())?;
+    write_atomic(&path, &text)
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
 /// Seconds since the epoch, or 0 if the clock is before 1970.
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -958,6 +1357,129 @@ mod tests {
             ]
         );
         assert!(apexd_core::blueprint::THEMES.contains(&SHELL_DEFAULT_SCHEME));
+    }
+
+    /// Every step variant, so the dispatch in `perform` is exercised whole.
+    fn all_steps() -> Vec<Step> {
+        vec![
+            Step::SelectSession {
+                session: "apex-labwc".into(),
+            },
+            Step::SetTheme {
+                scheme: "monochrome".into(),
+            },
+            Step::InstallPackages {
+                names: vec!["firefox".into()],
+            },
+            Step::InstallFlatpaks {
+                ids: vec!["org.gimp.GIMP".into()],
+            },
+            Step::SetAgentDefault {
+                agent: "codex".into(),
+            },
+            Step::SetAgentSandbox {
+                policy: "strict".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn an_inert_converger_performs_every_step_and_changes_nothing() {
+        // The mirror of syswriter's
+        // `scx_and_nvidia_actions_are_accepted_and_skipped_rather_than_failing`:
+        // this runs on the test host, so it is also the assertion that these
+        // six steps cannot touch it. A step that returned Err here would abort
+        // a whole apply on a machine that simply lacks one primitive.
+        let c = RealConverger::inert();
+        assert!(!c.has_effects());
+        for step in all_steps() {
+            assert!(
+                c.perform(&step).is_ok(),
+                "an inert converger must skip {step}, not fail"
+            );
+        }
+        // And it really did nothing: the agent config is the one target that
+        // resolves through this process's own environment, so if `perform` had
+        // effects it would exist by now.
+        assert!(
+            !apex_agent_core::config::exists_at(&apex_agent_core::paths::config_file())
+                || RealConverger::inert().has_effects(),
+            "the inert converger wrote the agent configuration"
+        );
+    }
+
+    #[test]
+    fn a_live_converger_cannot_be_built_while_the_guard_is_set() {
+        // The refusal is at CONSTRUCTION, not a branch inside the apply loop —
+        // so there is no ordering a later change could get wrong.
+        //
+        // `cargo test` runs tests in threads of one process, so this mutates a
+        // shared environment. It is restored immediately and no other test in
+        // this module reads the variable, which is why this is the only place
+        // it is touched.
+        let restore = std::env::var(NO_APPLY_ENV).ok();
+
+        std::env::set_var(NO_APPLY_ENV, "1");
+        let Err(err) = RealConverger::for_apply() else {
+            panic!("the guard is set; a live converger must not be constructible");
+        };
+        assert!(err.contains(NO_APPLY_ENV), "{err}");
+        assert!(err.contains("--dry-run"), "the refusal must say what to do instead: {err}");
+
+        // Any non-empty value, matching apex-display-apply's truthiness check —
+        // including "0", which is exactly the value someone would expect to
+        // turn a guard OFF and which must not.
+        std::env::set_var(NO_APPLY_ENV, "0");
+        assert!(RealConverger::for_apply().is_err(), "\"0\" is still set");
+
+        // Empty is the off switch.
+        std::env::set_var(NO_APPLY_ENV, "");
+        assert!(
+            RealConverger::for_apply().is_ok(),
+            "an empty value must not block a real apply, or setting it in a shell \
+             profile would disable the feature permanently"
+        );
+
+        std::env::remove_var(NO_APPLY_ENV);
+        assert!(RealConverger::for_apply().is_ok());
+
+        match restore {
+            Some(v) => std::env::set_var(NO_APPLY_ENV, v),
+            None => std::env::remove_var(NO_APPLY_ENV),
+        }
+    }
+
+    #[test]
+    fn the_live_constructor_still_grants_effects() {
+        // Otherwise the guard has quietly disabled `apex apply` in production,
+        // which is the failure mode of fixing this the lazy way. Constructed
+        // and dropped without performing anything.
+        let restore = std::env::var(NO_APPLY_ENV).ok();
+        std::env::remove_var(NO_APPLY_ENV);
+        let c = RealConverger::for_apply()
+            .unwrap_or_else(|e| panic!("no guard is set, so this must succeed: {e}"));
+        assert!(c.has_effects());
+        if let Some(v) = restore {
+            std::env::set_var(NO_APPLY_ENV, v);
+        }
+    }
+
+    #[test]
+    fn every_step_belongs_to_exactly_one_domain() {
+        // The domain split is what removes `sudo` from `apply` entirely. A step
+        // in neither list would be skipped by `apex apply` AND by
+        // `sudo apex apply`, and the only symptom would be a machine that never
+        // converges that one field.
+        for step in all_steps() {
+            let d = step.domain();
+            assert!(matches!(d, Domain::User | Domain::Root), "{step}");
+        }
+        let root: Vec<String> = all_steps()
+            .iter()
+            .filter(|s| s.domain() == Domain::Root)
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(root.len(), 3, "{root:?}");
     }
 
     #[test]
