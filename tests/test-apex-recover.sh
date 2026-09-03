@@ -123,7 +123,12 @@ real_state_sum > "$REAL_STATE_SUM"
 # fixture points at. The PATH tripwire below cannot see a Rust
 # `remove_dir_all`, so these are what make "the reset did not escape" a
 # measurement rather than a hope.
-CANARY="$WORK/../apex-recover-canary.$$"
+# A sibling of $WORK, made with its own mktemp rather than spelled as
+# "$WORK/../…": `rm -rf "$WORK" "$CANARY"` removes $WORK first, and the second
+# path then no longer resolves through the parent that just vanished, so -f
+# swallows the ENOENT and the canary is left behind. Nine of them accumulated
+# in /tmp before that was noticed.
+CANARY=$(mktemp -d /tmp/apex-recover-canary.XXXXXX)
 mkdir -p "$CANARY/precious"
 printf 'do not delete\n' > "$CANARY/precious/data"
 printf 'do not delete\n' > "$CANARY/loose-file"
