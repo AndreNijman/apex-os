@@ -34,6 +34,7 @@
 //! The daemon and CLI are thin shells over this crate.
 
 pub mod ai;
+pub mod aiprobe;
 pub mod battery;
 pub mod blueprint;
 pub mod dispatch;

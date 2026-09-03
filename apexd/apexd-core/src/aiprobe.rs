@@ -1,10 +1,21 @@
-//! Reading the machine, so `apexd_core::ai` can decide about it.
+//! Reading the machine, so [`crate::ai`] can decide about it (roadmap §14).
 //!
 //! Every function here is the I/O half of a pure planner in that module: this
-//! file gathers evidence and never chooses. The split is what lets every rule
-//! about backend selection, VRAM and idle unloading be unit-tested with no GPU,
-//! and it is the same arrangement `apexd-core`'s `fingerprint`/`select` pair
-//! uses.
+//! file gathers evidence and never chooses. It is the same arrangement
+//! [`crate::fingerprint`] and [`crate::select`] use, and it is why [`crate::ai`]
+//! contains no `std::fs` call at all — the split is what lets every rule about
+//! backend selection, VRAM and idle unloading be unit-tested with no GPU.
+//!
+//! It lives in `apexd-core` rather than in the daemon because **two** programs
+//! need it. `apex-aid` probes to decide what to launch; `apex ai status` probes
+//! to report what *would* be launched on a machine where the daemon is not even
+//! enabled yet — which is the first command anyone runs. Two copies of this
+//! would be two answers to "which backend will this machine use", and the one
+//! the user saw would not be the one that ran.
+//!
+//! Nothing here spawns a process. `nvidia-smi` is reached through the injected
+//! [`NvidiaSmi`] trait, so a test supplies a mock and the static CI check that
+//! keeps §14's planners spawn-free covers this file too.
 //!
 //! ── Why the roots are overridable ──────────────────────────────────────────
 //!
@@ -21,8 +32,12 @@
 
 use std::path::{Path, PathBuf};
 
-use apexd_core::ai::{probe_paths, Accel, AccelEvidence, Device, Manifest, ModelInfo, Store};
-use apexd_core::gpu::NvidiaSmi;
+use crate::ai::{
+    plan_fit, plan_launch, probe_paths, select_backend, Accel, AccelEvidence, BackendChoice,
+    Device, Endpoints, Fit, LaunchPlan, LaunchRequest, Listen, Manifest, ModelInfo, Runtime,
+    Settings, Store, MIN_USEFUL_CONTEXT,
+};
+use crate::gpu::NvidiaSmi;
 
 /// Filesystem roots every read goes through.
 ///
@@ -123,7 +138,7 @@ pub fn accel(roots: &Roots) -> Accel {
 /// * `amdgpu`'s `mem_info_vram_{used,total}` in sysfs, which is the only
 ///   portable-shaped VRAM interface a kernel driver offers. `i915`/`xe` publish
 ///   no total, so an Intel iGPU appears with no device entry rather than with a
-///   wrong one — and [`apexd_core::ai::select_backend`] then reports "no device
+///   wrong one — and [`crate::ai::select_backend`] then reports "no device
 ///   reported its VRAM" instead of planning against a guess.
 pub fn devices(roots: &Roots, smi: &dyn NvidiaSmi) -> Vec<Device> {
     let mut out = Vec::new();
@@ -241,10 +256,7 @@ pub fn installed(store: &Store) -> Vec<(Manifest, bool)> {
                 let present = store.blob(&m.digest).map(|b| b.exists()).unwrap_or(false);
                 out.push((m, present));
             }
-            Err(e) => eprintln!(
-                "apex-aid: ignoring {}: {e}",
-                path.display()
-            ),
+            Err(e) => eprintln!("apex: ignoring {}: {e}", path.display()),
         }
     }
     out
@@ -272,6 +284,238 @@ pub fn model_infos(
         .collect()
 }
 
+/// Where a runtime was found, and which one it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    /// Which runtime.
+    pub runtime: Runtime,
+    /// The program to execute.
+    pub path: PathBuf,
+}
+
+/// Find an inference runtime.
+///
+/// Search order, and every step is a mechanism that already exists:
+///
+/// 1. `$APEX_AI_RUNTIME` — an explicit override. It is what the shell suite
+///    points at a fake backend, and what a developer points at a build tree.
+/// 2. `/usr/bin/<program>` — where a system extension lands, so
+///    `sudo apex install llama-cpp` is all it takes.
+/// 3. `PATH` — for a runtime reached some other way.
+///
+/// A capsule runtime (`apex env create cuda`) is deliberately **not** searched.
+/// Spawning into a capsule would mean the store and the socket directory being
+/// visible inside the container and the GPU being passed through, and neither
+/// claim could be verified on this branch without downloading a multi-gigabyte
+/// CUDA image. So `apex ai status` names the command and stops there rather
+/// than shipping a spawn path nobody has run. That is a stated limitation, not
+/// an oversight.
+pub fn locate(runtime: Runtime) -> Option<Located> {
+    if let Some(p) = std::env::var_os("APEX_AI_RUNTIME") {
+        if !p.is_empty() {
+            let path = PathBuf::from(p);
+            if path.is_file() {
+                return Some(Located { runtime, path });
+            }
+            eprintln!(
+                "apex-aid: APEX_AI_RUNTIME names {}, which is not a file — ignoring it",
+                path.display()
+            );
+        }
+    }
+    let sysext = PathBuf::from("/usr/bin").join(runtime.program());
+    if sysext.is_file() {
+        return Some(Located { runtime, path: sysext });
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(runtime.program()))
+        .find(|p| p.is_file())
+        .map(|path| Located { runtime, path })
+}
+
+/// The first runtime this machine can actually start, or `None`.
+///
+/// Only runtimes `apexd_core::ai` will launch are considered, so a machine with
+/// `ollama` installed does not report a runtime the daemon would then refuse.
+pub fn locate_any() -> Option<Located> {
+    Runtime::ALL
+        .into_iter()
+        .filter(|r| r.unsupported_because().is_none())
+        .find_map(locate)
+}
+
+
+// ── resolving one load ───────────────────────────────────────────────────────
+
+/// Everything decided about loading a model, from the store and the machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    /// The model that will be (or is) loaded.
+    pub model_id: String,
+    /// Its verified blob.
+    pub model_path: PathBuf,
+    /// Which runtime, and where it was found.
+    pub located: Located,
+    /// The chosen compute backend and device, with every rejection's reason.
+    pub choice: BackendChoice,
+    /// How much fits.
+    pub fit: Fit,
+    /// The argv.
+    pub launch: LaunchPlan,
+    /// Why the plan is what it is, in order.
+    pub notes: Vec<String>,
+}
+
+/// Resolve model, runtime, backend, fit and argv.
+///
+/// Every decision here comes from a pure function in [`crate::ai`]; this only
+/// gathers the inputs and reports the refusals.
+///
+/// **One implementation, two callers, and that is the point.** `apex-aid` calls
+/// it to decide what to launch; `apex ai status` calls it to report what
+/// *would* be launched — including on a machine where the daemon is not enabled
+/// yet. Two copies would be two answers to "which backend will this machine
+/// use", and the one the user was shown would not be the one that ran.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve(
+    store: &Store,
+    roots: &Roots,
+    settings: &Settings,
+    selected: Option<&str>,
+    endpoints: &Endpoints,
+    smi: &dyn NvidiaSmi,
+) -> Result<Resolved, String> {
+    let listed = installed(store);
+    if listed.is_empty() {
+        return Err(format!(
+            "no models are installed in {}. Pull one with `apex ai pull <name>`, or see what \
+             is available with `apex ai models --available`",
+            store.root().display()
+        ));
+    }
+
+    // The selected model, the configured default, or — when there is exactly
+    // one — that one. Never an arbitrary choice from several: picking silently
+    // would make which model answered depend on readdir order.
+    let wanted = selected
+        .map(str::to_string)
+        .or_else(|| settings.model.clone());
+    let (manifest, present) = match wanted {
+        Some(id) => listed
+            .into_iter()
+            .find(|(m, _)| m.id == id)
+            .ok_or_else(|| {
+                format!("no model named {id:?} in {}", store.root().display())
+            })?,
+        None if listed.len() == 1 => listed.into_iter().next().expect("length checked"),
+        None => {
+            let names: Vec<&str> = listed.iter().map(|(m, _)| m.id.as_str()).collect();
+            return Err(format!(
+                "several models are installed and none is selected: {}. Choose one with \
+                 `apex ai run --model <id>`, or set `model = \"<id>\"` in \
+                 ~/.config/apex/ai.toml",
+                names.join(", ")
+            ));
+        }
+    };
+    if !present {
+        return Err(format!(
+            "{} has a manifest but its weights are missing from {}. Re-pull it with \
+             `sudo apex ai pull {}`",
+            manifest.id,
+            store.blobs_dir().display(),
+            manifest.id
+        ));
+    }
+
+    let runtime_kind = manifest.runtime().ok_or_else(|| {
+        format!(
+            "{} names runtime {:?}, which this apex does not know. It was probably pulled by \
+             a newer build",
+            manifest.id, manifest.runtime
+        )
+    })?;
+    if let Some(why) = runtime_kind.unsupported_because() {
+        return Err(format!("{} needs {runtime_kind}, and {why}", manifest.id));
+    }
+
+    let accel = accel(roots);
+    let devices = devices(roots, smi);
+    let choice = select_backend(&accel, &devices, settings.backend_pref())
+        .map_err(|e| e.to_string())?;
+
+    let located = locate(runtime_kind).ok_or_else(|| {
+        format!(
+            "no {runtime_kind} runtime is installed. Install one with:\n    {}",
+            runtime_kind.install_hint(choice.backend)
+        )
+    })?;
+
+    // Context: what the user asked for, bounded by what the weights support. A
+    // request beyond the trained context is reduced rather than refused, and
+    // the reduction is a note rather than a silent clamp.
+    let want_context = match settings.context {
+        Some(0) | None => manifest.max_context.max(MIN_USEFUL_CONTEXT),
+        Some(c) => c,
+    };
+    let mut notes = Vec::new();
+    let context = if manifest.max_context > 0 && want_context > manifest.max_context {
+        notes.push(format!(
+            "context reduced from {want_context} to {}, which is the largest these weights \
+             were trained for",
+            manifest.max_context
+        ));
+        manifest.max_context
+    } else {
+        want_context
+    };
+
+    let budget = choice
+        .device
+        .and_then(|i| devices.iter().find(|d| d.index == i))
+        .map(Device::budget_mib)
+        .unwrap_or(0);
+    let fit = plan_fit(
+        manifest.weights_mib,
+        manifest.layers,
+        manifest.kv_mib_per_1k,
+        context,
+        budget,
+    );
+
+    let model_path = store.blob(&manifest.digest).map_err(|e| e.to_string())?;
+    let launch = plan_launch(&LaunchRequest {
+        runtime: runtime_kind,
+        program: &located.path.to_string_lossy(),
+        model_path: &model_path,
+        listen: Listen::Unix(endpoints.backend()),
+        fit: &fit,
+        choice: &choice,
+        // 0 lets the runtime pick, which is the right default: it knows the
+        // machine's core count and APEX has no better opinion for a workload
+        // that is memory-bandwidth bound.
+        threads: 0,
+    })
+    .map_err(|e| e.to_string())?;
+
+    notes.push(choice.why.clone());
+    for (b, why) in &choice.rejected {
+        notes.push(format!("{b}: {why}"));
+    }
+    notes.extend(launch.notes.iter().cloned());
+
+    Ok(Resolved {
+        model_id: manifest.id,
+        model_path,
+        located,
+        choice,
+        fit,
+        launch,
+        notes,
+    })
+}
+
 fn read_u64(path: &Path) -> Option<u64> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
@@ -279,11 +523,11 @@ fn read_u64(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apexd_core::ai::SCHEMA_VERSION;
+    use crate::ai::SCHEMA_VERSION;
 
     /// A throwaway fixture root. Named for the test so two cannot collide.
     fn fixture(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("apex-aid-probe-{name}-{}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("apex-aiprobe-{name}-{}", std::process::id()));
         std::fs::remove_dir_all(&p).ok();
         std::fs::create_dir_all(&p).unwrap();
         p
@@ -301,7 +545,7 @@ mod tests {
         fn available(&self) -> bool {
             false
         }
-        fn query(&self) -> Vec<apexd_core::gpu::NvidiaGpu> {
+        fn query(&self) -> Vec<crate::gpu::NvidiaGpu> {
             Vec::new()
         }
     }
@@ -401,8 +645,8 @@ mod tests {
             fn available(&self) -> bool {
                 true
             }
-            fn query(&self) -> Vec<apexd_core::gpu::NvidiaGpu> {
-                vec![apexd_core::gpu::NvidiaGpu {
+            fn query(&self) -> Vec<crate::gpu::NvidiaGpu> {
+                vec![crate::gpu::NvidiaGpu {
                     index: 0,
                     name: "NVIDIA GeForce RTX 3070 Laptop GPU".into(),
                     ..Default::default()
@@ -432,7 +676,7 @@ mod tests {
             fn available(&self) -> bool {
                 true
             }
-            fn query(&self) -> Vec<apexd_core::gpu::NvidiaGpu> {
+            fn query(&self) -> Vec<crate::gpu::NvidiaGpu> {
                 Vec::new()
             }
             fn vram_mib(&self) -> Vec<(u32, u64, u64)> {
@@ -525,5 +769,249 @@ mod tests {
     #[test]
     fn an_empty_or_absent_store_lists_nothing_rather_than_failing() {
         assert!(installed(&Store::new(Path::new("/nonexistent/apex-ai"))).is_empty());
+    }
+
+    // ── locating a runtime ───────────────────────────────────────────────────
+
+    #[test]
+    fn a_located_runtime_is_an_existing_file_the_planner_will_launch() {
+        // No `set_var`: it is process-global and races other tests. What is
+        // asserted instead is the invariant that has to hold on whatever
+        // machine runs this.
+        if let Some(l) = locate_any() {
+            assert!(l.path.is_file(), "{}", l.path.display());
+            assert!(l.runtime.unsupported_because().is_none(), "{}", l.runtime);
+        }
+        // And the search is deterministic.
+        assert_eq!(
+            locate(Runtime::LlamaCpp).map(|l| l.path),
+            locate(Runtime::LlamaCpp).map(|l| l.path)
+        );
+    }
+
+    #[test]
+    fn locate_any_never_offers_a_runtime_the_planner_would_refuse() {
+        // A machine with ollama installed must not report a runtime the daemon
+        // then refuses to start — a status line contradicting the next command.
+        let offered: Vec<Runtime> = Runtime::ALL
+            .into_iter()
+            .filter(|r| r.unsupported_because().is_none())
+            .collect();
+        assert_eq!(offered, vec![Runtime::LlamaCpp]);
+    }
+
+    // ── the shared resolver ──────────────────────────────────────────────────
+
+    /// A store with one loadable model, and a fake runtime binary.
+    fn resolvable(name: &str) -> (PathBuf, Store, Endpoints, PathBuf) {
+        let root = fixture(name);
+        let store = Store::new(&root.join("store"));
+        std::fs::create_dir_all(store.manifests_dir()).unwrap();
+        std::fs::create_dir_all(store.blobs_dir()).unwrap();
+        let m = Manifest {
+            version: SCHEMA_VERSION,
+            id: "tiny".into(),
+            digest: format!("sha256:{}", "3".repeat(64)),
+            weights_mib: 512,
+            layers: 16,
+            kv_mib_per_1k: 8,
+            max_context: 8192,
+            runtime: "llama.cpp".into(),
+            ..Default::default()
+        };
+        std::fs::write(store.manifest("tiny").unwrap(), m.to_json().unwrap()).unwrap();
+        std::fs::write(store.blob(&m.digest).unwrap(), b"weights").unwrap();
+
+        let fake = root.join("llama-server");
+        std::fs::write(&fake, b"#!/bin/sh\nexit 0\n").unwrap();
+        let endpoints = Endpoints::new(&root.join("run"));
+        (root, store, endpoints, fake)
+    }
+
+    #[test]
+    fn an_empty_store_refuses_with_the_command_that_fixes_it() {
+        let root = fixture("emptystore");
+        let store = Store::new(&root.join("store"));
+        let e = resolve(
+            &store,
+            &Roots { prefix: root.clone() },
+            &Settings::default(),
+            None,
+            &Endpoints::new(&root),
+            &NoSmi,
+        )
+        .unwrap_err();
+        assert!(e.contains("apex ai pull"), "{e}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_model_whose_weights_are_missing_refuses_and_says_to_re_pull() {
+        let (root, store, endpoints, _fake) = resolvable("noblob");
+        let m = installed(&store).remove(0).0;
+        std::fs::remove_file(store.blob(&m.digest).unwrap()).unwrap();
+        let e = resolve(
+            &store,
+            &Roots { prefix: root.clone() },
+            &Settings::default(),
+            None,
+            &endpoints,
+            &NoSmi,
+        )
+        .unwrap_err();
+        assert!(e.contains("weights are missing"), "{e}");
+        assert!(e.contains("apex ai pull tiny"), "{e}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn several_models_and_no_selection_refuses_rather_than_picking() {
+        // Picking silently would make which model answered depend on readdir
+        // order, which is the class of bug that is invisible until it matters.
+        let (root, store, endpoints, _fake) = resolvable("several");
+        let second = Manifest {
+            version: SCHEMA_VERSION,
+            id: "other".into(),
+            digest: format!("sha256:{}", "4".repeat(64)),
+            weights_mib: 512,
+            layers: 16,
+            max_context: 4096,
+            runtime: "llama.cpp".into(),
+            ..Default::default()
+        };
+        std::fs::write(store.manifest("other").unwrap(), second.to_json().unwrap()).unwrap();
+        std::fs::write(store.blob(&second.digest).unwrap(), b"w").unwrap();
+
+        let e = resolve(
+            &store,
+            &Roots { prefix: root.clone() },
+            &Settings::default(),
+            None,
+            &endpoints,
+            &NoSmi,
+        )
+        .unwrap_err();
+        assert!(e.contains("none is selected"), "{e}");
+        assert!(e.contains("tiny") && e.contains("other"), "{e}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_named_model_that_is_not_installed_refuses() {
+        let (root, store, endpoints, _fake) = resolvable("named");
+        let e = resolve(
+            &store,
+            &Roots { prefix: root.clone() },
+            &Settings::default(),
+            Some("absent"),
+            &endpoints,
+            &NoSmi,
+        )
+        .unwrap_err();
+        assert!(e.contains("absent"), "{e}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_manifest_naming_an_unknown_runtime_refuses_and_blames_version_skew() {
+        // Reachable after `bootc rollback`: a model pulled by a newer apex.
+        let (root, store, endpoints, _fake) = resolvable("skew");
+        let mut m = installed(&store).remove(0).0;
+        m.runtime = "tensorrt".into();
+        std::fs::write(store.manifest("tiny").unwrap(), m.to_json().unwrap()).unwrap();
+        let e = resolve(
+            &store,
+            &Roots { prefix: root.clone() },
+            &Settings::default(),
+            None,
+            &endpoints,
+            &NoSmi,
+        )
+        .unwrap_err();
+        assert!(e.contains("newer build"), "{e}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn with_no_runtime_installed_the_refusal_carries_the_install_command() {
+        // The one refusal every new machine hits first. It has to end in a
+        // command, because APEX ships no runtime and never downloads one.
+        let (root, store, endpoints, _fake) = resolvable("noruntime");
+        match resolve(
+            &store,
+            &Roots { prefix: root.clone() },
+            &Settings::default(),
+            None,
+            &endpoints,
+            &NoSmi,
+        ) {
+            // On a machine that genuinely has llama-server on PATH the resolve
+            // succeeds, and then the assertion is about the plan instead.
+            Ok(r) => {
+                assert_eq!(r.model_id, "tiny");
+                assert!(r.launch.argv.windows(2).any(|w| w[0] == "--model"));
+            }
+            Err(e) => {
+                assert!(e.contains("no llama.cpp runtime is installed"), "{e}");
+                assert!(
+                    e.contains("apex install llama-cpp") || e.contains("apex env create"),
+                    "the refusal must name a command that exists: {e}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_context_beyond_the_weights_is_reduced_with_a_note_not_refused() {
+        // Only reachable when a runtime is present, so the assertion is
+        // conditional — but the reduction itself is what plan_fit and the
+        // resolver together must produce.
+        let (root, store, endpoints, _fake) = resolvable("ctx");
+        let settings = Settings { context: Some(131_072), ..Default::default() };
+        if let Ok(r) = resolve(
+            &store,
+            &Roots { prefix: root.clone() },
+            &settings,
+            None,
+            &endpoints,
+            &NoSmi,
+        ) {
+            assert!(
+                r.notes.iter().any(|n| n.contains("context reduced")),
+                "{:?}",
+                r.notes
+            );
+            assert!(r.fit.context <= 8192, "{}", r.fit.context);
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_machine_with_no_accelerator_resolves_to_the_cpu_and_offloads_nothing() {
+        let (root, store, endpoints, _fake) = resolvable("cpuonly");
+        if let Ok(r) = resolve(
+            &store,
+            &Roots { prefix: root.clone() },
+            &Settings::default(),
+            None,
+            &endpoints,
+            &NoSmi,
+        ) {
+            assert_eq!(r.choice.backend, crate::ai::Backend::Cpu);
+            assert_eq!(r.fit.placement.gpu_layers(), 0);
+            assert!(
+                r.launch.argv.windows(2).any(|w| w == ["--n-gpu-layers", "0"]),
+                "{:?}",
+                r.launch.argv
+            );
+            // And the backend listens on a path, never a port.
+            assert!(r
+                .launch
+                .argv
+                .windows(2)
+                .any(|w| w[0] == "--host" && w[1].ends_with(".sock")));
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 }

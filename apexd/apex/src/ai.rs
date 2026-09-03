@@ -36,6 +36,38 @@
 //! it is a pure function over bytes with unit tests, because a streaming parser
 //! that is subtly wrong drops the last token of every answer and nothing
 //! notices.
+//!
+//! ── STATED LIMITATION: a client that only accepts a base URL cannot reach it ─
+//!
+//! The endpoint is a Unix socket, and that is a deliberate security decision
+//! with a real cost that belongs written down rather than discovered.
+//!
+//! **What works.** Anything that can be told to dial a Unix socket. `curl
+//! --unix-socket <path>` (verified present in this image's curl, alongside
+//! `--abstract-unix-socket`) is the reference form and is what
+//! [`serve`](AiCmd::Serve) prints. HTTP libraries that expose their transport —
+//! a custom dialer, a `socketPath`, a UDS transport — can be pointed at it the
+//! same way, and `apex ai run` itself is proof the protocol needs nothing
+//! special.
+//!
+//! **What does not.** An SDK whose entire configuration surface is
+//! `base_url = "http://host:port"` has nowhere to put a path. That is a genuine
+//! gap in §14's "allow agent clients to use local inference through the same
+//! service": such a client cannot use it without a bridge.
+//!
+//! **Why APEX ships no bridge.** A TCP listener forwarding to the socket would
+//! restore exactly the exposure the endpoint refuses — a port on 127.0.0.1 with
+//! no peer credential, open to every account on the machine and to every
+//! sandboxed application holding the network permission — and it would do so
+//! under an `apex` verb, which would read as APEX having decided it was safe.
+//! It is not safe; it is a trade. So the trade is *printed* instead, as the
+//! `socat` line that makes it, with the consequence stated next to it. A person
+//! who wants it can have it in one command, and the command and its cost live
+//! in the same place.
+//!
+//! The bridge APEX does provide is the remote one: `apex ai run --on <host>`
+//! over §20's ssh transport, where the credential is the user's own ssh
+//! identity rather than the absence of one.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -1298,6 +1330,12 @@ fn stream_response(stream: &mut UnixStream, plan: &RunPlan) -> i32 {
                 eprintln!("\napex: {e}");
                 return 1;
             }
+            // A short answer can arrive head-and-all in one read, so the
+            // end-of-body check belongs here too. Without it the whole response
+            // would be printed and then the command would block.
+            if h.chunked && chunked.done() {
+                break;
+            }
             continue;
         }
         let h = head.expect("checked");
@@ -1306,6 +1344,16 @@ fn stream_response(stream: &mut UnixStream, plan: &RunPlan) -> i32 {
         ) {
             eprintln!("\napex: {e}");
             return 1;
+        }
+        // A chunked body ends at its zero-length chunk, not at the close of the
+        // socket. `Connection: close` asks the server to close, but a server
+        // that ignores the header — or a relay that keeps the pair open — would
+        // otherwise leave this blocked in `read` after the answer had already
+        // finished printing, which reads as a hung command. The terminating
+        // chunk is the authoritative end of the response, so it is what ends
+        // the loop.
+        if h.chunked && chunked.done() {
+            break;
         }
     }
 
@@ -1610,7 +1658,27 @@ fn serve(listen: Option<&str>, foreground: bool) -> i32 {
     println!("There is no TCP port, and no option adds one: a TCP connection carries no peer");
     println!("credential, so a listener on 127.0.0.1 would be open to every account on this");
     println!("machine. To reach the service from another machine, use `apex host`'s ssh");
-    println!("transport.");
+    println!("transport:  apex ai run --on <device> \"…\"");
+    println!();
+    // The stated limitation, printed where the person who hits it is standing.
+    // A client whose only setting is `base_url = http://host:port` has nowhere
+    // to put a socket path, and pretending otherwise would make them discover
+    // it by failure. APEX ships no bridge because a bridge restores exactly the
+    // exposure above — so the command that makes that trade is printed with its
+    // cost attached, rather than wrapped in an `apex` verb that would imply it
+    // was safe.
+    println!("If a tool accepts only a base URL and cannot be given a socket path, there is no");
+    println!("APEX verb for that on purpose. You can bridge it yourself:");
+    println!();
+    println!(
+        "  socat TCP-LISTEN:11434,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:{}",
+        ends.api().display()
+    );
+    println!();
+    println!("Understand what that costs before you run it: while socat is up, every account");
+    println!("on this machine — and every sandboxed application with network access — can send");
+    println!("prompts through your model and read the answers. Nothing distinguishes them from");
+    println!("you, because a TCP connection carries nothing to distinguish them by.");
     println!();
     if UnixStream::connect(ends.control()).is_ok() {
         println!("The service is running.");
@@ -1685,8 +1753,6 @@ mod tests {
         };
         assert_eq!(args.forward_argv(), vec!["ai", "run", "hi"]);
     }
-
-    use super::*;
 
     fn args(prompt: &[&str]) -> RunArgs {
         RunArgs {

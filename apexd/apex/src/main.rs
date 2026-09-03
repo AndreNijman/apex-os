@@ -5,6 +5,7 @@
 //! degrades gracefully — a clear message, a non-zero exit, never a panic.
 
 mod agent;
+mod ai;
 mod blueprint;
 mod boot;
 mod dispatch;
@@ -99,6 +100,34 @@ enum Cmd {
     Boot {
         #[command(subcommand)]
         cmd: boot::BootCmd,
+    },
+    /// Local model inference as an OS service (§14).
+    ///
+    /// One endpoint every application and agent client can use — a Unix socket
+    /// in your `$XDG_RUNTIME_DIR` speaking the runtime's own
+    /// OpenAI-compatible HTTP API — with APEX owning the model store, the
+    /// backend choice (CUDA, ROCm, Vulkan or CPU), how much fits in VRAM, and
+    /// when an idle model is unloaded.
+    ///
+    /// The service is **per-user**, like `apex agent`, and for a stronger
+    /// reason: it turns your prompts into generated text, so it must not be a
+    /// privileged daemon shared between accounts. The weights are shared
+    /// instead — one root-owned, read-only copy under /var that no session can
+    /// alter, including its own.
+    ///
+    /// What it deliberately does NOT do: listen on a TCP port. A TCP
+    /// connection carries no peer credential, so a listener on 127.0.0.1 is
+    /// reachable by every account on the machine and by every sandboxed
+    /// application that holds the network permission. `--listen` exists only to
+    /// say so. It also ships no inference runtime — llama.cpp with CUDA is
+    /// gigabytes, and `Containerfile.core` is the tier a rebuild makes the
+    /// whole fleet download — so `apex ai status` names the `apex install` or
+    /// `apex env` command that provides one.
+    ///
+    /// Needs the per-user service: `systemctl --user enable --now apex-aid`.
+    Ai {
+        #[command(subcommand)]
+        cmd: ai::AiCmd,
     },
     /// Trusted APEX devices, and what each one can do (§20).
     ///
@@ -968,6 +997,12 @@ async fn main() {
         // Read-only except for `add`/`remove`/`probe`, which write only the
         // registry and the probe cache in the user's own home. Nothing here
         // touches apexd or needs root.
+        // Routed here, before anything connects to the system bus: `apex ai`
+        // talks to a per-user daemon and to the model store, never to `apexd`,
+        // so a system-bus connection ahead of it would be a dependency the
+        // feature does not have — and on a machine with no `apexd` it would be
+        // a failure the user cannot act on.
+        Cmd::Ai { cmd } => ai::main(cmd),
         Cmd::Host(args) => host::run(args),
         // Local by default; `--on` is the only thing that makes any of these
         // touch the network. None of them needs root: they run ssh as the

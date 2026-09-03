@@ -52,7 +52,6 @@
 
 mod paths;
 mod peer;
-mod probe;
 mod relay;
 mod runtime;
 
@@ -65,12 +64,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use apexd_core::ai::{
-    self, Device, DeviceInfo, Endpoints, ErrorKind, IdleInputs, Listen, Request, Response,
-    Settings, Status, Store, PROTOCOL_VERSION,
+    self, DeviceInfo, Endpoints, ErrorKind, IdleInputs, Request, Response, Settings, Status,
+    Store, PROTOCOL_VERSION,
 };
 use apexd_core::gpu::RealNvidiaSmi;
 
-use crate::probe::Roots;
+use apexd_core::aiprobe::{self as probe, Roots};
 
 /// How often the idle timer looks.
 ///
@@ -381,7 +380,7 @@ fn ensure_backend(daemon: &Arc<Daemon>) -> Result<std::path::PathBuf> {
 
     let plan = build_plan(daemon, &state)?;
     let socket = daemon.endpoints.backend();
-    let devices = runtime::device_nodes(plan.backend);
+    let devices = runtime::device_nodes(plan.choice.backend);
     let exposed = runtime::Exposed {
         model: &plan.model_path,
         socket_dir: daemon.endpoints.dir(),
@@ -398,7 +397,7 @@ fn ensure_backend(daemon: &Arc<Daemon>) -> Result<std::path::PathBuf> {
     eprintln!(
         "apex-aid: {} loaded on {} ({}), {}",
         plan.model_id,
-        plan.backend,
+        plan.choice.backend,
         plan.launch.describe(),
         if confine { "confined" } else { "UNCONFINED (bwrap absent)" }
     );
@@ -407,145 +406,22 @@ fn ensure_backend(daemon: &Arc<Daemon>) -> Result<std::path::PathBuf> {
     Ok(socket)
 }
 
-/// Everything decided about one load.
-struct Resolved {
-    model_id: String,
-    model_path: std::path::PathBuf,
-    backend: ai::Backend,
-    launch: ai::LaunchPlan,
-    notes: Vec<String>,
-}
-
-/// Resolve model, runtime, backend, fit and argv.
+/// Resolve one load, through the single shared resolver.
 ///
-/// Every decision comes from a pure function in `apexd_core::ai`; this only
-/// gathers the inputs and reports the refusals. That is what makes
-/// `apex ai status` a report of the same plan rather than a second
-/// implementation of it.
-fn build_plan(daemon: &Arc<Daemon>, state: &State) -> Result<Resolved> {
-    let installed = probe::installed(&daemon.store);
-    if installed.is_empty() {
-        anyhow::bail!(
-            "no models are installed. Pull one with `apex ai pull <name>`, or see what is \
-             available with `apex ai models --available`"
-        );
-    }
-
-    // The selected model, the configured default, or — when there is exactly
-    // one — that one. Never an arbitrary choice from several: picking silently
-    // would make which model answered depend on readdir order.
-    let wanted = state
-        .selected
-        .clone()
-        .or_else(|| state.settings.model.clone());
-    let (manifest, present) = match wanted {
-        Some(id) => installed
-            .into_iter()
-            .find(|(m, _)| m.id == id)
-            .with_context(|| format!("no model named {id:?} in {}", daemon.store.root().display()))?,
-        None if installed.len() == 1 => installed.into_iter().next().expect("length checked"),
-        None => {
-            let names: Vec<&str> = installed.iter().map(|(m, _)| m.id.as_str()).collect();
-            anyhow::bail!(
-                "several models are installed and none is selected: {}. \
-                 Choose one with `apex ai run --model <id>`, or set `model = \"<id>\"` in \
-                 ~/.config/apex/ai.toml",
-                names.join(", ")
-            )
-        }
-    };
-    if !present {
-        anyhow::bail!(
-            "{} has a manifest but its weights are missing from {}. \
-             Re-pull it with `sudo apex ai pull {}`",
-            manifest.id,
-            daemon.store.blobs_dir().display(),
-            manifest.id
-        );
-    }
-
-    let runtime_kind = manifest.runtime().with_context(|| {
-        format!(
-            "{} names runtime {:?}, which this apex does not know. \
-             It was probably pulled by a newer build",
-            manifest.id, manifest.runtime
-        )
-    })?;
-    if let Some(why) = runtime_kind.unsupported_because() {
-        anyhow::bail!("{} needs {runtime_kind}, and {why}", manifest.id);
-    }
-
-    let accel = probe::accel(&daemon.roots);
-    let devices = probe::devices(&daemon.roots, &RealNvidiaSmi);
-    let choice = ai::select_backend(&accel, &devices, state.settings.backend_pref())?;
-
-    let located = runtime::locate(runtime_kind).with_context(|| {
-        format!(
-            "no {} runtime is installed. Install one with:\n    {}",
-            runtime_kind,
-            runtime_kind.install_hint(choice.backend)
-        )
-    })?;
-
-    // Context: what the user asked for, bounded by what the weights support.
-    // A request beyond the trained context is reduced rather than refused, and
-    // the reduction is a note rather than a silent clamp.
-    let want_context = match state.settings.context {
-        Some(0) | None => manifest.max_context.max(ai::MIN_USEFUL_CONTEXT),
-        Some(c) => c,
-    };
-    let mut notes = Vec::new();
-    let context = if manifest.max_context > 0 && want_context > manifest.max_context {
-        notes.push(format!(
-            "context reduced from {want_context} to {}, which is the largest these weights \
-             were trained for",
-            manifest.max_context
-        ));
-        manifest.max_context
-    } else {
-        want_context
-    };
-
-    let budget = choice
-        .device
-        .and_then(|i| devices.iter().find(|d| d.index == i))
-        .map(Device::budget_mib)
-        .unwrap_or(0);
-    let fit = ai::plan_fit(
-        manifest.weights_mib,
-        manifest.layers,
-        manifest.kv_mib_per_1k,
-        context,
-        budget,
-    );
-
-    let model_path = daemon.store.blob(&manifest.digest)?;
-    let launch = ai::plan_launch(&ai::LaunchRequest {
-        runtime: runtime_kind,
-        program: &located.path.to_string_lossy(),
-        model_path: &model_path,
-        listen: Listen::Unix(daemon.endpoints.backend()),
-        fit: &fit,
-        choice: &choice,
-        // 0 lets the runtime pick, which is the right default: it knows the
-        // machine's core count and APEX has no better opinion for a workload
-        // that is memory-bandwidth bound.
-        threads: 0,
-    })?;
-
-    notes.push(choice.why.clone());
-    for (b, why) in &choice.rejected {
-        notes.push(format!("{b}: {why}"));
-    }
-    notes.extend(launch.notes.iter().cloned());
-
-    Ok(Resolved {
-        model_id: manifest.id,
-        model_path,
-        backend: choice.backend,
-        launch,
-        notes,
-    })
+/// A thin wrapper on purpose: `apexd_core::aiprobe::resolve` is the ONE
+/// implementation, and `apex ai status` calls exactly the same function. If the
+/// daemon had its own, "which backend will this machine use" would have two
+/// answers and the one printed would not be the one that ran.
+fn build_plan(daemon: &Arc<Daemon>, state: &State) -> Result<probe::Resolved> {
+    probe::resolve(
+        &daemon.store,
+        &daemon.roots,
+        &state.settings,
+        state.selected.as_deref(),
+        &daemon.endpoints,
+        &RealNvidiaSmi,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 // ── the control endpoint ─────────────────────────────────────────────────────
@@ -721,34 +597,30 @@ fn status(daemon: &Arc<Daemon>) -> Status {
         ));
     }
 
-    // What would happen, whether or not something is loaded.
+    // What would happen, whether or not something is loaded. The same resolver
+    // the daemon's start path uses, so this is a report and not a rehearsal of
+    // different code.
     match build_plan(daemon, &state) {
         Ok(p) => {
-            st.runtime = Some(p.launch.program.clone());
-            st.backend = Some(p.backend.as_str().to_string());
-            if st.runtime_path.is_none() {
-                st.runtime_path = Some(p.launch.program.clone());
-            }
-            for a in p.launch.argv.windows(2) {
-                match a[0].as_str() {
-                    "--n-gpu-layers" => st.gpu_layers = a[1].parse().ok(),
-                    "--ctx-size" => st.context = a[1].parse().ok(),
-                    _ => {}
-                }
-            }
-            st.device = None;
-            for a in p.launch.argv.windows(2) {
-                if a[0] == "--main-gpu" {
-                    st.device = a[1].parse().ok();
-                }
-            }
+            st.runtime = Some(p.located.runtime.as_str().to_string());
+            st.runtime_path = Some(p.located.path.display().to_string());
+            st.backend = Some(p.choice.backend.as_str().to_string());
+            st.device = p.choice.device;
+            st.gpu_layers = Some(p.fit.placement.gpu_layers());
+            st.total_layers = match p.fit.placement {
+                ai::Placement::Split { total, .. } => Some(total),
+                ai::Placement::Gpu { layers } => Some(layers),
+                ai::Placement::Cpu => None,
+            };
+            st.context = Some(p.fit.context);
+            st.vram_mib = Some(p.fit.vram_mib);
             st.notes.extend(p.notes);
         }
         Err(e) => {
             st.notes.push(format!("{e:#}"));
             // The install hint is the actionable half, so it is a field rather
             // than prose the CLI would have to grep for.
-            if let Some(r) = runtime::locate_any() {
+            if let Some(r) = probe::locate_any() {
                 st.runtime = Some(r.runtime.as_str().to_string());
                 st.runtime_path = Some(r.path.display().to_string());
             } else {
