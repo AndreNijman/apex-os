@@ -6,6 +6,7 @@
 
 mod agent;
 mod blueprint;
+mod gaming;
 mod mode;
 mod ops;
 mod proxy;
@@ -76,6 +77,15 @@ enum Cmd {
     /// reason, because no generic source for it exists and APEX will not
     /// substitute a number it did not measure.
     Perf(mode::PerfArgs),
+    /// Whether this machine can boot straight into a controller-first Gaming
+    /// Mode, and whether it is set to.
+    ///
+    /// Read-only. `apex game` is the hardware lever (cpuset, IRQ steering, GPU
+    /// clocks); this is the §12 experience around it — the greeter's Gaming
+    /// Mode entry, the gamescope session, the Desktop<->Gaming switch and any
+    /// attached controllers. Exits non-zero when Gaming Mode would not start,
+    /// so it is usable as a check.
+    Gaming(gaming::GamingArgs),
     /// Print the hardware fingerprint and layered profile selection.
     Fingerprint,
     /// Pin the current deployment (ostree admin pin 0). Requires root.
@@ -627,6 +637,16 @@ enum GameCmd {
     Status,
     /// Attach another PID to a running session.
     Attach { pid: u32 },
+    /// Per-game profiles (roadmap §12): a stored composition of a mode, a tier
+    /// and a fan mode, per title.
+    ///
+    /// Stored in `~/.config/apex/games.toml` — a separate user-owned file
+    /// rather than a blueprint section, because the blueprint's contract is
+    /// that no program rewrites it and `set` is a program that writes.
+    Profile {
+        #[command(subcommand)]
+        cmd: gaming::ProfileCmd,
+    },
 }
 
 #[derive(Args)]
@@ -864,13 +884,26 @@ async fn main() {
         Cmd::Profile => cmd_profile().await,
         Cmd::Battery(args) => cmd_battery(args).await,
         Cmd::Fan { cmd } => cmd_fan(cmd.unwrap_or(FanCmd::Status)).await,
-        Cmd::Game { cmd } => cmd_game(cmd).await,
+        // `profile` is intercepted HERE rather than inside `cmd_game`, and the
+        // reason is the guard: `cmd_game` connects to the system bus as its
+        // first act, before it looks at the verb at all. Routing
+        // `profile apply` through it would put a bus connection ahead of
+        // APEX_MODE_NO_APPLY, so on a machine with no bus the command would
+        // fail for the wrong reason and the guard's ordering proof would be
+        // vacuous. `apex mode set` has the same rule; this is the same rule.
+        Cmd::Game { cmd } => match cmd {
+            GameCmd::Profile { cmd } => gaming::profile_main(cmd).await,
+            other => cmd_game(other).await,
+        },
         // Read-only by default and deliberately absent from the privileged set:
         // `mode set` mutates through apexd's polkit-authorised D-Bus API as the
         // session user, exactly as `apex tier` does.
         Cmd::Mode { cmd } => mode::main(cmd.unwrap_or(mode::ModeCmd::Status)).await,
         Cmd::Workload(args) => mode::workload_main(args),
         Cmd::Perf(args) => mode::perf_main(args),
+        // Read-only, like `perf` and `workload`, and for the same reason it is
+        // not in the privileged set: it measures and reports.
+        Cmd::Gaming(args) => gaming::gaming_main(args),
         Cmd::Fingerprint => cmd_fingerprint(),
         Cmd::Pin => ops::pin(),
         Cmd::Rollback => ops::rollback(),
@@ -1567,6 +1600,18 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
                 1
             }
         },
+        // Normally unreachable: the dispatch in `main` routes `profile` here
+        // BEFORE this function, because everything above has already connected
+        // to the system bus and `apex game profile apply`'s guard is only
+        // meaningful when it is reached first.
+        //
+        // Routed rather than panicked on, because this crate's contract is a
+        // clear message and a non-zero exit, never a panic — and routed rather
+        // than wildcarded, so adding a verb to `GameCmd` is still a compile
+        // error here. Reaching it costs a wasted bus connection and nothing
+        // else: a connection raises no polkit prompt, and no mutating method
+        // has been called at this point.
+        GameCmd::Profile { cmd } => gaming::profile_main(cmd).await,
         GameCmd::Attach { pid } => match &proxy {
             Some(p) => match p.attach_pid(pid).await {
                 Ok(()) => {

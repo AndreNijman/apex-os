@@ -268,6 +268,62 @@ jobs:
           fi
           echo "converging: only \`apex apply\` opts in, and it never escalates"
 
+      - name: §12 shares one apply guard, and its planner stays pure
+        run: |
+          set -euo pipefail
+          # The third member of the family above, for roadmap §12's per-game
+          # profiles. Same three-part shape, and for the same reason: a red
+          # check fixed by neutering the feature is the failure mode this
+          # arrangement exists to prevent.
+          CORE_PLAN=apexd/apexd-core/src/gameprofile.rs
+          CORE_PROBE=apexd/apexd-core/src/gaming.rs
+          CLI=apexd/apex/src/gaming.rs
+          for f in "$CORE_PLAN" "$CORE_PROBE" "$CLI"; do test -f "$f"; done
+
+          # 1. `apex game profile apply` moves the same levers as
+          #    `apex mode set` — tier, auto-switch, game mode, fan — so it must
+          #    obey the SAME guard. A second environment variable would split
+          #    one invariant across two names, and the older one's
+          #    guard-before-bus proof would stop covering the newer verb.
+          prod="$(sed '/^#\[cfg(test)\]/,$d' "$CLI")"
+          grep -q 'crate::mode::guard_set()' <<<"$prod" \
+            || { echo "FATAL: \`apex game profile apply\` no longer checks the shared guard; it could move the tier of a machine running the tests" >&2; exit 1; }
+          if grep -nE 'NO_APPLY_ENV *: *&str *=' "$CLI"; then
+            echo "FATAL: §12 must not define a second apply guard (see above)" >&2
+            exit 1
+          fi
+
+          # 2. The planner and the readiness probe are pure/read-only, which is
+          #    what lets every rule in them be unit-tested with no machine to
+          #    break. Neither may construct a writer or spawn a process. The
+          #    probe reads files by design; running a program is the line,
+          #    because a PATH lookup is redirected by a fixture root and a
+          #    spawn is not.
+          #
+          #    Comment lines are stripped, as in the two checks above, so prose
+          #    explaining the rule does not trip it — the rule is about code.
+          impure="$(grep -nE 'RealWriter|Command::new|std::process::Command' \
+                    "$CORE_PLAN" "$CORE_PROBE" \
+                    | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+          if [ -n "$impure" ]; then
+            echo "FATAL: §12's planner and probe must not write or spawn:" >&2
+            printf '%s\n' "$impure" >&2
+            exit 1
+          fi
+
+          # 3. And the CLI must still route the verb, or `apex game profile
+          #    apply` has silently become a command that changes nothing while
+          #    every test still passes.
+          grep -q 'gaming::profile_main' apexd/apex/src/main.rs \
+            || { echo "FATAL: nothing dispatches \`apex game profile\`" >&2; exit 1; }
+          # It must be routed at the dispatch site, NOT only inside cmd_game:
+          # cmd_game connects to the system bus before it looks at the verb, so
+          # routing through it would put a connection ahead of the guard.
+          sed -n '/Cmd::Game { cmd } => match cmd {/,/^        },$/p' \
+              apexd/apex/src/main.rs | grep -q 'GameCmd::Profile { cmd } => gaming::profile_main' \
+            || { echo "FATAL: \`game profile\` must be routed before cmd_game, which connects to the bus first" >&2; exit 1; }
+          echo "§12: one shared guard, a pure planner, a read-only probe"
+
   rust:
     name: Rust validation
     needs: changes
@@ -341,6 +397,25 @@ jobs:
       - name: Run mode, workload and Performance Lab assertions
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-modes.sh
+
+      # §12's other two halves: per-game profiles and boot-to-game readiness.
+      # A separate file from the suite above because it is a separate claim —
+      # that one asserts `mode`/`workload`/`perf` only report, this one asserts
+      # a profile is stored losslessly, resolves to one ordered plan, and is
+      # gated before it can move anything.
+      #
+      # It carries its own tripwire and its own negative control rather than
+      # inheriting them, because a separate file with an unarmed tripwire would
+      # be worse than no separate file. `steam` and `gamescope` are in its fake
+      # set as an assertion in their own right: the readiness probe must find
+      # them by PATH lookup and must never spawn one.
+      #
+      # Every invocation in it redirects DBUS_SYSTEM_BUS_ADDRESS at a path that
+      # does not exist, so nothing in it can reach a live apexd — which is also
+      # what makes it behave identically here and on a developer's desktop.
+      - name: Run per-game profile and boot-to-game assertions
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-gaming.sh
 
   installer:
     name: Installer safety and UI
