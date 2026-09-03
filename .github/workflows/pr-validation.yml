@@ -353,6 +353,27 @@ jobs:
       - name: §22 boot v2 — the opt-in is structural, and nothing shipped touches a boot path
         run: ./tests/test-boot-v2.sh
 
+      # §14's cross-file constants. The daemon, the CLI and the unit all have to
+      # agree about the socket names, the store root, the protocol version and
+      # the refusal of a TCP endpoint — and they are in three different
+      # languages, so nothing but a parity check can hold them together.
+      #
+      # In `static` and not `rust` on purpose: the selectors would skip it. A PR
+      # touching only files/system/units/apex-aid.service does not set
+      # rust=true, and that unit is one of the files this check reads.
+      #
+      # `--self-test` is the part that makes it worth having: it mutates each
+      # constant and asserts the check catches it, and it also asserts a COMMENT
+      # mentioning the forbidden token does NOT trip it — the inverse mutant.
+      # This repository has shipped four checks satisfied by their own comments;
+      # this one proves it is not a fifth.
+      - name: §14 the daemon, the CLI and the unit agree
+        run: |
+          set -euo pipefail
+          test -f files/scripts/check-ai-parity
+          python3 files/scripts/check-ai-parity
+          python3 files/scripts/check-ai-parity --self-test
+
   rust:
     name: Rust validation
     needs: changes
