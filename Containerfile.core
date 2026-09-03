@@ -351,6 +351,20 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
 # niri sessions directly; Hyprland does not implement that protocol and is driven
 # through hyprctl by the same APEX settings model.
 #
+# wlopm is DISPLAY POWER, which is a different protocol and a different job from
+# wlr-randr's. It is the only thing that can turn the screen off on labwc:
+# labwc publishes no IPC socket at all, so there is no `hyprctl dispatch dpms`
+# or `niri msg action power-off-monitors` equivalent, and the one protocol it
+# does implement for this is zwlr-output-power-management-v1 (confirmed:
+# `strings /usr/bin/labwc` contains zwlr_output_power_manager_v1). Without it
+# the idle screen-off listener in the shipped hypridle.conf fired on labwc and
+# did nothing at all — the display stayed lit all night.
+#
+# wlr-randr is NOT a substitute. `--off` goes through wlr-output-management and
+# DISABLES the output: layer-shell surfaces on it are destroyed and windows are
+# re-laid-out onto whatever is left, every single idle timeout. That is worse
+# than the no-op it would replace. 28 KiB, and it is the whole fix.
+#
 # bubblewrap is the agent sandbox. It was already present as a flatpak
 # dependency and Containerfile.base asserts it, deliberately, so that the
 # security boundary did not force a core rebuild on its own. This transaction is
@@ -371,7 +385,7 @@ RUN set -eux; \
         upower libnotify lm_sensors cava wf-recorder ImageMagick \
         qt6ct qt6-qtwebengine mpv-mpris xdg-user-dirs polkit gnome-keyring \
         gammastep geoclue2 jq dconf \
-        kanshi wlr-randr \
+        kanshi wlr-randr wlopm \
         bubblewrap \
         NetworkManager-wifi wpa_supplicant wireless-regdb iw \
         glibc-langpack-en zram-generator-defaults; \

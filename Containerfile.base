@@ -1379,6 +1379,14 @@ RUN set -eux; \
     test -f /usr/share/wayland-sessions/apex-labwc.desktop; \
     test ! -f /usr/share/wayland-sessions/labwc.desktop; \
     command -v labwc >/dev/null; \
+    # Idle screen-off. The shipped hypridle.conf's 6-minute listener calls
+    # apex-shell's DpmsControl.sh, which resolves to `wlopm --off '*'` on labwc
+    # — the only route there is, because labwc publishes no IPC socket and
+    # zwlr-output-power-management-v1 is the protocol it implements for this.
+    # Without the binary the listener fires, reports a missing program, and the
+    # display stays lit; asserting it here is what keeps that from regressing to
+    # the silent version it used to be.
+    command -v wlopm >/dev/null; \
     for f in rc.xml menu.xml autostart environment themerc-override; do \
         test -s "/usr/share/apex/labwc/$f"; \
     done; \
