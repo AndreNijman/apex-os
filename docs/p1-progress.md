@@ -91,10 +91,35 @@ Where each branch actually stands:
 | `p1/capsules-and-packages` | capsules + project binding landed; then a `wip` commit that **does not parse** — bash spliced into `apex-pkg` at line 124. Fix that first |
 | `p1/blueprint-and-sync` | schema, pure planner, `show`/`diff`/`init`. Clean tree. `apex sync` not started |
 
-Verified during the run and worth not re-doing: the seeded `rc.xml` passes
-`check-labwc-keybinds` against apex-shell **`main`** (not just against the local
-checkout), and the Katana build reached and PASSED that same check inside a real
-image build.
+### Katana build of `p1/compositor-and-plugins` — PASSED, 96/96
+
+CI never builds the base image, so this is the only place a broken
+`Containerfile.base` shows up before the final build. It builds cleanly:
+`localhost/apex-os-base:p1-validate`, ~49 min, no failures. Every step this
+branch touched passed — 61 (the generator COPYs and the verification block),
+72 (the Hyprland verify-config block), and 81, the one that mattered:
+
+    apex-labwc-keybinds: 48 defaults, 4 without a labwc equivalent
+    PASS  /usr/share/apex/labwc/rc.xml matches what the shell's defaults generate
+
+In-image: the helper is present and executable, `print` emits 44 `<keybind>`
+elements (48 − 4 unmappable, consistent), and the seeded `rc.xml` carries a
+134-line marked region matching the generated block exactly.
+
+**The result has a shelf life, and it is worth being precise about.** What is
+verified is that the coupling holds *at apex-shell `main` = `44b1fb4`*. Any
+commit to apex-shell `main` that touches `_defaults` in `KeybindService.qml`
+invalidates it without touching apex-os at all. That is the merge-order rule
+doing its job, not a fragile test.
+
+It is trustworthy rather than lucky because the staleness question was actually
+checked: 59 of 96 steps came from cache, so the apex-shell clone layer could
+have been testing an old shell. It was not — the cached commit equals current
+`origin/main` HEAD, confirmed by `git ls-remote` before the build and by
+`.apex-shell-commit` inside the finished image.
+
+A 47K build log is left at `/var/home/andre/build/p1-validate.log` on the
+Katana. Everything else was cleaned up; `:latest` was never touched.
 
 Not reported before the stop: the adversarial review of 5.1–5.3, and whether the
 Katana build completed after step 81. The `core` build fix had nothing pushed.
