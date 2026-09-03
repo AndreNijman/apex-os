@@ -34,22 +34,14 @@ jobs:
           rust=false
           installer=false
           engine=false
-<<<<<<< HEAD
-          # tests/test-apex-blueprint.sh runs in the `rust` job, because it
-          # drives the compiled `apex` binary and that is where the toolchain
-          # and the cargo cache are. It has to select that job too, or a change
-          # to the suite itself would never run it.
-          grep -Eq '^(apexd/|config/sysprofiles/|tests/test-apex-blueprint\.sh)' <<<"$files" && rust=true
-=======
           # `tests/` is in the Rust selector as well as the engine one because
-          # tests/test-apex-modes.sh runs the built `apex` binary and therefore
-          # lives in the `rust` job, which is the only one with a toolchain. A
-          # PR touching only that file used to set engine=true and rust=false,
-          # so the suite never ran — and the `result` job passed anyway,
-          # because a skipped job counts as success. A check required on every
-          # PR must always report.
+          # test-apex-blueprint.sh and test-apex-modes.sh both drive the built
+          # `apex` binary and therefore live in the `rust` job, the only one
+          # with a toolchain. A PR touching only such a file used to set
+          # engine=true and rust=false, so the suite never ran — and `result`
+          # passed anyway, because a skipped job counts as success. A check
+          # required on every PR must always report.
           grep -Eq '^(apexd/|config/sysprofiles/|tests/)' <<<"$files" && rust=true
->>>>>>> origin/p1/modes-and-workloads
           grep -Eq '^installer/' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
@@ -280,7 +272,6 @@ jobs:
       - name: Tests
         run: cargo test --locked
 
-<<<<<<< HEAD
       # §10's blueprint suite drives the COMPILED binary, so it belongs here
       # rather than in the `engine` job: this is where the toolchain and the
       # cargo cache are, and building `apex` a second time elsewhere would
@@ -309,7 +300,7 @@ jobs:
         # that cannot run must never report a green tick, which this repository
         # has now been bitten by three times.
         run: ./tests/test-apex-blueprint.sh
-=======
+
       # §11/§12/§13's shell-level suite. It lives HERE rather than in the
       # `engine` job because it runs the real built `apex` binary, and this is
       # the only job with a Rust toolchain and a warm cargo cache.
@@ -323,7 +314,6 @@ jobs:
       - name: Run mode, workload and Performance Lab assertions
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-modes.sh
->>>>>>> origin/p1/modes-and-workloads
 
   installer:
     name: Installer safety and UI
@@ -520,12 +510,9 @@ jobs:
           shellcheck -S warning files/system/libexec/apex-pkg \
             files/system/libexec/apex-env \
             tests/test-apex-pkg.sh tests/test-apex-firstrun.sh \
-<<<<<<< HEAD
             tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
-            tests/test-apex-resolve.sh tests/test-apex-blueprint.sh
-=======
-            tests/test-labwc-keybinds.sh tests/test-apex-modes.sh
->>>>>>> origin/p1/modes-and-workloads
+            tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
+            tests/test-apex-modes.sh
 
   result:
     name: PR validation
