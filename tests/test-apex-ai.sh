@@ -53,6 +53,24 @@ ok()  { printf 'PASS  %-62s\n' "$1"; pass=$((pass+1)); }
 bad() { printf 'FAIL  %-62s %s\n' "$1" "$2"; fail=$((fail+1)); }
 section() { printf '\n── %s ──\n' "$1"; }
 
+# Compare two files without an external binary.
+#
+# This used `diff -q`, and `diff` is diffutils — which is NOT installed in the
+# container CI builds in. There, `diff -q` exited 127, the test read that as
+# "the files differ", and the suite reported that the developer's own state had
+# been modified when nothing had touched it.
+#
+# A false alarm this time. The same shape produces a false PASS the moment the
+# comparison is written the other way round, and nothing asserted the binary was
+# there — which is the rule these suites already state for prerequisites and did
+# not follow for this one.
+#
+# Command substitution strips trailing newlines from both sides equally, so
+# equality is unaffected. These are small text files by construction.
+same_file() {
+    [ "$(cat "$1" 2>/dev/null)" = "$(cat "$2" 2>/dev/null)" ]
+}
+
 command -v python3 >/dev/null 2>&1 || {
     echo "FATAL: python3 is required to validate JSON output" >&2; exit 2
 }
@@ -390,7 +408,7 @@ if [ -d "$STORE" ]; then
 else
     : > "$STORE_AFTER"
 fi
-if diff -q "$STORE_BEFORE" "$STORE_AFTER" >/dev/null; then
+if same_file "$STORE_BEFORE" "$STORE_AFTER"; then
     ok "nothing in this suite wrote to the root-owned shared store"
 else
     bad "the shared store was not touched" "IT CHANGED — see $STORE"

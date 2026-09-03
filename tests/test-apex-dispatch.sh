@@ -48,6 +48,24 @@ ok()  { printf 'PASS  %-60s\n' "$1"; pass=$((pass+1)); }
 bad() { printf 'FAIL  %-60s %s\n' "$1" "$2"; fail=$((fail+1)); }
 section() { printf '\n── %s ──\n' "$1"; }
 
+# Compare two files without an external binary.
+#
+# This used `diff -q`, and `diff` is diffutils — which is NOT installed in the
+# container CI builds in. There, `diff -q` exited 127, the test read that as
+# "the files differ", and the suite reported that the developer's own state had
+# been modified when nothing had touched it.
+#
+# A false alarm this time. The same shape produces a false PASS the moment the
+# comparison is written the other way round, and nothing asserted the binary was
+# there — which is the rule these suites already state for prerequisites and did
+# not follow for this one.
+#
+# Command substitution strips trailing newlines from both sides equally, so
+# equality is unaffected. These are small text files by construction.
+same_file() {
+    [ "$(cat "$1" 2>/dev/null)" = "$(cat "$2" 2>/dev/null)" ]
+}
+
 # A missing prerequisite is a FAILURE, never a skip: a suite reporting
 # "0 passed, 0 failed" with a green tick has asserted nothing.
 for tool in git python3 tar; do
@@ -565,7 +583,7 @@ done
 # ── the machine running the tests ───────────────────────────────────────────
 section "the machine running the tests"
 if [ -f "$REAL_REG" ]; then cp "$REAL_REG" "$WORK/real-after"; else : > "$WORK/real-after"; fi
-if diff -q "$REAL_BEFORE" "$WORK/real-after" >/dev/null; then
+if same_file "$REAL_BEFORE" "$WORK/real-after"; then
     ok "the developer's own hosts.toml was not touched"
 else
     bad "the developer's own hosts.toml was not touched" "IT CHANGED — see $REAL_REG"
