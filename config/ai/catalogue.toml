@@ -1,0 +1,79 @@
+# APEX-OS model catalogue (roadmap §14).
+#
+# Installed to /usr/share/apexos/ai/catalogue.toml. This file is the ONLY place
+# a model name becomes a digest, and it is image content rather than something
+# fetched — which is the whole of §14's provenance story.
+#
+# WHY IT IS NOT DOWNLOADED
+# "Content-address and verify by digest" proves that the bytes which arrived
+# match the digest they were compared against. It proves nothing about what you
+# asked for if the name -> digest mapping came over the same network as the
+# file. So the mapping ships inside the image, which is cosign-signed,
+# digest-pinned in CI, carries its source revision, and rolls back with the OS.
+# The trust anchor for a model is therefore the same one as for the kernel.
+#
+# The alternatives, for the record:
+#   * a remote index — the digest check becomes decorative, because whoever
+#     serves the index serves the digest;
+#   * trust on first use — every verification after the first would pass while
+#     proving only that the file had not changed since a moment nobody watched.
+# Neither ships. A model outside this file needs an explicit
+# `--url … --digest sha256:…`, which is the user vouching for it, and
+# `apex ai models` keeps saying so for the life of that model.
+#
+# HOW TO ADD AN ENTRY
+# Every field is required except `note`, and `apexd_core::ai::Catalogue`
+# validates all of them at parse time — a bad entry is a build failure, not a
+# runtime surprise, because a user cannot fix image content.
+#
+#   digest         `sha256:` + 64 lowercase hex. Get it with:
+#                    curl -fL <url> | sha256sum
+#   weights_mib    the file's size on disk, which is also approximately the
+#                  VRAM the weights occupy.
+#   layers         repeating transformer blocks — what `llama-server -ngl`
+#                  counts. Printed by llama-server at load as
+#                  "n_layer = N". NOT the total tensor count.
+#   kv_mib_per_1k  KV cache cost in MiB per 1024 tokens of context, for this
+#                  architecture at this build's default cache precision. A
+#                  declared per-model constant rather than a formula, because
+#                  computing it needs n_kv_heads, head_dim and the cache type,
+#                  none of which are knowable without parsing the GGUF — and a
+#                  formula that guessed them would produce a confident wrong
+#                  number instead of an honest table entry.
+#   runtime        `llama.cpp` is the only value this build launches.
+#
+# THIS FILE SHIPS EMPTY, AND THAT IS DELIBERATE.
+#
+# Every entry is a promise that a specific multi-gigabyte file at a specific URL
+# has a specific digest, and that its layer count and KV cost are the measured
+# ones. None of that can be asserted by reading a model card: it needs the file
+# downloaded, hashed, and loaded once on real hardware to read back `n_layer`
+# and the cache size. Shipping entries transcribed from documentation would put
+# four unverified numbers per model into the one file whose entire purpose is
+# being the thing you can trust — and the first symptom would be `apex ai pull`
+# refusing every model with a digest mismatch, or `plan_fit` planning an
+# offload against a layer count that is not real.
+#
+# So the shape, the validation and the refusals ship now, and the entries are
+# added one at a time by someone who has run the four commands. `apex ai pull
+# <name> --url … --digest …` works today without any of them, and
+# `apex ai models --available` says plainly that the catalogue is empty rather
+# than pretending otherwise.
+
+version = 1
+
+# Example of a complete entry, kept commented so the file is empty rather than
+# wrong. Fill in the digest and the two measured numbers before uncommenting.
+#
+# [model.qwen3-coder-7b]
+# title = "Qwen3 Coder 7B Instruct"
+# url = "https://huggingface.co/…/qwen3-coder-7b-instruct-q4_k_m.gguf"
+# digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+# weights_mib = 4400
+# layers = 28
+# kv_mib_per_1k = 28
+# max_context = 32768
+# quant = "Q4_K_M"
+# license = "Apache-2.0"
+# runtime = "llama.cpp"
+# note = "code-focused; fits an 8 GiB card fully offloaded at 8k context"

@@ -38,7 +38,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use apexd_core::ai::{Backend, LaunchPlan, Runtime};
+use apexd_core::ai::{Backend, LaunchPlan};
 
 /// How long to wait for the backend to bind its socket.
 ///
@@ -376,7 +376,9 @@ fn signal_group(pgid: libc::pid_t, sig: libc::c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apexd_core::ai::{plan_fit, plan_launch, select_backend, Accel, Device, LaunchRequest, Listen};
+    use apexd_core::ai::{
+        plan_fit, plan_launch, select_backend, Accel, Device, LaunchRequest, Listen, Runtime,
+    };
 
     fn a_plan() -> LaunchPlan {
         let fit = plan_fit(4096, 32, 32, 8192, 7628);
