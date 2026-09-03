@@ -81,6 +81,14 @@ cross-branch commit pollution on three of them.
 | 7 blueprint + sync | `p1/blueprint-and-sync` | apex-os |
 | 8 modes + workloads | `p1/modes-and-workloads` | apex-os |
 
+Three more running alongside them, independent of P1 and of each other:
+
+| Work | Branch |
+|------|--------|
+| the weekly `core` build has been red since ~2026-08-24 (`/etc/system-release not branded`) | `fix/core-system-release-branding` |
+| adversarial review of the landed 5.1–5.3 work | read-only, no branch |
+| Katana build of `p1/compositor-and-plugins` — CI never builds the base image, so a broken `Containerfile.base` is invisible on a PR | read-only, no branch |
+
 The three apex-os branches all add subcommands to `apexd/apex/src/main.rs`, so
 that file is the expected merge conflict at integration. Each branch is
 independently complete and independently tested; integration is a separate step
