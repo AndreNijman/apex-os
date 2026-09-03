@@ -17,11 +17,32 @@
 //! So it is started under `bubblewrap` with `--unshare-net`, and that flag is
 //! the load-bearing one. A path-named `AF_UNIX` socket is unaffected by network
 //! namespaces — only the abstract namespace is per-netns — so the daemon still
-//! reaches the backend through the filesystem while the backend has no
-//! reachable network stack at all. That makes "no local account can find a port
-//! to connect to" true by construction rather than by the planner having got
-//! `--host` right, and it is the second line behind
-//! `apexd_core::ai::plan_launch`'s refusal to emit a TCP address.
+//! reaches the backend through the filesystem while the backend's network is
+//! its own.
+//!
+//! ── What `--unshare-net` does and does NOT do, measured ────────────────────
+//!
+//! Stated precisely, because the imprecise version invites the wrong test. The
+//! backend can still *create* and *bind* an `AF_INET` socket: `--unshare-net`
+//! gives it a private network namespace with its own loopback, not a missing
+//! network stack. Verified on the katana — a program inside the sandbox bound
+//! `127.0.0.1:18099` successfully.
+//!
+//! What it cannot do is be reached. From the host, in the same run:
+//!
+//! ```text
+//! inside : bind+listen on 127.0.0.1:18099 succeeded
+//! host   : connect to 127.0.0.1:18099 -> ConnectionRefusedError
+//! host   : ss -ltn 'sport = 18099'     -> 0 lines
+//! ```
+//!
+//! That is the property §14 needs: no port the backend opens is visible or
+//! connectable from any other process on the machine, whatever account it runs
+//! as. So "no local account can find a port to connect to" holds by
+//! construction rather than by the planner having got `--host` right, and this
+//! is the second line behind `apexd_core::ai::plan_launch`'s refusal to emit a
+//! TCP address. The unit's `RestrictAddressFamilies=AF_UNIX AF_NETLINK` is the
+//! third, and that one does remove the ability to create the socket at all.
 //!
 //! `bubblewrap` is the same security dependency the agent runtime uses, present
 //! because flatpak pulls it in and asserted in `Containerfile.base`. When it is
@@ -389,12 +410,17 @@ fn wait_ready(running: &mut Running) -> Result<()> {
 /// after it, but "eventually" is not good enough for a function whose whole
 /// purpose is that the VRAM is free when it returns.
 pub fn stop(running: &mut Running) {
+    let started = Instant::now();
     signal_group(running.pgid, libc::SIGTERM);
-    let deadline = Instant::now() + STOP_GRACE;
+    let deadline = started + STOP_GRACE;
     while Instant::now() < deadline {
         match running.child.try_wait() {
             Ok(Some(_)) => {
                 let _ = std::fs::remove_file(&running.socket);
+                eprintln!(
+                    "apex-aid: backend stopped in {} ms",
+                    started.elapsed().as_millis()
+                );
                 return;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
@@ -410,17 +436,38 @@ pub fn stop(running: &mut Running) {
     let _ = std::fs::remove_file(&running.socket);
 }
 
-/// Signal a whole process group.
+/// Signal a whole process group, and the leader as a fallback.
+///
+/// The return value is CHECKED and reported, which it was not before. A
+/// discarded `kill` is how a function whose entire contract is "the VRAM is
+/// free when this returns" comes to return having signalled nothing — and the
+/// only symptom is the five-second grace period elapsing and a SIGKILL, which
+/// reads as a slow backend rather than as a signal that went nowhere.
+///
+/// The group AND the leader, because `bwrap --new-session` calls `setsid(2)` in
+/// the sandboxed child, which puts it in a new session and a new process group.
+/// The group we know about therefore contains only the `bwrap` process itself,
+/// and signalling the group alone leaves the sandbox's own group unsignalled —
+/// so the leader is signalled directly as well. `bwrap --die-with-parent`
+/// propagates from there.
 fn signal_group(pgid: libc::pid_t, sig: libc::c_int) {
     if pgid <= 1 {
         // Never `kill(-1, …)`, which means every process this user can signal.
         eprintln!("apex-aid: refusing to signal process group {pgid}");
         return;
     }
-    // Safe: kill() with a negative pid signals the group and cannot corrupt
-    // memory. The guard above is what keeps it from meaning "everything".
-    unsafe {
-        libc::kill(-pgid, sig);
+    // Safe: kill() with a negative pid signals the group, with a positive pid
+    // one process; neither can corrupt memory. The guard above is what keeps
+    // the negative form from meaning "everything".
+    let group = unsafe { libc::kill(-pgid, sig) };
+    let leader = unsafe { libc::kill(pgid, sig) };
+    if group != 0 && leader != 0 {
+        // ESRCH on both means it is already gone, which is the ordinary case
+        // when a backend crashed. Anything else is worth seeing.
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            eprintln!("apex-aid: signal {sig} to backend {pgid} failed: {err}");
+        }
     }
 }
 

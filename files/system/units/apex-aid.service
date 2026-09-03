@@ -95,6 +95,54 @@ NoNewPrivileges=yes
 # The model store must never be writable by this process or its children. It is
 # already root-owned with 0444 blobs; this is the second, independent reason.
 ReadOnlyPaths=/var/lib/apex/ai
+
+# §14's sharpest security decision, made structural instead of only enforced in
+# code. The endpoint is a Unix socket because a TCP connection carries no peer
+# credential; with this line the kernel refuses to create an AF_INET socket at
+# all, so the guarantee survives a future edit that gets a code path wrong.
+#
+# THE SET IS MEASURED, NOT GUESSED. All of this was run on the katana — a real
+# APEX host, SELinux enforcing, RTX 3070 Laptop plus an Alder Lake iGPU — with
+# `systemd-run --user -p RestrictAddressFamilies=…`:
+#
+#   AF_UNIX alone BREAKS THE BACKEND SANDBOX:
+#     bwrap: loopback: Failed to create NETLINK_ROUTE socket:
+#            Address family not supported by protocol
+#   bwrap needs AF_NETLINK to bring up `lo` inside the network namespace it
+#   creates, so AF_UNIX on its own would refuse every confined launch — and the
+#   symptom would be "the runtime will not start", pointing nowhere near here.
+#
+#   AF_UNIX AF_NETLINK:
+#     bwrap --unshare-net … builds the sandbox and /usr is visible inside it
+#     AF_INET refused, AF_INET6 refused, AF_UNIX works — outside AND inside
+#       the sandbox, checked separately
+#     nvidia-smi reports "NVIDIA GeForce RTX 3070 Laptop GPU, 8192 MiB"
+#     vulkaninfo enumerates the iGPU, the dGPU and llvmpipe
+#
+#   The negative control, because a sandboxing directive that is silently
+#   ignored is worse than an absent one: under AF_UNIX an AF_INET socket is
+#   refused, and under "AF_UNIX AF_INET" the same program creates one. So the
+#   restriction is genuinely enforced in a --user unit and this is not
+#   decoration.
+#
+# WHAT IS NOT PROVEN: llama.cpp's own CUDA and ROCm backends were not run here
+# — this branch has no model weights and installs no runtime. nvidia-smi and
+# vulkaninfo exercise the same driver-initialisation and device-enumeration
+# path, which is the part at risk, but they are proxies. If a real backend ever
+# needs another family, the failure is at backend start, `apex ai status`
+# reports it, and the fix is a drop-in — not a reason to omit the line now.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+# IPAddressDeny=any: CONSIDERED AND REJECTED, and the reason is measured.
+# It needs the `bpf-firewall` cgroup controller, and a systemd --user manager
+# does not get it: on the katana
+#   cat /sys/fs/cgroup/user.slice/user-1000.slice/cgroup.controllers
+# returns `cpu memory pids`, and `systemctl --user show -p DelegateControllers`
+# is empty. A transient unit with the directive ran without complaint and
+# without effect. A directive that looks like a firewall and is not one is
+# worse than none, because the next reader stops looking. RestrictAddressFamilies
+# above is enforced by seccomp and needs no delegation, and the backend's own
+# `--unshare-net` means it has a private network namespace regardless.
 # ProtectSystem/ProtectHome are NOT set: the backend inherits this namespace
 # before bwrap re-creates it, and a runtime installed as a system extension
 # lives under the /usr that ProtectSystem would restrict.
