@@ -806,6 +806,29 @@ impl RealConverger {
         if let Some(why) = guard_reason() {
             return Err(why);
         }
+        // The privilege domain, checked HERE and not only where the plan is
+        // filtered. `cmd_apply` already hands over only the steps for this
+        // process's domain, so this can never fire in normal operation — which
+        // is exactly why it is worth having.
+        //
+        // The root-domain steps reach `/usr/libexec/apex-session-select` and
+        // `/usr/libexec/apex-pkg` by ABSOLUTE path, so no amount of `PATH`
+        // faking in a test can intercept them the way it intercepts `flatpak`.
+        // A test's outermost safety net therefore cannot cover them, and the
+        // filtering in `cmd_apply` is the only thing that would be left. This
+        // makes the guarantee structural instead: a non-root process cannot
+        // perform a root step even if the caller asks it to.
+        let running_as = match crate::ops::effective_uid() {
+            Some(0) => Domain::Root,
+            _ => Domain::User,
+        };
+        if step.domain() != running_as {
+            return Err(format!(
+                "refusing to perform a {} step while running as {}: {step}",
+                step.domain().as_str(),
+                running_as.as_str()
+            ));
+        }
         match step {
             Step::SelectSession { session } => self.select_session(session),
             Step::SetTheme { scheme } => self.set_theme(scheme),
@@ -1732,6 +1755,47 @@ mod tests {
         let c = RealConverger::for_apply()
             .unwrap_or_else(|e| panic!("no guard is set, so this must succeed: {e}"));
         assert!(c.has_effects());
+        if let Some(v) = restore {
+            std::env::set_var(NO_APPLY_ENV, v);
+        }
+    }
+
+    #[test]
+    fn a_live_converger_refuses_a_step_from_the_other_privilege_domain() {
+        // The structural version of "apply never escalates". `cmd_apply`
+        // already hands over only this process's domain, so this can never
+        // fire in normal operation — which is the point. The root steps reach
+        // /usr/libexec by ABSOLUTE path, so a test's PATH fakes cannot
+        // intercept them and the plan filtering would otherwise be the only
+        // thing standing between a wrong caller and the session.
+        //
+        // Whichever way round this test runs, it asserts a REFUSAL and
+        // performs nothing: a non-root process is asked for a root step, and a
+        // root one is asked for a user step.
+        let restore = std::env::var(NO_APPLY_ENV).ok();
+        std::env::remove_var(NO_APPLY_ENV);
+
+        let root_now = matches!(crate::ops::effective_uid(), Some(0));
+        let wrong_domain_step = if root_now {
+            Step::SetTheme {
+                scheme: "neutral".into(),
+            }
+        } else {
+            Step::SelectSession {
+                session: "apex-labwc".into(),
+            }
+        };
+        let c = RealConverger::for_apply()
+            .unwrap_or_else(|e| panic!("no guard is set, so this must succeed: {e}"));
+        let Err(why) = c.perform(&wrong_domain_step) else {
+            panic!("a {wrong_domain_step} must be refused when running as the other domain");
+        };
+        assert!(why.contains("refusing to perform"), "{why}");
+        assert!(
+            why.contains(wrong_domain_step.domain().as_str()),
+            "the refusal must name the domain the step needs: {why}"
+        );
+
         if let Some(v) = restore {
             std::env::set_var(NO_APPLY_ENV, v);
         }

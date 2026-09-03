@@ -172,7 +172,32 @@ nothing would report as converged forever.
 - [ ] **7.4** GUI editing in the shell. **Deferred out of this phase** — §10's
       last bullet, and it is apex-shell work, not apex-os work. The schema
       round-trips through TOML losslessly so the editor has something to write.
-- [ ] **7.5** Tests.
+- [x] **7.5** Tests. `tests/test-apex-blueprint.sh` — 97 assertions against the
+      compiled binary — plus 27 planner unit tests in `apexd-core` and 15 in
+      the `apex` crate, and two static CI checks.
+      The suite runs a **live** `apex apply`, deliberately. "The dry run prints
+      the same steps" is only meaningful if it is compared against what a real
+      run does; two identical printouts from the same unused code path prove
+      nothing. It is safe because `apply` never escalates, so as an ordinary
+      user the only reachable steps write files inside a throwaway HOME the
+      suite created.
+      Four layers keep it off the machine, and the suite asserts each:
+      fake `sudo`/`pkexec`/`secret-tool`/`systemctl`/`scxctl` first on PATH
+      whose invocation is a failure (with a self-test proving the trap itself
+      works, or every isolation assertion would be vacuous); a fully isolated
+      HOME/XDG_CONFIG_HOME/XDG_STATE_HOME per invocation; the domain split;
+      and the environment guard.
+      Also asserted: that the blueprint classifies app names **identically to
+      the shipped `apex-pkg`**, by sourcing the engine and calling its own
+      `is_flatpak_id` — the planner has to classify independently, because it
+      compares against different sources, but classifying *differently* would
+      report an app missing forever while the engine kept installing it.
+      And that a sync bundle carries no credentials, by planting a sentinel
+      token in the runtime's secrets directory and grepping the bundle for it.
+      Every assertion was proved able to fail: the guard, the domain split and
+      all three parts of the static check were each mutated and the failure
+      observed. The suite was run under `bash -e` with a stripped environment,
+      which is how GitHub Actions invokes it.
 
 Two scope decisions made up front, both because the alternative was invention:
 

@@ -34,7 +34,11 @@ jobs:
           rust=false
           installer=false
           engine=false
-          grep -Eq '^(apexd/|config/sysprofiles/)' <<<"$files" && rust=true
+          # tests/test-apex-blueprint.sh runs in the `rust` job, because it
+          # drives the compiled `apex` binary and that is where the toolchain
+          # and the cargo cache are. It has to select that job too, or a change
+          # to the suite itself would never run it.
+          grep -Eq '^(apexd/|config/sysprofiles/|tests/test-apex-blueprint\.sh)' <<<"$files" && rust=true
           grep -Eq '^installer/' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
@@ -182,6 +186,58 @@ jobs:
             || { echo "FATAL: the daemon no longer opts in; game mode would never switch the scheduler" >&2; exit 1; }
           echo "host commands: only the daemon opts in"
 
+      - name: Only `apex apply` may converge the machine
+        run: |
+          set -euo pipefail
+          # The blueprint's counterpart to the check above, for the same class
+          # of accident one command along. `apex apply` writes session state,
+          # runs the package engine and rewrites the user's configuration, so
+          # `RealConverger::for_apply` is the one constructor permitted to have
+          # effects — everything else gets the inert one, which logs and skips.
+          #
+          # Three parts, matching the host-command check, because a red check
+          # fixed by neutering the feature is the failure mode this shape
+          # exists to prevent.
+          FILE=apexd/apex/src/blueprint.rs
+          test -f "$FILE"
+
+          # 1. Nothing outside that file may construct one. Comment lines are
+          #    stripped so prose about it does not trip the check.
+          found="$(grep -rn 'RealConverger::for_apply' apexd --include='*.rs' \
+                   | grep -vE ':[0-9]+:[[:space:]]*//' || true)"
+          echo "$found"
+          outside="$(printf '%s\n' "$found" | grep -v "^${FILE}:" | grep . || true)"
+          if [ -n "$outside" ]; then
+            echo "FATAL: only \`apex apply\` may build a converger with effects; found:" >&2
+            printf '%s\n' "$outside" >&2
+            exit 1
+          fi
+
+          # 2. No test may construct one, whatever the path.
+          if grep -rn 'RealConverger::for_apply' apexd --include='*.rs' \
+             | grep -E '/tests/'; then
+            echo "FATAL: a test must never build a converger with effects (see above)" >&2
+            exit 1
+          fi
+
+          # 3. And the CLI must still use it, in code that is not #[cfg(test)] —
+          #    or `apex apply` has silently become a command that converges
+          #    nothing while every test still passes.
+          prod="$(sed '/^#\[cfg(test)\]/,$d' "$FILE")"
+          grep -q 'RealConverger::for_apply()' <<<"$prod" \
+            || { echo "FATAL: nothing outside the tests constructs a live converger; \`apex apply\` would change nothing" >&2; exit 1; }
+
+          # `apply` must never escalate. This is the whole reason it cannot
+          # raise a polkit prompt: it converges the privilege domain it is
+          # already in and reports the other. A `sudo` here would undo that,
+          # and the symptom would be a password prompt in the middle of a test
+          # run — which has happened twice in this repository already.
+          if grep -nE 'Command::new\("(sudo|pkexec|su|doas)"|"(sudo|pkexec|doas)"' <<<"$prod"; then
+            echo "FATAL: apex apply must never escalate privilege (see above)" >&2
+            exit 1
+          fi
+          echo "converging: only \`apex apply\` opts in, and it never escalates"
+
   rust:
     name: Rust validation
     needs: changes
@@ -212,6 +268,35 @@ jobs:
 
       - name: Tests
         run: cargo test --locked
+
+      # §10's blueprint suite drives the COMPILED binary, so it belongs here
+      # rather than in the `engine` job: this is where the toolchain and the
+      # cargo cache are, and building `apex` a second time elsewhere would
+      # double the slowest step in the PR for no extra coverage.
+      #
+      # APEX_BLUEPRINT_NO_APPLY is set for the whole step as a blanket net for
+      # anything that might invoke `apex apply` directly. It is NOT what keeps
+      # the suite safe, and pretending otherwise would be worse than not
+      # setting it: the suite builds each invocation's environment with
+      # `env -i`, so this variable does not reach the binary at all. What
+      # actually keeps it safe is that `apply` never escalates — every run in
+      # the suite is an ordinary user, so the only reachable steps write files
+      # inside a throwaway HOME the suite created — plus fake `sudo`, `pkexec`,
+      # `secret-tool` and friends first on PATH, whose invocation the suite
+      # fails on. It asserts the guard itself by setting the variable
+      # explicitly, per case.
+      - name: Run blueprint and sync assertions
+        working-directory: .
+        env:
+          APEX_BLUEPRINT_NO_APPLY: "1"
+        # No APEX_BIN: the suite builds the binary itself, which is a cache hit
+        # after the two steps above. Pointing it at a path instead would make
+        # the job depend on exactly which targets `cargo test` happens to
+        # build, and the failure would read as a broken suite rather than a
+        # missing artefact. When it cannot build, it exits non-zero — a suite
+        # that cannot run must never report a green tick, which this repository
+        # has now been bitten by three times.
+        run: ./tests/test-apex-blueprint.sh
 
   installer:
     name: Installer safety and UI
@@ -371,7 +456,7 @@ jobs:
           # this level today, so any finding is one this PR introduced.
           shellcheck -S warning files/system/libexec/apex-pkg \
             tests/test-apex-pkg.sh tests/test-apex-firstrun.sh \
-            tests/test-labwc-keybinds.sh
+            tests/test-labwc-keybinds.sh tests/test-apex-blueprint.sh
 
   result:
     name: PR validation
