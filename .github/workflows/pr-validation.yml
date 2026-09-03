@@ -591,6 +591,37 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-ai.sh
 
+      # §21's Task. It belongs in this job rather than `engine` because it
+      # drives the built `apex` binary, and this is the only job with a Rust
+      # toolchain and a warm cargo cache.
+      #
+      # The binary is built explicitly first and then asserted executable. The
+      # suite would build it itself if it were absent, but `target/` here comes
+      # out of a restored cache, so "absent" is not the failure mode — a STALE
+      # binary from an older commit is, and a suite that passed against one has
+      # asserted nothing about this PR.
+      #
+      # What the suite is really for: a task names a project, a capsule, a
+      # worktree and a checkpoint, and every one of them can go away
+      # underneath it. Each of those cases greps the specific refusal and the
+      # specific recovery command rather than a non-zero exit. It also proves
+      # the two properties that are absences: `apex task` reopens no window
+      # (the fixture window logs every launch, and the count must stay at one),
+      # and it invokes none of sudo, pkexec, secret-tool, podman, distrobox,
+      # hyprctl or niri — recording stubs for all seven are first on PATH, with
+      # a negative control proving the recorder is armed. That is the "never a
+      # polkit or keyring prompt" rule asserted rather than claimed.
+      - name: §21 task — binder assertions, refusals and the no-prompt tripwire
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --bin apex --manifest-path apexd/Cargo.toml
+          # A missing binary must be a hard failure, not a skip.
+          test -x "$APEX_BIN"
+          ./tests/test-apex-task.sh
+
   installer:
     name: Installer safety and UI
     needs: changes
