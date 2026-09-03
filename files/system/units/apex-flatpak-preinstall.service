@@ -1,0 +1,49 @@
+# APEX-OS — install the Flatpak applications every image should ship with.
+#
+# Right now that is Zen Browser, and only Zen Browser.
+#
+# ── Why first boot and not the Containerfile ─────────────────────────────────
+# `flatpak install` needs a running system: it writes to /var/lib/flatpak, and
+# bootc treats /var as machine-local state that is seeded once and never
+# updated. The same reasoning already governs the Flathub remote itself — see
+# apex-flathub-setup.service, which this unit runs after, because there is
+# nothing to install from until the remote exists.
+#
+# ── Why Zen is a Flatpak and not an RPM ──────────────────────────────────────
+# Zen is not in Fedora's repositories and ships no Fedora RPM. The alternatives
+# are a tarball in /opt or an AppImage, and both would need APEX to write its own
+# updater to keep "always the latest stable" true. `apex update` already runs
+# `flatpak update --system` (see cmd_flatpak_upgrade in apex-pkg), so as a
+# Flatpak Zen tracks latest stable with no new machinery at all.
+#
+# ── Firefox stays the default browser ────────────────────────────────────────
+# Deliberate. Zen is a Firefox fork with an opinionated interface, and someone
+# who dislikes it should not have to undo a decision the image made for them.
+# So Zen is installed and discoverable, Firefox keeps the http/https handler in
+# files/desktop/xdg/mimeapps.list, and the image build asserts that — a Flatpak's
+# exported .desktop can otherwise win the handler race depending on XDG data
+# directory ordering.
+#
+# Idempotent: `flatpak install` is a no-op when the app is present, and the
+# stamp keeps the unit quiet after the first success. The stamp is written ONLY
+# on success, so a boot with no network retries on the next one.
+[Unit]
+Description=APEX-OS: install the shipped Flatpak applications (first boot)
+Documentation=https://zen-browser.app
+After=network-online.target apex-flathub-setup.service
+Wants=network-online.target
+Requires=apex-flathub-setup.service
+ConditionPathExists=!/var/lib/flatpak/.apex-flatpaks-installed
+ConditionPathExists=/var/lib/flatpak/repo
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/flatpak install --system --assumeyes --noninteractive flathub app.zen_browser.zen
+ExecStartPost=/usr/bin/touch /var/lib/flatpak/.apex-flatpaks-installed
+# A first boot without network must not wedge, and must not stamp: the unit
+# runs again next boot and installs then.
+SuccessExitStatus=0
+
+[Install]
+WantedBy=multi-user.target
