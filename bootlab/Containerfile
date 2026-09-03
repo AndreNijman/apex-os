@@ -1,0 +1,50 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX boot lab
+#
+#  §22's migration sequence step 2 is "prototype composefs/systemd-boot in CI
+#  and virtual machines". This is that environment, as a container rather than
+#  as packages on a host: `ukify`, `qemu`, `sbsign` and `swtpm` are build-time
+#  tooling, and installing them onto an APEX box would be exactly the machine
+#  drift AGENTS.md prohibits — most temptingly on the build box, which is a real
+#  APEX machine too.
+#
+#  Everything it produces lands in a bind-mounted work directory. It never sees
+#  the host's ESP; see the boot-path rules in AGENTS.md.
+#
+#  Run it with:
+#    podman run --rm --device /dev/kvm -v "$PWD:/work" apex-bootlab <cmd>
+#
+#  /dev/kvm is a device pass-through, not a privilege: the container stays
+#  unprivileged and the guest is a normal qemu process.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM registry.fedoraproject.org/fedora:43
+
+# Pinned by name here and resolved once per build. The lab is a test harness,
+# so a newer qemu arriving is a signal worth seeing rather than a regression to
+# hide behind a lockfile — but the image digest is what CI carries forward, so a
+# long run cannot pick up a newer toolchain halfway through.
+RUN dnf -y install --setopt=install_weak_deps=False \
+        qemu-kvm qemu-system-x86-core qemu-img \
+        edk2-ovmf \
+        systemd-ukify systemd-boot-unsigned systemd-udev \
+        sbsigntools efitools openssl \
+        dosfstools mtools parted e2fsprogs cryptsetup \
+        swtpm swtpm-tools tpm2-tools \
+        ostree rpm-ostree \
+        python3 python3-pefile \
+        jq file findutils procps-ng iproute socat \
+    && dnf clean all
+
+# The guest firmware paths differ between Fedora releases often enough that
+# discovering them at run time beats hardcoding: a missing OVMF is a clear
+# failure here rather than a confusing qemu error later.
+RUN set -eux; \
+    test -f /usr/share/edk2/ovmf/OVMF_CODE.fd || \
+    test -f /usr/share/edk2/ovmf/OVMF_CODE_4M.fd; \
+    command -v ukify; \
+    command -v sbsign; \
+    command -v swtpm; \
+    command -v qemu-system-x86_64
+
+WORKDIR /work
+ENTRYPOINT ["/bin/bash"]

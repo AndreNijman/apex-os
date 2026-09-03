@@ -41,6 +41,7 @@ pub mod game;
 pub mod gameprofile;
 pub mod gaming;
 pub mod gpu;
+pub mod host;
 pub mod irq;
 pub mod mode;
 pub mod perf;
