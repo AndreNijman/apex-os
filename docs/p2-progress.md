@@ -271,9 +271,10 @@ Both of these are recorded here so they cannot be quietly forgotten.
    unrecoverable. `AGENTS.md` also forbids it directly: documentation must
    state current behaviour, not aspiration.
 
-2. **`tests/test-apex-ai.sh` does not exist.** §14's unit tests are in the 944,
-   but nothing drives `apex ai` as a process the way `host` and `dispatch` are
-   driven, which is what `AGENTS.md` asks for.
+2. ~~`tests/test-apex-ai.sh` does not exist.~~ **Closed** in `f25c8e8`: 43
+   assertions, shellcheck-clean, wired into the `rust` job. Written here rather
+   than by the §14 branch because that branch was interrupted five times by
+   transient API errors and a missing suite was the worse outcome.
 
 ## Independent verification of the boot scripts' safety, done here
 
@@ -291,3 +292,21 @@ loopback-mounted image; mtools does not mount anything at all, so there is no
 mountpoint that could resolve to the host's ESP even by mistake. Entries land
 under `/EFI/APEX/`, which is §22's own requirement for an APEX identity rather
 than a Fedora-named path.
+
+## The boot-v2 CI workflow, checked against the release-tier rules
+
+`AGENTS.md` says a `core` rebuild makes the next fleet update multi-gigabyte,
+and that promotion must happen only after verification and signing. A new
+workflow is exactly where that gets broken by accident, so it was checked
+rather than read off its own header comment:
+
+| requirement | how it holds |
+| --- | --- |
+| must not rebuild `core` | no `Containerfile.core` reference outside a comment |
+| must not publish or promote | no `podman push`, no `ghcr.io`, no `cosign sign` anywhere |
+| least privilege | `permissions: contents: read` — no `packages: write`, no `id-token: write`, so it **cannot** push to GHCR or mint a keyless identity even by mistake |
+| no unattended runs | triggers are `pull_request` and `workflow_dispatch` only; no `push:` and no `schedule:` |
+
+The permissions line is the load-bearing part. A workflow that merely *does
+not* push today can start pushing with one careless step; one that has no
+`packages: write` token cannot.
