@@ -156,20 +156,23 @@ free as a top-level verb — the existing `Mode` is `apex fan mode`.
   for whoever picks it up: that file is stale on a separate point, still listing
   five tier IDs including `ultra-max`/`ultra`, which `tier.rs` removed.
 
-### Known-red on this branch, inherited not caused
+### The cross-repo merge order, observed working
 
-PR #27's **`Package engine`** job fails on two assertions in
-`tests/test-labwc-keybinds.sh`: "KeybindService invokes the generator" and "it
+Worth recording because it is the first time the mechanism actually fired. PR
+#27's **`Package engine`** job was red on two assertions in
+`tests/test-labwc-keybinds.sh` — "KeybindService invokes the generator" and "it
 checks the helper exists before spawning it". Both grep
 `src/services/config_tab/KeybindService.qml` in an **apex-shell** tree cloned
-from remote `main`, and that shell-side change is still on the unmerged
-apex-shell PR #8 (`p1/compositor-adapter`) — `main` has zero occurrences of
-`apex-labwc-keybinds` today.
+from remote `main`, and at that moment `main` had zero occurrences of
+`apex-labwc-keybinds`, because the shell half was still on the unmerged
+apex-shell PR #8.
 
-That is the documented merge order working, not a broken check: the suite's own
-CI comment says a shell change "fails here until it lands". Phase 8 does not
-touch that file, that suite, or apex-shell. `Rust validation` — which is where
-this phase's own tests run — passes.
+Nothing was done about it on this side. The shell change landed while phase 8
+was in flight, `main` now has three occurrences, and the job went green on the
+next run. That is exactly what 5.3's CI comment predicted — "a shell change …
+fails here until it lands, which is the documented merge order doing its job
+rather than a broken check". If a future phase sees this suite red, check
+apex-shell `main` before looking anywhere else.
 
 ### The safety rule this phase is built around
 
