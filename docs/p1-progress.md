@@ -114,6 +114,25 @@ with `follow_mouse` crossing a monitor boundary now closes popups (unflagged
 behaviour change); and the facade suite encodes Hyprland's refcount semantics as
 universal, so it would fail on niri or labwc.
 
+## Two gaps the tracker did not show — 2026-09-03
+
+Auditing P1 against the roadmap rather than against this file turned up two
+things nothing had recorded:
+
+**§10 had no write verb.** `blueprint show/diff/init`, `apply`, `sync
+export/show/import` — read, compare, seed, converge, transfer. Nothing wrote a
+blueprint. The agent sent to build §10's GUI editor stopped before implementing
+and said so, which was correct: the only write-shaped verb was `sync import`,
+which consumes a *bundle*, so the shell would have had to author bundle TOML —
+the schema reimplemented with extra steps. `apex blueprint set --json -` now
+exists (`p1/blueprint-write`), reusing the same normalise + validate + to_toml +
+atomic write a hand-edited file goes through.
+
+**Every P1 verb is missing from the shell completions.** `files/desktop/shell/agent.sh`
+completes `agent`, `project`, `request` and `secret` — the P0 verbs — and its
+top-level list has none of `env resolve blueprint apply sync mode workload perf`.
+The CLI shipped; its shell integration did not follow.
+
 ## Finishing the deferred items — 2026-09-03
 
 The four phases are done and integrated (PR #30). Five things were deferred
@@ -125,6 +144,8 @@ in parallel worktrees:
 | finish 5.2 (screen shader, night light, SystemStats) + the two open review items | `p1/finish-5.2` | apex-shell |
 | §16 more extension points (launcher provider, quick-settings tile) | `p1/plugin-points` | apex-shell |
 | §10 GUI blueprint editor (7.4) | `p1/blueprint-editor` | apex-shell |
+| §10 `apex blueprint set` — the write verb the editor needs | `p1/blueprint-write` | apex-os |
+| shell completions for every P1 verb | `p1/completions` | apex-os |
 | §12 controller-first gaming + per-game profiles (8.4) | `p1/gaming-profiles` | apex-os |
 | §8 GUI export, §10 `[development] languages` convergence, §16 `apex plugin` CLI | `p1/deferred-items` | apex-os |
 
