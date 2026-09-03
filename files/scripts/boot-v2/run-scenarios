@@ -45,7 +45,7 @@ ALL=(prereq signed-uki reproducible negative-unsigned negative-foreign
 # Scenarios needing something the container cannot produce for itself. Kept OUT
 # of ALL so a default run cannot silently skip them and still report success:
 # they are requested by name and hard-fail when their input is missing.
-STAGED=(apex-image)
+STAGED=(apex-image luks-tpm)
 if (( LIST )); then printf '%s\n' "${ALL[@]}" "${STAGED[@]}"; exit 0; fi
 (( ${#SCENARIOS[@]} )) || SCENARIOS=("${ALL[@]}")
 
@@ -530,6 +530,176 @@ HOOK
     # this line, so it is what distinguishes "the APEX initramfs ran" from "an
     # initramfs ran".
     assert_serial_has "$ser" 'APEX-BOOTLAB: initramfs-release=NAME="APEX-OS"'
+}
+
+scenario_luks_tpm() {
+    log "luks-tpm: measured boot and TPM-bound LUKS2, opt-in (§22 step 5)"
+    fixtures
+    local root="$WORK/apex-root"
+    [[ -d "$root" ]] || die "no staged APEX root at $root.
+    Run, on an APEX host:
+      sudo files/scripts/boot-v2/apex-stage-root --output <workdir>/out/apex-root
+    This scenario needs the REAL APEX initramfs: its dracut module list is what
+    provides systemd-cryptsetup, systemd-pcrphase, libcryptsetup and the
+    libtss2 stack. A synthetic guest would prove nothing about the image APEX
+    actually ships."
+
+    local tpmstate="$WORK/tpm-luks" luks="$WORK/luks.img"
+    rm -rf "$tpmstate"
+
+    # ── enrol, host-side, against a software TPM ───────────────────────────
+    # The SAME state directory is then handed to qemu, which is what makes the
+    # sealed object reachable from the guest: a key sealed to one TPM's SRK
+    # cannot be unsealed by a different TPM, and that failure is indistinguish-
+    # able from a broken PCR policy in the guest's logs.
+    local recovery
+    recovery="$("$HERE/apex-luks-enroll" --image "$luks" --tpm-state "$tpmstate" \
+        --pcr-pubkey "$KEYS/pcr/pub.pem" 2>/dev/null | tail -1)" \
+        || { bad "apex-luks-enroll failed"; return; }
+    [[ -s "$recovery" ]] || { bad "no recovery key at $recovery"; return; }
+    ok "enrolled a systemd-tpm2 public-key token and a recovery key"
+
+    # ── three UKIs: same kernel, three different policy situations ─────────
+    #   good    signed by the PCR key, cmdline A
+    #   update  signed by the PCR key, cmdline B. A different cmdline changes
+    #           PCR 11 exactly as a new kernel would, because sd-stub measures
+    #           the .cmdline section into it — so this is a faithful stand-in
+    #           for a legitimate kernel update, and it is the whole reason for
+    #           choosing a signed policy over a value-bound one.
+    #   foreign signed by the OTHER PCR key. The measured state is fine; the
+    #           signature over it is not, which is the "measured state does not
+    #           match" case that must refuse.
+    local hook_common="$WORK/luks-hook"
+    build_luks_hook() {  # build_luks_hook OUT_CPIO WITH_RECOVERY
+        local out="$1" with_recovery="$2"
+        rm -rf "$hook_common"
+        mkdir -p "$hook_common/var/lib/dracut/hooks/pre-mount"
+        install -m 0755 "$HERE/guest-luks-probe.sh" \
+            "$hook_common/var/lib/dracut/hooks/pre-mount/50-apex-luks-probe.sh"
+        if [[ "$with_recovery" == yes ]]; then
+            # Baked into the initrd, which is inside the signed UKI, so it is
+            # covered by the same Secure Boot signature as the kernel. That is
+            # acceptable for an ephemeral lab key and for nothing else: a real
+            # recovery key is shown to the user once and stored by them, which
+            # is the whole point of it being a recovery key.
+            install -m 0400 "$recovery" "$hook_common/apex-bootlab-recovery-key"
+        fi
+        ( cd "$hook_common" && find . -print0 | cpio --null -o -H newc --quiet ) > "$out"
+        [[ -s "$out" ]] || die "empty hook cpio at $out"
+    }
+
+    local -a specs=(
+        "good:$KEYS/pcr/key.pem:$KEYS/pcr/pub.pem:no:unlock"
+        "update:$KEYS/pcr/key.pem:$KEYS/pcr/pub.pem:no:update"
+        "foreign:$KEYS/foreign/key.pem:$KEYS/pcr/pub.pem:yes:refuse"
+    )
+    local spec name pcrkey pcrpub recov mode
+    for spec in "${specs[@]}"; do
+        IFS=: read -r name pcrkey pcrpub recov mode <<<"$spec"
+        build_luks_hook "$WORK/luks-hook-$name.cpio" "$recov"
+        # --pcrpkey stays the REAL public key even for the foreign UKI. That is
+        # deliberate: it isolates the failure to the SIGNATURE. If the embedded
+        # public key were swapped too, the refusal could equally be "the key in
+        # the image is not the enrolled one", and the test would not
+        # distinguish a policy check from a key-identity check.
+        "$HERE/apex-mkuki" --output "$WORK/uki-luks-$name.efi" --from-root "$root" \
+            --cmdline "$CMDLINE_BASE apex.bootlab.entry=luks$name apex.bootlab.luks=$mode rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+            --deployment "luks$name" --variant gaming \
+            --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+            --pcr-key "$pcrkey" --pcr-pubkey "$pcrpub" \
+            --extra-initrd "$WORK/luks-hook-$name.cpio" >/dev/null \
+            || { bad "apex-mkuki failed for the '$name' LUKS UKI"; return; }
+        # The measured-boot sections must actually be there. apex-mkuki checks
+        # this itself, but the check is repeated here because these three UKIs
+        # are the only ones in the suite that carry them and a silent regression
+        # would turn every assertion below into a test of the recovery path.
+        if python3 "$HERE/pe-section.py" "$WORK/uki-luks-$name.efi" .pcrsig >/dev/null 2>&1; then
+            ok "$name UKI carries a .pcrsig section"
+        else
+            bad "$name UKI has no .pcrsig section"
+        fi
+    done
+
+    # The three signatures must differ from one another, or the scenario is
+    # three copies of one test.
+    local h_good h_update h_foreign
+    h_good="$(python3 "$HERE/pe-section.py" "$WORK/uki-luks-good.efi" .pcrsig | sha256sum | cut -d' ' -f1)"
+    h_update="$(python3 "$HERE/pe-section.py" "$WORK/uki-luks-update.efi" .pcrsig | sha256sum | cut -d' ' -f1)"
+    h_foreign="$(python3 "$HERE/pe-section.py" "$WORK/uki-luks-foreign.efi" .pcrsig | sha256sum | cut -d' ' -f1)"
+    [[ "$h_good" != "$h_update" ]] \
+        && ok "the 'update' UKI has a different PCR signature (its PCR 11 differs)" \
+        || bad "the 'good' and 'update' UKIs have identical .pcrsig — the kernel-update case is vacuous"
+    [[ "$h_good" != "$h_foreign" ]] \
+        && ok "the 'foreign' UKI has a different PCR signature" \
+        || bad "the 'good' and 'foreign' UKIs have identical .pcrsig — the refusal case is vacuous"
+
+    boot_luks() {  # boot_luks NAME
+        # One `local` per line. `local n="$1" disk="...$n..."` does NOT work:
+        # bash expands every word of the command before performing any of the
+        # assignments, so $n is still unset in the second one — and under
+        # `set -u` that aborts the whole suite three scenarios in, after eight
+        # minutes of UKI builds.
+        local n="$1"
+        local disk="$WORK/disk-luks-$n.img"
+        local vars="$WORK/vars-luks-$n.fd"
+        local ser="$WORK/serial-luks-$n.log"
+        local rc=0
+        "$HERE/apex-mkesp" --disk "$disk" --size 1024 \
+            --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+            --uki "luks$n:0:$WORK/uki-luks-$n.efi" --default "apex-luks$n*" >/dev/null
+        fresh_vars "$vars"
+        vm_boot --disk "$disk" --vars "$vars" --name "luks-$n" --serial "$ser" \
+                --tpm-state "$tpmstate" --extra-disk "$luks" \
+                --mem 4096 --timeout 240 || rc=$?
+        printf '%s\n' "$rc"
+    }
+
+    # ── boot 1: the enrolled state unlocks ─────────────────────────────────
+    local rc ser
+    rc="$(boot_luks good)"; ser="$WORK/serial-luks-good.log"
+    assert_eq 0 "$rc" "good: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: apex-initramfs-reached"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=present"
+    assert_serial_has "$ser" "APEX-BOOTLAB: pcr-signature=/run/systemd/tpm2-pcr-signature.json"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=written"
+    # PCR 11 must be a real measurement, not the zeros an uninitialised bank
+    # reports. Without this the unlock could be succeeding against an
+    # effectively unenforced policy, which systemd warns about at enrol time.
+    local pcr11
+    pcr11="$(grep -ao 'APEX-BOOTLAB: pcr11=[[:xdigit:]]*' "$ser" | head -1 | cut -d= -f2)"
+    # 64 hex characters, and not the all-zero digest an uninitialised PCR bank
+    # reports. Both halves matter: an empty capture would pass a "not zeros"
+    # test, and the first version of this assertion did exactly that because it
+    # matched [0-9a-f] against a value sysfs prints in UPPERCASE.
+    if [[ "$pcr11" =~ ^[[:xdigit:]]{64}$ && "$pcr11" != "$(printf '0%.0s' {1..64})" ]]; then
+        ok "PCR 11 was extended by the boot ($pcr11)"
+    else
+        bad "PCR 11 is absent or all zeros ('$pcr11') — nothing measured this boot"
+    fi
+
+    # ── boot 2: a changed PCR 11, same signing key. THE hard requirement ───
+    rc="$(boot_luks update)"; ser="$WORK/serial-luks-update.log"
+    assert_eq 0 "$rc" "update: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # Same volume, and it really decrypted: the marker boot 1 wrote is read
+    # back through the mapper device after the measured state changed.
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=found"
+    local pcr11b
+    pcr11b="$(grep -ao 'APEX-BOOTLAB: pcr11=[[:xdigit:]]*' "$ser" | head -1 | cut -d= -f2)"
+    if [[ -n "$pcr11b" && "$pcr11b" != "$pcr11" ]]; then
+        ok "PCR 11 changed between the two boots, and the same keyslot still opened"
+    else
+        bad "PCR 11 did not change ('$pcr11b' == '$pcr11') — the kernel-update case proves nothing"
+    fi
+
+    # ── boot 3: a signature the enrolled key did not make ──────────────────
+    rc="$(boot_luks foreign)"; ser="$WORK/serial-luks-foreign.log"
+    assert_eq 0 "$rc" "foreign: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=REFUSED"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # And recoverable in the SAME boot that was refused.
+    assert_serial_has "$ser" "APEX-BOOTLAB: recovery-unlock=SUCCESS"
 }
 
 # ── run ─────────────────────────────────────────────────────────────────────

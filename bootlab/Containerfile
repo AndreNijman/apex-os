@@ -66,11 +66,15 @@ RUN set -eux; \
     command -v swtpm; \
     command -v qemu-system-x86_64; \
     \
-    : '── Secure Boot needs the secboot firmware build, not just any OVMF.'; \
-    : 'F43 ships the 2 MB raw pair here and only qcow2 for the 4 MB layout;'; \
-    : 'virt-fw-vars edits raw .fd, so the raw pair is the one that matters.'; \
-    test -f /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd; \
-    test -f /usr/share/edk2/ovmf/OVMF_VARS.secboot.fd; \
+    : '── Measured boot needs the 4 MB OVMF, and only the 4 MB OVMF ──'; \
+    : 'Measured 2026-09-03: the 2 MB OVMF_CODE.secboot.fd does Secure Boot'; \
+    : 'but has no TCG2 protocol, so sd-stub cannot measure, PCR 11 stays at'; \
+    : '64 zeros and every TPM-bound unlock fails for a reason that reads as'; \
+    : 'a broken PCR policy. F43 ships only qcow2 for the 4 MB layout, and'; \
+    : 'virt-fw-vars edits raw varstores, so lib.sh converts both once.'; \
+    test -f /usr/share/edk2/ovmf/OVMF_CODE_4M.secboot.qcow2; \
+    test -f /usr/share/edk2/ovmf/OVMF_VARS_4M.qcow2; \
+    command -v qemu-img; \
     \
     : '── the boot-v2 additions, asserted rather than assumed present ──'; \
     command -v virt-fw-vars; \

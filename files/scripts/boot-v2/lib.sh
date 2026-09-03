@@ -44,14 +44,63 @@ die()  { printf '!!! %s\n' "$*" >&2; exit 1; }
 #              scenario while proving nothing.
 # virt-fw-vars edits raw `.fd` varstores, so the raw pair is what we need;
 # Fedora 43 ships only qcow2 for the 4 MB layout.
+# ── the 4 MB firmware, and why the 2 MB pair is not good enough ────────────
+#
+# MEASURED, 2026-09-03, edk2-ovmf-20260508-7.fc43:
+#
+#   /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd        (2 MB, raw)
+#       Secure Boot works. TCG2 does NOT: the OVMF debug log contains no Tcg2
+#       activity, sd-stub sets no StubPcr* EFI variables, and PCR 11 in the
+#       guest reads as 64 zeros. systemd-cryptsetup then says "No signature
+#       for current PCR policy in TPM2 signature JSON" and every TPM unlock
+#       fails — including the ones that should succeed.
+#
+#   /usr/share/edk2/ovmf/OVMF_CODE_4M.secboot.qcow2  (4 MB, qcow2)
+#       367 Tcg2 lines in the debug log, PCR 11 extended to a real value, the
+#       .pcrsig and .pcrpkey sections delivered to
+#       /run/systemd/tpm2-pcr-{signature.json,public-key.pem}.
+#
+# So measured boot needs the 4 MB build, and Fedora 43 ships only qcow2 for
+# it — while virt-fw-vars edits raw varstores. Both are therefore converted to
+# raw ONCE into a cache directory and reused. This is the whole reason the lab
+# does not simply use the raw 2 MB pair, and finding it cost a full LUKS
+# scenario reporting six failures that were all one missing firmware feature.
+BOOTV2_FW_CACHE="${APEX_BOOTLAB_FW:-${TMPDIR:-/tmp}/apex-bootlab-fw}"
+
+# _ovmf_raw CODE|VARS — echo a raw firmware image path, converting if needed.
+_ovmf_raw() {
+    local kind="$1" out src
+    mkdir -p "$BOOTV2_FW_CACHE"
+    case "$kind" in
+        CODE) out="$BOOTV2_FW_CACHE/OVMF_CODE_4M.secboot.fd"
+              src=/usr/share/edk2/ovmf/OVMF_CODE_4M.secboot.qcow2 ;;
+        # The PRISTINE (key-free) 4 MB varstore, not the .secboot one — see the
+        # comment on ovmf_vars_template below.
+        VARS) out="$BOOTV2_FW_CACHE/OVMF_VARS_4M.fd"
+              src=/usr/share/edk2/ovmf/OVMF_VARS_4M.qcow2 ;;
+        *) die "_ovmf_raw: unknown kind $kind" ;;
+    esac
+    if [[ ! -s "$out" ]]; then
+        [[ -f "$src" ]] || return 1
+        qemu-img convert -O raw "$src" "$out" >&2 || return 1
+    fi
+    printf '%s\n' "$out"
+}
+
+# The Secure Boot firmware. Fails hard rather than silently falling back to a
+# build without TCG2: a run that quietly lost measured boot would report the
+# LUKS scenarios as broken policy rather than as missing firmware, which is
+# exactly the misdiagnosis this comment exists to prevent.
 ovmf_code_secboot() {
     local c
-    for c in /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd \
-             /usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd \
-             /usr/share/edk2/x64/OVMF_CODE.secure.4m.fd; do
+    if c="$(_ovmf_raw CODE)"; then printf '%s\n' "$c"; return 0; fi
+    for c in /usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd; do
         [[ -f "$c" ]] && { printf '%s\n' "$c"; return 0; }
     done
-    die "no Secure Boot OVMF firmware found (looked in /usr/share/edk2/{ovmf,x64})"
+    die "no 4 MB Secure Boot OVMF found. The 2 MB OVMF_CODE.secboot.fd is
+    deliberately NOT used as a fallback: it has no TCG2 protocol, so sd-stub
+    cannot measure and every TPM-bound unlock fails for a reason that looks
+    like a broken PCR policy."
 }
 
 # The PRISTINE template — the one with no keys in it at all.
@@ -65,17 +114,18 @@ ovmf_code_secboot() {
 # still passing, because a Fedora-signed shim would satisfy db too.
 ovmf_vars_template() {
     local v
-    for v in /usr/share/edk2/ovmf/OVMF_VARS.fd \
-             /usr/share/edk2/x64/OVMF_VARS.4m.fd; do
-        [[ -f "$v" ]] || continue
-        # Assert pristine. If Fedora ever pre-enrolls keys into this file too,
-        # that must be a hard failure here rather than a silently weakened test.
+    if v="$(_ovmf_raw VARS)"; then
         if virt-fw-vars --input "$v" --print 2>/dev/null | grep -qE '^name=(PK|db)\b'; then
-            continue
+            die "$v is not pristine — it already has PK/db enrolled"
         fi
         printf '%s\n' "$v"; return 0
+    fi
+    for v in /usr/share/edk2/x64/OVMF_VARS.4m.fd; do
+        [[ -f "$v" ]] || continue
+        virt-fw-vars --input "$v" --print 2>/dev/null | grep -qE '^name=(PK|db)\b' && continue
+        printf '%s\n' "$v"; return 0
     done
-    die "no PRISTINE (key-free) OVMF variable-store template found in /usr/share/edk2/{ovmf,x64}"
+    die "no PRISTINE (key-free) 4 MB OVMF variable-store template found"
 }
 
 sd_boot_efi() {
@@ -168,10 +218,16 @@ esp_mkdir_p() {
 # cannot get a shell.
 vm_boot() {
     local disk="" vars="" name="run" timeout=120 mem=2048 smp=2
-    local tpm=0 serial="" extra_disk="" accel="kvm:tcg"
+    local tpm=0 serial="" extra_disk="" accel="kvm:tcg" tpm_state=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --disk)       disk="$2"; shift 2;;
+            # A swtpm state directory to KEEP across runs. Without it every
+            # --tpm boot gets a fresh TPM, which is right for the bootloader
+            # scenarios and fatal for the LUKS one: a key sealed to one TPM's
+            # SRK cannot be unsealed by a different TPM, and the failure looks
+            # exactly like a broken PCR policy.
+            --tpm-state)  tpm_state="$2"; tpm=1; shift 2;;
             --vars)       vars="$2"; shift 2;;
             --name)       name="$2"; shift 2;;
             --timeout)    timeout="$2"; shift 2;;
@@ -191,24 +247,29 @@ vm_boot() {
     local code; code="$(ovmf_code_secboot)"
     local tpmdir="" tpm_args=()
     if (( tpm )); then
-        tpmdir="$(dirname "$serial")/tpm-$name"
-        rm -rf "$tpmdir"; mkdir -p "$tpmdir"
+        if [[ -n "$tpm_state" ]]; then
+            tpmdir="$tpm_state"
+            mkdir -p "$tpmdir"
+        else
+            tpmdir="$(dirname "$serial")/tpm-$name"
+            rm -rf "$tpmdir"; mkdir -p "$tpmdir"
+        fi
         swtpm socket --tpm2 --tpmstate "dir=$tpmdir" \
-            --ctrl "type=unixio,path=$tpmdir/sock" \
-            --log "file=$tpmdir/swtpm.log,level=1" \
-            --pid "file=$tpmdir/swtpm.pid" --daemon \
-            || die "swtpm failed to start (see $tpmdir/swtpm.log)"
+            --ctrl "type=unixio,path=$tpmdir/sock-$name" \
+            --log "file=$tpmdir/swtpm-$name.log,level=1" \
+            --pid "file=$tpmdir/swtpm-$name.pid" --daemon \
+            || die "swtpm failed to start (see $tpmdir/swtpm-$name.log)"
         # Wait for the control socket rather than sleeping: a fixed sleep is
         # either flaky or slow, and on a 20-core box it is always the wrong
         # number.
         local i
         for i in $(seq 1 100); do
-            [[ -S "$tpmdir/sock" ]] && break
+            [[ -S "$tpmdir/sock-$name" ]] && break
             sleep 0.05
         done
-        [[ -S "$tpmdir/sock" ]] || die "swtpm control socket never appeared"
+        [[ -S "$tpmdir/sock-$name" ]] || die "swtpm control socket never appeared"
         tpm_args=(
-            -chardev "socket,id=chrtpm,path=$tpmdir/sock"
+            -chardev "socket,id=chrtpm,path=$tpmdir/sock-$name"
             -tpmdev emulator,id=tpm0,chardev=chrtpm
             -device tpm-tis,tpmdev=tpm0
         )
@@ -245,8 +306,17 @@ vm_boot() {
     rc=$?
     set -e
 
-    if [[ -n "$tpmdir" && -f "$tpmdir/swtpm.pid" ]]; then
-        kill "$(cat "$tpmdir/swtpm.pid")" 2>/dev/null || true
+    if [[ -n "$tpmdir" && -f "$tpmdir/swtpm-$name.pid" ]]; then
+        kill "$(cat "$tpmdir/swtpm-$name.pid")" 2>/dev/null || true
+        # Wait for it to actually exit before the caller reuses the state
+        # directory: swtpm writes its NV state on shutdown, and starting a
+        # second instance on a half-written state file is how a sealed object
+        # disappears between two boots.
+        for i in $(seq 1 100); do
+            kill -0 "$(cat "$tpmdir/swtpm-$name.pid" 2>/dev/null || echo 0)" 2>/dev/null || break
+            sleep 0.05
+        done
+        rm -f "$tpmdir/swtpm-$name.pid" "$tpmdir/sock-$name"
     fi
     info "qemu exited rc=$rc (0 = guest powered off; 137 = timeout kill)"
     return "$rc"
