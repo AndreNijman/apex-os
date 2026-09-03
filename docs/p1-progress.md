@@ -241,17 +241,48 @@ removing applications (`apply` is additive).
 **Untested:** every run was non-root, so `sudo apex apply` actually driving the
 package engine has only been exercised as a refusal.
 
-## Phase 8 — modes + gaming + workload manager
+## Phase 8 — modes + gaming + workload manager — DONE
 
-Not started. `apex mode` is free as a top-level verb — the existing `Mode` is
-`apex fan mode`.
+apex-os **PR #27**, branch `p1/modes-and-workloads`. All CI green. 66 Rust
+assertions + 67 in `tests/test-apex-modes.sh` against the built binary.
 
-- [ ] **8.1** `apex mode` composing existing primitives (tier, profile, game,
-      services, sysext).
-- [ ] **8.2** Workload-aware policy: measured signals, visible and overrideable.
-- [ ] **8.3** Performance Lab.
-- [ ] **8.4** Controller-first gaming mode and per-game profiles.
-- [ ] **8.5** Tests.
+- [x] **8.1** `apex mode` — eight modes composing levers that already ship
+      (tier, apexd's AC/battery auto-switch, game mode). **No new D-Bus
+      member.** The active mode is *derived* from what apexd reports rather than
+      stored, so `set` needs no root and the answer cannot go stale. `status`
+      reports every exactly-matching mode, because development/creator/server
+      are genuinely indistinguishable from observable state.
+- [x] **8.2** `apex workload` — every signal is measured *with its path* or
+      unavailable *with a reason*; there is no third state. Process names never
+      decide alone: uncorroborated by PSI or load, the verdict is `unknown`.
+      That is the roadmap's "do not market random tuning as AI optimization"
+      taken literally.
+- [x] **8.3** `apex perf` — clocks, power, temps, VRAM, sched-ext state. Frame
+      time is reported unavailable *with the reason* rather than substituted.
+- [ ] **8.4** Controller-first / per-game profiles — deferred, and it was the
+      stated lowest priority. `apex-gaming-session` already gives boot-to-game;
+      per-game profile *storage* wants a schema decision that belongs with
+      phase 7's blueprint.
+- [x] **8.5** Tests.
+
+**A real bug, found by running it rather than reading it:** `apex perf` printed
+`package: 20.47 W` above `battery: 20.47 W` — the same sensor twice, because the
+reader took the first hwmon exposing `power1_*` and on this ThinkPad that is
+`hwmon4`, owned by `BAT0`. Both numbers real, the label invented. There is now
+no single "package power" figure; sensors are named (`amdgpu/PPT: 10.00 W`) and
+power-supply hwmons are excluded.
+
+**On the harm this area caused before:** `mode`/`workload`/`perf` construct no
+`SysWriter` at all. The suite puts fake `scxctl`/`nvidia-smi`/`systemctl` first
+on PATH, fails if any is called, and then calls `scxctl` deliberately to prove
+the tripwire was armed — a trap that cannot itself pass vacuously. Verified
+independently afterwards: **zero** polkit or keyring prompt events in the whole
+session, no scx scheduler running, Hyprland gaps still the user's 5/10.
+
+**Not verified:** a real `apex mode set` against a live daemon. The plan → state
+mapping is proven by a property test over all 48 start-state/mode combinations,
+not by a live switch. GPU clocks and VRAM on NVIDIA and i915/xe are fixtures
+only; the amdgpu path is the one exercised for real.
 
 ## Log
 
