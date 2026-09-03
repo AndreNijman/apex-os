@@ -67,9 +67,14 @@ is the technical debt §17 names.
       points, crash isolation, `apex plugin` CLI, one real example plugin.
 - [ ] **5.5** Tests: shell CI invariants + an OS-side plugin suite.
 
-## PAUSED — 2026-09-03
+## Paused, then resumed — 2026-09-03
 
-Andre paused the session. Every agent was stopped and every worktree swept, so
+Andre paused the session and unpaused it shortly after; all seven agents were
+restarted from their own transcripts, so they kept their context. The snapshot
+below is the state at the moment of the pause and is what a cold restart should
+assume, since the agents have moved on from it.
+
+Every agent was stopped and every worktree swept, so
 **nothing is uncommitted and nothing is unpushed.** Two branches were caught
 mid-edit and checkpointed as `wip(...)` commits rather than losing the work;
 both say in their own commit message exactly what state they are in.
