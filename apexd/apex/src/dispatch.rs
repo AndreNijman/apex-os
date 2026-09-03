@@ -216,47 +216,174 @@ fn session_script(needs: &str) -> String {
         r#"
 uid=$(id -u); rt=/run/user/$uid
 [ -S "$rt/bus" ] || {{ echo NO_BUS; exit 0; }}
-have=
+wd=
 for s in "$rt"/wayland-*; do
-  [ -S "$s" ] && have=1 && break
+  [ -S "$s" ] || continue
+  b=${{s##*/}}
+  case "$b" in
+    wayland-[0-9]|wayland-[0-9][0-9]) wd=$b; break ;;
+  esac
 done
-[ -n "$have" ] || {{ echo NO_SESSION; exit 0; }}
+[ -n "$wd" ] || {{ echo NO_SESSION; exit 0; }}
 command -v {q} >/dev/null 2>&1 || {{ echo "NO_TOOL {q}"; exit 0; }}
-echo "BUS $rt/bus"
+echo "SESSION $rt/bus $wd"
 exit 0
 "#
     )
 }
 
-/// Turn the session probe's answer into a bus path, or a message saying what is
-/// missing.
-fn parse_session(out: &str, host: &str, tool: &str) -> Result<String> {
+/// Turn the session probe's answer into the bus path and compositor socket, or
+/// a message saying what is missing.
+fn parse_session(out: &str, host: &str, tool: &str) -> Result<(String, String)> {
     let line = out
         .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("");
-    if let Some(bus) = line.strip_prefix("BUS ") {
-        return Ok(bus.trim().to_string());
+    if let Some(rest) = line.strip_prefix("SESSION ") {
+        let mut parts = rest.split_whitespace();
+        if let (Some(bus), Some(wd)) = (parts.next(), parts.next()) {
+            return Ok((bus.to_string(), wd.to_string()));
+        }
     }
     Err(match line {
         "NO_BUS" => anyhow!(
-            "{host} has no per-user bus, so nobody is logged in there. \
-             Nothing was sent."
+            "{host} has no per-user bus, so nobody is logged in there. Nothing was sent."
         ),
         "NO_SESSION" => anyhow!(
-            "{host} is logged in but has no graphical session — it is probably sitting at \
+            "{host} is logged in but has no compositor socket — it is probably sitting at \
              the greeter. Opening something there would succeed and be seen by nobody, so \
              nothing was sent."
         ),
-        l if l.starts_with("NO_TOOL") => anyhow!(
-            "{host} has no {tool}. Nothing was sent."
-        ),
+        l if l.starts_with("NO_TOOL") => {
+            let missing = l.strip_prefix("NO_TOOL ").unwrap_or(tool).trim_matches('\'');
+            anyhow!("{host} has no {missing}. Nothing was sent.")
+        }
         "" => anyhow!(
             "{host} did not answer the session probe. Check that `ssh {host}` works."
         ),
         other => anyhow!("{host} answered the session probe with {other:?}; nothing was sent."),
     })
+}
+
+/// Run one command inside the remote user's graphical session, and return what
+/// it actually did.
+///
+/// Through `systemd-run --user`, not a bare ssh command with hand-set
+/// variables. The reason is a bug this had on its first live run: `apex open`
+/// reported "opened on katana" while nothing opened. `setsid --fork` returns 0
+/// the moment it forks, so the exit status proved only that a fork happened,
+/// and `WAYLAND_DISPLAY` was never set at all so the browser had no display to
+/// connect to. Both faults were invisible because the output went to
+/// /dev/null.
+///
+/// The user's own service manager already holds the session environment that
+/// the compositor imported into it, so this stops reconstructing that
+/// environment and asks the thing that has it. `--wait` makes the exit status
+/// the *program's*, which is what turns "we forked something" into "it worked".
+/// The remote launch script: set the session environment, start the program
+/// in the background, then observe what happened to it.
+fn launch_script(bus_addr: &str, wayland: &str, argv: &[String]) -> String {
+    format!(
+        r#"
+export DBUS_SESSION_BUS_ADDRESS={bus} WAYLAND_DISPLAY={wd}
+err=$(mktemp)
+{cmd} >/dev/null 2>"$err" &
+pid=$!
+i=0
+while [ $i -lt 15 ]; do
+  kill -0 $pid 2>/dev/null || break
+  sleep 0.1
+  i=$((i+1))
+done
+if kill -0 $pid 2>/dev/null; then
+  echo RUNNING
+else
+  wait $pid; echo "EXIT $?"
+fi
+cat "$err" >&2
+rm -f "$err"
+exit 0
+"#,
+        bus = shell_quote(bus_addr),
+        wd = shell_quote(wayland),
+        cmd = remote_sh(argv)
+    )
+}
+
+fn session_run(
+    host: &Host,
+    name: &str,
+    bus: &str,
+    wayland: &str,
+    argv: &[String],
+) -> Result<(bool, String)> {
+    // Launched in the background and then *observed*, rather than waited on.
+    //
+    // Two wrong versions came before this one, and both are worth recording.
+    // The first used `setsid --fork`, which returns 0 the instant it forks — so
+    // `apex open katana <url>` printed "opened" while nothing opened, because
+    // WAYLAND_DISPLAY was never set and the browser had no display to reach.
+    // The second used `systemd-run --user --wait`, which does propagate the
+    // real exit status but blocks until the program *exits*: a browser becomes
+    // the unit's main process, so the command hung for two minutes.
+    //
+    // What actually distinguishes success from failure here is short-lived:
+    // xdg-open either fails quickly (no handler, no display) or hands off and
+    // returns. So this waits up to 1.5s for it to exit, reports its status if
+    // it did, and reports RUNNING if it is still going — which for a GUI launch
+    // is the good case, not an unknown one.
+    //
+    // The third mistake, and the least obvious: the backgrounded child's
+    // STDOUT must be redirected, not just its stderr. ssh does not close the
+    // session while any descendant still holds the channel, so a browser
+    // inheriting stdout kept `apex open` hanging for a full minute *after*
+    // successfully launching — the launch worked and the command still looked
+    // broken.
+    let inner = launch_script(&format!("unix:path={bus}"), wayland, argv);
+    let command = remote_sh(&["sh", "-c", &inner]);
+    let ssh = ssh_argv(
+        host.destination(name),
+        host.port,
+        Tty::None,
+        CONNECT_TIMEOUT,
+        Some(&command),
+    );
+    let out = Command::new(&ssh[0])
+        .args(&ssh[1..])
+        .output()
+        .with_context(|| format!("running ssh for host {name:?}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    Ok((launch_succeeded(&stdout), stderr))
+}
+
+/// The launch script, for the assertions that check its shape.
+///
+/// Exists because the two faults that mattered — an unredirected stdout and a
+/// blocking wait — are properties of the script text, and building it requires
+/// no host.
+#[cfg(test)]
+fn launch_script_for_test() -> String {
+    launch_script("unix:path=/run/user/1000/bus", "wayland-1", &["xdg-open".to_string()])
+}
+
+/// Whether the launch report says the program is doing its job.
+///
+/// `RUNNING` is success: a GUI application that is still alive after 1.5s
+/// started. `EXIT 0` is success: it handed off and returned. Anything else,
+/// including an answer this does not recognise, is a failure — the whole
+/// purpose of this function is to stop reporting success without evidence.
+fn launch_succeeded(stdout: &str) -> bool {
+    for line in stdout.lines().map(str::trim) {
+        if line == "RUNNING" {
+            return true;
+        }
+        if let Some(code) = line.strip_prefix("EXIT ") {
+            return code.trim() == "0";
+        }
+    }
+    false
 }
 
 // ── apex build --on ──────────────────────────────────────────────────────────
@@ -424,31 +551,32 @@ fn send_clipboard(name: &str, host: &Host) -> Result<()> {
     let out = Command::new("wl-paste")
         .arg("--no-newline")
         .output()
-        .map_err(|e| {
-            anyhow!("cannot read the clipboard: wl-paste is not available here ({e})")
-        })?;
+        .map_err(|e| anyhow!("cannot read the clipboard: wl-paste is not available here ({e})"))?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "the clipboard is empty, or wl-paste could not read it"
-        ));
+        return Err(anyhow!("the clipboard is empty, or wl-paste could not read it"));
     }
     let bytes = out.stdout;
     if bytes.is_empty() {
         return Err(anyhow!("the clipboard is empty; nothing was sent"));
     }
 
-    let (ok, sout) = ssh_capture(host, name, &remote_sh(&["sh", "-c", &session_script("wl-copy")]))?;
+    let (ok, sout) =
+        ssh_capture(host, name, &remote_sh(&["sh", "-c", &session_script("wl-copy")]))?;
     if !ok && sout.trim().is_empty() {
         return Err(anyhow!("{name} did not answer"));
     }
-    let bus = parse_session(&sout, name, "wl-copy")?;
+    let (bus, wayland) = parse_session(&sout, name, "wl-copy")?;
 
-    // The clipboard content goes over stdin, never in the argv: it can be
-    // megabytes, it can contain anything, and an argv has neither the room nor
-    // the safety for it.
+    // Not through session_run: `wl-copy` forks and stays alive to serve the
+    // selection, so `systemd-run --wait` would never return. It gets the same
+    // two variables the service manager would have given it, set explicitly.
+    //
+    // The content goes over stdin, never in the argv: it can be megabytes and
+    // can contain anything, and an argv has neither the room nor the safety.
     let inner = format!(
-        "DBUS_SESSION_BUS_ADDRESS={} WAYLAND_DISPLAY=$(basename $(ls -1 /run/user/$(id -u)/wayland-* | head -1)) wl-copy",
-        shell_quote(&format!("unix:path={bus}"))
+        "DBUS_SESSION_BUS_ADDRESS={} WAYLAND_DISPLAY={} wl-copy",
+        shell_quote(&format!("unix:path={bus}")),
+        shell_quote(&wayland)
     );
     let command = remote_sh(&["sh", "-c", &inner]);
     let argv = ssh_argv(
@@ -476,8 +604,39 @@ fn send_clipboard(name: &str, host: &Host) -> Result<()> {
     if !status.success() {
         return Err(anyhow!("{name} did not accept the clipboard"));
     }
-    println!("sent {} bytes to {name}'s clipboard", bytes.len());
-    Ok(())
+
+    // Read it back. wl-copy exiting 0 means it forked, not that the selection
+    // is being served — the same gap that made `apex open` claim success while
+    // nothing opened. Comparing the round trip is the only honest confirmation.
+    let (rok, rout) = ssh_capture(
+        host,
+        name,
+        &remote_sh(&[
+            "sh",
+            "-c",
+            &format!(
+                "DBUS_SESSION_BUS_ADDRESS={} WAYLAND_DISPLAY={} wl-paste --no-newline | wc -c",
+                shell_quote(&format!("unix:path={bus}")),
+                shell_quote(&wayland)
+            ),
+        ]),
+    )?;
+    let there: Option<usize> = rout.trim().parse().ok();
+    match (rok, there) {
+        (true, Some(n)) if n == bytes.len() => {
+            println!("sent {} bytes to {name}'s clipboard", bytes.len());
+            Ok(())
+        }
+        (true, Some(n)) => Err(anyhow!(
+            "{name}'s clipboard holds {n} bytes but {} were sent, so something else \
+             took the selection. Try again.",
+            bytes.len()
+        )),
+        _ => Err(anyhow!(
+            "sent {} bytes to {name}, but reading its clipboard back did not confirm it",
+            bytes.len()
+        )),
+    }
 }
 
 fn send_files(args: &SendArgs, host: &Host) -> Result<()> {
@@ -539,6 +698,12 @@ fn send_files(args: &SendArgs, host: &Host) -> Result<()> {
         .args(&argv[1..])
         .stdin(Stdio::from(tar_out.stdout.expect("stdout was piped")))
         .stdout(Stdio::piped())
+        // Captured rather than inherited. The remote tar prints its own
+        // "Exiting with failure status due to previous errors" straight to the
+        // terminal otherwise, above the message explaining what actually
+        // happened — observed on the first live run. It is still shown, but as
+        // detail under the explanation rather than instead of it.
+        .stderr(Stdio::piped())
         .spawn()
         .context("running ssh")?;
     let out = child.wait_with_output().context("waiting for ssh")?;
@@ -549,13 +714,20 @@ fn send_files(args: &SendArgs, host: &Host) -> Result<()> {
         .map(str::trim);
 
     if !out.status.success() || landed.is_none() {
+        let detail = String::from_utf8_lossy(&out.stderr);
+        let detail: Vec<&str> = detail.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let suffix = if detail.is_empty() {
+            String::new()
+        } else {
+            format!("\n  {}", detail.join("\n  "))
+        };
         if !args.force {
             return Err(anyhow!(
                 "{name} refused at least one file, most likely because it already exists \
-                 there. Nothing was overwritten. Pass --force to replace."
+                 there. Nothing was overwritten. Pass --force to replace.{suffix}"
             ));
         }
-        return Err(anyhow!("{name} did not accept the files"));
+        return Err(anyhow!("{name} did not accept the files{suffix}"));
     }
     println!(
         "sent {} item(s) to {name}:{}",
@@ -604,19 +776,29 @@ fn open_inner(args: OpenArgs) -> Result<()> {
     if !ok && sout.trim().is_empty() {
         return Err(anyhow!("{name} did not answer"));
     }
-    let bus = parse_session(&sout, name, "xdg-open")?;
+    let (bus, wayland) = parse_session(&sout, name, "xdg-open")?;
 
-    // setsid, so the opened application is not killed when ssh disconnects —
-    // which is what happens without it, and it looks like "nothing opened".
-    let inner = format!(
-        "DBUS_SESSION_BUS_ADDRESS={} setsid --fork xdg-open {} >/dev/null 2>&1",
-        shell_quote(&format!("unix:path={bus}")),
-        shell_quote(&args.target)
-    );
-    let command = remote_sh(&["sh", "-c", &inner]);
-    let (ok, _) = ssh_capture(&host, name, &command)?;
+    let (ok, err) = session_run(
+        &host,
+        name,
+        &bus,
+        &wayland,
+        &["xdg-open".to_string(), args.target.clone()],
+    )?;
     if !ok {
-        return Err(anyhow!("{name} could not open it"));
+        // The status is xdg-open's own, because systemd-run --wait propagates
+        // it. This is the check that was missing when `apex open` reported
+        // success while nothing opened.
+        let detail: Vec<&str> =
+            err.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        return Err(anyhow!(
+            "{name} could not open it{}",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(":\n  {}", detail.join("\n  "))
+            }
+        ));
     }
     println!("opened on {name}: {}", args.target);
     Ok(())
@@ -723,9 +905,78 @@ mod tests {
     }
 
     #[test]
-    fn a_session_answer_yields_the_bus_path() {
-        let bus = parse_session("BUS /run/user/1000/bus\n", "katana", "xdg-open").unwrap();
+    fn a_session_answer_yields_the_bus_and_the_compositor_socket() {
+        let (bus, wd) =
+            parse_session("SESSION /run/user/1000/bus wayland-1\n", "katana", "xdg-open").unwrap();
         assert_eq!(bus, "/run/user/1000/bus");
+        // Not wayland-0. The katana's is wayland-1, and hardcoding 0 is how
+        // this would silently fail on a real machine.
+        assert_eq!(wd, "wayland-1");
+    }
+
+    #[test]
+    fn a_session_answer_missing_the_socket_is_not_accepted() {
+        // Half an answer must not yield an empty WAYLAND_DISPLAY, which would
+        // fail later and further away.
+        assert!(parse_session("SESSION /run/user/1000/bus\n", "k", "xdg-open").is_err());
+    }
+
+    #[test]
+    fn the_probe_picks_the_compositor_socket_and_not_its_neighbours() {
+        // Real directory contents from the katana:
+        //   wayland-1                       <- the compositor
+        //   wayland-1-awww-daemon.sock      <- another program's socket
+        //   wayland-1.lock                  <- not a socket at all
+        // A plain `wayland-*` glob with `head -1` happens to pick the right one
+        // only because of sort order, which is not a reason.
+        let s = session_script("xdg-open");
+        assert!(
+            s.contains("wayland-[0-9]|wayland-[0-9][0-9]"),
+            "the socket is not matched by an exact pattern: {s}"
+        );
+        assert!(!s.contains("head -1"), "relying on sort order: {s}");
+    }
+
+    #[test]
+    fn a_launch_report_is_believed_only_when_it_says_something_known() {
+        // The point of the report is to stop claiming success without
+        // evidence, so an unrecognised answer must be a failure.
+        assert!(launch_succeeded("RUNNING\n"));
+        assert!(launch_succeeded("EXIT 0\n"));
+        assert!(!launch_succeeded("EXIT 1\n"));
+        assert!(!launch_succeeded("EXIT 127\n"));
+        assert!(!launch_succeeded(""));
+        assert!(!launch_succeeded("probably fine\n"));
+    }
+
+    #[test]
+    fn the_backgrounded_child_has_both_streams_redirected() {
+        // ssh keeps the session open while any descendant holds the channel.
+        // Redirecting only stderr left a launched browser holding stdout, and
+        // `apex open` hung for a minute after it had already succeeded.
+        let s = session_script("xdg-open");
+        let _ = s;
+        // The launch script is built by session_run, so assert on it directly.
+        let inner = launch_script_for_test();
+        assert!(inner.contains(">/dev/null"), "stdout not redirected: {inner}");
+        assert!(inner.contains(r#"2>"$err""#), "stderr not captured: {inner}");
+    }
+
+    #[test]
+    fn the_launch_is_observed_rather_than_waited_on() {
+        // `systemd-run --wait` propagates a real status but blocks until a GUI
+        // program exits — measured: two minutes and still going. `setsid
+        // --fork` returns 0 immediately and proves nothing. Neither may come
+        // back.
+        let s = session_script("xdg-open");
+        assert!(!s.contains("--wait"), "blocking launch: {s}");
+        assert!(!s.contains("setsid"), "unverifiable launch: {s}");
+    }
+
+    #[test]
+    fn a_missing_tool_is_named_in_the_refusal() {
+        let e = parse_session("NO_TOOL systemd-run\n", "k", "xdg-open").unwrap_err();
+        assert!(e.to_string().contains("systemd-run"), "got {e}");
     }
 
     #[test]
