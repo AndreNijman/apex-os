@@ -170,3 +170,89 @@ Merge order, and why:
 Before merging, honestly: every suite green, `cargo clippy --all-targets
 --locked -- -D warnings` clean, shellcheck clean, and nothing that opens a
 window on his desktop. Do not merge red.
+
+## The polish pass found a worse bug than the one it was sent for
+
+Branch apex-shell `p3/ui-polish`, four commits, pushed.
+
+**Two home-dashboard cards never followed the wallpaper.**
+`src/services/home/CalendarCard.qml` and `ProfileCard.qml` had
+`Qt.rgba(166/255, 208/255, 247/255, α)` and `Qt.rgba(205/255, 214/255, 244/255, α)`
+compiled in. Those are exactly `#a6d0f7` and `#cdd6f4` — the **fallback** values
+`ColorLoader.qml` declares at lines 17–18 for `active` and `text`. Verified
+directly against both files.
+
+So those two cards rendered the fallback palette permanently, while every other
+surface tracked matugen from the wallpaper. They looked correct on one palette
+and were silently wrong on every other. That is the same shape as the scaler
+bug: correct on the developer's configuration, invisible to every test, wrong
+everywhere else.
+
+**A second systematic layer, invisible to the audit that found the first.**
+The 66 hex literals were the visible half. Writing the check exposed 45
+occurrences of `Qt.rgba(248/255, 113/255, 113/255, α)` — hex with the digits
+filed off, which no grep for `#` can see. 43 became tokens.
+
+**Seven new tokens**, sourced from the dominant existing value at each role so
+no existing install shifts: `danger` `#f87171` (12 of 24 red sites), `warning`
+`#f5c47a` (7 of 13), `success` `#a6e3a1`, plus `fixedLight`, `fixedDark`,
+`dangerFill`, `dangerFillHover`.
+
+They are deliberately **not** wired to matugen, and the argument is worth
+keeping: M3 guarantees an `error` role but no amber and no green, so a red that
+followed the wallpaper would sit beside a green that could not. `wsUrgent` is
+the precedent — `Colors.qml` has held a fixed status red since it was written.
+
+**Two more mismatches fell out.** `NotificationToast` and `NotificationList`
+disagreed about normal urgency, so a notification's accent bar changed colour as
+the toast expired into the list. And `AppearancePage`'s wallpaper grid is a
+second copy of `WallpaperPopup`'s thumbnail ring that snaps where the original
+eases, at radius 9 against 10.
+
+### One visible behaviour change, flagged rather than buried
+
+`BatteryStatus` used `#ff4444 / #ff6b00 / #ffcc00 / #ff9900` at 5 / 10 / 20 /
+30 percent. That is **not monotonic**: 20% drew a calm yellow while 30% drew a
+more urgent orange, so the icon became *less* alarming as the battery drained
+past 30. Accretion, not a scale.
+
+Both battery surfaces now use two tokens — `danger` at ≤10, `warning` at ≤30.
+Monotonic and correct, but it **changes what the bar looks like between 10% and
+30%**, and it trades two steps of granularity for correctness. Kept, because a
+non-monotonic warning scale is a defect; recorded here because it is the one
+change in this pass a person would notice without being told, and reverting that
+hunk alone restores the four steps.
+
+Four monotonic steps would be better than two, but choosing the two intermediate
+colours means inventing a ramp without being able to see it — which is the
+"similar-looking token" mistake this pass exists to avoid.
+
+### The check
+
+`tests/check-color-tokens.sh`, 15 assertions, wired into `ci.yml`. Its allowlist
+is **(file, colour) pairs each carrying a stated reason**, with the total
+asserted exactly — a per-file tally would pass while someone swapped one literal
+for another in the same file. Colours are extracted by a comment- and
+string-aware scanner rather than a line grep, so prose can neither satisfy it
+nor trip it.
+
+Negative control, run here rather than taken on trust: against
+`p2/remote-agent-status` it reports **6 passed, 9 failed**; against the fixed
+tree, **15 passed, 0 failed**.
+
+| suite | before | after |
+| --- | --- | --- |
+| `node tests/*-test.js` | 494 / 0 | 494 / 0 |
+| `tests/check-*.sh` | 284 / 0 | 299 / 0 |
+| `qmllint-qt6` warnings across the 34 changed files | — | unchanged |
+
+### Deliberately not attempted
+
+Radius was measured and left alone: the large literals are all hand-written
+`height/2` pills, containers use `Theme.cornerRadius`, small controls sit on a
+6–10 scale. No surface speaks its own dialect the way the Agent Center did. The
+real smell there is that a hand-maintained `height/2` breaks silently when a
+height changes — a follow-up, not blind churn.
+
+Shared-component migration was not attempted, by instruction: it is a large
+refactor with real regression risk, and the reported defect was not caused by it.
