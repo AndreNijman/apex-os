@@ -250,6 +250,19 @@ Newest last. One line per pushed commit that changes the state above.
   the shipped config, and 4 bindings genuinely have no labwc equivalent
   (scratchpad ×2, pseudo-tiling, split) so they are reported rather than mapped
   onto something approximate.
+- 2026-09-03 — **Phase 7 done.** PR #28 (`p1/blueprint-and-sync`): the schema
+  and pure planner in `apexd-core/src/blueprint.rs`, the probes, converger and
+  verbs in `apex/src/blueprint.rs`, `tests/test-apex-blueprint.sh`, and two
+  static CI checks. `apex blueprint show/diff/init`, `apex apply`,
+  `apex sync export/show/import`. Rust validation and Static validation both
+  green on the first CI run.
+  The `Package engine` job is red on that PR and it is **not** phase 7's: the
+  two failing assertions are phase 5.3's, checking that apex-shell's
+  `KeybindService.qml` invokes `apex-labwc-keybinds`. The suite clones
+  apex-shell from remote `main`, and that change has not landed there yet —
+  `gh api` confirms zero occurrences on `apex-shell/main`. This is the
+  documented merge order (shell before or with the OS) doing its job, and it
+  will clear when `p1/compositor-adapter` merges to `apex-shell/main`.
 - 2026-09-03 — noted for whoever picks this up: an early draft of the facade
   test called `setGaps(0, 0)` to check that a *capable* action returns true, and
   set the live Hyprland gaps to zero on the developer's desktop. Suites here run
