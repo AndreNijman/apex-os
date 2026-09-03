@@ -63,9 +63,56 @@ is the technical debt §17 names.
       `check-labwc-keybinds` became an assertion that the seeded config IS the
       generator's output rather than a comparison of two hand-written lists.
       32 assertions; input and display already emitted for all three.
-- [ ] **5.4** Plugin platform: manifest + permission model, loader, extension
-      points, crash isolation, `apex plugin` CLI, one real example plugin.
-- [ ] **5.5** Tests: shell CI invariants + an OS-side plugin suite.
+- [x] **5.4** Plugin platform — apex-shell **PR #9**, branch
+      `p1/plugin-platform`, CI green. Manifest + permission model, loader,
+      crash isolation, the `bar-widget` extension point end to end, and
+      `plugins/apex-worldclock` as a real example. 156 headless decision
+      assertions + 46 static invariants both run on CI; the 43 behavioural ones
+      skip there, which is why the security logic lives in a plain `.js` file
+      Node can import.
+
+      Two decisions worth keeping: `system`, `secrets` and `location` are
+      **refused at load** rather than implemented — `system` ("run a command")
+      subsumes every other permission, so shipping it would make `network` and
+      `files` decorative, and a permission field that grants nothing still reads
+      as a reviewed capability. And the guarantee is stated as narrower than
+      "confined": QML plugins run in-process, there is no sandbox, and CI fails
+      if that paragraph is deleted.
+
+      A late hole: `files` was documented as confined to the plugin's own
+      directory but enforced only textually, so a symlinked subdirectory escaped
+      it with no `..` and no absolute path. Discovery now refuses any plugin
+      containing a symlink at any depth.
+- [x] **5.5** Tests — covered by each item above rather than as a separate step.
+
+### Phase 5 review — nine defects, seven fixed here
+
+An adversarial review of 5.1–5.3 found real bugs that CI was green over. The
+severe ones, all introduced by this branch:
+
+- **A shared `Process` could leave every key captured.** Four commands
+  consolidated onto one Process could kill each other (`running = false; true`
+  terminates the child). The worst case is a retint killing `submap reset`,
+  leaving Hyprland in `ApexShell_clean` until it restarts.
+- **Focus mode could permanently lose the user's gaps** — a double-toggle raced
+  its own restore and saved 0/6 as the "real" values.
+- **The layout indicator never released its ref**, so the polling saving its
+  commit message claimed never happened. It gated on `visible`, and an Item in a
+  hidden Window still reports visible.
+- **Keybind capture was still gated on `isNiri`** — wrong on labwc, where the UI
+  offered capture and the keys then fired both the shell and labwc's bindings.
+- **The labwc generator dropped every workspace shortcut** — `[A-Za-z-]+`
+  excludes digits, so 20 of 68 bindings never entered the model, and the check
+  reported "48 defaults" and passed.
+- **`splice()` could put the block outside `<keyboard>`** and report success,
+  because it anchored on `rfind("</keyboard>")`, which matches a comment.
+- One settle timer served both state helpers, so a fast failure could settle a
+  slow success as `(false, null)`.
+
+Still open, both low severity: `focusedmon` was added to the focus events, so
+with `follow_mouse` crossing a monitor boundary now closes popups (unflagged
+behaviour change); and the facade suite encodes Hyprland's refcount semantics as
+universal, so it would fail on niri or labwc.
 
 ## Paused, then resumed — 2026-09-03
 
