@@ -90,6 +90,32 @@ REV="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 
 CORE_IMG=localhost/apex-os-core:latest
 
+# ── The shell ref, resolved rather than named ────────────────────────────────
+# Containerfile.base defaults APEX_SHELL_REF to `main`, and `git clone --branch
+# main` is a cache hit forever: podman cannot know the remote moved, so a local
+# build silently vendors whatever apex-shell was at the first build and keeps
+# doing so. Observed directly — a base build begun minutes after apex-shell's
+# main advanced printed `Using cache` for the clone layer and shipped the old
+# shell.
+#
+# CI does not have this problem because build-image.yml resolves the SHA first
+# and passes it, so the build-arg changes whenever the shell does. This does the
+# same, which also makes a local build reproduce what CI produces instead of
+# something subtly older.
+#
+# A failure to reach the remote is fatal rather than a fallback to `main`: a
+# build that quietly vendors a stale shell is the thing this exists to prevent.
+SHELL_REF="${APEX_SHELL_REF:-}"
+if [ -z "$SHELL_REF" ]; then
+    SHELL_REF="$(git ls-remote https://github.com/AndreNijman/apex-shell refs/heads/main 2>/dev/null | awk '{print $1}')"
+    [ -n "$SHELL_REF" ] || {
+        echo "FATAL: cannot resolve apex-shell main. Set APEX_SHELL_REF=<sha> to build offline." >&2
+        exit 1
+    }
+fi
+echo "== shell == vendoring apex-shell $SHELL_REF"
+
+
 # Everything the shipped kernel's signature can be checked against. Used after
 # core (where signing happens) and after base (which only inherits it).
 assert_signed() {  # $1 = image, $2 = label
@@ -134,6 +160,7 @@ build_base() {
     sudo podman build --isolation=chroot \
         --build-arg CORE="$CORE_IMG" \
         --build-arg APEX_REVISION="$REV" \
+        --build-arg APEX_SHELL_REF="$SHELL_REF" \
         -f Containerfile.base -t localhost/apex-os-base:latest .
 
     # Catches building on a stale unsigned core.
