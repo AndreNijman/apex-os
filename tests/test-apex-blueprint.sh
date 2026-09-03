@@ -824,6 +824,72 @@ if [ ! -e "${WORK}/not-cloned-here" ]; then ok "import created no directory"
 else bad "import created no directory" "it made the path up"; fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+section "blueprint set — the write path §10's GUI editor needs"
+
+# Without a write verb the shell would have to author TOML itself, which means a
+# second implementation of the schema. It drifts the first time a field is added
+# and the round-trip stops being lossless — the property the whole design rests
+# on. So `set` reuses the same normalise + validate + to_toml + atomic write a
+# hand-edited file goes through.
+
+h="$(newhome set-roundtrip)"
+printf '[desktop]\ncompositor = "labwc"\n\n[apps]\ninstall = ["firefox", "obsidian", "firefox"]\n' \
+    > "${h}/.config/apex/blueprint.toml"
+
+json="$(apex_in "$h" blueprint show --json 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["blueprint"]))' 2>/dev/null)"
+if [ -n "$json" ]; then
+    ok "show --json exposes the blueprint for an editor to read"
+else
+    bad "show --json exposes the blueprint for an editor to read"
+fi
+
+printf '%s' "$json" | apex_in "$h" blueprint set --json - >/dev/null 2>&1
+rc=$?
+[ "$rc" = 0 ] && ok "a blueprint round-trips back through set" \
+              || bad "a blueprint round-trips back through set" "exit $rc"
+
+grep -q 'compositor = "labwc"' "${h}/.config/apex/blueprint.toml" \
+    && ok "the round-trip preserves what was declared" \
+    || bad "the round-trip preserves what was declared"
+
+# normalise() runs on the way in, exactly as it does for a hand-edited file.
+[ "$(grep -c '"firefox"' "${h}/.config/apex/blueprint.toml")" = 1 ] \
+    && ok "set dedupes like a hand-edited file, because it uses the same parser" \
+    || bad "set dedupes like a hand-edited file"
+
+# Writing desired state and changing the machine are separate verbs. If `set`
+# ever created the generated record, `diff` would start agreeing with `apply` by
+# construction instead of by measurement.
+[ ! -e "${h}/.local/state/apex/blueprint-state.toml" ] \
+    && ok "set converges nothing and writes no generated state" \
+    || bad "set converges nothing and writes no generated state"
+
+# ── refusals ────────────────────────────────────────────────────────────────
+# Each of these must leave the previous good blueprint intact. A write verb that
+# truncates on bad input is worse than no write verb: the editor is the only
+# thing that calls it, and a bad round-trip would silently unmanage everything.
+h2="$(newhome set-refusals)"
+printf '[desktop]\ncompositor = "labwc"\n' > "${h2}/.config/apex/blueprint.toml"
+
+printf '' | apex_in "$h2" blueprint set --json - >/dev/null 2>&1
+[ $? -ne 0 ] && ok "empty stdin is refused" || bad "empty stdin is refused"
+
+printf 'not json at all' | apex_in "$h2" blueprint set --json - >/dev/null 2>&1
+[ $? -ne 0 ] && ok "unparseable JSON is refused" || bad "unparseable JSON is refused"
+
+printf '{"desktop":{"compositor":"nonesuch"}}' | apex_in "$h2" blueprint set --json - >/dev/null 2>&1
+[ $? -ne 0 ] && ok "a value validate() rejects is refused" \
+             || bad "a value validate() rejects is refused"
+
+apex_in "$h2" blueprint set </dev/null >/dev/null 2>&1
+[ $? -ne 0 ] && ok "set without --json - is refused" || bad "set without --json - is refused"
+
+grep -q 'compositor = "labwc"' "${h2}/.config/apex/blueprint.toml" \
+    && ok "every refusal left the existing blueprint untouched" \
+    || bad "every refusal left the existing blueprint untouched"
+
+# ═════════════════════════════════════════════════════════════════════════════
 section "nothing in this suite could prompt for a password"
 
 # The assertion the whole design exists for. `apply` never runs sudo, so no

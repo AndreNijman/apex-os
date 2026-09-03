@@ -365,6 +365,27 @@ enum BlueprintCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Replace the blueprint with one supplied as JSON on stdin.
+    ///
+    /// The write path for §10's GUI editor. Without it the shell would have to
+    /// author TOML itself, which means a second implementation of the schema
+    /// that drifts the first time a field is added — and the lossless
+    /// round-trip is the property the whole design rests on.
+    ///
+    /// The JSON goes through the same normalise + validate as a hand-edited
+    /// file, so what the editor writes is indistinguishable from what a human
+    /// types, and an invalid one is refused with the same messages. It writes
+    /// desired state only: it converges nothing, never touches the generated
+    /// applied-state file, and does not escalate.
+    ///
+    ///     apex blueprint show --json | jq … | apex blueprint set --json -
+    Set {
+        /// Read the blueprint as JSON from this source. Only `-` (stdin) is
+        /// supported: a path would invite passing the live blueprint's own
+        /// path and truncating it mid-read.
+        #[arg(long, value_name = "-")]
+        json: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -731,6 +752,7 @@ async fn main() {
             BlueprintCmd::Show { file, json } => blueprint::cmd_show(file.as_deref(), json),
             BlueprintCmd::Diff { file, json } => blueprint::cmd_diff(file.as_deref(), json),
             BlueprintCmd::Init { force } => blueprint::cmd_init(force),
+            BlueprintCmd::Set { json } => blueprint::cmd_set(json.as_deref() == Some("-")),
         },
         // Deliberately NOT in the root-only list above. `apply` is a mixed
         // verb: it converges the domain it is in and reports the other, so
