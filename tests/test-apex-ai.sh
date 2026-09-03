@@ -84,7 +84,10 @@ chmod 700 "$XDG_RUNTIME_DIR"
 #
 # Asserted rather than assumed present: if the repo copy ever moves, this must
 # fail loudly here rather than silently fall back to the installed path.
-export APEX_AI_CATALOGUE=$REPO/config/ai/catalogue.toml
+# Overridable from outside so the non-empty assertion below can be negative
+# controlled against a deliberately empty catalogue. Defaults to the repository
+# copy, which is what CI uses.
+export APEX_AI_CATALOGUE=${APEX_AI_CATALOGUE:-$REPO/config/ai/catalogue.toml}
 [ -f "$APEX_AI_CATALOGUE" ] || {
     echo "FATAL: no catalogue at $APEX_AI_CATALOGUE — has config/ai/ moved?" >&2
     exit 2
@@ -274,11 +277,23 @@ else
 fi
 # Every id the catalogue offers must be one `pull` would accept — otherwise the
 # catalogue could advertise a model no verb can install.
+# The catalogue must not be empty, because the parity assertion below is
+# vacuously true when it is — "every id it advertises is pullable" passes
+# trivially over zero ids, which is exactly how it passed before there were any
+# entries. This makes an accidental emptying fail here.
+adverts=$(printf '%s' "$avail" | grep -cE "^ +[a-z0-9][a-z0-9._+-]* +[0-9]+ MiB")
+if [ "$adverts" -ge 1 ]; then
+    ok "the catalogue advertises at least one model ($adverts)"
+else
+    bad "the catalogue advertises at least one model" "it is empty, so the next assertion proves nothing"
+fi
+
 badids=0
 while read -r id; do
     [ -n "$id" ] || continue
     [ "$(rc_of pull "$id" --dry-run)" = "2" ] && badids=$((badids+1))
-done <<< "$(printf '%s' "$avail" | sed -n 's/^ *\([a-z0-9][a-z0-9._+-]*\) .*/\1/p')"
+done <<< "$(printf '%s' "$avail" \
+              | sed -n 's/^ \+\([a-z0-9][a-z0-9._+-]*\) \+[0-9]\+ MiB.*/\1/p')"
 if [ "$badids" = "0" ]; then
     ok "every id the catalogue advertises is one pull will accept"
 else

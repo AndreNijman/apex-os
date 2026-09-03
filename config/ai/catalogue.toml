@@ -42,23 +42,36 @@
 #                  number instead of an honest table entry.
 #   runtime        `llama.cpp` is the only value this build launches.
 #
-# THIS FILE SHIPS EMPTY, AND THAT IS DELIBERATE.
+# EVERY NUMBER BELOW WAS READ OFF THE FILE, NOT OFF A MODEL CARD.
 #
-# Every entry is a promise that a specific multi-gigabyte file at a specific URL
+# An entry is a promise that a specific multi-gigabyte file at a specific URL
 # has a specific digest, and that its layer count and KV cost are the measured
-# ones. None of that can be asserted by reading a model card: it needs the file
-# downloaded, hashed, and loaded once on real hardware to read back `n_layer`
-# and the cache size. Shipping entries transcribed from documentation would put
-# four unverified numbers per model into the one file whose entire purpose is
-# being the thing you can trust — and the first symptom would be `apex ai pull`
-# refusing every model with a digest mismatch, or `plan_fit` planning an
-# offload against a layer count that is not real.
+# ones. None of that can be asserted from documentation, and transcribing it
+# would put four unverified numbers into the one file whose entire purpose is
+# being the thing you can trust. The first symptom would be `apex ai pull`
+# refusing the model with a digest mismatch, or `plan_fit` planning an offload
+# against a layer count that is not real.
 #
-# So the shape, the validation and the refusals ship now, and the entries are
-# added one at a time by someone who has run the four commands. `apex ai pull
-# <name> --url … --digest …` works today without any of them, and
-# `apex ai models --available` says plainly that the catalogue is empty rather
-# than pretending otherwise.
+# So each entry is added by someone who has downloaded the file, hashed it, and
+# read the header. For the entry below that was done on 2026-09-03: the file
+# fetched whole (1,117,320,768 bytes), `sha256sum` run over it, and the GGUF
+# header parsed for `qwen2.block_count`, `qwen2.context_length`,
+# `attention.head_count`, `attention.head_count_kv` and
+# `attention.key_length`/`value_length`.
+#
+# `kv_mib_per_1k` is computed from those, not estimated:
+#
+#     head_count_kv x (key_length + value_length) x 2 bytes x block_count
+#       = 2 x (128 + 128) x 2 x 28  = 28,672 bytes per token
+#       = 28 MiB per 1024 tokens at f16, llama.cpp's default cache type
+#
+# K and V are separate tensors, so both are charged. At the model's full 32,768
+# context that is ~896 MiB of cache on top of the weights, which is why
+# `plan_fit` charges context separately from `weights_mib`.
+#
+# A model outside this file still needs an explicit `--url … --digest sha256:…`,
+# which is the user vouching for it, and `apex ai models` keeps saying so for
+# the life of that model.
 
 version = 1
 
@@ -77,3 +90,24 @@ version = 1
 # license = "Apache-2.0"
 # runtime = "llama.cpp"
 # note = "code-focused; fits an 8 GiB card fully offloaded at 8k context"
+
+# ── Qwen2.5 Coder 1.5B Instruct, Q4_K_M ──────────────────────────────────────
+# Measured on the katana, 2026-09-03. GGUF v3, architecture `qwen2`, 339
+# tensors, `general.file_type` 15 — which is llama.cpp's Q4_K_M, agreeing with
+# the filename rather than being taken from it.
+#
+# Chosen as the first entry because it is small enough to verify end to end in
+# minutes and still a real coding model: 28 layers fully offloadable on any
+# card with ~2 GiB free at 8k context, and it runs on CPU at a usable speed.
+[model.qwen25-coder]
+title = "Qwen2.5 Coder 1.5B Instruct"
+url = "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"
+digest = "sha256:cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046"
+weights_mib = 1065
+layers = 28
+kv_mib_per_1k = 28
+max_context = 32768
+quant = "Q4_K_M"
+license = "Apache-2.0"
+runtime = "llama.cpp"
+note = "1.5B code model; 28 layers fit any card with ~2 GiB free at 8k context"
