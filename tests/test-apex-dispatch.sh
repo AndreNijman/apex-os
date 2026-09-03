@@ -127,9 +127,13 @@ case "$last" in
     ;;
 esac
 
-# The graphical-session probe.
+# The graphical-session probe. Matched on NO_BUS, a token that appears in no
+# other script. An earlier version matched *wayland-* and so also caught the
+# launch script, which sets WAYLAND_DISPLAY='wayland-1' — the value is
+# lowercase, so the glob hit it and every launch was answered with a session
+# reply and read as a failure.
 case "$last" in
-  *wayland-*)
+  *NO_BUS*)
     case "${SSH_SESSION:-ok}" in
       ok)         echo "SESSION /run/user/1000/bus wayland-1" ;;
       no_bus)     echo NO_BUS ;;
@@ -140,9 +144,9 @@ case "$last" in
     ;;
 esac
 
-# A launch: report whatever the scenario wants.
+# A launch. Matched on `kill -0`, which only the launch script contains.
 case "$last" in
-  *xdg-open*|*RUNNING*)
+  *"kill -0"*)
     case "${SSH_LAUNCH:-running}" in
       running) echo RUNNING ;;
       ok)      echo "EXIT 0" ;;
@@ -154,7 +158,7 @@ esac
 
 # tar receiving files.
 case "$last" in
-  *tar*)
+  *"tar -x"*)
     cat > /dev/null
     if [ "${SSH_TAR:-ok}" = "exists" ]; then
       echo "tar: thing: Cannot open: File exists" >&2
@@ -306,13 +310,27 @@ rm -f "$PROJ/newfile"
 # ── quoting of the dispatched command ───────────────────────────────────────
 section "what actually reaches the remote shell"
 resetssh
-SSH_SCENARIO=same apex build --on katana --dry-run -- make "a target" >/dev/null
+# The dry run PRINTS the command it would run, which is the thing to assert on.
+# An earlier version read `lastargv` here, but with --dry-run the build never
+# dispatches, so that was the identity probe's multi-line script and the
+# assertion was reading its closing quote.
+dry=$(SSH_SCENARIO=same apex build --on katana --dry-run -- make "a target")
+remote=$(printf '%s\n' "$dry" | grep "^dry run: ")
 argv=$(lastargv)
-remote=$(printf '%s\n' "$argv" | tail -1)
-if printf '%s' "$remote" | grep -q "'make' 'a target'"; then
-    ok "an argument with a space survives into the remote command"
+# Doubly quoted, and that is correct rather than a bug: the build is
+# `sh -c '<inner>'`, so every quote inside <inner> is itself escaped for the
+# outer layer. `a target` therefore appears as '\''a target'\'' — one argument
+# at the inner level, which is what has to survive.
+if printf '%s' "$remote" | grep -qF "'\''a target'\''"; then
+    ok "an argument with a space survives as ONE argument through both quoting layers"
 else
     bad "an argument with a space survives" "got [$remote]"
+fi
+# And it must not have become two arguments at the inner level.
+if printf '%s' "$remote" | grep -qF "'\''a'\'' '\''target'\''"; then
+    bad "the spaced argument did not split" "it split into two"
+else
+    ok "the spaced argument did not split into two"
 fi
 if printf '%s' "$remote" | grep -q "cd '"; then
     ok "the project directory is quoted in the remote command"
@@ -398,9 +416,16 @@ fi
 # ssh channel open for a minute after a successful launch.
 resetssh
 SSH_SESSION=ok SSH_LAUNCH=running apex open katana https://example.com >/dev/null
-launch=$(lastargv | tail -1)
-if printf '%s' "$launch" | grep -q ">/dev/null"; then
-    ok "the backgrounded child's stdout is redirected, so ssh can close"
+# The whole recorded argv, not its last line: the launch script is multi-line,
+# so `tail -1` was reading its closing quote and asserting nothing.
+launch=$(lastargv)
+# Matched as the redirect ON THE LAUNCHED COMMAND, not merely somewhere in the
+# script. The first version of this grepped for ">/dev/null" alone and was
+# satisfied by `kill -0 $pid 2>/dev/null` further down — so a mutant that
+# removed the child's stdout redirect passed 55/0. The assertion has to name
+# the shape it cares about.
+if printf '%s' "$launch" | grep -qF '>/dev/null 2>"$err" &'; then
+    ok "the backgrounded child has BOTH streams redirected, so ssh can close"
 else
     bad "the child's stdout is redirected" "got [$launch]"
 fi
