@@ -351,6 +351,19 @@ RUN set -eux; \
     grep -q '^SHELL=/bin/zsh' /etc/default/useradd; \
     grep -q '^/bin/zsh$' /etc/shells; \
     test -x /usr/bin/starship; \
+    # The rest of the terminal-developer row, re-asserted here for the same
+    # reason zsh is: core installs it, and a bad core must not reach a user
+    # unnoticed. Binaries first — `nu` is nushell's, and zellij comes from a
+    # pinned upstream tarball rather than a package, so `test -x` is the only
+    # check that covers both sources.
+    test -x /usr/bin/fish; \
+    test -x /usr/bin/nu; \
+    test -x /usr/bin/tmux; \
+    test -x /usr/bin/zellij; \
+    # ...then the half that decides whether a user can actually adopt one:
+    # chsh rejects a shell missing from /etc/shells.
+    grep -qx /usr/bin/fish /etc/shells; \
+    grep -qx /usr/bin/nu /etc/shells; \
     test -s /usr/share/apex/zsh/zshrc; \
     test -s /usr/share/apex/starship/starship.toml; \
     zsh -n /usr/share/apex/zsh/zshrc; \
