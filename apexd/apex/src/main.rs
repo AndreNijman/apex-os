@@ -5,6 +5,7 @@
 //! degrades gracefully — a clear message, a non-zero exit, never a panic.
 
 mod agent;
+mod blueprint;
 mod ops;
 mod proxy;
 mod request;
@@ -12,7 +13,7 @@ mod secret;
 mod touchpad;
 
 use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use apexd_core::tier::Tier;
@@ -206,6 +207,139 @@ enum Cmd {
     Secret {
         #[command(subcommand)]
         cmd: secret::SecretCmd,
+    },
+
+    /// The declarative APEX Blueprint: what this machine should be.
+    ///
+    /// One TOML file — `~/.config/apex/blueprint.toml` — describes the desktop,
+    /// applications, development languages, agent defaults and gaming. `apex
+    /// blueprint diff` shows how the machine differs from it and `apex apply`
+    /// converges it.
+    ///
+    /// The blueprint is yours: nothing in APEX rewrites it. `apex apply` writes
+    /// its own record somewhere else (`apex blueprint show` prints where), so
+    /// generated state and the file you edit never share a path.
+    Blueprint {
+        #[command(subcommand)]
+        cmd: BlueprintCmd,
+    },
+
+    /// Converge this machine toward its blueprint.
+    ///
+    /// Idempotent: running it twice does nothing the second time, because the
+    /// plan is recomputed from a fresh measurement of the machine every time
+    /// rather than from a record of what was done last.
+    ///
+    /// It converges only the privilege domain it is already running in and
+    /// reports the other. `apex apply` sets your desktop colour scheme and
+    /// agent defaults; `sudo apex apply` selects the session and installs
+    /// applications. Nothing here ever calls sudo itself, so `apply` cannot
+    /// raise an authentication prompt — and a root run can never write
+    /// root-owned files into your ~/.config.
+    ///
+    /// Applications are added, never removed. A package missing from the
+    /// blueprint is left alone: reading a deleted line as "uninstall it" turns
+    /// an edit into data loss.
+    ///
+    /// Setting APEX_BLUEPRINT_NO_APPLY to any non-empty value makes this refuse
+    /// to change anything. --dry-run keeps working with it set.
+    Apply(ApplyArgs),
+
+    /// Carry settings, applications and projects to another APEX machine.
+    ///
+    /// `apex sync export` writes one file; `apex sync import` reads it on the
+    /// other machine. The bundle carries the blueprint, which projects exist
+    /// and where they came from, and nothing else — no credentials of any
+    /// kind, because this is a file people put in a git repository.
+    ///
+    /// `import` never converges anything. It writes the blueprint and records
+    /// the projects, and leaves `apex blueprint diff` and `apex apply` as
+    /// separate decisions.
+    Sync {
+        #[command(subcommand)]
+        cmd: SyncCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncCmd {
+    /// Write a bundle for another machine. Prints to stdout without --output.
+    Export {
+        /// Where to write it. Omit to print to stdout.
+        #[arg(long, short, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Export this blueprint rather than the one on the search path.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Leave projects out. A project entry carries a local path and a git
+        /// remote, which is the only machine-specific data in a bundle.
+        #[arg(long)]
+        no_projects: bool,
+    },
+    /// Print a bundle without importing it.
+    Show {
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
+    /// Install a bundle's blueprint and record its projects. Converges nothing.
+    Import {
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        /// Replace an existing blueprint that differs. The current one is kept
+        /// alongside it as blueprint.toml.previous.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Args)]
+struct ApplyArgs {
+    /// Read this blueprint instead of the usual search path.
+    #[arg(long, value_name = "PATH")]
+    file: Option<PathBuf>,
+    /// Report exactly what would change and perform none of it.
+    ///
+    /// The plan is computed once, so this prints the same steps a live run
+    /// executes — it is a report, not a rehearsal of a different code path.
+    #[arg(long)]
+    dry_run: bool,
+    /// Emit the plan as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand)]
+enum BlueprintCmd {
+    /// Print the blueprint, where it came from, and when it was last applied.
+    Show {
+        /// Read this file instead of the usual search path.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// How the machine currently differs from the blueprint.
+    ///
+    /// Exits 0 when converged and 1 when there is drift `apex apply` could
+    /// close, so it reads like `diff(1)` in a script. Changes that cannot be
+    /// converged at all — a Gaming edition asked of a Daily machine — are
+    /// reported but do not set the exit code, because no number of `apply`
+    /// runs would ever clear them.
+    Diff {
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a commented starting blueprint to ~/.config/apex/blueprint.toml.
+    ///
+    /// Every section arrives commented out, so the new file manages nothing
+    /// until it is edited.
+    Init {
+        /// Overwrite an existing blueprint.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -566,6 +700,32 @@ async fn main() {
         Cmd::Project { cmd } => agent::project_cmd(cmd),
         Cmd::Request { cmd } => request::main(cmd),
         Cmd::Secret { cmd } => secret::main(cmd),
+        // Read-only, so no root gate: seeing what the machine should be must
+        // not require privilege. `apex apply` is the verb that changes things,
+        // and it converges only the privilege domain it is already in.
+        Cmd::Blueprint { cmd } => match cmd {
+            BlueprintCmd::Show { file, json } => blueprint::cmd_show(file.as_deref(), json),
+            BlueprintCmd::Diff { file, json } => blueprint::cmd_diff(file.as_deref(), json),
+            BlueprintCmd::Init { force } => blueprint::cmd_init(force),
+        },
+        // Deliberately NOT in the root-only list above. `apply` is a mixed
+        // verb: it converges the domain it is in and reports the other, so
+        // gating the whole command on root would make the user half — colour
+        // scheme, agent defaults — reachable only by running it as the wrong
+        // user, which is precisely the mistake the domain split exists to
+        // prevent.
+        Cmd::Apply(args) => blueprint::cmd_apply(args.file.as_deref(), args.dry_run, args.json),
+        // `sync` writes only the user's own blueprint and project records, so
+        // it needs no privilege and must not ask for any.
+        Cmd::Sync { cmd } => match cmd {
+            SyncCmd::Export {
+                output,
+                file,
+                no_projects,
+            } => blueprint::cmd_sync_export(file.as_deref(), output.as_deref(), no_projects),
+            SyncCmd::Show { path } => blueprint::cmd_sync_show(&path),
+            SyncCmd::Import { path, force } => blueprint::cmd_sync_import(&path, force),
+        },
         Cmd::Tier { name } => cmd_tier(name).await,
         Cmd::Profile => cmd_profile().await,
         Cmd::Battery(args) => cmd_battery(args).await,

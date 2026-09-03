@@ -260,6 +260,116 @@ and the resolver against live dnf5 or Flathub metadata — probes run against
 fixtures.
 
 ### A correction I owe this file
+§10's own "keep generated/system state separate from user-owned blueprint
+state" is the requirement the design is built around, so it is worth writing
+down what the three kinds of state are:
+
+| | file | who writes it |
+|---|---|---|
+| **desired** | `~/.config/apex/blueprint.toml` | a person (and, one day, the GUI) |
+| **observed** | nothing — probed live on every `diff` | nobody |
+| **applied** | `~/.local/state/apex/blueprint-state.toml` | `apex apply`, generated |
+
+Collapsing observed into a cached file is the trap: `diff` would then agree with
+`apply` by construction instead of by measurement, and a step that silently did
+nothing would report as converged forever.
+
+- [x] **7.1** Blueprint schema and `apex blueprint show/diff/init`.
+      `apexd-core/src/blueprint.rs` is the §10 shape with
+      `deny_unknown_fields` throughout, closed vocabularies, hostile-input
+      checks on app names and bundle project paths, and the pure
+      `plan(desired, observed)`. `apex/src/blueprint.rs` is the other half:
+      path resolution, the `Host` probes, and the renderers. 24 + 13 tests.
+      Two things worth knowing:
+      - `Host` takes a fixture `root` **and** a separate `probe_programs`
+        switch, for exactly the reason `RealWriter` needs `sys_root` and
+        `host_commands` separately — a fixture root redirects a file read and
+        cannot redirect a process spawn, so a fixture host that ran
+        `flatpak list` would answer from the developer's machine.
+      - observed `[apps]` comes from the engine's `requested` list, not
+        `state.json`. `state.json` records the resolved transaction including
+        every dependency, so diffing against it reports convergence based on
+        packages nobody asked for.
+- [x] **7.2** `apex apply` convergence, idempotent with a real dry run.
+      Idempotency is a property, not a code path: the plan is recomputed from a
+      fresh measurement every run, so "twice changes nothing" *is* "observed ==
+      desired plans an empty list". The dry run is real for the same reason —
+      the plan is computed once and `--dry-run` prints exactly the steps a live
+      run executes; the only difference between the two is whether those steps
+      reach a converger.
+      **Three independent things keep `apply` away from a test machine:**
+      1. `RealConverger::for_apply()` is the only constructor with effects,
+         after `RealWriter::for_daemon`. CI has a static check with the same
+         three parts as the existing host-command one, including "the real
+         caller must still use it".
+      2. `APEX_BLUEPRINT_NO_APPLY` refuses, after `APEX_DISPLAY_NO_LIVE`. It
+         blocks only the *live* path, unlike the display guard — that is
+         deliberate, and it is what lets CI export it for a whole job as a
+         blanket net while every dry-run assertion still runs.
+      3. **`apply` never runs `sudo`.** It converges the privilege domain it is
+         already in and reports the other. That is the structural answer to
+         "never cause a polkit prompt", and it also removes the silent bug
+         where `sudo apex apply` writes user config into `/root` or leaves
+         root-owned files in `~/.config`.
+      After converging, `apply` **re-measures** and reports residual drift, per
+      `apexd/AGENTS.md`: a command that reports success must verify the
+      requested state, and a step can exit 0 having changed nothing.
+- [x] **7.3** `apex sync export` / `show` / `import`. One bundle file carries
+      the blueprint, which projects exist and where they came from — and no
+      credentials of any kind, because this is a file people put in a git
+      repository. Three deliberate refusals:
+      - `import` **converges nothing**. It writes the blueprint and records
+        projects; `diff` and `apply` stay separate decisions, so a user who
+        has just pulled in someone else's file gets to read it first.
+      - `import` never creates a directory or clones anything. A project path
+        that is not present is reported with its remote, not acted on.
+      - An existing blueprint is only replaced with `--force`, and the old one
+        is kept as `blueprint.toml.previous`.
+      `export` round-trips its own output through `Bundle::parse` before
+      writing, and validates each project entry through the same door `import`
+      uses — otherwise a bad bundle only fails on the *other* machine, hours
+      later, with no way to tell which end was wrong.
+- [ ] **7.4** GUI editing in the shell. **Deferred out of this phase** — §10's
+      last bullet, and it is apex-shell work, not apex-os work. The schema
+      round-trips through TOML losslessly so the editor has something to write.
+- [x] **7.5** Tests. `tests/test-apex-blueprint.sh` — 105 assertions against
+      the compiled binary — plus 27 planner unit tests in `apexd-core` and 16
+      in the `apex` crate, and two static CI checks.
+      The suite runs a **live** `apex apply`, deliberately. "The dry run prints
+      the same steps" is only meaningful if it is compared against what a real
+      run does; two identical printouts from the same unused code path prove
+      nothing. It is safe because `apply` never escalates, so as an ordinary
+      user the only reachable steps write files inside a throwaway HOME the
+      suite created.
+      Four layers keep it off the machine, and the suite asserts each:
+      fake `sudo`/`pkexec`/`secret-tool`/`systemctl`/`scxctl` first on PATH
+      whose invocation is a failure (with a self-test proving the trap itself
+      works, or every isolation assertion would be vacuous); a fully isolated
+      HOME/XDG_CONFIG_HOME/XDG_STATE_HOME per invocation; the domain split;
+      and the environment guard.
+      Also asserted: that the blueprint classifies app names **identically to
+      the shipped `apex-pkg`**, by sourcing the engine and calling its own
+      `is_flatpak_id` — the planner has to classify independently, because it
+      compares against different sources, but classifying *differently* would
+      report an app missing forever while the engine kept installing it.
+      And that a sync bundle carries no credentials, by planting a sentinel
+      token in the runtime's secrets directory and grepping the bundle for it.
+      Every assertion was proved able to fail: the guard, the domain split and
+      all three parts of the static check were each mutated and the failure
+      observed. The suite was run under `bash -e` with a stripped environment,
+      which is how GitHub Actions invokes it.
+
+Two scope decisions made up front, both because the alternative was invention:
+
+- **`[gaming] enabled` is observed and reported, never converged.** Gaming
+  provisioning is an *image* — the Gaming editions carry the session, drivers
+  and tuning. No command turns Daily into Gaming, and installing a gaming
+  package set onto Daily is the edition leakage the root `AGENTS.md` forbids.
+- **`[development] languages` is validated and diffed, not converged.**
+  Toolchains belong to phase 6's `apex env` capsules, which are being built on a
+  parallel branch right now; a language→package table here would be a second,
+  conflicting answer to the same question. Validating today is still worth it:
+  someone who writes `typscript` finds out today.
 
 During the pause I recorded that the phase 6 checkpoint "does not parse", quoted
 a bash line, and amended a commit message to say so. **That was wrong.** I ran
@@ -440,6 +550,19 @@ Newest last. One line per pushed commit that changes the state above.
   because the mistake is repeatable: a stale `origin/main` in the sibling
   apex-shell clone looks exactly like an unmerged shell branch. `git fetch`
   there before drawing any conclusion about the merge order.
+- 2026-09-03 — **Phase 7 done.** PR #28 (`p1/blueprint-and-sync`): the schema
+  and pure planner in `apexd-core/src/blueprint.rs`, the probes, converger and
+  verbs in `apex/src/blueprint.rs`, `tests/test-apex-blueprint.sh`, and two
+  static CI checks. `apex blueprint show/diff/init`, `apex apply`,
+  `apex sync export/show/import`. Rust validation and Static validation both
+  green on the first CI run.
+  The `Package engine` job is red on that PR and it is **not** phase 7's: the
+  two failing assertions are phase 5.3's, checking that apex-shell's
+  `KeybindService.qml` invokes `apex-labwc-keybinds`. The suite clones
+  apex-shell from remote `main`, and that change has not landed there yet —
+  `gh api` confirms zero occurrences on `apex-shell/main`. This is the
+  documented merge order (shell before or with the OS) doing its job, and it
+  will clear when `p1/compositor-adapter` merges to `apex-shell/main`.
 - 2026-09-03 — noted for whoever picks this up: an early draft of the facade
   test called `setGaps(0, 0)` to check that a *capable* action returns true, and
   set the live Hyprland gaps to zero on the developer's desktop. Suites here run
