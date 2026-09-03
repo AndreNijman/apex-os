@@ -482,6 +482,24 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-host.sh
 
+      # §20's remote compute and handoff. The largest group of cases in it is
+      # about one refusal: `apex build --on` has to decide which directory on
+      # the far side is this project, and the failure mode of a wrong answer is
+      # not a crash but a build that SUCCEEDS against the wrong source. So the
+      # suite asserts the same-repository check happens, refuses on a mismatch,
+      # names both origins in the refusal, and that --remote-path skips it and
+      # says so.
+      #
+      # The fake ssh plays the far side in scenarios — same repo, different
+      # repo, no such directory, a machine at its greeter — because those are
+      # refusals that need another computer to be in a particular state. The
+      # live equivalents were run by hand against the developer's katana, which
+      # has this repository at the same absolute path; that proved the design,
+      # and this keeps it proved.
+      - name: Run remote-compute and handoff assertions
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-dispatch.sh
+
   installer:
     name: Installer safety and UI
     needs: changes
@@ -681,7 +699,7 @@ jobs:
             tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
             tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
             tests/test-apex-modes.sh tests/test-apex-plugin.sh \
-            tests/test-apex-host.sh
+            tests/test-apex-host.sh tests/test-apex-dispatch.sh
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
       # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict

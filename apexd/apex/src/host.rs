@@ -243,6 +243,17 @@ fn load_caps(name: &str) -> Option<HostCaps> {
     serde_json::from_str(&text).ok()
 }
 
+/// The cached probe for a host, if there is one.
+///
+/// Public for [`crate::dispatch`], which uses it to refuse a forwarded verb
+/// against a host that was probed and lacks the capability — without paying an
+/// ssh round trip to learn what is already on disk. A host that has never been
+/// probed returns `None` and is not refused: "unknown" and "absent" are
+/// different answers.
+pub fn cached_caps(name: &str) -> Option<HostCaps> {
+    load_caps(name)
+}
+
 fn save_caps(name: &str, caps: &HostCaps) -> Result<()> {
     let path = caps_path(name)?;
     let dir = caps_dir();

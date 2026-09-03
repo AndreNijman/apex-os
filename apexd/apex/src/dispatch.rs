@@ -804,6 +804,77 @@ fn open_inner(args: OpenArgs) -> Result<()> {
     Ok(())
 }
 
+// ── forwarding a verb to a remote apex ───────────────────────────────────────
+
+/// Run `apex <argv>` on a trusted device and become that process.
+///
+/// For verbs that need no project directory — listing sessions, attaching to
+/// one, asking a model something. There is nothing to resolve and nothing to
+/// verify, so this is deliberately thinner than [`agent_run_remote`]: it
+/// reaches the remote's own `apex`, which applies its own policy.
+///
+/// `require` names a capability the cached probe must not have *denied*. A host
+/// that has never been probed is not refused — it may have been added a moment
+/// ago — but one that was probed and lacks the thing is, because that is a real
+/// answer and the alternative is an ssh that fails several seconds later with
+/// "unrecognized subcommand".
+pub fn forward_to_host(
+    name: &str,
+    argv: &[String],
+    tty: Tty,
+    require: Option<Capability>,
+) -> Result<()> {
+    let hosts = load_hosts()?;
+    let host = hosts.get(name)?.clone();
+
+    if let (Some(cap), Some(caps)) = (require, crate::host::cached_caps(name)) {
+        if caps.is_apex() && !cap.present_in(&caps) {
+            return Err(anyhow!(
+                "{name} has no {}, so there is nothing there to run this on. \
+                 `apex host probe {name}` if that has changed.",
+                cap.describe()
+            ));
+        }
+    }
+
+    let mut full = vec!["apex".to_string()];
+    full.extend(argv.iter().cloned());
+    let command = remote_sh(&full);
+    let ssh = ssh_argv(
+        host.destination(name),
+        host.port,
+        tty,
+        CONNECT_TIMEOUT,
+        Some(&command),
+    );
+    exec(&ssh)
+}
+
+/// A capability a forwarded verb depends on.
+///
+/// One variant for now. `Ai` joins it in the commit that wires `apex ai --on`,
+/// rather than sitting here unconstructed: a variant nothing builds is dead
+/// code that looks like a wired feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capability {
+    /// The per-user agent runtime.
+    Agentd,
+}
+
+impl Capability {
+    fn present_in(&self, caps: &apexd_core::host::HostCaps) -> bool {
+        match self {
+            Self::Agentd => caps.agentd,
+        }
+    }
+
+    fn describe(&self) -> &'static str {
+        match self {
+            Self::Agentd => "agent runtime",
+        }
+    }
+}
+
 // ── apex agent run --host ────────────────────────────────────────────────────
 
 /// Re-run this `apex agent run` invocation on a remote device.

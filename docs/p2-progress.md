@@ -81,7 +81,7 @@ section. Guest ESPs only.
 | This tracker | in progress |
 | 9.1 `apex host` — trust and transport | done — `0650db6`, `e3e742e`, `355c946` |
 | 9.2 §14 local AI service | in progress |
-| 9.3 §20 dispatch, handoff, remote status | in progress |
+| 9.3 §20 dispatch, handoff, remote status | OS side done — `7636431`, `781378a`; shell side in progress |
 | 10 Boot v2 | in progress |
 
 ## 9.1, and what it decided for everything above it
@@ -134,3 +134,67 @@ the remote runs the remote's committed state; a dirty local worktree is reported
 and needs `--allow-dirty` to proceed. Syncing a working tree would mean this
 tool writing over files on another machine, which is not something a dispatch
 verb should do by default.
+
+## 9.3 — what §20 asked for, and where each piece landed
+
+| §20 asks for | verb | state |
+| --- | --- | --- |
+| Run builds on a more powerful desktop | `apex build --on <host>` | done |
+| Run agents there | `apex agent run --host <host>` | done |
+| Continue a terminal or agent session elsewhere | `apex agent attach --host`, `apex agent list --host` | done |
+| Run local-model inference there | `apex ai run --on <host>` | forwarder built; wired when §14 lands |
+| Send clipboard and files between devices | `apex send <host> [paths…] \| --clipboard` | done |
+| Open a browser tab or project on another device | `apex open <host> <target>` | done |
+| Show remote agent status in APEX Shell | apex-shell branch | in progress |
+
+`apex host run <host> -- <argv>` remains the general escape hatch §24 asks APEX
+to keep, and the specific verbs are thin over it.
+
+### apex open took three attempts, and each fault was invisible in a green test
+
+The first version printed `opened on katana` while **nothing opened**.
+
+1. `setsid --fork` returns 0 the instant it forks, so the exit status proved
+   only that a fork happened. `WAYLAND_DISPLAY` was never set — only
+   `DBUS_SESSION_BUS_ADDRESS` — so the browser had no display to reach, and the
+   output went to `/dev/null` where the evidence died.
+2. `systemd-run --user --wait` does propagate the real status, but a browser
+   becomes the unit's main process, so it blocked until the browser exited —
+   measured at two minutes and still going.
+3. The backgrounded child's **stdout** has to be redirected, not just its
+   stderr. ssh holds the session open while any descendant holds the channel,
+   so a successfully launched browser kept the command hanging for a full
+   minute *after* it had already worked.
+
+What it does now: launch in the background, then observe. `RUNNING` after 1.5s
+is success for a GUI, `EXIT 0` is success for a hand-off, and anything else —
+including an answer it does not recognise — is a failure. The session probe
+requires a **compositor socket** and not merely the per-user bus, because the
+bus exists for any login including the ssh connection asking the question; a
+machine at its greeter would otherwise report success.
+
+The socket is matched as `wayland-[0-9]`, not by a `wayland-*` glob with
+`head -1`: the katana's runtime directory holds `wayland-1`,
+`wayland-1-awww-daemon.sock` and `wayland-1.lock`, and picking the right one by
+sort order is not a reason.
+
+**How it was finally verified:** by killing the firefox that attempt 2 had
+started, so an already-running browser could not let `xdg-open` hand off and
+exit 0. That confound is what made attempt 2 look like it worked.
+
+### Tests
+
+| suite | count |
+| --- | --- |
+| `apexd-core::host` | 37 |
+| `apexd-core::dispatch` | 34 |
+| `apex::host` | 31 |
+| `apex::dispatch` | 18 |
+| `tests/test-apex-host.sh` | 53 |
+| `tests/test-apex-dispatch.sh` | wired; run pending the §14 branch compiling |
+
+Both shell suites are shellcheck-clean at `-S warning` and wired into the
+`rust` job of `pr-validation.yml` — that job rather than `static`, because they
+need a toolchain to build the binary they drive. `static` is where a cross-file
+parity check belongs, per the note P1 left after a check in a specialised job
+was skipped by a PR touching only the other side.

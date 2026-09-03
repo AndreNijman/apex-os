@@ -38,6 +38,9 @@ pub enum AgentCmd {
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
+        /// List the sessions on a trusted device instead (§20).
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
     },
     /// Reattach to a session's terminal.
     Attach {
@@ -45,6 +48,13 @@ pub enum AgentCmd {
         /// Do not repaint the scrollback first.
         #[arg(long)]
         no_replay: bool,
+        /// Attach to a session on a trusted device (§20).
+        ///
+        /// This is §20's "continue a terminal or agent session elsewhere": the
+        /// session keeps running there, and this becomes a view onto it. The id
+        /// is the remote's, which is why `apex agent list --host` exists.
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
     },
     /// Suspend a session and everything it started.
     Pause { id: u32 },
@@ -307,8 +317,46 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             }
             None => run(args),
         },
-        AgentCmd::List { all, json } => list(all, json),
-        AgentCmd::Attach { id, no_replay } => attach(id, !no_replay),
+        AgentCmd::List { all, json, host } => match host {
+            Some(h) => {
+                let mut argv = vec!["agent".to_string(), "list".to_string()];
+                if all {
+                    argv.push("--all".to_string());
+                }
+                if json {
+                    argv.push("--json".to_string());
+                }
+                // No tty: this is output to be read or parsed, and asking for
+                // one would make ssh warn when stdin is a pipe.
+                crate::dispatch::forward_to_host(
+                    &h,
+                    &argv,
+                    apexd_core::host::Tty::None,
+                    Some(crate::dispatch::Capability::Agentd),
+                )
+                .map(|()| 0)
+            }
+            None => list(all, json),
+        },
+        AgentCmd::Attach { id, no_replay, host } => match host {
+            Some(h) => {
+                let mut argv =
+                    vec!["agent".to_string(), "attach".to_string(), id.to_string()];
+                if no_replay {
+                    argv.push("--no-replay".to_string());
+                }
+                // A terminal, always: attaching is the interactive case, and
+                // the remote pty has to be forwarded for it to be usable.
+                crate::dispatch::forward_to_host(
+                    &h,
+                    &argv,
+                    apexd_core::host::Tty::Interactive,
+                    Some(crate::dispatch::Capability::Agentd),
+                )
+                .map(|()| 0)
+            }
+            None => attach(id, !no_replay),
+        },
         AgentCmd::Pause { id } => signal(id, "stop", "paused"),
         AgentCmd::Resume { id } => signal(id, "cont", "resumed"),
         AgentCmd::Kill { id, signal: sig } => signal(id, &sig, "signalled"),
