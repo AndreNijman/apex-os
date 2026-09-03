@@ -67,6 +67,25 @@ is the technical debt §17 names.
       points, crash isolation, `apex plugin` CLI, one real example plugin.
 - [ ] **5.5** Tests: shell CI invariants + an OS-side plugin suite.
 
+## In flight — four parallel branches
+
+Andre asked for multiple agents, so phases 5.4, 6, 7 and 8 are being built
+concurrently, each in its own git worktree. Worktrees are not optional here: a
+previous round of parallel agents shared one working tree and produced
+cross-branch commit pollution on three of them.
+
+| Work | Branch | Repo |
+|------|--------|------|
+| 5.4 plugin platform | `p1/plugin-platform` | apex-shell |
+| 6 capsules + resolver | `p1/capsules-and-packages` | apex-os |
+| 7 blueprint + sync | `p1/blueprint-and-sync` | apex-os |
+| 8 modes + workloads | `p1/modes-and-workloads` | apex-os |
+
+The three apex-os branches all add subcommands to `apexd/apex/src/main.rs`, so
+that file is the expected merge conflict at integration. Each branch is
+independently complete and independently tested; integration is a separate step
+and belongs to whoever picks this up.
+
 ## Phase 6 — capsules + universal package resolver
 
 Not started. `apex install` / `search` / `repo` / `pkg` already ship on the
