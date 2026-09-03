@@ -18,6 +18,7 @@ mod proxy;
 mod recover;
 mod request;
 mod secret;
+mod task;
 mod touchpad;
 
 use std::net::{SocketAddr, TcpStream};
@@ -330,6 +331,23 @@ enum Cmd {
         #[command(subcommand)]
         cmd: agent::ProjectCmd,
     },
+    /// What you are working on: the binder that can be put down and picked back
+    /// up (§21).
+    ///
+    /// A task NAMES a project, a capsule, an agent worktree and the agents you
+    /// run, and `apex task resume` checks that every one of them is still there
+    /// before telling you how to continue — a task whose capsule was deleted or
+    /// whose worktree was removed is refused by name rather than half-resumed.
+    ///
+    /// It creates none of those things and it grants nothing. There is
+    /// deliberately no window list (windows come from
+    /// `apex project layout save`) and no permission of any kind: §4's brokers
+    /// own those, and a permission in a hand-editable file would be a grant
+    /// nobody reviewed.
+    ///
+    /// Unprivileged: a task is yours, kept in your own `~/.config/apex` and
+    /// `~/.local/state/apex`, so none of these verbs needs (or accepts) root.
+    Task(task::TaskArgs),
     /// Structured privilege requests: how a sandboxed agent asks for a system
     /// change, and how you decide.
     ///
@@ -987,6 +1005,12 @@ async fn main() {
         // as long as the user stays attached.
         Cmd::Agent { cmd } => agent::agent(cmd),
         Cmd::Project { cmd } => agent::project_cmd(cmd),
+        // Reads the task file, the capsule engine's records, the project's
+        // checkpoints and the agent runtime's session list; writes only the
+        // task file and the task's own state file. No D-Bus, no root, and
+        // nothing that can raise a prompt — routed here, before anything
+        // connects to the system bus, for the reason `apex ai` is.
+        Cmd::Task(args) => task::run(args),
         Cmd::Request { cmd } => request::main(cmd),
         Cmd::Secret { cmd } => secret::main(cmd),
         // Read-only, so no root gate: seeing what the machine should be must
