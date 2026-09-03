@@ -396,3 +396,68 @@ been bitten by five times — a pattern satisfied by prose rather than by code �
 and it is worth recording that it catches the person checking for it too.
 Verifying the job boundaries before acting is what kept it from becoming a
 wrong "fix".
+
+## Row 10 — Boot v2, and the two firmware traps that would have made it fake
+
+Measured on the katana, kernel `7.1.5-cachyos1.fc43.x86_64`.
+
+| step | what was measured |
+| --- | --- |
+| 2, prototype in CI and VMs | a UKI built from the booted APEX deployment — kernel 16,758,856 B, initramfs 386,072,073 B, ~390 MB signed PE — boots under `OVMF_CODE_4M.secboot` with only the ephemeral APEX cert in db. sd-stub printed `Booting initrd of APEX-OS dracut-107-8.fc43`; the real initramfs ran to dracut's `pre-mount` hook and powered off cleanly |
+| 3, signed UKIs and APEX EFI paths | unsigned, foreign-signed and one-byte-tampered `.cmdline` UKIs each failed to reach userspace; the foreign one proven *validly* signed by a key not in db. `microcode=embedded-in-initrd`, detected in dracut's leading cpio rather than demanded again |
+| 4, boot counting and rollback | four boots walked `apex-new+3-0.efi` → `+2-1` → `+1-2` → `+0-3`; the fifth selected the unsuffixed `apex-good.efi`; a sixth stayed there. Exact filename pairs asserted at every step |
+| 5, measured boot + TPM LUKS2, opt-in | PCR 11 **changes** between two UKIs signed by the same PCR key and the same keyslot still opens with no re-enrollment; a `.pcrsig` from a different key is refused; the **recovery key unlocks in the same boot that was refused**; a marker written through the mapper in boot 1 is read back in boot 2 |
+| 6, encryption by default | **not done, deliberately** — §22 gates it on recovery and hardware edge cases being proven, and one software TPM in one VM is not that |
+| 7, legacy BIOS on GRUB | preserved; nothing installs a bootloader |
+
+Reproducibility: same `SOURCE_DATE_EPOCH` gives byte-identical output, a
+different one gives different bytes.
+
+### The two findings that would have made every Secure Boot assertion vacuous
+
+**Fedora's 2 MB `OVMF_CODE.secboot.fd` has no TCG2 protocol.** Secure Boot
+enforcement works, so the signing assertions pass — but sd-stub sets no
+`StubPcr*` variables, PCR 11 stays 64 zero bytes, and every TPM unlock fails
+with "No signature for current PCR policy", which reads exactly like a broken
+policy rather than like firmware that cannot measure. Only
+`OVMF_CODE_4M.secboot.qcow2` measures (367 `Tcg2` event-log lines). `lib.sh`
+converts the 4 MB pair once and **refuses to fall back**.
+
+**`OVMF_VARS.secboot.fd` ships Red Hat *and Microsoft* certificates
+pre-enrolled**, and `virt-fw-vars --no-microsoft` only means "add no more". A
+varstore built on it leaves the firmware trusting Microsoft's UEFI CA — so
+"only APEX-signed images load" becomes **unfalsifiable**: the test passes while
+proving nothing, because a foreign image would have loaded too. Only the
+pristine `OVMF_VARS_4M.qcow2` is correct. This is the most consequential
+vacuous-pass this project has found, because the assertion it defeats is the
+Secure Boot product invariant itself.
+
+### Upstream behaviour measured rather than assumed
+
+**Boot counting is not a property of the entry type.** systemd-boot 258 counts
+type #2 UKIs *and* type #1 entries that use the `linux` key, and does **not**
+count type #1 entries that use `efi`. So a fully `/EFI/APEX`-named UKI path is
+possible; type #2 remains the default only because `bootctl list --json` — what
+`apex boot status` reads — reports the tally and `.osrel` title only for entries
+it recognises as UKIs. All three rows are asserted.
+
+### Bugs the boot assertions caught in their own subjects
+
+Every one had a green-looking symptom:
+
+* `apex-boot-health` was non-executable in the repo, so every exit-code check
+  got 126 and read as "the gate refused". The assertions now demand rc **1**,
+  not merely non-zero — "it failed" was true while "it failed for the reason
+  under test" was not.
+* `printf | python3 - <<HEREDOC` discards the pipe, so the recovery notice was
+  never written.
+* `if ! cmd; then rc=$?` captures the negation rather than exit 10, leaving
+  stale notices.
+* A dotted JSON accessor returned `null` for every entry-level check, because
+  entry ids contain a literal dot.
+* **The APEX initramfs has `cat` and `tr` but not `dd`** — and `2>/dev/null`
+  turned "command not found" into a written marker, so the probe reported
+  success from a missing binary.
+* A 29-byte write to a dm-crypt mapper is `EINVAL`.
+* `local n="$1" disk="…$n…"` leaves `$n` unset, because bash expands every word
+  before assigning any of them.
