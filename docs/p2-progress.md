@@ -81,7 +81,7 @@ section. Guest ESPs only.
 | This tracker | in progress |
 | 9.1 `apex host` — trust and transport | done — `0650db6`, `e3e742e`, `355c946` |
 | 9.2 §14 local AI service | in progress |
-| 9.3 §20 dispatch, handoff, remote status | OS side done — `7636431`, `781378a`; shell side in progress |
+| 9.3 §20 dispatch, handoff, remote status | OS side done — `7636431`, `781378a`, `5e42a49`, `5d72b5e`, `fdeef1e`; shell side in progress |
 | 10 Boot v2 | in progress |
 
 ## 9.1, and what it decided for everything above it
@@ -191,7 +191,7 @@ exit 0. That confound is what made attempt 2 look like it worked.
 | `apex::host` | 31 |
 | `apex::dispatch` | 18 |
 | `tests/test-apex-host.sh` | 53 |
-| `tests/test-apex-dispatch.sh` | wired; run pending the §14 branch compiling |
+| `tests/test-apex-dispatch.sh` | 55 |
 
 Both shell suites are shellcheck-clean at `-S warning` and wired into the
 `rust` job of `pr-validation.yml` — that job rather than `static`, because they
@@ -221,3 +221,38 @@ the units on a machine that never boots through systemd-boot.
 `LoaderBootCountPath` is set only when the booted entry actually carries a boot
 counter, which is exactly the state the health gate is about. The choice of
 variable is load-bearing rather than incidental, and this is the evidence.
+
+## Whole-tree baseline — taken after 9.1 and 9.3 landed
+
+| | count | failures |
+| --- | --- | --- |
+| Rust tests (`cargo test --locked`) | **944** | 0 |
+| Shell assertions, 18 suites | **1269** | 0 |
+
+At P1's close the same measurement was 659 Rust and 859 shell, so P2 has added
+roughly 285 Rust tests and 410 shell assertions so far.
+
+Per-suite, all green: blueprint 139, env 253, plugin 117, gaming 113, resolve
+88, modes 67, **boot-v2 60**, **dispatch 55**, pkg 54, **host 53**, firstrun 51,
+secret-broker 47, privilege-requests 38, labwc-keybinds 37, input 31, display
+26, project-layout 22, labwc-session 18.
+
+**`tests/test-apex-ai.sh` does not exist yet.** §14's shell suite is still owed
+by the branch building it; the 944 Rust tests include its unit tests, but there
+is no artifact-level suite driving `apex ai` as a process the way `host` and
+`dispatch` have. Recorded here rather than left to be noticed.
+
+## Known rough edge in the dispatch verbs
+
+`apex ai run --on katana` currently ends in the katana's own
+`error: unrecognized subcommand 'ai'`, because that machine runs apex 0.1.0
+from the last published image and the verb is new. The message is truthful and
+comes from the remote, and it resolves as soon as both ends carry this build.
+
+It is not caught locally because the capability check only refuses when the
+cached probe came from an **APEX peer that described itself**. The katana's
+cached probe came from the portable shell fallback, which cannot report an
+`apex_version`, so `is_apex()` is false and the check is skipped — "unknown is
+not absent", by design. The alternative would be refusing dispatch to any host
+whose `apex` is too old to self-describe, which is worse: it would refuse the
+very machines that most need probing again.
