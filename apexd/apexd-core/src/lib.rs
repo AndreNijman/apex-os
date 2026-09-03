@@ -36,6 +36,7 @@
 pub mod ai;
 pub mod battery;
 pub mod blueprint;
+pub mod dispatch;
 pub mod fan;
 pub mod fingerprint;
 pub mod game;

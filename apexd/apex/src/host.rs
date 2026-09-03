@@ -51,7 +51,7 @@ use apexd_core::host::{
 /// each attempt pays this. Long enough for a slow link, short enough that
 /// `apex host list` on a disconnected laptop returns rather than appearing to
 /// hang.
-const CONNECT_TIMEOUT: u32 = 8;
+pub const CONNECT_TIMEOUT: u32 = 8;
 
 /// How long a probe result is presented without comment. Older than this and
 /// `list` marks it stale — reported, never refused, because a stale probe is

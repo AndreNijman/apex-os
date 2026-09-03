@@ -6,6 +6,8 @@
 
 mod agent;
 mod blueprint;
+mod boot;
+mod dispatch;
 mod gaming;
 mod host;
 mod mode;
@@ -87,6 +89,17 @@ enum Cmd {
     /// attached controllers. Exits non-zero when Gaming Mode would not start,
     /// so it is usable as a check.
     Gaming(gaming::GamingArgs),
+    /// What verified this boot, and what the boot counter believes (§22).
+    ///
+    /// Read-only. GRUB is the default bootloader for every published APEX
+    /// image in this generation, and `status` reports that as the normal state
+    /// rather than as a fault: boot counting, signed UKIs and TPM-bound unlock
+    /// are the opt-in systemd-boot path, and this is the command that says
+    /// which of them is actually in effect on this machine.
+    Boot {
+        #[command(subcommand)]
+        cmd: boot::BootCmd,
+    },
     /// Trusted APEX devices, and what each one can do (§20).
     ///
     /// A device is named by an ssh destination — normally an alias already in
@@ -101,6 +114,33 @@ enum Cmd {
     /// host that is not APEX gets a portable shell probe so `list` still says
     /// something true about it.
     Host(host::HostArgs),
+    /// Build this project, here or on a trusted device (§20).
+    ///
+    /// Without `--on` it builds locally, running the same command it would
+    /// dispatch — so a local run and a remote one cannot drift apart about
+    /// what "the build" is. The command is detected from the project's marker
+    /// files and *printed*, because a detector silently choosing between five
+    /// possibilities is one nobody can correct; give it explicitly after `--`
+    /// to override.
+    ///
+    /// The remote directory is assumed to be the same absolute path and then
+    /// **verified** — it must exist and be the same repository, compared by
+    /// `origin` URL — because the failure mode of a wrong guess is a build
+    /// that succeeds against the wrong source.
+    Build(dispatch::BuildArgs),
+    /// Send files or the clipboard to a trusted device (§20).
+    ///
+    /// Files land under their own name, not the sender's directory layout, and
+    /// an existing file is NOT overwritten unless `--force` says so: a send
+    /// that replaced something on another machine is not recoverable from this
+    /// end.
+    Send(dispatch::SendArgs),
+    /// Open a URL or a path on a trusted device's screen (§20).
+    ///
+    /// Needs a graphical session there, and checks for one: an ssh command has
+    /// no session bus, and a machine sitting at its greeter would otherwise
+    /// report success and open something nobody can see.
+    Open(dispatch::OpenArgs),
     /// Print the hardware fingerprint and layered profile selection.
     Fingerprint,
     /// Pin the current deployment (ostree admin pin 0). Requires root.
@@ -919,10 +959,22 @@ async fn main() {
         // Read-only, like `perf` and `workload`, and for the same reason it is
         // not in the privileged set: it measures and reports.
         Cmd::Gaming(args) => gaming::gaming_main(args),
+        // Also read-only, and deliberately not in the privileged set even
+        // though the boot chain is the most privileged thing on the machine.
+        // Reading the ESP does need root, and `status` reports that as
+        // "unavailable, and why" rather than demanding a password to answer
+        // "what verified my boot".
+        Cmd::Boot { cmd } => boot::boot_main(cmd),
         // Read-only except for `add`/`remove`/`probe`, which write only the
         // registry and the probe cache in the user's own home. Nothing here
         // touches apexd or needs root.
         Cmd::Host(args) => host::run(args),
+        // Local by default; `--on` is the only thing that makes any of these
+        // touch the network. None of them needs root: they run ssh as the
+        // invoking user and write nothing outside the user's own home.
+        Cmd::Build(args) => dispatch::build(args),
+        Cmd::Send(args) => dispatch::send(args),
+        Cmd::Open(args) => dispatch::open(args),
         Cmd::Fingerprint => cmd_fingerprint(),
         Cmd::Pin => ops::pin(),
         Cmd::Rollback => ops::rollback(),
