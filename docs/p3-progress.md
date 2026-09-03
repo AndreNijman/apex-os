@@ -369,3 +369,48 @@ caught by a person re-reading a diff.
 `tests/test-apex-verbs.sh` now asks the built binary what it can do: 44 verbs
 enumerated by name. Proven against the real failure — removing `mod task;`
 compiles with zero errors and turns this suite red.
+
+## Shell branches consolidated
+
+Five apex-shell branches existed by the end of P3. `p3/recovery-ui` already
+contained `p3/ui-polish`, which already contained `p2/remote-agent-status`, so
+the consolidation was three merges rather than five:
+
+| branch | contents |
+| --- | --- |
+| `p2/remote-agent-status` | P2 §20 shell half, plus the geometry-scaler fix |
+| `p3/ui-polish` | ⊃ above, plus 7 colour tokens and the two token checks |
+| `p3/recovery-ui` | ⊃ above, plus §19's Settings surface |
+| `p3/unified-search` | §15, off `main` |
+| `p3/floating-parity` | labwc's three dead verbs + niri portals, off `main` |
+
+**`p3/shell-integration`** is all five. One conflict, in `ci.yml`, where the
+search and recovery branches each appended to the same required-files list —
+resolved by union, with both sides' entries asserted present afterwards.
+
+Integrated tree, re-run rather than assumed:
+
+| | result |
+| --- | --- |
+| node suites (6) | all assertions passed |
+| `check-*.sh` (9) | **521 passed, 0 failed** |
+| `shellcheck -S warning` on `tests/*.sh src/scripts/*.sh` | clean |
+
+## §24's remaining rows, and an honest line under them
+
+Two §24 rows are **not** closable by tonight's work, and padding them would be
+worse than naming them:
+
+**Colour management does not exist.** Zero hits for icc, colord,
+color-management or `wp_color` anywhere in the tree. It is the Creator row's
+defining feature, and it appears nowhere in §1–§23 as a deliverable — the
+roadmap never scheduled it, which is why no phase built it. Building an ICC
+pipeline unattended, against no specification, is not something to do at 2am.
+
+**GPU controls are NVIDIA-only, and clock locks exist for one machine.**
+`gpu.rs` is NVIDIA-only and only `msi-katana-gf76.toml` — the developer's own
+laptop — carries a `[gamemode]` section. `generic-desktop`, `generic-laptop`
+and `amd-zen` have none. That is a real limit on the Gamer and Creator rows,
+and closing it needs hardware nobody here has.
+
+Both are recorded as gaps rather than quietly counted as met.
