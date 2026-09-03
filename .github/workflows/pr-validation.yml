@@ -417,6 +417,24 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-gaming.sh
 
+      # §20's trusted devices. A fake `ssh` first on PATH records every argv,
+      # which is the only way to assert the things that matter here: that
+      # BatchMode=yes is always passed so a dispatch can never block on a
+      # password prompt, that StrictHostKeyChecking is never weakened (an
+      # ABSENCE assertion — `accept-new` in a background probe would pin an
+      # unverified key), and that a remote argument containing a space stays one
+      # argument rather than becoming two when ssh hands the string to the
+      # remote login shell.
+      #
+      # It also means the suite reaches no network and no other machine, so it
+      # behaves the same here as on a laptop that has left the LAN. The last
+      # case compares the developer's real ~/.config/apex/hosts.toml before and
+      # after: if `apex host` ever resolved paths from $HOME instead of
+      # XDG_CONFIG_HOME, the cost of not catching it is someone's device list.
+      - name: Run trusted-device assertions
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-host.sh
+
   installer:
     name: Installer safety and UI
     needs: changes
@@ -615,7 +633,8 @@ jobs:
             tests/test-apex-pkg.sh tests/test-apex-firstrun.sh \
             tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
             tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
-            tests/test-apex-modes.sh tests/test-apex-plugin.sh
+            tests/test-apex-modes.sh tests/test-apex-plugin.sh \
+            tests/test-apex-host.sh
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
       # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict

@@ -310,21 +310,25 @@ fn parse_shell_probe(text: &str, now: i64) -> HostCaps {
             "podman" => caps.podman = v == "1",
             // Repeated keys accumulate, and duplicates are dropped: a machine
             // with two AMD cards reports `gpu=amdgpu` twice and listing it once
-            // is what a person wants to read.
-            "accel" => {
-                if !caps.accel.iter().any(|a| a == v) && caps.accel.len() < 8 {
-                    caps.accel.push(v.to_string());
-                }
-            }
-            "gpu" => {
-                if !caps.gpus.iter().any(|g| g == v) && caps.gpus.len() < 8 {
-                    caps.gpus.push(v.to_string());
-                }
-            }
+            // is what a person wants to read. Bounded, because the length of
+            // this list is the remote host's choice, not ours.
+            "accel" => push_bounded(&mut caps.accel, v),
+            "gpu" => push_bounded(&mut caps.gpus, v),
             _ => {}
         }
     }
     caps
+}
+
+/// Append `value` to `list` unless it is already there or the list is full.
+///
+/// Shared by the `accel` and `gpu` arms of the probe parser: both accumulate
+/// repeated keys from remote output, and both must be bounded because the
+/// number of lines is the remote's choice.
+fn push_bounded(list: &mut Vec<String>, value: &str) {
+    if list.len() < 8 && !list.iter().any(|e| e == value) {
+        list.push(value.to_string());
+    }
 }
 
 /// Parse what a peer's `apex host describe --json` printed.
