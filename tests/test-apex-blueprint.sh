@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  test-apex-blueprint.sh — assertions against the SHIPPED `apex` binary for
+#  test-apex-blueprint.sh — assertions against the REAL `apex` binary for
 #  roadmap §10: the declarative blueprint, `apex apply` and `apex sync`.
 #
 #  ── Why this file exists ────────────────────────────────────────────────────

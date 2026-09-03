@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  test-apex-gaming.sh — assertions against the SHIPPED `apex` binary for
+#  test-apex-gaming.sh — assertions against the REAL `apex` binary for
 #  roadmap §12: per-game profiles (`apex game profile`) and boot-to-game
 #  readiness (`apex gaming`).
 #
@@ -252,7 +252,7 @@ want "set reports what it stored" "mode gaming, tier balanced, fan manual:200" "
 FILE="${H}/.config/apex/games.toml"
 [ -f "$FILE" ] && ok "set wrote the file" || bad "set wrote the file" "no $FILE"
 
-# The lossless round trip, through the SHIPPED binary rather than only through
+# The lossless round trip, through the built binary rather than only through
 # a unit test: every field that survives validation comes back byte-identical
 # in the JSON view.
 j="$(apex_in "$H" game profile show 1091500 --json)"

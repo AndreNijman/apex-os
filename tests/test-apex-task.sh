@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  test-apex-task.sh — assertions against the SHIPPED `apex` binary for
+#  test-apex-task.sh — assertions against the REAL `apex` binary for
 #  `apex task` (roadmap §21's Task: the binder that references a project, a
 #  capsule, a worktree, agents and a checkpoint).
 #
 #  Nothing here re-implements the CLI: every case runs the real built binary as
-#  a process, the same one the image installs.
+#  a process. It is a DEBUG build from this tree — APEX_BIN defaults to
+#  apexd/target/debug/apex and the suite builds it if it is missing. The image
+#  installs apexd/target/release/apex (Containerfile.base), which is the same
+#  source and a different binary. Point APEX_BIN at a release build to assert
+#  against one; the header used to claim that was already happening.
 #
 #  ── What is actually under test ─────────────────────────────────────────────
 #  A task is worth having only if it tells the truth about the things it names,
@@ -24,7 +28,7 @@
 #      generated state in the file a person edits, no stored weakening of
 #      confinement.
 #    * the window story is honest end to end. A layout is saved through the
-#      SHIPPED `apex project layout save` (with a faked compositor adapter, the
+#      real `apex project layout save` (with a faked compositor adapter, the
 #      pattern test-project-layout.sh established), and then `apex task resume`
 #      must REPORT it and must NOT reopen it. The window process writes a line
 #      to a log when it starts, so "resume reopened nothing" is a counted fact
@@ -376,7 +380,7 @@ chmod +x "$FAKEBIN/apex-task-test-window"
 trap 'kill "$WIN_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
 sleep 0.4
 
-# The layout is saved through the SHIPPED verb with a faked compositor adapter,
+# The layout is saved through the real verb with a faked compositor adapter,
 # the pattern test-project-layout.sh established, so the slug and the file
 # location are whatever the shipped code computes rather than something this
 # suite spells out.

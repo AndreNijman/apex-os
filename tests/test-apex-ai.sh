@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  test-apex-ai.sh — assertions against the SHIPPED `apex` binary for §14's
+#  test-apex-ai.sh — assertions against the REAL `apex` binary for §14's
 #  local inference service.
 #
 #  Nothing here re-implements the CLI. Every case runs the real built binary,
