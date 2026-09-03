@@ -353,6 +353,21 @@ jobs:
       - name: §22 boot v2 — the opt-in is structural, and nothing shipped touches a boot path
         run: ./tests/test-boot-v2.sh
 
+      # §19's disposable engine, and the structural rules its teardown depends
+      # on. In `static` for the reason boot-v2's structural half is: the
+      # `engine` selector is ^(files/|tests/) and the `rust` selector is
+      # ^(apexd/|config/|tests/), so a PR touching ONLY
+      # files/system/libexec/apex-disposable sets engine=true and rust=false.
+      # A check that lived only in `rust` would be skipped by exactly the PR
+      # that changes the recursive delete — and a skipped job counts as
+      # success. `static` has no path filter and can never be skipped.
+      #
+      # No argument, so no `apex` binary is needed. The binary-driven half runs
+      # in `rust` below, where the toolchain is, and dies rather than skipping
+      # if the binary is missing.
+      - name: §19 disposable execution — the teardown's four fences, and the copy boundary
+        run: ./tests/test-apex-recover.sh
+
       # §14's cross-file constants. The daemon, the CLI and the unit all have to
       # agree about the socket names, the store root, the protocol version and
       # the refusal of a TCP endpoint — and they are in three different
@@ -492,6 +507,34 @@ jobs:
           # A missing binary must be a hard failure, not a skip.
           test -x "$APEX_BIN"
           ./tests/test-boot-v2.sh --with-binary
+
+      # §19's binary half: the recovery surface against whole fixture machines,
+      # `apex doctor --json`, and the factory reset.
+      #
+      # This step drives the most destructive verb in the product, so it is
+      # worth stating what stops it reaching the runner: every path is
+      # redirected into a temp tree and the suite hard-exits if one resolves
+      # outside it, a PATH tripwire fails the run if bootctl, efibootmgr,
+      # ostree, bootc, podman, pkexec, busctl or sudo is ever spawned, canaries
+      # planted outside every fixture are compared byte-for-byte at the end
+      # (Rust's remove_dir_all spawns no `rm`, so the PATH tripwire is blind to
+      # it), and the invoking account's own ~/.config/apex is diffed before and
+      # after. The safety properties are mutation-tested, not assumed: removing
+      # the teardown's symlink guard fails one assertion, removing both guards
+      # fails six including "THE CANARY IS GONE".
+      #
+      # The structural half of the same file runs in `static`, where no path
+      # filter can skip it.
+      - name: §19 recovery, repair and the scoped factory reset
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          # A missing binary must be a hard failure, not a skip.
+          test -x "$APEX_BIN"
+          ./tests/test-apex-recover.sh --with-binary
 
       # §20's trusted devices. A fake `ssh` first on PATH records every argv,
       # which is the only way to assert the things that matter here: that
@@ -743,6 +786,8 @@ jobs:
           shellcheck -S warning files/system/libexec/apex-pkg \
             files/system/libexec/apex-env \
             files/system/libexec/apex-plugin \
+            files/system/libexec/apex-disposable \
+            tests/test-apex-recover.sh \
             tests/test-apex-pkg.sh tests/test-apex-firstrun.sh \
             tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
             tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
