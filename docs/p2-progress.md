@@ -461,3 +461,77 @@ Every one had a green-looking symptom:
 * A 29-byte write to a dm-crypt mapper is `EINVAL`.
 * `local n="$1" disk="…$n…"` leaves `$n` unset, because bash expands every word
   before assigning any of them.
+
+## Closing the items that were left open
+
+The list of "left undone" items each agent reported was reviewed one at a time.
+Four were closable and are now closed; four are correctly out of scope and the
+argument for each is below rather than implied.
+
+### Closed
+
+**§14's parity check is wired into CI.** `files/scripts/check-ai-parity` — 37
+checks that the daemon, the CLI and the unit agree about socket names, store
+root, protocol version and the TCP refusal, across three languages — now runs
+in the **`static`** job, with `--self-test`. It is in `static` and not `rust`
+because the selectors would skip it: a PR touching only
+`files/system/units/apex-aid.service` does not set `rust=true`, and that unit
+is one of the files the check reads. Its self-test mutates each constant to
+prove the check catches it *and* asserts a comment mentioning the forbidden
+token does not trip it: 4 mutations caught, 2 comments correctly ignored.
+
+**`boot-v2.yml` now has run on GitHub Actions.** It could not be dispatched —
+`workflow_dispatch` requires the workflow to exist on the default branch — so
+PR #36 was opened, which triggers it through `pull_request:`. Checked first
+that this does not spend the reserved image build: `build-image.yml` fires on
+`push: branches: [main]` and manual dispatch only, so a pull request does not
+build an image.
+
+**The catalogue has a real entry.** §14's own example is
+`apex ai pull qwen3-coder`, which cannot work against an empty catalogue. Qwen2.5
+Coder 1.5B Instruct Q4_K_M is now in it, with every number read off the file:
+the whole 1,117,320,768 bytes fetched and hashed, and the GGUF v3 header parsed
+for `block_count` 28, `context_length` 32768, `head_count_kv` 2 and
+key/value length 128. `kv_mib_per_1k` is computed from those — 2 × (128+128) × 2
+bytes × 28 = 28,672 per token = 28 MiB per 1024 tokens at f16 — not estimated.
+
+**composefs was never actually undone.** Reported as "no composefs work", but
+§23's row names composefs because it is part of the target architecture, and
+APEX already boots on it. Verified directly: `findmnt -no FSTYPE,SOURCE /`
+returns `overlay composefs` on **both** the laptop and the katana. Nothing
+needed changing, which is different from nothing having been done.
+
+### Correctly out of scope, with the argument
+
+**§22 step 6, encryption by default.** §22 gates this itself: *"Make encryption
+default once recovery and hardware edge cases are proven."* What is proven is
+one software TPM in one VM. Real firmware updates, real TPM clears, real
+suspend/resume, and machines with no TPM are not covered, and a default that
+fails on any of them costs a user their disk. Doing it would violate the
+section it implements.
+
+**No Secure Boot enrollment script.** `AGENTS.md` boot-path rule 4: keys are
+never generated on, or written to, a real machine's firmware by a script in this
+repository. That is not a gap in the implementation, it is the implementation —
+the safety argument for the whole boot path is that enrollment is a human
+procedure, which is why `docs/boot-v2.md` had to stop being a placeholder.
+
+**No NVRAM management.** The lab boots guests through
+`/EFI/BOOT/BOOTX64.EFI`. §22's requirement is a dedicated `/EFI/APEX/`
+*identity*, and that is met — systemd-boot and the UKIs live under `/EFI/APEX/`.
+What is not done is creating a firmware boot *entry*, which needs `efibootmgr`;
+on hardware `bootctl install` does it and the operator runs it.
+
+**Ollama and vLLM are recognised and refused rather than adapted.** §14 says
+"abstract runtimes such as llama.cpp, Ollama, vLLM or future engines", and the
+*abstraction* does accommodate them — `Runtime` is an enum with a launch planner
+per variant. What APEX declines is adopting their model stores, because each owns
+its own and adopting one means two provenance stories for the same weights,
+which is the thing the catalogue exists to prevent. This is a deliberate
+deviation from a literal reading of §14, stated here rather than buried.
+
+**APU VRAM is under-reported.** `mem_info_vram_total` on an integrated GPU is
+the BIOS carveout, not what the driver can actually allocate — measured on the
+laptop as `1024 MiB total, 0 spendable`. A hardware reporting limitation, not
+something APEX can fix; `plan_fit` planning against *measured free* VRAM is what
+keeps it from becoming a crash.
