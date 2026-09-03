@@ -535,3 +535,61 @@ the BIOS carveout, not what the driver can actually allocate — measured on the
 laptop as `1024 MiB total, 0 spendable`. A hardware reporting limitation, not
 something APEX can fix; `plan_fit` planning against *measured free* VRAM is what
 keeps it from becoming a crash.
+
+## P2 close-out — verified on GitHub, not only on the katana
+
+Both halves are open as pull requests. Neither triggers an image build:
+`build-image.yml` fires on `push: branches: [main]` and manual dispatch only,
+which was checked before opening either.
+
+| | PR | checks |
+| --- | --- | --- |
+| apex-os rows 9 + 10 | **#36** | `pr-validation` green — Static, Select, Rust, Package engine and the aggregate gate |
+| apex-os boot v2 VM job | **#36** | `boot-v2.yml` **success**, 46 passed / 0 failed |
+| apex-shell §20 shell half | **apex-shell #15** | all three jobs green |
+
+**The boot VM job ran accelerated, not emulated.** The workflow warns and falls
+back to TCG when `/dev/kvm` is absent; on the runner it printed
+`/dev/kvm is present; guests run accelerated`. What it proved there, having
+built its own UKI from a Fedora kernel because a runner has no ostree
+deployment:
+
+* the signed UKI reached userspace — `APEX-BOOTLAB: userspace-reached`,
+  `clean-poweroff`, `StubInfo=systemd-stub`, `LoaderEntrySelected=apex-good.efi`;
+* the unsigned UKI reached nothing — `qemu rc=137`, and the serial log
+  explicitly does *not* contain the userspace marker;
+* the foreign UKI is *validly signed by a key that is not in db* and fails
+  against the APEX certificate — the assertion that would be unfalsifiable on a
+  varstore carrying Microsoft's CA;
+* two identical builds hash identically
+  (`ddd3e56f6c2c361f904eb9235a33f9119906fa03ba0ede1c93271382985880f2`) and a
+  different `SOURCE_DATE_EPOCH` changes the bytes;
+* the counter walked `apex-new+3-0.efi` → `+2-1` → `+1-2` → `+0-3` and the next
+  boot selected `apex-good`.
+
+The katana proved the same chain against the **real APEX image** — a 390 MB
+signed UKI from the booted deployment's own kernel and 386 MB initramfs. CI
+proves it stays true; the katana proves it is true of the thing that ships.
+
+### One assertion CI caught that three local runs could not
+
+`test-apex-host.sh` asserted `describe --json` carries `accel` unconditionally.
+`HostCaps` declares `gpus` and `accel` with
+`skip_serializing_if = "Vec::is_empty"`, so a machine with no accelerator omits
+them — intended behaviour, since a host that cannot demonstrate a capability
+reports it absent rather than as an empty list. It passed on the developer's AMD
+laptop, where `/dev/kfd` makes rocm real, and failed on a runner with a
+`hyperv_drm` display and no accelerator at all. That is the whole argument for
+running tests somewhere that is not your own desk, and it is why the PR was
+worth opening rather than trusting a local sweep.
+
+### Final counts
+
+| | count | failures |
+| --- | --- | --- |
+| Rust tests | 947 | 0 |
+| Shell assertions, 19 suites (apex-os) | 1314 | 0 |
+| `boot-v2.yml` VM scenarios (GitHub, KVM) | 46 | 0 |
+| apex-shell, pre-existing | 864 | 0 |
+| apex-shell, new | 89 + 48 + 18 | 0 |
+| `cargo clippy --all-targets --locked -- -D warnings` | clean, six crates | — |
