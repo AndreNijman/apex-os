@@ -37,11 +37,29 @@ ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
 bad() { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
 section() { printf '\n── %s ──\n' "$1"; }
 
+# ── prerequisites ────────────────────────────────────────────────────────────
+#
+# A missing prerequisite is a FAILURE, never a skip. This suite used to
+# whole-suite-skip on a missing `cargo`, print "0 passed, 0 failed (skipped)"
+# and exit 0 — a green tick over nothing asserted, which is the shape
+# docs/p1-progress.md already records this repository being bitten by three
+# times, most recently when the labwc keybind suite reported passed=0 failed=0
+# on its first CI run.
+#
+# `pgrep` is on the list for a sharper reason than "the script calls it". The
+# "a dry run starts nothing" assertion counts `pgrep -c -x sleep` before and
+# after, with `|| echo 0` on both sides: with no pgrep both sides are "0", the
+# comparison holds, and the assertion PASSES having measured nothing. Same
+# shape as the `diff -q` that exited 127 in the CI container and was read as a
+# verdict.
+for tool in cargo git python3 pgrep; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "FATAL: $tool is required; this suite cannot test anything without it" >&2
+        exit 2
+    }
+done
+
 section "the binary"
-if ! command -v cargo >/dev/null 2>&1; then
-    printf 'SKIP  cargo unavailable\n\nproject-layout: 0 passed, 0 failed (skipped)\n'
-    exit 0
-fi
 if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" --bin apex >/dev/null 2>&1; then
     bad "apex builds"
     printf '\nproject-layout: %d passed, %d failed\n' "$pass" "$fail"

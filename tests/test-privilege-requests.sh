@@ -34,7 +34,9 @@ WORK="$(mktemp -d)"
 pass=0; fail=0
 ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
 bad() { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
-skp() { printf 'SKIP  %s\n' "$1"; }
+# There is deliberately no `skp` helper. It existed for exactly one caller —
+# the whole-suite skip on a missing cargo — and a suite with a skip helper
+# lying around invites the next one.
 section() { printf '\n── %s ──\n' "$1"; }
 
 DAEMON_PID=""
@@ -48,13 +50,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ── prerequisites ────────────────────────────────────────────────────────────
+#
+# A missing prerequisite is a FAILURE, never a skip. This suite used to
+# whole-suite-skip on a missing `cargo`, print "0 passed, 0 failed (skipped)"
+# and exit 0 — a green tick over nothing asserted, which is the shape
+# docs/p1-progress.md already records this repository being bitten by three
+# times, most recently when the labwc keybind suite reported passed=0 failed=0
+# on its first CI run.
+for tool in cargo git python3; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "FATAL: $tool is required; this suite cannot test anything without it" >&2
+        exit 2
+    }
+done
+
 # ── build ────────────────────────────────────────────────────────────────────
 section "the binaries"
-if ! command -v cargo >/dev/null 2>&1; then
-    skp "cargo unavailable; cannot build the runtime"
-    printf '\nprivilege: 0 passed, 0 failed (skipped)\n'
-    exit 0
-fi
 if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
         --bin apex-agentd --bin apex >/dev/null 2>&1; then
     bad "apex-agentd and apex build"

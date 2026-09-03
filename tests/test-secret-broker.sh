@@ -54,9 +54,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ── prerequisites ────────────────────────────────────────────────────────────
+#
+# A missing prerequisite is a FAILURE, never a skip. This suite used to
+# whole-suite-skip on a missing `cargo`, print "0 passed, 0 failed (skipped)"
+# and exit 0 — a green tick over nothing asserted, which is the shape
+# docs/p1-progress.md already records this repository being bitten by three
+# times, most recently when the labwc keybind suite reported passed=0 failed=0
+# on its first CI run.
+#
+# The one legitimate skip in this file is the sandbox section further down: a
+# confined session needs bubblewrap, and where bwrap is genuinely absent the
+# boundary cannot be tested at all. That skip is loud, names bubblewrap, and is
+# refused outright when APEX_REQUIRE_SANDBOX is set — which CI sets, so the job
+# cannot go green having skipped it.
+for tool in cargo git python3; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "FATAL: $tool is required; this suite cannot test anything without it" >&2
+        exit 2
+    }
+done
+
 section "the binaries"
-command -v cargo >/dev/null 2>&1 || {
-    printf 'SKIP  cargo unavailable\n\nsecret-broker: 0 passed, 0 failed (skipped)\n'; exit 0; }
 cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
     --bin apex-agentd --bin apex >/dev/null 2>&1 || {
     bad "apex-agentd and apex build"
@@ -257,6 +276,18 @@ chmod +x "${PROJ}/inside.sh"
 # about what was checked. CI installs bwrap precisely so this does not skip
 # there; a skip in CI is itself a signal that the install step was lost.
 if [ ! -x /usr/bin/bwrap ]; then
+    # APEX_REQUIRE_SANDBOX turns the one legitimate skip in this file into a
+    # failure, and CI sets it. Without it the `engine` job could go green on a
+    # runner where the bubblewrap install step was removed or silently failed,
+    # having never run the assertion §4 exists for — the same "a skipped check
+    # counts as success" shape the rest of this suite no longer has.
+    if [ -n "${APEX_REQUIRE_SANDBOX:-}" ]; then
+        bad "bubblewrap is present (APEX_REQUIRE_SANDBOX is set)"
+        printf '      /usr/bin/bwrap is missing, so the sandbox boundary — the\n'
+        printf '      one thing §4 claims — cannot be tested. Refusing to skip.\n'
+        printf '\nsecret-broker: %d passed, %d failed\n' "$pass" "$fail"
+        exit 1
+    fi
     printf 'SKIP  a confined session needs bubblewrap, which is not installed\n'
     printf '      (the sandbox-boundary assertions below cannot run here)\n'
     sid=""
