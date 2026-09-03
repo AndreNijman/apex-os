@@ -114,6 +114,17 @@ with `follow_mouse` crossing a monitor boundary now closes popups (unflagged
 behaviour change); and the facade suite encodes Hyprland's refcount semantics as
 universal, so it would fail on niri or labwc.
 
+## `/tmp` was wiped mid-session, and it cost nothing
+
+Four of the coordinator's worktrees and one agent's vanished when `/tmp` was
+cleared. **Every branch they held was pushed and matched its remote**, so the
+loss was a `git worktree prune` and nothing else.
+
+This is the "commit and push every logical step" rule collecting on its premium.
+Worktrees under `/tmp` are convenient and disposable *only* while that holds — a
+single unpushed commit in one of them would have been gone with no warning and
+no way to tell what had been in it.
+
 ## Resumed — and one hard rule added
 
 Restarted after the third pause. Every agent carries a new rule, now in the
@@ -458,8 +469,41 @@ the compiled binary, 43 Rust unit tests, two static CI checks.
       measurement each run) and re-measuring afterwards to report residual drift.
 - [x] **7.3** `apex sync export / show / import`. Import converges nothing and
       will not clobber an existing blueprint without `--force`.
-- [ ] **7.4** GUI editing — deferred; it is apex-shell work. The schema
-      round-trips losslessly so the editor has something to write.
+- [x] **7.4** GUI editing — apex-shell **PR #10**, branch `p1/blueprint-editor`.
+      CI green, and the job log confirms the suites *executed* rather than
+      skipping (75 assertions on CI, 80 locally — the 5-assertion gap is a
+      vocabulary-parity block needing apex-os checked out beside the shell, and
+      it is deliberately **not** a skip: the Node suite asserts the vocabularies
+      regardless).
+
+      Config → Blueprint reads with `blueprint show --json`, stages edits in
+      memory, writes back through `blueprint set --json -`. **No TOML is
+      authored anywhere.** The TOML shown is the CLI rendering the *saved* file;
+      there is no preview of unsaved state, because no verb renders a draft and
+      writing one would be the schema implemented twice.
+
+      Nine mutation-tested assertions pin the write path: exactly one write
+      command, entered from exactly one place (inside the digest re-read handler,
+      so the stale guard cannot be bypassed), no plan command may name a writing
+      verb, and no `sed -i` / `tee` / `truncate` / shell redirection anywhere. A
+      `sed -i` writer and a `printf > "$1"` writer both go red.
+
+      **A bug found in its own review:** `available` gated every section
+      including Reload, and the plan path latched it false on any `diff` exit > 1
+      — so one transient failure collapsed the page to a false "not available"
+      with no escape. Cause worth remembering: DisplayService's flag was copied
+      without the property that `refresh()` clears it.
+
+      **Known and accepted:** the first GUI save reformats inline arrays, because
+      `to_toml()` is `toml::to_string_pretty`. Semantically lossless — same
+      blueprint, same digest, no invented `version` — and the digest surviving it
+      is load-bearing, since a moved digest would trip the stale guard on the
+      page's own write. Fixing the formatting in QML would be the forbidden
+      second TOML writer.
+
+      **Not verified: the QML page has never been rendered.** `qmllint` clean and
+      statically checked, but the round trip is proven at the JSON/CLI boundary,
+      not through the GUI. Inert until apex-os `p1/blueprint-write` merges.
 - [x] **7.5** Tests.
 
 **`apply` never runs `sudo`.** It converges the privilege domain it is already
