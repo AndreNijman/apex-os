@@ -359,3 +359,40 @@ instantiated against real `SessionInfo` records is not the same as "the rows
 look right". Real ssh was never exercised either: the shim exits instantly
 where a dead host takes ~8 s, so "a dead host delays those behind it" is
 reasoned. Both are the agent's own words, and they are the right words.
+
+## Verification checkpoint
+
+Run against the committed tree (`git archive HEAD`, so no agent's in-progress
+edits could contaminate it), in the `apex-rust` container on the katana:
+
+```
+cargo clippy --all-targets --locked -- -D warnings
+```
+
+**Clean** across all six crates — `apexd-core`, `apexd`, `apex`,
+`apex-agent-core`, `apex-agentd`, `apex-aid`. That is what CI runs, verbatim.
+
+| | count | failures |
+| --- | --- | --- |
+| Rust tests | 944 | 0 |
+| `tests/test-boot-v2.sh` (no argument, `static` job) | 60 | 0 |
+| `tests/test-boot-v2.sh --with-binary` (`rust` job) | 85 | 0 |
+| `tests/test-apex-ai.sh` | 43 | 0 |
+| `tests/test-apex-host.sh` | 53 | 0 |
+| `tests/test-apex-dispatch.sh` | 55 | 0 |
+
+The boot suite's last assertion is worth copying elsewhere: it hashes its
+fixture tree before and after and asserts the digest is unchanged, which is how
+you prove a read-only verb is read-only rather than asserting that it looked
+read-only.
+
+### One thing I got wrong while reviewing, and how
+
+I read `rust:` as starting at line 348 of `pr-validation.yml` and concluded the
+boot suite's unfiltered half was in the wrong job. Line 348 is a *comment*
+containing the word `rust`; the job starts at 356 and the wiring was correct all
+along. The grep that misled me is the same shape as the one this project has
+been bitten by five times — a pattern satisfied by prose rather than by code —
+and it is worth recording that it catches the person checking for it too.
+Verifying the job boundaries before acting is what kept it from becoming a
+wrong "fix".
