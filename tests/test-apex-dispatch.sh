@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  test-apex-dispatch.sh — assertions against the SHIPPED `apex` binary for
+#  test-apex-dispatch.sh — assertions against the REAL `apex` binary for
 #  §20's remote compute and handoff: `apex build --on`, `apex send`,
 #  `apex open`, and the `--host` forms of `apex agent`.
 #

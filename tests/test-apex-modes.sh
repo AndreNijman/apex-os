@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  test-apex-modes.sh — assertions against the SHIPPED `apex` binary for
+#  test-apex-modes.sh — assertions against the REAL `apex` binary for
 #  `apex mode`, `apex workload` and `apex perf` (roadmap §11, §12, §13).
 #
 #  Nothing here re-implements the CLI: every case runs the real built binary as
-#  a process, the same one the image installs.
+#  a process. It is a DEBUG build from this tree — APEX_BIN defaults to
+#  apexd/target/debug/apex and the suite builds it if it is missing. The image
+#  installs apexd/target/release/apex (Containerfile.base), which is the same
+#  source and a different binary. Point APEX_BIN at a release build to assert
+#  against one; the header used to claim that was already happening.
 #
 #  ── Why this file exists, and why it is careful ─────────────────────────────
 #  This is the area that has already caused real harm once. An earlier
