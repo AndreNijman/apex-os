@@ -95,6 +95,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-aid"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "apexd-core",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "apexd"
 version = "0.1.0"
 dependencies = [
