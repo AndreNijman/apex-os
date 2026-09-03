@@ -768,6 +768,72 @@ RUN set -eux; \
     grep -q '^readonly ENV_ENGINE=/usr/libexec/apex-env$' /usr/libexec/apex-pkg; \
     /usr/libexec/apex-pkg --help | grep -q -- '--source rpm|flatpak|capsule'
 
+# ── The plugin CLI (§16) ────────────────────────────────────────────────────
+# apex-shell's plugin platform ships the manifest, the permission model and the
+# loader; this is the OS-side CLI it deliberately left out.
+#
+# IT OWNS NO PLUGIN RULES. Every verdict comes from the shell's own
+# src/services/plugins/manifest.js, `require`d by the node shim below — the
+# same file the QML engine imports and the same file apex-shell's own tests
+# load. Two implementations of a permission model drift, and the failure mode
+# is a CLI that tells a user their plugin is fine while the shell refuses it.
+#
+# That makes three things build dependencies rather than runtime hopes, which
+# is why they are asserted here: node, the vendored shell tree, and the exact
+# functions the shim calls out of manifest.js. A missing one turns `apex
+# plugin` into a confusing runtime failure on the user's machine instead of a
+# failed build.
+COPY --chmod=0755 files/system/libexec/apex-plugin /usr/libexec/apex-plugin
+COPY --chmod=0755 files/system/libexec/apex-plugin-verdict.js /usr/libexec/apex-plugin-verdict.js
+RUN set -eux; \
+    bash -n /usr/libexec/apex-plugin; \
+    for t in node jq find awk; do \
+        command -v "$t" >/dev/null || { echo "FATAL: apex-plugin needs $t"; exit 1; }; \
+    done; \
+    node --check /usr/libexec/apex-plugin-verdict.js; \
+    # The shell's validator has to BE there, at the path the CLI defaults to.
+    MJS=/usr/share/apex-shell/src/services/plugins/manifest.js; \
+    test -f "$MJS"; \
+    # …and it has to still export what the shim calls. Checked by running the
+    # SHIPPED shim rather than a copy of its export list here: the shim already
+    # refuses with exit 2 if manifest.js has lost any of the four functions,
+    # and an upstream rename would otherwise surface as "undefined is not a
+    # function" halfway through a verdict — which reads as a broken CLI rather
+    # than a broken coupling.
+    /usr/libexec/apex-plugin-verdict.js validid "$MJS" apex-worldclock; \
+    ! /usr/libexec/apex-plugin-verdict.js validid "$MJS" ../escape; \
+    # End to end, in the image, against the shell's OWN example plugin. This is
+    # the only place the coupling is exercised for real: CI vendors apex-shell
+    # from remote main and cannot know what the finished image contains.
+    P=/tmp/apex-plugin-verify; \
+    mkdir -p "$P/.config/apex-shell/plugins"; \
+    cp -r /usr/share/apex-shell/plugins/apex-worldclock \
+          "$P/.config/apex-shell/plugins/apex-worldclock"; \
+    HOME="$P" /usr/libexec/apex-plugin list 2>&1 | tee /tmp/apex-plugin-list.txt; \
+    grep -q 'apex-worldclock' /tmp/apex-plugin-list.txt; \
+    grep -qE 'apex-worldclock +enabled +yes' /tmp/apex-plugin-list.txt; \
+    HOME="$P" /usr/libexec/apex-plugin info apex-worldclock | grep -q 'bar-widget'; \
+    # The disable/enable round trip, on a throwaway HOME, asserting the file
+    # count is preserved in both directions.
+    HOME="$P" /usr/libexec/apex-plugin disable apex-worldclock; \
+    test ! -e "$P/.config/apex-shell/plugins/apex-worldclock"; \
+    test -d "$P/.config/apex-shell/plugins-disabled/apex-worldclock"; \
+    HOME="$P" /usr/libexec/apex-plugin enable apex-worldclock; \
+    test -d "$P/.config/apex-shell/plugins/apex-worldclock"; \
+    test ! -e "$P/.config/apex-shell/plugins-disabled/apex-worldclock"; \
+    rm -rf "$P" /tmp/apex-plugin-list.txt; \
+    # Unprivileged, and it must stay that way: every path it touches is under
+    # the invoking user's ~/.config/apex-shell, which is the directory the
+    # shell itself reads. Asserted because "plugins are per-user" is a security
+    # claim, not a preference.
+    test ! -u /usr/libexec/apex-plugin; \
+    test ! -g /usr/libexec/apex-plugin; \
+    # The permission model must never read as stronger than it is. QML plugins
+    # run in-process with the shell's full authority; apex-shell fails its own
+    # CI if that paragraph is deleted, and so does this image.
+    /usr/libexec/apex-plugin --help | grep -q 'neither one confines hostile code'; \
+    echo "apex-plugin verified against the vendored shell validator"
+
 # ── Console setup must not be able to report the machine as broken ──────────
 # systemd-vconsole-setup runs loadkeys/setfont with whatever /etc/vconsole.conf
 # names. If that keymap or font is not installed the tool exits non-zero, the
