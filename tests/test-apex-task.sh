@@ -138,6 +138,10 @@ export PATH="$FAKEBIN:$PATH"
 apex() { "$APEX_BIN" "$@" 2>&1; }
 calls() { wc -l < "$CALLS" | tr -d ' '; }
 
+# The ordered steps out of a resume's printed plan: the lines after
+# "resume it with:" up to the first note, which is prefixed with "- ".
+plan_steps() { printf '%s\n' "$1" | awk '/^resume it with:/{f=1;next} f&&/^  - /{exit} f{print}' | sed 's/^  //'; }
+
 # ── the fixture project ─────────────────────────────────────────────────────
 PROJ=$WORK/apex-os
 mkdir -p "$PROJ"
@@ -314,9 +318,7 @@ if [ "$rc" = "0" ]; then
 else
     bad "a task whose parts are all present resumes" "rc=$rc out=$out"
 fi
-# The steps, extracted from the block the plan prints: lines after
-# "resume it with:" up to the first note (which is prefixed with "- ").
-steps=$(printf '%s\n' "$out" | awk '/^resume it with:/{f=1;next} f&&/^  - /{exit} f{print}' | sed 's/^  //')
+steps=$(plan_steps "$out")
 first=$(printf '%s\n' "$steps" | head -1)
 last=$(printf '%s\n' "$steps" | tail -1)
 if [ "$first" = "cd $WT" ]; then
@@ -354,13 +356,23 @@ section "windows: reported from the project layout, and never reopened"
 # fact instead of an assumption.
 LAUNCHES=$WORK/launches
 : > "$LAUNCHES"
+# `sleep` as a background child with a TERM trap, rather than `exec sleep`:
+# the layout records the window's own argv, so the process must stay THIS
+# script for a restore to be detectable, and killing the script must still take
+# the sleep with it rather than leaving one behind.
 cat > "$FAKEBIN/apex-task-test-window" <<EOF
 #!/usr/bin/env bash
 printf 'launched\n' >> "$LAUNCHES"
-sleep 600
+trap 'kill \$! 2>/dev/null; exit 0' TERM INT
+sleep 120 &
+wait
 EOF
 chmod +x "$FAKEBIN/apex-task-test-window"
-( cd "$WT" && exec "$FAKEBIN/apex-task-test-window" ) & WIN_PID=$!
+# Its file descriptors go to /dev/null, and that is not tidiness: a background
+# process that inherited this suite's stdout keeps the pipe open after the
+# script exits, so `./tests/test-apex-task.sh | grep …` never sees EOF and
+# hangs forever. Measured — it hung a verification run for ten minutes.
+( cd "$WT" && exec "$FAKEBIN/apex-task-test-window" ) >/dev/null 2>&1 & WIN_PID=$!
 trap 'kill "$WIN_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
 sleep 0.4
 
@@ -396,6 +408,27 @@ if printf '%s' "$out" | grep -qx "  apex project layout restore"; then
     ok "resume names the one command that reopens windows"
 else
     bad "resume names the one command that reopens windows" "$out"
+fi
+# The ordering assertion, repeated HERE because this is the first plan with
+# more than two steps in it. Mutation testing found that: moving the capsule
+# step off the end was invisible to the earlier check, where the plan was only
+# `cd` + `apex env enter` and the capsule step was last either way.
+steps=$(plan_steps "$out")
+n=$(printf '%s\n' "$steps" | grep -c .)
+if [ "$n" -ge 3 ]; then
+    ok "the plan now has $n steps, so the ordering assertion is not vacuous"
+else
+    bad "the plan has enough steps to order" "only $n: $steps"
+fi
+if [ "$(printf '%s\n' "$steps" | tail -1)" = "apex env enter fedora-build" ]; then
+    ok "entering the capsule is still last with a layout step in front of it"
+else
+    bad "entering the capsule is still last" "$steps"
+fi
+if [ "$(printf '%s\n' "$steps" | grep -n "^apex project layout restore$" | cut -d: -f1)" -lt "$n" ]; then
+    ok "the windows come back before the capsule shell opens"
+else
+    bad "the windows come back before the capsule shell opens" "$steps"
 fi
 # THE assertion. Reopening stays explicit; a resume that launched things would
 # put windows on the developer's desktop.
