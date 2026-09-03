@@ -83,6 +83,17 @@ impl Roots {
         Self { fixture: std::env::var_os("APEX_BOOT_ROOT").map(PathBuf::from) }
     }
 
+    /// A fixture root chosen by the caller rather than by `$APEX_BOOT_ROOT`.
+    ///
+    /// `apex recover status` (§19) reports the boot chain as one row of its
+    /// surface and reads it through [`chain_facts`], under its own fixture
+    /// variable. One reader, two callers — the alternative was a second
+    /// efivar decoder, and two of those disagree the first time one of them
+    /// is corrected.
+    fn from_path(fixture: Option<PathBuf>) -> Self {
+        Self { fixture }
+    }
+
     fn path(&self, absolute: &str) -> PathBuf {
         match &self.fixture {
             // `absolute` always starts with '/', so strip it before joining or
@@ -182,6 +193,58 @@ fn read_json_file(roots: &Roots, absolute: &str) -> (Option<Value>, Option<Strin
     }
 }
 
+/// Which loader ran this boot.
+///
+/// Extracted so `status` and §19's recovery surface cannot disagree about it.
+/// The answer decides more than a label: on GRUB, `systemd.unit=rescue.target`
+/// typed at the boot menu is a real recovery route, and on the opt-in UKI path
+/// it is not — a UKI's command line is inside the signed image and cannot be
+/// edited at the menu. A surface that claimed the route uniformly would be
+/// lying on exactly the machines that need it.
+fn detect_bootloader(cmdline: &str, loader_info: Option<&str>) -> &'static str {
+    if loader_info.is_some_and(|s| s.starts_with("systemd-boot")) {
+        return "systemd-boot";
+    }
+    // GRUB's BLS entries carry ostree=; this is the expected answer on every
+    // published APEX image.
+    if cmdline.contains("BOOT_IMAGE=") || cmdline.contains("ostree=") {
+        return "grub";
+    }
+    "unknown"
+}
+
+/// The boot-chain facts §19's recovery surface reports, from the same reads
+/// `apex boot status` uses.
+pub(crate) struct ChainFacts {
+    pub bootloader: &'static str,
+    /// `None` means the kernel exposed no `SecureBoot` variable at all — not a
+    /// UEFI boot. Reporting `false` there would claim a measurement nobody
+    /// took.
+    pub secure_boot: Option<bool>,
+    pub setup_mode: Option<bool>,
+    pub booted_from_uki: bool,
+    pub boot_counting: bool,
+}
+
+/// Read the boot chain under an explicit fixture root (or the real system when
+/// `fixture` is `None`). No subprocess: every value here is a file read, which
+/// is what lets `apex recover status` promise it spawns nothing.
+pub(crate) fn chain_facts(fixture: Option<PathBuf>) -> ChainFacts {
+    let roots = Roots::from_path(fixture);
+    let cmdline = roots
+        .read("/proc/cmdline")
+        .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+        .unwrap_or_default();
+    let loader_info = roots.efivar("LoaderInfo", LOADER_GUID);
+    ChainFacts {
+        bootloader: detect_bootloader(&cmdline, loader_info.as_deref()),
+        secure_boot: roots.efivar_bool("SecureBoot", GLOBAL_GUID),
+        setup_mode: roots.efivar_bool("SetupMode", GLOBAL_GUID),
+        booted_from_uki: roots.efivar("StubInfo", LOADER_GUID).is_some(),
+        boot_counting: roots.efivar("LoaderBootCountPath", LOADER_GUID).is_some(),
+    }
+}
+
 fn build_report(roots: &Roots) -> Value {
     let cmdline = roots
         .read("/proc/cmdline")
@@ -196,18 +259,7 @@ fn build_report(roots: &Roots) -> Value {
     let loader_info = roots.efivar("LoaderInfo", LOADER_GUID);
     let boot_count_path = roots.efivar("LoaderBootCountPath", LOADER_GUID);
 
-    let bootloader = if loader_info
-        .as_deref()
-        .is_some_and(|s| s.starts_with("systemd-boot"))
-    {
-        "systemd-boot"
-    } else if cmdline.contains("BOOT_IMAGE=") || cmdline.contains("ostree=") {
-        // GRUB's BLS entries carry ostree=; this is the expected answer on
-        // every published APEX image.
-        "grub"
-    } else {
-        "unknown"
-    };
+    let bootloader = detect_bootloader(&cmdline, loader_info.as_deref());
 
     let (entries, entries_error) = boot_entries(roots);
     let (health, health_error) = read_json_file(roots, "/var/lib/apex/boot/last-health.json");
