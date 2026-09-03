@@ -67,6 +67,33 @@ is the technical debt §17 names.
       points, crash isolation, `apex plugin` CLI, one real example plugin.
 - [ ] **5.5** Tests: shell CI invariants + an OS-side plugin suite.
 
+## PAUSED — 2026-09-03
+
+Andre paused the session. Every agent was stopped and every worktree swept, so
+**nothing is uncommitted and nothing is unpushed.** Two branches were caught
+mid-edit and checkpointed as `wip(...)` commits rather than losing the work;
+both say in their own commit message exactly what state they are in.
+
+Where each branch actually stands:
+
+| Branch | State |
+|--------|-------|
+| `p1/compositor-adapter` (apex-shell #8) | **done** — 5.1–5.3, CI green |
+| `p1/compositor-and-plugins` (apex-os #25) | **done** — 5.3 OS side, CI green |
+| `fix/mt7925-resume` (apex-os #26) | **done** — wifi fix, applied live and verified |
+| `p1/plugin-platform` (apex-shell) | substantial: manifest, permissions, loader, crash isolation, bar-widget point, example plugin. Not finished, no PR yet |
+| `p1/modes-and-workloads` | mode catalogue, workload signals, perf readers, then a `wip` commit — `cargo check` clean, verbs not all wired, nothing tested |
+| `p1/capsules-and-packages` | capsules + project binding landed; then a `wip` commit that **does not parse** — bash spliced into `apex-pkg` at line 124. Fix that first |
+| `p1/blueprint-and-sync` | schema, pure planner, `show`/`diff`/`init`. Clean tree. `apex sync` not started |
+
+Verified during the run and worth not re-doing: the seeded `rc.xml` passes
+`check-labwc-keybinds` against apex-shell **`main`** (not just against the local
+checkout), and the Katana build reached and PASSED that same check inside a real
+image build.
+
+Not reported before the stop: the adversarial review of 5.1–5.3, and whether the
+Katana build completed after step 81. The `core` build fix had nothing pushed.
+
 ## In flight — four parallel branches
 
 Andre asked for multiple agents, so phases 5.4, 6, 7 and 8 are being built
