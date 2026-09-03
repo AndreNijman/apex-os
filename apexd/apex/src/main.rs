@@ -205,6 +205,20 @@ enum Cmd {
         #[command(subcommand)]
         cmd: agent::AgentCmd,
     },
+    /// APEX Shell plugins: what is installed, and whether the shell will load it.
+    ///
+    /// The shell's plugin platform (§16) owns every rule about a manifest — the
+    /// permission vocabulary, which permissions apiVersion 1 will actually
+    /// grant, the import allowlist, the forbidden constructs. This command asks
+    /// that validator rather than reimplementing it, so a verdict here is the
+    /// verdict the shell will reach. If the shell is not installed, it refuses
+    /// instead of guessing.
+    ///
+    /// Unprivileged: plugins live in your own `~/.config/apex-shell/plugins`.
+    Plugin {
+        #[command(subcommand)]
+        cmd: PluginCmd,
+    },
     /// Projects, agent worktrees and checkpoints.
     Project {
         #[command(subcommand)]
@@ -506,6 +520,43 @@ enum EnvCmd {
     },
     /// The language table: which capsule provides what, and from which packages.
     Languages,
+}
+
+/// `apex plugin <verb>` — the OS side of §16's plugin platform.
+///
+/// A separate enum rather than an argument passthrough, for the same reason
+/// `EnvCmd` is one: `apex plugin --help` documents the real surface and a typo
+/// is caught before a process is spawned.
+#[derive(Subcommand)]
+enum PluginCmd {
+    /// Installed plugins, whether each one is valid, and why not.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// One plugin in full: its grant, its permissions, or its refusal reason.
+    Info {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Move a plugin into the directory the shell scans.
+    ///
+    /// The shell scans exactly one directory and has no allowlist file, so this
+    /// is a directory move — which is what actually takes effect against the
+    /// shipped shell. It takes effect at the next shell start; nothing here can
+    /// load a plugin into a running shell.
+    Enable {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Move a plugin out of the directory the shell scans.
+    ///
+    /// Nothing is deleted and no file is rewritten. The running shell keeps a
+    /// plugin it has already loaded until it restarts.
+    Disable {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -867,6 +918,7 @@ async fn main() {
             ops::pkg(&argv)
         }
         Cmd::Env { cmd } => ops::env(&env_argv(cmd)),
+        Cmd::Plugin { cmd } => ops::plugin(&plugin_argv(cmd)),
     };
     std::process::exit(code);
 }
@@ -985,6 +1037,21 @@ fn env_argv(cmd: EnvCmd) -> Vec<String> {
         EnvCmd::Exports { name } => vec!["exports".to_string(), name],
         EnvCmd::Provision { language } => vec!["provision".to_string(), language],
         EnvCmd::Languages => vec!["languages".to_string()],
+    }
+}
+
+fn plugin_argv(cmd: PluginCmd) -> Vec<String> {
+    match cmd {
+        PluginCmd::List { json } => {
+            let mut a = vec!["list".to_string()];
+            if json {
+                a.push("--json".to_string());
+            }
+            a
+        }
+        PluginCmd::Info { id } => vec!["info".to_string(), id],
+        PluginCmd::Enable { id } => vec!["enable".to_string(), id],
+        PluginCmd::Disable { id } => vec!["disable".to_string(), id],
     }
 }
 
@@ -2658,6 +2725,76 @@ mod tests {
         ] {
             assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
         }
+    }
+
+    // ── apex plugin (§16) ───────────────────────────────────────────────────
+
+    fn plugin(argv: &[&str]) -> Vec<String> {
+        match Cli::try_parse_from(argv).expect("parses").command {
+            Cmd::Plugin { cmd } => plugin_argv(cmd),
+            _ => panic!("not a plugin verb"),
+        }
+    }
+
+    #[test]
+    fn the_plugin_verbs_reach_the_helper_unchanged() {
+        assert_eq!(plugin(&["apex", "plugin", "list"]), vec!["list"]);
+        assert_eq!(
+            plugin(&["apex", "plugin", "list", "--json"]),
+            vec!["list", "--json"]
+        );
+        assert_eq!(
+            plugin(&["apex", "plugin", "info", "apex-worldclock"]),
+            vec!["info", "apex-worldclock"]
+        );
+        assert_eq!(
+            plugin(&["apex", "plugin", "enable", "apex-worldclock"]),
+            vec!["enable", "apex-worldclock"]
+        );
+        assert_eq!(
+            plugin(&["apex", "plugin", "disable", "apex-worldclock"]),
+            vec!["disable", "apex-worldclock"]
+        );
+    }
+
+    #[test]
+    fn a_plugin_id_is_passed_through_and_never_interpreted_here() {
+        // The id is validated by the helper — for path safety in shell, and
+        // against apex-shell's own `validId` through node. This side must not
+        // pre-filter it: a CLI that silently dropped or rewrote an id would
+        // make the helper's refusal unreachable, and the refusal is the thing
+        // that keeps a traversal out of a filesystem path.
+        assert_eq!(
+            plugin(&["apex", "plugin", "info", "../../etc/passwd"]),
+            vec!["info", "../../etc/passwd"]
+        );
+    }
+
+    #[test]
+    fn plugins_are_never_a_privileged_verb() {
+        // Every path `apex plugin` touches is under the invoking user's
+        // ~/.config/apex-shell, which is the directory APEX Shell itself
+        // reads. A root `apex plugin disable` would move root's plugins and
+        // leave the user's alone — a command that reports success and changes
+        // nothing the user can see.
+        for argv in [
+            vec!["apex", "plugin", "list"],
+            vec!["apex", "plugin", "info", "x"],
+            vec!["apex", "plugin", "enable", "x"],
+            vec!["apex", "plugin", "disable", "x"],
+        ] {
+            assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
+        }
+    }
+
+    #[test]
+    fn the_plugin_helper_is_an_absolute_path_in_libexec() {
+        // Not a PATH lookup. `apex plugin` drives a shipped program, and
+        // resolving it through PATH would let anything on the user's PATH
+        // answer for the shell's plugin rules.
+        assert!(ops::PLUGIN_ENGINE.starts_with('/'));
+        assert_ne!(ops::PLUGIN_ENGINE, ops::ENV_ENGINE);
+        assert_ne!(ops::PLUGIN_ENGINE, ops::PKG_ENGINE);
     }
 
     // ── apex env (§8 capsules) ──────────────────────────────────────────────

@@ -1,0 +1,480 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# apex-plugin — the OS-side CLI for APEX Shell's plugin platform (§16).
+#
+# WHY THIS EXISTS
+# apex-shell PR #9 shipped the platform: the manifest, the permission model,
+# the loader, crash isolation and the `bar-widget` extension point. It
+# deliberately left the OS-side CLI out. This is that CLI:
+#
+#     apex plugin list [--json]     what is installed, and whether it loads
+#     apex plugin info <id>         one plugin in full: grant, permissions, why
+#     apex plugin enable <id>       put it back where the shell looks
+#     apex plugin disable <id>      take it out of where the shell looks
+#
+# ── IT OWNS NO RULES ────────────────────────────────────────────────────────
+# Every decision about a manifest — the permission vocabulary, which
+# permissions apiVersion 1 will actually grant, the id and version charsets,
+# the API compatibility policy, the import allowlist, the forbidden constructs,
+# and the English for every refusal — belongs to
+# /usr/share/apex-shell/src/services/plugins/manifest.js, and this file asks
+# THAT FILE, through node, rather than reimplementing any of it. Two
+# implementations would drift, and the failure mode is a CLI that tells a user
+# their plugin is fine while the shell refuses it.
+#
+# So there is no manifest parsing here at all. What this file does is:
+#   * enumerate the plugin directory,
+#   * measure the four facts about a DIRECTORY that manifest.js cannot see
+#     (symlink present, how many .qml files, which one), and
+#   * move a directory in or out of the tree the shell scans.
+#
+# The four structural facts and their ordering are duplicated from
+# `PluginService.qml`, because they live in QML that bash cannot execute. That
+# is declared, it is the only duplication in this feature, and
+# tests/test-apex-plugin.sh FAILS if PluginService.qml grows a fifth structural
+# refusal or changes the fields its own scan emits.
+#
+# ── WHAT `disable` ACTUALLY DOES, AND WHY IT IS A MOVE ──────────────────────
+# The shell has no enabled/disabled concept. `PluginService.qml` discovers
+# plugins by scanning ONE directory — $HOME/.config/apex-shell/plugins — for
+# subdirectories containing a plugin.json, and it is the only reader of that
+# path in the whole shell. There is no allowlist file to edit and no IPC to
+# push a decision over.
+#
+# So `disable` moves the plugin directory to a SIBLING the shell does not scan,
+# $HOME/.config/apex-shell/plugins-disabled, and `enable` moves it back. That
+# takes effect against the shipped shell with no shell change at all, which a
+# state file this side invented would not: an `apex plugin disable` the shell
+# ignored would be a lie told by a command whose whole job is to be believed.
+#
+# A shell-side enabled list is the better long-term answer and is a §16
+# follow-up in apex-shell, not something this file can grant itself.
+#
+# ── NO FILE CONTENT IS EVER REWRITTEN ───────────────────────────────────────
+# This is a hard rule in the repo's AGENTS.md, added after a one-line regex
+# substitution deleted 217 of 256 lines from the developer's live
+# hyprland.conf. Everything under ~/.config belongs to the user.
+#
+# This file therefore never opens a config file for writing. `enable` and
+# `disable` are a single `mv` of a directory — the plugin's own manifest and
+# .qml are moved byte-for-byte and never read on the write path. There is no
+# substitution to get wrong, and the operation is its own inverse.
+#
+# What is asserted anyway, because "it is only a rename" is how the next
+# outage starts:
+#   * the source exists and the destination does not, BEFORE the move;
+#   * a plugin present in both trees is ambiguous and refused, not merged;
+#   * the file count under the directory is identical after the move;
+#   * the source is gone and the destination is there afterwards, so a
+#     half-completed move is reported rather than announced as success.
+# Nothing is ever deleted by any verb in this file.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+# ── paths ───────────────────────────────────────────────────────────────────
+# Read once, here, and never re-derived — the same rule apex-env states for
+# APEX_ENV_HOME, and for the same reason: a helper that recomputed a path from
+# $HOME would quietly operate on the real one while the caller believed it was
+# pointed somewhere else.
+#
+# NOT $XDG_CONFIG_HOME. `PluginService.qml` builds its path as
+# `Quickshell.env("HOME") + "/.config/apex-shell/plugins"`, so following the
+# base-directory spec here would make this CLI manage a directory the shell
+# does not read on any machine where XDG_CONFIG_HOME is set. Matching the shell
+# exactly is the whole point.
+HOME_DIR="${HOME:-/nonexistent}"
+PLUGIN_DIR="${APEX_PLUGIN_DIR:-${HOME_DIR}/.config/apex-shell/plugins}"
+DISABLED_DIR="${APEX_PLUGIN_DISABLED_DIR:-${HOME_DIR}/.config/apex-shell/plugins-disabled}"
+
+# The shell's own validator, and the shim that asks it. Overridable so the
+# suite can point at a checkout instead of the vendored copy.
+SHELL_DIR="${APEX_SHELL_DIR:-/usr/share/apex-shell}"
+MANIFEST_JS="${APEX_PLUGIN_MANIFEST_JS:-${SHELL_DIR}/src/services/plugins/manifest.js}"
+VERDICT_JS="${APEX_PLUGIN_VERDICT_JS:-/usr/libexec/apex-plugin-verdict.js}"
+NODE="${APEX_PLUGIN_NODE:-node}"
+
+msg()  { printf 'apex-plugin: %s\n' "$*" >&2; }
+warn() { printf 'apex-plugin: warning: %s\n' "$*" >&2; }
+die()  { printf 'apex-plugin: error: %s\n' "$*" >&2; exit 1; }
+
+# ── preflight ───────────────────────────────────────────────────────────────
+# A missing validator is a REFUSAL, never a fallback. The alternative — this
+# file guessing at a verdict when manifest.js is absent — is the two-answers
+# problem the whole design exists to avoid, and it would show up as a CLI that
+# quietly disagreed with the shell on exactly the machines where the shell was
+# not installed properly.
+require_validator() {
+    command -v "$NODE" >/dev/null 2>&1 || die \
+        "node is not available, and the plugin rules live in the shell's own JavaScript; nothing here can answer without it"
+    [ -f "$VERDICT_JS" ] || die "${VERDICT_JS} is missing; this install is incomplete"
+    [ -f "$MANIFEST_JS" ] || die \
+        "the shell's plugin validator is not at ${MANIFEST_JS}. APEX does not reimplement the plugin rules, so there is no verdict to give without it — check that /usr/share/apex-shell is a complete apex-shell checkout"
+}
+
+# ── ids ─────────────────────────────────────────────────────────────────────
+# The charset decision belongs to manifest.js (`validId`), so it is asked.
+#
+# The bash check below is NOT a second opinion about what an id is. It is a
+# path-safety assertion: this id is about to be interpolated into a filesystem
+# path, and a path separator or a leading dot must be impossible regardless of
+# what any validator thinks. Two locks on one door, in the order that matters —
+# the cheap structural one cannot be reached past, and the real rule is still
+# manifest.js's.
+valid_id_shape() {
+    [ -n "$1" ] || return 1
+    [ "${#1}" -le 64 ] || return 1
+    case "$1" in
+        */*|*\\*) return 1 ;;
+        .*)       return 1 ;;
+        -*)       return 1 ;;
+    esac
+    case "$1" in *..*) return 1 ;; esac
+    return 0
+}
+
+# The path-safety refusal on its own, with no validator involved.
+#
+# `enable` and `disable` use only this, deliberately. Moving a directory in or
+# out of the tree the shell scans is a filesystem operation, and requiring a
+# JavaScript runtime for it would mean that a machine with a broken shell
+# install cannot disable the plugin that is breaking it — which is exactly when
+# a user most needs to. The id still has to be one that cannot leave the plugin
+# directory, and that is what this checks.
+require_id_shape() {
+    valid_id_shape "$1" \
+        || die "'${1}' cannot be a plugin id: it would not stay inside the plugin directory"
+}
+
+# The full rule, for the verbs that exist to report a verdict. The charset
+# decision is manifest.js's `validId` and is asked, never reimplemented.
+require_id() {
+    local id="$1"
+    require_id_shape "$id"
+    "$NODE" "$VERDICT_JS" validid "$MANIFEST_JS" "$id" \
+        || die "'${id}' is not a valid plugin id (the shell's own rule: lowercase letters, digits and dashes, starting alphanumeric)"
+}
+
+# ── enumeration ─────────────────────────────────────────────────────────────
+# One tab-separated line per candidate directory:
+#
+#     <id>\t<qmlCount>\t<symlinkCount>\t<theOneQmlName>
+#
+# This mirrors `PluginService.qml`'s own `_scanScript` — the same four fields
+# in the same order — because those are the facts manifest.js cannot see and
+# the shell decides on. The symlink count is a SECURITY fact, not bookkeeping:
+# `files` is documented as read-only inside the plugin's own directory and
+# enforced textually, so a plugin shipping `data` as a symlink to $HOME turns
+# an approved relative path into a read of the user's documents. Only the
+# filesystem can see that, which is why it is counted at any depth rather than
+# checked per .qml.
+enumerate() {
+    local dir="$1" p id n only link
+    [ -d "$dir" ] || return 0
+    for p in "$dir"/*/; do
+        [ -d "$p" ] || continue
+        id=${p%/}; id=${id##*/}
+        [ -f "${p}plugin.json" ] || continue
+        n=0; only=
+        for q in "$p"*.qml; do
+            { [ -e "$q" ] || [ -L "$q" ]; } || continue
+            n=$((n+1)); only=${q##*/}
+        done
+        link=$(find "$p" -type l 2>/dev/null | wc -l)
+        printf '%s\t%s\t%s\t%s\n' "$id" "$n" "$link" "$only"
+    done
+}
+
+# One enumerated line, by id. `awk` with a literal field comparison rather than
+# a grep pattern: an id is user input on the `info`/`enable`/`disable` paths,
+# and a regex would give a metacharacter in it a meaning it must not have.
+line_for() {
+    local dir="$1" id="$2"
+    enumerate "$dir" | awk -F'\t' -v want="$id" '$1 == want { print; exit }'
+}
+
+# The shell's verdict for one enumerated line, as JSON.
+verdict_for() {
+    local dir="$1" id="$2" qml="$3" links="$4" name="$5"
+    "$NODE" "$VERDICT_JS" verdict "$MANIFEST_JS" "$dir" "$id" "$qml" "$links" "$name"
+}
+
+# Where a plugin of this id lives, and in which state. Prints "<state>\t<dir>"
+# or nothing.
+locate() {
+    local id="$1"
+    if [ -d "${PLUGIN_DIR}/${id}" ] && [ -d "${DISABLED_DIR}/${id}" ]; then
+        printf 'both\t\n'
+        return 0
+    fi
+    if [ -d "${PLUGIN_DIR}/${id}" ]; then
+        printf 'enabled\t%s\n' "${PLUGIN_DIR}/${id}"
+        return 0
+    fi
+    if [ -d "${DISABLED_DIR}/${id}" ]; then
+        printf 'disabled\t%s\n' "${DISABLED_DIR}/${id}"
+        return 0
+    fi
+    return 1
+}
+
+# ── verbs ───────────────────────────────────────────────────────────────────
+cmd_list() {
+    local json=0
+    [ "${1:-}" = --json ] && json=1
+    require_validator
+
+    local -a rows=()
+    local state root id qml links name v
+    for state in enabled disabled; do
+        case "$state" in
+            enabled)  root="$PLUGIN_DIR" ;;
+            *)        root="$DISABLED_DIR" ;;
+        esac
+        while IFS=$'\t' read -r id qml links name; do
+            [ -n "$id" ] || continue
+            v="$(verdict_for "${root}/${id}" "$id" "$qml" "$links" "$name")" || v=''
+            [ -n "$v" ] || v='{"ok":false,"reason":"load-error","detail":"the validator could not be run","describe":"the plugin failed to load"}'
+            rows+=("$(jq -c --arg state "$state" --arg id "$id" --arg dir "${root}/${id}" \
+                        '. + {state:$state, id:($id), directory:$dir}' <<<"$v")")
+        done < <(enumerate "$root")
+    done
+
+    if [ "$json" = 1 ]; then
+        if [ "${#rows[@]}" -eq 0 ]; then
+            printf '[]\n'
+        else
+            printf '%s\n' "${rows[@]}" | jq -s '.'
+        fi
+        return 0
+    fi
+
+    if [ "${#rows[@]}" -eq 0 ]; then
+        msg "no plugins installed — they go in ${PLUGIN_DIR}/<id>/"
+        return 0
+    fi
+    # VALID, not LOADED. A disabled plugin can be perfectly valid — this column
+    # is the shell's verdict on the files, not a statement that anything is
+    # running. Nothing in this CLI can see a live shell's loaded set.
+    printf '%-24s  %-8s  %-6s  %s\n' ID STATE VALID DETAIL
+    local r ok
+    for r in "${rows[@]}"; do
+        ok=$(jq -r '.ok' <<<"$r")
+        printf '%-24s  %-8s  %-6s  %s\n' \
+            "$(jq -r '.id' <<<"$r")" \
+            "$(jq -r '.state' <<<"$r")" \
+            "$([ "$ok" = true ] && printf 'yes' || printf 'NO')" \
+            "$(jq -r 'if .ok then ((.name // "") + " " + (.version // "")) else .describe end' <<<"$r")"
+    done
+}
+
+cmd_info() {
+    [ "$#" -ge 1 ] || die "usage: apex plugin info <id>"
+    require_validator
+    local id="$1"
+    require_id "$id"
+
+    local found state dir
+    found="$(locate "$id")" \
+        || die "no plugin called '${id}' in ${PLUGIN_DIR} or ${DISABLED_DIR} (apex plugin list)"
+    IFS=$'\t' read -r state dir <<<"$found"
+    [ "$state" = both ] && die \
+        "'${id}' exists in BOTH ${PLUGIN_DIR} and ${DISABLED_DIR}; APEX will not guess which one is real — remove or rename one of them"
+
+    local line qml links name
+    line="$(line_for "$(dirname "$dir")" "$id")"
+    if [ -z "$line" ]; then
+        die "'${id}' is a directory with no plugin.json in it, so the shell would not see it at all"
+    fi
+    IFS=$'\t' read -r _ qml links name <<<"$line"
+
+    local v
+    v="$(verdict_for "$dir" "$id" "$qml" "$links" "$name")" \
+        || die "the shell's validator could not be run"
+
+    printf 'id           %s\n' "$id"
+    printf 'state        %s\n' "$state"
+    printf 'directory    %s\n' "$dir"
+    if [ "$(jq -r '.ok' <<<"$v")" = true ]; then
+        printf 'loads        yes\n'
+        printf 'name         %s\n' "$(jq -r '.name' <<<"$v")"
+        printf 'version      %s\n' "$(jq -r '.version' <<<"$v")"
+        printf 'api          %s (this shell implements %s)\n' \
+            "$(jq -r '.apiVersion' <<<"$v")" "$(jq -r '.hostApiVersion' <<<"$v")"
+        printf 'entry        %s\n' "$(jq -r '.entry' <<<"$v")"
+        printf 'point        %s\n' "$(jq -r '.extensionPoint' <<<"$v")"
+        printf 'permissions  %s\n' "$(jq -r 'if (.permissions | length) == 0 then "none" else (.permissions | join(" ")) end' <<<"$v")"
+        local hosts desc
+        hosts="$(jq -r '.networkHosts | join(" ")' <<<"$v")"
+        if [ -n "$hosts" ]; then printf 'network      %s\n' "$hosts"; fi
+        desc="$(jq -r '.description' <<<"$v")"
+        if [ -n "$desc" ]; then printf 'description  %s\n' "$desc"; fi
+        # The distinction the shell makes by refusing at load rather than
+        # granting silently: a permission that is in the vocabulary and cannot
+        # be enforced is not offered at all, because a permission field that
+        # grants nothing still reads — to the author and to whoever reviews
+        # what a plugin asked for — as a capability somebody approved. Both
+        # lists come from manifest.js; this only subtracts them.
+        printf 'unenforceable %s\n' \
+            "$(jq -r '(.allPermissions - .implementedPermissions) | join(" ")' <<<"$v")"
+    else
+        printf 'loads        NO\n'
+        printf 'reason       %s\n' "$(jq -r '.reason' <<<"$v")"
+        printf 'why          %s\n' "$(jq -r '.describe' <<<"$v")"
+    fi
+    # Said every time, not only when something is wrong: a permission model
+    # that reads as stronger than it is does more harm than none at all.
+    printf '\n'
+    printf 'QML plugins run in-process in the shell. The permission model gates the\n'
+    printf 'API and the load-time scan defends the API monopoly; neither one confines\n'
+    printf 'hostile code. Install plugins you would run as yourself.\n'
+}
+
+# How many files are under a directory. The "shape did not change" check for a
+# move: a rename must carry every file across, and a rename that half-happened
+# has to be reported rather than announced as success.
+count_files() {
+    find "$1" -mindepth 1 2>/dev/null | wc -l
+}
+
+# The one write path in this file, and it writes no file CONTENT — it renames a
+# directory. See the header for why that is the mechanism and for the rule it
+# is complying with.
+move_plugin() {
+    local id="$1" from="$2" to_dir="$3" verb="$4"
+    local to="${to_dir}/${id}"
+
+    [ -d "$from" ] || die "'${id}' is not in ${from%/*}"
+    if [ -e "$to" ]; then
+        die "'${to}' already exists; APEX will not overwrite it"
+    fi
+
+    local before after
+    before="$(count_files "$from")"
+    if [ "$before" -eq 0 ]; then
+        die "'${from}' is empty; refusing to ${verb} something with no files in it"
+    fi
+
+    mkdir -p "$to_dir" || die "cannot create ${to_dir}"
+    mv -- "$from" "$to" || die "cannot ${verb} '${id}': the move failed"
+
+    # Assert the shape, in both directions. A rename that lost files, or one
+    # that left the original behind, must be a failure and not a message.
+    after="$(count_files "$to")"
+    if [ "$after" != "$before" ]; then
+        die "'${id}' had ${before} files and now has ${after}; the move did not carry everything and NOTHING has been deleted — inspect ${to} and ${from}"
+    fi
+    if [ -e "$from" ]; then
+        die "'${id}' was copied to ${to} but ${from} is still there; the move only half happened"
+    fi
+    printf '%s\n' "$after"
+}
+
+cmd_disable() {
+    [ "$#" -ge 1 ] || die "usage: apex plugin disable <id>"
+    local id="$1"
+    # No validator. See require_id_shape(): taking a plugin out of the shell's
+    # reach must work on a machine whose shell install is broken, because that
+    # is when it is most needed.
+    require_id_shape "$id"
+
+    if [ -d "${DISABLED_DIR}/${id}" ] && [ ! -d "${PLUGIN_DIR}/${id}" ]; then
+        msg "'${id}' is already disabled"
+        return 0
+    fi
+    [ -d "${PLUGIN_DIR}/${id}" ] || die "no plugin called '${id}' in ${PLUGIN_DIR}"
+    if [ -d "${DISABLED_DIR}/${id}" ]; then
+        die "'${id}' exists in BOTH ${PLUGIN_DIR} and ${DISABLED_DIR}; APEX will not guess which one is real"
+    fi
+
+    local n
+    n="$(move_plugin "$id" "${PLUGIN_DIR}/${id}" "$DISABLED_DIR" disable)" || exit 1
+    msg "'${id}' is disabled: its ${n} files moved to ${DISABLED_DIR}/${id}, which the shell does not scan"
+    # Said plainly rather than implied. PluginService scans once, at
+    # construction, and there is deliberately no timer and no IPC to push a
+    # rescan over — so a running shell keeps the plugin it already loaded.
+    msg "the running shell keeps it until the shell restarts; nothing here can unload a plugin from a live shell"
+}
+
+cmd_enable() {
+    [ "$#" -ge 1 ] || die "usage: apex plugin enable <id>"
+    local id="$1"
+    require_id_shape "$id"
+
+    if [ -d "${PLUGIN_DIR}/${id}" ] && [ ! -d "${DISABLED_DIR}/${id}" ]; then
+        msg "'${id}' is already enabled"
+        return 0
+    fi
+    [ -d "${DISABLED_DIR}/${id}" ] || die "no disabled plugin called '${id}' in ${DISABLED_DIR}"
+    if [ -d "${PLUGIN_DIR}/${id}" ]; then
+        die "'${id}' exists in BOTH ${PLUGIN_DIR} and ${DISABLED_DIR}; APEX will not guess which one is real"
+    fi
+
+    local n
+    n="$(move_plugin "$id" "${DISABLED_DIR}/${id}" "$PLUGIN_DIR" enable)" || exit 1
+    msg "'${id}' is enabled: its ${n} files moved to ${PLUGIN_DIR}/${id}"
+
+    # Enabling a plugin the shell will refuse is not an error — the user may be
+    # about to fix it — but reporting it as done without saying so would be the
+    # "reports success having changed nothing useful" case apexd/AGENTS.md
+    # forbids. So the verdict is re-measured and stated.
+    #
+    # The move above has already happened, so a missing validator here is a
+    # missing REPORT, not a failed operation. Said as "unknown" rather than
+    # guessed: this file has no opinion of its own about a manifest.
+    local line qml links name v
+    line="$(line_for "$PLUGIN_DIR" "$id")"
+    if [ -z "$line" ]; then
+        warn "'${id}' has no plugin.json, so the shell will not see it at all"
+        return 0
+    fi
+    if ! command -v "$NODE" >/dev/null 2>&1 || [ ! -f "$MANIFEST_JS" ]; then
+        warn "whether the shell will accept it is unknown here: its validator is not at ${MANIFEST_JS}"
+        return 0
+    fi
+    IFS=$'\t' read -r _ qml links name <<<"$line"
+    v="$(verdict_for "${PLUGIN_DIR}/${id}" "$id" "$qml" "$links" "$name")" || return 0
+    if [ "$(jq -r '.ok' <<<"$v")" = true ]; then
+        msg "the shell will load it at the next start"
+    else
+        warn "the shell will still REFUSE it: $(jq -r '.describe' <<<"$v")"
+    fi
+}
+
+usage() {
+    cat <<'EOF'
+usage: apex-plugin <command> [args]
+
+  list [--json]        installed plugins, whether each one loads, and why not
+  info <id>            one plugin in full: grant, permissions, refusal reason
+  enable <id>          move it into the directory the shell scans
+  disable <id>         move it out of the directory the shell scans
+
+Plugins live in ~/.config/apex-shell/plugins/<id>/, one plugin.json and one
+.qml per plugin. Disabling moves the directory to ~/.config/apex-shell/
+plugins-disabled/<id>/ — the shell scans exactly one directory and has no
+allowlist file, so moving it is what actually takes effect. Nothing is ever
+deleted and no file is ever rewritten.
+
+Every verdict comes from the shell's own validator,
+/usr/share/apex-shell/src/services/plugins/manifest.js. APEX does not
+reimplement the plugin rules, so if that file is missing this command refuses
+rather than guessing.
+
+QML plugins run in-process in the shell. The permission model gates the API and
+the load-time scan defends the API monopoly; neither one confines hostile code.
+EOF
+}
+
+main() {
+    local cmd="${1:-}"; shift || true
+    case "$cmd" in
+        list)    cmd_list "$@" ;;
+        info)    cmd_info "$@" ;;
+        enable)  cmd_enable "$@" ;;
+        disable) cmd_disable "$@" ;;
+        ""|-h|--help|help) usage ;;
+        *) die "unknown command '$cmd' (try --help)" ;;
+    esac
+}
+
+main "$@"
