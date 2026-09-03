@@ -90,3 +90,83 @@ irreversible.
 | 15.x §15 unified search and command surface | not started |
 | 19.x §19 recovery, repair, disposable execution | not started |
 | 21.x §21 the Task concept | not started |
+
+## The UI mismatch had one cause, and it was measurable
+
+Andre reported that the Agent tab "didn't match apex shell at all". That turned
+out to be a single systematic error rather than a matter of taste.
+
+`Theme` exposes two scalers, and they are not interchangeable:
+
+```
+px(v) = Math.round(v * scale)
+fs(v) = Math.max(7, Math.round(v * scale))     <- text legibility floor
+```
+
+The floor exists because text below about 7px is illegible at any DPI. It is
+correct for a font size and **wrong for everything else**, because it silently
+clamps small geometric values up to 7.
+
+Every geometric property in the Agent Center used `fs()` — 42 call sites across
+seven files. Sixteen were under the floor:
+
+| written | rendered | error |
+| --- | --- | --- |
+| `spacing: Theme.fs(2)` | 7px | 3.5× too loose |
+| `spacing: Theme.fs(3)` | 7px | 2.3× |
+| `leftMargin: Theme.fs(4)` | 7px | 1.75× |
+| `radius: Theme.fs(3)` | 7px | 2.3× too round |
+| `radius: Theme.fs(5)`, `fs(6)` | 7px | — |
+
+So the tab's spacing rhythm and corner radii matched nothing else in the shell.
+Nothing was broken, every test passed, and no check looked: the wrong function
+was simply being called.
+
+**It was also spreading.** The remote-agents section added hours earlier copied
+the surrounding idiom and contributed twelve of the 42. A wrong local convention
+reproduces itself, which is the argument for a check rather than a one-off fix.
+
+Fixed in apex-shell `ad53f5d` on `p2/remote-agent-status` (PR #15). All 32
+`font.pixelSize` calls still use `fs()`, asserted during the conversion rather
+than assumed.
+
+`tests/check-scale-tokens.sh` prevents recurrence — 5 assertions, wired into
+`ci.yml`, anchored to a property assignment so prose cannot satisfy it, and
+self-testing in both directions. Its strongest control is not a synthetic
+mutant: **run against the tree as it was before the fix, it fails.**
+
+### The polish debt that remains, measured
+
+**66 hardcoded hex colours** in QML outside `src/theme/`. Worst: `UpdatePopup`
+8, `KanbanBoard` 6, `CenterContent` 6, `KeybindsPage` 4, `BatteryStatus` 4.
+
+For contrast, the discipline that *is* fully applied: **zero** raw
+`font.pixelSize` literals in the whole tree. The codebase can hold a standard;
+colour simply never got one.
+
+Delegated with the instruction that this is judgement rather than
+find-and-replace — a literal mapped onto a token that merely looks similar
+today produces a shell that breaks the moment the palette changes, which is
+worse than the literal because the mistake is invisible.
+
+## The endgame, and the authorization for it
+
+Andre has now authorized what was held back all session: **when everything is
+complete, merge everything and kick off the real final image build.**
+
+Merge order, and why:
+
+1. **apex-shell first.** PR #15 (P2 §20 + the scaler fix), then the P3 shell
+   branches. apex-shell has no image build of its own, and `Containerfile.base`
+   resolves the shell by `git ls-remote refs/heads/main` **at build time** — so
+   the shell must be on `main` before the OS build starts, or the image vendors
+   a shell without this work.
+2. **apex-os P1 #35**, then **P2 #36**, then P3. P2 branched from P1 and P3 from
+   P2, so this is the order they were built in.
+3. `build-image.yml` fires on push to `main` for paths
+   `Containerfile*|files/**|apexd/**|config/**|kernel/**|.github/**`. So
+   **merging to `main` IS the final build** — no separate dispatch needed.
+
+Before merging, honestly: every suite green, `cargo clippy --all-targets
+--locked -- -D warnings` clean, shellcheck clean, and nothing that opens a
+window on his desktop. Do not merge red.
