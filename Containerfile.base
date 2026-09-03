@@ -874,6 +874,13 @@ COPY files/system/units/apex-flathub-setup.service \
 # them. The assertion below is the part that matters — a Flatpak's exported
 # .desktop can win the http/https handler depending on XDG data directory
 # ordering, which would make Zen the default by accident on every machine.
+# SUPER+W opens the DEFAULT browser, not a named one. `$browser = firefox` in
+# hyprland.conf meant the keybind contradicted the user's own setting the moment
+# a second browser existed — which shipping Zen guarantees. The helper resolves
+# the http/https handler at press time, so it follows the user to any browser,
+# including ones APEX has never heard of.
+COPY --chmod=0755 files/system/libexec/apex-open-browser \
+     /usr/libexec/apex-open-browser
 COPY files/system/units/apex-flatpak-preinstall.service \
      /usr/lib/systemd/system/apex-flatpak-preinstall.service
 RUN set -eux; \
@@ -891,7 +898,16 @@ RUN set -eux; \
     # And Zen must not be shipped a second time as a system .desktop, which
     # would put it in the handler race at build time rather than at install.
     test ! -e /usr/share/applications/app.zen_browser.zen.desktop; \
-    echo "zen: first-boot flatpak; firefox keeps the web handlers"
+    # The browser keybind must name no browser. A regression here is invisible
+    # until someone changes their default and wonders why SUPER+W ignores it.
+    test -x /usr/libexec/apex-open-browser; \
+    bash -n /usr/libexec/apex-open-browser; \
+    grep -q '^\$browser     = /usr/libexec/apex-open-browser$' \
+        /usr/share/apex/hypr/hyprland.conf \
+        || grep -q 'browser.*= /usr/libexec/apex-open-browser' \
+           /usr/share/apex/hypr/hyprland.conf; \
+    ! grep -qE '^\$browser\s*=\s*(firefox|zen)' /usr/share/apex/hypr/hyprland.conf; \
+    echo "zen: first-boot flatpak; firefox keeps the web handlers; SUPER+W follows the default"
 
 # The whole apex-greet tree lands at /usr/share/apex-greet so the QML's
 # Qt.resolvedUrl("assets/…") resolves in place; the wallpaper is dropped where

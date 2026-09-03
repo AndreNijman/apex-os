@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Open the user's DEFAULT web browser — whichever one that is.
+#
+# WHY THIS EXISTS
+#
+# SUPER+W was `exec firefox`, via `$browser = firefox` in hyprland.conf. So
+# installing another browser and making it your default changed everything
+# except the one key you press to open a browser. Once APEX started shipping two
+# browsers that stopped being a rough edge and became a wrong answer: the
+# keybind contradicted the setting.
+#
+# The fix is not "make it zen". It is to stop naming a browser at all, so the
+# keybind follows the user wherever they go — Zen, Chromium, Brave, a browser
+# APEX has never heard of.
+#
+#     apex-open-browser [URL...]
+#
+# With no argument it opens the browser's own start page. With arguments it
+# passes them through, so this doubles as a URL opener.
+#
+# WHY NOT JUST `xdg-open`
+#
+# `xdg-open` needs something to open. `xdg-open ""` is an error and
+# `xdg-open about:blank` hands the browser a URL the user did not ask for, which
+# on some browsers replaces the configured start page and on others opens a
+# blank tab instead of the homepage. Resolving the handler and launching the
+# application directly gives the browser its normal no-argument startup.
+set -uo pipefail
+
+log() { printf 'apex-open-browser: %s\n' "$*" >&2; }
+
+# Every place a .desktop can live, in the order XDG resolves them: user first,
+# then Flatpak exports (a Flatpak browser like Zen lives ONLY here — miss this
+# and the helper silently falls through to a system browser), then system.
+desktop_dirs() {
+    printf '%s\n' \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/applications" \
+        "$HOME/.local/share/flatpak/exports/share/applications" \
+        /var/lib/flatpak/exports/share/applications \
+        /usr/local/share/applications \
+        /usr/share/applications
+}
+
+find_desktop() {
+    local id="$1" dir
+    while IFS= read -r dir; do
+        [ -f "${dir}/${id}" ] && { printf '%s' "${dir}/${id}"; return 0; }
+    done < <(desktop_dirs)
+    return 1
+}
+
+launch_desktop() {
+    local path="$1"; shift
+    # `gio launch` takes a path and is present wherever glib is, which on this
+    # image is always. gtk-launch takes an id and is the fallback.
+    if command -v gio >/dev/null 2>&1; then
+        exec gio launch "$path" "$@"
+    fi
+    if command -v gtk-launch >/dev/null 2>&1; then
+        exec gtk-launch "$(basename "$path")" "$@"
+    fi
+    return 1
+}
+
+# ── 1. Ask what the default is ──────────────────────────────────────────────
+# xdg-settings is the canonical question and reads the same mimeapps.list chain
+# the desktop uses, so a browser that set itself default from its own settings
+# UI is honoured here.
+id=""
+if command -v xdg-settings >/dev/null 2>&1; then
+    id="$(xdg-settings get default-web-browser 2>/dev/null | tr -d '[:space:]')"
+fi
+# Second opinion: the http handler. xdg-settings can come back empty on a
+# minimal session while the mime association is perfectly well set.
+if [ -z "$id" ] && command -v xdg-mime >/dev/null 2>&1; then
+    id="$(xdg-mime query default x-scheme-handler/https 2>/dev/null \
+          | tr -d '[:space:]' | cut -d';' -f1)"
+fi
+
+if [ -n "$id" ]; then
+    if path="$(find_desktop "$id")"; then
+        launch_desktop "$path" "$@" || log "could not launch ${id}"
+    else
+        # A stale mimeapps entry naming an uninstalled browser. Do not stop
+        # here: falling through to something that exists is better than doing
+        # nothing when a key is pressed.
+        log "default browser ${id} is set but its .desktop was not found"
+    fi
+fi
+
+# ── 2. Nothing set, or what was set is gone ─────────────────────────────────
+# Try the browsers this image might carry, then anything at all that declares
+# itself a web browser. Firefox first because it is the image default.
+for cand in org.mozilla.firefox.desktop firefox.desktop \
+            app.zen_browser.zen.desktop zen.desktop \
+            chromium-browser.desktop chromium.desktop \
+            google-chrome.desktop com.brave.Browser.desktop; do
+    if path="$(find_desktop "$cand")"; then
+        log "no usable default; falling back to ${cand}"
+        launch_desktop "$path" "$@" || true
+    fi
+done
+
+# ── 3. Last resort: a browser binary on PATH ────────────────────────────────
+for bin in firefox zen-browser zen chromium chromium-browser google-chrome brave; do
+    if command -v "$bin" >/dev/null 2>&1; then
+        log "no .desktop found; execing ${bin}"
+        exec "$bin" "$@"
+    fi
+done
+
+log "no web browser found on this system"
+exit 1
