@@ -1112,6 +1112,11 @@ cmd_install() {
     fi
 
     if [ "${#names[@]}" -gt 0 ]; then
+        # Declared out here, not inside the arms. `local` in a case arm only
+        # takes effect if that arm runs, so `id` assigned in the "" arm below
+        # would otherwise leak into the global scope of a script running as
+        # root.
+        local n id curated forced
         case "$SOURCE" in
             capsule)
                 # Returns; a capsule install touches neither the extension nor
@@ -1120,7 +1125,6 @@ cmd_install() {
                 return $?
                 ;;
             flatpak)
-                local n id
                 local -a resolved=()
                 for n in "${names[@]}"; do
                     id="$(first_flatpak_id "$n")" \
@@ -1137,7 +1141,6 @@ cmd_install() {
                 # can move a bare name off the repository route is the curated
                 # table — which then has to say why, on the spot.
                 local -a kept=()
-                local curated forced
                 for n in "${names[@]}"; do
                     if curated="$(curated_source "$n")"; then
                         forced="${curated%%|*}"
