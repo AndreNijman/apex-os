@@ -561,7 +561,7 @@ jobs:
       # what the vendor step clones — the documented merge order (the shell
       # lands before or with the OS) doing its job, exactly as it did for 5.3's
       # keybind suite on PRs #27 and #28. The suite reports it as ONE labelled
-      # assertion naming PR #9 and still runs its other 61, rather than
+      # assertion naming PR #9 and still runs its other 62, rather than
       # refusing at the top and reporting passed=0 with a red tick.
       #
       # WHY IT IS THE LAST STEP: a failed step skips every step BELOW it in the
