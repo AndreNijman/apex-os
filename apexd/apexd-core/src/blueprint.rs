@@ -356,10 +356,6 @@ impl Blueprint {
     }
 
     /// The Flatpak ids in `[apps] install`.
-    ///
-    /// Same rule as the shipped package engine: an argument with at least two
-    /// dots and no path separator is a reverse-DNS application id. Kept as one
-    /// function so the CLI cannot classify differently from the planner.
     pub fn flatpak_ids(&self) -> Vec<String> {
         self.apps
             .install
@@ -399,8 +395,28 @@ pub fn compositor_for_session(session: &str) -> Option<&'static str> {
 }
 
 /// Whether an `[apps] install` entry is a Flatpak application id.
+///
+/// This is the shipped package engine's rule, transcribed: `apex-pkg`'s
+/// `is_flatpak_id` is
+///
+/// ```text
+/// [[ "$1" =~ ^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z][A-Za-z0-9_-]*){2,}$ ]]
+/// ```
+///
+/// — three or more dot-separated segments, each starting with a letter. The
+/// planner has to classify independently (it compares against `flatpak list`
+/// and against the engine's requested list, which are different sources), but
+/// it must not classify *differently*, or a blueprint would report an app as
+/// missing forever while the engine kept installing it somewhere else.
+/// `tests/test-apex-blueprint.sh` asserts the two agree on the same inputs.
 pub fn is_flatpak_id(name: &str) -> bool {
-    !name.contains('/') && name.matches('.').count() >= 2
+    let segments: Vec<&str> = name.split('.').collect();
+    segments.len() >= 3
+        && segments.iter().all(|s| {
+            let mut chars = s.chars();
+            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+                && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        })
 }
 
 /// Why an application name is unacceptable, if it is.
@@ -424,6 +440,19 @@ fn check_app_name(name: &str) -> Result<(), String> {
     }
     if name.starts_with('.') {
         return Err("starts with '.'".into());
+    }
+    if name.ends_with(".rpm") {
+        // `apex install ./foo.rpm` is a real and supported thing; a blueprint
+        // entry is not the place for it. The whole value of the file is that
+        // it reproduces on another machine, and a local .rpm is exactly the
+        // input that does not travel — the other machine has no such file, and
+        // `sync` cannot carry a binary.
+        return Err(
+            "names a local .rpm; a blueprint must reproduce on another machine, so use \
+             `apex install ./file.rpm` for that and keep the blueprint to repository \
+             packages and Flatpak ids"
+                .into(),
+        );
     }
     if let Some(bad) = name
         .chars()
@@ -655,12 +684,20 @@ pub fn plan(bp: &Blueprint, obs: &Observed) -> Plan {
                 // `apex-session-select` validates against the shipped
                 // .desktop files and would refuse. Say so here instead of
                 // planning a step that is guaranteed to fail.
-                let installed = obs.sessions_available.iter().any(|s| s == session);
                 let (step, blocked) = if obs.sessions_available.is_empty() {
-                    // No session directory at all: a container or a dev box.
-                    // Plan the step; the converger reports the refusal.
-                    (Some(Step::SelectSession { session: session.into() }), None)
-                } else if installed {
+                    // No /usr/share/wayland-sessions at all: a container, a CI
+                    // runner, a development checkout. Planning a step here
+                    // would guarantee a failure, because apex-session-select
+                    // validates against the very list that is empty.
+                    (
+                        None,
+                        Some(
+                            "no Wayland sessions are installed; this is not an APEX \
+                             desktop, so the greeter has nothing to preselect"
+                                .to_string(),
+                        ),
+                    )
+                } else if obs.sessions_available.iter().any(|s| s == session) {
                     (Some(Step::SelectSession { session: session.into() }), None)
                 } else {
                     (
@@ -1094,6 +1131,10 @@ enabled = true
             "$(id)",
             ".hidden",
             "",
+            // A local file is supported by `apex install` and meaningless in a
+            // blueprint, which has to reproduce on a machine that does not
+            // have the file.
+            "some-vendor-driver.rpm",
         ] {
             let text = format!("[apps]\ninstall = [{bad:?}]\n");
             assert!(
@@ -1114,6 +1155,48 @@ enabled = true
         .unwrap();
         assert_eq!(bp.flatpak_ids(), ["org.gimp.GIMP", "com.valvesoftware.Steam"]);
         assert_eq!(bp.package_names(), ["firefox", "python3-pip"]);
+    }
+
+    #[test]
+    fn the_flatpak_rule_matches_the_shipped_engines_exactly() {
+        // apex-pkg's regex is ^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z][A-Za-z0-9_-]*){2,}$
+        // and its comment names the two RPM shapes that must NOT match. If this
+        // drifts, a blueprint reports an application as missing forever while
+        // the engine keeps installing it from the other source.
+        for yes in [
+            "org.gimp.GIMP",
+            "io.github.foo.Bar",
+            "com.valvesoftware.Steam",
+            "md.obsidian.Obsidian",
+        ] {
+            assert!(is_flatpak_id(yes), "{yes} is a Flatpak id");
+        }
+        for no in [
+            "firefox",
+            "python3.12",         // two segments
+            "java-1.8.0-openjdk", // segments starting with digits
+            "gcc-c++",
+            "NetworkManager-tui",
+            "a.b",
+        ] {
+            assert!(!is_flatpak_id(no), "{no} is not a Flatpak id");
+        }
+    }
+
+    #[test]
+    fn a_machine_with_no_sessions_blocks_rather_than_planning_a_doomed_step() {
+        // A container, a CI runner, a checkout. apex-session-select validates
+        // against the list that is empty here, so a planned step could only
+        // fail; say why instead.
+        let bp = Blueprint::parse("[desktop]\ncompositor = \"niri\"\n").unwrap();
+        let p = plan(&bp, &Observed::default());
+        assert_eq!(p.changes.len(), 1);
+        assert!(p.changes[0].step.is_none());
+        assert!(p.changes[0]
+            .blocked
+            .as_deref()
+            .unwrap()
+            .contains("not an APEX desktop"));
     }
 
     #[test]
