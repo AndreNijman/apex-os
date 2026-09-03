@@ -66,6 +66,37 @@ else
 fi
 bash -n "${power}"
 
+# PowerControl.sh and DpmsControl.sh SOURCE src/scripts/compositor.sh, and every
+# action in both runs through its apex_run(). A tree carrying the source line
+# without the file has a power menu where nothing works at all — worse than the
+# labwc no-ops the adapter was added to fix, and nothing else here would notice,
+# because every check above names PowerControl.sh alone.
+#
+# Keyed on the source line rather than the words "compositor.sh": both scripts
+# discuss the adapter in comments, and a check a comment can satisfy is a check
+# this repo has already shipped five times.
+adapter="${dest}/src/scripts/compositor.sh"
+if grep -qE '^[[:space:]]*\.[[:space:]].*compositor\.sh' "${power}"; then
+    test -s "${adapter}" || {
+        echo "FATAL: PowerControl.sh sources compositor.sh but the checkout has no such file" >&2
+        exit 1
+    }
+    bash -n "${adapter}"
+    grep -qE '^apex_run\(\)' "${adapter}" || {
+        echo "FATAL: compositor.sh defines no apex_run; every power-menu action would call an undefined function" >&2
+        exit 1
+    }
+    grep -qE '^[[:space:]]*\.[[:space:]].*compositor\.sh' "${dest}/src/scripts/DpmsControl.sh" || {
+        echo "FATAL: DpmsControl.sh does not use the compositor adapter; idle screen-off would be compositor-blind again" >&2
+        exit 1
+    }
+elif [[ "${strict}" = 1 ]]; then
+    echo "FATAL: this apex-shell ref predates src/scripts/compositor.sh; labwc has no Log Out and no idle screen-off" >&2
+    exit 1
+else
+    echo "WARN: shell predates src/scripts/compositor.sh; the labwc session has no Log Out and no idle screen-off"
+fi
+
 # The image intentionally drops .git; keep the version field functional.
 misc="${dest}/src/services/config_tab/pages/MiscPage.qml"
 if grep -q 'describe --tags --always 2>/dev/null' "${misc}"; then
