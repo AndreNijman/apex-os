@@ -240,6 +240,28 @@ pub const IDLE_TIMEOUT_BATTERY_SECS: u64 = 60;
 /// because that machine runs its desktop on the Alder Lake iGPU; a single-GPU
 /// machine's compositor, browser and shell hold far more, and the reserve is
 /// sized for that case rather than for the measurement that flatters it.
+///
+/// ── STATED LIMITATION: this is wrong for an APU, conservatively ────────────
+///
+/// Measured on the developer's laptop, an AMD APU with no discrete card:
+/// `device 0 card1 — 1024 MiB total, 818 used, 0 spendable`. The reserve
+/// consumed what was left of a 1 GiB carveout and [`select_backend`] correctly
+/// fell through to [`Backend::Cpu`].
+///
+/// "Correctly" is doing some work there. On an APU, VRAM *is* system RAM:
+/// `mem_info_vram_total` reports only the BIOS carveout, and a runtime can
+/// allocate far beyond it through GTT. So a 32 GiB APU that could hold a large
+/// model is reported as having a gigabyte, and this planner declines to offload
+/// to it. The failure direction is the safe one — CPU inference on an APU is
+/// most of the speed anyway, because both paths share one memory bus — but it
+/// is a real underestimate and it is recorded rather than papered over.
+///
+/// Fixing it properly needs GTT accounting, which sysfs does not expose in any
+/// portable shape (`mem_info_gtt_total` exists on amdgpu but means something
+/// different again, and there is no i915/xe equivalent). Guessing "APU
+/// therefore system RAM" from a missing discrete card would be exactly the
+/// confident wrong number this module refuses elsewhere, so the honest move is
+/// to under-promise and say so.
 pub const VRAM_RESERVE_MIB: u64 = 512;
 
 /// Fixed VRAM cost of having a backend at all, in MiB: the driver context,

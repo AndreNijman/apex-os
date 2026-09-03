@@ -158,6 +158,21 @@ pub enum AiCmd {
     /// load again. `apex ai status` says when it will unload.
     Run(RunArgs),
 
+    /// Stop the resident model and release its VRAM now.
+    ///
+    /// The service unloads on its own timer — see `apex ai status` for the
+    /// timeout in force — so this exists for the case the timer cannot serve:
+    /// you want the VRAM back *now*, before starting a game or a render.
+    ///
+    /// It refuses while a client is attached rather than cutting a generation
+    /// off mid-answer. The model reloads on the next request.
+    ///
+    /// It deliberately does NOT stop the service. A stopped daemon would also
+    /// stop answering `apex ai status`, and "why is there no model loaded" is
+    /// exactly the question you would then be unable to ask. Use
+    /// `systemctl --user stop apex-aid` if that is what you mean.
+    Unload,
+
     /// What the service decided, and what it would decide.
     ///
     /// Answers with the daemon when it is running and without it when it is
@@ -749,6 +764,7 @@ pub fn main(cmd: AiCmd) -> i32 {
             }
             None => run(&args),
         },
+        AiCmd::Unload => unload(),
         AiCmd::Status { json } => status(json),
         AiCmd::Serve { listen, foreground } => serve(listen.as_deref(), foreground),
     }
@@ -1445,6 +1461,42 @@ fn explain(plan: &RunPlan) -> i32 {
     println!("  body      {} bytes", plan.request_body().len());
     println!();
     status(false)
+}
+
+// ── unload ───────────────────────────────────────────────────────────────────
+
+/// `apex ai unload` — release the VRAM now rather than on the idle timer.
+///
+/// A no-op when nothing is loaded, and it says so rather than reporting
+/// success: "there was nothing to unload" and "the model has been unloaded"
+/// are different facts, and a user freeing VRAM before starting a game wants
+/// to know which one happened.
+fn unload() -> i32 {
+    // Asked first, so the "nothing was loaded" case can be distinguished from
+    // the "it has been stopped" one. Both go through the same request; only
+    // the wording differs.
+    let was = ask_status().ok().and_then(|s| s.loaded);
+    match ask(&Request::Unload) {
+        Ok(Response::Ok) => {
+            match was {
+                Some(model) => println!("apex: {model} unloaded; its VRAM is free"),
+                None => println!("apex: nothing was loaded"),
+            }
+            0
+        }
+        Ok(Response::Error { message, .. }) => {
+            eprintln!("apex: {message}");
+            1
+        }
+        Ok(other) => {
+            eprintln!("apex: unexpected reply to unload: {other:?}");
+            1
+        }
+        Err(e) => {
+            eprintln!("apex: {e}");
+            1
+        }
+    }
 }
 
 // ── status ───────────────────────────────────────────────────────────────────

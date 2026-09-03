@@ -1482,7 +1482,7 @@ RUN set -eux; \
     # Every §14 verb, by name. `apex ai --help` passing proves the subcommand
     # exists; it does not prove `run` was not renamed, and a renamed verb is a
     # silent no-op in every script and shell integration that calls it.
-    for v in models pull rm run status serve; do \
+    for v in models pull rm run unload status serve; do \
         /usr/bin/apex ai "$v" --help >/dev/null || { echo "FATAL: apex ai $v is gone"; exit 1; }; \
     done; \
     # The daemon must RUN in the image it ships in, not merely exist: a dynamic
