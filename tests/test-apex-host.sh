@@ -183,13 +183,37 @@ fi
 
 # The struct on the wire is the one the other end parses. If a field were
 # renamed on only one side this is what would catch it.
-for field in apex_version cpus probed_at accel gpus podman agentd ai; do
+#
+# Only the fields that are ALWAYS serialised. `gpus` and `accel` carry
+# `skip_serializing_if = "Vec::is_empty"`, so a machine with no accelerator
+# omits them entirely — which is the intended behaviour, not a gap: a host
+# that cannot demonstrate a capability reports it absent rather than as an
+# empty list. This suite asserted `accel` unconditionally and passed on the
+# developer's AMD laptop, where /dev/kfd makes rocm real, then failed on a
+# GitHub runner with a hyperv_drm display and no accelerator at all. The
+# assertion was "works on my machine" in one line.
+for field in apex_version cpus probed_at podman agentd ai; do
     if printf '%s' "$out" | grep -q "\"$field\""; then
-        ok "describe --json carries $field"
+        ok "describe --json always carries $field"
     else
-        bad "describe --json carries $field" "absent from $out"
+        bad "describe --json always carries $field" "absent from $out"
     fi
 done
+
+# And the conditional ones: absent is legal, but a present one must be an
+# array, because that is what the far side deserialises into a Vec.
+if python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+for k in ('gpus','accel'):
+    if k in d:
+        assert isinstance(d[k], list), f'{k} is not an array'
+        assert d[k], f'{k} is present but empty, which should have been omitted'
+" "$out" 2>/dev/null; then
+    ok "gpus and accel are omitted when empty, never present-and-empty"
+else
+    bad "gpus and accel are omitted when empty" "$out"
+fi
 
 if apex host describe | grep -q "APEX"; then
     ok "describe without --json is human-readable"
