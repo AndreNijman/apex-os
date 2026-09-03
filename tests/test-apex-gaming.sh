@@ -356,14 +356,29 @@ is "…and the user's file is untouched" "this is not toml [[[" \
 section "hostile ids — these become TOML keys and reach argv"
 # ─────────────────────────────────────────────────────────────────────────────
 H="$(newhome hostile)"
+# Two things about the shape of these invocations, both learned the hard way.
+#
+# `--fan max` goes BEFORE the `--`. With it after, clap reads `--fan` as an
+# unexpected positional and exits 2 — for EVERY id, legal ones included. The
+# first draft of this loop had it after, so all seven cases passed without ever
+# reaching the id check. A mutation that accepted every id reddened nothing
+# here, which is what exposed it.
+#
+# And the exit code alone is not enough: 2 is also what clap returns for a
+# usage error, so the refusal must be identified by its message too. Otherwise
+# a future flag rename would silently turn this whole section vacuous again.
 for badid in '-rf' 'a.b' 'x/y' 'a;b' 'a$b' '.hidden' '_lead'; do
-    out="$(apex_in "$H" game profile set -- "$badid" --fan max)"; rc=$?
-    if [ "$rc" = 2 ]; then ok "the id '$badid' is refused"
-    else bad "the id '$badid' is refused" "exit $rc: $(head -1 <<<"$out")"; fi
+    out="$(apex_in "$H" game profile set --fan max -- "$badid")"; rc=$?
+    if [ "$rc" = 2 ] && grep -qF "refusing the id" <<<"$out"; then
+        ok "the id '$badid' is refused by the id check"
+    else
+        bad "the id '$badid' is refused by the id check" \
+            "exit $rc: $(head -1 <<<"$out")"
+    fi
 done
 # The one whose consequence is corruption rather than a bad command line: a
 # dot would make TOML read one profile as nested inside another.
-out="$(apex_in "$H" game profile set -- 'a.b')"
+out="$(apex_in "$H" game profile set --fan max -- 'a.b')"
 want "a dotted id explains that TOML would nest it" "nested table" "$out"
 if [ -e "${H}/.config/apex/games.toml" ]; then
     bad "no hostile id created a file" "the file exists"
@@ -575,8 +590,11 @@ is "a fixture root does not measure program presence" "None" \
    "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["checks"]["steam"]["value"])')"
 is "…and says why" "False" \
    "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["probes_programs"])')"
+# `.get`, not `[...]`: when the value IS measured there is no `unavailable`
+# key, and a KeyError traceback is a correct red that reads like a broken
+# suite. The assertion is the same; only the failure output is legible.
 want "…with the reason naming the PATH problem" "PATH lookup" \
-     "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["checks"]["steam"]["unavailable"])')"
+     "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["checks"]["steam"].get("unavailable"))')"
 
 j="$(apex_env "$H" "APEX_ROOT=$DAILY" -- gaming --json)"
 is "a Daily edition is not ready" "False" \
