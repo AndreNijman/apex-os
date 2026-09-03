@@ -62,3 +62,33 @@ Documentation and comments must state measured facts and current behavior. Rejec
 - Upstream agent CLIs are launched unmodified in a real PTY. Never wrap, patch, proxy or reimplement them, and never make the runtime a prerequisite for running `claude`, `opencode`, `codex` or `gemini` directly.
 - Checkpoints must not disturb the user's git state. Capture goes through a temporary index (`GIT_INDEX_FILE`) so the index, stash and branch are untouched; checkpoint refs live under `refs/apex/`, never `refs/heads/`. Restore takes a safety checkpoint first. Ignored files stay out of checkpoints, and package changes are reported rather than silently removed.
 - The control protocol is a compatibility surface: the CLI and APEX Shell both parse `SessionInfo`. Treat field renames, removals and semantic changes the way `org.apexos.Apexd1` changes are treated, and bump `PROTOCOL_VERSION` when a change is not backward compatible. Serialised requests and responses must never contain a raw newline, because the framing is line-based.
+
+## Editing a live machine's configuration
+
+These rules exist because breaking them destroyed the developer's desktop. A
+single `re.S` in a one-line substitution deleted 217 of 256 lines from his live
+`hyprland.conf`, taking every `exec-once` with it: next reboot, no shell, no
+wallpaper daemon, no polkit agent, no clipboard, no input method.
+
+1. **Back up before touching a live config.** A `.pre-<change>` copy alongside
+   it. This is what turned that outage into a two-minute restore.
+2. **`re.M`, never `re.S`, for a line-oriented edit.** With `re.S` a trailing
+   `.*$` matches to the end of the FILE, not the end of the line. If a
+   genuinely multi-line match is needed, bound it explicitly — never with
+   `.*$`.
+3. **Assert the line count is unchanged** before writing a config whose shape
+   you do not intend to change, and assert the substitution count is exactly
+   what you expected. One `assert` turns a silent truncation into a refusal.
+4. **Grepping for what you added cannot detect what you deleted.** Verify with
+   a size or line count AND a landmark that must still be present — for
+   hyprland.conf, `grep -c exec-once`. A truncated config is still a *valid*
+   config, so `Hyprland --verify-config` and `hyprctl reload` both report `ok`.
+5. **`hyprctl reload` re-reads the config; it does not re-run `exec-once`.**
+   After restoring one, the services it starts are still dead. `hyprctl
+   dispatch exec` restarts them parented to the compositor, as `exec-once`
+   does.
+6. **Do not use `pgrep -f <pattern>` to decide whether something is running.**
+   It matches your own shell's command line, which produced five consecutive
+   false "running" results during that incident. Use `pgrep -x`, or
+   `ps -eo comm=` — remembering that `comm` truncates to 15 characters, which
+   is how `polkit-mate-authentication-agent-1` reads as `polkit-mate-aut`.
