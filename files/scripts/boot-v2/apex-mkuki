@@ -244,9 +244,12 @@ if [[ -n "$PCR_KEY" ]]; then
         [[ -f "$PCR_PUBKEY" ]] || die "no such PCR public key: $PCR_PUBKEY"
         UKIFY_ARGS+=("--pcrpkey=$PCR_PUBKEY")
     fi
-    UKIFY_ARGS+=(--phases=enter-initrd --phases=enter-initrd:leave-initrd
-                 --phases=enter-initrd:leave-initrd:sysinit
-                 --phases=enter-initrd:leave-initrd:sysinit:ready)
+    # No --phases. ukify 258 requires exactly one --phases argument per
+    # --pcr-private-key ("--phases= specifications must match
+    # --pcr-private-key="), and with none given it signs its own default set:
+    # enter-initrd, enter-initrd:leave-initrd, :sysinit and :ready. That is the
+    # set APEX wants, and spelling it out bought nothing except a build failure
+    # the first time it was tried.
 fi
 
 if [[ -n "$SB_KEY" ]]; then
