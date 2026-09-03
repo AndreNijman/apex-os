@@ -494,6 +494,9 @@ fn a_session_with_a_gpu_locks_and_unlocks_it() {
             max_memory_mhz: Some(6001),
             persistence: Some(false),
         }],
+        // Game planning does not read VRAM; spelled with the struct-update
+        // syntax so a future querier field does not break this case again.
+        ..Default::default()
     };
     let plan = game::plan(&GameInputs {
         cfg: &cfg,
