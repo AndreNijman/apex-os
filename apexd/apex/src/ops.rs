@@ -320,6 +320,35 @@ const PKG_STATE: &str = "/var/lib/apex/pkg/state.json";
 /// the shell drives cannot disagree about what a capsule is.
 pub const ENV_ENGINE: &str = "/usr/libexec/apex-env";
 
+/// The plugin CLI behind `apex plugin` (§16).
+///
+/// A constant, not an overridable variable — the same rule as [`PKG_ENGINE`]
+/// and [`ENV_ENGINE`]. Unlike `apex apply`'s capsule step there is no test that
+/// needs to redirect this one: `tests/test-apex-plugin.sh` drives the shipped
+/// script directly, the way the capsule and package suites do.
+pub const PLUGIN_ENGINE: &str = "/usr/libexec/apex-plugin";
+
+/// `apex plugin …`.
+///
+/// Unprivileged, and structurally so: every path it touches is under the
+/// invoking user's `~/.config/apex-shell`, which is the same directory APEX
+/// Shell reads. A root `apex plugin disable` would move a plugin belonging to
+/// root and leave the user's alone, which is a command that reports success
+/// and changes nothing the user can see.
+pub fn plugin(args: &[String]) -> i32 {
+    match Command::new(PLUGIN_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the plugin helper: {e}");
+            eprintln!(
+                "apex: no plugin helper on this system — it predates `apex plugin`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
 /// `apex env …`.
 ///
 /// Unprivileged on purpose, and it must stay that way: capsules are rootless

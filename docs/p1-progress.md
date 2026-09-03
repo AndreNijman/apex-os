@@ -72,6 +72,211 @@ cost him something real: never mutate his live session or anything under his
   merge to `apex-shell/main` as they go. `Containerfile.base` vendors the shell
   from remote `main`, so shell must land before or with the OS side.
 
+## The three deferred P1 items — DONE
+
+Branch `p1/deferred-items`, off `origin/p1/integration` (which has all four P1
+phases merged, built and tested together). Three items that were each deferred
+for the same reason — they depended on work on a *parallel* branch — and are
+therefore closed together now that the branches are merged.
+
+| Item | Was deferred because | Closed as |
+|------|----------------------|-----------|
+| §8 GUI export from capsules | "§8 says 'when useful'; needs a real desktop to verify" | `apex env export / unexport / exports` |
+| §10 `[development] languages` convergence | "a language→package table here would conflict at integration" | `Step::ProvisionLanguage` → `apex env provision` |
+| §16 `apex plugin` CLI | apex-shell PR #9 shipped the platform and left the OS side out | `apex plugin list / info / enable / disable` |
+
+### 1. §8's GUI export
+
+`distrobox-export` runs **inside** the container — it refuses to start anywhere
+else — and reaches back through `/run/host` to write the `.desktop` file into
+the host's `~/.local/share/applications`. So the host side is
+`distrobox enter --no-tty <capsule> -- distrobox-export --app <name>` and there
+is no host-side program to call instead. Nothing needs root, and
+`update-desktop-database` runs against the user's own directory, so this path
+cannot raise an authentication prompt.
+
+Three decisions worth keeping:
+
+- **The host-side filename is recorded, never derived.** distrobox names the
+  file after the `.desktop` it found *inside* the capsule, so
+  `apex env export py gimp` produces `py-org.gimp.GIMP.desktop`. `export`
+  snapshots the launcher directory before and after and records what appeared.
+  The test fixture deliberately uses a name the naive derivation does not
+  produce — with a matching fixture the claim would be untestable, and a
+  derived-name mutant did in fact survive until that was fixed.
+- **`rm` deletes those recorded names and never a `<capsule>-*.desktop` glob.**
+  Capsule `shell` and capsule `shell-x` are both valid names and the glob for
+  the first matches the second's entries. The suite has a capsule pair proving
+  it.
+- **Only bare application names are accepted.** `--app` also takes an absolute
+  path to a desktop file, which would let a caller name any `.desktop` inside
+  the capsule and produce a host filename the script cannot predict or check.
+
+**What a desktop session would still be needed for, stated plainly:** that the
+exported entry appears in a running launcher, that its icon resolves on the
+host, and that clicking it starts the application. Every assertion here is
+about the argv, the recorded state and the refusals.
+
+### 2. §10's `[development] languages`
+
+A declared language is satisfied two ways, and the order matters:
+
+1. **The toolchain is already on the host's `PATH`.** The APEX images ship a
+   full dev stack (gcc, g++, python3, node, cargo, golang, bash), so this is the
+   *common* case. Reading it as drift would provision seven multi-gigabyte
+   capsules to duplicate software the image already has — the "reformats a
+   machine the first time it runs" failure `Blueprint`'s own doc comment exists
+   to prevent.
+2. **A capsule records itself as providing it.** This is what `apply` creates,
+   and it is where §8 wants a toolchain.
+
+Neither, and there is a step per language — not one for the list, because each
+language maps to its own capsule and a partial failure has to leave the others
+converged.
+
+The step carries the **language** and never a capsule name: `c`/`cpp` share one
+toolchain and `javascript`/`typescript` one runtime, so which capsule provides
+what is the engine's decision. That is exactly the second answer phase 7
+deferred the section to avoid. The table lives only in `apex-env`; the planner
+has the vocabulary, which it needs to validate a blueprint before any engine
+exists.
+
+`provision` records a language only after running the language's probe **inside**
+the capsule. `dnf -y install` exits 0 for a package set that puts nothing on
+`PATH`, and recording on the strength of that exit code is the "exited 0 having
+changed nothing" case `apexd/AGENTS.md` forbids. For the same reason `create`
+records no language even for the `python` alias, whose `--additional-packages`
+are installed by distrobox during container setup and can partly fail while
+leaving the container present.
+
+**A behaviour change on a shipped command, called out because it looks
+identical to the feature working:** `apex blueprint diff` now exits 1 for a
+missing language. Phase 7 shipped the section with `step: None`, so it reported
+CANNOT CONVERGE and exited 0 forever.
+
+Two couplings that would otherwise drift silently, both now checked:
+
+- The record directory follows the engine's precedence exactly
+  (`APEX_ENV_HOME`, then `XDG_DATA_HOME`, then `$HOME/.local/share`). If writer
+  and observer disagreed, `apply` would provision a capsule the next `diff`
+  could not see — and it would show up first in the isolated-HOME test, where it
+  reads as a broken test rather than a broken path. The suite's engine stub
+  writes the record precisely so that assertion is real.
+- `files/scripts/check-language-parity` compares `apexd-core`'s `LANGUAGES` with
+  `apex-env`'s, and runs `apex-env languages` to assert every row resolves to a
+  capsule, packages **and** a probe. It is in the **`static`** job on purpose:
+  `rust` fires on `^(apexd/|…)` and `engine` on `^(files/|tests/)`, so a check in
+  either specialised job would be skipped by a PR that touched only the other
+  side — and a skipped job counts as success. That is the same bug this file
+  already records for `test-apex-modes.sh`.
+
+`APEX_ENV_ENGINE` is new and overridable, which is the *opposite* of the rule
+`Containerfile.base` asserts for `apex-pkg`'s `readonly ENV_ENGINE`. The
+reasoning there ("a caller-controlled variable naming a program a root process
+executes is a hole") is right and does not apply here, structurally:
+`ProvisionLanguage` is user-domain and `perform()` refuses a step from the other
+domain before it builds any path or spawns anything, so the variable can only
+name a program the invoking user could already have run. What it buys is a live
+`apex apply` that exercises the real convergence path — the engine is reached by
+absolute path, so no `PATH` faking intercepts it and a user-domain step has no
+domain filtering to fall back on. It is the sibling of `APEX_WINDOW_ADAPTER`.
+
+**Unverified:** a real `apex env provision` against live podman. No capsule was
+created; the path is exercised end to end against a recording stub.
+
+### 3. §16's `apex plugin`
+
+**It owns no plugin rules.** Every verdict comes from apex-shell's own
+`src/services/plugins/manifest.js`, `require`d by a node shim — the same file
+the QML engine imports and the same file apex-shell's tests load. `nodejs` is in
+`Containerfile.core` and the shell is vendored to `/usr/share/apex-shell`, so
+this works in the image. If manifest.js is absent, `list` and `info` **refuse**;
+a fallback would be the second, drifting answer the design exists to prevent,
+appearing on exactly the machines where the shell was installed wrong.
+
+The suite proves that differentially rather than trusting it: for each fixture it
+asks manifest.js directly and compares the reason code. A shim that invented
+`manifest-invalid` instead of passing `manifest-unparseable` through fails ten
+assertions.
+
+**The duplication that could not be avoided, and its tripwire.** Four refusals
+live in `PluginService.qml`, not manifest.js, because they are facts about the
+*directory*: a symlink at any depth, no `.qml`, more than one `.qml`, and an
+`entry` that is not the one `.qml` there. That is QML bash cannot execute, so it
+is duplicated — declared in both files, and tripwired: the suite asserts
+`PluginService.qml` still has exactly **five** literal-reason refusals (those
+four plus `load-error`, which needs a live QML engine), still emits four
+tab-separated scan fields, still counts symlinks with `find -type l`, and still
+delegates to `Manifest.validateManifest` and `Manifest.scanSource`. Adding a
+sixth structural refusal upstream fails the count — verified by mutation.
+
+**Why `disable` is a directory move.** The shell has no enabled/disabled
+concept: `PluginService.qml` scans exactly one directory and is the only reader
+of that path in the whole shell — no allowlist file, no IPC. So `disable` moves
+the plugin to a sibling the shell does not scan and `enable` moves it back,
+which takes effect against the shipped shell with no shell change. A state file
+invented on the OS side would be an `apex plugin disable` the shell ignored,
+which is a lie told by a command whose whole job is to be believed. A shell-side
+enabled list is the better long-term answer and is a §16 follow-up in
+apex-shell.
+
+`list` reports a **VALID** column, not LOADED: a disabled plugin can be
+perfectly valid, and nothing here can see a live shell's loaded set. Both verbs
+say plainly that a running shell keeps what it has already loaded.
+
+**No file content is ever rewritten**, per the live-config rule added to the
+root `AGENTS.md`. `enable`/`disable` are a single `mv` of a directory; the
+manifest and `.qml` are carried byte-for-byte and never opened for writing, so
+there is no substitution to get wrong and the operation is its own inverse.
+Nothing is deleted by any verb. Asserted anyway, because "it is only a rename"
+is how the next outage starts: source present and destination absent before the
+move, a plugin in **both** trees refused rather than merged, an identical file
+count afterwards, and a half-completed move treated as a failure. A `cp -r`
+mutant fails nineteen assertions.
+
+`disable` needs no validator at all, deliberately: taking a plugin out of the
+shell's reach must work on a machine whose shell install is broken, which is
+when a user most needs it. `enable` moves without one too, then reports the
+verdict as *unknown* rather than guessing.
+
+The suite **hard-exits** if either plugin directory resolves outside its temp
+tree. `disable` moves directories and `~/.config/apex-shell/plugins` is real on
+the developer's machine; a skip would be the accident the rule exists for.
+
+**Unverified:** no running APEX Shell was restarted to confirm it stops loading
+a disabled plugin. That rests on `PluginService.qml` scanning one directory,
+which is read from source and tripwired, not observed live.
+
+### EXPECT ONE JOB RED: the cross-repo merge order, third time
+
+The `Package engine` job fails on **one labelled assertion** until apex-shell
+**PR #9** merges. `manifest.js` is on `p1/plugin-platform`, not on apex-shell
+`main`, which is what CI clones — confirmed with `git ls-tree`: `main` has no
+`src/services/plugins` at all. This is the documented order (shell before or
+with the OS) doing its job, exactly as it did for 5.3's keybind suite on PRs #27
+and #28. **Check apex-shell `main` before looking anywhere else in this repo.**
+
+It is deliberately one labelled assertion rather than a refusal at the top of
+the file: **62 of the 117** assertions do not need manifest.js and run
+regardless — measured, not estimated, by running the suite against a checkout
+of apex-shell `main`.
+A suite that hard-exited would report `passed=0` with a red tick, which is the
+same vacuous shape this repository has been bitten by, only inverted.
+
+### Test counts
+
+| Suite | Before | After |
+|-------|--------|-------|
+| `tests/test-apex-env.sh` | 149 | 253 |
+| `tests/test-apex-blueprint.sh` | 105 | 129 |
+| `tests/test-apex-plugin.sh` | — | **117** (62 without the shell tree) |
+
+Plus 35 planner unit tests in `apexd-core`, 108 in the `apex` crate, and two new
+static CI checks (`check-language-parity`, `node --check` on the shim).
+Every load-bearing new assertion was mutation-verified — eight mutants across
+the three items, all caught, and one (a derived export filename) survived until
+the fixture was changed to make the claim reachable.
+
 ## Phase 5 — compositor-neutral shell + plugin platform
 
 Roadmap §17 asks for one `ApexCompositor` surface with compositor adapters
@@ -127,6 +332,12 @@ is the technical debt §17 names.
       assertions + 46 static invariants both run on CI; the 43 behavioural ones
       skip there, which is why the security logic lives in a plain `.js` file
       Node can import.
+
+      That last decision paid off twice. `manifest.js` being plain JavaScript is
+      what lets **apex-os's `apex plugin` CLI `require` it directly** instead of
+      reimplementing the permission model — see "The three deferred P1 items" at
+      the top of this file. The OS side is done on `p1/deferred-items`; this
+      shell PR is the dependency it waits on.
 
       Two decisions worth keeping: `system`, `secrets` and `location` are
       **refused at load** rather than implemented — `system` ("run a command")
@@ -587,6 +798,10 @@ apex-os **PR #29**, branch `p1/capsules-and-packages`. All CI green.
       was originally mid-job, where it would have silently skipped four suites
       and the ShellCheck gate below it; and the suite assumed `/usr/bin/node`,
       which would have produced ~50 spurious failures on the runner.
+- [x] GUI export via `distrobox-export` — **done** on `p1/deferred-items`.
+      `apex env export / unexport / exports`. See "The three deferred P1 items"
+      at the top of this file for what a real desktop would still be needed to
+      check.
 - [x] **6.4** Tests.
 
 `apex install <bare-name>` behaves exactly as before: an exact-name RPM still
@@ -709,6 +924,9 @@ Two scope decisions made up front, both because the alternative was invention:
   parallel branch right now; a language→package table here would be a second,
   conflicting answer to the same question. Validating today is still worth it:
   someone who writes `typscript` finds out today.
+  — **Superseded.** Both branches are merged, and it converges through a capsule
+  on `p1/deferred-items`. The table still lives only in `apex-env`, so the
+  reason this was deferred is honoured rather than worked around.
 
 During the pause I recorded that the phase 6 checkpoint "does not parse", quoted
 a bash line, and amended a commit message to say so. **That was wrong.** I ran
@@ -782,6 +1000,12 @@ Three sections are deliberately observed-but-not-converged: `[gaming] enabled`
 leakage `AGENTS.md` forbids), `[development] languages` (deferred to phase 6's
 capsules, to avoid a conflicting language→package table at integration), and
 removing applications (`apply` is additive).
+
+**`[development] languages` is no longer one of them** — it converges through a
+capsule on `p1/deferred-items`. `[gaming] enabled` and removing applications
+still are, and both for reasons that do not expire. Also note that
+`Plan::is_converged()` therefore now returns false for a missing language, so
+`apex blueprint diff` exits 1 where it used to exit 0.
 
 **Untested:** every run was non-root, so `sudo apex apply` actually driving the
 package engine has only been exercised as a refusal.
@@ -1066,3 +1290,35 @@ Newest last. One line per pushed commit that changes the state above.
   set the live Hyprland gaps to zero on the developer's desktop. Suites here run
   against the real session. Assert refusal on the actions a backend cannot
   perform; check the capable ones by shape and never invoke them.
+- 2026-09-03 — **the three deferred P1 items are done** on
+  `p1/deferred-items`, off `origin/p1/integration`: §8's GUI export from
+  capsules, §10's `[development] languages` convergence, and §16's `apex plugin`
+  CLI. Full write-up at the top of this file. Four things worth carrying
+  forward.
+  **First**, a mutant survived and that is the useful part: "the exported
+  `.desktop` filename is recorded, not derived" passed against an
+  implementation that derived it, because the fixture filename
+  (`py-gimp.desktop`) happened to equal what the derivation produces. The real
+  distrobox output is `py-org.gimp.GIMP.desktop`. A fixture that cannot
+  distinguish the right answer from the wrong one makes the assertion
+  decorative, and no amount of running it would have shown that — only mutating
+  the code did.
+  **Second**, the language vocabulary check went in the **`static`** job, not
+  `rust` or `engine`. The path selectors are `^(apexd/|config/sysprofiles/|tests/)`
+  and `^(files/|tests/)`, so a check in either specialised job is skipped by a
+  PR that changes only the other side — and a skipped job counts as success.
+  This file already records that exact bug once, for `test-apex-modes.sh`. Any
+  future cross-file parity check belongs in `static` unless it needs a
+  toolchain.
+  **Third**, `apex plugin` calls apex-shell's `manifest.js` through node rather
+  than reimplementing it, and the coupling is asserted **differentially** — the
+  suite asks manifest.js directly for each fixture and compares the reason code.
+  The four structural refusals that live in `PluginService.qml` instead could
+  not be shared, so they carry a tripwire on the count of literal-reason
+  refusals in that file. "Declare the duplication and make it fail loudly" beat
+  both alternatives here.
+  **Fourth**, `apex plugin disable` moves a directory and never edits a file,
+  which is the strongest available compliance with the live-config rule added to
+  `AGENTS.md` the same day. The suite hard-exits if its plugin directory
+  resolves outside the temp tree, because `~/.config/apex-shell/plugins` is real
+  on the developer's machine.
