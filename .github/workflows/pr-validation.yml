@@ -278,7 +278,24 @@ jobs:
       # The suite splices into fixture files only — it must never touch a real
       # ~/.config/labwc/rc.xml, which is what the helper's own default would do
       # if `apply` were ever called without --rc.
+      # The model lives in apex-shell, so the suite needs that tree. Vendored
+      # from remote `main`, which is exactly what Containerfile.base does — so a
+      # shell change that moves the keybind defaults fails here until it lands,
+      # which is the documented merge order (shell before or with the OS) doing
+      # its job rather than a broken check.
+      - name: Vendor apex-shell for the keybind model
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/AndreNijman/apex-shell.git \
+            "${GITHUB_WORKSPACE}/../apex-shell"
+          test -f "${GITHUB_WORKSPACE}/../apex-shell/src/services/config_tab/KeybindService.qml"
+
       - name: Run labwc keybind generator assertions
+        env:
+          # Turns "no shell tree, skip everything" into a failure. Without it the
+          # suite reported passed=0 failed=0 and a green tick on its first CI
+          # run, having asserted precisely nothing.
+          APEX_REQUIRE_SHELL_TREE: "1"
         run: ./tests/test-labwc-keybinds.sh
 
       # End-to-end, against a real daemon on an isolated socket: that the
