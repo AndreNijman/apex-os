@@ -98,13 +98,19 @@ pub const SANDBOX_POLICIES: [&str; 3] = ["unrestricted", "project", "strict"];
 
 /// Languages `[development] languages` may name.
 ///
-/// Validated but **not converged** in phase 7. Convergence belongs to phase 6's
-/// `apex env` capsules, which are being built on a parallel branch; a
-/// language -> package table here would be a second, conflicting answer to the
-/// same question. So the schema, the validation and the diff are real, and
-/// `apply` reports the section as deferred rather than guessing at a toolchain
-/// install. Validating anyway is deliberate: a user writing `typscript` today
-/// should find out today, not when phase 6 lands.
+/// **This list is one half of a pair.** The other is `LANGUAGES` in
+/// `files/system/libexec/apex-env`, which is where a language turns into a
+/// capsule, a package set and a probe. The planner needs the vocabulary in
+/// order to validate a blueprint before any engine is involved; it must not
+/// need the *table*, because a language -> package table on the host is exactly
+/// what §8 exists to avoid. The two are asserted equal by a static CI check in
+/// `pr-validation.yml` — in the `static` job specifically, because the path
+/// selectors would otherwise skip whichever job did not match the change.
+///
+/// Phase 7 shipped this validated but **not converged**, deferred to phase 6's
+/// capsules, which were being built on a parallel branch at the time. Both are
+/// merged now, so it converges: see the `[development]` arm of [`plan`] and
+/// [`Step::ProvisionLanguage`].
 pub const LANGUAGES: [&str; 8] = [
     "c",
     "cpp",
@@ -492,6 +498,12 @@ pub struct Observed {
     pub flatpaks: Vec<String>,
     /// Toolchains detected on `PATH`.
     pub languages: Vec<String>,
+    /// Languages a capsule records itself as providing, with the capsule's name.
+    ///
+    /// Read out of the capsule records `apex env provision` writes, so the
+    /// engine that provisions a language and the planner that observes it agree
+    /// by construction rather than by a shared table.
+    pub capsule_languages: Vec<CapsuleLanguage>,
     /// `default_agent` from the agent runtime's config.
     pub agent_default: Option<String>,
     /// `sandbox` from the agent runtime's config.
@@ -500,7 +512,23 @@ pub struct Observed {
     pub variant_id: Option<String>,
 }
 
+/// One language a capsule says it provides.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapsuleLanguage {
+    pub language: String,
+    /// The capsule's name, so a diff can say *which* one and a user can enter it.
+    pub capsule: String,
+}
+
 impl Observed {
+    /// The capsule providing `language`, if one does.
+    pub fn capsule_for(&self, language: &str) -> Option<&str> {
+        self.capsule_languages
+            .iter()
+            .find(|c| c.language == language)
+            .map(|c| c.capsule.as_str())
+    }
+
     /// Whether this machine carries the gaming session, which is what actually
     /// distinguishes a Gaming edition from Daily at the session level.
     pub fn has_gaming_session(&self) -> bool {
@@ -543,18 +571,17 @@ impl Domain {
 /// One concrete thing `apply` would do.
 ///
 /// Every variant maps onto a primitive APEX already ships, which is the reason
-/// there is no `Step` for `[gaming]` or `[development]`:
+/// there is still no `Step` for `[gaming]`: `enabled = true` asks for a machine
+/// provisioned for games, and that provisioning is an *image*. The Gaming
+/// editions carry the session, the drivers and the low-latency tuning; no
+/// command converts Daily into Gaming, and installing a bag of gaming packages
+/// onto Daily would be exactly the edition leakage the repo contract forbids.
+/// So it is observed, diffed and reported — never converged. Its [`Change`]
+/// carries `step: None` and a `blocked` reason, so the user is told plainly
+/// instead of being shown a converged machine that is not.
 ///
-///   * **gaming** — `enabled = true` asks for a machine provisioned for games,
-///     and that provisioning is an *image*: the Gaming editions carry the
-///     session, the drivers and the low-latency tuning. No command converts
-///     Daily into Gaming, and installing a bag of gaming packages onto Daily
-///     would be exactly the edition leakage the repo contract forbids. So it is
-///     observed, diffed and reported — never converged.
-///   * **development** — belongs to phase 6's `apex env` capsules.
-///
-/// A [`Change`] for either carries `step: None` and a `blocked` reason, so the
-/// user is told plainly instead of being shown a converged machine that is not.
+/// `[development]` used to be in that list and no longer is. See
+/// [`Step::ProvisionLanguage`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
     /// Point the greeter at a session. Does NOT log anyone out: the blueprint
@@ -571,6 +598,21 @@ pub enum Step {
     SetAgentDefault { agent: String },
     /// Set the agent runtime's default sandbox policy.
     SetAgentSandbox { policy: String },
+    /// Make a capsule that provides a language, through `apex env provision`.
+    ///
+    /// The language, not a capsule name. Which capsule provides what is the
+    /// capsule engine's decision — `c` and `cpp` share one toolchain,
+    /// `javascript` and `typescript` share one runtime — and naming a capsule
+    /// here would be a second answer to the same question, which is precisely
+    /// what phase 7 deferred this section to avoid.
+    ///
+    /// **User domain, and that is load-bearing.** Capsules are rootless
+    /// per-user podman containers; `apex-env` refuses to run as root and says
+    /// so. A root-domain step here would create images under
+    /// /var/lib/containers, share one environment between every account, and
+    /// need an authentication prompt to enter — and it would break `apply`'s
+    /// claim that it never escalates.
+    ProvisionLanguage { language: String },
 }
 
 impl Step {
@@ -580,9 +622,10 @@ impl Step {
             Step::SelectSession { .. } | Step::InstallPackages { .. } | Step::InstallFlatpaks { .. } => {
                 Domain::Root
             }
-            Step::SetTheme { .. } | Step::SetAgentDefault { .. } | Step::SetAgentSandbox { .. } => {
-                Domain::User
-            }
+            Step::SetTheme { .. }
+            | Step::SetAgentDefault { .. }
+            | Step::SetAgentSandbox { .. }
+            | Step::ProvisionLanguage { .. } => Domain::User,
         }
     }
 }
@@ -596,6 +639,9 @@ impl fmt::Display for Step {
             Step::InstallFlatpaks { ids } => write!(f, "install flatpaks: {}", ids.join(" ")),
             Step::SetAgentDefault { agent } => write!(f, "set default agent to {agent}"),
             Step::SetAgentSandbox { policy } => write!(f, "set agent sandbox to {policy}"),
+            Step::ProvisionLanguage { language } => {
+                write!(f, "provision a capsule for {language}")
+            }
         }
     }
 }
@@ -773,29 +819,45 @@ pub fn plan(bp: &Blueprint, obs: &Observed) -> Plan {
     }
 
     // ── [development] ───────────────────────────────────────────────────────
-    let missing_langs: Vec<String> = bp
-        .development
-        .languages
-        .iter()
-        .filter(|l| !obs.languages.iter().any(|d| d == *l))
-        .cloned()
-        .collect();
-    if !missing_langs.is_empty() {
+    //
+    // A declared language is satisfied two ways, and the order matters.
+    //
+    //   1. The toolchain is on the host's PATH. The APEX images already ship a
+    //      full dev stack — gcc, g++, python3, node, cargo, golang, bash — so
+    //      this is the common case, and treating it as drift would provision
+    //      seven capsules of several gigabytes to duplicate software the image
+    //      already has. That is the "reformats a machine the first time it
+    //      runs" failure this whole type is written to avoid.
+    //   2. A capsule records itself as providing it. This is what `apply`
+    //      creates, and it is where §8 wants a toolchain: the bootc host stays
+    //      read-only and unmodified, and `pip install --user`, `npm -g` and
+    //      `cargo install` work inside the container that has them.
+    //
+    // Neither one, and there is a step. One step per language rather than one
+    // for the list, because each language maps to its own capsule and a partial
+    // failure has to leave the others converged — `apply` reports per step.
+    //
+    // Note what this section does NOT do: it never removes a capsule, and it
+    // never converges a language the blueprint does not name. Additive, like
+    // `[apps]`, and for the same reason.
+    for lang in &bp.development.languages {
+        if obs.languages.iter().any(|d| d == lang) {
+            continue;
+        }
+        // Satisfied, and by the mechanism §8 asks for. Not reported as a change
+        // at all: `diff` printing a converged row would make the exit code
+        // useless as a signal.
+        if obs.capsule_for(lang).is_some() {
+            continue;
+        }
         changes.push(Change {
-            what: "[development] languages".into(),
-            current: if obs.languages.is_empty() {
-                "none detected".into()
-            } else {
-                obs.languages.join(" ")
-            },
-            desired: missing_langs.join(" "),
-            step: None,
-            blocked: Some(
-                "development environments are phase 6 (`apex env` capsules); \
-                 the blueprint records and diffs them, but does not install \
-                 toolchains"
-                    .into(),
-            ),
+            what: format!("[development] {lang}"),
+            current: "not on PATH, and no capsule provides it".into(),
+            desired: format!("a capsule providing {lang}"),
+            step: Some(Step::ProvisionLanguage {
+                language: lang.clone(),
+            }),
+            blocked: None,
         });
     }
 
@@ -1214,6 +1276,7 @@ enabled = true
             packages: vec!["firefox".into()],
             flatpaks: vec!["org.gimp.GIMP".into()],
             languages: vec!["rust".into()],
+            capsule_languages: vec![],
             agent_default: Some("claude".into()),
             agent_sandbox: Some("project".into()),
             variant_id: Some("daily".into()),
@@ -1367,17 +1430,78 @@ sandbox = "project"
     }
 
     #[test]
-    fn development_is_diffed_but_deferred_to_phase_six() {
+    fn a_language_on_the_hosts_path_is_already_satisfied() {
+        // The APEX images ship a full dev stack, so this is the common case.
+        // Reading it as drift would provision gigabytes of capsule to duplicate
+        // software the image already has.
         let bp = Blueprint::parse("[development]\nlanguages = [\"go\", \"rust\"]\n").unwrap();
         let obs = Observed {
             languages: vec!["rust".into()],
             ..Observed::default()
         };
         let p = plan(&bp, &obs);
-        assert_eq!(p.changes.len(), 1);
-        assert_eq!(p.changes[0].desired, "go");
-        assert!(p.changes[0].step.is_none());
-        assert!(p.changes[0].blocked.as_deref().unwrap().contains("phase 6"));
+        assert_eq!(p.changes.len(), 1, "only the missing one is a change");
+        assert_eq!(p.changes[0].what, "[development] go");
+        assert_eq!(
+            p.changes[0].step,
+            Some(Step::ProvisionLanguage { language: "go".into() })
+        );
+        assert!(p.changes[0].blocked.is_none());
+    }
+
+    #[test]
+    fn a_language_a_capsule_provides_is_satisfied_too() {
+        // This is the mechanism §8 asks for, and the whole reason phase 7
+        // deferred the section: the toolchain lives in a container, not in an
+        // RPM overlay on a read-only host.
+        let bp = Blueprint::parse("[development]\nlanguages = [\"rust\"]\n").unwrap();
+        let obs = Observed {
+            languages: vec![],
+            capsule_languages: vec![CapsuleLanguage {
+                language: "rust".into(),
+                capsule: "rust".into(),
+            }],
+            ..Observed::default()
+        };
+        assert!(plan(&bp, &obs).changes.is_empty());
+        assert_eq!(obs.capsule_for("rust"), Some("rust"));
+        assert_eq!(obs.capsule_for("go"), None);
+    }
+
+    #[test]
+    fn development_converges_and_no_longer_reports_itself_blocked() {
+        // The behaviour change this closes. Phase 7 shipped `[development]`
+        // with `step: None` and a "phase 6" reason, so a machine missing a
+        // language reported CANNOT CONVERGE forever and `diff` exited 0.
+        let bp = Blueprint::parse("[development]\nlanguages = [\"go\", \"typescript\"]\n").unwrap();
+        let p = plan(&bp, &Observed::default());
+        assert_eq!(p.changes.len(), 2, "one step per language, not one per list");
+        assert!(p.blocked().is_empty(), "nothing here is blocked any more");
+        assert!(!p.is_converged(), "and `diff` must now report drift");
+        for c in &p.changes {
+            assert_eq!(
+                c.domain(),
+                Some(Domain::User),
+                "a capsule is rootless; a root step here would need a password"
+            );
+        }
+    }
+
+    #[test]
+    fn provisioning_names_a_language_and_never_a_capsule() {
+        // Which capsule provides what is the engine's decision — c and cpp
+        // share one toolchain. A capsule name in the step would be a second
+        // answer to the same question.
+        let bp = Blueprint::parse("[development]\nlanguages = [\"c\", \"cpp\"]\n").unwrap();
+        let p = plan(&bp, &Observed::default());
+        let steps: Vec<String> = p.steps().iter().map(ToString::to_string).collect();
+        assert_eq!(
+            steps,
+            vec![
+                "provision a capsule for c".to_string(),
+                "provision a capsule for cpp".to_string()
+            ]
+        );
     }
 
     #[test]
