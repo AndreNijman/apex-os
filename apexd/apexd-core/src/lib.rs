@@ -100,7 +100,7 @@ pub use profile::{
     ProfileKind, ProfileSet, TierSettings,
 };
 pub use select::{select, Selection};
-pub use syswriter::{MockWriter, RealWriter, SysWriter};
+pub use syswriter::{MockWriter, Outcome, RealWriter, SysWriter};
 pub use tier::{Action, Tier, UnknownTier};
 pub use topology::{CoreSource, CoreTopology};
 pub use workload::{Assessment, Signal, Signals, Vram, Workload};

@@ -35,10 +35,13 @@ TMPL="${ROOT}/files/desktop/labwc"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-pass=0; fail=0
+pass=0; fail=0; skip=0
 ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
 bad() { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
-skp() { printf 'SKIP  %s\n' "$1"; }
+# Counted, and reported in the summary. An uncounted skip is how a suite ends up
+# reporting a clean pass for assertions that never ran — which is the same
+# failure mode as the bug this file's niri section exists to close.
+skp() { printf 'SKIP  %s\n' "$1"; skip=$((skip + 1)); }
 section() { printf '\n── %s ──\n' "$1"; }
 
 [ -f "$GEN" ] || { printf 'missing %s\n' "$GEN" >&2; exit 1; }
