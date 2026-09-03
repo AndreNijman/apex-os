@@ -717,12 +717,16 @@ fi
 section "the machine running the tests"
 if [ -f "$REAL_TASKS" ]; then cp "$REAL_TASKS" "$WORK/real-tasks-after"; else : > "$WORK/real-tasks-after"; fi
 if [ -d "$REAL_STATE" ]; then ls -1 "$REAL_STATE" > "$WORK/real-state-after" 2>/dev/null; else : > "$WORK/real-state-after"; fi
-if diff -q "$REAL_TASKS_BEFORE" "$WORK/real-tasks-after" >/dev/null; then
+# Compared as strings rather than with `diff`: diffutils is not in every
+# environment this suite is expected to run in — the project's own Rust
+# container has no `diff` — and the last assertion in the file is the wrong one
+# to lose to a missing tool.
+if [ "$(cat "$REAL_TASKS_BEFORE")" = "$(cat "$WORK/real-tasks-after")" ]; then
     ok "the developer's own tasks.toml was not touched"
 else
     bad "the developer's own tasks.toml was not touched" "IT CHANGED — see $REAL_TASKS"
 fi
-if diff -q "$REAL_STATE_BEFORE" "$WORK/real-state-after" >/dev/null; then
+if [ "$(cat "$REAL_STATE_BEFORE")" = "$(cat "$WORK/real-state-after")" ]; then
     ok "the developer's own task state directory was not touched"
 else
     bad "the developer's own task state was not touched" "IT CHANGED — see $REAL_STATE"
