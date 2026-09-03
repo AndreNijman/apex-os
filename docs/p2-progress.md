@@ -79,7 +79,58 @@ section. Guest ESPs only.
 | --- | --- |
 | Boot-path rules in `AGENTS.md` | `baf25f4` |
 | This tracker | in progress |
-| 9.1 `apex host` — trust and transport | not started |
-| 9.2 §14 local AI service | not started |
-| 9.3 §20 dispatch, handoff, remote status | not started |
-| 10 Boot v2 | not started |
+| 9.1 `apex host` — trust and transport | done — `0650db6`, `e3e742e`, `355c946` |
+| 9.2 §14 local AI service | in progress |
+| 9.3 §20 dispatch, handoff, remote status | in progress |
+| 10 Boot v2 | in progress |
+
+## 9.1, and what it decided for everything above it
+
+`apexd-core/src/host.rs` (37 tests) owns the registry, the validation and the
+argv construction; `apex/src/host.rs` (31 tests) does the I/O;
+`tests/test-apex-host.sh` (53 assertions) drives the shipped binary with a fake
+`ssh` that records every argv.
+
+**The transport is the user's own ssh configuration.** A host entry names an ssh
+destination, normally an alias already in `~/.ssh/config`. Not for brevity: a
+real entry is often not "a hostname" — the `katana` alias here resolves over the
+LAN when the LAN is up, otherwise a VPS port, otherwise a jump host into a
+reverse tunnel. An `address` field would work at home and fail everywhere else,
+which is exactly when remote compute is worth having. It also means APEX
+generates no key and holds no passphrase, so it cannot produce a credential
+prompt.
+
+Three keys exist only to be refused, so the refusal can say where the setting
+really lives: `identity_file`, `strict_host_key_checking`, `ssh_options`.
+
+Verified against the katana over real ssh, not a mock. Its installed apex 0.1.0
+does not know `host describe`, so the live run took the fallback path and read
+20 cpu / 62 GiB / cuda+vulkan / podman off it. The self-describe path was then
+confirmed by running the new binary there, and **its actual output is the
+fixture the parser test uses** — a hand-written fixture would only prove the
+parser accepts what I imagine the other end sends.
+
+## Where a project is on the far side — the 9.3 decision
+
+§20's `apex build --on desktop` and `apex agent run --host desktop` need the
+project, and the files are on the laptop while the compute is on the desktop.
+Three options were on the table:
+
+| option | why not |
+| --- | --- |
+| Same absolute path, assumed | Silently building the wrong tree is far worse than refusing. |
+| Locate by git identity, clone on demand | Turns a dispatch into a repository write on the remote; uncommitted work still unhandled. |
+| A configured path map per host | Real config complexity for a case that is usually trivial. |
+
+**Chosen: same absolute path, *verified*, never assumed.** The remote path is
+checked to exist and to be the same repository — `git remote get-url origin`
+compared on both ends — and a mismatch is a refusal naming both values, with
+`--remote-path` as the explicit override. For one developer with the same
+username on two APEX boxes this needs no configuration, and when the assumption
+is wrong it fails loudly instead of quietly.
+
+**Uncommitted changes are not transferred, and the command says so.** A build on
+the remote runs the remote's committed state; a dirty local worktree is reported
+and needs `--allow-dirty` to proceed. Syncing a working tree would mean this
+tool writing over files on another machine, which is not something a dispatch
+verb should do by default.
