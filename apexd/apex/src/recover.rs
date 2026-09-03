@@ -995,27 +995,34 @@ fn package_row(sys: &Sys, running_version: &str) -> Row {
 }
 
 /// §19's four action buttons, and the command each one runs.
+///
+/// The command strings are bounded at 66 characters, because the text renderer
+/// prints them after a 28-column prefix and the report as a whole is held to
+/// 96. A test asserts the rendered width rather than this constant: the first
+/// version of this table produced a 102-column line while every `wrap` unit
+/// test passed, because the fixed-width action rows do not go through `wrap`
+/// at all.
 fn actions() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
         (
             "repair",
             "Repair automatically",
-            "apex recover repair            (a dry run; --commit performs it)",
+            "apex recover repair                  (dry run; --commit runs it)",
         ),
         (
             "bootPrevious",
             "Boot previous deployment",
-            "sudo apex rollback             then reboot",
+            "sudo apex rollback                   then reboot",
         ),
         (
             "factoryReset",
             "Factory reset",
-            "apex recover reset --scope desktop|user   (a dry run; read the loss list)",
+            "apex recover reset --scope desktop|user   (a dry run)",
         ),
         (
             "diagnostics",
             "Hardware diagnostics",
-            "apex doctor                    (--json for a UI)",
+            "apex doctor                          (--json for a UI)",
         ),
     ]
 }
@@ -1054,8 +1061,14 @@ fn cmd_status(json: bool) -> i32 {
     println!("  bootloader : {}", s.bootloader);
     println!();
     println!("{:<22}  {:<12}  DETAIL", "COMPONENT", "STATE");
+    // 38, not 24: the prefix printed before the first line of the detail is
+    // 22 + 2 + 12 + 2 columns, and `wrap` bounds a line INCLUDING the indent it
+    // is given. Told 24 it left the first line free to reach 110 columns on a
+    // 96-column budget — invisible to a test that checks `wrap`'s contract
+    // rather than the rendered row.
+    const DETAIL_COL: usize = 38;
     for r in &s.rows {
-        println!("{:<22}  {:<12}  {}", r.label, r.state.as_str(), wrap(&r.detail, 24));
+        println!("{:<22}  {:<12}  {}", r.label, r.state.as_str(), wrap(&r.detail, DETAIL_COL));
         if let Some(a) = &r.action {
             println!("{:<22}  {:<12}  -> {a}", "", "");
         }

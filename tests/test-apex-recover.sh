@@ -88,6 +88,17 @@ is() {
     if [ "$got" = "$want" ]; then ok "$name"
     else bad "$name" "expected $(printf '%q' "$want"), got $(printf '%q' "$got")"; fi
 }
+# For prose the report WRAPS. `has` greps the raw output, so a phrase that
+# happens to land across a line break stops matching the moment the column
+# arithmetic changes — which is what happened when the detail indent was
+# corrected from 24 to 38 and two content assertions went red for a reason that
+# had nothing to do with the content. This flattens whitespace first, so the
+# assertion is about what the report SAYS rather than where it broke the line.
+saysit() {
+    local name=$1 want=$2 hay=$3
+    if grep -qF -- "$want" <<<"$(tr -s '[:space:]' ' ' <<<"$hay")"; then ok "$name"
+    else bad "$name" "expected $(printf '%q' "$want") in the flattened report"; fi
+}
 
 # A missing prerequisite is a FAILURE, never a skip. A suite that reports
 # "0 passed, 0 failed" and a green tick has asserted precisely nothing, which
@@ -612,25 +623,35 @@ for row in "Current deployment" "Previous deployment" "Secure Boot" "Filesystem"
     has "the surface carries §19's row '$row'" "$row" "$out"
 done
 has "the booted deployment is named by its ostree checksum" "8f14e45fceea" "$out"
-has "a rollback target is reported as available" "2 deployments present" "$out"
+saysit "a rollback target is reported as available" "2 deployments present" "$out"
 has "…and names the command a button runs" "sudo apex rollback" "$out"
-has "/usr read-only is reported as verified" "read-only" "$out"
+saysit "/usr read-only is reported as verified" "read-only" "$out"
 has "the GPU's loaded module is named" "amdgpu" "$out"
 has "§19's four actions are listed" "Repair automatically" "$out"
 has "…including hardware diagnostics" "apex doctor" "$out"
 has "…and the factory reset, as a dry run" "apex recover reset" "$out"
 has "recovery routes are reported" "Recovery routes" "$out"
+# The rendered width, not `wrap`'s contract. `wrap` bounds a line including the
+# indent it is told about, and the row printer prints a 38-column prefix before
+# the first line of a detail — so a unit test on `wrap` passes while the report
+# runs off a terminal. Measured on the whole rendered report.
+widest=$(awk '{ if (length($0) > m) m = length($0) } END { print m+0 }' <<<"$out")
+if [ "$widest" -le 96 ]; then
+    ok "no rendered line exceeds the 96-column budget (widest: $widest)"
+else
+    bad "no rendered line exceeds the 96-column budget" "widest is $widest"
+fi
 
 sec "apex recover status — the states a healthy machine does not have"
 out=$(APEX_RECOVER_ROOT="$DEGRADED" apex recover status); rc=$?
 is "a machine needing attention exits non-zero" "1" "$rc"
-has "one deployment means nothing to roll back to" "nothing to roll back to" "$out"
-has "a writable /usr is reported as drift" "READ-WRITE" "$out"
+saysit "one deployment means nothing to roll back to" "nothing to roll back to" "$out"
+saysit "a writable /usr is reported as drift" "READ-WRITE" "$out"
 has "Secure Boot disabled is reported as attention, not as fine" "disabled" "$out"
-has "a missing GPU module is named" "no kernel module loaded" "$out"
-has "no default route is reported" "no default route" "$out"
-has "an extension built for another release names the rebuild" "pkg rebuild" "$out"
-has "…and says which release it was built for" "built for OS 42" "$out"
+saysit "a missing GPU module is named" "no kernel module loaded" "$out"
+saysit "no default route is reported" "no default route" "$out"
+saysit "an extension built for another release names the rebuild" "pkg rebuild" "$out"
+saysit "…and says which release it was built for" "built for OS 42" "$out"
 
 sec "apex recover status --json"
 out=$(APEX_RECOVER_ROOT="$HEALTHY" apex recover status --json)
@@ -911,6 +932,37 @@ has "…for the reason under test" "could not put back" "$out"
 is "…and deletes nothing" "{\"a\":1}" "$(cat "$RH/.config/apex-shell/input.json")"
 has "…and names the escape hatch for someone who wants only the deletion" \
     "--no-reprovision" "$out"
+
+sec "--no-reprovision still leaves a config Hyprland can parse"
+# The one path that skips the reseed postcondition. It must NOT be able to
+# strand a session: hyprland.conf `source=`s these two files and a source with
+# no match is a FATAL config error, so if --no-reprovision left either of them
+# ABSENT the next login would come up with no configuration at all. They are
+# truncate targets, so the emptying runs regardless of the reseed — asserted
+# here rather than reasoned about, because the consequence is a machine with no
+# desktop.
+seed_reset_home
+tok=$(HOME="$RH" APEX_RECOVER_ROOT="$HEALTHY" \
+      apex recover reset --scope desktop --no-reprovision \
+      | grep -o 'desktop:[0-9]*:[0-9a-f]*' | tail -1)
+out=$(HOME="$RH" APEX_RECOVER_ROOT="$HEALTHY" \
+      apex recover reset --scope desktop --no-reprovision --commit --confirm "$tok"); rc=$?
+is "--no-reprovision performs the reset" "0" "$rc"
+has "…and says the files were NOT put back" "were NOT put back" "$out"
+for gen in ".config/hypr/apex-input.conf" ".config/hypr/apex-display.conf"; do
+    if [ -f "$RH/$gen" ] && [ ! -s "$RH/$gen" ]; then
+        ok "…and $gen is still PRESENT and empty, so hyprland.conf still parses"
+    else
+        bad "…and $gen is still present and empty" \
+            "exists=$([ -f "$RH/$gen" ] && echo y || echo NO) — the next login would be fatal"
+    fi
+done
+if [ ! -f "$RH/.config/apex-shell/input.json" ] \
+   && [ ! -f "$RH/.config/apex-shell/display.json" ]; then
+    ok "…and the shell settings really were removed, so the flag did something"
+else
+    bad "…and the shell settings really were removed" "nothing was deleted"
+fi
 
 sec "a symlinked target is refused, and what it pointed at survives"
 seed_reset_home
