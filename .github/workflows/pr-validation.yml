@@ -149,6 +149,27 @@ jobs:
             *)  exit "$rc" ;;
           esac
 
+      - name: The blueprint and the capsule engine agree on the languages
+        run: |
+          set -euo pipefail
+          # `[development] languages` is validated by apexd-core's LANGUAGES
+          # const and converged by apex-env's own LANGUAGES table. The split is
+          # deliberate — the planner needs the vocabulary and must NOT have the
+          # language -> package table, because a table on the host is what §8
+          # exists to avoid — but two lists in two files drift silently, and
+          # each side is internally consistent so neither suite catches it.
+          #
+          # THIS RUNS IN THE `static` JOB ON PURPOSE. The path selectors would
+          # otherwise hide it: `rust` fires on ^(apexd/|…) and `engine` on
+          # ^(files/|tests/), so a PR touching only apex-env's table never runs
+          # the Rust job and a PR touching only the const never runs the engine
+          # job — and a skipped job counts as success. That is the exact bug
+          # this repository already recorded once with test-apex-modes.sh.
+          #
+          # Needs no toolchain and no container: it parses one Rust const and
+          # runs `apex-env languages`, which is a pure print.
+          python3 files/scripts/check-language-parity
+
       - name: Only the daemon may run host commands
         run: |
           set -euo pipefail
