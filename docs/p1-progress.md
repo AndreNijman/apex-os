@@ -100,13 +100,43 @@ sysext engine — phase 6 extends that, it does not replace it.
 
 ## Phase 7 — blueprint + sync
 
-Not started.
+§10's own "keep generated/system state separate from user-owned blueprint
+state" is the requirement the design is built around, so it is worth writing
+down what the three kinds of state are:
 
-- [ ] **7.1** Blueprint schema and `apex blueprint show/diff`.
+| | file | who writes it |
+|---|---|---|
+| **desired** | `~/.config/apex/blueprint.toml` | a person (and, one day, the GUI) |
+| **observed** | nothing — probed live on every `diff` | nobody |
+| **applied** | `~/.local/state/apex/blueprint-state.toml` | `apex apply`, generated |
+
+Collapsing observed into a cached file is the trap: `diff` would then agree with
+`apply` by construction instead of by measurement, and a step that silently did
+nothing would report as converged forever.
+
+- [~] **7.1** Blueprint schema and `apex blueprint show/diff`. **Schema done**
+      — `apexd-core/src/blueprint.rs`: the §10 shape, `deny_unknown_fields`
+      throughout, closed vocabularies, hostile-input checks on app names and on
+      bundle project paths, and the pure `plan(desired, observed)`. 22 unit
+      tests. `show`/`diff` next.
 - [ ] **7.2** `apex apply` convergence, idempotent with a real dry run.
 - [ ] **7.3** `apex sync` between machines.
-- [ ] **7.4** GUI editing in the shell.
+- [ ] **7.4** GUI editing in the shell. **Deferred out of this phase** — §10's
+      last bullet, and it is apex-shell work, not apex-os work. The schema
+      round-trips through TOML losslessly so the editor has something to write.
 - [ ] **7.5** Tests.
+
+Two scope decisions made up front, both because the alternative was invention:
+
+- **`[gaming] enabled` is observed and reported, never converged.** Gaming
+  provisioning is an *image* — the Gaming editions carry the session, drivers
+  and tuning. No command turns Daily into Gaming, and installing a gaming
+  package set onto Daily is the edition leakage the root `AGENTS.md` forbids.
+- **`[development] languages` is validated and diffed, not converged.**
+  Toolchains belong to phase 6's `apex env` capsules, which are being built on a
+  parallel branch right now; a language→package table here would be a second,
+  conflicting answer to the same question. Validating today is still worth it:
+  someone who writes `typscript` finds out today.
 
 ## Phase 8 — modes + gaming + workload manager
 

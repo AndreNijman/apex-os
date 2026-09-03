@@ -25,9 +25,16 @@
 //! * [`irq`] plans interrupt-affinity steering, and [`game`] combines the three
 //!   into a symmetric enter/exit pair.
 //!
+//! [`blueprint`] is the same pattern once more, for a different subject: it
+//! parses the declarative APEX Blueprint, compares it to an observed machine,
+//! and emits [`blueprint::Step`]s. It reads nothing and runs nothing — `apex`
+//! does the probing and the converging, exactly as the daemon does for
+//! [`Action`]s.
+//!
 //! The daemon and CLI are thin shells over this crate.
 
 pub mod battery;
+pub mod blueprint;
 pub mod fan;
 pub mod fingerprint;
 pub mod game;
@@ -40,6 +47,9 @@ pub mod tier;
 pub mod topology;
 
 pub use battery::{Battery, BatteryInventory, ThresholdSupport};
+pub use blueprint::{
+    AppliedState, Blueprint, Bundle, Change, Domain, Observed, Plan, ProjectRef, Step,
+};
 pub use fan::{FanInventory, FanMode, FanSnapshot, UnknownFanMode};
 pub use fingerprint::{CpuInfo, CpuVendor, Fingerprint, GpuInfo, GpuVendor};
 pub use game::{GameInputs, GamePlan, PidPlacement};
