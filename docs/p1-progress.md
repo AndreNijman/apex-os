@@ -28,18 +28,70 @@ the documented merge order rather than a shortcut.
 | #9  | §16 plugin platform | merged `f2908f9` |
 | #10 | §10 blueprint GUI editor | merged `3434c66` |
 | #12 | two more extension points | merged `099c44c` |
-| #11 | 5.2 finished + review leftovers | green, **held** |
-| #13 | niri application keybinds | green, **held** |
+| #11 | 5.2 finished + review leftovers | merged `39afc34` |
+| #13 | niri application keybinds | merged `34ba36c` |
+| #14 | Caffeine + SystemStats | merged `6f2e55d` |
 
-#11 and #13 are held only because `p1/idle-and-stats` is still being built on
-top of #11. Merging a base mid-flight orphans the branch above it — that already
-cost one rebase today when #9 landed under #12.
+**Every apex-shell PR is on `main`.** #13 and #14 both needed rebasing onto the
+moved main first — both conflicted on `ci.yml`, where each had added a step in
+the same place; the union was correct and the suites were re-run on the rebased
+trees before merging rather than assumed.
+
+Verified afterwards, because this is the coupling that has bitten twice: the
+seeded `rc.xml` still passes `check-labwc-keybinds` against the **new**
+apex-shell `main`.
 
 **Merging #9 immediately unblocked apex-os PR #34**, whose `Package engine` job
 failed on a single labelled assertion: the CLI takes its plugin verdicts from
 apex-shell's `manifest.js`, and CI clones the shell from `main`, where it did not
 yet exist. The agent predicted that precisely, and the job went green on re-run
 with no change on either side. The vendoring coupling working as designed.
+
+## Caffeine did nothing at all on Hyprland — apex-shell #14
+
+The most consequential finding of the session, and it was on Andre's own daily
+driver.
+
+`ShellState` held the logind idle inhibitor only when `Compositor.isLabwc`, on
+the belief that the Wayland surface inhibitor in each TopBar covered Hyprland
+and niri. The agent measured it instead of moving the branch:
+
+| mechanism | Hyprland 0.56.2 | labwc 0.9.6 |
+|---|---|---|
+| controls (nothing held) | fires | fires |
+| **Wayland inhibitor on a LAYER SURFACE — what the bar is** | **fires: no effect** | suppressed |
+| Wayland inhibitor on a toplevel | suppressed | suppressed |
+| logind `--what=idle --mode=block` | suppressed | suppressed |
+
+**Hyprland ignores idle inhibitors on layer-shell surfaces**, and the bar is a
+layer surface. So Caffeine did nothing on the primary compositor — tile lit,
+screen locked anyway — while the labwc branch aimed the one working mechanism at
+the one compositor that did not need it.
+
+**No capability was added, and that is the finding rather than a shortcut.** The
+brief offered two shapes — gate the feature, or select the mechanism — and the
+measurement says neither: nothing here varies by compositor, because a logind
+lock is not a compositor feature. An `idleInhibit` key would be `true` in all
+four backends selecting one mechanism, carrying no information and giving a
+future author somewhere to write `false` and kill the tile. Both mechanisms are
+held unconditionally now, gated on `caffeine` alone. The §17 debt is discharged
+by **deleting** the branch.
+
+Two process failures it reported against itself, both worth keeping:
+
+- Its mutation harness ran `git checkout -- .` in the live worktree and
+  **destroyed four files of uncommitted work.** The harness now runs on a copy,
+  and it commits before mutating.
+- Its hypridle detector grepped for the string the rule echoes — and **hypridle
+  prints its own rule at startup**, so every arm read FIRED and it briefly
+  concluded logind did not work either. Now a marker file the rule creates. That
+  is the fourth appearance today of "a grep satisfied by the thing it is
+  searching", and this one went further than the rest: it added **inverse
+  mutants** asserting that comments cannot cause a false *red*.
+
+It also declined to corroborate on the live session: Spotify was playing and
+held its own toplevel inhibitor, and removing that confound needed pausing
+Andre's music or toggling his Caffeine. It said so instead.
 
 ## Standing instruction from Andre — 2026-09-03
 
