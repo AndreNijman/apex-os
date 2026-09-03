@@ -59,6 +59,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -71,21 +72,49 @@ use apexd_core::gpu::RealNvidiaSmi;
 
 use apexd_core::aiprobe::{self as probe, Roots};
 
-/// How often the idle timer looks.
+/// How often the supervisor looks at the idle policy when no request is
+/// waiting.
 ///
 /// Five seconds. The timeout it enforces is measured in minutes, so the
 /// resolution costs nothing, and a tighter loop on a laptop is exactly the
 /// wakeup the battery timeout exists to avoid.
 const IDLE_TICK: Duration = Duration::from_secs(5);
 
+/// How long a connection waits for the supervisor to produce a backend.
+///
+/// Must exceed the supervisor's own readiness timeout, or a slow first load
+/// would be reported as a client-side timeout while the load was still
+/// succeeding — two different failures with one message.
+const BACKEND_WAIT: Duration = Duration::from_secs(240);
+
+/// What a connection thread asks the supervisor for: a ready backend socket,
+/// or the reason there is not one.
+type BackendReply = Sender<Result<std::path::PathBuf, String>>;
+
 /// Everything the threads share.
 struct Daemon {
     endpoints: Endpoints,
     store: Store,
     roots: Roots,
-    /// Bumped on every API connection and every relayed byte count, so the idle
-    /// timer never has to take the big lock to know whether to bother.
+    /// Bumped on every API connection and every relayed byte count, so the
+    /// supervisor never has to take the big lock to know whether to bother.
     open: AtomicU32,
+    /// How a connection thread asks the supervisor to start the backend.
+    ///
+    /// A channel rather than a direct call, and the reason is a kernel detail
+    /// that cost a real debugging session on the katana: `bwrap
+    /// --die-with-parent` uses `PR_SET_PDEATHSIG`, and Linux delivers that
+    /// signal when the parent **thread** exits, not when the parent process
+    /// does. Spawning the backend from a connection thread therefore had it
+    /// SIGKILLed the instant that request finished — the generation succeeded,
+    /// then the model unloaded itself, and the next request paid a full reload.
+    /// A service whose entire purpose is keeping a model resident had a
+    /// residency of one request.
+    ///
+    /// So exactly one thread ever creates the backend, and it never exits.
+    /// That is also the right shape independently: the backend's lifetime
+    /// should not be tied to whichever connection happened to trigger the load.
+    spawn: Mutex<Sender<BackendReply>>,
     state: Mutex<State>,
 }
 
@@ -152,11 +181,13 @@ fn run() -> Result<()> {
     let roots = Roots::from_env();
 
     let settings = load_settings();
+    let (spawn_tx, spawn_rx) = mpsc::channel::<BackendReply>();
     let daemon = Arc::new(Daemon {
         endpoints: endpoints.clone(),
         store: store.clone(),
         roots,
         open: AtomicU32::new(0),
+        spawn: Mutex::new(spawn_tx),
         state: Mutex::new(State {
             selected: settings.model.clone(),
             settings,
@@ -170,7 +201,7 @@ fn run() -> Result<()> {
 
     block_termination_signals();
     spawn_signal_thread(Arc::clone(&daemon));
-    spawn_idle_thread(Arc::clone(&daemon));
+    spawn_supervisor(Arc::clone(&daemon), spawn_rx)?;
 
     eprintln!(
         "apex-aid: api {} control {} store {}{}",
@@ -300,7 +331,8 @@ fn serve_api(daemon: &Arc<Daemon>, client: UnixStream) {
     // Counted BEFORE the backend is started, so the idle timer cannot unload
     // between a client connecting and the model finishing its load.
     daemon.open.fetch_add(1, Ordering::SeqCst);
-    let result = ensure_backend(daemon);
+    // Asked of the supervisor, never done here: see `Daemon::spawn`.
+    let result = request_backend(daemon);
     match result {
         Ok(socket) => match UnixStream::connect(&socket) {
             Ok(backend) => match relay::duplex(client, backend) {
@@ -319,7 +351,7 @@ fn serve_api(daemon: &Arc<Daemon>, client: UnixStream) {
             // The client is speaking HTTP and expects HTTP, so the refusal is
             // an HTTP response rather than a closed socket — a bare close reads
             // as "connection reset" in every client and tells nobody anything.
-            http_error(client, &format!("{e:#}"));
+            http_error(client, &e);
         }
     }
     daemon.open.fetch_sub(1, Ordering::SeqCst);
@@ -352,12 +384,43 @@ fn touch(daemon: &Arc<Daemon>) {
     }
 }
 
+/// Ask the supervisor for a ready backend socket.
+///
+/// Bounded: a supervisor that has wedged must produce an HTTP error rather than
+/// a client that hangs forever.
+fn request_backend(daemon: &Arc<Daemon>) -> Result<std::path::PathBuf, String> {
+    let (tx, rx) = mpsc::channel();
+    {
+        let sender = daemon
+            .spawn
+            .lock()
+            .map_err(|_| "the daemon's spawn channel is poisoned".to_string())?;
+        sender
+            .send(tx)
+            .map_err(|_| "the backend supervisor has stopped".to_string())?;
+    }
+    match rx.recv_timeout(BACKEND_WAIT) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => Err(format!(
+            "the backend supervisor did not answer within {}s",
+            BACKEND_WAIT.as_secs()
+        )),
+        Err(RecvTimeoutError::Disconnected) => {
+            Err("the backend supervisor has stopped".to_string())
+        }
+    }
+}
+
 /// Make sure a backend is running for the selected model, and return its
 /// socket.
 ///
-/// Holds the lock for the whole start, deliberately: two clients arriving at
-/// once must not each spawn a backend and each claim the same VRAM. The second
-/// waits and then finds the first one's backend already up.
+/// **Called only from the supervisor thread.** That is not a style preference:
+/// `bwrap --die-with-parent` is `PR_SET_PDEATHSIG`, which fires when the
+/// creating THREAD exits, so a backend spawned from a connection thread is
+/// killed the moment that request completes. See [`Daemon::spawn`].
+///
+/// Holds the lock for the whole start, deliberately: nothing else may observe a
+/// half-started backend, and the state it mutates is the one `status` reads.
 fn ensure_backend(daemon: &Arc<Daemon>) -> Result<std::path::PathBuf> {
     let mut state = daemon
         .state
@@ -636,17 +699,41 @@ fn status(daemon: &Arc<Daemon>) -> Status {
 
 // ── the idle timer ───────────────────────────────────────────────────────────
 
-fn spawn_idle_thread(daemon: Arc<Daemon>) {
+/// The one thread that owns the backend's lifetime.
+///
+/// It both starts the backend and enforces the idle policy, in one loop, for
+/// two reasons. The first is the `PR_SET_PDEATHSIG` semantics recorded on
+/// [`Daemon::spawn`]: the thread that spawns the child must outlive it. The
+/// second is that "start it" and "stop it when idle" are the same
+/// responsibility, and splitting them across two threads would need a second
+/// lock ordering to get right.
+///
+/// A pending request is served before the idle check, so a load never waits on
+/// a timer tick. While a load is in progress the idle check does not run, which
+/// is correct: there is nothing to unload yet.
+fn spawn_supervisor(daemon: Arc<Daemon>, rx: mpsc::Receiver<BackendReply>) -> Result<()> {
     std::thread::Builder::new()
-        .name("apex-aid-idle".into())
+        .name("apex-aid-super".into())
         .spawn(move || loop {
-            std::thread::sleep(IDLE_TICK);
-            tick(&daemon);
+            match rx.recv_timeout(IDLE_TICK) {
+                Ok(reply) => {
+                    let result = ensure_backend(&daemon).map_err(|e| format!("{e:#}"));
+                    // A client that gave up before the load finished is
+                    // ordinary, not a fault: the backend is up either way and
+                    // the next request finds it.
+                    let _ = reply.send(result);
+                }
+                Err(RecvTimeoutError::Timeout) => tick(&daemon),
+                // Only reachable once every sender is gone, which means the
+                // daemon is shutting down.
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
         })
-        .ok();
+        .context("spawning the backend supervisor")?;
+    Ok(())
 }
 
-/// One pass of the idle policy.
+/// One pass of the idle policy, on the supervisor thread.
 ///
 /// The decision itself is `apexd_core::ai::plan_idle`, so every rule about
 /// attached clients, configured timeouts and the battery default is unit-tested
