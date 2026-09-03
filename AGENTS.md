@@ -92,3 +92,40 @@ wallpaper daemon, no polkit agent, no clipboard, no input method.
    false "running" results during that incident. Use `pgrep -x`, or
    `ps -eo comm=` — remembering that `comm` truncates to 15 characters, which
    is how `polkit-mate-authentication-agent-1` reads as `polkit-mate-aut`.
+
+## Touching a machine's boot path
+
+`/usr` being read-only and `bootc rollback` existing make most mistakes on an
+APEX box recoverable. The boot path is the exception: there is no rollback for
+an ESP you overwrote or an EFI variable you replaced, because the thing that
+would perform the rollback is what you broke.
+
+The katana is a development machine running APEX (`VARIANT_ID=gaming`,
+composefs root, GRUB 2.12, TPM2 present, Secure Boot disabled). It is also the
+build box. Bricking it does not cost an afternoon; it costs every remaining
+phase.
+
+1. **Boot v2 work runs against guest ESPs only.** On any real APEX host —
+   laptop or katana — never run `bootctl install`, `bootctl update`,
+   `bootupctl`, `grub2-install`, `grub2-mkconfig -o` against a live
+   `/boot/grub2/grub.cfg`, or `efibootmgr -c`/`-B`/`-o`. Never write under
+   `/boot`, `/boot/efi` or `/efi`.
+2. **A VM's ESP is a loopback-mounted image file**, under a scratch directory
+   or `/var/lib/apex/bootlab/`, never the host's. Mount it, write it, unmount
+   it; if a command needs a `--esp-path`, pass the mountpoint explicitly rather
+   than letting the tool discover the host's.
+3. **`ukify`, `qemu`, `mkosi` and `virt-install` are build-time tooling, not
+   host software.** They arrive in a capsule or a system extension, never
+   `rpm-ostree install`, and never as an ad-hoc `dnf` on a host — that is the
+   machine drift this contract prohibits, and a build box is exactly where it
+   is most tempting.
+4. **Secure Boot keys are never generated on, or written to, a real machine's
+   firmware by a script in this repo.** Enrollment is a documented, explicitly
+   user-initiated path. CI and VMs get ephemeral keys; a private key never
+   reaches the repository.
+5. **GRUB stays the default for every published image in this generation.**
+   §22's own recommendation is to keep it while the OSTree/bootc install path
+   depends on it, and to keep it for legacy BIOS regardless. The systemd-boot +
+   UKI path is built, tested and shipped as an **opt-in**, and a change that
+   makes it the default for `daily`, `gaming-mesa` or `gaming-nvidia` is a
+   contract violation, not a milestone.
