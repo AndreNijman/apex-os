@@ -9,14 +9,15 @@ mod ai;
 mod blueprint;
 mod boot;
 mod dispatch;
+mod disposable;
 mod gaming;
 mod host;
 mod mode;
 mod ops;
 mod proxy;
+mod recover;
 mod request;
 mod secret;
-mod task;
 mod touchpad;
 
 use std::net::{SocketAddr, TcpStream};
@@ -198,7 +199,17 @@ enum Cmd {
     /// needs no root.
     Metrics(MetricsArgs),
     /// Diagnose the power stack.
-    Doctor,
+    ///
+    /// `--json` is §19's "expose `apex doctor` results graphically" from the OS
+    /// side: the same checks, in the shape a UI renders. Not a second set of
+    /// checks — the list is built once and rendered either way, because two
+    /// diagnostic implementations disagree and the one the user reads would be
+    /// the one wired to nothing.
+    Doctor {
+        /// Emit machine-readable JSON instead of PASS/WARN lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show the booted image and its changelog labels.
     Changelog,
     /// Install packages from the enabled repositories, Flathub, a capsule, or
@@ -319,23 +330,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: agent::ProjectCmd,
     },
-    /// What you are working on: the binder that can be put down and picked back
-    /// up (§21).
-    ///
-    /// A task NAMES a project, a capsule, an agent worktree and the agents you
-    /// run, and `apex task resume` checks that every one of them is still there
-    /// before telling you how to continue — a task whose capsule was deleted or
-    /// whose worktree was removed is refused by name rather than half-resumed.
-    ///
-    /// It creates none of those things and it grants nothing. There is
-    /// deliberately no window list (windows come from
-    /// `apex project layout save`) and no permission of any kind: §4's brokers
-    /// own those, and a permission in a hand-editable file would be a grant
-    /// nobody reviewed.
-    ///
-    /// Unprivileged: a task is yours, kept in your own `~/.config/apex` and
-    /// `~/.local/state/apex`, so none of these verbs needs (or accepts) root.
-    Task(task::TaskArgs),
     /// Structured privilege requests: how a sandboxed agent asks for a system
     /// change, and how you decide.
     ///
@@ -408,6 +402,46 @@ enum Cmd {
     Sync {
         #[command(subcommand)]
         cmd: SyncCmd,
+    },
+
+    /// Recovery, repair and rollback, in one surface (§19).
+    ///
+    /// `status` reports every component §19 names — the booted deployment, the
+    /// rollback target, Secure Boot, the filesystem, the GPU driver, APEX
+    /// Shell, the network and the package extension — with the action that
+    /// addresses each one. It spawns no subprocess and contacts nothing, so it
+    /// is safe for APEX Settings to poll and can never raise an authentication
+    /// prompt.
+    ///
+    /// `repair` runs only steps that are idempotent and remove no data.
+    /// `reset` is the scoped factory reset, and it is a dry run unless it is
+    /// given both --commit and a token derived from the plan it printed.
+    ///
+    /// Rolling back is `apex rollback`, which already exists; this surface
+    /// makes it visible rather than adding a second name for it.
+    Recover {
+        #[command(subcommand)]
+        cmd: recover::RecoverCmd,
+    },
+
+    /// Disposable environments: a capsule that is deleted when you close it (§19).
+    ///
+    /// A mode of `apex env`, not a second mechanism. Every disposable
+    /// environment is an ordinary APEX capsule created through the same engine
+    /// and visible to `apex env list` — it just gets its own throwaway home,
+    /// an explicit copy-in/copy-out boundary, and a teardown that removes the
+    /// container and the directory together.
+    ///
+    /// It is a disposable ENVIRONMENT, not a security boundary: distrobox
+    /// mounts the host filesystem at /run/host inside every capsule, and
+    /// `apex disposable plan` prints that in full before anything starts. For
+    /// confinement — a default-deny mount namespace with $HOME masked — the
+    /// mechanism is `apex agent`'s sandbox.
+    ///
+    /// Unprivileged, like `apex env`, and for the same reason.
+    Disposable {
+        #[command(subcommand)]
+        cmd: disposable::DisposableCmd,
     },
 }
 
@@ -953,12 +987,6 @@ async fn main() {
         // as long as the user stays attached.
         Cmd::Agent { cmd } => agent::agent(cmd),
         Cmd::Project { cmd } => agent::project_cmd(cmd),
-        // Reads the task file, the capsule engine's records, the project's
-        // checkpoints and the agent runtime's session list; writes only the
-        // task file and the task's own state file. No D-Bus, no root, and
-        // nothing that can raise a prompt — routed here, before anything
-        // connects to the system bus, for the reason `apex ai` is.
-        Cmd::Task(args) => task::run(args),
         Cmd::Request { cmd } => request::main(cmd),
         Cmd::Secret { cmd } => secret::main(cmd),
         // Read-only, so no root gate: seeing what the machine should be must
@@ -1047,7 +1075,17 @@ async fn main() {
         }),
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Metrics(args) => cmd_metrics(args).await,
-        Cmd::Doctor => cmd_doctor().await,
+        Cmd::Doctor { json } => cmd_doctor(json).await,
+        // Read-only and subprocess-free, so deliberately not in the privileged
+        // set: "what state is my machine in, and how do I get back" must never
+        // cost a password. `repair` converges the domain it is already in and
+        // reports the other, and `reset` refuses to run as root outright —
+        // root's home is not the user's, so a `sudo` run would reset the wrong
+        // account while reporting success.
+        Cmd::Recover { cmd } => recover::main(cmd),
+        // Unprivileged for the same structural reason `apex env` is: a
+        // disposable capsule is a rootless per-user container.
+        Cmd::Disposable { cmd } => ops::disposable(&disposable::argv(cmd)),
         Cmd::Changelog => ops::changelog(),
         Cmd::Install {
             packages,
@@ -2233,7 +2271,7 @@ pub(crate) fn json_string(s: &str) -> String {
     out
 }
 
-async fn cmd_doctor() -> i32 {
+async fn cmd_doctor(json: bool) -> i32 {
     let v = LocalView::detect();
     let conn = connect().await;
     let running = match &conn {
@@ -2241,102 +2279,22 @@ async fn cmd_doctor() -> i32 {
         None => false,
     };
 
-    line(running, "apexd running (owns org.apexos.Apexd1)");
-    line(true, &format!("profile resolved: active={} class={} device={}",
-        v.selection.active, v.selection.class_or_empty(), v.selection.device_or_empty()));
-
-    // Every check below reports what this machine has; a WARN is information,
-    // not a fault. Nothing here is required for apexd to work.
-    let driver = v.fingerprint.cpu.scaling_driver.as_deref().unwrap_or("");
-    line(
-        !driver.is_empty(),
-        &format!(
-            "cpufreq scaling driver present ({})",
-            if driver.is_empty() { "none" } else { driver }
-        ),
-    );
-    line(
-        v.fingerprint.cpu.amd_pstate() || v.fingerprint.cpu.intel_pstate(),
-        &format!(
-            "EPP-capable scaling driver ({}) — without it, tiers use the governor alone",
-            if driver.is_empty() { "none" } else { driver }
-        ),
-    );
-    line(
-        Path::new("/sys/firmware/acpi/platform_profile").exists(),
-        &format!(
-            "ACPI platform_profile present (choices: {})",
-            read_sys("firmware/acpi/platform_profile_choices").unwrap_or_else(|| "none".into())
-        ),
-    );
-
-    let inv = apexd_core::BatteryInventory::detect();
-    line(!inv.is_empty(), &format!("battery discovery: {}", inv.summary()));
-    if !inv.is_empty() {
-        line(
-            inv.supports_thresholds(),
-            &format!(
-                "charge threshold control present ({})",
-                inv.threshold_support().as_str()
-            ),
-        );
-    }
-
-    for (ok, what) in touchpad::doctor_lines() {
-        line(ok, &what);
-    }
-
-    let s2idle = read_sys("power/mem_sleep").map(|s| s.contains("[s2idle]")).unwrap_or(false);
-    line(s2idle, "s2idle is the active suspend mode");
-
-    // ── M6: fan control and game orchestration ───────────────────────────────
-    let fan_cfg = v.active_profile().fan_config();
-    let inv = apexd_core::fan::FanInventory::discover(Path::new("/sys"), &fan_cfg);
-    line(
-        inv.controllable(),
-        &format!(
-            "fan control channel present, write access unverified ({})",
-            if inv.controls.is_empty() && inv.msi_ec.is_none() {
-                "none".to_string()
-            } else {
-                let mut s: Vec<String> = inv.controls.iter().map(|c| c.id.clone()).collect();
-                if inv.msi_ec.is_some() {
-                    s.push("msi-ec".into());
-                }
-                s.join(", ")
-            }
-        ),
-    );
-    let topo = apexd_core::CoreTopology::detect_from(Path::new("/sys"));
-    if v.fingerprint.cpu.hybrid {
-        line(
-            topo.is_hybrid(),
-            &format!(
-                "P/E split detected via {} (P={} E={})",
-                topo.source.as_str(),
-                topo.pcore_list(),
-                topo.ecore_list()
-            ),
-        );
-    }
-    if v.fingerprint.gpus.iter().any(|g| g.vendor == apexd_core::GpuVendor::Nvidia) {
-        line(
-            apexd_core::gpu::nvidia_smi_available(),
-            "nvidia-smi on PATH (needed for game-mode clock locks)",
-        );
-    }
-    line(
-        Path::new("/sys/fs/cgroup/cgroup.controllers").exists(),
-        "cgroup v2 present (needed for game-mode cpuset pinning)",
-    );
-
+    // The checks themselves live in `recover`, so §19's graphical surface and
+    // this command are the same list rendered twice rather than two lists that
+    // can disagree. Everything except the metrics probe is a file read, and
+    // the probe stays here because it is the one check that needs a socket.
+    let mut checks = recover::doctor_checks(&v, running);
     let metrics_up = TcpStream::connect_timeout(
         &"127.0.0.1:9723".parse::<SocketAddr>().unwrap(),
         Duration::from_millis(200),
     )
     .is_ok();
-    line(metrics_up, "metrics endpoint reachable on 127.0.0.1:9723");
+    checks.push(recover::Check {
+        ok: metrics_up,
+        what: "metrics endpoint reachable on 127.0.0.1:9723".to_string(),
+    });
 
+    print!("{}", recover::render_doctor(&checks, json));
     0
 }
 
@@ -2390,11 +2348,11 @@ fn print_kv(key: &str, val: Option<String>) {
     }
 }
 
-fn line(ok: bool, what: &str) {
-    println!("[{}] {}", if ok { "PASS" } else { "WARN" }, what);
-}
-
-fn read_sys(rel: &str) -> Option<String> {
+/// `pub(crate)` because the doctor's checks moved to `recover`, where §19's
+/// JSON rendering of them lives. The reader stays here rather than being
+/// duplicated: two `/sys` readers with different trimming rules would answer
+/// the same question two ways.
+pub(crate) fn read_sys(rel: &str) -> Option<String> {
     read_abs(&format!("/sys/{rel}"))
 }
 

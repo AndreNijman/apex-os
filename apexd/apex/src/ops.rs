@@ -320,6 +320,16 @@ const PKG_STATE: &str = "/var/lib/apex/pkg/state.json";
 /// the shell drives cannot disagree about what a capsule is.
 pub const ENV_ENGINE: &str = "/usr/libexec/apex-env";
 
+/// The disposable-capsule engine behind `apex disposable` (§19).
+///
+/// A constant, like [`ENV_ENGINE`] and [`PKG_ENGINE`], and for the same reason:
+/// a caller-controlled variable naming a program is a hole even in an
+/// unprivileged command. It is a separate program from `apex-env` and a *mode
+/// of the same mechanism*: every environment it makes is an ordinary capsule
+/// created through `apex-env`, so `apex env list` sees it and `podman ps` sees
+/// it, and APEX has not grown a second container runtime.
+pub const DISPOSABLE_ENGINE: &str = "/usr/libexec/apex-disposable";
+
 /// The plugin CLI behind `apex plugin` (§16).
 ///
 /// A constant, not an overridable variable — the same rule as [`PKG_ENGINE`]
@@ -366,6 +376,31 @@ pub fn env(args: &[String]) -> i32 {
             eprintln!("apex: cannot run the capsule engine: {e}");
             eprintln!(
                 "apex: no capsule engine on this system — it predates `apex env`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
+/// `apex disposable …`.
+///
+/// Unprivileged, structurally: a disposable capsule is a rootless per-user
+/// container and its throwaway home is under the user's own state directory.
+/// Running it as root would put the images under /var/lib/containers and need
+/// an authentication prompt to enter a shell — and a "disposable" environment
+/// that survives in root's storage is not disposable.
+///
+/// `status()` rather than `output()`: `run` gives the terminal to an
+/// interactive capsule shell, and the teardown has to happen when that shell
+/// exits.
+pub fn disposable(args: &[String]) -> i32 {
+    match Command::new(DISPOSABLE_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the disposable engine: {e}");
+            eprintln!(
+                "apex: no disposable engine on this system — it predates `apex disposable`.\n\
                  \x20      run `sudo apex update` first."
             );
             1
