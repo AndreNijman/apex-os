@@ -103,7 +103,12 @@ VERBS = {
 # The shell keeps these symbolic because Hyprland expands them; labwc does not.
 APPS = {
     "$terminal": "alacritty",
-    "$browser": "firefox",
+    # NOT a browser name. The keybind opens whatever the user has set as their
+    # default, so it follows them to any browser they install and choose — the
+    # same reason hyprland.conf no longer says `firefox` here. Naming a browser
+    # made the shortcut contradict the user's own setting the moment a second
+    # browser existed, which shipping Zen guarantees.
+    "$browser": "/usr/libexec/apex-open-browser",
     "$fileManager": "thunar",
 }
 

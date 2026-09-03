@@ -194,6 +194,17 @@ printf '%s\n' "$block" | grep -q 'command="\$' \
     && bad "no unresolved config variable reaches a command" \
     || ok "no unresolved config variable reaches a command"
 
+# The browser bind must name NO browser. It opens whatever the user has set as
+# default, so a hardcoded `firefox` or `zen` here would make the shortcut
+# contradict the user's own setting — which is exactly what it used to do.
+printf '%s\n' "$block" | grep -q 'command="/usr/libexec/apex-open-browser"' \
+    && ok "the browser bind opens the default browser, not a named one" \
+    || bad "the browser bind opens the default browser, not a named one"
+
+printf '%s\n' "$block" | grep -qE 'command="(firefox|zen|zen-browser|chromium|google-chrome)"' \
+    && bad "no generated bind hardcodes a browser" \
+    || ok "no generated bind hardcodes a browser"
+
 printf '%s\n' "$block" | grep -q 'command="alacritty"' \
     && ok "\$terminal is resolved to the installed terminal" \
     || bad "\$terminal is resolved to the installed terminal"
