@@ -141,6 +141,67 @@ pub struct RunArgs {
     /// the first one is the program to run.
     #[arg(last = true)]
     pub args: Vec<String>,
+
+    // ── §20: run it on another device instead ───────────────────────────────
+    /// Run the agent on this trusted device instead of here.
+    ///
+    /// The whole invocation is forwarded to that machine's own
+    /// `apex agent run`, which applies its own sandbox policy, default agent
+    /// and checkpointing. Reconstructing those decisions locally would mean
+    /// two implementations of one policy, and the remote's is the one that
+    /// matters because that is where the agent actually runs.
+    #[arg(long, value_name = "HOST")]
+    pub host: Option<String>,
+    /// The project directory on the remote, when it is not the same absolute
+    /// path as here. Skips the same-repository check.
+    #[arg(long, value_name = "PATH", requires = "host")]
+    pub remote_path: Option<String>,
+    /// Run remotely even though this worktree has uncommitted changes.
+    ///
+    /// They are NOT sent: the remote works from its own checkout.
+    #[arg(long, requires = "host")]
+    pub allow_dirty: bool,
+}
+
+impl RunArgs {
+    /// Rebuild the flags this invocation carried, for forwarding to a remote
+    /// `apex agent run`.
+    ///
+    /// Reconstructed from the parsed struct rather than taken from
+    /// `std::env::args`, so a flag that clap normalised or defaulted is
+    /// forwarded in its normalised form — and so the local-only flags
+    /// (`--host`, `--remote-path`, `--allow-dirty`) cannot leak into the
+    /// remote command and make it try to dispatch again.
+    pub fn forward_argv(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(p) = &self.prompt {
+            out.push(p.clone());
+        }
+        for (flag, value) in [
+            ("--agent", self.agent.as_ref()),
+            ("--sandbox", self.sandbox.as_ref()),
+            ("--worktree", self.worktree.as_ref()),
+        ] {
+            if let Some(v) = value {
+                out.push(flag.to_string());
+                out.push(v.clone());
+            }
+        }
+        if self.checkpoint {
+            out.push("--checkpoint".to_string());
+        }
+        if self.detach {
+            out.push("--detach".to_string());
+        }
+        // `--cwd` is deliberately NOT forwarded: the remote command already
+        // cds into the resolved project directory, and a local path would be
+        // meaningless or wrong there.
+        if !self.args.is_empty() {
+            out.push("--".to_string());
+            out.extend(self.args.iter().cloned());
+        }
+        out
+    }
 }
 
 /// `apex project <verb>`.
@@ -233,7 +294,19 @@ pub enum LayoutCmd {
 
 pub fn agent(cmd: AgentCmd) -> i32 {
     let result = match cmd {
-        AgentCmd::Run(args) => run(args),
+        AgentCmd::Run(args) => match &args.host {
+            // §20. Checked before anything local happens, so a remote run
+            // never starts a local session as a side effect.
+            Some(host) => {
+                let (h, rp, ad) = (host.clone(), args.remote_path.clone(), args.allow_dirty);
+                let forward = args.forward_argv();
+                // `Result<i32>`, matching the local arm: this function's
+                // contract is the exit code, and the surrounding dispatcher
+                // owns the error printing.
+                crate::dispatch::agent_run_remote(&h, rp.as_deref(), ad, &forward).map(|()| 0)
+            }
+            None => run(args),
+        },
         AgentCmd::List { all, json } => list(all, json),
         AgentCmd::Attach { id, no_replay } => attach(id, !no_replay),
         AgentCmd::Pause { id } => signal(id, "stop", "paused"),
