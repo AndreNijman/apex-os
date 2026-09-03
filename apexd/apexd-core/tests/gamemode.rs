@@ -239,7 +239,7 @@ fn a_uniform_machine_plans_no_pinning_and_no_steering() {
         mems: "0".into(),
         irqbalance: false,
     });
-    assert_eq!(plan.irqs_steered, 0);
+    assert_eq!(plan.irqs_attempted, 0);
     assert!(!plan.enter.iter().any(|a| matches!(a, Action::IrqAffinity { .. })));
     assert!(plan.notes.iter().any(|n| n.contains("no P/E split")));
 }
@@ -264,7 +264,7 @@ fn irq_policy_off_leaves_interrupts_alone() {
         mems: "0".into(),
         irqbalance: false,
     });
-    assert_eq!(plan.irqs_steered, 0);
+    assert_eq!(plan.irqs_attempted, 0);
     assert!(plan.enter.iter().any(|a| matches!(a, Action::CgroupEnsure { .. })));
 }
 
@@ -377,7 +377,7 @@ fn a_running_irqbalance_is_called_out() {
         mems: "0".into(),
         irqbalance: true,
     });
-    assert!(plan.irqs_steered > 0);
+    assert!(plan.irqs_attempted > 0);
     assert!(
         plan.notes.iter().any(|n| n.contains("irqbalance")),
         "steering while irqbalance runs must be reported, not silently lost"

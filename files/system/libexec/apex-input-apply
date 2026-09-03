@@ -405,14 +405,41 @@ def validate_hyprland(path):
 
 
 def validate_niri(path):
+    """Validate the generated file the way niri will actually see it.
+
+    Wrapped in an `include`, not checked bare. niri accepts a fragment as a
+    whole config, so validating the file directly proves only that the KDL
+    parses — and that is precisely how a generated file no config ever included
+    passed its own self-test while doing nothing on a real machine. The wrapper
+    is the shipped shape: apex-shell-firstrun appends this same `include` line
+    to ~/.config/niri/config.kdl.
+    """
     if not which("niri"):
         return None
-    try:
-        out = subprocess.run(["niri", "validate", "--config", path],
-                             capture_output=True, text=True, timeout=60)
-        return out.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return None
+    with tempfile.TemporaryDirectory() as d:
+        wrapper = os.path.join(d, "config.kdl")
+        with open(wrapper, "w", encoding="utf-8") as fh:
+            fh.write(f'include "{path}"\n')
+        try:
+            out = subprocess.run(["niri", "validate", "--config", wrapper],
+                                 capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if out.returncode == 0:
+            return True
+        # Say which half failed. "The mapping is wrong" and "this niri is too
+        # old to have includes" need different fixes, and the wrapped run
+        # cannot tell them apart on its own.
+        try:
+            bare = subprocess.run(["niri", "validate", "--config", path],
+                                  capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if bare.returncode == 0:
+            print("      the generated file itself is valid; niri rejected the "
+                  "`include` that reaches it (includes need niri 25.11+)",
+                  file=sys.stderr)
+        return False
 
 
 def reload_compositor():

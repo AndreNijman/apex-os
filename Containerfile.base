@@ -1175,6 +1175,43 @@ RUN set -eux; \
         --verify-config --config "$config" | grep -q 'config ok'; \
     rm -rf "$config" "$stub" "$runtime"
 
+# The same guard for niri, which had none because it has no APEX template to
+# grep: niri's config is seeded from niri's OWN default and the APEX additions
+# are appended by the per-login provisioner, so that is where the include lines
+# live and that is what gets checked here.
+#
+# This exists because the niri half was missing entirely. apex-input-apply wrote
+# ApexShellInput.kdl and the shell wrote ApexShellKeybinds.kdl, and nothing ever
+# read either one — the generator emitted a COMMENT telling the user to add the
+# include by hand. A generated file nothing reads is worse than no generator,
+# because the Settings page reports success and the setting does not apply.
+RUN set -eux; \
+    f=/usr/libexec/apex-shell-firstrun; \
+    grep -q 'include "${CFG_DIR}/ApexShellInput.kdl"' "$f"; \
+    grep -q 'include "${CFG_DIR}/ApexShellKeybinds.kdl"' "$f"; \
+    # Both include targets must be pre-created before that append runs. niri
+    # treats an include it cannot read as a fatal parse error and refuses the
+    # WHOLE config, so a line without a matching pre-create costs a niri user
+    # every binding and window rule on boot #1 — the same failure Hyprland's
+    # `source=` had, one compositor along.
+    grep -q '^\[ -f "${CFG_DIR}/ApexShellInput.kdl" \]' "$f"; \
+    grep -q 'ApexShellKeybinds.${_variant}' "$f"; \
+    # `include` is a niri 25.11+ feature. Ask THIS image's niri rather than
+    # trusting a version string: if the package is ever pinned back, the build
+    # fails here instead of the desktop failing at login.
+    d="$(mktemp -d)"; \
+    printf 'input {\n    touchpad {\n        tap\n    }\n}\n' > "$d/inc.kdl"; \
+    printf 'include "%s/inc.kdl"\n' "$d" > "$d/config.kdl"; \
+    niri validate --config "$d/config.kdl"; \
+    # And the pre-create is load-bearing, not defensive: with the target gone,
+    # the identical config must be REFUSED. If a future niri downgrades this to
+    # a warning this line fails — read the pre-create rationale in the
+    # provisioner before deleting it, because `include optional=true` (26.04+)
+    # is then the better shape.
+    rm -f "$d/inc.kdl"; \
+    ! niri validate --config "$d/config.kdl"; \
+    rm -rf "$d"
+
 # Greeter session picker: offer Hyprland + niri only. sway/labwc are the greeter
 # HOST compositor, not user sessions — strip their wayland-session files so they
 # are never offered as logins. apex-greet enumerates /usr/share/wayland-sessions.

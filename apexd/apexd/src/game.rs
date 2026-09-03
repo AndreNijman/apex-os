@@ -12,6 +12,20 @@
 //!   is no longer meaningful.
 //! * The exit plan is computed at enter time from values read before anything
 //!   was written (see [`apexd_core::game::plan`]).
+//!
+//! ── Where "what actually landed" lives ──────────────────────────────────────
+//!
+//! In [`GameSession`], in memory, and nowhere else. This is generated state —
+//! a measurement of one session, not anything a user typed — so §10's rule
+//! about keeping generated state out of user-owned files is satisfied without
+//! a file at all: the fact is scoped to a session, the session dies with the
+//! daemon, and a file would add ownership, labelling and staleness questions
+//! to answer a question nobody can ask once the session is over.
+//!
+//! `apex game status` reads it over the `org.apexos.Apexd1.GameMode` `Status`
+//! property, which is a plain property read: no polkit action, no root, no
+//! recomputation of a plan. That is what keeps status read-only while still
+//! reporting a fact only the privileged applier could have observed.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -20,12 +34,42 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use apexd_core::fan::FanMode;
 use apexd_core::game::{self, GameInputs, PidPlacement, CGROUP_ROOT};
-use apexd_core::irq::{self, PROC_IRQ};
+use apexd_core::irq;
+use apexd_core::syswriter::Outcome;
 use apexd_core::tier::{Action, Tier};
 use apexd_core::topology::CoreTopology;
 use zvariant::{OwnedValue, Value};
 
 use crate::state::Ctx;
+
+/// What applying the enter plan's [`Action::IrqAffinity`] writes actually did.
+///
+/// Kept separate from the plan's own count because they are different facts and
+/// conflating them is the bug this type exists to close: `apex game status`
+/// used to report `plan.irqs_attempted` under the name `irqs_steered`, so a
+/// machine whose kernel refused every affinity write was told "N IRQs steered".
+///
+/// `IrqAffinity` is the one action that is exactly one write (see
+/// [`apexd_core::syswriter::Outcome`]), which is what makes counting these a
+/// measurement rather than an estimate.
+#[derive(Debug, Clone, Default)]
+pub struct IrqReport {
+    /// Affinity writes the plan contained.
+    pub attempted: usize,
+    /// Affinity writes the kernel accepted.
+    pub landed: usize,
+    /// The first refusal's reason, so status can say *why* rather than only
+    /// that a number is lower than expected. Refusals are overwhelmingly the
+    /// same reason repeated (a kernel-managed interrupt returns -EIO), so one
+    /// example beats a list as long as the count is next to it.
+    pub first_refusal: Option<String>,
+}
+
+impl IrqReport {
+    pub fn refused(&self) -> usize {
+        self.attempted.saturating_sub(self.landed)
+    }
+}
 
 /// Everything needed to undo a session.
 pub struct GameSession {
@@ -42,7 +86,8 @@ pub struct GameSession {
     pub core_source: String,
     pub pids: Vec<u32>,
     pub gpus_locked: Vec<u32>,
-    pub irqs_steered: usize,
+    /// Measured at enter time from the writer's own outcomes.
+    pub irqs: IrqReport,
     pub notes: Vec<String>,
 }
 
@@ -78,7 +123,7 @@ impl Ctx {
 
         // ── read the machine as it is right now ──────────────────────────────
         let topo = CoreTopology::detect_from(&self.sys_root);
-        let irqs = irq::enumerate(Path::new(PROC_IRQ));
+        let irqs = irq::enumerate(&self.proc_irq_root);
         let nvidia = self.nvidia.query();
         let mems = cfg
             .cpuset_mems
@@ -137,10 +182,44 @@ impl Ctx {
             _ => None,
         };
 
+        // The applier is also the only place that can observe what the machine
+        // did with the plan, so it counts as it goes. An `Err` here is a hard
+        // failure; an `Outcome::Refused` is the ordinary case this counting
+        // exists for — a kernel-managed interrupt refusing an affinity write.
+        let mut irqs = IrqReport::default();
         for a in &plan.enter {
-            if let Err(e) = self.writer.apply(a) {
-                eprintln!("apexd: game action failed ({}): {e:#}", a.describe());
+            let is_irq = matches!(a, Action::IrqAffinity { .. });
+            if is_irq {
+                irqs.attempted += 1;
             }
+            match self.writer.apply(a) {
+                Ok(Outcome::Landed) => {
+                    if is_irq {
+                        irqs.landed += 1;
+                    }
+                }
+                Ok(Outcome::Refused(why)) => {
+                    if is_irq && irqs.first_refusal.is_none() {
+                        irqs.first_refusal = Some(why);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("apexd: game action failed ({}): {e:#}", a.describe());
+                }
+            }
+        }
+
+        let mut notes = plan.notes.clone();
+        if irqs.refused() > 0 {
+            notes.push(format!(
+                "IRQ steering: {} of {} affinity writes were refused — {}",
+                irqs.refused(),
+                irqs.attempted,
+                irqs
+                    .first_refusal
+                    .as_deref()
+                    .unwrap_or("no reason recorded")
+            ));
         }
 
         let session = GameSession {
@@ -154,18 +233,19 @@ impl Ctx {
             core_source: topo.source.as_str().to_string(),
             pids: pids.to_vec(),
             gpus_locked: plan.gpus_locked.clone(),
-            irqs_steered: plan.irqs_steered,
-            notes: plan.notes.clone(),
+            irqs,
+            notes,
         };
         eprintln!(
-            "apexd: game mode ON — cpus {} ({}), {} IRQs steered, {} GPU(s) locked, tier {}",
+            "apexd: game mode ON — cpus {} ({}), {}/{} IRQs steered, {} GPU(s) locked, tier {}",
             if session.cpu_list.is_empty() {
                 "(unpinned)"
             } else {
                 &session.cpu_list
             },
             session.core_source,
-            session.irqs_steered,
+            session.irqs.landed,
+            session.irqs.attempted,
             session.gpus_locked.len(),
             session.tier
         );
@@ -262,7 +342,18 @@ impl Ctx {
                 insert(&mut m, "cpus", Value::from(s.cpu_list.clone()));
                 insert(&mut m, "core_source", Value::from(s.core_source.clone()));
                 insert(&mut m, "prior_tier", Value::from(s.prior_tier.as_str()));
-                insert(&mut m, "irqs_steered", Value::from(s.irqs_steered as u32));
+                // `irqs_steered` keeps its name and changes its meaning, on
+                // purpose. It is the key the CLI and the shell already render,
+                // and it used to hold the number of writes the plan INTENDED.
+                // It now holds the number the kernel accepted. Renaming it
+                // would leave the old name reading as a measurement somewhere;
+                // reporting both under one name would be the same lie with
+                // more words. The two flanking keys are what makes a partial
+                // result legible — some interrupts are unmovable on some
+                // hardware, and that is normal rather than a failure.
+                insert(&mut m, "irqs_steered", Value::from(s.irqs.landed as u32));
+                insert(&mut m, "irqs_attempted", Value::from(s.irqs.attempted as u32));
+                insert(&mut m, "irqs_refused", Value::from(s.irqs.refused() as u32));
                 insert(
                     &mut m,
                     "gpus_locked",
@@ -304,13 +395,22 @@ mod tests {
     //! these prove the daemon state is, including the rule that prior state is
     //! captured only on the 0 -> 1 transition. Everything runs against a
     //! `MockWriter` and a temp-dir sysfs root, so nothing real is touched.
+    //!
+    //! The second group proves what `apex game status` reports about IRQ
+    //! steering, because status used to report the PLAN: on a machine that
+    //! refuses every affinity write it said "N IRQs steered" having steered
+    //! none. Those run against a fixture procfs and a writer that refuses, so
+    //! the refusal is produced rather than hoped for, and no interrupt on the
+    //! machine running the suite is enumerated, let alone moved.
 
-    use std::sync::Arc;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
 
     use apexd_core::gpu::MockNvidiaSmi;
-    use apexd_core::syswriter::{MockWriter, SysWriter};
+    use apexd_core::syswriter::{MockWriter, Outcome, SysWriter};
     use apexd_core::{ProfileSet, Selection};
 
+    use super::*;
     use crate::state::{Ctx, State};
     use apexd_core::tier::Tier;
 
@@ -337,15 +437,31 @@ mod tests {
         enabled = false
     "#;
 
-    fn ctx(tag: &str) -> Arc<Ctx> {
+    fn scratch(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "apexd-game-ctx-{tag}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
         std::fs::remove_dir_all(&root).ok();
+        root
+    }
+
+    fn ctx(tag: &str) -> Arc<Ctx> {
+        let root = scratch(tag);
+        // An empty sysfs root and an empty procfs IRQ root: no fans, no CPUs,
+        // no interrupts, nothing to discover.
+        build_ctx(&root, PROFILE, &root.join("no-irqs"), Arc::new(MockWriter::new()))
+    }
+
+    fn build_ctx(
+        root: &Path,
+        profile: &str,
+        proc_irq_root: &Path,
+        writer: Arc<dyn SysWriter>,
+    ) -> Arc<Ctx> {
         std::fs::create_dir_all(root.join("profiles")).unwrap();
-        std::fs::write(root.join("profiles/test-game.toml"), PROFILE).unwrap();
+        std::fs::write(root.join("profiles/test-game.toml"), profile).unwrap();
 
         let set = ProfileSet::load(Some(&root.join("profiles"))).unwrap();
         let selection = Selection {
@@ -354,9 +470,7 @@ mod tests {
             device: Some("test-game".into()),
             active: "test-game".into(),
         };
-        // An empty sysfs root: no fans, no CPUs, nothing to discover.
-        let fingerprint = apexd_core::Fingerprint::detect_from(&root, &root);
-        let writer: Arc<dyn SysWriter> = Arc::new(MockWriter::new());
+        let fingerprint = apexd_core::Fingerprint::detect_from(root, root);
         Ctx::new(
             set,
             selection,
@@ -372,6 +486,7 @@ mod tests {
                 charge_stop: 100,
             },
             root,
+            proc_irq_root,
             Arc::new(MockNvidiaSmi::default()),
         )
     }
@@ -461,5 +576,256 @@ mod tests {
         // pretending the PID was pinned.
         assert!(ctx.game_attach(4242).await.is_err());
         ctx.game_exit().await.unwrap();
+    }
+
+    // ── what status says about IRQ steering ─────────────────────────────────
+    //
+    // `apex game status` reported `plan.irqs_attempted` under the name
+    // `irqs_steered`: the number of affinity writes the plan CONTAINED, printed
+    // as though it had been measured. Every write is tolerated — a
+    // kernel-managed MSI-X queue returns -EIO — and the applier threw the
+    // outcome away, so on a machine that refused every one of them status still
+    // said "N IRQs steered".
+
+    /// A profile that really does steer interrupts: P-core cpuset, IRQ steering
+    /// on, nothing else. `scx = ""` keeps a host command out of the plan and
+    /// `cpuset_mems` keeps the daemon from reading the real cgroup root.
+    const PROFILE_STEER: &str = r#"
+        id = "test-game"
+        kind = "device"
+        [defaults]
+        ac = "balanced"
+        battery = "power-saver"
+        [tiers.performance]
+        governor = "performance"
+        [tiers.balanced]
+        governor = "powersave"
+        [tiers.power-saver]
+        governor = "powersave"
+        [gamemode]
+        tier = "performance"
+        cpuset = "p-cores"
+        cpuset_mems = "0"
+        irq = "away-from-game"
+        scx = ""
+        [gamemode.nvidia]
+        enabled = false
+    "#;
+
+    /// A hybrid machine with three interrupts, as sysfs and procfs present it.
+    ///
+    /// Two of the three are steerable: IRQ 0 is the timer, which the planner
+    /// never touches. So a correct run attempts exactly 2 affinity writes, and
+    /// that number being fixed by the fixture rather than by the host is what
+    /// makes "landed" and "refused" comparable to it.
+    fn hybrid_machine(root: &Path) -> PathBuf {
+        std::fs::create_dir_all(root.join("devices/system/cpu")).unwrap();
+        std::fs::write(root.join("devices/system/cpu/online"), "0-19\n").unwrap();
+        std::fs::create_dir_all(root.join("devices/cpu_core")).unwrap();
+        std::fs::write(root.join("devices/cpu_core/cpus"), "0-11\n").unwrap();
+        std::fs::create_dir_all(root.join("devices/cpu_atom")).unwrap();
+        std::fs::write(root.join("devices/cpu_atom/cpus"), "12-19\n").unwrap();
+
+        let irq_root = root.join("proc-irq");
+        for (n, handler) in [(0u32, "timer"), (16, "nvidia"), (24, "xhci_hcd")] {
+            std::fs::create_dir_all(irq_root.join(n.to_string()).join(handler)).unwrap();
+            std::fs::write(
+                irq_root.join(n.to_string()).join("smp_affinity_list"),
+                "0-19\n",
+            )
+            .unwrap();
+        }
+        irq_root
+    }
+
+    /// The machine the bug was invisible on: every affinity write comes back
+    /// `-EIO`, everything else succeeds.
+    ///
+    /// Deliberately not a `MockWriter` option. The mock's contract is that it
+    /// records the plan exactly as issued and reports success, which is what
+    /// every other test in this file leans on; a mock that could also refuse
+    /// would make those assertions ambiguous about which behaviour they were
+    /// pinning.
+    #[derive(Default)]
+    struct RefusesEveryIrqWrite {
+        applied: Mutex<Vec<Action>>,
+    }
+
+    impl SysWriter for RefusesEveryIrqWrite {
+        fn apply(&self, action: &Action) -> anyhow::Result<Outcome> {
+            self.applied.lock().unwrap().push(action.clone());
+            Ok(match action {
+                Action::IrqAffinity { .. } => Outcome::Refused(
+                    "irq affinity: Input/output error (os error 5)".to_string(),
+                ),
+                _ => Outcome::Landed,
+            })
+        }
+    }
+
+    fn u32_of(m: &HashMap<String, OwnedValue>, key: &str) -> u32 {
+        let v = m
+            .get(key)
+            .unwrap_or_else(|| panic!("status has no '{key}' key: {:?}", m.keys()));
+        u32::try_from(v).unwrap_or_else(|e| panic!("'{key}' is not a u32: {e}"))
+    }
+
+    /// The `notes` array, unwrapped the way `apex game status`'s own renderer
+    /// unwraps it — so the assertions below are over the lines a user reads.
+    fn notes_of(m: &HashMap<String, OwnedValue>) -> Vec<String> {
+        let Value::Array(a) = &**m.get("notes").expect("status has a notes key") else {
+            panic!("notes is not an array");
+        };
+        a.iter()
+            .map(|v| match v {
+                Value::Str(s) => s.to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn status_reports_zero_steered_when_the_machine_refuses_every_write() {
+        let root = scratch("irq-refused");
+        let irq_root = hybrid_machine(&root);
+        let writer = Arc::new(RefusesEveryIrqWrite::default());
+        let ctx = build_ctx(&root, PROFILE_STEER, &irq_root, writer.clone());
+
+        ctx.game_enter(&[]).await.unwrap();
+        let status = ctx.game_status().await;
+
+        // The negative control: the plan really did contain the writes, so a
+        // zero below is a refusal and not an empty plan.
+        let attempted = u32_of(&status, "irqs_attempted");
+        assert_eq!(
+            attempted, 2,
+            "the fixture's two steerable interrupts must both be attempted"
+        );
+        assert_eq!(
+            writer
+                .applied
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|a| matches!(a, Action::IrqAffinity { .. }))
+                .count(),
+            2,
+            "and the writer must actually have been asked to perform them"
+        );
+
+        assert_eq!(
+            u32_of(&status, "irqs_steered"),
+            0,
+            "not one write landed, so status must not claim any interrupt was steered"
+        );
+        assert_eq!(u32_of(&status, "irqs_refused"), 2);
+
+        let notes = notes_of(&status);
+        assert!(
+            notes.iter().any(|n| n.contains("2 of 2") && n.contains("refused")),
+            "status must say how many were refused: {notes:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("Input/output error")),
+            "and why, when the writer knows: {notes:?}"
+        );
+
+        ctx.game_exit().await.unwrap();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn status_reports_what_landed_when_the_machine_accepts_the_writes() {
+        // The other half: the report is not hardwired to zero. Same fixture,
+        // same plan, a writer that accepts — and now the count is the count.
+        let root = scratch("irq-landed");
+        let irq_root = hybrid_machine(&root);
+        let ctx = build_ctx(&root, PROFILE_STEER, &irq_root, Arc::new(MockWriter::new()));
+
+        ctx.game_enter(&[]).await.unwrap();
+        let status = ctx.game_status().await;
+        assert_eq!(u32_of(&status, "irqs_attempted"), 2);
+        assert_eq!(u32_of(&status, "irqs_steered"), 2);
+        assert_eq!(u32_of(&status, "irqs_refused"), 0);
+        assert!(
+            !notes_of(&status).iter().any(|n| n.contains("refused")),
+            "nothing was refused, so nothing must say so"
+        );
+
+        ctx.game_exit().await.unwrap();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_partial_refusal_is_reported_as_a_partial_result() {
+        // The normal case on real hardware: some interrupts move, some are
+        // kernel-managed and do not. Reporting either extreme would be a lie.
+        #[derive(Default)]
+        struct RefusesOneIrqWrite {
+            seen: Mutex<usize>,
+        }
+        impl SysWriter for RefusesOneIrqWrite {
+            fn apply(&self, action: &Action) -> anyhow::Result<Outcome> {
+                if !matches!(action, Action::IrqAffinity { .. }) {
+                    return Ok(Outcome::Landed);
+                }
+                let mut seen = self.seen.lock().unwrap();
+                *seen += 1;
+                Ok(if *seen == 1 {
+                    Outcome::Refused("irq affinity: Input/output error (os error 5)".into())
+                } else {
+                    Outcome::Landed
+                })
+            }
+        }
+
+        let root = scratch("irq-partial");
+        let irq_root = hybrid_machine(&root);
+        let ctx = build_ctx(
+            &root,
+            PROFILE_STEER,
+            &irq_root,
+            Arc::new(RefusesOneIrqWrite::default()),
+        );
+
+        ctx.game_enter(&[]).await.unwrap();
+        let status = ctx.game_status().await;
+        assert_eq!(u32_of(&status, "irqs_attempted"), 2);
+        assert_eq!(u32_of(&status, "irqs_steered"), 1);
+        assert_eq!(u32_of(&status, "irqs_refused"), 1);
+        assert!(
+            notes_of(&status)
+                .iter()
+                .any(|n| n.contains("1 of 2") && n.contains("refused")),
+            "a partial result must read as a partial result"
+        );
+
+        ctx.game_exit().await.unwrap();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn status_needs_no_session_and_writes_nothing() {
+        // `apex game status` must stay read-only and root-free. It reads a
+        // recorded fact rather than recomputing a plan, so with no session
+        // there is no IRQ number to report at all — reporting a plan's count
+        // here is exactly the thing that was wrong.
+        let root = scratch("irq-idle");
+        let irq_root = hybrid_machine(&root);
+        let ctx = build_ctx(&root, PROFILE_STEER, &irq_root, Arc::new(MockWriter::new()));
+
+        let status = ctx.game_status().await;
+        for key in ["irqs_steered", "irqs_attempted", "irqs_refused"] {
+            assert!(
+                !status.contains_key(key),
+                "an idle machine has steered nothing; '{key}' must not be reported"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(irq_root.join("24/smp_affinity_list")).unwrap(),
+            "0-19\n",
+            "status must not have touched an interrupt"
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 }

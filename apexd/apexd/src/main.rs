@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
         dry_run,
         initial,
         Path::new("/sys"),
+        Path::new(apexd_core::irq::PROC_IRQ),
         nvidia,
     );
 

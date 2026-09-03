@@ -40,6 +40,17 @@ pub struct Ctx {
     pub batteries: BatteryInventory,
     /// The sysfs root everything reads from (parameterised for fixtures).
     pub sys_root: PathBuf,
+    /// The procfs IRQ root game mode enumerates interrupts from.
+    ///
+    /// Parameterised for the same reason `sys_root` is, and the hazard is the
+    /// same one: this was `apexd_core::irq::PROC_IRQ`, a hardcoded `/proc/irq`,
+    /// in a daemon where every other read is rooted. A test that wanted to
+    /// prove what game mode reports about IRQ steering had to either read the
+    /// host's real interrupts — non-deterministic, and one careless writer away
+    /// from steering the developer's machine — or not exist. It did not exist,
+    /// which is how `apex game status` shipped reporting a plan as a
+    /// measurement.
+    pub proc_irq_root: PathBuf,
     /// M6: fan discovery, mode state and the restore path.
     pub fan: Arc<FanController>,
     /// M6: read-side access to `nvidia-smi`.
@@ -59,6 +70,7 @@ impl Ctx {
         dry_run: bool,
         initial: State,
         sys_root: impl Into<PathBuf>,
+        proc_irq_root: impl Into<PathBuf>,
         nvidia: Arc<dyn NvidiaSmi>,
     ) -> Arc<Ctx> {
         let sys_root = sys_root.into();
@@ -76,6 +88,7 @@ impl Ctx {
             dry_run,
             batteries,
             sys_root,
+            proc_irq_root: proc_irq_root.into(),
             fan,
             nvidia,
             game: Mutex::new(None),

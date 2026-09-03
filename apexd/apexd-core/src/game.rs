@@ -85,10 +85,17 @@ pub struct GamePlan {
     pub cpus: Vec<u32>,
     /// CPUs everything else is pushed onto.
     pub housekeeping: Vec<u32>,
-    /// GPU indices whose clocks were locked.
+    /// GPU indices whose clocks the plan asks to lock.
     pub gpus_locked: Vec<u32>,
-    /// How many interrupts the plan attempts to move.
-    pub irqs_steered: usize,
+    /// How many interrupts the plan ATTEMPTS to move.
+    ///
+    /// Named for what it is. It used to be called `irqs_steered` and was handed
+    /// straight to `apex game status`, which then reported a plan as a
+    /// measurement: on a machine that refuses every affinity write — and
+    /// kernel-managed MSI-X queues do — status said "N IRQs steered" having
+    /// steered none. What landed is only knowable after the writer has run;
+    /// see `GameSession` in the daemon.
+    pub irqs_attempted: usize,
     /// Human-readable explanations (shown by `apex game status`).
     pub notes: Vec<String>,
 }
@@ -205,8 +212,8 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
             }
         }
     };
-    let irqs_steered = steer.len();
-    if irqs_steered > 0 && inputs.irqbalance {
+    let irqs_attempted = steer.len();
+    if irqs_attempted > 0 && inputs.irqbalance {
         notes.push(
             "irqbalance is running and will re-scatter these interrupts — mask it, or ban the game CPUs in its config".into(),
         );
@@ -272,7 +279,7 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
         cpus,
         housekeeping,
         gpus_locked,
-        irqs_steered,
+        irqs_attempted,
         notes,
     }
 }
