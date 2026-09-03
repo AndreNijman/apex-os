@@ -851,26 +851,29 @@ pub fn forward_to_host(
 }
 
 /// A capability a forwarded verb depends on.
-///
-/// One variant for now. `Ai` joins it in the commit that wires `apex ai --on`,
-/// rather than sitting here unconstructed: a variant nothing builds is dead
-/// code that looks like a wired feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
     /// The per-user agent runtime.
     Agentd,
+    /// The per-user local inference service.
+    Ai,
 }
 
 impl Capability {
     fn present_in(&self, caps: &apexd_core::host::HostCaps) -> bool {
         match self {
             Self::Agentd => caps.agentd,
+            // `can_infer` and not "has a GPU": a CPU-only host serves
+            // inference, slowly, and the question is whether the service is
+            // there.
+            Self::Ai => caps.can_infer(),
         }
     }
 
     fn describe(&self) -> &'static str {
         match self {
             Self::Agentd => "agent runtime",
+            Self::Ai => "local inference service",
         }
     }
 }
