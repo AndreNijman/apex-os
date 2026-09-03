@@ -163,6 +163,77 @@ jobs:
             *)  exit "$rc" ;;
           esac
 
+      - name: §24 every session APEX ships has a decided portal backend set
+        run: |
+          set -euo pipefail
+          # Screen sharing, file pickers, screenshots and the dark/light Settings
+          # signal all route through xdg-desktop-portal, and the backend is
+          # chosen by XDG_CURRENT_DESKTOP. Get that wrong and the session still
+          # starts, still looks right, and quietly hands "Open File" to a
+          # different implementation — or, where nothing matches, to whichever
+          # backend resolves first.
+          #
+          # niri shipped that way for three releases. Its packaged
+          # `default=gnome;gtk` sent FileChooser, AppChooser, Print and Settings
+          # to xdg-desktop-portal-gnome while labwc and Hyprland both reached
+          # gtk, and the only build assertion that existed named labwc, so
+          # nothing could see it.
+          #
+          # This is enumerated BY DESKTOP NAME, and every name is either pinned
+          # by APEX or listed here as deliberately packaged-default with the
+          # reason. A count would pass with one of them missing.
+          fail() { echo "::error::$*"; exit 1; }
+
+          # Why a name may have no APEX-owned config. Empty means APEX must pin it.
+          packaged_reason() {
+            case "$1" in
+              hyprland) echo "hyprland-portals.conf ships default=hyprland;gtk, and hyprland.portal implements only Screenshot/ScreenCast/GlobalShortcuts/InputCapture, so every desktop interface already reaches gtk" ;;
+              *)        echo "" ;;
+            esac
+          }
+
+          for d in hyprland niri labwc; do
+            own="files/system/xdg-desktop-portal/${d}-portals.conf"
+            if [ -f "$own" ]; then
+              # Captured into a variable first: under `set -o pipefail` a
+              # `cat | grep -q` reports the PRODUCER's SIGPIPE status when grep
+              # exits early, which has already produced opposite verdicts for
+              # the same pattern in this repo.
+              body="$(cat "$own")"
+              grep -qE '^\s*default=' <<<"$body" \
+                || fail "${own} names no default backend"
+              # `if`, not `&&`: under `set -e` a `grep && fail` line aborts the
+              # step when grep finds nothing, which is the PASSING case.
+              if grep -qE '^\s*default=.*[*]' <<<"$body"; then
+                fail "${own} resolves backends through a wildcard, which is the defect it exists to remove"
+              fi
+              grep -qE "^COPY files/system/xdg-desktop-portal/${d}-portals.conf" Containerfile.base \
+                || fail "${own} exists but Containerfile.base never installs it"
+              grep -q "/etc/xdg-desktop-portal/${d}-portals.conf" Containerfile.base \
+                || fail "${own} is not installed into /etc, so the packaged file wins"
+              echo "portals: ${d} pinned by ${own}"
+            else
+              why="$(packaged_reason "$d")"
+              [ -n "$why" ] || fail "no portal configuration for the ${d} session, and no stated reason to rely on the packaged one"
+              echo "portals: ${d} deliberately packaged-default — ${why}"
+            fi
+          done
+
+          # A portals.conf is only ever read because the session announces that
+          # desktop name. These two are the links that make the filenames mean
+          # anything, and both have silently broken before in this repo's history
+          # of renames.
+          grep -q '^DesktopNames=niri$' files/desktop/wayland-sessions/niri.desktop \
+            || fail "niri.desktop no longer announces DesktopNames=niri; niri-portals.conf would be inert"
+          grep -q '^XDG_CURRENT_DESKTOP=labwc' files/desktop/labwc/environment \
+            || fail "the labwc session no longer announces labwc; labwc-portals.conf would be inert"
+
+          # apex-gaming is gamescope + Steam Big Picture: no desktop session, no
+          # Flatpak file dialogs, no portal story. Named as excluded rather than
+          # silently absent — silently absent is exactly what niri was.
+          grep -q '^DesktopNames=gamescope$' files/desktop/wayland-sessions/apex-gaming.desktop \
+            || fail "apex-gaming.desktop changed its desktop name; re-decide whether it now needs a portal config"
+
       - name: The blueprint and the capsule engine agree on the languages
         run: |
           set -euo pipefail
