@@ -374,6 +374,72 @@ Newest last. One line per pushed commit that changes the state above.
   the shipped config, and 4 bindings genuinely have no labwc equivalent
   (scratchpad ×2, pseudo-tiling, split) so they are reported rather than mapped
   onto something approximate.
+- 2026-09-03 — **6.1 done.** `files/system/libexec/apex-env` + `apex env` in
+  the CLI + 149 assertions. Three things worth knowing. (1) `cuda` and `rocm`
+  are **device profiles on an Ubuntu LTS base**, not the vendor images:
+  `nvidia/cuda` and `rocm/dev-ubuntu` are 5–20 GB carrying a toolchain most
+  users replace, and §8 asks for the *access profile*, which is the part APEX
+  has to get right. `--image` still takes a vendor image. (2) The `python`
+  alias is fedora-toolbox plus the Python toolchain, **not**
+  `docker.io/library/python` — that image has no user and is not a
+  distrobox-compatible base, so the host integration this exists for does not
+  work in it. (3) ROCm needs `--group-add keep-groups` as well as `/dev/kfd`:
+  rootless podman drops the user's supplementary groups, so without it the
+  device node is present and unopenable, which reads as a driver bug. The
+  suite pins the exact argv per profile, because `create` can never run for
+  real in CI.
+- 2026-09-03 — **6.2 done.** The binding is one optional field, and the whole
+  difficulty is one line in `remember`: it runs on every `apex agent run` and
+  every layout save with a project detected from the filesystem, and the
+  filesystem does not know which capsule the user chose. A plain replace would
+  have unbound the project the first time an agent started, silently — the
+  record would still be there and still valid. `remember` now keeps an
+  existing binding when the incoming one is `None`, and `apex project env
+  --clear` writes directly instead of going back through it, or the merge
+  would undo the clear. Both have their own assertion. A second thing found by
+  the suite rather than by reading: `project::list` DELETES the record of any
+  project whose checkout has gone, so a test using a root that does not exist
+  loses its record the moment another case runs a listing.
+- 2026-09-03 — **6.3 and 6.4 done.** The resolver extends `apex-pkg`; there is
+  still exactly one package engine. The design question was what
+  `apex install <bare-name>` should do now, and the answer is **the same thing
+  it did before**: that command ships, and silently re-routing a name which
+  installs an RPM today would be a behaviour change on a shipped command. So
+  an exact-name repository package still wins — it puts the command on `$PATH`,
+  its signature is checked against keys APEX already trusts, and it rolls back
+  with the extension — and the resolver's job is to SAY what it chose, print
+  the alternative as a runnable command, and take `--source` when the user
+  disagrees. The one thing that can move a name is a curated table, currently
+  **one entry** (discord: the RPM Fusion package is the vendor tarball
+  repackaged and refuses to start once it considers itself stale, which on an
+  image-based system it regularly does). Every entry carries its reason in the
+  file and prints it at install time. Two notes for later: an earlier draft
+  tried to pick GUI-vs-CLI from `repoquery --file '/usr/share/applications/*'`
+  to decide Flatpak-vs-RPM automatically — it classifies neovim as graphical,
+  costs a multi-MB filelists fetch on the install hot path, and was dropped.
+  And mutation testing found a real hole: the `provenance:` line on the RPM
+  install path sits behind the root gate, so no runnable assertion could reach
+  it; it is covered by a static check over `cmd_install`, labelled as such.
+- 2026-09-03 — for the record, because it cost an hour: a mid-session sweep
+  committed the half-finished resolver as `wip(pkg)` and reported it as "DOES
+  NOT PARSE", having run `python3 -m ast` over `files/system/libexec/apex-pkg`.
+  That file is bash. `bash -n` passes, and CI selects the syntax checker BY
+  SHEBANG — only `installer/apex-installer-gui` is fed to Python. The cited
+  line 124 is `is_flatpak_id`, untouched upstream code. Nothing was broken. The
+  commit has been squashed into the finished §9 commit, so the false claim is
+  not in the branch history.
+- 2026-09-03 — **do not judge these suites by a local run.** They look for an
+  apex-shell tree at `../apex-shell` and fall back to `/usr/share/apex-shell`,
+  which is whatever the booted image shipped and therefore lags the tree under
+  test — the file says so itself, and it is still easy to forget.
+  `test-apex-firstrun.sh` fails against that stale copy and passes (24/0) in
+  CI. I then predicted, from a worktree of the local `origin/main` ref, that
+  `test-labwc-keybinds.sh` would fail on two assertions; **that prediction was
+  wrong** — the local ref was behind, the phase-5 shell work is on
+  `apex-shell/main`, and CI reports 32/0. PR #29 is green in full. Recorded
+  because the mistake is repeatable: a stale `origin/main` in the sibling
+  apex-shell clone looks exactly like an unmerged shell branch. `git fetch`
+  there before drawing any conclusion about the merge order.
 - 2026-09-03 — noted for whoever picks this up: an early draft of the facade
   test called `setGaps(0, 0)` to check that a *capable* action returns true, and
   set the live Hyprland gaps to zero on the developer's desktop. Suites here run

@@ -704,6 +704,61 @@ RUN set -eux; \
     systemctl enable apex-sysext-rebuild.service; \
     test -L /etc/systemd/system/multi-user.target.wants/apex-sysext-rebuild.service
 
+# ── APEX Capsules (§8) ──────────────────────────────────────────────────────
+# The other half of "how does software get onto this machine". The extension
+# engine above serves the system: one signed set of RPMs overlaid onto /usr,
+# rolled back as a unit. It cannot serve a development ecosystem, because
+# `pip install --user`, `npm -g`, `cargo install` and a vendor's ./install.sh
+# all expect a mutable userspace that a bootc host deliberately does not have.
+#
+# apex-env gives each ecosystem its own rootless podman container through
+# distrobox, with the user's home, terminal and devices — and APEX's own
+# policy on top: named images, device profiles for CUDA/ROCm/hardware work,
+# and a record of what each capsule was built from.
+#
+# NO STATE UNDER /var. Capsules belong to the user, so the records live under
+# ${XDG_DATA_HOME}/apex/env and the container storage under ~/.local/share/
+# containers, which is why this needs no tmpfiles.d entry and no unit.
+COPY --chmod=0755 files/system/libexec/apex-env /usr/libexec/apex-env
+RUN set -eux; \
+    bash -n /usr/libexec/apex-env; \
+    # Every external tool the engine drives, asserted here rather than trusted,
+    # because a missing one turns `apex env create` into a confusing runtime
+    # failure on the user's machine instead of a failed build.
+    for t in podman distrobox jq find date grep sed; do \
+        command -v "$t" >/dev/null || { echo "FATAL: apex-env needs $t"; exit 1; }; \
+    done; \
+    # The two distrobox flags the device profiles are built out of. Both are
+    # what the profiles ARE, so an upstream rename would silently produce
+    # capsules with no GPU access — a bug that reads as a driver problem. The
+    # help text is the only place a shipped distrobox states them.
+    distrobox create --help 2>&1 | grep -q -- '--nvidia'; \
+    distrobox create --help 2>&1 | grep -q -- '--additional-flags'; \
+    # `enter --no-tty` is the same class of dependency: `apex env exec` and
+    # `apex install --source capsule` both run through it, and both are meant
+    # for scripts and agents with no terminal. Losing the flag would make them
+    # allocate a TTY and hang instead of returning.
+    distrobox enter --help 2>&1 | grep -q -- '--no-tty'; \
+    # The alias table has to resolve on THIS release: the fedora and python
+    # aliases derive their tag from /usr/lib/os-release, so a missing or
+    # renamed VERSION_ID would produce `fedora-toolbox:` with nothing after it.
+    /usr/libexec/apex-env images | grep -qE 'fedora-toolbox:[0-9]+'; \
+    /usr/libexec/apex-env images | grep -q 'ubuntu:24.04'; \
+    # `apex env` is unprivileged and must stay that way, so the helper is not
+    # setuid, has no polkit action and gets no unit. Asserted because "capsules
+    # are per-user" is a security claim, not a preference.
+    test ! -u /usr/libexec/apex-env; \
+    test ! -g /usr/libexec/apex-env; \
+    # §9's resolver offers a capsule as a package source and execs this exact
+    # path. The engine holds it as a constant rather than an overridable
+    # variable — `apex install` runs as root, and a caller-controlled variable
+    # naming a program a root process executes is a hole — so the two files
+    # agree only by both being right. Checked here, where being wrong is a
+    # failed build rather than an `apex install --source capsule` that reports
+    # "no capsule engine" on a machine that has one.
+    grep -q '^readonly ENV_ENGINE=/usr/libexec/apex-env$' /usr/libexec/apex-pkg; \
+    /usr/libexec/apex-pkg --help | grep -q -- '--source rpm|flatpak|capsule'
+
 # ── Console setup must not be able to report the machine as broken ──────────
 # systemd-vconsole-setup runs loadkeys/setfont with whatever /etc/vconsole.conf
 # names. If that keymap or font is not installed the tool exits non-zero, the

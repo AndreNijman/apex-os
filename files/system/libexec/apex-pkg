@@ -1097,6 +1097,70 @@ cmd_install() {
         fi
     done
 
+    # ── §9: which source serves the BARE names ──────────────────────────────
+    # A path and an application id have already decided themselves; `--source`
+    # would either agree with them or contradict them, and a contradiction is
+    # refused rather than silently resolved one way. Everything below therefore
+    # concerns `names` only.
+    if [ -n "$SOURCE" ]; then
+        if [ "${#files[@]}" -gt 0 ] && [ "$SOURCE" != rpm ]; then
+            die "--source ${SOURCE} contradicts the local .rpm file you named; a file is always installed as an RPM"
+        fi
+        if [ "${#flatpaks[@]}" -gt 0 ] && [ "$SOURCE" != flatpak ]; then
+            die "--source ${SOURCE} contradicts the Flatpak id you named; an application id is always installed as a Flatpak"
+        fi
+    fi
+
+    if [ "${#names[@]}" -gt 0 ]; then
+        # Declared out here, not inside the arms. `local` in a case arm only
+        # takes effect if that arm runs, so `id` assigned in the "" arm below
+        # would otherwise leak into the global scope of a script running as
+        # root.
+        local n id curated forced
+        case "$SOURCE" in
+            capsule)
+                # Returns; a capsule install touches neither the extension nor
+                # Flatpak, and needs no root.
+                install_into_capsule "${names[@]}"
+                return $?
+                ;;
+            flatpak)
+                local -a resolved=()
+                for n in "${names[@]}"; do
+                    id="$(first_flatpak_id "$n")" \
+                        || die "no Flatpak application matches '${n}' (apex search ${n})"
+                    msg "'${n}' resolves to the Flatpak ${id}"
+                    resolved+=("$id")
+                done
+                flatpaks+=("${resolved[@]}")
+                names=()
+                ;;
+            rpm) ;;   # today's behaviour, explicitly requested
+            "")
+                # No source named: the ranking applies, and the ONLY thing that
+                # can move a bare name off the repository route is the curated
+                # table — which then has to say why, on the spot.
+                local -a kept=()
+                for n in "${names[@]}"; do
+                    if curated="$(curated_source "$n")"; then
+                        forced="${curated%%|*}"
+                        if [ "$forced" = flatpak ] && id="$(first_flatpak_id "$n")"; then
+                            warn "installing ${n} as a Flatpak instead of the RPM: ${curated#*|}"
+                            msg "to override: sudo apex install --source rpm ${n}"
+                            flatpaks+=("$id")
+                            continue
+                        fi
+                    fi
+                    kept+=("$n")
+                done
+                names=("${kept[@]:-}")
+                # An all-empty array from the loop above must not leave a stray
+                # empty string that dnf would then try to resolve.
+                [ -n "${names[0]:-}" ] || names=()
+                ;;
+        esac
+    fi
+
     local -a lpath=() lname=()
     for p in "${files[@]:-}"; do
         [ -n "$p" ] || continue
@@ -1110,6 +1174,10 @@ cmd_install() {
 
     if [ "${#flatpaks[@]}" -gt 0 ]; then
         flatpak_install "${flatpaks[@]}"
+        # §9 asks for provenance in the UI. One line, stating who vouched for
+        # what was just installed and what it can reach — the question a user
+        # cannot answer from the install log otherwise.
+        msg "provenance: $(provenance flatpak)"
     fi
     # A Flatpak-only request must not rebuild the extension: that would cost
     # minutes and re-merge /usr to change nothing.
@@ -1167,6 +1235,7 @@ cmd_install() {
             want+=("$e")
         fi
     done
+    msg "provenance: $(provenance rpm)"
     rebuild_extension "${want[@]}"
 }
 
@@ -1389,9 +1458,358 @@ cmd_adopt() {
     msg "adopted. Reboot to drop the layered deployment, after which 'apex update' works again."
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ── the universal resolver (§9) ──────────────────────────────────────────────
+#
+# WHAT PROBLEM THIS SOLVES
+# A user who wants Discord should type `apex install discord`. They should not
+# first have to know that APEX is image-based, that an RPM goes into a system
+# extension while a Flatpak does not, that a vendor RPM which self-updates is a
+# trap on a read-only /usr, or that some software only exists as a package for
+# a distribution this is not. §9: "a normal user does not have to understand
+# RPM vs Flatpak vs AppImage vs containerized distro packages unless they want
+# to."
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+# It does not change what `apex install <name>` already does. That command
+# ships, runs from `apex update` and from a boot-time unit, and is covered by
+# the assertions above; a resolver that silently re-routed a name which
+# installs an RPM today would be a behaviour change on a non-interactive
+# command, which is exactly the shape this repository refuses. So the ranking
+# below puts an exact-name repository package first and everything else after
+# it, and the resolver's job is to SAY what it chose, name the alternative, and
+# take `--source` when the user disagrees.
+#
+# The one exception is the curated table, and it is deliberately tiny: a
+# handful of packages whose RPM exists and is a known trap on an atomic host.
+# Every entry carries its reason in the file, so the table is auditable rather
+# than clever.
+#
+# WHY THE ORDER IS WHAT IT IS
+#   1. an exact-name repository package — it puts the command on $PATH where a
+#      script expects it, its signature is checked against a keyring APEX
+#      already trusts, it is rebuilt automatically after an OS upgrade, and it
+#      rolls back with the rest of the extension;
+#   2. a Flatpak — sandboxed and never touching /usr, which is better than
+#      nothing but cannot provide a command-line tool a script can call;
+#   3. a capsule — anything a distribution APEX is not still packages. The
+#      software works, and it works inside the capsule, not on the host.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Where the capsule engine lives. A CONSTANT, not an environment variable:
+# `apex install` runs as root, and letting a caller-controlled variable choose
+# a program a root process executes is a privilege-escalation hole for the sake
+# of test convenience. The capsule route refuses root anyway (see below), so
+# nothing here ever execs it with privileges.
+readonly ENV_ENGINE=/usr/libexec/apex-env
+
+# Packages whose repository build is a trap on an image-based system.
+#
+# The bar for an entry is high: the RPM must exist, must install, and must then
+# behave badly in a way the user cannot fix — not merely "the Flatpak is nicer".
+# Format: `name|source|reason`. The reason is printed verbatim, because a
+# re-route the user did not ask for has to justify itself on the spot.
+#
+#   discord  The RPM Fusion package is the vendor's own tarball repackaged, and
+#            Discord refuses to start once it considers itself out of date. On
+#            a normal distribution the next `dnf update` fixes that; here the
+#            update has to wait for RPM Fusion to rebuild AND for the extension
+#            to be rebuilt, so the client spends days telling the user to
+#            update and offering them no way to do it. The Flathub build
+#            updates itself on its own schedule.
+curated_source() {
+    case "$1" in
+        discord)
+            printf 'flatpak|the RPM is the vendor tarball repackaged and refuses to start once it considers itself out of date, which on an image-based system it regularly does'
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Does a Flathub result actually answer what was asked?
+#
+# `flatpak search` matches descriptions too, so searching for "code" returns
+# fifty applications that merely mention it. A candidate counts only when the
+# application id's last segment or the application's name equals the term,
+# case-insensitively — that is the difference between "there is a Flatpak for
+# this" and "Flathub contains the word".
+flatpak_match() {
+    local term appid name last
+    term="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    appid="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+    name="$(printf '%s' "$3" | tr '[:upper:]' '[:lower:]')"
+    [ -n "$term" ] || return 1
+    last="${appid##*.}"
+    [ "$last" = "$term" ] && return 0
+    [ "$name" = "$term" ] && return 0
+    [ "$appid" = "$term" ] && return 0
+    return 1
+}
+
+# The order the sources are offered in, given which ones have a candidate.
+# Pure, and separated from the probes for exactly that reason: the ranking is
+# the policy, and a policy that can only be exercised with a network and a
+# populated dnf cache is a policy nobody checks.
+rank_sources() {
+    local have_rpm="$1" have_flatpak="$2" have_capsule="$3"
+    [ "$have_rpm" = 1 ]     && printf 'rpm\n'
+    [ "$have_flatpak" = 1 ] && printf 'flatpak\n'
+    [ "$have_capsule" = 1 ] && printf 'capsule\n'
+    return 0
+}
+
+# How software from each source is vouched for. §9 asks for provenance in the
+# UI, and "where did this come from" is answered by who signed it, not by which
+# command installed it.
+provenance() {
+    case "$1" in
+        rpm)     printf 'signature checked against the Fedora/RPM Fusion/COPR keys APEX trusts; installed into the system extension, rolls back with it' ;;
+        flatpak) printf 'signed by its Flatpak remote and sandboxed; never touches /usr and updates independently of the OS' ;;
+        capsule) printf "signed by the capsule distribution's own keys; installed inside the container, invisible to the host" ;;
+        *) return 1 ;;
+    esac
+}
+
+valid_source() { case "$1" in rpm|flatpak|capsule) return 0 ;; esac; return 1; }
+
+# ── source probes ───────────────────────────────────────────────────────────
+# Each prints one line per candidate and nothing on no match. Kept separate
+# from the ranking so a fake `dnf5`/`flatpak` on $PATH exercises the whole
+# resolver with no network.
+
+# `name|evr|repo|summary` for an exact-name repository package.
+#
+# repoquery, not search: `dnf5 search htop` matches summaries and would report
+# a candidate for every package that mentions the word. A bare name is an exact
+# name match to repoquery, which is the question being asked.
+probe_rpm() {
+    command -v dnf5 >/dev/null 2>&1 || return 0
+    dnf5 repoquery --quiet --latest-limit 1 \
+         --queryformat '%{name}|%{evr}|%{repoid}|%{summary}\n' -- "$1" 2>/dev/null \
+        | awk -F'|' -v n="$1" '$1 == n' \
+        | head -3
+}
+
+# `appid|name|remote` for Flatpak applications that really answer the term.
+probe_flatpak() {
+    have_flatpak || return 0
+    local appid name remote
+    while IFS=$'\t' read -r appid name remote _; do
+        [ -n "$appid" ] || continue
+        if flatpak_match "$1" "$appid" "$name"; then
+            printf '%s|%s|%s\n' "$appid" "$name" "${remote:-flathub}"
+        fi
+    done < <(flatpak search --columns=application,name,remotes -- "$1" 2>/dev/null) \
+        | head -3
+    return 0
+}
+
+# The capsule that would receive the package, or nothing.
+#
+# Runs the capsule engine as the INVOKING user, never as root: capsules are
+# per-user, and root's list is empty on every machine. Under sudo that means
+# $SUDO_USER; with no sudo it is simply this user.
+probe_capsule() {
+    # The one knob here, and it only ever turns the probe OFF — it cannot name
+    # a program, a path or a source, so nothing it can be set to changes what a
+    # root process executes. It exists because the suite has to get the same
+    # answer on a machine that has capsules and one that does not; without it,
+    # "nothing provides this name" would depend on whether the developer
+    # running the tests happens to have made a capsule.
+    [ "${APEX_PKG_NO_CAPSULE:-0}" = 1 ] && return 0
+    [ -x "$ENV_ENGINE" ] || return 0
+    local out
+    if [ "$(id -u)" = 0 ]; then
+        local u="${SUDO_USER:-}"
+        [ -n "$u" ] && [ "$u" != root ] || return 0
+        out="$(runuser -u "$u" -- "$ENV_ENGINE" list --json 2>/dev/null)" || return 0
+    else
+        out="$("$ENV_ENGINE" list --json 2>/dev/null)" || return 0
+    fi
+    printf '%s' "$out" | jq -r '.[0] | select(.) | "\(.name)|\(.image)|\(.package_manager)"' 2>/dev/null
+    return 0
+}
+
+# The application id a bare name resolves to on Flathub, or nothing.
+# Used by `--source flatpak` and by the curated re-route, both of which have to
+# turn a word the user typed into an id they have never seen.
+first_flatpak_id() {
+    local hit
+    hit="$(probe_flatpak "$1" | head -1)"
+    [ -n "$hit" ] || return 1
+    printf '%s' "${hit%%|*}"
+}
+
+# `apex install --source capsule <pkg>...` — §9's third source.
+#
+# Refuses root, and that refusal is the point rather than an inconvenience:
+# capsules are per-user rootless containers, so root has none, and `sudo apex
+# install --source capsule` would report an empty capsule list on every machine
+# in the world. Told with the command that works, because a user who reached
+# here typed `sudo` for a reason.
+install_into_capsule() {
+    local box="$ENV_NAME"
+    if [ "$(id -u)" = 0 ]; then
+        local u="${SUDO_USER:-}"
+        printf 'apex-pkg: error: %s\n' \
+            "a capsule belongs to a user, and root has none" \
+            "" \
+            "Run it without sudo:" \
+            "  apex install --source capsule $*" >&2
+        [ -n "$u" ] && [ "$u" != root ] \
+            && printf 'apex-pkg: error: %s\n' "  (as ${u}, the account that ran sudo)" >&2
+        exit 1
+    fi
+    [ -x "$ENV_ENGINE" ] \
+        || die "no capsule engine on this system — it predates 'apex env'; run: sudo apex update"
+    if [ -z "$box" ]; then
+        local hit
+        hit="$(probe_capsule)"
+        box="${hit%%|*}"
+        [ -n "$box" ] \
+            || die "no capsule to install into. Make one first:  apex env create fedora"
+        msg "using capsule '${box}' (name another with --env)"
+    fi
+    "$ENV_ENGINE" install "$box" "$@"
+}
+
+# ── resolve ─────────────────────────────────────────────────────────────────
+# Read-only and unprivileged on purpose: "what would this install, and from
+# where" is a question a user should be able to ask without a password.
+cmd_resolve() {
+    [ "$#" -ge 1 ] || die "usage: apex resolve <name>"
+    local name="$1"
+
+    # The two syntactic forms decide themselves and there is nothing to rank.
+    if is_local_rpm_arg "$name"; then
+        printf 'apex: %s\n' \
+            "'${name}' is a local RPM file, so there is nothing to choose." \
+            "  sudo apex install ${name}" \
+            "  provenance: $(provenance rpm)"
+        return 0
+    fi
+    if is_flatpak_id "$name"; then
+        printf 'apex: %s\n' \
+            "'${name}' is a Flatpak application id, so there is nothing to choose." \
+            "  sudo apex install ${name}" \
+            "  provenance: $(provenance flatpak)"
+        return 0
+    fi
+
+    if [[ "$name" =~ $REFUSE_RE ]]; then
+        printf 'apex: %s\n' \
+            "'${name}' is a kernel or core-system package." \
+            "No source can provide it: overlaying a second copy of the running" \
+            "userspace ABI onto /usr is unrecoverable without a rollback, and a" \
+            "kernel needs an initramfs and a real deployment." \
+            "If APEX should ship it, that is an image change, not an install." >&2
+        return 1
+    fi
+
+    local -a rpm_hits=() flatpak_hits=() capsule_hits=()
+    mapfile -t rpm_hits < <(probe_rpm "$name")
+    mapfile -t flatpak_hits < <(probe_flatpak "$name")
+    mapfile -t capsule_hits < <(probe_capsule)
+
+    local have_rpm=0 have_flatpak=0 have_capsule=0
+    [ -n "${rpm_hits[0]:-}" ] && have_rpm=1
+    [ -n "${flatpak_hits[0]:-}" ] && have_flatpak=1
+    [ -n "${capsule_hits[0]:-}" ] && have_capsule=1
+
+    if [ "$have_rpm$have_flatpak$have_capsule" = 000 ]; then
+        printf 'apex: %s\n' \
+            "nothing called '${name}' in the repositories or on Flathub." \
+            "" \
+            "  apex search ${name}          look for a near match" \
+            "  apex repo enable-copr O/P    add a COPR that has it" \
+            "  apex env create fedora       then: apex env install fedora ${name}" >&2
+        return 1
+    fi
+
+    local -a order=()
+    mapfile -t order < <(rank_sources "$have_rpm" "$have_flatpak" "$have_capsule")
+    local chosen="${order[0]}" reason="ranked first for this system"
+
+    local curated
+    if curated="$(curated_source "$name")"; then
+        local forced="${curated%%|*}"
+        case " ${order[*]} " in
+            *" $forced "*)
+                chosen="$forced"
+                reason="APEX prefers this source for ${name}: ${curated#*|}"
+                ;;
+        esac
+    fi
+
+    echo "candidates for '${name}':"
+    local h
+    for h in "${rpm_hits[@]:-}"; do
+        [ -n "$h" ] || continue
+        printf '  %-8s %s-%s  (repo %s)  %s\n' rpm \
+            "$(cut -d'|' -f1 <<<"$h")" "$(cut -d'|' -f2 <<<"$h")" \
+            "$(cut -d'|' -f3 <<<"$h")" "$(cut -d'|' -f4- <<<"$h")"
+    done
+    for h in "${flatpak_hits[@]:-}"; do
+        [ -n "$h" ] || continue
+        printf '  %-8s %s  (%s on %s)\n' flatpak \
+            "$(cut -d'|' -f1 <<<"$h")" "$(cut -d'|' -f2 <<<"$h")" \
+            "$(cut -d'|' -f3 <<<"$h")"
+    done
+    for h in "${capsule_hits[@]:-}"; do
+        [ -n "$h" ] || continue
+        printf '  %-8s capsule %s  (%s, %s)\n' capsule \
+            "$(cut -d'|' -f1 <<<"$h")" "$(cut -d'|' -f2 <<<"$h")" \
+            "$(cut -d'|' -f3 <<<"$h")"
+    done
+
+    echo
+    echo "APEX would use: ${chosen} — ${reason}"
+    echo "provenance:     $(provenance "$chosen")"
+    echo "install:        $(install_command "$name" "$chosen" "${flatpak_hits[0]:-}" "${capsule_hits[0]:-}")"
+
+    local alt
+    for alt in "${order[@]}"; do
+        [ "$alt" = "$chosen" ] && continue
+        echo "or:             $(install_command "$name" "$alt" "${flatpak_hits[0]:-}" "${capsule_hits[0]:-}")"
+    done
+    return 0
+}
+
+# The exact command that installs `name` from `source`. Printed rather than
+# described, because "you could use a Flatpak instead" leaves the user to guess
+# an application id they have never seen.
+install_command() {
+    local name="$1" source="$2" flatpak_hit="$3" capsule_hit="$4"
+    case "$source" in
+        rpm)     printf 'sudo apex install --source rpm %s' "$name" ;;
+        flatpak)
+            local id="${flatpak_hit%%|*}"
+            printf 'sudo apex install %s' "${id:-$name}"
+            ;;
+        capsule)
+            local box="${capsule_hit%%|*}"
+            printf 'apex env install %s %s' "${box:-<capsule>}" "$name"
+            ;;
+    esac
+}
+
 cmd_search() {
     [ "$#" -gt 0 ] || die "usage: apex search <term>..."
+    # Repository packages first: they are the source `apex install` uses for a
+    # bare name, so putting anything above them would misrepresent what typing
+    # the name does.
+    echo "── repository packages ─────────────────────────────────────────────"
     dnf5 search "$@"
+    # §9's "search multiple supported package sources". Flatpak's own search
+    # reads the local AppStream cache, so this costs nothing and works offline.
+    if have_flatpak; then
+        echo
+        echo "── Flatpak applications ────────────────────────────────────────────"
+        flatpak search --columns=application,name,description "$@" 2>/dev/null \
+            || echo "(no Flatpak remote is configured)"
+    fi
+    echo
+    echo "apex resolve <name>  shows which source APEX would use, and why"
 }
 
 valid_copr_project() {
@@ -1466,6 +1884,12 @@ usage: apex-pkg <command> [args]
                        dependencies still come from the repositories.
                        --allow-unsigned accepts one local file that no trusted
                        key covers; the decision is recorded per file.
+                       --source rpm|flatpak|capsule picks the source for a bare
+                       name instead of letting APEX rank them; --env NAME says
+                       which capsule --source capsule installs into.
+  resolve <name>       which source APEX would use for that name, why, what
+                       vouches for it, and the exact command for each
+                       alternative. Read-only; needs no root.
   remove  <pkg>...     remove packages or Flatpak apps (a local file is removed
                        by its package name)
   upgrade              refresh all extension packages from the repositories
@@ -1490,6 +1914,11 @@ main() {
     # default and the opt-in is never remembered as a global setting. What IS
     # remembered is the per-file decision, in LOCAL_DIR.
     ALLOW_UNSIGNED=0
+    # §9's escape hatch. Empty means "let APEX decide", which is the only
+    # setting that ever changes behaviour based on the curated table below;
+    # naming a source explicitly always wins and is never overridden.
+    SOURCE=""
+    ENV_NAME=""
     local -a rest=()
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -1497,10 +1926,18 @@ main() {
             --allow-unsigned) ALLOW_UNSIGNED=1 ;;
             --enable-repo=*) ENABLE_REPOS="${ENABLE_REPOS} ${1#*=}" ;;
             --enable-repo) shift || true; ENABLE_REPOS="${ENABLE_REPOS} ${1:-}" ;;
+            --source=*) SOURCE="${1#*=}" ;;
+            --source) shift || true; SOURCE="${1:-}" ;;
+            --env=*) ENV_NAME="${1#*=}" ;;
+            --env) shift || true; ENV_NAME="${1:-}" ;;
             *) rest+=("$1") ;;
         esac
         shift || true
     done
+    if [ -n "$SOURCE" ]; then
+        valid_source "$SOURCE" \
+            || die "unknown source '${SOURCE}' (rpm, flatpak, capsule)"
+    fi
     if [ "${#rest[@]}" -gt 0 ]; then
         set -- "${rest[@]}"
     else
@@ -1520,6 +1957,7 @@ main() {
         status)   cmd_status ;;
         verify)   cmd_verify ;;
         search)   cmd_search "$@" ;;
+        resolve)  cmd_resolve "$@" ;;
         repo-list) cmd_repo_list ;;
         repo-enable-copr) cmd_repo_enable_copr "$@" ;;
         repo-disable-copr) cmd_repo_disable_copr "$@" ;;

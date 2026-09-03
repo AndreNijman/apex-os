@@ -19,6 +19,8 @@ use apex_agent_core::term::{self, RawMode, WinSize};
 use apex_agent_core::{adapter, checkpoint, config, git, layout, project};
 use clap::{Args, Subcommand};
 
+use crate::ops;
+
 /// `apex agent <verb>`.
 #[derive(Subcommand)]
 pub enum AgentCmd {
@@ -164,6 +166,21 @@ pub enum ProjectCmd {
     },
     /// Stop tracking a project. The checkout is never touched.
     Forget { slug: String },
+    /// The capsule (§8) this project's work belongs in.
+    ///
+    /// With no argument it reports the binding, and suggests an image alias
+    /// when there is none. The suggestion is printed and never acted on:
+    /// creating a container because a `package.json` exists would be a
+    /// surprise measured in gigabytes.
+    Env {
+        /// Bind this project to a capsule. `apex env list` shows the ones you
+        /// have; `apex env create <name>` makes one.
+        #[arg(value_name = "CAPSULE")]
+        name: Option<String>,
+        /// Remove the binding. The capsule itself is untouched.
+        #[arg(long, conflicts_with = "name")]
+        clear: bool,
+    },
     /// Go to a project: switch to the workspace its windows are on.
     ///
     /// §6's "allow switching by project, not only by numeric workspace". Needs
@@ -814,6 +831,7 @@ pub fn project_cmd(cmd: ProjectCmd) -> i32 {
             })
         }
         ProjectCmd::Switch { name } => project_switch(name),
+        ProjectCmd::Env { name, clear } => project_env(name, clear),
         ProjectCmd::Layout { cmd } => match cmd {
             LayoutCmd::Save => layout_save(),
             LayoutCmd::Show { json } => layout_show(json),
@@ -1101,6 +1119,10 @@ fn project_info() -> Result<i32> {
             p.languages.join(", ")
         }
     );
+    println!(
+        "capsule      {}",
+        p.capsule.clone().unwrap_or_else(|| "-".to_string())
+    );
     if let Some(branch) = git::current_branch(Path::new(&p.root)) {
         println!("branch       {branch}");
     }
@@ -1117,6 +1139,76 @@ fn project_info() -> Result<i32> {
         .count();
     println!("sessions     {mine} running");
     Ok(0)
+}
+
+/// `apex project env [CAPSULE|--clear]` — §8's binding, from the project side.
+///
+/// Deliberately does not create anything. A capsule is hundreds of megabytes
+/// and belongs to the user's decision; this records which one their work
+/// belongs in and says how to make it if it does not exist yet.
+fn project_env(name: Option<String>, clear: bool) -> Result<i32> {
+    let p = current_project()?;
+
+    if clear {
+        project::bind_capsule(&p, None)?;
+        println!("{}: no capsule (the capsule itself is untouched)", p.name);
+        return Ok(0);
+    }
+
+    let Some(name) = name else {
+        match &p.capsule {
+            Some(c) => {
+                println!("{}: {c}", p.name);
+                // Naming the capsule is not the same as it existing: a
+                // binding survives `apex env rm`, and a stale one that only
+                // shows up when a command fails is worse than one reported
+                // here.
+                if !capsule_exists(c) {
+                    println!(
+                        "note: no capsule called '{c}' on this machine — \
+                         apex env create {c}"
+                    );
+                }
+            }
+            None => {
+                println!("{}: no capsule", p.name);
+                if let Some(alias) = project::suggested_capsule(&p.languages) {
+                    println!(
+                        "this looks like a {} project; a capsule keeps its toolchain off the host:\n  \
+                         apex env create {alias}\n  \
+                         apex project env {alias}",
+                        p.languages.join("/"),
+                    );
+                }
+            }
+        }
+        return Ok(0);
+    };
+
+    project::bind_capsule(&p, Some(&name))?;
+    println!("{}: {name}", p.name);
+    if !capsule_exists(&name) {
+        println!("note: it does not exist yet — apex env create {name}");
+    }
+    Ok(0)
+}
+
+/// Does `apex env` know this capsule?
+///
+/// A hint, so it fails open: a machine whose capsule engine is missing or
+/// broken must still be able to record a binding. Reported as "exists" when
+/// the answer cannot be obtained, because printing "no such capsule" for a
+/// capsule that is right there is the more confusing wrong answer.
+fn capsule_exists(name: &str) -> bool {
+    match Command::new(ops::ENV_ENGINE)
+        .args(["info", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) => status.success(),
+        Err(_) => true,
+    }
 }
 
 fn project_worktrees() -> Result<i32> {
