@@ -45,9 +45,16 @@ is the technical debt §17 names.
       `p1/compositor-adapter`. 37 live assertions + 23 headless static ones.
       The facade selects its backend by URL so `Quickshell.Hyprland` is never
       parsed off Hyprland. Nothing is rewired yet; consumers move in 5.2.
-- [ ] **5.2** Migrate consumers onto the facade, a file (or small group) per
-      commit. Done when no module outside `src/services/compositor/` spawns
-      `hyprctl` or `niri msg`.
+- [~] **5.2** Migrate consumers onto the facade. **Nearly done.** No file
+      outside `src/services/compositor/` imports `Quickshell.Hyprland` any
+      more. Migrated: CenterContent, IpcManager, ScreenRecService,
+      WallpaperService, QuickSettings (focus mode), ShellState (keybind
+      interception), PopupDismiss, Workspaces, LayoutDisplayer.
+      **Left:** `QuickSettings` screen shader + night light (both genuinely
+      Hyprland-only features, needing a `screenShader` capability), and
+      `SystemStats`' `hyprctl version` line. Keybind and display config
+      generation are 5.3, not 5.2. Compositor *name* checks that remain are
+      about appearance — labwc borders, the labwc dock — which §17 permits.
 - [ ] **5.3** One settings model → generated compositor config, with per-
       compositor emitters (Hyprland and labwc exist; niri is missing). Done
       when a keybind set round-trips to all three.
@@ -100,6 +107,13 @@ Newest last. One line per pushed commit that changes the state above.
   both halves of its test coverage. niri and labwc gained output-box screenshot
   picking that nobody had wired up, and `NiriService` gained a window list off
   its existing event stream.
+- 2026-09-03 — **5.2 in progress**, four pushed commits on
+  `apex-shell/p1/compositor-adapter`. The facade grew what the consumers
+  actually needed as they moved: `focusedAppName`, a `focusMoved` signal,
+  `readGaps`, `workspaceSlots`, per-entry workspace `ref`,
+  `specialWorkspaceOpen`, and the tiling-layout surface. 42 live assertions,
+  23 static. The whole shell loads under a nested labwc session with zero
+  errors, which exercises the labwc backend for real.
 - 2026-09-03 — noted for whoever picks this up: an early draft of the facade
   test called `setGaps(0, 0)` to check that a *capable* action returns true, and
   set the live Hyprland gaps to zero on the developer's desktop. Suites here run
