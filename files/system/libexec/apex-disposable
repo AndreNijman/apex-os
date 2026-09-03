@@ -342,7 +342,18 @@ require_engine() {
 print_boundary() {
     local name="$1" image="$2" copy_out="$3" force="$4" git_url="$5"
     shift 5
-    local -a copy_in=("$@")
+    # Empty arguments are dropped rather than carried. Every caller expands an
+    # array as "${arr[@]:-}" so that `set -u` is safe on an empty one, and that
+    # substitution produces a single EMPTY element — which this function
+    # happily reported as a copied-in path with no name, under a heading that
+    # should have read "(nothing)". Caught by the suite; the reason it is
+    # filtered here rather than at each call site is that there is one of these
+    # and three of those.
+    local -a copy_in=()
+    local a
+    for a in "$@"; do
+        [ -n "$a" ] && copy_in+=("$a")
+    done
 
     printf 'disposable environment\n'
     printf '  name        : %s\n' "$name"
