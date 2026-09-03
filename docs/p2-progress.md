@@ -198,3 +198,26 @@ Both shell suites are shellcheck-clean at `-S warning` and wired into the
 need a toolchain to build the binary they drive. `static` is where a cross-file
 parity check belongs, per the note P1 left after a check in a specialised job
 was skipped by a PR touching only the other side.
+
+## Independent check of the boot units' inertness, and why the variable matters
+
+`AGENTS.md` boot-path rule 5 says GRUB stays the default, and the OS-side boot
+work enforces that with `ConditionPathExists=` on systemd-boot's
+`LoaderBootCountPath-` EFI variable: on a GRUB machine the variable is absent,
+the unit does not start, and a failed condition is a skip rather than a
+failure.
+
+Verified directly on both real machines rather than from the code:
+
+| machine | bootloader | `LoaderBootCountPath-` | other `Loader*` vars |
+| --- | --- | --- | --- |
+| the laptop | GRUB 2.12 | absent | none |
+| the katana | GRUB 2.12 | absent | `LoaderInfo`, `LoaderDevicePartUUID`, `LoaderSystemToken` |
+
+**The katana result is the interesting one.** It carries three of systemd-boot's
+variables while still booting GRUB, so a condition written against
+`LoaderInfo` — the obvious "is systemd-boot involved" test — would have fired
+the units on a machine that never boots through systemd-boot.
+`LoaderBootCountPath` is set only when the booted entry actually carries a boot
+counter, which is exactly the state the health gate is about. The choice of
+variable is load-bearing rather than incidental, and this is the evidence.
