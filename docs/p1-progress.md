@@ -114,6 +114,31 @@ with `follow_mouse` crossing a monitor boundary now closes popups (unflagged
 behaviour change); and the facade suite encodes Hyprland's refcount semantics as
 universal, so it would fail on niri or labwc.
 
+## Resumed — and one hard rule added
+
+Restarted after the third pause. Every agent carries a new rule, now in the
+repo's root `AGENTS.md` (branch `docs/live-config-edit-rule`), because breaking
+it destroyed Andre's live desktop mid-session:
+
+A one-line substitution using Python `re.S` deleted **217 of 256 lines** from his
+live `~/.config/hypr/hyprland.conf` — under DOTALL a trailing `.*$` matches to
+the end of the FILE, not the line. Every `exec-once` went with it: next reboot,
+no shell, no wallpaper daemon, no polkit agent, no clipboard, no input method.
+
+The check I ran afterwards could not have caught it. I grepped for the line I had
+just added, found it, and moved on — **grepping for what you added cannot detect
+what you deleted.** `Hyprland --verify-config` and `hyprctl reload` both said
+`ok`, because a truncated config is still a valid one.
+
+Recovery took two minutes only because a `.pre-browser-fix` backup existed.
+`hyprctl reload` re-reads config but does **not** re-run `exec-once`, so each
+dead service had to be restarted with `hyprctl dispatch exec`. And `pgrep -f`
+reported five of them as running when none were, because it matched this shell's
+own command line.
+
+Full write-up in the memory vault at
+`errors-and-fixes/re-dotall-truncated-the-live-hyprland-config`.
+
 ## PAUSED (third time) — 2026-09-03
 
 All work stopped at Andre's request. **Nothing uncommitted, nothing unpushed**,
