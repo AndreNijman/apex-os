@@ -82,9 +82,54 @@ block="$(g print 2>/dev/null)"
 [ -n "$block" ] && ok "it generates a non-empty block" || bad "it generates a non-empty block"
 
 n="$(printf '%s\n' "$block" | grep -c '<keybind key=')"
-[ "$n" -ge 30 ] \
+
+# EVERY id in the model is either generated or explicitly skipped. Nothing may
+# fall out in between.
+#
+# This replaces a `-ge 30` threshold that carried this exact assertion's name
+# and could not do its job: the generator was silently dropping 20 of the 68
+# bindings — every `workspace-N` and `move-workspace-N`, because the id regex
+# was `[A-Za-z-]+` and those ids contain digits — and 44 >= 30, so it passed.
+# They were not reported as skipped either, since they never reached the code
+# that reports that, so the build check printed "48 defaults" and agreed.
+#
+# A count compared against a number derived from the model cannot drift the way
+# a hand-picked floor can.
+accounted="$(python3 - "$SHELL_TREE" "$INSTALLED" <<'PYEOF'
+import sys
+from importlib.machinery import SourceFileLoader
+k = SourceFileLoader("k", "files/system/libexec/apex-labwc-keybinds").load_module()
+defaults = k.shell_defaults(sys.argv[1], sys.argv[2])
+block, skipped = k.generate(defaults)
+generated = block.count("<keybind key=")
+print(f"{len(defaults)} {generated} {len(skipped)}")
+PYEOF
+)"
+d_total="$(echo "$accounted" | cut -d' ' -f1)"
+d_gen="$(echo "$accounted" | cut -d' ' -f2)"
+d_skip="$(echo "$accounted" | cut -d' ' -f3)"
+
+[ $((d_gen + d_skip)) -eq "$d_total" ] \
+    && ok "every default is either generated or skipped ($d_gen + $d_skip = $d_total)" \
+    || bad "bindings vanished between the model and the output: $d_gen generated + $d_skip skipped != $d_total defaults"
+
+[ "$n" = "$d_gen" ] \
     && ok "it generates every binding it can ($n)" \
-    || bad "it generates every binding it can (got $n, expected >= 30)"
+    || bad "it generates every binding it can (printed $n, accounted $d_gen)"
+
+# The model is read out of QML by regex, so a parse that silently matches almost
+# nothing is a live risk. Compare against the ids actually present.
+present="$(python3 - "$SHELL_TREE" <<'PYEOF'
+import re, sys
+src = open(sys.argv[1] + "/src/services/config_tab/KeybindService.qml", encoding="utf-8").read()
+start = src.index("_defaults")
+end = src.find("\n    })", start)
+print(len(re.findall(r'"([A-Za-z0-9-]+)":\s*\{', src[start:end])))
+PYEOF
+)"
+[ "$d_total" = "$present" ] \
+    && ok "the model parser sees every id in _defaults ($present)" \
+    || bad "the model parser sees $d_total of $present ids in _defaults"
 
 # A duplicate key is two bindings fighting over one shortcut, and labwc resolves
 # that by taking one of them silently.
@@ -187,6 +232,38 @@ grep -q 'A-Tab' "$WORK/fresh.xml" \
 python3 -c "import xml.etree.ElementTree as ET,sys; ET.parse(sys.argv[1])" "$WORK/fresh.xml" \
     && ok "the spliced file parses" || bad "the spliced file parses"
 
+# Well-formed is not the same as correct. A block spliced in as a SIBLING of
+# <keyboard> parses fine and does nothing — labwc reads keybinds only from
+# inside that element. The anchor used to be rfind("</keyboard>"), which
+# happily matched the phrase inside a comment.
+cat > "$WORK/trap.xml" <<'XML'
+<?xml version="1.0"?>
+<labwc_config>
+  <keyboard>
+    <keybind key="A-Tab"><action name="NextWindow"/></keybind>
+  </keyboard>
+  <!-- old notes: the block used to live before </keyboard> here -->
+</labwc_config>
+XML
+g apply --rc "$WORK/trap.xml" --no-reload >/dev/null 2>&1
+placed="$(python3 - "$WORK/trap.xml" <<'PYEOF'
+import sys, xml.etree.ElementTree as ET
+t = ET.parse(sys.argv[1]).getroot()
+inside = sum(len(kb.findall("keybind")) for kb in t.iter("keyboard"))
+print(f"{inside} {len(list(t.iter('keybind')))}")
+PYEOF
+)"
+# Both halves matter. Equality alone passes vacuously when the splice is
+# REFUSED — the file keeps its single pre-existing bind, 1 == 1, green tick.
+# So the block must also actually be there.
+p_in="$(echo "$placed" | cut -d' ' -f1)"
+p_all="$(echo "$placed" | cut -d' ' -f2)"
+if [ "$p_in" = "$p_all" ] && [ "$p_in" -gt "$n" ]; then
+    ok "bindings land inside <keyboard> even when a comment mentions the closing tag"
+else
+    bad "the block did not land inside <keyboard> (inside=$p_in total=$p_all, expected > $n)"
+fi
+
 # Idempotent. A second apply must replace the region, not stack another copy.
 before="$(grep -c '<keybind key=' "$WORK/fresh.xml")"
 g apply --rc "$WORK/fresh.xml" --no-reload >/dev/null 2>&1
@@ -203,15 +280,28 @@ grep -q 'key="W-S-p"' "$WORK/fresh.xml" && ! grep -q 'key="A-space"' "$WORK/fres
 
 section "refusals"
 
+# A clean refusal and an unhandled traceback both exit non-zero, so exit status
+# alone cannot tell them apart — and `tempfile.mkstemp` sits outside its try, so
+# the traceback path is real rather than hypothetical. Every refusal below is
+# checked for the absence of a traceback as well as a non-zero status.
+refused() {  # refused <desc> <stderr-file> <status>
+    if [ "$3" -ne 0 ] && ! grep -q "Traceback" "$2"; then
+        ok "$1"
+    elif grep -q "Traceback" "$2"; then
+        bad "$1 (crashed instead of refusing)"
+        head -3 "$2" | sed 's/^/        /'
+    else
+        bad "$1 (did not refuse)"
+    fi
+}
+
 # An unparseable rc.xml is never rewritten. labwc already falls back to defaults
 # silently on a broken config; overwriting it would destroy the user's own
 # bindings along with whatever the real problem was.
 printf '<labwc_config><keyboard></labwc_config>' > "$WORK/broken.xml"
 cp "$WORK/broken.xml" "$WORK/broken.orig"
-g apply --rc "$WORK/broken.xml" --no-reload >/dev/null 2>&1
-rc=$?
-[ "$rc" -ne 0 ] \
-    && ok "an unparseable rc.xml is refused" || bad "an unparseable rc.xml is refused"
+g apply --rc "$WORK/broken.xml" --no-reload >/dev/null 2>"$WORK/e1"
+refused "an unparseable rc.xml is refused" "$WORK/e1" $?
 cmp -s "$WORK/broken.xml" "$WORK/broken.orig" \
     && ok "the unparseable file is left untouched" \
     || bad "the unparseable file is left untouched"
@@ -219,16 +309,15 @@ cmp -s "$WORK/broken.xml" "$WORK/broken.orig" \
 # No </keyboard> means there is nowhere correct to put the block.
 printf '<labwc_config><theme/></labwc_config>' > "$WORK/nokbd.xml"
 cp "$WORK/nokbd.xml" "$WORK/nokbd.orig"
-g apply --rc "$WORK/nokbd.xml" --no-reload >/dev/null 2>&1
-[ $? -ne 0 ] && ok "a file with no <keyboard> is refused" || bad "a file with no <keyboard> is refused"
+g apply --rc "$WORK/nokbd.xml" --no-reload >/dev/null 2>"$WORK/e2"
+refused "a file with no <keyboard> is refused" "$WORK/e2" $?
 cmp -s "$WORK/nokbd.xml" "$WORK/nokbd.orig" \
     && ok "that file is left untouched too" || bad "that file is left untouched too"
 
 # A missing file is a skip, not a crash: a user who has never launched labwc has
 # no rc.xml, and saving a keybind must not fail because of it.
-g apply --rc "$WORK/does-not-exist.xml" --no-reload >/dev/null 2>&1
-[ $? -ne 0 ] && ok "a missing rc.xml reports rather than crashing" \
-             || bad "a missing rc.xml reports rather than crashing"
+g apply --rc "$WORK/does-not-exist.xml" --no-reload >/dev/null 2>"$WORK/e3"
+refused "a missing rc.xml reports rather than crashing" "$WORK/e3" $?
 
 section "the build-time check"
 
