@@ -6,9 +6,11 @@ into it, and how to get back.
 
 ## GRUB is the default, and that is not a temporary state
 
-**Every published APEX image — `daily`, `gaming-mesa`, `gaming-nvidia` — boots
-through GRUB, and will for this generation of APEX.** The systemd-boot + UKI
-path described here is **opt-in**, per machine, by hand.
+**The published APEX image boots through GRUB, and will for this generation of
+APEX.** There is one image; `apex`, `daily`, `gaming-mesa` and `gaming-nvidia`
+are four tags on the same manifest digest, so this is one artifact, not four.
+The systemd-boot + UKI path described here is **opt-in**, per machine, by
+hand.
 
 §23's implementation table reads "Boot v2: composefs + systemd-boot + UKIs +
 measured boot", which alone sounds like a bootloader swap. §22 says the
