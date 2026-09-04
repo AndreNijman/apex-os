@@ -89,29 +89,32 @@ some signal still distinguishes "cannot game here", the test should assert
 
 ## What was actually wrong with CI
 
-Read `docs/ci-release-tiers.md` before touching the base job. Three runs failed
-here and the first two explanations were both wrong, so the short version:
+Read `docs/ci-release-tiers.md` before touching the base job. Four runs failed
+here and three explanations were wrong, so the short version:
 
-`--cache-to` kills builds. Two runs died mid-build with the same podman error,
-`failed pushing cache ...: locating image with ID ...: image not known`, at
-step 18 and step 44 of 120. The push happens inside `podman build`, so it exits
-125 and takes a half-finished build with it. The base job now reads the cache
-(`--cache-from`) and does not write it.
+1. **`--cache-to` kills builds.** Two runs died mid-build on podman's
+   `locating image with ID ...: image not known`, at step 18 and step 44. The
+   push runs inside `podman build`, so it exits 125 and takes the build with it.
+2. **Per-step commits made `base` unfinishable.** A commit costs a constant
+   3m28s on this runner and base produces 102 of its own layers: 5h54m against a
+   6h ceiling. Run 33866516076 was cancelled at 6h01m. Fixed with
+   `--layers=false` — one commit instead of 102 — at a measured cost of 15 MiB
+   per update, because base's own layers total 14.9 MiB.
 
 The wrong turns, so nobody repeats them:
 
-* "A cache-push failure is survivable if the image exists." True, and useless —
+* "A cache-push failure is survivable if the image exists." True and useless:
   the failure lands mid-build, when there is no image yet.
-* "`--cache-to` is too slow: 4m13s per layer x 120 = 8h26m against a 6h
-  ceiling." The arithmetic was right, the measurement was one bad night.
-  Removing both flags gave the worst run of the three (5h44m, never finished).
-  Re-measured: **~22s per layer**, so a full stage is ~45 minutes.
-* "It must be the storage driver doing whole-rootfs copies." The base job now
+* "`--cache-to` is too SLOW — 4m13s/layer x 120 > 6h." Right arithmetic, wrong
+  target. Removing both cache flags gave the worst run of all (5h44m, never
+  finished).
+* "It must be the storage driver copying the whole rootfs." The base job now
   prints it: the runner reports `overlay`, not `vfs`.
 
-Still unexplained, and left as open questions rather than guesses: why the
-no-cache run took 5h44m, and whether `--cache-from` is worth keeping — it
-produced zero hits on the run that measured it.
+Why a commit costs 3m28s is STILL not explained — 22s against the old core,
+3m28s against a new one only 11% larger, from different runners hours apart.
+Leave it unexplained rather than adding a fifth theory; the fix does not depend
+on it.
 
 ## Landing order
 

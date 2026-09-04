@@ -136,7 +136,11 @@ env:
   # ONLY thing keeping already-deployed machines updating after the collapse to a
   # single image. But it is NOT a speed optimisation, and should not be cited as one.
   IMAGE: ghcr.io/andrenijman/apex-os
-  CACHE_PREFIX: ghcr.io/andrenijman/apex-os-build-cache
+  # No CACHE_PREFIX: nothing reads or writes a registry build cache any more.
+  # `--cache-to` killed two builds outright (podman "image not known" mid-push)
+  # and `--cache-from` became meaningless once base stopped producing
+  # intermediate layers. The ghcr.io/andrenijman/apex-os-build-cache-base
+  # repository is orphaned and can be deleted in the GHCR UI.
   TAG_CORE: core
   TAG_BASE: base
   # Transitional: where core/base lived before the consolidation. The base job
@@ -648,6 +652,41 @@ jobs:
 
       - name: Build base
         run: |
+          # ── ONE COMMIT, NOT 102. This is what makes base finishable. ──
+          #
+          # `--layers=true` commits an image layer per Containerfile step, and a
+          # commit on this runner costs a dead-constant 3m28s regardless of what
+          # the step changed. Measured on run 33866516076, one line per layer:
+          #
+          #   STEP  3/120 12:09:42    STEP  7/120 12:23:30
+          #   STEP  4/120 12:13:07    STEP  8/120 12:27:00
+          #   STEP  5/120 12:16:33    ...
+          #   STEP  6/120 12:20:00    STEP 15/120 12:51:56
+          #
+          # base produces 102 of its own layers, so 102 x 3m28s = 5h54m and the
+          # job dies on GitHub's 6h ceiling. It did exactly that: `base`
+          # cancelled at 6h01m having never reached the end of the build.
+          #
+          # WHY that per-commit cost is so high is NOT established. It was 22s
+          # against the previous core and 3m28s against this one, for an image
+          # only 11% larger (101 layers/4.73 GiB -> 107/5.26 GiB), which neither
+          # size nor layer count explains, and the two figures come from
+          # different runners hours apart so runner variability is not ruled
+          # out. Three theories have already been wrong here; this fix
+          # deliberately does not depend on a fourth. It removes 101 of the 102
+          # commits, which helps whatever the cause turns out to be.
+          #
+          # THE PRICE, measured rather than assumed: base's own 102 layers total
+          # 14.9 MiB (largest 7.0 MiB). Squashing them into one means a change
+          # to any base file redownloads all ~15 MiB instead of just the layers
+          # that moved. That is noise next to the 5.26 GiB core those machines
+          # already have and do not re-fetch — the core/base split, which is
+          # what actually keeps `apex update` small, is untouched.
+          #
+          # `--cache-from` goes with it: with no intermediate layers there is
+          # nothing to look up, so it would be a registry round-trip per build
+          # returning nothing. That retires CACHE_PREFIX too.
+          #
           # ── A cache-push failure must not fail a build that made an image ──
           #
           # `--cache-to` writes intermediate layers to ghcr so the NEXT build is
@@ -668,9 +707,7 @@ jobs:
           # This is the narrow exception AGENTS.md allows for a tolerated
           # upstream defect, with the hard postcondition it requires.
           set +e
-          sudo podman build --isolation=chroot --layers=true \
-            --cache-from "$CACHE_PREFIX-base" \
-            --cache-ttl=336h \
+          sudo podman build --isolation=chroot --layers=false \
             --build-arg CORE="$IMAGE@${{ steps.core.outputs.digest }}" \
             --build-arg APEX_REVISION="${{ github.sha }}" \
             --build-arg APEX_SHELL_REF="${{ needs.changes.outputs.shell_sha }}" \
