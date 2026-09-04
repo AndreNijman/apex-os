@@ -845,6 +845,14 @@ pub fn gaming_main(args: GamingArgs) -> i32 {
         for b in &blockers {
             print_wrapped("  - ", b);
         }
+        // One unwrapped, pastable line. Deliberately says "the missing
+        // programs" rather than promising readiness: a blocker like "this is
+        // not a Gaming edition image" survives any amount of installing.
+        if let Some(hint) = r.install_hint() {
+            println!();
+            println!("Install the missing programs with:");
+            println!("  {hint}");
+        }
     }
     let warnings = r.warnings();
     if !warnings.is_empty() {
@@ -891,7 +899,7 @@ fn gaming_json(r: &Readiness, probes_programs: bool) -> String {
     format!(
         "{{\"ready\":{},\"probes_programs\":{},\"boots_to_game\":{},\
          \"preselected_session\":{},\"checks\":{{{}}},\"gamepads\":{},\
-         \"blockers\":[{}],\"warnings\":[{}]}}",
+         \"blockers\":[{}],\"warnings\":[{}],\"install_hint\":{}}}",
         r.is_ready(),
         probes_programs,
         r.boots_to_game()
@@ -915,6 +923,7 @@ fn gaming_json(r: &Readiness, probes_programs: bool) -> String {
         pads,
         list(&r.blockers()),
         list(&r.warnings()),
+        r.install_hint().map(|h| js(&h)).unwrap_or("null".into()),
     )
 }
 
