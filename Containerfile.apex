@@ -36,6 +36,13 @@
 # and none of that touches the deployment — `apex install` builds a systemd
 # system extension, so `bootc upgrade` keeps working (see docs/packages.md).
 #
+# Verified against the repositories this image actually enables, rather than
+# assumed: steam resolves from RPMFusion nonfree; gamescope, mangohud, gamemode,
+# obs-studio, steam-devices and protontricks from Fedora. Proton itself ships
+# inside Steam. SUNSHINE IS THE EXCEPTION and is named as one — it is in no
+# enabled repository, so it needs `apex repo enable-copr` or a downloaded .rpm
+# (which `apex install` also takes). One command for the rest, two for Sunshine.
+#
 # Everything in the left-hand column lives in Containerfile.core, NOT here and
 # NOT in the base. That is a download decision, and it is the reason a single
 # image is affordable at all: the base consumes core as `FROM …@sha256:…`, so
