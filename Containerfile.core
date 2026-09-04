@@ -3,6 +3,8 @@
 #
 #   fedora-bootc:43
 #     → CachyOS perf kernel swap + MOK signing                [own RUNs]
+#     → out-of-tree modules (nvidia, xone, xpadneo) + MOK     [own RUNs]
+#       module signing, NVIDIA userspace, nouveau/KMS config
 #     → hardware-enablement firmware                          [own RUN]
 #     → desktop + greeter stack (hyprland/quickshell/sway/…)  [own RUN]
 #     → sched-ext userspace (scx), Bazaar, RPMFusion + codecs [own RUNs]
@@ -31,7 +33,11 @@
 #
 # ── What belongs in core vs base ──
 #   CORE  anything installed by dnf, fetched from the network, or compiled;
-#         OS-level branding/locale/hardening that does not read files/**.
+#         OS-level branding/locale/hardening that does not read files/**;
+#         and — since the three published images became one — every out-of-tree
+#         KERNEL MODULE, because a module can only be made loadable under an
+#         enforcing kernel by signing it with the APEX MOK, and that private key
+#         exists only inside a CI build secret that is mounted here.
 #   BASE  every COPY out of files/** and config/**, the apexd/apex binaries,
 #         the vendored APEX Shell, and any RUN that asserts against them.
 # A RUN that mixes the two must be SPLIT, not moved wholesale. Four in the
@@ -330,6 +336,375 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
         echo "SECURE BOOT: no signing secret supplied — kernel left UNSIGNED (Secure Boot must be OFF)"; \
     fi
 
+# ── Stage 1d: out-of-tree kernel modules — built AND SIGNED here ───────────
+#
+# WHY THESE ARE IN CORE AND NOT IN A FLAVOR
+# APEX publishes ONE image for every laptop. Userspace can be added to a running
+# machine (`apex install` builds a systemd system extension); a KERNEL MODULE
+# cannot, because a module the kernel will accept has to be signed with the APEX
+# MOK private key, and that key is a CI secret that must never reach a user's
+# machine. `apex-pkg` refuses kernels/akmods for exactly this reason. So the rule
+# that decides what ships and what installs on demand is simply:
+#
+#     kernel module  -> built and signed HERE, in the image
+#     userspace      -> `apex install steam gamescope …` on demand
+#
+# and everything below is on the kernel-module side of that line.
+#
+# WHY CORE SPECIFICALLY, GIVEN THE HEADER'S UPDATE-SIZE RULE
+# This is the tier the signing secret is already mounted in (Stage 1b), the tier
+# that owns the kernel these modules must match, and — decisively — the tier the
+# base consumes as `FROM …@sha256:…`. A digest-pinned parent's layer descriptors
+# are reused verbatim, so bootc already holds these blobs and downloads none of
+# them on a normal `apex update`. Put the same content in `base` or a flavor and
+# every user would re-download the NVIDIA driver on every push.
+#
+# THE SIGNING GAP THIS CLOSES
+# Nothing in this repository has ever signed an out-of-tree module. The akmod was
+# built in Containerfile.gaming, which is a FLAVOR — and the flavor job is never
+# passed `--secret id=apex_sb_key`, so `sign-file` could not have run there even
+# if someone had written it. CI's Secure Boot check ran `sbverify` against
+# vmlinuz only. AGENTS.md has always required that "the shipped kernel and
+# required out-of-tree modules must be signed by the expected chain".
+#
+# Measured caveat, recorded so nobody over-claims this fix: on the shipped
+# CachyOS kernel the modules were LOADING regardless, because that kernel does
+# not enforce module signatures —
+#     CONFIG_MODULE_SIG=y            (signatures are understood)
+#     # CONFIG_MODULE_SIG_FORCE is not set
+#     CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y
+#     CONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT — absent entirely
+# so, unlike a Fedora kernel, Secure Boot does NOT put this kernel into lockdown
+# and an unsigned module loads fine today. What the signature buys is that the
+# moment enforcement appears — a CachyOS respin enabling the lockdown coupling, a
+# user adding `module.sig_enforce=1` or `lockdown=integrity` — NVIDIA keeps
+# working instead of silently failing to load into a black screen. And it can be
+# trusted when it happens: the kernel carries
+#     CONFIG_INTEGRITY_MACHINE_KEYRING=y  +  CONFIG_SECONDARY_TRUSTED_KEYRING=y
+# so the MOK the user already enrols for the kernel validates these modules too.
+#
+# WHAT IS BUILT
+#   nvidia    RPMFusion akmod-nvidia (580.x). The dGPU driver.
+#   xone      ublue-os/akmods — Xbox One/Series controllers, wired and via the
+#             Microsoft wireless dongle. NOTE: the DONGLE also needs a firmware
+#             blob extracted from a Microsoft driver package, which is not
+#             redistributable and therefore not baked in; wired pads work as
+#             shipped, dongle users run `xone-get-firmware.sh` once.
+#   xpadneo   shdwchn10/xpadneo 0.10.2 — Bluetooth Xbox pads: rumble, battery
+#             reporting and correct axis mapping that in-kernel `hid-generic`
+#             does not provide.
+# Containerfile.gaming claimed "no akmod source is currently published that
+# matches this kernel". That was wrong, and it is worth naming why: an akmod
+# source package is kernel-INDEPENDENT — `akmods` compiles it against whatever
+# `--kernels` is given. Verified with the COPRs enabled against fc43:
+#     akmod-xone     1000.0.0.git.1442.85e53359-2.fc43  [ublue-os/akmods]
+#     akmod-xpadneo  0.10.2-1.fc43                      [shdwchn10/xpadneo]
+#
+# RPMFusion is enabled HERE (earliest consumer) and left enabled — Stage 5a-codecs
+# below now asserts it rather than re-adding it. The two akmod COPRs are one-shot
+# build inputs and are disabled again, matching the CachyOS kernel COPR posture.
+#
+# Build and signing are ONE layer on purpose: signing rewrites every module, so
+# splitting them would commit the unsigned copies to a lower layer and ship both.
+ARG APEX_AKMODS="nvidia xone xpadneo"
+RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
+    set -eux; \
+    KVER="$(cat /usr/lib/apex-kver)"; \
+    echo "building out-of-tree modules against CachyOS kver: ${KVER}"; \
+    test -d "/usr/src/kernels/${KVER}" \
+        || { echo "FATAL: kernel-devel headers missing for ${KVER}"; exit 1; }; \
+    dnf5 -y install \
+        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
+        "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"; \
+    dnf5 -y copr enable ublue-os/akmods; \
+    dnf5 -y copr enable shdwchn10/xpadneo; \
+    dnf5 -y install akmods kmodtool gcc make; \
+    dnf5 -y install akmod-nvidia akmod-xone akmod-xpadneo; \
+    for k in ${APEX_AKMODS}; do \
+        echo "=== akmods: building ${k} for ${KVER} ==="; \
+        akmods --force --kernels "${KVER}" --kmod "${k}"; \
+        RPM="$(ls -1 /var/cache/akmods/${k}/kmod-${k}-*.rpm 2>/dev/null | head -1)"; \
+        test -n "${RPM}" && test -f "${RPM}" \
+            || { echo "FATAL: ${k} akmod produced no kmod RPM for ${KVER}"; \
+                 sed -n '1,80p' /var/cache/akmods/${k}/*.failed.log 2>/dev/null; exit 1; }; \
+        echo "built: ${RPM}"; \
+        dnf5 -y install "${RPM}"; \
+    done; \
+    dnf5 -y copr disable ublue-os/akmods; \
+    dnf5 -y copr disable shdwchn10/xpadneo; \
+    depmod -a "${KVER}"; \
+    MODDIR="/usr/lib/modules/${KVER}"; \
+    SIGN_FILE="${MODDIR}/build/scripts/sign-file"; \
+    HASH="$(sed -n 's/^CONFIG_MODULE_SIG_HASH="\(.*\)"$/\1/p' "${MODDIR}/config")"; \
+    test -n "${HASH}" \
+        || { echo "FATAL: cannot read CONFIG_MODULE_SIG_HASH from ${MODDIR}/config"; exit 1; }; \
+    mkdir -p /usr/share/apex-os/secureboot; \
+    if [ -s /run/secrets/apex_sb_key ] && [ -s /run/secrets/apex_sb_crt ]; then \
+        test -x "${SIGN_FILE}" \
+            || { echo "FATAL: ${SIGN_FILE} missing — kernel-devel did not ship the signing helper"; exit 1; }; \
+        dnf5 -y install zstd xz >/dev/null; \
+        openssl x509 -in /run/secrets/apex_sb_crt -outform DER -out /tmp/apex-mok.der; \
+        SIGNER="$(openssl x509 -in /run/secrets/apex_sb_crt -noout -subject -nameopt multiline \
+                  | sed -n 's/^ *commonName *= *//p')"; \
+        test -n "${SIGNER}" \
+            || { echo "FATAL: APEX MOK certificate has no commonName to verify against"; exit 1; }; \
+        echo "signing out-of-tree modules with ${HASH}, signer CN='${SIGNER}'"; \
+        SIGNED=0; \
+        OOT=""; for d in extra updates; do [ -d "${MODDIR}/${d}" ] && OOT="${OOT} ${MODDIR}/${d}"; done; \
+        test -n "${OOT}" \
+            || { echo "FATAL: no out-of-tree module directory under ${MODDIR}"; exit 1; }; \
+        for m in $(find ${OOT} -type f -name '*.ko*'); do \
+            case "${m}" in \
+                *.ko.zst) zstd -q -d --rm "${m}"; ko="${m%.zst}"; recomp=zst ;; \
+                *.ko.xz)  xz -q -d "${m}";        ko="${m%.xz}";  recomp=xz  ;; \
+                *.ko)     ko="${m}";              recomp=none ;; \
+                *) echo "FATAL: unhandled module file ${m}"; exit 1 ;; \
+            esac; \
+            "${SIGN_FILE}" "${HASH}" /run/secrets/apex_sb_key /tmp/apex-mok.der "${ko}"; \
+            tail -c 28 "${ko}" | grep -q 'Module signature appended' \
+                || { echo "FATAL: no signature trailer on ${ko}"; exit 1; }; \
+            case "${recomp}" in \
+                zst) zstd -q -19 -T0 --rm "${ko}" ;; \
+                xz)  xz -q -T0 "${ko}" ;; \
+            esac; \
+            SIGNED=$((SIGNED + 1)); \
+        done; \
+        rm -f /tmp/apex-mok.der; \
+        test "${SIGNED}" -gt 0 \
+            || { echo "FATAL: signed 0 modules — the enumeration found nothing to sign"; exit 1; }; \
+        depmod -a "${KVER}"; \
+        printf '%s\n' "${SIGNER}" > /usr/share/apex-os/secureboot/module-signer; \
+        printf 'signed\n' > /usr/share/apex-os/secureboot/modules-signed; \
+        echo "SECURE BOOT: ${SIGNED} out-of-tree modules signed with the APEX MOK"; \
+    else \
+        printf 'unsigned\n' > /usr/share/apex-os/secureboot/modules-signed; \
+        echo "SECURE BOOT: no signing secret — out-of-tree modules left UNSIGNED"; \
+    fi; \
+    dnf5 clean all
+
+# THE POSTCONDITION. Separate RUN so it cannot share a shell with the code that
+# produced the thing it checks, and written so it CANNOT PASS VACUOUSLY: it
+# enumerates every out-of-tree module, requires at least one nvidia + one xone +
+# one xpadneo, and requires `modinfo -F signer` on each to equal the certificate
+# CN recorded above. A marker file is not evidence; this reads the signature out
+# of the shipped artifact. `modules-signed = unsigned` (a local build with no
+# key) is tolerated here in the same way Stage 1b tolerates an unsigned kernel —
+# and CI refuses to publish either.
+#
+# Module NAMES, not package names: `akmod-xone` builds xone-wired/xone-dongle/
+# xone-gip*, and `akmod-xpadneo` builds hid-xpadneo. Only nvidia is named after
+# its akmod, so presence is checked by locating the module FILES each akmod
+# installed rather than by `modinfo <akmod name>`, which would fail for two of
+# the three and would have to be weakened to pass — the exact shape of check
+# that stops meaning anything.
+RUN set -eux; \
+    KVER="$(cat /usr/lib/apex-kver)"; \
+    MODDIR="/usr/lib/modules/${KVER}"; \
+    OOT=""; for d in extra updates; do [ -d "${MODDIR}/${d}" ] && OOT="${OOT} ${MODDIR}/${d}"; done; \
+    test -n "${OOT}" || { echo "FATAL: no out-of-tree module directory"; exit 1; }; \
+    for pat in nvidia xone xpadneo; do \
+        n="$(find ${OOT} -type f -name "*${pat}*.ko*" | wc -l)"; \
+        test "${n}" -gt 0 \
+            || { echo "FATAL: no ${pat} module under ${OOT}"; find ${OOT} -name '*.ko*'; exit 1; }; \
+        echo "present: ${n} ${pat} module(s)"; \
+    done; \
+    modinfo -k "${KVER}" nvidia >/dev/null \
+        || { echo "FATAL: modinfo cannot resolve nvidia for ${KVER}"; exit 1; }; \
+    if [ "$(cat /usr/share/apex-os/secureboot/modules-signed)" = signed ]; then \
+        SIGNER="$(cat /usr/share/apex-os/secureboot/module-signer)"; \
+        N=0; \
+        for m in $(find ${OOT} -type f -name '*.ko*'); do \
+            got="$(modinfo -F signer "${m}" 2>/dev/null || true)"; \
+            [ "${got}" = "${SIGNER}" ] \
+                || { echo "FATAL: ${m} signer is '${got}', expected '${SIGNER}'"; exit 1; }; \
+            N=$((N + 1)); \
+        done; \
+        test "${N}" -gt 0 \
+            || { echo "FATAL: zero out-of-tree modules found — this check would have passed vacuously"; exit 1; }; \
+        echo "module signatures verified: ${N} modules, all signed by '${SIGNER}'"; \
+    else \
+        echo "modules are UNSIGNED (no build secret); CI will refuse to publish this"; \
+    fi
+
+# ── Stage 1e: NVIDIA userspace driver (every image, every machine) ─────────
+# The stage above built the kernel MODULE; a working NVIDIA machine also needs
+# the USERSPACE driver (libGLX_nvidia / libnvidia-*) plus the CUDA runtime. The
+# VA-API↔NVDEC bridge (RPMFusion renamed nvidia-vaapi-driver →
+# libva-nvidia-driver) gives the codec userland hardware decode on NVIDIA too;
+# best-effort across BOTH names with `--skip-unavailable`, so a rename upstream
+# can never abort the driver + CUDA install that matters.
+#
+# COEXISTENCE WITH MESA IS THE WHOLE QUESTION HERE, because this now lands on
+# AMD-only and Intel-only laptops too. It is safe because Fedora/RPMFusion ship
+# GLVND: mesa provides libGLX_mesa/libEGL_mesa, NVIDIA provides
+# libGLX_nvidia/libEGL_nvidia, and libglvnd dispatches per-screen from the
+# vendor JSON in /usr/share/glvnd/egl_vendor.d — there is no libGL.so
+# "alternative" to win or lose any more, which is what the old
+# `nvidia-xconfig`-era conflict was about. Asserted, not assumed: the next RUN
+# checks both vendors' GLX/EGL libraries and Vulkan ICDs survive this install.
+RUN set -eux; \
+    dnf5 -y install xorg-x11-drv-nvidia xorg-x11-drv-nvidia-cuda; \
+    dnf5 -y install --skip-unavailable libva-nvidia-driver nvidia-vaapi-driver; \
+    dnf5 clean all
+
+# Mesa must still work on a machine that has no NVIDIA GPU at all. These are the
+# files that make that true, so these are what is checked — the mechanism is
+# GLVND dispatch, the evidence is that both vendors are present and neither
+# replaced the other.
+RUN set -eux; \
+    test -e /usr/lib64/libGLX_mesa.so.0; \
+    test -e /usr/lib64/libEGL_mesa.so.0; \
+    test -e /usr/lib64/libGLX_nvidia.so.0; \
+    test -s /usr/share/glvnd/egl_vendor.d/50_mesa.json; \
+    test -s /usr/share/glvnd/egl_vendor.d/10_nvidia.json; \
+    ls /usr/share/vulkan/icd.d/ | grep -q '^radeon_icd'; \
+    ls /usr/share/vulkan/icd.d/ | grep -q '^intel_icd'; \
+    ls /usr/share/vulkan/icd.d/ | grep -qi 'nvidia'; \
+    # THE ONE THAT MATTERS. The historical Mesa/NVIDIA conflict was over who
+    # owned libGL.so.1. Under GLVND neither vendor does — libglvnd owns the
+    # dispatch library and both ship only libGLX_<vendor>. If a driver update
+    # ever went back to claiming libGL.so.1, an AMD/Intel laptop would be
+    # dispatching its OpenGL through the NVIDIA stack, and this is what catches
+    # it. Checked by package ownership, not by the file merely existing.
+    owner="$(rpm -qf --qf '%{NAME}\n' /usr/lib64/libGL.so.1)"; \
+    case "${owner}" in libglvnd*) ;; \
+        *) echo "FATAL: /usr/lib64/libGL.so.1 is owned by '${owner}', not libglvnd — mesa/nvidia GL dispatch is broken"; exit 1 ;; \
+    esac; \
+    echo "glvnd: libGL.so.1 owned by ${owner}; mesa and nvidia GLX/EGL/Vulkan coexist"
+
+# ── Stage 1f: NVIDIA boot correctness — nouveau, KMS, initramfs ────────────
+# Everything here MUST land before the LAST initramfs regeneration in the build,
+# which is the Plymouth dracut run in Containerfile.apex. (apex-logs 46)
+#
+# THREE FINDINGS FROM THE FLASH-READINESS REVIEW, unchanged by unification:
+#
+# 1. nouveau is NOT blacklisted by anything else. RPMFusion ships its blacklist
+#    ONLY via a %posttrans grubby call, which is inert on bootc — there is no
+#    modprobe.d fallback anywhere in RPMFusion F43. The CachyOS kernel ships
+#    nouveau with a catch-all pci:v000010DEd* alias AND nouveau is present in the
+#    initramfs, so it races nvidia for the dGPU during early boot.
+#
+# 2. RPMFusion deliberately OMITS nvidia from the initramfs
+#    (/usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf), reasoning "avoid
+#    needing to regenerate the ramdisk on updates". That reasoning does not apply
+#    to bootc, where every driver update IS an image rebuild — and the omission
+#    means the splash/greeter cannot come up on a dGPU-attached output. We
+#    OVERWRITE that exact file (plain `=`, not `+=`) rather than relying on
+#    add_drivers-vs-omit_drivers precedence, so the fix is correct either way.
+#
+# 3. nvidia-drm modeset: RPMFusion's nvidia-kmod carries make_modeset_default.patch
+#    so the built default is already on. We set it EXPLICITLY anyway, so a future
+#    RPMFusion respin that drops that patch cannot silently ship an image with no
+#    KMS — an explicit modprobe option beats whatever the compiled-in default is.
+#
+# WHAT UNIFICATION CHANGES, STATED PLAINLY: every APEX machine now carries the
+# nouveau blacklist, not just the ex-`gaming-nvidia` ones. On AMD/Intel hardware
+# that is inert (no NVIDIA device, nothing to bind). On a machine whose NVIDIA
+# GPU is too old for the 580 branch it means the dGPU goes unused rather than
+# falling back to nouveau — acceptable on the laptops this image targets, where
+# the panel is driven by the iGPU, and preferable to the boot race above.
+# The nvidia-*.service condition gates and the nvidia-fallback mask below are
+# what keep the image clean on machines with no NVIDIA hardware; they were
+# already written for portability and are now load-bearing for everyone.
+# printf, not a heredoc: heredoc bodies do not survive backslash-continued RUN
+# lines reliably, and this project has already shipped one Dockerfile-escaping bug.
+RUN set -eux; \
+    mkdir -p /usr/lib/modprobe.d /usr/lib/bootc/kargs.d /usr/lib/dracut/dracut.conf.d; \
+    printf '%s\n' \
+        '# APEX-OS (apex-logs 46). nouveau must never bind the dGPU: it races' \
+        '# the proprietary driver, and RPMFusion ships its blacklist only via a' \
+        '# %posttrans grubby call, which is inert on bootc.' \
+        'blacklist nouveau' \
+        'install nouveau /bin/false' \
+        '# Explicit, so we do not depend on RPMFusion make_modeset_default.patch' \
+        '# surviving a respin. modeset=1 is required by every Wayland compositor;' \
+        '# fbdev=1 gives a console/splash framebuffer on dGPU-attached outputs.' \
+        'options nvidia-drm modeset=1 fbdev=1' \
+        > /usr/lib/modprobe.d/50-apex-nvidia.conf; \
+    printf '%s\n' \
+        '# rd.driver.blacklist is the mechanism dracut honours in the INITRAMFS' \
+        '# phase — modprobe.d alone is weaker there, and nouveau is verifiably' \
+        '# inside the initramfs. modprobe.blacklist covers the real root.' \
+        'kargs = ["rd.driver.blacklist=nouveau", "modprobe.blacklist=nouveau"]' \
+        > /usr/lib/bootc/kargs.d/25-apex-nvidia.toml; \
+    printf '%s\n' \
+        '# APEX-OS overwrite of RPMFusion 99-nvidia-dracut.conf.' \
+        '# Assignment, NOT +=, so their omit_drivers is cleared outright and we' \
+        '# do not depend on add_drivers-vs-omit_drivers precedence.' \
+        'omit_drivers=""' \
+        'add_drivers+=" nvidia nvidia_modeset nvidia_drm nvidia_uvm "' \
+        > /usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf; \
+    systemctl mask nvidia-fallback.service; \
+    for u in nvidia-powerd nvidia-persistenced; do \
+        mkdir -p "/usr/lib/systemd/system/${u}.service.d"; \
+        printf '%s\n' \
+            '# Portability (apex-logs 46): this image runs on ANY machine,' \
+            '# including ones with no NVIDIA GPU. Without this gate these units' \
+            '# fail at every boot on AMD/Intel hardware and show up as failed' \
+            '# units, which is noise the user then has to triage.' \
+            '[Unit]' \
+            'ConditionPathExistsGlob=/sys/module/nvidia' \
+            > "/usr/lib/systemd/system/${u}.service.d/10-apex-nvidia-only.conf"; \
+    done; \
+    test -s /usr/lib/modprobe.d/50-apex-nvidia.conf; \
+    test -s /usr/lib/bootc/kargs.d/25-apex-nvidia.toml; \
+    grep -q 'omit_drivers=""' /usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf; \
+    echo "nvidia: nouveau blacklisted, KMS forced, driver added to initramfs"
+
+# ── Stage 1g: controller + fan/IRQ policy that is no longer edition-specific ─
+# These four moved out of Containerfile.gaming unchanged in effect. They were
+# never gaming-only in nature — they are hardware and daemon-arbitration policy —
+# and with one image there is no edition to gate them on.
+#
+# msi-wmi-platform: the in-tree msi-ec has a 25-entry EC-firmware allowlist with
+# NO 17L3 entry and no `force` parameter, so it will NOT bind on the MSI Katana
+# GF76 (board MS-17L3). msi-wmi-platform does take force=1 and registers an hwmon
+# device, so it is the viable fan/telemetry backend there. Loading it taints the
+# kernel; harmless, and a no-op on non-MSI hardware where the WMI GUID is absent.
+# apexd probes hwmon -> msi-wmi-platform -> msi-ec -> unsupported.
+#
+# irqbalance is MASKED (it is installed, as a dependency, on every image — so the
+# `|| true` this carried in Containerfile.gaming was dead weight guarding a
+# command that cannot fail, and is gone). It actively undoes apexd's M6 IRQ
+# pinning and a static IRQBALANCE_BANNED_CPULIST cannot track a cpuset chosen at
+# runtime. On a laptop the cost of not running it is negligible; the cost of it
+# fighting apexd is a measurable frame-pacing regression.
+#
+# /etc/gamemode.ini ships even though gamemode itself is now an on-demand
+# package: it is inert without gamemode, and it means the FIRST time a user runs
+# `apex install gamemode`, gamemoded already hands the governor to apexd instead
+# of flapping it. Config that arrives after the daemon is config nobody applies.
+#
+# xone/xpadneo module options: xpadneo's rumble and the xone dongle are what the
+# akmods above exist for; these give both sane defaults without a udev rule.
+RUN set -eux; \
+    mkdir -p /usr/lib/modules-load.d /usr/lib/modprobe.d; \
+    printf '%s\n' 'msi-wmi-platform' > /usr/lib/modules-load.d/apex-msi.conf; \
+    printf '%s\n' 'options msi-wmi-platform force=1' \
+        > /usr/lib/modprobe.d/51-apex-msi.conf; \
+    systemctl mask irqbalance.service; \
+    printf '%s\n' \
+        '[general]' \
+        '; apexd owns scaling_governor (M6 tier engine). Matching gamemoded to' \
+        '; apexd game tier means neither daemon flaps the governor against the' \
+        '; other.' \
+        'desiredgov=performance' \
+        'defaultgov=performance' \
+        'igpu_desiredgov=performance' \
+        '' \
+        '[custom]' \
+        '; Makes Steam `gamemoderun %command%` drive APEX game mode: P-core' \
+        '; cpuset, IRQ steering, NVIDIA clock locks and fan boost. Idempotent,' \
+        '; and safe when apexd is absent (the CLI reports unsupported, not err).' \
+        'start=/usr/bin/apex game start' \
+        'end=/usr/bin/apex game stop' \
+        > /etc/gamemode.ini; \
+    test -s /usr/lib/modules-load.d/apex-msi.conf; \
+    test -s /usr/lib/modprobe.d/51-apex-msi.conf; \
+    test -s /etc/gamemode.ini; \
+    test "$(readlink -f /etc/systemd/system/irqbalance.service)" = /dev/null \
+        || { echo "FATAL: irqbalance.service is not masked"; exit 1; }
+
 # ── Stage 2: desktop + greeter stack ───────────────────────────────────────
 # hyprland (sdegler COPR) + quickshell (errornointernet COPR 0.3.0 —
 # the exact version apex-greet targets) + greetd. The greeter's compositor host
@@ -513,21 +888,48 @@ RUN set -eux; \
 # Fedora ships a legally-crippled multimedia stack: `ffmpeg-free` (no H.264/H.265/
 # AAC encoders) and mesa built WITHOUT the proprietary video codecs, so hardware
 # H.264/H.265 decode on the AMD 780M is dead out of the box. This stage fixes the
-# CODEC USERLAND that both editions share; the mesa VA drivers themselves are
-# swapped per-edition (Daily → mesa-va-drivers-freeworld; Gaming → Terra mesa),
-# because §4c pins Daily to stable mesa and Gaming to a fresher mesa.
+# codec userland AND — new with the single image — the mesa leg itself.
 #
-# Enable RPMFusion free+nonfree and LEAVE THEM ENABLED (unlike the COPRs, which
-# are one-shot build inputs disabled after use): RPMFusion is a persistent,
-# well-known repo the running system wants so users can install codecs/drivers —
-# the same posture Bazzite ships. Swap ffmpeg-free → full ffmpeg with
-# --allowerasing (they conflict), then the GStreamer plugin set (good is Fedora;
-# bad-freeworld/ugly/libav are RPMFusion) + VA-API userland. openh264 comes from
-# Fedora's Cisco repo. Own transaction, `dnf5 clean all`.
+# RPMFusion free+nonfree are enabled in Stage 1d (the akmod build is the earliest
+# consumer) and LEFT ENABLED, unlike the COPRs, which are one-shot build inputs
+# disabled after use: RPMFusion is a persistent, well-known repo the running
+# system wants so users can install codecs/drivers — the same posture Bazzite
+# ships. Asserted here rather than re-added, so deleting Stage 1d fails loudly
+# instead of silently depsolving this stage against Fedora alone.
+#
+# ── THE MESA LEG, MOVED HERE FROM THE FLAVOR TIER ──
+# §4c used to pin Daily to latest-STABLE mesa (Terra) and Gaming to mesa-*git*.
+# One image cannot have two, and latest-stable wins on two counts:
+#
+#   1. mesa-git's entire value is being fresh, and nothing in `core` is fresh —
+#      core rebuilds only on an upstream digest change or a force. A git snapshot
+#      frozen for weeks at a time is the worst of both: the regression risk of
+#      main-branch RADV with none of the currency that was the point.
+#   2. This image is now the one every laptop runs, including the ones whose
+#      acceptance gate is suspend reliability and idle drain. Shipping
+#      main-branch Mesa to all of them to chase frame pacing on some of them is
+#      the wrong trade. `apex repo enable-copr xxmitsu/mesa-git` remains for
+#      anyone who wants it per-machine.
+#
+# Terra (fyralabs) ships a newer *release* mesa than the fc43-pinned base, built
+# WITHOUT Fedora's codec crippling — so one distro-sync gets BOTH the fresher
+# stable stack AND H.264/H.265 hardware decode on RADV (the point of the base's
+# mpv.conf `hwdec=auto-safe`), with no separate freeworld swap.
+#
+# The Terra repo is REMOVED after the sync. It must NOT stay enabled in the
+# shipped image: terra-release's repo file points gpgkey at
+# file:///etc/pki/rpm-gpg/RPM-GPG-KEY-terra$releasever, and any later depsolve
+# against that enabled repo (bootc-image-builder's ISO build, or an `apex
+# install`) fails to read the key and aborts — which is exactly what broke the
+# first installer-ISO build. Falls back to Fedora-stable mesa + RPMFusion
+# freeworld VA if Terra is unavailable at build time; codecs work either way.
+#
+# Swap ffmpeg-free → full ffmpeg with --allowerasing (they conflict), then the
+# GStreamer plugin set (good is Fedora; bad-freeworld/ugly/libav are RPMFusion) +
+# VA-API userland. openh264 comes from Fedora's Cisco repo. Own transaction.
 RUN set -eux; \
-    dnf5 -y install \
-        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
-        "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"; \
+    rpm -q rpmfusion-free-release rpmfusion-nonfree-release >/dev/null \
+        || { echo "FATAL: RPMFusion is not enabled — Stage 1d must run before this stage"; exit 1; }; \
     dnf5 -y install --allowerasing ffmpeg; \
     dnf5 -y install \
         gstreamer1-plugins-base gstreamer1-plugins-good \
@@ -535,6 +937,24 @@ RUN set -eux; \
         gstreamer1-plugins-ugly gstreamer1-libav \
         libva libva-utils; \
     dnf5 -y install --skip-unavailable gstreamer1-vaapi; \
+    if dnf5 -y install --nogpgcheck \
+            --repofrompath "terra,https://repos.fyralabs.com/terra\$releasever" \
+            terra-release \
+       && dnf5 -y distro-sync "mesa*"; then \
+        dnf5 -y remove terra-release; \
+        echo "mesa: Terra latest-stable (codec-enabled; repo removed post-bake)" > /usr/lib/apex-mesa-leg; \
+    else \
+        echo "Terra unavailable — Fedora-stable mesa + RPMFusion freeworld VA"; \
+        dnf5 -y install --allowerasing \
+            mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld; \
+        echo "mesa: Fedora-stable + freeworld VA (Terra fallback)" > /usr/lib/apex-mesa-leg; \
+    fi; \
+    rm -f /etc/yum.repos.d/terra*.repo /etc/yum.repos.d/*terra*.repo; \
+    cat /usr/lib/apex-mesa-leg; \
+    test -z "$(ls /etc/yum.repos.d/ | grep -i terra || true)" \
+        || { echo "FATAL: a Terra repo file survived — every later depsolve would abort on its missing gpgkey"; exit 1; }; \
+    test -e /usr/lib64/libGLX_mesa.so.0; \
+    test -e /usr/lib64/libGLX_nvidia.so.0; \
     dnf5 clean all
 
 # ── Stage 5a-apps: baked userland (both editions) ──────────────────────────
@@ -671,12 +1091,21 @@ RUN set -eux; \
 # `Restart=on-failure` — so enabling it as-is would restart-loop into a failed
 # unit on every AMD boot. The ExecCondition drop-in makes systemd skip it
 # cleanly (condition-failed, not failed) on non-Intel machines, the same
-# portability posture Containerfile.gaming already applies to the NVIDIA units.
+# portability posture Stage 1f applies to the NVIDIA units.
+#
+# power-profiles-daemon moved here from Containerfile.daily. NOT tlp — tlp
+# conflicts with PPD on Fedora and fights the platform profile driver; the plan
+# standardises on PPD plus apexd's own sysctl/udev layer. It rides this existing
+# transaction rather than getting its own RUN, and that is a download decision,
+# not tidiness: every dnf transaction rewrites the ~200 MB sqlite rpmdb into its
+# own layer, and in the flavor tier that layer moved on EVERY push and shipped to
+# every user on every `apex update`. Here it is inside a layer the base consumes
+# by digest and nobody re-downloads.
 RUN set -eux; \
     dnf5 -y install \
         fprintd fprintd-pam iio-sensor-proxy switcheroo-control thermald \
         ModemManager NetworkManager-ppp NetworkManager-bluetooth \
-        nm-connection-editor \
+        nm-connection-editor power-profiles-daemon \
         libinput-utils usbutils pciutils; \
     mkdir -p /usr/lib/systemd/system/thermald.service.d; \
     printf '%s\n' \
@@ -690,6 +1119,7 @@ RUN set -eux; \
     systemctl enable switcheroo-control.service; \
     systemctl enable ModemManager.service; \
     systemctl enable thermald.service; \
+    systemctl enable power-profiles-daemon.service; \
     dnf5 clean all
 
 # ── Stage 5a-fonts: full font stack ────────────────────────────────────────
@@ -854,13 +1284,13 @@ RUN set -eux; \
     rm -f /tmp/zellij.tgz; \
     zellij --version
 
-# ── Plymouth engine (theme + default are set per EDITION, in the flavors) ──
-# The plymouth packages moved here from Containerfile.daily/.gaming, and the
-# reason is download size, not tidiness. Each flavor ran its own
+# ── Plymouth engine (theme + default are set in Containerfile.apex) ────────
+# The plymouth packages moved here from the retired flavor Containerfiles, and
+# the reason is download size, not tidiness. Each flavor ran its own
 # `dnf5 -y install plymouth …`, and every dnf transaction rewrites the ~200 MB
 # sqlite rpmdb baked into that layer — so both editions shipped an extra
 # rpmdb-sized layer that changed on every single build. Installing the engine
-# once here leaves the flavors with `plymouth-set-default-theme` + a dracut run,
+# once here leaves the image tier with `plymouth-set-default-theme` + a dracut run,
 # neither of which touches the rpmdb. dracut is invoked with --reproducible, so
 # an unchanged theme + unchanged kernel now produce a byte-identical initramfs
 # and bootc re-fetches nothing.
