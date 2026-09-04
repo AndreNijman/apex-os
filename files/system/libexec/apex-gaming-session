@@ -42,13 +42,22 @@ set -uo pipefail
 log() { printf '[apex-gaming-session] %s\n' "$*" >&2; }
 
 # ── Hard requirements ───────────────────────────────────────────────────────
+# The message matters: this is the ONE moment a user meets this failure, from a
+# log they usually cannot see, after picking Gaming Mode at the greeter. It used
+# to guess — "this is not the Gaming edition?" — which was a fair guess while
+# there were editions. There is one image now, this session script ships on
+# every machine, and gamescope/steam install on demand, so the cause is never
+# the edition and the remedy is always the same command. Say it.
+missing=""
 for bin in gamescope steam; do
-    command -v "$bin" >/dev/null 2>&1 || {
-        log "FATAL: '$bin' is not installed — this is not the Gaming edition?"
-        log "returning to the greeter rather than starting a broken session"
-        exit 1
-    }
+    command -v "$bin" >/dev/null 2>&1 || missing="$missing $bin"
 done
+if [ -n "$missing" ]; then
+    log "FATAL: not installed:$missing"
+    log "install the gaming userspace with: sudo apex install$missing"
+    log "returning to the greeter rather than starting a broken session"
+    exit 1
+fi
 
 # ── APEX game mode: cpuset, IRQ steering, GPU clocks, tier, sched-ext ───────
 # One call does all of it. `apex game start` goes through apexd's D-Bus API,

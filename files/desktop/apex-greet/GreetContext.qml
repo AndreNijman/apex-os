@@ -73,7 +73,7 @@ Item {
     // hyprland-uwsm.desktop sorted before hyprland.desktop, became the default,
     // and bounce-looped at login on real hardware (see Containerfile.base).
     //
-    // The Gaming edition now also ships apex-gaming.desktop, which sorts before
+    // Every image now ships apex-gaming.desktop, which sorts before
     // BOTH of them. So the default is named, not positional, and adding a
     // session can no longer change it by accident.
     readonly property string defaultSession: "hyprland"
