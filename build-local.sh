@@ -224,6 +224,25 @@ build_image() {  # $1 = apex (or a legacy tag name, which maps to it)
         sudo podman tag localhost/apex-os:apex "localhost/apex-os:$t"
     done
 
+    # Then read them back. `podman tag` cannot plausibly fail here — the point
+    # is not to doubt it, it is to pin the INVARIANT. If this function is ever
+    # changed to build per-name images again, the tags stop being one image and
+    # every machine tracking a legacy name starts drifting onto different bytes.
+    # That regression is silent, and this is the only local thing that would
+    # notice it. The registry-side equivalent lives in build-image.yml and can
+    # only run on a real publish.
+    want="$(sudo podman image inspect --format '{{.Id}}' localhost/apex-os:apex)"
+    [ -n "$want" ] || { echo "FATAL: localhost/apex-os:apex has no image ID" >&2; exit 1; }
+    for t in apex daily gaming-mesa gaming-nvidia; do
+        got="$(sudo podman image inspect --format '{{.Id}}' "localhost/apex-os:$t" 2>/dev/null || echo MISSING)"
+        [ "$got" = "$want" ] || {
+            echo "FATAL: localhost/apex-os:$t resolves to '$got', expected '$want'" >&2
+            echo "       the four names must be ONE image; see docs/ci-release-tiers.md" >&2
+            exit 1
+        }
+    done
+    echo "tags: apex, daily, gaming-mesa, gaming-nvidia all resolve to $want"
+
     # The image inherits signing from core via the base, so this catches building
     # on top of a stale or unsigned tier — the same hole the CI job covers.
     assert_signed localhost/apex-os:apex apex
