@@ -17,9 +17,13 @@
 //! What is missing is that **nothing can answer the question before you reboot
 //! into it.** The session's own preflight is a `FATAL` at start-up: if
 //! `gamescope` or `steam` is absent it exits non-zero and greetd re-displays the
-//! greeter. That is the right behaviour and a terrible diagnostic — the user
-//! learns at the worst moment, from a log they cannot see, and the message
-//! guesses at the cause ("this is not the Gaming edition?").
+//! greeter. That is the right behaviour and a bad moment to learn it — the user
+//! finds out at the worst possible time, from a log they usually cannot see.
+//! (That message used to guess at the cause, "this is not the Gaming edition?";
+//! with one image the cause is never the edition, so it now names the command
+//! that fixes it. Same command this module's [`Readiness::install_hint`]
+//! produces — but printed after the reboot rather than before it, which is the
+//! whole reason this module exists.)
 //!
 //! ── One image changed what these signals MEAN ───────────────────────────────
 //!
