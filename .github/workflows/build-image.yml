@@ -620,6 +620,26 @@ jobs:
 
       - name: Build base
         run: |
+          # ── A cache-push failure must not fail a build that made an image ──
+          #
+          # `--cache-to` writes intermediate layers to ghcr so the NEXT build is
+          # fast. It is an optimisation, not the deliverable. podman runs it
+          # inside the build command, so its failure exits 125 and takes the
+          # build with it — which happened twice in a row on the final image
+          # build, both times AFTER apexd, apex, apex-agentd and apex-aid had
+          # compiled and been installed:
+          #
+          #   Error: failed pushing cache ... reading blob sha256:3c29356a...:
+          #   locating image with ID "e2dd7f77...": image not known
+          #
+          # Measured rather than assumed: `podman build --cache-to <unreachable
+          # repo>` exits 125 AND leaves the image tagged and present. So a 125
+          # can be forgiven — but only after checking the image exists, never by
+          # inferring it.
+          #
+          # This is the narrow exception AGENTS.md allows for a tolerated
+          # upstream defect, with the hard postcondition it requires.
+          set +e
           sudo podman build --isolation=chroot --layers=true \
             --cache-from "$CACHE_PREFIX-base" \
             --cache-to "$CACHE_PREFIX-base" \
@@ -631,6 +651,22 @@ jobs:
             -f Containerfile.base \
             -t "$IMAGE:$TAG_BASE-${{ github.sha }}" \
             .
+          rc=$?
+          set -e
+
+          if [ "$rc" -ne 0 ]; then
+            if sudo podman image exists "$IMAGE:$TAG_BASE-${{ github.sha }}"; then
+              echo "::warning::podman exited $rc but the base image exists — treating it as a cache-push failure. The next build will be slower; this image is unaffected."
+            else
+              echo "::error::base build failed with $rc and produced no image"
+              exit "$rc"
+            fi
+          fi
+
+          # Unconditional: whatever podman reported, this job may not succeed
+          # without the image it exists to produce.
+          sudo podman image exists "$IMAGE:$TAG_BASE-${{ github.sha }}" \
+            || { echo "::error::no base image after build"; exit 1; }
 
       - name: Verify base image
         run: |
