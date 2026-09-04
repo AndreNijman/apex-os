@@ -19,10 +19,17 @@ manual run can target one flavor or Daily plus Gaming NVIDIA.
 No tier uses a registry build cache. The base tier used to, with a 14-day
 lookup lifetime, and it was removed after being measured: `--cache-to` cost a
 constant 4m13s per layer against layers whose own commands ran in one to two
-seconds. Across base's 120 layers that is 8h26m, past the 6h GitHub job limit,
-so no build using it could finish. The same build without the cache runs at 16s
-per layer. The build-image workflow carries the per-layer timings; do not
-re-add the flags without re-measuring.
+seconds. Across base's 120 layers that is 8h26m, against the 6h GitHub job
+limit — which the workflow does not override with `timeout-minutes`, so the 6h
+default is the ceiling. No build using that cache could finish, and the
+arithmetic settles it on its own.
+
+Rebuilding the same Containerfile against the same pinned core parent without
+the flags measured 13.3s per layer — but on the Katana (20 cores, local overlay
+store, no registry push), not on a runner, so treat that as an order-of-
+magnitude sanity check and not as a same-environment counterfactual. The
+build-image workflow carries the per-layer timings; do not re-add the flags
+without re-measuring on a runner.
 
 ## Shell releases
 
