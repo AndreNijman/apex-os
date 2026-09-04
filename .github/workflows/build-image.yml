@@ -124,7 +124,10 @@ env:
   # are UNCHANGED so every installed machine keeps tracking the same reference.
   # But it is NOT a speed optimisation, and should not be cited as one.
   IMAGE: ghcr.io/andrenijman/apex-os
-  CACHE_PREFIX: ghcr.io/andrenijman/apex-os-build-cache
+  # No CACHE_PREFIX: the registry build cache was removed from the base job —
+  # see the comment there for the per-layer timings that killed it. The
+  # ghcr.io/andrenijman/apex-os-build-cache-base repository it wrote to is now
+  # orphaned and can be deleted in the GHCR UI whenever convenient.
   TAG_CORE: core
   TAG_BASE: base
   # Transitional: where core/base lived before the consolidation. The base job
@@ -620,30 +623,41 @@ jobs:
 
       - name: Build base
         run: |
-          # ── A cache-push failure must not fail a build that made an image ──
+          # ── NO REGISTRY CACHE HERE. It cost more than it ever saved. ──
           #
-          # `--cache-to` writes intermediate layers to ghcr so the NEXT build is
-          # fast. It is an optimisation, not the deliverable. podman runs it
-          # inside the build command, so its failure exits 125 and takes the
-          # build with it — which happened twice in a row on the final image
-          # build, both times AFTER apexd, apex, apex-agentd and apex-aid had
-          # compiled and been installed:
+          # This step used to pass --cache-from/--cache-to/--cache-ttl. A
+          # previous commit made a cache-push failure non-fatal, on the reading
+          # that the cache is "an optimisation, not the deliverable". That was
+          # true but far too generous: the optimisation was not slow, it was
+          # fatal. Timestamps from run 33828399604, one line per layer:
           #
-          #   Error: failed pushing cache ... reading blob sha256:3c29356a...:
-          #   locating image with ID "e2dd7f77...": image not known
+          #   STEP  2/120 ... 02:25:56      STEP 11/120 ... 03:03:21
+          #   STEP  3/120 ... 02:30:02      STEP 12/120 ... 03:07:36
+          #   STEP  4/120 ... 02:34:09      STEP 13/120 ... 03:11:50
+          #   ...                           STEP 18/120 ... 03:33:28
           #
-          # Measured rather than assumed: `podman build --cache-to <unreachable
-          # repo>` exits 125 AND leaves the image tagged and present. So a 125
-          # can be forgiven — but only after checking the image exists, never by
-          # inferring it.
+          # A dead-constant 4m13s per layer, while the command inside each layer
+          # finished in one to two seconds. 120 layers x 4m13s = 8h26m, against
+          # a 6h GitHub job limit. **No build using this cache could ever have
+          # finished.** The three consecutive red runs were not three separate
+          # accidents; the GHCR 500 that ended this one merely arrived before
+          # the timeout would have.
           #
-          # This is the narrow exception AGENTS.md allows for a tolerated
-          # upstream defect, with the hard postcondition it requires.
-          set +e
+          # Why per-layer and why constant: the env block above already measures
+          # that pushing to GHCR never skips a blob, because compressing out of
+          # containers-storage only yields a digest AFTER compression. So each
+          # --cache-to re-compresses and re-uploads, and pays that in full 120
+          # times regardless of how little the layer changed.
+          #
+          # There was nothing to win. Containerfile.base is 69 COPY steps and 23
+          # RUN steps; every expensive thing (the kernel, the packages) lives in
+          # the core tier, and core has never used a registry cache. The one
+          # genuinely costly step is `cargo build --release` in the builder
+          # stage, which a per-layer registry cache is the wrong tool for.
+          #
+          # Cache flags stay off unless someone re-measures and can show the
+          # per-layer cost is gone.
           sudo podman build --isolation=chroot --layers=true \
-            --cache-from "$CACHE_PREFIX-base" \
-            --cache-to "$CACHE_PREFIX-base" \
-            --cache-ttl=336h \
             --build-arg CORE="$IMAGE@${{ steps.core.outputs.digest }}" \
             --build-arg APEX_REVISION="${{ github.sha }}" \
             --build-arg APEX_SHELL_REF="${{ needs.changes.outputs.shell_sha }}" \
@@ -651,20 +665,10 @@ jobs:
             -f Containerfile.base \
             -t "$IMAGE:$TAG_BASE-${{ github.sha }}" \
             .
-          rc=$?
-          set -e
 
-          if [ "$rc" -ne 0 ]; then
-            if sudo podman image exists "$IMAGE:$TAG_BASE-${{ github.sha }}"; then
-              echo "::warning::podman exited $rc but the base image exists — treating it as a cache-push failure. The next build will be slower; this image is unaffected."
-            else
-              echo "::error::base build failed with $rc and produced no image"
-              exit "$rc"
-            fi
-          fi
-
-          # Unconditional: whatever podman reported, this job may not succeed
-          # without the image it exists to produce.
+          # Kept from the tolerant version: podman exiting 0 is not proof the
+          # image exists, and this job may not succeed without the one thing it
+          # exists to produce.
           sudo podman image exists "$IMAGE:$TAG_BASE-${{ github.sha }}" \
             || { echo "::error::no base image after build"; exit 1; }
 
