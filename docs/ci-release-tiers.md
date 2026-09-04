@@ -14,8 +14,15 @@ rebuilding Mesa, NVIDIA modules, package transactions, or initramfs images.
    `platform-<flavor>` tags.
 
 Platform builds run for OS source changes and the weekly upstream refresh. A
-manual run can target one flavor or Daily plus Gaming NVIDIA. The reusable base
-tier uses a registry-backed Buildah cache with a 14-day lookup lifetime.
+manual run can target one flavor or Daily plus Gaming NVIDIA.
+
+No tier uses a registry build cache. The base tier used to, with a 14-day
+lookup lifetime, and it was removed after being measured: `--cache-to` cost a
+constant 4m13s per layer against layers whose own commands ran in one to two
+seconds. Across base's 120 layers that is 8h26m, past the 6h GitHub job limit,
+so no build using it could finish. The same build without the cache runs at 16s
+per layer. The build-image workflow carries the per-layer timings; do not
+re-add the flags without re-measuring.
 
 ## Shell releases
 
