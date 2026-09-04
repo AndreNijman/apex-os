@@ -226,8 +226,12 @@ Item {
         stdout: SplitParser {
             onRead: function(line) {
                 var v = line.trim().toLowerCase()
-                if (v === "gaming" || v === "daily") ctx.edition = v
-                else if (v !== "")                   ctx.edition = "mono"
+                // `apex` is the single published image (VARIANT_ID=apex).
+                // `daily` and `gaming` are kept so a machine that has not yet
+                // updated past the three-edition split still gets its accent
+                // instead of falling through to mono.
+                if (v === "apex" || v === "gaming" || v === "daily") ctx.edition = v
+                else if (v !== "")                                   ctx.edition = "mono"
             }
         }
     }
@@ -309,12 +313,22 @@ Item {
     }
 
     // ── Session list from /usr/share/wayland-sessions/*.desktop ───
+    //
+    // TryExec is honoured, per the desktop-entry spec: an entry whose TryExec
+    // binary is not on PATH is skipped entirely. APEX ships one image for every
+    // laptop and the gaming userspace installs on demand, so apex-gaming.desktop
+    // is present on every machine but must only be OFFERED where gamescope has
+    // actually been installed. Without this filter the greeter would list a
+    // session that exits straight back to the greeter on most machines.
     Process {
         running: true
         command: ["sh", "-c",
             "for f in /usr/share/wayland-sessions/*.desktop; do" +
             " [ -r \"$f\" ] || continue;" +
             " id=$(basename \"$f\" .desktop);" +
+            " tryexec=$(sed -n 's/^TryExec=//p' \"$f\" | head -n1);" +
+            " if [ -n \"$tryexec\" ] && ! command -v \"$tryexec\" >/dev/null 2>&1;" +
+            " then continue; fi;" +
             " name=$(sed -n 's/^Name=//p' \"$f\" | head -n1);" +
             " exec=$(sed -n 's/^Exec=//p' \"$f\" | head -n1);" +
             " [ -n \"$exec\" ] || continue;" +
