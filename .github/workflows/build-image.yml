@@ -1206,15 +1206,31 @@ jobs:
           export REGISTRY_AUTH_FILE="$RUNNER_TEMP/skopeo-auth.json"
           echo '{}' > "$REGISTRY_AUTH_FILE"
           creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
-          new=$(skopeo inspect --raw --creds "$creds" \
-                  "docker://$IMAGE@${{ steps.push.outputs.digest }}")
+          # Via FILES, not argv. A manifest is one argument, Linux caps a
+          # single argument at MAX_ARG_STRLEN (128 KiB), and an image that
+          # inherits every core layer lists enough of them to exceed it. Passing
+          # them inline is what made run 33861012269 die with
+          # "/usr/bin/python3: Argument list too long" on both gaming flavors
+          # AFTER their images had already been pushed and promoted — a red run
+          # for a summary table. Daily squeaked under the limit, which is why it
+          # passed and looked like a flavor-specific defect.
+          new_f="$RUNNER_TEMP/manifest-new.json"
+          core_f="$RUNNER_TEMP/manifest-core.json"
+          skopeo inspect --raw --creds "$creds" \
+                  "docker://$IMAGE@${{ steps.push.outputs.digest }}" > "$new_f"
           # Layers shared with the parent core are the ones bootc will NOT
           # download; anything else is new bytes on every machine.
-          core=$(skopeo inspect --raw --creds "$creds" \
-                  "docker://$IMAGE:$TAG_CORE" 2>/dev/null || echo '{}')
-          python3 - "$new" "$core" <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          skopeo inspect --raw --creds "$creds" \
+                  "docker://$IMAGE:$TAG_CORE" > "$core_f" 2>/dev/null \
+                  || echo '{}' > "$core_f"
+          python3 - "$new_f" "$core_f" <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json, sys
-          new, core = json.loads(sys.argv[1]), json.loads(sys.argv[2] or '{}')
+
+          def load(path):
+              text = open(path).read().strip()
+              return json.loads(text) if text else {}
+
+          new, core = load(sys.argv[1]), load(sys.argv[2])
           nl = new.get('layers', [])
           shared = {l['digest'] for l in core.get('layers', [])}
           fresh = [l for l in nl if l['digest'] not in shared]
