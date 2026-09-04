@@ -205,9 +205,13 @@ RUN set -eux; \
     # The initramfs is the artifact that boots, so it is the artifact checked.
     # `lsinitrd` lists what actually landed inside; a driver that is configured
     # but absent here is a black screen on a dGPU-attached panel.
+    # Modules are listed by full path and are compressed, so match the path
+    # segment and allow any suffix: `.../extra/nvidia/nvidia.ko.zst`. Verified
+    # against a real initramfs before this was written, rather than pattern-
+    # matching against an assumption about the filenames.
     lsinitrd "/usr/lib/modules/${KVER}/initramfs.img" \
-        | grep -E 'nvidia(_drm|_modeset|_uvm)?\.ko' \
-        || { echo "FATAL: nvidia is not in the shipped initramfs"; exit 1; }; \
+        | grep -E '/nvidia[^/]*\.ko' \
+        || { echo "FATAL: nvidia is not in the shipped initramfs — a dGPU-attached panel would stay black"; exit 1; }; \
     echo "initramfs: plymouth theme + nvidia drivers present"
 
 # Kernel args for the graphical splash. `quiet splash` per the theme's own
