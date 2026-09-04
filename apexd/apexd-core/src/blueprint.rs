@@ -529,8 +529,12 @@ impl Observed {
             .map(|c| c.capsule.as_str())
     }
 
-    /// Whether this machine carries the gaming session, which is what actually
-    /// distinguishes a Gaming edition from Daily at the session level.
+    /// Whether Gaming Mode is actually offered on this machine.
+    ///
+    /// There is one published image, so `apex-gaming.desktop` is present
+    /// everywhere; what varies is whether its `TryExec` binary (gamescope) has
+    /// been installed. `Observed::sessions_available` applies that gate, so this
+    /// answers "can the user pick Gaming Mode", not "which image is this".
     pub fn has_gaming_session(&self) -> bool {
         self.sessions_available
             .iter()
@@ -538,7 +542,7 @@ impl Observed {
     }
 }
 
-/// The session id the Gaming editions install.
+/// The session id Gaming Mode is offered under.
 pub const GAMING_SESSION: &str = "apex-gaming";
 
 // ── the plan ─────────────────────────────────────────────────────────────────
@@ -897,15 +901,18 @@ pub fn plan(bp: &Blueprint, obs: &Observed) -> Plan {
                 step: None,
                 blocked: Some(if want {
                     format!(
-                        "gaming provisioning comes from a Gaming edition image, not a \
-                         package set; this machine is VARIANT_ID={variant}. Reinstall or \
-                         rebase onto gaming-mesa / gaming-nvidia."
+                        "the gaming userspace is not installed on this machine \
+                         (VARIANT_ID={variant}). It is an explicit action, not drift, so \
+                         nothing here will install it for you: run `sudo apex install steam \
+                         gamescope mangohud gamemode`. The NVIDIA and controller kernel \
+                         modules already ship in the image — only userspace is on demand."
                     )
                 } else {
                     format!(
-                        "this machine boots a Gaming edition image (VARIANT_ID={variant}); \
-                         removing the gaming session would leave a Gaming image without its \
-                         session. Rebase onto daily instead."
+                        "the gaming userspace is installed on this machine \
+                         (VARIANT_ID={variant}). Removing it is an explicit action too: run \
+                         `sudo apex remove gamescope steam`. The GPU and controller drivers \
+                         are image content and stay either way."
                     )
                 }),
             });
@@ -1417,13 +1424,17 @@ sandbox = "project"
             "no step may install a gaming package set onto Daily"
         );
         let why = p.changes[0].blocked.as_deref().unwrap();
-        assert!(why.contains("Gaming edition image"), "{why}");
+        assert!(why.contains("apex install"), "the reason must be actionable: {why}");
         assert!(why.contains("daily"), "the reason must name the measured VARIANT_ID: {why}");
+        assert!(
+            !why.contains("gaming-mesa") && !why.contains("rebase"),
+            "there is one image; nothing may tell a user to rebase onto a retired edition: {why}"
+        );
 
-        // On a Gaming edition the same blueprint is already satisfied.
+        // Once the gaming userspace is installed the same blueprint is satisfied.
         let gaming = Observed {
             sessions_available: vec!["hyprland".into(), "apex-gaming".into()],
-            variant_id: Some("gaming-mesa".into()),
+            variant_id: Some("apex".into()),
             ..Observed::default()
         };
         assert!(plan(&bp, &gaming).changes.is_empty());
