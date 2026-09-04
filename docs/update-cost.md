@@ -51,7 +51,17 @@ The image is now built in three tiers instead of two:
 |------|------|----------|---------------|
 | **core** | `Containerfile.core` | kernel + MOK signing, firmware, desktop/greeter stack, scx, Bazaar, codecs, baked apps, printing, input methods, fonts, dev toolchain, zsh/starship, awww/matugen/yazi, OS branding & locale | `Containerfile.core` or `kernel/**` changes · `force_core` · the weekly cron finds a **new** `fedora-bootc` digest |
 | **base** | `Containerfile.base` | apexd + apex CLI, sysprofiles, D-Bus/polkit/units, every `files/**` COPY, the vendored APEX Shell | `Containerfile.base`, `apexd/**`, `config/**`, `files/**` change, or core rebuilt |
-| **flavor** | `Containerfile.daily` / `.gaming` | edition stamp, mesa leg, Plymouth theme, GPU stack | every run |
+| **image** | `Containerfile.apex` | edition stamp, gaming-session files, Plymouth theme, final initramfs | every run |
+
+The GPU stack, the Mesa leg and `power-profiles-daemon` used to sit in the
+flavor tier. They are in `core` now, and that is a download change, not a
+tidiness one: measured on the published `:daily` manifest, its flavor tier was
+342 MiB over six layers, of which **67 MiB was two `dnf` transactions**
+(`power-profiles-daemon`, and the Terra Mesa `distro-sync`) whose only real
+content was a rewritten ~200 MB sqlite rpmdb. Every push shipped those to every
+machine. In `core` they are inside a digest-pinned parent nobody re-downloads,
+so collapsing three images into one — while *adding* the NVIDIA driver to every
+machine — made the per-update download smaller, not larger.
 
 The base is built `FROM ghcr.io/andrenijman/apex-os:core@sha256:…`. **A digest-pinned `FROM` reuses
 the parent's layer descriptors verbatim** — the derived manifest lists the same

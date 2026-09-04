@@ -7,15 +7,20 @@ rebuilding Mesa, NVIDIA modules, package transactions, or initramfs images.
 
 `.github/workflows/build-image.yml` owns the slow path:
 
-1. `core` contains the kernel and slow-moving third-party dependencies.
+1. `core` contains the kernel, slow-moving third-party dependencies, and every
+   out-of-tree kernel module (NVIDIA, xone, xpadneo) together with its MOK
+   signature — this is the only tier the signing secret is mounted in.
 2. `base` contains APEX system services and shared OS configuration.
-3. The flavor matrix builds Daily, Gaming Mesa, and Gaming NVIDIA.
-4. Each green flavor is also promoted to moving and revision-pinned
-   `platform-<flavor>` tags.
+3. `Containerfile.apex` stamps the edition and owns the final initramfs.
+4. The one green image is promoted to `apex`, `daily`, `gaming-mesa` and
+   `gaming-nvidia`, plus moving and revision-pinned `platform-<name>` tags for
+   each. A step then reads every tag's digest back out of the registry and fails
+   the run if any differs.
 
-Platform builds run for OS source changes and the weekly upstream refresh. A
-manual run can target one flavor or Daily plus Gaming NVIDIA. The reusable base
-tier uses a registry-backed Buildah cache with a 14-day lookup lifetime.
+There is no flavor matrix and no `target_platform` input: there is one image.
+Platform builds run for OS source changes and the weekly upstream refresh. The
+reusable base tier uses a registry-backed Buildah cache with a 14-day lookup
+lifetime.
 
 ### `--cache-to` is what kills these builds
 
@@ -55,17 +60,24 @@ Nothing writes the cache repository now, so its entries age out after the
 14-day TTL and `--cache-from` becomes a no-op. That is a performance question,
 not a correctness one, and it is the correct trade against a flag that has
 killed two builds outright.
+Collapsing three image builds into one does not change any of this, because
+the cost is per layer, not per image.
 
 ## Shell releases
 
 `.github/workflows/release-shell.yml` owns the fast path. It resolves an exact
 40-character `apex-shell` commit, builds a final layer on the selected stable
-platform images, verifies that every inherited layer digest is unchanged, signs
-the result, then promotes the existing user-facing tags:
+platform image, verifies that every inherited layer digest is unchanged, signs
+the result, then promotes every user-facing tag to that one digest:
 
+- `apex`
 - `daily`
 - `gaming-mesa`
 - `gaming-nvidia`
+
+All four, from one build. Three legs building identical content would produce
+three different manifest digests and pull the tags apart again, which is why the
+matrix is gone here too.
 
 BuildKit pushes directly to GHCR for this path. The hosted runner's older Podman
 cannot reliably preserve inherited `zstd:chunked` blob digests; recompressing
