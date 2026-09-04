@@ -21,6 +21,18 @@
 //! learns at the worst moment, from a log they cannot see, and the message
 //! guesses at the cause ("this is not the Gaming edition?").
 //!
+//! ── One image changed what these signals MEAN ───────────────────────────────
+//!
+//! There are no editions any more: `apex-gaming.desktop` and
+//! `apex-gaming-session` ship on every machine, and `gamescope`/`steam` install
+//! on demand (a kernel module cannot be installed at runtime under Secure Boot,
+//! userspace can — so the GPU and controller drivers are baked in and the
+//! gaming userspace is not). The session entry is `TryExec`-gated so the greeter
+//! hides it until gamescope exists. The consequence for this module is that the
+//! file signals no longer answer "which edition is this" — they answer "is this
+//! image current" — while the program signals are the only ones a user can act
+//! on. See [`Readiness::blockers`].
+//!
 //! So this is a **read-only readiness report**: every requirement the session
 //! and the mode switch depend on, measured with the path it was measured at, or
 //! unavailable with a reason. It writes nothing, spawns nothing, and never
@@ -244,22 +256,50 @@ impl Readiness {
     /// before it does anything, plus the two files without which the greeter
     /// cannot offer the session at all. Deliberately the same list, so this
     /// report cannot say "ready" about a session that would then FATAL.
+    ///
+    /// ── WHAT EACH BLOCKER MEANS NOW THAT APEX PUBLISHES ONE IMAGE ──
+    ///
+    /// The two groups have different remedies, and conflating them is how a user
+    /// gets told to install a package that cannot help.
+    ///
+    /// * `session_desktop` / `session_launcher` are IMAGE content and ship on
+    ///   every APEX machine. They used to discriminate editions — a missing
+    ///   entry meant "you installed Daily" — and that reading is now wrong.
+    ///   They are not dead code, though: absent, they mean this machine is
+    ///   still booting an image from BEFORE the editions merged (the common
+    ///   case: a laptop on the old `:daily`, which really did not ship them),
+    ///   or the deployment is damaged. Either way the remedy is `apex update`,
+    ///   never a package install.
+    /// * `gamescope` / `steam` are the on-demand half of the payload split and
+    ///   are the only blockers a user can fix themselves, with `apex install`.
+    ///
+    /// So the rule for anything offering an install hint: offer it only when
+    /// every blocker present is one of the installable two. An image-content
+    /// blocker means no package fixes this.
     pub fn blockers(&self) -> Vec<String> {
         let mut out = Vec::new();
         if self.session_desktop.value() == Some(&false) {
             out.push(
-                "the greeter has no Gaming Mode entry — this is not a Gaming edition image"
+                "the greeter has no Gaming Mode entry, which every current APEX image ships \
+                 — this machine is booting an image from before the editions merged, or a \
+                 damaged one. Run `apex update`; no package install fixes this"
                     .to_string(),
             );
         }
         if self.session_launcher.value() == Some(&false) {
             out.push(
                 "the gamescope session script is missing or not executable, so picking Gaming \
-                 Mode at the greeter would bounce straight back"
+                 Mode at the greeter would bounce straight back. It is image content, so the \
+                 remedy is `apex update`, not a package install"
                     .to_string(),
             );
         }
-        // `gamescope` and `steam` are the session's own two hard requirements.
+        // `gamescope` and `steam` are the session's own two hard requirements,
+        // and since the editions merged they are also the only two blockers a
+        // user can clear themselves — they install on demand rather than
+        // shipping in the image, because userspace can be added at runtime and
+        // a signed kernel module cannot.
+        //
         // An *unmeasured* program is not a blocker: saying "not ready" because
         // a fixture root switched program probing off would be a false negative.
         if self.gamescope.value() == Some(&false) {
@@ -269,6 +309,21 @@ impl Readiness {
             out.push("steam is not installed; the session exits FATAL without it".to_string());
         }
         out
+    }
+
+    /// Whether every blocker present can be cleared by installing packages.
+    ///
+    /// The distinction the prose above describes, as a predicate: image-content
+    /// blockers need `apex update`, program blockers need `apex install`, and
+    /// telling a user to install gamescope on a machine whose image has no
+    /// gaming session at all is advice that cannot work. `false` when there are
+    /// no blockers, because there is then nothing to remedy.
+    pub fn blockers_are_installable(&self) -> bool {
+        let image_content_missing = self.session_desktop.value() == Some(&false)
+            || self.session_launcher.value() == Some(&false);
+        let program_missing =
+            self.gamescope.value() == Some(&false) || self.steam.value() == Some(&false);
+        program_missing && !image_content_missing
     }
 
     /// Requirements that are met but degraded, with what is lost. Not blockers:
@@ -487,15 +542,48 @@ mod tests {
         assert_eq!(r.boots_to_game(), Some(true));
     }
 
+    // Renamed from `a_daily_edition_is_blocked_and_says_which_edition_it_is`.
+    // There are no editions: an image with no gaming session is not "Daily", it
+    // is an image from before the merge, or a damaged one. The blocker must say
+    // so and must NOT read as something a package install can fix.
     #[test]
-    fn a_daily_edition_is_blocked_and_says_which_edition_it_is() {
-        let f = Fixture::new("daily");
+    fn an_image_without_the_gaming_session_is_blocked_and_no_package_fixes_it() {
+        let f = Fixture::new("premerge");
         f.write(GREETER_LAST_SESSION, "hyprland");
         let r = f.probe().report();
         let joined = r.blockers().join("\n");
-        assert!(joined.contains("not a Gaming edition"), "{joined}");
+        assert!(joined.contains("apex update"), "the remedy must be an OS update: {joined}");
+        assert!(
+            !joined.contains("Gaming edition"),
+            "there are no editions left to name: {joined}"
+        );
+        assert!(
+            !r.blockers_are_installable(),
+            "no `apex install` can put image content onto a machine"
+        );
         assert!(!r.is_ready());
         assert_eq!(r.boots_to_game(), Some(false));
+    }
+
+    // The mirror image, and the case that actually matters now: a current image
+    // whose only gap is the on-demand userspace. That IS installable, and it is
+    // the only shape of blocker that may carry an install hint.
+    #[test]
+    fn a_current_image_missing_only_gamescope_is_installable() {
+        let f = gaming_edition("needs-userspace");
+        let mut r = f.probe().report();
+        // The fixture cannot redirect a PATH lookup, so state the program
+        // signals directly — that is the whole reason `probe_programs` exists.
+        r.gamescope = Signal::measured(false, "PATH:gamescope".to_string());
+        r.steam = Signal::measured(false, "PATH:steam".to_string());
+        let joined = r.blockers().join("\n");
+        assert!(joined.contains("gamescope is not installed"), "{joined}");
+        assert!(
+            !joined.contains("apex update"),
+            "the image is current; nothing here needs an OS update: {joined}"
+        );
+        assert!(r.blockers_are_installable());
+        assert!(!r.is_ready());
     }
 
     #[test]

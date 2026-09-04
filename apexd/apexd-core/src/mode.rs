@@ -29,8 +29,8 @@
 //! lists them as things a mode "may change", and they are modelled here so
 //! `apex mode show` can state the full intent — but merging or unmerging a
 //! sysext on a mode switch is a heavyweight, machine-breaking lever with its own
-//! rebuild service, and `Containerfile.gaming` already masks `irqbalance`
-//! permanently, so a mode that toggled it would fight the image. A declared gap
+//! rebuild service, and the image masks `irqbalance` permanently (in
+//! `Containerfile.core`), so a mode that toggled it would fight the image. A declared gap
 //! beats execution that silently does not happen.
 
 use std::fmt;

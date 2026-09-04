@@ -253,10 +253,12 @@ pub struct GameModeConfig {
     /// than naming it per-profile is what makes Gaming Mode tuned on ANY
     /// machine instead of only on the author's Katana.
     ///
-    /// That is safe for the Daily edition by construction, not by luck:
-    /// `scxctl` is a D-Bus client for scx_loader, and scx_loader.service is
-    /// enabled ONLY in Containerfile.gaming. On Daily the switch is a logged
-    /// no-op. A profile can still opt out explicitly with `scx = ""`.
+    /// Safe on a machine that never games, by construction rather than luck:
+    /// `scxctl` is a D-Bus client for scx_loader, whose unit is `Type=dbus` and
+    /// is NOT enabled at boot — it is activated by the first call, so no
+    /// scheduler daemon runs on a laptop that never enters game mode, and the
+    /// shipped /usr/share/scx_loader/config.toml leaves `default_sched`
+    /// commented out. A profile can still opt out explicitly with `scx = ""`.
     pub scx: String,
 }
 

@@ -118,8 +118,8 @@ const STARTER: &str = r#"# APEX Blueprint — what this machine should be.
 # sandbox = "project"       # project | strict | unrestricted
 
 # [gaming]
-# Observed and reported, never converged: gaming provisioning comes from a
-# Gaming edition image, not from a package set.
+# Observed and reported, never converged: the gaming userspace is installed on
+# demand with `apex install`, which is a deliberate user action, not drift.
 # enabled = true
 "#;
 
@@ -306,19 +306,51 @@ impl Host {
 
     /// Session ids in `/usr/share/wayland-sessions`, sorted. The same set
     /// `apex-session-select --list` prints and validates against.
+    /// The sessions a user could actually pick at the greeter.
+    ///
+    /// `TryExec` is honoured, and that is not a refinement — it is what keeps
+    /// this field meaning anything. APEX ships one image for every laptop, so
+    /// `apex-gaming.desktop` is present on EVERY machine while gamescope and
+    /// Steam install on demand. A plain directory listing would therefore report
+    /// the gaming session as available everywhere, which is both untrue and the
+    /// opposite of what the greeter shows: the greeter skips an entry whose
+    /// `TryExec` binary is absent, and so does this.
     fn sessions_available(&self) -> Vec<String> {
         let mut out: Vec<String> = match std::fs::read_dir(self.at(SESSION_DIR)) {
             Ok(entries) => entries
                 .flatten()
                 .filter_map(|e| {
                     let name = e.file_name().to_string_lossy().into_owned();
-                    name.strip_suffix(".desktop").map(str::to_string)
+                    let id = name.strip_suffix(".desktop")?.to_string();
+                    let body = std::fs::read_to_string(e.path()).unwrap_or_default();
+                    let try_exec = body
+                        .lines()
+                        .find_map(|l| l.strip_prefix("TryExec="))
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty());
+                    match try_exec {
+                        Some(bin) if !self.try_exec_resolves(bin) => None,
+                        _ => Some(id),
+                    }
                 })
                 .collect(),
             Err(_) => Vec::new(),
         };
         out.sort();
         out
+    }
+
+    /// Resolve a `TryExec` value the way the desktop-entry spec asks: an
+    /// absolute path is tested directly, a bare name is looked up on `PATH`.
+    /// Both are resolved under the observation root so the tests can build a
+    /// machine that does or does not have the binary.
+    fn try_exec_resolves(&self, bin: &str) -> bool {
+        if bin.starts_with('/') {
+            return self.at(bin.trim_start_matches('/')).is_file();
+        }
+        ["usr/local/bin", "usr/bin", "usr/sbin", "bin", "sbin"]
+            .iter()
+            .any(|d| self.at(&format!("{d}/{bin}")).is_file())
     }
 
     /// APEX Shell's matugen scheme.
@@ -1709,6 +1741,36 @@ mod tests {
         let obs = f.host().observe();
         assert!(obs.has_gaming_session());
         assert_eq!(obs.variant_id.as_deref(), Some("gaming-nvidia"));
+    }
+
+    // The single image ships apex-gaming.desktop on every machine, so without
+    // the TryExec gate every machine would report the gaming session as
+    // available and `[gaming] enabled` would be silently satisfied everywhere.
+    #[test]
+    fn a_session_whose_tryexec_binary_is_absent_is_not_offered() {
+        let f = Fixture::new("tryexec-missing");
+        f.write("usr/share/wayland-sessions/hyprland.desktop", "Exec=Hyprland\n")
+            .write(
+                "usr/share/wayland-sessions/apex-gaming.desktop",
+                "Exec=/usr/libexec/apex-gaming-session\nTryExec=/usr/bin/gamescope\n",
+            );
+        let obs = f.host().observe();
+        assert_eq!(obs.sessions_available, ["hyprland"]);
+        assert!(!obs.has_gaming_session(), "gamescope is not installed");
+    }
+
+    #[test]
+    fn the_same_session_is_offered_once_its_binary_is_installed() {
+        let f = Fixture::new("tryexec-present");
+        f.write("usr/share/wayland-sessions/hyprland.desktop", "Exec=Hyprland\n")
+            .write(
+                "usr/share/wayland-sessions/apex-gaming.desktop",
+                "Exec=/usr/libexec/apex-gaming-session\nTryExec=/usr/bin/gamescope\n",
+            )
+            .write("usr/bin/gamescope", "");
+        let obs = f.host().observe();
+        assert_eq!(obs.sessions_available, ["apex-gaming", "hyprland"]);
+        assert!(obs.has_gaming_session());
     }
 
     #[test]
