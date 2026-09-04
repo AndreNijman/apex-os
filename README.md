@@ -1,21 +1,36 @@
 # APEX-OS
 
-APEX-OS is a two-edition, atomic Linux distribution built on **Fedora bootc**
-(OCI-native, image-based, transactional updates with rollback). It ships
+APEX-OS is an atomic Linux distribution built on **Fedora bootc** (OCI-native,
+image-based, transactional updates with rollback). It ships
 [Brain_Shell](https://github.com/AndreNijman/brain-shell-void) as its native
 desktop and is managed by **apexd**, a first-party system daemon.
 
-## Editions
+## One image, every laptop
 
-| Edition | Accent | Meaning | Target use |
-|---------|--------|---------|------------|
-| **APEX-OS Gaming** | Gold | Power | Performance-tuned desktop for gaming |
-| **APEX-OS Daily**  | Chartreuse | Everyday | General-purpose daily driver |
+There used to be three editions — Daily, Gaming Mesa, Gaming NVIDIA — and
+choosing between them at install time was a decision nobody had the information
+to make. Someone with a gaming laptop who plays occasionally picked Daily and
+found their GPU had no driver.
 
-Both editions share a common base image and diverge in packages, tuning, and
-branding. The "spark" logo is the shared mark; gold and chartreuse colorways
-distinguish the editions, with mono (black/white) variants for neutral
-contexts. See [docs/branding.md](docs/branding.md).
+There is one image now. The NVIDIA driver and the Xbox controller modules
+(xone, xpadneo) are built into it and signed with the APEX Machine Owner Key.
+The gaming userspace is not, and installs when you want it:
+
+```sh
+sudo apex install steam gamescope mangohud gamemode
+```
+
+The line between the two is not a product decision, it is a technical one: a
+kernel module has to be signed by a key that only CI holds, so it cannot be
+added to a running machine under Secure Boot. Userspace can. Everything that is
+a kernel module ships in the image; everything else is a package.
+
+`ghcr.io/andrenijman/apex-os:apex` is the image. `:daily`, `:gaming-mesa` and
+`:gaming-nvidia` still resolve to exactly the same digest, so machines installed
+before the merge keep updating with nothing to do.
+
+The "spark" logo is the mark, in chartreuse, with mono (black/white) variants
+for neutral contexts. See [docs/branding.md](docs/branding.md).
 
 ## Installing
 
@@ -30,12 +45,11 @@ Roughly 30 minutes start to finish, most of it waiting.
 ### Step 1 — Download
 
 From the [Releases page](https://github.com/AndreNijman/apex-os/releases), take
-the edition you want plus its `.sha256` file:
+the ISO plus its `.sha256` file:
 
-| File | Edition |
-|------|---------|
-| `apex-os-daily-netinstall.iso` | **Daily** — general-purpose desktop |
-| `apex-os-gaming-nvidia-netinstall.iso` | **Gaming** — performance-tuned, NVIDIA |
+| File | What it installs |
+|------|------------------|
+| `apex-os-daily-netinstall.iso` | APEX-OS. The `daily` in the name is historical — there is one image, and this ISO installs it. |
 
 Check the download is intact. A truncated ISO fails much later, in ways that
 look like hardware problems.
@@ -288,8 +302,7 @@ updates. See [docs/packages.md](docs/packages.md).
 |------|----------|
 | `Containerfile.core` | Slow-moving foundation: kernel, desktop stack, apps (bootc) |
 | `Containerfile.base` | Thin per-commit tier on top of core: apexd, files/**, shell |
-| `Containerfile.daily` | Daily edition image (chartreuse) |
-| `Containerfile.gaming` | Gaming edition image (gold) |
+| `Containerfile.apex` | The published image: edition stamp, splash, final initramfs |
 | `kernel/` | Custom kernel config / build inputs |
 | `signing/` | MOK / Secure Boot signing tooling (no private keys) |
 | `files/branding/` | Logos, Plymouth boot themes, wallpapers |
@@ -297,7 +310,7 @@ updates. See [docs/packages.md](docs/packages.md).
 | `files/desktop/` | Desktop / Brain_Shell integration files |
 | `files/scripts/` | Build and runtime helper scripts |
 | `apexd/` | apexd system daemon source |
-| `config/sysprofiles/` | System tuning profiles (gaming/daily) |
+| `config/sysprofiles/` | Per-machine hardware tuning profiles |
 | `tests/` | Image and integration tests |
 | `docs/` | Project documentation |
 | `.github/workflows/` | CI (image build, sign, publish) |
@@ -312,11 +325,13 @@ the `apex` control CLI. The six system profiles live in `config/sysprofiles/`.
 See [docs/m3-notes.md](docs/m3-notes.md) and the frozen contract in
 [docs/apexd-dbus.md](docs/apexd-dbus.md).
 
-**M1 — production images + CI.** The three images build locally (shared
-`Containerfile.base` → `daily` / `gaming`, with the CachyOS kernel, desktop /
-greeter stack, scx, and Bazaar), the DIY NVIDIA akmod builds against the shared
-kernel, and `.github/workflows/build-image.yml` builds, cosign-signs (keyless),
-and pushes all three to GHCR. See [docs/m1-notes.md](docs/m1-notes.md) for build
-results, package drift, and open items (greeter render still needs a GL target).
+**M1 — production image + CI.** `Containerfile.core` → `Containerfile.base` →
+`Containerfile.apex` builds locally with the CachyOS kernel, the desktop /
+greeter stack, scx and Bazaar. The NVIDIA and controller akmods build against
+that exact kernel in `core` and are signed there with the APEX MOK, and
+`.github/workflows/build-image.yml` builds, cosign-signs (keyless), pushes, and
+verifies that `:apex`, `:daily`, `:gaming-mesa` and `:gaming-nvidia` all resolve
+to the one digest. See [docs/m1-notes.md](docs/m1-notes.md) for build results
+and open items; its per-edition tables predate the merge.
 Earlier: [docs/m0-results.md](docs/m0-results.md) (spikes) and
 [docs/experiments.md](docs/experiments.md).
