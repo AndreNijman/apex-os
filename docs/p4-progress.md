@@ -87,14 +87,27 @@ greeter entry is universal. It needs reconciling — not deleting blindly; if
 some signal still distinguishes "cannot game here", the test should assert
 *that* instead.
 
-## The build cache that made every build impossible
+## The base build is slow, and the cache is not why
 
-Worth reading `docs/ci-release-tiers.md` and the comment in the base job before
-touching CI. Short version: the base tier's registry build cache cost a
-dead-constant 4m13s per layer on layers whose own commands ran in one to two
-seconds. 120 layers is 8h26m against a 6h ceiling, so **no build using it could
-ever have finished**, and the three red runs that looked like three separate
-accidents were one defect. Removed. Do not re-add without measuring on a runner.
+Read `docs/ci-release-tiers.md` before touching CI here — this was got wrong
+once already, in a way that cost most of a night.
+
+The base job spends around 90s to 4m per layer on layers whose own commands run
+in one to two seconds, and `Containerfile.base` is 92 steps. That is the real
+problem and it is still unfixed: the build spends its time committing layers,
+not doing work.
+
+What it is NOT is the registry build cache. Run 33828399604 showed a constant
+4m13s/layer and 120 x 4m13s = 8h26m against a 6h ceiling, which is correct
+arithmetic and looked conclusive. It was a COLD cache — every layer a miss,
+every miss then pushed. Removing the flags (33834836070) made things worse:
+`base` ran 5h44m without finishing, against 1h21m / 3h14m / 3h16m for the runs
+that succeeded WITH the cache. The flags went back.
+
+The base job now prints the podman storage driver, graph root, backing
+filesystem and native-overlay-diff support before building. If it reports
+`vfs`, every layer copies the whole multi-GB rootfs and that alone explains the
+constant cost. Read that output before forming any other theory.
 
 ## Landing order
 
