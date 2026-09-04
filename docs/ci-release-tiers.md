@@ -22,46 +22,43 @@ Platform builds run for OS source changes and the weekly upstream refresh. The
 reusable base tier uses a registry-backed Buildah cache with a 14-day lookup
 lifetime.
 
-### `--cache-to` is what kills these builds
+### The base job commits once, and uses no registry cache
 
-The base job reads the cache and does not write it. That asymmetry is the
-result of three failed runs, and it is worth knowing why before anyone
-"fixes" it back.
+Two separate things went wrong here. Both are recorded because the reasoning
+that produced the wrong fixes looked strong at the time.
 
-Two runs died mid-build with the identical podman error:
+**`--cache-to` kills builds.** Two runs died mid-build with the same podman
+error, `failed pushing cache ...: locating image with ID ...: image not known`,
+at step 18 and step 44 of 120. The push happens inside `podman build`, so it
+exits 125 and takes a half-finished build with it. It is gone.
 
-    Error: failed pushing cache ...: reading blob sha256:...:
-    locating image with ID "...": image not known
+**Per-step commits are what made `base` unfinishable.** With `--layers=true`,
+podman commits an image layer per Containerfile step. On this runner a commit
+costs a dead-constant 3m28s no matter how small the step, and base produces 102
+of its own layers: 5h54m, against a 6h job ceiling. Run 33866516076 hit exactly
+that and was cancelled at 6h01m. The job now passes `--layers=false` and commits
+once.
 
-33828399604 at step 18 of 120, 33859688618 at step 44. `--cache-to` pushes
-inside the build, so its failure exits 125 and takes a half-finished build with
-it. `--cache-from` has never errored — a lookup that misses is free.
+The price is small and was measured, not assumed: base's own 102 layers total
+**14.9 MiB** (largest 7.0 MiB). Squashing them means a change to any base file
+redownloads ~15 MiB rather than only the layers that moved — noise beside the
+5.26 GiB core those machines already hold and never re-fetch. The core/base
+split, which is what actually keeps `apex update` small, is untouched.
 
-The theory in between — that `--cache-to` was too SLOW, at a measured constant
-4m13s per layer, and 120 x 4m13s exceeded the 6h job ceiling — was wrong, and
-removing both flags on the strength of it produced the worst run of the three
-(33834836070: `base` ran 5h44m without finishing, cancelled). Re-measured on
-33859688618, per-layer cost is about 22 seconds, which puts a full 120-layer
-stage at roughly 45 minutes. The 4m13s belonged to one bad night, on which GHCR
-also returned a 500.
+`--cache-from` went with it: with no intermediate layers there is nothing to
+look up. Nothing reads or writes the build-cache repository now.
 
-Two things are still not understood, and should not be guessed at again:
+**What is still not explained**, and should not attract a fourth theory: why a
+commit costs 3m28s at all. It was 22s against the previous core and 3m28s
+against this one, for an image 11% larger (101 layers / 4.73 GiB -> 107 / 5.26
+GiB). Neither size nor layer count accounts for that, the two measurements come
+from different runners hours apart, and runner variability has not been ruled
+out. The storage driver is not the answer — the base job prints it and the
+runner reports `overlay`. The fix above deliberately does not depend on knowing
+the cause: it removes 101 of the 102 commits, which helps regardless.
 
-* Why 33834836070 took 5h44m with no cache flags at all, when the same build
-  with `--cache-from` runs at 22s/layer. It is not the storage driver — the
-  base job now prints it and the runner reports `overlay`, graph root
-  `/var/lib/containers/storage`.
-* Whether `--cache-from` earns its place. On 33859688618 it produced ZERO
-  hits, so it is currently costing a lookup per layer and returning nothing.
-  It stays only because it has never broken a build; if a run is ever needed
-  to prove it, measure it rather than reasoning about it.
-
-Nothing writes the cache repository now, so its entries age out after the
-14-day TTL and `--cache-from` becomes a no-op. That is a performance question,
-not a correctness one, and it is the correct trade against a flag that has
-killed two builds outright.
-Collapsing three image builds into one does not change any of this, because
-the cost is per layer, not per image.
+Collapsing three image builds into one does not change any of this, because the
+cost is per layer, not per image.
 
 ## Shell releases
 
