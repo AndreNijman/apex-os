@@ -131,5 +131,6 @@ phase.
    §22's own recommendation is to keep it while the OSTree/bootc install path
    depends on it, and to keep it for legacy BIOS regardless. The systemd-boot +
    UKI path is built, tested and shipped as an **opt-in**, and a change that
-   makes it the default for `daily`, `gaming-mesa` or `gaming-nvidia` is a
-   contract violation, not a milestone.
+   makes it the default for the published image is a contract violation, not a
+   milestone. (There is one image; `daily`, `gaming-mesa` and `gaming-nvidia`
+   are tags on its digest, so there is no per-edition exception to find here.)

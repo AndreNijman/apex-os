@@ -7,16 +7,22 @@ colorways. The wordmark is the letterspaced "APEX OS".
 
 ## Color semantics
 
-| Colorway | Hex (highlight) | Edition | Represents |
-|----------|-----------------|---------|------------|
-| **Gold** | `#FDE047` | APEX-OS **Gaming** | Power |
-| **Chartreuse** | `#D9F99D` | APEX-OS **Daily** | Everyday |
+| Colorway | Hex (highlight) | Used for | Represents |
+|----------|-----------------|----------|------------|
+| **Chartreuse** | `#D9F99D` | APEX-OS | Everyday |
+| **Gold** | `#FDE047` | legacy Gaming accent | Power |
 | **Mono (black)** | — | neutral | Light backgrounds, print, single-color contexts |
 | **Mono (white)** | — | neutral | Dark backgrounds, single-color contexts |
 
-Gold always denotes the Gaming edition; chartreuse always denotes the Daily
-edition. The mono variants exist for any context that needs a neutral,
-single-color mark and must not imply an edition.
+APEX publishes ONE image, so chartreuse is the colour of the product: the boot
+splash and the greeter accent. There is no edition for gold to denote any more.
+
+Gold is retained for one reason, and only that reason: a machine still booting a
+pre-merge image reports `VARIANT_ID=gaming`, and apex-greet maps that to the gold
+accent and `spark-gold.png` so it keeps its identity until it updates. New
+artwork should not use gold to mean anything.
+
+The mono variants exist for any context that needs a neutral, single-color mark.
 
 ## Asset inventory
 
@@ -36,10 +42,15 @@ Each colorway provides:
 
 ### Plymouth boot themes — `files/branding/plymouth/`
 
-Two themes, one per edition:
+**One theme ships.** `Containerfile.apex` copies `apex-os-chartreuse` and runs
+`plymouth-set-default-theme apex-os-chartreuse`; nothing installs the gold
+theme, because there is no second image to install it into.
 
-- `apex-os-gold/` — Gaming edition boot splash
-- `apex-os-chartreuse/` — Daily edition boot splash
+- `apex-os-chartreuse/` — the boot splash, on every machine
+- `apex-os-gold/` — source art only. NOT installed by any Containerfile. Kept
+  because it is the same animation in the other colourway and deleting
+  commissioned art to tidy a build is not a trade worth making; do not read its
+  presence as evidence that a second image exists.
 
 Each theme contains its `.plymouth` descriptor, the shared `apex-os.script`
 animation, and the sprite images `spark.png`, `comet.png`, `glow.png`,
@@ -57,8 +68,8 @@ handled (theme dims, prompt + bullets shown); shutdown shows a static spark.
 Install (inside the image build):
 
 ```sh
-cp -r apex-os-gold /usr/share/plymouth/themes/
-plymouth-set-default-theme -R apex-os-gold   # -R rebuilds the initramfs
+cp -r apex-os-chartreuse /usr/share/plymouth/themes/
+plymouth-set-default-theme -R apex-os-chartreuse   # -R rebuilds the initramfs
 ```
 
 Kernel args need `quiet splash`. See
@@ -128,7 +139,7 @@ Fixes land in one of two places:
 | 14 | Kernel-version stamp file | `/usr/lib/apex-cachyos-kver` | `/usr/lib/apex-kver` | image | `Containerfile.base` / `.daily` / `.gaming` |
 | 15 | Installer completion screen | *"look for \"Fedora\" / \"APEX\""* | *"pick it from the one-time boot menu (F12 on ThinkPads)"* | image | `installer/apex-install` |
 | 16 | Live-ISO GRUB menu | already `Install APEX-OS` | unchanged | image (pre-existing) | `installer/build-live-iso.sh` |
-| 17 | Plymouth boot splash | already `apex-os-chartreuse` / `apex-os-gold`, wordmark `A P E X   O S` | unchanged | image (pre-existing) | `files/branding/plymouth/` |
+| 17 | Plymouth boot splash | `apex-os-chartreuse` on every machine (gold is source art only), wordmark `A P E X   O S` | unchanged | image (pre-existing) | `files/branding/plymouth/` |
 | 18 | Greeter (`apex-greet`) | no distro string at all | unchanged | n/a | verified clean |
 | 18a | `hostnamectl` "Operating System" | `Fedora Linux 43 (Forty Three)` | `APEX-OS` | image | reads os-release `PRETTY_NAME`; covered by surface 3. Its "Kernel:" line still shows the CachyOS release string — see the unfixable table |
 | 18b | `neofetch` / `screenfetch` / `lsb_release` | — | — | n/a | **not installed** in the image (verified). `fastfetch` is the only fetch tool, and it is handled by surfaces 12–13. If one is ever layered in, it will auto-detect the Fedora logo from `ID` exactly as bare `fastfetch` would, and needs the same `logo.source` pin |
