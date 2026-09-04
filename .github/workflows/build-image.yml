@@ -2,11 +2,31 @@ name: build-image
 
 # Build, sign (cosign keyless), and push the APEX-OS images to GHCR.
 #
-#   core            → ghcr.io/andrenijman/apex-os-core      (heavy, slow-moving)
-#   base            → ghcr.io/andrenijman/apex-os-base      (thin, per-commit)
-#   daily           → ghcr.io/andrenijman/apex-os:daily
-#   gaming-mesa     → ghcr.io/andrenijman/apex-os:gaming-mesa
-#   gaming-nvidia   → ghcr.io/andrenijman/apex-os:gaming-nvidia
+#   core            → ghcr.io/andrenijman/apex-os:core   (heavy, slow-moving)
+#   base            → ghcr.io/andrenijman/apex-os:base   (thin, per-commit)
+#   the image       → ghcr.io/andrenijman/apex-os:apex
+#                     …and :daily, :gaming-mesa, :gaming-nvidia, which are the
+#                     SAME MANIFEST DIGEST under their old names.
+#
+# ═══ ONE IMAGE, AND WHY THE OLD TAGS MUST NEVER STOP RESOLVING ═══
+#
+# APEX published three images that were one operating system with different
+# payloads. That forced a choice at install time — pick Daily on a gaming laptop
+# and you had no GPU driver — so it is now a single image: NVIDIA and the
+# xone/xpadneo controller modules are built and SIGNED into it (a kernel module
+# cannot be installed at runtime under Secure Boot, because signing needs the MOK
+# private key that never leaves CI), while Steam, gamescope, MangoHud, Sunshine
+# and OBS install on demand through `apex install`.
+#
+# Every machine already deployed has bootc pointed at ONE of `:daily`,
+# `:gaming-mesa` or `:gaming-nvidia`. A tag that stops being updated does not
+# error — `bootc upgrade` simply keeps reporting "no update available" forever,
+# and the machine silently stops receiving security updates. So all three are
+# promoted to the same digest on every run, and the `Assert every published tag
+# resolves` step below fails the run if any of them does not. Retagging (rather
+# than a manifest list or a redirect) is what GHCR actually supports, costs one
+# manifest write each because the blobs are already there, and needs nothing
+# from the installed machines.
 #
 # ═══ THE THREE-TIER SPLIT, AND WHY `apex update` USED TO PULL 5.3 GB ═══
 #
@@ -39,9 +59,9 @@ name: build-image
 #           digest core was built from is stamped on it as a label and compared.
 #   base    Containerfile.base / apexd/** / config/** / files/** changed, or
 #           core rebuilt.
-#   flavor  every run (they are thin, and they must follow the base digest).
+#   image   every run (it is thin, and it must follow the base digest).
 #
-# The base's immutable digest is passed to the flavor builds as
+# The base's immutable digest is passed to the image build as
 # --build-arg BASE=<base>@<digest>, and core's as --build-arg CORE=<core>@<digest>,
 # so every tier is pinned to an exact parent. Signing is keyless
 # (Sigstore/Fulcio) via the runner's OIDC token.
@@ -59,27 +79,17 @@ on:
   workflow_dispatch:
     inputs:
       build_qcow2:
-        description: "Also build a daily qcow2 disk image (bootc-image-builder)"
+        description: "Also build a qcow2 disk image (bootc-image-builder)"
         type: boolean
         default: false
       build_iso:
-        description: "Build the daily APEX-OS installer ISO (anaconda-iso)"
+        description: "Build the APEX-OS installer ISO (anaconda-iso)"
         type: boolean
         default: false
       force_core:
         description: "Force a full, cache-bypassing CORE rebuild (~45 min; makes the next update a full download for every user)"
         type: boolean
         default: false
-      target_platform:
-        description: "Platform flavors to rebuild (shell-only releases use release-shell instead)"
-        type: choice
-        options:
-          - all
-          - daily-and-nvidia
-          - daily
-          - gaming-mesa
-          - gaming-nvidia
-        default: all
   schedule:
     # Weekly (Mon 06:00 UTC) to pick up upstream fedora-bootc / COPR / RPMFusion
     # security updates. This only rebuilds core when the upstream base image has
@@ -121,8 +131,10 @@ env:
   #
   # The consolidation is kept anyway: it costs nothing, keeps every tier's tags
   # in one place, and the user-facing tags (:daily, :gaming-mesa, :gaming-nvidia)
-  # are UNCHANGED so every installed machine keeps tracking the same reference.
-  # But it is NOT a speed optimisation, and should not be cited as one.
+  # are UNCHANGED so every installed machine keeps tracking the same reference —
+  # which now matters far more than it did, because those three names are the
+  # ONLY thing keeping already-deployed machines updating after the collapse to a
+  # single image. But it is NOT a speed optimisation, and should not be cited as one.
   IMAGE: ghcr.io/andrenijman/apex-os
   CACHE_PREFIX: ghcr.io/andrenijman/apex-os-build-cache
   TAG_CORE: core
@@ -182,6 +194,7 @@ jobs:
               # download for the common one.
             base:
               - 'Containerfile.base'
+              - 'Containerfile.apex'
               - 'apexd/**'
               - 'config/**'
               - 'files/**'
@@ -939,7 +952,11 @@ jobs:
           cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
 
   # ── Job 4: flavors ────────────────────────────────────────────────────────
-  flavors:
+  # ── Job 4: THE image ──────────────────────────────────────────────────────
+  # Was a three-leg matrix (daily / gaming-mesa / gaming-nvidia). There is one
+  # image now, so there is one job, and the three old names are applied to its
+  # digest as tags in the promotion step below.
+  image:
     needs: [base]
     if: >-
       ${{
@@ -957,19 +974,6 @@ jobs:
       APEX_SB_CONFIGURED: ${{ secrets.APEX_SB_KEY_B64 != '' }}
       GHCR_USER: ${{ github.actor }}
       GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - flavor: daily
-            containerfile: Containerfile.daily
-            build_args: ""
-          - flavor: gaming-mesa
-            containerfile: Containerfile.gaming
-            build_args: "--build-arg GPU=mesa"
-          - flavor: gaming-nvidia
-            containerfile: Containerfile.gaming
-            build_args: "--build-arg GPU=nvidia"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -990,55 +994,93 @@ jobs:
           cosign login "$REGISTRY" -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
 
       # FROM the base pinned by digest — the exact base job 3 pushed and signed.
-      - name: Build ${{ matrix.flavor }}
-        if: >-
-          ${{
-            github.event_name != 'workflow_dispatch'
-            || inputs.target_platform == 'all'
-            || inputs.target_platform == matrix.flavor
-            || (inputs.target_platform == 'daily-and-nvidia' && matrix.flavor != 'gaming-mesa')
-          }}
+      - name: Build the image
         run: |
           sudo podman build --isolation=chroot --layers=true \
             --build-arg BASE="$IMAGE@${{ needs.base.outputs.digest }}" \
             --build-arg APEX_REVISION="${{ github.sha }}" \
-            ${{ matrix.build_args }} \
-            -f "${{ matrix.containerfile }}" \
-            -t "$IMAGE:${{ matrix.flavor }}" \
-            -t "$IMAGE:${{ matrix.flavor }}-${{ github.sha }}" \
+            -f Containerfile.apex \
+            -t "$IMAGE:apex" \
+            -t "$IMAGE:apex-${{ github.sha }}" \
             .
 
-      # Gate the PUSH on the edition actually carrying a signed kernel.
+      # Gate the PUSH on the image actually carrying a signed kernel AND signed
+      # out-of-tree modules.
       #
-      # sbverify against the real vmlinuz, not just the marker file: the marker
-      # is a claim written by the build, and this project has been bitten
-      # repeatedly by trusting claims over measurements.
-      - name: Verify ${{ matrix.flavor }} kernel signature
-        if: >-
-          ${{
-            env.APEX_SB_CONFIGURED == 'true'
-            && (github.event_name != 'workflow_dispatch'
-                || inputs.target_platform == 'all'
-                || inputs.target_platform == matrix.flavor
-                || (inputs.target_platform == 'daily-and-nvidia' && matrix.flavor != 'gaming-mesa'))
-          }}
+      # The module half is new, and it closes a real hole: the NVIDIA akmod used
+      # to be built in Containerfile.gaming, i.e. in the FLAVOR job — which is
+      # never passed `--secret id=apex_sb_key`, so nothing could have signed it
+      # there and nothing did. This check ran `sbverify` against vmlinuz only, so
+      # nothing caught it either. Both halves are now measured against the built
+      # artifact: the marker file is read, and then ignored in favour of the
+      # signature actually present in the kernel image and in every module.
+      - name: Verify the Secure Boot chain (kernel AND modules)
+        if: ${{ env.APEX_SB_CONFIGURED == 'true' }}
         run: |
           set -euo pipefail
-          state=$(sudo podman run --rm --entrypoint /bin/sh "$IMAGE:${{ matrix.flavor }}" \
+          state=$(sudo podman run --rm --entrypoint /bin/sh "$IMAGE:apex" \
                     -c 'cat /usr/share/apex-os/secureboot/kernel-signed 2>/dev/null || echo missing')
           if [ "$state" != signed ]; then
-            echo "::error::${{ matrix.flavor }} is stamped '$state' — refusing to publish an unsigned kernel."
+            echo "::error::the image is stamped '$state' — refusing to publish an unsigned kernel."
             echo "::error::The core it was built from is not signed. Re-run with force_core=true."
             exit 1
           fi
-          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:${{ matrix.flavor }}" -c \
+          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:apex" -c \
             'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/apex-kver)/vmlinuz' \
             | grep -qi 'signature certificates\|image signature issuers\|APEX' \
-            || { echo "::error::sbverify found no signature on ${{ matrix.flavor }}'s vmlinuz"; exit 1; }
-          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:${{ matrix.flavor }}" \
+            || { echo "::error::sbverify found no signature on the shipped vmlinuz"; exit 1; }
+          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:apex" \
             -c 'test -s /usr/share/apex-os/secureboot/apex-mok.der' \
-            || { echo "::error::${{ matrix.flavor }} has no apex-mok.der — users would have nothing to enrol"; exit 1; }
-          echo "${{ matrix.flavor }}: kernel signed and apex-mok.der present"
+            || { echo "::error::no apex-mok.der — users would have nothing to enrol"; exit 1; }
+
+          # Out-of-tree modules. Written so it CANNOT pass on an empty set: a
+          # loop over zero modules succeeds, and "there were no modules" is the
+          # exact failure this exists to catch.
+          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:apex" -c '
+            set -eu
+            KVER=$(cat /usr/lib/apex-kver)
+            MODDIR=/usr/lib/modules/$KVER
+            [ "$(cat /usr/share/apex-os/secureboot/modules-signed 2>/dev/null || echo missing)" = signed ] \
+              || { echo "modules-signed marker is not \"signed\""; exit 1; }
+            SIGNER=$(cat /usr/share/apex-os/secureboot/module-signer)
+            OOT=""
+            for d in extra updates; do [ -d "$MODDIR/$d" ] && OOT="$OOT $MODDIR/$d"; done
+            [ -n "$OOT" ] || { echo "no out-of-tree module directory"; exit 1; }
+            n=0
+            for m in $(find $OOT -type f -name "*.ko*"); do
+              got=$(modinfo -F signer "$m" 2>/dev/null || true)
+              [ "$got" = "$SIGNER" ] || { echo "$m signer=\"$got\" expected=\"$SIGNER\""; exit 1; }
+              n=$((n + 1))
+            done
+            [ "$n" -gt 0 ] || { echo "zero out-of-tree modules found — vacuous pass"; exit 1; }
+            for pat in nvidia xone xpadneo; do
+              [ "$(find $OOT -type f -name "*$pat*.ko*" | wc -l)" -gt 0 ] \
+                || { echo "no $pat module in the image"; exit 1; }
+            done
+            echo "modules: $n out-of-tree, all signed by \"$SIGNER\""
+          ' || { echo "::error::out-of-tree kernel modules are unsigned, missing, or signed by the wrong key"; exit 1; }
+          echo "kernel and modules signed; apex-mok.der present"
+
+      # The payload split is a product promise, so it is checked rather than
+      # assumed: the drivers a user cannot install themselves must be present,
+      # and the userspace they can install must NOT be baked in (baking it would
+      # quietly undo the whole point of collapsing the editions).
+      - name: Verify the payload split
+        run: |
+          set -euo pipefail
+          sudo podman run --rm --entrypoint /bin/sh "$IMAGE:apex" -c '
+            set -eu
+            for b in gamescope steam mangohud sunshine obs; do
+              ! command -v "$b" >/dev/null 2>&1 || { echo "$b is baked in; it must be on-demand"; exit 1; }
+            done
+            test -e /usr/lib64/libGLX_nvidia.so.0 || { echo "nvidia userspace missing"; exit 1; }
+            test -e /usr/lib64/libGLX_mesa.so.0   || { echo "mesa GLX missing"; exit 1; }
+            test -e /usr/lib64/libEGL_mesa.so.0   || { echo "mesa EGL missing"; exit 1; }
+            owner=$(rpm -qf --qf "%{NAME}" /usr/lib64/libGL.so.1)
+            case "$owner" in libglvnd*) ;; *) echo "libGL.so.1 owned by $owner, not libglvnd"; exit 1 ;; esac
+            grep -q "^VARIANT_ID=apex$" /usr/lib/os-release || { echo "VARIANT_ID is not apex"; exit 1; }
+            echo "payload split OK: drivers in, gaming userspace out, glvnd intact"
+          '
 
       # ── Push once, then tag in-registry ──────────────────────────────────
       # Two problems this solves, both measured on run 30775672845.
@@ -1052,13 +1094,6 @@ jobs:
       #    gaming-nvidia build to `502 Bad Gateway` eight minutes into the
       #    upload, with nothing retrying.
       - name: Push helper
-        if: >-
-          ${{
-            github.event_name != 'workflow_dispatch'
-            || inputs.target_platform == 'all'
-            || inputs.target_platform == matrix.flavor
-            || (inputs.target_platform == 'daily-and-nvidia' && matrix.flavor != 'gaming-mesa')
-          }}
         run: |
           command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
           cat > /tmp/push-retry.sh <<'SH'
@@ -1078,29 +1113,34 @@ jobs:
           SH
           chmod +x /tmp/push-retry.sh
 
-      - name: Push ${{ matrix.flavor }} + capture digest
+      - name: Push the image + capture digest
         id: push
-        if: >-
-          ${{
-            github.event_name != 'workflow_dispatch'
-            || inputs.target_platform == 'all'
-            || inputs.target_platform == matrix.flavor
-            || (inputs.target_platform == 'daily-and-nvidia' && matrix.flavor != 'gaming-mesa')
-          }}
         run: |
           # zstd:chunked — see the note on the core push. This is the one users
           # actually pull, so it is where the download saving lands.
-          /tmp/push-retry.sh "$IMAGE" "${{ matrix.flavor }}-${{ github.sha }}" /tmp/flavor.digest
-          DIGEST="$(cat /tmp/flavor.digest)"
+          /tmp/push-retry.sh "$IMAGE" "apex-${{ github.sha }}" /tmp/image.digest
+          DIGEST="$(cat /tmp/image.digest)"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-          echo "${{ matrix.flavor }} digest: $DIGEST"
+          echo "image digest: $DIGEST"
 
-      - name: Sign ${{ matrix.flavor }} (cosign keyless)
+      - name: Sign the image (cosign keyless)
         if: ${{ steps.push.outputs.digest != '' }}
         run: |
           cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
 
-      - name: Promote signed ${{ matrix.flavor }}
+      # EVERY published name, all pointing at the one digest.
+      #
+      #   apex / apex-<sha>              the canonical name going forward
+      #   daily / gaming-mesa / gaming-nvidia   MIGRATION. Machines in the field
+      #       have bootc pointed at these. If one stops moving, `bootc upgrade`
+      #       reports "no update" forever and that machine silently stops getting
+      #       security updates. They are not deprecated aliases, they are live
+      #       references owned by other people's laptops.
+      #   platform-*                     stable inputs for shell-only releases
+      #       (release-shell.yml builds Containerfile.release FROM a platform tag,
+      #       and its own dispatch still offers the three flavor names).
+      #   daily-<sha>                    consumed by the qcow2 job.
+      - name: Promote to every published tag
         if: ${{ steps.push.outputs.digest != '' }}
         run: |
           set -euo pipefail
@@ -1112,17 +1152,50 @@ jobs:
             skopeo copy --retry-times 3 --src-creds "$creds" --dest-creds "$creds" \
               "docker://$IMAGE@$digest" "docker://$IMAGE:$1"
           }
-          # Move the user-facing tag last. Any earlier registry failure leaves
-          # installed machines on the previous signed release.
-          promote "platform-${{ matrix.flavor }}-${{ github.sha }}"
-          promote "platform-${{ matrix.flavor }}"
-          promote "${{ matrix.flavor }}"
+          # Platform + per-SHA tags first; the names installed machines actually
+          # track are moved LAST, so any earlier registry failure leaves the
+          # fleet on the previous signed release rather than half-migrated.
+          for f in apex daily gaming-mesa gaming-nvidia; do
+            promote "platform-$f-${{ github.sha }}"
+            promote "platform-$f"
+            promote "$f-${{ github.sha }}"
+          done
+          for f in apex daily gaming-mesa gaming-nvidia; do
+            promote "$f"
+          done
+
+      # The migration promise, measured. Reading the digest back out of the
+      # registry is the only thing that proves a machine tracking `:gaming-mesa`
+      # will actually receive this build; the promotion step succeeding only
+      # proves skopeo exited zero.
+      - name: Assert every published tag resolves to this digest
+        if: ${{ steps.push.outputs.digest != '' }}
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/skopeo-auth.json"
+          echo '{}' > "$REGISTRY_AUTH_FILE"
+          creds="$GHCR_USER:$GHCR_TOKEN"
+          want="${{ steps.push.outputs.digest }}"
+          fail=0
+          for t in apex daily gaming-mesa gaming-nvidia \
+                   platform-apex platform-daily platform-gaming-mesa platform-gaming-nvidia \
+                   "daily-${{ github.sha }}"; do
+            got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$t" 2>/dev/null || echo MISSING)"
+            if [ "$got" = "$want" ]; then
+              echo "  ok   :$t -> $got"
+            else
+              echo "::error::tag :$t resolves to '$got', expected '$want' — machines tracking it would stop updating"
+              fail=1
+            fi
+          done
+          [ "$fail" = 0 ] || exit 1
 
       # How much this push actually costs the fleet. The point of the core tier
       # is that this number is small; printing it into the run summary is what
       # turns "it should be small" into something anyone can check at a glance,
       # and what will make a regression obvious the week it happens.
-      - name: Report update cost for ${{ matrix.flavor }}
+      - name: Report update cost
         if: ${{ steps.push.outputs.digest != '' }}
         run: |
           set -euo pipefail
@@ -1146,7 +1219,7 @@ jobs:
           shared = {l['digest'] for l in core.get('layers', [])}
           fresh = [l for l in nl if l['digest'] not in shared]
           mib = lambda b: b / 2**20
-          print(f"### `${{ matrix.flavor }}` update cost")
+          print("### `apex` update cost")
           print()
           print(f"- total image: **{len(nl)} layers, {mib(sum(l['size'] for l in nl)):.0f} MiB**")
           print(f"- inherited from core (not re-downloaded): "
@@ -1155,27 +1228,23 @@ jobs:
                 f"**{len(fresh)} layers, {mib(sum(l['size'] for l in fresh)):.0f} MiB**")
           print()
           print("The last figure is an UPPER BOUND on what `apex update` downloads: "
-                "base/flavor layers that happen to be unchanged since the previous "
+                "base/image layers that happen to be unchanged since the previous "
                 "push are also reused, but are counted as new here. Before the "
-                "core/base split this number was the whole image (153 layers, 5.3 GB).")
+                "core/base split this number was the whole image (153 layers, 5.3 GB). "
+                "The NVIDIA driver and the controller modules are in `core`, so they "
+                "are inside the inherited figure and are downloaded once, ever.")
           PY
 
   # ── Job 5: qcow2 (stretch, dispatch-gated, non-blocking) ─────────────────
-  # Proves bootc-image-builder produces a bootable disk from the daily image.
+  # Proves bootc-image-builder produces a bootable disk from the published image.
   # GitHub runners have NO /dev/kvm, so the disk is NOT booted here — producing
   # the qcow2 is the check. Gated on manual dispatch (build_qcow2=true) and
   # continue-on-error so bib flakiness never fails the image pipeline.
   qcow2:
-    needs: flavors
+    needs: image
     runs-on: ubuntu-24.04
     if: >-
-      ${{
-        github.event_name == 'workflow_dispatch'
-        && inputs.build_qcow2
-        && (inputs.target_platform == 'all'
-            || inputs.target_platform == 'daily'
-            || inputs.target_platform == 'daily-and-nvidia')
-      }}
+      ${{ github.event_name == 'workflow_dispatch' && inputs.build_qcow2 }}
     continue-on-error: true
     steps:
       - name: Checkout
@@ -1189,34 +1258,35 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | sudo podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
 
-      - name: Build daily qcow2 via bootc-image-builder
+      - name: Build the qcow2 via bootc-image-builder
         run: |
           mkdir -p output
-          sudo podman pull "$IMAGE:daily-${{ github.sha }}"
+          sudo podman pull "$IMAGE:apex-${{ github.sha }}"
           sudo podman run --rm --privileged \
             --security-opt label=type:unconfined_t \
             -v "$(pwd)/output":/output \
             -v /var/lib/containers/storage:/var/lib/containers/storage \
             quay.io/centos-bootc/bootc-image-builder:latest \
             --type qcow2 --rootfs xfs --local \
-            "$IMAGE:daily-${{ github.sha }}"
+            "$IMAGE:apex-${{ github.sha }}"
           ls -lh output/qcow2 || ls -lhR output
 
       - name: Upload qcow2 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apex-os-daily-qcow2
+          name: apex-os-qcow2
           path: output/qcow2/*.qcow2
           if-no-files-found: warn
           retention-days: 7
 
   # ── Job 6: installer ISO (dispatch-gated) ─────────────────────────────────
-  # Builds the APEX-OS Daily installer as an Anaconda ISO (bootc-image-builder
-  # --type anaconda-iso) — a bootable USB that installs the signed daily image
-  # to a target disk. The image is pulled into local storage first (each job is
-  # a fresh runner; --local needs it present). Uploaded as an artifact for the
-  # maintainer to write to a USB stick. Independent of core/base/flavors: it
-  # pulls the already-published :daily, so it runs on an ISO-only dispatch.
+  # Builds the APEX-OS installer as an Anaconda ISO (bootc-image-builder --type
+  # anaconda-iso) — a bootable USB that installs the signed image to a target
+  # disk. The image is pulled into local storage first (each job is a fresh
+  # runner; --local needs it present). Uploaded as an artifact for the maintainer
+  # to write to a USB stick. Independent of core/base/image: it pulls the
+  # already-published tag, so it runs on an ISO-only dispatch. There is one ISO
+  # now, because there is one image.
   installer-iso:
     runs-on: ubuntu-24.04
     if: github.event_name == 'workflow_dispatch' && inputs.build_iso
@@ -1233,15 +1303,15 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | sudo podman login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
 
-      - name: Pull the latest green daily image into local storage
-        run: sudo podman pull "$IMAGE:daily"
+      - name: Pull the latest green image into local storage
+        run: sudo podman pull "$IMAGE:apex"
 
       # The installer config (installer/bib-config.toml) is mounted at
       # /config.toml so bootc-image-builder applies our INTERACTIVE kickstart
       # instead of its destructive default (clearpart --all + locked root). See
       # that file's header and docs. Without it the ISO wipes the target disk
       # unattended and locks the user out — the two bugs this fixes.
-      - name: Build daily installer ISO via bootc-image-builder
+      - name: Build the installer ISO via bootc-image-builder
         run: |
           mkdir -p output
           test -f installer/bib-config.toml  # fail loudly if the config is missing
@@ -1252,7 +1322,7 @@ jobs:
             -v /var/lib/containers/storage:/var/lib/containers/storage \
             quay.io/centos-bootc/bootc-image-builder:latest \
             --type anaconda-iso --rootfs btrfs --local \
-            "$IMAGE:daily"
+            "$IMAGE:apex"
           ls -lhR output/bootiso || ls -lhR output
 
       # Guard: extract the embedded kickstart from the built ISO and FAIL the
@@ -1309,7 +1379,7 @@ jobs:
       - name: Upload installer ISO artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apex-os-daily-installer-iso
+          name: apex-os-installer-iso
           path: output/bootiso/*.iso
           if-no-files-found: warn
           retention-days: 7
