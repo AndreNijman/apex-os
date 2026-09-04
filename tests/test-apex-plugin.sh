@@ -6,7 +6,7 @@
 #  and calls the function the image runs.
 #
 #  ── Why this file exists ────────────────────────────────────────────────────
-#  §16's plugin platform ships in apex-shell (PR #9) and deliberately left the
+#  §16's plugin platform ships in apex-shell (PR #9, merged) and deliberately left the
 #  OS-side CLI out. `apex plugin list|info|enable|disable` is that CLI, and it
 #  has two properties that need proving rather than asserting in prose:
 #
@@ -38,11 +38,13 @@
 #  the rule exists for.
 #
 #  ── What needs the shell tree, and what does not ────────────────────────────
-#  The verdict half cannot run without apex-shell's manifest.js, and at the time
-#  of writing that file is on apex-shell **PR #9** and NOT on apex-shell `main`,
-#  which is what CI vendors. That is the documented cross-repo merge order
-#  (shell before or with the OS) doing its job, and it has fired twice before in
-#  this repository.
+#  The verdict half cannot run without apex-shell's manifest.js. That file was
+#  once only on apex-shell **PR #9**, and this section used to say so; PR #9 has
+#  since merged, so a missing validator no longer means "the shell has not
+#  landed yet". It now means the tree that answered is older than that merge —
+#  in practice a stale /usr/share/apex-shell on a development machine, which is
+#  the last-resort fallback when no checkout is found. The suite prints which
+#  tree it used for exactly this reason; `APEX_SHELL_TREE` overrides it.
 #
 #  It is deliberately ONE labelled failure rather than a refusal at the top of
 #  the file. Everything that does not need manifest.js — the path-safety rules,
@@ -114,6 +116,16 @@ MANIFEST_JS=""
 [ -n "$SHELL_TREE" ] && MANIFEST_JS="${SHELL_TREE}/src/services/plugins/manifest.js"
 PLUGIN_SERVICE=""
 [ -n "$SHELL_TREE" ] && PLUGIN_SERVICE="${SHELL_TREE}/src/services/plugins/PluginService.qml"
+
+# Say which tree answered. Without this the suite's own failure message cannot
+# be acted on: "the validator is missing" reads as a code defect, when the
+# usual cause is that a stale /usr/share/apex-shell on a development machine
+# answered instead of a source checkout.
+if [ -n "$SHELL_TREE" ]; then
+    printf 'using apex-shell tree: %s\n' "$(cd "$SHELL_TREE" 2>/dev/null && pwd || echo "$SHELL_TREE")"
+else
+    printf 'no apex-shell tree found (looked for $APEX_SHELL_TREE, ../../apex-shell, /usr/share/apex-shell)\n'
+fi
 
 echo "── the suite must not be able to reach the real plugin directory ──────"
 # This is the guard, not a formality. `disable` MOVES a directory; if these
@@ -456,10 +468,10 @@ echo "── the shell's own validator: verdicts, and the structural tripwire �
 # ═════════════════════════════════════════════════════════════════════════════
 if [ -z "$MANIFEST_JS" ] || [ ! -f "$MANIFEST_JS" ]; then
     bad "apex-shell's plugin validator is present" \
-        "not at ${MANIFEST_JS:-<no apex-shell tree found>}. It is on apex-shell PR #9 (branch p1/plugin-platform) and NOT on apex-shell main, which is what CI vendors. This is the documented cross-repo merge order — the shell lands before or with the OS — and it clears when PR #9 merges. Check apex-shell main before looking anywhere else in this repository."
+        "not at ${MANIFEST_JS:-<no apex-shell tree found>}. This file HAS been on apex-shell main since PR #9 merged, so the usual cause is not a missing merge: this run resolved an apex-shell tree that predates it — most often a stale /usr/share/apex-shell installed on a development machine, which is the fallback when no checkout is found. The tree that answered is printed at the top of this run. Point the suite at a current one with APEX_SHELL_TREE=/path/to/apex-shell."
     printf '\n'
     printf 'apex-plugin: %d passed, %d failed\n' "$pass" "$fail"
-    printf 'The verdict and tripwire sections did not run: apex-shell PR #9 is unmerged.\n'
+    printf 'The verdict and tripwire sections did not run: no apex-shell tree carrying the validator.\n'
     exit 1
 fi
 ok "apex-shell's plugin validator is present"
