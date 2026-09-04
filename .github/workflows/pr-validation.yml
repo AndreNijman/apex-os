@@ -125,8 +125,7 @@ jobs:
           #
           # A static check, so both are caught in seconds on the PR instead.
           python3 files/scripts/check-containerfile-order \
-            Containerfile.base Containerfile.core \
-            Containerfile.daily Containerfile.gaming
+            Containerfile.base Containerfile.core Containerfile.apex
 
       - name: Input page and generator agree
         run: |
