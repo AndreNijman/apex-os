@@ -112,7 +112,7 @@ cgroup = "/sys/fs/cgroup/apex-game"
 # silently. Set it to "" to opt a machine out.
 #
 # This does nothing on the Daily edition: scxctl drives scx_loader over D-Bus,
-# and scx_loader.service is enabled only in Containerfile.gaming, so on Daily
+# and scx_loader.service is D-Bus activated rather than enabled at boot, so
 # apexd logs a skip and carries on.
 scx = "scx_lavd"
 
