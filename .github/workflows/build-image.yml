@@ -657,7 +657,6 @@ jobs:
           set +e
           sudo podman build --isolation=chroot --layers=true \
             --cache-from "$CACHE_PREFIX-base" \
-            --cache-to "$CACHE_PREFIX-base" \
             --cache-ttl=336h \
             --build-arg CORE="$IMAGE@${{ steps.core.outputs.digest }}" \
             --build-arg APEX_REVISION="${{ github.sha }}" \

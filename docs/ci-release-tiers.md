@@ -17,44 +17,44 @@ Platform builds run for OS source changes and the weekly upstream refresh. A
 manual run can target one flavor or Daily plus Gaming NVIDIA. The reusable base
 tier uses a registry-backed Buildah cache with a 14-day lookup lifetime.
 
-### The base cache was removed once, and putting it back was the fix
+### `--cache-to` is what kills these builds
 
-Worth reading before anyone tries it again, because the reasoning that removed
-it looked strong and was wrong.
+The base job reads the cache and does not write it. That asymmetry is the
+result of three failed runs, and it is worth knowing why before anyone
+"fixes" it back.
 
-Run 33828399604 died with `base` at step 18 of 120 after 1h07m, on a GHCR 500
-during a cache push. Its per-layer timestamps were a dead-constant 4m13s while
-the command inside each layer ran in one to two seconds, and 120 x 4m13s is
-8h26m against the 6h GitHub job ceiling (the workflow sets no
-`timeout-minutes`, so 6h is the default). That arithmetic is correct. The
-conclusion drawn from it — that `--cache-to` was the cost, and removing it
-would make the build finish — was not.
+Two runs died mid-build with the identical podman error:
 
-Run 33834836070 removed the flags and was **worse**: `base` ran 5h44m without
-reaching the end of the build step, and was cancelled before the ceiling killed
-it. Measured against the runs that actually succeeded, all of them WITH the
-cache:
+    Error: failed pushing cache ...: reading blob sha256:...:
+    locating image with ID "...": image not known
 
-    32542180556   base  1h21m
-    32559116919   base  3h14m
-    32610711696   base  3h16m
+33828399604 at step 18 of 120, 33859688618 at step 44. `--cache-to` pushes
+inside the build, so its failure exits 125 and takes a half-finished build with
+it. `--cache-from` has never errored — a lookup that misses is free.
 
-So the cache was not overhead being paid for nothing. `--cache-from` was
-supplying real layer reuse, and that reuse was worth more than the push cost.
-What 4m13s/layer actually showed was a cold cache — every layer a miss, every
-miss then pushed — not a cache that never paid for itself.
+The theory in between — that `--cache-to` was too SLOW, at a measured constant
+4m13s per layer, and 120 x 4m13s exceeded the 6h job ceiling — was wrong, and
+removing both flags on the strength of it produced the worst run of the three
+(33834836070: `base` ran 5h44m without finishing, cancelled). Re-measured on
+33859688618, per-layer cost is about 22 seconds, which puts a full 120-layer
+stage at roughly 45 minutes. The 4m13s belonged to one bad night, on which GHCR
+also returned a 500.
 
-The genuine problem is underneath both: **the per-layer cost on a hosted runner
-is inherently high**, somewhere around 90s/layer even on the good runs, against
-layer commands that take seconds. `Containerfile.base` is 69 COPY steps and 23
-RUN steps, and the build spends its time committing layers rather than doing
-work. That is what needs fixing — by cutting the layer count, or by finding out
-why a commit is that expensive (the storage driver is the first thing to check,
-and nothing has yet confirmed which driver the runner uses). Removing the cache
-does not address it and takes away the one thing that was helping.
+Two things are still not understood, and should not be guessed at again:
 
-Do not remove these flags again without a runner-side measurement showing the
-per-layer commit cost is gone.
+* Why 33834836070 took 5h44m with no cache flags at all, when the same build
+  with `--cache-from` runs at 22s/layer. It is not the storage driver — the
+  base job now prints it and the runner reports `overlay`, graph root
+  `/var/lib/containers/storage`.
+* Whether `--cache-from` earns its place. On 33859688618 it produced ZERO
+  hits, so it is currently costing a lookup per layer and returning nothing.
+  It stays only because it has never broken a build; if a run is ever needed
+  to prove it, measure it rather than reasoning about it.
+
+Nothing writes the cache repository now, so its entries age out after the
+14-day TTL and `--cache-from` becomes a no-op. That is a performance question,
+not a correctness one, and it is the correct trade against a flag that has
+killed two builds outright.
 
 ## Shell releases
 
