@@ -1637,9 +1637,8 @@ RUN set -eux; \
 #     display-manager.service alias; graphical.target Wants it), so a graphical
 #     boot starts greetd → sway → the apex-greet greeter on tty1.
 #   - graphical.target as default.
-# NOTE: VARIANT is deliberately NOT stamped here — the flavor images
-# (Containerfile.daily / .gaming) own the os-release VARIANT/VARIANT_ID stamp,
-# which is what drives apex-greet's edition (gold/chartreuse) branding.
+# NOTE: VARIANT is deliberately NOT stamped here — Containerfile.apex owns the
+# os-release VARIANT/VARIANT_ID stamp, which is what drives apex-greet's accent.
 RUN set -eux; \
     printf 'd /var/lib/apex-greet 0755 greetd greetd -\nd /var/lib/apex-greet/wallpapers 0755 root root -\n' \
         > /usr/lib/tmpfiles.d/apex-greet.conf; \

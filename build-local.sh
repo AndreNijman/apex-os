@@ -18,18 +18,29 @@
 #  explicitly ask for one with --allow-unsigned.
 #
 #  Usage:
-#     ./build-local.sh                 core + base + daily + gaming-nvidia, signed
+#     ./build-local.sh                 core + base + apex, signed
 #     ./build-local.sh base            just the base (reuses the existing core)
-#     ./build-local.sh daily gaming-mesa
+#     ./build-local.sh apex            just the image tier
 #     ./build-local.sh --allow-unsigned base       no key needed
 #     ./build-local.sh --force-core                rebuild core even if present
 #
+#  ONE IMAGE. `daily`, `gaming-mesa` and `gaming-nvidia` are gone as build
+#  targets; there is a single image and the three names survive only as published
+#  tags pointing at it. They are still accepted here and map to `apex`, so a
+#  habit or a stale script does not fail with "unknown target".
+#
 #  CORE vs BASE. The image is built in three tiers (see Containerfile.core's
 #  header): `core` is the slow-moving ~45 min foundation, `base` is the thin
-#  per-commit tier on top of it, and the editions come last. Core is REUSED when
-#  it already exists locally, because rebuilding it is both slow and — on a
+#  per-commit tier on top of it, and the image tier comes last. Core is REUSED
+#  when it already exists locally, because rebuilding it is both slow and — on a
 #  published image — a multi-gigabyte download for every machine on the fleet.
 #  Pass --force-core when you actually mean to move it.
+#
+#  --force-core IS NOT OPTIONAL FOR A GPU OR MODULE CHANGE. The NVIDIA and
+#  controller akmods, their MOK signatures and the NVIDIA userspace all live in
+#  core now. Reusing an older local core produces an image without them and every
+#  check below still passes, which is exactly how a validation build in this
+#  project reported green against an artifact that did not contain the change.
 #
 #  Key location: ~/.apex-signing/apex-mok.{key,crt}, overridable with
 #  APEX_SIGNING_DIR. The key is never copied, never committed, and never enters
@@ -54,7 +65,7 @@ for a in "$@"; do
         *) TARGETS+=("$a") ;;
     esac
 done
-[ "${#TARGETS[@]}" -gt 0 ] || TARGETS=(core base daily gaming-nvidia)
+[ "${#TARGETS[@]}" -gt 0 ] || TARGETS=(core base apex)
 
 # ── The signing key ──────────────────────────────────────────────────────────
 SECRET_ARGS=()
@@ -132,7 +143,35 @@ assert_signed() {  # $1 = image, $2 = label
     sudo podman run --rm --entrypoint /bin/sh "$1" \
         -c 'test -s /usr/share/apex-os/secureboot/apex-mok.der' \
         || { echo "FATAL: $2 has no apex-mok.der — users would have nothing to enrol"; exit 1; }
-    echo "$2: kernel signed, apex-mok.der present"
+    # The out-of-tree modules, checked the same way and for the same reason: a
+    # marker file is a claim the build wrote about itself. `modinfo -F signer`
+    # reads the PKCS#7 signature out of the module that will actually ship.
+    #
+    # Written so it cannot pass on an empty set — a loop over nothing succeeds,
+    # and "no modules found" is precisely the failure this is here to catch.
+    sudo podman run --rm --entrypoint /bin/sh "$1" -c '
+        set -eu
+        KVER=$(cat /usr/lib/apex-kver)
+        MODDIR=/usr/lib/modules/$KVER
+        [ "$(cat /usr/share/apex-os/secureboot/modules-signed 2>/dev/null || echo missing)" = signed ] || {
+            echo "modules-signed is not \"signed\""; exit 1; }
+        SIGNER=$(cat /usr/share/apex-os/secureboot/module-signer)
+        OOT=""
+        for d in extra updates; do [ -d "$MODDIR/$d" ] && OOT="$OOT $MODDIR/$d"; done
+        [ -n "$OOT" ] || { echo "no out-of-tree module directory"; exit 1; }
+        n=0
+        for m in $(find $OOT -type f -name "*.ko*"); do
+            got=$(modinfo -F signer "$m" 2>/dev/null || true)
+            [ "$got" = "$SIGNER" ] || { echo "$m signed by \"$got\", expected \"$SIGNER\""; exit 1; }
+            n=$((n + 1))
+        done
+        [ "$n" -gt 0 ] || { echo "zero out-of-tree modules — vacuous pass"; exit 1; }
+        for pat in nvidia xone xpadneo; do
+            [ "$(find $OOT -type f -name "*$pat*.ko*" | wc -l)" -gt 0 ] || { echo "no $pat module"; exit 1; }
+        done
+        echo "  $n out-of-tree modules, all signed by \"$SIGNER\""
+    ' || { echo "FATAL: $2 has unsigned or missing out-of-tree kernel modules"; exit 1; }
+    echo "$2: kernel signed, modules signed, apex-mok.der present"
 }
 
 build_core() {
@@ -167,31 +206,34 @@ build_base() {
     assert_signed localhost/apex-os-base:latest base
 }
 
-build_flavor() {  # $1 = daily | gaming-mesa | gaming-nvidia
-    local f=$1 cf args=()
+build_image() {  # $1 = apex (or a legacy tag name, which maps to it)
+    local f=$1
     case "$f" in
-        daily)         cf=Containerfile.daily ;;
-        gaming-mesa)   cf=Containerfile.gaming; args=(--build-arg GPU=mesa) ;;
-        gaming-nvidia) cf=Containerfile.gaming; args=(--build-arg GPU=nvidia) ;;
+        apex|daily|gaming-mesa|gaming-nvidia) ;;
         *) echo "unknown target: $f" >&2; exit 2 ;;
     esac
-    echo "== $f =="
+    [ "$f" = apex ] || echo "note: '$f' is a published TAG, not a build target — building the one image"
+    echo "== apex =="
     sudo podman build --isolation=chroot \
         --build-arg BASE=localhost/apex-os-base:latest \
         --build-arg APEX_REVISION="$REV" \
-        "${args[@]}" -f "$cf" -t "localhost/apex-os:$f" .
+        -f Containerfile.apex -t localhost/apex-os:apex .
+    # The three published names all resolve to this one image in the registry;
+    # tag them locally too so a local `bootc switch` against any of them works.
+    for t in daily gaming-mesa gaming-nvidia; do
+        sudo podman tag localhost/apex-os:apex "localhost/apex-os:$t"
+    done
 
-    # Editions inherit signing from core via the base, so this catches building
-    # an edition on top of a stale unsigned tier — the same hole the CI edition
-    # jobs cover.
-    assert_signed "localhost/apex-os:$f" "$f"
+    # The image inherits signing from core via the base, so this catches building
+    # on top of a stale or unsigned tier — the same hole the CI job covers.
+    assert_signed localhost/apex-os:apex apex
 }
 
 for t in "${TARGETS[@]}"; do
     case "$t" in
         core) build_core ;;
         base) build_base ;;
-        *)    build_flavor "$t" ;;
+        *)    build_image "$t" ;;
     esac
 done
 echo "done: ${TARGETS[*]}"

@@ -41,11 +41,13 @@ ShellRoot {
         readonly property color border:     "#ffffff"
         readonly property color errorColor: "#ff5c5c"
 
-        // Edition accent: gaming → gold, daily → chartreuse, anything
-        // else (dev box / VARIANT_ID unset) → the Brain_Shell blue so
-        // the greeter is pixel-identical to the Lockscreen off-target.
+        // Edition accent: apex (the one published image) and the legacy
+        // daily → chartreuse, legacy gaming → gold, anything else (dev box
+        // / VARIANT_ID unset) → the Brain_Shell blue so the greeter is
+        // pixel-identical to the Lockscreen off-target.
         readonly property color active:
             greetCtx.edition === "gaming" ? "#fde047"
+          : greetCtx.edition === "apex"   ? "#d9f99d"
           : greetCtx.edition === "daily"  ? "#d9f99d"
           : "#a6d0f7"
 
@@ -53,6 +55,7 @@ ShellRoot {
         // in-tree (dev) and installed at /usr/share/apex-greet/.
         readonly property url logoSource:
             greetCtx.edition === "gaming" ? Qt.resolvedUrl("assets/spark-gold.png")
+          : greetCtx.edition === "apex"   ? Qt.resolvedUrl("assets/spark-chartreuse.png")
           : greetCtx.edition === "daily"  ? Qt.resolvedUrl("assets/spark-chartreuse.png")
           : Qt.resolvedUrl("assets/spark-white.png")
     }
