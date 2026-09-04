@@ -87,27 +87,31 @@ greeter entry is universal. It needs reconciling — not deleting blindly; if
 some signal still distinguishes "cannot game here", the test should assert
 *that* instead.
 
-## The base build is slow, and the cache is not why
+## What was actually wrong with CI
 
-Read `docs/ci-release-tiers.md` before touching CI here — this was got wrong
-once already, in a way that cost most of a night.
+Read `docs/ci-release-tiers.md` before touching the base job. Three runs failed
+here and the first two explanations were both wrong, so the short version:
 
-The base job spends around 90s to 4m per layer on layers whose own commands run
-in one to two seconds, and `Containerfile.base` is 92 steps. That is the real
-problem and it is still unfixed: the build spends its time committing layers,
-not doing work.
+`--cache-to` kills builds. Two runs died mid-build with the same podman error,
+`failed pushing cache ...: locating image with ID ...: image not known`, at
+step 18 and step 44 of 120. The push happens inside `podman build`, so it exits
+125 and takes a half-finished build with it. The base job now reads the cache
+(`--cache-from`) and does not write it.
 
-What it is NOT is the registry build cache. Run 33828399604 showed a constant
-4m13s/layer and 120 x 4m13s = 8h26m against a 6h ceiling, which is correct
-arithmetic and looked conclusive. It was a COLD cache — every layer a miss,
-every miss then pushed. Removing the flags (33834836070) made things worse:
-`base` ran 5h44m without finishing, against 1h21m / 3h14m / 3h16m for the runs
-that succeeded WITH the cache. The flags went back.
+The wrong turns, so nobody repeats them:
 
-The base job now prints the podman storage driver, graph root, backing
-filesystem and native-overlay-diff support before building. If it reports
-`vfs`, every layer copies the whole multi-GB rootfs and that alone explains the
-constant cost. Read that output before forming any other theory.
+* "A cache-push failure is survivable if the image exists." True, and useless —
+  the failure lands mid-build, when there is no image yet.
+* "`--cache-to` is too slow: 4m13s per layer x 120 = 8h26m against a 6h
+  ceiling." The arithmetic was right, the measurement was one bad night.
+  Removing both flags gave the worst run of the three (5h44m, never finished).
+  Re-measured: **~22s per layer**, so a full stage is ~45 minutes.
+* "It must be the storage driver doing whole-rootfs copies." The base job now
+  prints it: the runner reports `overlay`, not `vfs`.
+
+Still unexplained, and left as open questions rather than guesses: why the
+no-cache run took 5h44m, and whether `--cache-from` is worth keeping — it
+produced zero hits on the run that measured it.
 
 ## Landing order
 
