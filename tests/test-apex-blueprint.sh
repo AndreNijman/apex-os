@@ -414,8 +414,16 @@ if [ "$rc" = 0 ]; then ok "a blocked-only diff still exits 0"
 else bad "a blocked-only diff still exits 0" "exit $rc"; fi
 if grep -q "CANNOT CONVERGE" <<<"$out"; then ok "a blocked change is reported anyway"
 else bad "a blocked change is reported anyway"; fi
-if grep -q "Gaming edition image" <<<"$out"; then ok "the gaming refusal explains why"
-else bad "the gaming refusal explains why"; fi
+# The refusal must name the command that works. It used to assert the phrase
+# "Gaming edition image", which was correct only while there were editions;
+# with one image that reason is retired and the remedy is a package install.
+if grep -q "sudo apex install steam gamescope" <<<"$out"; then ok "the gaming refusal names the command that fixes it"
+else bad "the gaming refusal names the command that fixes it" "$out"; fi
+# The retired advice must never come back: rebasing onto gaming-mesa or
+# gaming-nvidia is a no-op now, since they resolve to the image already running.
+if grep -qE "Gaming edition|rebase onto|gaming-mesa|gaming-nvidia" <<<"$out"; then
+  bad "the gaming refusal must not mention a retired edition" "$out"
+else ok "the gaming refusal mentions no retired edition"; fi
 # …and no step exists for it. Installing a gaming package set onto Daily is the
 # edition leakage the root AGENTS.md forbids.
 if apex_in "$H_BLOCK" blueprint diff --json 2>&1 | python3 -c "
