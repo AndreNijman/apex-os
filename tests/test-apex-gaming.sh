@@ -588,8 +588,8 @@ PY
 
 H="$(newhome ready)"
 GAMING="${WORK}/root-gaming"; mkgaming "$GAMING"
-DAILY="${WORK}/root-daily";   mkdir -p "$DAILY/var/lib/apex-greet" "$DAILY/sys/class/input"
-printf 'hyprland' > "$DAILY/var/lib/apex-greet/last-session"
+PREMERGE="${WORK}/root-premerge"; mkdir -p "$PREMERGE/var/lib/apex-greet" "$PREMERGE/sys/class/input"
+printf 'hyprland' > "$PREMERGE/var/lib/apex-greet/last-session"
 
 j="$(apex_env "$H" "APEX_ROOT=$GAMING" -- gaming --json)"
 is "gaming --json is valid JSON" "ok" \
@@ -615,14 +615,19 @@ is "…and says why" "False" \
 want "…with the reason naming the PATH problem" "PATH lookup" \
      "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["checks"]["steam"].get("unavailable"))')"
 
-j="$(apex_env "$H" "APEX_ROOT=$DAILY" -- gaming --json)"
-is "a Daily edition is not ready" "False" \
+# APEX publishes ONE image, so a root with no gaming session is not "Daily" —
+# it is a machine still booting a pre-merge image, or a damaged one. The blocker
+# has to say that, and must not read like something `apex install` can fix.
+j="$(apex_env "$H" "APEX_ROOT=$PREMERGE" -- gaming --json)"
+is "an image without the gaming session is not ready" "False" \
    "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["ready"])')"
 is "…and is not set to boot into the game" "False" \
    "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["boots_to_game"])')"
-want "…and says which edition it is" "not a Gaming edition" \
+want "…and points at an OS update, not a package" "apex update" \
      "$(jget "$j" 'import json,sys; print(" | ".join(json.load(sys.stdin)["blockers"]))')"
-rc_out="$(apex_env "$H" "APEX_ROOT=$DAILY" -- gaming >/dev/null 2>&1; echo $?)"
+is "…and names no edition, because there are none" "0" \
+   "$(jget "$j" 'import json,sys; print(" | ".join(json.load(sys.stdin)["blockers"]).count("Gaming edition"))')"
+rc_out="$(apex_env "$H" "APEX_ROOT=$PREMERGE" -- gaming >/dev/null 2>&1; echo $?)"
 is "gaming exits non-zero when Gaming Mode would not start" 1 "$rc_out"
 rc_out="$(apex_env "$H" "APEX_ROOT=$GAMING" -- gaming >/dev/null 2>&1; echo $?)"
 is "…and zero when it would" 0 "$rc_out"
