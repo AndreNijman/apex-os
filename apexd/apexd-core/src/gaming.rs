@@ -326,6 +326,37 @@ impl Readiness {
         program_missing && !image_content_missing
     }
 
+    /// The single command that clears every blocker, or `None` when no install
+    /// would clear them all.
+    ///
+    /// Gated on [`Self::blockers_are_installable`] rather than on "is some
+    /// program missing", which is the whole point: on a machine whose image
+    /// predates the merge, gamescope and steam are *also* missing, so a hint
+    /// derived from the programs alone would print `sudo apex install gamescope
+    /// steam` to someone whose actual remedy is `apex update`. They would run
+    /// it, the packages would install, and Gaming Mode would still not start.
+    ///
+    /// Kept out of the individual [`Self::blockers`] strings on purpose: those
+    /// are word-wrapped to the terminal, which splits a command across lines
+    /// and makes it unpastable. One unwrapped line that installs everything
+    /// missing in a single engine run beats a remedy per blocker.
+    pub fn install_hint(&self) -> Option<String> {
+        if !self.blockers_are_installable() {
+            return None;
+        }
+        let mut pkgs = Vec::new();
+        if self.gamescope.value() == Some(&false) {
+            pkgs.push("gamescope");
+        }
+        if self.steam.value() == Some(&false) {
+            pkgs.push("steam");
+        }
+        if pkgs.is_empty() {
+            return None;
+        }
+        Some(format!("sudo apex install {}", pkgs.join(" ")))
+    }
+
     /// Requirements that are met but degraded, with what is lost. Not blockers:
     /// Gaming Mode starts without every one of these.
     pub fn warnings(&self) -> Vec<String> {
@@ -758,5 +789,117 @@ mod tests {
     #[test]
     fn the_gaming_session_id_matches_the_blueprints() {
         assert_eq!(GAMING_SESSION, crate::blueprint::GAMING_SESSION);
+    }
+
+    // ── what a blocker tells you to do about it ──────────────────────────────
+
+    /// A `Readiness` with everything present except the named signals, which
+    /// are measured *absent*. Measured-false, not unmeasured: an unmeasured
+    /// program is deliberately not a blocker, so an unmeasured fixture would
+    /// exercise none of this.
+    fn readiness_missing(absent: &[&str]) -> Readiness {
+        let present = |name: &str| Signal::measured(!absent.contains(&name), "test fixture");
+        Readiness {
+            session_desktop: present("session_desktop"),
+            session_launcher: present("session_launcher"),
+            switch_helper: present("switch_helper"),
+            switch_sudoers: present("switch_sudoers"),
+            rtprio_limits: present("rtprio_limits"),
+            preselected_session: Signal::measured(GAMING_SESSION.to_string(), "test fixture"),
+            gamepad: Signal::measured(vec!["/dev/input/event0".to_string()], "test fixture"),
+            gamescope: present("gamescope"),
+            steam: present("steam"),
+            mangoapp: present("mangoapp"),
+        }
+    }
+
+    #[test]
+    fn every_installable_blocker_is_covered_by_the_install_hint() {
+        // The hint is derived separately from `blockers()`, so it can drift.
+        // Whenever a program blocker is raised, the hint must name it.
+        for absent in [
+            vec!["gamescope"],
+            vec!["steam"],
+            vec!["gamescope", "steam"],
+        ] {
+            let r = readiness_missing(&absent);
+            let hint = r
+                .install_hint()
+                .unwrap_or_else(|| panic!("{absent:?} blocks but offers no remedy"));
+            for pkg in &absent {
+                assert!(
+                    hint.contains(pkg),
+                    "{pkg} blocks Gaming Mode but {hint:?} does not install it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_remedy_is_one_line_and_not_repeated_inside_each_blocker() {
+        // Blocker prose is word-wrapped to the terminal, which would split a
+        // command across lines. The command lives only in `install_hint`.
+        let joined = readiness_missing(&["gamescope", "steam"]).blockers().join("\n");
+        assert!(
+            !joined.contains("apex install"),
+            "an embedded command gets wrapped and stops being pastable: {joined}"
+        );
+    }
+
+    #[test]
+    fn both_missing_programs_collapse_into_one_install_command() {
+        // Two blockers, but one command clears both — printing two separate
+        // `apex install` lines would have the reader run the engine twice.
+        let r = readiness_missing(&["gamescope", "steam"]);
+        assert_eq!(
+            r.install_hint().as_deref(),
+            Some("sudo apex install gamescope steam")
+        );
+    }
+
+    #[test]
+    fn the_install_hint_names_only_what_is_actually_missing() {
+        let r = readiness_missing(&["steam"]);
+        assert_eq!(r.install_hint().as_deref(), Some("sudo apex install steam"));
+    }
+
+    #[test]
+    fn a_ready_machine_has_no_install_hint() {
+        let r = readiness_missing(&[]);
+        assert!(r.is_ready(), "{:?}", r.blockers());
+        assert_eq!(r.install_hint(), None);
+    }
+
+    #[test]
+    fn a_pre_merge_image_gets_no_install_hint_because_no_package_fixes_it() {
+        // The greeter entry is image content on every current image, so its
+        // absence means the machine is booting something from before the
+        // editions merged. Offering `apex install` would send the reader after
+        // a package that cannot supply it.
+        let r = readiness_missing(&["session_desktop"]);
+        assert!(!r.is_ready());
+        assert_eq!(r.install_hint(), None);
+    }
+
+    #[test]
+    fn a_pre_merge_image_is_silent_even_though_its_programs_are_missing_too() {
+        // The case the `blockers_are_installable` gate exists for, and the one
+        // a hint derived from the programs alone gets WRONG. A machine on a
+        // pre-merge image has no gaming session AND no gamescope/steam, so
+        // "some program is missing" is true and would print `sudo apex install
+        // gamescope steam`. The reader would run it, both packages would
+        // install, and Gaming Mode still would not start — their actual remedy
+        // is `apex update`.
+        let r = readiness_missing(&["session_desktop", "session_launcher", "gamescope", "steam"]);
+        assert!(!r.blockers_are_installable());
+        assert_eq!(
+            r.install_hint(),
+            None,
+            "an install hint here sends the reader to a command that cannot work"
+        );
+        assert!(
+            r.blockers().join("\n").contains("apex update"),
+            "and the blockers must still name the remedy that does work"
+        );
     }
 }
