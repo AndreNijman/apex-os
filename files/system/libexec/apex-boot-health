@@ -39,8 +39,9 @@
 #
 #  ── inert on a GRUB machine, which is every published image ──
 #
-#  GRUB stays the default for `daily`, `gaming-mesa` and `gaming-nvidia` in
-#  this generation (AGENTS.md boot-path rule 5, and §22's own recommendation).
+#  GRUB stays the default for the published image in this generation (AGENTS.md
+#  boot-path rule 5, and §22's own recommendation). APEX ships one image, so
+#  that is every APEX machine, not a per-edition statement.
 #  This script therefore has to be a no-op there, and the condition it uses is
 #  the same one systemd-bless-boot-generator uses: the `LoaderBootCountPath`
 #  EFI variable, which only exists when systemd-boot booted this machine WITH
