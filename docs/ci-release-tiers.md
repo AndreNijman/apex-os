@@ -7,14 +7,18 @@ rebuilding Mesa, NVIDIA modules, package transactions, or initramfs images.
 
 `.github/workflows/build-image.yml` owns the slow path:
 
-1. `core` contains the kernel and slow-moving third-party dependencies.
+1. `core` contains the kernel, slow-moving third-party dependencies, and every
+   out-of-tree kernel module (NVIDIA, xone, xpadneo) together with its MOK
+   signature — this is the only tier the signing secret is mounted in.
 2. `base` contains APEX system services and shared OS configuration.
-3. The flavor matrix builds Daily, Gaming Mesa, and Gaming NVIDIA.
-4. Each green flavor is also promoted to moving and revision-pinned
-   `platform-<flavor>` tags.
+3. `Containerfile.apex` stamps the edition and owns the final initramfs.
+4. The one green image is promoted to `apex`, `daily`, `gaming-mesa` and
+   `gaming-nvidia`, plus moving and revision-pinned `platform-<name>` tags for
+   each. A step then reads every tag's digest back out of the registry and fails
+   the run if any differs.
 
-Platform builds run for OS source changes and the weekly upstream refresh. A
-manual run can target one flavor or Daily plus Gaming NVIDIA.
+There is no flavor matrix and no `target_platform` input: there is one image.
+Platform builds run for OS source changes and the weekly upstream refresh.
 
 No tier uses a registry build cache. The base tier used to, with a 14-day
 lookup lifetime, and it was removed after being measured: `--cache-to` cost a
@@ -22,18 +26,25 @@ constant 4m13s per layer against layers whose own commands ran in one to two
 seconds. Across base's 120 layers that is 8h26m, past the 6h GitHub job limit,
 so no build using it could finish. The same build without the cache runs at 16s
 per layer. The build-image workflow carries the per-layer timings; do not
-re-add the flags without re-measuring.
+re-add the flags without re-measuring — and note that collapsing three image
+builds into one does not change that arithmetic, because the cost was per
+layer, not per image.
 
 ## Shell releases
 
 `.github/workflows/release-shell.yml` owns the fast path. It resolves an exact
 40-character `apex-shell` commit, builds a final layer on the selected stable
-platform images, verifies that every inherited layer digest is unchanged, signs
-the result, then promotes the existing user-facing tags:
+platform image, verifies that every inherited layer digest is unchanged, signs
+the result, then promotes every user-facing tag to that one digest:
 
+- `apex`
 - `daily`
 - `gaming-mesa`
 - `gaming-nvidia`
+
+All four, from one build. Three legs building identical content would produce
+three different manifest digests and pull the tags apart again, which is why the
+matrix is gone here too.
 
 BuildKit pushes directly to GHCR for this path. The hosted runner's older Podman
 cannot reliably preserve inherited `zstd:chunked` blob digests; recompressing
