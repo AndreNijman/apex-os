@@ -20,8 +20,8 @@ Before=boot-complete.target
 After=graphical.target multi-user.target
 # ── and this line is why the unit is inert on every published image ──
 #
-# GRUB is the default for daily, gaming-mesa and gaming-nvidia in this
-# generation (AGENTS.md boot-path rule 5). LoaderBootCountPath is set by
+# GRUB is the default for the published image in this generation (AGENTS.md
+# boot-path rule 5) — one image, so every APEX machine. LoaderBootCountPath is set by
 # systemd-boot only when it booted the machine WITH boot counting in effect, so
 # on a GRUB machine this unit never starts. It is the same condition
 # systemd-bless-boot-generator uses to decide whether to pull bless-boot in at

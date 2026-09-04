@@ -139,6 +139,12 @@ a documented first-run install from Flathub.
   akmod need device access the runner's rootless podman denies), tags
   `apex-os-base:latest` + `:<sha>`, pushes, captures the pushed **digest** via
   `--digestfile`, cosign-signs the digest, and exposes the digest as a job output.
+> **Superseded.** This section records M1, when APEX published three images. It
+> is kept as a dated build record, not as current behaviour: there is one image
+> now, the `flavors` matrix is a single `image` job, and the NVIDIA akmod is
+> built and MOK-signed in `core` rather than in a flavor. See
+> `docs/ci-release-tiers.md` and `Containerfile.apex`.
+
 - **Job `flavors`** (needs base): matrix `[daily, gaming-mesa, gaming-nvidia]`.
   Each builds the right Containerfile with
   `--build-arg BASE=apex-os-base@<digest>` (so every flavor is pinned to the
