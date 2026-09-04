@@ -33,9 +33,12 @@ vt = 1
 # so on any hybrid-graphics machine the greeter dies before it paints and there
 # is NO way to log in, on any display.
 #
-# It is a no-op without a proprietary driver, so it lives here in the shared
-# greeter config rather than the gaming leg: `daily` and `gaming-mesa` carry the
-# same latent bug the moment they meet an NVIDIA GPU.
+# This used to be described as insurance for the non-NVIDIA editions, which
+# "carry the same latent bug the moment they meet an NVIDIA GPU". It is not
+# latent any more: APEX ships ONE image and the NVIDIA driver is baked into it,
+# so `nvidia-drm` is present on every machine and binds on every machine that
+# has the hardware. The flag is load-bearing on all of them, and it stays in the
+# shared greeter config because it is a no-op where the driver never binds.
 #
 # `labwc` (installed, see the fallback note below) has no such gate.
 command = "sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf"

@@ -571,8 +571,8 @@ RUN set -eux; \
 #
 #   * No bootloader installation. Nothing in this image runs `bootctl install`,
 #     `bootctl update`, `bootupctl` or `efibootmgr -c`. GRUB stays the default
-#     for daily, gaming-mesa and gaming-nvidia in this generation (AGENTS.md
-#     boot-path rule 5; §22's own recommendation is to keep it while the
+#     for the published image in this generation — one image, so every APEX
+#     machine (AGENTS.md boot-path rule 5; §22's own recommendation is to keep it while the
 #     OSTree/bootc install path depends on it, and to keep it for legacy BIOS
 #     regardless). Enrolling a machine on the systemd-boot path is a
 #     documented, user-initiated procedure in docs/boot-v2.md, not a script —

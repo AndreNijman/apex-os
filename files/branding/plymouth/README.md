@@ -1,6 +1,9 @@
 # APEX-OS Plymouth Themes
 
-Boot splash for APEX-OS, in two colorways: `apex-os-gold` and `apex-os-chartreuse`.
+Boot splash for APEX-OS, in two colorways. **`apex-os-chartreuse` is the one
+that ships** — APEX publishes a single image and `Containerfile.apex` installs
+only that theme. `apex-os-gold` is source art for the other colourway and is
+installed by nothing; it dates from when Gaming was a separate edition.
 
 **Animation -- "Convergence":** 4 comets orbit with speed trails and accelerate,
 spiral into the center (anticipation), flash, and morph into the spark
@@ -15,8 +18,8 @@ Previews: `previews/preview-gold.gif`, `previews/preview-chartreuse.gif`
 ## Install (on the target system / in the image build)
 
 ```sh
-cp -r apex-os-gold /usr/share/plymouth/themes/
-plymouth-set-default-theme -R apex-os-gold    # -R rebuilds initramfs
+cp -r apex-os-chartreuse /usr/share/plymouth/themes/
+plymouth-set-default-theme -R apex-os-chartreuse    # -R rebuilds initramfs
 ```
 
 In the APEX-OS Containerfile the theme is copied into
