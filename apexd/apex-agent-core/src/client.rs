@@ -44,7 +44,7 @@ impl Client {
             {
                 anyhow!(
                     "the agent runtime is not running.\n\
-                     start it with: systemctl --user enable --now apex-agentd"
+                     enable it with: apex agent enable"
                 )
             } else {
                 anyhow!("cannot reach the agent runtime at {}: {e}", path.display())
@@ -299,10 +299,9 @@ mod tests {
         let err = Client::connect_at(Path::new("/nonexistent/apex-agentd.sock")).unwrap_err();
         let text = err.to_string();
         assert!(text.contains("not running"), "{text}");
-        assert!(
-            text.contains("systemctl --user enable --now apex-agentd"),
-            "{text}"
-        );
+        // Points at the one command that opts in for any user, root included,
+        // rather than a raw systemctl line that does not work as root.
+        assert!(text.contains("apex agent enable"), "{text}");
     }
 
     #[test]

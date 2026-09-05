@@ -339,8 +339,18 @@ COPY files/desktop/shell/apex-greeting.sh /usr/share/apex/shell/greeting.sh
 # from the seeded ~/.zshrc; the bash side is appended to /etc/bashrc here rather
 # than in core, because a core edit rebuilds the whole image tier.
 COPY files/desktop/shell/agent.sh /usr/share/apex/shell/agent.sh
+# One shared file, sourced system-wide from BOTH shell rc files so `a` exists for
+# every user in every interactive shell, root included -- not just those with a
+# seeded ~/.zshrc. bash reaches /etc/bashrc via a ~/.bashrc that sources it; zsh
+# sources /etc/zshrc itself for every interactive shell, which is why the zsh
+# hook must live there and not only in the seeded dotfile (the gap that kept `a`
+# undefined for root and for any pre-existing ~/.zshrc). A single source line in
+# each, not a block: /etc/zshrc is package-owned, so the smaller the appended
+# text the less there is to drift when the package updates. agent.sh guards
+# against the resulting double-source from a seeded ~/.zshrc.
 RUN set -eux; \
-    printf '\n# APEX-OS agent shortcuts. One file shared with zsh (see the seeded\n# ~/.zshrc), so bash and zsh can never drift. Guarded so a partial image\n# cannot break bash, and skippable with APEX_NO_AGENT_ALIASES=1.\n[ -r /usr/share/apex/shell/agent.sh ] && . /usr/share/apex/shell/agent.sh\n' >> /etc/bashrc
+    printf '\n# APEX-OS agent shortcuts. One file shared with zsh (see /etc/zshrc),\n# so bash and zsh can never drift. Guarded so a partial image cannot\n# break bash, and skippable with APEX_NO_AGENT_ALIASES=1.\n[ -r /usr/share/apex/shell/agent.sh ] && . /usr/share/apex/shell/agent.sh\n' >> /etc/bashrc; \
+    printf '\n# APEX-OS agent shortcuts, shared with bash (see /etc/bashrc). zsh sources\n# /etc/zshrc for every interactive shell, so this reaches root and any user\n# whose ~/.zshrc predates the OS seed. Guarded against a double source.\n[ -r /usr/share/apex/shell/agent.sh ] && . /usr/share/apex/shell/agent.sh\n' >> /etc/zshrc
 
 # Verify everything the three COPYs above just seeded, plus the pieces of the
 # shell story that core is responsible for. zsh being the default login shell,
@@ -389,6 +399,7 @@ RUN set -eux; \
     bash -n /usr/share/apex/shell/agent.sh; \
     zsh -n  /usr/share/apex/shell/agent.sh; \
     grep -q 'agent.sh' /etc/bashrc; \
+    grep -q 'agent.sh' /etc/zshrc; \
     grep -q 'agent.sh' /usr/share/apex/zsh/zshrc; \
     grep -q 'APEX_NO_AGENT_ALIASES' /usr/share/apex/shell/agent.sh; \
     # Sourcing it and asserting `a` is defined happens in the apexd stage at the
@@ -1752,6 +1763,15 @@ RUN set -eux; \
     # both shells because the file carries a bash and a zsh completion block.
     bash -c 'set -e; . /usr/share/apex/shell/agent.sh; [ "$(type -t a)" = function ]'; \
     zsh -fc 'set -e; . /usr/share/apex/shell/agent.sh; [ "$(whence -w al)" = "al: function" ]'; \
+    # And that an INTERACTIVE zsh with no ~/.zshrc still defines the a command:
+    # that is root's exact situation, and the case the file-text greps above
+    # cannot see. zsh sources /etc/zshrc for every interactive shell, so this
+    # proves the system-wide hook and not a per-user dotfile. bash reaches
+    # /etc/bashrc only through a ~/.bashrc that sources it, so its equivalent
+    # needs a seeded home and is covered by the manual-source check above.
+    APEXHOME="$(mktemp -d)"; \
+    env -i HOME="$APEXHOME" TERM=xterm PATH=/usr/bin:/bin zsh -ic 'whence -w a >/dev/null' </dev/null; \
+    rm -rf "$APEXHOME"; \
     echo "apexd/apex/apex-agentd/apex-aid installed and runnable; shell verbs and `a` intact"
 
 # ── Stage 7: bootc container sanity lint (informational) ───────────────────
