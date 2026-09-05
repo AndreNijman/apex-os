@@ -123,6 +123,14 @@ pub enum AgentCmd {
     Rm { id: u32 },
     /// Forget every finished session.
     Prune,
+    /// Turn the per-user agent runtime on for this account.
+    ///
+    /// The runtime is a `systemd --user` service, opt-in by design. This is the
+    /// one command that opts in, so it never matters whether you remember the
+    /// `systemctl --user` incantation. Run as root it first gives root a
+    /// lingering systemd user instance (root has none by default) and then
+    /// prints what running agents as root costs.
+    Enable,
 }
 
 #[derive(Args)]
@@ -378,6 +386,7 @@ pub fn agent(cmd: AgentCmd) -> i32 {
         } => event(state, session, detail),
         AgentCmd::Rm { id } => remove(id),
         AgentCmd::Prune => prune(),
+        AgentCmd::Enable => enable(),
     };
     report(result)
 }
@@ -642,7 +651,7 @@ fn status(id: Option<u32>) -> Result<i32> {
             println!("detach key   {}", cfg.detach_key);
             if !running {
                 println!();
-                println!("start it with: systemctl --user enable --now apex-agentd");
+                println!("enable it with: apex agent enable");
                 return Ok(1);
             }
             let sessions = client::sessions()?;
@@ -651,6 +660,92 @@ fn status(id: Option<u32>) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+/// `apex agent enable` — turn the per-user runtime on for whoever runs it.
+///
+/// The runtime is opt-in by design: a per-user daemon holding PTYs is not
+/// something every account should start. This is the single command that opts
+/// in, so `apex agent` and the `not running` message can point at one thing
+/// instead of a `systemctl --user` line the user has to get right — and, for
+/// root, a line that does not work at all until root has a lingering user
+/// instance.
+fn enable() -> Result<i32> {
+    if apex_agent_core::paths::uid() == 0 {
+        enable_root()
+    } else {
+        enable_user()
+    }
+}
+
+/// The ordinary case: an interactive login already has a running user instance
+/// and an `$XDG_RUNTIME_DIR`, so this is exactly the documented one-liner.
+fn enable_user() -> Result<i32> {
+    let code = run_tool("systemctl", &["--user", "enable", "--now", "apex-agentd"], None)?;
+    if code == 0 {
+        println!("agent runtime enabled. `a` and `apex agent run` work now.");
+    }
+    Ok(code)
+}
+
+/// Root has no `systemd --user` instance unless it lingers, and no
+/// `$XDG_RUNTIME_DIR` in a sudo shell, so the ordinary line fails with a bus
+/// error. Give root a lingering instance, wait for its runtime directory to
+/// appear, then enable the service against it.
+///
+/// A deliberate, user-invoked choice, not a default, and it says what it costs:
+/// an agent started by a root runtime runs as root. The per-session sandbox
+/// still keeps `/` read-only and masks the home, but the working directory is
+/// writable, so a root agent can write as root wherever it is started. Running
+/// the upstream agent (`claude`, `opencode`, …) directly as root is strictly
+/// less confined than this; a normal user account is safer than either.
+fn enable_root() -> Result<i32> {
+    let code = run_tool("loginctl", &["enable-linger", "root"], None)?;
+    if code != 0 {
+        bail!("could not enable a lingering systemd user instance for root");
+    }
+    // enable-linger brings user@0 up asynchronously; nudge it, then wait for the
+    // runtime directory where the control socket will live.
+    run_tool("systemctl", &["start", "user@0.service"], None).ok();
+    let runtime = Path::new("/run/user/0");
+    for _ in 0..50 {
+        if runtime.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !runtime.exists() {
+        bail!("root's systemd user instance did not come up (/run/user/0 is absent)");
+    }
+    // XDG_RUNTIME_DIR is how `systemctl --user` finds the bus; a sudo shell does
+    // not set it, so point it at root's own instance explicitly.
+    let code = run_tool(
+        "systemctl",
+        &["--user", "enable", "--now", "apex-agentd"],
+        Some(("XDG_RUNTIME_DIR", "/run/user/0")),
+    )?;
+    if code == 0 {
+        println!("agent runtime enabled for root.");
+        println!();
+        println!("note: agents started here run AS ROOT. The per-session sandbox keeps /");
+        println!("read-only and masks the home, but the working directory is writable, so a");
+        println!("root agent can write as root wherever you start it. A normal user account");
+        println!("is safer. To undo:  systemctl --user disable --now apex-agentd");
+        println!("                    loginctl disable-linger root");
+    }
+    Ok(code)
+}
+
+/// Spawn a helper, inheriting stdio, optionally with one extra environment
+/// variable. Returns its exit code.
+fn run_tool(program: &str, args: &[&str], env: Option<(&str, &str)>) -> Result<i32> {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    if let Some((k, v)) = env {
+        cmd.env(k, v);
+    }
+    let status = cmd.status().with_context(|| format!("running {program}"))?;
+    Ok(status.code().unwrap_or(1))
 }
 
 fn print_session(s: &SessionInfo) {

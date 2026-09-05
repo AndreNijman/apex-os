@@ -20,10 +20,13 @@
 # service.
 #
 # NOT enabled by default. A user opts in with:
-#   systemctl --user enable --now apex-agentd
-# `apex agent` says exactly that when the socket is absent. It is opt-in
-# because a per-user daemon holding PTYs is not something a Daily install
-# should start for users who never run an agent.
+#   apex agent enable
+# which enables and starts this service for the invoking user. `apex agent`
+# says exactly that when the socket is absent. Run as root it first gives root a
+# lingering systemd user instance (root has none by default), then enables the
+# service and warns that agents started there run as root. It is opt-in because
+# a per-user daemon holding PTYs is not something a Daily install should start
+# for users who never run an agent.
 
 [Unit]
 Description=APEX-OS agent runtime (PTY sessions, sandboxing, checkpoints)

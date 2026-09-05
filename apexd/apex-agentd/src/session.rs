@@ -164,6 +164,32 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
         }
     }
 
+    // bwrap will not mount on a path that traverses a symlink ("Can't mount on
+    // symlink destination"), and an atomic OS reaches every home through one:
+    // /root -> var/roothome, /home -> var/home. So the tmpfs that masks $HOME,
+    // and any bind under a symlinked home, abort the session unless the target
+    // is resolved to its real path first. The logical paths still exist inside
+    // the sandbox as symlinks to the resolved ones, so $HOME and the working
+    // directory keep resolving. cwd is deliberately not resolved: it becomes a
+    // --chdir, which follows symlinks, not a mount point.
+    spec.home = sandbox::real_target(&spec.home);
+    spec.runtime_dir = sandbox::real_target(&spec.runtime_dir);
+    if !spec.scratch.as_os_str().is_empty() {
+        spec.scratch = sandbox::real_target(&spec.scratch);
+    }
+    if !spec.control_socket.as_os_str().is_empty() {
+        spec.control_socket = sandbox::real_target(&spec.control_socket);
+    }
+    for p in spec.rw.iter_mut() {
+        *p = sandbox::real_target(p);
+    }
+    for p in spec.ro.iter_mut() {
+        *p = sandbox::real_target(p);
+    }
+    for p in spec.mask.iter_mut() {
+        *p = sandbox::real_target(p);
+    }
+
     let argv = sandbox::build_argv(&spec, &program, &args).map_err(SandboxRefused)?;
     let env = sandbox::resolved_env(&spec);
 

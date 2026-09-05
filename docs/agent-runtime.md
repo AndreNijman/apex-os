@@ -6,11 +6,17 @@ Coding agents as a first-class OS workload, without replacing them.
 exactly as they do today. APEX adds what sits underneath: the terminal they run
 on, the confinement they run inside, and the project state around them.
 
-Nothing here is enabled by default. Start it with:
+Nothing here is enabled by default. Turn it on with:
 
 ```
-systemctl --user enable --now apex-agentd
+apex agent enable
 ```
+
+That works for any user, root included. As root it first gives root a lingering
+systemd user instance (root has none by default), then enables the service and
+prints that agents started there run as root: the per-session sandbox keeps `/`
+read-only and masks the home, but the working directory is writable, so a normal
+user account is safer.
 
 ---
 

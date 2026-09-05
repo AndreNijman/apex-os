@@ -19,6 +19,17 @@
 # Nothing to do if the CLI is not installed (a partial image, a container).
 command -v apex >/dev/null 2>&1 || return 0
 
+# This file is sourced from more than one place that can overlap: /etc/bashrc and
+# /etc/zshrc source it for every interactive shell, and a seeded ~/.zshrc sources
+# it again (that file is read after /etc/zshrc). Guard so the second source is a
+# no-op instead of redefining every function and re-registering completion. A
+# plain shell variable, deliberately NOT exported: a child shell must source the
+# file afresh and must not inherit a guard that makes it skip.
+if [ -n "${_APEX_AGENT_SH_SOURCED}" ]; then
+    return 0
+fi
+_APEX_AGENT_SH_SOURCED=1
+
 if [ -z "${APEX_NO_AGENT_ALIASES}" ]; then
     # Start an agent here. `a` with no arguments opens the agent interactively;
     # `a "fix the tests"` gives it an opening instruction.
@@ -178,7 +189,7 @@ if [ -n "${BASH_VERSION}" ]; then
 
         if [ "$COMP_CWORD" -eq 2 ]; then
             COMPREPLY=($(compgen -W "run list attach pause resume kill logs status \
-                default adapters diff undo checkpoint event rm prune" -- "$cur"))
+                default adapters diff undo checkpoint event rm prune enable" -- "$cur"))
             return
         fi
 
@@ -290,7 +301,7 @@ if [ -n "${ZSH_VERSION}" ]; then
     _apex_agent_zsh() {
         local -a verbs
         verbs=(run list attach pause resume kill logs status default adapters
-               diff undo checkpoint event rm prune)
+               diff undo checkpoint event rm prune enable)
         if (( CURRENT == 3 )); then
             _describe 'agent verb' verbs
             return
