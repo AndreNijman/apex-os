@@ -67,6 +67,68 @@ ROOTFS_TYPE="${APEX_ROOTFS:-btrfs}"
 # when it builds one.
 NETINSTALL=0
 [ -f /usr/lib/apex-installer/netinstall ] && NETINSTALL=1
+# Overridable for tests only, the same way APEX_EDITION/APEX_IMAGE are: nothing
+# else can exercise the netinstall guards on a machine that booted the offline
+# ISO, and those guards run before anything is written.
+[ -n "${APEX_NETINSTALL:-}" ] && NETINSTALL="$APEX_NETINSTALL"
+
+# ── Where a network install stages the image, and why it is not RAM ──────────
+#
+# `podman pull` writes into the live environment's containers-storage, which on
+# a booted ISO is the RAM-backed overlay. That is ~12 GB of decompressed layers
+# in RAM. bootc then re-tars every layer into the container's /var/tmp — also
+# the RAM overlay — for another several GB. A 16 GB laptop dies; an 8 GB one
+# never had a chance. The offline ISO never had this problem because it installs
+# straight from the OCI directory on the ISO (`--source-imgref oci:…`), which
+# streams COMPRESSED blobs and never decompresses to a temporary tree.
+#
+# So a network install now does the same thing: skopeo fetches the compressed
+# blobs into an OCI directory ON A REAL DISK, and bootc installs from that. The
+# only thing still needing containers-storage is the container bootc itself runs
+# in, and that store is pointed at the same disk.
+#
+# Sizes, measured against the published image (ghcr.io/andrenijman/apex-os:apex,
+# 120 layers / 5762 MiB compressed): ~5.8 GB for the OCI directory, ~12 GB for
+# the runner's store. NEED_SCRATCH_GB is deliberately generous — running out
+# halfway through leaves a half-written disk, which is the worst outcome here.
+NEED_SCRATCH_GB="${APEX_NEED_SCRATCH_GB:-22}"
+
+# A filesystem that can hold the staged image: writable, real (not a RAM
+# overlay), big enough, and NOT on the disk we are about to repartition.
+#
+# `df -P` output is used rather than findmnt because the live env is minimal and
+# df is already a hard dependency of this script.
+scratch_fs_ok() {
+  local dir="$1" avail_gb src fstype
+  [ -d "$dir" ] || return 1
+  [ -w "$dir" ] || return 1
+  src="$(df -P "$dir" 2>/dev/null | awk 'NR==2{print $1}')"
+  fstype="$(df -PT "$dir" 2>/dev/null | awk 'NR==2{print $2}')"
+  case "$fstype" in
+    tmpfs|ramfs|devtmpfs|overlay|squashfs|iso9660|"") return 1 ;;
+  esac
+  # Never stage onto the disk that is about to be wiped.
+  case "$src" in "${DISK:-__none__}"*) return 1 ;; esac
+  avail_gb="$(df -PBG "$dir" 2>/dev/null | awk 'NR==2{gsub(/G/,"",$4); print $4+0}')"
+  [ "${avail_gb:-0}" -ge "$NEED_SCRATCH_GB" ]
+}
+
+# Returns a usable scratch DIRECTORY on stdout, or nothing.
+pick_scratch() {
+  local c
+  if [ -n "${APEX_OCI_SCRATCH:-}" ]; then
+    mkdir -p "$APEX_OCI_SCRATCH" 2>/dev/null || true
+    scratch_fs_ok "$APEX_OCI_SCRATCH" && { printf '%s\n' "$APEX_OCI_SCRATCH"; return 0; }
+    return 1
+  fi
+  # Any mounted, writable, real filesystem with room. /run/media/* is where the
+  # live session automounts a second partition on the USB stick.
+  for c in /run/media/*/* /run/media/* /mnt/* /media/* /var/tmp; do
+    [ -d "$c" ] || continue
+    if scratch_fs_ok "$c"; then printf '%s\n' "${c%/}/apex-install-scratch"; return 0; fi
+  done
+  return 1
+}
 
 # On the live ISO the image is ALSO present as an OCI directory (ISO /container,
 # mounted at /run/initramfs/live/container). Prefer it as the bootc install
@@ -76,6 +138,10 @@ NETINSTALL=0
 # Absent (e.g. plain-host testing) we fall back to the embedded storage image.
 OCI_DIR="${APEX_OCI_DIR:-/run/initramfs/live/container}"
 SRC_VOL=(); SRC_ARGS=()
+# Extra `podman` flags that redirect containers-storage onto the staging disk.
+# Empty everywhere except a network install — the offline ISO's store is on the
+# ISO itself and is already fine.
+PODMAN_STORE=()
 if [ -d "$OCI_DIR" ]; then
   SRC_VOL=(-v "$OCI_DIR":/run/apex-oci:ro)
   # --target-imgref is what the INSTALLED system records as its update origin.
@@ -277,6 +343,12 @@ if [ "$NETINSTALL" = 1 ]; then
   # install that is about to become perfectly possible. The real check, and the
   # pull, happen at the install step — before anything is written to the disk.
   IMAGE="$TARGET_IMAGE"
+  # skopeo is what fetches the image now, so its absence must be a refusal here
+  # and not a "command not found" halfway through the download.
+  have skopeo || die "skopeo is missing from the live environment, so a network install cannot fetch APEX-OS.
+
+Nothing has been erased — your disks are untouched.
+Use the full offline ISO, which needs no download."
   note "Network install: APEX-OS will be downloaded from $TARGET_IMAGE."
 elif ! podman image exists "$IMAGE" 2>/dev/null && [ ! -e /run/install/repo/container ]; then
   die "The APEX-OS image ($IMAGE) is not present in the live environment."
@@ -508,7 +580,7 @@ if [ "$UNATTENDED" = 1 ]; then
   trap - ERR
   set +e
   # --net=host: no netavark needed in the live env; bootc install is offline.
-  podman run --rm --privileged --pid=host --net=host --security-opt label=disable \
+  podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
     -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
     ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
     bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
@@ -872,11 +944,47 @@ school portal — which this installer cannot do. Try a different network, a pho
 hotspot, or use the full offline ISO, which needs no network at all." ;;
   esac
 
+  # ── Stage to disk, not to RAM ─────────────────────────────────────────────
+  # See NEED_SCRATCH_GB above for why. Chosen BEFORE the download so a machine
+  # that cannot hold the image is told now, with its disks untouched, rather
+  # than after several GB have gone into the RAM overlay.
+  SCRATCH="$(pick_scratch || true)"
+  if [ -z "$SCRATCH" ]; then
+    ram_gb=$(awk '/^MemTotal:/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 0)
+    die "There is nowhere to put the download.
+
+Nothing has been erased — your disks are untouched.
+
+A network install needs about ${NEED_SCRATCH_GB} GB of WRITABLE DISK to stage
+APEX-OS before writing it. This machine has ${ram_gb} GB of RAM and no suitable
+disk, and staging into RAM is what this installer refuses to do: it would run
+out partway through and leave a half-written machine.
+
+Any of these fixes it:
+  * Use the full offline ISO. It carries the OS and needs no staging at all.
+  * Plug in a USB stick or drive with ${NEED_SCRATCH_GB} GB free and try again —
+    it is used as scratch space only, and is not erased.
+  * Add a second partition with ${NEED_SCRATCH_GB} GB free to the stick you
+    booted from."
+  fi
+  OCI_SCRATCH="$SCRATCH/oci"
+  STORE_SCRATCH="$SCRATCH/store"
+  mkdir -p "$OCI_SCRATCH" "$STORE_SCRATCH" \
+    || die "Could not create the staging directory at $SCRATCH."
+  note "Staging to $SCRATCH (needs ~${NEED_SCRATCH_GB} GB; nothing there is erased)."
+  log "scratch: $SCRATCH ($(df -PBG "$SCRATCH" 2>/dev/null | awk 'NR==2{print $4}') free)"
+
   note "Downloading APEX-OS from $TARGET_IMAGE — this is the slow part, and nothing has been erased yet."
-  if podman image exists "$TARGET_IMAGE" 2>/dev/null; then
+  if [ -f "$OCI_SCRATCH/index.json" ]; then
     note "Already downloaded."
+    pull_ok=1
   else
     pull_ok=0
+    # skopeo, not `podman pull`: it writes the COMPRESSED blobs straight into an
+    # OCI directory and never decompresses them into containers-storage. That is
+    # the whole point — it is the difference between ~5.8 GB on disk and ~12 GB
+    # in RAM. It also fetches layers in parallel by default.
+    #
     # Back off between attempts. The first version retried with NO delay at all,
     # so all three attempts completed inside one second — which is one attempt
     # wearing a disguise, and gives a flapping link or a slow DNS server no
@@ -887,7 +995,10 @@ hotspot, or use the full offline ISO, which needs no network at all." ;;
         note "Download failed — waiting ${_wait}s, then retrying (attempt $attempt of 3)…"
         sleep "$_wait"
       fi
-      if podman pull "$TARGET_IMAGE" 2>&1 | tee -a "$LOG"; then pull_ok=1; break; fi
+      if skopeo copy --retry-times 3 \
+           "docker://$TARGET_IMAGE" "oci:$OCI_SCRATCH:apex" 2>&1 | tee -a "$LOG"; then
+        pull_ok=1; break
+      fi
     done
     [ "$pull_ok" = 1 ] || die "Could not download APEX-OS from $TARGET_IMAGE after 3 attempts.
 
@@ -901,6 +1012,32 @@ If this keeps happening, use the full offline ISO — it contains the whole syst
 and needs no network at all."
   fi
   note "Download complete."
+
+  # ── Install FROM the OCI directory, exactly as the offline ISO does ────────
+  # bootc reads compressed blobs straight out of this tree, so nothing is
+  # re-tarred into the container's /var/tmp — the second of the two RAM writes
+  # this path used to make.
+  SRC_VOL=(-v "$OCI_SCRATCH":/run/apex-oci:ro)
+  SRC_ARGS=(--source-imgref "oci:/run/apex-oci" --target-imgref "$TARGET_IMAGE")
+
+  # bootc still has to RUN from somewhere, and the netinstall live environment
+  # has no bootc of its own. Materialise the runner from the OCI directory we
+  # already have — a local decompress, no second download — into a store on the
+  # SAME scratch disk, so containers-storage never touches the RAM overlay.
+  note "Preparing the installer runtime…"
+  if ! podman --root "$STORE_SCRATCH/graph" --runroot "$STORE_SCRATCH/run" \
+         image exists "$TARGET_IMAGE" 2>/dev/null; then
+    skopeo copy "oci:$OCI_SCRATCH:apex" \
+      "containers-storage:[overlay@$STORE_SCRATCH/graph+$STORE_SCRATCH/run]$TARGET_IMAGE" \
+      2>&1 | tee -a "$LOG" \
+      || die "Could not prepare the installer runtime from the downloaded image.
+
+Nothing has been erased — your disks are untouched.
+The exact error is above and in $LOG."
+  fi
+  # Every later `podman` call in this script must use that store, not the
+  # RAM-backed default one.
+  PODMAN_STORE=(--root "$STORE_SCRATCH/graph" --runroot "$STORE_SCRATCH/run")
 fi
 
 note "Do not power off — $TARGET is being erased and rewritten from here on."
@@ -989,7 +1126,7 @@ if [ "$INSTALL_MODE" = partition ]; then
       { echo "--- backed up neighbour EFI files to EFI/fedora/apex-backup ---"
         ls -l "$TROOT/boot/efi/EFI/fedora/apex-backup" 2>/dev/null; } >>"$LOG" 2>&1 || true
     fi
-    podman run --rm --privileged --pid=host --net=host --security-opt label=disable \
+    podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
       -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
       -v "$TROOT":"$TROOT":rshared \
       ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
@@ -1007,7 +1144,7 @@ else
   # Set BEFORE the call: `--wipe` destroys the disk immediately, so a Ctrl+C one
   # second later must NOT be reported as "nothing was written".
   WROTE_DISK=1
-  podman run --rm --privileged --pid=host --net=host --security-opt label=disable \
+  podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
     -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
     ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
     bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
