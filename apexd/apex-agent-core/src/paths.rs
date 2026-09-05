@@ -32,6 +32,15 @@ pub fn runtime_dir() -> PathBuf {
     PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() }))
 }
 
+/// The current user's uid. Callers that must special-case root ask here
+/// rather than reaching for `libc` themselves: the agent runtime is a per-user
+/// service, and root has no `systemd --user` instance to enable it against
+/// unless it lingers, which an ordinary login does not need.
+pub fn uid() -> u32 {
+    // Safe: getuid() cannot fail and has no side effects.
+    unsafe { libc::getuid() }
+}
+
 /// `$XDG_STATE_HOME`, or `~/.local/state` per the base-directory spec.
 pub fn state_home() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_STATE_HOME") {

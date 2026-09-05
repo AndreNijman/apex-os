@@ -268,6 +268,27 @@ pub fn bwrap_path() -> PathBuf {
     PathBuf::from("/usr/bin/bwrap")
 }
 
+/// Resolve a mount target to a real, symlink-free path.
+///
+/// `bwrap` refuses to create a mount point whose path traverses a symlink — it
+/// exits with "Can't mount on symlink destination" — as a defence against a
+/// symlinked target redirecting a bind somewhere unintended. On an atomic OS
+/// the home directories are exactly such symlinks (`/root -> var/roothome`,
+/// `/home -> var/home`), so masking `$HOME` with a tmpfs fails for the root
+/// account and for any user whose home is reached through `/home`. Resolving
+/// the path first hands `bwrap` the real directory to mount on; the logical
+/// path still exists inside the sandbox as a symlink to it, so an env
+/// `HOME=/root` keeps resolving.
+///
+/// Only what exists is resolved: an allowlist entry that is not present yet is
+/// bound with a `-try` and must pass through untouched, not become an error.
+/// This stays out of [`build_argv`], which is a pure function of its spec so its
+/// argv can be asserted exhaustively — the daemon resolves the spec's paths
+/// before handing it over, the same division of labour [`resolv_binds`] uses.
+pub fn real_target(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
 /// Whether the kernel still honours the legacy `TIOCSTI` ioctl.
 ///
 /// Absent file means the knob does not exist on this kernel, which means the
@@ -497,6 +518,31 @@ fn check_writable(path: &Path, home: &Path) -> Result<(), SandboxError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn real_target_resolves_a_symlinked_directory() {
+        use super::real_target;
+        use std::path::PathBuf;
+        // Mirrors an atomic OS's /root -> var/roothome: bwrap will not mount
+        // on the symlink, so the daemon must hand build_argv the real path.
+        let base: PathBuf =
+            std::env::temp_dir().join(format!("apex-realtarget-{}", std::process::id()));
+        let real = base.join("var/roothome");
+        std::fs::create_dir_all(&real).expect("mkdir real");
+        let link = base.join("root");
+        std::os::unix::fs::symlink("var/roothome", &link).expect("symlink");
+
+        let resolved = real_target(&link);
+        assert_eq!(resolved, std::fs::canonicalize(&real).unwrap());
+        assert_ne!(resolved, link, "the symlink must be resolved, not passed through");
+
+        // A path that does not exist passes through unchanged, so a -try
+        // allowlist entry for a cache that is not there yet still no-ops.
+        let missing = base.join("does/not/exist");
+        assert_eq!(real_target(&missing), missing);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     use super::*;
 
     fn spec() -> SandboxSpec {
