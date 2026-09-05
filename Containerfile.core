@@ -87,8 +87,12 @@ ENV CARGO_HOME=/build/.cargo
 # gcc/cc is needed by several -sys crates.
 RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
     dnf5 -y install cargo rust git-core gcc lz4-devel pkgconf-pkg-config \
-        wayland-protocols-devel wayland-devel libxkbcommon-devel >/dev/null \
+        wayland-protocols-devel wayland-devel libxkbcommon-devel \
+        curl unzip tar >/dev/null \
     && dnf5 clean all
+# curl/unzip/tar are for the prebuilt matugen and yazi downloads below. cargo
+# and the wayland dev files remain because awww is still built from source —
+# it is a codeberg fork with no release artifacts.
 
 # `mkdir -p /out` first, and it is load-bearing rather than tidy. Nothing else
 # creates /out: on the success path `install -D` makes /out/usr/bin as a side
@@ -110,10 +114,26 @@ RUN set -eux; \
         done; echo "awww: built" > /out/awww-status; \
     else echo "awww: BUILD FAILED (wallpaper daemon absent; non-fatal)" > /out/awww-status; \
     fi; cat /out/awww-status
-# matugen (Rust, from crates.io) — built here rather than via a COPR that lacks a
-# fedora-43 build; COPY'd out with the other binaries. The shell's theming needs
-# it, so this one IS fatal on failure.
-RUN cargo install matugen --root /out/usr
+# matugen — the shell's theming engine, FATAL on failure.
+#
+# Was `cargo install matugen`, which compiled it from crates.io on every core
+# build. Upstream ships a prebuilt x86_64 tarball, so this is a download and a
+# checksum instead of a compile: minutes back on the critical path, and a
+# pinned VERSION rather than "whatever crates.io had that morning", which the
+# cargo form silently allowed to drift.
+#
+# The sha256 is pinned deliberately. A release asset can be replaced in place;
+# an unpinned download would make the image's contents depend on that. Verified
+# to run on a clean fedora:43 (`matugen --version` -> 4.2.0) before landing.
+ARG MATUGEN_VERSION=4.2.0
+ARG MATUGEN_SHA256=a2e3b50e49ed6439999ba3c252ed04fabd98ee4e9d12e5e5dff2e66370569751
+RUN set -eux; \
+    curl -fsSL -o /tmp/matugen.tar.gz \
+      "https://github.com/InioX/matugen/releases/download/v${MATUGEN_VERSION}/matugen-${MATUGEN_VERSION}-x86_64.tar.gz"; \
+    echo "${MATUGEN_SHA256}  /tmp/matugen.tar.gz" | sha256sum -c -; \
+    tar xzf /tmp/matugen.tar.gz -C /tmp; \
+    install -Dm755 /tmp/matugen /out/usr/bin/matugen; \
+    /out/usr/bin/matugen --version
 # yazi (Rust TUI file manager, the CLI companion to Thunar). NOT packaged in
 # Fedora dist-git, and `cargo install yazi-fm yazi-cli` from crates.io is BROKEN:
 # yazi-plugin `include_bytes!`s its preset .lua files via a workspace-relative
@@ -122,14 +142,25 @@ RUN cargo install matugen --root /out/usr
 # the pinned git WORKSPACE (same clone+build pattern as awww above). yazi-fm →
 # `yazi`, yazi-cli → `ya`. Non-fatal: a failure leaves the TUI FM absent (Thunar,
 # the GUI handler, remains) but never aborts the image.
+# Upstream ships a prebuilt musl tarball of the SAME v26.5.6 this used to build
+# from the git workspace, so the workspace-layout problem described above is
+# moot: the release artifact is already linked. musl rather than gnu so the
+# binary cannot care what glibc the image happens to carry.
+#
+# Still non-fatal: a failure leaves the TUI file manager absent (Thunar, the GUI
+# handler, remains) but never aborts the image.
+ARG YAZI_VERSION=26.5.6
+ARG YAZI_SHA256=1031a02560d053301537195a6661d227c15cb4ce5c30481050b31e2b88681bff
 RUN set -eux; \
-    if git clone --depth 1 --branch v26.5.6 https://github.com/sxyazi/yazi /build/yazi \
-       && cd /build/yazi \
-       && cargo build --release --locked -p yazi-fm -p yazi-cli; then \
-        install -Dm755 target/release/yazi /out/usr/bin/yazi; \
-        install -Dm755 target/release/ya   /out/usr/bin/ya; \
-        echo "yazi: built v26.5.6 from git workspace"; \
-    else echo "yazi: BUILD FAILED (TUI file manager absent; non-fatal — Thunar remains)"; fi
+    if curl -fsSL -o /tmp/yazi.zip \
+         "https://github.com/sxyazi/yazi/releases/download/v${YAZI_VERSION}/yazi-x86_64-unknown-linux-musl.zip" \
+       && echo "${YAZI_SHA256}  /tmp/yazi.zip" | sha256sum -c - \
+       && unzip -qo /tmp/yazi.zip -d /tmp/yazi; then \
+        install -Dm755 /tmp/yazi/yazi-x86_64-unknown-linux-musl/yazi /out/usr/bin/yazi; \
+        install -Dm755 /tmp/yazi/yazi-x86_64-unknown-linux-musl/ya   /out/usr/bin/ya; \
+        /out/usr/bin/yazi --version; \
+        echo "yazi: installed prebuilt v${YAZI_VERSION}"; \
+    else echo "yazi: DOWNLOAD FAILED (TUI file manager absent; non-fatal — Thunar remains)"; fi
 
 # ─────────────────────────────────────────────────────────────────────────
 FROM quay.io/fedora/fedora-bootc:43
