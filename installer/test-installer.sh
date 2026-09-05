@@ -138,6 +138,84 @@ else
 fi
 
 echo
+echo "── netinstall staging: never RAM, never the disk being wiped ──────────"
+# A network install used to `podman pull` into the live environment's
+# containers-storage, which on a booted ISO is the RAM overlay: ~12 GB of
+# decompressed layers in RAM, plus several more when bootc re-tarred them into
+# /var/tmp. It staged to disk instead, and these guard the chooser that decides
+# WHERE. Two of them are the difference between a working install and a
+# destroyed one:
+#
+#   * a tmpfs must never be chosen — that IS the RAM overlay, the whole bug;
+#   * the disk about to be repartitioned must never be chosen — staging onto it
+#     means bootc wipes the image out from under itself mid-install.
+#
+# The functions are sourced out of the shipped engine rather than copied, so
+# this tests what installs, not a paraphrase of it.
+_fns=$(mktemp /tmp/apex-scratch-fns.XXXXXX)
+sed -n '/^scratch_fs_ok()/,/^}/p;/^pick_scratch()/,/^}/p' "$ENGINE" > "$_fns"
+if [ ! -s "$_fns" ]; then
+    printf 'FAIL  %-30s could not extract the chooser from %s\n' "scratch chooser" "$ENGINE"
+    fail=$((fail+1))
+else
+(
+    set +u
+    NEED_SCRATCH_GB=22
+    DISK=/dev/sdz
+    # shellcheck disable=SC1090
+    . "$_fns"
+    _p=0; _f=0
+    _ck() {  # name, got, want
+        if [ "$2" = "$3" ]; then printf 'PASS  %-30s\n' "$1"; _p=$((_p+1))
+        else printf 'FAIL  %-30s want %s got %s\n' "$1" "$3" "$2"; _f=$((_f+1)); fi
+    }
+    mkdir -p /dev/shm/apex-scratch-test
+    scratch_fs_ok /dev/shm/apex-scratch-test && r=yes || r=no
+    _ck "tmpfs refused"              "$r" no
+    scratch_fs_ok /var/tmp && r=yes || r=no
+    _ck "real filesystem accepted"   "$r" yes
+    # shellcheck disable=SC2034  # read by scratch_fs_ok, sourced above
+    ( NEED_SCRATCH_GB=999999; scratch_fs_ok /var/tmp ) && r=yes || r=no
+    _ck "too small refused"          "$r" no
+    scratch_fs_ok /no/such/dir && r=yes || r=no
+    _ck "missing directory refused"  "$r" no
+    # shellcheck disable=SC2034  # read by scratch_fs_ok, sourced above
+    ( DISK=$(df -P /var/tmp | awk 'NR==2{print $1}'); scratch_fs_ok /var/tmp ) && r=yes || r=no
+    _ck "target disk refused"        "$r" no
+    mkdir -p /var/tmp/apex-scratch-ovr
+    out=$(APEX_OCI_SCRATCH=/var/tmp/apex-scratch-ovr pick_scratch || true)
+    _ck "override honoured"          "$out" /var/tmp/apex-scratch-ovr
+    out=$(APEX_OCI_SCRATCH=/dev/shm/apex-scratch-test pick_scratch || true)
+    _ck "override onto tmpfs refused" "${out:-<empty>}" "<empty>"
+    rmdir /dev/shm/apex-scratch-test /var/tmp/apex-scratch-ovr 2>/dev/null
+    echo "$_p $_f" > /tmp/apex-scratch-counts
+)
+read -r _sp _sf < /tmp/apex-scratch-counts 2>/dev/null || { _sp=0; _sf=1; }
+pass=$((pass + _sp)); fail=$((fail + _sf))
+rm -f "$_fns" /tmp/apex-scratch-counts
+fi
+
+# The refusal a machine with nowhere to stage must get. Asserted on the shipped
+# text because the whole point is that the user is told what to do about it —
+# "There is nowhere to put the download" with the offline ISO named as the way
+# out. A silent fallback to RAM is the bug this replaced.
+for _want in "There is nowhere to put the download" \
+             "Nothing has been erased" \
+             "full offline ISO"; do
+    if grep -qF "$_want" "$ENGINE"; then
+        printf 'PASS  %-30s\n' "refusal names: ${_want:0:22}"; pass=$((pass+1))
+    else
+        printf 'FAIL  %-30s missing from the engine\n' "refusal names: ${_want:0:22}"; fail=$((fail+1))
+    fi
+done
+
+# And the engine must not have quietly kept the old RAM-filling path.
+if grep -qE '^\s*if podman pull' "$ENGINE"; then
+    printf 'FAIL  %-30s engine still uses `podman pull` to fetch the OS\n' "no podman pull"; fail=$((fail+1))
+else
+    printf 'PASS  %-30s\n' "no podman pull"; pass=$((pass+1))
+fi
+
 echo "── GUI: every page must draw — it is the only front end there is ──────"
 
 GUI=./apex-installer-gui
