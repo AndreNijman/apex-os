@@ -128,12 +128,10 @@ impl GrantAuthority {
     /// requirement is really asking for, and a state nobody renders is a
     /// silent one.
     pub fn new() -> GrantAuthority {
-        let boot = BootStamp::current();
-        let authority = GrantAuthority {
-            boot,
+        GrantAuthority {
+            boot: BootStamp::current(),
             live: Mutex::new(HashMap::new()),
-        };
-        authority
+        }
     }
 
     /// Close out every grant left on disk by a previous daemon or a previous

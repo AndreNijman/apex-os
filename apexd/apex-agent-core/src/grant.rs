@@ -149,6 +149,14 @@ pub const MAX_SESSION_ACCESS_MS: u64 = 8 * 60 * 60 * 1000;
 /// default TTL is the opposite of explicit. [`ttl_for`] refuses it.
 pub const DEFAULT_SESSION_ACCESS_MS: u64 = 30 * 60 * 1000;
 
+/// Break-glass is the shorter window, and its default is the one that does not
+/// exist. Both are facts about constants, so they are checked when the crate
+/// compiles rather than when a test runs — the same form `protocol.rs` uses for
+/// its version guards. A build in which break-glass had become the *looser*
+/// mode would be one where §4.5 had quietly turned into §4.4.
+const _: () = assert!(MAX_BREAK_GLASS_MS < MAX_SESSION_ACCESS_MS);
+const _: () = assert!(DEFAULT_SESSION_ACCESS_MS <= MAX_SESSION_ACCESS_MS);
+
 /// A TTL this build will not issue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TtlError {
@@ -889,9 +897,8 @@ mod tests {
             let over = ttl_for(*kind, Some(cap + 1)).expect_err("must be capped");
             assert!(over.to_string().contains("§3.4"), "{over}");
         }
-        // Break-glass is the shorter of the two, which is the whole point of
-        // it being a different mode.
-        assert!(MAX_BREAK_GLASS_MS < MAX_SESSION_ACCESS_MS);
+        // That break-glass is the shorter of the two is a fact about two
+        // constants and is asserted at compile time, beside them.
     }
 
     #[test]
