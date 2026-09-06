@@ -808,6 +808,19 @@ jobs:
       - name: Run the Hyprland Lua config assertions
         run: ./tests/test-apex-hypr-lua.sh
 
+      # The input half of the same argument. test-apex-input.sh proves each
+      # compositor's validator ACCEPTS what is generated; only a running
+      # instance proves the value arrives, that `hyprctl reload` re-reads a
+      # module rewritten under it, and that every option name the read-back
+      # asks for still exists — `getoption` answers "no such option" for a name
+      # it does not know, and a read-back treating that as "unset" would show a
+      # working control as untouched forever.
+      #
+      # Same nesting, so it draws nothing and cannot reach a real session, and
+      # the same status-0 skip where the binaries are absent.
+      - name: Run the live input-settings assertions
+        run: ./tests/test-apex-input-live.sh
+
       # §17's fourth generator. The shell has written Hyprland .conf/.lua and
       # niri .kdl on every keybind edit for a long time; labwc got nothing,
       # because it has no IPC to push bindings over and no include mechanism to
