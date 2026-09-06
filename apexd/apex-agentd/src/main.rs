@@ -18,6 +18,7 @@
 
 mod broker;
 mod egress;
+mod grants;
 mod origin;
 mod peer;
 mod privilege;
@@ -32,6 +33,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use apex_agent_core::adapter;
+use apex_agent_core::auth::{Authenticator, PolkitAuthenticator};
 use apex_agent_core::config::Config;
 use apex_agent_core::paths;
 use apex_agent_core::protocol::{
@@ -45,6 +47,19 @@ use crate::registry::Registry;
 pub struct Daemon {
     pub registry: Mutex<Registry>,
     pub config: Mutex<Config>,
+    /// The system-access grants this process is holding (§4.4, §4.5).
+    ///
+    /// Not a `Mutex<...>` around a map here: the authority owns its own lock,
+    /// because the invariant it protects is "authority is this process's
+    /// memory" and it should not be possible to take the registry lock and
+    /// the grant lock in the wrong order.
+    pub grants: grants::GrantAuthority,
+    /// How a human is asked for a password.
+    ///
+    /// Boxed behind the trait so a test can build a daemon that never reaches
+    /// polkit. Nothing in this repository's test suite raises a prompt, and
+    /// this field is why that is enforceable.
+    pub auth: Box<dyn Authenticator>,
 }
 
 impl Daemon {
@@ -52,9 +67,19 @@ impl Daemon {
         Daemon {
             registry: Mutex::new(Registry::new()),
             config: Mutex::new(Config::load()),
+            grants: grants::GrantAuthority::new(),
+            auth: Box::new(PolkitAuthenticator),
         }
     }
 }
+
+/// How often the daemon looks for a grant whose window has run out.
+///
+/// §3.4 asks for automatic expiry, and a break-glass grant's expiry means
+/// ending the session — so the granularity of this tick is the granularity of
+/// that promise. Five seconds on a fifteen-minute window is under one percent
+/// of it, and the cost is one pass over a map that is almost always empty.
+const EXPIRY_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn main() {
     // The in-sandbox half of the `allowlist` network mode, answered before any
@@ -98,6 +123,20 @@ fn run() -> Result<()> {
 
     let listener = bind(&socket)?;
     let daemon = Arc::new(Daemon::new());
+
+    // §3.4's fifth requirement, answered rather than dodged. A grant left on
+    // disk has ended — a grant is in force only while the process that minted
+    // it is holding it — and this is where the machine says HOW each one
+    // ended, once, in the trail and on the daemon's own log. A break-glass
+    // window that was open when the machine went down is reported as ended at
+    // the reboot; one that ran out before that is reported as expired; one
+    // from this boot means this daemon replaced another. Losing the
+    // distinction would make "does not silently persist" true only in the
+    // sense that nothing says anything.
+    for said in daemon.grants.sweep_previous_lives() {
+        eprintln!("apex-agentd: {said}");
+    }
+    spawn_expiry_thread(Arc::clone(&daemon));
 
     // Shutdown runs on its own thread waiting on a blocked signal set, rather
     // than in a handler: stopping sessions means taking locks and iterating a
@@ -169,6 +208,49 @@ fn block_termination_signals() {
         libc::sigaddset(&mut set, libc::SIGHUP);
         libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
     }
+}
+
+/// Close grants whose windows have run out, and end the sessions that cannot
+/// survive their grant ending.
+///
+/// §3.4's "automatic expiry". A session grant stops applying the moment it
+/// leaves the authority's map, so for that kind the sweep is the whole of the
+/// expiry. Break-glass is different and the difference is a kernel fact:
+/// `PR_SET_NO_NEW_PRIVS` was cleared between `fork` and `exec` and no process
+/// can put it back, so a break-glass session outliving its window would keep
+/// its `sudo` whatever any record said. The only honest expiry for that mode
+/// is to end the session, and that is what this does.
+fn spawn_expiry_thread(daemon: Arc<Daemon>) {
+    std::thread::Builder::new()
+        .name("apex-agentd-grants".into())
+        .spawn(move || loop {
+            std::thread::sleep(EXPIRY_TICK);
+            let now = request::now_ms();
+            for (grant, ends_session) in daemon.grants.expire(now) {
+                eprintln!(
+                    "apex-agentd: {}",
+                    grant.describe(now, daemon.grants.boot())
+                );
+                if !ends_session {
+                    continue;
+                }
+                let Some(handle) = lookup(&daemon, grant.session) else {
+                    continue;
+                };
+                let mut s = handle.lock().expect("session lock");
+                if !s.info.is_live() {
+                    continue;
+                }
+                eprintln!(
+                    "apex-agentd: ending session {} — its break-glass window is over and \
+                     no_new_privs cannot be put back on a running process",
+                    grant.session
+                );
+                registry::terminate(&mut s);
+                registry::write_record(&s.info);
+            }
+        })
+        .ok();
 }
 
 fn spawn_signal_thread(daemon: Arc<Daemon>, socket: PathBuf) {
@@ -554,6 +636,15 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
 
         Request::Revoke { project, key } => {
             privilege::revoke(daemon, creds, &project, key.as_deref())
+        }
+
+        // ── system-access grants ────────────────────────────────────────────
+        Request::SystemGrants => privilege::system_grants(daemon),
+
+        Request::RevokeSystemGrant { id } => privilege::revoke_system_grant(daemon, creds, id),
+
+        Request::RenewSystemGrant { id, ttl_ms } => {
+            privilege::renew_system_grant(daemon, creds, id, ttl_ms)
         }
 
         // ── the secret broker ───────────────────────────────────────────────

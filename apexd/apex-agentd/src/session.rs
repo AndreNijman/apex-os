@@ -115,6 +115,44 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     let session_origin = crate::privilege::for_new_session(&who, req.request_origin)
         .map_err(OriginRefused)?;
 
+    // ── dimension 3: the grant, before anything exists to clean up ─────────
+    //
+    // §3.3: root is delegated, not inherited. A session that asks for either
+    // elevated mode gets one only after a human at this machine has said so,
+    // and the whole of that decision happens here — before the worktree, the
+    // checkpoint, the reserved id and the PTY, so a refused password leaves
+    // nothing behind and a refused ORIGIN never reaches the password at all.
+    //
+    // The order inside `authorise_grant` is the security property; it is
+    // written out there. The TTL is checked first, so a typo in `--ttl` fails
+    // in front of the user instead of after a password dialog they then find
+    // out was pointless.
+    let wanted_grant = policy.needs_grant();
+    if wanted_grant.is_none() && req.ttl_ms.is_some() {
+        // A `--ttl` with nothing to bound is a user who believes they asked
+        // for something they did not. Refused rather than ignored.
+        bail!(
+            "--ttl bounds a system-access grant, and this session is not asking for one; add \
+             `--system-access session` or `--unsafe-everything`, or drop the --ttl"
+        );
+    }
+    let authorised = match wanted_grant {
+        None => None,
+        Some(kind) => {
+            let ttl_ms = apex_agent_core::grant::ttl_for(kind, req.ttl_ms)
+                .map_err(|e| TtlRefused(e.to_string()))?;
+            let (grant_origin, proof) = crate::privilege::authorise_grant(
+                daemon,
+                &who,
+                peer,
+                kind,
+                "ask for a system-access grant",
+            )
+            .map_err(|e| GrantRefused(e.to_string()))?;
+            Some((kind, ttl_ms, grant_origin, proof))
+        }
+    };
+
     // Resolve the project, then the worktree, then the working directory. Each
     // step can change where the session actually runs.
     let detected = project::detect(&cwd);
@@ -350,6 +388,23 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         *p = sandbox::real_target(p);
     }
 
+    // The grant is minted now that the session has an id to be bound to, and
+    // before the process starts: §3.3 wants the grant "bound to a concrete
+    // agent session", and a grant issued after the agent was already running
+    // would have a window in which the session existed and the record did not.
+    let issued = authorised.map(|(kind, ttl_ms, grant_origin, proof)| {
+        daemon.grants.issue(
+            proof,
+            kind,
+            id,
+            adapter.id,
+            detected.as_ref().map(|p| p.root.as_str()),
+            ttl_ms,
+            grant_origin,
+            apex_agent_core::request::now_ms(),
+        )
+    });
+
     let argv = sandbox::build_argv(&spec, &program, &args).map_err(SandboxRefused)?;
     let env = sandbox::resolved_env(&spec);
 
@@ -373,6 +428,12 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         policy,
         request_origin: Some(session_origin.origin),
         origin_source: Some(session_origin.source),
+        grant: issued.as_ref().map(|g| g.id),
+        grant_expires_ms: issued.as_ref().map(|g| g.expires_ms),
+        // Nothing has been heard from the agent yet. Claude fills this in on
+        // its first hook event; an agent that never publishes one leaves it
+        // absent, which reads as "not reported" rather than as a mode.
+        native_observed: None,
         pid: spawned.pid,
         started: now_secs(),
         last_activity: now_secs(),
@@ -574,6 +635,42 @@ impl std::fmt::Display for OriginRefused {
 
 impl std::error::Error for OriginRefused {}
 
+/// A system-access grant that was refused, or a TTL that was not issuable.
+///
+/// Its own type for the same reason as the three above: the remedies are
+/// different and specific. A grant refused because the connection came from
+/// inside a session is answered by asking from a terminal; one refused because
+/// the origin was remote is answered by approving locally; one refused because
+/// polkit said no is answered by getting the password right. None of them is
+/// answered by changing the sandbox, which is what a shared error type would
+/// eventually suggest.
+#[derive(Debug)]
+pub struct GrantRefused(pub String);
+
+impl std::fmt::Display for GrantRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for GrantRefused {}
+
+/// A dimension refusal that is a sentence rather than a [`PolicyError`].
+///
+/// The TTL bounds live in `grant.rs`, which knows nothing about `PolicyError`
+/// and should not: a TTL is not one of the six dimensions, it is a parameter
+/// of a grant.
+#[derive(Debug)]
+pub struct TtlRefused(pub String);
+
+impl std::fmt::Display for TtlRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for TtlRefused {}
+
 /// Map a `start` failure to a response, keeping the distinctions the client
 /// needs in order to explain what to do next.
 pub fn run_error(e: anyhow::Error) -> Response {
@@ -588,6 +685,15 @@ pub fn run_error(e: anyhow::Error) -> Response {
     }
     if e.downcast_ref::<OriginRefused>().is_some() {
         return Response::error(ErrorKind::PermissionDenied, format!("{e:#}"));
+    }
+    // A refused grant is a permission answer, so it gets the kind a client
+    // branches on for one. A refused TTL is the user asking for something
+    // out of bounds, which is a bad request.
+    if e.downcast_ref::<GrantRefused>().is_some() {
+        return Response::error(ErrorKind::PermissionDenied, format!("{e:#}"));
+    }
+    if e.downcast_ref::<TtlRefused>().is_some() {
+        return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
     }
     Response::error(ErrorKind::BadRequest, format!("{e:#}"))
 }
@@ -876,16 +982,35 @@ mod tests {
     #[test]
     fn a_policy_refusal_is_not_reported_as_a_sandbox_problem() {
         // The remedy differs. `SandboxUnavailable` means "re-run with
-        // --sandbox unrestricted", which for a denied system grant would be
-        // advice that fails and leaves the user less confined for nothing.
-        let e = anyhow::Error::new(PolicyRefused(PolicyError::SystemAccessUnavailable(
-            apex_agent_core::policy::SystemAccess::Session,
+        // --sandbox unrestricted", which for a confined break-glass request
+        // is the opposite of what the user should do.
+        let e = anyhow::Error::new(PolicyRefused(PolicyError::BreakGlassCannotBeConfined(
+            apex_agent_core::protocol::SandboxPolicy::Project,
         )));
         let resp = run_error(e);
         assert_eq!(resp.as_error().map(|(k, _)| k), Some(ErrorKind::PolicyRefused));
         let (_, message) = resp.as_error().expect("error");
-        assert!(message.contains("apex request"), "{message}");
-        assert!(!message.contains("--sandbox unrestricted"), "{message}");
+        assert!(message.contains("no_new_privs"), "{message}");
+    }
+
+    #[test]
+    fn a_refused_grant_is_a_permission_answer_and_a_refused_ttl_is_not() {
+        // The two failures a `--unsafe-everything` run can hit, and a client
+        // branches on the kind: `PermissionDenied` means somebody has to
+        // authorise this, `PolicyRefused` means the request itself was out of
+        // bounds and no amount of authorising will help.
+        let denied = run_error(anyhow::Error::new(GrantRefused(
+            "this connection belongs to session 3".into(),
+        )));
+        assert_eq!(
+            denied.as_error().map(|(k, _)| k),
+            Some(ErrorKind::PermissionDenied)
+        );
+
+        let ttl = run_error(anyhow::Error::new(TtlRefused(
+            "break-glass caps at 1h".into(),
+        )));
+        assert_eq!(ttl.as_error().map(|(k, _)| k), Some(ErrorKind::PolicyRefused));
     }
 
     #[test]

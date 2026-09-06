@@ -12,13 +12,14 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use apex_agent_core::client::{self, Client};
+use apex_agent_core::grant::{GrantKind, SystemGrant};
 use apex_agent_core::policy::{
     AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset, RequestOrigin, SecretPolicy,
     SystemAccess,
 };
 use apex_agent_core::protocol::{
     AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo,
-    POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION,
+    POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION, SYSTEM_GRANT_VERSION,
 };
 use apex_agent_core::hook::{self as hook_core, HookEvent};
 use apex_agent_core::term::{self, RawMode, WinSize};
@@ -100,6 +101,41 @@ pub enum AgentCmd {
         /// Remove it instead of adding it.
         #[arg(long)]
         remove: bool,
+    },
+    /// System-access grants: what has been granted, and to what (§4.4, §4.5).
+    ///
+    /// §3.4 asks that "revocation control always be visible", which starts
+    /// with the grants themselves being visible. Every grant this machine has
+    /// ever issued is listed, with how each one ended — including the ones
+    /// that ended because the machine rebooted, which is the answer to "was
+    /// that break-glass window still open?".
+    Grants {
+        /// Only the ones still in force.
+        #[arg(long)]
+        active: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take a system-access grant back before its window runs out.
+    ///
+    /// Immediate, and it asks for no password: giving up privilege is free.
+    /// A break-glass session whose grant is revoked keeps running — its
+    /// `no_new_privs` was cleared at exec and cannot be put back — so the
+    /// runtime ends it, the same way it does when the window runs out.
+    RevokeGrant { id: u32 },
+    /// Extend a grant that is still in force, with a fresh password.
+    ///
+    /// Not an extension of the old consent: the window is recomputed from now
+    /// and the same local authentication is asked for again. A managed
+    /// session cannot renew its own grant, and cannot renew anybody's — the
+    /// runtime refuses any connection that resolves to a session, from the
+    /// kernel's view of it rather than from anything the request says.
+    RenewGrant {
+        id: u32,
+        /// The new window, from now: `15m`, `1h`.
+        #[arg(long, value_name = "DURATION", value_parser = parse_ttl)]
+        ttl: u64,
     },
     /// List the agents this runtime can launch.
     Adapters,
@@ -317,6 +353,18 @@ pub struct RunArgs {
     /// §4.5 break-glass: take the APEX protections off.
     #[arg(long)]
     pub unsafe_everything: bool,
+    /// How long a system-access grant lasts: `15m`, `90s`, `1h`.
+    ///
+    /// Required with `--unsafe-everything` — §3.4 asks for an "explicit short
+    /// TTL", and a default would be the opposite of explicit. Optional with
+    /// `--system-access session`, which is a smaller grant and takes a
+    /// half-hour default. Refused without either, because a TTL on an
+    /// ordinary session bounds nothing.
+    ///
+    /// A bare number is refused: `15` is fifteen seconds or fifteen minutes
+    /// depending on who is reading, and the value is a security window.
+    #[arg(long, value_name = "DURATION", value_parser = parse_ttl)]
+    pub ttl: Option<u64>,
     /// Run in a dedicated git worktree, creating it if needed.
     #[arg(long, short)]
     pub worktree: Option<String>,
@@ -401,6 +449,16 @@ impl RunArgs {
         }
         if self.unsafe_everything {
             out.push("--unsafe-everything".to_string());
+        }
+        // Forwarded in its parsed form, in milliseconds' worth of seconds, so
+        // the remote applies the window that was asked for rather than its own
+        // default. Losing a `--ttl` on the way to another machine would leave
+        // a break-glass session there with a longer window than the user typed
+        // — or, with `--unsafe-everything`, refuse outright, which is at least
+        // loud. This is the quiet half, so it is forwarded.
+        if let Some(ms) = self.ttl {
+            out.push("--ttl".to_string());
+            out.push(format!("{}s", ms / 1000));
         }
         if self.checkpoint {
             out.push("--checkpoint".to_string());
@@ -572,6 +630,9 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             destination,
             remove,
         } => allow(destination, remove),
+        AgentCmd::Grants { active, json } => grants(active, json),
+        AgentCmd::RevokeGrant { id } => revoke_grant(id),
+        AgentCmd::RenewGrant { id, ttl } => renew_grant(id, ttl),
         AgentCmd::Adapters => adapters(),
         AgentCmd::Profile { cmd } => profile_cmd(cmd),
         AgentCmd::Diff { id, stat } => diff(id, stat),
@@ -624,6 +685,17 @@ dimension_parser!(parse_system_access, SystemAccess, "none, session or unsafe");
 dimension_parser!(parse_secrets, SecretPolicy, "brokered, none or export");
 dimension_parser!(parse_network, NetworkPolicy, "open, allowlist, brokered or offline");
 dimension_parser!(parse_origin_policy, OriginPolicy, "local or remote");
+
+/// `--ttl`, in milliseconds.
+///
+/// Only the shape is checked here. Whether the window is issuable — the caps,
+/// the zero, and whether break-glass may default — is
+/// [`apex_agent_core::grant::ttl_for`], because it depends on which mode was
+/// asked for and the daemon has to apply the same rule to a client that
+/// skipped this.
+fn parse_ttl(s: &str) -> std::result::Result<u64, String> {
+    apex_agent_core::grant::parse_ttl(s).map_err(|e| e.to_string())
+}
 
 /// `--origin`, which is not a dimension and does not accept every value.
 ///
@@ -752,6 +824,7 @@ fn run(args: RunArgs) -> Result<i32> {
         request_origin: args.origin,
         worktree: args.worktree.clone(),
         checkpoint: args.checkpoint,
+        ttl_ms: args.ttl,
         cols: size.cols,
         rows: size.rows,
         env: Vec::new(),
@@ -782,6 +855,28 @@ fn run(args: RunArgs) -> Result<i32> {
         return Ok(0);
     }
 
+    // §3.4's "prominent red indicator", in the surface a terminal user is
+    // looking at. The Agent Center shows the same thing from the same field.
+    if let (Some(grant), Some(expires)) = (info.grant, info.grant_expires_ms) {
+        let left = expires.saturating_sub(apex_agent_core::request::now_ms());
+        let window = apex_agent_core::grant::format_ms(left);
+        if info.policy.system == SystemAccess::Unsafe {
+            eprintln!(
+                "{}",
+                red(&format!(
+                    "apex: BREAK-GLASS — grant {grant} removes the APEX root boundary for \
+                     {window}. This session can become root. It ends when the window does; \
+                     `apex agent revoke-grant {grant}` ends it now"
+                ))
+            );
+        } else {
+            eprintln!(
+                "apex: system-access grant {grant} for {window} — the privilege operations \
+                 this session files are pre-approved until it runs out; \
+                 `apex agent revoke-grant {grant}` ends it now"
+            );
+        }
+    }
     eprintln!(
         "apex: session {} ({}, {}) — detach with {}",
         info.id,
@@ -793,6 +888,20 @@ fn run(args: RunArgs) -> Result<i32> {
 }
 
 /// One line naming the sandbox and anything else that is not at its default.
+///
+/// §4.1's second criterion — "APEX does not duplicate the dangerous-mode
+/// warning" — is a property of this function and of what surrounds it. Claude
+/// prints its own banner when it is in `bypassPermissions`, every launch, and
+/// a user who has set that as their profile default has already agreed to see
+/// it. A second APEX warning saying the same thing would be noise on every
+/// run, and noise on every run is how a warning stops being read — including
+/// the one warning here that is worth reading, which is break-glass.
+///
+/// So this line states what APEX's OWN layers are, in APEX's own vocabulary,
+/// and says nothing evaluative about dimension 1. `native bypass` appears in
+/// it when the user asked APEX for that mode, as a fact among five other
+/// facts. It is a status line, not a caution; `dimension_warnings_are_apexs_own`
+/// holds it to that.
 fn describe_policy(policy: &AgentPolicy) -> String {
     let mut parts = vec![format!("sandbox {}", policy.sandbox)];
     for (name, value) in non_default_dimensions(policy) {
@@ -827,6 +936,16 @@ fn check_daemon_understands(
     // Remote Control is the local origin §7 reserves root for.
     if origin.is_some() {
         needs.push(("--origin", REQUEST_ORIGIN_VERSION));
+    }
+    // The worst of the three, which is why it is checked even though `system`
+    // is already in `moved`. A daemon below this refuses both elevated modes
+    // outright, so the failure is loud — but it also drops `ttl_ms`, and a
+    // future daemon that accepted the mode while ignoring the window would
+    // give a break-glass session no expiry at all. Named separately so the
+    // refusal says which setting would be lost.
+    if policy.needs_grant().is_some() {
+        needs.push(("--system-access", SYSTEM_GRANT_VERSION));
+        needs.push(("--ttl", SYSTEM_GRANT_VERSION));
     }
     if needs.is_empty() {
         return Ok(());
@@ -1247,6 +1366,140 @@ fn allow(destination: Option<String>, remove: bool) -> Result<i32> {
     cfg.save()?;
     println!("{line} allowed for `--network allowlist` sessions started from now on");
     Ok(0)
+}
+
+// ── system-access grants (§4.4, §4.5) ───────────────────────────────────────
+
+/// The escape that makes break-glass unmissable, and the one that undoes it.
+///
+/// §3.4 asks for a "prominent red Agent Center indicator". The Agent Center is
+/// APEX Shell's, and it reads `SessionInfo.grant`; this is the same statement
+/// in the place a terminal user is actually looking. Colour is a strong claim
+/// to make about somebody's terminal, so it is made only when stderr is a
+/// terminal and `NO_COLOR` is unset — and every message that uses it still
+/// says the words, so a pipe, a log file and a screen reader all carry the
+/// same information.
+const RED: &str = "\x1b[1;31m";
+const OFF: &str = "\x1b[0m";
+
+fn red(text: &str) -> String {
+    let colour = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    if colour {
+        format!("{RED}{text}{OFF}")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Ask the daemon for its grants.
+fn fetch_grants() -> Result<(Vec<SystemGrant>, Vec<(String, String)>)> {
+    let mut c = Client::connect()?;
+    match c.call(&Request::SystemGrants)? {
+        Response::SystemGrants { grants, states } => Ok((grants, states)),
+        Response::Error { message, .. } => bail!(message),
+        other => bail!("unexpected reply: {other:?}"),
+    }
+}
+
+fn grants(active_only: bool, json: bool) -> Result<i32> {
+    let (grants, states) = fetch_grants()?;
+    let rows: Vec<_> = grants
+        .iter()
+        .zip(states.iter())
+        .filter(|(_, (state, _))| !active_only || state == "active")
+        .collect();
+
+    if json {
+        let out: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(g, (state, said))| {
+                let mut v = serde_json::to_value(g).unwrap_or_default();
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("state".into(), state.clone().into());
+                    o.insert("summary".into(), said.clone().into());
+                }
+                v
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(0);
+    }
+
+    if rows.is_empty() {
+        println!(
+            "no {}system-access grants. `apex agent run --system-access session` or \
+             `--unsafe-everything --ttl 15m` asks for one, and each takes a local password",
+            if active_only { "active " } else { "" }
+        );
+        return Ok(0);
+    }
+
+    println!(
+        "{:>3}  {:<13} {:>7}  {:<21} {:<8} WHAT IT COVERS",
+        "ID", "MODE", "SESSION", "STATE", "WINDOW"
+    );
+    for (g, (state, _)) in &rows {
+        let window = apex_agent_core::grant::format_ms(g.expires_ms.saturating_sub(g.issued_ms));
+        let covers = if g.capabilities.is_empty() {
+            // Break-glass carries none, and saying "-" would read as a gap in
+            // the record rather than as the point of the mode.
+            "root inside the session (sudo)".to_string()
+        } else {
+            g.capabilities.join(", ")
+        };
+        let line = format!(
+            "{:>3}  {:<13} {:>7}  {:<21} {:<8} {}",
+            g.id, g.kind, g.session, state, window, covers
+        );
+        // Only an active break-glass grant is red. A grant that has ended is
+        // history, and colouring history teaches people to ignore the colour.
+        if state == "active" && g.kind == GrantKind::BreakGlass {
+            println!("{}", red(&line));
+        } else {
+            println!("{line}");
+        }
+    }
+    // The sentence, under the table, for anything that is not simply active:
+    // "ended at the reboot" and "ended with the runtime" are the answers §3.4
+    // asks the machine to be able to give, and a STATE column alone gives
+    // them too quietly.
+    for (_, (state, said)) in &rows {
+        if state != "active" {
+            println!("  {said}");
+        }
+    }
+    if rows.iter().any(|(_, (s, _))| s == "active") {
+        println!("\nrevoke one with `apex agent revoke-grant <id>`");
+    }
+    Ok(0)
+}
+
+fn revoke_grant(id: u32) -> Result<i32> {
+    let mut c = Client::connect()?;
+    match c.call(&Request::RevokeSystemGrant { id })? {
+        Response::SystemGrants { states, .. } => {
+            for (_, said) in states {
+                println!("{said}");
+            }
+            Ok(0)
+        }
+        Response::Error { message, .. } => bail!(message),
+        other => bail!("unexpected reply: {other:?}"),
+    }
+}
+
+fn renew_grant(id: u32, ttl_ms: u64) -> Result<i32> {
+    let mut c = Client::connect()?;
+    match c.call(&Request::RenewSystemGrant { id, ttl_ms })? {
+        Response::SystemGrants { states, .. } => {
+            for (_, said) in states {
+                println!("{said}");
+            }
+            Ok(0)
+        }
+        Response::Error { message, .. } => bail!(message),
+        other => bail!("unexpected reply: {other:?}"),
+    }
 }
 
 fn adapters() -> Result<i32> {
@@ -2334,6 +2587,7 @@ mod tests {
             origin_policy: None,
             origin: None,
             unsafe_everything: false,
+            ttl: None,
             worktree: None,
             checkpoint: false,
             cwd: None,
@@ -2377,12 +2631,13 @@ mod tests {
             secrets: Some(SecretPolicy::None),
             ..run_args()
         };
-        // The policy itself is refused until P0-006 lands, so this asserts the
-        // resolution order through the error rather than the value: the
-        // refusal names system access, which is what break-glass set, and not
-        // the secret dimension, which the flag set to a value that is allowed.
-        let err = resolve_policy(&cfg, &args).expect_err("break-glass is not built yet");
-        assert!(err.to_string().contains("system-access"), "{err}");
+        let p = resolve_policy(&cfg, &args).expect("resolve");
+        // Break-glass set three dimensions; the flag overrode the one it
+        // named and left the other two where the preset put them.
+        assert_eq!(p.system, SystemAccess::Unsafe);
+        assert_eq!(p.sandbox, SandboxPolicy::Unrestricted);
+        assert_eq!(p.native, NativeMode::Bypass);
+        assert_eq!(p.secrets, SecretPolicy::None, "the flag did not win");
     }
 
     #[test]
@@ -2437,8 +2692,15 @@ mod tests {
         let cfg = config::Config::default();
         let cases: [(RunArgs, &str); 3] = [
             (
-                RunArgs { system_access: Some(SystemAccess::Session), ..run_args() },
-                "apex request",
+                // Break-glass inside a sandbox that would keep no_new_privs
+                // on anyway: bwrap sets it unconditionally, so the pair would
+                // report a boundary it had not moved.
+                RunArgs {
+                    system_access: Some(SystemAccess::Unsafe),
+                    sandbox: Some(SandboxPolicy::Project),
+                    ..run_args()
+                },
+                "no_new_privs",
             ),
             (
                 RunArgs { secrets: Some(SecretPolicy::Export), ..run_args() },

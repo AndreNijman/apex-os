@@ -163,6 +163,24 @@ impl Config {
             ));
             self.detach_key = default_detach_key();
         }
+        // §3.4: no "remember forever". Dimension 3 is the one dimension that
+        // must not have a stored default at all, because a configuration file
+        // saying `"system": "unsafe"` is precisely a remembered elevation —
+        // every later `apex agent run` would arrive already asking for
+        // break-glass, and the grant machinery would dutifully prompt for it.
+        // The other five dimensions are settings; this one is a grant, and a
+        // grant is issued per session, to a session, after somebody is asked.
+        //
+        // Corrected rather than refused, and named, for the reason below.
+        if self.system != SystemAccess::None {
+            fixed.push(format!(
+                "system-access cannot be a stored default ({} was set); §3.4 allows no \
+                 remembered elevation, so ask for it per session with `apex agent run \
+                 --system-access session` or `--unsafe-everything --ttl 15m`",
+                self.system
+            ));
+            self.system = SystemAccess::None;
+        }
         // A stored default this build cannot enforce is corrected here rather
         // than refused at every `apex agent run`. Refusing would be the safe
         // reflex, but the failure lands on a command the user did not connect
@@ -333,14 +351,52 @@ mod tests {
         // `apex agent run` with the same error is a worse outcome than
         // correcting toward the default, which is the stricter value.
         let mut cfg = Config {
-            system: SystemAccess::Unsafe,
+            secrets: crate::policy::SecretPolicy::Export,
             ..Config::default()
         };
         let notes = cfg.normalise();
-        assert_eq!(cfg.system, SystemAccess::None);
+        assert_eq!(cfg.secrets, crate::policy::SecretPolicy::Brokered);
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("system-access"), "{notes:?}");
+        assert!(notes[0].contains("secret"), "{notes:?}");
         assert_eq!(cfg.policy().validate(), Ok(()));
+    }
+
+    #[test]
+    fn elevation_is_never_a_stored_default_whatever_the_file_says() {
+        // §3.4: "no remember forever". Dimension 3 is a grant, not a setting.
+        // A configuration file that named an elevated default would make
+        // every later `apex agent run` arrive asking for it — a remembered
+        // elevation with a password prompt bolted on, which is the shape §3.4
+        // exists to forbid. Over both values, and the correction is named so
+        // the user can see the file was not obeyed.
+        for stored in [SystemAccess::Session, SystemAccess::Unsafe] {
+            let mut cfg = Config {
+                system: stored,
+                // Unrestricted, so `validate` would have accepted break-glass
+                // and could not have been what corrected it.
+                sandbox: SandboxPolicy::Unrestricted,
+                ..Config::default()
+            };
+            assert_eq!(cfg.policy().validate(), Ok(()), "{stored}");
+            let notes = cfg.normalise();
+            assert_eq!(cfg.system, SystemAccess::None, "{stored} survived");
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert!(notes[0].contains("no remembered elevation"), "{notes:?}");
+            assert!(notes[0].contains("--ttl"), "{notes:?}");
+            // The other five dimensions are untouched: this is a correction
+            // to one key, not a reset.
+            assert_eq!(cfg.sandbox, SandboxPolicy::Unrestricted, "{stored}");
+        }
+
+        // And it applies to the file, not only to the struct. The key still
+        // parses — a file APEX Shell or a newer build wrote must not fail to
+        // load — and `from_str`, which every caller goes through, corrects it.
+        let raw: Config =
+            serde_json::from_str(r#"{"system":"unsafe","sandbox":"unrestricted"}"#).expect("parse");
+        assert_eq!(raw.system, SystemAccess::Unsafe, "the key must still parse");
+        let loaded = from_str(r#"{"system":"unsafe","sandbox":"unrestricted"}"#).expect("load");
+        assert_eq!(loaded.system, SystemAccess::None);
+        assert_eq!(loaded.policy().needs_grant(), None);
     }
 
     #[test]
