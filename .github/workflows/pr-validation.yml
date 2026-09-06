@@ -487,8 +487,21 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      # `cargo test` does not build the `apex` binary, and apex-agentd's
+      # hook_bridge suite needs it: it runs `apex agent hook` inside a real
+      # session to prove the publish path. Without the binary that test SKIPS
+      # and reports as a pass, which is how it went unnoticed that the live
+      # assertion had never run in CI at all — four green tests in 0.13 s.
+      - name: Build the apex CLI, which the live agent tests drive
+        run: cargo build --locked -p apex
+
+      # APEX_REQUIRE_APEX_CLI turns that skip into a failure. Same shape as
+      # APEX_REQUIRE_NIRI in tests/test-apex-input.sh: a developer running one
+      # crate's tests still gets a skip, CI does not.
       - name: Tests
         run: cargo test --locked
+        env:
+          APEX_REQUIRE_APEX_CLI: "1"
 
       # §10's blueprint suite drives the COMPILED binary, so it belongs here
       # rather than in the `engine` job: this is where the toolchain and the

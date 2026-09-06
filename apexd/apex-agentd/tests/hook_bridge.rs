@@ -166,7 +166,25 @@ macro_rules! harness {
 fn a_hook_inside_a_session_reaches_the_daemon_that_started_it() {
     let apex = apex_cli();
     if !apex.is_file() {
-        eprintln!("SKIP: {} has not been built", apex.display());
+        // `cargo test -p apex-agentd` does not build the `apex` binary, so this
+        // skip is reachable by an ordinary command. It reports as a PASS, which
+        // is the worst answer a test can give: I spent a while treating this
+        // suite's 0.13s "4 passed" as evidence the publish path worked, when it
+        // meant the publish path had not been exercised at all.
+        //
+        // APEX_REQUIRE_APEX_CLI turns it into a failure, the same shape
+        // tests/test-apex-input.sh uses for APEX_REQUIRE_NIRI. CI sets it; a
+        // developer running one crate's tests does not.
+        let msg = format!(
+            "{} has not been built — run `cargo build -p apex` or the whole \
+             workspace; this test cannot exercise the publish path without it",
+            apex.display()
+        );
+        assert!(
+            std::env::var_os("APEX_REQUIRE_APEX_CLI").is_none(),
+            "{msg}"
+        );
+        eprintln!("SKIP: {msg}");
         return;
     }
     let h = harness!("publish");
