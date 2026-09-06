@@ -239,6 +239,30 @@ else
         sudo -n systemctl daemon-reload' || {
         bad "staging the policy onto the target" "could not install the unit"; finish; exit $?
     }
+    # SELinux. /usr/sbin/nft is iptables_exec_t, so systemd starting it
+    # transitions into iptables_t, and iptables_t may not read a file labelled
+    # var_run_t — which is what everything created under /run gets. Measured
+    # here, twice: as root, from a transient unit, `nft -f` on a var_run_t copy
+    # exits 1 with "Could not open file ... Permission denied" and the audit
+    # log says `avc denied { getattr } ... scontext=iptables_t
+    # tcontext=var_run_t`; the identical file relabelled usr_t loads. This is
+    # the staging path's problem and not the shipped one's, and the labels used
+    # are exactly the ones the shipped paths carry — /usr/share is usr_t,
+    # /usr/libexec is bin_t — so the run still exercises what an image would.
+    if on 'command -v chcon >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" != Disabled ]'; then
+        if on 'sudo -n chcon -R -t usr_t /run/apex-fw &&
+               sudo -n chcon -t bin_t /run/apex-fw/libexec/apex-firewall'; then
+            ok "the staged files carry the labels their shipped originals do"
+        else
+            bad "the staged files carry the labels their shipped originals do" \
+                "chcon failed; a confined nft will not be able to read the policy"
+            finish; exit $?
+        fi
+    else
+        skip "the staged files carry the labels their shipped originals do" \
+             "SELinux is not enforcing on this target"
+    fi
+
     printf '  the unit differs from the shipped one only in these lines:\n'
     on 'diff /run/apex-fw/units/apex-firewall.service /etc/systemd/system/apex-firewall.service' \
         | sed 's/^/    /'
