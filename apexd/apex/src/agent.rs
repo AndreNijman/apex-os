@@ -21,7 +21,7 @@ use apex_agent_core::protocol::{
     POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION,
 };
 use apex_agent_core::term::{self, RawMode, WinSize};
-use apex_agent_core::{adapter, checkpoint, config, git, layout, project};
+use apex_agent_core::{adapter, checkpoint, config, git, layout, profile, project};
 use clap::{Args, Subcommand};
 
 use crate::ops;
@@ -102,6 +102,16 @@ pub enum AgentCmd {
     },
     /// List the agents this runtime can launch.
     Adapters,
+    /// Inspect, check and carry an agent's own configuration (§5).
+    ///
+    /// An agent installation is a profile, not just a binary: instructions,
+    /// settings, commands, skills, plugins and MCP definitions decide what the
+    /// binary does. These verbs say which of that is the same on any machine
+    /// and which belongs to this one.
+    Profile {
+        #[command(subcommand)]
+        cmd: ProfileCmd,
+    },
     /// What an agent changed since its checkpoint.
     Diff {
         /// Session id. Defaults to the most recent session in this project.
@@ -166,6 +176,67 @@ pub enum AgentCmd {
     /// lingering systemd user instance (root has none by default) and then
     /// prints what running agents as root costs.
     Enable,
+}
+
+/// `apex agent profile <verb>`.
+#[derive(Subcommand)]
+pub enum ProfileCmd {
+    /// Agents whose profile this runtime understands.
+    List {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show every part of a profile, its class and how a session mounts it.
+    Inspect {
+        /// Which agent. Defaults to the configured one.
+        agent: Option<String>,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a profile: config, hooks, plugins, MCP and skills.
+    ///
+    /// Reads and reports; it repairs nothing. Exits non-zero when it found
+    /// something wrong, so it is usable from a script.
+    Doctor {
+        /// Which agent. Defaults to the configured one.
+        agent: Option<String>,
+    },
+    /// Write the reusable half of a profile to a directory.
+    ///
+    /// Instructions, skills, commands, settings and MCP definitions. Never
+    /// credentials, conversation transcripts, caches or install paths — and
+    /// the values of anything the settings put in the environment are replaced
+    /// with blanks, so the bundle says which variables are needed without
+    /// carrying what is in them.
+    Export {
+        /// Which agent. Defaults to the configured one.
+        agent: Option<String>,
+        /// Where to write it. Defaults to ./<agent>-profile.
+        #[arg(long, short, value_name = "DIR")]
+        to: Option<PathBuf>,
+        /// Write into a directory that already has files in it.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Apply an exported profile to this machine.
+    ///
+    /// Files are added and updated; nothing local is deleted, and the two
+    /// files that hold both reusable and machine-local state are merged key by
+    /// key rather than overwritten — so importing a profile cannot remove the
+    /// environment values the export refused to carry.
+    #[command(visible_alias = "sync")]
+    Import {
+        /// Which agent. Defaults to the configured one.
+        agent: Option<String>,
+        /// The directory `apex agent profile export` wrote.
+        #[arg(long, short, value_name = "DIR")]
+        from: PathBuf,
+        /// Print what would change and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Args)]
@@ -484,6 +555,7 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             remove,
         } => allow(destination, remove),
         AgentCmd::Adapters => adapters(),
+        AgentCmd::Profile { cmd } => profile_cmd(cmd),
         AgentCmd::Diff { id, stat } => diff(id, stat),
         AgentCmd::Undo {
             id,
@@ -1183,6 +1255,254 @@ fn adapters() -> Result<i32> {
         );
     }
     Ok(0)
+}
+
+// ── agent profiles (§5) ─────────────────────────────────────────────────────
+
+fn profile_cmd(cmd: ProfileCmd) -> Result<i32> {
+    match cmd {
+        ProfileCmd::List { json } => profile_list(json),
+        ProfileCmd::Inspect { agent, json } => profile_inspect(agent, json),
+        ProfileCmd::Doctor { agent } => profile_doctor(agent),
+        ProfileCmd::Export { agent, to, force } => profile_export(agent, to, force),
+        ProfileCmd::Import {
+            agent,
+            from,
+            dry_run,
+        } => profile_import(agent, from, dry_run),
+    }
+}
+
+/// Resolve the agent name a profile verb was given.
+///
+/// An adapter without a profile is refused by name rather than by an empty
+/// table: `apex agent profile doctor codex` reporting nothing wrong would be a
+/// worse answer than saying APEX does not know what a codex profile is.
+fn profile_for(agent: Option<String>) -> Result<&'static profile::Profile> {
+    let id = agent.unwrap_or_else(|| config::Config::load().default_agent);
+    profile::by_agent(&id).with_context(|| {
+        let known: Vec<&str> = profile::PROFILES.iter().map(|p| p.agent).collect();
+        format!(
+            "APEX has no profile description for {id}; it knows: {}",
+            known.join(", ")
+        )
+    })
+}
+
+fn profile_list(json: bool) -> Result<i32> {
+    let home = apex_agent_core::paths::home();
+    if json {
+        let all: Vec<_> = profile::PROFILES
+            .iter()
+            .map(|p| profile::summary(p, &home))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&all)?);
+        return Ok(0);
+    }
+    println!(
+        "{:<10} {:<24} {:<10} {}",
+        "AGENT", "ROOT", "INSTALLED", "REUSABLE / LOCAL / SECRET"
+    );
+    for p in profile::PROFILES {
+        let s = profile::summary(p, &home);
+        let n = |k: &str| s.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        println!(
+            "{:<10} {:<24} {:<10} {} / {} / {}",
+            p.agent,
+            s["root"].as_str().unwrap_or_default(),
+            if s["installed"] == true { "yes" } else { "no" },
+            n("reusable") + n("mixed"),
+            n("machine_local"),
+            n("secret"),
+        );
+    }
+    Ok(0)
+}
+
+fn profile_inspect(agent: Option<String>, json: bool) -> Result<i32> {
+    let p = profile_for(agent)?;
+    let home = apex_agent_core::paths::home();
+    let found = profile::inspect(p, &home);
+    if json {
+        let rows: Vec<_> = found
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "path": f.path,
+                    "class": f.class.as_str(),
+                    "mount": match f.mount {
+                        profile::Mount::ReadOnly => "read-only",
+                        profile::Mount::Writable => "writable",
+                    },
+                    "role": f.role.as_str(),
+                    "present": f.present,
+                    "files": f.files,
+                    "what": f.what,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(0);
+    }
+    println!("{} — {}", p.display, profile::display_home(&p.root_dir(&home), &home));
+    println!();
+    println!(
+        "{:<42} {:<14} {:<10} {:<14} {}",
+        "PATH", "CLASS", "MOUNT", "ROLE", "FILES"
+    );
+    for f in &found {
+        println!(
+            "{:<42} {:<14} {:<10} {:<14} {}",
+            f.path,
+            f.class.as_str(),
+            match f.mount {
+                profile::Mount::ReadOnly => "read-only",
+                profile::Mount::Writable => "writable",
+            },
+            f.role.as_str(),
+            if f.present {
+                f.files.to_string()
+            } else {
+                "-".to_string()
+            },
+        );
+    }
+    println!();
+    println!("reusable and mixed are what `apex agent profile export` carries.");
+    println!("mixed files are carried in part: see `apex agent profile export --help`.");
+    Ok(0)
+}
+
+fn profile_doctor(agent: Option<String>) -> Result<i32> {
+    let p = profile_for(agent)?;
+    let home = apex_agent_core::paths::home();
+    let report = profile::doctor(p, &home);
+
+    println!(
+        "{} — {}",
+        p.display,
+        profile::display_home(&p.root_dir(&home), &home)
+    );
+    for section in &report.sections {
+        println!();
+        println!("{}", section.title);
+        for line in &section.lines {
+            println!("  {line}");
+        }
+    }
+    println!();
+    if report.problems.is_empty() {
+        println!("no problems found");
+        return Ok(0);
+    }
+    println!(
+        "{} problem{}",
+        report.problems.len(),
+        if report.problems.len() == 1 { "" } else { "s" }
+    );
+    for problem in &report.problems {
+        println!("  {problem}");
+    }
+    Ok(1)
+}
+
+fn profile_export(agent: Option<String>, to: Option<PathBuf>, force: bool) -> Result<i32> {
+    let p = profile_for(agent)?;
+    let home = apex_agent_core::paths::home();
+    let dest = to.unwrap_or_else(|| PathBuf::from(format!("{}-profile", p.agent)));
+
+    if !force {
+        let occupied = std::fs::read_dir(&dest)
+            .map(|mut it| it.next().is_some())
+            .unwrap_or(false);
+        if occupied {
+            bail!(
+                "{} already has files in it; pass --force to write into it anyway",
+                dest.display()
+            );
+        }
+    }
+
+    let report = profile::export(p, &home, &dest)
+        .with_context(|| format!("exporting the {} profile", p.agent))?;
+    println!(
+        "wrote {} file{} ({}) to {}",
+        report.files,
+        if report.files == 1 { "" } else { "s" },
+        human_bytes(report.bytes),
+        report.dest.display()
+    );
+    for (path, gave_up) in &report.edited {
+        println!("  redacted  {}  ({gave_up})", path.display());
+    }
+    for (path, class) in &report.excluded {
+        println!(
+            "  left      {}  ({class})",
+            profile::display_home(path, &home)
+        );
+    }
+    Ok(0)
+}
+
+fn profile_import(agent: Option<String>, from: PathBuf, dry_run: bool) -> Result<i32> {
+    let p = profile_for(agent)?;
+    let home = apex_agent_core::paths::home();
+    let changes = if dry_run {
+        profile::plan_import(p, &from, &home)
+    } else {
+        profile::import(p, &from, &home)
+    }
+    .with_context(|| format!("importing {}", from.display()))?;
+
+    let writes = changes
+        .iter()
+        .filter(|c| !matches!(c, profile::Change::Unfilled(_, _)))
+        .count();
+    if writes == 0 {
+        println!("nothing to change: this machine already has what the bundle carries");
+    } else {
+        println!(
+            "{} {} file{}",
+            if dry_run { "would change" } else { "changed" },
+            writes,
+            if writes == 1 { "" } else { "s" }
+        );
+    }
+    for change in &changes {
+        match change {
+            profile::Change::Unfilled(_, _) => {}
+            other => println!("  {other}"),
+        }
+    }
+    let unfilled: Vec<&profile::Change> = changes
+        .iter()
+        .filter(|c| matches!(c, profile::Change::Unfilled(_, _)))
+        .collect();
+    if !unfilled.is_empty() {
+        println!();
+        println!("set these yourself — the export carried the names, not the values:");
+        for change in unfilled {
+            println!("  {change}");
+        }
+    }
+    Ok(0)
+}
+
+/// Bytes as a person reads them. Binary units, because that is what `du -h`
+/// and every file manager on this machine show.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn which(program: &str) -> Option<PathBuf> {

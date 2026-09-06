@@ -24,6 +24,7 @@
 //!         ├─ sandbox policy                sandbox.rs
 //!         ├─ network destination policy    destination.rs
 //!         ├─ adapters                      adapter.rs
+//!         ├─ agent profiles                profile.rs
 //!         ├─ projects + worktrees          project.rs
 //!         ├─ project window layouts        layout.rs
 //!         ├─ checkpoints                   checkpoint.rs
@@ -51,6 +52,7 @@ pub mod lock;
 pub mod origin;
 pub mod paths;
 pub mod policy;
+pub mod profile;
 pub mod project;
 pub mod protocol;
 pub mod request;
