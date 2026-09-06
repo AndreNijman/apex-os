@@ -200,7 +200,7 @@ fn session(
         store.seen(&device_id, apex_remote_core::now_ms(), "lan");
         let _ = state.save_devices(&store);
     }
-    if let Some(s) = socket.try_clone().ok() {
+    if let Ok(s) = socket.try_clone() {
         state.register(Live {
             device_id: device_id.clone(),
             socket: s,
