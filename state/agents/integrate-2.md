@@ -5,10 +5,11 @@ worktree: /var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell
 branch: roadmap/v2.2
 
 ## NEXT
-apex-os: PUSHED bb5b355 = 9a24d2b + the p1-002 scrub fix (coordinator's queue jump).
-Now re-applying the 10 already-resolved p0-005 commits, saved on local branch
-`int2-p0005-landed` (a37dc71). Recovery tags: int-os-prelanding-2 (9a24d2b),
-int-shell-prelanding-2 (d2d1f33).
+apex-os p0-005 LANDED AND PUSHED: roadmap/v2.2 = 5ae4350. Next job: apex-shell
+task/p0-005-agent-center-modes (1 commit d9cdb37) in /var/tmp/apex-work/int-shell,
+then apex-os task/p1-030-shell-integrations, then ONE clippy container run on the
+final os tip. Recovery tags: int-os-prelanding-2 (9a24d2b),
+int-shell-prelanding-2 (d2d1f33), local branch int2-p0005-landed.
 
 ## PLAN
 1. apex-os: cherry-pick d31257a..task/p0-005-permission-modes onto roadmap/v2.2 (9a24d2b)
@@ -87,3 +88,29 @@ apex-secretd bin tests 69 -> 70. Full suite 1512 passed + the known flake.
   live; the same two were hung for 1h and 5h in /var/tmp/apex-work/wt-p0-005's
   own runs. Run alone: 86 passed / 0 failed in 2.01s. pty.rs and egress.rs are
   not touched by any branch here. Cross-run contention, not a regression.
+
+## APEX-OS P0-005 VERIFIED AND PUSHED (tip 5ae4350)
+- cargo test --locked --no-fail-fast: 1589 passed / 0 failed (28 binaries).
+  Baseline 1512 -> +1 (the scrub-fix test) +76 (p0-005) = 1589.
+- check-no-conflict-markers.sh: PASS after every round and on the tip.
+- test-privilege-requests.sh  38/0
+- test-agent-profile.sh       48/0
+- test-apex-verbs.sh          44/0
+- check-doc-verbs.sh: running it with NO ARGUMENTS is a phantom pass
+  ("0 valid, 0 deliberate, 0 not a command"); it takes doc paths and an
+  APEX= pointing at the build. Run properly on docs/agent-runtime.md:
+  43 valid / 0 not-a-command. Over docs/*.md there are 4 BADs, all in
+  historical progress notes (m0-results, m4-install-runbook, p1-progress,
+  p3-progress) that this landing does not touch and that the script's own
+  header says the CI wrapper excludes. Pre-existing.
+- Reading pass for renames: p0-005 renames PolicyError::SystemAccessUnavailable
+  -> BreakGlassCannotBeConfined and deletes the old "has no grant behind it in
+  this build ... apex request" sentence. grep over tests/*.sh, Containerfile.*,
+  .github/workflows/, files/ and docs/: NOTHING asserts the old variant or the
+  old sentence. No test-secret-migrate-class failure hiding here.
+- Brief's two orderings confirmed by inspection of the LANDED privilege.rs:
+  * renew_system_grant: may_be_granted() at line 441, the grant-exists lookup
+    after it; revoke_system_grant: session check before grants.revoke(id).
+  * decided_by line 509: (false, Some(id)) => (Decision::AllowOnce, Some(id),
+    "requested-and-covered") -- allow_once carrying system_grant, NOT
+    allow_for_project.
