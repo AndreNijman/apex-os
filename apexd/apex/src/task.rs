@@ -317,6 +317,14 @@ fn load_state(id: &str) -> TaskState {
     let Ok(path) = state_path(id) else {
         return TaskState::default();
     };
+    // §25 deliberately does NOT migrate on this path. `apex task show` is a
+    // read, and a read that rewrites the file it read — leaving a `.pre-v0`
+    // beside it — is a surprise nobody asked for and one more thing to go wrong
+    // while somebody is only looking. It is also unnecessary: version 0 of this
+    // record is a subset of version 1, so `TaskState` parses it as it stands
+    // and `save_state` stamps the version the next time there is a reason to
+    // write. `apex schema migrate --commit` is the explicit sweep for anyone
+    // who wants every record moved at once.
     std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
@@ -327,6 +335,15 @@ fn save_state(id: &str, state: &TaskState) -> Result<()> {
     let path = state_path(id)?;
     let dir = state_dir();
     paths::ensure_private_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    // Stamp the version on the way out, so a record this build wrote can be
+    // told apart from one written before the key existed. A record that
+    // arrived from a newer APEX keeps its own — this build has no business
+    // claiming a record is on a schema it does not understand.
+    let mut state = state.clone();
+    if state.schema.unwrap_or(0) < apexd_core::task::STATE_SCHEMA_VERSION {
+        state.schema = Some(apexd_core::task::STATE_SCHEMA_VERSION);
+    }
+    let state = &state;
     let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     std::fs::write(&tmp, serde_json::to_string_pretty(state)?)
         .with_context(|| format!("writing {}", tmp.display()))?;
