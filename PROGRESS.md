@@ -301,6 +301,25 @@ fixed on `roadmap/v2.2`:
   whose name appears at a different EVR for the host arch is now dropped as an
   application fork rather than a multilib library.
 
+### A test count read through a pipe is not a test count
+
+`cargo test --locked 2>&1 | grep -E '^test result' | tail -12` reported **810
+passed, 0 failed, exit 0** on a tree whose baseline is 1512. Both halves of that
+are wrong in the same way: the exit code belongs to `tail`, not to cargo, and
+the log holds only what `grep` let through, so a run that stopped early looks
+identical to one that finished.
+
+Under a shell without `pipefail`, **every "N tests passed" measured through a
+pipe is unverified**, and this program has taken a lot of those numbers on
+trust. Set `set -o pipefail`, or redirect to a file and grep the file afterwards
+— which also leaves the failures readable instead of filtered away.
+
+Same family as the three earlier ones: `git stash create --include-untracked`
+accepting a flag it ignores, a suite reporting phantom passes with blank counts,
+and an integration test skipping itself in CI while reporting success. **A check
+that cannot fail is not a check**, and the cheapest way to find out which kind
+you have is to break the thing it guards and watch.
+
 ### The 01:11 limit — what the resume system was built for, measured
 
 All six agents died together at 01:11 on the same session limit, resetting at

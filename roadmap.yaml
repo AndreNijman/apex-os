@@ -1479,7 +1479,7 @@ tasks:
 - id: P1-030
   title: Finish Fish agent integration
   priority: P1
-  status: partial
+  status: done
   area: shell
   depends_on: []
   acceptance:
@@ -1487,10 +1487,12 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-031
   title: Finish Nushell agent integration
   priority: P1
-  status: partial
+  status: done
   area: shell
   depends_on: []
   acceptance:
@@ -1498,10 +1500,12 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-032
   title: Finish tmux integration
   priority: P1
-  status: todo
+  status: done
   area: terminal
   depends_on: []
   acceptance:
@@ -1509,10 +1513,12 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-033
   title: Finish Zellij integration
   priority: P1
-  status: todo
+  status: done
   area: terminal
   depends_on: []
   acceptance:
@@ -1520,10 +1526,12 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-034
   title: Add editor/agent layout templates
   priority: P1
-  status: todo
+  status: done
   area: terminal
   depends_on: []
   acceptance:
@@ -1531,6 +1539,8 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-035
   title: Screenshot and file injection into TUI agents
   priority: P1
