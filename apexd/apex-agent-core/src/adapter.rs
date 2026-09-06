@@ -145,7 +145,11 @@ pub const ADAPTERS: &[Adapter] = &[
         id: "claude",
         display: "Claude Code",
         program: "claude",
-        home_rw: &[".claude", ".claude.json"],
+        // Empty because `crate::profile` describes this one path by path: its
+        // instructions, skills and commands go in read-only and its session and
+        // plugin state goes in writable. `.claude` here would bind the profile
+        // whole and writable, which is what P0-010 replaced.
+        home_rw: &[],
         home_ro: &[],
         env_pass: &[
             "ANTHROPIC_API_KEY",
@@ -330,8 +334,37 @@ impl Adapter {
         args
     }
 
+    /// The agent's own profile, when APEX has a description of one.
+    ///
+    /// An adapter without one keeps the whole-directory `home_rw` behaviour:
+    /// `codex` and `gemini` have not been read off a real installation, and
+    /// guessing which half of `~/.codex` is a session store would produce
+    /// exactly the failure P0-010 exists to avoid.
+    pub fn profile(&self) -> Option<&'static crate::profile::Profile> {
+        crate::profile::by_agent(self.id)
+    }
+
     /// Add this adapter's home requirements, the shared toolchain state and the
     /// credential masks to a sandbox spec.
+    ///
+    /// ## The profile goes in path by path, not as a directory (P0-010)
+    ///
+    /// Binding `~/.claude` writable hands a confined session its own
+    /// instructions, skills, commands and slash commands to rewrite — and a
+    /// session that can edit `CLAUDE.md` can edit what the next session is told
+    /// to do. The profile table already says which of the directory is
+    /// reusable, so the mounts come from that one table:
+    /// [`crate::profile::Profile::mounts`] returns the read-only paths and the
+    /// writable ones, and the disjointness is asserted there rather than
+    /// re-decided here.
+    ///
+    /// What is left is the profile root itself, which nothing binds. `$HOME` is
+    /// a tmpfs and `bwrap` creates the mount points it needs, so `~/.claude`
+    /// exists inside the session as an empty writable directory with the listed
+    /// entries mounted into it. That is the runtime overlay: a file Claude
+    /// invents there — a log, a directory a later release adds — is writable,
+    /// is private to the session, and is gone when the session ends. Nothing
+    /// unlisted reaches the real profile, and nothing unlisted fails to write.
     pub fn apply_sandbox(&self, spec: &mut SandboxSpec) {
         let home = spec.home.clone();
         let join = |rel: &str| -> PathBuf { home.join(rel) };
@@ -346,6 +379,21 @@ impl Adapter {
             let p = join(rel);
             if !spec.ro.contains(&p) {
                 spec.ro.push(p);
+            }
+        }
+        if let Some(profile) = self.profile() {
+            let (ro, rw) = profile.mounts();
+            for rel in &ro {
+                let p = join(rel);
+                if !spec.ro.contains(&p) {
+                    spec.ro.push(p);
+                }
+            }
+            for rel in &rw {
+                let p = join(rel);
+                if !spec.rw.contains(&p) {
+                    spec.rw.push(p);
+                }
             }
         }
         for rel in CREDENTIAL_MASKS {
@@ -557,11 +605,61 @@ mod tests {
     }
 
     #[test]
-    fn an_adapter_gets_its_own_config_writable() {
+    fn the_reusable_half_of_a_profile_is_read_only_and_the_session_half_is_not() {
+        // P0-010 criteria 1 and 2. Both come from the one profile table, so a
+        // path cannot be exportable here and rewritable there.
         let mut s = spec();
         by_id("claude").unwrap().apply_sandbox(&mut s);
-        assert!(s.rw.contains(&PathBuf::from("/home/tester/.claude")));
-        assert!(s.rw.contains(&PathBuf::from("/home/tester/.claude.json")));
+        for rel in [
+            ".claude/CLAUDE.md",
+            ".claude/settings.json",
+            ".claude/skills",
+            ".claude/commands",
+            ".claude/agents",
+            ".claude/plugins/known_marketplaces.json",
+        ] {
+            let p = PathBuf::from(format!("/home/tester/{rel}"));
+            assert!(s.ro.contains(&p), "{rel} is not read-only");
+            assert!(!s.rw.contains(&p), "{rel} is writable");
+        }
+        for rel in [
+            ".claude/projects",
+            ".claude/shell-snapshots",
+            ".claude/todos",
+            ".claude/plugins/cache",
+            ".claude/plugins/data",
+            ".claude/plugins/installed_plugins.json",
+            ".claude.json",
+        ] {
+            let p = PathBuf::from(format!("/home/tester/{rel}"));
+            assert!(s.rw.contains(&p), "{rel} is not writable");
+            assert!(!s.ro.contains(&p), "{rel} is read-only");
+        }
+    }
+
+    #[test]
+    fn the_profile_directory_itself_is_never_bound() {
+        // What makes the rest of it a runtime overlay: $HOME is a tmpfs and
+        // bwrap creates the mount points, so ~/.claude is an empty writable
+        // directory with the listed entries mounted into it. Anything Claude
+        // invents there is writable, private to the session and gone with it.
+        // Binding the directory would put all of that on the real profile.
+        let mut s = spec();
+        by_id("claude").unwrap().apply_sandbox(&mut s);
+        let root = PathBuf::from("/home/tester/.claude");
+        assert!(!s.rw.contains(&root), "the whole profile is writable");
+        assert!(!s.ro.contains(&root), "the whole profile is bound");
+    }
+
+    #[test]
+    fn an_adapter_without_a_profile_keeps_its_directory() {
+        // codex and gemini have not been read off a real installation, and
+        // guessing which half of ~/.codex is a session store would produce
+        // exactly the failure P0-010 exists to avoid.
+        let mut s = spec();
+        by_id("codex").unwrap().apply_sandbox(&mut s);
+        assert!(by_id("codex").unwrap().profile().is_none());
+        assert!(s.rw.contains(&PathBuf::from("/home/tester/.codex")));
     }
 
     #[test]
