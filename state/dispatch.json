@@ -1,22 +1,7 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T00:35+08:00",
+  "updated": "2026-09-07T00:41+08:00",
   "agents": [
-    {
-      "slug": "p1-045",
-      "items": [
-        "P1-045",
-        "P1-046",
-        "P1-047"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-045",
-      "branch": "task/p1-045-updates-trust",
-      "agent_id": "a8f13ad4ee7b9ad44",
-      "dispatched": "2026-09-06T23:33+08:00",
-      "title": "persistent-state migration, update channels, apex status trust",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
-    },
     {
       "slug": "integrate-2",
       "items": [
@@ -70,6 +55,35 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T00:12+08:00",
       "title": "printing/scanning/shares, networking, Bluetooth/dock maturity"
+    },
+    {
+      "slug": "p1-018",
+      "items": [
+        "P1-018",
+        "P1-019"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p1-018",
+      "branch": "task/p1-018-mcp-auth",
+      "agent_id": "a08a2896d0abc3e49",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T00:45+08:00",
+      "title": "MCP auth helper and per-MCP sidecar sandboxing"
+    },
+    {
+      "slug": "p1-020",
+      "items": [
+        "P1-020",
+        "P1-021",
+        "P1-022"
+      ],
+      "repo": "apex-shell",
+      "worktree": "/var/tmp/apex-work/wt-p1-020",
+      "branch": "task/p1-020-agent-graph",
+      "agent_id": "abf06a9f97738441c",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T00:45+08:00",
+      "title": "agent/subagent graph, statusline telemetry, notification bridge and dedup"
     }
   ]
 }

@@ -1658,7 +1658,7 @@ tasks:
 - id: P1-045
   title: Persistent-state migration framework
   priority: P1
-  status: todo
+  status: done
   area: updates
   depends_on: []
   acceptance:
@@ -1666,10 +1666,12 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-046
   title: Update channels and staged rollout
   priority: P1
-  status: todo
+  status: partial
   area: updates
   depends_on: []
   acceptance:
@@ -1678,10 +1680,12 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-047
   title: SBOM/provenance/trust status
   priority: P1
-  status: partial
+  status: done
   area: supply-chain
   depends_on: []
   acceptance:
@@ -1691,15 +1695,7 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Half landed on roadmap/v2.2. Signing already existed, cosign keyless on core, base and the image; what was
-    missing was any description of what is inside them. syft now generates an SPDX document from the pushed digest
-    read back out of the registry, and cosign attest signs it under the same keyless identity, so one verify-
-    attestation answers both who built it and what is in it. Deliberately not cosign attach sbom, which is
-    deprecated upstream and unsigned. Attached to the apex image alone, since core and base are build tiers nobody
-    boots and their contents are a strict subset. Two assertions guard it, the SBOM must list more than a hundred
-    packages because one describing nothing answers a CVE question with silence while looking authoritative, and
-    the job verifies its own signature and attestation against the workflow identity before promoting any tag.
-    Outstanding, apex status does not surface trust, which is the second criterion.
+    --evidence
 - id: P1-048
   title: Redesign Blueprint into a simple guided experience
   priority: P1

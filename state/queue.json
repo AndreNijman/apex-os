@@ -15,6 +15,19 @@
       "note": "One commit, two files (tests/run-clippy.sh, .gitignore). Should apply cleanly onto roadmap/v2.2 at any time. Neither machine has clippy or rustup, so cargo clippy exits 'no such command'; this runs it in docker.io/library/rust:1 against any ref. Mutation-proved: a &Vec<String> parameter fails it with clippy::ptr_arg at exit 101 and passes RUSTFLAGS=-D warnings cargo build at exit 0, which is exactly the gap that let three reports claim a check nobody ran."
     },
     {
+      "id": "trust-enforcement",
+      "repo": "apex-os",
+      "items": [
+        "(new, from P1-047)"
+      ],
+      "title": "Make an APEX machine actually verify the signature it already has",
+      "after": [
+        "integrate-2"
+      ],
+      "conflicts": [],
+      "note": "P1-047 measured this rather than suspecting it. /etc/containers/policy.json on both machines is byte-identical to the image's /usr/etc copy and holds one insecureAcceptAnything, and the booted deployment records the consequence in its own origin: container-image-reference=ostree-unverified-registry:. Every image is cosign-signed and self-verified in CI and none of that reaches a machine. The .sig tag is present for the digest both machines run and names build-image.yml@refs/heads/main; the .att tag is not, because the SBOM work has only ever been built on roadmap/v2.2. DANGEROUS TO GET WRONG: a policy that refuses the wrong thing leaves a machine unable to update, and on an atomic OS that is not a small mistake. Whoever takes this must prove the rollback path on katana BEFORE the L16 ever sees it, must keep a documented escape hatch, and must not enable enforcement in the same change that introduces the policy. cosign is not in the image; skopeo and openssl are."
+    },
+    {
       "id": "integrate-cloudflare",
       "repo": "apex-os",
       "items": [
