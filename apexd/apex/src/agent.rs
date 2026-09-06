@@ -82,6 +82,23 @@ pub enum AgentCmd {
     Status { id: Option<u32> },
     /// Show or set the agent that `a` and an unqualified run use.
     Default { agent: Option<String> },
+    /// Show or change where an `--network allowlist` session may connect.
+    ///
+    /// A destination is a host, or a host and a port: `api.example.com`,
+    /// `*.example.com`, `git.example.com:22`. A rule with no port means 443.
+    /// With no argument this prints the list.
+    ///
+    /// The list is the runtime's, not a session's — an agent that could name
+    /// its own destinations would be writing its own allowlist. A change
+    /// applies to sessions started after it; one already running keeps the
+    /// list it was started with.
+    Allow {
+        /// The destination to add. Omit to list what is allowed.
+        destination: Option<String>,
+        /// Remove it instead of adding it.
+        #[arg(long)]
+        remove: bool,
+    },
     /// List the agents this runtime can launch.
     Adapters,
     /// What an agent changed since its checkpoint.
@@ -432,6 +449,10 @@ pub fn agent(cmd: AgentCmd) -> i32 {
         AgentCmd::Logs { id, bytes } => logs(id, bytes),
         AgentCmd::Status { id } => status(id),
         AgentCmd::Default { agent } => default_agent(agent),
+        AgentCmd::Allow {
+            destination,
+            remove,
+        } => allow(destination, remove),
         AgentCmd::Adapters => adapters(),
         AgentCmd::Diff { id, stat } => diff(id, stat),
         AgentCmd::Undo {
@@ -541,7 +562,10 @@ pub fn resolve_policy(cfg: &config::Config, args: &RunArgs) -> Result<AgentPolic
 
     // Refuse anything this build cannot enforce, here as well as in the
     // daemon: the message is better in front of the user who typed the flag.
-    policy.validate()?;
+    // The allowlist goes in because `--network allowlist` with nothing on it
+    // is a refusal too, and the user who typed the flag is the one who can
+    // fix it.
+    policy.validate_for(&cfg.allowlist())?;
     Ok(policy.normalised())
 }
 
@@ -1003,6 +1027,61 @@ fn default_agent(agent: Option<String>) -> Result<i32> {
     cfg.default_agent = agent.clone();
     cfg.save()?;
     println!("default agent is now {agent}");
+    Ok(0)
+}
+
+/// `apex agent allow [DESTINATION] [--remove]`.
+///
+/// The rule is parsed before it is stored, so a line that would empty the
+/// whole allowlist on the next load is refused here, with the reason, rather
+/// than written and then silently dropped.
+fn allow(destination: Option<String>, remove: bool) -> Result<i32> {
+    use apex_agent_core::destination::Rule;
+
+    let (mut cfg, notes) = config::load_reporting();
+    for note in &notes {
+        eprintln!("apex: {note}");
+    }
+
+    let Some(destination) = destination else {
+        if cfg.network_allow.is_empty() {
+            println!(
+                "nothing is allowed, so `--network allowlist` has nothing to reach.\n\
+                 add a destination with `apex agent allow <host>`"
+            );
+            return Ok(0);
+        }
+        for line in cfg.allowlist().lines() {
+            println!("{line}");
+        }
+        return Ok(0);
+    };
+
+    // Normalised through the parser, so `API.Example.COM.` and
+    // `api.example.com` cannot both end up in the file as separate rules that
+    // mean one thing.
+    let rule = Rule::parse(&destination).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let line = rule.as_line();
+
+    if remove {
+        let before = cfg.network_allow.len();
+        cfg.network_allow
+            .retain(|d| Rule::parse(d).map(|r| r.as_line()) != Ok(line.clone()));
+        if cfg.network_allow.len() == before {
+            bail!("{line} is not on the allowlist");
+        }
+        cfg.save()?;
+        println!("{line} removed");
+        return Ok(0);
+    }
+
+    if cfg.allowlist().lines().contains(&line) {
+        println!("{line} is already allowed");
+        return Ok(0);
+    }
+    cfg.network_allow.push(line.clone());
+    cfg.save()?;
+    println!("{line} allowed for `--network allowlist` sessions started from now on");
     Ok(0)
 }
 
@@ -1834,11 +1913,7 @@ mod tests {
     #[test]
     fn an_unenforceable_dimension_is_refused_in_front_of_the_user_who_typed_it() {
         let cfg = config::Config::default();
-        let cases: [(RunArgs, &str); 4] = [
-            (
-                RunArgs { network: Some(NetworkPolicy::Allowlist), ..run_args() },
-                "not enforced by this build",
-            ),
+        let cases: [(RunArgs, &str); 3] = [
             (
                 RunArgs { system_access: Some(SystemAccess::Session), ..run_args() },
                 "apex request",
@@ -1859,6 +1934,44 @@ mod tests {
             let err = resolve_policy(&cfg, &args).expect_err(expect);
             assert!(err.to_string().contains(expect), "{err}");
         }
+    }
+
+    #[test]
+    fn an_allowlist_with_nothing_on_it_is_refused_where_it_can_still_be_fixed() {
+        // Fail-closed either way — an empty allowlist denies everything — but
+        // a session reporting `allowlist` while reaching nothing is an offline
+        // session nobody asked for, and the failure would otherwise arrive
+        // minutes later as a network error inside the agent.
+        let cfg = config::Config::default();
+        assert!(cfg.network_allow.is_empty());
+        let args = RunArgs {
+            network: Some(NetworkPolicy::Allowlist),
+            ..run_args()
+        };
+        let err = resolve_policy(&cfg, &args).expect_err("an empty allowlist");
+        assert!(err.to_string().contains("apex agent allow"), "{err}");
+
+        // With a destination configured it is a mode that runs.
+        let cfg = config::Config {
+            network_allow: vec!["api.anthropic.com".into()],
+            ..config::Config::default()
+        };
+        let p = resolve_policy(&cfg, &args).expect("resolve");
+        assert_eq!(p.network, NetworkPolicy::Allowlist);
+        assert_eq!(p.sandbox, SandboxPolicy::Project, "it still needs a namespace");
+    }
+
+    #[test]
+    fn a_destination_is_normalised_before_it_is_stored() {
+        // Otherwise `API.Example.COM.` and `api.example.com` become two rules
+        // in the file that mean one thing, and removing one leaves the other.
+        use apex_agent_core::destination::Rule;
+        assert_eq!(Rule::parse("API.Example.COM.").unwrap().as_line(), "api.example.com");
+        assert_eq!(Rule::parse("api.example.com:443").unwrap().as_line(), "api.example.com");
+        assert_eq!(Rule::parse("git.example.com:22").unwrap().as_line(), "git.example.com:22");
+        // And a rule that would empty the whole list on the next load is
+        // refused before it is written.
+        assert!(Rule::parse("*.com").is_err());
     }
 
     #[test]
