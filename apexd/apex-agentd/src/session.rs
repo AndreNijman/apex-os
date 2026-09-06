@@ -189,12 +189,12 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
     // and whose proxy did not start does not run with the host's network, and
     // does not run at all.
     if policy.effective_network() == NetworkPolicy::Allowlist {
+        let program = bridge_program()?;
         let socket = scratch.join("egress.sock");
         egress::start(id, &socket, allowlist.clone())
             .with_context(|| format!("starting the egress proxy for session {id}"))?;
         spec.egress = Some(EgressBridge {
-            program: std::env::current_exe()
-                .context("finding this runtime's own binary, which is the egress bridge")?,
+            program,
             socket,
             port: BRIDGE_PORT,
         });
@@ -308,6 +308,44 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
 /// sandbox decides separately whether those directories are actually visible.
 fn inherited_path() -> String {
     std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string())
+}
+
+/// This runtime's own binary, which is also the egress bridge.
+///
+/// Checked for existence rather than trusted, because `/proc/self/exe` answers
+/// with a path that ends in " (deleted)" once the file behind it is gone, and
+/// because a session's view of the filesystem is not the daemon's: `$HOME` and
+/// `/tmp` are masked inside the sandbox, so a development build living in
+/// either is a path the session cannot exec. Both cases would otherwise
+/// surface as a session that starts and dies with status 127.
+fn bridge_program() -> Result<PathBuf> {
+    let program = std::env::current_exe()
+        .context("finding this runtime's own binary, which is the egress bridge")?;
+    if !program.is_file() {
+        bail!(
+            "the egress bridge for an allowlisted session is this runtime's own binary, and \
+             {} is not there any more; restart the runtime, or use `--network offline`",
+            program.display()
+        );
+    }
+    // `/tmp` only. `/var/tmp` is covered by the read-only root like the rest of
+    // the filesystem, and a build there is reachable — which is what makes a
+    // live test of this mode possible at all.
+    if program.starts_with("/tmp") {
+        bail!(
+            "an allowlisted session cannot reach {}, because a confined session's /tmp is a \
+             fresh tmpfs; install the runtime, or use `--network offline`",
+            program.display()
+        );
+    }
+    if program.starts_with(paths::home()) {
+        bail!(
+            "an allowlisted session cannot reach {}, because a confined session's home is \
+             masked; install the runtime, or use `--network offline`",
+            program.display()
+        );
+    }
+    Ok(program)
 }
 
 /// Whether this runtime is running as root.
