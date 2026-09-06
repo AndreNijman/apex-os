@@ -987,6 +987,28 @@ jobs:
       - name: Run privilege-request assertions
         run: ./tests/test-privilege-requests.sh
 
+      # §7's other half, and the one the privilege suite deliberately does not
+      # touch: approving a request WITHOUT --no-run performs the operation and
+      # is gated on being root. That was argued from the code rather than run,
+      # on the grounds that testing it needs a real sudo prompt. It does not —
+      # `unshare -r` gives a process a real effective uid 0, established by the
+      # kernel and read the way ops::effective_uid reads it, and asks nobody
+      # for a password. Nothing in this suite can raise a prompt: no sudo, no
+      # pkexec, no pkcheck.
+      #
+      # The operation that then runs is contained by a mount namespace, with a
+      # stub bound over the absolute path `apex install` execs, so the real
+      # package engine is never reached. The two steps that genuinely need a
+      # person — sudo's own authentication, and capability over the real
+      # machine — are named at the end of the run with the commands to check
+      # them by hand.
+      #
+      # The apparmor knob two steps up is what makes `unshare -r` work on a
+      # 24.04 runner at all; without it this suite skips out loud rather than
+      # passing.
+      - name: Run root-approval assertions
+        run: ./tests/test-root-approval.sh
+
       # §5's two claims, neither of which the unit tests can reach: a portable
       # bundle carries no credential and no conversation, from a profile on a
       # real filesystem; and a confined session cannot rewrite the instructions
