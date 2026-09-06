@@ -57,7 +57,8 @@ RUN set -eux; cd /build/apexd; cargo build --release --locked; \
     install -Dm755 target/release/apexd       /out/usr/bin/apexd; \
     install -Dm755 target/release/apex        /out/usr/bin/apex; \
     install -Dm755 target/release/apex-agentd /out/usr/bin/apex-agentd; \
-    install -Dm755 target/release/apex-aid    /out/usr/bin/apex-aid
+    install -Dm755 target/release/apex-aid    /out/usr/bin/apex-aid; \
+    install -Dm755 target/release/apex-secretd /out/usr/bin/apex-secretd
 
 # ─────────────────────────────────────────────────────────────────────────
 FROM ${CORE}
@@ -135,6 +136,46 @@ RUN systemctl enable apexd.service
 # daemon holding PTYs should not start for people who never run an agent. The
 # CLI prints the enable command when the socket is absent.
 COPY files/system/units/apex-agentd.service /usr/lib/systemd/user/apex-agentd.service
+
+# ── protected secret service (apex-secretd, §11) ────────────────────────────
+# A SYSTEM unit, and the only agent-adjacent daemon that is one. The threat it
+# exists for is a managed agent running as the user, so the store must sit under
+# a uid no human user has — which a per-user daemon cannot give it. See the
+# unit's own header for the full argument.
+#
+# The account is created by sysusers.d at boot rather than here: /var is
+# machine-local and empty in the image, and a uid baked into the image would
+# collide with whatever a host already allocated.
+COPY files/system/units/apex-secretd.service /usr/lib/systemd/system/apex-secretd.service
+COPY files/system/sysusers/apex-secretd.conf /usr/lib/sysusers.d/apex-secretd.conf
+RUN set -eux; \
+    test -s /usr/lib/systemd/system/apex-secretd.service; \
+    grep -q '^ExecStart=/usr/bin/apex-secretd$' /usr/lib/systemd/system/apex-secretd.service; \
+    test -x /usr/bin/apex-secretd; \
+    # It runs as its own account, never as root. A unit that lost User= would
+    # put a daemon parsing JSON from every local uid into pid 1's privilege.
+    grep -q '^User=apex-secret$' /usr/lib/systemd/system/apex-secretd.service; \
+    grep -q '^Group=apex-secret$' /usr/lib/systemd/system/apex-secretd.service; \
+    grep -q '^u apex-secret ' /usr/lib/sysusers.d/apex-secretd.conf; \
+    # The store is systemd's to create, 0700, before ExecStart. Without these
+    # the daemon would fall back to creating it itself, which works, and would
+    # silently stop working the day ProtectSystem=strict is tightened further.
+    grep -q '^StateDirectory=apex-secretd$' /usr/lib/systemd/system/apex-secretd.service; \
+    grep -q '^StateDirectoryMode=0700$' /usr/lib/systemd/system/apex-secretd.service; \
+    # THE invariant of §11, asserted on the shipped unit. A credential store
+    # that can read $HOME is a credential store an agent's own files can
+    # influence, and ProtectHome=yes is what makes "outside agent-readable home
+    # paths" a property of the process rather than a claim about the path.
+    grep -q '^ProtectHome=yes$' /usr/lib/systemd/system/apex-secretd.service; \
+    grep -q '^NoNewPrivileges=yes$' /usr/lib/systemd/system/apex-secretd.service; \
+    grep -q '^CapabilityBoundingSet=$' /usr/lib/systemd/system/apex-secretd.service; \
+    # Like apex-aid and apex-agentd: no polkit action, no system-bus name, no
+    # setuid helper. AGENTS.md forbids all three for agent-adjacent daemons, and
+    # this one being a SYSTEM unit makes the check matter more, not less.
+    test ! -e /usr/share/polkit-1/actions/org.apexos.apex-secretd.policy; \
+    test ! -e /usr/share/dbus-1/system.d/org.apexos.ApexSecretd1.conf; \
+    echo "apex-secretd: system unit present, unprivileged account, home protected"
+RUN systemctl enable apex-secretd.service
 
 # ── local inference service (apex-aid, §14) ─────────────────────────────────
 # A USER unit, and — exactly like apex-agentd — deliberately NOT
@@ -236,6 +277,11 @@ RUN set -eux; \
     # Opt-in by design: a per-user daemon holding PTYs must not be enabled for
     # users who never run an agent. Assert it is NOT wired into any target.
     test ! -e /usr/lib/systemd/user/default.target.wants/apex-agentd.service; \
+    # The secret service is the exception and is enabled: it holds nothing
+    # until a credential is stored, and it must be listening before the first
+    # one can be. A service you have to start before you can store anything is
+    # a service people work around.
+    test -L /etc/systemd/system/multi-user.target.wants/apex-secretd.service; \
     echo "agent sandbox: bwrap functional; agentd unit present and opt-in"
 
 # Default browser (system-wide XDG): Firefox is the only baked browser, but set

@@ -891,6 +891,17 @@ jobs:
           APEX_REQUIRE_SANDBOX: "1"
         run: ./tests/test-secret-broker.sh
 
+      # The protected secret service (§11, P0-002). The daemon's own behaviour
+      # is covered by the Rust suite, which drives the real binary over real
+      # sockets; what that CANNOT see is the SHIPPED unit. `paths.rs` hard-codes
+      # /var/lib/apex-secretd and /run/apex-secretd, systemd creates both from
+      # StateDirectory= and RuntimeDirectory=, and renaming one alone compiles
+      # and passes every Rust test. This asserts the two still agree, and that
+      # the properties AGENTS.md records — an unprivileged account, no
+      # capabilities, ProtectHome=yes — are in the file that actually ships.
+      - name: Run secret-service packaging assertions
+        run: ./tests/test-secret-service.sh
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail

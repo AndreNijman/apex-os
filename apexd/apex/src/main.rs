@@ -8,6 +8,7 @@ mod agent;
 mod ai;
 mod blueprint;
 mod boot;
+mod capability;
 mod dispatch;
 mod disposable;
 mod gaming;
@@ -360,6 +361,19 @@ enum Cmd {
         #[command(subcommand)]
         cmd: request::RequestCmd,
     },
+    /// The protected secret service: capabilities an agent may use, never
+    /// credentials it may hold.
+    ///
+    /// `apex-secretd` keeps credentials under its own system account, outside
+    /// every path a managed agent can read, and performs provider operations on
+    /// request. No verb returns a value; `store`, `grant`, `rotate` and
+    /// `remove` are owner decisions and need sudo, because an agent runs under
+    /// your uid and a permission it could give itself is not a permission.
+    Capability {
+        #[command(subcommand)]
+        cmd: capability::CapabilityCmd,
+    },
+
     /// The secret broker: let an agent USE a credential without holding it.
     ///
     /// The broker performs the operation and returns the result; the token
@@ -1012,6 +1026,7 @@ async fn main() {
         // connects to the system bus, for the reason `apex ai` is.
         Cmd::Task(args) => task::run(args),
         Cmd::Request { cmd } => request::main(cmd),
+        Cmd::Capability { cmd } => capability::main(cmd),
         Cmd::Secret { cmd } => secret::main(cmd),
         // Read-only, so no root gate: seeing what the machine should be must
         // not require privilege. `apex apply` is the verb that changes things,

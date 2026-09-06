@@ -67,6 +67,15 @@ Documentation and comments must state measured facts and current behavior. Rejec
 - Checkpoints must not disturb the user's git state. Capture goes through a temporary index (`GIT_INDEX_FILE`) so the index, stash and branch are untouched; checkpoint refs live under `refs/apex/`, never `refs/heads/`. Restore takes a safety checkpoint first. Ignored files stay out of checkpoints, and package changes are reported rather than silently removed.
 - The control protocol is a compatibility surface: the CLI and APEX Shell both parse `SessionInfo`. Treat field renames, removals and semantic changes the way `org.apexos.Apexd1` changes are treated, and bump `PROTOCOL_VERSION` when a change is not backward compatible. Serialised requests and responses must never contain a raw newline, because the framing is line-based.
 
+## Secret service rules
+
+- `apex-secretd` is a system daemon under its own account and must stay one. `apex-agentd` cannot hold credentials because it runs as the user and so does the agent it starts; protecting the store from a managed agent needs a uid no human user has. Never move the store into a home path, never run the unit as root, and never give the daemon a polkit action, a system-bus name or a setuid helper.
+- No response the service can produce may carry a credential. `SecretValue` implements no `Serialize`, `Display`, `Deref` or `AsRef<str>`, and `protocol::payload_kind` classifies every response variant exhaustively — there is no kind meaning "a credential". Adding a response that could hold one has to break both, which is a diff nobody merges by accident. `apexd/apex-secretd/tests/wire.rs` drives every verb against the real binary and greps the raw bytes; keep it exhaustive when a verb is added.
+- Mutation lives on the `0600` admin socket and nowhere else. A managed agent runs under the owner's uid, so a grant it could make over the broker socket is a grant it could make for itself. `store`, `rotate`, `grant`, `revoke` and `remove` need root; using a capability does not.
+- The operation vocabulary is closed. A caller names a stored credential and an operation id, both looked up in tables, plus a `resource` validated against that operation's shape. Never add an operation that takes a URL, a path, a header or a method from the caller, and never return a provider's response body — only the allow-listed scalar fields, scrubbed.
+- `project`, `agent_session` and `request_origin` are claims and are wrapped in `Claimed<T>`. The service runs under a different uid and can verify none of them. They belong in the audit record and must never become an input to a policy decision; per-project narrowing is `apex-agentd`'s job, one layer up.
+- Sealing must never silently degrade. If a credential is asked to be TPM-sealed and cannot be, the store refuses — it does not write the value plain. And nothing in this service may raise an interactive authentication: an agent calls it, and a prompt nobody is watching is a hang.
+
 ## Editing a live machine's configuration
 
 These rules exist because breaking them destroyed the developer's desktop. A
