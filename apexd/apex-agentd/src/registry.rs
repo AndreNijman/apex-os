@@ -195,8 +195,16 @@ impl Session {
             HookEvent::SubagentStop => {
                 graph::subagent_stopped(&mut self.info.children, agent_id, agent_type, at)
             }
-            HookEvent::Stop | HookEvent::SessionEnd => {
+            // Two sweeps, two words, because they are two different facts.
+            // The turn ending is provisional — a subagent can outlive it, and
+            // `subagent_stopped` will overwrite the entry if the real report
+            // turns up. The session ending is not: the agent is on its way
+            // out, and nothing it delegated survives the process.
+            HookEvent::Stop => {
                 graph::close_open(&mut self.info.children, graph::ChildEnd::ParentStop, at);
+            }
+            HookEvent::SessionEnd => {
+                graph::close_open(&mut self.info.children, graph::ChildEnd::ParentExit, at);
             }
             _ => {}
         }
