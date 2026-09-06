@@ -304,6 +304,9 @@ fn dispatch(
             host,
             scheme,
             username,
+            path,
+            auth,
+            port,
             value_len,
         } => {
             // The bytes are read whatever the decision, or the next request
@@ -321,6 +324,9 @@ fn dispatch(
                 &host,
                 &scheme,
                 username.as_deref(),
+                &path,
+                auth.as_deref(),
+                port,
                 value,
             )
         }
@@ -343,7 +349,15 @@ fn dispatch(
         }
 
         // The broker. Sessions are exactly who this is for.
-        Request::Use { record } => service.use_capability(peer, *record),
+        Request::Use { record, body_len } => {
+            // Read whatever was promised before deciding anything, or the next
+            // request line would be parsed out of the middle of this message.
+            let body = match read_body(reader, body_len, stream, VALUE_TIMEOUT) {
+                Ok(b) => b,
+                Err(message) => return Response::error(ErrorKind::BadRequest, message),
+            };
+            service.use_capability(peer, *record, body)
+        }
     }
 }
 
@@ -410,6 +424,40 @@ fn read_value(
     read.map_err(|e| format!("the credential did not arrive: {e}"))?;
     Ok(SecretValue::new(buf))
 }
+
+/// Read exactly `len` bytes of message from the socket.
+///
+/// The same framing as [`read_value`] and bounded by the same reasoning, with
+/// one difference: a message body is not a credential, so it is a plain `Vec`
+/// and a length of zero is legitimate — every git capability sends none.
+fn read_body(
+    reader: &mut BufReader<UnixStream>,
+    len: usize,
+    stream: &UnixStream,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, String> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if len > MAX_BODY_BYTES {
+        return Err(format!(
+            "that message is {len} bytes; the limit is {MAX_BODY_BYTES}"
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    stream.set_read_timeout(Some(timeout)).ok();
+    let read = reader.read_exact(&mut buf);
+    stream.set_read_timeout(None).ok();
+    read.map_err(|e| format!("the message did not arrive: {e}"))?;
+    Ok(buf)
+}
+
+/// Longest message body a capability may carry.
+///
+/// An MCP `write_note` of a long document is the case this has to fit; a
+/// caller that could name any length at all is a way to make the daemon
+/// allocate.
+const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 #[cfg(test)]
 mod tests {

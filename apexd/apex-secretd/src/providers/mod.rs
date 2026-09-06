@@ -18,6 +18,7 @@ use crate::provider::Registry;
 #[cfg(test)]
 pub mod bearer;
 pub mod git;
+pub mod mcp;
 
 /// Every provider, registered.
 ///
@@ -28,6 +29,7 @@ pub mod git;
 pub fn default_registry() -> Result<Registry, String> {
     let mut registry = Registry::new();
     registry.register(Box::new(git::GitProvider))?;
+    registry.register(Box::new(mcp::McpProvider::new()))?;
     Ok(registry)
 }
 
@@ -36,11 +38,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_shipped_registry_builds_and_offers_the_git_vocabulary() {
+    fn the_shipped_registry_builds_and_offers_every_provider_s_vocabulary() {
         let registry = default_registry().expect("every shipped provider must declare validly");
         assert_eq!(
             registry.operation_ids(),
-            vec!["git.fetch", "git.ls-remote", "git.push"]
+            vec!["git.fetch", "git.ls-remote", "git.push", "mcp.request"]
         );
+    }
+
+    #[test]
+    fn p0_002_and_p0_003_spellings_still_resolve() {
+        // Grants written before P1-001 say `git-push` and `mcp-request`. The
+        // registry canonicalises them, so an owner does not have to re-grant
+        // anything to keep a machine working across the upgrade.
+        let registry = default_registry().expect("registry");
+        for (old, new) in [
+            ("git-push", "git.push"),
+            ("git-fetch", "git.fetch"),
+            ("git-ls-remote", "git.ls-remote"),
+            ("mcp-request", "mcp.request"),
+        ] {
+            let (_, op) = registry.lookup(old).unwrap_or_else(|e| panic!("{old}: {e}"));
+            assert_eq!(op.id, new);
+        }
     }
 }

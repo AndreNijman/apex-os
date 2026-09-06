@@ -18,7 +18,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::paths;
-use crate::protocol::{ErrorKind, Request, Response, MAX_LINE_BYTES};
+use crate::protocol::{ErrorKind, Request, Response, MAX_RESPONSE_BYTES};
 use crate::value::SecretValue;
 
 /// How long to wait for the daemon to answer.
@@ -88,12 +88,16 @@ impl Client {
     ///
     /// Two writes: the request line, then exactly `value.len()` raw bytes. The
     /// value is never part of the JSON — see [`crate::protocol`].
+    #[allow(clippy::too_many_arguments)]
     pub fn add(
         &mut self,
         service: &str,
         host: &str,
         scheme: &str,
         username: Option<&str>,
+        path: &str,
+        auth: &str,
+        port: Option<u16>,
         value: &SecretValue,
     ) -> Result<Response> {
         if value.is_empty() {
@@ -111,6 +115,9 @@ impl Client {
             host: host.to_string(),
             scheme: scheme.to_string(),
             username: username.map(str::to_string),
+            path: path.to_string(),
+            auth: Some(auth.to_string()),
+            port,
             value_len: value.len(),
         })?;
         self.stream
@@ -122,6 +129,29 @@ impl Client {
             bail!("{message}");
         }
         Ok(resp)
+    }
+
+    /// Perform a capability that carries a message body.
+    ///
+    /// Two writes, like [`Client::add`]: the request line, then exactly
+    /// `body.len()` raw bytes. Used by `mcp-request`, whose body is the caller's
+    /// own JSON-RPC message and can be larger than a request line may be.
+    pub fn use_with_body(
+        &mut self,
+        record: crate::capability::CapabilityRecord,
+        body: &[u8],
+    ) -> Result<Response> {
+        self.send(&Request::Use {
+            record: Box::new(record),
+            body_len: body.len(),
+        })?;
+        if !body.is_empty() {
+            self.stream
+                .write_all(body)
+                .context("sending to the secret service")?;
+        }
+        self.stream.flush().ok();
+        self.read_response()
     }
 
     fn send(&mut self, req: &Request) -> Result<()> {
@@ -137,7 +167,7 @@ impl Client {
     fn read_response(&mut self) -> Result<Response> {
         let mut buf = String::new();
         let n = (&mut self.reader)
-            .take(MAX_LINE_BYTES as u64)
+            .take(MAX_RESPONSE_BYTES as u64)
             .read_line(&mut buf)
             .context("reading from the secret service")?;
         if n == 0 {
@@ -192,7 +222,7 @@ mod tests {
             stream: a,
         };
         let err = client
-            .add("demo", "github.com", "https", None, &SecretValue::new(Vec::new()))
+            .add("demo", "github.com", "https", None, "", "bearer", None, &SecretValue::new(Vec::new()))
             .unwrap_err();
         assert!(err.to_string().contains("empty"), "{err}");
     }

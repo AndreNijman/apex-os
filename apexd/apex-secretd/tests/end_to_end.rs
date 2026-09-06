@@ -282,6 +282,9 @@ fn arrange(daemon: &Daemon, host: &str, project: &Path, capability: &str) {
             host,
             "http",
             Some("x-access-token"),
+            "",
+            "bearer",
+            None,
             &SecretValue::new(SENTINEL.into()),
         )
         .expect("add");
@@ -310,6 +313,7 @@ fn a_credential_backed_operation_runs_and_the_credential_never_comes_back() {
     let reply = daemon
         .client()
         .request(&Request::Use {
+            body_len: 0,
             record: Box::new(record("demo", "git.ls-remote", "origin", &repo)),
         })
         .expect("use");
@@ -375,6 +379,7 @@ fn a_fetch_is_brokered_the_same_way_a_read_only_capability_is() {
     let reply = daemon
         .client()
         .request(&Request::Use {
+            body_len: 0,
             record: Box::new(record("demo", "git.fetch", "origin", &repo)),
         })
         .expect("use");
@@ -407,15 +412,19 @@ fn nothing_the_socket_can_answer_contains_the_credential() {
         Request::Audit { lines: 100 },
         // A use that succeeds, and three that are refused at different steps.
         Request::Use {
+            body_len: 0,
             record: Box::new(record("demo", "git.ls-remote", "origin", &repo)),
         },
         Request::Use {
+            body_len: 0,
             record: Box::new(record("demo", "git.push", "origin", &repo)),
         },
         Request::Use {
+            body_len: 0,
             record: Box::new(record("demo", "git.ls-remote", "elsewhere", &repo)),
         },
         Request::Use {
+            body_len: 0,
             record: Box::new(record("nosuch", "git.ls-remote", "origin", &repo)),
         },
         Request::Grant {
@@ -461,6 +470,7 @@ fn the_store_is_the_only_place_the_credential_exists() {
     daemon
         .client()
         .request(&Request::Use {
+            body_len: 0,
             record: Box::new(record("demo", "git.ls-remote", "origin", &repo)),
         })
         .expect("use");
@@ -523,6 +533,7 @@ fn a_grant_written_under_the_old_spelling_still_matches() {
         let reply = daemon
             .client()
             .request(&Request::Use {
+                body_len: 0,
                 record: Box::new(record("demo", spelling, "origin", &repo)),
             })
             .expect("use");
@@ -551,6 +562,7 @@ fn a_remote_pointing_elsewhere_is_refused_before_anything_is_contacted() {
         let reply = daemon
             .client()
             .request(&Request::Use {
+                body_len: 0,
                 record: Box::new(record("demo", "git.ls-remote", remote, &repo)),
             })
             .expect("use");
@@ -577,6 +589,7 @@ fn a_capability_that_was_not_granted_is_refused_and_recorded() {
     let reply = daemon
         .client()
         .request(&Request::Use {
+            body_len: 0,
             record: Box::new(record("demo", "git.push", "origin", &repo)),
         })
         .expect("use");
@@ -685,4 +698,311 @@ fn http_get(url: &str, authorization: Option<&str>) -> String {
     let mut out = Vec::new();
     stream.read_to_end(&mut out).expect("read");
     String::from_utf8_lossy(&out).into_owned()
+}
+
+// ── the MCP half (P0-003) ───────────────────────────────────────────────────
+//
+// The same shape as the git half and for the same reason: a loopback server
+// that refuses without an `Authorization` header, so "the credential reached
+// the provider" is something the test observes rather than infers. What differs
+// is that the destination is not resolved from a repository — it is the stored
+// record itself, because `mcp-request` has no arguments a caller could put a
+// URL in.
+
+/// An MCP server that demands a bearer token.
+///
+/// Answers `401` without one and a JSON-RPC result with one, recording every
+/// `Authorization` header and every body it was posted.
+struct FakeMcp {
+    port: u16,
+    seen: Arc<Mutex<Vec<String>>>,
+    bodies: Arc<Mutex<Vec<String>>>,
+    /// Whether to answer in `text/event-stream` framing rather than plain JSON.
+    /// Both are legal for the same server on the same endpoint.
+    sse: bool,
+}
+
+impl FakeMcp {
+    fn start(sse: bool) -> FakeMcp {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let (h, b) = (Arc::clone(&seen), Arc::clone(&bodies));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let (h, b) = (Arc::clone(&h), Arc::clone(&b));
+                std::thread::spawn(move || serve_mcp(stream, &h, &b, sse));
+            }
+        });
+        FakeMcp {
+            port,
+            seen,
+            bodies,
+            sse,
+        }
+    }
+
+    fn authorizations(&self) -> Vec<String> {
+        self.seen.lock().expect("lock").clone()
+    }
+
+    fn bodies(&self) -> Vec<String> {
+        self.bodies.lock().expect("lock").clone()
+    }
+}
+
+fn serve_mcp(
+    mut stream: TcpStream,
+    header_log: &Arc<Mutex<Vec<String>>>,
+    body_log: &Arc<Mutex<Vec<String>>>,
+    sse: bool,
+) {
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+    let mut first = String::new();
+    if reader.read_line(&mut first).is_err() {
+        return;
+    }
+    let mut authorization = None;
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => return,
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            break;
+        }
+        let Some((name, value)) = trimmed.split_once(": ") else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("authorization") {
+            authorization = Some(value.to_string());
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            length = value.parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0u8; length];
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    body_log
+        .lock()
+        .expect("lock")
+        .push(String::from_utf8_lossy(&body).into_owned());
+
+    let Some(authorization) = authorization else {
+        let _ = stream.write_all(
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        return;
+    };
+    header_log.lock().expect("lock").push(authorization);
+
+    let payload = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":["read_note"]}}"#;
+    let (content_type, framed) = if sse {
+        (
+            "text/event-stream",
+            format!("event: message\ndata: {payload}\n\n"),
+        )
+    } else {
+        ("application/json", payload.to_string())
+    };
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
+         Mcp-Session-Id: apex-test-session-1\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
+        framed.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(framed.as_bytes());
+}
+
+/// Store the sentinel as an MCP credential and grant `mcp-request`.
+fn arrange_mcp(daemon: &Daemon, port: u16, project: &Path) {
+    let mut client = daemon.client();
+    client
+        .add(
+            "memory",
+            "127.0.0.1",
+            "http",
+            Some("x-access-token"),
+            "/mcp",
+            "bearer",
+            Some(port),
+            &SecretValue::new(SENTINEL.into()),
+        )
+        .expect("add");
+    client
+        .call(&Request::Grant {
+            project: project.to_string_lossy().into_owned(),
+            service: "memory".into(),
+            capability: "mcp-request".into(),
+            revoke: false,
+        })
+        .expect("grant");
+}
+
+#[test]
+fn an_mcp_message_is_carried_with_the_credential_and_the_credential_stays_here() {
+    // P0-003's second and fourth criteria, in one run: the bearer token reaches
+    // the MCP server and reaches nothing else.
+    let provider = FakeMcp::start(false);
+    let daemon = Daemon::start("mcp");
+    let project = daemon.dir.join("proj");
+    std::fs::create_dir_all(&project).expect("project dir");
+    arrange_mcp(&daemon, provider.port, &project);
+
+    let message = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    let mut rec = CapabilityRecord::new("memory", "mcp.request", "");
+    rec.project = Some(project.to_string_lossy().into_owned());
+    let reply = daemon
+        .client()
+        .use_with_body(rec, message)
+        .expect("use mcp-request");
+
+    let (endpoint, exit_code, output) = match &reply {
+        Response::Performed {
+            endpoint,
+            exit_code,
+            output,
+            ..
+        } => (endpoint.clone(), *exit_code, output.clone()),
+        other => panic!("expected a performed reply, got {other:?}"),
+    };
+    assert_eq!(exit_code, 0, "{output}");
+    assert_eq!(endpoint, format!("http://127.0.0.1"), "{endpoint}");
+
+    // The server received the credential, as a bearer header the daemon built.
+    assert_eq!(
+        provider.authorizations(),
+        vec![format!("Bearer {SENTINEL}")],
+        "the credential did not reach the provider"
+    );
+    // ...and the message the caller wrote, unaltered.
+    assert_eq!(
+        provider.bodies(),
+        vec![String::from_utf8_lossy(message).into_owned()]
+    );
+    // ...and the reply carries the server's answer and no credential.
+    assert!(output.contains("read_note"), "{output}");
+    assert!(!output.contains(SENTINEL), "{output}");
+    let serialised = serde_json::to_string(&reply).expect("serialise");
+    assert!(!serialised.contains(SENTINEL), "the reply carried it");
+
+    // Nor does the trail.
+    let trail = std::fs::read_to_string(daemon.store.join("audit.jsonl")).unwrap_or_default();
+    assert!(!trail.is_empty(), "nothing was audited");
+    assert!(trail.contains("mcp.request"), "{trail}");
+    assert!(!trail.contains(SENTINEL), "the audit trail carried it");
+}
+
+#[test]
+fn an_event_stream_answer_is_carried_back_as_its_message() {
+    // The same endpoint may answer either way, per request. A bridge that only
+    // understood one shape would work until the day the server changed.
+    let provider = FakeMcp::start(true);
+    let daemon = Daemon::start("mcp-sse");
+    let project = daemon.dir.join("proj");
+    std::fs::create_dir_all(&project).expect("project dir");
+    arrange_mcp(&daemon, provider.port, &project);
+
+    let mut rec = CapabilityRecord::new("memory", "mcp.request", "");
+    rec.project = Some(project.to_string_lossy().into_owned());
+    let reply = daemon
+        .client()
+        .use_with_body(rec, br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+        .expect("use mcp-request");
+    let output = match &reply {
+        Response::Performed { output, .. } => output.clone(),
+        other => panic!("expected a performed reply, got {other:?}"),
+    };
+    assert!(provider.sse);
+    assert!(output.contains("data:"), "{output}");
+    assert!(!output.contains(SENTINEL), "{output}");
+}
+
+#[test]
+fn an_mcp_request_without_a_grant_never_reaches_the_provider() {
+    // The grant is what stands between a session and a credential, and a
+    // refusal that still made the request would be a refusal in name only.
+    let provider = FakeMcp::start(false);
+    let daemon = Daemon::start("mcp-nogrant");
+    let project = daemon.dir.join("proj");
+    std::fs::create_dir_all(&project).expect("project dir");
+
+    let mut client = daemon.client();
+    client
+        .add(
+            "memory",
+            "127.0.0.1",
+            "http",
+            Some("x-access-token"),
+            "/mcp",
+            "bearer",
+            Some(provider.port),
+            &SecretValue::new(SENTINEL.into()),
+        )
+        .expect("add");
+
+    let mut rec = CapabilityRecord::new("memory", "mcp.request", "");
+    rec.project = Some(project.to_string_lossy().into_owned());
+    let reply = daemon
+        .client()
+        .use_with_body(rec, br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+        .expect("a reply, refused");
+    assert!(
+        reply.as_error().is_some_and(|(_, m)| m.contains("not granted")),
+        "{reply:?}"
+    );
+    assert!(
+        provider.authorizations().is_empty(),
+        "the provider was contacted anyway"
+    );
+}
+
+#[test]
+fn a_credential_stored_without_an_endpoint_cannot_carry_a_message() {
+    // The git credentials already on an upgraded machine have no path, and a
+    // service that guessed one would be a service that picked a destination.
+    let daemon = Daemon::start("mcp-nopath");
+    let project = daemon.dir.join("proj");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let mut client = daemon.client();
+    client
+        .add(
+            "gh",
+            "127.0.0.1",
+            "http",
+            Some("x-access-token"),
+            "",
+            "bearer",
+            None,
+            &SecretValue::new(SENTINEL.into()),
+        )
+        .expect("add");
+    client
+        .call(&Request::Grant {
+            project: project.to_string_lossy().into_owned(),
+            service: "gh".into(),
+            capability: "mcp-request".into(),
+            revoke: false,
+        })
+        .expect("grant");
+
+    let mut rec = CapabilityRecord::new("gh", "mcp.request", "");
+    rec.project = Some(project.to_string_lossy().into_owned());
+    let reply = daemon
+        .client()
+        .use_with_body(rec, br#"{"id":1}"#)
+        .expect("a reply, refused");
+    assert!(
+        reply.as_error().is_some_and(|(_, m)| m.contains("--path")),
+        "{reply:?}"
+    );
 }

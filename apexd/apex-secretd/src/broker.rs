@@ -54,6 +54,7 @@
 //! contact another. `--push` for a write, because `pushurl` and `pushInsteadOf`
 //! can send a push somewhere the fetch URL never mentions.
 
+use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -269,6 +270,43 @@ fn hardening_flags() -> Vec<String> {
 const CREDENTIAL_HELPER: &str =
     "!f() { echo \"username=$APEX_GIT_USER\"; echo \"password=$APEX_GIT_TOKEN\"; }; f";
 
+/// Make `cmd` exec as `owner` rather than as this process.
+///
+/// The daemon is root because the store must be. The child must not be: git
+/// runs a caller-controlled repository's own configuration, and curl writes to
+/// a caller-named path — either as root is a local escalation handed to whoever
+/// can write a `.git/config`. So the drop happens between fork and exec, and is
+/// then verified, because a drop that reported success without happening is the
+/// one failure this whole arrangement exists to prevent.
+fn drop_to(cmd: &mut Command, owner: &Owner) {
+    let target_uid = owner.uid;
+    let target_gid = owner.gid;
+    let groups = owner.groups.clone();
+    // Safe: the closure runs between fork and exec in a single-threaded child
+    // and calls only async-signal-safe functions. The group list was resolved
+    // in the parent for exactly that reason.
+    unsafe {
+        cmd.pre_exec(move || {
+            // Safe: geteuid cannot fail.
+            if libc::geteuid() == 0 {
+                if libc::setgroups(groups.len(), groups.as_ptr()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setgid(target_gid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setuid(target_uid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            if libc::getuid() != target_uid || libc::geteuid() != target_uid {
+                return Err(std::io::Error::other("could not drop to the owner's uid"));
+            }
+            Ok(())
+        });
+    }
+}
+
 /// Run git as the owner, with a cleared environment.
 ///
 /// `credential` is `(username, token)` when the operation needs one. Everything
@@ -312,35 +350,7 @@ fn run_git(
             .env("APEX_GIT_TOKEN", token);
     }
 
-    let target_uid = owner.uid;
-    let target_gid = owner.gid;
-    let groups = owner.groups.clone();
-    // Safe: the closure runs between fork and exec in a single-threaded child
-    // and calls only async-signal-safe functions. The group list was resolved
-    // in the parent for exactly that reason.
-    unsafe {
-        cmd.pre_exec(move || {
-            // Safe: geteuid cannot fail.
-            if libc::geteuid() == 0 {
-                if libc::setgroups(groups.len(), groups.as_ptr()) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::setgid(target_gid) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::setuid(target_uid) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            // Belt and braces. A failed drop that reported success would run
-            // git as root in a caller-controlled repository, which is the one
-            // outcome this whole arrangement exists to prevent.
-            if libc::getuid() != target_uid || libc::geteuid() != target_uid {
-                return Err(std::io::Error::other("could not drop to the owner's uid"));
-            }
-            Ok(())
-        });
-    }
+    drop_to(&mut cmd, owner);
 
     let out = cmd
         .output()
@@ -361,6 +371,219 @@ fn run_git(
         ));
     }
     Ok(Output { code, text })
+}
+
+/// How large a brokered HTTP reply may be before it is refused.
+///
+/// Bounded because the far end is a server the owner chose but the daemon does
+/// not control, and an unbounded read is a way for it to exhaust this machine's
+/// memory one connection at a time.
+pub const HTTP_MAX_BYTES: usize = 3 * 1024 * 1024;
+
+/// The `Mcp-Session-Id` a server issued, if it issued one.
+pub struct HttpOutput {
+    pub out: Output,
+    pub session: Option<String>,
+}
+
+/// Carry one message to the service's own endpoint, with the credential
+/// attached, and answer with the reply body.
+///
+/// ## Where the credential goes, and where it does not
+///
+/// Not on the command line: `/proc/<pid>/cmdline` is world-readable, and the
+/// whole point of the store is that this value is not readable by the account
+/// the child runs as. Not in a file either, which would leave it at rest for
+/// as long as the request takes. It goes down the child's **stdin**, as a curl
+/// configuration file — `--config -` — which is the one channel between this
+/// process and that one that no third party can read.
+///
+/// The body goes in a file for the mirror-image reason: only one of the two can
+/// have stdin, and the body is the caller's own message rather than a
+/// credential. It is written `0600` and owned by the account the child runs as,
+/// and removed when the child is done.
+///
+/// ## Where the request goes
+///
+/// `info.url()`, built from the host, scheme and path pinned when the
+/// credential was stored. Nothing the caller sent contributes to it —
+/// `mcp.request` declares no resource and no parameters — so a session cannot aim this at a
+/// server of its own choosing. `--proto` and `--location` are set so a
+/// *redirect* cannot do it either: curl follows nothing, and would refuse a
+/// non-https hop even if it did.
+pub fn perform_http(
+    info: &ServiceInfo,
+    value: &SecretValue,
+    body: &[u8],
+    session: Option<&str>,
+    owner: &Owner,
+) -> Result<HttpOutput, String> {
+    let token = value
+        .as_str()
+        .ok_or_else(|| "that credential is not text, so it cannot become a header".to_string())?;
+
+    let scratch = TempFile::create(&format!("apex-secretd-body-{}", std::process::id()), owner)?;
+    scratch.write(body)?;
+    let headers = TempFile::create(&format!("apex-secretd-hdr-{}", std::process::id()), owner)?;
+
+    let mut config = String::new();
+    config.push_str(&format!("url = {}\n", quote(&info.url())));
+    config.push_str("request = \"POST\"\n");
+    config.push_str(&format!(
+        "header = {}\n",
+        quote(&format!("Authorization: {}", info.header_value(token)))
+    ));
+    config.push_str("header = \"Content-Type: application/json\"\n");
+    config.push_str("header = \"Accept: application/json, text/event-stream\"\n");
+    if let Some(id) = session {
+        config.push_str(&format!("header = {}\n", quote(&format!("Mcp-Session-Id: {id}"))));
+    }
+    config.push_str(&format!("data-binary = {}\n", quote(&format!("@{}", scratch.path))));
+    config.push_str(&format!("dump-header = {}\n", quote(&headers.path)));
+    config.push_str("silent\nshow-error\nfail-with-body\n");
+    config.push_str("proto = \"=https,http\"\n");
+    config.push_str(&format!("max-filesize = {HTTP_MAX_BYTES}\n"));
+    config.push_str(&format!("max-time = {GIT_TIMEOUT_SECS}\n"));
+
+    let mut out = run_curl(&config, owner)?;
+    out.text = scrub(&scrub(&out.text, token), &info.header_value(token));
+    let session = std::fs::read_to_string(&headers.path)
+        .ok()
+        .and_then(|h| mcp_session_id(&h));
+    Ok(HttpOutput { out, session })
+}
+
+/// The `Mcp-Session-Id` in a header dump, if there is one.
+///
+/// Bounded and character-checked before it is kept: it is replayed into a
+/// later request's headers, and a value carrying a newline would let the far
+/// end write headers of its own choosing into the next one.
+pub fn mcp_session_id(headers: &str) -> Option<String> {
+    for line in headers.lines() {
+        let (name, value) = line.split_once(':')?;
+        if !name.eq_ignore_ascii_case("mcp-session-id") {
+            continue;
+        }
+        let value = value.trim();
+        let ok = !value.is_empty()
+            && value.len() <= 128
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'));
+        return ok.then(|| value.to_string());
+    }
+    None
+}
+
+/// Run curl as the owner, with its whole configuration on stdin.
+fn run_curl(config: &str, owner: &Owner) -> Result<Output, String> {
+    let mut cmd = Command::new("curl");
+    cmd.arg("--config").arg("-");
+    cmd.env_clear()
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("HOME", &owner.home)
+        .env("LC_ALL", "C")
+        // A proxy the environment could name is a destination the caller did
+        // not choose and this daemon did not check.
+        .env("NO_PROXY", "*")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    drop_to(&mut cmd, owner);
+
+    let mut child = cmd.spawn().map_err(|e| format!("running curl: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "curl has no stdin".to_string())?
+        .write_all(config.as_bytes())
+        .map_err(|e| format!("sending curl its configuration: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("waiting for curl: {e}"))?;
+
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if text.len() > HTTP_MAX_BYTES {
+        return Err(format!(
+            "that reply is larger than the {HTTP_MAX_BYTES} bytes this service will carry"
+        ));
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !err.trim().is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(err.trim_end());
+    }
+    Ok(Output {
+        code: out.status.code().unwrap_or(-1),
+        text,
+    })
+}
+
+/// A curl config value, quoted so nothing in it can be read as syntax.
+///
+/// curl's parser takes `"…"` with backslash escapes. A credential is never
+/// interpolated anywhere else, so this is the only place a `"` or a `\` in one
+/// could change what curl does, and it is closed here rather than trusted to
+/// the shape of a token.
+fn quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A file the child can read and nothing else can, removed when it is dropped.
+struct TempFile {
+    path: String,
+}
+
+impl TempFile {
+    fn create(prefix: &str, owner: &Owner) -> Result<TempFile, String> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = format!(
+            "/tmp/{prefix}-{}-{}",
+            owner.uid,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        std::fs::write(&path, b"").map_err(|e| format!("creating {path}: {e}"))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("securing {path}: {e}"))?;
+        // The child runs as the owner and has to be able to read it. Only
+        // meaningful when this daemon is root; a no-op in a test, where the
+        // file already belongs to the account that will read it.
+        // Safe: chown on a path this function just created, with owned CString.
+        if let Ok(c) = std::ffi::CString::new(path.as_str()) {
+            unsafe {
+                libc::chown(c.as_ptr(), owner.uid, owner.gid);
+            }
+        }
+        Ok(TempFile { path })
+    }
+
+    fn write(&self, bytes: &[u8]) -> Result<(), String> {
+        std::fs::write(&self.path, bytes).map_err(|e| format!("writing {}: {e}", self.path))
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
 }
 
 /// Remove the credential from anything on its way back to the caller.

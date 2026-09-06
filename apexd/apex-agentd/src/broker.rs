@@ -98,6 +98,7 @@ const UNKNOWN_ORIGIN: &str = "unknown";
 ///   4. stamp §7's origin from the connection, not from the request;
 ///   5. hand the record to `apex-secretd`, which owns every remaining check and
 ///      the credential itself.
+#[allow(clippy::too_many_arguments)]
 pub fn use_capability(
     daemon: &Arc<Daemon>,
     peer: Option<Peer>,
@@ -105,6 +106,9 @@ pub fn use_capability(
     operation: &str,
     resource: &str,
     params: &BTreeMap<String, String>,
+    // The message the operation carries, for the one operation that carries
+    // one. Opaque here: this daemon forwards it and never looks inside.
+    body: Option<&str>,
     claimed_project: Option<&str>,
 ) -> Response {
     // Shape only, and that is the whole of what this daemon knows about a
@@ -187,7 +191,7 @@ pub fn use_capability(
     record.agent_session_agent(who.agent.as_deref());
     stamp_origin(&mut record, &who);
 
-    perform(record)
+    perform(record, body.unwrap_or_default().as_bytes())
 }
 
 /// Copy §7's origin onto the record, with how it was arrived at.
@@ -210,7 +214,7 @@ fn stamp_origin(record: &mut CapabilityRecord, who: &privilege::Origin) {
 }
 
 /// Send the record to `apex-secretd` and translate its answer.
-fn perform(record: CapabilityRecord) -> Response {
+fn perform(record: CapabilityRecord, body: &[u8]) -> Response {
     let mut client = match Client::connect() {
         Ok(c) => c,
         Err(e) => {
@@ -223,10 +227,7 @@ fn perform(record: CapabilityRecord) -> Response {
             )
         }
     };
-    let request = secret_protocol::Request::Use {
-        record: Box::new(record),
-    };
-    match client.request(&request) {
+    match client.use_with_body(record, body) {
         Ok(secret_protocol::Response::Performed {
             record,
             endpoint,
