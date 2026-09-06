@@ -48,7 +48,7 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// the two above and still worth naming: a daemon below this reads its OWN old
 /// store, so a credential added to the secret service is simply not found and
 /// the user is told they never stored it.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// The revision at which the credential store moved to `apex-secretd`.
 ///
@@ -56,12 +56,22 @@ pub const PROTOCOL_VERSION: u32 = 4;
 /// and a bare `< 4` in the CLI is one careless edit away from meaning nothing.
 pub const BROKERED_SECRET_SERVICE_VERSION: u32 = 4;
 
+/// The revision at which `SecretUse` began carrying a message body.
+///
+/// `apex mcp bridge` checks it. A daemon below this parses the request, ignores
+/// the field it has never heard of, and forwards a capability with no message —
+/// which the secret service refuses, correctly, with an error about an empty
+/// message that says nothing about the actual cause. Named so the bridge can
+/// say the actual cause instead.
+pub const MCP_BRIDGE_VERSION: u32 = 5;
+
 /// The guards arrive in order, checked when the crate compiles rather than
 /// when a test runs: they are facts about three constants, and a revision
 /// numbered behind the one before it would make a `<` comparison in the CLI
 /// mean something nobody intended.
 const _: () = assert!(POLICY_DIMENSIONS_VERSION < REQUEST_ORIGIN_VERSION);
 const _: () = assert!(REQUEST_ORIGIN_VERSION < BROKERED_SECRET_SERVICE_VERSION);
+const _: () = assert!(BROKERED_SECRET_SERVICE_VERSION < MCP_BRIDGE_VERSION);
 
 /// The revision that first carried the six dimensions.
 ///
@@ -451,6 +461,18 @@ pub enum Request {
         remote: String,
         #[serde(default)]
         branch: Option<String>,
+        /// The message a capability carries, for the one capability that
+        /// carries a message: `mcp-request`.
+        ///
+        /// A field here and raw bytes on the secret service's own wire, which
+        /// is not an inconsistency. That protocol caps a request line because
+        /// any local process may write one; this one does not, and a second
+        /// framing convention on a socket APEX Shell also parses would be a
+        /// compatibility surface for no gain. What both refuse is a credential
+        /// in a serialisable type, and a JSON-RPC message the caller wrote is
+        /// not one.
+        #[serde(default)]
+        body: Option<String>,
         /// The caller's project root.
         ///
         /// Honoured ONLY when the peer is not a managed session. A session's
@@ -956,6 +978,7 @@ mod tests {
                 capability: "git-push".into(),
                 remote: "origin".into(),
                 branch: Some("feat/x".into()),
+                body: None,
                 project: Some("/home/t/p".into()),
             },
             Request::Info { id: 1 },
@@ -1138,6 +1161,7 @@ mod tests {
             ("the six dimensions", POLICY_DIMENSIONS_VERSION),
             ("request_origin", REQUEST_ORIGIN_VERSION),
             ("the secret service", BROKERED_SECRET_SERVICE_VERSION),
+            ("the mcp bridge", MCP_BRIDGE_VERSION),
         ] {
             assert!(
                 since <= PROTOCOL_VERSION,
@@ -1147,7 +1171,7 @@ mod tests {
         }
         // The newest guard is the current revision: adding a wire field
         // without bumping the version is the fail-open these exist to catch.
-        assert_eq!(BROKERED_SECRET_SERVICE_VERSION, PROTOCOL_VERSION);
+        assert_eq!(MCP_BRIDGE_VERSION, PROTOCOL_VERSION);
     }
 
     #[test]

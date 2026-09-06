@@ -41,7 +41,7 @@ use crate::store::ServiceInfo;
 /// Bumped when a change is not backward compatible. Clients send nothing and
 /// the daemon reports it in [`Response::Hello`], so a mismatch is a message
 /// rather than a parse failure halfway through a credential operation.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Longest request line the daemon will read.
 ///
@@ -49,6 +49,16 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// orders of magnitude more, and it is bounded because the daemon reads from a
 /// socket any local process can open.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
+
+/// Longest reply the daemon will send and a client will read.
+///
+/// Larger than a request, and for a reason that is not symmetry: a request line
+/// is written by whoever connected, so it is an attack surface and stays small,
+/// while a reply is the *result* of an operation the daemon just performed. A
+/// `git fetch` of a busy repository or one MCP `read_note` is comfortably more
+/// than a request line may be, and truncating it would hand the caller a
+/// half-parsed JSON document instead of an answer.
+pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 /// What a client asks for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +80,16 @@ pub enum Request {
         scheme: String,
         #[serde(default)]
         username: Option<String>,
+        /// The endpoint path, for a credential whose destination is the
+        /// service itself. Empty for a git credential.
+        #[serde(default)]
+        path: String,
+        /// `bearer` or `raw`. See `ServiceInfo::auth`.
+        #[serde(default)]
+        auth: Option<String>,
+        /// The endpoint's port, when it is not the scheme's own.
+        #[serde(default)]
+        port: Option<u16>,
         value_len: usize,
     },
 
@@ -93,7 +113,18 @@ pub enum Request {
 
     /// Perform a capability. The credential does not come back; the
     /// operation's output does.
-    Use { record: Box<CapabilityRecord> },
+    ///
+    /// `body_len` raw bytes follow this line when the capability carries a
+    /// message — `mcp-request` does, the git ones do not. Framed the way
+    /// [`Request::Add`] frames a credential, for the second of that variant's
+    /// two reasons: an MCP `write_note` body is larger than
+    /// [`MAX_LINE_BYTES`], and a request line that could grow to hold one
+    /// would raise the bound on every request any local process can send.
+    Use {
+        record: Box<CapabilityRecord>,
+        #[serde(default)]
+        body_len: usize,
+    },
 
     /// The audit trail.
     Audit {
@@ -249,6 +280,9 @@ mod tests {
                     host: "github.com".into(),
                     scheme: "https".into(),
                     username: "x-access-token".into(),
+                    path: String::new(),
+                    auth: "bearer".into(),
+                    port: None,
                     added: 1,
                 }],
             },
@@ -326,6 +360,9 @@ mod tests {
             host: "github.com".into(),
             scheme: "https".into(),
             username: None,
+            path: String::new(),
+            auth: None,
+            port: None,
             value_len: 40,
         };
         let json = serde_json::to_value(&req).unwrap();
@@ -347,6 +384,9 @@ mod tests {
                 host: "github.com".into(),
                 scheme: "https".into(),
                 username: Some("x-access-token".into()),
+                path: String::new(),
+                auth: None,
+                port: None,
                 value_len: 3,
             },
             Request::Remove {
@@ -361,6 +401,7 @@ mod tests {
             },
             Request::Grants,
             Request::Use {
+                body_len: 0,
                 record: Box::new(CapabilityRecord::new(
                     "demo",
                     Capability::parse("git-push", "origin", Some("main")).unwrap(),
@@ -389,6 +430,9 @@ mod tests {
                 host: "h".into(),
                 scheme: "https".into(),
                 username: None,
+                path: String::new(),
+                auth: None,
+                port: None,
                 value_len: 1,
             }
         );

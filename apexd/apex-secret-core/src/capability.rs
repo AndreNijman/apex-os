@@ -43,6 +43,18 @@ pub enum Capability {
     /// working tree, so a hermetic loopback server can prove the credential was
     /// attached without a network or a fixture repository on the far side.
     GitLsRemote { remote: String },
+
+    /// One JSON-RPC message to the MCP server this credential was stored for.
+    ///
+    /// The only capability with no arguments, and that is the point. §10 wants
+    /// an MCP server's bearer token out of `~/.claude.json`, where anything
+    /// running as the user — a managed session included — can read it. The
+    /// broker holds the token and makes the request instead, so the endpoint
+    /// must not be anything the caller can influence: it comes entirely from
+    /// the stored service's own host, scheme and path. The message body travels
+    /// beside the request the way a credential does, as raw bytes after the
+    /// line, because a `write_note` body is bigger than a request line may be.
+    McpRequest,
 }
 
 /// Why a capability request was refused.
@@ -120,11 +132,20 @@ impl std::error::Error for CapabilityError {}
 
 impl Capability {
     /// Parse a capability as typed on the command line.
+    /// Parse a capability as typed on the command line.
+    ///
+    /// `remote` and `branch` are ignored by a capability that takes neither —
+    /// `mcp-request` is the only one — and validated for every capability that
+    /// does. Checking them first would mean `apex mcp bridge` had to invent a
+    /// remote name to satisfy a check that means nothing to it.
     pub fn parse(
         name: &str,
         remote: &str,
         branch: Option<&str>,
     ) -> Result<Capability, CapabilityError> {
+        if name == "mcp-request" {
+            return Ok(Capability::McpRequest);
+        }
         if !valid_remote_name(remote) {
             return Err(CapabilityError::BadRemoteName(remote.to_string()));
         }
@@ -149,7 +170,7 @@ impl Capability {
     }
 
     pub fn names() -> &'static [&'static str] {
-        &["git-push", "git-fetch", "git-ls-remote"]
+        &["git-push", "git-fetch", "git-ls-remote", "mcp-request"]
     }
 
     /// The capability name, without its arguments. This is what a grant is
@@ -160,14 +181,35 @@ impl Capability {
             Capability::GitPush { .. } => "git-push",
             Capability::GitFetch { .. } => "git-fetch",
             Capability::GitLsRemote { .. } => "git-ls-remote",
+            Capability::McpRequest => "mcp-request",
         }
     }
 
-    pub fn remote(&self) -> &str {
+    /// The git remote this operation names, when it names one.
+    ///
+    /// `None` for a capability whose destination is the stored service itself.
+    /// An `Option` rather than an empty string because every caller of this
+    /// resolves a URL or pins a host with it, and an empty remote name would
+    /// reach `git remote get-url ""`.
+    pub fn remote(&self) -> Option<&str> {
         match self {
             Capability::GitPush { remote, .. }
             | Capability::GitFetch { remote }
-            | Capability::GitLsRemote { remote } => remote,
+            | Capability::GitLsRemote { remote } => Some(remote),
+            Capability::McpRequest => None,
+        }
+    }
+
+    /// What the record says this operation touches.
+    ///
+    /// A git remote's name, or — for a capability that names nothing, because
+    /// nothing about its endpoint is caller-chosen — the stored service. The
+    /// audit line then still answers "against what", which is the only reason
+    /// the field exists.
+    pub fn resource(&self, provider: &str) -> String {
+        match self.remote() {
+            Some(remote) => remote.to_string(),
+            None => provider.to_string(),
         }
     }
 
@@ -181,6 +223,14 @@ impl Capability {
         matches!(self, Capability::GitPush { .. })
     }
 
+    /// Whether the daemon resolves a git remote for this operation.
+    ///
+    /// False for `mcp-request`, whose endpoint is the stored service's own and
+    /// is never read out of a repository.
+    pub fn is_git(&self) -> bool {
+        self.remote().is_some()
+    }
+
     /// One line for the audit log and for `apex secret grants`.
     pub fn summary(&self) -> String {
         match self {
@@ -190,6 +240,7 @@ impl Capability {
             },
             Capability::GitFetch { remote } => format!("git fetch {remote}"),
             Capability::GitLsRemote { remote } => format!("git ls-remote {remote}"),
+            Capability::McpRequest => "mcp request".to_string(),
         }
     }
 
@@ -198,6 +249,7 @@ impl Capability {
             "git-push" => "push a branch of this project to one of its own remotes",
             "git-fetch" => "fetch from one of this project's own remotes",
             "git-ls-remote" => "list the refs one of this project's own remotes advertises",
+            "mcp-request" => "carry one message to the MCP server this credential belongs to",
             _ => "",
         }
     }
@@ -286,7 +338,7 @@ impl CapabilityRecord {
     pub fn new(provider: &str, operation: Capability) -> CapabilityRecord {
         CapabilityRecord {
             provider: provider.to_string(),
-            resource: operation.remote().to_string(),
+            resource: operation.resource(provider),
             operation,
             project: None,
             agent_session: None,
@@ -480,7 +532,11 @@ mod tests {
             assert!(!Capability::describe(name).is_empty(), "{name}");
             let cap = Capability::parse(name, "origin", None).unwrap();
             assert_eq!(cap.name(), *name);
-            assert!(cap.summary().contains("origin"), "{name}");
+            if cap.is_git() {
+                assert!(cap.summary().contains("origin"), "{name}");
+            } else {
+                assert!(!cap.summary().is_empty(), "{name}");
+            }
         }
     }
 
@@ -521,6 +577,30 @@ mod tests {
             );
         }
         assert!(Capability::parse("git-push", "origin", Some("feat/x-1.2")).is_ok());
+    }
+
+    #[test]
+    fn an_mcp_request_takes_nothing_from_the_caller() {
+        // The whole security argument for this capability: there is no field
+        // for a session to put a URL, a host or a path in, so the endpoint can
+        // only be the stored service's own. A remote name passed alongside it
+        // is ignored rather than honoured.
+        let cap = Capability::parse("mcp-request", "https://attacker.example", None).unwrap();
+        assert_eq!(cap, Capability::McpRequest);
+        assert_eq!(cap.remote(), None);
+        assert!(!cap.is_git());
+        let json = serde_json::to_value(&cap).unwrap();
+        assert_eq!(json["capability"], "mcp-request");
+        assert_eq!(json.as_object().unwrap().len(), 1, "{json}");
+    }
+
+    #[test]
+    fn an_mcp_record_names_the_service_as_its_resource() {
+        // "against what" has to be answerable in the audit trail, and an MCP
+        // request names no remote. The service is what it touched.
+        let rec = CapabilityRecord::new("claude-memory", Capability::McpRequest);
+        assert_eq!(rec.resource, "claude-memory");
+        assert_eq!(rec.operation.summary(), "mcp request");
     }
 
     #[test]
