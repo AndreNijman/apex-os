@@ -1,0 +1,16 @@
+# Services a user may open by name, as: name proto port description
+#
+# A catalogue rather than free-form ports. "5353/udp" is something you paste
+# from a forum; "mdns" is something you can decide about, and read back in six
+# months and still understand.
+ssh          tcp 22    Remote shell, and how APEX remote agents and `apex host run` reach this machine
+http         tcp 80    A web server you are running
+https        tcp 443   A web server you are running, over TLS
+mdns         udp 5353  Local name discovery, for printers and `apex host`
+samba        tcp 445   Windows file sharing
+nfs          tcp 2049  NFS file sharing
+ipp          tcp 631   Sharing a printer attached to this machine
+steam-remote udp 27036 Steam Remote Play from another machine on this network
+sunshine     tcp 47989 Sunshine game streaming host
+ollama       tcp 11434 A local model server, reachable from other machines
+syncthing    tcp 22000 Syncthing peer connections

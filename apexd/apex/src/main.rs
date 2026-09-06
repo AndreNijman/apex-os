@@ -322,6 +322,14 @@ enum Cmd {
     /// instead of guessing.
     ///
     /// Unprivileged: plugins live in your own `~/.config/apex-shell/plugins`.
+    /// The incoming firewall: what is dropped, and the exceptions you opened.
+    ///
+    /// APEX drops inbound traffic by default. Reading needs no privilege;
+    /// changing an exception needs root.
+    Firewall {
+        #[command(subcommand)]
+        cmd: FirewallCmd,
+    },
     Plugin {
         #[command(subcommand)]
         cmd: PluginCmd,
@@ -712,6 +720,26 @@ enum EnvCmd {
 /// A separate enum rather than an argument passthrough, for the same reason
 /// `EnvCmd` is one: `apex plugin --help` documents the real surface and a typo
 /// is caught before a process is spawned.
+#[derive(Subcommand)]
+enum FirewallCmd {
+    /// What the policy is, and which exceptions you have added.
+    Status,
+    /// The services you can open, by name.
+    List,
+    /// Open one service on every interface. Requires root.
+    Allow {
+        #[arg(value_name = "SERVICE")]
+        name: String,
+    },
+    /// Close one again. Requires root.
+    Deny {
+        #[arg(value_name = "SERVICE")]
+        name: String,
+    },
+    /// Reapply the recorded exceptions. Requires root.
+    Reload,
+}
+
 #[derive(Subcommand)]
 enum PluginCmd {
     /// Installed plugins, whether each one is valid, and why not.
@@ -1165,6 +1193,7 @@ async fn main() {
             ops::pkg(&argv)
         }
         Cmd::Env { cmd } => ops::env(&env_argv(cmd)),
+        Cmd::Firewall { cmd } => ops::firewall(&firewall_argv(cmd)),
         Cmd::Plugin { cmd } => ops::plugin(&plugin_argv(cmd)),
     };
     std::process::exit(code);
@@ -1284,6 +1313,18 @@ fn env_argv(cmd: EnvCmd) -> Vec<String> {
         EnvCmd::Exports { name } => vec!["exports".to_string(), name],
         EnvCmd::Provision { language } => vec!["provision".to_string(), language],
         EnvCmd::Languages => vec!["languages".to_string()],
+    }
+}
+
+/// Kept a pure function, like `plugin_argv`, so the argv this hands a
+/// root-run helper can be asserted without running it.
+fn firewall_argv(cmd: FirewallCmd) -> Vec<String> {
+    match cmd {
+        FirewallCmd::Status => vec!["status".to_string()],
+        FirewallCmd::List => vec!["list".to_string()],
+        FirewallCmd::Allow { name } => vec!["allow".to_string(), name],
+        FirewallCmd::Deny { name } => vec!["deny".to_string(), name],
+        FirewallCmd::Reload => vec!["reload".to_string()],
     }
 }
 
