@@ -93,8 +93,12 @@ const VERSION: ParamSpec = ParamSpec {
 
 /// The vocabulary, in §13.2's shape.
 ///
-/// Seven names. §13.2 lists thirty-two, and the other twenty-five belong to
-/// P1-005 through P1-017 — R2, D1, KV, DNS, Access, Tunnels, the AI gateway.
+/// Seven names: **six of §13.2's thirty-two**, plus `worker.route.read`, which
+/// is §13.3's "Worker routes" rather than one of §13.2's examples. So
+/// **twenty-six** of §13.2's list are still unimplemented and belong to P1-005
+/// through P1-017 — R2, D1, KV, Queues, Hyperdrive, DNS, Secrets Store, Access,
+/// Tunnels, Workers AI and the AI gateway.
+///
 /// Declaring one this module cannot perform would put it in
 /// `apex secret capabilities`, let an owner grant it, and then fail at use
 /// time, which is a worse answer than not offering it.
