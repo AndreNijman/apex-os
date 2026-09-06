@@ -304,13 +304,15 @@ fn dispatch(
             }
             service.add(
                 peer,
-                &name,
-                &host,
-                &scheme,
-                username.as_deref(),
-                &path,
-                auth.as_deref(),
-                port,
+                service::NewService {
+                    service: &name,
+                    host: &host,
+                    scheme: &scheme,
+                    username: username.as_deref(),
+                    path: &path,
+                    auth: auth.as_deref(),
+                    port,
+                },
                 value,
             )
         }
