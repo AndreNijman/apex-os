@@ -24,7 +24,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::gpu::NvidiaSmi;
+use crate::gpu::{self, GpuVendor, NvidiaSmi};
 use crate::topology::parse_cpu_list;
 use crate::workload::{read_pressure, read_vram, Roots, Signal, Vram};
 
@@ -53,12 +53,38 @@ pub struct CpuPerf {
     pub pressure: Signal<f64>,
 }
 
+/// One GPU, named, with what THAT card can answer.
+///
+/// The lab used to have exactly one set of GPU readings, filled from whichever
+/// DRM card answered first. On a hybrid laptop that is the iGPU: on the MSI
+/// Katana, `card1` is Alder Lake-P Iris Xe and `card2` is the RTX 3070, so the
+/// lab reported the Intel chip's clock, called it "GPU", and never mentioned
+/// the card the games run on. Naming them is the fix; there is no way to be
+/// honest about a two-GPU machine with one row.
+#[derive(Debug, Clone)]
+pub struct GpuDevicePerf {
+    /// `card1`, as under `/sys/class/drm`.
+    pub card: String,
+    /// "AMD", "Intel", "NVIDIA", or the raw PCI id.
+    pub vendor: String,
+    /// The bound kernel driver, when one is readable.
+    pub driver: Option<String>,
+    /// The firmware's display adapter — the iGPU, on a hybrid laptop.
+    pub boot_vga: bool,
+    pub clock_mhz: Signal<u64>,
+    pub busy_percent: Signal<f64>,
+}
+
 /// What the GPU side reports.
 #[derive(Debug, Clone)]
 pub struct GpuPerf {
+    /// The headline figures, taken from [`gpu::primary`] rather than from the
+    /// lowest-numbered card.
     pub clock_mhz: Signal<u64>,
     pub busy_percent: Signal<f64>,
     pub vram: Signal<Vram>,
+    /// Every GPU, so a hybrid machine is legible.
+    pub devices: Vec<GpuDevicePerf>,
 }
 
 /// One named temperature reading.
@@ -326,7 +352,18 @@ pub fn read_gpu_clock(sys: &Path, smi: &dyn NvidiaSmi) -> Signal<u64> {
 ///
 /// This is engine busy time, **not** frame rate and not a frame-time proxy — a
 /// GPU can sit at 99% while a game stutters, and at 40% while it runs perfectly.
-pub fn read_gpu_busy(sys: &Path) -> Signal<f64> {
+///
+/// Three vendors, three answers, and only one of them is a sysfs file:
+///
+/// * amdgpu publishes `gpu_busy_percent`.
+/// * NVIDIA publishes nothing in sysfs; `nvidia-smi --query-gpu=utilization.gpu`
+///   is the only source, and until it was wired in here the lab said "no driver
+///   here publishes gpu_busy_percent" on a machine with an RTX 3070 in it.
+/// * i915 publishes no busy percentage at all. Engine busy time is available
+///   through the i915 PMU (`perf_event_open` on the `i915` PMU, or
+///   `intel_gpu_top`), which needs a perf event rather than a file read and is
+///   NOT substituted with a clock reading here.
+pub fn read_gpu_busy(sys: &Path, smi: &dyn NvidiaSmi) -> Signal<f64> {
     let src = sys
         .join("class/drm/card*/device/gpu_busy_percent")
         .display()
@@ -337,7 +374,103 @@ pub fn read_gpu_busy(sys: &Path) -> Signal<f64> {
             return Signal::measured(v, p.display().to_string());
         }
     }
-    Signal::unavailable("no driver here publishes gpu_busy_percent", src)
+    if let Some((_, pct)) = smi.utilization().first() {
+        return Signal::measured(*pct, "nvidia-smi --query-gpu=utilization.gpu");
+    }
+    Signal::unavailable(
+        "no GPU here publishes a utilisation figure (amdgpu uses gpu_busy_percent, \
+         NVIDIA needs nvidia-smi, and i915 exposes engine busy only through its PMU)",
+        src,
+    )
+}
+
+/// Every GPU, each with what that card can answer for itself.
+///
+/// NVIDIA's readings come from `nvidia-smi`, matched to the DRM card by ORDER
+/// among the NVIDIA cards rather than by index: nvidia-smi's index and the DRM
+/// card number are two different numbering schemes and there is no published
+/// mapping between them. With one NVIDIA GPU — which is every machine this has
+/// been run on — order is exact; with two it is a guess, and the field says so
+/// rather than the code pretending otherwise.
+pub fn read_gpu_devices(sys: &Path, smi: &dyn NvidiaSmi) -> Vec<GpuDevicePerf> {
+    let devices = gpu::discover(sys);
+    let nv_clocks = smi.clocks_mhz();
+    let nv_util = smi.utilization();
+    let mut nv_seen = 0usize;
+
+    devices
+        .iter()
+        .map(|d| {
+            let is_nv = d.vendor == GpuVendor::Nvidia;
+            let nv_slot = if is_nv {
+                let i = nv_seen;
+                nv_seen += 1;
+                Some(i)
+            } else {
+                None
+            };
+
+            let clock = match &d.clock_path {
+                Some(p) if p.ends_with("pp_dpm_sclk") => read_trim(p)
+                    .and_then(|t| parse_pp_dpm(&t))
+                    .map(|v| Signal::measured(v, p.display().to_string()))
+                    .unwrap_or_else(|| {
+                        Signal::unavailable(
+                            "pp_dpm_sclk lists no active level",
+                            p.display().to_string(),
+                        )
+                    }),
+                Some(p) => read_trim(p)
+                    .and_then(|t| t.parse::<u64>().ok())
+                    .map(|v| Signal::measured(v, p.display().to_string()))
+                    .unwrap_or_else(|| {
+                        Signal::unavailable("unreadable", p.display().to_string())
+                    }),
+                None => match nv_slot.and_then(|i| nv_clocks.get(i)) {
+                    Some((_, ghz, _)) => Signal::measured(
+                        *ghz,
+                        "nvidia-smi --query-gpu=clocks.current.graphics".to_string(),
+                    ),
+                    None => Signal::unavailable(
+                        "this driver publishes no current core clock",
+                        format!("{}/class/drm/{}", sys.display(), d.card),
+                    ),
+                },
+            };
+
+            let busy = match &d.busy_path {
+                Some(p) => read_trim(p)
+                    .and_then(|t| t.parse::<f64>().ok())
+                    .map(|v| Signal::measured(v, p.display().to_string()))
+                    .unwrap_or_else(|| {
+                        Signal::unavailable("unreadable", p.display().to_string())
+                    }),
+                None => match nv_slot.and_then(|i| nv_util.get(i)) {
+                    Some((_, pct)) => Signal::measured(
+                        *pct,
+                        "nvidia-smi --query-gpu=utilization.gpu".to_string(),
+                    ),
+                    None if d.vendor == GpuVendor::Intel => Signal::unavailable(
+                        "i915 exposes engine busy through its PMU, not through sysfs",
+                        format!("{}/class/drm/{}", sys.display(), d.card),
+                    ),
+                    None => Signal::unavailable(
+                        "this driver publishes no utilisation figure",
+                        format!("{}/class/drm/{}", sys.display(), d.card),
+                    ),
+                },
+            };
+
+            GpuDevicePerf {
+                card: d.card.clone(),
+                vendor: d.vendor.label().to_string(),
+                driver: d.driver.clone(),
+                boot_vga: d.boot_vga,
+                clock_mhz: clock,
+                busy_percent: busy,
+            }
+        })
+        .collect()
 }
 
 /// One power sensor, named by the chip that owns it.
@@ -576,10 +709,24 @@ pub fn snapshot(roots: &Roots, smi: &dyn NvidiaSmi) -> PerfSnapshot {
             platform_profile: read_platform_profile(sys),
             pressure: read_pressure(roots, "cpu"),
         },
-        gpu: GpuPerf {
-            clock_mhz: read_gpu_clock(sys, smi),
-            busy_percent: read_gpu_busy(sys),
-            vram: read_vram(roots, smi),
+        gpu: {
+            let devices = read_gpu_devices(sys, smi);
+            // The headline row follows the card that matters, not card order.
+            // On a hybrid laptop those are different cards.
+            let lead = gpu::primary(&gpu::discover(sys)).map(|d| d.card.clone());
+            let leading = lead
+                .as_ref()
+                .and_then(|c| devices.iter().find(|d| &d.card == c));
+            GpuPerf {
+                clock_mhz: leading
+                    .map(|d| d.clock_mhz.clone())
+                    .unwrap_or_else(|| read_gpu_clock(sys, smi)),
+                busy_percent: leading
+                    .map(|d| d.busy_percent.clone())
+                    .unwrap_or_else(|| read_gpu_busy(sys, smi)),
+                vram: read_vram(roots, smi),
+                devices,
+            }
         },
         power_sources: read_power_sources(sys),
         battery_watts: read_battery_watts(sys),
