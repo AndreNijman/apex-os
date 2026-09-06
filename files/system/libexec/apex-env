@@ -1,0 +1,1100 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# apex-env — APEX Capsules: development environments that do not touch the host.
+#
+# WHY THIS EXISTS
+# APEX is a bootc image. /usr is read-only, packages come from a system
+# extension, and `rpm-ostree install` is refused outright because a layered
+# deployment stops `bootc upgrade`. That is the right shape for an operating
+# system and the wrong shape for a development ecosystem: `pip install --user`,
+# `npm -g`, `cargo install`, a vendor's `./install.sh`, an SDK that wants
+# /opt and a package manager that wants /etc/apt all expect a mutable userspace
+# that APEX deliberately does not have.
+#
+# The answer is not to make the host mutable. It is to give each ecosystem its
+# own container that FEELS like the host: the user's home, the user's shell,
+# the user's terminal, the same $DISPLAY/$WAYLAND_DISPLAY, the same devices.
+# That is what distrobox already does, and it ships in the image. This tool is
+# the APEX policy on top of it — named images, GPU/device profiles, a record of
+# what each capsule is and where it came from, and one vocabulary
+# (`apex env create|list|enter|exec|rm`) instead of a distrobox tutorial.
+#
+# WHAT THIS IS NOT
+# It is not a second container runtime, not a wrapper that hides distrobox, and
+# not a build system. Every capsule here is an ordinary rootless podman
+# container that `podman ps` and `distrobox list` both see, so a user who
+# outgrows this tool loses nothing by using distrobox directly.
+#
+# ROOTLESS, ALWAYS
+# Capsules belong to the user, not to the machine. A root capsule would put
+# images under /var/lib/containers, give every user on the box the same
+# environment, and need a polkit prompt to enter — three ways of being less
+# useful than a per-user container. `create` refuses to run as root and says
+# so, rather than silently producing a capsule the user cannot enter without
+# sudo. Rootless podman needs a subordinate uid/gid range, so that is checked
+# BEFORE an image is pulled: "cannot find UID/GID for user" after a 400 MB
+# download is not a diagnosis.
+#
+# NAMES ARE NOT PREFIXED
+# A capsule called `fedora` is a container called `fedora`. Prefixing it with
+# `apex-` would make every `podman exec` and every distrobox command the user
+# already knows print something they did not type. The safety that a prefix
+# would have bought is bought explicitly instead: `rm` refuses a container APEX
+# has no record of, and `create` refuses a name that already exists as a
+# container it did not make.
+#
+# STATE
+# One JSON record per capsule under ${XDG_DATA_HOME}/apex/env/. It holds what
+# the container was made from — image reference, the digest that reference
+# resolved to on the day it was created, the GPU profile, the alias — because
+# "which CUDA image is this" is the question that gets asked six months later
+# and `podman inspect` only answers it while the image is still local.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+# ── paths ───────────────────────────────────────────────────────────────────
+# APEX_ENV_HOME exists so the test suite can point the whole tool at a
+# throwaway directory. It is read once, here, and never re-derived: a helper
+# that recomputes the path from $HOME would quietly write to the real one.
+DATA_HOME="${XDG_DATA_HOME:-${HOME:-/nonexistent}/.local/share}"
+ENV_ROOT="${APEX_ENV_HOME:-${DATA_HOME}/apex/env}"
+
+# The files that say whether rootless containers can work at all. Overridable
+# for the same reason: the suite asserts both the "range present" and the
+# "range missing" refusal, and neither may depend on the developer's own
+# /etc/subuid.
+SUBUID_FILE="${APEX_ENV_SUBUID_FILE:-/etc/subuid}"
+SUBGID_FILE="${APEX_ENV_SUBGID_FILE:-/etc/subgid}"
+
+# The container manager and the integration layer, invoked by name so that
+# $PATH decides which one runs. That is what makes this file testable without a
+# container runtime: the suite puts recording stubs first on $PATH and asserts
+# the exact argv, instead of asserting a string this file also produced.
+PODMAN="${APEX_ENV_PODMAN:-podman}"
+DISTROBOX="${APEX_ENV_DISTROBOX:-distrobox}"
+
+# Where a GUI export lands on the host. NOT ${XDG_DATA_HOME}: distrobox-export
+# writes to "${host_home}/.local/share/applications" unconditionally — it reads
+# the host home out of the container's /run/host mount and does not consult
+# XDG_DATA_HOME for the .desktop case. Following it exactly matters, because
+# this path is what `rm` deletes from; deriving it differently would leave the
+# launcher entries behind while reporting them removed.
+HOST_APPS="${APEX_ENV_HOST_APPS:-${HOME:-/nonexistent}/.local/share/applications}"
+
+msg()  { printf 'apex-env: %s\n' "$*" >&2; }
+warn() { printf 'apex-env: warning: %s\n' "$*" >&2; }
+die()  { printf 'apex-env: error: %s\n' "$*" >&2; exit 1; }
+
+# ── names ───────────────────────────────────────────────────────────────────
+# A capsule name becomes a container name AND a file name under ENV_ROOT, so it
+# is validated as a security check, not as a nicety. Lowercase because podman
+# lowercases container names anyway and a capsule the user cannot address by
+# the name they typed is worse than a refusal.
+#
+# The bound is 40 characters: podman itself allows more, but a hostname is
+# derived from this and DNS labels stop at 63, leaving room for the suffixes
+# distrobox appends.
+valid_env_name() {
+    [ "${#1}" -le 40 ] || return 1
+    [[ "$1" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || return 1
+    case "$1" in *..*) return 1 ;; esac
+    return 0
+}
+
+# ── named images ────────────────────────────────────────────────────────────
+# §8 asks for `apex env create python|ubuntu|arch|cuda|rocm` to just work, so
+# each of those names is an alias for a (image, gpu profile, extra packages)
+# triple. Anything that is not an alias is treated as a plain capsule name and
+# gets the default image, and `--image` accepts any registry reference.
+#
+# WHY THESE IMAGES
+#   fedora  the host's own release, so a capsule built today matches the
+#           libraries and the dnf the user already knows. Read from
+#           /usr/lib/os-release rather than pinned here: a capsule created
+#           after an OS upgrade should follow the OS, not a number a file
+#           remembered.
+#   ubuntu  24.04 LTS. Pinned to the LTS rather than `latest` because a
+#           development capsule that changes distribution release under the
+#           user on a re-create is not an environment, it is a surprise.
+#   arch    `latest` is the only tag Arch publishes; a rolling distribution has
+#           no other honest answer.
+#   python  fedora-toolbox plus the Python toolchain, NOT docker.io/library/
+#           python. The official Python image is a build base: it has no user,
+#           no sudo, and is not on distrobox's compatibility list, so the
+#           integration this tool exists for does not work in it. A toolbox
+#           image with python3/pip/virtualenv gives the same Python and a
+#           capsule that behaves like the host.
+#   cuda    Ubuntu LTS with the nvidia device profile — deliberately NOT
+#   rocm    nvidia/cuda or rocm/dev, which are 5-20 GB images carrying a
+#           toolchain most users then replace. §8 asks for "GPU/device access
+#           profiles for CUDA, ROCm and hardware development", and the profile
+#           is the part APEX has to get right; the toolkit is one `apt install`
+#           inside a capsule that can already see the GPU. `--image` takes a
+#           vendor image for anyone who wants one.
+alias_image() {
+    case "$1" in
+        fedora|python|"") printf 'registry.fedoraproject.org/fedora-toolbox:%s' "$(os_version)" ;;
+        ubuntu|cuda|rocm) printf 'docker.io/library/ubuntu:24.04' ;;
+        arch)             printf 'docker.io/library/archlinux:latest' ;;
+        debian)           printf 'docker.io/library/debian:stable' ;;
+        *)                return 1 ;;
+    esac
+}
+
+# The device profile an alias implies. `apex env create cuda` has to come out
+# with GPU access or the alias is a lie.
+alias_gpu() {
+    case "$1" in
+        cuda) printf 'nvidia' ;;
+        rocm) printf 'amd' ;;
+        *)    printf 'none' ;;
+    esac
+}
+
+# Packages installed during container setup, per alias.
+alias_packages() {
+    case "$1" in
+        python) printf 'python3 python3-pip python3-virtualenv python3-devel' ;;
+        *)      printf '' ;;
+    esac
+}
+
+is_alias() { alias_image "$1" >/dev/null 2>&1 && [ -n "$1" ]; }
+
+ALIASES='fedora ubuntu arch debian python cuda rocm'
+
+os_version() {
+    local f=/usr/lib/os-release
+    [ -r "$f" ] || f=/etc/os-release
+    if [ -r "$f" ]; then
+        # shellcheck disable=SC1090  # a fixed pair of paths, not caller input
+        . "$f"
+        printf '%s' "${VERSION_ID:-latest}"
+        return 0
+    fi
+    printf 'latest'
+}
+
+# ── device profiles ─────────────────────────────────────────────────────────
+# What each profile adds to the container, one argument per line so the caller
+# can read it into an array and the test suite can assert the exact flags.
+#
+#   nvidia  distrobox's own --nvidia. The guest has no NVIDIA userspace driver
+#           and must not have one: the driver libraries have to match the
+#           running host kernel module exactly, so distrobox mounts the host's
+#           in rather than letting the capsule install a second, skewed copy.
+#   amd     ROCm talks to /dev/kfd, which distrobox does not forward on its own,
+#           and needs the `render` group to open it. Under rootless podman the
+#           user's supplementary groups are dropped unless `keep-groups` asks
+#           for them, so without this a ROCm capsule sees the device node and
+#           gets EACCES — a failure that looks like a driver problem and is not.
+#           /dev/dri is passed explicitly for the same reason it is for
+#           hardware: a device that is not there cannot be probed.
+#   hw      §8's "hardware development": USB serial adapters, programmers and
+#           JTAG probes live on /dev/bus/usb and are owned by dialout/plugdev
+#           on the host, so the same keep-groups rule applies.
+#   none    nothing. The default, because a capsule that quietly holds a device
+#           open is a capsule that stops the host from suspending.
+gpu_flags() {
+    case "$1" in
+        nvidia)
+            printf -- '--nvidia\n'
+            ;;
+        amd)
+            printf -- '--additional-flags\n'
+            printf -- '--device /dev/kfd --device /dev/dri --group-add keep-groups\n'
+            ;;
+        hw)
+            printf -- '--additional-flags\n'
+            printf -- '--device /dev/bus/usb --group-add keep-groups\n'
+            ;;
+        none)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+valid_gpu_profile() { case "$1" in nvidia|amd|hw|none) return 0 ;; esac; return 1; }
+
+# An image reference and a home path both end up as single arguments in a
+# newline-delimited argv list, so a newline in either would split one argument
+# into two and hand distrobox something the user never typed. Refused rather
+# than sanitised: there is no legitimate reference containing whitespace.
+valid_image_ref() {
+    [ -n "$1" ] || return 1
+    case "$1" in *[[:space:]]*) return 1 ;; esac
+    case "$1" in -*) return 1 ;; esac
+    return 0
+}
+
+valid_home_path() {
+    case "$1" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in *$'\n'*) return 1 ;; esac
+    return 0
+}
+
+# ── application names, for the GUI export ───────────────────────────────────
+# `distrobox-export --app` accepts either a bare application name or an
+# absolute path to a .desktop file. APEX accepts only the bare name, and that
+# is a deliberate narrowing rather than an oversight.
+#
+# The argument crosses into the container and comes back out as a file written
+# into the host's ~/.local/share/applications. An absolute path would let a
+# caller name any .desktop file inside the capsule, including one the capsule's
+# own tooling generated, and the host-side filename that results is not
+# something this script can predict or check. A bare name keeps the whole
+# operation to "an application this capsule advertises", which is what §8's
+# "when useful" is about.
+#
+# `..` is refused even though there is no path separator: `distrobox-export`
+# globs the name against the capsule's application directories, and a name that
+# resolves through a parent is not a name.
+valid_app_name() {
+    [ -n "$1" ] || return 1
+    [ "${#1}" -le 128 ] || return 1
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || return 1
+    case "$1" in *..*) return 1 ;; esac
+    return 0
+}
+
+# A .desktop file name recorded as exported. Read back out of a JSON record and
+# then deleted, so it is re-validated on the way out: a record edited by hand
+# must not turn `apex env rm` into a delete of an arbitrary path.
+valid_desktop_file() {
+    [ -n "$1" ] || return 1
+    case "$1" in *.desktop) ;; *) return 1 ;; esac
+    case "$1" in */*|*..*|.*) return 1 ;; esac
+    return 0
+}
+
+# ── languages → capsules (§10's [development] section) ──────────────────────
+# `[development] languages` in the blueprint is converged HERE, through a
+# capsule, and not by a language → package table on the host. That is the whole
+# point of §8: the bootc host stays read-only and unmodified, so the answer to
+# "I need a Rust toolchain" is a container that has one, not an RPM overlay.
+#
+# One capsule can provide several languages, which is why this is a mapping and
+# not a name derivation: `c` and `cpp` are one toolchain, and `javascript` and
+# `typescript` are one runtime. A capsule per language would make
+# `languages = ["c", "cpp"]` download two identical containers.
+LANGUAGES='c cpp go javascript python rust shell typescript'
+
+lang_capsule() {
+    case "$1" in
+        c|cpp)                 printf 'cdev' ;;
+        go)                    printf 'go' ;;
+        javascript|typescript) printf 'node' ;;
+        python)                printf 'python' ;;
+        rust)                  printf 'rust' ;;
+        shell)                 printf 'shell' ;;
+        *)                     return 1 ;;
+    esac
+}
+
+# What to install inside the capsule for a language. Fedora package names,
+# because a language capsule is created from the `fedora` alias — the host's
+# own release, so the toolchain matches the libraries the user already knows.
+#
+# `provision` REFUSES to touch a capsule whose base is not dnf-managed rather
+# than guessing at apt or pacman names for it. A capsule the user built from
+# another base is theirs, and inventing a package list for it is the kind of
+# guess that installs the wrong thing and reports success.
+lang_packages() {
+    case "$1" in
+        c)          printf 'gcc make gdb' ;;
+        cpp)        printf 'gcc-c++ make gdb' ;;
+        go)         printf 'golang' ;;
+        javascript) printf 'nodejs npm' ;;
+        python)     printf 'python3 python3-pip python3-virtualenv python3-devel' ;;
+        rust)       printf 'rust cargo' ;;
+        shell)      printf 'bash shellcheck' ;;
+        typescript) printf 'nodejs npm nodejs-typescript' ;;
+        *)          return 1 ;;
+    esac
+}
+
+# The program whose presence INSIDE the capsule means the language is really
+# there. `provision` runs this after the install and records the language only
+# if it answers, because `dnf -y install` can exit 0 having installed a package
+# that does not carry the compiler the user was promised — the "exited 0 having
+# changed nothing" case apexd/AGENTS.md forbids reporting as success.
+lang_probe() {
+    case "$1" in
+        c)          printf 'gcc' ;;
+        cpp)        printf 'g++' ;;
+        go)         printf 'go' ;;
+        javascript) printf 'node' ;;
+        python)     printf 'python3' ;;
+        rust)       printf 'cargo' ;;
+        shell)      printf 'bash' ;;
+        typescript) printf 'tsc' ;;
+        *)          return 1 ;;
+    esac
+}
+
+valid_language() { lang_capsule "$1" >/dev/null 2>&1; }
+
+# ── why `create` records no language, not even for the `python` alias ────────
+# The obvious shortcut is a table saying "the python alias provides python", so
+# `apex env create python` is observed as satisfying `[development] languages =
+# ["python"]` straight away. It is wrong, and the reason is the same one the
+# blueprint's own design note gives for refusing to cache observed state:
+# `create` does not VERIFY the toolchain. Distrobox installs
+# `--additional-packages` during container setup, and a setup that partly
+# failed leaves the container present and the toolchain absent. A record
+# claiming the language on the strength of the alias would then report
+# converged forever.
+#
+# So only `provision` writes `languages`, and only after running the probe
+# inside the capsule. `apex env create python` followed by `apex apply` is
+# still cheap — provision finds the capsule, the packages are already there,
+# the probe answers, and the language is recorded.
+
+# What the host looks like it has. Used only to print a hint — never to change
+# the profile behind the user's back, because a capsule that grabs a GPU
+# because one was detected is exactly the "device-risky default" the daemon
+# rules forbid.
+detect_gpu() {
+    if [ -e /dev/nvidiactl ] || [ -e /dev/nvidia0 ]; then printf 'nvidia'; return; fi
+    if [ -e /dev/kfd ]; then printf 'amd'; return; fi
+    printf 'none'
+}
+
+# ── the container-manager command ───────────────────────────────────────────
+# The whole point of keeping this a pure function: `apex env create` is the one
+# verb that pulls hundreds of megabytes and makes a container, so its argv can
+# never be exercised end to end in CI. Building it here, printing one argument
+# per line and asserting THAT is how the GPU profiles, the image reference and
+# the non-interactive flags are covered by a suite that starts nothing.
+#
+# --yes because this runs from a CLI that may be scripted; distrobox otherwise
+# stops on a pull confirmation that nothing will ever answer.
+create_argv() {
+    local name="$1" image="$2" gpu="$3" packages="${4:-}" home="${5:-}"
+    printf '%s\n' create --yes --name "$name" --image "$image"
+    if [ -n "$packages" ]; then
+        printf '%s\n' --additional-packages "$packages"
+    fi
+    # A capsule with its own home is opt-in, not the default. §8's promise is a
+    # development environment, and a development environment that cannot see
+    # the checkout the user is working in is a virtual machine with extra
+    # steps. --home is offered for the case the flag exists for: an ecosystem
+    # whose tooling litters $HOME (node_modules caches, .m2, .gradle) badly
+    # enough that the user wants it contained.
+    if [ -n "$home" ]; then
+        printf '%s\n' --home "$home"
+    fi
+    gpu_flags "$gpu" || return 1
+    return 0
+}
+
+# ── the capsule's own package manager ───────────────────────────────────────
+# §8: "support distro-like package managers inside the right capsule". The
+# resolver (§9) routes `apex install --source capsule` here, so this mapping is
+# the difference between that working and printing dnf at an Ubuntu container.
+#
+# Matched on the image reference because that is the only thing known before
+# the container exists — probing inside it would need it to be running.
+pm_for_image() {
+    case "$1" in
+        *fedora*|*rhel*|*centos*|*almalinux*|*rocky*) printf 'dnf' ;;
+        *ubuntu*|*debian*|*mint*|*devuan*)            printf 'apt' ;;
+        *arch*|*manjaro*|*endeavour*)                 printf 'pacman' ;;
+        *opensuse*|*tumbleweed*|*leap*)               printf 'zypper' ;;
+        *alpine*)                                      printf 'apk' ;;
+        *) return 1 ;;
+    esac
+}
+
+# The argv that installs packages non-interactively with that manager, one
+# argument per line. Non-interactive matters: this is driven from `apex
+# install`, which may be running from a keybind with no terminal to answer a
+# y/n prompt.
+#
+# `sudo -n` for the same reason, and it is the part that is easy to get wrong.
+# Distrobox normally configures NOPASSWD inside the capsule, so a bare `sudo`
+# works — right up until it does not, and then a command run through
+# `distrobox enter --no-tty` sits forever on a password prompt that has no
+# terminal to appear on. That is a hang, which reads as "APEX froze"; `-n`
+# makes it an immediate, readable refusal instead.
+pm_install_argv() {
+    local pm="$1"; shift
+    case "$pm" in
+        dnf)    printf '%s\n' sudo -n dnf -y install "$@" ;;
+        apt)    printf '%s\n' sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -y install "$@" ;;
+        pacman) printf '%s\n' sudo -n pacman -S --needed --noconfirm "$@" ;;
+        zypper) printf '%s\n' sudo -n zypper --non-interactive install "$@" ;;
+        apk)    printf '%s\n' sudo -n apk add "$@" ;;
+        *)      return 1 ;;
+    esac
+    return 0
+}
+
+# ── the GUI export argv (§8's "when useful") ────────────────────────────────
+# §8 asks for GUI applications from a capsule to appear in the host's launcher.
+# distrobox already implements it, and the shape is unusual enough to be worth
+# writing down: `distrobox-export` runs INSIDE the container. It refuses to run
+# anywhere else — it checks for /run/.containerenv — and it reaches back out
+# through the container's /run/host mount to write the .desktop file into the
+# host's ~/.local/share/applications.
+#
+# So the host side of this is `distrobox enter --no-tty <capsule> --
+# distrobox-export --app <name>`, and there is no host-side program to call
+# instead. --no-tty for the same reason `apex env exec` uses it: this may run
+# from `apex apply`, from a keybind or from an agent, with no terminal for a
+# prompt to appear on.
+#
+# A pure function, printing one argument per line, for the same reason
+# create_argv() is one: nothing here can be exercised end to end without a
+# container, so the argv IS the behaviour and the suite pins it exactly.
+#
+# NOT root, and no polkit action. The file lands in the user's own data
+# directory and `update-desktop-database` is run by distrobox against that same
+# per-user directory, so nothing in this path can raise an authentication
+# prompt.
+export_argv() {
+    local name="$1" app="$2" action="${3:-add}"
+    printf '%s\n' enter --no-tty "$name" -- distrobox-export --app "$app"
+    case "$action" in
+        add) ;;
+        delete) printf '%s\n' --delete ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+list_exports_argv() {
+    printf '%s\n' enter --no-tty "$1" -- distrobox-export --list-apps
+}
+
+# The .desktop files present in the host's launcher directory right now, sorted.
+# Used as a before/after pair around an export so the exact filename distrobox
+# produced can be recorded.
+#
+# The filename is NOT derived. distrobox names it "<container>-<basename of the
+# desktop file it found>", and the basename is whatever the application ships —
+# `apex env export py gimp` can produce `py-org.gimp.GIMP.desktop`. Deriving it
+# would be a guess, and a guessed name is one `rm` would fail to delete while
+# reporting that it had. A prefix glob is not the answer either: capsule `a`
+# and capsule `a-b` are both valid names, and `a-*` matches both.
+host_desktop_files() {
+    [ -d "$HOST_APPS" ] || return 0
+    find "$HOST_APPS" -maxdepth 1 -type f -name '*.desktop' -printf '%f\n' \
+        2>/dev/null | sort
+}
+
+# ── records ─────────────────────────────────────────────────────────────────
+record_path() { printf '%s/%s.json' "$ENV_ROOT" "$1"; }
+has_record()  { [ -f "$(record_path "$1")" ]; }
+
+# Everything APEX knows about a capsule, written atomically. The digest is
+# recorded as whatever podman resolved the reference to at create time and is
+# allowed to be empty: a capsule built from a local image that was never pulled
+# has no repo digest, and inventing one would make provenance a guess.
+write_record() {
+    local name="$1" image="$2" gpu="$3" alias_used="$4" digest="$5" home="$6"
+    local path tmp
+    path="$(record_path "$name")"
+    tmp="${path}.tmp"
+    mkdir -p "$ENV_ROOT" || die "cannot create ${ENV_ROOT}"
+    chmod 0700 "$ENV_ROOT" 2>/dev/null || true
+    # `languages` and `exports` are always present, even when empty, so the
+    # record has one shape for every consumer — `apex env info` prints it
+    # verbatim and `apex blueprint diff` reads `languages` out of it with jq.
+    #
+    # A record written by an OLDER apex-env has neither key, and both readers
+    # treat that as "provides nothing" rather than as an error. That is the
+    # right answer and not merely a lenient one: an older record was written
+    # without the in-capsule probe `provision` now runs, so there is no
+    # verified claim in it to honour. `apex env provision` on such a capsule
+    # installs, probes and then records — cheap, and it measures.
+    jq -n \
+        --arg name "$name" --arg image "$image" --arg gpu "$gpu" \
+        --arg alias "$alias_used" --arg digest "$digest" --arg home "$home" \
+        --arg pm "$(pm_for_image "$image" || printf 'unknown')" \
+        --argjson created "$(date +%s)" \
+        '{name:$name, image:$image, image_digest:$digest, gpu:$gpu,
+          alias:$alias, package_manager:$pm, home:$home, created:$created,
+          languages:[], exports:[]}' \
+        > "$tmp" || die "cannot write the capsule record"
+    mv -f "$tmp" "$path"
+}
+
+# Add one entry to a list-valued field of a record, atomically and without
+# duplicates. Read-modify-write through jq rather than an append, because the
+# record is JSON and a shell append would produce a file nothing can parse —
+# including the next run of this function.
+record_add() {
+    local name="$1" field="$2" value="$3" path tmp
+    path="$(record_path "$name")"
+    [ -f "$path" ] || return 1
+    tmp="${path}.tmp"
+    jq --arg f "$field" --arg v "$value" \
+        '.[$f] = ((.[$f] // []) + [$v] | unique)' "$path" > "$tmp" \
+        || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$path"
+}
+
+record_remove() {
+    local name="$1" field="$2" value="$3" path tmp
+    path="$(record_path "$name")"
+    [ -f "$path" ] || return 1
+    tmp="${path}.tmp"
+    jq --arg f "$field" --arg v "$value" \
+        '.[$f] = ((.[$f] // []) | map(select(. != $v)))' "$path" > "$tmp" \
+        || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$path"
+}
+
+# Entries of a list-valued field, one per line.
+read_record_list() {
+    local name="$1" field="$2" path
+    path="$(record_path "$name")"
+    [ -f "$path" ] || return 1
+    jq -r --arg f "$field" '(.[$f] // [])[]' "$path" 2>/dev/null
+}
+
+read_record_field() {
+    local name="$1" field="$2" path
+    path="$(record_path "$name")"
+    [ -f "$path" ] || return 1
+    jq -r --arg f "$field" '.[$f] // empty' "$path" 2>/dev/null
+}
+
+# Capsule names APEX has records for, sorted.
+record_names() {
+    [ -d "$ENV_ROOT" ] || return 0
+    find "$ENV_ROOT" -maxdepth 1 -type f -name '*.json' -printf '%f\n' 2>/dev/null \
+        | sed 's/\.json$//' | sort
+}
+
+# ── preflight ───────────────────────────────────────────────────────────────
+# Does this user have a subordinate uid/gid range? Rootless podman cannot map
+# any uid but its own without one, so an image extracts as a single-uid mess or
+# not at all. shadow-utils' useradd allocates the ranges from /etc/login.defs,
+# so a normally created account has them and an account made with
+# `useradd --no-user-group`-style automation may not.
+has_subid_range() {
+    local user="$1" file
+    for file in "$SUBUID_FILE" "$SUBGID_FILE"; do
+        [ -r "$file" ] || return 1
+        grep -qE "^${user}:[0-9]+:[0-9]+$" "$file" || return 1
+    done
+    return 0
+}
+
+require_rootless() {
+    if [ "$(id -u)" = 0 ]; then
+        printf 'apex-env: error: %s\n' \
+            "capsules are per-user and must not be created as root" \
+            "" \
+            "A root capsule stores its images under /var/lib/containers, is shared" \
+            "by every account on the machine, and needs sudo to enter — which is" \
+            "three ways of being less useful than a container that belongs to you." \
+            "" \
+            "Run it as yourself:" \
+            "  apex env create $*" >&2
+        exit 1
+    fi
+}
+
+require_tools() {
+    command -v "$PODMAN" >/dev/null 2>&1 \
+        || die "podman is not available; capsules need a container runtime"
+    command -v "$DISTROBOX" >/dev/null 2>&1 \
+        || die "distrobox is not available; it ships in the APEX image, so this system is incomplete"
+    command -v jq >/dev/null 2>&1 || die "jq is not available"
+}
+
+require_subid() {
+    local user="${USER:-$(id -un)}"
+    has_subid_range "$user" && return 0
+    printf 'apex-env: error: %s\n' \
+        "rootless containers are not usable for ${user}" \
+        "" \
+        "A rootless container maps a range of subordinate user and group ids," \
+        "and ${user} has no range in ${SUBUID_FILE} / ${SUBGID_FILE}. Without one" \
+        "podman fails part-way through extracting an image, after the download." \
+        "" \
+        "Give the account a range and log in again:" \
+        "  sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 ${user}" \
+        "  podman system migrate" >&2
+    exit 1
+}
+
+# Does a container of this name already exist? Used to refuse re-using a name
+# rather than letting distrobox fail halfway, and to refuse REMOVING something
+# APEX did not create.
+container_exists() {
+    "$PODMAN" container exists "$1" >/dev/null 2>&1
+}
+
+# What the reference resolved to locally, or empty. Never fatal: provenance is
+# recorded when it can be, and a capsule is not refused because podman printed
+# nothing.
+image_digest() {
+    "$PODMAN" image inspect --format '{{index .RepoDigests 0}}' "$1" 2>/dev/null \
+        | head -1 || true
+}
+
+# ── verbs ───────────────────────────────────────────────────────────────────
+cmd_images() {
+    local a img gpu pkgs
+    printf '%-8s  %-52s  %-7s  %s\n' ALIAS IMAGE GPU EXTRA
+    for a in $ALIASES; do
+        img="$(alias_image "$a")"
+        gpu="$(alias_gpu "$a")"
+        pkgs="$(alias_packages "$a")"
+        printf '%-8s  %-52s  %-7s  %s\n' "$a" "$img" "$gpu" "${pkgs:--}"
+    done
+}
+
+cmd_create() {
+    local name="" image="" gpu="" home="" packages="" alias_used=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --image) shift; image="${1:-}" ;;
+            --image=*) image="${1#*=}" ;;
+            --gpu) shift; gpu="${1:-}" ;;
+            --gpu=*) gpu="${1#*=}" ;;
+            --home) shift; home="${1:-}" ;;
+            --home=*) home="${1#*=}" ;;
+            -*) die "unknown option '$1' (try: apex env create --help)" ;;
+            *) [ -n "$name" ] && die "only one capsule name at a time"; name="$1" ;;
+        esac
+        shift || true
+    done
+    [ -n "$name" ] || die "usage: apex env create <name> [--image REF] [--gpu nvidia|amd|hw|none]"
+    valid_env_name "$name" \
+        || die "'${name}' is not a usable capsule name (lowercase letters, digits, . _ - ; at most 40 characters)"
+
+    # An alias fills in what the user did not say, and never overrides what they
+    # did: `apex env create cuda --gpu none` is a legitimate request for the
+    # cuda capsule's image with no device access.
+    if is_alias "$name"; then
+        alias_used="$name"
+        [ -n "$image" ] || image="$(alias_image "$name")"
+        [ -n "$gpu" ]   || gpu="$(alias_gpu "$name")"
+        packages="$(alias_packages "$name")"
+    fi
+    [ -n "$image" ] || image="$(alias_image fedora)"
+    [ -n "$gpu" ]   || gpu=none
+    valid_gpu_profile "$gpu" || die "unknown device profile '${gpu}' (nvidia, amd, hw, none)"
+    valid_image_ref "$image" || die "'${image}' is not a usable image reference"
+    if [ -n "$home" ]; then
+        valid_home_path "$home" || die "--home needs an absolute path, got '${home}'"
+    fi
+
+    require_rootless "$name"
+    require_tools
+    require_subid
+
+    has_record "$name" && die "capsule '${name}' already exists (apex env rm ${name} to replace it)"
+    if container_exists "$name"; then
+        die "a container called '${name}' already exists but APEX did not create it; pick another name or remove it with 'distrobox rm ${name}'"
+    fi
+
+    # Built into a string first and split afterwards. `mapfile < <(f)` reports
+    # mapfile's own exit status, never f's, so a failure inside create_argv
+    # would come back as success and run distrobox with a truncated argv.
+    local argv_text
+    argv_text="$(create_argv "$name" "$image" "$gpu" "$packages" "$home")" \
+        || die "cannot build the container command"
+    local -a argv=()
+    mapfile -t argv <<<"$argv_text"
+
+    msg "creating capsule '${name}' from ${image} (device profile: ${gpu})"
+    if [ "$gpu" = none ]; then
+        local detected; detected="$(detect_gpu)"
+        if [ "$detected" != none ]; then
+            msg "this machine has hardware the '${detected}' profile is for; 'apex env create ${name} --gpu ${detected}' would give the capsule access to it"
+        fi
+    fi
+    "$DISTROBOX" "${argv[@]}" >&2 || die "distrobox could not create '${name}'"
+
+    write_record "$name" "$image" "$gpu" "$alias_used" "$(image_digest "$image")" "$home"
+    msg "capsule '${name}' is ready:  apex env enter ${name}"
+}
+
+cmd_list() {
+    local json=0
+    [ "${1:-}" = --json ] && json=1
+    local -a names=()
+    mapfile -t names < <(record_names)
+    if [ "$json" = 1 ]; then
+        local -a files=()
+        local n
+        for n in "${names[@]:-}"; do
+            [ -n "$n" ] || continue
+            files+=("$(record_path "$n")")
+        done
+        # No records means no files, and `jq -s .` with no file arguments reads
+        # stdin — which from a CLI with no pipe is a hang, not an empty list.
+        if [ "${#files[@]}" -eq 0 ]; then
+            printf '[]\n'
+        else
+            jq -s '.' "${files[@]}"
+        fi
+        return 0
+    fi
+    if [ "${#names[@]}" -eq 0 ] || [ -z "${names[0]:-}" ]; then
+        msg "no capsules yet — try: apex env create fedora"
+        return 0
+    fi
+    printf '%-16s  %-7s  %-6s  %s\n' NAME GPU PKG IMAGE
+    local n
+    for n in "${names[@]}"; do
+        printf '%-16s  %-7s  %-6s  %s\n' \
+            "$n" \
+            "$(read_record_field "$n" gpu)" \
+            "$(read_record_field "$n" package_manager)" \
+            "$(read_record_field "$n" image)"
+    done
+}
+
+cmd_info() {
+    [ "$#" -ge 1 ] || die "usage: apex env info <name>"
+    local name="$1"
+    valid_env_name "$name" || die "'${name}' is not a usable capsule name"
+    has_record "$name" || die "no capsule called '${name}' (apex env list)"
+    cat "$(record_path "$name")"
+}
+
+# `enter` and `exec` are the same operation with a different tail; both refuse
+# a capsule APEX has no record of so that a typo does not silently start
+# somebody else's container.
+require_capsule() {
+    local name="$1"
+    valid_env_name "$name" || die "'${name}' is not a usable capsule name"
+    has_record "$name" || die "no capsule called '${name}' (apex env list, or apex env create ${name})"
+}
+
+cmd_enter() {
+    [ "$#" -ge 1 ] || die "usage: apex env enter <name> [-- command...]"
+    local name="$1"; shift
+    require_capsule "$name"
+    require_tools
+    if [ "${1:-}" = -- ]; then shift; fi
+    if [ "$#" -gt 0 ]; then
+        exec "$DISTROBOX" enter "$name" -- "$@"
+    fi
+    exec "$DISTROBOX" enter "$name"
+}
+
+cmd_exec() {
+    [ "$#" -ge 1 ] || die "usage: apex env exec <name> -- command..."
+    local name="$1"; shift
+    require_capsule "$name"
+    require_tools
+    if [ "${1:-}" = -- ]; then shift; fi
+    [ "$#" -gt 0 ] || die "usage: apex env exec ${name} -- command..."
+    exec "$DISTROBOX" enter --no-tty "$name" -- "$@"
+}
+
+# Install packages with the capsule's OWN package manager. This is §9's third
+# source: software that exists only as a distribution package for a
+# distribution APEX is not.
+cmd_pkg_install() {
+    [ "$#" -ge 2 ] || die "usage: apex env install <name> <package>..."
+    local name="$1"; shift
+    require_capsule "$name"
+    require_tools
+    local image pm
+    image="$(read_record_field "$name" image)"
+    pm="$(pm_for_image "$image")" \
+        || die "APEX does not know which package manager '${image}' uses; run: apex env enter ${name}"
+    local argv_text
+    argv_text="$(pm_install_argv "$pm" "$@")" || die "cannot build the package command"
+    local -a argv=()
+    mapfile -t argv <<<"$argv_text"
+    msg "installing in capsule '${name}' with ${pm}: $*"
+    "$DISTROBOX" enter --no-tty "$name" -- "${argv[@]}" >&2 \
+        || die "the capsule's package manager refused: $*"
+    msg "installed in '${name}': $*"
+}
+
+# ── GUI export ──────────────────────────────────────────────────────────────
+# §8: "GUI applications from a capsule appear in the host launcher when
+# useful." One verb per direction, and the record remembers what was exported
+# so `rm` can take the launcher entries with it.
+cmd_export() {
+    [ "$#" -ge 2 ] || die "usage: apex env export <name> <application>"
+    local name="$1" app="$2"
+    require_capsule "$name"
+    valid_app_name "$app" \
+        || die "'${app}' is not a usable application name (letters, digits and . _ + - ; a bare name, not a path)"
+    require_tools
+
+    local argv_text
+    argv_text="$(export_argv "$name" "$app" add)" || die "cannot build the export command"
+    local -a argv=()
+    mapfile -t argv <<<"$argv_text"
+
+    # Snapshot the whole directory, not just this capsule's prefix. See
+    # host_desktop_files() for why a prefix is wrong.
+    local before after
+    before="$(host_desktop_files)"
+    msg "exporting '${app}' from capsule '${name}' to the host launcher"
+    "$DISTROBOX" "${argv[@]}" >&2 \
+        || die "distrobox-export could not export '${app}' from '${name}'; 'apex env enter ${name}' and check the application is installed there"
+    after="$(host_desktop_files)"
+
+    # Everything that appeared. Usually one file; more than one is possible
+    # when a .desktop carries several actions, and recording all of them is
+    # what makes the removal exact.
+    local new f recorded=0
+    new="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") 2>/dev/null || true)"
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        valid_desktop_file "$f" || continue
+        record_add "$name" exports "$f" || warn "could not record the export of ${f}"
+        recorded=$((recorded + 1))
+    done <<<"$new"
+
+    if [ "$recorded" = 0 ]; then
+        # distrobox exited 0 and no new file appeared. Either it was already
+        # exported (re-running is idempotent and writes the same filename) or
+        # the host directory is not where this script thinks it is. Say so
+        # rather than reporting an export that may not have happened.
+        warn "no new launcher entry appeared in ${HOST_APPS}; if '${app}' was already exported this is expected, otherwise 'apex env exports ${name}' will say what the capsule thinks it exported"
+    fi
+    msg "'${app}' should appear in the launcher shortly; the .desktop file is in ${HOST_APPS}"
+}
+
+cmd_unexport() {
+    [ "$#" -ge 2 ] || die "usage: apex env unexport <name> <application>"
+    local name="$1" app="$2"
+    require_capsule "$name"
+    valid_app_name "$app" || die "'${app}' is not a usable application name"
+    require_tools
+
+    local argv_text
+    argv_text="$(export_argv "$name" "$app" delete)" || die "cannot build the export command"
+    local -a argv=()
+    mapfile -t argv <<<"$argv_text"
+
+    local before after
+    before="$(host_desktop_files)"
+    "$DISTROBOX" "${argv[@]}" >&2 \
+        || die "distrobox-export could not un-export '${app}' from '${name}'"
+    after="$(host_desktop_files)"
+
+    local gone f
+    gone="$(comm -23 <(printf '%s\n' "$before") <(printf '%s\n' "$after") 2>/dev/null || true)"
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        record_remove "$name" exports "$f" || true
+    done <<<"$gone"
+    msg "'${app}' is no longer exported from '${name}'"
+}
+
+# What the CAPSULE says it has exported, from distrobox itself, plus what APEX
+# recorded. Both, because they answer different questions and can legitimately
+# disagree: a user who ran `distrobox-export` by hand inside the capsule has an
+# export APEX never saw, and saying so beats pretending the record is complete.
+cmd_exports() {
+    [ "$#" -ge 1 ] || die "usage: apex env exports <name>"
+    local name="$1"
+    require_capsule "$name"
+    require_tools
+    local argv_text
+    argv_text="$(list_exports_argv "$name")"
+    local -a argv=()
+    mapfile -t argv <<<"$argv_text"
+    printf 'exported from the capsule, as distrobox sees it:\n'
+    "$DISTROBOX" "${argv[@]}" || warn "the capsule could not be asked; it may not be running"
+    printf '\nlauncher entries APEX recorded for this capsule:\n'
+    local any=0 f
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        any=1
+        printf '  %s/%s\n' "$HOST_APPS" "$f"
+    done < <(read_record_list "$name" exports)
+    [ "$any" = 1 ] || printf '  (none)\n'
+}
+
+# ── [development] convergence (§10) ─────────────────────────────────────────
+# One language in, one capsule that provides it out. Idempotent: a capsule that
+# already exists is reused, and a language already recorded is a no-op, so
+# `apex apply` running twice does nothing the second time.
+cmd_provision() {
+    [ "$#" -ge 1 ] || die "usage: apex env provision <language>"
+    local language="$1"
+    valid_language "$language" \
+        || die "'${language}' is not a language APEX provisions (${LANGUAGES// /, })"
+    local capsule packages probe
+    capsule="$(lang_capsule "$language")"
+    packages="$(lang_packages "$language")"
+    probe="$(lang_probe "$language")"
+
+    require_rootless "$capsule"
+    require_tools
+
+    if ! has_record "$capsule"; then
+        msg "provisioning ${language}: creating capsule '${capsule}'"
+        cmd_create "$capsule"
+    fi
+
+    # Already provided: nothing to do, and say so with the capsule's name so a
+    # user reading `apex apply` output can go and use it.
+    if read_record_list "$capsule" languages 2>/dev/null | grep -qxF "$language"; then
+        msg "capsule '${capsule}' already provides ${language}:  apex env enter ${capsule}"
+        return 0
+    fi
+
+    # The capsule's base decides the package names, and APEX only knows dnf's.
+    # A capsule the user built from another base is theirs; guessing apt or
+    # pacman names for it would install the wrong thing and report success.
+    local pm
+    pm="$(read_record_field "$capsule" package_manager)"
+    if [ "$pm" != dnf ]; then
+        die "capsule '${capsule}' is ${pm}-based, and APEX only knows the Fedora package names for ${language}; install it yourself with: apex env install ${capsule} <packages>"
+    fi
+
+    # shellcheck disable=SC2086  # a space-separated list from a closed table
+    cmd_pkg_install "$capsule" $packages
+
+    # Verify, then record. In that order, and it is the whole reason this verb
+    # is not just "create and install": `dnf -y install` exits 0 for a package
+    # set that does not put the promised program on PATH, and recording the
+    # language on the strength of that exit code would make `apex blueprint
+    # diff` report converged forever on a capsule with no toolchain.
+    local -a probe_argv=(enter --no-tty "$capsule" -- command -v "$probe")
+    if ! "$DISTROBOX" "${probe_argv[@]}" >/dev/null 2>&1; then
+        die "installed the ${language} packages in '${capsule}' but '${probe}' is still not on PATH inside it; not recording the language"
+    fi
+    record_add "$capsule" languages "$language" \
+        || die "cannot record ${language} on capsule '${capsule}'"
+    msg "${language} is provided by capsule '${capsule}':  apex env enter ${capsule}"
+}
+
+cmd_languages() {
+    local l
+    printf '%-11s  %-8s  %-6s  %s\n' LANGUAGE CAPSULE PROBE PACKAGES
+    for l in $LANGUAGES; do
+        printf '%-11s  %-8s  %-6s  %s\n' \
+            "$l" "$(lang_capsule "$l")" "$(lang_probe "$l")" "$(lang_packages "$l")"
+    done
+}
+
+cmd_rm() {
+    local name="" keep_home=0 force=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --keep-home) keep_home=1 ;;
+            --force) force=1 ;;
+            -*) die "unknown option '$1'" ;;
+            *) [ -n "$name" ] && die "only one capsule name at a time"; name="$1" ;;
+        esac
+        shift || true
+    done
+    [ -n "$name" ] || die "usage: apex env rm <name>"
+    valid_env_name "$name" || die "'${name}' is not a usable capsule name"
+    if ! has_record "$name"; then
+        [ "$force" = 1 ] \
+            || die "no capsule called '${name}'; APEX only removes containers it created (--force overrides)"
+    fi
+    require_tools
+    # distrobox rm --force stops a running container first. Without it the
+    # command fails on exactly the capsule the user is most likely to be
+    # removing: the one they just used.
+    "$DISTROBOX" rm --force "$name" >&2 || warn "distrobox could not remove the container '${name}'"
+
+    # Launcher entries go with the container. A .desktop pointing at a capsule
+    # that no longer exists is a menu item that does nothing, and the user has
+    # no way to guess which file to delete.
+    #
+    # Deleted BY NAME, from the record, never by a `<name>-*.desktop` glob:
+    # capsule `a` and capsule `a-b` are both valid names and the glob for the
+    # first matches the second's entries. Every name is re-validated on the way
+    # out, so a hand-edited record cannot turn this into a delete of an
+    # arbitrary path.
+    local f
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        if ! valid_desktop_file "$f"; then
+            warn "the record lists an export APEX will not delete: ${f}"
+            continue
+        fi
+        rm -f -- "${HOST_APPS}/${f}" \
+            && msg "removed the launcher entry ${HOST_APPS}/${f}"
+    done < <(read_record_list "$name" exports 2>/dev/null || true)
+
+    local home
+    home="$(read_record_field "$name" home 2>/dev/null || true)"
+    rm -f "$(record_path "$name")"
+    if [ -n "$home" ] && [ "$keep_home" = 0 ]; then
+        # Never recursive-delete a path this tool did not create. The capsule
+        # home is the user's data; saying where it is beats deleting it.
+        msg "the capsule's home directory is left in place: ${home}"
+    fi
+    msg "removed capsule '${name}'"
+}
+
+usage() {
+    cat <<'EOF'
+usage: apex-env <command> [args]
+
+  create <name> [--image REF] [--gpu nvidia|amd|hw|none] [--home DIR]
+                       make a capsule. A name that is also an image alias
+                       (fedora, ubuntu, arch, debian, python, cuda, rocm)
+                       brings that alias's image and device profile with it.
+  list [--json]        capsules APEX created, with their image and profile
+  info <name>          the full record: image, digest, device profile
+  enter <name> [-- cmd...]
+                       an interactive shell in the capsule
+  exec <name> -- cmd...
+                       run one command in the capsule, no TTY
+  install <name> <pkg>...
+                       install with the capsule's own package manager
+  rm <name> [--keep-home] [--force]
+                       remove the container; the record and any launcher
+                       entries it exported go with it
+  images               the image aliases and what they resolve to
+  export <name> <app>  put a GUI application from the capsule into the host
+                       launcher (§8). Runs distrobox-export inside the capsule;
+                       the .desktop file lands in your own data directory, so
+                       nothing here needs root.
+  unexport <name> <app>
+                       take it back out again
+  exports <name>       what this capsule has exported, and where
+  provision <language> make a capsule that provides a language, and record it.
+                       This is what `apex apply` runs for the blueprint's
+                       [development] languages — a toolchain goes in a capsule,
+                       never onto the read-only host.
+  languages            the language table: capsule, probe and packages
+
+Capsules are rootless per-user podman containers driven through distrobox.
+They see your home directory, your terminal and your devices, and the bootc
+host stays read-only and unmodified.
+EOF
+}
+
+main() {
+    local cmd="${1:-}"; shift || true
+    case "$cmd" in
+        create)  cmd_create "$@" ;;
+        list)    cmd_list "$@" ;;
+        info)    cmd_info "$@" ;;
+        enter)   cmd_enter "$@" ;;
+        exec)    cmd_exec "$@" ;;
+        install) cmd_pkg_install "$@" ;;
+        rm)      cmd_rm "$@" ;;
+        images)  cmd_images ;;
+        export)   cmd_export "$@" ;;
+        unexport) cmd_unexport "$@" ;;
+        exports)  cmd_exports "$@" ;;
+        provision) cmd_provision "$@" ;;
+        languages) cmd_languages ;;
+        ""|-h|--help|help) usage ;;
+        *) die "unknown command '$cmd' (try --help)" ;;
+    esac
+}
+
+main "$@"

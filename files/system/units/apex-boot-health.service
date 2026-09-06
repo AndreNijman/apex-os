@@ -1,0 +1,45 @@
+[Unit]
+Description=APEX boot health check
+Documentation=file:///usr/share/doc/apex/boot-v2.md
+# ── the whole rollback mechanism hangs off these four lines ──
+#
+# boot-complete.target is reached only if every unit that is RequiredBy it and
+# ordered Before it succeeded. systemd-bless-boot.service Requires that target,
+# and it is what strips the +N-M boot-counting suffix from the ESP entry. So a
+# non-zero exit here means: target not reached -> bless-boot does not run ->
+# the suffix survives -> systemd-boot spends another try on the next boot ->
+# at zero tries it selects the previous, blessed deployment.
+#
+# APEX contributes the health definition and nothing else. There is no APEX
+# boot counter, because the boots that need counting never reach userspace.
+Before=boot-complete.target
+# After the desktop, so "reached the graphical desktop" is a question that can
+# be answered. Both are listed because a machine whose default is
+# multi-user.target has no graphical.target in the transaction and the ordering
+# is then simply ignored.
+After=graphical.target multi-user.target
+# ── and this line is why the unit is inert on every published image ──
+#
+# GRUB is the default for daily, gaming-mesa and gaming-nvidia in this
+# generation (AGENTS.md boot-path rule 5). LoaderBootCountPath is set by
+# systemd-boot only when it booted the machine WITH boot counting in effect, so
+# on a GRUB machine this unit never starts. It is the same condition
+# systemd-bless-boot-generator uses to decide whether to pull bless-boot in at
+# all, deliberately: an APEX-invented marker could disagree with the mechanism
+# it is supposed to track, and a condition that fails counts as a skip rather
+# than a failure, so nothing depending on boot-complete.target breaks.
+ConditionPathExists=/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/apex-boot-health check
+
+[Install]
+# RequiredBy, not WantedBy. WantedBy would let boot-complete.target be reached
+# with this check failing, which would bless a broken deployment — the exact
+# outcome §22 forbids: "do not mark an update successful merely because the
+# kernel started."
+RequiredBy=boot-complete.target

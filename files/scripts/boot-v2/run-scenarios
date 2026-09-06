@@ -1,0 +1,753 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  run-scenarios — the boot v2 VM harness. §22 migration step 2, "prototype
+#  composefs/systemd-boot in CI and virtual machines".
+#
+#  Every scenario boots a real guest under Secure-Boot-enforcing OVMF and
+#  asserts on what came out of the guest's serial port and on what the
+#  bootloader wrote back into the ESP. Nothing here asserts that a build
+#  command exited 0.
+#
+#  Three rules the assertions follow, each of which this project has been
+#  bitten by:
+#
+#  1. A marker must be read from the SERIAL LOG and nowhere else. The UKI, the
+#     staged ESP and the guest init script all contain the marker string, so a
+#     grep over the work directory would pass with no guest having run.
+#  2. A run counts as a boot only when qemu exited 0 under -no-reboot. Marker
+#     present + timeout kill means the guest printed and then hung, which §22
+#     refuses to count as a successful update.
+#  3. Counts are EXACT. `-ge` once let 20 of 68 dropped bindings pass a test
+#     called "it generates every binding it can".
+#
+#  Usage: run-scenarios [--work DIR] [SCENARIO ...]
+#         run-scenarios --list
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=files/scripts/boot-v2/lib.sh
+. "$HERE/lib.sh"
+
+WORK="${APEX_BOOTLAB_WORK:-/work/out}"
+SCENARIOS=()
+LIST=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --work) WORK="$2"; shift 2;;
+        --list) LIST=1; shift;;
+        --*) die "unknown option $1";;
+        *) SCENARIOS+=("$1"); shift;;
+    esac
+done
+
+ALL=(prereq signed-uki reproducible negative-unsigned negative-foreign
+     negative-tampered entry-layout boot-counting)
+# Scenarios needing something the container cannot produce for itself. Kept OUT
+# of ALL so a default run cannot silently skip them and still report success:
+# they are requested by name and hard-fail when their input is missing.
+STAGED=(apex-image luks-tpm)
+if (( LIST )); then printf '%s\n' "${ALL[@]}" "${STAGED[@]}"; exit 0; fi
+(( ${#SCENARIOS[@]} )) || SCENARIOS=("${ALL[@]}")
+
+KVER="$(cat /etc/apex-bootlab-kver 2>/dev/null || true)"
+[[ -n "$KVER" ]] || die "/etc/apex-bootlab-kver missing — not running inside the boot lab image"
+LAB_KERNEL="/usr/lib/modules/$KVER/vmlinuz"
+KEYS="$WORK/keys"
+CMDLINE_BASE="console=ttyS0,115200 earlyprintk=serial,ttyS0,115200"
+
+mkdir -p "$WORK"
+
+# ── shared fixtures ─────────────────────────────────────────────────────────
+fixtures() {
+    [[ -d "$KEYS" ]] && return 0
+    "$HERE/apex-sb-keys" "$KEYS" >/dev/null
+    "$HERE/apex-sb-vars" --cert "$KEYS/sb/cert.der" --output "$WORK/vars-apex.tmpl.fd" >/dev/null
+    "$HERE/apex-guest-micro" "$WORK/micro.cpio.gz" >/dev/null
+}
+
+# A fresh writable varstore per scenario: EFI variables persist inside the
+# file, and a scenario inheriting another's LoaderEntryDefault or BootOrder
+# would make the results depend on execution order.
+fresh_vars() { cp "$WORK/vars-apex.tmpl.fd" "$1"; }
+
+mkuki() {  # mkuki OUT ENTRY_ID [--unsigned|--foreign|extra args...]
+    local out="$1" id="$2"; shift 2
+    local -a args=(
+        --output "$out"
+        --kernel "$LAB_KERNEL" --initrd "$WORK/micro.cpio.gz" --allow-no-ucode
+        --cmdline "$CMDLINE_BASE apex.bootlab.entry=$id"
+        --deployment "$id" --variant bootlab
+    )
+    case "${1:-}" in
+        --unsigned) shift ;;
+        --foreign)  shift; args+=(--sb-key "$KEYS/foreign/key.pem" --sb-cert "$KEYS/foreign/cert.pem") ;;
+        *)          args+=(--sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem") ;;
+    esac
+    "$HERE/apex-mkuki" "${args[@]}" "$@" >/dev/null
+}
+
+# List the type #2 entry filenames the bootloader currently sees, read back out
+# of the disk image AFTER the boot rather than from our staging copy.
+esp_linux_entries() {
+    local disk="$1"
+    esp_disk_readback "$disk" "$disk.after"
+    mdir -i "$disk.after" -b ::/EFI/Linux 2>/dev/null \
+        | sed 's|^::/EFI/Linux/||' | sed 's/\r$//' | grep -i '\.efi$' | sort
+}
+
+esp_loader_entries() {
+    local disk="$1"
+    esp_disk_readback "$disk" "$disk.after"
+    mdir -i "$disk.after" -b ::/loader/entries 2>/dev/null \
+        | sed 's|^::/loader/entries/||' | sed 's/\r$//' | grep -i '\.conf$' | sort
+}
+
+# ── scenarios ───────────────────────────────────────────────────────────────
+
+scenario_prereq() {
+    log "prereq: the lab has what every other scenario assumes"
+    [[ -f "$LAB_KERNEL" ]] && ok "lab kernel $KVER" || bad "no lab kernel at $LAB_KERNEL"
+    local f; f="$(ovmf_code_secboot)";      ok "SB firmware $f"
+    f="$(ovmf_vars_template)";              ok "pristine varstore template $f"
+    f="$(sd_boot_efi)";                     ok "systemd-boot $f"
+    f="$(sd_stub_efi)";                     ok "sd-stub $f"
+    # KVM makes the difference between a 6-second boot and a 40-second one, but
+    # it is not a hard requirement: qemu falls back to TCG and the assertions
+    # are identical. Report which one ran, because "it passed" means different
+    # things at different speeds and a CI timeout is the usual symptom.
+    if [[ -r /dev/kvm ]]; then ok "acceleration: kvm"; else ok "acceleration: tcg (no /dev/kvm)"; fi
+}
+
+scenario_signed_uki() {
+    log "signed-uki: an APEX-signed UKI boots under Secure Boot enforcing"
+    fixtures
+    mkuki "$WORK/uki-good.efi" good
+    local disk="$WORK/disk-signed.img" vars="$WORK/vars-signed.fd" ser="$WORK/serial-signed.log"
+    "$HERE/apex-mkesp" --disk "$disk" --size 96 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "good:0:$WORK/uki-good.efi" --default 'apex-good*' >/dev/null
+    fresh_vars "$vars"
+
+    local rc=0
+    vm_boot --disk "$disk" --vars "$vars" --name signed --serial "$ser" --timeout 120 || rc=$?
+    assert_eq 0 "$rc" "qemu exit status (clean guest poweroff)"
+    assert_serial_has "$ser" "APEX-BOOTLAB: userspace-reached"
+    assert_serial_has "$ser" "APEX-BOOTLAB: clean-poweroff"
+    # The command line inside the signed image is the one the kernel received.
+    # This is the property that makes a UKI worth having: on the GRUB/BLS path
+    # the cmdline is unsigned and unmeasured.
+    assert_serial_has "$ser" "apex.bootlab.entry=good"
+    # sd-boot ran and identified itself, so the boot went through the loader we
+    # signed rather than the firmware loading the UKI directly.
+    assert_serial_has "$ser" "APEX-BOOTLAB: efivar LoaderEntrySelected=apex-good.efi"
+    assert_serial_has "$ser" "APEX-BOOTLAB: efivar StubInfo=systemd-stub"
+}
+
+scenario_reproducible() {
+    log "reproducible: the same inputs and SOURCE_DATE_EPOCH give the same bytes"
+    fixtures
+
+    # ── The UKI PAYLOAD is reproducible. The SIGNATURE is not, and cannot be ──
+    #
+    # This scenario used to build two SIGNED UKIs and assert byte equality. It
+    # passed, then failed on a later CI run whose only changes were to
+    # documentation — because `sbsign` records a signing time in the PKCS#7
+    # structure, so two signings of identical input match only when they land
+    # in the same second.
+    #
+    # Measured directly rather than inferred: signing one unmodified
+    # linuxx64.efi.stub twice, two seconds apart, with one key, produced
+    # sha256 c266048303a17056… and 66d64b06a66db973…. There is no sbsign flag
+    # that removes the timestamp.
+    #
+    # So the assertion moves to the artifact whose bytes SOURCE_DATE_EPOCH
+    # actually controls — the unsigned UKI — and the signature gets the
+    # assertion that is true of it: that it verifies, every time. Claiming
+    # byte-identical signed output would be claiming a property Authenticode
+    # does not have.
+    local a="$WORK/repro-1.efi" b="$WORK/repro-2.efi"
+    SOURCE_DATE_EPOCH=1700000000 mkuki "$a" repro --unsigned
+    SOURCE_DATE_EPOCH=1700000000 mkuki "$b" repro --unsigned
+    local ha hb
+    ha="$(sha256sum <"$a" | cut -d' ' -f1)"
+    hb="$(sha256sum <"$b" | cut -d' ' -f1)"
+    assert_eq "$ha" "$hb" "sha256 of two identical UNSIGNED UKI builds"
+
+    # And a different epoch must produce different bytes, otherwise the check
+    # above would pass even if SOURCE_DATE_EPOCH were being ignored and the
+    # timestamp were hardcoded.
+    local c="$WORK/repro-3.efi" hc
+    SOURCE_DATE_EPOCH=1600000000 mkuki "$c" repro --unsigned
+    hc="$(sha256sum <"$c" | cut -d' ' -f1)"
+    if [[ "$ha" == "$hc" ]]; then
+        bad "SOURCE_DATE_EPOCH has no effect on the output — reproducibility is not being controlled"
+    else
+        ok "a different SOURCE_DATE_EPOCH changes the bytes"
+    fi
+
+    # The signed artifact: two independent builds, both of which must verify.
+    # This is what "produced reproducibly" can mean for a signed PE, and it is
+    # not weaker than it sounds — the payload equality above plus a valid
+    # signature over it is the whole of what a verifier checks.
+    local s1="$WORK/repro-signed-1.efi" s2="$WORK/repro-signed-2.efi"
+    SOURCE_DATE_EPOCH=1700000000 mkuki "$s1" repro
+    SOURCE_DATE_EPOCH=1700000000 mkuki "$s2" repro
+    local vok=1
+    for s in "$s1" "$s2"; do
+        sbverify --cert "$KEYS/sb/cert.pem" "$s" >/dev/null 2>&1 || vok=0
+    done
+    if [[ "$vok" == 1 ]]; then
+        ok "both signed builds verify against the APEX certificate"
+    else
+        bad "both signed builds verify against the APEX certificate"
+    fi
+
+    # And say out loud whether the signed bytes matched this time, without
+    # asserting it either way — a run where they happen to match must not be
+    # read as evidence that they always will.
+    if [[ "$(sha256sum <"$s1" | cut -d' ' -f1)" == "$(sha256sum <"$s2" | cut -d' ' -f1)" ]]; then
+        log "  (the two signed builds happened to land in the same second)"
+    else
+        log "  (the two signed builds differ, as expected: sbsign timestamps)"
+    fi
+}
+
+# One helper for all three negative controls: the difference between them is
+# only how the UKI was (not) signed, and the expected outcome is identical.
+negative_boot() {
+    local name="$1" uki="$2"
+    local disk="$WORK/disk-$name.img" vars="$WORK/vars-$name.fd" ser="$WORK/serial-$name.log"
+    "$HERE/apex-mkesp" --disk "$disk" --size 96 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "$name:0:$uki" --default "apex-$name*" >/dev/null
+    fresh_vars "$vars"
+    local rc=0
+    # A short timeout: the firmware refusing an image is immediate. sd-boot
+    # then has nothing bootable and sits at its menu, so the timeout kill IS
+    # the expected outcome here and the marker's absence is the assertion.
+    vm_boot --disk "$disk" --vars "$vars" --name "$name" --serial "$ser" --timeout 45 || rc=$?
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: userspace-reached"
+    if (( rc == 0 )); then
+        bad "$name: the guest powered off cleanly, so something booted"
+    else
+        ok "$name: no guest reached userspace (qemu rc=$rc)"
+    fi
+}
+
+scenario_negative_unsigned() {
+    log "negative-unsigned: an unsigned UKI is refused by the firmware"
+    fixtures
+    mkuki "$WORK/uki-unsigned.efi" unsigned --unsigned
+    # Prove the mutant is really unsigned. A negative control that "passed"
+    # because the artifact was never built is a documented failure in this
+    # project; so is one that passed because the artifact was accidentally fine.
+    if sbverify --cert "$KEYS/sb/cert.pem" "$WORK/uki-unsigned.efi" >/dev/null 2>&1; then
+        bad "the 'unsigned' UKI verifies against the APEX certificate — the control is void"
+        return
+    fi
+    ok "the unsigned UKI does not verify against the APEX certificate"
+    negative_boot unsigned "$WORK/uki-unsigned.efi"
+}
+
+scenario_negative_foreign() {
+    log "negative-foreign: a UKI signed by an unenrolled key is refused"
+    fixtures
+    mkuki "$WORK/uki-foreign.efi" foreign --foreign
+    # This control is the stronger one: it proves the firmware is CHECKING the
+    # signature against db, not merely checking that a signature exists.
+    if ! sbverify --cert "$KEYS/foreign/cert.pem" "$WORK/uki-foreign.efi" >/dev/null 2>&1; then
+        bad "the foreign UKI is not signed by the foreign key — the control is void"
+        return
+    fi
+    ok "the foreign UKI is validly signed, by a key that is not in db"
+    if sbverify --cert "$KEYS/sb/cert.pem" "$WORK/uki-foreign.efi" >/dev/null 2>&1; then
+        bad "the foreign UKI also verifies against the APEX certificate — the control is void"
+        return
+    fi
+    ok "the foreign UKI does not verify against the APEX certificate"
+    negative_boot foreign "$WORK/uki-foreign.efi"
+}
+
+scenario_negative_tampered() {
+    log "negative-tampered: editing the signed command line breaks the boot"
+    fixtures
+    mkuki "$WORK/uki-tampered.efi" tampered
+    local victim="$WORK/uki-tampered.efi"
+    # Flip one byte inside .cmdline. This is the attack a UKI exists to stop:
+    # on the GRUB/BLS path the command line is a text file anyone with the ESP
+    # can edit, and `init=/bin/sh` or a changed composefs digest would be
+    # accepted. Here it must invalidate the whole image.
+    local off before after
+    off="$(python3 - "$victim" <<'PY'
+import sys, pefile
+pe = pefile.PE(sys.argv[1], fast_load=True)
+s = next(x for x in pe.sections if x.Name.rstrip(b'\x00') == b'.cmdline')
+print(s.PointerToRawData)
+PY
+)"
+    before="$(sha256sum <"$victim" | cut -d' ' -f1)"
+    printf 'X' | dd of="$victim" bs=1 seek="$off" conv=notrunc status=none
+    after="$(sha256sum <"$victim" | cut -d' ' -f1)"
+    # Verify the mutant exists AND differs before concluding anything was
+    # caught. A `dd` that errored, or an offset of 0, would leave the original
+    # in place and the scenario would "catch" a UKI that was never mutated.
+    if [[ "$before" == "$after" ]]; then
+        bad "the tampered UKI is byte-identical to the original — the mutation did not happen"
+        return
+    fi
+    ok "the tampered UKI differs from the signed original (offset $off)"
+    if sbverify --cert "$KEYS/sb/cert.pem" "$victim" >/dev/null 2>&1; then
+        bad "sbverify still accepts the tampered UKI"
+        return
+    fi
+    ok "sbverify rejects the tampered UKI"
+    negative_boot tampered "$victim"
+}
+
+scenario_entry_layout() {
+    log "entry-layout: which entry types does systemd-boot 258 apply the tally to?"
+    fixtures
+    # §22 asks for APEX-owned EFI paths; systemd-boot hardcodes \\EFI\\Linux for
+    # UKI discovery. Rather than read that out of the source, this scenario
+    # measures it, because the boot-counting deliverable rests on the answer:
+    # a layout that satisfies "APEX-owned paths" and loses the tally would read
+    # as implementing §22 while removing its step 4.
+    #
+    # MEASURED, systemd-boot 258.10-1.fc43, OVMF secboot, 2026-09-03:
+    #   type #2  /EFI/Linux/apex-t2+3-0.efi         -> renamed to +2-1   ✓
+    #   type #1  /loader/entries/apex-t1+3-0.conf   -> NOT renamed
+    #            with `efi /EFI/APEX/uki/apex-t1.efi`  (the entry booted fine)
+    #   type #1  /loader/entries/apex-t3+3-0.conf   -> renamed to +2-1   ✓
+    #            with `linux /EFI/APEX/uki/apex-t3.efi`
+    #
+    # So the tally is not a property of the entry type: it is skipped for
+    # entries whose target is named with the `efi` key, and applied for `linux`
+    # and for type #2 UKIs. Both working layouts are therefore available, and
+    # the choice is a real decision rather than a constraint. apex-mkesp
+    # defaults to type #2 — see the header comment there for why, and for what
+    # the type #1 alternative would cost.
+    #
+    # All three halves are asserted, including the negative one. If a future
+    # systemd starts counting `efi` entries, this fails and whoever sees it
+    # re-reads this comment instead of rediscovering the difference.
+    mkuki "$WORK/uki-t2.efi" t2
+    mkuki "$WORK/uki-t1.efi" t1
+    mkuki "$WORK/uki-t3.efi" t3
+    local disk="$WORK/disk-layout.img" vars="$WORK/vars-layout.fd"
+
+    # (a) type #2, /EFI/Linux, tally 3
+    "$HERE/apex-mkesp" --disk "$disk" --size 96 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "t2:3:$WORK/uki-t2.efi" --default 'apex-t2*' >/dev/null
+    fresh_vars "$vars"
+    local rc=0
+    vm_boot --disk "$disk" --vars "$vars" --name layout-t2 \
+            --serial "$WORK/serial-layout-t2.log" --timeout 120 || rc=$?
+    assert_eq 0 "$rc" "type #2 entry: clean poweroff"
+    assert_serial_has "$WORK/serial-layout-t2.log" "apex.bootlab.entry=t2"
+    assert_eq "apex-t2+2-1.efi " "$(esp_linux_entries "$disk" | tr '\n' ' ')" \
+              "type #2 filename after one boot"
+
+    # (b) and (c) type #1 -> /EFI/APEX/uki/, with each of the two keys that can
+    # name a PE image. Both must boot (so the APEX-owned path is reachable) and
+    # neither is expected to be counted.
+    local key
+    for key in efi linux; do
+        local id flag want
+        if [[ "$key" == efi ]]; then
+            id=t1; flag=--type1;       want="apex-t1+3-0.conf "   # not counted
+        else
+            id=t3; flag=--type1-linux; want="apex-t3+2-1.conf "   # counted
+        fi
+        "$HERE/apex-mkesp" --disk "$disk" --size 96 \
+            --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+            "$flag" "$id:3:$WORK/uki-$id.efi" --default "apex-$id*" >/dev/null
+        fresh_vars "$vars"
+        rc=0
+        vm_boot --disk "$disk" --vars "$vars" --name "layout-$key" \
+                --serial "$WORK/serial-layout-$key.log" --timeout 120 || rc=$?
+        assert_eq 0 "$rc" "type #1 ($key) entry: clean poweroff"
+        assert_serial_has "$WORK/serial-layout-$key.log" "apex.bootlab.entry=$id"
+        assert_eq "$want" "$(esp_loader_entries "$disk" | tr '\n' ' ')" \
+                  "type #1 ($key) filename after one boot"
+    done
+}
+
+scenario_boot_counting() {
+    log "boot-counting: the tally walks down and the loader falls back to the previous entry"
+    fixtures
+    # The shape of a real APEX rollback:
+    #   apex-new   the deployment just installed, tally +3-0. Nothing blesses
+    #              it, because the micro guest is not a systemd guest — which
+    #              is exactly what a deployment that never finishes booting
+    #              looks like to the bootloader.
+    #   apex-good  the previous deployment, NO tally. A blessed entry has no
+    #              +N-M suffix at all, so it is always eligible.
+    # This is the upstream mechanism and not an APEX invention. It has to be:
+    # the counter must be decremented by something that runs BEFORE the kernel,
+    # since the boots it needs to count are the ones that never reach
+    # userspace. Nothing in userspace can count those.
+    mkuki "$WORK/uki-new.efi"  new
+    mkuki "$WORK/uki-good.efi" good
+    local disk="$WORK/disk-count.img" vars="$WORK/vars-count.fd"
+    "$HERE/apex-mkesp" --disk "$disk" --size 128 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "new:3:$WORK/uki-new.efi" \
+        --uki "good:0:$WORK/uki-good.efi" >/dev/null
+    fresh_vars "$vars"
+
+    # Exactly two entries. A run that produced one would let every "it fell
+    # back to the other entry" assertion pass vacuously.
+    local n; n="$(esp_linux_entries "$disk" | wc -l)"
+    assert_eq 2 "$n" "entries in /EFI/Linux before any boot"
+    assert_eq "apex-good.efi apex-new+3-0.efi " "$(esp_linux_entries "$disk" | tr '\n' ' ')" \
+        "staged entry filenames"
+
+    # Walk the tally down. Each step asserts the EXACT filename pair, in both
+    # directions: the counted entry decrements and the blessed entry never
+    # grows a suffix.
+    local -a expect=(
+        "apex-good.efi apex-new+2-1.efi "
+        "apex-good.efi apex-new+1-2.efi "
+        "apex-good.efi apex-new+0-3.efi "
+    )
+    local -a expect_entry=(new new new)
+    local i
+    for i in 0 1 2; do
+        vm_boot --disk "$disk" --vars "$vars" --name "count-$i" \
+                --serial "$WORK/serial-count-$i.log" --timeout 120 || true
+        assert_eq "${expect[$i]}" "$(esp_linux_entries "$disk" | tr '\n' ' ')" \
+                  "filenames after boot $((i + 1))"
+        assert_serial_has "$WORK/serial-count-$i.log" "apex.bootlab.entry=${expect_entry[$i]}"
+    done
+
+    # Tally exhausted. The next boot must select the OTHER entry — the previous
+    # known-good deployment — and the exhausted entry must keep its +0-3
+    # suffix so the state is visible to `apex boot status` afterwards.
+    vm_boot --disk "$disk" --vars "$vars" --name count-fallback \
+            --serial "$WORK/serial-count-fallback.log" --timeout 120 || true
+    assert_serial_has "$WORK/serial-count-fallback.log" "apex.bootlab.entry=good"
+    assert_serial_has "$WORK/serial-count-fallback.log" \
+        "APEX-BOOTLAB: efivar LoaderEntrySelected=apex-good.efi"
+    assert_eq "apex-good.efi apex-new+0-3.efi " "$(esp_linux_entries "$disk" | tr '\n' ' ')" \
+        "filenames after the fallback boot"
+    # And the fallback must be stable: a machine that alternated between a
+    # broken deployment and a good one every other boot would be worse than
+    # one that just stayed broken.
+    vm_boot --disk "$disk" --vars "$vars" --name count-fallback2 \
+            --serial "$WORK/serial-count-fallback2.log" --timeout 120 || true
+    assert_serial_has "$WORK/serial-count-fallback2.log" "apex.bootlab.entry=good"
+}
+
+# ── scenarios needing a staged APEX root (see apex-stage-root) ──────────────
+
+scenario_apex_image() {
+    log "apex-image: a UKI built from a real APEX kernel and the real APEX initramfs"
+    fixtures
+    local root="$WORK/apex-root"
+    # Hard-fail rather than skip. This is the scenario that substantiates
+    # "produced reproducibly from an APEX image"; a version of it that quietly
+    # passed without the image would be worse than not having it.
+    [[ -d "$root" ]] || die "no staged APEX root at $root.
+    Run, on an APEX host:
+      sudo files/scripts/boot-v2/apex-stage-root --output <workdir>/out/apex-root
+    Reading /usr/lib/modules/<kver>/initramfs.img needs root; it is mode 0600."
+
+    local kver
+    kver="$(find "$root/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')"
+    info "staged kernel $kver"
+
+    # A dracut hook, delivered as a second initramfs archive rather than by
+    # rebuilding the APEX initramfs. The kernel concatenates initrd images and
+    # later archives overlay earlier ones, so this adds one file to a 369 MB
+    # image the boot lab never has to regenerate — and, more importantly, the
+    # image under test stays byte-identical to the one on the machine.
+    #
+    # The path is var/lib/dracut/hooks/pre-mount and NOT usr/lib/dracut/hooks:
+    # in this initramfs the latter is a symlink to ../../../var/lib/dracut/hooks,
+    # and a cpio that created usr/lib/dracut/hooks as a real directory would
+    # shadow the symlink and lose every hook already in it.
+    local hookdir="$WORK/hook/var/lib/dracut/hooks/pre-mount"
+    rm -rf "$WORK/hook"; mkdir -p "$hookdir"
+    cat > "$hookdir/50-apex-vmprobe.sh" <<'HOOK'
+#!/bin/sh
+# APEX boot-lab probe. Runs inside the REAL APEX initramfs, at dracut's
+# pre-mount hook point — after udev has settled and the modules are loaded,
+# before it tries to find a root filesystem the boot lab's disk does not have.
+#
+# Getting a line out of a dracut hook onto the serial port took three
+# attempts, and each failure looked like "the UKI did not boot":
+#
+#   1. `echo` — dracut-pre-mount.service is StandardOutput=syslog, so it
+#      landed in the journal of a machine that was about to power off.
+#   2. /dev/kmsg with no priority prefix — Fedora builds the kernel with
+#      CONFIG_CONSOLE_LOGLEVEL_DEFAULT=4, so an unprefixed (KERN_WARNING)
+#      message is filtered off the console. The same filtering is why the
+#      kernel's own KERN_INFO "Command line:" line is absent from the log.
+#   3. Both of the below.
+#
+# /dev/console goes through the tty layer to every registered console with no
+# printk filtering; the `<0>` kmsg write is the belt to that braces, and also
+# timestamps the marker in the log so the ordering is legible.
+say() {
+    printf 'APEX-BOOTLAB: %s\n' "$*" > /dev/console 2>/dev/null || true
+    printf '<0>APEX-BOOTLAB: %s\n' "$*" > /dev/kmsg 2>/dev/null || true
+}
+say "apex-initramfs-reached"
+say "cmdline=$(cat /proc/cmdline)"
+say "initramfs-release=$(tr '\n' ' ' < /etc/initrd-release 2>/dev/null)"
+say "clean-poweroff"
+# The guest must power off rather than continue into a root-device search that
+# would time out: a timeout kill is not a successful boot, and this harness
+# refuses to count one.
+poweroff -f 2>/dev/null || reboot -f -p 2>/dev/null || echo o > /proc/sysrq-trigger
+HOOK
+    chmod 0755 "$hookdir/50-apex-vmprobe.sh"
+    ( cd "$WORK/hook" && find . -print0 | cpio --null -o -H newc --quiet ) \
+        > "$WORK/apex-hook.cpio"
+    [[ -s "$WORK/apex-hook.cpio" ]] || { bad "the hook cpio is empty"; return; }
+    ok "built a $(stat -c %s "$WORK/apex-hook.cpio")-byte dracut pre-mount addendum"
+
+    # No --allow-no-ucode. A dracut initramfs prepends an uncompressed cpio of
+    # kernel/x86/microcode/*, and apex-mkuki must find it: this is the
+    # assertion that §22's "microcode in the UKI" is satisfied on the real
+    # image rather than waved through.
+    local uki="$WORK/uki-apex.efi"
+    "$HERE/apex-mkuki" --output "$uki" --from-root "$root" \
+        --cmdline "$CMDLINE_BASE apex.bootlab.entry=apeximage rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+        --deployment apeximage --variant gaming \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --extra-initrd "$WORK/apex-hook.cpio" >/dev/null \
+        || { bad "apex-mkuki failed on the real APEX root"; return; }
+
+    # The metadata must describe the APEX image, not the lab. Read back out of
+    # the PE section table of the signed artifact.
+    local meta
+    meta="$(python3 "$HERE/pe-section.py" "$uki" .apexinf)"
+    local got
+    got="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["kernelVersion"])' "$meta")"
+    assert_eq "$kver" "$got" ".apexinf kernelVersion matches the staged APEX kernel"
+    got="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["microcode"])' "$meta")"
+    assert_eq "embedded-in-initrd" "$got" ".apexinf microcode state"
+    got="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["variant"])' "$meta")"
+    assert_eq "gaming" "$got" ".apexinf variant"
+    # The .osrel section comes from the APEX image, which is what makes the
+    # boot menu and `bootctl list` say APEX-OS instead of Fedora.
+    if python3 "$HERE/pe-section.py" "$uki" .osrel | grep -qi 'APEX'; then
+        ok ".osrel names APEX rather than the boot lab's own os-release"
+    else
+        bad ".osrel does not mention APEX — the wrong os-release was embedded"
+    fi
+
+    local disk="$WORK/disk-apex.img" vars="$WORK/vars-apex-image.fd"
+    local ser="$WORK/serial-apex-image.log"
+    # 1 GiB: the UKI is ~390 MB, and an ESP too small fails at mcopy rather
+    # than at boot, which is at least an honest failure.
+    "$HERE/apex-mkesp" --disk "$disk" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "apeximage:0:$uki" --default 'apex-apeximage*' >/dev/null
+    fresh_vars "$vars"
+    local rc=0
+    # More RAM and a longer timeout than the micro guest: this initramfs is
+    # 369 MB and the kernel copies it before it runs.
+    vm_boot --disk "$disk" --vars "$vars" --name apex-image --serial "$ser" \
+            --mem 4096 --timeout 240 || rc=$?
+    assert_eq 0 "$rc" "qemu exit status (clean guest poweroff)"
+    assert_serial_has "$ser" "APEX-BOOTLAB: apex-initramfs-reached"
+    assert_serial_has "$ser" "APEX-BOOTLAB: clean-poweroff"
+    assert_serial_has "$ser" "apex.bootlab.entry=apeximage"
+    # sd-stub's own banner, printed by the stub before it hands control to the
+    # kernel. This is stronger evidence than reading the StubInfo EFI variable
+    # back from userspace — that assertion belongs to the micro guest, which
+    # mounts efivarfs itself; here the line is emitted by the stub, and it
+    # names the image, so it proves both that a UKI stub ran AND that the
+    # .osrel inside it came from APEX.
+    assert_serial_has "$ser" "Booting initrd of "
+    if grep -aq 'Booting initrd of.*APEX-OS' "$ser"; then
+        ok "sd-stub announced an APEX-OS initrd"
+    else
+        bad "sd-stub's banner does not name APEX-OS: $(grep -ao 'Booting initrd of[^\r]*' "$ser" | head -1)"
+    fi
+    # The real initramfs identifies itself. A synthetic guest could not produce
+    # this line, so it is what distinguishes "the APEX initramfs ran" from "an
+    # initramfs ran".
+    assert_serial_has "$ser" 'APEX-BOOTLAB: initramfs-release=NAME="APEX-OS"'
+}
+
+scenario_luks_tpm() {
+    log "luks-tpm: measured boot and TPM-bound LUKS2, opt-in (§22 step 5)"
+    fixtures
+    local root="$WORK/apex-root"
+    [[ -d "$root" ]] || die "no staged APEX root at $root.
+    Run, on an APEX host:
+      sudo files/scripts/boot-v2/apex-stage-root --output <workdir>/out/apex-root
+    This scenario needs the REAL APEX initramfs: its dracut module list is what
+    provides systemd-cryptsetup, systemd-pcrphase, libcryptsetup and the
+    libtss2 stack. A synthetic guest would prove nothing about the image APEX
+    actually ships."
+
+    local tpmstate="$WORK/tpm-luks" luks="$WORK/luks.img"
+    rm -rf "$tpmstate"
+
+    # ── enrol, host-side, against a software TPM ───────────────────────────
+    # The SAME state directory is then handed to qemu, which is what makes the
+    # sealed object reachable from the guest: a key sealed to one TPM's SRK
+    # cannot be unsealed by a different TPM, and that failure is indistinguish-
+    # able from a broken PCR policy in the guest's logs.
+    local recovery
+    recovery="$("$HERE/apex-luks-enroll" --image "$luks" --tpm-state "$tpmstate" \
+        --pcr-pubkey "$KEYS/pcr/pub.pem" 2>/dev/null | tail -1)" \
+        || { bad "apex-luks-enroll failed"; return; }
+    [[ -s "$recovery" ]] || { bad "no recovery key at $recovery"; return; }
+    ok "enrolled a systemd-tpm2 public-key token and a recovery key"
+
+    # ── three UKIs: same kernel, three different policy situations ─────────
+    #   good    signed by the PCR key, cmdline A
+    #   update  signed by the PCR key, cmdline B. A different cmdline changes
+    #           PCR 11 exactly as a new kernel would, because sd-stub measures
+    #           the .cmdline section into it — so this is a faithful stand-in
+    #           for a legitimate kernel update, and it is the whole reason for
+    #           choosing a signed policy over a value-bound one.
+    #   foreign signed by the OTHER PCR key. The measured state is fine; the
+    #           signature over it is not, which is the "measured state does not
+    #           match" case that must refuse.
+    local hook_common="$WORK/luks-hook"
+    build_luks_hook() {  # build_luks_hook OUT_CPIO WITH_RECOVERY
+        local out="$1" with_recovery="$2"
+        rm -rf "$hook_common"
+        mkdir -p "$hook_common/var/lib/dracut/hooks/pre-mount"
+        install -m 0755 "$HERE/guest-luks-probe.sh" \
+            "$hook_common/var/lib/dracut/hooks/pre-mount/50-apex-luks-probe.sh"
+        if [[ "$with_recovery" == yes ]]; then
+            # Baked into the initrd, which is inside the signed UKI, so it is
+            # covered by the same Secure Boot signature as the kernel. That is
+            # acceptable for an ephemeral lab key and for nothing else: a real
+            # recovery key is shown to the user once and stored by them, which
+            # is the whole point of it being a recovery key.
+            install -m 0400 "$recovery" "$hook_common/apex-bootlab-recovery-key"
+        fi
+        ( cd "$hook_common" && find . -print0 | cpio --null -o -H newc --quiet ) > "$out"
+        [[ -s "$out" ]] || die "empty hook cpio at $out"
+    }
+
+    local -a specs=(
+        "good:$KEYS/pcr/key.pem:$KEYS/pcr/pub.pem:no:unlock"
+        "update:$KEYS/pcr/key.pem:$KEYS/pcr/pub.pem:no:update"
+        "foreign:$KEYS/foreign/key.pem:$KEYS/pcr/pub.pem:yes:refuse"
+    )
+    local spec name pcrkey pcrpub recov mode
+    for spec in "${specs[@]}"; do
+        IFS=: read -r name pcrkey pcrpub recov mode <<<"$spec"
+        build_luks_hook "$WORK/luks-hook-$name.cpio" "$recov"
+        # --pcrpkey stays the REAL public key even for the foreign UKI. That is
+        # deliberate: it isolates the failure to the SIGNATURE. If the embedded
+        # public key were swapped too, the refusal could equally be "the key in
+        # the image is not the enrolled one", and the test would not
+        # distinguish a policy check from a key-identity check.
+        "$HERE/apex-mkuki" --output "$WORK/uki-luks-$name.efi" --from-root "$root" \
+            --cmdline "$CMDLINE_BASE apex.bootlab.entry=luks$name apex.bootlab.luks=$mode rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+            --deployment "luks$name" --variant gaming \
+            --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+            --pcr-key "$pcrkey" --pcr-pubkey "$pcrpub" \
+            --extra-initrd "$WORK/luks-hook-$name.cpio" >/dev/null \
+            || { bad "apex-mkuki failed for the '$name' LUKS UKI"; return; }
+        # The measured-boot sections must actually be there. apex-mkuki checks
+        # this itself, but the check is repeated here because these three UKIs
+        # are the only ones in the suite that carry them and a silent regression
+        # would turn every assertion below into a test of the recovery path.
+        if python3 "$HERE/pe-section.py" "$WORK/uki-luks-$name.efi" .pcrsig >/dev/null 2>&1; then
+            ok "$name UKI carries a .pcrsig section"
+        else
+            bad "$name UKI has no .pcrsig section"
+        fi
+    done
+
+    # The three signatures must differ from one another, or the scenario is
+    # three copies of one test.
+    local h_good h_update h_foreign
+    h_good="$(python3 "$HERE/pe-section.py" "$WORK/uki-luks-good.efi" .pcrsig | sha256sum | cut -d' ' -f1)"
+    h_update="$(python3 "$HERE/pe-section.py" "$WORK/uki-luks-update.efi" .pcrsig | sha256sum | cut -d' ' -f1)"
+    h_foreign="$(python3 "$HERE/pe-section.py" "$WORK/uki-luks-foreign.efi" .pcrsig | sha256sum | cut -d' ' -f1)"
+    [[ "$h_good" != "$h_update" ]] \
+        && ok "the 'update' UKI has a different PCR signature (its PCR 11 differs)" \
+        || bad "the 'good' and 'update' UKIs have identical .pcrsig — the kernel-update case is vacuous"
+    [[ "$h_good" != "$h_foreign" ]] \
+        && ok "the 'foreign' UKI has a different PCR signature" \
+        || bad "the 'good' and 'foreign' UKIs have identical .pcrsig — the refusal case is vacuous"
+
+    boot_luks() {  # boot_luks NAME
+        # One `local` per line. `local n="$1" disk="...$n..."` does NOT work:
+        # bash expands every word of the command before performing any of the
+        # assignments, so $n is still unset in the second one — and under
+        # `set -u` that aborts the whole suite three scenarios in, after eight
+        # minutes of UKI builds.
+        local n="$1"
+        local disk="$WORK/disk-luks-$n.img"
+        local vars="$WORK/vars-luks-$n.fd"
+        local ser="$WORK/serial-luks-$n.log"
+        local rc=0
+        "$HERE/apex-mkesp" --disk "$disk" --size 1024 \
+            --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+            --uki "luks$n:0:$WORK/uki-luks-$n.efi" --default "apex-luks$n*" >/dev/null
+        fresh_vars "$vars"
+        vm_boot --disk "$disk" --vars "$vars" --name "luks-$n" --serial "$ser" \
+                --tpm-state "$tpmstate" --extra-disk "$luks" \
+                --mem 4096 --timeout 240 || rc=$?
+        printf '%s\n' "$rc"
+    }
+
+    # ── boot 1: the enrolled state unlocks ─────────────────────────────────
+    local rc ser
+    rc="$(boot_luks good)"; ser="$WORK/serial-luks-good.log"
+    assert_eq 0 "$rc" "good: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: apex-initramfs-reached"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=present"
+    assert_serial_has "$ser" "APEX-BOOTLAB: pcr-signature=/run/systemd/tpm2-pcr-signature.json"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=written"
+    # PCR 11 must be a real measurement, not the zeros an uninitialised bank
+    # reports. Without this the unlock could be succeeding against an
+    # effectively unenforced policy, which systemd warns about at enrol time.
+    local pcr11
+    pcr11="$(grep -ao 'APEX-BOOTLAB: pcr11=[[:xdigit:]]*' "$ser" | head -1 | cut -d= -f2)"
+    # 64 hex characters, and not the all-zero digest an uninitialised PCR bank
+    # reports. Both halves matter: an empty capture would pass a "not zeros"
+    # test, and the first version of this assertion did exactly that because it
+    # matched [0-9a-f] against a value sysfs prints in UPPERCASE.
+    if [[ "$pcr11" =~ ^[[:xdigit:]]{64}$ && "$pcr11" != "$(printf '0%.0s' {1..64})" ]]; then
+        ok "PCR 11 was extended by the boot ($pcr11)"
+    else
+        bad "PCR 11 is absent or all zeros ('$pcr11') — nothing measured this boot"
+    fi
+
+    # ── boot 2: a changed PCR 11, same signing key. THE hard requirement ───
+    rc="$(boot_luks update)"; ser="$WORK/serial-luks-update.log"
+    assert_eq 0 "$rc" "update: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # Same volume, and it really decrypted: the marker boot 1 wrote is read
+    # back through the mapper device after the measured state changed.
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=found"
+    local pcr11b
+    pcr11b="$(grep -ao 'APEX-BOOTLAB: pcr11=[[:xdigit:]]*' "$ser" | head -1 | cut -d= -f2)"
+    if [[ -n "$pcr11b" && "$pcr11b" != "$pcr11" ]]; then
+        ok "PCR 11 changed between the two boots, and the same keyslot still opened"
+    else
+        bad "PCR 11 did not change ('$pcr11b' == '$pcr11') — the kernel-update case proves nothing"
+    fi
+
+    # ── boot 3: a signature the enrolled key did not make ──────────────────
+    rc="$(boot_luks foreign)"; ser="$WORK/serial-luks-foreign.log"
+    assert_eq 0 "$rc" "foreign: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=REFUSED"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # And recoverable in the SAME boot that was refused.
+    assert_serial_has "$ser" "APEX-BOOTLAB: recovery-unlock=SUCCESS"
+}
+
+# ── run ─────────────────────────────────────────────────────────────────────
+for s in "${SCENARIOS[@]}"; do
+    fn="scenario_${s//-/_}"
+    declare -F "$fn" >/dev/null || die "no such scenario: $s (try --list)"
+    "$fn"
+done
+bootv2_summary "boot-v2 VM harness"

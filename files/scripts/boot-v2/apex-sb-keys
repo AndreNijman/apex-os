@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-sb-keys — generate the EPHEMERAL key material a boot-lab run needs.
+#
+#  Three keypairs, because they sign three different things and conflating them
+#  is how a compromise of one becomes a compromise of all:
+#
+#    sb/   Secure Boot. Signs PE binaries (the UKI, systemd-boot). In
+#          production this is the APEX MOK/db key and lives in an HSM or a CI
+#          secret; signing/spike-d/keygen.sh is the same shape and predates
+#          this. Enrolled into the guest firmware as PK+KEK+db.
+#    pcr/  PCR 11 policy. Signs the expected measurements ukify computes for
+#          the UKI. LUKS2 keyslots are bound to the PUBLIC half of this, which
+#          is what makes a kernel update survivable — see docs/boot-v2.md.
+#    foreign/ A second Secure Boot key that is deliberately NOT enrolled. It
+#          exists so the negative controls sign something real: "unsigned is
+#          refused" is a much weaker claim than "signed by a key the firmware
+#          does not trust is refused", and only the latter proves the firmware
+#          is checking the signature rather than its presence.
+#
+#  AGENTS.md, boot-path rule 4: CI and VMs get ephemeral keys, a private key
+#  never reaches the repository, and nothing here writes to any real machine's
+#  firmware. The output directory is a caller-supplied scratch path and every
+#  run regenerates it, so no key here outlives the test that made it.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+# shellcheck source=files/scripts/boot-v2/lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+OUT="${1:?usage: apex-sb-keys OUTDIR}"
+
+# Refuse to write anywhere that could be a real boot path. A typo'd argument
+# must not be the thing that decides this.
+case "$(readlink -m "$OUT")" in
+    /boot|/boot/*|/efi|/efi/*|/sys/*|/usr|/usr/*)
+        die "refusing to write key material under $OUT" ;;
+esac
+
+rm -rf "$OUT"
+mkdir -p "$OUT"/{sb,pcr,foreign}
+chmod 700 "$OUT"
+
+gen_sb() {
+    local dir="$1" cn="$2"
+    openssl req -new -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
+        -keyout "$dir/key.pem" -out "$dir/cert.pem" -subj "/CN=$cn/" 2>/dev/null
+    openssl x509 -in "$dir/cert.pem" -outform DER -out "$dir/cert.der"
+    chmod 600 "$dir/key.pem"
+}
+
+log "generating ephemeral boot-lab key material in $OUT"
+gen_sb "$OUT/sb"      "APEX-OS boot lab Secure Boot key (EPHEMERAL, DO NOT TRUST)"
+gen_sb "$OUT/foreign" "NOT APEX - untrusted key for negative controls"
+
+# PCR policy key. RSA-2048 because that is what systemd-measure and
+# systemd-cryptenroll --tpm2-public-key interoperate on; the TPM does the
+# verification and 2048 is the size every TPM 2.0 supports.
+openssl genrsa -out "$OUT/pcr/key.pem" 2048 2>/dev/null
+openssl rsa -in "$OUT/pcr/key.pem" -pubout -out "$OUT/pcr/pub.pem" 2>/dev/null
+chmod 600 "$OUT/pcr/key.pem"
+
+# A stable owner GUID for the enrolled signature, regenerated per run.
+uuidgen 2>/dev/null > "$OUT/guid.txt" || cat /proc/sys/kernel/random/uuid > "$OUT/guid.txt"
+
+for f in sb/key.pem sb/cert.pem sb/cert.der foreign/key.pem foreign/cert.der \
+         pcr/key.pem pcr/pub.pem guid.txt; do
+    [[ -s "$OUT/$f" ]] || die "apex-sb-keys did not produce $OUT/$f"
+done
+
+# The APEX and foreign certificates must actually differ, or every negative
+# control in the suite would pass for the wrong reason.
+# sha256sum rather than cmp: diffutils is not in the boot lab image, and
+# adding a package to get one comparison would be the wrong trade.
+if [[ "$(sha256sum <"$OUT/sb/cert.der" | cut -d" " -f1)" \
+   == "$(sha256sum <"$OUT/foreign/cert.der" | cut -d" " -f1)" ]]; then
+    die "the APEX and foreign certificates are identical — negative controls would be meaningless"
+fi
+
+info "sb      $(openssl x509 -in "$OUT/sb/cert.pem" -noout -subject)"
+info "foreign $(openssl x509 -in "$OUT/foreign/cert.pem" -noout -subject)"
+info "pcr     $(openssl rsa -in "$OUT/pcr/key.pem" -noout -text 2>/dev/null | head -1)"

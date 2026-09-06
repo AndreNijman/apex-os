@@ -1,0 +1,186 @@
+name: boot-v2
+
+# §22 migration step 2: "prototype composefs/systemd-boot in CI and virtual
+# machines". This is the CI half. It builds the boot lab container, builds
+# signed UKIs inside it, and boots them under Secure-Boot-enforcing OVMF with a
+# software TPM.
+#
+# ═══ WHAT THIS WORKFLOW MUST NOT DO ═══
+#
+#   * It must not rebuild `core`. A core rebuild reissues ~5 GB of layers to
+#     every machine on the next `apex update` (see the arithmetic at the top of
+#     build-image.yml), and this workflow has no business costing the fleet
+#     anything. It never invokes build-image.yml, never touches
+#     Containerfile.core, and pulls no APEX image at all: the boot lab carries
+#     its own kernel precisely so a runner does not have to fetch a
+#     multi-gigabyte one to prove a bootloader behaviour.
+#   * It must not publish or promote. `permissions: contents: read` and nothing
+#     else — no `packages: write`, no `id-token: write`, so it cannot push to
+#     GHCR or mint a cosign identity even by accident.
+#   * It must not touch a real boot path. Everything happens inside a container
+#     against image files in a scratch directory; every script in
+#     files/scripts/boot-v2 refuses an output path under /boot, /efi or /usr,
+#     and tests/test-boot-v2.sh asserts those refusals on every PR.
+#
+# ═══ WHY THE REQUIRED CHECK IS NOT HERE ═══
+#
+# This workflow is path-filtered, so it is skipped by a PR that does not touch
+# boot v2 — and a skipped job counts as success. The assertions that must
+# report on EVERY pull request therefore live in pr-validation.yml's `static`
+# job, which has no path filter: the unit conditions that keep systemd-boot
+# opt-in, the tripwire against a shipped script touching a boot path, and the
+# schema parity between apex-boot-health and `apex boot status`. What lives
+# here is the part that needs qemu, OVMF and eight minutes.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "files/scripts/boot-v2/**"
+      - "files/system/libexec/apex-boot-health"
+      - "files/system/units/apex-boot-*.service"
+      - "bootlab/**"
+      - "apexd/apex/src/boot.rs"
+      - "tests/test-boot-v2.sh"
+      - ".github/workflows/boot-v2.yml"
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "Scenarios to run (blank = all VM scenarios)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # Per-ref, cancellable. Unlike the publication lock build-image.yml and
+  # release-shell.yml share, nothing here produces an artifact anyone consumes,
+  # so superseding an in-flight run costs nothing.
+  group: boot-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vm:
+    name: Signed UKI, boot counting and rollback in a VM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Acceleration available?
+        id: accel
+        run: |
+          set -euo pipefail
+          # KVM is the difference between a six-second guest and a
+          # forty-second one. It is not a requirement — the harness passes
+          # accel=kvm:tcg, so qemu falls back and every assertion is
+          # identical — but which one ran must be recorded, because a CI
+          # timeout is the usual symptom of silently landing on TCG.
+          if [[ -e /dev/kvm ]]; then
+            # The runner user is in the kvm group, but the container runs as a
+            # different uid, so the device needs to be readable by it. This is
+            # a runner-local permission change on an ephemeral VM, not a
+            # configuration change to anything that outlives the job.
+            sudo chmod 0666 /dev/kvm
+            echo "kvm=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::/dev/kvm is present; guests run accelerated"
+          else
+            echo "kvm=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::/dev/kvm is absent; guests fall back to TCG and will be slow"
+          fi
+
+      - name: Build the boot lab
+        run: |
+          set -euo pipefail
+          # The lab's own postconditions run during the build: a missing OVMF,
+          # ukify, virt-fw-vars, swtpm or kernel is a build failure here rather
+          # than a confusing qemu error later. See bootlab/Containerfile.
+          podman build -t localhost/apex-bootlab -f bootlab/Containerfile .
+
+      - name: Boot the scenarios
+        env:
+          SCENARIOS: ${{ inputs.scenarios }}
+        run: |
+          set -euo pipefail
+          mkdir -p bootlab-work/out
+          # SCENARIOS is passed through the environment, never interpolated
+          # into the shell: ${{ inputs.scenarios }} on a command line is a
+          # command-injection boundary, and workflow_dispatch input is
+          # attacker-controlled for anyone who can dispatch.
+          kvm_arg=()
+          [[ "${{ steps.accel.outputs.kvm }}" == "true" ]] && kvm_arg=(--device /dev/kvm)
+          podman run --rm "${kvm_arg[@]}" \
+            -v "$PWD:/work:z" \
+            -e "SCENARIOS=$SCENARIOS" \
+            localhost/apex-bootlab -c '
+              set -euo pipefail
+              # Unquoted on purpose: SCENARIOS is a space-separated list of
+              # scenario names, and run-scenarios validates every one against
+              # its own table and dies on an unknown name.
+              # shellcheck disable=SC2086
+              /work/files/scripts/boot-v2/run-scenarios \
+                  --work /work/bootlab-work/out $SCENARIOS
+            '
+
+      - name: The run produced the evidence it claims
+        run: |
+          set -euo pipefail
+          # run-scenarios exits non-zero on any failed assertion, so reaching
+          # this step already means every assertion passed. This is the
+          # postcondition on the ARTIFACTS: a harness that silently ran no
+          # scenario at all would also exit 0, and a green tick for zero boots
+          # is the failure mode this repository has been bitten by repeatedly.
+          out=bootlab-work/out
+          missing=0
+          for log in serial-signed.log serial-count-0.log serial-count-1.log \
+                     serial-count-2.log serial-count-fallback.log \
+                     serial-unsigned.log serial-foreign.log serial-tampered.log; do
+              if [[ ! -s "$out/$log" ]]; then
+                  echo "FATAL: $out/$log is missing or empty — that guest never ran" >&2
+                  missing=$((missing + 1))
+              fi
+          done
+          (( missing == 0 )) || exit 1
+
+          # The positive control must contain the marker and the negative
+          # controls must not. Asserted again here, out of band from the
+          # harness, so a harness whose own assertions were commented out
+          # still cannot produce a green run.
+          grep -aq 'APEX-BOOTLAB: userspace-reached' "$out/serial-signed.log" \
+            || { echo "FATAL: the signed UKI never reached userspace" >&2; exit 1; }
+          for log in serial-unsigned.log serial-foreign.log serial-tampered.log; do
+              if grep -aq 'APEX-BOOTLAB: userspace-reached' "$out/$log"; then
+                  echo "FATAL: $log reached userspace — Secure Boot did not refuse it" >&2
+                  exit 1
+              fi
+          done
+
+          # And the boot counter really walked down. The tally lives in the ESP
+          # filename, which the harness reads back out of the disk image after
+          # each boot; asserting it here as well means a change that made the
+          # harness stop checking cannot pass unnoticed.
+          test -f "$out/disk-count.img.after"
+          entries="$(podman run --rm -v "$PWD:/work:z" localhost/apex-bootlab -c \
+              'mdir -i /work/'"$out"'/disk-count.img.after -b ::/EFI/Linux' \
+              | sed 's|::/EFI/Linux/||' | tr -d "\r" | sort | tr "\n" " ")"
+          echo "final ESP entries: $entries"
+          [[ "$entries" == "apex-good.efi apex-new+0-3.efi " ]] \
+            || { echo "FATAL: expected 'apex-good.efi apex-new+0-3.efi ', got '$entries'" >&2; exit 1; }
+
+          echo "boot-v2: every guest booted or was refused as expected"
+
+      - name: Upload the serial logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-v2-serial-logs
+          # Logs and firmware debug output only. The disk images are hundreds
+          # of megabytes and the key material is ephemeral and must not leave
+          # the runner — a private key never reaches an artifact any more than
+          # it reaches the repository.
+          path: |
+            bootlab-work/out/*.log
+          if-no-files-found: error
+          retention-days: 7

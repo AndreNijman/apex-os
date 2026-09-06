@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-sb-vars — author a Secure-Boot-ENFORCING OVMF variable store with the
+#  boot lab's ephemeral APEX certificate as PK + KEK + db.
+#
+#  This is the headless equivalent of enrolling a key in firmware setup, and it
+#  exists ONLY for guests. It writes one file that the caller passes to qemu as
+#  pflash unit 1. It never touches efivarfs, never calls efibootmgr, and the
+#  path it writes is validated against every real boot path first — AGENTS.md
+#  boot-path rules 1 and 4.
+#
+#  No Microsoft keys by default. That is stricter than any shipping machine and
+#  deliberately so: with only the APEX certificate in db, "the UKI booted"
+#  means the firmware verified it against the APEX chain specifically, not that
+#  some vendor CA happened to cover it. `--with-microsoft` exists for the
+#  scenario that has to mirror a real machine (shim, third-party option ROMs).
+#
+#  signing/spike-d/enroll-vars.sh did this for M0 and is the ancestor of this
+#  script. It is not reused directly because it hardcodes
+#  /usr/share/edk2/x64/OVMF_VARS.4m.fd, a path that does not exist in the boot
+#  lab — Fedora 43 ships the raw pair under /usr/share/edk2/ovmf and only qcow2
+#  for the 4 MB layout. Discovery lives in lib.sh so there is one place to fix,
+#  and it picks the PRISTINE template on purpose; see the comment there.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+# shellcheck source=files/scripts/boot-v2/lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+CERT_DER="" OUT="" WITH_MICROSOFT=0 GUID=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --cert)            CERT_DER="$2"; shift 2;;
+        --output)          OUT="$2"; shift 2;;
+        --guid)            GUID="$2"; shift 2;;
+        --with-microsoft)  WITH_MICROSOFT=1; shift;;
+        *) die "unknown argument: $1";;
+    esac
+done
+[[ -n "$CERT_DER" && -n "$OUT" ]] || die "usage: apex-sb-vars --cert CERT.der --output VARS.fd [--with-microsoft]"
+[[ -f "$CERT_DER" ]] || die "no such certificate: $CERT_DER"
+
+case "$(readlink -m "$OUT")" in
+    /boot|/boot/*|/efi|/efi/*|/sys/*|/usr|/usr/*)
+        die "refusing to write a variable store under $OUT — that is a real boot path" ;;
+esac
+
+command -v virt-fw-vars >/dev/null || die "virt-fw-vars not found (python3-virt-firmware)"
+
+TEMPLATE="$(ovmf_vars_template)"
+[[ -n "$GUID" ]] || GUID="$(cat "$(dirname "$CERT_DER")/../guid.txt" 2>/dev/null || echo 18dbe522-6169-48c8-b28c-702b8124f6f3)"
+GUID="$(tr -d '[:space:]' <<<"$GUID")"
+
+MS=(--no-microsoft)
+(( WITH_MICROSOFT )) && MS=(--microsoft-db all --microsoft-kek all)
+
+log "enrolling $(basename "$CERT_DER") as PK/KEK/db (microsoft=$WITH_MICROSOFT)"
+info "template $TEMPLATE"
+mkdir -p "$(dirname "$OUT")"
+virt-fw-vars \
+    --input "$TEMPLATE" \
+    --set-pk  "$GUID" "$CERT_DER" \
+    --add-kek "$GUID" "$CERT_DER" \
+    --add-db  "$GUID" "$CERT_DER" \
+    "${MS[@]}" \
+    --secure-boot \
+    --output "$OUT" >&2
+
+# Postcondition. A varstore that exists but has SecureBoot off would make every
+# signing assertion in the suite vacuous: an unsigned UKI would boot and the
+# negative controls would fail, but the POSITIVE control would pass too and
+# that is the one people read. So this is checked by reading the produced file
+# back and looking at the enrolled SUBJECTS, not by trusting virt-fw-vars'
+# exit status or counting bytes.
+DUMP="$(virt-fw-vars --input "$OUT" --print --verbose 2>&1)"
+grep -qE '^name=SecureBootEnable' <<<"$DUMP" || die "SecureBootEnable is absent from $OUT"
+grep -qE '^ *bool: ON'            <<<"$DUMP" || die "SecureBootEnable is not ON in $OUT"
+grep -qE '^name=PK'               <<<"$DUMP" || die "no PK enrolled in $OUT"
+grep -qE '^name=db'               <<<"$DUMP" || die "no db enrolled in $OUT"
+
+# The enrolled db entry must be OUR certificate, identified by subject.
+CN="$(openssl x509 -inform DER -in "$CERT_DER" -noout -subject | sed 's/.*CN *= *//')"
+grep -qF "subject CN=$CN" <<<"$DUMP" \
+    || die "the db in $OUT does not contain 'CN=$CN'
+$DUMP"
+
+if (( ! WITH_MICROSOFT )); then
+    # The point of the pristine template plus --no-microsoft is that NOTHING
+    # else can boot. Exactly one certificate must be enrolled in db, and it
+    # must not be a vendor CA: a Microsoft or Red Hat certificate slipping in
+    # would let a Fedora-signed shim satisfy the firmware, and "the UKI booted
+    # because the APEX chain verified it" would become unfalsifiable.
+    n_db="$(sed -n '/^name=db /,/^$/p' <<<"$DUMP" | grep -c '^ *subject ' || true)"
+    [[ "$n_db" == "1" ]] || die "expected exactly 1 certificate in db, found $n_db:
+$DUMP"
+    if grep -qiE 'subject CN=(Microsoft|Red Hat|Windows)' <<<"$DUMP"; then
+        die "a vendor certificate is enrolled in $OUT despite --no-microsoft:
+$DUMP"
+    fi
+fi
+
+info "wrote $OUT ($CN as the only db entry, SecureBoot on)"

@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-luks-enroll — build a LUKS2 volume for the boot lab and bind it to a
+#  SOFTWARE TPM, using a signed PCR 11 policy plus a recovery key.
+#
+#  §22 migration step 5, "measured boot and TPM-bound disk unlock as an opt-in
+#  developer feature". Step 6 — encryption by default — is explicitly gated on
+#  recovery and hardware edge cases being proven, and they are not, so nothing
+#  in this repository turns encryption on for anyone.
+#
+#  ── the PCR policy choice, and the one that was rejected ──
+#
+#  The hard requirement is a policy that survives a legitimate kernel update.
+#  On an image-based OS the kernel changes on every update, so a policy that
+#  breaks when the kernel changes breaks on every update, and the user meets it
+#  at the one moment they cannot get a shell.
+#
+#  CHOSEN: signed PCR 11 policy. ukify computes the PCR 11 values the UKI will
+#  produce in each boot phase, signs them with an RSA key, and embeds the
+#  signatures as .pcrsig with the public half as .pcrpkey.
+#  `systemd-cryptenroll --tpm2-public-key=` then binds the keyslot to the
+#  PUBLIC KEY rather than to a measurement, via a TPM2 PolicyAuthorize. Any UKI
+#  signed by that key satisfies the policy, so a kernel update needs no
+#  re-enrollment and no user interaction. The trust anchor becomes a key APEX
+#  already owns and already protects — the same shape as the Secure Boot chain.
+#
+#  REJECTED: systemd-pcrlock. It predicts the firmware PCRs (0, 2, 4, 7) from
+#  the TPM event log and writes the resulting policy into a TPM NV index. Three
+#  problems, all of them about the update path rather than the security model:
+#    * `systemd-pcrlock make-policy` has to be re-run, with TPM access, after
+#      every kernel install. A missed run is an unbootable machine.
+#    * The policy lives in an NV index, so a firmware reset or a TPM clear
+#      loses it — and firmware resets are exactly the "hardware edge case"
+#      §22's step 6 wants proven before encryption goes on by default.
+#    * It binds firmware measurements, so a UEFI update also invalidates it.
+#
+#  The honest limitation of the chosen policy, stated because a comment that
+#  oversells is worse than none: signed PCR 11 attests the UKI and the boot
+#  PHASE. It does not attest the firmware or the Secure Boot state. What stops
+#  an attacker substituting their own UKI is Secure Boot enforcing, which is
+#  the layer that makes only APEX-signed images loadable in the first place.
+#  The two are complementary, and neither alone is enough.
+#
+#  ── the TPM this may talk to ──
+#
+#  ONLY a software TPM at an explicit swtpm state directory. `--tpm2-device=auto`
+#  is refused outright, and so is any /dev path: inside the boot lab container
+#  `systemd-cryptenroll --tpm2-device=list` prints the KATANA'S REAL TPM,
+#  because it enumerates through the read-only /sys the container inherits.
+#  /dev/tpmrm0 is not passed through, so `auto` would fail rather than write —
+#  but "would fail" is not a safety property, and a real machine's TPM is not
+#  something to leave protected by an accident of device passthrough. This is
+#  the same discipline as always passing --esp-path explicitly.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+# shellcheck source=files/scripts/boot-v2/lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+IMAGE="" SIZE_MIB=64 TPM_STATE="" PCR_PUBKEY="" PORT=2321
+PASSPHRASE="apex-bootlab-passphrase"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --image)       IMAGE="$2"; shift 2;;
+        --size)        SIZE_MIB="$2"; shift 2;;
+        --tpm-state)   TPM_STATE="$2"; shift 2;;
+        --pcr-pubkey)  PCR_PUBKEY="$2"; shift 2;;
+        --port)        PORT="$2"; shift 2;;
+        *) die "unknown argument: $1";;
+    esac
+done
+[[ -n "$IMAGE" && -n "$TPM_STATE" && -n "$PCR_PUBKEY" ]] \
+    || die "usage: apex-luks-enroll --image FILE --tpm-state DIR --pcr-pubkey PUB.pem [--size MIB]"
+[[ -f "$PCR_PUBKEY" ]] || die "no such PCR public key: $PCR_PUBKEY"
+
+for p in "$IMAGE" "$TPM_STATE"; do
+    case "$(readlink -m "$p")" in
+        /|/boot|/boot/*|/efi|/efi/*|/usr|/usr/*|/sys/*|/dev/*)
+            die "refusing to operate on $p — that is a real path" ;;
+    esac
+done
+
+# ── the software TPM ────────────────────────────────────────────────────────
+mkdir -p "$TPM_STATE"
+# TCP rather than a unix socket: the swtpm TCTI that systemd loads
+# (libtss2-tcti-swtpm.so) speaks the mssim wire protocol over TCP, and takes a
+# host/port. qemu uses the unix control socket instead, on the same state
+# directory, which is what makes the sealed object reachable from both sides.
+swtpm socket --tpm2 --tpmstate "dir=$TPM_STATE" \
+    --server "type=tcp,port=$PORT,bindaddr=127.0.0.1" \
+    --ctrl "type=tcp,port=$((PORT + 1)),bindaddr=127.0.0.1" \
+    --flags not-need-init,startup-clear \
+    --log "file=$TPM_STATE/swtpm-enroll.log,level=1" \
+    --pid "file=$TPM_STATE/swtpm-enroll.pid" --daemon \
+    || die "swtpm failed to start (see $TPM_STATE/swtpm-enroll.log)"
+
+stop_swtpm() {
+    if [[ -f "$TPM_STATE/swtpm-enroll.pid" ]]; then
+        kill "$(cat "$TPM_STATE/swtpm-enroll.pid")" 2>/dev/null || true
+        # Wait for the NV state to be flushed. Starting qemu's swtpm on a
+        # half-written state file loses the sealed object, and the symptom is
+        # an unlock failure in the guest that reads as a broken PCR policy.
+        local i
+        for i in $(seq 1 200); do
+            kill -0 "$(cat "$TPM_STATE/swtpm-enroll.pid" 2>/dev/null || echo 0)" 2>/dev/null || break
+            sleep 0.05
+        done
+        rm -f "$TPM_STATE/swtpm-enroll.pid"
+    fi
+}
+trap stop_swtpm EXIT
+
+DEV="swtpm:host=127.0.0.1,port=$PORT"
+case "$DEV" in
+    auto|/dev/*) die "refusing a non-software TPM device: $DEV" ;;
+esac
+
+# ── the volume ──────────────────────────────────────────────────────────────
+log "creating a LUKS2 volume at $IMAGE (${SIZE_MIB} MiB)"
+rm -f "$IMAGE"
+truncate -s "${SIZE_MIB}M" "$IMAGE"
+# --pbkdf-force-iterations is the lowest cryptsetup accepts, because this is a
+# throwaway volume in a test and the default argon2id memory cost turns a
+# 30-second scenario into a three-minute one. It is NOT what a real APEX
+# machine would use, and nothing in this repository configures a real one.
+printf '%s' "$PASSPHRASE" | cryptsetup luksFormat --type luks2 \
+    --batch-mode --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
+    --label APEXLUKSLAB "$IMAGE" - >&2
+
+# ── the recovery key, enrolled FIRST ────────────────────────────────────────
+# Before the TPM, deliberately. §22's step 5 is an opt-in developer feature and
+# step 6 gates the default on recovery being proven; a volume that had a TPM
+# binding and no recovery path would be exactly the state that makes a firmware
+# update a data-loss event. Enrolling recovery first means there is no window
+# in which the volume is TPM-only.
+log "enrolling a recovery key"
+RECOVERY="$(dirname "$IMAGE")/$(basename "$IMAGE").recovery-key"
+PASSWORD="$PASSPHRASE" systemd-cryptenroll --recovery-key "$IMAGE" \
+    2>/dev/null | tr -d '[:space:]' > "$RECOVERY"
+# systemd prints the modhex recovery key on stdout as 8 groups of 8 characters
+# separated by dashes: 71 characters. The DASHES ARE KEPT — that is the form
+# systemd accepts back as a passphrase and the form a user would be shown, and
+# stripping them was the first version of this line.
+#
+# The shape is asserted rather than assumed non-empty. An empty file here would
+# make the recovery scenario "pass" by unlocking with an empty passphrase the
+# volume does not have, which is the shape of false green this project keeps
+# meeting.
+[[ "$(wc -c < "$RECOVERY")" == "71" ]] \
+    || die "the recovery key is $(wc -c < "$RECOVERY") characters, expected 71: $(cat "$RECOVERY")"
+grep -qE '^[a-z]{8}(-[a-z]{8}){7}$' "$RECOVERY" \
+    || die "the recovery key is not 8 modhex groups of 8: $(cat "$RECOVERY")"
+chmod 600 "$RECOVERY"
+
+# ── the TPM2 binding ────────────────────────────────────────────────────────
+log "enrolling TPM2 with a signed PCR 11 policy"
+info "device     $DEV"
+info "public key $PCR_PUBKEY"
+PASSWORD="$PASSPHRASE" systemd-cryptenroll \
+    --tpm2-device="$DEV" \
+    --tpm2-public-key="$PCR_PUBKEY" \
+    --tpm2-public-key-pcrs=11 \
+    "$IMAGE" >&2
+
+# ── postconditions ─────────────────────────────────────────────────────────
+# Read the header back. `systemd-cryptenroll` exiting 0 is not proof the token
+# is the shape the guest needs, and the difference between a PCR-VALUE policy
+# and a PUBLIC-KEY policy is invisible in the exit status while being the whole
+# point: the first breaks on a kernel update, the second does not.
+DUMP="$(cryptsetup luksDump "$IMAGE")"
+grep -q 'systemd-tpm2' <<<"$DUMP"     || die "no systemd-tpm2 token in $IMAGE:
+$DUMP"
+grep -q 'systemd-recovery' <<<"$DUMP" || die "no systemd-recovery token in $IMAGE:
+$DUMP"
+
+TOKENS="$(python3 - "$IMAGE" <<'PY'
+import json, subprocess, sys
+out = subprocess.run(["cryptsetup", "luksDump", "--dump-json-metadata", sys.argv[1]],
+                     capture_output=True, check=True, text=True).stdout
+meta = json.loads(out)
+tokens = meta.get("tokens", {})
+kinds = sorted(t.get("type", "?") for t in tokens.values())
+# The tpm2 token must carry a public-key policy. systemd records the key
+# fingerprint in tpm2_pubkey_pcrs / tpm2_pubkey; a token with tpm2_pcrs and no
+# tpm2_pubkey is bound to a MEASUREMENT and would break on the next kernel.
+tpm2 = [t for t in tokens.values() if t.get("type") == "systemd-tpm2"]
+if len(tpm2) != 1:
+    sys.exit(f"expected exactly 1 systemd-tpm2 token, found {len(tpm2)}")
+t = tpm2[0]
+if not t.get("tpm2_pubkey"):
+    sys.exit("the systemd-tpm2 token has no tpm2_pubkey: it is bound to a PCR "
+             "VALUE, not to a signing key, and would break on a kernel update")
+if t.get("tpm2_pubkey_pcrs") != [11]:
+    sys.exit(f"tpm2_pubkey_pcrs is {t.get('tpm2_pubkey_pcrs')}, expected [11]")
+print(" ".join(kinds))
+PY
+)" || die "the LUKS2 token metadata is not what the guest needs: $TOKENS"
+
+[[ "$TOKENS" == "systemd-recovery systemd-tpm2" ]] \
+    || die "expected exactly the tokens 'systemd-recovery systemd-tpm2', got '$TOKENS'"
+
+info "tokens     $TOKENS"
+info "recovery   $RECOVERY"
+info "passphrase $PASSPHRASE"
+printf '%s\n' "$RECOVERY"

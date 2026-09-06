@@ -1,0 +1,28 @@
+[Unit]
+Description=APEX rollback recovery notice
+Documentation=file:///usr/share/doc/apex/boot-v2.md
+# §22: "show recovery notification after a successful boot". After, not during.
+# Ordering this behind boot-complete.target means the boot it reports on has
+# already passed apex-boot-health.service, so the notice always reads "you were
+# rolled back and the machine is now working" rather than appearing on a
+# machine that is still failing.
+After=boot-complete.target
+Requires=boot-complete.target
+# Same switch as apex-boot-health.service: without systemd-boot's boot counter
+# there is no automatic rollback to report, so this unit does not start on a
+# GRUB machine.
+ConditionPathExists=/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/apex-boot-health notice
+
+[Install]
+# WantedBy here, unlike the health check. A notice that could not be written —
+# because the ESP was unreadable, say — must not turn a healthy boot into a
+# failed one; it is reporting, not policy. `apex boot status` says
+# "unavailable, and why" in that case rather than "no rollback".
+WantedBy=boot-complete.target

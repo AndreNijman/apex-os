@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+"""§14's constants appear in four files. This proves they still agree.
+
+WHY THIS EXISTS AND WHY IT IS NOT A UNIT TEST
+`apexd_core::ai` declares where the model store is, where the catalogue is,
+and what the sockets are called. Three other files repeat those values in
+forms Rust cannot see:
+
+  * Containerfile.base   the tmpfiles.d rules that create the store, and the
+                         COPY destination for the catalogue
+  * files/system/units/apex-aid.service
+                         ExecStart, and ReadOnlyPaths on the store
+  * apexd/apex/src/ai.rs the daemon's path, as the CLI reports it
+
+Every one of those disagreements is silent. A tmpfiles rule for the wrong path
+leaves a store that does not exist and an `apex ai pull` that fails at the
+first mkdir. A `ReadOnlyPaths` for the wrong path leaves the inference process
+able to rewrite every user's weights while the unit still looks hardened. And
+neither side's own tests would notice, because each is internally consistent.
+
+WHY IT RUNS IN THE `static` JOB
+`pr-validation.yml`'s selectors are `^(apexd/|config/sysprofiles/|tests/)` for
+the Rust job and `^(files/|tests/)` for the engine job. A PR that changes only
+the unit file sets engine=true and rust=false; one that changes only the Rust
+const sets the reverse. A check in either specialised job is therefore skipped
+by a PR touching the other side — and a skipped job counts as success. That is
+the exact bug this repository already recorded for test-apex-modes.sh, and the
+reason the language-parity check lives in `static` too.
+
+It needs no toolchain and no container: it reads four text files.
+
+COMMENTS CANNOT SATISFY A CHECK HERE
+Every match runs against comment-stripped text. This repository has been bitten
+four times in one day by a grep a file's own prose satisfied, and this file is
+almost entirely prose about the strings it looks for. `--self-test` proves both
+directions: that a real mutation is caught, and that moving the same string
+into a comment does NOT make the check pass.
+
+    check-ai-parity              verify the tree
+    check-ai-parity --self-test  verify the checks can fail
+"""
+
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+AI_RS = "apexd/apexd-core/src/ai.rs"
+CLI_RS = "apexd/apex/src/ai.rs"
+UNIT = "files/system/units/apex-aid.service"
+CONTAINERFILE = "Containerfile.base"
+
+FILES = (AI_RS, CLI_RS, UNIT, CONTAINERFILE)
+
+
+def read(root: Path, rel: str) -> str:
+    path = root / rel
+    if not path.is_file():
+        raise SystemExit(f"FATAL: {rel} is missing; §14 cannot be checked")
+    return path.read_text()
+
+
+def strip_rust_comments(text: str) -> str:
+    """Drop `//` line comments. Not a parser: enough for const declarations.
+
+    A `//` inside a string literal would be mangled, which is why this is used
+    only to find `const NAME: &str = "value";` lines and never to check for the
+    absence of something in Rust source.
+    """
+    out = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("//"):
+            continue
+        out.append(line.split("//")[0] if "//" in line and '"' not in line else line)
+    return "\n".join(out)
+
+
+def strip_hash_comments(text: str) -> str:
+    """Drop `#` comment lines from a unit file or a Containerfile.
+
+    Whole lines only. A `#` mid-line is a shell comment in a Containerfile RUN
+    and its content is genuinely part of the layer's text, so the conservative
+    move is to keep those lines and let the caller match precisely.
+    """
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def const_str(text: str, name: str) -> str:
+    """The value of `pub const NAME: &str = "…";`."""
+    m = re.search(
+        r"^\s*pub const " + re.escape(name) + r"\s*:\s*&str\s*=\s*\"([^\"]*)\"\s*;",
+        text,
+        re.M,
+    )
+    if not m:
+        raise SystemExit(f"FATAL: {AI_RS} no longer declares {name}")
+    return m.group(1)
+
+
+class Checker:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.problems: list[str] = []
+        self.checks = 0
+
+    def require(self, ok: bool, why: str) -> None:
+        self.checks += 1
+        if not ok:
+            self.problems.append(why)
+
+    def run(self) -> int:
+        ai = strip_rust_comments(read(self.root, AI_RS))
+        cli_raw = read(self.root, CLI_RS)
+        cli = strip_rust_comments(cli_raw)
+        unit = strip_hash_comments(read(self.root, UNIT))
+        cf = strip_hash_comments(read(self.root, CONTAINERFILE))
+
+        store = const_str(ai, "STORE_ROOT")
+        catalogue = const_str(ai, "CATALOGUE_PATH")
+        subdir = const_str(ai, "RUNTIME_SUBDIR")
+        api = const_str(ai, "API_SOCKET")
+        control = const_str(ai, "CONTROL_SOCKET")
+        backend = const_str(ai, "BACKEND_SOCKET")
+        daemon = const_str(cli, "DAEMON")
+
+        # ── the store: /usr is read-only, so it must be under /var ───────────
+        self.require(
+            store.startswith("/var/"),
+            f"STORE_ROOT is {store!r}; /usr is image-owned and read-only at "
+            f"runtime, so the model store has to be under /var",
+        )
+
+        # ── every store directory has a tmpfiles rule ───────────────────────
+        # /var is machine-local and empty in the image. A missing rule is a
+        # store that does not exist on first boot.
+        wanted_dirs = [
+            store,
+            f"{store}/models",
+            f"{store}/models/blobs",
+            f"{store}/models/manifests",
+            f"{store}/staging",
+        ]
+        for d in wanted_dirs:
+            self.require(
+                re.search(r"'d " + re.escape(d) + r" 0[0-7]{3} root root", cf)
+                is not None,
+                f"{CONTAINERFILE} has no tmpfiles rule creating {d}",
+            )
+
+        # Staging holds a partially written blob mid-verify. It must not be
+        # readable by the account that will eventually use the model.
+        self.require(
+            re.search(r"'d " + re.escape(store) + r"/staging 0700 root root", cf)
+            is not None,
+            f"{store}/staging must be 0700: it holds an unverified download, and "
+            f"a world-readable one is a model nobody has checked yet",
+        )
+        # The shared parts must be world-readable, or the whole point of one
+        # copy for every account is lost.
+        for d in (f"{store}/models/blobs", f"{store}/models/manifests"):
+            self.require(
+                re.search(r"'d " + re.escape(d) + r" 0755 root root", cf) is not None,
+                f"{d} must be 0755: the store is shared read-only, and a 0700 "
+                f"directory would make it private to root",
+            )
+
+        # ── the unit protects the store ─────────────────────────────────────
+        self.require(
+            f"ReadOnlyPaths={store}" in unit,
+            f"{UNIT} must carry ReadOnlyPaths={store}. The 0444 blobs are the "
+            f"first reason the inference process cannot rewrite a model; this is "
+            f"the second, and a unit that lost it still looks hardened",
+        )
+
+        # ── the daemon path agrees in all three places ──────────────────────
+        self.require(
+            f"ExecStart={daemon}" in unit,
+            f"{UNIT} starts something other than {daemon}, which is what "
+            f"{CLI_RS} tells the user to run",
+        )
+        self.require(
+            daemon.endswith("/apex-aid"),
+            f"DAEMON is {daemon!r}; the binary is apex-aid",
+        )
+        self.require(
+            f"{daemon} /out{daemon}" in cf or f"/out{daemon}" in cf,
+            f"{CONTAINERFILE} never installs {daemon}",
+        )
+
+        # ── the catalogue lands where ai.rs looks for it ────────────────────
+        self.require(
+            catalogue.startswith("/usr/"),
+            f"CATALOGUE_PATH is {catalogue!r}; it is image content and belongs "
+            f"under /usr, so that its integrity is the image's and it rolls back "
+            f"with the OS",
+        )
+        self.require(
+            re.search(r"^COPY\s+\S+\s+" + re.escape(catalogue) + r"\s*$", cf, re.M)
+            is not None,
+            f"{CONTAINERFILE} never COPYs anything to {catalogue}, so "
+            f"`apex ai pull <name>` would find no catalogue on a real machine",
+        )
+
+        # ── the per-user endpoints ──────────────────────────────────────────
+        # The suffix is not decoration: llama-server's --host binds AF_UNIX only
+        # when the value ends ".sock" and otherwise parses it as an IP address,
+        # which would put the backend on a loopback port every local account
+        # could open.
+        suffix = re.search(
+            r"Runtime::LlamaCpp\s*=>\s*Some\(\"(\.[a-z]+)\"\)", ai
+        )
+        self.require(
+            suffix is not None,
+            f"{AI_RS} no longer declares the listen-address suffix llama.cpp "
+            f"needs to bind a Unix socket",
+        )
+        if suffix:
+            self.require(
+                backend.endswith(suffix.group(1)),
+                f"BACKEND_SOCKET is {backend!r} but llama.cpp binds AF_UNIX only "
+                f"for a --host ending {suffix.group(1)!r}. Anything else becomes a "
+                f"loopback port that every account on the machine can open",
+            )
+        for name in (api, control, backend):
+            self.require(
+                "/" not in name and name != "",
+                f"{name!r} is a file name inside $XDG_RUNTIME_DIR/{subdir}, not a path",
+            )
+        self.require(
+            len({api, control, backend}) == 3,
+            f"the three sockets must have distinct names, got {api!r} {control!r} {backend!r}",
+        )
+
+        # ── the invariants AGENTS.md states, asserted on the shipped files ──
+        self.require(
+            "multi-user.target" not in unit,
+            f"{UNIT} names multi-user.target. This is a per-user service; a "
+            f"system target here is how it becomes a system daemon by accident, "
+            f"which AGENTS.md forbids for anything handling model output",
+        )
+        self.require(
+            not (self.root / "files/system/units/apex-aid.service.d").exists()
+            and not (
+                self.root / "files/system/polkit-1/actions/org.apexos.apex-aid.policy"
+            ).exists(),
+            "apex-aid must have no polkit action: AGENTS.md forbids giving a "
+            "daemon that handles untrusted model output one",
+        )
+        self.require(
+            "systemctl --global enable apex-aid" not in cf
+            and "systemctl enable apex-aid" not in cf,
+            f"{CONTAINERFILE} enables apex-aid. It is opt-in: a per-user daemon "
+            f"that will hold gigabytes of VRAM must not start for people who "
+            f"never ask for local inference",
+        )
+        self.require(
+            "test ! -e /usr/lib/systemd/user/default.target.wants/apex-aid.service"
+            in cf,
+            f"{CONTAINERFILE} no longer asserts apex-aid is un-enabled, which is "
+            f"the only thing keeping the opt-in true across an edit",
+        )
+
+        # ── there is no TCP endpoint, anywhere ──────────────────────────────
+        # An absence, which is the kind of assertion a suite forgets. Matched on
+        # comment-stripped source precisely because both files talk at length
+        # about the ports they refuse to open.
+        for rel, text in ((AI_RS, ai), (CLI_RS, cli), (UNIT, unit)):
+            for pattern in (
+                r"TcpListener",
+                r"bind\(\s*\"127\.0\.0\.1",
+                r"^\s*ListenStream=",
+            ):
+                self.require(
+                    re.search(pattern, text, re.M) is None,
+                    f"{rel} contains {pattern!r}. §14's endpoint is a Unix socket "
+                    f"because TCP carries no peer credential; a listener here "
+                    f"would be reachable by every account on the machine",
+                )
+
+        # The refusal itself must still be reachable from both parsers, or the
+        # decision has quietly become an unrecognised-option error.
+        self.require(
+            "refuse_tcp_endpoint" in ai,
+            f"{AI_RS} no longer defines the TCP refusal",
+        )
+        self.require(
+            "SO_PEERCRED" in read(self.root, AI_RS),
+            f"{AI_RS}'s TCP refusal must name SO_PEERCRED: a bare 'unsupported' "
+            f"reads as 'not implemented yet' and invites someone to implement it",
+        )
+        self.require(
+            "refuse_tcp_endpoint" in cli,
+            f"{CLI_RS} must reach the same refusal, because `apex ai serve "
+            f"--listen` has its own argument parser",
+        )
+
+        if self.problems:
+            print(f"check-ai-parity: {len(self.problems)} problem(s):", file=sys.stderr)
+            for p in self.problems:
+                print(f"  FATAL: {p}", file=sys.stderr)
+            return 1
+        print(f"check-ai-parity: {self.checks} checks, §14's constants agree")
+        return 0
+
+
+# ── the self-test ────────────────────────────────────────────────────────────
+#
+# Four mutations, each of which SHOULD be caught, plus two comment mutations
+# which should NOT be — the inverse control this repository learned to need.
+#
+# Every mutation is verified to have actually changed the file before its result
+# is believed. A `sed` that errored and left the original in place is how this
+# repository once got four "caught" results from a check that never ran.
+
+MUTATIONS = [
+    # (file, find, replace, why it must be caught)
+    (
+        UNIT,
+        "ReadOnlyPaths=/var/lib/apex/ai",
+        "ReadOnlyPaths=/var/lib/apex/aj",
+        "the store left writable by the inference process",
+    ),
+    (
+        UNIT,
+        "ExecStart=/usr/bin/apex-aid",
+        "ExecStart=/usr/bin/apex-inference",
+        "the unit starting a binary the CLI does not name",
+    ),
+    (
+        CONTAINERFILE,
+        "'d /var/lib/apex/ai/staging 0700 root root -'",
+        "'d /var/lib/apex/ai/staging 0755 root root -'",
+        "an unverified download made world-readable",
+    ),
+    (
+        CONTAINERFILE,
+        "COPY config/ai/catalogue.toml /usr/share/apexos/ai/catalogue.toml",
+        "COPY config/ai/catalogue.toml /usr/share/apexos/catalogue.toml",
+        "the catalogue installed where ai.rs does not look",
+    ),
+]
+
+# These move a forbidden string into a comment. The check must STILL pass:
+# a file's own prose about a port must not be readable as a port.
+COMMENT_MUTATIONS = [
+    (
+        UNIT,
+        "[Unit]",
+        "# multi-user.target is deliberately not used here\n[Unit]",
+        "a comment mentioning multi-user.target",
+    ),
+    (
+        CLI_RS,
+        "// ── the daemon client ",
+        "// TcpListener and bind(\"127.0.0.1\" are what this file refuses\n// ── the daemon client ",
+        "a comment mentioning TcpListener",
+    ),
+]
+
+
+def self_test(root: Path) -> int:
+    failures = 0
+    for rel, find, replace, why in MUTATIONS:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / "tree"
+            copy_tree(root, work)
+            target = work / rel
+            original = target.read_text()
+            if find not in original:
+                print(
+                    f"SELF-TEST BROKEN: {rel} does not contain {find!r}; the "
+                    f"mutation could not be applied, so its result would mean "
+                    f"nothing",
+                    file=sys.stderr,
+                )
+                failures += 1
+                continue
+            target.write_text(original.replace(find, replace, 1))
+            # The mutant must exist and DIFFER. A mutation that silently did
+                # nothing is how a negative control comes to pass by accident.
+            if target.read_text() == original:
+                print(f"SELF-TEST BROKEN: {rel} unchanged after mutation", file=sys.stderr)
+                failures += 1
+                continue
+            rc = Checker(work).run()
+            if rc == 0:
+                print(f"NOT CAUGHT: {why} ({rel}: {find!r} -> {replace!r})", file=sys.stderr)
+                failures += 1
+            else:
+                print(f"caught: {why}")
+
+    for rel, find, replace, why in COMMENT_MUTATIONS:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / "tree"
+            copy_tree(root, work)
+            target = work / rel
+            original = target.read_text()
+            if find not in original:
+                print(f"SELF-TEST BROKEN: {rel} does not contain {find!r}", file=sys.stderr)
+                failures += 1
+                continue
+            target.write_text(original.replace(find, replace, 1))
+            if target.read_text() == original:
+                print(f"SELF-TEST BROKEN: {rel} unchanged", file=sys.stderr)
+                failures += 1
+                continue
+            rc = Checker(work).run()
+            if rc != 0:
+                print(
+                    f"FALSE POSITIVE: {why} made the check fail. A file's own "
+                    f"prose must not be readable as the thing it describes.",
+                    file=sys.stderr,
+                )
+                failures += 1
+            else:
+                print(f"ignored (correctly): {why}")
+
+    if failures:
+        print(f"check-ai-parity --self-test: {failures} problem(s)", file=sys.stderr)
+        return 1
+    print(
+        f"check-ai-parity --self-test: {len(MUTATIONS)} mutations caught, "
+        f"{len(COMMENT_MUTATIONS)} comments correctly ignored"
+    )
+    return 0
+
+
+def copy_tree(root: Path, dest: Path) -> None:
+    """Copy only the four files this checker reads, preserving their paths."""
+    for rel in FILES:
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(root / rel, target)
+
+
+def repo_root() -> Path:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(out.stdout.strip())
+    except Exception:
+        # Not a git checkout, or no git: fall back to this file's grandparent,
+        # which is where it lives in the tree (files/scripts/).
+        return Path(__file__).resolve().parents[2]
+
+
+def main() -> int:
+    root = repo_root()
+    if "--self-test" in sys.argv[1:]:
+        return self_test(root)
+    return Checker(root).run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# APEX: repair the MT7925 receive path after resume, but only when it is broken.
+#
+# WHY THIS EXISTS
+#
+# Closing the lid and reopening it leaves mt7925e in a state where the link looks
+# healthy and is not: -45 dBm signal, tx negotiated at 156 Mbit/s, rx pinned to
+# VHT-MCS 0 (7.2 Mbit/s), and 66% of pings to the local gateway lost. TCP
+# connects and then stalls, which reads as "the internet is slow" rather than as
+# a driver fault. Rebooting fixed it, which is why it kept being rebooted.
+#
+# Neither of the cheap repairs is enough on its own:
+#   * turning power save off      66% loss -> 50%
+#   * re-associating the AP       50% loss -> 33%, rx still MCS 0
+# Reloading the driver clears it completely: 0% loss, rx 144 Mbit/s.
+#
+# WHY IT IS CONDITIONAL
+#
+# An unconditional reload would add ~15 seconds of no network to every single
+# lid-open, including the majority where nothing is wrong. So this probes the
+# gateway first and only reloads when the link is genuinely failing. A resume
+# with a working radio costs three pings.
+set -u
+
+[ "${1:-}" = "post" ] || exit 0
+
+log() { logger -t apex-wifi-resume -- "$*"; }
+
+dev="$(ls /sys/class/net | grep -m1 '^wl')" || exit 0
+[ -n "${dev:-}" ] || exit 0
+
+# Only this driver. The images run on more than one machine, and cycling the
+# radio on hardware that does not have this fault would be a regression
+# invented by a fix for someone else's laptop.
+drv="$(basename "$(readlink -f "/sys/class/net/$dev/device/driver" 2>/dev/null)" 2>/dev/null)"
+[ "$drv" = "mt7925e" ] || exit 0
+
+# Give the radio a chance to re-associate on its own before judging it.
+for _ in $(seq 1 20); do
+    gw="$(ip route show default 2>/dev/null | awk '/default/{print $3; exit}')"
+    [ -n "${gw:-}" ] && break
+    sleep 1
+done
+[ -n "${gw:-}" ] || { log "no default route after resume; leaving it alone"; exit 0; }
+
+# Three packets is enough to tell "wedged" from "fine": the failure mode loses
+# a third to two thirds of them, and a healthy link loses none.
+if ping -c 3 -W 2 -q "$gw" >/dev/null 2>&1; then
+    log "link to $gw is healthy after resume; no repair needed"
+    exit 0
+fi
+
+log "link to $gw is failing after resume; reloading mt7925e"
+nmcli radio wifi off >/dev/null 2>&1
+sleep 2
+modprobe -r mt7925e mt7925_common mt792x_lib mt76_connac_lib mt76 >/dev/null 2>&1
+sleep 2
+modprobe mt7925e >/dev/null 2>&1
+sleep 3
+nmcli radio wifi on >/dev/null 2>&1
+log "mt7925e reloaded"

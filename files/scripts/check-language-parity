@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Assert that the blueprint's language vocabulary and the capsule engine's agree.
+
+WHY THIS EXISTS
+
+`[development] languages` is validated by `apexd-core::blueprint::LANGUAGES` and
+converged by `LANGUAGES` in `files/system/libexec/apex-env`. Two lists, in two
+languages, in two files — and that split is deliberate: the planner needs the
+VOCABULARY so a blueprint can be validated before any engine exists, and it must
+NOT have the table, because a language -> package table on the host is precisely
+what roadmap §8 exists to avoid. The toolchain belongs in a capsule.
+
+Both failure modes are silent, and each side is internally consistent:
+
+  * a language the blueprint ACCEPTS and the engine does not provision — the
+    blueprint validates, `apex apply` plans a step, and the step fails with
+    "not a language APEX provisions". The user is told their own valid
+    blueprint is invalid, by a different program.
+  * a language the engine provisions and the blueprint REFUSES — a capsule
+    nobody can declare. It looks like a missing feature rather than a
+    disagreement.
+
+A third, worse case is a language in both lists with no capsule, no packages or
+no probe behind it: `provision` would then create nothing, install nothing, or
+record the language without verifying it. So this does not merely compare two
+lists — it runs the shipped engine's own `languages` verb and asserts every row
+resolves to all three.
+
+WHY IT RUNS IN THE `static` CI JOB
+
+The path selectors would otherwise hide it. `rust` fires on `^(apexd/|...)` and
+`engine` on `^(files/|tests/)`, so a PR that changes only `apex-env`'s table
+never runs the Rust job and a PR that changes only the Rust const never runs the
+engine job — and a skipped job counts as success. This check needs no toolchain
+and no container, so it belongs in the job that always runs.
+
+USAGE
+
+    check-language-parity [--planner PATH] [--engine PATH]
+
+Exits 0 when they agree and 1 when they do not. There is no skip code: both
+files are in this repository, so an absent one is a failure, not an
+unavailability.
+"""
+
+import argparse
+import pathlib
+import re
+import subprocess
+import sys
+
+HERE = pathlib.Path(__file__).resolve().parent.parent.parent
+DEFAULT_PLANNER = HERE / "apexd/apexd-core/src/blueprint.rs"
+DEFAULT_ENGINE = HERE / "files/system/libexec/apex-env"
+
+
+def fail(message):
+    print(f"check-language-parity: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def planner_languages(path):
+    """The `pub const LANGUAGES: [&str; N] = [ ... ];` literal.
+
+    Parsed rather than obtained by running the binary: this must work in a job
+    with no Rust toolchain, and the declared array length is itself worth
+    checking — a const whose length disagrees with its contents would not
+    compile, so reading both and comparing them catches a hand-edit here.
+    """
+    text = path.read_text()
+    match = re.search(
+        r"pub const LANGUAGES:\s*\[&str;\s*(\d+)\]\s*=\s*\[(.*?)\];",
+        text,
+        re.DOTALL,
+    )
+    if not match:
+        fail(f"{path}: no `pub const LANGUAGES: [&str; N] = [...]` found")
+    declared = int(match.group(1))
+    names = re.findall(r'"([^"]+)"', match.group(2))
+    if len(names) != declared:
+        fail(
+            f"{path}: LANGUAGES declares {declared} entries and lists {len(names)}"
+        )
+    return names
+
+
+def engine_languages(path):
+    """The `LANGUAGES='...'` assignment in the shipped engine."""
+    text = path.read_text()
+    match = re.search(r"^LANGUAGES='([^']*)'\s*$", text, re.MULTILINE)
+    if not match:
+        fail(f"{path}: no `LANGUAGES='...'` assignment found")
+    return match.group(1).split()
+
+
+def engine_table(path):
+    """`apex-env languages`, as rows of (language, capsule, probe, packages).
+
+    Runs the shipped engine. `languages` touches no container, no network and
+    no state — it is a pure print of three case statements — so this is safe in
+    any job and is the only way to prove the table actually resolves.
+    """
+    proc = subprocess.run(
+        ["bash", str(path), "languages"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        fail(f"{path} languages exited {proc.returncode}: {proc.stderr.strip()}")
+    rows = {}
+    for line in proc.stdout.splitlines()[1:]:
+        fields = line.split(None, 3)
+        if len(fields) != 4:
+            fail(f"{path} languages printed an unreadable row: {line!r}")
+        rows[fields[0]] = (fields[1], fields[2], fields[3])
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--planner", type=pathlib.Path, default=DEFAULT_PLANNER)
+    parser.add_argument("--engine", type=pathlib.Path, default=DEFAULT_ENGINE)
+    args = parser.parse_args()
+
+    for path in (args.planner, args.engine):
+        if not path.is_file():
+            fail(f"{path} is missing")
+
+    planner = planner_languages(args.planner)
+    engine = engine_languages(args.engine)
+
+    if sorted(planner) != sorted(engine):
+        only_planner = sorted(set(planner) - set(engine))
+        only_engine = sorted(set(engine) - set(planner))
+        if only_planner:
+            print(
+                "the blueprint accepts languages the capsule engine cannot "
+                f"provision: {', '.join(only_planner)}",
+                file=sys.stderr,
+            )
+        if only_engine:
+            print(
+                "the capsule engine provisions languages the blueprint refuses: "
+                f"{', '.join(only_engine)}",
+                file=sys.stderr,
+            )
+        fail("the two language vocabularies disagree")
+
+    table = engine_table(args.engine)
+    if sorted(table) != sorted(engine):
+        fail(
+            "`apex-env languages` prints "
+            f"{sorted(table)}, but LANGUAGES says {sorted(engine)}"
+        )
+
+    for language in sorted(table):
+        capsule, probe, packages = table[language]
+        for label, value in (
+            ("a capsule", capsule),
+            ("a probe", probe),
+            ("packages", packages),
+        ):
+            if not value or value == "-":
+                fail(f"{language} has no {label}; `provision` would verify nothing")
+
+    print(
+        f"language parity holds: {len(planner)} languages, "
+        f"{len(set(c for c, _, _ in table.values()))} capsules"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
