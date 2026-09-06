@@ -116,6 +116,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

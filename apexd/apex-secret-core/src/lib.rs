@@ -59,6 +59,7 @@ pub mod capability;
 pub mod client;
 pub mod operation;
 pub mod paths;
+pub mod project;
 pub mod protocol;
 pub mod store;
 pub mod value;
@@ -69,6 +70,7 @@ pub use operation::{
     Effect, OperationId, OperationInfo, OperationSpec, ParamInfo, ParamSpec, Params, ProviderSpec,
     ResourceKind, Syntax, VocabularyError,
 };
+pub use project::{ProjectConfig, ProjectError};
 pub use protocol::{ErrorKind, Request, Response};
 pub use store::{Grants, ServiceInfo, Store, StoreError};
 pub use value::SecretValue;
