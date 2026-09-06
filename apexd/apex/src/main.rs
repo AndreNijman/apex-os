@@ -11,6 +11,7 @@ mod boot;
 mod dispatch;
 mod disposable;
 mod gaming;
+mod gitshim;
 mod host;
 mod mcp;
 mod mode;
@@ -379,6 +380,19 @@ enum Cmd {
     Secret {
         #[command(subcommand)]
         cmd: secret::SecretCmd,
+    },
+
+    /// The `git` a managed session finds first on its PATH. Not typed by hand.
+    ///
+    /// Runs `push`, `fetch` and `ls-remote` through the broker when the remote
+    /// has a stored credential, and execs the real git for everything else. It
+    /// holds no credential and enforces nothing — `/usr/bin/git` is still
+    /// there, and reaches the same remotes with no credential at all.
+    #[command(hide = true)]
+    GitShim {
+        /// Everything the session typed after `git`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// MCP servers APEX brokers, so a bearer token is not in the agent's config.
@@ -1055,6 +1069,7 @@ async fn main() {
         Cmd::Request { cmd } => request::main(cmd),
         Cmd::Secret { cmd } => secret::main(cmd),
         Cmd::Mcp { cmd } => mcp::main(cmd),
+        Cmd::GitShim { args } => gitshim::main(args),
         // Read-only, so no root gate: seeing what the machine should be must
         // not require privilege. `apex apply` is the verb that changes things,
         // and it converges only the privilege domain it is already in.

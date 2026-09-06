@@ -305,7 +305,11 @@ fn capabilities() {
          \n\
          A remote is named, never given as a URL: the service resolves the name\n\
          against the repository's own remotes and checks the host against the\n\
-         credential, so a grant cannot be turned into a push to anywhere else."
+         credential, so a grant cannot be turned into a push to anywhere else.\n\
+         \n\
+         You do not have to type any of this. A managed session finds a `git` on\n\
+         its PATH that sends push, fetch and ls-remote here and execs the real\n\
+         git for everything else, so a skill keeps running `git push`."
     );
 }
 

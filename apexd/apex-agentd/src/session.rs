@@ -181,6 +181,16 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     // state from the PTY scanner, which is the fallback §6.1 keeps and not a
     // reason to refuse to start. `hook_settings` says what went wrong, once.
     let hook_settings = install_hook_settings(adapter, &scratch);
+
+    // §12: the shim's directory goes first on the session's PATH, so a skill's
+    // own `git push` reaches the broker without the skill knowing there is one.
+    // Only for a confined session — an unconfined one has the user's own git,
+    // the user's own credential helper, and no reason to be routed anywhere.
+    let session_bin = policy
+        .sandbox
+        .is_confined()
+        .then(|| install_git_shim(&scratch))
+        .flatten();
     let mut extra = extra;
     if let Some(path) = hook_settings.as_ref() {
         let mut with_hooks = adapter.hook_settings_args(path);
@@ -223,6 +233,13 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     // nothing downstream is allowed to depend on the hook having run.
     if let Some(path) = hook_settings.as_ref() {
         spec.ro.push(path.clone());
+    }
+    // Read-only for the same reason the hook settings are: the scratch is
+    // bound writable, and a shim the session could rewrite is one it could
+    // point at something else. It holds no credential either way — this is
+    // tidiness, not a boundary.
+    if let Some(bin) = session_bin.as_ref() {
+        spec.ro.push(bin.clone());
     }
 
     // P0-003's first criterion, enforced at spawn rather than left to whether
@@ -287,7 +304,11 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
 
     spec.env_set.push(("HOME".into(), paths::home().to_string_lossy().into_owned()));
     spec.env_set.push(("PWD".into(), workdir.to_string_lossy().into_owned()));
-    spec.env_set.push(("PATH".into(), inherited_path()));
+    let path = match session_bin.as_ref() {
+        Some(bin) => format!("{}:{}", bin.display(), inherited_path()),
+        None => inherited_path(),
+    };
+    spec.env_set.push(("PATH".into(), path));
     spec.env_set.push((SESSION_ENV.into(), id.to_string()));
     spec.env_set
         .push(("APEX_AGENT_SANDBOX".into(), policy.sandbox.to_string()));
@@ -466,6 +487,60 @@ fn install_redacted_settings(
     );
     Some((copy, real))
 }
+
+/// Write the `git` a confined session finds first, and say where its directory
+/// is.
+///
+/// §12: the user's existing skills keep using normal tools. A skill runs
+/// `git push`, this is what runs, and it asks the broker to perform the push
+/// rather than needing a credential of its own. Everything it does not
+/// recognise it execs `/usr/bin/git` for.
+///
+/// A shell script rather than a symlink or a copy: `apex` has to be invoked as
+/// `apex git-shim -- …`, and the session's `PATH` entry has to be called `git`.
+/// Two lines of `sh` are the whole of it, and being readable matters more here
+/// than being clever — the agent can read this file, and what it says is the
+/// truth about what happens to its git commands.
+///
+/// `None` when the `apex` binary could not be found or the file could not be
+/// written. The session then has no shim, `git` is the real one, and a push to
+/// a private remote fails to authenticate the way it does today. Nothing is
+/// less safe: the shim holds no credential and enforces nothing.
+fn install_git_shim(scratch: &Path) -> Option<PathBuf> {
+    let apex = apex_program()?;
+    let bin = scratch.join(SESSION_BIN);
+    if let Err(e) = std::fs::create_dir_all(&bin) {
+        eprintln!(
+            "apex-agentd: could not create {} ({e}), so git is not brokered in this session",
+            bin.display()
+        );
+        return None;
+    }
+    let shim = bin.join("git");
+    let script = format!(
+        "#!/bin/sh\n\
+         # Written by apex-agentd. `git` for a managed session: push, fetch and\n\
+         # ls-remote go through the broker, everything else execs /usr/bin/git.\n\
+         exec {} git-shim -- \"$@\"\n",
+        apex.display()
+    );
+    if let Err(e) = std::fs::write(&shim, script) {
+        eprintln!(
+            "apex-agentd: could not write {} ({e}), so git is not brokered in this session",
+            shim.display()
+        );
+        return None;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)) {
+        eprintln!("apex-agentd: could not make {} executable ({e})", shim.display());
+        return None;
+    }
+    Some(bin)
+}
+
+/// The directory inside the session scratch that goes first on its `PATH`.
+const SESSION_BIN: &str = "bin";
 
 /// The agent settings file a credential can arrive through.
 const SETTINGS_FILE: &str = "settings.json";
