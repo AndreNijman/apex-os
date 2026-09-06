@@ -33,7 +33,8 @@ use apex_agent_core::policy::{
     AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset, RequestOrigin,
     SandboxPolicy, SecretPolicy, SystemAccess,
 };
-use apex_agent_core::sandbox::{build_argv, SandboxSpec};
+use apex_agent_core::destination::Allowlist;
+use apex_agent_core::sandbox::{build_argv, EgressBridge, SandboxSpec, BRIDGE_PORT};
 
 use std::path::PathBuf;
 
@@ -49,6 +50,14 @@ fn spec(policy: AgentPolicy) -> SandboxSpec {
     s.scratch = PathBuf::from("/tmp/apex-agent/1");
     s.cwd = PathBuf::from("/home/tester/Projects/demo");
     s.rw = vec![PathBuf::from("/home/tester/Projects/demo")];
+    // Present for every policy, and used only by the one network mode that
+    // requires it — so a test can iterate over the whole value set without
+    // each case having to know which modes need a route out.
+    s.egress = Some(EgressBridge {
+        program: PathBuf::from("/usr/bin/apex-agentd"),
+        socket: PathBuf::from("/tmp/apex-agent/1/egress.sock"),
+        port: BRIDGE_PORT,
+    });
     s
 }
 
@@ -361,18 +370,13 @@ fn strict_is_still_fail_closed_whatever_the_network_dimension_says() {
 }
 
 #[test]
-fn a_network_mode_this_build_cannot_enforce_is_refused_not_downgraded() {
-    // The other half of criterion 2. A mode with no enforcement point must
-    // fail the session, never fall through to `open` — an unenforced
+fn a_network_mode_is_refused_wherever_it_could_not_be_enforced() {
+    // The other half of criterion 2. A mode that cannot be enforced must fail
+    // the session, never fall through to `open` — an unenforced
     // `--network allowlist` would read as a protection in `apex agent status`,
     // in the Agent Center and in a script, with nothing behind it.
-    let unenforceable = AgentPolicy {
-        network: NetworkPolicy::Allowlist,
-        ..AgentPolicy::default()
-    };
-    assert!(unenforceable.validate().is_err());
-
-    // Nor may an enforceable mode be granted without the namespace it needs.
+    //
+    // No mode may be granted without the namespace it is enforced by.
     for network in NetworkPolicy::ALL {
         let p = AgentPolicy {
             sandbox: SandboxPolicy::Unrestricted,
@@ -384,7 +388,34 @@ fn a_network_mode_this_build_cannot_enforce_is_refused_not_downgraded() {
             *network == NetworkPolicy::Open,
             "an unconfined session was granted {network}, which it cannot enforce"
         );
+        // And the argv builder refuses the same pair, so a caller that skipped
+        // the policy check still cannot produce a command running on the
+        // host's network under a policy that said otherwise.
+        assert_eq!(
+            build_argv(&spec(p), "claude", &[]).is_ok(),
+            *network == NetworkPolicy::Open,
+            "an unconfined {network} session was built anyway"
+        );
     }
+
+    // And `allowlist` is refused when there is nothing on the allowlist: a
+    // session reporting a destination policy while reaching nothing is an
+    // offline session under another name.
+    let allowlisted = AgentPolicy {
+        sandbox: SandboxPolicy::Project,
+        network: NetworkPolicy::Allowlist,
+        ..AgentPolicy::default()
+    };
+    assert!(allowlisted.validate_for(&Allowlist::default()).is_err());
+    assert!(allowlisted
+        .validate_for(&Allowlist::parse(&["api.example.com"]).expect("parse"))
+        .is_ok());
+
+    // The argv builder refuses it a third time when the route the mode
+    // depends on was not built.
+    let mut without_bridge = spec(allowlisted);
+    without_bridge.egress = None;
+    assert!(build_argv(&without_bridge, "claude", &[]).is_err());
 }
 
 #[test]
