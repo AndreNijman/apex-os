@@ -44,7 +44,7 @@
 #  the resolver has ever heard of. The probes here are raw TCP from the driver,
 #  so they need an address. It is taken from SSH_CONNECTION on the target —
 #  the far end of the path already under test — rather than from a name lookup
-#  that would fail on exactly the machines this is for.
+#  that fails on the machines this is for.
 #
 #  Usage:
 #    tests/test-apex-firewall-ssh.sh --target HOST --yes-this-host-may-lose-its-network
@@ -107,10 +107,9 @@ CM="$(mktemp -u /tmp/apex-fw-ssh.XXXXXX)"
 #     OpenSSH's PerSourcePenalties counts every one of them as a connection
 #     without authentication and starts dropping new ones: measured, the driver
 #     was locked out of the target for about fifty seconds, mid-test, with the
-#     policy loaded. A firewall test that gets its operator banned by sshd is
-#     indistinguishable from a firewall test that stranded its operator.
-#     Six commands through the config open seven such connections; six over the
-#     socket open none.
+#     policy loaded. A firewall test whose operator is banned by sshd looks
+#     like a firewall test that stranded him. Six commands through the config
+#     open seven such connections; six over the socket, none.
 #   * re-reading the config per command lets a later command take a DIFFERENT
 #     path. The same alias here falls back to a tunnel, so the moment the LAN
 #     probe fails, ssh quietly reconnects through it — and "a new connection
@@ -157,10 +156,9 @@ ok "ssh to $TARGET works, and this connection is the one under test"
 
 # Everything below reads a non-zero exit as a fact about the target — "no table
 # is loaded", "the firewall is not shipped here". A multiplexed call that never
-# arrives fails in exactly the same shape, so prove the socket carries one
-# before believing any of them.
-# 7 is a status the target has to choose; ssh answers 255 of its own accord
-# when it never gets there.
+# arrives fails in the same shape, so prove the socket carries one before
+# believing any of them. 7 is a status the target has to choose; ssh answers
+# 255 of its own accord when it never gets there.
 on 'exit 7'; muxrc=$?
 if [ "$muxrc" != 7 ]; then
     bad "commands ride the master's socket rather than reconnecting" \
@@ -247,7 +245,7 @@ else
     # log says `avc denied { getattr } ... scontext=iptables_t
     # tcontext=var_run_t`; the identical file relabelled usr_t loads. This is
     # the staging path's problem and not the shipped one's, and the labels used
-    # are exactly the ones the shipped paths carry — /usr/share is usr_t,
+    # are the ones the shipped paths carry — /usr/share is usr_t,
     # /usr/libexec is bin_t — so the run still exercises what an image would.
     if on 'command -v chcon >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" != Disabled ]'; then
         if on 'sudo -n chcon -R -t usr_t /run/apex-fw &&
