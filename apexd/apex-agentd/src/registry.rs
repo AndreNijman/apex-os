@@ -23,7 +23,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use apex_agent_core::paths;
 use apex_agent_core::protocol::{AgentState, SessionInfo};
-use apex_agent_core::session::{OutputScanner, Scrollback, SCROLLBACK_BYTES};
+use apex_agent_core::hook::ToolTransition;
+use apex_agent_core::session::{self as logic, OutputScanner, Scrollback, SCROLLBACK_BYTES};
 
 use crate::pty;
 
@@ -60,6 +61,10 @@ pub struct Session {
     pub scanner: OutputScanner,
     /// Connections currently mirroring this session's output.
     pub attachers: Vec<UnixStream>,
+    /// When a published event last said a tool started, and nothing has said
+    /// it finished. `None` for every session no hook speaks for, which is what
+    /// leaves the idle rule deciding on its own exactly as it did before.
+    tool_started: Option<u64>,
     log: Option<File>,
     log_bytes: u64,
     log_capped: bool,
@@ -152,6 +157,31 @@ impl Session {
     /// Seconds since the last output or published event.
     pub fn idle_secs(&self) -> u64 {
         now_secs().saturating_sub(self.info.last_activity)
+    }
+
+    /// Record what a published lifecycle event says about a tool call.
+    ///
+    /// Set by a `pre_tool_use`, cleared by the `post_tool_use` that answers it
+    /// and by anything that ends the turn. See
+    /// [`apex_agent_core::hook::HookEvent::tool_transition`] for why a `stop`
+    /// clears it too: it is the recovery path for a `post_tool_use` that never
+    /// arrived.
+    pub fn apply_tool_transition(&mut self, t: ToolTransition) {
+        match t {
+            ToolTransition::Started => self.tool_started = Some(now_secs()),
+            ToolTransition::Finished => self.tool_started = None,
+            ToolTransition::Unchanged => {}
+        }
+    }
+
+    /// How long ago a published event said a tool started, if one did.
+    ///
+    /// This is the argument [`apex_agent_core::session::next_state`] takes,
+    /// and `None` — an unintegrated agent, or a hook that never fired — is
+    /// what makes the idle rule the fallback rather than a second opinion.
+    pub fn tool_in_flight(&self) -> logic::ToolInFlight {
+        self.tool_started
+            .map(|at| now_secs().saturating_sub(at))
     }
 }
 
@@ -252,6 +282,7 @@ impl Registry {
             scrollback: Scrollback::new(SCROLLBACK_BYTES),
             scanner: OutputScanner::new(),
             attachers: Vec::new(),
+            tool_started: None,
             log,
             log_bytes: 0,
             log_capped: false,
@@ -617,6 +648,7 @@ mod tests {
             scrollback: Scrollback::new(1024),
             scanner: OutputScanner::new(),
             attachers: Vec::new(),
+            tool_started: None,
             log: None,
             log_bytes: 0,
             log_capped: false,

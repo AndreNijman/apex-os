@@ -334,9 +334,28 @@ pub enum Request {
     Signal { id: u32, signal: String },
     /// Publish a state transition. This is the open event protocol: any client
     /// that knows its session id can report what it is doing.
+    ///
+    /// Both payload fields are optional, and the two absences mean different
+    /// things. No `state` is an event that records something without changing
+    /// what the session is doing — a task created, a compaction, a config
+    /// change; §6.1 asks for those and none of them is a state. No `event` is
+    /// the original form, which every existing client still sends and which
+    /// still works: a bare state with no lifecycle name attached.
+    ///
+    /// Deliberately additive rather than a new request. A daemon that predates
+    /// this drops `event`, keeps `state`, and reports exactly what it reported
+    /// before — the version guards above exist for changes where an old daemon
+    /// dropping a key loses a *restriction*, and this one loses only detail.
+    /// It is therefore not a protocol bump, which matters when three branches
+    /// are open on this file at once.
     Event {
         id: u32,
-        state: String,
+        #[serde(default)]
+        state: Option<String>,
+        /// One of [`crate::hook::HookEvent`]'s names, when the publisher has a
+        /// lifecycle event rather than an opinion about state.
+        #[serde(default)]
+        event: Option<String>,
         #[serde(default)]
         detail: Option<String>,
     },
@@ -919,8 +938,15 @@ mod tests {
             },
             Request::Event {
                 id: 1,
-                state: "working".into(),
+                state: Some("working".into()),
+                event: Some("pre_tool_use".into()),
                 detail: Some("d".into()),
+            },
+            Request::Event {
+                id: 1,
+                state: None,
+                event: Some("task_created".into()),
+                detail: None,
             },
             Request::Logs { id: 1, bytes: 100 },
             Request::Remove { id: 1 },
@@ -946,7 +972,8 @@ mod tests {
         // this asserts that rather than assuming it.
         let req = Request::Event {
             id: 1,
-            state: "working".into(),
+            state: Some("working".into()),
+            event: None,
             detail: Some("line one\nline two".into()),
         };
         let text = serde_json::to_string(&req).unwrap();
@@ -1019,6 +1046,41 @@ mod tests {
             req.policy,
             AgentPolicy { sandbox: SandboxPolicy::Strict, ..AgentPolicy::default() }
         );
+    }
+
+    #[test]
+    fn an_event_from_a_pre_hook_client_still_publishes_its_state() {
+        // The wire form every existing `apex agent event working` sends. The
+        // two new keys are additive, so this must keep parsing unchanged —
+        // that is the whole reason the hook bridge is not a protocol bump.
+        let req: Request =
+            serde_json::from_str(r#"{"cmd":"event","id":4,"state":"working"}"#).expect("parse");
+        match req {
+            Request::Event { id, state, event, detail } => {
+                assert_eq!(id, 4);
+                assert_eq!(state.as_deref(), Some("working"));
+                assert_eq!(event, None);
+                assert_eq!(detail, None);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_event_may_record_a_lifecycle_without_claiming_a_state() {
+        // §6.1 asks for task, compaction, config and worktree events. None of
+        // them says what the session is doing, and inventing a state for them
+        // would overwrite a truthful one.
+        let req: Request =
+            serde_json::from_str(r#"{"cmd":"event","id":4,"event":"task_created"}"#)
+                .expect("parse");
+        match req {
+            Request::Event { state, event, .. } => {
+                assert_eq!(state, None);
+                assert_eq!(event.as_deref(), Some("task_created"));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     #[test]

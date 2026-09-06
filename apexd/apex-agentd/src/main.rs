@@ -367,19 +367,78 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             }
         }
 
-        Request::Event { id, state, detail } => {
-            let Some(parsed) = apex_agent_core::protocol::AgentState::parse(&state) else {
+        Request::Event {
+            id,
+            state,
+            event,
+            detail,
+        } => {
+            // An event that names neither is not a smaller event, it is a
+            // request that says nothing. Refused rather than recorded, because
+            // a silent no-op here would look identical to a working hook.
+            if state.is_none() && event.is_none() {
                 return Response::error(
                     ErrorKind::BadRequest,
-                    format!("unknown state {state:?}; expected one of \
-                             working, waiting_for_user, permission_request, complete, failed"),
+                    "an event must carry a state, a lifecycle event, or both".to_string(),
                 );
+            }
+            let parsed = match state.as_deref() {
+                None => None,
+                Some(s) => match apex_agent_core::protocol::AgentState::parse(s) {
+                    Some(p) => Some(p),
+                    None => {
+                        return Response::error(
+                            ErrorKind::BadRequest,
+                            format!(
+                                "unknown state {s:?}; expected one of \
+                                 working, waiting_for_user, permission_request, complete, failed"
+                            ),
+                        )
+                    }
+                },
+            };
+            let lifecycle = match event.as_deref() {
+                None => None,
+                Some(e) => match apex_agent_core::hook::HookEvent::parse(e) {
+                    Some(p) => Some(p),
+                    None => {
+                        return Response::error(
+                            ErrorKind::BadRequest,
+                            format!(
+                                "unknown lifecycle event {e:?}; expected one of {}",
+                                apex_agent_core::hook::HookEvent::ALL
+                                    .iter()
+                                    .map(|e| e.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        )
+                    }
+                },
             };
             let Some(handle) = lookup(daemon, id) else {
                 return no_such_session(id);
             };
             let mut s = handle.lock().expect("session lock");
-            s.set_state(parsed, detail);
+            // The tool flag first: a `stop` publishes `waiting_for_user` and
+            // also ends any tool call the last `pre_tool_use` claimed, and the
+            // order matters only in that both must happen.
+            if let Some(e) = lifecycle {
+                s.apply_tool_transition(e.tool_transition());
+            }
+            match parsed {
+                Some(p) => s.set_state(p, detail),
+                // No state: the event is a fact worth recording — a task, a
+                // compaction — and the session goes on doing whatever it was.
+                // `last_activity` still moves, because the session demonstrably
+                // is not idle.
+                None => {
+                    if detail.is_some() {
+                        s.info.detail = detail;
+                    }
+                    s.info.last_activity = registry::now_secs();
+                }
+            }
             registry::write_record(&s.info);
             Response::Ok
         }
