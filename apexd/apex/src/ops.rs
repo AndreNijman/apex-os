@@ -356,6 +356,36 @@ pub const PLUGIN_ENGINE: &str = "/usr/libexec/apex-plugin";
 /// front of it, so a malformed exception cannot take the base policy with it.
 pub const FIREWALL_ENGINE: &str = "/usr/libexec/apex-firewall";
 
+/// The device enumeration behind `apex devices`.
+///
+/// A constant for the same reason as [`FIREWALL_ENGINE`] and [`PKG_ENGINE`].
+/// This one is never run under sudo — it reads, and every verb it has is
+/// unprivileged — but a caller-controlled variable naming a program is a hole
+/// whatever the program does, and the rule is worth more than the exception.
+pub const DEVICES_ENGINE: &str = "/usr/libexec/apex-devices";
+
+/// `apex devices …`.
+///
+/// Unprivileged, and it must stay that way. Running it as root would change
+/// what it reports rather than reveal more: root walks through the 0000
+/// directory whose refusal is the interesting answer, root has no seat, and
+/// root's `bluetoothctl` sees a different set of paired devices than the user
+/// whose desktop is asking. A diagnostic that has to be run as root to be
+/// believed cannot tell a user why their own session cannot see a device.
+pub fn devices(args: &[String]) -> i32 {
+    match Command::new(DEVICES_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the device enumeration: {e}");
+            eprintln!(
+                "apex: no device helper on this system — it predates `apex devices`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
 /// `apex firewall …`.
 pub fn firewall(args: &[String]) -> i32 {
     match Command::new(FIREWALL_ENGINE).args(args).status() {
