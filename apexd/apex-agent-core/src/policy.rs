@@ -722,10 +722,9 @@ impl std::fmt::Display for PolicyError {
             PolicyError::RemoteElevationUnavailable => write!(
                 f,
                 "§7 allows remote elevation only behind a WebAuthn/FIDO2 security key, and \
-                 nothing in this build can ask for one. The policy it would relax is in \
-                 place — a remote origin may edit, test and push, and a root operation waits \
-                 for a local approval — so this setting would take the second half off and \
-                 put nothing in its place. Approve the operation locally instead"
+                 nothing in this build can ask for one. This setting would drop the \
+                 local-approval rule and put nothing in its place. Approve the operation \
+                 locally instead"
             ),
         }
     }
