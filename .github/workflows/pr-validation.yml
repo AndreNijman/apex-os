@@ -430,6 +430,15 @@ jobs:
       - name: §22 boot v2 — the opt-in is structural, and nothing shipped touches a boot path
         run: ./tests/test-boot-v2.sh
 
+      # §27's trust readout, structural half. In `static` because the check
+      # that matters most here compares two files in DIFFERENT selectors: the
+      # cosign identity in .github/workflows/build-image.yml against the one
+      # `apex trust` expects in apexd/apex/src/trust.rs. A PR touching only the
+      # workflow sets rust=false, and the drift would ship — with every machine
+      # reporting a good image as signed by the wrong party.
+      - name: §27 trust — the readout is wired into apex status, and expects the identity CI signs under
+        run: ./tests/test-apex-trust.sh
+
       # §19's disposable engine, and the structural rules its teardown depends
       # on. In `static` for the reason boot-v2's structural half is: the
       # `engine` selector is ^(files/|tests/) and the `rust` selector is
@@ -597,6 +606,22 @@ jobs:
           # A missing binary must be a hard failure, not a skip.
           test -x "$APEX_BIN"
           ./tests/test-boot-v2.sh --with-binary
+
+      # §27's binary half: `apex trust` and `apex status` against fixture
+      # machines — an unverified pull on a permissive policy (what every APEX
+      # machine has today), a signed pull on a strict one, and the two reads
+      # that must report as unavailable rather than as an answer. `--verify`
+      # refuses to run under a fixture root, so this step never leaves the
+      # runner and cannot go red because ghcr.io is having a bad day.
+      - name: §27 trust — apex trust against unverified, signed and unreadable fixtures
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-trust.sh --with-binary
 
       # §19's binary half: the recovery surface against whole fixture machines,
       # `apex doctor --json`, and the factory reset.
