@@ -106,8 +106,8 @@ impl std::fmt::Display for VocabularyError {
             }
             VocabularyError::UnknownParam { operation, param } => write!(
                 f,
-                "{operation} has no '{}' option; an option this build does not \
-                 declare is refused rather than ignored",
+                "{operation} has no '{}' option; this build refuses an option it \
+                 does not declare rather than ignoring it",
                 param.escape_debug()
             ),
             VocabularyError::MissingParam { operation, param } => {

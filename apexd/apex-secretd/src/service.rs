@@ -202,17 +202,22 @@ impl Service {
         // Through the registry, so a grant is written under the operation's
         // canonical id whichever spelling was typed — and an operation no
         // provider offers cannot be granted at all.
-        let capability = match self.registry.lookup(capability) {
-            Ok((_, op)) => op.id,
+        let op = match self.registry.lookup(capability) {
+            Ok((_, op)) => op,
             Err(e) => return Response::error(ErrorKind::BadRequest, e.to_string()),
         };
+        let capability = op.id;
         if !store::valid_service_name(service) {
             return refuse_store(StoreError::BadServiceName(service.to_string()));
         }
 
         let mut grants = self.store.grants(peer.uid);
         if revoke {
-            if !grants.revoke(project, service, capability) {
+            // Every name the operation answers to, not just the canonical one.
+            // A grant written before a rename is on disk under the old
+            // spelling, and a revoke that missed it would report "was not
+            // granted" and leave it there.
+            if !grants.revoke_any(project, service, &provider::grant_names(op)) {
                 return Response::error(
                     ErrorKind::NoSuchService,
                     format!("{service}:{capability} was not granted for {project}"),
@@ -308,6 +313,11 @@ impl Service {
     pub fn use_capability(&self, peer: Peer, mut record: CapabilityRecord) -> Response {
         let audit_id = self.next_audit_id();
         record.audit_id = audit_id.clone();
+        // §11's `approval_policy` is the daemon's answer, and until `decide`
+        // gives one there is no answer. Cleared before the refusal path can
+        // capture it: a caller that arrived claiming `owner` must not have that
+        // word appear on a `refused` line, where nobody would think to doubt it.
+        record.approval_policy = UNDECIDED.to_string();
 
         let refuse = |record: &CapabilityRecord, reason: String, kind: ErrorKind| -> Response {
             self.record(AuditLine {
@@ -495,6 +505,13 @@ enum Decision {
     Refused(String),
 }
 
+/// What `approval_policy` says before [`Service::decide`] has said anything.
+///
+/// Every line the refusal path writes carries this, so a trail can be read as
+/// "these requests were never authorised" rather than as a mix of the daemon's
+/// answers and the caller's claims.
+const UNDECIDED: &str = "undecided";
+
 /// Which protocol error a provider's refusal is.
 ///
 /// A provider that could only say "error" would make every failure look like a
@@ -584,6 +601,77 @@ mod tests {
         let mut rec = CapabilityRecord::new(provider, cap, remote);
         rec.project = Some(project.to_string());
         rec
+    }
+
+    #[test]
+    fn a_grant_already_on_disk_under_an_old_spelling_still_works_and_can_be_removed() {
+        // The compatibility claim, against a grants.json the way P0-002 wrote
+        // one — written straight to the store rather than through `grant`,
+        // which canonicalises on the way in and so could never produce a
+        // legacy key. Andre's machine has exactly these.
+        let (svc, dir) = temp_service("legacy");
+        let peer = me();
+        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+
+        let store = Store::new(dir.clone());
+        let mut grants = apex_secret_core::store::Grants::default();
+        grants.allow("/tmp/p", "demo", "git-fetch");
+        store.save_grants(peer.uid, &grants).expect("save");
+
+        // It matches under the name the request now uses. The operation then
+        // fails for its own reasons — /tmp/p is not a repository — and that is
+        // the point: it got PAST the grant check.
+        let past = svc.use_capability(peer, record("demo", "git.fetch", "origin", "/tmp/p"));
+        assert!(
+            !past.as_error().is_some_and(|(_, m)| m.contains("not granted")),
+            "a grant on disk under the old name stopped matching: {past:?}"
+        );
+
+        // The contrast, so the assertion above cannot pass by accident: with
+        // nothing granted, the same request is refused for the grant.
+        let (empty, empty_dir) = temp_service("legacy-contrast");
+        empty.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+        assert!(
+            empty
+                .use_capability(peer, record("demo", "git.fetch", "origin", "/tmp/p"))
+                .as_error()
+                .is_some_and(|(_, m)| m.contains("not granted")),
+            "the ungranted case must be refused for the grant"
+        );
+        std::fs::remove_dir_all(&empty_dir).ok();
+
+        // ...and it can be withdrawn, under either spelling. Without this the
+        // owner is told the grant is not there while it goes on working.
+        let reply = svc.grant(peer, "/tmp/p", "demo", "git.fetch", true);
+        assert!(reply.as_error().is_none(), "revoke refused: {reply:?}");
+        assert_eq!(
+            svc.grants(peer),
+            Response::Grants {
+                projects: Default::default()
+            },
+            "the legacy key survived a revoke"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_refusal_never_records_an_approval_the_caller_claimed() {
+        // §11's `approval_policy` is the daemon's answer. A request refused
+        // before `decide` has no answer, and a trail that carried the caller's
+        // claim there would say `owner` on a line nobody authorised.
+        let (svc, dir) = temp_service("undecided");
+        let peer = me();
+        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+        let mut rec = record("demo", "git.fetch", "origin", "/tmp/p");
+        rec.approval_policy = "owner".into();
+        svc.use_capability(peer, rec);
+
+        let line = audit::tail(&trail(&dir), 10)
+            .into_iter()
+            .find(|l| l.event == AuditEvent::Refused)
+            .expect("a refusal was recorded");
+        assert_eq!(line.approval_policy, UNDECIDED, "the caller's claim reached the trail");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

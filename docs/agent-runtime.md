@@ -771,7 +771,7 @@ So the service performs the operation instead. The agent asks for
 `git.push origin`; `apex-agentd` says which session is asking and what it is
 allowed; `apex-secretd` runs the push and returns git's output.
 
-### Capabilities are provider-shaped, and the framework is not
+### Where a provider plugs in
 
 An operation is named the way §13.2 names one: `provider.thing.verb` —
 `git.push`, `cloudflare.worker.deploy`, `cloudflare.r2.object.read`. The first
@@ -790,10 +790,10 @@ provider declared, expiry, the project, §7's origin, the grant, **the host
 pin**, reading the value once and only after all of that, scrubbing it out of
 everything returned, and the audit line.
 
-`bind` and `perform` are separate calls because the pin sits between them. A
-provider that both resolved and acted would have to be trusted to check where it
-was sending your credential; splitting the call means the framework checks it,
-for every provider written from now on.
+`bind` and `perform` are separate calls because the pin sits between them. If a
+provider both resolved and acted, you would have to trust it to check where it
+was sending your credential. Split, the framework checks that — for every
+provider anyone writes from now on.
 
 Adding a provider is a module and one `register` call in `apex-secretd`. It
 needs no change to `apex-agent-core`, `apex-agentd` or the `apex` CLI: the wire
