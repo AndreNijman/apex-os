@@ -267,9 +267,14 @@ grep -q "$FAKE_BEARER" "${HOME}/.claude.json" \
 printf '%s' "$out" | grep -q "grant(s) from the old broker" \
     && ok "the old broker's grants were carried across" \
     || bad "the old broker's grants were carried across"
-"$APEX" secret grants 2>/dev/null | grep -q "legacy-git:git-ls-remote" \
-    && ok "and the secret service now holds them" \
-    || { bad "and the secret service now holds them"; "$APEX" secret grants; }
+# `git.ls-remote`, not the `git-ls-remote` the fixture above wrote. The old
+# broker's grants are carried across through the daemon's own grant verb, and
+# P1-001's registry canonicalises an old spelling as it goes in — so this
+# asserts the stronger thing the migration actually does: it arrives, and it
+# arrives spelled the one way the trail and the grant table use from now on.
+"$APEX" secret grants 2>/dev/null | grep -q "legacy-git:git.ls-remote" \
+    && ok "and the secret service now holds them, under the canonical name" \
+    || { bad "and the secret service now holds them, under the canonical name"; "$APEX" secret grants; }
 grep -q "Basic" "${WORK}/seen" \
     && ok "the legacy credential was verified against the fixture server" \
     || { bad "the legacy credential was verified against the fixture server"; cat "${WORK}/seen" 2>/dev/null; }
@@ -365,7 +370,9 @@ if grep -qE "$FAKE_BEARER|$FAKE_LEGACY" "${APEX_SECRETD_STORE}/audit.jsonl" 2>/d
 else
     ok "the audit trail carries no credential"
 fi
-grep -q "mcp-request" "${APEX_SECRETD_STORE}/audit.jsonl" 2>/dev/null \
+# `mcp.request` for the same reason: `mcp-request` is an alias the daemon
+# accepts and never a spelling it writes.
+grep -q "mcp.request" "${APEX_SECRETD_STORE}/audit.jsonl" 2>/dev/null \
     && ok "the audit trail records the brokered request" \
     || bad "the audit trail records the brokered request"
 
