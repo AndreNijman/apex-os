@@ -1,0 +1,17 @@
+# Commands the docs name on purpose because they do NOT exist. Each line is a
+# deliberate mention; deleting the line would make the checker demand the
+# sentence be removed, and the sentence is the useful part.
+
+# docs/boot-v2.md: "There is deliberately no `apex boot ack` verb: the notice is
+# cleared automatically on a boot where no entry is exhausted, so it tracks
+# reality instead of tracking whether somebody dismissed it."
+apex boot ack
+
+# docs/recovery.md: "Adding an `apex recover previous` verb would have been a
+# second name for an operation that already exists" (namely `sudo apex rollback`).
+apex recover previous
+
+# docs/rollback.md: "An earlier version of this document claimed
+# `apex reset --keep-home` shipped in M3. It never did; the verb above is what
+# exists." Naming the retired claim is how a reader who saw the old doc knows.
+apex reset
