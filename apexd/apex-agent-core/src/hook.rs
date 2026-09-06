@@ -484,7 +484,7 @@ fn clamp(text: &str) -> String {
 /// hook command takes no session id: `$APEX_AGENT_SESSION` is in the
 /// environment bwrap set, and an id on the command line would be an id the
 /// agent could edit.
-pub fn settings_json(apex: &Path) -> serde_json::Value {
+pub fn settings_json(apex: &Path, status: Option<&crate::statusline::UserStatusLine>) -> serde_json::Value {
     let mut hooks = serde_json::Map::new();
 
     for event in HookEvent::ALL {
@@ -505,7 +505,20 @@ pub fn settings_json(apex: &Path) -> serde_json::Value {
         }
     }
 
-    serde_json::json!({ "hooks": hooks })
+    serde_json::json!({
+        "hooks": hooks,
+        // §P1-021. `hooks` is a list key and Claude combines list keys across
+        // settings sources, which is why the subscriptions above add
+        // themselves and leave the user's own hooks running. `statusLine` is
+        // an object, and this file outranks every source but managed policy —
+        // so naming it here REPLACES whatever the user configured.
+        //
+        // That is why `apex agent statusline` runs the user's own command and
+        // copies its output through, and why the presentation keys are carried
+        // across here. Both halves are needed for "without breaking terminal
+        // statusline"; either one alone changes what the user sees.
+        "statusLine": crate::statusline::overlay(&shell_quote(apex), status),
+    })
 }
 
 /// Quote a path for the shell Claude runs a `command` hook through.
@@ -1064,7 +1077,7 @@ mod tests {
 
     #[test]
     fn the_settings_document_subscribes_every_event_with_a_short_timeout() {
-        let v = settings_json(Path::new("/usr/bin/apex"));
+        let v = settings_json(Path::new("/usr/bin/apex"), None);
         let hooks = v["hooks"].as_object().expect("hooks object");
 
         for event in HookEvent::ALL {
@@ -1089,20 +1102,20 @@ mod tests {
         // The id comes from $APEX_AGENT_SESSION, which bwrap set. On the
         // command line it would be a number the agent could edit into another
         // session's.
-        let text = settings_json(Path::new("/usr/bin/apex")).to_string();
+        let text = settings_json(Path::new("/usr/bin/apex"), None).to_string();
         assert!(!text.contains("--session"), "{text}");
         assert!(!text.contains("APEX_AGENT_SESSION"), "{text}");
     }
 
     #[test]
     fn a_path_with_a_space_is_quoted_for_the_shell() {
-        let v = settings_json(Path::new("/opt/my apps/apex"));
+        let v = settings_json(Path::new("/opt/my apps/apex"), None);
         let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .expect("command");
         assert_eq!(cmd, "'/opt/my apps/apex' agent hook stop");
         // The ordinary case stays unquoted and readable.
-        let v = settings_json(Path::new("/usr/bin/apex"));
+        let v = settings_json(Path::new("/usr/bin/apex"), None);
         assert_eq!(
             v["hooks"]["Stop"][0]["hooks"][0]["command"],
             "/usr/bin/apex agent hook stop"

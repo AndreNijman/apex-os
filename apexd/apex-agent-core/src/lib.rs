@@ -67,6 +67,7 @@ pub mod protocol;
 pub mod request;
 pub mod sandbox;
 pub mod session;
+pub mod statusline;
 pub mod term;
 
 pub use policy::AgentPolicy;
