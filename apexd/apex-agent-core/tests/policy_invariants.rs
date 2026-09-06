@@ -720,6 +720,7 @@ fn sample_request() -> PrivilegeRequest {
         decided_ms: None,
         executed_ms: None,
         exit_code: None,
+        system_grant: None,
     }
 }
 
