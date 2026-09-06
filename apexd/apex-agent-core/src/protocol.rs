@@ -559,6 +559,29 @@ pub enum Request {
     },
 }
 
+impl Request {
+    /// Whether answering this can block on a person at a keyboard.
+    ///
+    /// §4.4 and §4.5 both authenticate, and polkit dispatches the challenge to
+    /// the login session's own agent — a dialog on the desktop, not in the
+    /// PTY. The daemon sits in `pkcheck` until the person answers it, which is
+    /// as long as they take. The control socket's ordinary read timeout is
+    /// generous but finite, and a person who walks away from the dialog would
+    /// otherwise get a socket error from the CLI while the dialog is still on
+    /// screen and the grant is still being decided behind it — a failure
+    /// message about the wrong thing entirely.
+    ///
+    /// Erring towards `true` costs nothing: it removes a deadline from one
+    /// request, and the daemon still answers when it is done.
+    pub fn waits_on_a_human(&self) -> bool {
+        match self {
+            Request::Run(r) => r.policy.needs_grant().is_some(),
+            Request::RenewSystemGrant { .. } => true,
+            _ => false,
+        }
+    }
+}
+
 fn default_replay() -> usize {
     crate::session::SCROLLBACK_BYTES
 }
@@ -883,6 +906,7 @@ mod tests {
             decided_ms: None,
             executed_ms: None,
             exit_code: None,
+            system_grant: None,
         }
     }
 
@@ -1031,6 +1055,41 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(v["reply"], "request");
         assert_eq!(v["verb"], "install");
+    }
+
+    #[test]
+    fn only_the_requests_that_authenticate_wait_on_a_person() {
+        // The polkit dialog is on the desktop and the person may take a
+        // minute or ten; the CLI must not give up on the socket and report a
+        // connection failure while the dialog is still up.
+        use crate::policy::SystemAccess;
+        let run = |system| {
+            Request::Run(RunRequest {
+                agent: None,
+                prompt: None,
+                args: vec![],
+                cwd: "/home/t/p".into(),
+                policy: AgentPolicy {
+                    system,
+                    ..AgentPolicy::default()
+                },
+                request_origin: None,
+                worktree: None,
+                checkpoint: false,
+                ttl_ms: None,
+                cols: 80,
+                rows: 24,
+                env: vec![],
+            })
+        };
+        assert!(run(SystemAccess::Session).waits_on_a_human());
+        assert!(run(SystemAccess::Unsafe).waits_on_a_human());
+        assert!(!run(SystemAccess::None).waits_on_a_human());
+        assert!(Request::RenewSystemGrant { id: 1, ttl_ms: 60_000 }.waits_on_a_human());
+        // Giving privilege up asks nobody, so it keeps its deadline.
+        assert!(!Request::RevokeSystemGrant { id: 1 }.waits_on_a_human());
+        assert!(!Request::SystemGrants.waits_on_a_human());
+        assert!(!Request::List.waits_on_a_human());
     }
 
     #[test]
