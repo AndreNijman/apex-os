@@ -1,0 +1,99 @@
+#!/usr/sbin/nft -f
+#
+# APEX default incoming firewall.
+#
+# Until this shipped there was none: firewalld is not installed, nftables was
+# present with an empty ruleset, and every port a program happened to bind was
+# reachable from the network. On the author's own laptop that was seventeen
+# listening ports, including a model server and a Steam remote-play socket.
+#
+# ── What it does ────────────────────────────────────────────────────────────
+# Drops inbound, permits outbound, and permits the things a desktop stops
+# working without. Forwarding is dropped too: this is a workstation, and a
+# machine that routes by accident is a machine on someone else's path.
+#
+# ── Why each exception is here ──────────────────────────────────────────────
+# Every `accept` below is a decision, not a default. If you are reading this to
+# find out whether you can delete one, the answer is in its comment.
+#
+# ── What it deliberately does NOT do ────────────────────────────────────────
+# No egress filtering. That belongs to the agent network dimension (P0-008),
+# which is per-session and knows which agent is asking; a host-wide egress rule
+# would either be too coarse to matter or would break the user's own browser.
+# No port knocking, no rate limits beyond ICMP, no logging by default — a log
+# rule on a desktop fills the journal with broadcast noise within the hour.
+
+table inet apex {
+    # Exceptions APEX adds live here rather than in the chain below, so
+    # `apex firewall allow` never rewrites a shipped rule and a corrupted
+    # exception set cannot take the base policy with it.
+    set allowed_tcp {
+        type inet_service
+        flags interval
+        # Populated by apex-firewall from /etc/apex/firewall.d/*.conf
+    }
+    set allowed_udp {
+        type inet_service
+        flags interval
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        # Anything we started. This is what makes an outbound-only policy
+        # usable at all: without it every reply to your own request is dropped.
+        ct state established,related accept
+        ct state invalid drop
+
+        # Loopback. A surprising amount of a desktop session talks to itself,
+        # and the seventeen listening ports on this machine are mostly here.
+        iif lo accept
+
+        # ICMP is not optional. Dropping it breaks path MTU discovery, which
+        # fails as a slow connection rather than a refused one, and on IPv6 it
+        # breaks neighbour discovery outright, which means no network at all.
+        # Rate-limited rather than open: an unlimited echo responder is a
+        # reflector.
+        ip protocol icmp icmp type { echo-request } limit rate 10/second accept
+        ip protocol icmp icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+        ip6 nexthdr icmpv6 icmpv6 type { echo-request } limit rate 10/second accept
+        ip6 nexthdr icmpv6 icmpv6 type {
+            destination-unreachable, packet-too-big, time-exceeded, parameter-problem,
+            nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, nd-redirect,
+            mld-listener-query, mld-listener-report, mld-listener-done
+        } accept
+
+        # DHCPv6 and DHCP replies arrive before a connection exists, so
+        # conntrack cannot recognise them as related.
+        ip6 daddr fe80::/10 udp dport 546 accept
+        udp sport 67 udp dport 68 accept
+
+        # mDNS and LLMNR. Printers, Chromecasts, and `apex host` discovery all
+        # depend on answering these; a desktop that cannot be resolved by name
+        # on its own LAN is a support ticket.
+        udp dport 5353 accept
+        udp dport 5355 accept
+        tcp dport 5355 accept
+
+        # ssh, and the one exception that is genuinely load-bearing here: APEX
+        # remote agents, `apex host run` and `apex build --on` are all ssh, and
+        # a firewall that shipped without it would strand a user mid-session on
+        # the machine they were driving from.
+        tcp dport 22 accept
+
+        # Whatever the user allowed, by name, through `apex firewall allow`.
+        tcp dport @allowed_tcp accept
+        udp dport @allowed_udp accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        # Podman and distrobox install their own tables for container traffic;
+        # dropping here does not touch those, because they hook at their own
+        # priority in their own table.
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}

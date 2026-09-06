@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-firewall — the exception list in front of APEX's default-drop policy.
+#
+#  The policy itself is /usr/share/apex/nftables/apex.nft and is not editable
+#  from here. This adds and removes named exceptions, and nothing else: a user
+#  who wants to open a port opens a *service*, because "5353/udp" is a thing you
+#  paste from a forum and "mdns" is a thing you can decide about.
+#
+#  Exceptions live in /etc/apex/firewall.d/<name>.conf, one file per service, so
+#  removing one is removing a file and the set is readable without this tool.
+#  They are applied into two named nftables sets rather than by rewriting the
+#  ruleset, so a malformed exception can never take the base policy with it.
+#
+#  Run as root for anything that changes state. Reading is unprivileged, and
+#  says so when it cannot see the live ruleset rather than reporting an empty
+#  one — `nft list` needs CAP_NET_ADMIN, and a firewall tool that answers "no
+#  rules" to a user who merely lacks permission is the worst possible answer.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+readonly TABLE="inet apex"
+readonly CONF_DIR=/etc/apex/firewall.d
+readonly CATALOGUE=/usr/share/apex/firewall/services
+
+msg()  { printf 'apex-firewall: %s\n' "$*"; }
+warn() { printf 'apex-firewall: warning: %s\n' "$*" >&2; }
+die()  { printf 'apex-firewall: error: %s\n' "$*" >&2; exit 1; }
+
+need_root() {
+    [ "$(id -u)" = 0 ] || die "$1 needs root; try: sudo apex firewall $1"
+}
+
+# The named services a user may open, as `name proto port description`.
+# A catalogue rather than free-form ports: the point of the exception list is
+# that a user can read it back later and know what they decided.
+catalogue() {
+    if [ -r "$CATALOGUE" ]; then
+        grep -vE '^\s*(#|$)' "$CATALOGUE"
+        return
+    fi
+    # Built in, so the tool still works if the image's copy is missing.
+    cat <<'EOF'
+ssh          tcp 22    Remote shell, and how APEX remote agents and `apex host run` reach this machine
+http         tcp 80    A web server you are running
+https        tcp 443   A web server you are running, over TLS
+mdns         udp 5353  Local name discovery, for printers and `apex host`
+samba        tcp 445   Windows file sharing
+nfs          tcp 2049  NFS file sharing
+ipp          tcp 631   Sharing a printer attached to this machine
+steam-remote udp 27036 Steam Remote Play from another machine on this network
+sunshine     tcp 47989 Sunshine game streaming host
+ollama       tcp 11434 A local model server, reachable from other machines
+syncthing    tcp 22000 Syncthing peer connections
+EOF
+}
+
+lookup() {
+    catalogue | awk -v n="$1" '$1 == n { print $2, $3; found=1 } END { exit !found }'
+}
+
+# Is the ruleset actually loaded? Distinguishes "no exceptions" from "cannot
+# look", for the same reason the rest of this codebase does.
+ruleset_state() {
+    if ! command -v nft >/dev/null 2>&1; then
+        printf 'absent\n'; return
+    fi
+    local out rc
+    out="$(nft list table $TABLE 2>&1)"; rc=$?
+    if [ "$rc" -eq 0 ]; then
+        printf 'loaded\n'
+    elif printf '%s' "$out" | grep -qiE 'permission denied|operation not permitted'; then
+        printf 'unreadable\n'
+    else
+        printf 'notloaded\n'
+    fi
+}
+
+cmd_list() {
+    printf '%-13s %-5s %-6s %s\n' NAME PROTO PORT DESCRIPTION
+    catalogue | while read -r name proto port desc; do
+        printf '%-13s %-5s %-6s %s\n' "$name" "$proto" "$port" "$desc"
+    done
+}
+
+cmd_status() {
+    case "$(ruleset_state)" in
+        absent)     msg "nft is not installed; no policy is being enforced" ;;
+        notloaded)  msg "policy: NOT LOADED — incoming traffic is not being filtered"
+                    msg "  load it with: sudo systemctl start apex-firewall" ;;
+        unreadable) msg "policy: cannot read the ruleset; reading it needs root"
+                    msg "  try: sudo apex firewall status" ;;
+        loaded)     msg "policy: incoming dropped by default, outgoing allowed" ;;
+    esac
+    echo
+    echo "always allowed, and not removable here:"
+    echo "  established replies, loopback, ICMP, DHCP, mDNS/LLMNR, ssh"
+    echo
+    echo "exceptions you have added:"
+    local any=0 f name
+    for f in "$CONF_DIR"/*.conf; do
+        [ -e "$f" ] || continue
+        name="$(basename "$f" .conf)"
+        printf '  %-13s %s\n' "$name" "$(head -1 "$f" 2>/dev/null || echo '(unreadable)')"
+        any=1
+    done
+    [ "$any" = 1 ] || echo "  (none)"
+}
+
+apply_sets() {
+    local state; state="$(ruleset_state)"
+    [ "$state" = loaded ] || { warn "the ruleset is not loaded; the exception is recorded and will apply when it is"; return 0; }
+    local tcp="" udp="" f proto port
+    for f in "$CONF_DIR"/*.conf; do
+        [ -e "$f" ] || continue
+        read -r proto port _ < "$f" || continue
+        case "$proto" in
+            tcp) tcp="${tcp:+$tcp, }$port" ;;
+            udp) udp="${udp:+$udp, }$port" ;;
+            *)   warn "ignoring $f: '$proto' is not tcp or udp" ;;
+        esac
+    done
+    nft flush set $TABLE allowed_tcp 2>/dev/null
+    nft flush set $TABLE allowed_udp 2>/dev/null
+    [ -n "$tcp" ] && nft add element $TABLE allowed_tcp "{ $tcp }"
+    [ -n "$udp" ] && nft add element $TABLE allowed_udp "{ $udp }"
+    return 0
+}
+
+cmd_allow() {
+    local name="${1:-}"
+    [ -n "$name" ] || die "which service? see: apex firewall list"
+    # Resolve the name BEFORE demanding root. Reading the catalogue needs no
+    # privilege, and making someone type a password to be told they misspelled
+    # a service is a worse command than one that answers first.
+    local spec
+    spec="$(lookup "$name")" || die "no service called '$name'; see: apex firewall list"
+    need_root allow
+    mkdir -p "$CONF_DIR"
+    printf '%s %s\n' $spec > "${CONF_DIR}/${name}.conf"
+    apply_sets
+    msg "allowed '$name' ($spec) on every interface"
+}
+
+cmd_deny() {
+    local name="${1:-}"
+    [ -n "$name" ] || die "which service? see: apex firewall status"
+    # Same order as allow: say it was never open before asking for a password.
+    # /etc/apex/firewall.d is world-readable precisely so this can answer.
+    [ -e "${CONF_DIR}/${name}.conf" ] || die "'$name' was not allowed"
+    need_root deny
+    rm -f "${CONF_DIR}/${name}.conf"
+    apply_sets
+    msg "removed '$name'"
+}
+
+cmd_reload() { need_root reload; apply_sets; msg "exceptions reapplied"; }
+
+usage() {
+    cat <<'EOF'
+Incoming traffic is dropped by default. This manages the exceptions.
+
+Usage: apex firewall <command>
+
+Commands:
+  status          What the policy is, and what you have opened
+  list            The services you can open, by name
+  allow <name>    Open one, on every interface. Needs root.
+  deny <name>     Close one again. Needs root.
+  reload          Reapply the recorded exceptions. Needs root.
+
+ssh is always open: APEX remote agents and `apex host run` are ssh, and closing
+it would strand you on the machine you were driving from.
+EOF
+}
+
+case "${1:-}" in
+    status|"")   cmd_status ;;
+    list)        cmd_list ;;
+    allow)       shift; cmd_allow "$@" ;;
+    deny)        shift; cmd_deny "$@" ;;
+    reload)      cmd_reload ;;
+    -h|--help)   usage ;;
+    *)           usage >&2; exit 2 ;;
+esac

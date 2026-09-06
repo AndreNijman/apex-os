@@ -1030,6 +1030,48 @@ RUN set -eux; \
 #
 # The assertions below are the safety claims, checked here so that being wrong
 # is a failed build rather than a recursive delete on a user's machine.
+# ── The default incoming firewall ───────────────────────────────────────────
+# APEX shipped without one. firewalld is not installed, nftables was present
+# with an empty ruleset, and every port a program happened to bind was reachable
+# from the network — seventeen of them on the author's own laptop, including a
+# model server and a Steam remote-play socket.
+COPY files/system/nftables/apex.nft /usr/share/apex/nftables/apex.nft
+COPY files/system/firewall/services /usr/share/apex/firewall/services
+COPY --chmod=0755 files/system/libexec/apex-firewall /usr/libexec/apex-firewall
+COPY files/system/units/apex-firewall.service /usr/lib/systemd/system/apex-firewall.service
+RUN set -eux; \
+    bash -n /usr/libexec/apex-firewall; \
+    # nft arrives as a dependency rather than a named package, so assert it: a
+    # future dependency change that dropped it would leave the unit failing at
+    # boot and the machine unfiltered, which is the one failure that must not be
+    # quiet.
+    test -x /usr/sbin/nft; \
+    # The policy must parse. `nft -c` checks without applying, so this is safe
+    # in a build container, and a ruleset that fails to load at boot is a
+    # machine with no firewall and no warning.
+    /usr/sbin/nft -c -f /usr/share/apex/nftables/apex.nft; \
+    # Default drop is the whole point; an `accept` policy on input would pass
+    # every other assertion here and protect nothing.
+    grep -qE '^\s*type filter hook input priority filter; policy drop;$' \
+        /usr/share/apex/nftables/apex.nft; \
+    # ssh is load-bearing, not incidental: APEX remote agents, `apex host run`
+    # and `apex build --on` are all ssh, so a policy without it strands the user
+    # on the machine they were driving from.
+    grep -qE '^\s*tcp dport 22 accept$' /usr/share/apex/nftables/apex.nft; \
+    # Without established/related every reply to the machine's own request is
+    # dropped, which reads as "the network is broken" rather than as a firewall.
+    grep -qE '^\s*ct state established,related accept$' /usr/share/apex/nftables/apex.nft; \
+    # ICMPv6 neighbour discovery is not optional; dropping it removes IPv6
+    # entirely, and slowly enough that nobody blames the firewall.
+    grep -q 'nd-neighbor-solicit' /usr/share/apex/nftables/apex.nft; \
+    # Exceptions are applied into named sets, never by rewriting the policy.
+    grep -q 'tcp dport @allowed_tcp accept' /usr/share/apex/nftables/apex.nft; \
+    test -s /usr/share/apex/firewall/services; \
+    # Enabled by default. A firewall that ships disabled is documentation.
+    systemctl enable apex-firewall.service; \
+    test -L /etc/systemd/system/multi-user.target.wants/apex-firewall.service; \
+    echo "firewall: default-drop policy present, parses, and is enabled"
+
 COPY --chmod=0755 files/system/libexec/apex-disposable /usr/libexec/apex-disposable
 RUN set -eux; \
     bash -n /usr/libexec/apex-disposable; \
