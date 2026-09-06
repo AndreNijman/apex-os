@@ -52,12 +52,16 @@
 //!   minus the two Unix sockets.
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use apex_agent_core::protocol::{
     Request as AgentRequest, Response as AgentResponse, MCP_BRIDGE_VERSION,
 };
 use clap::Subcommand;
+
+pub mod connect;
+pub mod servers;
 
 /// `apex mcp <verb>`.
 #[derive(Subcommand)]
@@ -69,6 +73,37 @@ pub enum McpCmd {
     Bridge {
         /// The stored credential, by the name `apex secret list` shows.
         service: String,
+    },
+
+    /// Every MCP server this machine has, and where each one's credential is.
+    ///
+    /// Reads all four places a server can be defined — your own
+    /// `~/.claude.json`, its per-directory block, a repository's `.mcp.json`
+    /// and every enabled plugin's — and says for each whether the agent can
+    /// read the credential.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Move one MCP server's credential into the broker, once, by hand.
+    ///
+    /// The credential is read from stdin, stored, proved against the server
+    /// itself, and only then removed from the file the agent reads. What is
+    /// left behind names `apex mcp bridge`, so the agent still sees an MCP
+    /// server and no longer sees a token.
+    Connect {
+        /// The server, as `apex mcp list` names it.
+        name: String,
+        /// The endpoint, when the server is not already defined here.
+        #[arg(long)]
+        url: Option<String>,
+        /// Store it under a different credential name.
+        #[arg(long)]
+        service: Option<String>,
+        /// Say what would happen and write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -82,6 +117,108 @@ pub fn main(cmd: McpCmd) -> i32 {
                 eprintln!("apex mcp bridge: {e:#}");
                 1
             }
+        },
+        McpCmd::List { json } => report(list(json)),
+        McpCmd::Connect {
+            name,
+            url,
+            service,
+            dry_run,
+        } => report(connect::main(&name, url.as_deref(), service.as_deref(), dry_run)),
+    }
+}
+
+fn report(result: Result<i32>) -> i32 {
+    match result {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("apex mcp: {e:#}");
+            1
+        }
+    }
+}
+
+/// Where this account's Claude profile is.
+pub fn home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// `apex mcp list`.
+fn list(json: bool) -> Result<i32> {
+    let cwd = std::env::current_dir().ok();
+    let found = servers::discover(&home(), cwd.as_deref());
+    if json {
+        println!("{}", serde_json::to_string_pretty(&servers::as_json(&found))?);
+        return Ok(0);
+    }
+    if found.is_empty() {
+        println!("no MCP server is defined for this account");
+        return Ok(0);
+    }
+
+    let mut readable = 0;
+    for server in &found {
+        println!("{}", server.name);
+        println!("  transport   {}", describe_transport(&server.transport));
+        println!("  credential  {}", describe_credential(&server.credential));
+        println!("  defined in  {}", server.surface.describe());
+        if server.credential.agent_readable() {
+            readable += 1;
+            if server.surface.is_writable_here() {
+                println!("  fix         apex mcp connect {}", server.name);
+            }
+        }
+        println!();
+    }
+
+    // The count, not a lecture: somebody who has already decided is not helped
+    // by being told again, and somebody who has not needs the number.
+    match readable {
+        0 => println!("no MCP credential on this machine is readable by an agent"),
+        1 => println!("1 MCP credential is readable by any agent that runs as you"),
+        n => println!("{n} MCP credentials are readable by any agent that runs as you"),
+    }
+    Ok(0)
+}
+
+fn describe_transport(t: &servers::Transport) -> String {
+    match t {
+        servers::Transport::Stdio { command, args } => {
+            let mut line = command.clone();
+            for a in args.iter().take(4) {
+                line.push(' ');
+                line.push_str(a);
+            }
+            format!("stdio, {line}")
+        }
+        servers::Transport::Endpoint { kind, url } => format!("{kind}, {url}"),
+        servers::Transport::Other(what) => format!("{what} — not one this understands"),
+    }
+}
+
+fn describe_credential(c: &servers::Credential) -> String {
+    match c {
+        servers::Credential::None => "none in the definition".to_string(),
+        servers::Credential::Brokered { service } => {
+            format!("held by apex-secretd as '{service}' — the agent cannot read it")
+        }
+        servers::Credential::InConfig { header, shape } => format!(
+            "{shape} in the definition's {header} header, which the agent reads",
+            shape = shape.describe(),
+        ),
+        servers::Credential::FromEnvironment {
+            header,
+            var,
+            defined,
+            source,
+        } => match (defined, source) {
+            (Some(shape), Some(source)) => format!(
+                "{header}: ${var}, which is {} in {source}",
+                shape.describe()
+            ),
+            _ => format!("{header}: ${var}, and nothing on this machine defines it"),
         },
     }
 }
