@@ -140,18 +140,16 @@ impl Service {
 
     // ── administration, owner only ──────────────────────────────────────────
 
-    pub fn add(
-        &self,
-        peer: Peer,
-        service: &str,
-        host: &str,
-        scheme: &str,
-        username: Option<&str>,
-        path: &str,
-        auth: Option<&str>,
-        port: Option<u16>,
-        value: SecretValue,
-    ) -> Response {
+    pub fn add(&self, peer: Peer, new: NewService<'_>, value: SecretValue) -> Response {
+        let NewService {
+            service,
+            host,
+            scheme,
+            username,
+            path,
+            auth,
+            port,
+        } = new;
         if !store::valid_service_name(service) {
             return refuse_store(StoreError::BadServiceName(service.to_string()));
         }
@@ -501,6 +499,21 @@ impl Service {
 
 use apex_secret_core::capability;
 
+/// What an `add` was asked to store, before any of it has been judged.
+///
+/// A struct rather than seven parameters: an endpoint is one thing described
+/// seven ways, and a call site that passed `path` where `scheme` goes would
+/// compile.
+pub struct NewService<'a> {
+    pub service: &'a str,
+    pub host: &'a str,
+    pub scheme: &'a str,
+    pub username: Option<&'a str>,
+    pub path: &'a str,
+    pub auth: Option<&'a str>,
+    pub port: Option<u16>,
+}
+
 fn valid_host_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_')
 }
@@ -540,6 +553,20 @@ mod tests {
     /// that needs an accessor added for it is a test shaping the API.
     fn trail(dir: &Path) -> PathBuf {
         Store::new(dir.to_path_buf()).audit_path()
+    }
+
+
+    /// The seven fields an `add` takes, for a test that cares about two.
+    fn demo_service<'a>(service: &'a str, host: &'a str, scheme: &'a str) -> NewService<'a> {
+        NewService {
+            service,
+            host,
+            scheme,
+            username: None,
+            path: "",
+            auth: None,
+            port: None,
+        }
     }
 
     fn me() -> Peer {
@@ -588,16 +615,7 @@ mod tests {
         let (svc, dir) = temp_service("noleak");
         let peer = me();
         assert_eq!(
-            svc.add(
-                peer,
-                "demo",
-                "github.com",
-                "https",
-                None,
-                "",
-                None,
-                None,
-                SecretValue::new(SENTINEL.into())
+            svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(SENTINEL.into())
             ),
             Response::Ok
         );
@@ -633,7 +651,7 @@ mod tests {
     fn a_credential_grants_nothing_by_itself() {
         let (svc, dir) = temp_service("nogrant");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"x".to_vec()));
         assert_eq!(
             svc.grants(peer),
             Response::Grants {
@@ -651,7 +669,7 @@ mod tests {
     fn a_grant_is_per_capability_and_per_project() {
         let (svc, dir) = temp_service("perproject");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"x".to_vec()));
         svc.grant(peer, "/tmp/p", "demo", "git-fetch", false);
 
         // Another capability in the same project.
@@ -688,7 +706,7 @@ mod tests {
     fn the_vocabulary_is_closed_at_the_grant_and_at_the_use() {
         let (svc, dir) = temp_service("closed");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"x".to_vec()));
         for evil in ["exec", "sh", "git-clone", "curl"] {
             let resp = svc.grant(peer, "/tmp/p", "demo", evil, false);
             assert!(
@@ -704,7 +722,7 @@ mod tests {
     fn a_use_without_a_project_cannot_match_a_grant() {
         let (svc, dir) = temp_service("noproject");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"x".to_vec()));
         let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
         rec.project = None;
         assert!(svc
@@ -728,7 +746,7 @@ mod tests {
         // value that is not a label at all.
         let (svc, dir) = temp_service("originshape");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"x".to_vec()));
         svc.grant(peer, "/tmp/p", "demo", "git-fetch", false);
 
         for bad in ["local terminal", "Local-Terminal", "local\nterminal", ""] {
@@ -773,7 +791,7 @@ mod tests {
         // the daemon silently dropped would be worse than one it never had.
         let (svc, dir) = temp_service("origintrail");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"x".to_vec()));
         let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
         rec.request_origin = "claude-remote-control".into();
         rec.origin_source = "inherited".into();
@@ -792,7 +810,7 @@ mod tests {
     fn an_expired_or_over_long_request_is_refused() {
         let (svc, dir) = temp_service("expiry");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"x".to_vec()));
         svc.grant(peer, "/tmp/p", "demo", "git-fetch", false);
 
         let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
@@ -815,7 +833,7 @@ mod tests {
     fn every_refusal_is_recorded_with_a_reason_and_an_id() {
         let (svc, dir) = temp_service("trail");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"x".to_vec()));
         svc.use_capability(peer, record("demo", "git-fetch", "origin", "/tmp/p"), Vec::new());
 
         let lines = audit::tail(&trail(&dir), 10);
@@ -849,7 +867,7 @@ mod tests {
             uid: mine.uid.wrapping_add(1),
             ..mine
         };
-        svc.add(mine, "demo", "github.com", "https", None, "", None, None, SecretValue::new(SENTINEL.into()));
+        svc.add(mine, demo_service("demo", "github.com", "https"), SecretValue::new(SENTINEL.into()));
 
         assert_eq!(svc.list(theirs), Response::Services { services: vec![] });
         assert!(svc
@@ -883,7 +901,7 @@ mod tests {
     fn removing_a_credential_takes_its_grants_with_it() {
         let (svc, dir) = temp_service("removegrants");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"x".to_vec()));
         svc.grant(peer, "/tmp/p", "demo", "git-fetch", false);
         assert_eq!(svc.remove(peer, "demo"), Response::Ok);
         assert_eq!(
@@ -899,16 +917,7 @@ mod tests {
     fn http_is_refused_for_a_host_that_is_not_this_machine() {
         let (svc, dir) = temp_service("scheme");
         let peer = me();
-        let resp = svc.add(
-            peer,
-            "demo",
-            "github.com",
-            "http",
-            None,
-            "",
-            None,
-            None,
-            SecretValue::new(b"x".to_vec()),
+        let resp = svc.add(peer, demo_service("demo", "github.com", "http"), SecretValue::new(b"x".to_vec()),
         );
         assert!(resp
             .as_error()
@@ -922,7 +931,7 @@ mod tests {
         let (svc, dir) = temp_service("host");
         let peer = me();
         for evil in ["", "a b", "a/b", "a\nb", "-"] {
-            let resp = svc.add(peer, "demo", evil, "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
+            let resp = svc.add(peer, demo_service("demo", evil, "https"), SecretValue::new(b"x".to_vec()));
             if evil == "-" {
                 // A single hyphen is a legal host character; it simply never
                 // matches a remote. The framing characters are what matter.
