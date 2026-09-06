@@ -19,8 +19,9 @@
 //! none, because a network namespace cannot be un-shared upward. That is
 //! checked here by running the sidecar inside an outer `bwrap --unshare-net`.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Where `bwrap` is. The same fixed path the sandbox module uses, and for the
 /// same reason: a `PATH` lookup would let a shadowing binary decide what this
@@ -274,5 +275,228 @@ fn a_variable_the_parent_has_does_not_reach_a_confined_server() {
         "a parent variable reached the server: {text}"
     );
     assert!(text.contains("HOME="), "{text}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+// ---------------------------------------------------------------------------
+// The real `apex mcp run`, not a copy of its flags.
+//
+// Everything above hand-builds an argv, which measures bubblewrap and not this
+// codebase: the flags are asserted against the real ones by the unit tests, and
+// a copy that drifted would keep passing. The tests below spawn the shipped
+// binary, hand it a stdio MCP server and talk JSON-RPC to it through the
+// sandbox — so the transport, the exec, the working directory, `HOME`, and the
+// two dimensions that are sockets are all measured end to end.
+//
+// The server is a double. It speaks enough of MCP to complete an `initialize`
+// handshake and reports what it can see from inside; a real third-party server
+// would prove nothing more about the sandbox and would need a package registry.
+// ---------------------------------------------------------------------------
+
+/// A stdio MCP server that answers `initialize` and says what it could reach.
+const DOUBLE: &str = r#"
+import json, os, socket, sys
+
+agent_file, agentd_socket = sys.argv[1], sys.argv[2]
+
+def reachable(path):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    message = json.loads(line)
+    if message.get("method") != "initialize":
+        continue
+    sys.stdout.write(json.dumps({
+        "jsonrpc": "2.0",
+        "id": message.get("id"),
+        "result": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "serverInfo": {"name": "double", "version": "0"},
+            "_saw": {
+                "home": os.environ.get("HOME"),
+                "cwd": os.getcwd(),
+                "agentFile": os.path.exists(agent_file),
+                "parentVariable": "APEX_LIVE_SECRET" in os.environ,
+                "broker": reachable(agentd_socket),
+            },
+        },
+    }) + "\n")
+    sys.stdout.flush()
+    break
+"#;
+
+/// A fixture with every directory `apex mcp run` reads, and nothing of the
+/// user's. Returns (root, home, state, config, runtime, server_home).
+fn sidecar_fixture(tag: &str, name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+    let root = fixture(tag);
+    let (home, state, config, runtime) = (
+        root.join("home"),
+        root.join("state"),
+        root.join("config"),
+        root.join("run-user"),
+    );
+    let server_home = state.join("apex/agent/mcp").join(name);
+    for dir in [&home, &config, &runtime, &server_home] {
+        std::fs::create_dir_all(dir).expect("fixture dir");
+    }
+    // The double lives in the server's own home, because that is one of the two
+    // places inside the sandbox that exists: `/tmp` is masked, and the fixture
+    // is under it.
+    std::fs::write(server_home.join("server.py"), DOUBLE).expect("double");
+    std::fs::write(home.join("the-agents-own-file"), "a token the agent has").expect("write");
+    (root, home, state, config, runtime, server_home)
+}
+
+/// Run `apex mcp run <name> -- python3 server.py …`, send one message, and
+/// return (exit code, stdout, stderr).
+fn talk_to_sidecar(
+    name: &str,
+    home: &Path,
+    state: &Path,
+    config: &Path,
+    runtime: &Path,
+    agent_file: &Path,
+    agentd_socket: &Path,
+    message: &str,
+) -> (i32, String, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_apex"))
+        .args([
+            "mcp",
+            "run",
+            name,
+            "--",
+            "/usr/bin/python3",
+            "server.py",
+            &agent_file.to_string_lossy(),
+            &agentd_socket.to_string_lossy(),
+        ])
+        // Cleared and rebuilt, so nothing of the developer's environment can
+        // decide what this measures — and so `APEX_LIVE_SECRET` below is the
+        // only interesting thing in it.
+        .env_clear()
+        .env("HOME", home)
+        .env("XDG_STATE_HOME", state)
+        .env("XDG_CONFIG_HOME", config)
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("PATH", "/usr/bin:/bin")
+        .env("APEX_LIVE_SECRET", "sentinel-must-not-appear")
+        .current_dir(home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn apex mcp run");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(format!("{message}\n").as_bytes())
+        .expect("write the message");
+    let out = child.wait_with_output().expect("wait");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"live-test","version":"0"}}}"#;
+
+#[test]
+fn the_shipped_command_runs_a_stdio_mcp_server_and_its_handshake_still_completes() {
+    // P1-019's second criterion, measured rather than asserted: a server that
+    // no longer inherits the agent's sandbox must still *work*. The whole of
+    // the default policy is exercised — the mask, the private home, the cleared
+    // environment, both closed sockets — by a server that talks MCP through it.
+    let (root, home, state, config, runtime, server_home) =
+        sidecar_fixture("handshake", "demo");
+    let agentd = runtime.join("apex-agentd/control.sock");
+
+    let (code, stdout, stderr) = talk_to_sidecar(
+        "demo",
+        &home,
+        &state,
+        &config,
+        &runtime,
+        &home.join("the-agents-own-file"),
+        &agentd,
+        INITIALIZE,
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+
+    let reply: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout} {stderr}"));
+    // The handshake, addressed to the message that asked for it.
+    assert_eq!(reply["id"], 1, "{stdout}");
+    assert_eq!(reply["result"]["serverInfo"]["name"], "double", "{stdout}");
+
+    let saw = &reply["result"]["_saw"];
+    // `HOME` is the server's own directory and the working directory is it too,
+    // so a server that writes beside itself writes there.
+    assert_eq!(saw["home"], server_home.to_string_lossy().as_ref(), "{stdout}");
+    assert_eq!(saw["cwd"], server_home.to_string_lossy().as_ref(), "{stdout}");
+    // The three closed dimensions, from inside.
+    assert_eq!(saw["agentFile"], false, "the masked home was readable: {stdout}");
+    assert_eq!(saw["parentVariable"], false, "a parent variable survived: {stdout}");
+    assert_eq!(saw["broker"], false, "the broker was reachable by default: {stdout}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn the_broker_dimension_opens_the_runtime_socket_and_only_when_asked() {
+    // The dimension that was wrong until this branch measured it. `broker` used
+    // to bind `apex-secretd`'s socket, which is not the one anything inside a
+    // sandbox connects to — `apex secret use` and `apex mcp bridge` both talk
+    // to `apex-agentd`, under `$XDG_RUNTIME_DIR`. The argv test says which path
+    // is in the flags; this says the flag opens a socket that is demonstrably
+    // accepting, which is what the network test does and for the same reason:
+    // without a live listener, "could not connect" proves nothing.
+    let (root, home, state, config, runtime, _) = sidecar_fixture("broker", "demo");
+    std::fs::create_dir_all(runtime.join("apex-agentd")).expect("runtime dir");
+    let agentd = runtime.join("apex-agentd/control.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&agentd).expect("listen");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            drop(stream);
+        }
+    });
+
+    let agent_file = home.join("the-agents-own-file");
+    // Closed, against the listener that is definitely there.
+    let (code, stdout, stderr) = talk_to_sidecar(
+        "demo", &home, &state, &config, &runtime, &agent_file, &agentd, INITIALIZE,
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let closed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("json");
+    assert_eq!(
+        closed["result"]["_saw"]["broker"], false,
+        "the default reached the runtime: {stdout}"
+    );
+
+    // The same fixture, one line of policy.
+    std::fs::create_dir_all(config.join("apex/mcp")).expect("policy dir");
+    std::fs::write(config.join("apex/mcp/demo.toml"), "broker = true\n").expect("policy");
+    let (code, stdout, stderr) = talk_to_sidecar(
+        "demo", &home, &state, &config, &runtime, &agent_file, &agentd, INITIALIZE,
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let open: serde_json::Value = serde_json::from_str(stdout.trim()).expect("json");
+    assert_eq!(
+        open["result"]["_saw"]["broker"], true,
+        "broker = true did not open the runtime socket: {stdout}"
+    );
+    // And nothing else moved: the home is still masked when the broker opens.
+    assert_eq!(open["result"]["_saw"]["agentFile"], false, "{stdout}");
     std::fs::remove_dir_all(&root).ok();
 }

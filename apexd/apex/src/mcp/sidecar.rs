@@ -44,8 +44,11 @@
 //! not exist**, and nothing here pretends otherwise. What *is* enforceable is
 //! reachability: the daemons' sockets live under `/run` and
 //! `$XDG_RUNTIME_DIR`, both masked, so by default a server cannot open either.
-//! `broker = true` binds the secret service's socket back, and the grant table
-//! then decides as it always did.
+//! `broker = true` binds back the one socket a confined process is ever given —
+//! `apex-agentd`'s, under `$XDG_RUNTIME_DIR` — and the grant table then decides
+//! as it always did. `apex-secretd`'s own socket is not bound and must not be:
+//! a session does not get it either, and an MCP server holding a door into the
+//! secret daemon that the agent starting it lacks is the inverse of a sandbox.
 //!
 //! ## What this is a boundary against, and what it is not
 //!
@@ -145,9 +148,9 @@ impl McpPolicy {
             format!(
                 "secrets     {}",
                 if self.broker {
-                    "may reach apex-secretd, where its grants decide"
+                    "may reach apex-agentd, where this project's grants decide"
                 } else {
-                    "cannot reach apex-secretd or apex-agentd at all"
+                    "cannot reach apex-agentd or apex-secretd at all"
                 }
             ),
         ];
@@ -336,11 +339,22 @@ pub fn build(
     if policy.network {
         spec.run_ro = sandbox::resolv_binds();
     }
-    // The secret service's socket lives under `/run`, which `build_argv` masks.
-    // Binding it back is the whole of the `broker` dimension: the grant table
-    // decides everything after that, exactly as it does for the agent.
+    // The way into the broker is the agent runtime's control socket, under
+    // `$XDG_RUNTIME_DIR`, which `build_argv` masks with a tmpfs. Binding it
+    // back is the whole of the `broker` dimension: `apex secret use` and
+    // `apex mcp bridge` both connect there, `apex-agentd` stamps the request
+    // and forwards it, and the grant table decides everything after that —
+    // exactly as it does for a session, which is bound the same socket by
+    // `apex-agentd`'s own session builder.
+    //
+    // Not `apex_secret_core::paths::socket()`. That is the secret daemon's own
+    // socket, and a confined agent session is never given it: the daemon is
+    // reached *through* the runtime, not beside it. Binding it here would have
+    // handed an MCP server a door into apex-secretd that the agent starting the
+    // server does not have, which is the inverse of what a per-server sandbox
+    // is for.
     if policy.broker {
-        spec.control_socket = apex_secret_core::paths::socket();
+        spec.control_socket = apex_agent_core::paths::control_socket_in(runtime_dir);
     }
 
     spec.env_set = vec![
@@ -417,6 +431,13 @@ pub fn run(name: &str, command: &[String]) -> Result<i32> {
     spec.rw = spec.rw.iter().map(|p| sandbox::real_target(p)).collect();
     spec.ro = spec.ro.iter().map(|p| sandbox::real_target(p)).collect();
     spec.cwd = sandbox::real_target(&spec.cwd);
+    // The same resolution `apex-agentd` applies to a session's copy of this
+    // path, and for the same reason: an empty one must stay empty, because
+    // `build_argv` reads that as "no socket" and a resolved "" would become a
+    // bind of the current directory.
+    if !spec.control_socket.as_os_str().is_empty() {
+        spec.control_socket = sandbox::real_target(&spec.control_socket);
+    }
 
     let argv = sandbox::build_argv(&spec, program, args).map_err(|e| anyhow::anyhow!("{e}"))?;
     exec(&argv)
@@ -539,8 +560,13 @@ mod tests {
         let mut broker = McpPolicy::closed("m");
         broker.broker = true;
         let argv = spec_for(&broker);
-        let socket = apex_secret_core::paths::socket();
-        assert!(has_pair(&argv, "--bind-try", &socket.to_string_lossy()), "{argv:?}");
+        // The agent runtime's socket, under the runtime directory `spec_for`
+        // passes in — the way into the broker for anything confined. Not the
+        // secret daemon's own socket: see the next test.
+        assert!(
+            has_pair(&argv, "--bind-try", "/run/user/1000/apex-agentd/control.sock"),
+            "{argv:?}"
+        );
 
         let mut readable = McpPolicy::closed("m");
         readable.read = vec![PathBuf::from("/usr/share/dict")];
@@ -549,6 +575,51 @@ mod tests {
         let mut writable = McpPolicy::closed("m");
         writable.write = vec![PathBuf::from("/home/tester/Notes")];
         assert!(has_pair(&spec_for(&writable), "--bind-try", "/home/tester/Notes"));
+    }
+
+    #[test]
+    fn the_broker_dimension_opens_the_door_a_session_uses_and_no_other() {
+        // The defect this pins. `broker = true` first bound
+        // `apex_secret_core::paths::socket()`, and the two halves were both
+        // wrong:
+        //
+        // * `apex secret use` and `apex mcp bridge` connect to **apex-agentd**,
+        //   whose socket is under `$XDG_RUNTIME_DIR` and is masked by the
+        //   tmpfs — so the one thing `broker = true` promises did not work, and
+        //   `--bind-try` made the wrong path fail without a word.
+        // * `apex-secretd`'s socket is one a confined agent session is never
+        //   given. Binding it handed an MCP server a door into the secret
+        //   daemon that the agent starting the server does not have, which is
+        //   the inverse of a per-server sandbox.
+        let mut broker = McpPolicy::closed("m");
+        broker.broker = true;
+        let argv = spec_for(&broker);
+        let agentd = "/run/user/1000/apex-agentd/control.sock";
+        assert!(has_pair(&argv, "--bind-try", agentd), "{argv:?}");
+        assert!(
+            !argv.iter().any(|a| a.contains("apex-secretd")),
+            "the secret daemon's own socket reached a confined server: {argv:?}"
+        );
+        // And it is the `broker` flag that does it, not something else in the
+        // spec: without the flag neither socket is there.
+        let closed = spec_for(&McpPolicy::closed("m"));
+        assert!(!closed.iter().any(|a| a.contains("apex-agentd")), "{closed:?}");
+        assert!(!closed.iter().any(|a| a.contains("apex-secretd")), "{closed:?}");
+    }
+
+    #[test]
+    fn the_broker_socket_is_the_one_the_session_builder_uses() {
+        // Two callers, one path function: `apex-agentd` binds
+        // `paths::control_socket()` into a session and this binds
+        // `control_socket_in` under the runtime directory it was handed. A
+        // test that spelled the path out twice would keep passing if either
+        // moved.
+        assert_eq!(
+            apex_agent_core::paths::control_socket_in(Path::new("/run/user/1000")),
+            PathBuf::from("/run/user/1000/apex-agentd/control.sock")
+        );
+        assert!(apex_agent_core::paths::control_socket()
+            .ends_with("apex-agentd/control.sock"));
     }
 
     #[test]
@@ -663,12 +734,17 @@ mod tests {
     fn the_policy_reads_as_a_sentence_a_person_can_check() {
         let lines = McpPolicy::closed("m").describe().join("\n");
         assert!(lines.contains("none — its own empty namespace"), "{lines}");
-        assert!(lines.contains("cannot reach apex-secretd"), "{lines}");
+        assert!(lines.contains("cannot reach apex-agentd or apex-secretd"), "{lines}");
         let mut open = McpPolicy::closed("m");
         open.network = true;
         open.broker = true;
         let lines = open.describe().join("\n");
         assert!(lines.contains("ceiling and not a grant"), "{lines}");
-        assert!(lines.contains("its grants decide"), "{lines}");
+        // Named where a request actually goes: `apex secret use` and `apex mcp
+        // bridge` both talk to apex-agentd, which stamps the session and
+        // forwards. A line that promised apex-secretd would be describing a
+        // socket the sandbox does not bind.
+        assert!(lines.contains("may reach apex-agentd"), "{lines}");
+        assert!(lines.contains("this project's grants decide"), "{lines}");
     }
 }
