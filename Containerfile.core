@@ -1082,10 +1082,9 @@ RUN set -eux; \
 # cluster. Left out deliberately; add it if legacy print servers matter to you.
 #
 # DISCOVERY IS HALF THE JOB. A driverless printer is only findable if mDNS
-# works: avahi is installed, but `nss-mdns` was absent and /etc/nsswitch.conf
-# had no mdns module, so nothing could resolve a printer's .local name. An
-# earlier version of this comment also claimed avahi was enabled here. It was
-# not — see the numbered note below.
+# works: avahi is already installed AND enabled in this image (verified), but
+# `nss-mdns` was absent and /etc/nsswitch.conf had no mdns module, so nothing
+# could resolve a printer's .local name.
 #
 # nss-mdns wires itself through authselect (`%posttrans` runs
 # `authselect enable-feature with-mdns4`), which is the ONLY correct mechanism
@@ -1099,30 +1098,28 @@ RUN set -eux; \
 # cups.SOCKET, not cups.service: socket activation means cupsd only runs when
 # something actually prints, instead of sitting resident on every laptop.
 #
-# ── Two things this stage got wrong, found by running it ────────────────────
+# ── avahi is asserted here, not enabled here ────────────────────────────────
+# Fedora's 90-default.preset carries `enable avahi-daemon.*` and the built image
+# does have avahi-daemon.service in multi-user.target.wants, so the enable below
+# changes nothing on a good build. It is a regression guard: everything in this
+# stage rests on avahi — DNS-SD finds driverless printers, nss-mdns resolves
+# .local through avahi's socket, `apex host` discovery is mDNS — and a preset
+# change or a dropped package would take all of it out silently. The FATAL makes
+# that a failed build instead.
 #
-# 1. AVAHI WAS NEVER ENABLED, only assumed. The comment above says avahi is
-#    "already installed AND enabled in this image (verified)" and no step here
-#    checks it. On the machine booted from this image both avahi-daemon.service
-#    and avahi-daemon.socket were masked. Everything above depends on avahi:
-#    driverless printers are found by DNS-SD, nss-mdns resolves .local through
-#    avahi's socket, and `apex host` discovery is mDNS. So it is enabled here
-#    and the build fails if the enable did not take. A mask lives in /etc,
-#    survives every image update, and is invisible to a build — which is why
-#    `apex devices print` reports it rather than reporting no printers.
+# What this CANNOT fix is a mask. `systemctl mask avahi-daemon` writes a symlink
+# to /dev/null in /etc, which outlives every image update and is invisible to a
+# build. The machine this stage was written on is in exactly that state, and it
+# costs more than discovery:
 #
-# 2. hplip's SANE BACKEND HANGS `scanimage -L` FOREVER. With hpaio in
-#    /etc/sane.d/dll.d, device enumeration never returns: SANE_DEBUG_DLL shows
-#    hpaio as the last backend loaded and the process then sits in
-#    rt_sigsuspend with no children and no sockets, still there after 400
-#    seconds. Every scanning UI enumerates devices at startup, so the image
-#    could not scan at all. With hpaio disabled the same command returns in
-#    seven seconds and finds a real network scanner over WSD.
-#
-#    hplip stays, because it is how HP printers get a driver. Only its scanner
-#    backend is switched off, and the cost is bounded: modern HP all-in-ones
-#    scan driverlessly over eSCL/WSD through sane-airscan, which is installed.
-#    A user who needs the proprietary path uncomments one line.
+#   scanimage -L NEVER RETURNS when avahi is unavailable. hplip's hpaio backend
+#   links libavahi-client and does a network probe in sane_hpaio_get_devices;
+#   with no avahi to answer it, the process sits in rt_sigsuspend past 400
+#   seconds instead of failing. On a machine with avahi running, the same image
+#   and the same backend list return in twelve seconds and find the same
+#   scanner. So this is avahi's absence, not hplip's presence — hpaio is left
+#   alone, and `apex devices scan` names the mask rather than letting a scan UI
+#   freeze on a device list that will not arrive.
 #
 # simple-scan ships because the image had no scanning application of any kind —
 # `scanimage` on a terminal is not "scanning works" for the person this distro
@@ -1138,18 +1135,6 @@ RUN set -eux; \
     systemctl is-enabled avahi-daemon.service \
         || { echo "FATAL: avahi is not enabled — no printer on this network would ever be found"; exit 1; }; \
     command -v simple-scan; \
-    printf '%s\n' \
-        '# sane-dll entry for sane-airscan' \
-        '# APEX-OS: DISABLED. hplip is installed for its printer driver, but its' \
-        '# SANE backend never returns from sane_get_devices on a machine with no' \
-        '# HP scanner attached, and every scanning UI calls that at startup — so' \
-        '# leaving it on means the image cannot scan with anything. Modern HP' \
-        '# all-in-ones scan over eSCL/WSD through sane-airscan instead. Uncomment' \
-        '# the line below if you need hplip'"'"'s own USB scanner path.' \
-        '#hpaio' \
-        > /etc/sane.d/dll.d/hpaio; \
-    grep -q '^#hpaio' /etc/sane.d/dll.d/hpaio; \
-    test -z "$(grep -E '^hpaio' /etc/sane.d/dll.d/hpaio || true)"; \
     authselect enable-feature with-mdns4 >/dev/null 2>&1 || true; \
     grep '^hosts:' /etc/nsswitch.conf; \
     grep -q mdns /etc/nsswitch.conf \

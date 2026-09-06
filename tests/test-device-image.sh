@@ -154,27 +154,28 @@ asserts 'systemctl enable avahi-daemon.service' \
         "avahi is not enabled — DNS-SD discovery, .local resolution and \`apex host\` all depend on it"
 asserts 'FATAL: avahi is not enabled' \
         "the build fails if the avahi enable did not take" \
-        "the enable is issued and never checked, which is how this was wrong before"
+        "Fedora's preset does the enable, so nothing here would notice the preset changing"
 asserts 'command -v simple-scan' \
         "the scanning app is asserted on the built image" \
         "simple-scan is requested and never verified"
 
 echo
-echo "── hplip's scanner backend, which hung every scan UI ──────────────────"
-# `scanimage -L` never returned with hpaio active: SANE_DEBUG_DLL showed it as
-# the last backend loaded and the process then sat in rt_sigsuspend past 400
-# seconds. Every scanning UI enumerates at startup, so the image could not scan.
-asserts '/etc/sane.d/dll.d/hpaio' \
-        "the hpaio backend entry is rewritten" \
-        "hplip's SANE backend is left active and device enumeration never returns"
-asserts "grep -q '^#hpaio' /etc/sane.d/dll.d/hpaio" \
-        "the rewritten entry is asserted to be commented out" \
-        "the file is written and never checked"
-grep -oE "'#?hpaio'" "$JOINED" > "$WORK/hpaio" || true
-if grep -qF "'hpaio'" "$WORK/hpaio"; then
-    bad "no active hpaio line survives" "an uncommented hpaio is still written to the backend list"
+echo "── the SANE backend list is left as the packages ship it ──────────────"
+# An earlier version of this branch rewrote /etc/sane.d/dll.d/hpaio to disable
+# hplip's scanner backend, on the strength of `scanimage -L` never returning.
+# It does not return — on a machine where avahi is unavailable. hpaio links
+# libavahi-client and probes the network in sane_hpaio_get_devices, and with no
+# avahi to answer it waits past 400 seconds instead of failing. On a second
+# machine running the same image with avahi up, the same command with the same
+# backend list returns in twelve seconds and finds the same scanner. So the
+# defect is avahi's, and disabling hpaio would have removed HP's USB scanner
+# path to work around it. The condition is reported by `apex devices scan`
+# instead.
+if present '/etc/sane.d/dll.d/hpaio'; then
+    bad "the shipped SANE backend list is left alone" \
+        "hpaio is being rewritten again — the hang is avahi's absence, not hplip's presence"
 else
-    ok "no active hpaio line survives"
+    ok "the shipped SANE backend list is left alone"
 fi
 
 echo
