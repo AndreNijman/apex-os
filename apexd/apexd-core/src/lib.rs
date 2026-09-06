@@ -42,6 +42,9 @@ pub mod ai;
 pub mod aiprobe;
 pub mod battery;
 pub mod blueprint;
+// §26's update channels and the health signal that stops a rollout. Pure, like
+// its neighbours: the CLI measures the machine and hands the measurements in.
+pub mod channel;
 pub mod dispatch;
 pub mod fan;
 pub mod fingerprint;
