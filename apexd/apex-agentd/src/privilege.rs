@@ -477,6 +477,40 @@ pub fn renew_system_grant(
     }
 }
 
+
+/// Which authority decided a request, and how the record must say so.
+///
+/// Two things can decide a request before a human sees it, and they are not
+/// the same decision:
+///
+/// * a standing per-project grant (P0-013) — a human said yes to this
+///   operation in this project, once, and meant it to keep holding. The
+///   record says `allow_for_project`, which is what the next identical
+///   request in that project will find.
+/// * a session-scoped system-access grant (§4.4) — a human authenticated at
+///   the top of *this* session for a stated window. It decided this request
+///   and nothing beyond it: the window can be revoked or run out before the
+///   next one. The record says `allow_once` and names the grant, so this
+///   trail can be joined to the `APEX_GRANT_ID` journald holds for the same
+///   window.
+///
+/// Recording a session grant as `allow_for_project` would put a standing
+/// grant in the trail that no human ever made and that nothing on disk
+/// backs — the audit would be describing an authority that does not exist.
+///
+/// A project grant wins when both apply, and the request is *not* attributed
+/// to the session grant: it would have been allowed with no window open.
+fn decided_by(
+    by_project: bool,
+    by_grant: Option<u32>,
+) -> (Option<Decision>, Option<u32>, &'static str) {
+    match (by_project, by_grant) {
+        (true, _) => (Some(Decision::AllowForProject), None, "requested-and-granted"),
+        (false, Some(id)) => (Some(Decision::AllowOnce), Some(id), "requested-and-covered"),
+        (false, None) => (None, None, "requested"),
+    }
+}
+
 /// File a request.
 ///
 /// The verb is parsed here rather than accepted pre-parsed, so a client cannot
@@ -523,12 +557,19 @@ pub fn file(daemon: &Arc<Daemon>, peer: Option<Peer>, verb: &str, args: &[String
     // The system-access half is read from the daemon's memory, never from the
     // grant store, because the session this is being decided for can write the
     // store — see `grants.rs`.
-    let session_grant = daemon
-        .grants
-        .covers(who.session, parsed.name(), request::now_ms());
-    let pre_approved = grants.allows(who.project.as_deref(), &parsed) || session_grant;
-
+    //
+    // They are recorded differently for the same reason. A project grant is a
+    // standing decision, so the record says `allow_for_project` and the next
+    // identical request in that project finds it again. A session grant is
+    // not: it decided this one request, and the window it came from may be
+    // gone by the next, so the record says `allow_once` and names the grant.
     let now = request::now_ms();
+    let by_project = grants.allows(who.project.as_deref(), &parsed);
+    let by_grant = daemon
+        .grants
+        .covering_grant(who.session, parsed.name(), now);
+    let (decision, attributed, event) = decided_by(by_project, by_grant);
+
     let req = PrivilegeRequest {
         id: request::next_id(&dir),
         verb: parsed,
@@ -538,29 +579,18 @@ pub fn file(daemon: &Arc<Daemon>, peer: Option<Peer>, verb: &str, args: &[String
         project: who.project,
         request_origin: Some(source.origin),
         origin_source: Some(source.source),
-        decision: if pre_approved {
-            Decision::AllowForProject
-        } else {
-            Decision::Pending
-        },
+        decision: decision.unwrap_or(Decision::Pending),
         created_ms: now,
-        decided_ms: if pre_approved { Some(now) } else { None },
+        decided_ms: decision.map(|_| now),
         executed_ms: None,
         exit_code: None,
+        system_grant: attributed,
     };
 
     if let Err(e) = request::save(&dir, &req) {
         return Response::error(ErrorKind::Internal, format!("recording the request: {e}"));
     }
-    let _ = request::audit(
-        &request::audit_log(),
-        if pre_approved {
-            "requested-and-granted"
-        } else {
-            "requested"
-        },
-        &req,
-    );
+    let _ = request::audit(&request::audit_log(), event, &req);
     Response::Request(Box::new(req))
 }
 
@@ -781,6 +811,35 @@ mod tests {
             request_origin: Some(SessionOrigin::observed(origin)),
             ..Origin::default()
         }
+    }
+
+    #[test]
+    fn a_request_a_session_grant_covered_is_not_recorded_as_a_standing_grant() {
+        // §4.4's grant is a window, not a policy. If a request it covered were
+        // filed as `allow_for_project`, the audit would name an authority no
+        // human created: a standing permission for that project, readable by
+        // anyone who lists grants later, backed by nothing.
+        let (decision, attributed, event) = decided_by(false, Some(9));
+        assert_eq!(decision, Some(Decision::AllowOnce));
+        assert_eq!(attributed, Some(9), "the trail must name the grant");
+        assert_eq!(event, "requested-and-covered");
+
+        // A standing grant is the other authority, and says so.
+        let (decision, attributed, event) = decided_by(true, None);
+        assert_eq!(decision, Some(Decision::AllowForProject));
+        assert_eq!(attributed, None);
+        assert_eq!(event, "requested-and-granted");
+
+        // Both: the human's standing decision is the reason it was allowed,
+        // and it would have been allowed with no window open, so the record
+        // does not hang it on a window that will be gone in an hour.
+        let (decision, attributed, event) = decided_by(true, Some(9));
+        assert_eq!(decision, Some(Decision::AllowForProject));
+        assert_eq!(attributed, None, "a grant that decided nothing is not cited");
+        assert_eq!(event, "requested-and-granted");
+
+        // Neither: a human still has to look at it.
+        assert_eq!(decided_by(false, None), (None, None, "requested"));
     }
 
     #[test]
