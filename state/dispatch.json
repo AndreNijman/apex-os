@@ -1,76 +1,7 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T00:18+08:00",
+  "updated": "2026-09-07T00:21+08:00",
   "agents": [
-    {
-      "slug": "p0-003",
-      "items": [
-        "P0-002",
-        "P0-003"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p0-003",
-      "branch": "task/p0-003-cred-broker",
-      "agent_id": "af08f6b4eacd4e8da",
-      "dispatched": "2026-09-06T16:20+08:00",
-      "resumed": "2026-09-06T23:24+08:00",
-      "title": "GitHub and MCP credentials into the broker",
-      "status": "FINISHED 23:29 \u2014 P0-003 done, P0-002 still partial (daemon never run as root). Tip 12d75a5. Handed to the integration agent.",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
-    },
-    {
-      "slug": "p0-005",
-      "items": [
-        "P0-005",
-        "P0-006",
-        "P0-007"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p0-005",
-      "branch": "task/p0-005-permission-modes",
-      "agent_id": "a907ffaca52c69e6b",
-      "dispatched": "2026-09-06T16:20+08:00",
-      "resumed": "2026-09-06T23:24+08:00",
-      "title": "native permission mode, break-glass, session-scoped grants",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "status": "FINISHED 00:0x \u2014 P0-005 done, P0-006 done, P0-007 partial (capabilities whitelist is unconditional; needs one --capabilities flag). apex-os tip ee51ef4, apex-shell task/p0-005-agent-center-modes d9cdb37. Both await integration."
-    },
-    {
-      "slug": "p0-018b",
-      "items": [
-        "P0-018",
-        "P0-021",
-        "P0-025"
-      ],
-      "repo": "apex-shell",
-      "worktree": "/var/tmp/apex-work/wt-p0-018b",
-      "branch": "task/p0-018-display-finish",
-      "agent_id": "a3adb0a5651214af0",
-      "dispatched": "2026-09-06T16:20+08:00",
-      "resumed": "2026-09-06T23:24+08:00",
-      "title": "display apply/confirm, agent colours, Hyprland Lua \u2014 shell half",
-      "status": "FINISHED 23:29 \u2014 P0-018 done, P0-025 done, P0-021 partial (212 hardcoded white colour bindings). Tip 7004c2d. Handed to the integration agent.",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
-    },
-    {
-      "slug": "p1-030",
-      "items": [
-        "P1-030",
-        "P1-031",
-        "P1-032",
-        "P1-033",
-        "P1-034"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-030",
-      "branch": "task/p1-030-shell-integrations",
-      "agent_id": "a71f0340a7d470fc6",
-      "dispatched": "2026-09-06T16:20+08:00",
-      "resumed": "2026-09-06T23:24+08:00",
-      "title": "fish, nushell, tmux, zellij, editor/agent layouts",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "status": "FINISHED 23:5x \u2014 all five done, tip 63493c7. Awaits integration."
-    },
     {
       "slug": "p1-045",
       "items": [
@@ -102,17 +33,58 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
-      "slug": "integrate-1",
+      "slug": "integrate-2",
       "items": [
         "(integration only)"
       ],
       "repo": "both",
       "worktree": "/var/tmp/apex-work/int-os",
       "branch": "roadmap/v2.2",
-      "agent_id": "a818f596f9157651f",
-      "dispatched": "2026-09-06T23:42+08:00",
+      "agent_id": "a29172e5ee8a1c40a",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "title": "land task/p0-003-cred-broker (8 conflicts) and task/p0-018-display-finish (1 conflict)"
+      "dispatched": "2026-09-07T00:10+08:00",
+      "title": "land task/p0-005-permission-modes, task/p0-005-agent-center-modes, task/p1-030-shell-integrations"
+    },
+    {
+      "slug": "p1-044",
+      "items": [
+        "P1-044"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p1-044",
+      "branch": "task/p1-044-firewall-live",
+      "agent_id": "a719f6fec80944714",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T00:10+08:00",
+      "title": "prove the default-drop firewall on real hardware and in a netns"
+    },
+    {
+      "slug": "p1-038",
+      "items": [
+        "P1-038"
+      ],
+      "repo": "apex-shell",
+      "worktree": "/var/tmp/apex-work/wt-p1-038",
+      "branch": "task/p1-038-labwc-parity",
+      "agent_id": "a14bfb5557d9f0b18",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T00:12+08:00",
+      "title": "port 17 orphaned August commits, then finish the labwc validation matrix"
+    },
+    {
+      "slug": "p2-005",
+      "items": [
+        "P2-005",
+        "P2-006",
+        "P2-007"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p2-005",
+      "branch": "task/p2-005-device-maturity",
+      "agent_id": "a3d3e9ca8472418b9",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T00:12+08:00",
+      "title": "printing/scanning/shares, networking, Bluetooth/dock maturity"
     }
   ]
 }

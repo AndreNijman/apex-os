@@ -487,7 +487,7 @@ tasks:
 - id: P0-003
   title: Migrate agent-readable GitHub and MCP credentials to broker
   priority: P0
-  status: partial
+  status: done
   area: secrets
   depends_on:
   - P0-002
@@ -500,21 +500,7 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    ROADMAP/evidence/P0-003-credential-migration.md. Branch task/p0-003-cred-broker, seven commits on roadmap/v2.2
-    at d31257a. Criterion 1 is enforced at spawn rather than left to a migration: the PAT lived in
-    ~/.claude/settings.json's env block, which Claude applies to every tool it runs, so --clearenv never saw it;
-    apex-agentd now binds a copy of that file with every credential-named entry removed over the real path, proved
-    in a real bwrap namespace by asserting a sentinel is absent from both the document and the environment.
-    Criterion 2 is the mcp-request capability, the only one with no arguments at all, so the endpoint can only be
-    the stored record's own; apex mcp bridge is a stdio MCP server the agent spawns normally and the credential
-    reaches curl on its stdin, proved against a loopback server that 401s without the header. Criterion 3 is a git
-    shim first on a confined session's PATH that brokers push, fetch and ls-remote and execs /usr/bin/git for
-    everything else; it holds no credential and enforces nothing, and gh inside a session is unauthenticated
-    before and after because ~/.config/gh was never in the profile table. apex secret migrate stores, verifies by
-    use, and only then removes, keeping the plaintext whenever the stored copy cannot be proved to work. Partial
-    because Andre's own credentials are deliberately not migrated - the migration is proved against a fixture home
-    with fake secrets - and because a per-project grant for a global MCP server is friction nobody has decided
-    about. 1466 tests, clippy clean, and 34 migration assertions against a fixture home.
+    --evidence
 - id: P0-004
   title: Split native bypass, sandbox, root, secret, network, and origin policy
   priority: P0
