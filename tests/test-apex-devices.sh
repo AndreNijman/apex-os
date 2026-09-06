@@ -352,7 +352,7 @@ case_says "no MMC host reads as no SD slot" "$out" "none" \
           "this laptop genuinely has none, and that is a measurement"
 case_says "and a USB card reader is excluded from that claim" "$out" "usb-storage" \
           "'no SD slot' would otherwise tell someone their card reader cannot work"
-case_says "no udisks2 means nothing mounts what appears" "$out" "mounted by nothing" \
+case_says "no udisks2 means nothing mounts what appears" "$out" "nothing mounts it" \
           "the block device is created either way; the mount is what goes missing"
 
 reset_world
@@ -384,10 +384,10 @@ case_says "a masked udisks2 is reported as masked" "$out" "MASKED" \
 
 reset_world
 out=$(devices media)
-case_says "a session with no seat is told mounting will be refused" "$out" "refusal, not an absence" \
+case_says "a session with no seat is told mounting will be refused" "$out" "a refusal rather than an absence" \
           "over ssh the disk is present and unmountable, which reads as a dead port"
 out=$(devices media XDG_SEAT=seat0)
-case_silent "and a seated session is not warned about it" "$out" "refusal, not an absence" \
+case_silent "and a seated session is not warned about it" "$out" "a refusal rather than an absence" \
             "the warning is about this session, not about the machine"
 
 # ── enterprise Wi-Fi ────────────────────────────────────────────────────────
