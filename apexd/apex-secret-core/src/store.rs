@@ -152,6 +152,20 @@ impl Grants {
             .is_some_and(|keys| keys.contains(&key))
     }
 
+    /// Whether any of `names` is granted. Fails closed the same way.
+    ///
+    /// The names are one operation's canonical id and the older spellings it
+    /// answers to — see `OperationSpec::aliases`. A grant written before a
+    /// rename says `github:git-push` on disk, and the request now arrives as
+    /// `git.push`; without this the grant silently stops matching and the
+    /// owner is told a capability they granted is not granted.
+    ///
+    /// Only ever called with names the registry produced from ONE operation's
+    /// declaration, so it cannot be used to widen a grant across operations.
+    pub fn allows_any(&self, project: Option<&str>, service: &str, names: &[&str]) -> bool {
+        names.iter().any(|name| self.allows(project, service, name))
+    }
+
     pub fn allow(&mut self, project: &str, service: &str, capability: &str) {
         let keys = self.projects.entry(project.to_string()).or_default();
         let key = grant_key(service, capability);

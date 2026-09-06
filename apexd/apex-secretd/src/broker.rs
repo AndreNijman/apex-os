@@ -58,7 +58,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use apex_secret_core::capability::{self, Capability, CapabilityError};
+use apex_secret_core::capability::{Capability, CapabilityError};
 use apex_secret_core::store::ServiceInfo;
 use apex_secret_core::SecretValue;
 
@@ -379,18 +379,6 @@ pub fn scrub(text: &str, token: &str) -> String {
     text.replace(token, "«redacted»")
 }
 
-/// Scheme and host of a resolved URL, for the audit line and the reply.
-///
-/// The path is deliberately dropped: it is repository detail, and an audit line
-/// that carries it invites somebody to grep the trail for private repository
-/// names.
-pub fn endpoint(url: &str) -> String {
-    match capability::http_endpoint(url) {
-        Some((scheme, host)) => format!("{scheme}://{host}"),
-        None => "unknown".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,15 +441,6 @@ mod tests {
             assert!(!valid_project(evil), "'{}' was accepted", evil.escape_debug());
         }
         assert!(!valid_project(&"/".repeat(5000)));
-    }
-
-    #[test]
-    fn the_endpoint_is_the_scheme_and_host_and_nothing_else() {
-        // A private repository's name must not end up in a trail an
-        // administrator reads.
-        assert_eq!(endpoint("https://github.com/acme/secret-plans.git"), "https://github.com");
-        assert_eq!(endpoint("http://127.0.0.1:9418/demo.git"), "http://127.0.0.1");
-        assert_eq!(endpoint("git@github.com:a/b"), "unknown");
     }
 
     #[test]
