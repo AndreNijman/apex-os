@@ -137,10 +137,23 @@ impl Ctx {
             })
             .collect();
 
+        // Every DRM card, with what its controls read RIGHT NOW: the exit plan
+        // restores these exact values, so they have to be captured before the
+        // enter plan is applied and not re-read afterwards.
+        let gpus: Vec<(apexd_core::gpu::GpuDevice, apexd_core::gpu::SysfsGpuPrior)> =
+            apexd_core::gpu::discover(&self.sys_root)
+                .into_iter()
+                .map(|d| {
+                    let prior = apexd_core::gpu::read_prior(&d);
+                    (d, prior)
+                })
+                .collect();
+
         let plan = game::plan(&GameInputs {
             cfg: &cfg,
             topo: &topo,
             nvidia: &nvidia,
+            gpus: &gpus,
             irqs: &irqs,
             pids: &placements,
             mems,
