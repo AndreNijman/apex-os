@@ -46,10 +46,23 @@ function M.key(mods, key)
 end
 
 --- Turn off the APEX default bound to this combo. Returns true if there was one.
+---
+--- `:remove()` rather than `:set_enabled(false)`. Both stop the bind firing, and
+--- both are handle methods — the point of a handle is that it addresses THIS
+--- bind rather than "whatever is on this key", which is all `unbind` could do.
+--- The difference is what the rest of the system sees: a disabled bind is still
+--- listed by `hyprctl binds`, with no field saying it is inert, and APEX Shell
+--- reads that list to warn about conflicting shortcuts. A ghost there makes
+--- that list lie about what the keyboard actually does.
+---
+--- Nothing is lost by removing: `hyprctl reload` re-runs this whole file, so
+--- every default comes back and is re-disabled by whatever claimed it.
 function M.disable(mods, key)
-    local handle = M.binds[M.key(mods, key)]
+    local id = M.key(mods, key)
+    local handle = M.binds[id]
     if not handle then return false end
-    handle:set_enabled(false)
+    handle:remove()
+    M.binds[id] = nil
     return true
 end
 
