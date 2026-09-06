@@ -20,6 +20,7 @@
 //!         ├─ PTY + session lifecycle       session.rs
 //!         ├─ the six permission dimensions policy.rs
 //!         ├─ sandbox policy                sandbox.rs
+//!         ├─ network destination policy    destination.rs
 //!         ├─ adapters                      adapter.rs
 //!         ├─ projects + worktrees          project.rs
 //!         ├─ project window layouts        layout.rs
@@ -41,6 +42,7 @@ pub mod adapter;
 pub mod checkpoint;
 pub mod client;
 pub mod config;
+pub mod destination;
 pub mod git;
 pub mod layout;
 pub mod paths;
