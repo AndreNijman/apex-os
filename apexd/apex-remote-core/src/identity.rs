@@ -190,9 +190,11 @@ impl Identity {
 
     /// The raw secret key, for handing to the Noise builder.
     ///
-    /// Crate-internal on purpose: outside this crate there is no legitimate
-    /// reason to hold one.
-    pub(crate) fn secret_bytes(&self) -> [u8; 32] {
+    /// Named for what it is for rather than for what it returns, because the
+    /// name is the only thing standing between a caller and a copy of the
+    /// key: `secret_bytes()` invites a call site that wants to look at it,
+    /// and `secret_bytes_for_handshake()` does not.
+    pub fn secret_bytes_for_handshake(&self) -> [u8; 32] {
         self.secret
     }
 
@@ -249,7 +251,7 @@ mod tests {
         // And not all zeroes, which is what an uninitialised buffer looks
         // like and what a broken RNG most often returns.
         assert_ne!(a.public_bytes(), [0u8; 32]);
-        assert_ne!(a.secret_bytes(), [0u8; 32]);
+        assert_ne!(a.secret_bytes_for_handshake(), [0u8; 32]);
     }
 
     #[test]
@@ -264,7 +266,7 @@ mod tests {
         assert!(!text.contains(&id.public_key()), "the file holds the public key too");
         assert!(text.trim() == id.secret_key_base64());
         assert_eq!(
-            crate::noise::public_from_secret(&id.secret_bytes()).expect("derive"),
+            crate::noise::public_from_secret(&id.secret_bytes_for_handshake()).expect("derive"),
             id.public_bytes()
         );
     }
