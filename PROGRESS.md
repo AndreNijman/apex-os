@@ -301,6 +301,34 @@ fixed on `roadmap/v2.2`:
   whose name appears at a different EVR for the host arch is now dropped as an
   application fork rather than a multilib library.
 
+### The 01:11 limit — what the resume system was built for, measured
+
+All six agents died together at 01:11 on the same session limit, resetting at
+04:10. Both resume crons fired. The recovery, in full:
+
+1. One `resume.sh -f`. It named every agent, said each was dead by how long, and
+   printed each one's `NEXT` line.
+2. One card read (`integrate-2.md`, ~2 KB) to find out what the integration
+   agent had left undone: apex-shell finished and pushed at `0fd12ee`, apex-os
+   P0-005 finished and pushed at `5ae4350`, six P1-030 commits cherry-picked
+   locally and unpushed.
+3. Five fresh agents dispatched, each pointed at its own card rather than handed
+   a transcript.
+
+Compare with 2026-09-06, when four agents were revived by replaying four
+transcripts of 2.1–2.4 MB and it cost about 10% of a usage window. Nothing was
+lost either time; what changed is the price of picking the work back up.
+
+Two details worth keeping:
+
+- **`p1-048` had 14 uncommitted files** when it died. They were in
+  `refs/wip/wt-p1-048-` and still in the worktree. The replacement agent was
+  told to look at them before anything else, because a card describes intent and
+  the tree holds the work.
+- **The cards were 191–208 minutes old** — written before the limit, not after —
+  which is exactly the property the "write it as you go, never at the end" rule
+  exists to produce. A card written at the end would not have existed.
+
 ### The landed-check was wrong, and it cost an agent run
 
 `ROADMAP/state/unlanded.py` sampled the lines a commit added and asked whether

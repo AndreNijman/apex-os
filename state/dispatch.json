@@ -1,20 +1,7 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T00:52+08:00",
+  "updated": "2026-09-07T04:32+08:00",
   "agents": [
-    {
-      "slug": "integrate-2",
-      "items": [
-        "(integration only)"
-      ],
-      "repo": "both",
-      "worktree": "/var/tmp/apex-work/int-os",
-      "branch": "roadmap/v2.2",
-      "agent_id": "a29172e5ee8a1c40a",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T00:10+08:00",
-      "title": "land task/p0-005-permission-modes, task/p0-005-agent-center-modes, task/p1-030-shell-integrations"
-    },
     {
       "slug": "p1-044",
       "items": [
@@ -23,9 +10,9 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p1-044",
       "branch": "task/p1-044-firewall-live",
-      "agent_id": "a719f6fec80944714",
+      "agent_id": "a7062a098c9969f55",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T00:10+08:00",
+      "dispatched": "2026-09-07T04:25+08:00 (fresh agent, resumed from card after the 01:11 limit)",
       "title": "prove the default-drop firewall on real hardware and in a netns"
     },
     {
@@ -38,9 +25,9 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p2-005",
       "branch": "task/p2-005-device-maturity",
-      "agent_id": "a3d3e9ca8472418b9",
+      "agent_id": "aeab351cdb106d1fb",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T00:12+08:00",
+      "dispatched": "2026-09-07T04:25+08:00 (fresh agent, resumed from card after the 01:11 limit)",
       "title": "printing/scanning/shares, networking, Bluetooth/dock maturity"
     },
     {
@@ -52,9 +39,9 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p1-018",
       "branch": "task/p1-018-mcp-auth",
-      "agent_id": "a08a2896d0abc3e49",
+      "agent_id": "a30398b0e1f728050",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T00:45+08:00",
+      "dispatched": "2026-09-07T04:25+08:00 (fresh agent, resumed from card after the 01:11 limit)",
       "title": "MCP auth helper and per-MCP sidecar sandboxing"
     },
     {
@@ -67,9 +54,9 @@
       "repo": "apex-shell",
       "worktree": "/var/tmp/apex-work/wt-p1-020",
       "branch": "task/p1-020-agent-graph",
-      "agent_id": "abf06a9f97738441c",
+      "agent_id": "aa62ecf6b30bd06cf",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T00:45+08:00",
+      "dispatched": "2026-09-07T04:25+08:00 (fresh agent, resumed from card after the 01:11 limit)",
       "title": "agent/subagent graph, statusline telemetry, notification bridge and dedup"
     },
     {
@@ -82,9 +69,9 @@
       "repo": "apex-shell",
       "worktree": "/var/tmp/apex-work/wt-p1-048",
       "branch": "task/p1-048-guided-settings",
-      "agent_id": "a7d8be8771b5ff609",
+      "agent_id": "a9d3dd1972f20e56d",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T01:05+08:00",
+      "dispatched": "2026-09-07T04:25+08:00 (fresh agent, resumed from card after the 01:11 limit)",
       "title": "stop four test runners opening windows on Andre's desktop, then redesign Blueprint and Gaming settings"
     }
   ]
