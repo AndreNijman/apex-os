@@ -25,13 +25,15 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use apex_secret_core::audit::{self, AuditEvent, AuditLine};
-use apex_secret_core::capability::{Capability, CapabilityError, CapabilityRecord};
+use apex_secret_core::capability::{self, Capability, CapabilityError, CapabilityRecord};
+use apex_secret_core::operation::{OperationSpec, Params};
 use apex_secret_core::protocol::{ErrorKind, Response};
 use apex_secret_core::store::{self, ServiceInfo, Store, StoreError};
 use apex_secret_core::SecretValue;
 
 use crate::broker;
 use crate::peer::Peer;
+use crate::provider::{self, Registry};
 
 /// How far in the future a record's expiry may sit.
 ///
@@ -48,14 +50,19 @@ pub struct Service {
     /// daemon started by hand for a test does not imply a protection it does
     /// not have.
     protected: bool,
+    /// The providers this daemon serves. Fixed at startup: a request cannot
+    /// cause a provider to appear, and the vocabulary it advertises is the one
+    /// it can actually perform.
+    registry: Registry,
     audit_counter: AtomicU64,
 }
 
 impl Service {
-    pub fn new(store: Store, protected: bool) -> Service {
+    pub fn new(store: Store, protected: bool, registry: Registry) -> Service {
         Service {
             store,
             protected,
+            registry,
             audit_counter: AtomicU64::new(0),
         }
     }
@@ -75,7 +82,7 @@ impl Service {
     pub fn hello(&self) -> Response {
         Response::Hello {
             version: apex_secret_core::protocol::PROTOCOL_VERSION,
-            capabilities: Capability::names().iter().map(|s| s.to_string()).collect(),
+            capabilities: self.registry.operation_ids(),
             protected: self.protected,
         }
     }
@@ -191,9 +198,13 @@ impl Service {
                 "a grant is keyed on an absolute project path".to_string(),
             );
         }
-        if !Capability::names().contains(&capability) {
-            return refuse_capability(CapabilityError::UnknownCapability(capability.to_string()));
-        }
+        // Through the registry, so a grant is written under the operation's
+        // canonical id whichever spelling was typed — and an operation no
+        // provider offers cannot be granted at all.
+        let capability = match self.registry.lookup(capability) {
+            Ok((_, op)) => op.id,
+            Err(e) => return Response::error(ErrorKind::BadRequest, e.to_string()),
+        };
         if !store::valid_service_name(service) {
             return refuse_store(StoreError::BadServiceName(service.to_string()));
         }
@@ -235,21 +246,64 @@ impl Service {
         }
     }
 
-    // ── the broker ──────────────────────────────────────────────────────────
+    // ── the framework ───────────────────────────────────────────────────────
+
+    /// Why a request was allowed, in §11's `approval_policy` vocabulary.
+    ///
+    /// Its own step, and its own type, because it is the seam the permission
+    /// work attaches to: break-glass and session-scoped grants (P0-005) are
+    /// more answers here, not more branches in the middle of the pipeline.
+    ///
+    /// The value is **decided by the daemon**. A record arrives carrying an
+    /// `approval_policy` because §11 puts one in the record, and it is
+    /// overwritten — the same treatment `resource` gets, and for the same
+    /// reason: a caller that could name how it was approved could write
+    /// `owner` into a trail nobody read.
+    fn decide(
+        &self,
+        peer: Peer,
+        project: &str,
+        provider: &str,
+        op: &'static OperationSpec,
+    ) -> Decision {
+        let names = provider::grant_names(op);
+        if self
+            .store
+            .grants(peer.uid)
+            .allows_any(Some(project), provider, &names)
+        {
+            return Decision::Allowed("grant");
+        }
+        Decision::Refused(format!(
+            "'{}' on '{provider}' is not granted for this project; allow it with \
+             `apex secret grant {provider} {}`",
+            op.id, op.id
+        ))
+    }
 
     /// Perform a capability.
     ///
     /// The order is the security argument, and every step before the last can
-    /// refuse:
+    /// refuse. Steps 1–7 and 9–12 belong to the framework and apply to every
+    /// provider that will ever be registered; only 8 and 10 are the provider's,
+    /// and neither of them decides whether the request was allowed.
     ///
-    /// 1. the caller's account, from the kernel — never from the request;
-    /// 2. the record is well formed and has not expired;
-    /// 3. a credential exists under that name, for that account;
-    /// 4. the capability is granted for that project;
-    /// 5. the remote NAME resolves, in the repository, as the owner;
-    /// 6. the resolved URL's host and scheme are the ones the credential was
-    ///    stored for;
-    /// 7. only then is the value read, and only into a child's environment.
+    ///  1. the caller's account, from the kernel — never from the request;
+    ///  2. the operation exists, in a registered provider's vocabulary;
+    ///  3. its arguments are the ones that provider declared;
+    ///  4. the record is well formed and has not expired;
+    ///  5. a credential exists under that name, for that account;
+    ///  6. the capability is granted for that project — [`Service::decide`];
+    ///  7. only then may the provider touch the caller's machine;
+    ///  8. the provider resolves what the caller named, and says where the
+    ///     credential would go;
+    ///  9. that endpoint is pinned against the one the credential was stored
+    ///     for — the provider does not get to skip this, because it has not
+    ///     been given the value yet;
+    /// 10. the value is read, once, and the provider presents it;
+    /// 11. the value — and any short-lived one minted from it — is scrubbed
+    ///     out of everything returned;
+    /// 12. the trail records the record the decision was made on.
     pub fn use_capability(&self, peer: Peer, mut record: CapabilityRecord) -> Response {
         let audit_id = self.next_audit_id();
         record.audit_id = audit_id.clone();
@@ -257,16 +311,17 @@ impl Service {
         // operation's, so the two cannot disagree in the audit trail.
         record.resource = record.operation.remote().to_string();
 
-        let refuse = |reason: String, kind: ErrorKind| -> Response {
+        let refuse = |record: &CapabilityRecord, reason: String, kind: ErrorKind| -> Response {
             self.record(AuditLine {
                 reason: Some(reason.clone()),
-                ..AuditLine::from_record(&audit_id, AuditEvent::Refused, peer.uid, peer.pid, &record)
+                ..AuditLine::from_record(&audit_id, AuditEvent::Refused, peer.uid, peer.pid, record)
             });
             Response::error(kind, reason)
         };
 
         if !store::valid_service_name(&record.provider) {
             return refuse(
+                &record,
                 StoreError::BadServiceName(record.provider.clone()).to_string(),
                 ErrorKind::BadRequest,
             );
@@ -283,42 +338,37 @@ impl Service {
         ] {
             if !capability::valid_origin_label(value) {
                 return refuse(
-                    format!(
-                        "'{}' is not a {field} label",
-                        value.escape_debug()
-                    ),
-                    ErrorKind::BadRequest,
-                );
-            }
-        }
-        if !capability::valid_remote_name(record.operation.remote()) {
-            return refuse(
-                CapabilityError::BadRemoteName(record.operation.remote().to_string()).to_string(),
-                ErrorKind::BadRequest,
-            );
-        }
-        if let Capability::GitPush {
-            branch: Some(branch),
-            ..
-        } = &record.operation
-        {
-            if !capability::valid_branch_name(branch) {
-                return refuse(
-                    CapabilityError::BadBranchName(branch.clone()).to_string(),
+                    &record,
+                    format!("'{}' is not a {field} label", value.escape_debug()),
                     ErrorKind::BadRequest,
                 );
             }
         }
 
+        // The vocabulary, closed by what is registered. An operation no
+        // provider declares never reaches a credential — the same property
+        // P0-002's closed enum had, held by the registry instead so that adding
+        // a provider does not mean editing a type in `apex-secret-core`.
+        let (name, resource, params) = generic(&record.operation);
+        let (backend, op) = match self.registry.lookup(name) {
+            Ok(found) => found,
+            Err(e) => return refuse(&record, e.to_string(), ErrorKind::BadRequest),
+        };
+        if let Err(e) = op.check(&resource, &params) {
+            return refuse(&record, e.to_string(), ErrorKind::BadRequest);
+        }
+
         let now = store::now_ms();
         if record.is_expired(now) {
             return refuse(
+                &record,
                 "that capability request has expired; ask for it again".to_string(),
                 ErrorKind::PermissionDenied,
             );
         }
         if record.expiry.is_some_and(|at| at > now + MAX_EXPIRY_AHEAD_MS) {
             return refuse(
+                &record,
                 "that capability request is valid for longer than this service \
                  will honour"
                     .to_string(),
@@ -328,14 +378,15 @@ impl Service {
 
         let Some(project) = record.project.clone().filter(|p| broker::valid_project(p)) else {
             return refuse(
-                "this request names no project, so no grant can match it"
-                    .to_string(),
+                &record,
+                "this request names no project, so no grant can match it".to_string(),
                 ErrorKind::PermissionDenied,
             );
         };
 
         let Some(owner) = broker::owner(peer.uid) else {
             return refuse(
+                &record,
                 format!("uid {} is not an account on this machine", peer.uid),
                 ErrorKind::PermissionDenied,
             );
@@ -343,50 +394,84 @@ impl Service {
 
         let Some(info) = self.store.info(peer.uid, &record.provider) else {
             return refuse(
+                &record,
                 StoreError::NoSuchService(record.provider.clone()).to_string(),
                 ErrorKind::NoSuchService,
             );
         };
 
-        let capability_name = record.operation.name();
-        if !self
-            .store
-            .grants(peer.uid)
-            .allows(Some(&project), &record.provider, capability_name)
+        // Decided here, and stamped on the record before anything is performed,
+        // so the trail says how this was authorised even if the operation then
+        // fails.
+        match self.decide(peer, &project, &record.provider, op) {
+            Decision::Allowed(policy) => record.approval_policy = policy.to_string(),
+            Decision::Refused(reason) => {
+                return refuse(&record, reason, ErrorKind::PermissionDenied)
+            }
+        }
+
+        // Everything the framework can check has passed, so the provider may
+        // now touch the caller's machine. For git that is a `git remote
+        // get-url` in a caller-controlled repository, as the owner; doing it
+        // before the grant check would run it for a request that was never
+        // allowed.
+        let req = provider::Bind {
+            operation: op,
+            resource: &resource,
+            params: &params,
+            project: &project,
+            service: &info,
+            owner: &owner,
+        };
+        let bound = match backend.bind(&req) {
+            Ok(bound) => bound,
+            Err(e) => return refuse(&record, e.to_string(), kind_of(&e)),
+        };
+
+        // The pin, in the framework and not in the provider. A credential
+        // stored for one host may only ever be sent to that host, whatever the
+        // provider resolved and whoever wrote the provider.
+        if bound.endpoint.scheme != info.scheme
+            || bound.endpoint.host != info.host.to_ascii_lowercase()
         {
             return refuse(
-                format!(
-                    "'{capability_name}' on '{}' is not granted for this project; \
-                     allow it with `apex secret grant {} {capability_name}`",
-                    record.provider, record.provider
-                ),
+                &record,
+                CapabilityError::HostMismatch {
+                    remote_host: bound.endpoint.to_string(),
+                    service_host: format!("{}://{}", info.scheme, info.host),
+                }
+                .to_string(),
                 ErrorKind::PermissionDenied,
             );
         }
-
-        let url = match broker::resolve_url(&project, &record.operation, &owner) {
-            Ok(url) => url,
-            Err(e) => return refuse(e.to_string(), ErrorKind::BadRequest),
-        };
-        if let Err(e) = capability::check_url(&url, &info.host, &info.scheme) {
-            return refuse(e.to_string(), ErrorKind::PermissionDenied);
-        }
-        let endpoint = broker::endpoint(&url);
+        let endpoint = bound.endpoint.to_string();
 
         // Every check has passed. Only now is the value read.
-        let value = match self.store.value(peer.uid, &record.provider) {
+        let stored = match self.store.value(peer.uid, &record.provider) {
             Ok(v) => v,
-            Err(e) => return refuse(e.to_string(), ErrorKind::NoSuchService),
+            Err(e) => return refuse(&record, e.to_string(), ErrorKind::NoSuchService),
         };
 
-        let out = match broker::perform(&project, &record.operation, &info, &value, &owner) {
-            Ok(out) => out,
-            Err(e) => return refuse(e, ErrorKind::Internal),
+        // §13.4: prefer a short-lived credential where the provider has one.
+        // The minted value is used INSTEAD of the stored one and scrubbed
+        // alongside it — a temporary token is still a credential, and §13.4 is
+        // explicit that it is not handed to the agent either.
+        let minted = match backend.mint(&req, &bound, &stored) {
+            Ok(minted) => minted,
+            Err(e) => return refuse(&record, e.to_string(), kind_of(&e)),
         };
+        let presented = minted.as_ref().unwrap_or(&stored);
+
+        let out = match backend.perform(&req, &bound, presented) {
+            Ok(out) => out,
+            Err(e) => return refuse(&record, e.to_string(), kind_of(&e)),
+        };
+        let output = scrub_all(&out.output, &[Some(&stored), minted.as_ref()]);
 
         self.record(AuditLine {
             endpoint: Some(endpoint.clone()),
             exit_code: Some(out.code),
+            detail: bound.detail.clone(),
             ..AuditLine::from_record(&audit_id, AuditEvent::Used, peer.uid, peer.pid, &record)
         });
 
@@ -394,12 +479,71 @@ impl Service {
             record: Box::new(record),
             endpoint,
             exit_code: out.code,
-            output: out.text,
+            output,
         }
     }
 }
 
-use apex_secret_core::capability;
+/// How a request was authorised, or why it was not.
+///
+/// The `&'static str` is §11's `approval_policy`. `grant` — a standing
+/// per-project grant — is the only one this build reaches; P0-005's
+/// session-scoped and break-glass answers are more variants of this, decided in
+/// [`Service::decide`] and nowhere else.
+enum Decision {
+    Allowed(&'static str),
+    Refused(String),
+}
+
+/// A P0-002 capability, as the generic pipeline sees it.
+///
+/// The bridge between the wire this build still speaks — a closed
+/// `Capability` enum with git's arguments as fields — and the framework, which
+/// takes an operation name, a resource and a declared parameter map. It goes
+/// when the wire does.
+fn generic(cap: &Capability) -> (&'static str, String, Params) {
+    let mut params = Params::new();
+    if let Capability::GitPush {
+        branch: Some(branch),
+        ..
+    } = cap
+    {
+        params.insert("branch".to_string(), branch.clone());
+    }
+    (cap.name(), cap.remote().to_string(), params)
+}
+
+/// Which protocol error a provider's refusal is.
+///
+/// A provider that could only say "error" would make every failure look like a
+/// bug in APEX. `NoSuchResource` is a caller's typo, `Refused` is a policy the
+/// caller can read, `Failed` is ours.
+fn kind_of(e: &provider::ProviderError) -> ErrorKind {
+    match e {
+        provider::ProviderError::NoSuchResource(_) => ErrorKind::BadRequest,
+        provider::ProviderError::Refused(_) => ErrorKind::PermissionDenied,
+        provider::ProviderError::Failed(_) => ErrorKind::Internal,
+    }
+}
+
+/// Remove every credential in play from anything on its way back to the caller.
+///
+/// In the framework rather than in each provider, so a provider added later
+/// cannot forget. It is defence in depth either way: the reply type cannot
+/// carry a `SecretValue`, and a provider is not supposed to print one — this is
+/// for the case where a provider's own tooling embeds the credential in an
+/// error message, which git does when a URL of the form
+/// `https://user:token@host/…` fails.
+fn scrub_all(text: &str, values: &[Option<&SecretValue>]) -> String {
+    let mut out = text.to_string();
+    for value in values.iter().flatten() {
+        if let Some(token) = value.as_str() {
+            out = broker::scrub(&out, token);
+        }
+    }
+    out
+}
+
 
 fn valid_host_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_')
@@ -412,10 +556,6 @@ fn refuse_store(e: StoreError) -> Response {
         _ => ErrorKind::BadRequest,
     };
     Response::error(kind, e.to_string())
-}
-
-fn refuse_capability(e: CapabilityError) -> Response {
-    Response::error(ErrorKind::BadRequest, e.to_string())
 }
 
 #[cfg(test)]
@@ -432,7 +572,14 @@ mod tests {
             store::now_ms()
         ));
         std::fs::remove_dir_all(&dir).ok();
-        (Service::new(Store::new(dir.clone()), false), dir)
+        (
+            Service::new(
+                Store::new(dir.clone()),
+                false,
+                crate::providers::default_registry().expect("the shipped registry"),
+            ),
+            dir,
+        )
     }
 
     /// The audit trail of a temp service, by path rather than through the
@@ -470,7 +617,11 @@ mod tests {
                 protected,
             } => {
                 assert_eq!(version, apex_secret_core::protocol::PROTOCOL_VERSION);
-                assert!(capabilities.contains(&"git-fetch".to_string()));
+                // The registry's canonical ids, never an alias: the list is
+                // what `apex secret capabilities` prints, and advertising a
+                // spelling on its way out teaches people to use it.
+                assert!(capabilities.contains(&"git.fetch".to_string()), "{capabilities:?}");
+                assert!(!capabilities.contains(&"git-fetch".to_string()), "{capabilities:?}");
                 // A daemon running as an ordinary user must say so rather than
                 // implying a boundary it does not have.
                 assert!(!protected);
@@ -586,12 +737,27 @@ mod tests {
         let (svc, dir) = temp_service("closed");
         let peer = me();
         svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
-        for evil in ["exec", "sh", "git-clone", "curl"] {
+        for evil in ["exec", "sh", "git-clone", "curl", "git.clone", "cloudflare.dns.delete"] {
             let resp = svc.grant(peer, "/tmp/p", "demo", evil, false);
             assert!(
                 resp.as_error()
-                    .is_some_and(|(_, m)| m.contains("not a capability")),
+                    .is_some_and(|(_, m)| m.contains("not an operation")),
                 "'{evil}' was grantable: {resp:?}"
+            );
+        }
+        // And an operation a registered provider DOES offer is grantable under
+        // either spelling, and stored under the canonical one.
+        for spelling in ["git-fetch", "git.fetch"] {
+            let resp = svc.grant(peer, "/tmp/p", "demo", spelling, false);
+            assert_eq!(
+                resp,
+                Response::Grants {
+                    projects: std::collections::BTreeMap::from([(
+                        "/tmp/p".to_string(),
+                        vec!["demo:git.fetch".to_string()]
+                    )])
+                },
+                "{spelling} was not canonicalised"
             );
         }
         std::fs::remove_dir_all(&dir).ok();
