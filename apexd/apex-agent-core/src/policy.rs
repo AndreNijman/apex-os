@@ -65,17 +65,35 @@
 //!
 //! ## Fail closed on what is not built yet
 //!
-//! Four values in this vocabulary describe policy the runtime cannot enforce
-//! today: both system-access modes, raw secret export and remote elevation.
-//! [`AgentPolicy::validate`] refuses each one and names the task that will
-//! implement it. All four network modes are enforced.
+//! One value in this vocabulary still describes policy the runtime cannot
+//! enforce: raw secret export, and remote elevation, which §7 permits only
+//! behind a security key nothing here can ask for.
+//! [`AgentPolicy::validate`] refuses both and names why. All four network
+//! modes are enforced, and so are both system-access modes.
 //!
 //! Refusing is the only honest option. A `--network allowlist` that parsed and
 //! then ran with an open network would be worse than no flag at all: it would
 //! read as a protection in `apex agent status`, in the Agent Center and in a
-//! script, and there would be nothing behind it. Defining the vocabulary now
-//! and rejecting the parts without an enforcement point is what lets P0-006,
-//! P0-007 and P0-008 land as an implementation rather than a redesign.
+//! script, and there would be nothing behind it. Defining the vocabulary and
+//! rejecting the parts without an enforcement point is what let P0-006,
+//! P0-007 and P0-008 land as implementations rather than redesigns.
+//!
+//! ## What this type does *not* decide about dimension 3
+//!
+//! [`AgentPolicy::validate`] takes no arguments and reads no files, so it
+//! cannot know whether a grant exists. It answers only the questions that are
+//! properties of the six values themselves — including one that is new here:
+//! break-glass with a confined sandbox is refused, because `bwrap` sets
+//! `PR_SET_NO_NEW_PRIVS` unconditionally and the pair would describe a
+//! boundary it had not moved.
+//!
+//! Whether a session may actually *have* [`SystemAccess::Session`] or
+//! [`SystemAccess::Unsafe`] is the daemon's question, because the answer
+//! depends on who is asking and on a live authentication. It is asked in
+//! `apex-agentd`'s `session::start`, in this order: resolve the peer from the
+//! kernel, refuse it if it belongs to a managed session, refuse it if its
+//! origin is not local, and only then authenticate. See [`crate::grant`] and
+//! [`crate::auth`].
 
 use serde::{Deserialize, Serialize};
 
@@ -142,19 +160,26 @@ impl std::fmt::Display for NativeMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemAccess {
-    /// The default, and the only value with an implementation today. No root:
-    /// a session that needs a system change files a structured request through
-    /// `apex request` and a human approves it.
+    /// The default, and the only value that needs no grant behind it. No
+    /// root: a session that needs a system change files a structured request
+    /// through `apex request` and a human approves it.
     #[default]
     None,
     /// §4.4's `--system-access`. A grant that is session-bound, capability-
     /// scoped, time-limited, authorised outside the agent's terminal, and not
-    /// renewable by the agent. P0-007 issues it; until then this is refused.
+    /// renewable by the agent. [`crate::grant::GrantKind::SystemAccess`] is
+    /// the grant; the daemon refuses to start a session in this mode without
+    /// one, and issuing one takes a local password.
+    ///
+    /// The session still runs under `no_new_privs`. What it gains is that the
+    /// privilege verbs the grant names stop needing a separate human decision
+    /// each time, for as long as the grant lasts.
     Session,
     /// §4.5's `--unsafe-everything`. Break-glass, deliberately not the same
-    /// thing as [`SystemAccess::Session`]: local authentication, a short TTL,
-    /// a red indicator, an audit record and automatic expiry. P0-006 builds
-    /// that; until then this is refused.
+    /// thing as [`SystemAccess::Session`]: local authentication, an explicit
+    /// short TTL, a red indicator, an audit record and automatic expiry. This
+    /// one does clear `no_new_privs`, so the session can genuinely become
+    /// root — see [`AgentPolicy::no_new_privs`].
     Unsafe,
 }
 
@@ -550,13 +575,27 @@ impl AgentPolicy {
     /// it", and the tighter reading is taken: a capability-scoped session grant
     /// is brokered, so it has no need of a setuid binary inside the session,
     /// and handing one back would reinstate exactly the general-purpose root
-    /// shell `request.rs` refuses to offer. P0-007 may loosen this, with a
-    /// reason written down.
+    /// shell `request.rs` refuses to offer. P0-007 kept it that way, and that
+    /// is what makes §4.4's grant a different thing from §4.5's rather than a
+    /// shorter spelling of it.
     ///
     /// A confined session gets this from `bwrap` already. It is the unconfined
     /// ones that need it set explicitly, and they are the ones §4.3 is about.
+    /// The same fact is why [`AgentPolicy::validate`] refuses a *confined*
+    /// break-glass session: `bwrap` sets the flag unconditionally, so a policy
+    /// asking for both would report a boundary it had not moved.
     pub fn no_new_privs(&self) -> bool {
         !matches!(self.system, SystemAccess::Unsafe)
+    }
+
+    /// The grant this policy cannot start without, if any.
+    ///
+    /// The one place dimension 3 is turned into a grant kind, so the CLI, the
+    /// daemon and the reaper cannot disagree about which value needs what.
+    /// `None` for the default, which is the whole of "root is delegated, not
+    /// inherited": there is no path that arrives at a grant by omission.
+    pub fn needs_grant(&self) -> Option<crate::grant::GrantKind> {
+        crate::grant::GrantKind::for_system_access(self.system)
     }
 
     /// The policy with every derivation applied, ready to be stored.
@@ -594,8 +633,16 @@ impl AgentPolicy {
         if network.needs_broker() && !self.secrets.may_use_broker() {
             return Err(PolicyError::BrokeredNetworkNeedsBroker);
         }
-        if self.system != SystemAccess::None {
-            return Err(PolicyError::SystemAccessUnavailable(self.system));
+        // `bwrap` sets `PR_SET_NO_NEW_PRIVS` for every session it wraps, and
+        // no process can clear it afterwards. So a confined break-glass
+        // session would run with the flag on whatever this policy said, and
+        // `no_new_privs()` — which the sandbox, the hook bridge and the
+        // Agent Center all read — would be describing a boundary that had not
+        // moved. Refused rather than silently corrected in either direction:
+        // dropping the confinement would be a bigger grant than was asked
+        // for, and keeping it would be a mode that lies.
+        if self.system == SystemAccess::Unsafe && self.sandbox.is_confined() {
+            return Err(PolicyError::BreakGlassCannotBeConfined(self.sandbox));
         }
         if self.secrets == SecretPolicy::Export {
             return Err(PolicyError::SecretExportUnavailable);
@@ -662,8 +709,8 @@ pub enum PolicyError {
     BrokeredNetworkNeedsBroker,
     /// An allowlisted session with nothing on its allowlist.
     AllowlistEmpty,
-    /// A system-access mode whose grant machinery does not exist.
-    SystemAccessUnavailable(SystemAccess),
+    /// Break-glass inside a sandbox that would keep `no_new_privs` on anyway.
+    BreakGlassCannotBeConfined(SandboxPolicy),
     /// Raw secret values in the session environment.
     SecretExportUnavailable,
     /// Elevation authorised from a remote origin.
@@ -705,13 +752,13 @@ impl std::fmt::Display for PolicyError {
                  cannot be combined with `--secrets none`, which is what shuts the broker; \
                  use `--network offline` if a session with no way out is what you meant"
             ),
-            PolicyError::SystemAccessUnavailable(mode) => write!(
+            PolicyError::BreakGlassCannotBeConfined(sandbox) => write!(
                 f,
-                "`--system-access {mode}` has no grant behind it in this build: the \
-                 authentication, the time limit and the audit record it depends on are not \
-                 written yet, and a session that reported system access without them would be \
-                 claiming a boundary it does not have. Ask for the operation with \
-                 `apex request` instead"
+                "`--unsafe-everything` takes no_new_privs off, and `--sandbox {sandbox}` puts \
+                 it back: bwrap sets it for every session it wraps and nothing can clear it \
+                 afterwards, so this pair would report a boundary it had not moved. Break-glass \
+                 is `--sandbox unrestricted`; if the confinement is what you want, ask for the \
+                 operation with `apex request` instead"
             ),
             PolicyError::SecretExportUnavailable => write!(
                 f,
@@ -1117,14 +1164,6 @@ mod tests {
     fn unbuilt_dimension_values_are_refused_and_name_their_remedy() {
         let cases: Vec<(AgentPolicy, PolicyError)> = vec![
             (
-                AgentPolicy { system: SystemAccess::Session, ..Default::default() },
-                PolicyError::SystemAccessUnavailable(SystemAccess::Session),
-            ),
-            (
-                AgentPolicy { system: SystemAccess::Unsafe, ..Default::default() },
-                PolicyError::SystemAccessUnavailable(SystemAccess::Unsafe),
-            ),
-            (
                 AgentPolicy { secrets: SecretPolicy::Export, ..Default::default() },
                 PolicyError::SecretExportUnavailable,
             ),
@@ -1137,6 +1176,68 @@ mod tests {
             assert_eq!(policy.validate(), Err(want), "{policy:?}");
             let msg = want.to_string();
             assert!(msg.len() > 40, "unhelpful refusal: {msg}");
+        }
+    }
+
+    #[test]
+    fn break_glass_inside_a_sandbox_is_refused_rather_than_reported() {
+        // `bwrap` sets PR_SET_NO_NEW_PRIVS for everything it wraps and no
+        // process can clear it, so `--unsafe-everything --sandbox project`
+        // would run with the flag ON while `no_new_privs()` said otherwise —
+        // a policy describing a boundary it had not moved. Refused in both
+        // confined spellings.
+        for sandbox in [SandboxPolicy::Project, SandboxPolicy::Strict] {
+            let p = AgentPolicy {
+                system: SystemAccess::Unsafe,
+                sandbox,
+                ..AgentPolicy::default()
+            };
+            assert_eq!(
+                p.validate(),
+                Err(PolicyError::BreakGlassCannotBeConfined(sandbox)),
+                "{sandbox}"
+            );
+            assert!(p.validate().unwrap_err().to_string().contains("no_new_privs"));
+        }
+        // The unconfined form — which is what the preset is — passes.
+        assert_eq!(PolicyPreset::UnsafeEverything.policy().validate(), Ok(()));
+        // And the session grant is unaffected: it keeps no_new_privs, so it
+        // is at home in any sandbox.
+        for sandbox in SandboxPolicy::ALL {
+            let p = AgentPolicy {
+                system: SystemAccess::Session,
+                sandbox: *sandbox,
+                ..AgentPolicy::default()
+            };
+            assert_eq!(p.validate(), Ok(()), "{sandbox}");
+        }
+    }
+
+    #[test]
+    fn a_dimension_three_value_names_the_grant_it_cannot_start_without() {
+        // The default is the only value that arrives without one, which is
+        // §3.3's "root is delegated, not inherited" as a property of the type.
+        assert_eq!(AgentPolicy::default().needs_grant(), None);
+        assert_eq!(
+            AgentPolicy { system: SystemAccess::Session, ..Default::default() }.needs_grant(),
+            Some(crate::grant::GrantKind::SystemAccess)
+        );
+        assert_eq!(
+            PolicyPreset::UnsafeEverything.policy().needs_grant(),
+            Some(crate::grant::GrantKind::BreakGlass)
+        );
+        // No other dimension can reach it: a bypassing, unconfined, offline,
+        // broker-less session still needs no grant.
+        for sandbox in SandboxPolicy::ALL {
+            for native in NativeMode::ALL {
+                let p = AgentPolicy {
+                    sandbox: *sandbox,
+                    native: *native,
+                    secrets: SecretPolicy::None,
+                    ..AgentPolicy::default()
+                };
+                assert_eq!(p.needs_grant(), None, "{sandbox} {native}");
+            }
         }
     }
 
@@ -1191,6 +1292,8 @@ mod tests {
         assert_eq!(sys.sandbox, SandboxPolicy::Unrestricted);
         assert_eq!(sys.system, SystemAccess::Session);
         assert_eq!(sys.secrets, SecretPolicy::Brokered);
+        // §4.4 does not lift no_new_privs; §4.5 is the only mode that does.
+        assert!(sys.no_new_privs());
 
         // §4.5, and §3.4's last requirement.
         let breakglass = PolicyPreset::UnsafeEverything.policy();
@@ -1206,9 +1309,14 @@ mod tests {
             "§7: unsafe-everything requires local approval"
         );
 
-        // The two elevated presets are refused until P0-006 and P0-007 land.
-        assert!(sys.validate().is_err());
-        assert!(breakglass.validate().is_err());
+        // Both elevated presets are expressible now. What they are not is
+        // free: each names a grant, and the daemon will not start a session
+        // in either mode without one that a human authenticated.
+        assert_eq!(sys.validate(), Ok(()));
+        assert_eq!(breakglass.validate(), Ok(()));
+        assert!(sys.needs_grant().is_some());
+        assert!(breakglass.needs_grant().is_some());
+        assert_ne!(sys.needs_grant(), breakglass.needs_grant());
     }
 
     #[test]

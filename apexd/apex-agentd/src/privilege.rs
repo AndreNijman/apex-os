@@ -16,14 +16,16 @@
 
 use std::sync::Arc;
 
+use apex_agent_core::grant::GrantKind;
 use apex_agent_core::origin::{OriginSource, SessionOrigin};
 use apex_agent_core::paths;
-use apex_agent_core::policy::AgentPolicy;
+use apex_agent_core::policy::{AgentPolicy, RequestOrigin};
 use apex_agent_core::protocol::{ErrorKind, Response};
 use apex_agent_core::request::{
     self, Decision, Grants, PrivilegeRequest, RequestError, Verb,
 };
 
+use crate::grants::{authenticate, Authenticated, GrantError};
 use crate::peer::{self, Peer};
 use crate::Daemon;
 
@@ -207,7 +209,6 @@ pub fn origin(daemon: &Arc<Daemon>, peer: Option<Peer>) -> Origin {
 /// has started, so nothing observable about the connection ever changes and
 /// an observation alone could never reach §7's second column.
 pub fn declare(daemon: &Arc<Daemon>, peer: Option<Peer>, wanted: &str) -> Response {
-    use apex_agent_core::policy::RequestOrigin;
 
     let Some(wanted) = RequestOrigin::parse(wanted) else {
         return Response::error(
@@ -284,6 +285,189 @@ pub fn for_new_session(
     }
 }
 
+/// The one gate every system-access grant passes through, in the one order
+/// that makes it mean anything (§3.3, §4.4, §7).
+///
+/// Four steps, and the first three are refusals that happen **before** polkit
+/// is asked anything. That ordering is not tidiness: it is what makes the
+/// checks testable against a real daemon with no risk of a password dialog,
+/// and it is what puts the eventual prompt outside the agent's terminal.
+///
+///   1. **Not from inside a session.** This is P0-007's fourth criterion —
+///      "the agent cannot renew its own grant" — and it is the only form that
+///      criterion can take. The agent runs as the user, so "is this the user?"
+///      cannot distinguish it from the human; every uid, every group, every
+///      environment variable and every field in the request says the same
+///      thing for both. What differs is the *connection*: the peer pid comes
+///      from `SO_PEERCRED`, which the kernel fills in at `connect(2)`, and
+///      `peer::resolve_by_ancestry` walks it up `/proc` to the pid the daemon
+///      recorded when it forked the session. Every process inside the sandbox
+///      is a descendant of that pid, and a process cannot choose its parent.
+///
+///      The escape a reader will think of — reparenting to pid 1 by orphaning
+///      — does not work either, and not by luck: an orphan of a session is
+///      reparented inside the user manager, so its cgroup is
+///      `…/user@N.service/…`, and [`crate::origin::classify`] reads that as
+///      `scheduled-job`, which fails step 2. The two mechanisms cover each
+///      other, which is why both are here.
+///
+///   2. **Local origin.** §7's table gives root capability and
+///      unsafe-everything "local auth" locally and "local approval required"
+///      from everywhere else. A `scheduled-job`, an `mcp` server and a
+///      `subagent` are all non-local by [`RequestOrigin::is_local`], because
+///      the property that matters is whether a human is present.
+///
+///   3. **An origin at all.** An origin that could not be established is
+///      refused, never defaulted — `RequestOrigin::default()` is
+///      `local-terminal`, which is precisely the column being asked for.
+///
+///   4. **polkit**, with the peer as the subject.
+fn may_be_granted(who: &Origin, what: &'static str) -> Result<RequestOrigin, GrantError> {
+    if let Some(session) = who.session {
+        return Err(GrantError::FromInsideASession { session, what });
+    }
+    let Some(source) = who.request_origin else {
+        return Err(GrantError::OriginUnknown(
+            who.origin_unreadable
+                .clone()
+                .unwrap_or_else(|| "the origin of this connection could not be established".into()),
+        ));
+    };
+    if !source.is_local() {
+        return Err(GrantError::NotLocal {
+            origin: source.origin,
+            what,
+        });
+    }
+    Ok(source.origin)
+}
+
+/// [`may_be_granted`], then the password.
+///
+/// Returns the origin to record on the grant alongside the proof that a human
+/// was asked. The proof is a token only this function and its sibling can
+/// produce, so `GrantAuthority::issue` cannot be reached without one.
+pub fn authorise_grant(
+    daemon: &Arc<Daemon>,
+    who: &Origin,
+    peer: Option<Peer>,
+    kind: GrantKind,
+    what: &'static str,
+) -> Result<(RequestOrigin, Authenticated), GrantError> {
+    let origin = may_be_granted(who, what)?;
+    let Some(peer) = peer else {
+        return Err(GrantError::OriginUnknown(
+            "the kernel would not report the peer credentials of this connection".into(),
+        ));
+    };
+    let proof = authenticate(daemon.auth.as_ref(), kind, &peer)?;
+    Ok((origin, proof))
+}
+
+/// Every system-access grant, with the state each is in now.
+///
+/// Readable from anywhere, including from inside a session: an agent being
+/// able to see that it holds a grant and when it runs out is the opposite of
+/// a risk, and §3.4's "revocation control always visible" wants the listing
+/// available wherever somebody is looking.
+pub fn system_grants(daemon: &Arc<Daemon>) -> Response {
+    let now = request::now_ms();
+    let listed = daemon.grants.list(now);
+    Response::SystemGrants {
+        grants: listed.iter().map(|(g, _, _)| g.clone()).collect(),
+        states: listed
+            .iter()
+            .map(|(_, state, said)| (state.as_str().to_string(), said.clone()))
+            .collect(),
+    }
+}
+
+/// Take a grant back before its window runs out.
+///
+/// §3.4: "revocation control always visible". No authentication — giving up
+/// privilege is free, the same rule [`apex_agent_core::auth::required_for`]
+/// states over values and the same one P0-016's toggle follows. It still
+/// refuses a connection from inside a session, because a session revoking
+/// ANOTHER session's grant is a session changing somebody else's permissions.
+pub fn revoke_system_grant(daemon: &Arc<Daemon>, peer: Option<Peer>, id: u32) -> Response {
+    let who = origin(daemon, peer);
+    if let Some(session) = who.session {
+        return Response::error(
+            ErrorKind::PermissionDenied,
+            GrantError::FromInsideASession {
+                session,
+                what: "revoke a system-access grant",
+            }
+            .to_string(),
+        );
+    }
+    match daemon.grants.revoke(id, request::now_ms()) {
+        Ok(g) => Response::SystemGrants {
+            states: vec![(
+                g.state_at(request::now_ms(), daemon.grants.boot())
+                    .as_str()
+                    .to_string(),
+                g.describe(request::now_ms(), daemon.grants.boot()),
+            )],
+            grants: vec![g],
+        },
+        Err(e @ GrantError::NoSuchGrant(_)) => {
+            Response::error(ErrorKind::NoSuchRequest, e.to_string())
+        }
+        Err(e) => Response::error(ErrorKind::BadRequest, e.to_string()),
+    }
+}
+
+/// Extend a grant that is still in force.
+///
+/// The verb P0-007's fourth criterion is about. It goes through
+/// [`authorise_grant`], so the agent holding the grant is refused at step 1 —
+/// before polkit is asked and regardless of what it sends — and a fresh
+/// password is required of everybody else. A renewal is a new window on a new
+/// consent, not a longer one on the old.
+pub fn renew_system_grant(
+    daemon: &Arc<Daemon>,
+    peer: Option<Peer>,
+    id: u32,
+    ttl_ms: u64,
+) -> Response {
+    let who = origin(daemon, peer);
+    // The grant has to exist and be alive before anybody is asked for a
+    // password: prompting for a grant that has already expired teaches people
+    // to type their password at dialogs that achieve nothing.
+    let Some(kind) = daemon
+        .grants
+        .list(request::now_ms())
+        .into_iter()
+        .find(|(g, state, _)| g.id == id && state.is_active())
+        .map(|(g, _, _)| g.kind)
+    else {
+        return Response::error(
+            ErrorKind::NoSuchRequest,
+            format!(
+                "no active system-access grant {id}; a grant is issued to a session when it \
+                 starts, so start a new session with the mode you need"
+            ),
+        );
+    };
+    let proof = match authorise_grant(daemon, &who, peer, kind, "renew a system-access grant") {
+        Ok((_, proof)) => proof,
+        Err(e) => return Response::error(ErrorKind::PermissionDenied, e.to_string()),
+    };
+    match daemon.grants.renew(proof, id, ttl_ms, request::now_ms()) {
+        Ok(g) => Response::SystemGrants {
+            states: vec![(
+                g.state_at(request::now_ms(), daemon.grants.boot())
+                    .as_str()
+                    .to_string(),
+                g.describe(request::now_ms(), daemon.grants.boot()),
+            )],
+            grants: vec![g],
+        },
+        Err(e) => Response::error(ErrorKind::BadRequest, e.to_string()),
+    }
+}
+
 /// File a request.
 ///
 /// The verb is parsed here rather than accepted pre-parsed, so a client cannot
@@ -321,7 +505,19 @@ pub fn file(daemon: &Arc<Daemon>, peer: Option<Peer>, verb: &str, args: &[String
 
     let dir = request::requests_dir();
     let grants = Grants::load(&request::grants_file());
-    let pre_approved = grants.allows(who.project.as_deref(), &parsed);
+    // Two ways a request can arrive already decided, and they are different
+    // things. A per-project grant (P0-013) is a standing decision a human made
+    // about this project and it outlives every session. A system-access grant
+    // (§4.4) is a decision a human made about THIS session, for a stated
+    // window, and it dies with the session or the clock.
+    //
+    // The system-access half is read from the daemon's memory, never from the
+    // grant store, because the session this is being decided for can write the
+    // store — see `grants.rs`.
+    let session_grant = daemon
+        .grants
+        .covers(who.session, parsed.name(), request::now_ms());
+    let pre_approved = grants.allows(who.project.as_deref(), &parsed) || session_grant;
 
     let now = request::now_ms();
     let req = PrivilegeRequest {
