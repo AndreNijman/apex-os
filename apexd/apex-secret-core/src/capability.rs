@@ -369,12 +369,9 @@ pub fn valid_branch_name(name: &str) -> bool {
 /// gives the wrong host. The port stays out of the host: a credential is stored
 /// for a host, and a loopback fixture on a random port must still match.
 pub fn http_endpoint(url: &str) -> Option<(&'static str, String)> {
-    let (scheme, rest) = if let Some(r) = url.strip_prefix("https://") {
-        ("https", r)
-    } else if let Some(r) = url.strip_prefix("http://") {
-        ("http", r)
-    } else {
-        return None;
+    let (scheme, rest) = match url.strip_prefix("https://") {
+        Some(rest) => ("https", rest),
+        None => ("http", url.strip_prefix("http://")?),
     };
     let authority = rest.split('/').next()?;
     let host = authority.rsplit('@').next()?;

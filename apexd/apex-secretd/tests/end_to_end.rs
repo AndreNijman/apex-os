@@ -204,18 +204,23 @@ impl Daemon {
             .spawn()
             .expect("start apex-secretd");
 
+        // Wrapped before it is waited on, not after: if the daemon never comes
+        // up this function panics, and a child that is still a local at that
+        // point is leaked. Owned by the struct, `Drop` kills and reaps it on
+        // every path out of here.
+        let daemon = Daemon {
+            child,
+            socket,
+            store,
+            dir,
+        };
         for _ in 0..200 {
-            if Client::connect_at(&socket).is_ok() {
-                return Daemon {
-                    child,
-                    socket,
-                    store,
-                    dir,
-                };
+            if Client::connect_at(&daemon.socket).is_ok() {
+                return daemon;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        panic!("apex-secretd did not come up on {}", socket.display());
+        panic!("apex-secretd did not come up on {}", daemon.socket.display());
     }
 
     fn client(&self) -> Client {

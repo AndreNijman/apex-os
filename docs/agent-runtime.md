@@ -27,6 +27,7 @@ Three pieces:
 | piece | what it is | privilege |
 |---|---|---|
 | `apex-agentd` | per-user daemon owning PTYs, sandboxes and session state | none |
+| `apex-secretd` | system daemon owning brokered credentials | root |
 | `apex agent` / `apex project` | CLI client over its control socket | none |
 | `a`, `aa`, `al`, `ad`, `aw`, `ap` | shell shortcuts | none |
 
@@ -37,6 +38,11 @@ system compromise instead of a user-session one. When a session eventually
 needs a system change, it is your own `apex` invocation that makes the narrow
 request over `org.apexos.Apexd1` — not a right this daemon holds.
 
+`apex-secretd` is the one privileged piece, and it is a separate daemon for
+that reason. It holds credentials and nothing else, it has no verb that returns
+one, and the agent runtime is one of its clients rather than its owner. See
+*The secret service* below.
+
 ```
 claude / opencode / codex / gemini / any binary
         │  the real upstream process, unmodified, in a real PTY
@@ -46,8 +52,13 @@ apex-agentd  ── unprivileged, per-user, systemd --user
         ├─ bubblewrap sandbox
         ├─ adapters
         ├─ projects + git worktrees
-        └─ checkpoints
-        ▲
+        ├─ checkpoints
+        └─ capability requests ──┐
+        ▲                        │  newline-delimited JSON on /run/apex-secretd
+        │                        ▼
+        │              apex-secretd  ── root, system service
+        │                        ├─ the store, /var/lib/apex-secretd, 0700
+        │                        └─ git, run as the owner with the credential
         │  newline-delimited JSON on a 0600 Unix socket
 apex agent … / APEX Shell
 ```
@@ -577,10 +588,11 @@ approval and the execution.
 
 ---
 
-## The secret broker
+## The secret service
 
-§4: *"Agents should be able to use credentials without receiving the raw
-secret… Expose usage permission, not necessarily secret value."*
+§3.2: *"Normal managed agents should not receive raw long-lived secrets where
+APEX can broker the operation instead."* §11 asks for that brokering to live in
+a dedicated service. That service is `apex-secretd`.
 
 ```
 printf %s "$TOKEN" | apex secret add github --host github.com
@@ -589,69 +601,146 @@ apex secret use github git-push origin   # run by the agent
 apex secret audit
 ```
 
-### Why the broker performs the operation
+### Why it is a separate daemon, and why it is root
+
+`apex-agentd` runs as you, because it launches your own programs. Anything it
+can read, a managed agent with your uid can read too — an `unrestricted` session
+has your whole home. The first version of this broker kept credentials in a
+`0600` file under `$XDG_STATE_HOME`, which keeps out another *account* and
+nothing else.
+
+So the store moved to `/var/lib/apex-secretd`, `0700`, owned by root, and the
+agent runtime lost the ability to read a credential at all. `apex-secretd` runs
+as root for two requirements that nothing unprivileged satisfies together:
+
+1. the store must be unreadable by your uid, or the credential is still in
+   reach of anything running as you;
+2. the git operation must run **as** you, because it works inside your own
+   repository and git executes that repository's configuration — running it as
+   root would hand a local root escalation to anyone who can write a
+   `.git/config`.
+
+The daemon therefore starts privileged, keeps the store to itself, and drops to
+the owner's uid for every child it forks. It never gains anything.
+
+### Why the service performs the operation
 
 The obvious implementation is a git credential helper the sandbox can reach. It
 does not work, and the reason is worth writing down: **git runs inside the
 sandbox**, so whatever the helper prints is on git's stdin, inside the agent's
-own namespace, readable by the agent. A credential helper hands over the token
-by construction.
+own namespace, readable by the agent. A credential helper hands over the
+credential by construction.
 
-So the broker performs the operation instead. The agent asks for
-`git-push origin`; `apex-agentd`, which runs *outside* the sandbox, runs the
-push and returns git's output. The token only ever exists in the environment of
-a process the agent cannot see — the sandbox uses `--unshare-pid`, so the
-daemon's children are not in the agent's `/proc` at all.
+So the service performs the operation instead. The agent asks for
+`git-push origin`; `apex-agentd` says which session is asking and what it is
+allowed; `apex-secretd` runs the push and returns git's output.
 
-That is a **namespace** boundary, not a privilege one. The daemon is
-unprivileged and runs as the same user; what it has that the session does not is
-a view of the filesystem and the process table. For "the agent must not learn
-the token", that is exactly the boundary required.
+### The API cannot return a credential
+
+This is a property of the types, not a rule in a review checklist.
+`SecretValue` implements neither `Serialize` nor `Deserialize`; every reply
+derives `Serialize`. A variant that carried a credential does not compile —
+today, and after every variant added for §13's Cloudflare provider or §10's MCP
+header helper. The store keeps the value in a file of its own so that nothing
+ever hands one to serde in the first place.
+
+There is no `read` verb, no `export` verb and no debug escape hatch. The
+`--secrets export` policy dimension exists in P0-004 as a named refusal, and
+this task did not build it a path: `AgentPolicy::validate` still rejects it, and
+the service has no verb it could attach to.
 
 ### The agent cannot name a URL
 
-`git-push` takes a remote **name**, and the daemon resolves it against the
-repository's own configuration. Accepting a URL would let a session ask the
-broker to push a branch to `https://attacker.example/` with your token attached
-— and the broker would, because it was told to.
+`git-push` takes a remote **name**, and the service resolves it against the
+repository's own configuration — in the same config environment the operation
+then runs in, because `git remote get-url` expands `insteadOf` and resolving
+with one environment while contacting with another would pin the wrong URL.
+`--push` for a write, because `pushurl` can send a push somewhere the fetch URL
+never mentions.
 
-The remote's host is then checked against the credential's host, so a grant for
-GitHub cannot push to GitLab. An `ssh://` remote is refused with an explanation:
-a token is not how ssh authenticates, and the ssh-agent socket is masked with
-`$XDG_RUNTIME_DIR` by design.
+Accepting a URL would let a session ask the service to push a branch to
+`https://attacker.example/` with your credential attached — and it would,
+because it was told to. The resolved host is then checked against the
+credential's host, so a grant for GitHub cannot push to GitLab. An `ssh://`
+remote is refused with an explanation: a token is not how ssh authenticates, and
+the ssh-agent socket is masked with `$XDG_RUNTIME_DIR` by design.
 
-### Where the secret lives, and why not the keyring
+### Who may change what is allowed
 
-A `0600` file inside a `0700` directory under `$XDG_STATE_HOME`. That path is
-inside `$HOME`, which a confined session masks with a tmpfs, so a
-`project`-policy agent cannot read it — asserted both in the sandbox unit tests
-and end-to-end from inside a real session.
+The store is per-uid and the uid comes from `SO_PEERCRED`, which a process
+cannot forge. The pid is *not* treated as an identity — pids are reused — so it
+is turned into a `/proc/<pid>` dirfd the moment the connection is accepted, and
+every later question is asked through that. A reused pid makes those reads fail,
+and the service refuses rather than answering about a stranger.
 
-The keyring is supported (`--keyring`) but is **not** the default, and that was
-decided by measurement rather than principle: `secret-tool store` on APEX blocks
-on a `gcr-prompter` "Unlock Keyring" dialog — it hung until it was killed — and
-`gnome-keyring-daemon` ships disabled. A broker an agent calls must never hang
-and must never raise a prompt in front of somebody who is not watching. Every
-keyring call is bounded by a timeout for the same reason.
-
-An `unrestricted` session can read the file, as it can read everything else.
-That is what the escape hatch means.
+`add`, `remove`, `grant` and `revoke` are refused for any caller inside an agent
+session, recognised by its cgroup and by its `/proc` ancestry. A confined
+session cannot even reach the socket: the sandbox masks `/run` and binds back
+only the agent runtime's own.
 
 ### Order of checks
 
-Peer credentials → project → grant → remote name → remote host → **then** the
-token is read. Every step before the last can refuse, so a refusal cannot leak
-the credential through an error path. Output returned to the caller is scrubbed
-of the token as well: git does not normally print credentials, but some error
-messages include a `https://user:token@host/…` URL.
+Peer credentials → the session's secret dimension → project → grant → remote
+name → resolved host and scheme → **then** the value is read, and only into the
+environment of a child process. Every step before the last can refuse, so a
+refusal cannot leak the credential through an error path. Output returned to the
+caller is scrubbed as well: git does not normally print credentials, but some
+error messages include a `https://user:token@host/…` URL.
+
+### The audit trail
+
+One JSON line per event in `/var/lib/apex-secretd/audit.jsonl`, root-owned, so
+the audited party cannot rewrite the audit. Each line is §11's capability record
+— provider, operation, resource, project, agent session, request origin,
+approval policy, constraints, audit id — plus what the service established for
+itself: the endpoint the credential was sent to, and the exit code.
+
+```
+apex secret audit
+```
+
+You see your own account's lines. `agent_session` is **attribution, not
+authentication**: it is forwarded by `apex-agentd`, which runs as you, so a
+process with your uid can forge it. It labels the trail; it authorises nothing.
+
+### What this does not protect against
+
+Written here rather than left implied, because a boundary whose limits are not
+stated gets trusted for things it never did.
+
+* **A process running as you, outside the sandbox, can use any capability you
+  granted.** It talks to the socket and presents itself as an unsessioned
+  caller. What it gets is the *use* of a granted capability — never the
+  credential.
+* **The credential is in the environment of the `git` child while it runs**, and
+  that child runs as you so the operation can touch your repository. A same-uid
+  process outside the sandbox can read `/proc/<pid>/environ` during those
+  milliseconds. A confined session cannot: `--unshare-pid` means the service's
+  children are not in the agent's `/proc` at all.
+* **A repository is caller-controlled and git reads its local config.** Every
+  execution path reachable from the command line is closed — `core.hooksPath`,
+  `core.fsmonitor`, the credential-helper list, `http.proxy`, `http.sslVerify`
+  — and `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` are `/dev/null`. That is a
+  mitigation maintained by hand, not a proof.
+* **Root compromise ends the discussion**, here as everywhere.
+
+The two properties it does hold: a credential is not readable at rest by your
+uid, and no reply the service can send contains one.
 
 ### What is not built
 
-Only `git-push` and `git-fetch`. `gh`-style API capabilities (read issues,
-create a PR) are a second vocabulary with a second validation surface, and are
-not needed to demonstrate the property. Scoped-token *issuance* — asking GitHub
-for a narrower token per task — is also not here; the broker uses the token it
-was given.
+`git-push`, `git-fetch` and `git-ls-remote`. `gh`-style API capabilities (read
+issues, open a PR) are a second vocabulary with a second validation surface.
+Scoped-credential *issuance* — asking GitHub for a narrower token per task — is
+§13.4 and is not here; the service uses the credential it was given. Migrating
+your real GitHub and MCP credentials onto it is P0-003.
+
+`http` is accepted only for a loopback host, where the credential does not cross
+a network. It exists so the credential path can be tested end to end against a
+real credential-checking server without a certificate authority in the fixture.
+Only you can add a service record, and the host is pinned from then on.
+
+---
 
 ---
 
@@ -666,14 +755,22 @@ was given.
 | `$XDG_STATE_HOME/apex/agent/requests/` | privilege requests, one JSON file each |
 | `$XDG_STATE_HOME/apex/agent/grants.json` | per-project "allow for project" grants |
 | `$XDG_STATE_HOME/apex/agent/layouts/` | saved project window layouts |
-| `$XDG_STATE_HOME/apex/agent/secrets/` | brokered credentials, `0600` each |
-| `$XDG_STATE_HOME/apex/agent/secret-grants.json` | per-project capability grants |
-| `$XDG_STATE_HOME/apex/agent/secret-audit.jsonl` | append-only capability audit |
 | `$XDG_STATE_HOME/apex/agent/privilege-audit.jsonl` | append-only privilege audit |
 | `$XDG_CONFIG_HOME/apex/agent.json` | default agent, the six permission dimensions, the network allowlist, detach key |
 | `/tmp/apex-agent/<id>/` | per-session scratch, and an allowlisted session's egress socket; removed with the session |
 
 Transcripts are a record of your work and are readable only by you.
+
+The secret service keeps nothing here, and that is the point of it:
+
+| path | what |
+|---|---|
+| `/run/apex-secretd/control.sock` | control socket, `0666`, authorised by `SO_PEERCRED` |
+| `/var/lib/apex-secretd/` | the store, `0700`, owned by root |
+| `/var/lib/apex-secretd/users/<uid>/<name>.secret` | one credential, `0600` |
+| `/var/lib/apex-secretd/users/<uid>/<name>.json` | its metadata — never the value |
+| `/var/lib/apex-secretd/users/<uid>/grants.json` | per-project capability grants |
+| `/var/lib/apex-secretd/audit.jsonl` | append-only capability audit |
 
 ---
 
