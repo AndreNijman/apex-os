@@ -121,17 +121,11 @@ pub fn main(dry_run: bool) -> Result<i32> {
     }
 
     let mut client = Client::connect()?;
-    // Before anything is stored: the old broker's per-project grants. A
-    // credential that arrives with no grant is a credential nothing can verify,
-    // so this comes first and not last.
-    let carried = carry_grants(&mut client);
-    if carried > 0 {
-        println!("moved  {carried} grant(s) from the old broker");
-    }
+    let mut carried = 0;
     let mut moved = 0;
     let mut kept = 0;
     for f in &found {
-        match migrate_one(&mut client, f) {
+        match migrate_one(&mut client, f, &mut carried) {
             Ok(true) => {
                 moved += 1;
                 println!("moved  {} from {}", f.service, f.source);
@@ -151,6 +145,9 @@ pub fn main(dry_run: bool) -> Result<i32> {
         }
     }
 
+    if carried > 0 {
+        println!("moved  {carried} grant(s) from the old broker");
+    }
     println!("\n{moved} migrated, {kept} stored but not removed");
     if kept > 0 {
         println!(
@@ -166,7 +163,7 @@ pub fn main(dry_run: bool) -> Result<i32> {
 /// Answers whether the original was removed. `false` means the value is stored
 /// and the plaintext is still there, which is the deliberate outcome when the
 /// stored copy could not be proved to work.
-fn migrate_one(client: &mut Client, f: &Found) -> Result<bool> {
+fn migrate_one(client: &mut Client, f: &Found, carried: &mut usize) -> Result<bool> {
     // 1. Store. Replaces any previous credential of the same name, so a second
     //    run after an interrupted first is a no-op rather than a conflict.
     client
@@ -181,6 +178,13 @@ fn migrate_one(client: &mut Client, f: &Found) -> Result<bool> {
             &SecretValue::new(f.value.as_bytes().to_vec()),
         )
         .with_context(|| format!("storing {}", f.service))?;
+
+    // 1b. The grants the old broker held for it, now that there is something to
+    //     grant them on: the service refuses a grant for a credential that does
+    //     not exist, so this cannot run before the store — and it has to run
+    //     before the verify, because verification is a *use* and a use needs a
+    //     grant.
+    *carried += carry_grants_for(client, &f.service);
 
     // 2. Verify — the stored copy, through the daemon, doing the real thing.
     if !verify(client, f)? {
@@ -336,7 +340,14 @@ fn from_the_old_broker(skipped: &mut Vec<String>) -> Vec<Found> {
         }
         out.push(Found {
             host: string(&doc, "host").unwrap_or_default(),
-            scheme: "https".into(),
+            // The old broker's record had no scheme field, and https is the
+            // only thing every credential it held could have been. Read one if
+            // the record carries it anyway, for the reason P0-002 allowed
+            // `http` on a loopback host at all: otherwise this path cannot be
+            // exercised end to end without a certificate authority in the
+            // fixture, and the store still refuses `http` for any host but
+            // this machine.
+            scheme: string(&doc, "scheme").unwrap_or_else(|| "https".to_string()),
             username: string(&doc, "username").unwrap_or_else(|| "x-access-token".into()),
             path: String::new(),
             auth: "bearer".into(),
@@ -677,14 +688,21 @@ pub fn old_grants() -> BTreeMap<String, Vec<String>> {
         .unwrap_or_default()
 }
 
-/// Ask the daemon to re-create the grants the old store held.
-pub fn carry_grants(client: &mut Client) -> usize {
+/// Ask the daemon to re-create the grants the old store held for one service.
+///
+/// Per service rather than all at once, because a grant is refused for a
+/// credential that is not stored — which is the right refusal, and means the
+/// grants can only follow their credential rather than precede it.
+pub fn carry_grants_for(client: &mut Client, want: &str) -> usize {
     let mut carried = 0;
     for (project, keys) in old_grants() {
         for key in keys {
             let Some((service, capability)) = key.split_once(':') else {
                 continue;
             };
+            if service != want {
+                continue;
+            }
             let ok = client.call(&Request::Grant {
                 project: project.clone(),
                 service: service.to_string(),
