@@ -5,12 +5,30 @@ worktree: /var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell
 branch: roadmap/v2.2
 
 ## NEXT
-apex-os is DONE and PUSHED. Start Job 2 (apex-shell): land
-origin/task/p0-018-display-finish on roadmap/v2.2 in /var/tmp/apex-work/int-shell.
-One conflicted file: src/services/config_tab/pages/DisplayPage.qml. Keep
-P0-023's staging layer (stage/unstage/revertStaged/applyStaged) on top of
-P0-018's _writeFiles/_genLua changes underneath, and no banned control label
-(Discard/Undo/Forget/Restore/Commit/Write).
+Both jobs DONE and PUSHED. Nothing outstanding. roadmap.yaml deliberately NOT
+touched -- the orchestrator updates it after reading the report.
+
+## APEX-SHELL RESULT
+- roadmap/v2.2: 321e3a5 -> d2d1f33 (6 landed commits + 1 of mine), pushed
+  with --force-with-lease.
+- TWO files conflicted, not one. The brief named DisplayPage.qml;
+  .github/workflows/ci.yml also conflicted, because P0-019 and P0-018 each add
+  a CI step at the same anchor. Both steps kept, YAML re-parsed clean.
+- Suites, all run from the repository ROOT with XDG_STATE_HOME and
+  XDG_CONFIG_HOME pointed at /var/tmp/apex-shell-xdg:
+    check-no-conflict-markers      PASS
+    settings-semantics             33/0   (33/0 before)
+    settings-pages                 15/0   (15/0 before)
+    display-transaction statics    42/0   (35/0 before)
+    keybind-lua                    16/0   (suite is new on this branch)
+    color-tokens                   22/0   (21/0 before; see BELOW)
+    agent-state                    27/0   (17/0 before)
+    scale-tokens                    5/0   ( 5/0 before)
+    labwc display transaction      41/0   nested headless labwc
+    sway unplug                    21/0   nested headless sway
+- Andre's session untouched: his `quickshell -c /usr/share/apex-shell` (pid
+  2338) still running, no stray labwc/sway, ~/.config/apex-shell not written
+  (mtime still 6 Sep 09:01), only /var/tmp/apex-shell-xdg/config/qt6ct created.
 
 ## APEX-OS RESULT
 - roadmap/v2.2: a141cee -> ba087f4 (10 commits), pushed with --force-with-lease.
@@ -111,8 +129,25 @@ provider, including the loopback bearer-token server and the SSE variant.
   and `git.ls-remote`. "What is not built" now says two providers.
 - ROUNDS 9-10 applied clean (0e066c7, ba087f4).
 
+- APEX-SHELL DisplayPage.qml: composed exactly as the authoring agent
+  predicted. P0-023's CfgCommit bar (the staging layer) stays; P0-018's
+  semantic change -- the Hyprland artifact is now a Lua module at
+  ~/.config/hypr/apex/monitors.lua, not a monitor conf -- moved into
+  CfgCommit's `note`, which is the only prose that page still owns. P0-018's
+  three CfgRow/CfgButton rows are NOT restored: they are what P0-023 replaced.
+  No banned control label reintroduced; settings-semantics still 33/0.
+- APEX-SHELL ci.yml: both new steps kept, P0-019's input harness then P0-018's
+  sway hotplug harness.
+- APEX-SHELL EXPECT_WHITE_FG: 212 -> 211 in tests/check-color-tokens.sh, as its
+  own commit d2d1f33. THE ONLY CHANGE I MADE THAT NEITHER BRANCH ASKED FOR.
+  P0-018 wrote 212 as a ratchet ceiling measured on its own base; P0-023 had
+  meanwhile removed one (CfgRow.qml folded two whites into one conditional,
+  KeybindsPage.qml lost two). Verified by counting on all four refs:
+  base 212, roadmap 211, p0-018 212, merged 211. The check's own failure
+  message says to lower it. Flagged rather than done quietly.
+
 ## IN PROGRESS
-- apex-shell
+- nothing
 
 ## FOUND
 - THE HEADLINE: the task brief says the roadmap side is "P0-002's secretd
