@@ -88,14 +88,20 @@ mod tests {
         // whole shipped vocabulary rather than against the one operation it
         // was written for — so a provider added later that takes a resource
         // cannot quietly become grantable everywhere by inheriting a default.
+        // Asserted on the GATE, not on `names_nothing`. P1-002 landed
+        // `cloudflare.account.read`, which declares no resource and no
+        // parameters — `names_nothing()` is true — but resolves the account out
+        // of the project's own `apex.toml`, so it reaches a different thing in a
+        // different directory. Conflating the declaration with the permission is
+        // exactly the "inheriting a default" this test exists to catch.
         let registry = default_registry(std::env::temp_dir()).expect("registry");
         for id in registry.operation_ids() {
             let (_, op) = registry.lookup(&id).expect("declared");
             assert_eq!(
-                op.names_nothing(),
+                crate::service::may_be_granted_everywhere(op),
                 id == "mcp.request",
-                "'{id}' names nothing: {}",
-                op.names_nothing()
+                "'{id}' may be granted in every project: {}",
+                crate::service::may_be_granted_everywhere(op)
             );
         }
     }

@@ -1114,8 +1114,8 @@ fn a_grant_held_in_every_project_is_only_for_an_operation_that_names_nothing() {
         other => panic!("a project with no grant was allowed: {other:?}"),
     }
 
-    // `git.push` acts on a remote resolved out of the caller's repository, so
-    // it is refused the key outright.
+    // `git.push` resolves a remote out of the caller's repository, so it is
+    // refused the key outright.
     let refused = daemon
         .client()
         .call(&Request::Grant {
@@ -1126,7 +1126,12 @@ fn a_grant_held_in_every_project_is_only_for_an_operation_that_names_nothing() {
         })
         .expect_err("git.push must not be grantable everywhere")
         .to_string();
-    assert!(refused.contains("acts on something you name"), "{refused}");
+    // The refusal names the reason rather than the shape. It used to say "acts
+    // on something you name", which stopped being true once a provider landed
+    // that names nothing and is still refused: `cloudflare.account.read` takes
+    // no resource and no parameters, yet resolves its account out of the
+    // project's own apex.toml. What both have in common is the reason.
+    assert!(refused.contains("resolves against the project"), "{refused}");
 
     // `mcp.request` names nothing, so it is accepted.
     daemon
