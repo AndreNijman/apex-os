@@ -8,9 +8,8 @@
 # listening ports, including a model server and a Steam remote-play socket.
 #
 # ── What it does ────────────────────────────────────────────────────────────
-# Drops inbound, permits outbound, and permits the things a desktop stops
-# working without. Forwarding is dropped too: this is a workstation, and a
-# machine that routes by accident is a machine on someone else's path.
+# Drops inbound and permits outbound, plus the things a desktop stops working
+# without.
 #
 # ── Why each exception is here ──────────────────────────────────────────────
 # Every `accept` below is a decision, not a default. If you are reading this to
@@ -22,6 +21,26 @@
 # would either be too coarse to matter or would break the user's own browser.
 # No port knocking, no rate limits beyond ICMP, no logging by default — a log
 # rule on a desktop fills the journal with broadcast noise within the hour.
+#
+# No forward chain either. There was one, dropping by default, with a comment
+# claiming container traffic was unaffected because podman "hooks at its own
+# priority in its own table". That is not how nftables works, and
+# tests/test-apex-firewall-live.sh measures it: every base chain registered at
+# a hook is evaluated, an `accept` in one does not end the others, and a drop
+# in any one of them is final. A drop here therefore overrode netavark,
+# libvirt and incus alike, and killed every rootful container's networking
+# without appearing in their rules. The intent behind it — that a workstation
+# should not route by accident — is already met by the kernel: ip_forward is 0
+# until something turns it on, and the thing that turns it on brings its own
+# policy for the traffic it created.
+
+# `nft -f` MERGES a table block into an existing table rather than replacing
+# it, so loading this file twice appended every rule a second time — measured,
+# 14 accepts became 28 — and a doubled `limit rate` is silently twice the rate
+# it says. The empty declaration exists so the delete is safe on a machine
+# where the table is not there yet.
+table inet apex
+delete table inet apex
 
 table inet apex {
     # Exceptions APEX adds live here rather than in the chain below, so
@@ -40,8 +59,26 @@ table inet apex {
     chain input {
         type filter hook input priority filter; policy drop;
 
-        # Anything we started. This is what makes an outbound-only policy
-        # usable at all: without it every reply to your own request is dropped.
+        # Replies to traffic this machine started. Without it every answer to
+        # your own request is dropped and the machine reads as offline.
+        #
+        # What it does NOT do is rescue a connection that was already open when
+        # the policy loaded. conntrack is not running on an APEX box until this
+        # ruleset loads, so it has no entry for that connection; the first
+        # packet it sees creates a `new` entry, and `new` is dropped. Measured,
+        # per kind:
+        #
+        #   outbound          survives — our next packet out creates the entry
+        #                     and the reply to it is ESTABLISHED
+        #   inbound, open     survives on the port's own rule, which is why
+        #     port            starting this unit over ssh is safe
+        #   inbound, closed   dies. Correct, and the reason the unit loads
+        #     port            BEFORE the network rather than after it: at boot
+        #                     there is nothing yet to strand.
+        #
+        # The ssh case also needs nf_conntrack_tcp_loose=1, the kernel default.
+        # At 0 the first packet of an adopted connection is INVALID and the
+        # next rule drops it before `tcp dport 22 accept` is ever reached.
         ct state established,related accept
         ct state invalid drop
 
@@ -54,6 +91,11 @@ table inet apex {
         # breaks neighbour discovery outright, which means no network at all.
         # Rate-limited rather than open: an unlimited echo responder is a
         # reflector.
+        #
+        # The error types below overlap with `related` above rather than
+        # duplicating it, and the overlap is deliberate: the live test breaks
+        # each half in turn and shows path MTU discovery still working on the
+        # other. Deleting either is safe; deleting both is not.
         ip protocol icmp icmp type { echo-request } limit rate 10/second accept
         ip protocol icmp icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
         ip6 nexthdr icmpv6 icmpv6 type { echo-request } limit rate 10/second accept
@@ -84,13 +126,6 @@ table inet apex {
         # Whatever the user allowed, by name, through `apex firewall allow`.
         tcp dport @allowed_tcp accept
         udp dport @allowed_udp accept
-    }
-
-    chain forward {
-        type filter hook forward priority filter; policy drop;
-        # Podman and distrobox install their own tables for container traffic;
-        # dropping here does not touch those, because they hook at their own
-        # priority in their own table.
     }
 
     chain output {

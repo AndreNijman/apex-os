@@ -61,22 +61,18 @@ SRC_CATALOGUE="${APEX_FW_CATALOGUE:-$ROOT/files/system/firewall/services}"
 MUT_RULES=""
 MUT_HELPER=""
 SELFTEST=0
-ONLY=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --self-test)     SELFTEST=1; shift ;;
         --mutate-rules)  MUT_RULES="$2"; shift 2 ;;
         --mutate-helper) MUT_HELPER="$2"; shift 2 ;;
-        --only)          ONLY="$2"; shift 2 ;;
         *) printf 'usage: %s [--self-test | --mutate-rules SED | --mutate-helper SED]\n' "$0" >&2; exit 2 ;;
     esac
 done
 
 pass=0; fail=0; skipped=0
-FAILED_CASES=""
 ok()   { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
-bad()  { printf 'FAIL  %s — %s\n' "$1" "${2:-}"; fail=$((fail + 1)); FAILED_CASES="$FAILED_CASES$1
-"; }
+bad()  { printf 'FAIL  %s — %s\n' "$1" "${2:-}"; fail=$((fail + 1)); }
 skip() { printf 'SKIP  %s — %s\n' "$1" "${2:-}"; skipped=$((skipped + 1)); }
 sec()  { printf '\n── %s ──\n' "$1"; }
 
@@ -107,10 +103,12 @@ if [ "$SELFTEST" = 1 ]; then
 "rules|/^ *tcp dport @allowed_tcp accept$/d|allow really opens a port against the live ruleset"
 "helper|s/^\( *\)nft add element/\1: skipped-by-mutant nft add element/|allow really opens a port against the live ruleset"
 "helper|s/^\( *\)rm -f \"\${CONF_DIR}\/\${name}.conf\"$/\1: mutant kept the file/|deny really closes it again"
-"helper|s/^\( *\)apply_sets$/\1:/|the exceptions come back after a policy reload"
-"helper|s/apply_one \(.*\)$/apply_batch \1/|one malformed exception does not take the others with it"
+"helper|s/^\( *\)if apply_sets; then$/\1if true; then/|the exceptions come back after a policy reload"
+"helper|s/rejected=\$((rejected + 1))/return 1/|one malformed exception does not take the others with it"
 "rules|/^ *ct state established,related accept$/d;/destination-unreachable, time-exceeded, parameter-problem/d|path MTU discovery still works"
 "rules|/^ *table inet apex$/d;/^delete table inet apex$/d|loading the policy twice does not double the rules"
+"rules|s|^    chain output {|    chain forward {\n        type filter hook forward priority filter; policy drop;\n    }\n\n    chain output {|;|traffic another table accepts is still forwarded"
+"rules|s|^\( *\)ct state invalid drop$|\1tcp dport 9999 accept\n\1ct state invalid drop|;|a connection on a closed port does not survive the policy loading"
     )
     printf 'apex firewall live — self-test over %d mutants\n' "${#MUTANTS[@]}"
     printf 'Each mutant must make the named case FAIL. A mutant the suite survives\n'
@@ -640,14 +638,17 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "forwarding, and what the policy does to anything behind this machine"
+sec "anything behind this machine, which is every rootful container"
 # ═════════════════════════════════════════════════════════════════════════════
-# The forward chain's comment says container traffic is unaffected because
-# podman "hooks at their own priority in their own table". nftables evaluates
-# EVERY base chain registered at a hook; an accept in one does not stop the
-# others, and a drop in any one of them is final. So a second table that
-# accepts cannot rescue traffic this table's policy drops. That is what the
-# next two cases measure rather than assume.
+# The policy used to carry a forward chain with `policy drop` and a comment
+# saying container traffic was unaffected because podman "hooks at its own
+# priority in its own table". The two cases below are what removed it.
+#
+# nftables evaluates EVERY base chain registered at a hook. An `accept` in one
+# does not stop the others; a `drop` in any one of them is final. So a second
+# table that accepts — which is exactly what netavark, libvirt and incus each
+# install — cannot rescue traffic this table drops, and a rootful container
+# lost its network with nothing in its own rules to explain why.
 listen_tcp "$NS_LAN" 8080
 unload_policy
 if tcp_reach "$NS_NET" 10.9.46.2 8080 4; then
@@ -658,6 +659,8 @@ fi
 load_policy >/dev/null
 
 if [ "$fwd_baseline" = 1 ]; then
+    # The stand-in for netavark: another table, its own base chain at the same
+    # hook, accepting everything it sees.
     h nft -f - >/dev/null 2>&1 <<'STUB'
 table inet apexfw_stub {
     chain forward {
@@ -667,14 +670,13 @@ table inet apexfw_stub {
 }
 STUB
     if tcp_reach "$NS_NET" 10.9.46.2 8080 4; then
-        ok "another table's accept rescues forwarded traffic"
-        FWD_VERDICT="another table can rescue it"
+        ok "traffic another table accepts is still forwarded"
     else
-        ok "a second table accepting does NOT rescue forwarded traffic"
-        FWD_VERDICT="the policy drops it regardless of another table"
+        bad "traffic another table accepts is still forwarded" "every rootful container on this machine has just lost its network"
     fi
     h nft delete table inet apexfw_stub 2>/dev/null
-    printf '      note: with the policy loaded, forwarded traffic — %s\n' "$FWD_VERDICT"
+else
+    skip "traffic another table accepts is still forwarded" "no forwarding baseline"
 fi
 
 finish
