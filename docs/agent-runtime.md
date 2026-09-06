@@ -1011,6 +1011,14 @@ daemon's PTY through `TIOCSWINSZ`. And the detach key, `ctrl-]`, collides with
 neither tmux's `C-b` nor zellij's `Ctrl-p`, so you can leave an agent pane
 without leaving the multiplexer.
 
+Detaching does end that pane's `apex agent attach`, and the pane is built with
+`remain-on-exit` so the shape does not reflow around the hole — the pane stays,
+dead. In tmux, `C-b : respawn-pane -k` brings the agent back; zellij shows its
+own re-run prompt in the pane. Reopening the template attaches to the
+multiplexer session as it is and does not revive a dead pane, which is why the
+key is worth knowing. The agent itself was never affected: it is still running
+in the daemon, and `apex agent list` still shows it.
+
 ### Attach, and restore
 
 Reopening never rebuilds a session that is already there — it attaches to it.
