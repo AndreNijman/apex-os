@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::paths;
-use crate::protocol::{AgentState, ErrorKind, Request, Response, SessionInfo};
+use crate::protocol::{ErrorKind, Request, Response, SessionInfo};
 
 /// How long to wait for the daemon to answer a control request.
 ///
@@ -205,6 +205,11 @@ pub fn publish_event(id: u32, state: &str, detail: Option<String>) -> Result<()>
         // own permission mode, so this stays absent rather than being made a
         // flag anybody could set.
         native: None,
+        // Nor is anything there a subagent. The graph is built from Claude's
+        // own lifecycle events; a script that could name a subagent could name
+        // one that never ran.
+        agent_id: None,
+        agent_type: None,
     })?;
     Ok(())
 }
@@ -216,19 +221,20 @@ pub fn publish_event(id: u32, state: &str, detail: Option<String>) -> Result<()>
 /// about what happened. Some events imply a state and some do not, and
 /// [`crate::hook::observe`] is what decides which — not this function, and not
 /// the daemon.
-pub fn publish_hook(
-    id: u32,
-    event: crate::hook::HookEvent,
-    state: Option<AgentState>,
-    detail: Option<String>,
-    native: Option<String>,
-) -> Result<()> {
+///
+/// Takes the whole [`crate::hook::Observation`] rather than its fields one by
+/// one. It grew a sixth and a seventh with the session graph, and a call site
+/// passing seven positional `Option<String>`s is one reordering away from
+/// publishing a subagent's type as its id.
+pub fn publish_hook(id: u32, obs: &crate::hook::Observation) -> Result<()> {
     call(&Request::Event {
         id,
-        state: state.map(|s| s.as_str().to_string()),
-        event: Some(event.as_str().to_string()),
-        detail,
-        native,
+        state: obs.state.map(|s| s.as_str().to_string()),
+        event: Some(obs.event.as_str().to_string()),
+        detail: obs.detail.clone(),
+        native: obs.native.clone(),
+        agent_id: obs.agent_id.clone(),
+        agent_type: obs.agent_type.clone(),
     })?;
     Ok(())
 }

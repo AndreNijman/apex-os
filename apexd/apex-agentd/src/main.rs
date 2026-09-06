@@ -520,6 +520,8 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             event,
             detail,
             native,
+            agent_id,
+            agent_type,
         } => {
             // An event that names neither is not a smaller event, it is a
             // request that says nothing. Refused rather than recorded, because
@@ -587,6 +589,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             // order matters only in that both must happen.
             if let Some(e) = lifecycle {
                 s.apply_tool_transition(e.tool_transition());
+                s.apply_graph_event(e, agent_id.as_deref(), agent_type.as_deref());
             }
             match parsed {
                 Some(p) => s.set_state(p, detail),

@@ -472,6 +472,10 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         // its first hook event; an agent that never publishes one leaves it
         // absent, which reads as "not reported" rather than as a mode.
         native_observed: None,
+        // Empty, not absent: this daemon has the graph, and a session that has
+        // delegated nothing yet must be distinguishable from one whose runtime
+        // cannot tell. See `SessionInfo::children`.
+        children: Vec::new(),
         pid: spawned.pid,
         started: now_secs(),
         last_activity: now_secs(),

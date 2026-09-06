@@ -292,6 +292,14 @@ pub struct Observation {
     /// session record that the shell renders, and it comes off a document the
     /// agent writes.
     pub native: Option<String>,
+    /// Which subagent this event is about, and what kind (§P1-020).
+    ///
+    /// `Some` only on the two subagent events, and only for the fields the
+    /// payload actually carried. The daemon builds the session graph out of
+    /// these; up to P1-020 they were read here for the detail line and then
+    /// dropped, so no subagent was recorded anywhere.
+    pub agent_id: Option<String>,
+    pub agent_type: Option<String>,
 }
 
 /// Longest detail line a hook may publish.
@@ -330,12 +338,30 @@ pub fn observe(event: HookEvent, payload: &Payload) -> Observation {
         HookEvent::TaskCreated | HookEvent::TaskCompleted | HookEvent::Note => None,
     };
 
+    // The two subagent fields are carried ONLY for the two subagent events.
+    // `agent_type` is also set on Claude's task events, and letting it through
+    // there would have the daemon open a graph node for a to-do item.
+    let is_subagent = matches!(
+        event,
+        HookEvent::SubagentStart | HookEvent::SubagentStop
+    );
+
     Observation {
         event,
         state,
         detail: detail_for(event, payload),
         tool: event.tool_transition(),
         native: native_mode(payload),
+        agent_id: if is_subagent {
+            payload.agent_id.clone()
+        } else {
+            None
+        },
+        agent_type: if is_subagent {
+            payload.agent_type.clone()
+        } else {
+            None
+        },
     }
 }
 
@@ -831,6 +857,45 @@ mod tests {
         }
         assert_eq!(HookEvent::parse("PreToolUse"), None, "claude's spelling");
         assert_eq!(HookEvent::parse(""), None);
+    }
+
+    #[test]
+    fn the_subagent_events_carry_the_two_fields_the_graph_is_built_from() {
+        // P0-011 delivered both events to the daemon and dropped `agent_id`
+        // and `agent_type` here, so the detail line said "Explore started" and
+        // nothing anywhere recorded which subagent that was. This is the
+        // regression: the two fields leave `observe`, not just `detail_for`.
+        let payload = Payload {
+            agent_id: Some("agent-7".into()),
+            agent_type: Some("Explore".into()),
+            ..Default::default()
+        };
+        for event in [HookEvent::SubagentStart, HookEvent::SubagentStop] {
+            let obs = observe(event, &payload);
+            assert_eq!(obs.agent_id.as_deref(), Some("agent-7"), "{event}");
+            assert_eq!(obs.agent_type.as_deref(), Some("Explore"), "{event}");
+        }
+    }
+
+    #[test]
+    fn no_other_event_opens_a_node_in_the_graph() {
+        // `agent_type` is set on Claude's task events too, and letting it
+        // through there would have the daemon open a subagent for a to-do
+        // item. The daemon branches on the event, but a field that is only
+        // ever meaningful for two events is carried for two events.
+        let payload = Payload {
+            agent_id: Some("agent-7".into()),
+            agent_type: Some("Explore".into()),
+            ..Default::default()
+        };
+        for event in HookEvent::ALL {
+            if matches!(event, HookEvent::SubagentStart | HookEvent::SubagentStop) {
+                continue;
+            }
+            let obs = observe(*event, &payload);
+            assert!(obs.agent_id.is_none(), "{event} carried an agent id");
+            assert!(obs.agent_type.is_none(), "{event} carried an agent type");
+        }
     }
 
     #[test]
