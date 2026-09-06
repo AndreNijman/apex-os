@@ -27,6 +27,21 @@ use anyhow::{bail, Result};
 use apex_agent_core::protocol::{
     Request as AgentRequest, Response as AgentResponse, BROKERED_SECRET_SERVICE_VERSION,
 };
+
+/// The revision guard has to name a revision that exists, or it can never fire
+/// — and the failure it prevents is a "no credential stored" about a store the
+/// user never wrote to. At or below the current revision rather than equal to
+/// it: the protocol moves on for reasons that have nothing to do with the
+/// store, and pinning this to equality would make every later bump edit a guard
+/// whose subject had not changed.
+///
+/// Facts about constants, so the compiler checks them.
+const _: () = assert!(
+    BROKERED_SECRET_SERVICE_VERSION <= apex_agent_core::protocol::PROTOCOL_VERSION
+);
+const _: () = assert!(
+    BROKERED_SECRET_SERVICE_VERSION > apex_agent_core::protocol::REQUEST_ORIGIN_VERSION
+);
 use apex_secret_core::capability::Capability;
 use apex_secret_core::client::Client;
 use apex_secret_core::protocol::{Request, Response};
@@ -454,26 +469,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_version_guard_names_the_revision_the_store_moved_in() {
-        // A literal here would be one careless edit from meaning nothing, and
-        // the failure it prevents is a "no credential stored" about a store
-        // the user never wrote to.
-        //
-        // At or below the current revision, not equal to it: the protocol
-        // moves on for reasons that have nothing to do with the store, and
-        // pinning this to equality would make every later bump edit a guard
-        // whose subject had not changed — which is how a boundary ends up
-        // pointing at the wrong revision.
-        assert!(
-            BROKERED_SECRET_SERVICE_VERSION <= apex_agent_core::protocol::PROTOCOL_VERSION,
-            "the guard must name a revision that exists, or it can never fire"
-        );
-        assert!(
-            BROKERED_SECRET_SERVICE_VERSION > apex_agent_core::protocol::REQUEST_ORIGIN_VERSION,
-            "the store moved after request_origin, so the guard must be above it"
-        );
-    }
 
     #[test]
     fn the_use_exit_codes_are_distinct() {

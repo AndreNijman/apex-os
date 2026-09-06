@@ -636,6 +636,13 @@ pub fn force_kill(session: &mut Session) -> bool {
 /// to die.
 pub const TERMINATE_GRACE_MS: u64 = 10_000;
 
+/// The grace has to leave time to flush a transcript and drop a lock, and it
+/// has to be a small enough fraction of the shortest useful break-glass window
+/// that declining to die does not meaningfully extend it. Both are facts about
+/// constants, so they are checked when the crate compiles.
+const _: () = assert!(TERMINATE_GRACE_MS >= 1_000);
+const _: () = assert!(TERMINATE_GRACE_MS * 60 < apex_agent_core::grant::MAX_BREAK_GLASS_MS);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,17 +742,6 @@ mod tests {
         assert!(!force_kill(&mut s));
     }
 
-    #[test]
-    fn the_grace_is_bounded_and_shorter_than_the_shortest_useful_window() {
-        // A grace long enough to matter would extend a break-glass window by
-        // declining to die, which is the failure the escalation exists to
-        // prevent. Ten seconds against a fifteen-minute window is one percent.
-        assert!(TERMINATE_GRACE_MS >= 1_000, "no time to flush a transcript");
-        assert!(
-            TERMINATE_GRACE_MS * 60 < apex_agent_core::grant::MAX_BREAK_GLASS_MS,
-            "the grace is a meaningful fraction of the longest window"
-        );
-    }
 
     /// A store of this test's own.
     ///
