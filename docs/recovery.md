@@ -169,14 +169,23 @@ Preserved by **both**, and printed in full by the dry run:
   `apex env list` would show nothing while `podman ps -a` still shows them, and
   APEX would have lost the name it needs to remove them. `apex env rm` is the
   verb for that.
-* **Nothing under `~/.config/hypr` is ever *deleted*.** `hyprland.conf`
-  `source=`s `apex-input.conf` and `apex-display.conf`, and Hyprland treats a
-  `source=` with no match as a **fatal** config error — which is why
-  `apex-shell-firstrun` pre-creates both as empty files. So those two are
-  **truncated** to the empty state the provisioner itself seeds, and everything
-  else in that directory is preserved. A one-line edit to a live compositor
-  config has already cost this project a desktop once; `AGENTS.md`'s
-  "Editing a live machine's configuration" rules exist because of it.
+* **Nothing under `~/.config/hypr` is ever *deleted*.** The generated modules
+  `apex/input.lua`, `apex/monitors.lua` and `apex/shell-keybinds.lua` are
+  **truncated** to the "no overrides" state, and everything else in that
+  directory is preserved. A one-line edit to a live compositor config has
+  already cost this project a desktop once; `AGENTS.md`'s "Editing a live
+  machine's configuration" rules exist because of it.
+
+  Truncating rather than deleting used to be forced: `hyprland.conf` `source=`d
+  the generated files and a `source=` with no match is a **fatal** config error.
+  P0-025 removed that — `hyprland.lua` checks `package.searchpath` before
+  requiring, so an absent module is skipped — and the rule is kept anyway,
+  because "empty" is a state the compositor understands and one this code can
+  produce without deciding which of the user's files it may remove.
+
+  `apex/user-overrides.lua` is the exception in the other direction: it is where
+  `apex-hypr-migrate` puts a user's own hand-written hyprlang after converting
+  it, so it is a preserved landmark and not a reset target at all.
 
 ### The other protections
 
