@@ -1089,6 +1089,14 @@ fn copy_exec_bit(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether a key or variable name is a credential by name.
+///
+/// The same net the export uses, made public because two other things need the
+/// same answer: the daemon, deciding what to leave out of the settings copy a
+/// session reads, and `apex secret migrate`, deciding what to move. Three
+/// callers with three copies of this list would drift, and the one that drifted
+/// would be the one that mattered.
+///
 /// Key names whose value is a credential, wherever a mixed file puts one.
 ///
 /// The JSON counterpart of [`secret_component`], and there for the same reason.
@@ -1104,6 +1112,10 @@ fn copy_exec_bit(from: &Path, to: &Path) -> io::Result<()> {
 /// Names are kept and only one value is emptied, so a false positive costs an
 /// importing machine one value it has to supply — never a leak, and never a
 /// definition. [`blank_secret_keys`] is what makes the second half true.
+pub fn credential_name(name: &str) -> bool {
+    secret_key(name)
+}
+
 fn secret_key(name: &str) -> bool {
     let name = name.to_ascii_lowercase().replace(['-', '_', ' '], "");
     [

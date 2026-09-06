@@ -14,6 +14,7 @@ mod gaming;
 mod gitshim;
 mod host;
 mod mcp;
+mod migrate;
 mod mode;
 mod ops;
 mod proxy;
