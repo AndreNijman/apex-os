@@ -111,7 +111,12 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
         None
     };
 
-    let id = daemon.registry.lock().expect("registry lock").allocate();
+    // Reserved on disk, not merely counted in memory: an id that collides with
+    // a record left by an earlier daemon overwrites that session's transcript.
+    // Held as a guard so a failure between here and the spawn gives the id back
+    // instead of leaving an empty record behind.
+    let reservation = daemon.registry.lock().expect("registry lock").allocate()?;
+    let id = reservation.id();
     let scratch = paths::scratch_dir(id);
     // Not best-effort: the sandbox binds this path read-write and sets TMPDIR
     // to it. If it cannot be created, or cannot be made private, the session
@@ -227,6 +232,8 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
         reg.insert(info.clone(), spawned.master, spawned.pid, spawned.pgid)
     };
     registry::write_record(&info);
+    // The session owns its record now, so the id stops being a reservation.
+    reservation.commit();
     spawn_reader(Arc::clone(daemon), handle, id);
 
     Ok(info)
