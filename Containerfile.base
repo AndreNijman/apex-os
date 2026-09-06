@@ -233,10 +233,16 @@ RUN set -eux; \
     /usr/bin/bwrap --version; \
     test -s /usr/lib/systemd/user/apex-agentd.service; \
     grep -q '^ExecStart=/usr/bin/apex-agentd$' /usr/lib/systemd/user/apex-agentd.service; \
+    # A TUI with no TERM emits no colour, and systemd starts a user unit with
+    # almost no environment. Without these the agents render in one colour and
+    # the cause is invisible, because a daemon started by hand from a shell
+    # inherits TERM and looks correct.
+    grep -q '^Environment=TERM=' /usr/lib/systemd/user/apex-agentd.service; \
+    grep -q '^Environment=COLORTERM=' /usr/lib/systemd/user/apex-agentd.service; \
     # Opt-in by design: a per-user daemon holding PTYs must not be enabled for
     # users who never run an agent. Assert it is NOT wired into any target.
     test ! -e /usr/lib/systemd/user/default.target.wants/apex-agentd.service; \
-    echo "agent sandbox: bwrap functional; agentd unit present and opt-in"
+    echo "agent sandbox: bwrap functional; agentd unit present, coloured and opt-in"
 
 # Default browser (system-wide XDG): Firefox is the only baked browser, but set
 # the http/https/html handlers explicitly so any "open link" honours it without
