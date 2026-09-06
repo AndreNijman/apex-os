@@ -176,11 +176,143 @@ reporting none.
 
 ### What is refused until it is built
 
-Four values parse and are then refused, each naming the task that will
-implement it: `--system-access session`, `--system-access unsafe`,
-`--secrets export`, `--origin-policy remote`. A flag that parsed and then did
+Two values parse and are then refused: `--secrets export`, because §7's table
+denies raw secret reads from every origin including the local one, and
+`--origin-policy remote`, because §7 allows remote elevation only behind a
+security key nothing in this build can ask for. A flag that parsed and then did
 nothing would read as a protection in `apex agent status` and in a script, with
 nothing behind it.
+
+`--unsafe-everything --sandbox project` is refused too, for a different
+reason: not unbuilt, incoherent. `bwrap` sets `PR_SET_NO_NEW_PRIVS` on the
+sessions it wraps and nothing can clear it afterwards, so a confined
+break-glass session would run with the flag on while the policy reported it
+off.
+
+---
+
+## System-access grants
+
+Dimension 3 is the only one that is not a setting. `--system-access session`
+and `--unsafe-everything` are requests for a **grant**, and §3.3 says what a
+grant has to be: "explicit, scoped, time-limited, auditable, and bound to a
+concrete agent session".
+
+```bash
+apex agent run --system-access session --ttl 2h
+apex agent run --unsafe-everything --ttl 15m
+apex agent grants                 # what has been granted, and how each ended
+apex agent revoke-grant 3         # immediate, and asks for nothing
+apex agent renew-grant 3 --ttl 15m
+```
+
+### The two are deliberately different
+
+| | `--system-access session` (§4.4) | `--unsafe-everything` (§4.5) |
+|---|---|---|
+| `no_new_privs` | **on** | **off** — `sudo` works |
+| what it grants | the privilege verbs it names stop needing a second decision | root inside the session |
+| default TTL | 30m | **none** — §3.4 says explicit |
+| cap | 8h | 1h |
+| indicator | the mode, in the row | **red**, with a countdown |
+| expiry | the grant stops applying | the session ends |
+
+A kernel fact drives that last row. The kernel sets `PR_SET_NO_NEW_PRIVS`
+once, between `fork` and `exec`, and no process can clear it — so a break-glass
+session outliving its window keeps `sudo` whatever a record says. `SIGTERM` is
+then a request the session may decline, so the runtime escalates to `SIGKILL`
+after a ten-second grace and writes `session-ended` only once it has watched
+the process go.
+
+A session grant is scoped by verb **name**, not by argument: it covers
+`install <anything>`, where a per-project grant covers `install clang`. That is
+wider on purpose — a bounded window that only pre-approved the exact operations
+the user had already approved individually would buy nothing — and it is still
+a whitelist, so a verb added to the vocabulary tomorrow is not covered by a
+grant issued today. The grant pre-decides; it does not pre-execute. An
+approved request still runs through `apex request approve`, under the approving
+human's own root, and nothing in this module runs anything.
+
+### Where the authority lives, and why not on disk
+
+`apex-agentd` runs as the user. A `--sandbox unrestricted` session runs as the
+user. A break-glass session is unrestricted by definition. So every file this
+daemon can write, a granted session can rewrite — including the grant record
+and including the JSONL audit trail.
+
+So a grant holds only while **the daemon process that minted it, after a
+successful authentication, still has it in memory**. The store under
+`$XDG_STATE_HOME` is history: `apex agent grants` reads it and the next boot
+explains it, and nothing reads it back as permission. A daemon restart drops
+every grant rather than adopting one, and says so.
+
+The trail is written twice for the same reason. The JSONL is the readable copy;
+each grant event also goes to the journal, which `journald` owns as root and
+which no unprivileged process can alter afterwards:
+
+```bash
+journalctl --user -t apex-agentd APEX_GRANT_EVENT=issued
+journalctl --user APEX_GRANT_ID=3        # the whole life of one grant
+```
+
+### Reboot is answered, not forgotten
+
+§3.4 asks that a grant not *silently* persist across a reboot, which is not the
+same as being forgotten. An owner who authorised fifteen minutes of break-glass
+and then rebooted has no way to tell whether the window is still open, and a
+machine that simply loses the grant has answered them with silence.
+
+So each grant carries the boot it was issued under, holds on no other boot,
+and on the next start the daemon says which of four things happened —
+`/proc/stat`'s `btime` separating the first two:
+
+| the record says | what happened |
+|---|---|
+| `expired` | the TTL ran out, before the reboot or since |
+| `ended-at-reboot` | it was still live when the machine went down |
+| `ended-with-the-runtime` | `apex-agentd` restarted while it was live |
+| `revoked` | a human took it back |
+
+The daemon writes each once, to both trails, and `apex agent grants` prints
+the sentence under the table.
+
+### Who may ask, and where the password appears
+
+Four steps, in this order, and the order is the security property:
+
+1. **not from inside a session.** The connection is resolved through
+   `SO_PEERCRED` and `/proc` ancestry to the pid the daemon recorded when it
+   forked the session. This is what stops an agent renewing its own grant, and
+   it is the only form that check can take: the agent runs as the user, so
+   every uid, group, environment variable and request field says the same thing
+   for the agent and the human. What differs is the connection, and the kernel
+   fills that in. An orphan escapes the ancestry walk and lands under
+   `user@N.service`, which step 2 reads as `scheduled-job`.
+2. **local origin**, per §7. A `scheduled-job`, an `mcp` server and a
+   `subagent` are all non-local: the property that matters is whether a human
+   is present.
+3. **an origin at all.** One that could not be established is refused, never
+   defaulted — the default is `local-terminal`, which is the column being asked
+   for.
+4. **polkit**, with the *peer* as the subject, pinned by pid and start time.
+
+Step 4's choice of subject carries all of §4.4's "the user authenticates
+outside the agent PTY". polkit sends the challenge to the authentication agent
+of the *subject's* login session, and steps 1–3 have already shown that the
+subject sits outside every agent sandbox. The two actions are
+`org.apexos.agent.system-access` and `org.apexos.agent.break-glass`, both
+`auth_admin`, neither `_keep` — a renewal raises a fresh prompt, because the
+prompt is worth having only while there is no standing yes to inherit.
+
+Revoking asks for nothing. Giving up privilege is free.
+
+### Not a stored default
+
+Dimension 3 cannot be a default in `agent.json`. §3.4 allows no "remember
+forever", and a file saying `"system": "unsafe"` would make later
+`apex agent run` invocations arrive already asking for break-glass. Loading
+resets that one key to `none`, leaves the other five alone, and reports the
+correction.
 
 ---
 
@@ -1107,10 +1239,15 @@ Named because the roadmap asks for them and this does not do them:
 - **Test status and merge conflicts per worktree** in the Agent Center (§7).
   The worktree a session is on is shown; whether its tests pass is not.
 - **Disposable environments** and capsules.
-- **Enforcement for four permission values.** Both `--system-access` grants,
-  `--secrets export` and `--origin-policy remote` parse and then refuse. The
-  vocabulary is here so the enforcement slots in without moving anything else;
-  see *Six permission dimensions*. All four network modes are enforced.
+- **Enforcement for two permission values.** `--secrets export` and
+  `--origin-policy remote` parse and then refuse; see *Six permission
+  dimensions*. All four network modes and both system-access grants are
+  enforced.
+- **A session grant pre-decides, it does not pre-execute.** The verbs a
+  `--system-access session` grant covers arrive already decided, and are still
+  run by `apex request approve` under a human's own root. There is no
+  unattended root executor, and building one would be a new boundary rather
+  than a smaller version of this one.
 - **A per-project network allowlist.** The list is the runtime's, one per user.
   A project that needs a destination no other project should reach has to be
   given it globally, and §36's per-project identity is where that belongs.
