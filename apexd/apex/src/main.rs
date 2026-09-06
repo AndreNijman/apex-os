@@ -20,6 +20,7 @@ mod request;
 mod secret;
 mod task;
 mod touchpad;
+mod trust;
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -104,6 +105,15 @@ enum Cmd {
         #[command(subcommand)]
         cmd: boot::BootCmd,
     },
+    /// Whether the image this machine runs is the one APEX published (§27).
+    ///
+    /// Reports what was checked when the booted image was pulled, what the
+    /// signature policy will check on the next update, and — with `--verify` —
+    /// whether the registry holds a cosign signature and an SBOM attestation
+    /// for the digest running right now. The offline half reads files only, so
+    /// it needs no root and no network; a registry that cannot be reached is
+    /// reported as unavailable with the reason, never as unsigned.
+    Trust(trust::TrustArgs),
     /// Local model inference as an OS service (§14).
     ///
     /// One endpoint every application and agent client can use — a Unix socket
@@ -1099,6 +1109,11 @@ async fn main() {
         // "unavailable, and why" rather than demanding a password to answer
         // "what verified my boot".
         Cmd::Boot { cmd } => boot::boot_main(cmd),
+        // Same shape as `boot`, and for the same reason: the honest answer to
+        // "is my operating system signed" must not cost a password, so the
+        // offline half is file reads and `--verify` is the only path that
+        // leaves the machine.
+        Cmd::Trust(args) => trust::main(args),
         // Read-only except for `add`/`remove`/`probe`, which write only the
         // registry and the probe cache in the user's own home. Nothing here
         // touches apexd or needs root.
@@ -1353,6 +1368,19 @@ fn cmd_fingerprint() -> i32 {
 async fn cmd_status() -> i32 {
     let v = LocalView::detect();
     print!("{}", ops::render_fingerprint(&v.fingerprint, &v.selection));
+
+    // §27: "`apex status` should surface trust state clearly." Placed before
+    // the daemon section because it must appear on a machine where apexd is
+    // not running — that branch returns early, and a trust readout only the
+    // healthy machines get is the wrong way round.
+    //
+    // Offline only. Nothing here contacts the registry, so `apex status` keeps
+    // costing one set of file reads and cannot hang on a dead network.
+    println!();
+    print!(
+        "{}",
+        trust::render_block(&trust::offline_report(&trust::Roots::from_env()))
+    );
 
     let conn = connect().await;
     let running = match &conn {
