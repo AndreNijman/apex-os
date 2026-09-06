@@ -876,7 +876,7 @@ fn an_mcp_message_is_carried_with_the_credential_and_the_credential_stays_here()
         other => panic!("expected a performed reply, got {other:?}"),
     };
     assert_eq!(exit_code, 0, "{output}");
-    assert_eq!(endpoint, format!("http://127.0.0.1"), "{endpoint}");
+    assert_eq!(endpoint, "http://127.0.0.1", "{endpoint}");
 
     // The server received the credential, as a bearer header the daemon built.
     assert_eq!(
