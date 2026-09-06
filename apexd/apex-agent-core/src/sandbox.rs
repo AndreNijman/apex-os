@@ -74,7 +74,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::policy::{AgentPolicy, NetworkPolicy};
+use crate::policy::AgentPolicy;
 use crate::protocol::SandboxPolicy;
 
 /// Environment variables every session keeps, regardless of adapter.
@@ -446,8 +446,15 @@ pub fn build_argv(
     // removes the network, because `effective_network` forces it to `offline`
     // — but it does so as a policy floor rather than as a property of the
     // sandbox mode, which is what lets `--sandbox project --network offline`
-    // exist and what P0-008's allowlist and brokered modes will hang off.
-    if spec.policy.effective_network() == NetworkPolicy::Offline {
+    // exist.
+    //
+    // Every mode but `open` takes this flag, and the flag is the whole of the
+    // kernel enforcement: `offline`, `brokered` and `allowlist` are one
+    // namespace with nothing in it, and they differ in what apex-agentd offers
+    // over a Unix socket afterwards. Asked of the policy rather than matched
+    // on `Offline` here, so a mode added later cannot arrive with the
+    // namespace quietly left shared.
+    if spec.policy.effective_network().removes_direct_egress() {
         push("--unshare-net");
     }
 
@@ -558,6 +565,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::policy::NetworkPolicy;
 
     fn spec() -> SandboxSpec {
         let mut s = SandboxSpec::new(
@@ -988,9 +996,9 @@ mod tests {
     #[test]
     fn the_network_namespace_follows_the_network_dimension_not_the_sandbox_one() {
         // §3.1 splits these. `strict` still removes the network — it forces
-        // the dimension to `offline` — but the argv now reads the dimension,
-        // which is what gives P0-008 somewhere to hang allowlist and brokered
-        // modes without touching the sandbox modes.
+        // the dimension to `offline` — but the argv reads the dimension, which
+        // is what lets the other network modes exist without touching the
+        // sandbox modes.
         let mut s = spec();
         s.policy.sandbox = SandboxPolicy::Project;
         s.policy.network = NetworkPolicy::Offline;
@@ -998,6 +1006,42 @@ mod tests {
 
         s.policy.network = NetworkPolicy::Open;
         assert!(pos(&argv(&s), "--unshare-net").is_none());
+    }
+
+    #[test]
+    fn open_is_the_only_mode_that_keeps_the_host_network_namespace() {
+        // The kernel half of every network mode, asserted over the whole value
+        // set rather than one variant at a time — a mode added later without a
+        // decision about its namespace fails here instead of shipping with the
+        // host's network.
+        for network in NetworkPolicy::ALL {
+            let mut s = spec();
+            s.policy.sandbox = SandboxPolicy::Project;
+            s.policy.network = *network;
+            assert_eq!(
+                pos(&argv(&s), "--unshare-net").is_some(),
+                *network != NetworkPolicy::Open,
+                "{network} got the wrong network namespace"
+            );
+        }
+    }
+
+    #[test]
+    fn brokered_is_offline_in_the_kernel_and_differs_only_above_it() {
+        // Worth asserting because it is the honest description of the mode:
+        // the confinement is identical, and what separates them is what
+        // apex-agentd will do over the control socket. A future edit that gave
+        // brokered a weaker namespace would be a real downgrade, and it would
+        // be invisible in a test that only checked for `--unshare-net`.
+        let mut brokered = spec();
+        brokered.policy.sandbox = SandboxPolicy::Project;
+        brokered.policy.network = NetworkPolicy::Brokered;
+
+        let mut offline = spec();
+        offline.policy.sandbox = SandboxPolicy::Project;
+        offline.policy.network = NetworkPolicy::Offline;
+
+        assert_eq!(argv(&brokered), argv(&offline));
     }
 
     #[test]

@@ -65,8 +65,8 @@
 //!
 //! ## Fail closed on what is not built yet
 //!
-//! Six values in this vocabulary describe policy the runtime cannot enforce
-//! today: two network modes, both system-access modes, raw secret export and
+//! Five values in this vocabulary describe policy the runtime cannot enforce
+//! today: one network mode, both system-access modes, raw secret export and
 //! remote elevation. [`AgentPolicy::validate`] refuses each one and names the
 //! task that will implement it.
 //!
@@ -259,20 +259,37 @@ impl std::fmt::Display for SecretPolicy {
 /// Today they are entangled in one place only: `strict` forces this dimension
 /// to [`NetworkPolicy::Offline`], because that is what `strict` has always
 /// meant. See [`AgentPolicy::effective_network`].
+///
+/// Three of the four values are one kernel fact plus a different amount of
+/// plumbing back through the daemon. `--unshare-net` gives the session a
+/// namespace with nothing in it but loopback, and after that the only way out
+/// is a Unix socket the daemon holds the other end of — `AF_UNIX` is a
+/// filesystem object and a network namespace does not touch it. So the modes
+/// differ in what APEX offers on the far side of that socket, not in how much
+/// of the network the session is left holding:
+///
+/// | mode | IP egress | what reaches the network for it |
+/// |---|---|---|
+/// | `open` | everything | the session itself |
+/// | `allowlist` | none | agentd's egress proxy, for named destinations |
+/// | `brokered` | none | agentd's capability broker, for named operations |
+/// | `offline` | none | nothing is offered |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkPolicy {
     /// The default. The session shares the host's network namespace.
     #[default]
     Open,
-    /// Only the destinations a policy names. P0-008; refused until then.
+    /// Only the destinations a policy names, reached through the daemon's
+    /// egress proxy. Refused until that proxy exists, on the same grounds as
+    /// every other value with no enforcement point.
     Allowlist,
-    /// No direct egress; outbound work goes through an APEX broker that owns
-    /// the credential and the destination. P0-008; refused until then.
+    /// No direct egress; outbound work goes through the capability broker,
+    /// which owns the credential and the destination. `git push` already
+    /// works this way, and it is the mode a cloud provider's operations are
+    /// meant to be used from.
     Brokered,
-    /// No network at all. Enforced with `bwrap --unshare-net`, so it needs a
-    /// confined sandbox — an unconfined session has no namespace to unshare,
-    /// and asking for both is refused rather than silently granted.
+    /// No network at all, and nothing offered in its place.
     Offline,
 }
 
@@ -301,6 +318,27 @@ impl NetworkPolicy {
             "offline" | "none" | "off" => Some(NetworkPolicy::Offline),
             _ => None,
         }
+    }
+
+    /// Whether the session runs in its own network namespace.
+    ///
+    /// True for every mode except `open`, and it is the whole of the kernel
+    /// enforcement: three of the four modes take the same `--unshare-net` and
+    /// differ only in what the daemon offers over a Unix socket afterwards.
+    /// The sandbox reads this rather than matching on `Offline`, so a mode
+    /// added later cannot arrive with the namespace quietly left shared.
+    pub fn removes_direct_egress(&self) -> bool {
+        !matches!(self, NetworkPolicy::Open)
+    }
+
+    /// Whether this mode depends on the capability broker being reachable.
+    ///
+    /// Only `brokered` does. It is the mode's entire content: a session with
+    /// no direct egress whose outbound work is the broker's, so combining it
+    /// with `--secrets none` asks for egress through a door that was just
+    /// nailed shut. [`AgentPolicy::validate`] refuses that pair.
+    pub fn needs_broker(&self) -> bool {
+        matches!(self, NetworkPolicy::Brokered)
     }
 }
 
@@ -540,8 +578,13 @@ impl AgentPolicy {
         let network = self.effective_network();
         match network {
             NetworkPolicy::Open => {}
-            NetworkPolicy::Offline if self.sandbox.is_confined() => {}
+            // Both are `--unshare-net`, and an unconfined session has no
+            // namespace to unshare.
+            NetworkPolicy::Offline | NetworkPolicy::Brokered if self.sandbox.is_confined() => {}
             other => return Err(PolicyError::NetworkUnenforceable(other)),
+        }
+        if network.needs_broker() && !self.secrets.may_use_broker() {
+            return Err(PolicyError::BrokeredNetworkNeedsBroker);
         }
         if self.system != SystemAccess::None {
             return Err(PolicyError::SystemAccessUnavailable(self.system));
@@ -582,6 +625,8 @@ impl AgentPolicy {
 pub enum PolicyError {
     /// A network mode with no enforcement point in this build.
     NetworkUnenforceable(NetworkPolicy),
+    /// Brokered egress with the broker switched off.
+    BrokeredNetworkNeedsBroker,
     /// A system-access mode whose grant machinery does not exist.
     SystemAccessUnavailable(SystemAccess),
     /// Raw secret values in the session environment.
@@ -599,11 +644,23 @@ impl std::fmt::Display for PolicyError {
                  sandbox has one; use `--sandbox strict`, or `--sandbox project --network \
                  offline`"
             ),
+            PolicyError::NetworkUnenforceable(NetworkPolicy::Brokered) => write!(
+                f,
+                "brokered egress takes the session's network namespace away and hands the \
+                 outbound work to apex-agentd, and an unrestricted sandbox has no namespace \
+                 to take; use `--sandbox project --network brokered`"
+            ),
             PolicyError::NetworkUnenforceable(mode) => write!(
                 f,
                 "the {mode} network mode is not enforced by this build, and running with an \
                  open network instead would report a restriction that is not there; use \
-                 `--network open` or `--network offline`"
+                 `--network open`, `--network brokered` or `--network offline`"
+            ),
+            PolicyError::BrokeredNetworkNeedsBroker => write!(
+                f,
+                "`--network brokered` means the broker is the session's only way out, so it \
+                 cannot be combined with `--secrets none`, which is what shuts the broker; \
+                 use `--network offline` if a session with no way out is what you meant"
             ),
             PolicyError::SystemAccessUnavailable(mode) => write!(
                 f,
@@ -890,26 +947,87 @@ mod tests {
     }
 
     #[test]
-    fn an_offline_network_without_a_sandbox_to_enforce_it_is_refused() {
-        // There is no namespace to unshare, so the session would run with the
+    fn a_network_mode_without_a_sandbox_to_enforce_it_is_refused() {
+        // Every mode but `open` is `--unshare-net`, and an unrestricted
+        // session has no namespace to unshare — so it would run with the
         // network. Failing closed is the only answer that does not lie.
-        let p = AgentPolicy {
-            sandbox: SandboxPolicy::Unrestricted,
-            network: NetworkPolicy::Offline,
-            ..AgentPolicy::default()
-        };
-        assert_eq!(
-            p.validate(),
-            Err(PolicyError::NetworkUnenforceable(NetworkPolicy::Offline))
-        );
-        // The confined forms are accepted, both spellings of the same thing.
-        for sandbox in [SandboxPolicy::Project, SandboxPolicy::Strict] {
+        for network in [NetworkPolicy::Offline, NetworkPolicy::Brokered] {
             let p = AgentPolicy {
-                sandbox,
-                network: NetworkPolicy::Offline,
+                sandbox: SandboxPolicy::Unrestricted,
+                network,
                 ..AgentPolicy::default()
             };
-            assert_eq!(p.validate(), Ok(()), "{sandbox}");
+            assert_eq!(
+                p.validate(),
+                Err(PolicyError::NetworkUnenforceable(network)),
+                "{network}"
+            );
+            // The confined forms are accepted. For offline, both spellings of
+            // the same thing — `strict` normalises to it.
+            for sandbox in [SandboxPolicy::Project, SandboxPolicy::Strict] {
+                let p = AgentPolicy {
+                    sandbox,
+                    network,
+                    ..AgentPolicy::default()
+                };
+                assert_eq!(p.validate(), Ok(()), "{sandbox} {network}");
+            }
+        }
+    }
+
+    #[test]
+    fn brokered_egress_with_the_broker_shut_is_refused_rather_than_run() {
+        // The one interaction between the network and secret dimensions, and
+        // it is a refusal, not a derivation: `--network brokered --secrets
+        // none` is a session whose only route out has been nailed shut, and
+        // running it would be an offline session under another name reporting
+        // a capability it does not have.
+        let p = AgentPolicy {
+            sandbox: SandboxPolicy::Project,
+            network: NetworkPolicy::Brokered,
+            secrets: SecretPolicy::None,
+            ..AgentPolicy::default()
+        };
+        assert_eq!(p.validate(), Err(PolicyError::BrokeredNetworkNeedsBroker));
+        assert!(p.validate().unwrap_err().to_string().contains("--network offline"));
+
+        // And nothing else about the secret dimension is touched: brokered
+        // network with the default brokered secrets is the ordinary case.
+        let p = AgentPolicy {
+            secrets: SecretPolicy::Brokered,
+            ..p
+        };
+        assert_eq!(p.validate(), Ok(()));
+
+        // `--secrets none` on its own is still perfectly valid; it is only the
+        // pair that contradicts.
+        let p = AgentPolicy {
+            secrets: SecretPolicy::None,
+            network: NetworkPolicy::Offline,
+            ..p
+        };
+        assert_eq!(p.validate(), Ok(()));
+    }
+
+    #[test]
+    fn only_open_leaves_the_session_on_the_host_network() {
+        // The property the sandbox reads. A mode added without a decision
+        // about its namespace fails here rather than shipping with one.
+        assert!(!NetworkPolicy::Open.removes_direct_egress());
+        for network in NetworkPolicy::ALL {
+            assert_eq!(
+                network.removes_direct_egress(),
+                *network != NetworkPolicy::Open,
+                "{network}"
+            );
+        }
+        // And only one mode depends on the broker being reachable.
+        for network in NetworkPolicy::ALL {
+            assert_eq!(
+                network.needs_broker(),
+                *network == NetworkPolicy::Brokered,
+                "{network}"
+            );
         }
     }
 
@@ -919,10 +1037,6 @@ mod tests {
             (
                 AgentPolicy { network: NetworkPolicy::Allowlist, ..Default::default() },
                 PolicyError::NetworkUnenforceable(NetworkPolicy::Allowlist),
-            ),
-            (
-                AgentPolicy { network: NetworkPolicy::Brokered, ..Default::default() },
-                PolicyError::NetworkUnenforceable(NetworkPolicy::Brokered),
             ),
             (
                 AgentPolicy { system: SystemAccess::Session, ..Default::default() },
@@ -960,6 +1074,7 @@ mod tests {
             AgentPolicy { sandbox: SandboxPolicy::Strict, ..Default::default() },
             AgentPolicy { secrets: SecretPolicy::None, ..Default::default() },
             AgentPolicy { network: NetworkPolicy::Offline, ..Default::default() },
+            AgentPolicy { network: NetworkPolicy::Brokered, ..Default::default() },
         ] {
             assert_eq!(p.validate(), Ok(()), "{p:?}");
         }
