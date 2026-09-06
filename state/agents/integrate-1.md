@@ -5,9 +5,33 @@ worktree: /var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell
 branch: roadmap/v2.2
 
 ## NEXT
-apex-os round 6/10 (03e6ad2, `apex secret migrate`): resolve
-apexd/apex/src/secret.rs, then port apexd/apex/src/migrate.rs off the deleted
-`Capability` enum (it is the only file that imports it directly).
+apex-os is DONE and PUSHED. Start Job 2 (apex-shell): land
+origin/task/p0-018-display-finish on roadmap/v2.2 in /var/tmp/apex-work/int-shell.
+One conflicted file: src/services/config_tab/pages/DisplayPage.qml. Keep
+P0-023's staging layer (stage/unstage/revertStaged/applyStaged) on top of
+P0-018's _writeFiles/_genLua changes underneath, and no banned control label
+(Discard/Undo/Forget/Restore/Commit/Write).
+
+## APEX-OS RESULT
+- roadmap/v2.2: a141cee -> ba087f4 (10 commits), pushed with --force-with-lease.
+- cargo test: 1477 before -> 1512 after, 0 failed.
+- cargo clippy --locked --all-targets -- -D warnings: clean (run in
+  docker.io/library/rust:1.97 + `rustup component add clippy`; there is NO
+  clippy installed on L16's host toolchain -- /usr/bin/cargo is Fedora's
+  rustc 1.98 with no clippy component and no rustup).
+- tests/check-no-conflict-markers.sh: PASS at every round and at the tip.
+- No test lost from either side. Verified by name-set comparison:
+  * of the 27 tests P0-003 adds, 26 are present; the 27th
+    (`an_mcp_record_names_the_service_as_its_resource`) is the genuine
+    contradiction, see FOUND.
+  * of P1-001's 1252 test fns, all present; one renamed
+    (`the_shipped_registry_builds_and_offers_the_git_vocabulary` ->
+     `..._every_provider_s_vocabulary`, now asserting mcp.request too).
+- FLAKY, pre-existing, not caused by this landing:
+  `blueprint::tests::a_live_converger_cannot_be_built_while_the_guard_is_set`
+  failed once ("\"0\" is still set") and passed on re-run -- it mutates a
+  process-global env var while the rest of the `apex` bin tests run in
+  parallel.
 
 ## DONE
 - baseline verified on roadmap/v2.2 @ a141cee: cargo test = 1477 passed / 0 failed
@@ -73,8 +97,22 @@ provider, including the loopback bearer-token server and the SSE variant.
   `the_three_brokered_operations_are_recognised` caught that, which is the
   only actual regression this landing produced and it is fixed.
 
+- ROUND 6/10 committed 782e42a (1514). secret.rs -> roadmap's Use arm PLUS
+  P0-003's Migrate arm. migrate.rs ported off the `Capability` enum to
+  ("git.ls-remote","origin") / ("mcp.request","").
+- ROUND 7/10 committed ad1316b (1512). Honoured 4839e4f: the BROKERED store
+  guard became the const asserts at the top of secret.rs and its runtime test
+  was deleted; the roadmap's `GENERIC_CAPABILITY_VERSION == PROTOCOL_VERSION`
+  test was KEPT, because `==` is a claim about what a future edit must do,
+  not just a fact about two constants.
+- ROUND 8/10 committed 846fdf8. docs/agent-runtime.md -> P1-001's "Where a
+  provider plugs in" section AND P0-003's "MCP servers" + "Moving what a
+  machine already has" sections, all three present, respelled to `mcp.request`
+  and `git.ls-remote`. "What is not built" now says two providers.
+- ROUNDS 9-10 applied clean (0e066c7, ba087f4).
+
 ## IN PROGRESS
-- round 6/10 = 03e6ad2
+- apex-shell
 
 ## FOUND
 - THE HEADLINE: the task brief says the roadmap side is "P0-002's secretd
