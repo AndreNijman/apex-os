@@ -604,11 +604,19 @@ mod tests {
     /// looks like root. That keeps the test honest under `sudo cargo test` and
     /// inside a privileged container, where a uid comparison would be a guess.
     fn seal(dir: &Path, child: &Path) -> bool {
+        use std::io::ErrorKind;
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(dir).expect("stat").permissions();
         perms.set_mode(0o000);
         std::fs::set_permissions(dir, perms).expect("chmod");
-        matches!(std::fs::metadata(child), Err(e) if e.kind() != std::io::ErrorKind::NotFound)
+        // Require the exact error we are testing for. Accepting "any error
+        // other than NotFound" would let an unrelated failure count as a
+        // successful seal, and the assertion would then be about nothing.
+        match std::fs::metadata(child) {
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => true,
+            Ok(_) => false, // root, or CAP_DAC_OVERRIDE
+            Err(e) => panic!("expected PermissionDenied while sealing, got {e:?}"),
+        }
     }
 
     fn unseal(dir: &Path) {

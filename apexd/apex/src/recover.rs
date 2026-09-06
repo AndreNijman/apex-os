@@ -1869,7 +1869,13 @@ mod tests {
         std::fs::set_permissions(&pkg, perms).unwrap();
 
         let sys = Sys { fixture: Some(dir.clone()) };
-        let sealed = sys.read_result("/var/lib/apex/pkg/state.json").is_err();
+        // Require the exact error, so an unrelated failure cannot masquerade as
+        // a successful seal and leave the assertion asserting nothing.
+        let sealed = match sys.read_result("/var/lib/apex/pkg/state.json") {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => true,
+            Ok(_) => false, // root, or CAP_DAC_OVERRIDE
+            Err(e) => panic!("expected PermissionDenied while sealing, got {e:?}"),
+        };
         let row = package_row(&sys, "43");
 
         let mut perms = std::fs::metadata(&pkg).unwrap().permissions();
