@@ -1,0 +1,27 @@
+[Unit]
+Description=APEX default incoming firewall
+Documentation=man:nft(8)
+# Before the network is configured, so there is no window where an interface is
+# up and unfiltered. A firewall that loads after NetworkManager has finished is
+# a firewall with a gap at every boot.
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+# nftables ships its own unit. Running both would have two owners for one
+# ruleset, and whichever loaded last would win silently.
+Conflicts=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /usr/share/apex/nftables/apex.nft
+# Exceptions are applied after the policy, from /etc/apex/firewall.d, so a
+# malformed one fails here rather than taking the base policy down with it.
+ExecStart=-/usr/libexec/apex-firewall reload
+# Flushing on stop leaves the machine open, which is the wrong default for a
+# failure. `systemctl stop apex-firewall` is a deliberate act and says so.
+ExecStop=/usr/sbin/nft delete table inet apex
+
+[Install]
+WantedBy=multi-user.target

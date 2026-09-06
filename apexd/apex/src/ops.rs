@@ -345,6 +345,30 @@ pub const PLUGIN_ENGINE: &str = "/usr/libexec/apex-plugin";
 /// Shell reads. A root `apex plugin disable` would move a plugin belonging to
 /// root and leave the user's alone, which is a command that reports success
 /// and changes nothing the user can see.
+/// The firewall helper behind `apex firewall`.
+///
+/// Same shape as [`PKG_ENGINE`] and [`PLUGIN_ENGINE`], and for the same reason:
+/// a caller-controlled variable naming a program that runs under sudo is a hole
+/// whatever the program does. The default-drop policy itself is a shipped
+/// nftables file this helper does not edit — it manages the exception list in
+/// front of it, so a malformed exception cannot take the base policy with it.
+pub const FIREWALL_ENGINE: &str = "/usr/libexec/apex-firewall";
+
+/// `apex firewall …`.
+pub fn firewall(args: &[String]) -> i32 {
+    match Command::new(FIREWALL_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the firewall helper: {e}");
+            eprintln!(
+                "apex: no firewall helper on this system — it predates `apex firewall`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
 pub fn plugin(args: &[String]) -> i32 {
     match Command::new(PLUGIN_ENGINE).args(args).status() {
         Ok(status) => status.code().unwrap_or(-1),
