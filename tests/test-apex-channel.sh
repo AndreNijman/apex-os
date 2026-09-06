@@ -160,21 +160,52 @@ export XDG_STATE_HOME="$TMP/state"
 mkdir -p "$XDG_CONFIG_HOME/apex" "$XDG_STATE_HOME"
 
 # A fixture machine: the ostree= symlink chain `apex trust` and `apex channel`
-# both read, with a chosen tag in the deployment origin.
+# both read, with a chosen tag in the deployment origin. $3, when given, is the
+# booted digest a pre-rendered `rpm-ostree status --json` reports.
 fixture() {
-    local root="$TMP/$1" tag="$2"
+    local root="$TMP/$1" tag="$2" digest="${3:-}"
     local csum=f3f505fc39fb268c59f4458365c96b764a7bd7d30f2f51e98bb6a009666b7852
     local bootcsum=1d98b51dd76621b656c50e4f22dc7e5eade9b0f869443a3efa90eee08eb9373e
     rm -rf "$root"
     mkdir -p "$root/proc" "$root/etc/containers" \
              "$root/ostree/boot.0/default/$bootcsum" \
-             "$root/ostree/deploy/default/deploy/$csum.0"
+             "$root/ostree/deploy/default/deploy/$csum.0" \
+             "$root/var/lib/apex/channel"
     printf 'root=UUID=x rw ostree=/ostree/boot.0/default/%s/0\n' "$bootcsum" > "$root/proc/cmdline"
     ln -sfn "../../../deploy/default/deploy/$csum.0" "$root/ostree/boot.0/default/$bootcsum/0"
     printf '[origin]\ncontainer-image-reference=ostree-unverified-registry:%s\n' "$tag" \
         > "$root/ostree/deploy/default/deploy/$csum.0.origin"
     printf '{"default":[{"type":"insecureAcceptAnything"}]}\n' > "$root/etc/containers/policy.json"
+    if [[ -n "$digest" ]]; then
+        # What `rpm-ostree status --json` would say. Under a fixture root the
+        # binary reads this instead of spawning, which is the only reason the
+        # rollout stop is reachable from a test at all.
+        printf '{"deployments":[{"booted":true,"base-commit-meta":{"ostree.manifest-digest":"%s"}}]}\n' \
+            "$digest" > "$root/rpm-ostree-status.json"
+    fi
     printf '%s' "$root"
+}
+
+# The health verdict, driven through `systemctl --failed` — the one signal
+# every boot path has, and the only one a fixture can set without rebuilding
+# the whole recovery surface. The `apex recover status` rows are covered by
+# apexd-core's own `verdict` tests, which feed each Health state directly.
+break_unit()  { printf 'apex-shell.service loaded failed failed APEX Shell\n' > "$1/systemctl-failed"; }
+repair_unit() { rm -f "$1/systemctl-failed"; }
+
+record() {
+    printf '{"schema":1,"from_digest":"%s","tag":"edge","at":1788700000}\n' "$2" \
+        > "$1/var/lib/apex/channel/last-update.json"
+}
+
+held() { # held <trust-root> -> true / false / error:...
+    APEX_TRUST_ROOT="$1" "$APEX" channel status --json \
+        > "$TMP/held.json" 2>"$TMP/held.err" || true
+    python3 -c 'import json,sys
+try:
+    print(str(json.load(open(sys.argv[1]))["held"]).lower())
+except Exception as e:
+    print("error:%s" % e)' "$TMP/held.json"
 }
 
 run() { APEX_TRUST_ROOT="$1" "$APEX" "${@:2}" > "$TMP/out" 2> "$TMP/err"; echo $?; }
@@ -245,6 +276,79 @@ rc="$(run "$R" channel set nightly)"
 for c in stable candidate beta edge; do
     has "$c" "$TMP/err" "the refusal names $c"
 done
+
+sec "the rollout stop fires, and only when it should"
+# The assertion §26's second criterion rests on. Three mutation tests covered
+# the channel model, the health verdict and the CI promotion, and not one of
+# them covered the thing that actually stops a rollout: the stop was
+# unreachable from a fixture until the record, the booted digest and the failed
+# unit list all went through one. A gate nobody has watched fire is a gate
+# nobody has tested.
+OLD=sha256:5e206de5e00094276d73ef8ba85491b82573bd32e3e99a99597ee1266f81e677
+NEW=sha256:308127d9cefeada90414ae37bdc8175d011c1f851ea9dde1661279a5da5bd89b
+
+# 1. Rebooted into something new, and a unit that failed. This is the hold.
+R="$(fixture stop 'ghcr.io/andrenijman/apex-os:edge' "$NEW")"
+record "$R" "$OLD"
+break_unit "$R"
+case "$(held "$R")" in
+    true)  ok "a machine that rebooted into a new image with a failed unit is held" ;;
+    false) bad "the rollout stop did not fire on a regression" ;;
+    *)     bad "apex channel status --json did not answer: $(cat "$TMP/held.err")" ;;
+esac
+APEX_TRUST_ROOT="$R" "$APEX" channel status > "$TMP/out" 2>&1 || true
+has 'The next `apex update` is held' "$TMP/out" "the human readout says the next update is held"
+has 'apex-shell.service' "$TMP/out" "and names the unit"
+
+# 2. Same machine, same record, nothing failed. Nothing to hold.
+repair_unit "$R"
+case "$(held "$R")" in
+    false) ok "a healthy machine is not held" ;;
+    true)  bad "a healthy machine was held — every update would be refused" ;;
+    *)     bad "apex channel status --json did not answer: $(cat "$TMP/held.err")" ;;
+esac
+
+# 3. Broken, but it has NOT rebooted into the update: the record's digest is
+#    what it is running. Nothing about the new image has been observed, so
+#    holding would blame an update that never took effect.
+R2="$(fixture notyet 'ghcr.io/andrenijman/apex-os:edge' "$OLD")"
+record "$R2" "$OLD"
+break_unit "$R2"
+case "$(held "$R2")" in
+    false) ok "a machine that has not rebooted into the update is not held" ;;
+    true)  bad "held on an update that was never booted" ;;
+    *)     bad "apex channel status --json did not answer: $(cat "$TMP/held.err")" ;;
+esac
+
+# 4. No record at all — a machine that has never run `apex update`.
+R3="$(fixture norecord 'ghcr.io/andrenijman/apex-os:edge' "$NEW")"
+break_unit "$R3"
+case "$(held "$R3")" in
+    false) ok "a machine with no update record is never held" ;;
+    true)  bad "held a machine that has never updated" ;;
+    *)     bad "apex channel status --json did not answer: $(cat "$TMP/held.err")" ;;
+esac
+
+# 5. The record is there, the unit failed, and the digest cannot be read. Every
+#    uncertainty in this gate must permit: refusing somebody's update because a
+#    file was unreadable strands them on the release that broke them.
+R4="$(fixture nodigest 'ghcr.io/andrenijman/apex-os:edge')"
+record "$R4" "$OLD"
+break_unit "$R4"
+case "$(held "$R4")" in
+    false) ok "a digest that could not be read permits the update" ;;
+    true)  bad "held on a digest nobody could read" ;;
+    *)     bad "apex channel status --json did not answer: $(cat "$TMP/held.err")" ;;
+esac
+
+sec "the hold claims only what it measured"
+# The record can be months old with an unrelated unit having failed yesterday.
+# "This machine came back from its last update with a problem" asserts a cause
+# nothing here established, on the one screen somebody reads while their
+# machine is misbehaving.
+break_unit "$R"
+APEX_TRUST_ROOT="$R" "$APEX" channel status --json > "$TMP/out" 2>&1 || true
+hasnt 'came back from its last update' "$TMP/out" "the JSON does not assert the update caused it"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]] || exit 1

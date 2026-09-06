@@ -33,7 +33,7 @@
 //! is how one bad release becomes two, and the user is at the keyboard of the
 //! machine that would do it.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use apexd_core::channel::{
@@ -46,7 +46,22 @@ use serde_json::{json, Value};
 ///
 /// Under `/var/lib/apex`, root-written and world-readable, because `apex update`
 /// runs as root and `apex channel status` must not need to.
+///
+/// Resolved through `trust::Roots`, so the whole stop — record, digest,
+/// verdict, refusal — is reachable from a fixture tree. It was not, and the
+/// consequence was precise: three mutation tests covered the channel model, the
+/// health verdict and the CI promotion, and none of them covered the thing that
+/// actually stops a rollout. A gate nobody has watched fire is a gate nobody
+/// has tested.
 const RECORD: &str = "/var/lib/apex/channel/last-update.json";
+
+fn roots() -> crate::trust::Roots {
+    crate::trust::Roots::from_env()
+}
+
+fn record_path() -> PathBuf {
+    roots().path(RECORD)
+}
 
 /// The user's channel preferences, including the telemetry opt-in.
 fn config_path() -> PathBuf {
@@ -154,7 +169,31 @@ fn machine_bucket() -> Result<u8, String> {
 /// update, and inventing a failure out of a systemctl that would not run is the
 /// direction that strands somebody on the release that broke them. The reason
 /// is surfaced by the caller instead.
+///
+/// Under a fixture root it reads a pre-rendered `systemctl-failed` — one unit
+/// per line — rather than spawning, the same shape `apex boot status` uses for
+/// `bootctl list`. This is the signal that works on every boot path, so it is
+/// the one the rollout stop is driven by in the suite; a gate that could not be
+/// pushed into refusing has not been shown to refuse.
 fn failed_units() -> (Vec<String>, Option<String>) {
+    let r = roots();
+    if r.fixture.is_some() {
+        let p = r.path("/systemctl-failed");
+        return match std::fs::read_to_string(&p) {
+            Ok(text) => (
+                text.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                None,
+            ),
+            // No file is no failed units, which is what a healthy machine
+            // looks like. Any other error is a read that did not happen.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), None),
+            Err(e) => (Vec::new(), Some(format!("{}: {e}", p.display()))),
+        };
+    }
     let out = match Command::new("/usr/bin/systemctl")
         .args(["--failed", "--no-legend", "--plain", "--no-pager"])
         .output()
@@ -184,7 +223,7 @@ fn health() -> (Verdict, Option<String>) {
 // ── the record `apex update` leaves ──────────────────────────────────────────
 
 fn read_record() -> Option<LastUpdate> {
-    let text = std::fs::read_to_string(RECORD).ok()?;
+    let text = std::fs::read_to_string(record_path()).ok()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -195,7 +234,7 @@ fn read_record() -> Option<LastUpdate> {
 /// health gate, and refusing to update because a note could not be written
 /// would be worse than the thing the note is for.
 pub fn record_update(tag: &str) {
-    let digest = match crate::trust::booted_digest() {
+    let digest = match crate::trust::booted_digest(&roots()) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("apex: the update health gate is not armed: {e}");
@@ -211,7 +250,7 @@ pub fn record_update(tag: &str) {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     };
-    let path = Path::new(RECORD);
+    let path = record_path();
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
             eprintln!("apex: the update health gate is not armed: {}: {e}", dir.display());
@@ -220,8 +259,8 @@ pub fn record_update(tag: &str) {
     }
     match serde_json::to_string_pretty(&record) {
         Ok(text) => {
-            if let Err(e) = std::fs::write(path, text + "\n") {
-                eprintln!("apex: the update health gate is not armed: {RECORD}: {e}");
+            if let Err(e) = std::fs::write(&path, text + "\n") {
+                eprintln!("apex: the update health gate is not armed: {}: {e}", path.display());
             }
         }
         Err(e) => eprintln!("apex: the update health gate is not armed: {e}"),
@@ -239,7 +278,7 @@ pub fn record_update(tag: &str) {
 /// problem was an unreadable file.
 pub fn halt_reason() -> Option<String> {
     let record = read_record()?;
-    let booted = crate::trust::booted_digest().ok()?;
+    let booted = crate::trust::booted_digest(&roots()).ok()?;
     if !channel::rebooted_into_new(&record, &booted) {
         // Still running what we were before the last update: either it has not
         // been rebooted into yet, or it failed. Neither is evidence about the
@@ -250,17 +289,23 @@ pub fn halt_reason() -> Option<String> {
     if verdict.healthy {
         return None;
     }
+    // Worded to claim only what is measured. The machine HAS a regression and
+    // HAS not been updated since the recorded run — it does not follow that
+    // the update caused it, and the record can be months old with an unrelated
+    // unit having failed yesterday. Saying "the update broke this" in that
+    // case would be a confident wrong diagnosis on the one screen somebody
+    // reads while their machine is misbehaving.
     let mut s = String::from(
-        "apex: this machine came back from its last update with a problem, so \
-         the next one is being held.\n",
+        "apex: this machine has a problem an update could have caused, so the next \
+         update is being held.\n",
     );
     for r in &verdict.reasons {
         s.push_str(&format!("  {r}\n"));
     }
     s.push_str(&format!(
-        "\nThe update staged on {} took it from {}.\n\
-         Go back with `sudo apex rollback`, then reboot.\n\
-         Take it anyway with `sudo apex update --force`.\n",
+        "\nIt has not been updated since {}, when it was running {}.\n\
+         If that update caused this, `sudo apex rollback` and reboot undoes it.\n\
+         If it did not, `sudo apex update --force` takes the update anyway.\n",
         stamp(record.at),
         short(&record.from_digest),
     ));
@@ -341,7 +386,7 @@ fn payload(t: &Tracking, digest: Option<&str>, v: &Verdict) -> Value {
 
 fn status(as_json: bool) -> i32 {
     let t = tracking();
-    let digest = crate::trust::booted_digest().ok();
+    let digest = crate::trust::booted_digest(&roots()).ok();
     let (verdict, systemctl_error) = health();
     let bucket = machine_bucket();
     let record = read_record();
@@ -550,7 +595,7 @@ fn report(as_json: bool) -> i32 {
             return 1;
         }
     };
-    let digest = crate::trust::booted_digest().ok();
+    let digest = crate::trust::booted_digest(&roots()).ok();
     let (verdict, _) = health();
     let body = payload(&t, digest.as_deref(), &verdict);
     let c = consent();
@@ -676,6 +721,18 @@ mod tests {
         // as the user and reads it. Under the user's home it would be invisible
         // to root's update, and under /root it would be invisible to status.
         assert!(RECORD.starts_with("/var/lib/apex/"));
+        // And it goes through a fixture root, or the rollout stop is
+        // untestable. Built directly rather than through the environment:
+        // `cargo test` runs these in threads of one process, and
+        // `blueprint.rs` already documents that it is the only test allowed to
+        // mutate the environment. Adding a second one made an unrelated
+        // blueprint assertion fail intermittently — two threads writing
+        // `environ` is a data race, and the symptom lands somewhere else.
+        let roots = crate::trust::Roots { fixture: Some(PathBuf::from("/tmp/apex-fixture")) };
+        assert_eq!(
+            roots.path(RECORD),
+            PathBuf::from("/tmp/apex-fixture/var/lib/apex/channel/last-update.json")
+        );
         assert!(!RECORD.contains("/root/"));
     }
 
