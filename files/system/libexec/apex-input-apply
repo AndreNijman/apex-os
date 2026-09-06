@@ -241,31 +241,72 @@ def _hypr_name(name):
     return name.lower().replace(" ", "-")
 
 
+# Which list in `hyprctl devices` holds a device of each kind. A touchpad and a
+# trackpoint are both mice to Hyprland; a touchscreen is `touch`.
+HYPRCTL_GROUP = {
+    "touchpad": "mice", "trackpoint": "mice", "mouse": "mice",
+    "keyboard": "keyboards", "tablet": "tablets", "touchscreen": "touch",
+}
+
+
 def _hyprctl_names():
-    """Every device name the running Hyprland will match hl.device against.
+    """Device names the running Hyprland matches hl.device against, per group.
 
     Worth asking rather than deriving: Hyprland appends -1, -2 … to break ties
     between devices whose derived names collide, and which suffix a device gets
     depends on what else is plugged in. On this laptop a "Logitech G305" is both
-    a keyboard and a mouse, and the mouse is logitech-g305-1.
+    a keyboard and a mouse; the keyboard is logitech-g305 and the mouse is
+    logitech-g305-1.
 
-    Returns None — not an empty set — when there is no Hyprland to ask, so the
-    caller can tell "no devices" from "did not look".
+    Which is also why the answer is per group rather than one flat set. Matching
+    the mouse against every name Hyprland knows finds the KEYBOARD's, and the
+    generated hl.device block then names a keyboard and sets a mouse option on
+    it — the setting applies to nothing, silently, on exactly the hardware the
+    suffix exists for.
+
+    Returns None — not an empty mapping — when there is no Hyprland to ask, so
+    the caller can tell "no devices" from "did not look".
     """
     if not which("hyprctl") or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         return None
     try:
         out = subprocess.run(["hyprctl", "-j", "devices"],
                              capture_output=True, text=True, timeout=10)
-        data = json.loads(out.stdout)
+        return hyprctl_groups(json.loads(out.stdout))
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
         return None
-    names = []
+
+
+def hyprctl_groups(data):
+    """`hyprctl -j devices` as {group: [name, …]}."""
+    groups = {}
     for group in ("mice", "keyboards", "tablets", "touch", "switches"):
-        for entry in data.get(group) or []:
-            if isinstance(entry, dict) and entry.get("name"):
-                names.append(entry["name"])
-    return names
+        groups[group] = [e["name"] for e in (data.get(group) or [])
+                         if isinstance(e, dict) and e.get("name")]
+    return groups
+
+
+def resolve_hypr_names(devices, groups):
+    """Give each device the name Hyprland knows it by. Pure, so it can be tested.
+
+    `groups` is what hyprctl_groups returned, or None when Hyprland was not
+    asked; in that case every device keeps the plain derivation.
+    """
+    taken = set()
+    for dev in devices:
+        derived = _hypr_name(dev["name"])
+        dev["hypr_name"], dev["hypr_name_source"] = derived, "derived"
+        if groups is None:
+            continue
+        # Only the list for this kind of device, and never a name another
+        # device of the same kind already claimed.
+        candidates = groups.get(HYPRCTL_GROUP.get(dev["type"], ""), [])
+        for cand in [derived] + [f"{derived}-{i}" for i in range(1, 10)]:
+            if cand in candidates and cand not in taken:
+                dev["hypr_name"], dev["hypr_name_source"] = cand, "compositor"
+                taken.add(cand)
+                break
+    return devices
 
 
 def enumerate_devices():
@@ -294,8 +335,6 @@ def enumerate_devices():
     except OSError as e:
         return [], [f"cannot list input devices ({e}); no per-device settings"]
 
-    hypr_names = _hyprctl_names()
-    taken = set()
     for node in nodes:
         if not re.fullmatch(r"event\d+", node):
             continue
@@ -318,20 +357,9 @@ def enumerate_devices():
                 kind = typed
                 break
 
-        derived = _hypr_name(name)
-        resolved, how = derived, "derived"
-        if hypr_names is not None:
-            # Exact name first, then the tie-break suffixes, and never a name
-            # another device already claimed.
-            for cand in [derived] + [f"{derived}-{i}" for i in range(1, 10)]:
-                if cand in hypr_names and cand not in taken:
-                    resolved, how = cand, "compositor"
-                    break
-        taken.add(resolved)
-        devices.append({
-            "name": name, "type": kind, "event": node,
-            "hypr_name": resolved, "hypr_name_source": how,
-        })
+        devices.append({"name": name, "type": kind, "event": node})
+
+    resolve_hypr_names(devices, _hyprctl_names())
 
     # Whether the Hyprland name was asked for or derived is recorded per device
     # in hypr_name_source, not raised as a note: it is a property of the answer,
@@ -1218,76 +1246,190 @@ def read_back_hyprland():
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
             notes.append(f"{control}: Hyprland did not answer for {path}")
             continue
-        value = _from_hypr(control, answer)
-        if value is None:
-            continue
-        values[control] = {"value": value, "source": "compositor", "path": path}
+        # `set` is Hyprland's own word for "the config told me this". An option
+        # nothing has set reads back as [[EMPTY]], and the value in effect is
+        # then Hyprland's built-in default, which this cannot name. Reporting
+        # null with set=false says that; dropping the control would leave the
+        # page with nothing to show and no reason why.
+        values[control] = {"value": _from_hypr(control, answer),
+                           "set": bool(answer.get("set")),
+                           "source": "compositor", "path": path}
     return values, notes
 
 
-NIRI_READ = {
-    "touchpad.tap":                  (r"^\s+tap$", lambda m: True),
-    "touchpad.natural_scroll":       (r"^\s+natural-scroll$", lambda m: True),
-    "touchpad.disable_while_typing": (r"^\s+dwt$", lambda m: True),
-    "touchpad.drag_lock":            (r"^\s+drag-lock$", lambda m: True),
-    "touchpad.tap_and_drag":         (r"^\s+drag (true|false)$",
-                                      lambda m: m.group(1) == "true"),
-    "touchpad.speed":                (r"^\s+accel-speed (\S+)$", lambda m: float(m.group(1))),
-    "touchpad.accel_profile":        (r'^\s+accel-profile "(\w+)"$', lambda m: m.group(1)),
-    "touchpad.scroll_factor":        (r"^\s+scroll-factor (\S+)$", lambda m: float(m.group(1))),
+# The bare flags are the awkward half: niri says a boolean is false by leaving
+# the line out, so absence is a real answer — but only once the block has been
+# read. An unreadable file must yield NO answer rather than false for every
+# control, or a session where the file has never been written reports the whole
+# page as diverged from settings nobody has touched.
+NIRI_FLAGS = {
+    "touchpad": {"tap": "tap", "natural_scroll": "natural-scroll",
+                 "disable_while_typing": "dwt", "drag_lock": "drag-lock",
+                 "middle_emulation": "middle-emulation", "left_handed": "left-handed"},
+    "pointer":  {"natural_scroll": "natural-scroll",
+                 "middle_emulation": "middle-emulation", "left_handed": "left-handed"},
 }
+NIRI_VALUES = {
+    "touchpad": {
+        "tap_and_drag":   (r"^\s+drag (true|false)$", lambda m: m.group(1) == "true"),
+        "speed":          (r"^\s+accel-speed (\S+)$", lambda m: float(m.group(1))),
+        "accel_profile":  (r'^\s+accel-profile "(\w+)"$', lambda m: m.group(1)),
+        "scroll_factor":  (r"^\s+scroll-factor (\S+)$", lambda m: float(m.group(1))),
+        "scroll_method":  (r'^\s+scroll-method "([\w-]+)"$',
+                           lambda m: {v: k for k, v in NIRI_SCROLL_METHODS.items()}[m.group(1)]),
+        "click_method":   (r'^\s+click-method "([\w-]+)"$',
+                           lambda m: {v: k for k, v in NIRI_CLICK_METHODS.items()}[m.group(1)]),
+        "tap_button_map": (r'^\s+tap-button-map "([\w-]+)"$',
+                           lambda m: {v: k for k, v in NIRI_TAP_BUTTON_MAPS.items()}[m.group(1)]),
+    },
+    "pointer": {
+        "speed":         (r"^\s+accel-speed (\S+)$", lambda m: float(m.group(1))),
+        "accel_profile": (r'^\s+accel-profile "(\w+)"$', lambda m: m.group(1)),
+        "scroll_factor": (r"^\s+scroll-factor (\S+)$", lambda m: float(m.group(1))),
+    },
+    "keyboard": {
+        "repeat_rate":  (r"^\s+repeat-rate (\d+)$", lambda m: int(m.group(1))),
+        "repeat_delay": (r"^\s+repeat-delay (\d+)$", lambda m: int(m.group(1))),
+    },
+}
+NIRI_BLOCK = {"touchpad": "touchpad", "pointer": "mouse", "keyboard": "keyboard"}
+
+# The five Hyprland can only express per device, and so cannot be asked about:
+# `hyprctl getoption` has no path for a device field. Read from the module the
+# compositor loaded instead, and labelled `file` so the page does not claim a
+# device query it did not make.
+HYPR_DEVICE_READ = {
+    "touchpad.speed":            (r"^    sensitivity = (\S+),$", float),
+    "touchpad.accel_profile":    (r'^    accel_profile = "(\w+)",$', str),
+    "touchpad.left_handed":      (r"^    left_handed = (true|false),$",
+                                  lambda s: s == "true"),
+    "touchpad.scroll_method":    (r'^    scroll_method = "(\w+)",$',
+                                  lambda s: {v: k for k, v in HYPR_SCROLL_METHODS.items()}[s]),
+    "pointer.middle_emulation":  (r"^    middle_button_emulation = (true|false),$",
+                                  lambda s: s == "true"),
+}
+
+
+def _read_hypr_device_block(values, devices):
+    """The routed per-device settings, read out of the Lua module on disk."""
+    try:
+        with open(HYPR_OUT, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return
+    wanted = {"touchpad": [d for d in devices if d["type"] == "touchpad"],
+              "pointer": [d for d in devices if d["type"] in ("mouse", "trackpoint")]}
+    for control, (pattern, cast) in HYPR_DEVICE_READ.items():
+        section = control.split(".", 1)[0]
+        if not wanted[section]:
+            continue
+        name = wanted[section][0]["hypr_name"]
+        block = re.search(rf'^hl\.device\(\{{\n    name = "{re.escape(name)}",\n'
+                          r"(.*?)^\}\)$", text, re.M | re.S)
+        if block is None:
+            continue
+        found = re.search(pattern, block.group(1), re.M)
+        if found:
+            values[control] = {"value": cast(found.group(1)), "source": "file",
+                               "path": HYPR_OUT, "device": name}
+
+
+def _read_niri(values, notes):
+    try:
+        with open(NIRI_OUT, encoding="utf-8") as fh:
+            whole = fh.read()
+    except OSError as e:
+        notes.append(f"cannot read {NIRI_OUT}: {e}; nothing was read back")
+        return
+    for section, block_name in NIRI_BLOCK.items():
+        # Per block, because every block uses the same option names and a
+        # whole-file regex cannot tell a mouse's accel-speed from a touchpad's.
+        block = re.search(rf"^ *{block_name} \{{$(.*?)^    \}}$", whole, re.M | re.S)
+        if block is None:
+            continue
+        body = block.group(1)
+        for key, flag in NIRI_FLAGS.get(section, {}).items():
+            values[f"{section}.{key}"] = {
+                "value": re.search(rf"^\s+{flag}$", body, re.M) is not None,
+                "source": "file", "path": NIRI_OUT}
+        for key, (pattern, cast) in NIRI_VALUES.get(section, {}).items():
+            found = re.search(pattern, body, re.M)
+            if found:
+                values[f"{section}.{key}"] = {"value": cast(found), "source": "file",
+                                              "path": NIRI_OUT}
+
+
+def _read_labwc(values, notes):
+    try:
+        with open(LABWC_RC, encoding="utf-8") as fh:
+            text = fh.read()
+        root = ET.fromstring(text)
+    except (OSError, ET.ParseError) as e:
+        notes.append(f"cannot read {LABWC_RC}: {e}; nothing was read back")
+        return
+    tag_to_key = {v: k for k, v in LABWC_DEVICE_KEY.items()}
+    numeric = {"speed", "scroll_factor"}
+    for dev in root.iter("device"):
+        section = {"touchpad": "touchpad", "default": "pointer"}.get(
+            dev.get("category", ""))
+        if section is None:
+            continue
+        for child in dev:
+            key = tag_to_key.get(child.tag)
+            if key is None or child.text is None:
+                continue
+            control = f"{section}.{key}"
+            raw = child.text.strip()
+            if control in BOOL_CONTROLS:
+                value = raw in ("yes", "true")
+            elif key in numeric:
+                try:
+                    value = float(raw)
+                except ValueError:
+                    continue
+            else:
+                value = raw
+            values[control] = {"value": value, "source": "file", "path": LABWC_RC}
+        # threeFingerDrag is written only when it is on, so its absence is the
+        # answer "off" rather than "unknown" — and without this the one labwc
+        # control that can be off by omission has no read-back at all.
+        if section == "touchpad" and dev.find("threeFingerDrag") is None:
+            values["touchpad.three_finger_drag"] = {
+                "value": False, "source": "file", "path": LABWC_RC}
+    # Keyboard repeat is not in <libinput> and would otherwise be the one pair
+    # of controls with no read-back at all on labwc.
+    kb = root.find("keyboard")
+    if kb is not None:
+        for tag, key, cast in (("repeatRate", "repeat_rate", int),
+                               ("repeatDelay", "repeat_delay", int)):
+            child = kb.find(tag)
+            if child is not None and child.text:
+                values[f"keyboard.{key}"] = {"value": cast(child.text.strip()),
+                                             "source": "file", "path": LABWC_RC}
 
 
 def read_back(model_path):
     """What is actually in effect, per control, and where the answer came from."""
     comp = running_compositor()
+    values, notes = {}, []
     if comp == "hyprland":
         values, notes = read_back_hyprland()
+        devices, _ = enumerate_devices()
+        _read_hypr_device_block(values, devices)
+        notes.append("pointer speed, acceleration, left-handed and scroll "
+                     "method for the touchpad have no Hyprland query, so those "
+                     "are read from the module Hyprland loads")
     elif comp == "niri":
-        # Only the touchpad block, because both blocks use the same option
-        # names and a whole-file regex cannot tell a mouse's from a touchpad's.
-        values, notes = {}, []
-        try:
-            with open(NIRI_OUT, encoding="utf-8") as fh:
-                whole = fh.read()
-            block = re.search(r"^    touchpad \{$(.*?)^    \}$", whole, re.M | re.S)
-            body = block.group(1) if block else ""
-        except OSError as e:
-            body, notes = "", [f"cannot read {NIRI_OUT}: {e}"]
-        for control, (pattern, cast) in NIRI_READ.items():
-            found = re.search(pattern, body, re.M)
-            values[control] = {"value": cast(found) if found else False,
-                               "source": "file", "path": NIRI_OUT}
+        _read_niri(values, notes)
         notes.append("niri has no input query in `niri msg`, so these are read "
                      "from the file niri loads rather than from the compositor")
     elif comp == "labwc":
-        values, notes = {}, ["labwc has no IPC, so these are read from rc.xml "
-                             "rather than from the compositor"]
-        try:
-            with open(LABWC_RC, encoding="utf-8") as fh:
-                root = ET.fromstring(fh.read())
-        except (OSError, ET.ParseError) as e:
-            notes.append(f"cannot read {LABWC_RC}: {e}")
-            root = None
-        if root is not None:
-            for dev in root.iter("device"):
-                section = {"touchpad": "touchpad", "default": "pointer"}.get(
-                    dev.get("category", ""))
-                if section is None:
-                    continue
-                for tag, key in ((v, k) for k, v in LABWC_DEVICE_KEY.items()):
-                    child = dev.find(tag)
-                    if child is None or child.text is None:
-                        continue
-                    control = f"{section}.{key}"
-                    raw = child.text.strip()
-                    value = (raw in ("yes", "true") if control in BOOL_CONTROLS
-                             else raw)
-                    values[control] = {"value": value, "source": "file",
-                                       "path": LABWC_RC}
+        _read_labwc(values, notes)
+        notes.append("labwc has no IPC, so these are read from rc.xml rather "
+                     "than from the compositor")
     else:
-        values, notes = {}, ["no supported compositor is running, so nothing "
-                             "could be read back"]
+        notes.append("no supported compositor is running, so nothing could be "
+                     "read back")
 
     model, model_notes = load_model(model_path)
     wanted = {f"{s}.{k}": v for s in ("touchpad", "pointer", "keyboard")
@@ -1296,7 +1438,9 @@ def read_back(model_path):
     diverged = []
     for control, want in wanted.items():
         seen = values.get(control)
-        if seen is None:
+        # A null is "the compositor was never told", which is a state to show,
+        # not a mismatch to shout about.
+        if seen is None or seen["value"] is None:
             continue
         cap = caps["controls"].get(control, {}).get(comp or "", {})
         if not cap.get("supported", True):
