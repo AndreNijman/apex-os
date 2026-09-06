@@ -325,6 +325,15 @@ settles it.
 Fixed in the shipped skill too (`~/.claude/skills/resume-guard/`), because the
 same wrong check would have misled every project that installed it.
 
+Fixing it introduced a second bug of the classic shape: the script's argument
+list changed and its caller did not, so `resume.sh` passed a repository path
+where an integration ref belonged. It did not crash. It printed a blank tip and
+**"nothing — every task branch's content is on the integration tip"** for a
+repository it had never looked at, which is the most dangerous sentence a status
+page can contain. The script now refuses a bad invocation by name, and
+`resume.sh` prints a warning where the section would have been rather than
+letting a missing section read as a clean one.
+
 The run was not wasted. Inverting the question — *did the last 82 commits break
 any of that August work?* — found a defect nobody was looking for: Caffeine
 gated the logind idle inhibitor on `Compositor.isLabwc`, on the belief that the

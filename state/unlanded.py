@@ -54,6 +54,20 @@ def squashed_at(repo, branch, integration):
     return None
 
 def main(integration, repos):
+    # A report that degrades quietly is worse than one that fails. This script's
+    # signature changed once and its caller did not; the result printed a blank
+    # tip and "nothing unlanded" for a repository it had never looked at, which
+    # is the most dangerous thing a status page can say. So: refuse.
+    if not repos:
+        sys.exit("unlanded.py: usage: unlanded.py <integration-ref> <repo> [<repo>...]")
+    for repo in repos:
+        if not os.path.isdir(os.path.join(repo, '.git')) and not os.path.exists(os.path.join(repo, '.git')):
+            sys.exit(f"unlanded.py: {repo} is not a git worktree "
+                     f"(is the first argument the integration ref, not a repo?)")
+        if subprocess.run(['git', '-C', repo, 'rev-parse', '--verify', '--quiet', integration],
+                          capture_output=True).returncode != 0:
+            sys.exit(f"unlanded.py: {integration!r} does not resolve in {repo}")
+
     for repo in repos:
         name = os.path.basename(repo)
         tip = sh('git', '-C', repo, 'log', '--oneline', '-1', integration).strip()

@@ -120,7 +120,11 @@ PY
 # during the rebase also reads as unlanded — that fired twice on 2026-09-06.
 # The check that settles it is a two-dot diff scoped to the branch's own files.
 sec "unlanded work (content-checked against roadmap/v2.2)"
-python3 "$STATE/unlanded.py" "$INT_OS" "$INT_SHELL"
+if ! python3 "$STATE/unlanded.py" origin/roadmap/v2.2 "$INT_OS" "$INT_SHELL"; then
+    echo
+    echo "  *** THIS SECTION FAILED. Do not read its absence as 'nothing unlanded'."
+    echo "  *** Fix it before dispatching anything, or you will land work twice."
+fi
 
 # ── 4. Whether the net is actually up ───────────────────────────────────────
 sec "durability"
