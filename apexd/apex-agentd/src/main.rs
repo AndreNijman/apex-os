@@ -766,8 +766,42 @@ fn no_such_session(id: u32) -> Response {
 
 fn live_info(daemon: &Arc<Daemon>, id: u32) -> Option<SessionInfo> {
     let handle = lookup(daemon, id)?;
-    let info = handle.lock().expect("session lock").info.clone();
+    let mut info = handle.lock().expect("session lock").info.clone();
+    add_process_children(std::slice::from_mut(&mut info));
     Some(info)
+}
+
+/// Where the process table is read from. A constant so the one place that is
+/// not the fixture-driven parser is named rather than spelled inline twice.
+const PROC: &str = "/proc";
+
+/// Add each live session's forked processes to the copy about to be sent out.
+///
+/// Read time, not event time, and never written to the record. A subagent is
+/// history — it happened, and the record is the only evidence — but a process
+/// is a thing that either exists right now or does not, and the kernel is
+/// already keeping that list. Persisting it would mean writing the session
+/// record every time a compiler started, and answering "is it still running?"
+/// from a file rather than from `/proc`.
+///
+/// This is also what §P1-020 means by MCP servers and tool processes being
+/// representable: they publish nothing, and they do not have to. A confined
+/// session is inside its own pid namespace, but the daemon is outside it and
+/// the host `/proc` still lists every descendant, so the tree is readable for
+/// every adapter.
+fn add_process_children(infos: &mut [SessionInfo]) {
+    if !infos.iter().any(|i| i.is_live()) {
+        return;
+    }
+    let procs = apex_agent_core::graph::read_processes(Path::new(PROC));
+    for info in infos.iter_mut() {
+        if !info.is_live() {
+            continue;
+        }
+        let mut tree = apex_agent_core::graph::process_tree(&procs, info.pid);
+        apex_agent_core::graph::fill_rss(Path::new(PROC), &mut tree);
+        info.children.append(&mut tree);
+    }
 }
 
 /// Live sessions plus persisted records for ones this daemon no longer owns.
@@ -789,5 +823,6 @@ fn collect_sessions(daemon: &Arc<Daemon>) -> Vec<SessionInfo> {
         }
     }
     out.sort_by_key(|i| i.id);
+    add_process_children(&mut out);
     out
 }
