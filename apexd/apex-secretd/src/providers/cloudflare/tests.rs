@@ -330,9 +330,17 @@ impl Fixture {
     }
 }
 
+/// One row of [`every_operation`]: the operation id, the resource to ask it
+/// for, and the options its own declaration accepts.
+type OperationCase = (
+    &'static str,
+    &'static str,
+    Vec<(&'static str, &'static str)>,
+);
+
 /// Every operation the provider declares, with a resource and options that its
 /// own declaration accepts.
-fn every_operation() -> Vec<(&'static str, &'static str, Vec<(&'static str, &'static str)>)> {
+fn every_operation() -> Vec<OperationCase> {
     vec![
         ("cloudflare.account.read", "", vec![]),
         ("cloudflare.worker.read", "project", vec![]),
