@@ -23,20 +23,54 @@
 --      install fail its own provisioning check (apex-logs 14).
 -- The check strips comments before matching now, but keeping both strings out
 -- of the file means neither mistake can come back.
+-- ── These values are not free ────────────────────────────────────────────────
+-- Every one of them must equal the matching entry in apex-input-apply's
+-- DEFAULTS, and tests/test-apex-input.sh asserts that key by key.
+--
+-- The reason is the first use of Settings → Input. That page writes the WHOLE
+-- model, so touching one control sends all of them to the compositor. Where the
+-- two disagree, changing tap-to-click also turns on whatever else the model
+-- happens to default to — and this file used to set two touchpad options out of
+-- ten, so a user who moved one slider silently gained drag lock,
+-- disable-while-typing and clickfinger clicking.
+--
+-- Anything absent here is absent because Hyprland's touchpad block has no
+-- option for it: pointer speed, acceleration, left-handed and scroll method for
+-- a touchpad exist only as hl.device fields, and there is no device to name
+-- until the machine has one.
 hl.config({
     input = {
         kb_layout  = "@KB_LAYOUT@",
         kb_variant = "@KB_VARIANT@",
 
         follow_mouse = 1,
-        sensitivity  = 0,
+
+        -- Mouse and keyboard. `sensitivity` and `accel_profile` here are the
+        -- POINTER's: the touchpad's own are per-device and cannot be seeded.
+        sensitivity    = 0.0,
+        accel_profile  = "adaptive",
+        natural_scroll = false,
+        left_handed    = false,
+        scroll_factor  = 1.0,
+        repeat_rate    = 25,
+        repeat_delay   = 600,
 
         touchpad = {
-            -- hyprlang spelled this `tap-to-click`; the Lua key is
-            -- `tap_to_click`, and an unknown key is rejected outright rather
-            -- than ignored, which is what makes the build-time verify useful.
-            natural_scroll = true,
-            tap_to_click   = true,
+            -- hyprlang spelled the first two `tap-to-click` and
+            -- `tap-and-drag`; the Lua keys are underscored, and an unknown key
+            -- is rejected outright rather than ignored, which is what makes the
+            -- build-time verify useful.
+            natural_scroll          = true,
+            tap_to_click            = true,
+            tap_and_drag            = true,
+            drag_lock               = true,
+            disable_while_typing    = true,
+            middle_button_emulation = false,
+            clickfinger_behavior    = true,
+            tap_button_map          = "lrm",
+            scroll_factor           = 1.0,
+            -- 0 off, 1 three fingers, 2 four.
+            drag_3fg                = 0,
         },
     },
 })
