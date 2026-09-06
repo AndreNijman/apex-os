@@ -493,7 +493,20 @@ pub struct Observed {
     /// APEX Shell's matugen scheme.
     pub theme: Option<String>,
     /// RPM package names installed through the APEX extension engine.
+    ///
+    /// Empty means the engine's requested list was read and named nothing.
+    /// When the read itself failed, this is empty AND `packages_unreadable`
+    /// carries the reason — see there.
     pub packages: Vec<String>,
+    /// Why `packages` is not a measurement, when it is not one.
+    ///
+    /// `/var/lib/apex/pkg/requested` is 0700 root:root, and `apex blueprint
+    /// diff` is something a desktop session runs as itself. A refused read that
+    /// arrived here as an empty list made the planner report "0 of N present"
+    /// and propose installing packages that were already installed. A separate
+    /// field rather than an `Option<Vec<_>>` so `Observed::default()` and every
+    /// fixture built from it keep working unchanged.
+    pub packages_unreadable: Option<String>,
     /// Flatpak application ids installed.
     pub flatpaks: Vec<String>,
     /// Toolchains detected on `PATH`.
@@ -788,19 +801,44 @@ pub fn plan(bp: &Blueprint, obs: &Observed) -> Plan {
     // line into data loss on a machine the user shares with the file. Phase 10
     // of the roadmap can revisit that with an explicit `prune` verb; it must
     // never be the default.
-    let missing_pkgs: Vec<String> = bp
-        .package_names()
-        .into_iter()
-        .filter(|n| !obs.packages.iter().any(|p| p == n))
-        .collect();
-    if !missing_pkgs.is_empty() {
-        changes.push(Change {
-            what: "[apps] install (packages)".into(),
-            current: format!("{} of {} present", bp.package_names().len() - missing_pkgs.len(), bp.package_names().len()),
-            desired: missing_pkgs.join(" "),
-            step: Some(Step::InstallPackages { names: missing_pkgs }),
-            blocked: None,
-        });
+    //
+    // A list of installed packages we could not read is not a machine with no
+    // packages installed. Diffing against it produced "0 of N present" and an
+    // install step for software that was already there, so when the read failed
+    // the gap is reported as one that cannot be closed rather than planned.
+    if let Some(why) = &obs.packages_unreadable {
+        if !bp.package_names().is_empty() {
+            changes.push(Change {
+                what: "[apps] install (packages)".into(),
+                current: format!("unknown — {why}"),
+                desired: bp.package_names().join(" "),
+                step: None,
+                blocked: Some(format!(
+                    "the installed package list could not be read ({why}), so \
+                     nothing here has been compared. Reading it needs root; try \
+                     `sudo apex blueprint diff`."
+                )),
+            });
+        }
+    } else {
+        let missing_pkgs: Vec<String> = bp
+            .package_names()
+            .into_iter()
+            .filter(|n| !obs.packages.iter().any(|p| p == n))
+            .collect();
+        if !missing_pkgs.is_empty() {
+            changes.push(Change {
+                what: "[apps] install (packages)".into(),
+                current: format!(
+                    "{} of {} present",
+                    bp.package_names().len() - missing_pkgs.len(),
+                    bp.package_names().len()
+                ),
+                desired: missing_pkgs.join(" "),
+                step: Some(Step::InstallPackages { names: missing_pkgs }),
+                blocked: None,
+            });
+        }
     }
 
     let missing_flatpaks: Vec<String> = bp
@@ -1281,6 +1319,7 @@ enabled = true
             sessions_available: vec!["hyprland".into(), "niri".into(), "apex-labwc".into()],
             theme: Some("content".into()),
             packages: vec!["firefox".into()],
+            packages_unreadable: None,
             flatpaks: vec!["org.gimp.GIMP".into()],
             languages: vec!["rust".into()],
             capsule_languages: vec![],
@@ -1386,6 +1425,50 @@ sandbox = "project"
                 names: vec!["htop".into(), "neovim".into()]
             }]
         );
+    }
+
+    #[test]
+    fn packages_that_could_not_be_read_are_blocked_rather_than_reinstalled() {
+        // The observation failed, so there is nothing to diff against. Reading
+        // that as "none of them are installed" produced "0 of 2 present" and an
+        // install step for software already on the machine — a report that is
+        // wrong and an action that is wasted, both from a read nobody made.
+        let bp = Blueprint::parse("[apps]\ninstall = [\"firefox\", \"htop\"]\n").unwrap();
+        let obs = Observed {
+            packages: Vec::new(),
+            packages_unreadable: Some("/var/lib/apex/pkg/requested: Permission denied".into()),
+            ..Observed::default()
+        };
+        let p = plan(&bp, &obs);
+        assert_eq!(p.changes.len(), 1);
+        assert!(
+            p.changes[0].step.is_none(),
+            "nothing was compared, so nothing may be planned"
+        );
+        let why = p.changes[0].blocked.as_deref().unwrap();
+        assert!(why.contains("could not be read"), "{why}");
+        assert!(why.contains("sudo apex blueprint diff"), "the way to see it: {why}");
+        assert!(
+            !p.changes[0].current.contains("0 of 2 present"),
+            "the row claimed a count it never made: {}",
+            p.changes[0].current
+        );
+    }
+
+    #[test]
+    fn an_empty_but_readable_package_list_still_plans_the_install() {
+        // The other half: a machine that genuinely has nothing installed is the
+        // common case, and it must keep producing a step.
+        let bp = Blueprint::parse("[apps]\ninstall = [\"firefox\", \"htop\"]\n").unwrap();
+        let obs = Observed { packages: Vec::new(), ..Observed::default() };
+        let p = plan(&bp, &obs);
+        assert_eq!(
+            p.steps(),
+            [&Step::InstallPackages {
+                names: vec!["firefox".into(), "htop".into()]
+            }]
+        );
+        assert!(p.changes[0].current.contains("0 of 2 present"));
     }
 
     #[test]

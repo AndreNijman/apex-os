@@ -290,11 +290,16 @@ impl Host {
 
     /// Everything the planner needs, measured now.
     pub fn observe(&self) -> Observed {
+        let (packages, packages_unreadable) = match self.requested_packages() {
+            Ok(names) => (names, None),
+            Err(why) => (Vec::new(), Some(why)),
+        };
         Observed {
             session: read_trimmed(&self.at(GREETER_SESSION)),
             sessions_available: self.sessions_available(),
             theme: self.theme(),
-            packages: self.requested_packages(),
+            packages,
+            packages_unreadable,
             flatpaks: self.installed_flatpaks(),
             languages: self.languages(),
             capsule_languages: self.capsule_languages(),
@@ -378,15 +383,26 @@ impl Host {
     }
 
     /// The package engine's requested list, with the `local:` form stripped.
-    fn requested_packages(&self) -> Vec<String> {
-        let Ok(text) = std::fs::read_to_string(self.at(REQUESTED_LIST)) else {
-            return Vec::new();
+    ///
+    /// An absent list is an empty one, and that is the common case: most
+    /// machines install nothing with `apex install`. A list that exists and
+    /// could not be read is not. `/var/lib/apex/pkg` is 0700 root:root by a
+    /// tmpfiles.d rule and `apex blueprint diff` is something a desktop session
+    /// runs as itself, so collapsing the two made the planner report "0 of N
+    /// present" and offer to install packages the machine already had.
+    fn requested_packages(&self) -> Result<Vec<String>, String> {
+        let path = self.at(REQUESTED_LIST);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
         };
-        text.lines()
+        Ok(text
+            .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .map(|l| l.strip_prefix("local:").unwrap_or(l).to_string())
-            .collect()
+            .collect())
     }
 
     /// Flatpak application ids installed system-wide or for this user.
@@ -1791,10 +1807,56 @@ mod tests {
             "var/lib/apex/pkg/requested",
             "firefox\nlocal:some-vendor-driver\n\nhtop\n",
         );
-        assert_eq!(
-            f.host().observe().packages,
-            ["firefox", "some-vendor-driver", "htop"]
+        let obs = f.host().observe();
+        assert_eq!(obs.packages, ["firefox", "some-vendor-driver", "htop"]);
+        assert!(obs.packages_unreadable.is_none());
+    }
+
+    #[test]
+    fn a_requested_list_we_may_not_read_is_not_a_machine_with_no_packages() {
+        // /var/lib/apex/pkg is 0700 root:root by a tmpfiles.d rule and `apex
+        // blueprint diff` is something a desktop session runs as itself, so the
+        // refusal is the ordinary case rather than the exotic one. Reading it as
+        // an empty list made the planner offer to install what was already
+        // installed.
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new("requested-eacces");
+        f.write("var/lib/apex/pkg/requested", "firefox\nhtop\n");
+        let pkg = f.dir.join("var/lib/apex/pkg");
+        let mut perms = std::fs::metadata(&pkg).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&pkg, perms).unwrap();
+        // Root and CAP_DAC_OVERRIDE walk through 0000, so the seal is checked
+        // rather than assumed — and the exact error is required, or an
+        // unrelated failure would count as a seal and the assertion would be
+        // about nothing.
+        let sealed = match std::fs::read_to_string(pkg.join("requested")) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => true,
+            Ok(_) => false,
+            Err(e) => panic!("expected PermissionDenied while sealing, got {e:?}"),
+        };
+        let obs = f.host().observe();
+        let mut perms = std::fs::metadata(&pkg).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&pkg, perms).ok();
+        if !sealed {
+            return;
+        }
+        assert!(
+            obs.packages_unreadable.is_some(),
+            "a refused read must not arrive as a measurement of an empty machine"
         );
+        assert!(obs.packages.is_empty());
+    }
+
+    #[test]
+    fn an_absent_requested_list_is_a_measured_empty_list() {
+        // The other half. Most machines install nothing with `apex install`,
+        // and that must stay a fact rather than becoming a permanent warning.
+        let f = Fixture::new("requested-absent");
+        let obs = f.host().observe();
+        assert!(obs.packages.is_empty());
+        assert!(obs.packages_unreadable.is_none());
     }
 
     #[test]
