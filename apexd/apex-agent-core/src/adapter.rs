@@ -11,8 +11,9 @@
 //!
 //! The sandbox masks `$HOME`. Everything an agent needs from it therefore has
 //! to be named. That includes things it is easy to forget: `opencode` and
-//! `codex` install into `~/.local/bin`, so without that entry the sandbox would
-//! mask the binary the session is trying to run.
+//! `codex` install into `~/.local/bin` as symlinks into
+//! `~/.local/lib/node_modules`, so without both entries the sandbox masks the
+//! binary the session is trying to run, or the package it points at.
 //!
 //! ## State detection
 //!
@@ -47,8 +48,24 @@ const TOOLCHAIN_RW: &[&str] = &[
 
 /// Read-only home state every adapter gets: the tools themselves and the
 /// configuration a build reads but must not rewrite.
+///
+/// `.local/bin` and `.local/lib/node_modules` are one fact, not two. An npm
+/// install under `~/.local` puts the package in `lib/node_modules/<pkg>` and
+/// leaves `bin/<name>` as a symlink into it, so binding the bin directory alone
+/// binds a link with nothing on the far side: `bwrap: execvp opencode: No such
+/// file or directory`, before the agent has run a line. `claude` escaped that
+/// only because the image ships a root-owned `/usr/bin/claude` that
+/// `--ro-bind / /` covers — which also meant a confined `claude` session ran
+/// the image's copy rather than the user's, contradicting the promise that a
+/// user's own build wins.
+///
+/// The module directory and not `.local/lib`, which on an ordinary machine also
+/// holds `python3.N/site-packages` and whatever else a user has installed
+/// there. Read-only in either case, but the sandbox is default-deny and the
+/// module tree is the whole of what a symlinked CLI needs.
 const TOOLCHAIN_RO: &[&str] = &[
     ".local/bin",
+    ".local/lib/node_modules",
     ".gitconfig",
     ".config/git",
     ".local/share/mise",
@@ -312,6 +329,44 @@ mod tests {
         let mut s = spec();
         by_id("opencode").unwrap().apply_sandbox(&mut s);
         assert!(s.ro.contains(&PathBuf::from("/home/tester/.local/bin")));
+    }
+
+    #[test]
+    fn a_symlinked_agent_reaches_the_package_its_bin_entry_points_at() {
+        // `~/.local/bin/opencode` is a symlink into
+        // `~/.local/lib/node_modules/opencode-ai/bin`. Binding only the bin
+        // directory left the link dangling inside the home tmpfs, and bwrap
+        // exited 1 with "execvp opencode: No such file or directory".
+        use crate::sandbox::build_argv;
+
+        let modules = "/home/tester/.local/lib/node_modules";
+        for agent in ["opencode", "codex"] {
+            let mut s = spec();
+            s.cwd = PathBuf::from("/home/tester/p");
+            by_id(agent).unwrap().apply_sandbox(&mut s);
+            let argv = build_argv(&s, agent, &[]).unwrap();
+
+            assert!(
+                argv.windows(3)
+                    .any(|w| w == ["--ro-bind-try", modules, modules]),
+                "{agent} has no read-only bind of the module tree"
+            );
+            // Read-only and nothing else. A package tree an agent can rewrite
+            // is a package tree it can backdoor for the next session.
+            assert!(
+                !argv
+                    .windows(2)
+                    .any(|w| w[0] == "--bind-try" && w[1] == modules),
+                "{agent} got the module tree writable"
+            );
+            // And no wider than the module tree. ~/.local/lib also carries
+            // python3.N/site-packages and whatever else the user put there,
+            // none of which an agent needs in order to start.
+            assert!(
+                !argv.iter().any(|arg| arg == "/home/tester/.local/lib"),
+                "{agent} widened the allowlist to the whole of ~/.local/lib"
+            );
+        }
     }
 
     #[test]
