@@ -329,6 +329,9 @@ mod tests {
                 "127.0.0.1",
                 "http",
                 None,
+                "",
+                None,
+                None,
                 SecretValue::new(STORED.as_bytes().to_vec()),
             ),
             Response::Ok
@@ -355,7 +358,7 @@ mod tests {
         let f = fixture("run", false, "demo.object.read");
         let reply = f
             .service
-            .use_capability(me(), record("demo.object.read", "bucket/logs/today.json"));
+            .use_capability(me(), record("demo.object.read", "bucket/logs/today.json"), Vec::new());
 
         let Response::Performed {
             record,
@@ -393,7 +396,7 @@ mod tests {
         let f = fixture("mint", true, "demo.object.read");
         let reply = f
             .service
-            .use_capability(me(), record("demo.object.read", "bucket/key"));
+            .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new());
         let Response::Performed { output, .. } = &reply else {
             panic!("refused: {reply:?}");
         };
@@ -422,6 +425,9 @@ mod tests {
                 "example.invalid",
                 "https",
                 None,
+                "",
+                None,
+                None,
                 SecretValue::new(STORED.as_bytes().to_vec()),
             ),
             Response::Ok
@@ -434,7 +440,7 @@ mod tests {
 
         let mut rec = record("demo.object.read", "bucket/key");
         rec.provider = "elsewhere".into();
-        let reply = f.service.use_capability(peer, rec);
+        let reply = f.service.use_capability(peer, rec, Vec::new());
         let (kind, message) = reply.as_error().expect("the pin must refuse this");
         assert_eq!(kind, ErrorKind::PermissionDenied);
         assert!(message.contains("example.invalid"), "{message}");
@@ -451,7 +457,7 @@ mod tests {
         let f = fixture("ungranted", false, "demo.object.read");
         let reply = f
             .service
-            .use_capability(me(), record("demo.object.write", "bucket/key"));
+            .use_capability(me(), record("demo.object.write", "bucket/key"), Vec::new());
         assert_eq!(reply.as_error().map(|(k, _)| k), Some(ErrorKind::PermissionDenied));
         assert!(f.api.authorizations().is_empty());
     }
@@ -480,7 +486,7 @@ mod tests {
             if let Some((name, value)) = param {
                 rec = rec.param(name, value);
             }
-            let reply = f.service.use_capability(peer, rec);
+            let reply = f.service.use_capability(peer, rec, Vec::new());
             let (kind, message) = reply
                 .as_error()
                 .unwrap_or_else(|| panic!("{operation} {resource} {param:?} was accepted"));
@@ -491,7 +497,7 @@ mod tests {
         // And the one that IS the declared shape goes through.
         let rec = record("demo.object.write", "bucket/key").param("note", "released by apex");
         assert!(
-            matches!(f.service.use_capability(peer, rec), Response::Performed { .. }),
+            matches!(f.service.use_capability(peer, rec, Vec::new()), Response::Performed { .. }),
             "a well-formed request was refused"
         );
     }
@@ -500,7 +506,7 @@ mod tests {
     fn the_trail_records_the_provider_s_own_words_and_none_of_its_credential() {
         let f = fixture("trail", true, "demo.object.read");
         f.service
-            .use_capability(me(), record("demo.object.read", "bucket/key"));
+            .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new());
 
         let path = Store::new(f.dir.clone()).audit_path();
         let lines = audit::tail(&path, 10);
@@ -575,7 +581,7 @@ mod tests {
         // the bearer provider, so git's operations do not exist for it.
         let f = fixture("closed", false, "demo.object.read");
         for evil in ["git.push", "demo.object.delete", "exec", "demo.account.write"] {
-            let reply = f.service.use_capability(me(), record(evil, "bucket/key"));
+            let reply = f.service.use_capability(me(), record(evil, "bucket/key"), Vec::new());
             assert_eq!(
                 reply.as_error().map(|(k, _)| k),
                 Some(ErrorKind::BadRequest),
@@ -592,6 +598,7 @@ mod tests {
         // provider-shaped.
         let rec = record("demo.object.write", "bucket/key").param("note", "hello");
         let req = Request::Use {
+            body_len: 0,
             record: Box::new(rec.clone()),
         };
         let text = serde_json::to_string(&req).expect("serialise");

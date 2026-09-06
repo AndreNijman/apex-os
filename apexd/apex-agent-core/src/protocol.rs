@@ -51,13 +51,15 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// store, so a credential added to the secret service is simply not found and
 /// the user is told they never stored it.
 ///
-/// 5 — capabilities became generic (§13.2, §14, P1-001). `SecretUse` carried
-/// git's arguments as fields — `capability`, `remote`, `branch` — which meant
-/// every provider §14 names would have had to widen this protocol. It now
-/// carries an operation id, a resource and a declared parameter map, so
-/// `cloudflare.worker.deploy` needs nothing here. A daemon below this does not
-/// understand `operation` and answers as though no capability was named, so the
-/// CLI refuses to ask one.
+/// 5 — capabilities became generic (§13.2, §14, P1-001) *and* `SecretUse` began
+/// carrying a message body (§10, P0-003). Two changes, one revision, because
+/// they landed together. The variant used to carry git's arguments as fields —
+/// `capability`, `remote`, `branch` — which meant every provider §14 names
+/// would have had to widen this protocol. It now carries an operation id, a
+/// resource, a declared parameter map and an optional body, so
+/// `cloudflare.worker.deploy` and `mcp.request` both need nothing here. A
+/// daemon below this does not understand `operation` and answers as though no
+/// capability was named, so the CLI refuses to ask one.
 pub const PROTOCOL_VERSION: u32 = 5;
 
 /// The revision at which the credential store moved to `apex-secretd`.
@@ -73,6 +75,21 @@ pub const BROKERED_SECRET_SERVICE_VERSION: u32 = 4;
 /// nothing. Named for the same reason as the three around it.
 pub const GENERIC_CAPABILITY_VERSION: u32 = 5;
 
+/// The revision at which `SecretUse` began carrying a message body.
+///
+/// `apex mcp bridge` checks it. A daemon below this parses the request, ignores
+/// the field it has never heard of, and forwards a capability with no message —
+/// which the secret service refuses, correctly, with an error about an empty
+/// message that says nothing about the actual cause. Named so the bridge can
+/// say the actual cause instead.
+///
+/// The same number as [`GENERIC_CAPABILITY_VERSION`], and defined as it rather
+/// than written out: generic capabilities and the message body shipped in one
+/// revision, so there is one wire change and two reasons a daemon below it
+/// cannot serve this request. Two names, because the two reasons are what a
+/// reader of either guard needs to know.
+pub const MCP_BRIDGE_VERSION: u32 = GENERIC_CAPABILITY_VERSION;
+
 /// The guards arrive in order, checked when the crate compiles rather than
 /// when a test runs: they are facts about three constants, and a revision
 /// numbered behind the one before it would make a `<` comparison in the CLI
@@ -80,6 +97,9 @@ pub const GENERIC_CAPABILITY_VERSION: u32 = 5;
 const _: () = assert!(POLICY_DIMENSIONS_VERSION < REQUEST_ORIGIN_VERSION);
 const _: () = assert!(REQUEST_ORIGIN_VERSION < BROKERED_SECRET_SERVICE_VERSION);
 const _: () = assert!(BROKERED_SECRET_SERVICE_VERSION < GENERIC_CAPABILITY_VERSION);
+// Not `<`: they are one revision, and a guard claiming otherwise would make a
+// later `<` comparison in the bridge mean something nobody intended.
+const _: () = assert!(MCP_BRIDGE_VERSION == GENERIC_CAPABILITY_VERSION);
 
 /// The revision that first carried the six dimensions.
 ///
@@ -484,6 +504,23 @@ pub enum Request {
         /// map is not a way to smuggle a command line through.
         #[serde(default)]
         params: BTreeMap<String, String>,
+        /// The message a capability carries, for the one operation that carries
+        /// a message: `mcp.request`.
+        ///
+        /// A field here and raw bytes on the secret service's own wire, which
+        /// is not an inconsistency. That protocol caps a request line because
+        /// any local process may write one; this one does not, and a second
+        /// framing convention on a socket APEX Shell also parses would be a
+        /// compatibility surface for no gain. What both refuse is a credential
+        /// in a serialisable type, and a JSON-RPC message the caller wrote is
+        /// not one.
+        ///
+        /// Separate from `params` deliberately. A parameter is declared by the
+        /// operation and checked against its syntax; a message body is opaque
+        /// bytes the provider forwards, and putting it in the map would mean
+        /// declaring a parameter whose value nothing can validate.
+        #[serde(default)]
+        body: Option<String>,
         /// The caller's project root.
         ///
         /// Honoured ONLY when the peer is not a managed session. A session's
@@ -989,6 +1026,7 @@ mod tests {
                 operation: "git.push".into(),
                 resource: "origin".into(),
                 params: BTreeMap::from([("branch".to_string(), "feat/x".to_string())]),
+                body: None,
                 project: Some("/home/t/p".into()),
             },
             Request::Info { id: 1 },
@@ -1172,6 +1210,7 @@ mod tests {
             ("request_origin", REQUEST_ORIGIN_VERSION),
             ("the secret service", BROKERED_SECRET_SERVICE_VERSION),
             ("generic capabilities", GENERIC_CAPABILITY_VERSION),
+            ("the mcp bridge", MCP_BRIDGE_VERSION),
         ] {
             assert!(
                 since <= PROTOCOL_VERSION,
@@ -1182,6 +1221,7 @@ mod tests {
         // The newest guard is the current revision: adding a wire field
         // without bumping the version is the fail-open these exist to catch.
         assert_eq!(GENERIC_CAPABILITY_VERSION, PROTOCOL_VERSION);
+        assert_eq!(MCP_BRIDGE_VERSION, PROTOCOL_VERSION);
     }
 
     #[test]

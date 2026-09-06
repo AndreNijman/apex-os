@@ -77,6 +77,17 @@ pub struct Bind<'a> {
     pub resource: &'a str,
     /// Already checked against the operation's declared parameters.
     pub params: &'a Params,
+    /// The message the operation carries, when it carries one.
+    ///
+    /// Opaque to the framework, and the one thing here it does not check: what
+    /// a message means belongs to the provider, and a framework that parsed it
+    /// would be a framework that knew what JSON-RPC was. Empty for every
+    /// operation that carries none, which is all of them but `mcp.request`.
+    ///
+    /// Not a parameter, deliberately. A parameter is declared by the operation
+    /// and checked against a syntax; a body is bytes, and declaring one as a
+    /// parameter would mean declaring a value nothing can validate.
+    pub body: &'a [u8],
     /// Absolute project root the grant was matched on.
     pub project: &'a str,
     /// The stored credential's metadata. **Never the value.**
@@ -476,6 +487,9 @@ mod tests {
             host: "example.com".into(),
             scheme: "https".into(),
             username: "x-access-token".into(),
+            path: String::new(),
+            auth: "bearer".into(),
+            port: None,
             added: 0,
         };
         let params = Params::new();
@@ -483,6 +497,7 @@ mod tests {
             operation: &ONE.operations[0],
             resource: "thing",
             params: &params,
+            body: &[],
             project: "/tmp",
             service: &service,
             owner: &owner,

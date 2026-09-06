@@ -56,9 +56,73 @@ pub struct ServiceInfo {
     /// Username git should send. Most token schemes ignore it.
     #[serde(default = "default_username")]
     pub username: String,
+    /// The path on that host the credential's own endpoint lives at, for a
+    /// capability whose destination is the service rather than a repository.
+    ///
+    /// Empty for a git credential: a git operation resolves its URL from the
+    /// repository and the host is what gets pinned. An MCP credential has to
+    /// carry one, because there is no repository to ask and the caller may not
+    /// name a destination — that is the entire reason `mcp-request` has no
+    /// arguments.
+    #[serde(default)]
+    pub path: String,
+    /// How the credential is presented over HTTP: `bearer` sends
+    /// `Authorization: Bearer <value>`, `raw` sends the value as the whole
+    /// header. Git ignores it and authenticates through a credential helper.
+    ///
+    /// `raw` exists because a server can want `Basic`, or a header shape
+    /// nobody here has seen, and a migration that could not carry such a header
+    /// would leave it in `~/.claude.json` — which is the file this task is
+    /// about emptying.
+    #[serde(default = "default_auth")]
+    pub auth: String,
+    /// The port the endpoint is on, when it is not the scheme's own.
+    ///
+    /// Separate from [`Self::host`] rather than written into it, because the
+    /// host is what a git remote's URL is *pinned* against and that comparison
+    /// deliberately ignores ports — a credential for `github.com` must still
+    /// match a remote that spells out `:443`. An endpoint the broker dials
+    /// itself is the other case, and it needs the port.
+    #[serde(default)]
+    pub port: Option<u16>,
     /// When it was stored, ms since the epoch.
     #[serde(default)]
     pub added: u64,
+}
+
+impl ServiceInfo {
+    /// The endpoint this credential is for, as a URL.
+    ///
+    /// Built from the three pinned fields and nothing else. No caller
+    /// contributes to it, which is what makes `mcp-request` safe to offer to a
+    /// session at all.
+    pub fn url(&self) -> String {
+        let path = if self.path.starts_with('/') {
+            self.path.clone()
+        } else {
+            format!("/{}", self.path)
+        };
+        let host = match self.port {
+            // Bracketed for an IPv6 literal, which is what a bare `::1` would
+            // otherwise turn into `::1:9000` — a different address.
+            Some(port) if self.host.contains(':') => format!("[{}]:{port}", self.host),
+            Some(port) => format!("{}:{port}", self.host),
+            None => self.host.clone(),
+        };
+        format!("{}://{}{}", self.scheme, host, path)
+    }
+
+    /// The `Authorization` header value for a credential, per [`Self::auth`].
+    ///
+    /// Takes the value rather than returning one built from it, so the caller
+    /// that has the credential is the caller that builds the header, and no
+    /// intermediate holds a second copy.
+    pub fn header_value(&self, value: &str) -> String {
+        match self.auth.as_str() {
+            "raw" => value.to_string(),
+            _ => format!("Bearer {value}"),
+        }
+    }
 }
 
 fn default_scheme() -> String {
@@ -67,6 +131,31 @@ fn default_scheme() -> String {
 
 fn default_username() -> String {
     "x-access-token".to_string()
+}
+
+fn default_auth() -> String {
+    "bearer".to_string()
+}
+
+/// Whether `path` is one a stored endpoint may carry.
+///
+/// Absolute or empty, no query and no fragment, no framing characters. It is
+/// pinned at `add` time and never revisited, so this is the only place it is
+/// judged — and a path that could carry a `?` would let whoever stored it hide
+/// a second destination inside one that reads as innocent.
+pub fn valid_endpoint_path(path: &str) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+    path.starts_with('/')
+        && path.len() <= 512
+        && !path.contains("..")
+        && !path.contains('?')
+        && !path.contains('#')
+        && !path.contains('@')
+        && path
+            .chars()
+            .all(|c| c.is_ascii_graphic() && !matches!(c, '"' | '\\' | '\''))
 }
 
 /// Why a store operation failed.
@@ -494,6 +583,9 @@ mod tests {
             host: "github.com".to_string(),
             scheme: "https".to_string(),
             username: "x-access-token".to_string(),
+            path: String::new(),
+            auth: "bearer".to_string(),
+            port: None,
             added: now_ms(),
         }
     }

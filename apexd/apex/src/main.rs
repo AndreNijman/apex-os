@@ -12,6 +12,7 @@ mod dispatch;
 mod disposable;
 mod gaming;
 mod host;
+mod mcp;
 mod mode;
 mod ops;
 mod proxy;
@@ -378,6 +379,17 @@ enum Cmd {
     Secret {
         #[command(subcommand)]
         cmd: secret::SecretCmd,
+    },
+
+    /// MCP servers APEX brokers, so a bearer token is not in the agent's config.
+    ///
+    /// `apex mcp bridge <service>` is an MCP server on stdin and stdout that
+    /// carries each message through `apex-secretd`, which holds the credential
+    /// and attaches it. Meant to be spawned by an agent rather than typed;
+    /// `apex secret migrate` is what puts it in an agent's configuration.
+    Mcp {
+        #[command(subcommand)]
+        cmd: mcp::McpCmd,
     },
 
     /// The declarative APEX Blueprint: what this machine should be.
@@ -1042,6 +1054,7 @@ async fn main() {
         Cmd::Task(args) => task::run(args),
         Cmd::Request { cmd } => request::main(cmd),
         Cmd::Secret { cmd } => secret::main(cmd),
+        Cmd::Mcp { cmd } => mcp::main(cmd),
         // Read-only, so no root gate: seeing what the machine should be must
         // not require privilege. `apex apply` is the verb that changes things,
         // and it converges only the privilege domain it is already in.
