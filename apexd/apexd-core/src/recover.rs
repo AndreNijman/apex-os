@@ -45,14 +45,25 @@
 //!   `apex env list` would show nothing while `podman ps -a` still shows them,
 //!   and APEX would have lost the name it needs to remove them. `apex env rm`
 //!   is the verb for that, and it is named in the preserved list.
-//! * **Anything under `~/.config/hypr` as a deletion.** `hyprland.conf`
-//!   `source=`s `apex-input.conf` and `apex-display.conf`, and Hyprland treats
-//!   a `source=` with no match as a FATAL config error — verified against the
-//!   image's own Hyprland, which is why `apex-shell-firstrun` pre-creates both
-//!   as empty files. So those two are **truncated** to the empty state the
-//!   provisioner itself seeds, never removed, and every other file in that
-//!   directory is preserved. A one-line edit to a live compositor config has
-//!   already cost this project a desktop once.
+//! * **Anything under `~/.config/hypr` as a deletion.** The two generated
+//!   modules `apex/input.lua` and `apex/monitors.lua` are **truncated** to the
+//!   "no overrides" / "no saved layout" state, never removed, and every other
+//!   file in that directory is preserved. A one-line edit to a live compositor
+//!   config has already cost this project a desktop once.
+//!
+//!   Truncating rather than deleting used to be forced: `hyprland.conf`
+//!   `source=`d both and a `source=` with no match is a FATAL config error.
+//!   P0-025 removed that constraint — `hyprland.lua` checks
+//!   `package.searchpath` before requiring, so an absent module is skipped —
+//!   and the rule is kept anyway, because "empty" is a state the compositor
+//!   understands and one this code can produce without deciding which of the
+//!   user's files it is allowed to remove.
+//!
+//!   `apex/user-overrides.lua` is emphatically NOT a target. It is where
+//!   `apex-hypr-migrate` puts a user's own hand-written hyprlang after
+//!   converting it, so it is user content that happens to live under a
+//!   generated-looking name, and a desktop reset that emptied it would destroy
+//!   exactly what the migration promised to keep.
 
 use std::fmt;
 use std::str::FromStr;
@@ -309,8 +320,8 @@ impl FromStr for ResetScope {
 pub enum Disposition {
     /// Removed. A directory goes recursively.
     Delete,
-    /// Emptied in place, keeping the file. Only for a file another program
-    /// requires to exist — see the module header on Hyprland's `source=`.
+    /// Emptied in place, keeping the file. Used for everything under
+    /// `~/.config/hypr` — see the module header.
     Truncate,
 }
 
@@ -373,12 +384,23 @@ const TARGETS: &[Target] = &[
         scope: ResetScope::Desktop,
         what: "the generated niri input block",
     },
+    // Written by images before P0-025, when the shell generated a hyprlang
+    // fragment and a Lua one side by side here. Nothing writes either now — the
+    // Hyprland keybinds are `.config/hypr/apex/shell-keybinds.lua` — so these
+    // two entries exist to clear the leftovers off an upgraded machine.
     Target {
         rel: ".config/apex-shell/ApexShellKeybinds.conf",
         kind: Kind::File,
         how: Disposition::Delete,
         scope: ResetScope::Desktop,
-        what: "the generated Hyprland keybinds",
+        what: "the retired hyprlang keybind fragment",
+    },
+    Target {
+        rel: ".config/apex-shell/ApexShellKeybinds.lua",
+        kind: Kind::File,
+        how: Disposition::Delete,
+        scope: ResetScope::Desktop,
+        what: "the retired keybind module (it lives under ~/.config/hypr/apex now)",
     },
     Target {
         rel: ".config/apex-shell/ApexShellKeybinds.kdl",
@@ -388,39 +410,58 @@ const TARGETS: &[Target] = &[
         what: "the generated niri keybinds",
     },
     Target {
-        rel: ".config/apex-shell/ApexShellKeybinds.lua",
-        kind: Kind::File,
-        how: Disposition::Delete,
-        scope: ResetScope::Desktop,
-        what: "the generated labwc keybinds",
-    },
-    Target {
         rel: ".cache/apex-shell",
         kind: Kind::Dir,
         how: Disposition::Delete,
         scope: ResetScope::Desktop,
         what: "the shell's cache: generated colour scheme, thumbnails",
     },
-    // Truncated, never deleted. `hyprland.conf` sources both, and Hyprland
-    // treats a `source=` with no match as a fatal config error, so removing
-    // either one takes the whole session's config down with it. Empty is the
-    // documented "no overrides" state and is exactly what the provisioner
-    // seeds.
+    // Truncated, never deleted — see the module header. Empty is the "no
+    // overrides" / "no saved layout" state: the shipped defaults in
+    // apex/input-defaults.lua and apex/monitors-default.lua load BEFORE these
+    // and are not touched by a reset, so emptying one gives back exactly the
+    // seeded behaviour rather than leaving the session with nothing.
+    Target {
+        rel: ".config/hypr/apex/input.lua",
+        kind: Kind::File,
+        how: Disposition::Truncate,
+        scope: ResetScope::Desktop,
+        what: "the generated Hyprland input overrides (emptied, not removed: \
+               nothing under ~/.config/hypr is ever deleted)",
+    },
+    Target {
+        rel: ".config/hypr/apex/monitors.lua",
+        kind: Kind::File,
+        how: Disposition::Truncate,
+        scope: ResetScope::Desktop,
+        what: "the generated Hyprland monitor layout (emptied, not removed: \
+               nothing under ~/.config/hypr is ever deleted)",
+    },
+    Target {
+        rel: ".config/hypr/apex/shell-keybinds.lua",
+        kind: Kind::File,
+        how: Disposition::Truncate,
+        scope: ResetScope::Desktop,
+        what: "the generated Hyprland keybinds (emptied, not removed: \
+               nothing under ~/.config/hypr is ever deleted)",
+    },
+    // The three hyprlang fragments the same generators wrote before P0-025.
+    // Truncated rather than deleted for the same reason as everything else
+    // under this directory, and listed at all because an upgraded machine that
+    // has not yet run apex-hypr-migrate still has them.
     Target {
         rel: ".config/hypr/apex-input.conf",
         kind: Kind::File,
         how: Disposition::Truncate,
         scope: ResetScope::Desktop,
-        what: "the generated Hyprland input overrides (emptied, not removed: \
-               hyprland.conf sources it and a missing source is fatal)",
+        what: "the retired hyprlang input overrides",
     },
     Target {
         rel: ".config/hypr/apex-display.conf",
         kind: Kind::File,
         how: Disposition::Truncate,
         scope: ResetScope::Desktop,
-        what: "the generated Hyprland monitor layout (emptied, not removed: \
-               hyprland.conf sources it and a missing source is fatal)",
+        what: "the retired hyprlang monitor layout",
     },
     // ── user ────────────────────────────────────────────────────────────────
     Target {
@@ -501,8 +542,12 @@ pub const PRESERVED_LANDMARKS: &[&str] = &[
     ".ssh",
     ".gnupg",
     ".aws",
-    ".config/hypr/hyprland.conf",
+    ".config/hypr/hyprland.lua",
     ".config/hypr/hypridle.conf",
+    // Where apex-hypr-migrate puts a user's own hand-written hyprlang after
+    // converting it. It sits under a generated-looking path but is user
+    // content, and losing it would undo the one promise the migration makes.
+    ".config/hypr/apex/user-overrides.lua",
     ".config/apex-shell/plugins",
     ".local/share/apex/env",
     ".local/share/applications",
@@ -652,11 +697,18 @@ mod tests {
 
     #[test]
     fn nothing_under_hypr_is_ever_deleted() {
-        // hyprland.conf `source=`s the two generated files and Hyprland treats
-        // a source with no match as a FATAL config error, so a delete here
-        // takes the whole session's configuration down. Truncation to the
-        // documented empty state is the only legal disposition in that
-        // directory.
+        // A delete under this directory takes a live compositor configuration
+        // with it, and truncation to the documented empty state is the only
+        // legal disposition here.
+        //
+        // The ORIGINAL reason was that hyprland.conf `source=`d the generated
+        // files and a source with no match is a FATAL config error. P0-025
+        // removed that: hyprland.lua checks package.searchpath before requiring
+        // and skips an absent module. The rule survives on its own merit —
+        // "empty" is a state the compositor understands and one this code can
+        // produce without deciding which of the user's files it may remove —
+        // so the assertion stays, deliberately, rather than being relaxed
+        // because the constraint that first forced it went away.
         for t in TARGETS {
             if t.rel.starts_with(".config/hypr/") {
                 assert_eq!(
@@ -668,9 +720,43 @@ mod tests {
                 assert_eq!(t.kind, Kind::File, "{} must be a file target", t.rel);
             }
         }
-        // And the directory itself is never a target under any name.
+        // And the directory itself is never a target under any name — neither
+        // it nor the module directory inside it.
         for t in TARGETS {
             assert_ne!(t.rel, ".config/hypr");
+            assert_ne!(t.rel, ".config/hypr/apex");
+        }
+    }
+
+    #[test]
+    fn the_migrated_user_config_is_never_a_target() {
+        // apex-hypr-migrate writes the user's own converted hyprlang here. It
+        // is the only file under ~/.config/hypr/apex that is NOT generated, and
+        // a desktop reset that emptied it would destroy exactly what the
+        // migration exists to preserve.
+        for t in TARGETS {
+            assert_ne!(
+                t.rel, ".config/hypr/apex/user-overrides.lua",
+                "the migrated user config must never be reset"
+            );
+        }
+        assert!(PRESERVED_LANDMARKS.contains(&".config/hypr/apex/user-overrides.lua"));
+    }
+
+    #[test]
+    fn every_generated_hypr_module_is_a_target() {
+        // The three modules the generators write. A rename that moved one and
+        // left this table behind would make `apex recover reset --desktop`
+        // silently stop resetting it.
+        for rel in [
+            ".config/hypr/apex/input.lua",
+            ".config/hypr/apex/monitors.lua",
+            ".config/hypr/apex/shell-keybinds.lua",
+        ] {
+            assert!(
+                TARGETS.iter().any(|t| t.rel == rel),
+                "{rel} is generated but is not reset"
+            );
         }
     }
 

@@ -765,7 +765,7 @@ RH="$WORK/home-reset"
 seed_reset_home() {
     rm -rf "$RH"
     mkdir -p "$RH/.config/apex-shell/plugins/keep" "$RH/.config/apex" \
-             "$RH/.config/hypr" "$RH/.cache/apex-shell" \
+             "$RH/.config/hypr/apex" "$RH/.cache/apex-shell" \
              "$RH/.local/state/apex" "$RH/.local/share/apex/env" "$RH/.ssh" \
              "$RH/Documents"
     printf '{"a":1}\n'   > "$RH/.config/apex-shell/input.json"
@@ -773,10 +773,13 @@ seed_reset_home() {
     printf 'plugin\n'    > "$RH/.config/apex-shell/plugins/keep/manifest.json"
     printf 'bp\n'        > "$RH/.config/apex/blueprint.toml"
     printf 'games\n'     > "$RH/.config/apex/games.toml"
-    printf 'main\n'      > "$RH/.config/hypr/hyprland.conf"
+    printf 'main\n'      > "$RH/.config/hypr/hyprland.lua"
     printf 'idle\n'      > "$RH/.config/hypr/hypridle.conf"
-    printf 'generated\n' > "$RH/.config/hypr/apex-input.conf"
-    printf 'generated\n' > "$RH/.config/hypr/apex-display.conf"
+    printf 'generated\n' > "$RH/.config/hypr/apex/input.lua"
+    printf 'generated\n' > "$RH/.config/hypr/apex/monitors.lua"
+    printf 'generated\n' > "$RH/.config/hypr/apex/shell-keybinds.lua"
+    # Not generated: what apex-hypr-migrate wrote from the user's own hyprlang.
+    printf 'mine\n'      > "$RH/.config/hypr/apex/user-overrides.lua"
     printf 'cached\n'    > "$RH/.cache/apex-shell/colors.json"
     printf 'state\n'     > "$RH/.local/state/apex/blueprint-state.toml"
     printf 'capsule\n'   > "$RH/.local/share/apex/env/fedora.json"
@@ -853,15 +856,18 @@ if [ ! -d "$RH/.cache/apex-shell" ]; then
 else bad "the cache directory is gone" "it survived"; fi
 # The heart of the data boundary. Each of these is a promise the plan printed.
 for keep in ".ssh/id_ed25519" "Documents/thesis.txt" ".config/apex/blueprint.toml" \
-            ".config/apex/games.toml" ".config/hypr/hyprland.conf" \
-            ".config/hypr/hypridle.conf" ".config/apex-shell/plugins/keep/manifest.json" \
+            ".config/apex/games.toml" ".config/hypr/hyprland.lua" \
+            ".config/hypr/hypridle.conf" ".config/hypr/apex/user-overrides.lua" \
+            ".config/apex-shell/plugins/keep/manifest.json" \
             ".local/share/apex/env/fedora.json" ".local/state/apex/blueprint-state.toml"; do
     if [ -e "$RH/$keep" ]; then ok "desktop scope preserved ~/$keep"
     else bad "desktop scope preserved ~/$keep" "IT WAS DELETED"; fi
 done
-# Truncated, never removed: hyprland.conf sources these and a missing source is
-# a fatal config error, so a delete here takes the whole session's config down.
-for gen in ".config/hypr/apex-input.conf" ".config/hypr/apex-display.conf"; do
+# Truncated, never removed. Nothing under ~/.config/hypr is ever deleted:
+# "empty" is the no-overrides state the compositor understands, and it is
+# reachable without apexd deciding which of the user's files it may remove.
+for gen in ".config/hypr/apex/input.lua" ".config/hypr/apex/monitors.lua" \
+           ".config/hypr/apex/shell-keybinds.lua"; do
     if [ -f "$RH/$gen" ] && [ ! -s "$RH/$gen" ]; then
         ok "the generated $gen was emptied, not removed"
     else
@@ -896,7 +902,8 @@ HOME="$RH" APEX_RECOVER_ROOT="$HEALTHY" \
 if [ ! -f "$RH/.config/apex/blueprint.toml" ]; then
     ok "user scope really does remove the blueprint"
 else bad "user scope removes the blueprint" "it survived"; fi
-for keep in ".ssh/id_ed25519" "Documents/thesis.txt" ".config/hypr/hyprland.conf" \
+for keep in ".ssh/id_ed25519" "Documents/thesis.txt" ".config/hypr/hyprland.lua" \
+            ".config/hypr/apex/user-overrides.lua" \
             ".local/share/apex/env/fedora.json" \
             ".config/apex-shell/plugins/keep/manifest.json"; do
     if [ -e "$RH/$keep" ]; then ok "user scope still preserved ~/$keep"
@@ -935,12 +942,13 @@ has "…and names the escape hatch for someone who wants only the deletion" \
 
 sec "--no-reprovision still leaves a config Hyprland can parse"
 # The one path that skips the reseed postcondition. It must NOT be able to
-# strand a session: hyprland.conf `source=`s these two files and a source with
-# no match is a FATAL config error, so if --no-reprovision left either of them
-# ABSENT the next login would come up with no configuration at all. They are
-# truncate targets, so the emptying runs regardless of the reseed — asserted
-# here rather than reasoned about, because the consequence is a machine with no
-# desktop.
+# strand a session. An absent generated module is survivable under the Lua
+# layout — hyprland.lua checks package.searchpath before requiring — so the
+# stake here is no longer "the next login has no configuration at all". It is
+# that a reset must leave the compositor config in the state apexd says it
+# leaves it in: emptied, present, and the user's own file untouched beside it.
+# The emptying runs regardless of the reseed, which is exactly why this path
+# needs its own assertion rather than trusting the reseed to repair it.
 seed_reset_home
 tok=$(HOME="$RH" APEX_RECOVER_ROOT="$HEALTHY" \
       apex recover reset --scope desktop --no-reprovision \
@@ -949,14 +957,22 @@ out=$(HOME="$RH" APEX_RECOVER_ROOT="$HEALTHY" \
       apex recover reset --scope desktop --no-reprovision --commit --confirm "$tok"); rc=$?
 is "--no-reprovision performs the reset" "0" "$rc"
 has "…and says the files were NOT put back" "were NOT put back" "$out"
-for gen in ".config/hypr/apex-input.conf" ".config/hypr/apex-display.conf"; do
+for gen in ".config/hypr/apex/input.lua" ".config/hypr/apex/monitors.lua" \
+           ".config/hypr/apex/shell-keybinds.lua"; do
     if [ -f "$RH/$gen" ] && [ ! -s "$RH/$gen" ]; then
-        ok "…and $gen is still PRESENT and empty, so hyprland.conf still parses"
+        ok "…and $gen is still PRESENT and empty"
     else
         bad "…and $gen is still present and empty" \
-            "exists=$([ -f "$RH/$gen" ] && echo y || echo NO) — the next login would be fatal"
+            "exists=$([ -f "$RH/$gen" ] && echo y || echo NO)"
     fi
 done
+# The migrated user config is not a target at all, so --no-reprovision must
+# leave it exactly as it was. This is the file the migration promised to keep.
+if [ -s "$RH/.config/hypr/apex/user-overrides.lua" ]; then
+    ok "…and the migrated user config is untouched"
+else
+    bad "…and the migrated user config is untouched" "it was emptied or removed"
+fi
 if [ ! -f "$RH/.config/apex-shell/input.json" ] \
    && [ ! -f "$RH/.config/apex-shell/display.json" ]; then
     ok "…and the shell settings really were removed, so the flag did something"
