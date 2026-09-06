@@ -396,9 +396,17 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════
 sec "the machine does not look broken"
 # ═════════════════════════════════════════════════════════════════════════════
-h ping -c1 -W2 127.0.0.1 >/dev/null 2>&1 \
-    && ok "the machine can still talk to itself" \
-    || bad "the machine can still talk to itself" "loopback is filtered; most of a desktop session is on it"
+# NOT a ping: an echo-request to 127.0.0.1 is accepted by the ICMP rule
+# whether or not loopback is allowed, so a ping here passed against a policy
+# with `iif lo accept` deleted. What the lo rule actually carries is the
+# seventeen listening ports a desktop session has on 127.0.0.1, none of which
+# are in the accept list — so the probe is a TCP connection to one of them.
+listen_tcp "$NS_HOST" 4444
+if nsxt 3 "$NS_HOST" socat -u /dev/null "TCP4:127.0.0.1:4444,connect-timeout=3" >/dev/null 2>&1; then
+    ok "the machine can still talk to itself"
+else
+    bad "the machine can still talk to itself" "loopback is filtered; most of a desktop session is on it"
+fi
 
 # A name lookup is a UDP round trip to somebody else's port 53. What has to
 # work is that the ANSWER gets back in, which is conntrack's job, not a rule's.
