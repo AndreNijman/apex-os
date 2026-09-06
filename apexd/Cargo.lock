@@ -106,6 +106,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-secret-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "apex-secretd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "apex-secret-core",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "apexd"
 version = "0.1.0"
 dependencies = [
