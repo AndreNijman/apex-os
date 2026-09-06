@@ -1,4 +1,9 @@
-//! P0-004's acceptance criteria, as tests.
+//! The permission dimensions' acceptance criteria, as tests.
+//!
+//! P0-004 split the six dimensions and this file was its acceptance suite;
+//! P0-008 filled in the network one and added its criteria at the bottom,
+//! rather than starting a second file that would assert over the same value
+//! sets in a different shape.
 //!
 //! §3.1 says the six permission layers "must never be collapsed into one
 //! switch". Three of those non-collapses are acceptance criteria in their own
@@ -306,6 +311,115 @@ fn the_named_modes_are_reachable_and_so_is_everything_between_them() {
     );
     assert_eq!(bespoke.validate(), Ok(()));
     assert!(argv(bespoke).iter().any(|x| x == "--unshare-net"));
+}
+
+// ── P0-008: the network dimension ───────────────────────────────────────────
+
+#[test]
+fn every_network_mode_but_open_takes_the_session_off_the_host_network() {
+    // Criterion 1, at the level where it is enforced. §38 asks for four modes;
+    // three of them are one kernel fact — a network namespace with nothing in
+    // it — and differ in what apex-agentd offers over a Unix socket after
+    // that. Asserted over the whole value set so a fifth mode cannot arrive
+    // with the host's network by omission.
+    for network in NetworkPolicy::ALL {
+        let p = AgentPolicy {
+            sandbox: SandboxPolicy::Project,
+            network: *network,
+            ..AgentPolicy::default()
+        };
+        assert_eq!(
+            argv(p).iter().any(|x| x == "--unshare-net"),
+            *network != NetworkPolicy::Open,
+            "{network} got the wrong network namespace"
+        );
+    }
+}
+
+#[test]
+fn strict_is_still_fail_closed_whatever_the_network_dimension_says() {
+    // Criterion 2. `strict` is a floor, and the floor is asserted in the argv
+    // rather than in `effective_network`, because the argv is what runs. A
+    // client that sends `{"sandbox":"strict","network":"open"}` — an older one
+    // sends exactly that, since `open` is the deserialisation default — must
+    // still get a network-isolated session.
+    for network in NetworkPolicy::ALL {
+        let p = AgentPolicy {
+            sandbox: SandboxPolicy::Strict,
+            network: *network,
+            ..AgentPolicy::default()
+        };
+        assert_eq!(p.effective_network(), NetworkPolicy::Offline, "{network}");
+        assert!(
+            argv(p).iter().any(|x| x == "--unshare-net"),
+            "strict kept the network with network={network}"
+        );
+        // And the record stored for the session says so, so a listing cannot
+        // report a network the session does not have.
+        assert_eq!(p.normalised().network, NetworkPolicy::Offline, "{network}");
+    }
+}
+
+#[test]
+fn a_network_mode_this_build_cannot_enforce_is_refused_not_downgraded() {
+    // The other half of criterion 2. A mode with no enforcement point must
+    // fail the session, never fall through to `open` — an unenforced
+    // `--network allowlist` would read as a protection in `apex agent status`,
+    // in the Agent Center and in a script, with nothing behind it.
+    let unenforceable = AgentPolicy {
+        network: NetworkPolicy::Allowlist,
+        ..AgentPolicy::default()
+    };
+    assert!(unenforceable.validate().is_err());
+
+    // Nor may an enforceable mode be granted without the namespace it needs.
+    for network in NetworkPolicy::ALL {
+        let p = AgentPolicy {
+            sandbox: SandboxPolicy::Unrestricted,
+            network: *network,
+            ..AgentPolicy::default()
+        };
+        assert_eq!(
+            p.validate().is_ok(),
+            *network == NetworkPolicy::Open,
+            "an unconfined session was granted {network}, which it cannot enforce"
+        );
+    }
+}
+
+#[test]
+fn the_network_dimension_cannot_reach_the_secret_one() {
+    // Criterion 4's precondition. Brokered egress is only a way out if the
+    // broker answers, and the broker's gate is the secret dimension — so a
+    // network mode must not be able to move it, in either direction. A
+    // `--network brokered` that quietly turned the broker on would be a
+    // network flag granting a credential capability.
+    for network in NetworkPolicy::ALL {
+        let p = AgentPolicy {
+            sandbox: SandboxPolicy::Project,
+            network: *network,
+            ..AgentPolicy::default()
+        };
+        assert_eq!(
+            p.secrets,
+            SecretPolicy::default(),
+            "the {network} network mode moved the secret dimension"
+        );
+        assert!(
+            p.secrets.may_use_broker(),
+            "the {network} network mode shut the broker"
+        );
+    }
+
+    // The pair that contradicts is refused rather than resolved: brokered
+    // egress with `--secrets none` is a session with no way out at all.
+    let shut = AgentPolicy {
+        sandbox: SandboxPolicy::Project,
+        network: NetworkPolicy::Brokered,
+        secrets: SecretPolicy::None,
+        ..AgentPolicy::default()
+    };
+    assert!(shut.validate().is_err());
 }
 
 // ── the sixth dimension ─────────────────────────────────────────────────────

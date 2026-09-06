@@ -11,6 +11,29 @@
 //! that is exactly the boundary required, and it is why a git credential helper
 //! cannot work: `git` runs inside the sandbox, so the helper's reply lands in
 //! the agent's own namespace.
+//!
+//! ## The network dimension and where a cloud provider plugs in
+//!
+//! `--network brokered` is a session with `--unshare-net`: no IP egress at all,
+//! and this module is the way out. That works because the control socket is an
+//! `AF_UNIX` path, which a network namespace does not touch, and because the
+//! daemon that runs the operation is outside the namespace and therefore still
+//! has the network. The same property is why `git push` already works from a
+//! `strict` session today.
+//!
+//! Nothing in the network dimension is checked here, deliberately. [`Capability`]
+//! is the seam a cloud provider attaches to: adding a variant, a name in
+//! `Capability::names`, and an arm in the runner is the whole of what P1-002's
+//! Cloudflare provider needs in order to be usable from a session with no
+//! network — the confinement, the grant check, the audit record and the
+//! namespace argument above all apply to a new capability unchanged. The one
+//! dimension that can shut this door is the secret one, checked below, and
+//! `--network brokered --secrets none` is refused by `AgentPolicy::validate`
+//! before a session with both is ever started.
+//!
+//! What is deliberately *not* here is a provider trait: P1-001 models
+//! provider, operation, resource, expiry and constraints as a framework, and
+//! inventing half of one now would be a shape that task has to undo.
 
 use std::path::Path;
 use std::sync::Arc;

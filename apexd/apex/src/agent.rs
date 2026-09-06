@@ -530,8 +530,7 @@ pub fn resolve_policy(cfg: &config::Config, args: &RunArgs) -> Result<AgentPolic
         if policy.sandbox == SandboxPolicy::Strict && v != NetworkPolicy::Offline {
             bail!(
                 "`--sandbox strict` removes the network, so it cannot be combined with \
-                 `--network {v}`; use `--sandbox project --network {v}` to keep the network \
-                 under project confinement"
+                 `--network {v}`; use `--sandbox project --network {v}` instead"
             );
         }
         policy.network = v;
@@ -1860,6 +1859,32 @@ mod tests {
             let err = resolve_policy(&cfg, &args).expect_err(expect);
             assert!(err.to_string().contains(expect), "{err}");
         }
+    }
+
+    #[test]
+    fn brokered_egress_is_refused_when_the_broker_has_been_shut() {
+        // Two flags that each make sense and cannot both be honoured. Refused
+        // where the user typed them, so the message names both rather than
+        // arriving from the daemon as a policy error about one.
+        let cfg = config::Config::default();
+        let args = RunArgs {
+            sandbox: Some(SandboxPolicy::Project),
+            network: Some(NetworkPolicy::Brokered),
+            secrets: Some(SecretPolicy::None),
+            ..run_args()
+        };
+        let err = resolve_policy(&cfg, &args).expect_err("a contradiction");
+        assert!(err.to_string().contains("--secrets none"), "{err}");
+
+        // Brokered on its own, under project confinement, is a mode that runs.
+        let args = RunArgs {
+            sandbox: Some(SandboxPolicy::Project),
+            network: Some(NetworkPolicy::Brokered),
+            ..run_args()
+        };
+        let p = resolve_policy(&cfg, &args).expect("resolve");
+        assert_eq!(p.network, NetworkPolicy::Brokered);
+        assert_eq!(p.secrets, SecretPolicy::Brokered);
     }
 
     #[test]
