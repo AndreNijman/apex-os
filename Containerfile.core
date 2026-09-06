@@ -1000,26 +1000,71 @@ RUN set -eux; \
 # first boot; blueman gives the tray applet the shell's BT tab can also drive.
 # Package-name notes (verified against Fedora): the Thunar RPM is capitalised
 # `Thunar`; Fedora dropped p7zip for `7zip` (upstream 7-Zip, provides 7z + RAR
-# extraction); there is no `gvfs-archive` subpackage. `unrar` (RPMFusion nonfree)
-# is best-effort — `7zip`/`unar` already cover RAR — so a nonfree-repo hiccup can
-# never abort this stage.
+# extraction). `unrar` (RPMFusion nonfree) is best-effort — `7zip`/`unar` already
+# cover RAR — so a nonfree-repo hiccup can never abort this stage.
+#
+# ── The share stack was half a stack ────────────────────────────────────────
+# `gvfs gvfs-mtp gvfs-smb` looks like network shares are covered. They were not:
+#
+#   gvfs-fuse      NOT installed, and it is the one that decides whether a
+#                  mount exists for anything but GTK. gvfs without it puts the
+#                  share inside GIO and creates no /run/user/UID/gvfs, so
+#                  Thunar can open smb://server/share and a terminal, an
+#                  editor or an installer in the same session cannot see it.
+#                  "Mounted" and "usable" are different states and only this
+#                  package joins them.
+#   gvfs-gphoto2   NOT installed, so a camera or a phone in PTP mode appears
+#                  nowhere. MTP was covered and PTP was not, which is the
+#                  difference between an Android phone and every camera.
+#   gvfs-nfs       NOT installed: NFS was mountable as root and invisible to
+#                  the file manager.
+#   cifs-utils     NOT installed, so there was no mount.cifs at all — SMB
+#                  worked only through GIO, never as a kernel mount in fstab,
+#                  which is what a persistent share on a NAS actually is.
+#   samba-client   NOT installed, so no smbclient to diagnose any of it.
+#
+# WebDAV needed nothing: gvfsd-dav is in the base `gvfs` package and was
+# already here. It was still unusable outside GTK for the gvfs-fuse reason.
 RUN set -eux; \
     dnf5 -y copr enable zeno/scrcpy; \
     dnf5 -y install \
         firefox \
         Thunar thunar-volman thunar-archive-plugin \
-        gvfs gvfs-mtp gvfs-smb \
+        gvfs gvfs-fuse gvfs-mtp gvfs-smb gvfs-nfs gvfs-gphoto2 \
+        cifs-utils samba-client \
         evince qimgv mpv \
         7zip unzip unar xarchiver \
         btop qalculate-gtk neovim nano \
         alacritty fastfetch \
         pavucontrol \
         gparted parted gdisk udisks2 smartmontools \
-        bluez bluez-tools blueman \
+        bluez bluez-tools bluez-obexd blueman pipewire-codec-aptx \
         scrcpy android-tools; \
     rpm -q scrcpy android-tools; \
     command -v scrcpy; \
     command -v adb; \
+    # The share and device backends, asserted on the shipped artifact rather
+    # than on the package names above. gvfsd-fuse is the one that matters most:
+    # without it the GIO mounts exist only inside GTK's own process and
+    # /run/user/UID/gvfs is never created, so every other program on the
+    # machine — a terminal, an editor, Steam — cannot see the share at all.
+    test -x /usr/libexec/gvfsd-fuse; \
+    test -x /usr/libexec/gvfsd-gphoto2; \
+    test -x /usr/libexec/gvfsd-nfs; \
+    test -x /usr/libexec/gvfsd-dav; \
+    command -v mount.cifs; \
+    command -v smbclient; \
+    # aptX. The image already had AAC, LDAC, LC3, opus, G.722, FastStream and
+    # SBC; aptX is the one Qualcomm headset codec Fedora cannot ship, so it
+    # comes from RPM Fusion free, which Stage 1d enabled. Asserted rather than
+    # installed with --skip-unavailable: a headset that silently falls back to
+    # SBC is exactly the "it works but sounds wrong" report nobody can debug.
+    test -e /usr/lib64/spa-0.2/bluez5/libspa-codec-bluez5-aptx.so; \
+    test -e /usr/lib64/spa-0.2/bluez5/libspa-codec-bluez5-ldac.so; \
+    # Sending a file to a phone over Bluetooth. Session-bus activated, so it
+    # needs no unit enabled, but it needs to be installed — and it was only
+    # here as somebody else's dependency, which is not a thing to rely on.
+    test -x /usr/libexec/bluetooth/obexd; \
     dnf5 -y copr disable zeno/scrcpy; \
     dnf5 -y install --skip-unavailable unrar; \
     systemctl enable bluetooth.service; \
@@ -1037,9 +1082,10 @@ RUN set -eux; \
 # cluster. Left out deliberately; add it if legacy print servers matter to you.
 #
 # DISCOVERY IS HALF THE JOB. A driverless printer is only findable if mDNS
-# works: avahi is already installed AND enabled in this image (verified), but
-# `nss-mdns` was absent and /etc/nsswitch.conf had no mdns module, so nothing
-# could resolve a printer's .local name.
+# works: avahi is installed, but `nss-mdns` was absent and /etc/nsswitch.conf
+# had no mdns module, so nothing could resolve a printer's .local name. An
+# earlier version of this comment also claimed avahi was enabled here. It was
+# not — see the numbered note below.
 #
 # nss-mdns wires itself through authselect (`%posttrans` runs
 # `authselect enable-feature with-mdns4`), which is the ONLY correct mechanism
@@ -1052,13 +1098,58 @@ RUN set -eux; \
 #
 # cups.SOCKET, not cups.service: socket activation means cupsd only runs when
 # something actually prints, instead of sitting resident on every laptop.
+#
+# ── Two things this stage got wrong, found by running it ────────────────────
+#
+# 1. AVAHI WAS NEVER ENABLED, only assumed. The comment above says avahi is
+#    "already installed AND enabled in this image (verified)" and no step here
+#    checks it. On the machine booted from this image both avahi-daemon.service
+#    and avahi-daemon.socket were masked. Everything above depends on avahi:
+#    driverless printers are found by DNS-SD, nss-mdns resolves .local through
+#    avahi's socket, and `apex host` discovery is mDNS. So it is enabled here
+#    and the build fails if the enable did not take. A mask lives in /etc,
+#    survives every image update, and is invisible to a build — which is why
+#    `apex devices print` reports it rather than reporting no printers.
+#
+# 2. hplip's SANE BACKEND HANGS `scanimage -L` FOREVER. With hpaio in
+#    /etc/sane.d/dll.d, device enumeration never returns: SANE_DEBUG_DLL shows
+#    hpaio as the last backend loaded and the process then sits in
+#    rt_sigsuspend with no children and no sockets, still there after 400
+#    seconds. Every scanning UI enumerates devices at startup, so the image
+#    could not scan at all. With hpaio disabled the same command returns in
+#    seven seconds and finds a real network scanner over WSD.
+#
+#    hplip stays, because it is how HP printers get a driver. Only its scanner
+#    backend is switched off, and the cost is bounded: modern HP all-in-ones
+#    scan driverlessly over eSCL/WSD through sane-airscan, which is installed.
+#    A user who needs the proprietary path uncomments one line.
+#
+# simple-scan ships because the image had no scanning application of any kind —
+# `scanimage` on a terminal is not "scanning works" for the person this distro
+# is for.
 RUN set -eux; \
     dnf5 -y install \
         cups cups-filters cups-pk-helper ghostscript \
         gutenprint gutenprint-cups hplip \
         nss-mdns system-config-printer \
-        sane-backends sane-airscan; \
+        sane-backends sane-airscan simple-scan; \
     systemctl enable cups.socket; \
+    systemctl enable avahi-daemon.service avahi-daemon.socket; \
+    systemctl is-enabled avahi-daemon.service \
+        || { echo "FATAL: avahi is not enabled — no printer on this network would ever be found"; exit 1; }; \
+    command -v simple-scan; \
+    printf '%s\n' \
+        '# sane-dll entry for sane-airscan' \
+        '# APEX-OS: DISABLED. hplip is installed for its printer driver, but its' \
+        '# SANE backend never returns from sane_get_devices on a machine with no' \
+        '# HP scanner attached, and every scanning UI calls that at startup — so' \
+        '# leaving it on means the image cannot scan with anything. Modern HP' \
+        '# all-in-ones scan over eSCL/WSD through sane-airscan instead. Uncomment' \
+        '# the line below if you need hplip'"'"'s own USB scanner path.' \
+        '#hpaio' \
+        > /etc/sane.d/dll.d/hpaio; \
+    grep -q '^#hpaio' /etc/sane.d/dll.d/hpaio; \
+    test -z "$(grep -E '^hpaio' /etc/sane.d/dll.d/hpaio || true)"; \
     authselect enable-feature with-mdns4 >/dev/null 2>&1 || true; \
     grep '^hosts:' /etc/nsswitch.conf; \
     grep -q mdns /etc/nsswitch.conf \
@@ -1118,6 +1209,42 @@ RUN set -eux; \
 #                      university or corporate network needs on day one.
 #   libinput-utils / usbutils / pciutils  the tools any bug report will ask for.
 #
+# ── Four more gaps, each of them an acceptance criterion ────────────────────
+#
+#   bolt               Thunderbolt and USB4 device authorisation. On the
+#                      machine this was found on, both domains report
+#                      security=user, which means an attached device sits at
+#                      authorized=0 until something authorises it. Nothing did:
+#                      boltd was not installed, and APEX runs neither GNOME nor
+#                      KDE, so there was no other client of org.freedesktop.bolt
+#                      either. A USB-C dock behind a Thunderbolt controller was
+#                      dead with no message anywhere.
+#
+#   wireguard-tools    The kernel has CONFIG_WIREGUARD=m and NetworkManager
+#                      speaks WireGuard natively, so the protocol worked and
+#                      there was no `wg`, no `wg-quick` and no way to import
+#                      the .conf file every WireGuard provider hands out.
+#
+#   the NM VPN plugins Absolutely none were installed. NetworkManager has no
+#                      built-in VPN support beyond WireGuard: each protocol is a
+#                      separate service in /usr/lib/NetworkManager/VPN, so
+#                      "import a .ovpn" was not a slow path, it was no path.
+#                      openvpn and openconnect cover OpenVPN and the
+#                      AnyConnect/GlobalProtect/Pulse family; vpnc covers legacy
+#                      Cisco IPsec. l2tp is left out: it drags in strongswan and
+#                      xl2tpd, and nothing here has tested that chain.
+#
+#   dnsmasq            NetworkManager's shared mode — which is what "turn this
+#                      laptop into a hotspot" is — spawns dnsmasq for DHCP and
+#                      DNS. Without the binary the connection activates and
+#                      hands out no addresses, which reads as a hotspot that
+#                      exists and does not work.
+#                      NOTE: the default firewall still blocks a hotspot three
+#                      separate ways (forward is policy drop; the DHCP rule
+#                      matches replies, not a client's DISCOVER on dport 67;
+#                      dport 53 is shut). That is P1-044's file to change and
+#                      this stage does not touch it.
+#
 # thermald is Intel-only and its Fedora unit has NO vendor condition, plus
 # `Restart=on-failure` — so enabling it as-is would restart-loop into a failed
 # unit on every AMD boot. The ExecCondition drop-in makes systemd skip it
@@ -1137,7 +1264,29 @@ RUN set -eux; \
         fprintd fprintd-pam iio-sensor-proxy switcheroo-control thermald \
         ModemManager NetworkManager-ppp NetworkManager-bluetooth \
         nm-connection-editor power-profiles-daemon \
+        bolt \
+        wireguard-tools dnsmasq \
+        NetworkManager-openvpn NetworkManager-openconnect NetworkManager-vpnc \
         libinput-utils usbutils pciutils; \
+    # boltd is D-Bus activated and woken by 90-bolt.rules
+    # (SUBSYSTEM=="thunderbolt", SYSTEMD_WANTS+="bolt.service"), so it must NOT
+    # be `systemctl enable`d — the unit is Type=dbus and enabling it would start
+    # a Thunderbolt daemon on machines with no Thunderbolt. Both halves are
+    # asserted instead, because installing the package and never being woken by
+    # it is the failure mode that looks like success.
+    test -x /usr/libexec/boltd; \
+    grep -q 'SUBSYSTEM=="thunderbolt"' /usr/lib/udev/rules.d/90-bolt.rules; \
+    grep -q 'bolt.service' /usr/lib/udev/rules.d/90-bolt.rules; \
+    command -v wg; \
+    command -v wg-quick; \
+    test -e /usr/lib/NetworkManager/VPN/nm-openvpn-service.name; \
+    test -e /usr/lib/NetworkManager/VPN/nm-openconnect-service.name; \
+    test -e /usr/lib/NetworkManager/VPN/nm-vpnc-service.name; \
+    # NetworkManager spawns its own dnsmasq for a shared connection, with its
+    # own arguments and its own lifetime. Enabling dnsmasq.service would put a
+    # second resolver on port 53 that fights the first one.
+    command -v dnsmasq; \
+    test "$(systemctl is-enabled dnsmasq.service 2>&1)" != enabled; \
     mkdir -p /usr/lib/systemd/system/thermald.service.d; \
     printf '%s\n' \
         '# APEX-OS: thermald is Intel-only, its Fedora unit has no vendor gate,' \
