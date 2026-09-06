@@ -338,6 +338,13 @@ download_rpms() {
     local destdir="$1"; shift
     local -a args=(-y --setopt=keepcache=True download --resolve \
         --arch="$(uname -m)" --arch=noarch --destdir "$destdir")
+    # Resolve the 32-bit closure too. RPM Fusion's steam (and every other
+    # multilib application) declares its 32-bit libraries as requires, and
+    # dnf will not fetch a provider outside the declared arch set — without
+    # i686 here the extension ships a client that cannot load its own UI
+    # modules ("Could not load module 'vgui2_s.so'"). The guard already
+    # treats a protected name in this architecture as purely additive.
+    [ "$(uname -m)" = x86_64 ] && args+=(--arch=i686)
     [ "${NO_WEAK_DEPS:-0}" = 1 ] && args+=(--setopt=install_weak_deps=False)
     local repo
     for repo in ${ENABLE_REPOS:-}; do args+=(--enable-repo "$repo"); done
@@ -457,33 +464,90 @@ stage_local_rpms() {
 }
 
 # Everything that must be true BEFORE we extract a single file.
+# True when every requirement, across every other RPM in the set, that names
+# the package $2 is already satisfied by what the image ships. Asked of libdnf5
+# because it honours version ranges, exactly like installed_provides.
+newer_satisfied_by_image() {
+    local destdir="$1" name="$2" other req cap
+    for other in "$destdir"/*.rpm; do
+        while IFS= read -r req; do
+            [ -n "$req" ] || continue
+            case "$req" in rpmlib\(*) continue ;; esac
+            cap="${req%% *}"
+            [ "$cap" = "$name" ] || continue
+            # An unversioned requirement of the package name is satisfied by the
+            # installed build by definition; only ranges can demand newer.
+            [ "$req" = "$cap" ] && continue
+            dnf5 repoquery --installed --whatprovides -- "$req" --qf '%{name}\n' 2>/dev/null | grep -q . || return 1
+        done < <(rpm -qp --nosignature --requires -- "$other" 2>/dev/null)
+    done
+    return 0
+}
+
 guard_rpms() {
     local destdir="$1"
-    local rpmfile name evr installed bad=0
+    local rpmfile name evr arch installed bad=0
 
     for rpmfile in "$destdir"/*.rpm; do
         name="$(rpm -qp --nosignature --qf '%{NAME}' "$rpmfile" 2>/dev/null)" \
             || die "cannot read $rpmfile"
         evr="$(rpm -qp --nosignature --qf '%{EVR}' "$rpmfile" 2>/dev/null)"
+        arch="$(rpm -qp --nosignature --qf '%{ARCH}' "$rpmfile" 2>/dev/null)"
 
-        if [[ "$name" =~ $REFUSE_RE ]]; then
-            warn "refusing '${name}': kernel- or core-system packages must ship in the APEX image, not an extension"
+        # Already in the image — of the SAME architecture? Then this is either a
+        # no-op (same EVR: the overlay would carry a byte-identical copy, so it
+        # is skipped) or a REPLACEMENT (different EVR: exactly the class of
+        # change that breaks a running system). The check MUST be
+        # architecture-qualified: on a multilib system `rpm -q "$name"` returns
+        # the x86_64 build, and its EVR says nothing about whether the i686
+        # build is present. Judged by name alone, every 32-bit library a 32-bit
+        # client needs is silently dropped here as "already provided" and the
+        # application then fails to launch with a missing library.
+        if [ "$arch" = noarch ]; then
+            installed="$(rpm -q --qf '%{EVR}' -- "$name" 2>/dev/null)" || installed=""
+        else
+            installed="$(rpm -q --qf '%{EVR}' -- "${name}.${arch}" 2>/dev/null)" || installed=""
+        fi
+        if [ -n "$installed" ]; then
+            if [ "$installed" = "$evr" ]; then
+                warn "skipping '${name}-${evr}.${arch}': already provided by APEX-OS"
+                rm -f "$rpmfile"
+                continue
+            fi
+            # The repositories carry a NEWER build of an installed package. The
+            # overlay must never shadow the image's copy, but core is frozen at
+            # image build time while resolution always sees current repos — so
+            # dnf routinely pulls a newer provider for a capability the
+            # installed build already satisfies. Overlaying is then also
+            # UNNECESSARY: omit the package and keep the image's copy, but only
+            # when every requirement that names it is already satisfied by the
+            # image. Something that genuinely needs the newer build is refused —
+            # that is an OS update, not a package install.
+            if newer_satisfied_by_image "$destdir" "$name"; then
+                warn "omitting '${name}-${evr}.${arch}': newer than the image's build, but every requirement naming it is already satisfied — keeping the image's copy"
+                rm -f "$rpmfile"
+                continue
+            fi
+            warn "refusing '${name}': needs ${evr} but the image ships ${installed} — that requires an OS update, not a package install"
             bad=1
+            rm -f "$rpmfile"
             continue
         fi
 
-        # Already in the image? Then this is a REPLACEMENT, and an overlay
-        # carrying a second copy of an installed package is exactly the class of
-        # change that breaks a running system.
-        if installed="$(rpm -q --qf '%{EVR}' "$name" 2>/dev/null)"; then
-            if [ "$installed" = "$evr" ]; then
-                warn "skipping '${name}-${evr}': already provided by APEX-OS"
-            else
-                warn "refusing '${name}': needs ${evr} but the image ships ${installed} — that requires an OS update, not a package install"
+        # Not installed at all. A protected name on the host architecture (or
+        # noarch) belongs in the image and is refused: kernels and akmods need a
+        # real deployment, and a core package the image does not ship is one the
+        # image wants absent. But a 32-bit MULTILIB sibling (i686 on x86_64)
+        # shadows nothing — the image ships none of that architecture — and
+        # refusing it made every 32-bit application, Steam included,
+        # uninstallable through the documented `apex install` path.
+        if [[ "$name" =~ $REFUSE_RE ]]; then
+            if [ "$arch" = "$(uname -m)" ] || [ "$arch" = noarch ]; then
+                warn "refusing '${name}': kernel- or core-system packages must ship in the APEX image, not an extension"
                 bad=1
+                continue
             fi
-            rm -f "$rpmfile"
-            continue
+            warn "allowing '${name}-${evr}.${arch}': multilib sibling of a core package; the image ships none of this architecture"
         fi
     done
 
@@ -630,6 +694,21 @@ split_out_of_image() {
         [ -d "${root}/${d}" ] && find "${root}/${d}" -mindepth 1 -print >> "${WORK}/refused.paths" 2>/dev/null || true
         rm -rf "${root:?}/${d}"
     done
+    # Legacy top-level paths: rpm still ships 32-bit libraries in /lib even on
+    # merged-usr Fedora (libgcc.i686 carries /lib/libgcc_s.so.1). A sysext
+    # merges /usr and /opt ONLY, so a file left at the tree root silently
+    # never reaches the running system. Fold these into their canonical /usr
+    # location — exactly what the merged-/usr filesystem does at boot.
+    local legacy dst
+    for legacy in lib:usr/lib lib64:usr/lib64 bin:usr/bin sbin:usr/bin; do
+        d="${legacy%%:*}"; dst="${legacy##*:}"
+        if [ -d "${root:?}/${d}" ]; then
+            mkdir -p "${root:?}/${dst}"
+            cp -a "${root:?}/${d}/." "${root:?}/${dst}/" \
+                || die "cannot fold /${d} into /${dst}"
+            rm -rf "${root:?}/${d}"
+        fi
+    done
     if [ -s "${WORK}/refused.paths" ]; then
         warn "ignored files outside /usr, /opt, /etc and /var:"
         sed 's/^/  /' "${WORK}/refused.paths" >&2
@@ -722,12 +801,20 @@ install_etc() {
                 mkdir -p "$target"
                 continue
             fi
+            # cp -a, NEVER install: rpm ships /etc symlinks that point back into
+            # /usr RELATIVE (fontconfig's conf.d -> ../../../usr/share/...), and
+            # split_out_of_image has already moved this tree out of the payload
+            # root, so here the link is dangling at its current location. `install`
+            # dereferences and dies on it; cp -a copies the link as a link, and it
+            # resolves again the moment it reaches its real place in /etc.
             if [ -e "$target" ] && [ -f "$saved" ] && [ "$(sha "$target")" != "$(sha "$saved")" ]; then
                 # The user edited it. Their file wins; the new one is left beside it.
-                install -Dm0644 "${etcroot}/${rel}" "${target}.apexnew"
+                mkdir -p "$(dirname "${target}.apexnew")"
+                cp -a -- "${etcroot}/${rel}" "${target}.apexnew"
                 warn "kept your edited ${target}; new version saved as ${target}.apexnew"
             elif [ -e "$target" ] && [ ! -f "$saved" ]; then
-                install -Dm0644 "${etcroot}/${rel}" "${target}.apexnew"
+                mkdir -p "$(dirname "${target}.apexnew")"
+                cp -a -- "${etcroot}/${rel}" "${target}.apexnew"
                 warn "${target} already exists and is not ours; new version saved as ${target}.apexnew"
             else
                 mkdir -p "$(dirname "$target")"

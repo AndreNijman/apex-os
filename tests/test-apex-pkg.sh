@@ -87,7 +87,9 @@ not_refuses_with() {
 # main() with NO arguments on purpose — that prints usage and returns 0, leaving
 # every function and constant defined exactly as the image has them.
 call() {
-    bash -c '
+    # WORK is forwarded because it is the engine's own scratch directory, set
+    # inside main() and therefore unset when a function is called directly.
+    WORK="${WORK:-}" bash -c '
         e=$1; f=$2; shift 2; a=("$@"); set --
         source "$e" >/dev/null 2>&1
         set +e
@@ -306,6 +308,91 @@ else
     is "an unreadable file is unreadable" unreadable "$(call state_kind "$SK/filesealed/state.json")"
 fi
 chmod 644 "$SK/filesealed/state.json"
+
+echo "── 32-bit: Steam could not be installed through the documented path ───"
+# Four separate defects each made `apex install steam` fail, and none of them
+# had a test. Steam is a multilib application: RPM Fusion's package declares
+# 32-bit libraries as requires, and the client cannot load its own UI modules
+# without them ("Could not load module 'vgui2_s.so'").
+
+# 1. Resolution never asked for the 32-bit closure, so dnf fetched none of it.
+DNFARGS=$WORK/dnf-args
+mkdir -p "$WORK/stub"
+cat > "$WORK/stub/dnf5" <<STUB
+#!/bin/sh
+printf '%s\n' "\$@" > "$DNFARGS"
+exit 1
+STUB
+chmod +x "$WORK/stub/dnf5"
+PATH="$WORK/stub:$PATH" call download_rpms "$WORK/dl" steam >/dev/null 2>&1
+if [ "$(uname -m)" = x86_64 ]; then
+    if grep -qx -- '--arch=i686' "$DNFARGS" 2>/dev/null; then
+        ok "resolution asks for the 32-bit closure"
+    else
+        bad "resolution asks for the 32-bit closure" "no --arch=i686 in: $(tr '\n' ' ' < "$DNFARGS" 2>/dev/null)"
+    fi
+    grep -qx -- '--arch=x86_64' "$DNFARGS" 2>/dev/null \
+        && ok "and still asks for the host architecture" \
+        || bad "and still asks for the host architecture" "missing --arch=x86_64"
+else
+    skipped "resolution asks for the 32-bit closure" "only meaningful on x86_64"
+    skipped "and still asks for the host architecture" "only meaningful on x86_64"
+fi
+
+# 2. rpm ships 32-bit libraries at /lib even on merged-usr Fedora
+#    (libgcc.i686 carries /lib/libgcc_s.so.1). A sysext merges /usr and /opt
+#    only, so anything left at the tree root never reaches the running system
+#    and the library is missing at runtime with no error at install time.
+LP=$WORK/legacy
+mkdir -p "$LP/root/lib" "$LP/root/lib64" "$LP/root/bin" "$LP/root/sbin" "$LP/root/usr/lib"
+echo lib32 > "$LP/root/lib/libgcc_s.so.1"
+echo lib64 > "$LP/root/lib64/libfoo.so"
+echo abin  > "$LP/root/bin/thing"
+echo asbin > "$LP/root/sbin/daemon"
+echo kept  > "$LP/root/usr/lib/already-there"
+# $WORK is the engine's own scratch dir, set inside main(); exported here so the
+# function under test can write its refused-paths list.
+mkdir -p "$LP/work"
+WORK="$LP/work" call split_out_of_image "$LP/root" "$LP/etc" >/dev/null 2>&1
+is "a 32-bit library at /lib is folded into /usr/lib" "lib32" "$(cat "$LP/root/usr/lib/libgcc_s.so.1" 2>/dev/null)"
+is "/lib64 is folded into /usr/lib64"                "lib64" "$(cat "$LP/root/usr/lib64/libfoo.so" 2>/dev/null)"
+is "/bin is folded into /usr/bin"                    "abin"  "$(cat "$LP/root/usr/bin/thing" 2>/dev/null)"
+is "/sbin is folded into /usr/bin"                   "asbin" "$(cat "$LP/root/usr/bin/daemon" 2>/dev/null)"
+is "folding does not clobber what was already there" "kept"  "$(cat "$LP/root/usr/lib/already-there" 2>/dev/null)"
+[ -d "$LP/root/lib" ] && bad "the legacy directory is removed after folding" "/lib survived" \
+                      || ok  "the legacy directory is removed after folding"
+
+# 3. rpm ships /etc symlinks pointing back into /usr by relative path
+#    (fontconfig's conf.d entries). split_out_of_image has already moved the
+#    tree, so the link dangles where it now sits; `install` dereferences and
+#    dies on it, taking the whole install down. `cp -a` copies the link itself.
+ET=$WORK/etcsym
+mkdir -p "$ET/etcroot/fonts/conf.d"
+ln -s ../../../usr/share/fontconfig/conf.avail/10-x.conf "$ET/etcroot/fonts/conf.d/10-x.conf"
+if [ -L "$ET/etcroot/fonts/conf.d/10-x.conf" ] && [ ! -e "$ET/etcroot/fonts/conf.d/10-x.conf" ]; then
+    ok "the fixture reproduces a dangling relative symlink"
+else
+    bad "the fixture reproduces a dangling relative symlink" "fixture is wrong"
+fi
+if grep -q 'cp -a -- "${etcroot}/${rel}" "${target}.apexnew"' "$ENGINE"; then
+    ok "install_etc copies a symlink rather than dereferencing it"
+else
+    bad "install_etc copies a symlink rather than dereferencing it" "still uses install(1), which dies on a dangling link"
+fi
+
+# 4. The guard asked `rpm -q <name>` with no architecture. On multilib that
+#    answers with the x86_64 build, so every i686 library was deleted as
+#    "already provided by APEX-OS" and the application failed to launch.
+if grep -q 'rpm -q --qf .%{EVR}. -- "${name}.${arch}"' "$ENGINE"; then
+    ok "the installed-check is architecture-qualified"
+else
+    bad "the installed-check is architecture-qualified" "rpm -q by bare name answers for the host arch only"
+fi
+if grep -q 'multilib sibling of a core package' "$ENGINE"; then
+    ok "a 32-bit sibling of a protected package is allowed"
+else
+    bad "a 32-bit sibling of a protected package is allowed" "REFUSE_RE still rejects i686 siblings the image never ships"
+fi
 
 echo
 printf 'apex-pkg: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
