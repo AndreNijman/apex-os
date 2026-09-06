@@ -332,7 +332,19 @@ impl Fixture {
 
 /// Every operation the provider declares, with a resource and options that its
 /// own declaration accepts.
-fn every_operation() -> Vec<(&'static str, &'static str, Vec<(&'static str, &'static str)>)> {
+/// One row of [`every_operation`]: the operation id, the resource it names,
+/// and the parameters it declares.
+///
+/// A named type rather than the tuple written out, because clippy refuses the
+/// tuple at `-D warnings` and because a row this shape is unreadable at the
+/// call site otherwise.
+type OperationRow = (
+    &'static str,
+    &'static str,
+    Vec<(&'static str, &'static str)>,
+);
+
+fn every_operation() -> Vec<OperationRow> {
     vec![
         ("cloudflare.account.read", "", vec![]),
         ("cloudflare.worker.read", "project", vec![]),

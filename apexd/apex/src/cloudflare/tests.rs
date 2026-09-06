@@ -52,12 +52,14 @@ impl Auth {
                 let (status, reply) = if device {
                     (
                         200,
-                        format!(
-                            r#"{{"device_code":"dev-abc123","user_code":"WDJB-MJHT",
+                        // A plain raw string: there is nothing to interpolate,
+                        // so the braces are literal and `format!` was doing
+                        // nothing but doubling every one of them.
+                        r#"{"device_code":"dev-abc123","user_code":"WDJB-MJHT",
                                 "verification_uri":"https://dash.cloudflare.com/oauth2/device",
                                 "verification_uri_complete":"https://dash.cloudflare.com/oauth2/device?code=WDJB-MJHT",
-                                "expires_in":300}}"#
-                        ),
+                                "expires_in":300}"#
+                            .to_string(),
                     )
                 } else {
                     let step = steps.get(polls).cloned().unwrap_or(Step::Pending);
