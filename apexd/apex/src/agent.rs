@@ -102,6 +102,26 @@ pub enum AgentCmd {
         #[arg(long)]
         remove: bool,
     },
+    /// Show or change what a screen lock does to running work (§7).
+    ///
+    /// §7: "ordinary agents may continue; Remote Control may continue if
+    /// configured; short-lived root grants should default to revocation; user
+    /// policy may override." This is the override, and with no flags it
+    /// prints what the machine will do — and what the screen is doing now.
+    ///
+    /// The runtime picks a change up on its next few-second tick; nothing has
+    /// to be restarted.
+    Lock {
+        /// Ordinary agent sessions on a locked screen: continue | hold.
+        #[arg(long, value_name = "WHAT", value_parser = parse_continues)]
+        agents: Option<bool>,
+        /// Remote Control sessions on a locked screen: continue | hold.
+        #[arg(long, value_name = "WHAT", value_parser = parse_continues)]
+        remote: Option<bool>,
+        /// Short-lived root grants when the screen locks: revoke | keep.
+        #[arg(long, value_name = "WHAT", value_parser = parse_revokes)]
+        root_grants: Option<bool>,
+    },
     /// System-access grants: what has been granted, and to what (§4.4, §4.5).
     ///
     /// §3.4 asks that "revocation control always be visible", which starts
@@ -656,6 +676,11 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             destination,
             remove,
         } => allow(destination, remove),
+        AgentCmd::Lock {
+            agents,
+            remote,
+            root_grants,
+        } => lock_policy(agents, remote, root_grants),
         AgentCmd::Grants { active, json } => grants(active, json),
         AgentCmd::RevokeGrant { id } => revoke_grant(id),
         AgentCmd::RenewGrant { id, ttl } => renew_grant(id, ttl),
@@ -711,6 +736,28 @@ dimension_parser!(parse_system_access, SystemAccess, "none, session or unsafe");
 dimension_parser!(parse_secrets, SecretPolicy, "brokered, none or export");
 dimension_parser!(parse_network, NetworkPolicy, "open, allowlist, brokered or offline");
 dimension_parser!(parse_origin_policy, OriginPolicy, "local or remote");
+
+/// `--agents` and `--remote` on `apex agent lock`.
+///
+/// §7 words both rules as "may continue", so the value is the sentence rather
+/// than a bare true/false: `--agents hold` says what will happen, where
+/// `--agents false` would leave the reader working out which way round it is.
+fn parse_continues(s: &str) -> std::result::Result<bool, String> {
+    match s {
+        "continue" | "continues" | "run" | "keep-running" => Ok(true),
+        "hold" | "held" | "pause" | "stop" => Ok(false),
+        _ => Err("use continue or hold".to_string()),
+    }
+}
+
+/// `--root-grants` on `apex agent lock`.
+fn parse_revokes(s: &str) -> std::result::Result<bool, String> {
+    match s {
+        "revoke" | "revoked" => Ok(true),
+        "keep" | "kept" | "hold" => Ok(false),
+        _ => Err("use revoke or keep".to_string()),
+    }
+}
 
 /// `--ttl`, in milliseconds.
 ///
@@ -1336,6 +1383,90 @@ fn default_agent(agent: Option<String>) -> Result<i32> {
     cfg.default_agent = agent.clone();
     cfg.save()?;
     println!("default agent is now {agent}");
+    Ok(0)
+}
+
+/// `apex agent lock [--agents …] [--remote …] [--root-grants …]`.
+///
+/// With no flags it reports, and the report leads with what the screen is
+/// actually doing — read from logind, which is the half of this that did not
+/// exist until apex-shell started calling `SetLockedHint`. A settings page
+/// that could not say whether the mechanism was working would be the same
+/// switch-with-no-wire this policy used to be.
+fn lock_policy(
+    agents: Option<bool>,
+    remote: Option<bool>,
+    root_grants: Option<bool>,
+) -> Result<i32> {
+    use apex_agent_core::lock::{LockObserver, Loginctl};
+
+    let (mut cfg, notes) = config::load_reporting();
+    for note in &notes {
+        eprintln!("apex: {note}");
+    }
+
+    if agents.is_none() && remote.is_none() && root_grants.is_none() {
+        let state = Loginctl::new().observe();
+        println!("screen                   {state}");
+        println!(
+            "ordinary agents          {}",
+            if cfg.lock.agents_continue {
+                "continue"
+            } else {
+                "hold"
+            }
+        );
+        println!(
+            "Remote Control           {}",
+            if cfg.lock.remote_control_continues {
+                "continue"
+            } else {
+                "hold"
+            }
+        );
+        println!(
+            "short-lived root grants  {}",
+            if cfg.lock.revoke_root_grants {
+                "revoke"
+            } else {
+                "keep"
+            }
+        );
+        if !cfg.lock.remote_control_continues {
+            println!(
+                "\n§7 lets Remote Control past a lock only when it is configured to:\n  \
+                 apex agent lock --remote continue"
+            );
+        }
+        return Ok(0);
+    }
+
+    if let Some(v) = agents {
+        cfg.lock.agents_continue = v;
+    }
+    if let Some(v) = remote {
+        cfg.lock.remote_control_continues = v;
+    }
+    if let Some(v) = root_grants {
+        cfg.lock.revoke_root_grants = v;
+    }
+    cfg.save()?;
+
+    let p = cfg.lock;
+    println!(
+        "on a locked screen: ordinary agents {}, Remote Control {}, short-lived root grants {}",
+        if p.agents_continue { "continue" } else { "are held" },
+        if p.remote_control_continues {
+            "continues"
+        } else {
+            "is held"
+        },
+        if p.revoke_root_grants {
+            "are revoked"
+        } else {
+            "are kept"
+        }
+    );
     Ok(0)
 }
 
