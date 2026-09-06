@@ -1419,9 +1419,12 @@ def read_back(model_path):
     """What is actually in effect, per control, and where the answer came from."""
     comp = running_compositor()
     values, notes = {}, []
+    # One enumeration for the whole call. It shells out to `hyprctl -j devices`,
+    # and this used to do it twice — once here and once inside capabilities()
+    # below — on a path the settings page runs after every apply.
+    devices, _ = enumerate_devices()
     if comp == "hyprland":
         values, notes = read_back_hyprland()
-        devices, _ = enumerate_devices()
         _read_hypr_device_block(values, devices)
         notes.append("pointer speed, acceleration, left-handed and scroll "
                      "method for the touchpad have no Hyprland query, so those "
@@ -1441,7 +1444,7 @@ def read_back(model_path):
     model, model_notes = load_model(model_path)
     wanted = {f"{s}.{k}": v for s in ("touchpad", "pointer", "keyboard")
               for k, v in model[s].items()}
-    caps = capabilities()
+    caps = capabilities(devices)
     diverged = []
     for control, want in wanted.items():
         seen = values.get(control)
