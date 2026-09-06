@@ -454,6 +454,21 @@ pub enum Request {
         event: Option<String>,
         #[serde(default)]
         detail: Option<String>,
+        /// The agent's own report of its own permission mode (§4.1).
+        ///
+        /// Claude puts `permission_mode` on every hook payload, so the bridge
+        /// carries it here and the daemon records it on
+        /// [`SessionInfo::native_observed`]. It is what makes dimension 1
+        /// visible in the Agent Center: `policy.native` says what APEX did,
+        /// which for the default is *nothing*, and "inherit" is not a
+        /// permission mode a user recognises.
+        ///
+        /// Not a permission input, and no daemon behaviour branches on it.
+        /// Dimension 1 is the agent's own layer; APEX neither enforces nor
+        /// second-guesses it, so an agent reporting it is the authority on it
+        /// in exactly the way an agent reporting its own `detail` is.
+        #[serde(default)]
+        native: Option<String>,
     },
     /// Ask whether a tool call this session is about to make is one its own
     /// confinement would refuse (§6.2).
@@ -1172,12 +1187,14 @@ mod tests {
                 state: Some("working".into()),
                 event: Some("pre_tool_use".into()),
                 detail: Some("d".into()),
+                native: Some("bypassPermissions".into()),
             },
             Request::Event {
                 id: 1,
                 state: None,
                 event: Some("task_created".into()),
                 detail: None,
+                native: None,
             },
             Request::ToolCheck {
                 id: 1,
@@ -1211,6 +1228,7 @@ mod tests {
             state: Some("working".into()),
             event: None,
             detail: Some("line one\nline two".into()),
+            native: None,
         };
         let text = serde_json::to_string(&req).unwrap();
         assert!(!text.contains('\n'), "{text}");
@@ -1292,7 +1310,7 @@ mod tests {
         let req: Request =
             serde_json::from_str(r#"{"cmd":"event","id":4,"state":"working"}"#).expect("parse");
         match req {
-            Request::Event { id, state, event, detail } => {
+            Request::Event { id, state, event, detail, .. } => {
                 assert_eq!(id, 4);
                 assert_eq!(state.as_deref(), Some("working"));
                 assert_eq!(event, None);

@@ -182,6 +182,11 @@ pub fn publish_event(id: u32, state: &str, detail: Option<String>) -> Result<()>
         state: Some(state.to_string()),
         event: None,
         detail,
+        // `apex agent event` is the open protocol: a shell function or a
+        // script publishing a state. Nothing there is an agent describing its
+        // own permission mode, so this stays absent rather than being made a
+        // flag anybody could set.
+        native: None,
     })?;
     Ok(())
 }
@@ -198,12 +203,14 @@ pub fn publish_hook(
     event: crate::hook::HookEvent,
     state: Option<AgentState>,
     detail: Option<String>,
+    native: Option<String>,
 ) -> Result<()> {
     call(&Request::Event {
         id,
         state: state.map(|s| s.as_str().to_string()),
         event: Some(event.as_str().to_string()),
         detail,
+        native,
     })?;
     Ok(())
 }

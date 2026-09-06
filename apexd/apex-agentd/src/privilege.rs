@@ -322,7 +322,7 @@ pub fn for_new_session(
 ///      `local-terminal`, which is precisely the column being asked for.
 ///
 ///   4. **polkit**, with the peer as the subject.
-fn may_be_granted(who: &Origin, what: &'static str) -> Result<RequestOrigin, GrantError> {
+pub fn may_be_granted(who: &Origin, what: &'static str) -> Result<RequestOrigin, GrantError> {
     if let Some(session) = who.session {
         return Err(GrantError::FromInsideASession { session, what });
     }
@@ -432,8 +432,17 @@ pub fn renew_system_grant(
     ttl_ms: u64,
 ) -> Response {
     let who = origin(daemon, peer);
-    // The grant has to exist and be alive before anybody is asked for a
-    // password: prompting for a grant that has already expired teaches people
+    // Who is asking, before what they are asking about. Two reasons, and the
+    // first is the criterion: a session must be told that renewing is not a
+    // session's business, not that the grant it named has gone — a refusal
+    // that depended on which id was passed would be one an agent could probe
+    // its way around. The second is that neither check needs polkit, so the
+    // ordering costs nothing.
+    if let Err(e) = may_be_granted(&who, "renew a system-access grant") {
+        return Response::error(ErrorKind::PermissionDenied, e.to_string());
+    }
+    // Then: the grant has to exist and be alive before anybody is asked for a
+    // password. Prompting for a grant that has already expired teaches people
     // to type their password at dialogs that achieve nothing.
     let Some(kind) = daemon
         .grants
@@ -760,4 +769,94 @@ fn refusal(e: RequestError) -> Response {
 /// privileged operations this machine is about to run.
 pub fn ensure_dirs() {
     let _ = paths::ensure_private_dir(&request::requests_dir());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apex_agent_core::origin::SessionOrigin;
+
+    fn unsessioned(origin: RequestOrigin) -> Origin {
+        Origin {
+            request_origin: Some(SessionOrigin::observed(origin)),
+            ..Origin::default()
+        }
+    }
+
+    #[test]
+    fn a_connection_inside_a_session_is_refused_whatever_its_origin_says() {
+        // P0-007's fourth criterion as the exhaustive claim it has to be. The
+        // session check comes first, so it holds over every origin — including
+        // `local-terminal`, which is what a session's own connection would
+        // classify as if it were classified afresh rather than inherited.
+        for origin in RequestOrigin::ALL {
+            let who = Origin {
+                session: Some(4),
+                ..unsessioned(*origin)
+            };
+            let err = may_be_granted(&who, "ask for a grant").expect_err("must refuse");
+            assert_eq!(
+                err,
+                GrantError::FromInsideASession {
+                    session: 4,
+                    what: "ask for a grant"
+                },
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_local_origin_outside_a_session_may_be_granted_anything() {
+        // §7's table, at the gate. The two local origins pass; the five that
+        // mean "nobody is at this keyboard" do not, and that includes the two
+        // that run on this machine — a scheduled job and a subagent.
+        for origin in RequestOrigin::ALL {
+            let who = unsessioned(*origin);
+            match may_be_granted(&who, "ask for a grant") {
+                Ok(got) => {
+                    assert!(origin.is_local(), "{origin} was granted the local column");
+                    assert_eq!(got, *origin);
+                }
+                Err(GrantError::NotLocal { origin: got, .. }) => {
+                    assert!(!origin.is_local(), "{origin} was refused the local column");
+                    assert_eq!(got, *origin);
+                }
+                Err(other) => panic!("{origin}: {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_origin_that_could_not_be_read_is_refused_rather_than_defaulted() {
+        // `RequestOrigin::default()` is `local-terminal`, which is exactly the
+        // column being asked for, so a fallback here would hand a grant to a
+        // connection nobody identified.
+        let who = Origin {
+            origin_unreadable: Some("/proc/9/cgroup: no such file or directory".into()),
+            ..Origin::default()
+        };
+        let err = may_be_granted(&who, "ask for a grant").expect_err("must refuse");
+        assert!(matches!(err, GrantError::OriginUnknown(_)), "{err}");
+        assert!(err.to_string().contains("/proc/9/cgroup"), "{err}");
+
+        // And with nothing recorded at all, which is the shape a future caller
+        // could arrive in.
+        assert!(may_be_granted(&Origin::default(), "ask for a grant").is_err());
+    }
+
+    #[test]
+    fn the_session_check_beats_the_origin_check_so_the_refusal_names_the_session() {
+        // Order matters for what the user is told. A session whose origin is
+        // also non-local must hear "a session cannot do this", which is
+        // actionable, rather than "a subagent cannot do this", which invites
+        // the wrong fix.
+        let who = Origin {
+            session: Some(9),
+            ..unsessioned(RequestOrigin::Subagent)
+        };
+        let err = may_be_granted(&who, "renew a system-access grant").expect_err("refuse");
+        assert!(err.to_string().contains("session 9"), "{err}");
+        assert!(err.to_string().contains("renew a system-access grant"), "{err}");
+    }
 }
