@@ -724,16 +724,27 @@ struct FakeMcp {
 
 impl FakeMcp {
     fn start(sse: bool) -> FakeMcp {
+        FakeMcp::start_accepting_only(sse, None)
+    }
+
+    /// A server that accepts one credential and 401s every other.
+    ///
+    /// `start` accepts any header, which is enough to show a credential
+    /// arriving. It cannot show what a *wrong* one produces, and the answer to
+    /// that is the reason `apex mcp connect` reads the reply rather than the
+    /// exit code: a refusal is a successful HTTP request.
+    fn start_accepting_only(sse: bool, expect: Option<&str>) -> FakeMcp {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let port = listener.local_addr().expect("addr").port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let (h, b) = (Arc::clone(&seen), Arc::clone(&bodies));
+        let expect = expect.map(str::to_string);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let (h, b) = (Arc::clone(&h), Arc::clone(&b));
-                std::thread::spawn(move || serve_mcp(stream, &h, &b, sse));
+                let (h, b, e) = (Arc::clone(&h), Arc::clone(&b), expect.clone());
+                std::thread::spawn(move || serve_mcp(stream, &h, &b, sse, e.as_deref()));
             }
         });
         FakeMcp {
@@ -758,6 +769,7 @@ fn serve_mcp(
     header_log: &Arc<Mutex<Vec<String>>>,
     body_log: &Arc<Mutex<Vec<String>>>,
     sse: bool,
+    expect: Option<&str>,
 ) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut first = String::new();
@@ -802,7 +814,22 @@ fn serve_mcp(
         );
         return;
     };
-    header_log.lock().expect("lock").push(authorization);
+    header_log.lock().expect("lock").push(authorization.clone());
+
+    // A credential the server does not recognise. Answered the way a real one
+    // answers: 200-shaped plumbing, a 401 status, and a JSON body explaining
+    // itself — which is a *successful* request as far as curl is concerned.
+    if expect.is_some_and(|want| want != authorization) {
+        let payload = r#"{"error":"invalid_token","error_description":"the access token is invalid"}"#;
+        let header = format!(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n",
+            payload.len()
+        );
+        let _ = stream.write_all(header.as_bytes());
+        let _ = stream.write_all(payload.as_bytes());
+        return;
+    }
 
     let payload = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":["read_note"]}}"#;
     let (content_type, framed) = if sse {
@@ -1005,4 +1032,45 @@ fn a_credential_stored_without_an_endpoint_cannot_carry_a_message() {
         reply.as_error().is_some_and(|(_, m)| m.contains("--path")),
         "{reply:?}"
     );
+}
+
+#[test]
+fn a_credential_the_server_refuses_still_comes_back_as_a_successful_operation() {
+    // The fact `apex mcp connect` is built on, measured rather than assumed.
+    //
+    // The broker's job ends when the request reaches the far end, so a 401 is
+    // an operation that worked: `exit_code` is 0 and the trail records a
+    // success. A verb that took that for proof would rewrite the agent's
+    // configuration to name a credential the server has already refused, and
+    // the person would find out at the start of their next session.
+    let provider = FakeMcp::start_accepting_only(false, Some("Bearer the-only-one-it-takes"));
+    let daemon = Daemon::start("mcp-refused");
+    let project = daemon.dir.join("proj");
+    std::fs::create_dir_all(&project).expect("project dir");
+    arrange_mcp(&daemon, provider.port, &project);
+
+    let mut rec = CapabilityRecord::new("memory", "mcp.request", "");
+    rec.project = Some(project.to_string_lossy().into_owned());
+    let reply = daemon
+        .client()
+        .use_with_body(rec, br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#)
+        .expect("the operation itself succeeds");
+
+    let Response::Performed {
+        exit_code, output, ..
+    } = reply
+    else {
+        panic!("expected a performed reply, got {reply:?}");
+    };
+    // curl runs with `fail-with-body`, so an HTTP error status is a non-zero
+    // exit that still carries the body. 22 is curl's code for it.
+    assert_eq!(exit_code, 22, "{output}");
+    // The credential did reach the server — this is a refusal, not a failure to
+    // connect — and the reason is in the body, which is why the body is what
+    // `apex mcp connect` reports rather than "could not reach the server".
+    assert_eq!(provider.authorizations().len(), 1);
+    assert!(output.contains("invalid_token"), "{output}");
+    assert!(!output.contains("\"result\""), "{output}");
+    // And the credential is still not in anything the caller can read.
+    assert!(!output.contains(SENTINEL), "{output}");
 }
