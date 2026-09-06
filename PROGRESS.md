@@ -301,6 +301,40 @@ fixed on `roadmap/v2.2`:
   whose name appears at a different EVR for the host arch is now dropped as an
   application fork rather than a multilib library.
 
+### `producer | grep -qE` under `pipefail` is a flake, and eleven suites have it
+
+`grep -q` exits the moment it matches. The producer then takes SIGPIPE and exits
+141, and `set -o pipefail` reports that as a failure. Measured rather than
+argued: **16 spurious failures in 200 runs** on a 415-line input, and **0 in 400
+runs** with process substitution instead.
+
+Two suites are fixed. Eleven more carry the pattern, listed on
+`state/agents/p1-020.md`. This is very likely the mechanism behind several
+"pre-existing flakes" that got shrugged at over the last two days.
+
+### Two gates are red on the tip, and neither failure is a real defect
+
+Confirmed by stashing every local change, so they belong to the tip:
+
+- **"Agent Center invariants"** greps for `\bsudo\b` and `control\.sock` in
+  `src/services/agents/*.qml`. P0-022's `AgentHelpContent.qml` quotes both **as
+  help text**. The invariant was written when nothing in that directory could
+  mention them; a help panel that explains what `sudo` means now does.
+- **`run-agent-center-smoke.sh` counts any ERROR**, and the restarted shell logs
+  `pipewire … Errno: 112` under a private `XDG_RUNTIME_DIR` — an artefact of the
+  harness, not the shell.
+
+A red gate everyone knows to ignore is worse than no gate, because the next real
+failure hides behind it. Both are dispatched.
+
+### A fixed scratch path two daemons fight over
+
+`/tmp/apex-agent/<id>` is a fixed path and session ids are per-daemon, so two
+daemons belonging to one user collide and one deletes the other's scratch under
+a running session — the symptom is `bwrap: Can't open source`. Now movable by
+`$APEX_AGENT_SCRATCH`. This affects containers and a second user session, not
+only tests.
+
 ### A security hole that only existed once two branches met
 
 P1-018 shipped `apex secret grant <svc> <op> --everywhere`, gated in the daemon

@@ -1,22 +1,7 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T05:30+08:00",
+  "updated": "2026-09-07T05:44+08:00",
   "agents": [
-    {
-      "slug": "p1-020",
-      "items": [
-        "P1-020",
-        "P1-021",
-        "P1-022"
-      ],
-      "repo": "apex-shell",
-      "worktree": "/var/tmp/apex-work/wt-p1-020",
-      "branch": "task/p1-020-agent-graph",
-      "agent_id": "aa62ecf6b30bd06cf",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T04:25+08:00 (fresh agent, resumed from card after the 01:11 limit)",
-      "title": "agent/subagent graph, statusline telemetry, notification bridge and dedup"
-    },
     {
       "slug": "p1-050",
       "items": [
@@ -93,6 +78,23 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T05:45+08:00",
       "title": "finish the Remote Control privilege policy and the lock-state policy \u2014 closes P0"
+    },
+    {
+      "slug": "p1-023",
+      "items": [
+        "(red suites)",
+        "(pipefail sweep)",
+        "P1-023",
+        "P1-024",
+        "P1-029"
+      ],
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/wt-p1-023",
+      "branch": "task/p1-023-handoff-lifecycle",
+      "agent_id": "a546a74ab53f5684a",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T06:00+08:00",
+      "title": "fix two red suites and the grep -q pipefail flake in eleven more, then PTT, handoff packet, lifecycle types"
     }
   ]
 }
