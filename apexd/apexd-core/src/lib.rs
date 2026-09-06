@@ -51,6 +51,11 @@ pub mod gaming;
 pub mod gpu;
 pub mod host;
 pub mod irq;
+// §25's persistent-state migration framework. It resolves no paths and spawns
+// nothing: callers hand it a document or a `&Path`, which is what lets the
+// suite run entirely inside a temp directory rather than near a real
+// `$XDG_STATE_HOME`.
+pub mod migrate;
 pub mod mode;
 pub mod perf;
 pub mod profile;

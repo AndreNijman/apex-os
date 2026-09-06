@@ -432,6 +432,14 @@ jobs:
       - name: §27 trust — the readout is wired into apex status, and expects the identity CI signs under
         run: ./tests/test-apex-trust.sh
 
+      # §25's persistent-state migration, structural half. In `static` because
+      # the thing most likely to rot here is a doc comment — a version key that
+      # goes back to saying "absent means the current version" is a one-line
+      # change whose consequence lands the day the schema moves, on somebody
+      # else's machine.
+      - name: §25 schema — every store declares its rollback answer, and no version key defaults to current
+        run: ./tests/test-apex-schema.sh
+
       # §19's disposable engine, and the structural rules its teardown depends
       # on. In `static` for the reason boot-v2's structural half is: the
       # `engine` selector is ^(files/|tests/) and the `rust` selector is
@@ -615,6 +623,23 @@ jobs:
           cargo build -p apex --locked --manifest-path apexd/Cargo.toml
           test -x "$APEX"
           ./tests/test-apex-trust.sh --with-binary
+
+      # §25's binary half: `apex schema` against real state trees — a record
+      # from before the version key existed migrated with a copy kept, a record
+      # from a newer APEX left byte-identical, and a blueprint from a newer
+      # APEX refused by name rather than by serde. The suite exports
+      # XDG_STATE_HOME and XDG_CONFIG_HOME at its own mktemp tree and hard-exits
+      # if any store path resolves outside it: this is the suite that drives the
+      # code which REWRITES persistent state.
+      - name: §25 schema — apex schema against records older and newer than this build
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-schema.sh --with-binary
 
       # §19's binary half: the recovery surface against whole fixture machines,
       # `apex doctor --json`, and the factory reset.
