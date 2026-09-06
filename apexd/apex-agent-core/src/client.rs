@@ -73,6 +73,24 @@ impl Client {
             .context("sending to the agent runtime")?;
         self.stream.flush().ok();
 
+        // A request that authenticates has no deadline the CLI can pick: the
+        // deadline belongs to the person reading the polkit dialog. See
+        // [`Request::waits_on_a_human`].
+        let waiting = req.waits_on_a_human();
+        if waiting {
+            self.stream.set_read_timeout(None).ok();
+        }
+        let reply = self.read_reply();
+        if waiting {
+            // Back to the ordinary deadline: this connection may carry more
+            // requests, and only the authenticating one was open-ended.
+            self.stream.set_read_timeout(Some(CONTROL_TIMEOUT)).ok();
+        }
+        reply
+    }
+
+    /// Read one reply line off the connection.
+    fn read_reply(&mut self) -> Result<Response> {
         let reader = self
             .reader
             .as_mut()
