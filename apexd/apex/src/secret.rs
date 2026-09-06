@@ -53,6 +53,19 @@ pub enum SecretCmd {
         /// loopback host, where the credential does not cross a network.
         #[arg(long, default_value = "https")]
         scheme: String,
+        /// Path on that host this credential's own endpoint lives at, for a
+        /// service the broker talks to directly — an MCP server's `/mcp`. Not
+        /// used by git, which resolves its URL from the repository.
+        #[arg(long, default_value = "")]
+        path: String,
+        /// How the credential is sent: `bearer` for `Authorization: Bearer
+        /// <value>`, `raw` when the stored value is the whole header.
+        #[arg(long, default_value = "bearer")]
+        auth: String,
+        /// Port, when the endpoint is not on the scheme's own. Git ignores it;
+        /// the broker's own endpoint needs it.
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Stored credentials. Never prints one.
     List {
@@ -105,7 +118,10 @@ pub fn main(cmd: SecretCmd) -> i32 {
             host,
             username,
             scheme,
-        } => add(&service, &host, &username, &scheme),
+            path,
+            auth,
+            port,
+        } => add(&service, &host, &username, &scheme, &path, &auth, port),
         SecretCmd::List { json } => list(json),
         SecretCmd::Remove { service } => remove(&service),
         SecretCmd::Capabilities => {
@@ -138,7 +154,15 @@ pub fn main(cmd: SecretCmd) -> i32 {
     }
 }
 
-fn add(service: &str, host: &str, username: &str, scheme: &str) -> Result<i32> {
+fn add(
+    service: &str,
+    host: &str,
+    username: &str,
+    scheme: &str,
+    path: &str,
+    auth: &str,
+    port: Option<u16>,
+) -> Result<i32> {
     if !valid_service_name(service) {
         bail!("'{service}' is not a usable service name (letters, digits, _ - .)");
     }
@@ -165,6 +189,9 @@ fn add(service: &str, host: &str, username: &str, scheme: &str) -> Result<i32> {
         &host,
         scheme,
         Some(username),
+        path,
+        auth,
+        port,
         &SecretValue::new(value.as_bytes().to_vec()),
     )?;
     println!("stored a credential for {service} ({scheme}://{host})");
@@ -345,6 +372,7 @@ fn use_it(service: &str, capability: &str, remote: &str, branch: Option<&str>) -
         capability: capability.to_string(),
         remote: remote.to_string(),
         branch: branch.map(str::to_string),
+        body: None,
         project,
     })? {
         AgentResponse::Brokered {
@@ -458,12 +486,14 @@ mod tests {
     fn the_version_guard_names_the_revision_the_store_moved_in() {
         // A literal here would be one careless edit from meaning nothing, and
         // the failure it prevents is a "no credential stored" about a store
-        // the user never wrote to.
-        assert_eq!(
-            BROKERED_SECRET_SERVICE_VERSION,
-            apex_agent_core::protocol::PROTOCOL_VERSION,
-            "the guard must name the current revision, or it can never fire"
+        // the user never wrote to. It is a floor rather than the current
+        // revision — later revisions add capabilities, and a daemon that has
+        // the store in the right place still serves `git-push` correctly.
+        assert!(
+            BROKERED_SECRET_SERVICE_VERSION <= apex_agent_core::protocol::PROTOCOL_VERSION,
+            "the guard names a revision ahead of the protocol, so it can never fire"
         );
+        assert!(BROKERED_SECRET_SERVICE_VERSION > 0);
     }
 
     #[test]

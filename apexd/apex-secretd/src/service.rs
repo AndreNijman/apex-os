@@ -43,6 +43,20 @@ const MAX_EXPIRY_AHEAD_MS: u64 = 60 * 60 * 1000;
 /// The daemon's state.
 pub struct Service {
     store: Store,
+    /// The `Mcp-Session-Id` each (account, service) pair is currently using.
+    ///
+    /// Held here rather than sent back to the caller. A streamable-HTTP MCP
+    /// server issues one on `initialize` and expects it on every message after,
+    /// so somebody has to remember it — and the caller is a confined session, so
+    /// the answer is not "the caller". It is not a credential and the header is
+    /// useless without the one this daemon attaches, but it is conversation
+    /// state belonging to a connection the broker owns, and that is where
+    /// conversation state should live.
+    ///
+    /// One entry per pair, so two sessions talking to the same server share a
+    /// server-side conversation. That is a real limitation and it is named in
+    /// the module note rather than hidden behind a map that pretends otherwise.
+    mcp_sessions: std::sync::Mutex<std::collections::BTreeMap<(u32, String), String>>,
     /// Whether the store is genuinely out of the user's reach — true when the
     /// daemon runs as root. Reported in `hello` rather than assumed, so a
     /// daemon started by hand for a test does not imply a protection it does
@@ -56,12 +70,27 @@ impl Service {
         Service {
             store,
             protected,
+            mcp_sessions: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             audit_counter: AtomicU64::new(0),
         }
     }
 
     fn next_audit_id(&self) -> String {
         audit::mint_id(self.audit_counter.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn mcp_session(&self, uid: u32, service: &str) -> Option<String> {
+        self.mcp_sessions
+            .lock()
+            .ok()?
+            .get(&(uid, service.to_string()))
+            .cloned()
+    }
+
+    fn remember_mcp_session(&self, uid: u32, service: &str, id: String) {
+        if let Ok(mut map) = self.mcp_sessions.lock() {
+            map.insert((uid, service.to_string()), id);
+        }
     }
 
     fn record(&self, line: AuditLine) {
@@ -118,6 +147,9 @@ impl Service {
         host: &str,
         scheme: &str,
         username: Option<&str>,
+        path: &str,
+        auth: Option<&str>,
+        port: Option<u16>,
         value: SecretValue,
     ) -> Response {
         if !store::valid_service_name(service) {
@@ -139,11 +171,34 @@ impl Service {
                 ),
             );
         }
+        if !store::valid_endpoint_path(path) {
+            return Response::error(
+                ErrorKind::BadRequest,
+                format!(
+                    "'{}' is not an endpoint path; it must start with '/' and \
+                     carry no query, fragment or '..'",
+                    path.escape_debug()
+                ),
+            );
+        }
+        let auth = auth.unwrap_or("bearer");
+        if auth != "bearer" && auth != "raw" {
+            return Response::error(
+                ErrorKind::BadRequest,
+                format!(
+                    "'{}' is not an auth scheme; use bearer or raw",
+                    auth.escape_debug()
+                ),
+            );
+        }
         let info = ServiceInfo {
             service: service.to_string(),
             host: host.to_ascii_lowercase(),
             scheme: scheme.to_string(),
             username: username.unwrap_or("x-access-token").to_string(),
+            path: path.to_string(),
+            auth: auth.to_string(),
+            port,
             added: store::now_ms(),
         };
         if let Err(e) = self.store.put(peer.uid, &info, &value) {
@@ -250,12 +305,12 @@ impl Service {
     /// 6. the resolved URL's host and scheme are the ones the credential was
     ///    stored for;
     /// 7. only then is the value read, and only into a child's environment.
-    pub fn use_capability(&self, peer: Peer, mut record: CapabilityRecord) -> Response {
+    pub fn use_capability(&self, peer: Peer, mut record: CapabilityRecord, body: Vec<u8>) -> Response {
         let audit_id = self.next_audit_id();
         record.audit_id = audit_id.clone();
         // The record's own idea of what it touches is replaced by the
         // operation's, so the two cannot disagree in the audit trail.
-        record.resource = record.operation.remote().to_string();
+        record.resource = record.operation.resource(&record.provider);
 
         let refuse = |reason: String, kind: ErrorKind| -> Response {
             self.record(AuditLine {
@@ -291,11 +346,13 @@ impl Service {
                 );
             }
         }
-        if !capability::valid_remote_name(record.operation.remote()) {
-            return refuse(
-                CapabilityError::BadRemoteName(record.operation.remote().to_string()).to_string(),
-                ErrorKind::BadRequest,
-            );
+        if let Some(remote) = record.operation.remote() {
+            if !capability::valid_remote_name(remote) {
+                return refuse(
+                    CapabilityError::BadRemoteName(remote.to_string()).to_string(),
+                    ErrorKind::BadRequest,
+                );
+            }
         }
         if let Capability::GitPush {
             branch: Some(branch),
@@ -364,14 +421,37 @@ impl Service {
             );
         }
 
-        let url = match broker::resolve_url(&project, &record.operation, &owner) {
-            Ok(url) => url,
-            Err(e) => return refuse(e.to_string(), ErrorKind::BadRequest),
+        // The endpoint. For a git capability it is resolved from the
+        // repository and then pinned against the credential; for an MCP one
+        // there is no repository to ask, and the stored record IS the endpoint.
+        let endpoint = if record.operation.is_git() {
+            let url = match broker::resolve_url(&project, &record.operation, &owner) {
+                Ok(url) => url,
+                Err(e) => return refuse(e.to_string(), ErrorKind::BadRequest),
+            };
+            if let Err(e) = capability::check_url(&url, &info.host, &info.scheme) {
+                return refuse(e.to_string(), ErrorKind::PermissionDenied);
+            }
+            broker::endpoint(&url)
+        } else {
+            if info.path.is_empty() {
+                return refuse(
+                    format!(
+                        "'{}' was stored without an endpoint path, so there is \
+                         nowhere to carry a message to; re-add it with --path",
+                        record.provider
+                    ),
+                    ErrorKind::BadRequest,
+                );
+            }
+            if body.is_empty() {
+                return refuse(
+                    "an mcp request carries a message, and this one is empty".to_string(),
+                    ErrorKind::BadRequest,
+                );
+            }
+            broker::endpoint(&info.url())
         };
-        if let Err(e) = capability::check_url(&url, &info.host, &info.scheme) {
-            return refuse(e.to_string(), ErrorKind::PermissionDenied);
-        }
-        let endpoint = broker::endpoint(&url);
 
         // Every check has passed. Only now is the value read.
         let value = match self.store.value(peer.uid, &record.provider) {
@@ -379,9 +459,22 @@ impl Service {
             Err(e) => return refuse(e.to_string(), ErrorKind::NoSuchService),
         };
 
-        let out = match broker::perform(&project, &record.operation, &info, &value, &owner) {
-            Ok(out) => out,
-            Err(e) => return refuse(e, ErrorKind::Internal),
+        let out = if record.operation.is_git() {
+            match broker::perform(&project, &record.operation, &info, &value, &owner) {
+                Ok(out) => out,
+                Err(e) => return refuse(e, ErrorKind::Internal),
+            }
+        } else {
+            let carried = self.mcp_session(peer.uid, &record.provider);
+            match broker::perform_http(&info, &value, &body, carried.as_deref(), &owner) {
+                Ok(http) => {
+                    if let Some(id) = http.session {
+                        self.remember_mcp_session(peer.uid, &record.provider, id);
+                    }
+                    http.out
+                }
+                Err(e) => return refuse(e, ErrorKind::Internal),
+            }
         };
 
         self.record(AuditLine {
@@ -494,6 +587,9 @@ mod tests {
                 "github.com",
                 "https",
                 None,
+                "",
+                None,
+                None,
                 SecretValue::new(SENTINEL.into())
             ),
             Response::Ok
@@ -506,9 +602,9 @@ mod tests {
             svc.grants(peer),
             svc.audit(peer, 100),
             // A use that gets as far as it can without a repository.
-            svc.use_capability(peer, record("demo", "git-fetch", "origin", "/tmp/p")),
+            svc.use_capability(peer, record("demo", "git-fetch", "origin", "/tmp/p"), Vec::new()),
             // ...and one that is refused early.
-            svc.use_capability(peer, record("demo", "git-push", "origin", "/tmp/p")),
+            svc.use_capability(peer, record("demo", "git-push", "origin", "/tmp/p"), Vec::new()),
             svc.remove(peer, "demo"),
         ];
         for reply in &replies {
@@ -530,14 +626,14 @@ mod tests {
     fn a_credential_grants_nothing_by_itself() {
         let (svc, dir) = temp_service("nogrant");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
         assert_eq!(
             svc.grants(peer),
             Response::Grants {
                 projects: Default::default()
             }
         );
-        let resp = svc.use_capability(peer, record("demo", "git-fetch", "origin", "/tmp/p"));
+        let resp = svc.use_capability(peer, record("demo", "git-fetch", "origin", "/tmp/p"), Vec::new());
         let (kind, message) = resp.as_error().expect("refused");
         assert_eq!(kind, ErrorKind::PermissionDenied);
         assert!(message.contains("not granted"), "{message}");
@@ -548,17 +644,17 @@ mod tests {
     fn a_grant_is_per_capability_and_per_project() {
         let (svc, dir) = temp_service("perproject");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
         svc.grant(peer, "/tmp/p", "demo", "git-fetch", false);
 
         // Another capability in the same project.
         assert!(svc
-            .use_capability(peer, record("demo", "git-push", "origin", "/tmp/p"))
+            .use_capability(peer, record("demo", "git-push", "origin", "/tmp/p"), Vec::new())
             .as_error()
             .is_some_and(|(_, m)| m.contains("not granted")));
         // The same capability in another project.
         assert!(svc
-            .use_capability(peer, record("demo", "git-fetch", "origin", "/tmp/q"))
+            .use_capability(peer, record("demo", "git-fetch", "origin", "/tmp/q"), Vec::new())
             .as_error()
             .is_some_and(|(_, m)| m.contains("not granted")));
         std::fs::remove_dir_all(&dir).ok();
@@ -585,7 +681,7 @@ mod tests {
     fn the_vocabulary_is_closed_at_the_grant_and_at_the_use() {
         let (svc, dir) = temp_service("closed");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
         for evil in ["exec", "sh", "git-clone", "curl"] {
             let resp = svc.grant(peer, "/tmp/p", "demo", evil, false);
             assert!(
@@ -601,11 +697,11 @@ mod tests {
     fn a_use_without_a_project_cannot_match_a_grant() {
         let (svc, dir) = temp_service("noproject");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
         let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
         rec.project = None;
         assert!(svc
-            .use_capability(peer, rec)
+            .use_capability(peer, rec, Vec::new())
             .as_error()
             .is_some_and(|(_, m)| m.contains("names no project")));
 
@@ -613,7 +709,7 @@ mod tests {
         // against the DAEMON's working directory.
         let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
         rec.project = Some("relative/p".into());
-        assert!(svc.use_capability(peer, rec).as_error().is_some());
+        assert!(svc.use_capability(peer, rec, Vec::new()).as_error().is_some());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -625,13 +721,13 @@ mod tests {
         // value that is not a label at all.
         let (svc, dir) = temp_service("originshape");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
         svc.grant(peer, "/tmp/p", "demo", "git-fetch", false);
 
         for bad in ["local terminal", "Local-Terminal", "local\nterminal", ""] {
             let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
             rec.request_origin = bad.to_string();
-            let resp = svc.use_capability(peer, rec);
+            let resp = svc.use_capability(peer, rec, Vec::new());
             assert!(
                 resp.as_error()
                     .is_some_and(|(k, m)| k == ErrorKind::BadRequest
@@ -644,7 +740,7 @@ mod tests {
         let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
         rec.origin_source = "observed by me".into();
         assert!(svc
-            .use_capability(peer, rec)
+            .use_capability(peer, rec, Vec::new())
             .as_error()
             .is_some_and(|(_, m)| m.contains("origin_source")));
 
@@ -656,7 +752,7 @@ mod tests {
         let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
         rec.request_origin = "claude-remote-control".into();
         rec.origin_source = "declared".into();
-        let resp = svc.use_capability(peer, rec);
+        let resp = svc.use_capability(peer, rec, Vec::new());
         let (_, message) = resp.as_error().expect("no repository at /tmp/p");
         assert!(!message.contains("request_origin"), "{message}");
         assert!(!message.contains("origin_source"), "{message}");
@@ -670,11 +766,11 @@ mod tests {
         // the daemon silently dropped would be worse than one it never had.
         let (svc, dir) = temp_service("origintrail");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
         let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
         rec.request_origin = "claude-remote-control".into();
         rec.origin_source = "inherited".into();
-        svc.use_capability(peer, rec);
+        svc.use_capability(peer, rec, Vec::new());
 
         let refused = audit::tail(&Store::new(dir.clone()).audit_path(), 10)
             .into_iter()
@@ -689,20 +785,20 @@ mod tests {
     fn an_expired_or_over_long_request_is_refused() {
         let (svc, dir) = temp_service("expiry");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
         svc.grant(peer, "/tmp/p", "demo", "git-fetch", false);
 
         let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
         rec.expiry = Some(1);
         assert!(svc
-            .use_capability(peer, rec)
+            .use_capability(peer, rec, Vec::new())
             .as_error()
             .is_some_and(|(_, m)| m.contains("expired")));
 
         let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
         rec.expiry = Some(store::now_ms() + MAX_EXPIRY_AHEAD_MS * 2);
         assert!(svc
-            .use_capability(peer, rec)
+            .use_capability(peer, rec, Vec::new())
             .as_error()
             .is_some_and(|(_, m)| m.contains("longer than this service")));
         std::fs::remove_dir_all(&dir).ok();
@@ -712,8 +808,8 @@ mod tests {
     fn every_refusal_is_recorded_with_a_reason_and_an_id() {
         let (svc, dir) = temp_service("trail");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
-        svc.use_capability(peer, record("demo", "git-fetch", "origin", "/tmp/p"));
+        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
+        svc.use_capability(peer, record("demo", "git-fetch", "origin", "/tmp/p"), Vec::new());
 
         let lines = audit::tail(&trail(&dir), 10);
         let refused: Vec<&AuditLine> = lines
@@ -746,11 +842,11 @@ mod tests {
             uid: mine.uid.wrapping_add(1),
             ..mine
         };
-        svc.add(mine, "demo", "github.com", "https", None, SecretValue::new(SENTINEL.into()));
+        svc.add(mine, "demo", "github.com", "https", None, "", None, None, SecretValue::new(SENTINEL.into()));
 
         assert_eq!(svc.list(theirs), Response::Services { services: vec![] });
         assert!(svc
-            .use_capability(theirs, record("demo", "git-fetch", "origin", "/tmp/p"))
+            .use_capability(theirs, record("demo", "git-fetch", "origin", "/tmp/p"), Vec::new())
             .as_error()
             .is_some());
         // The trail is filtered too, so it is not a way to learn what another
@@ -780,7 +876,7 @@ mod tests {
     fn removing_a_credential_takes_its_grants_with_it() {
         let (svc, dir) = temp_service("removegrants");
         let peer = me();
-        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+        svc.add(peer, "demo", "github.com", "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
         svc.grant(peer, "/tmp/p", "demo", "git-fetch", false);
         assert_eq!(svc.remove(peer, "demo"), Response::Ok);
         assert_eq!(
@@ -802,6 +898,9 @@ mod tests {
             "github.com",
             "http",
             None,
+            "",
+            None,
+            None,
             SecretValue::new(b"x".to_vec()),
         );
         assert!(resp
@@ -816,7 +915,7 @@ mod tests {
         let (svc, dir) = temp_service("host");
         let peer = me();
         for evil in ["", "a b", "a/b", "a\nb", "-"] {
-            let resp = svc.add(peer, "demo", evil, "https", None, SecretValue::new(b"x".to_vec()));
+            let resp = svc.add(peer, "demo", evil, "https", None, "", None, None, SecretValue::new(b"x".to_vec()));
             if evil == "-" {
                 // A single hyphen is a legal host character; it simply never
                 // matches a remote. The framing characters are what matter.

@@ -562,6 +562,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             capability,
             remote,
             branch,
+            body,
             project,
         } => broker::use_capability(
             daemon,
@@ -570,6 +571,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             &capability,
             &remote,
             branch.as_deref(),
+            body.as_deref(),
             project.as_deref(),
         ),
 
