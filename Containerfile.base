@@ -1043,11 +1043,19 @@ RUN set -eux; \
     for arr in main-vertical tiled; do \
         /usr/libexec/apex-mux kdl "$arr" /tmp/apex-mux-check.tsv > /tmp/apex-mux-check.kdl; \
         grep -q 'tab name="apex"' /tmp/apex-mux-check.kdl; \
-        ! ZELLIJ_SOCKET_DIR=/tmp/apex-zcheck \
+        # Every directory zellij writes to is redirected under /tmp and removed
+        # below. Without that it registers a session record in the build user's
+        # ~/.cache and ~/.local/share, and the image would ship two dead zellij
+        # sessions nobody created.
+        ! ZELLIJ_SOCKET_DIR=/tmp/apex-zcheck/sock \
+          XDG_CACHE_HOME=/tmp/apex-zcheck/cache \
+          XDG_DATA_HOME=/tmp/apex-zcheck/data \
+          XDG_CONFIG_HOME=/tmp/apex-zcheck/config \
             timeout 30 zellij --layout-string "$(cat /tmp/apex-mux-check.kdl)" 2>&1 \
             | grep -q 'Failed to parse'; \
     done; \
     rm -rf /tmp/apex-mux-check.tsv /tmp/apex-mux-check.kdl /tmp/apex-zcheck; \
+    test ! -e /root/.cache/zellij; \
     echo "context menu + settings generators + agent helpers: installed and self-tested"
 RUN systemctl --global enable apex-shell-firstrun.service
 
