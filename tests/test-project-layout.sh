@@ -206,10 +206,29 @@ printf '%s' "$out" | grep -q "1 window(s) would be restored" \
     && ok "the dry run reports what it would do" || bad "the dry run reports what it would do"
 
 section "a dry run starts nothing"
-before="$(pgrep -c -x sleep 2>/dev/null || echo 0)"
+# Counted by WORKING DIRECTORY, not by program name. `pgrep -c -x sleep` counts
+# every `sleep` on the machine, so anything else on it starting or finishing in
+# the half second below flipped the comparison — this suite failed on a
+# developer machine that was simply busy, which is a test that reports on the
+# machine rather than on the code. `restore` spawns with `current_dir(&e.cwd)`,
+# so a process it started is one whose cwd is the project, and nothing outside
+# this suite has that.
+count_in_project() {
+    local n=0 d
+    for d in /proc/[0-9]*; do
+        [ "$(readlink -f "$d/cwd" 2>/dev/null)" = "$PROJ" ] && n=$((n + 1))
+    done
+    printf '%s' "$n"
+}
+before="$(count_in_project)"
 (cd "$PROJ" && "$APEX" project layout restore --dry-run >/dev/null 2>&1)
 sleep 0.5
-after="$(pgrep -c -x sleep 2>/dev/null || echo 0)"
+after="$(count_in_project)"
+# The fixture process itself lives in the project, so the count is never zero —
+# which is the property that makes this a real measurement rather than "0 = 0".
+[ "$before" -ge 1 ] \
+    && ok "the fixture process is visible, so the count means something" \
+    || bad "the fixture process is visible, so the count means something"
 [ "$before" = "$after" ] \
     && ok "no process was started by a dry run" \
     || bad "a dry run started something (${before} -> ${after})"
