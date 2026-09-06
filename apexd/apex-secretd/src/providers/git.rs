@@ -79,7 +79,7 @@ impl std::fmt::Display for GitError {
         match self {
             GitError::NotMine(op) => write!(
                 f,
-                "the git provider was handed '{}', which it does not implement",
+                "the git provider does not implement '{}'",
                 op.escape_debug()
             ),
             GitError::BadRemoteName(r) => write!(

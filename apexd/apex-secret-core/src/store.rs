@@ -189,6 +189,21 @@ impl Grants {
         removed
     }
 
+    /// Withdraw any of `names`, and say whether one was there.
+    ///
+    /// The counterpart to [`Grants::allows_any`], and the reason it has to
+    /// exist: a grant written before a rename says `github:git-push` on disk,
+    /// and a revoke that only looked for the canonical name would find nothing
+    /// and report "was not granted" — leaving a grant the owner asked to remove
+    /// in place, under a name they can no longer type.
+    pub fn revoke_any(&mut self, project: &str, service: &str, names: &[&str]) -> bool {
+        let mut removed = false;
+        for name in names {
+            removed |= self.revoke(project, service, name);
+        }
+        removed
+    }
+
     /// Drop every grant that names `service`, across every project.
     ///
     /// Called when a credential is removed. Without it, re-adding a service

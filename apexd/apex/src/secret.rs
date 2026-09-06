@@ -173,9 +173,9 @@ fn add(service: &str, host: &str, username: &str, scheme: &str) -> Result<i32> {
         &SecretValue::new(value.as_bytes().to_vec()),
     )?;
     println!("stored a credential for {service} ({scheme}://{host})");
-    println!("nothing is allowed yet. See what this service can do with:");
+    println!("nothing is allowed yet. The operations this service offers:");
     println!("  apex secret capabilities");
-    println!("then allow one for this project with:");
+    println!("allow one for this project:");
     println!("  apex secret grant {service} <operation>");
     Ok(0)
 }
@@ -297,10 +297,10 @@ fn capabilities() -> Result<i32> {
          because git runs inside the sandbox and whatever the helper prints is\n\
          readable by the agent.\n\
          \n\
-         A resource is named, never given as a URL: the provider resolves the\n\
-         name against something you do not control, and the service then checks\n\
-         the host against the credential — so a grant cannot be turned into a\n\
-         request to anywhere else."
+         A resource is named, never given as a URL. The provider resolves the\n\
+         name against something you do not control, and the service checks the\n\
+         host against the credential, so nobody can turn a grant into a request\n\
+         to somewhere else."
     );
     Ok(0)
 }
@@ -456,7 +456,7 @@ fn require_a_runtime_that_forwards(agent: &mut apex_agent_core::client::Client) 
     if version < GENERIC_CAPABILITY_VERSION {
         bail!(
             "the running agent runtime speaks protocol {version}, which predates generic \
-             capabilities and would not understand this request; restart it with \
+             capabilities and does not understand this request; restart it with \
              `systemctl --user restart apex-agentd`"
         );
     }
