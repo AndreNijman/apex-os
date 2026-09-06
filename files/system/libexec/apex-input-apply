@@ -7,7 +7,7 @@ it replaces anything.
 
     ~/.config/apex-shell/input.json          the model (written by APEX Settings)
               |
-              +--> ~/.config/hypr/apex-input.conf      sourced by hyprland.conf
+              +--> ~/.config/hypr/apex/input.lua       required by hyprland.lua
               +--> ~/.config/apex-shell/ApexShellInput.kdl   included by niri
               +--> the <libinput> element inside ~/.config/labwc/rc.xml
               |
@@ -15,11 +15,17 @@ it replaces anything.
 
 ## Why labwc is edited in place
 
-Hyprland has `source` and niri has `include` (25.11+; the image ships 26.04), so
-both get a generated file they pull in. Neither line is added by this script:
-apex-shell-firstrun puts `source =` in the seeded hyprland.conf and appends
-`include` to the seeded niri config.kdl, and pre-creates both targets because
-both compositors treat a missing one as a fatal config error.
+Hyprland has `require` and niri has `include` (25.11+; the image ships 26.04),
+so both get a generated file they pull in. Neither line is added by this script:
+the seeded hyprland.lua already requires apex/input.lua, and apex-shell-firstrun
+appends `include` to the seeded niri config.kdl.
+
+Hyprland's half stopped being a `source =` line in P0-025. hyprlang was
+deprecated in 0.55 with "1-2 releases" of life left and the image ships 0.56.2,
+so the compositor config is Lua now. `require("apex.input")` resolves because
+Hyprland prepends the config file's own directory to package.path, and an ABSENT
+module is skipped by the loader in hyprland.lua rather than being the fatal
+error a missing `source =` was.
 
 labwc has neither: rc.xml is the only file it reads. So the `<libinput>`
 element is replaced inside it, with ElementTree rather than a regex, and the
@@ -57,7 +63,7 @@ import xml.etree.ElementTree as ET
 HOME = os.path.expanduser("~")
 
 MODEL_PATH = os.path.join(HOME, ".config/apex-shell/input.json")
-HYPR_OUT = os.path.join(HOME, ".config/hypr/apex-input.conf")
+HYPR_OUT = os.path.join(HOME, ".config/hypr/apex/input.lua")
 NIRI_OUT = os.path.join(HOME, ".config/apex-shell/ApexShellInput.kdl")
 LABWC_RC = os.path.join(HOME, ".config/labwc/rc.xml")
 
@@ -128,6 +134,25 @@ def load_model(path):
                 continue
             model[section][key] = value
 
+    # `devices` is a different shape from the three global sections — a map of
+    # libinput device name to its own settings — so it is merged separately
+    # rather than through the key-by-key loop above. Only Hyprland can express
+    # it (hl.device is per named device); labwc has device categories, not
+    # names, and niri has neither, so those two generators ignore it.
+    model["devices"] = {}
+    for name, settings in (user.get("devices") or {}).items():
+        if not isinstance(settings, dict):
+            notes.append(f"ignoring devices.{name}: not a table of settings")
+            continue
+        kept = {}
+        for key, value in settings.items():
+            if key not in DEVICE_KEYS:
+                notes.append(f"ignoring unknown devices.{name}.{key}")
+                continue
+            kept[key] = value
+        if kept:
+            model["devices"][name] = kept
+
     notes += validate(model)
     return model, notes
 
@@ -171,40 +196,99 @@ def yn(value):
 
 
 # ── Hyprland ────────────────────────────────────────────────────────────────
+def lua_str(value):
+    """A Lua double-quoted string literal."""
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def lua_value(value):
+    """A Lua literal for a model value.
+
+    Booleans are the reason this exists: Python prints `True`, Lua wants `true`,
+    and Hyprland rejects the unknown identifier rather than coercing it.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    return lua_str(value)
+
+
+# Per-device keys HL.DeviceSpec accepts that this model can fill. Verified
+# against /usr/share/hypr/stubs/hl.meta.lua for the Hyprland in the image, not
+# from the wiki: the stub is generated from the compositor's own option table,
+# so an entry here that Hyprland does not implement fails --self-test.
+#
+# `hl.device` is per named device, which is what makes a "this touchpad only"
+# setting expressible at all — the input block above is global. P0-019's
+# per-device page fills `devices` in input.json and needs no new mechanism.
+DEVICE_KEYS = (
+    "natural_scroll", "sensitivity", "accel_profile", "tap_to_click",
+    "tap_and_drag", "drag_lock", "disable_while_typing", "left_handed",
+    "middle_button_emulation", "clickfinger_behavior", "scroll_method",
+    "scroll_factor", "scroll_button", "scroll_button_lock", "tap_button_map",
+    "enabled", "repeat_rate", "repeat_delay",
+)
+
+
 def gen_hyprland(model):
+    """apex/input.lua — one hl.config call, plus one hl.device per named device.
+
+    Loaded AFTER apex/input-defaults.lua by hyprland.lua, and hl.config is
+    last-write-wins, so everything here overrides the shipped default. That is
+    the same ordering the hyprlang config got from putting its `source =` lines
+    at the bottom, expressed as load order instead.
+    """
     t, p, k = model["touchpad"], model["pointer"], model["keyboard"]
     # Hyprland's touchpad block has no accel_profile or left_handed of its own;
     # those live on the parent input block and apply to both. Only the options
     # Hyprland actually accepts appear here — `Hyprland --verify-config` rejects
     # an unknown one, which --self-test relies on.
-    return "\n".join([
-        f"# {GENERATED_BANNER}",
-        "#",
-        "# Sourced by hyprland.conf. Values come from ~/.config/apex-shell/input.json.",
+    lines = [
+        f"-- {GENERATED_BANNER}",
+        "--",
+        "-- Required by hyprland.lua as `apex.input`. Values come from",
+        "-- ~/.config/apex-shell/input.json.",
         "",
-        "input {",
-        f"    sensitivity = {p['speed']}",
-        f"    accel_profile = {p['accel_profile']}",
-        f"    natural_scroll = {str(p['natural_scroll']).lower()}",
-        f"    left_handed = {str(p['left_handed']).lower()}",
-        f"    scroll_factor = {p['scroll_factor']}",
-        f"    repeat_rate = {k['repeat_rate']}",
-        f"    repeat_delay = {k['repeat_delay']}",
+        "hl.config({",
+        "    input = {",
+        f"        sensitivity    = {lua_value(p['speed'])},",
+        f"        accel_profile  = {lua_value(p['accel_profile'])},",
+        f"        natural_scroll = {lua_value(p['natural_scroll'])},",
+        f"        left_handed    = {lua_value(p['left_handed'])},",
+        f"        scroll_factor  = {lua_value(p['scroll_factor'])},",
+        f"        repeat_rate    = {lua_value(k['repeat_rate'])},",
+        f"        repeat_delay   = {lua_value(k['repeat_delay'])},",
         "",
-        "    touchpad {",
-        f"        natural_scroll = {str(t['natural_scroll']).lower()}",
-        f"        tap-to-click = {str(t['tap']).lower()}",
-        f"        tap-and-drag = {str(t['tap_and_drag']).lower()}",
-        f"        drag_lock = {str(t['drag_lock']).lower()}",
-        f"        disable_while_typing = {str(t['disable_while_typing']).lower()}",
-        f"        middle_button_emulation = {str(t['middle_emulation']).lower()}",
-        f"        clickfinger_behavior = {str(t['click_method'] == 'clickfinger').lower()}",
-        f"        tap_button_map = {t['tap_button_map']}",
-        f"        scroll_factor = {t['scroll_factor']}",
-        "    }",
-        "}",
+        "        touchpad = {",
+        f"            natural_scroll          = {lua_value(t['natural_scroll'])},",
+        # hyprlang spelled the first two `tap-to-click` and `tap-and-drag`.
+        # The Lua keys are underscored, and a wrong one is rejected outright.
+        f"            tap_to_click            = {lua_value(t['tap'])},",
+        f"            tap_and_drag            = {lua_value(t['tap_and_drag'])},",
+        f"            drag_lock               = {lua_value(t['drag_lock'])},",
+        f"            disable_while_typing    = {lua_value(t['disable_while_typing'])},",
+        f"            middle_button_emulation = {lua_value(t['middle_emulation'])},",
+        f"            clickfinger_behavior    = {lua_value(t['click_method'] == 'clickfinger')},",
+        f"            tap_button_map          = {lua_value(t['tap_button_map'])},",
+        f"            scroll_factor           = {lua_value(t['scroll_factor'])},",
+        "        },",
+        "    },",
+        "})",
         "",
-    ])
+    ]
+
+    for name in sorted(model.get("devices", {})):
+        settings = model["devices"][name]
+        lines.append("hl.device({")
+        lines.append(f"    name = {lua_str(name)},")
+        for key in DEVICE_KEYS:
+            if key in settings:
+                lines.append(f"    {key} = {lua_value(settings[key])},")
+        lines.append("})")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ── niri ────────────────────────────────────────────────────────────────────
@@ -382,26 +466,46 @@ def which(cmd):
     return shutil.which(cmd)
 
 
-def validate_hyprland(path):
+def validate_hyprland(text):
+    """Parse the generated Lua the way Hyprland will actually load it.
+
+    Wrapped in a config that `require`s it from a directory laid out like
+    ~/.config/hypr, not checked as a standalone config. Two reasons:
+
+      * `require("apex.input")` only resolves because Hyprland prepends the
+        CONFIG FILE'S directory to package.path, so the module has to sit at
+        apex/input.lua under the config being verified or the name will not
+        resolve at all;
+      * a Lua file that merely parses proves nothing. hl.config rejects an
+        unknown option at call time, which is the mistake worth catching, and
+        that only happens when Hyprland runs the chunk.
+
+    Returns True/False, or None when Hyprland is not installed.
+    """
     if not which("Hyprland"):
         return None
     env = dict(os.environ)
     env.setdefault("XDG_RUNTIME_DIR", tempfile.mkdtemp())
-    # Hyprland refuses to parse a bare fragment, so wrap it the way
-    # hyprland.conf does.
-    with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as fh:
-        fh.write(f"source = {path}\n")
-        wrapper = fh.name
-    try:
-        out = subprocess.run(
-            ["Hyprland", "--i-am-really-stupid", "--verify-config", "--config", wrapper],
-            capture_output=True, text=True, env=env, timeout=60,
-        )
+    with tempfile.TemporaryDirectory() as d:
+        os.mkdir(os.path.join(d, "apex"))
+        with open(os.path.join(d, "apex", "input.lua"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        wrapper = os.path.join(d, "hyprland.lua")
+        with open(wrapper, "w", encoding="utf-8") as fh:
+            fh.write('require("apex.input")\n')
+        try:
+            out = subprocess.run(
+                ["Hyprland", "--i-am-really-stupid", "--verify-config", "--config", wrapper],
+                capture_output=True, text=True, env=env, timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        # Everything Hyprland has to say lands under "Config parsing result:",
+        # and a clean config prints exactly "config ok" there. Checked against
+        # the four ways this file can be wrong — an unknown config key, a value
+        # of the wrong type, an unparseable bind string and a Lua error — and
+        # none of them print it. So the banner's presence is the whole test.
         return "config ok" in (out.stdout + out.stderr)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    finally:
-        os.unlink(wrapper)
 
 
 def validate_niri(path):
@@ -465,18 +569,26 @@ def self_test():
     model = {k: dict(v) for k, v in DEFAULTS.items()}
     rc = 0
 
+    # A device the defaults do not mention, so --self-test covers the hl.device
+    # path as well as the global block. P0-019's per-device page writes exactly
+    # this shape into input.json.
+    model["devices"] = {
+        "apex-self-test-touchpad": {
+            "natural_scroll": True, "tap_to_click": True, "sensitivity": 0.3,
+            "accel_profile": "adaptive", "disable_while_typing": True,
+            "scroll_method": "2fg", "left_handed": False,
+        },
+    }
+
     hypr = gen_hyprland(model)
     niri = gen_niri(model)
 
     with tempfile.TemporaryDirectory() as d:
-        hp = os.path.join(d, "apex-input.conf")
         np_ = os.path.join(d, "input.kdl")
-        with open(hp, "w", encoding="utf-8") as fh:
-            fh.write(hypr)
         with open(np_, "w", encoding="utf-8") as fh:
             fh.write(niri)
 
-        for name, result in (("Hyprland", validate_hyprland(hp)),
+        for name, result in (("Hyprland", validate_hyprland(hypr)),
                              ("niri", validate_niri(np_))):
             if result is None:
                 print(f"SKIP  {name} not installed; cannot validate its output")
@@ -485,6 +597,24 @@ def self_test():
             else:
                 print(f"FAIL  {name} rejects the generated config")
                 rc = 1
+
+    # The generated file must be Lua that hyprland.lua can require, not hyprlang.
+    # Asserted here as well as parsed above, because a file that happens to parse
+    # as both is exactly the regression this migration exists to prevent.
+    for want in ("hl.config({", "input = {", "hl.device({",
+                 'name = "apex-self-test-touchpad"'):
+        if want in hypr:
+            print(f"PASS  hyprland emits: {want}")
+        else:
+            print(f"FAIL  hyprland is missing: {want}")
+            rc = 1
+    leftovers = [s for s in ("source =", "tap-to-click", "tap-and-drag")
+                 if s in hypr]
+    if leftovers:
+        print(f"FAIL  hyprland output still carries hyprlang: {', '.join(leftovers)}")
+        rc = 1
+    else:
+        print("PASS  no hyprlang left in the Hyprland output")
 
     # labwc has no config validator, so check the XML is well formed and that
     # every element name is one labwc documents.
@@ -561,10 +691,7 @@ def main(argv=None):
     # Validate before replacing anything, per compositor, so one bad value
     # cannot take a session down.
     with tempfile.TemporaryDirectory() as d:
-        hp = os.path.join(d, "apex-input.conf")
-        with open(hp, "w", encoding="utf-8") as fh:
-            fh.write(hypr)
-        if validate_hyprland(hp) is False:
+        if validate_hyprland(hypr) is False:
             print("apex-input: the generated Hyprland config was rejected; nothing written",
                   file=sys.stderr)
             return 1
