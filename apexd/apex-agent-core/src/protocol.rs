@@ -19,10 +19,27 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::policy::AgentPolicy;
+
 /// Protocol revision. Bumped when a change is not backward compatible; the
 /// daemon reports it in [`Response::Hello`] so a mismatched CLI can say so
 /// plainly instead of failing on a missing field.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// 2 — the six permission dimensions (§3.1). The added keys are flattened
+/// alongside `sandbox` rather than nested under it, so an older daemon still
+/// reads a new client's `sandbox` correctly. What it does *not* read is the
+/// other five: a `--network offline` an old daemon ignores is a session that
+/// runs with the network, which is exactly the fail-open a version number
+/// exists to catch. The CLI compares this against [`Response::Hello`] and
+/// refuses to send a non-default dimension to a daemon that predates it.
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// The revision that first carried the six dimensions.
+///
+/// Named rather than written as a literal at the comparison, because the check
+/// is a security boundary and a bare `< 2` in the CLI is one careless edit away
+/// from meaning nothing.
+pub const POLICY_DIMENSIONS_VERSION: u32 = 2;
 
 /// What a session is doing. The five user-facing values come straight from the
 /// roadmap's agent event protocol; `Starting` and `Exited` are the lifecycle
@@ -96,8 +113,15 @@ impl std::fmt::Display for AgentState {
     }
 }
 
-/// How much of the machine a session may reach. See `sandbox.rs` for what each
-/// one actually builds.
+/// Dimension 2 of §3.1: how much of the filesystem and process table a session
+/// may reach. See `sandbox.rs` for what each one actually builds, and
+/// `policy.rs` for the other five dimensions this one is deliberately not
+/// coupled to.
+///
+/// It stays in `protocol.rs` because it is the one dimension that predates the
+/// split and is therefore a wire-compatibility surface in its own right;
+/// `policy::SandboxPolicy` re-exports it so the six can be reached from one
+/// place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxPolicy {
@@ -113,6 +137,14 @@ pub enum SandboxPolicy {
 }
 
 impl SandboxPolicy {
+    /// Every value, so a test that has to hold for all of them can say so
+    /// rather than listing three and missing the fourth somebody adds.
+    pub const ALL: &'static [SandboxPolicy] = &[
+        SandboxPolicy::Unrestricted,
+        SandboxPolicy::Project,
+        SandboxPolicy::Strict,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             SandboxPolicy::Unrestricted => "unrestricted",
@@ -175,7 +207,15 @@ pub struct SessionInfo {
     /// the default is "not paused", which is what an absent field meant.
     #[serde(default)]
     pub paused: bool,
-    pub sandbox: SandboxPolicy,
+    /// The six permission dimensions this session actually runs under, already
+    /// normalised by the daemon.
+    ///
+    /// Flattened, not nested: `sandbox` stays a top-level key, so APEX Shell's
+    /// existing read of it keeps working and a record written before the split
+    /// still loads with the other five at their defaults. Nesting would have
+    /// moved the key and silently reported every old session as `project`.
+    #[serde(flatten)]
+    pub policy: AgentPolicy,
     /// PID of the session leader (the sandbox wrapper when confined).
     pub pid: i32,
     /// Unix seconds when the session was created.
@@ -352,8 +392,14 @@ pub struct RunRequest {
     pub args: Vec<String>,
     /// Run here. Must be absolute.
     pub cwd: String,
-    #[serde(default)]
-    pub sandbox: SandboxPolicy,
+    /// The six permission dimensions, flattened for the same reason as
+    /// [`SessionInfo::policy`]: an older client sends `{"sandbox":"strict"}`
+    /// and nothing else, and that must keep meaning what it meant.
+    ///
+    /// The daemon normalises and validates this; it never trusts it as the
+    /// final word, because a client is free to send any combination.
+    #[serde(flatten)]
+    pub policy: AgentPolicy,
     /// Create/reuse this git worktree under the project and run there.
     #[serde(default)]
     pub worktree: Option<String>,
@@ -444,6 +490,12 @@ pub enum ErrorKind {
     BadRequest,
     /// The sandbox could not be built as requested. Never downgraded silently.
     SandboxUnavailable,
+    /// A policy dimension this build cannot enforce was asked for. Distinct
+    /// from [`ErrorKind::SandboxUnavailable`], whose remedy is "re-run with
+    /// `--sandbox unrestricted`" — advice that would be actively wrong for a
+    /// system-access refusal, since loosening the sandbox is not what the user
+    /// was denied.
+    PolicyRefused,
     /// No privilege request with that id.
     NoSuchRequest,
     /// The caller is not allowed to do this — notably, a session trying to
@@ -560,7 +612,8 @@ mod tests {
     fn run_request_sandbox_defaults_to_project_when_omitted() {
         let req: RunRequest =
             serde_json::from_str(r#"{"cwd":"/tmp","cols":80,"rows":24}"#).expect("parse");
-        assert_eq!(req.sandbox, SandboxPolicy::Project);
+        assert_eq!(req.policy.sandbox, SandboxPolicy::Project);
+        assert_eq!(req.policy, AgentPolicy::default());
         assert!(req.worktree.is_none());
         assert!(!req.checkpoint);
     }
@@ -607,7 +660,7 @@ mod tests {
             state: AgentState::Working,
             detail: None,
             paused: false,
-            sandbox: SandboxPolicy::Project,
+            policy: AgentPolicy::default(),
             pid: 42,
             started: 1,
             last_activity: 2,
@@ -744,7 +797,10 @@ mod tests {
                 prompt: Some("go".into()),
                 args: vec!["--verbose".into()],
                 cwd: "/home/t/p".into(),
-                sandbox: SandboxPolicy::Strict,
+                policy: AgentPolicy {
+                    sandbox: SandboxPolicy::Strict,
+                    ..AgentPolicy::default()
+                },
                 worktree: Some("issue-217".into()),
                 checkpoint: true,
                 cols: 80,
@@ -839,6 +895,75 @@ mod tests {
     }
 
     #[test]
+    fn the_six_dimensions_sit_beside_sandbox_and_not_under_it() {
+        // APEX Shell reads `sandbox` from the top level of a session record,
+        // and so does every record already on disk. Nesting the dimensions
+        // under a `policy` object would have moved that key, and the symptom
+        // would have been every existing session quietly listed as `project`.
+        use crate::policy::NativeMode;
+
+        let mut s = sample_session();
+        s.policy.sandbox = SandboxPolicy::Strict;
+        s.policy.native = NativeMode::Bypass;
+        let text = serde_json::to_string(&s).expect("serialise");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["sandbox"], "strict", "{text}");
+        assert_eq!(v["native"], "bypass", "{text}");
+        assert!(v.get("policy").is_none(), "the policy must not be nested: {text}");
+
+        let back: SessionInfo = serde_json::from_str(&text).expect("deserialise");
+        assert_eq!(back.policy, s.policy);
+    }
+
+    #[test]
+    fn a_session_record_written_before_the_split_still_loads() {
+        // Same shape as the `paused` test: strip the keys an older daemon did
+        // not write and assert the record comes back at the safe defaults,
+        // never loose. A dropped record would lose a running session from the
+        // Agent Center; a record that loaded with the network open would be
+        // worse.
+        use crate::policy::{NetworkPolicy, SecretPolicy, SystemAccess};
+
+        let s = sample_session();
+        let text = serde_json::to_string(&s).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        {
+            let obj = v.as_object_mut().unwrap();
+            for key in ["native", "system", "secrets", "network", "origin"] {
+                assert!(obj.remove(key).is_some(), "{key} was never written");
+            }
+        }
+        let old: SessionInfo = serde_json::from_value(v).expect("an old record still loads");
+        assert_eq!(old.policy, AgentPolicy::default());
+        assert_eq!(old.policy.system, SystemAccess::None);
+        assert_eq!(old.policy.secrets, SecretPolicy::Brokered);
+        assert_eq!(old.policy.network, NetworkPolicy::Open);
+        assert_eq!(old.policy.sandbox, SandboxPolicy::Project);
+    }
+
+    #[test]
+    fn a_run_request_from_a_pre_split_client_keeps_its_sandbox() {
+        // The wire form an older `apex agent run --sandbox strict` sends. It
+        // must not become `project`, and it must not become unconfined.
+        let req: RunRequest =
+            serde_json::from_str(r#"{"cwd":"/tmp","sandbox":"strict","cols":80,"rows":24}"#)
+                .expect("parse");
+        assert_eq!(req.policy.sandbox, SandboxPolicy::Strict);
+        assert_eq!(
+            req.policy,
+            AgentPolicy { sandbox: SandboxPolicy::Strict, ..AgentPolicy::default() }
+        );
+    }
+
+    #[test]
+    fn the_protocol_version_moved_with_the_dimensions() {
+        // The CLI refuses to send a non-default dimension to a daemon older
+        // than this, because an old daemon would drop the key and run the
+        // session without the restriction.
+        assert_eq!(PROTOCOL_VERSION, POLICY_DIMENSIONS_VERSION);
+    }
+
+    #[test]
     fn session_info_reports_liveness_and_exit() {
         let mut info = SessionInfo {
             id: 1,
@@ -852,7 +977,7 @@ mod tests {
             state: AgentState::Working,
             detail: None,
             paused: false,
-            sandbox: SandboxPolicy::Project,
+            policy: AgentPolicy::default(),
             pid: 123,
             started: 0,
             last_activity: 0,

@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use apex_agent_core::paths;
+use apex_agent_core::policy::AgentPolicy;
 use apex_agent_core::protocol::{ErrorKind, Response};
 use apex_agent_core::request::{
     self, Decision, Grants, PrivilegeRequest, RequestError, Verb,
@@ -35,6 +36,13 @@ pub struct Origin {
     pub session: Option<u32>,
     pub agent: Option<String>,
     pub project: Option<String>,
+    /// The permission dimensions the asking session runs under.
+    ///
+    /// Taken from what the daemon recorded when it forked the session, never
+    /// from the request: a session that could name its own policy could name a
+    /// looser one. An unsessioned peer is the human, whose policy is whatever
+    /// their shell allows, so the default applies.
+    pub policy: AgentPolicy,
 }
 
 /// Resolve a connection to the session that owns it.
@@ -81,17 +89,23 @@ pub fn origin(daemon: &Arc<Daemon>, peer: Option<Peer>) -> Origin {
     match reg.get(*id).and_then(|h| {
         h.lock()
             .ok()
-            .map(|s| (s.info.agent.clone(), s.info.project.clone()))
+            .map(|s| (s.info.agent.clone(), s.info.project.clone(), s.info.policy))
     }) {
-        Some((agent, project)) => Origin {
+        Some((agent, project, policy)) => Origin {
             session: Some(*id),
             agent: Some(agent),
             project,
+            policy,
         },
         None => Origin {
             session: Some(*id),
             agent: None,
             project: None,
+            // A session whose record vanished between the ancestry walk and
+            // this lookup gets the default, which is the strict value for
+            // every dimension. Failing toward the loose one here would make a
+            // race into a permission.
+            policy: AgentPolicy::default(),
         },
     }
 }

@@ -10,6 +10,7 @@ use apex_agent_core::adapter;
 use apex_agent_core::checkpoint;
 use apex_agent_core::client::SESSION_ENV;
 use apex_agent_core::paths;
+use apex_agent_core::policy::PolicyError;
 use apex_agent_core::project;
 use apex_agent_core::protocol::{AgentState, ErrorKind, Response, RunRequest, SessionInfo};
 use apex_agent_core::sandbox::{self, SandboxError, SandboxSpec};
@@ -62,9 +63,28 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
         );
     }
 
+    // Resolve the six permission dimensions before anything is created.
+    //
+    // Normalised first, so the record and the enforcement agree about what the
+    // session has — a `strict` request carries the client's default `open`
+    // network, and storing that would list an isolated session as networked.
+    // Validated second, so a client that skipped its own checks, or one built
+    // against a newer vocabulary, is refused here rather than granted a
+    // dimension nothing in this build enforces.
+    let policy = req.policy.normalised();
+    policy.validate().map_err(PolicyRefused)?;
+
+    // Dimension 1 is the agent's own, and only the adapter knows whether this
+    // one can express it. Refused rather than dropped: a `--agent-bypass` that
+    // silently did nothing would leave the user believing confirmations were
+    // off.
+    if let Some(why) = adapter.refuses_native_mode(policy.native, is_root()) {
+        bail!("{why}");
+    }
+
     // Fail closed before anything is created: a session must never start with
     // weaker confinement than was asked for.
-    sandbox::preflight(req.sandbox).map_err(SandboxRefused)?;
+    sandbox::preflight(policy.sandbox).map_err(SandboxRefused)?;
 
     // Resolve the project, then the worktree, then the working directory. Each
     // step can change where the session actually runs.
@@ -120,7 +140,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
     paths::ensure_private_dir(&scratch)
         .with_context(|| format!("preparing the session scratch directory {}", scratch.display()))?;
 
-    let args = adapter.build_args(req.prompt.as_deref(), &extra);
+    let args = adapter.build_args(policy.native, req.prompt.as_deref(), &extra);
     let size = WinSize {
         cols: req.cols,
         rows: req.rows,
@@ -128,7 +148,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
     .or_fallback();
 
     // Build the sandbox.
-    let mut spec = SandboxSpec::new(req.sandbox, paths::home(), paths::runtime_dir());
+    let mut spec = SandboxSpec::new(policy, paths::home(), paths::runtime_dir());
     // /run is masked, which takes the resolv.conf symlink target with it. Bind
     // the target back or the session has no DNS at all.
     spec.run_ro = sandbox::resolv_binds();
@@ -152,7 +172,15 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
     spec.env_set.push(("PATH".into(), inherited_path()));
     spec.env_set.push((SESSION_ENV.into(), id.to_string()));
     spec.env_set
-        .push(("APEX_AGENT_SANDBOX".into(), req.sandbox.to_string()));
+        .push(("APEX_AGENT_SANDBOX".into(), policy.sandbox.to_string()));
+    // The other five dimensions a session may usefully know about itself. A
+    // hook that wants to say "this session has no network" reads this rather
+    // than guessing from the sandbox name, which stopped being the authority
+    // on the network when the dimensions were split.
+    spec.env_set
+        .push(("APEX_AGENT_NATIVE_MODE".into(), policy.native.to_string()));
+    spec.env_set
+        .push(("APEX_AGENT_NETWORK".into(), policy.effective_network().to_string()));
     spec.env_set
         .push(("TMPDIR".into(), scratch.to_string_lossy().into_owned()));
     for (k, v) in &req.env {
@@ -195,7 +223,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
 
     // A confined session gets its environment from bwrap's --setenv, so the
     // process environment is only used for the unconfined path.
-    let spawned = pty::spawn(&argv, &workdir, &env, true, size)
+    let spawned = pty::spawn(&argv, &workdir, &env, true, policy.no_new_privs(), size)
         .with_context(|| format!("starting {program}"))?;
 
     let info = SessionInfo {
@@ -210,7 +238,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
         state: AgentState::Starting,
         detail: None,
         paused: false,
-        sandbox: req.sandbox,
+        policy,
         pid: spawned.pid,
         started: now_secs(),
         last_activity: now_secs(),
@@ -241,6 +269,16 @@ fn inherited_path() -> String {
     std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string())
 }
 
+/// Whether this runtime is running as root.
+///
+/// Only consulted for the agent's own permission mode, which some upstream
+/// CLIs refuse under root. Nothing in APEX's own policy branches on it: root
+/// is a dimension, not a euid.
+fn is_root() -> bool {
+    // Safe: geteuid takes no arguments and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
+
 /// A sandbox refusal, carried so `dispatch` can map it to the right error kind.
 #[derive(Debug)]
 pub struct SandboxRefused(pub SandboxError);
@@ -253,14 +291,34 @@ impl std::fmt::Display for SandboxRefused {
 
 impl std::error::Error for SandboxRefused {}
 
-/// Map a `start` failure to a response, keeping the sandbox distinction the
-/// client needs in order to explain the escape hatch.
+/// A permission-dimension refusal, carried for the same reason.
+///
+/// Kept distinct from [`SandboxRefused`] because the two need different
+/// remedies: a sandbox refusal is answered with `--sandbox unrestricted`, and
+/// telling somebody denied a system grant to loosen their sandbox would be
+/// advice that both fails and makes them less safe.
+#[derive(Debug)]
+pub struct PolicyRefused(pub PolicyError);
+
+impl std::fmt::Display for PolicyRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for PolicyRefused {}
+
+/// Map a `start` failure to a response, keeping the distinctions the client
+/// needs in order to explain what to do next.
 pub fn run_error(e: anyhow::Error) -> Response {
     // The whole chain, not just the innermost error: the sandbox refusal
     // carries the remedy ("re-run with --sandbox unrestricted") and the outer
     // context says which step was refused.
     if e.downcast_ref::<SandboxRefused>().is_some() {
         return Response::error(ErrorKind::SandboxUnavailable, format!("{e:#}"));
+    }
+    if e.downcast_ref::<PolicyRefused>().is_some() {
+        return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
     }
     Response::error(ErrorKind::BadRequest, format!("{e:#}"))
 }
@@ -542,6 +600,21 @@ mod tests {
         let resp = run_error(e);
         let (_, message) = resp.as_error().expect("error");
         assert!(message.contains("unrestricted"), "{message}");
+    }
+
+    #[test]
+    fn a_policy_refusal_is_not_reported_as_a_sandbox_problem() {
+        // The remedy differs. `SandboxUnavailable` means "re-run with
+        // --sandbox unrestricted", which for a denied system grant would be
+        // advice that fails and leaves the user less confined for nothing.
+        let e = anyhow::Error::new(PolicyRefused(PolicyError::SystemAccessUnavailable(
+            apex_agent_core::policy::SystemAccess::Session,
+        )));
+        let resp = run_error(e);
+        assert_eq!(resp.as_error().map(|(k, _)| k), Some(ErrorKind::PolicyRefused));
+        let (_, message) = resp.as_error().expect("error");
+        assert!(message.contains("apex request"), "{message}");
+        assert!(!message.contains("--sandbox unrestricted"), "{message}");
     }
 
     #[test]

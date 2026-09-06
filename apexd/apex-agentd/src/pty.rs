@@ -39,6 +39,7 @@ pub fn spawn(
     cwd: &Path,
     env: &[(String, String)],
     clear_env: bool,
+    no_new_privs: bool,
     size: WinSize,
 ) -> Result<Spawned> {
     if argv.is_empty() {
@@ -171,6 +172,28 @@ pub fn spawn(
                 fail(STAGE_CHDIR, 125);
             }
 
+            // The kernel half of "unrestricted-user does not imply root"
+            // (§4.3, §3.3). With PR_SET_NO_NEW_PRIVS set, execve stops
+            // honouring a setuid bit or a file capability, so sudo, su and
+            // pkexec still run inside the session but come up unprivileged and
+            // fail — and the flag is inherited by every descendant and cannot
+            // be cleared, which is what makes it a boundary rather than a
+            // setting.
+            //
+            // A confined session already has it: bwrap sets it unconditionally
+            // (measured — NoNewPrivs is 1 inside and 0 outside). Setting it
+            // here is what extends the same property to an unconfined one,
+            // which is the case §4.3 is about. Doing it for both is deliberate:
+            // the policy decides, not the sandbox mode, so a future sandbox
+            // that stops setting it cannot silently take this with it.
+            //
+            // Failure is fatal rather than ignored. A session that reported
+            // no_new_privs and did not have it would be exactly the silent
+            // downgrade the rest of this file refuses to perform.
+            if no_new_privs && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                fail(STAGE_NO_NEW_PRIVS, 124);
+            }
+
             if clear_env {
                 // clearenv can allocate on some libcs; unsetting the names we
                 // know and then setting ours is enough, because the sandbox
@@ -231,6 +254,7 @@ pub fn spawn(
         let what = match stage {
             STAGE_LOGIN_TTY => "attaching the agent to its terminal",
             STAGE_CHDIR => "entering the working directory",
+            STAGE_NO_NEW_PRIVS => "locking the session out of privilege escalation",
             _ => "starting the agent program",
         };
         return Err(err).context(what.to_string());
@@ -252,6 +276,7 @@ pub fn spawn(
 const STAGE_LOGIN_TTY: u8 = 1;
 const STAGE_CHDIR: u8 = 2;
 const STAGE_EXEC: u8 = 3;
+const STAGE_NO_NEW_PRIVS: u8 = 4;
 
 /// Wait for the child to exec or report a failure.
 ///
@@ -538,6 +563,7 @@ mod tests {
             Path::new("/tmp"),
             &[("TERM".to_string(), "xterm-256color".to_string())],
             true,
+            true,
             WinSize {
                 cols: 100,
                 rows: 40,
@@ -587,6 +613,7 @@ mod tests {
             Path::new("/tmp"),
             &[],
             true,
+            true,
             WinSize::FALLBACK,
         )
         .expect("spawn");
@@ -610,6 +637,7 @@ mod tests {
             ],
             Path::new("/tmp"),
             &[("TERM".to_string(), "xterm".to_string())],
+            true,
             true,
             WinSize {
                 cols: 132,
@@ -651,6 +679,7 @@ mod tests {
             Path::new("/tmp"),
             &[],
             true,
+            true,
             WinSize::FALLBACK,
         )
         .expect_err("a missing binary must fail the spawn");
@@ -664,6 +693,7 @@ mod tests {
             &["/bin/sh".to_string()],
             Path::new("/nonexistent/directory"),
             &[],
+            true,
             true,
             WinSize::FALLBACK,
         )
@@ -700,6 +730,7 @@ mod tests {
             ],
             Path::new("/tmp"),
             &[],
+            true,
             true,
             WinSize::FALLBACK,
         )
@@ -765,6 +796,7 @@ mod tests {
                 Path::new("/tmp"),
                 &[],
                 true,
+                true,
                 WinSize::FALLBACK,
             )
             .expect("spawn");
@@ -784,6 +816,108 @@ mod tests {
 
     #[test]
     fn spawning_with_no_argv_is_an_error_not_a_panic() {
-        assert!(spawn(&[], Path::new("/tmp"), &[], true, WinSize::FALLBACK).is_err());
+        assert!(spawn(&[], Path::new("/tmp"), &[], true, true, WinSize::FALLBACK).is_err());
+    }
+
+    /// Read `NoNewPrivs` from a spawned child's own `/proc` entry.
+    ///
+    /// The child's, not the parent's: the flag is set between fork and exec,
+    /// so nothing outside the child can observe it any other way.
+    fn spawned_no_new_privs(flag: bool) -> String {
+        let spawned = spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "grep '^NoNewPrivs' /proc/self/status".to_string(),
+            ],
+            Path::new("/tmp"),
+            &[],
+            true,
+            flag,
+            WinSize::FALLBACK,
+        )
+        .expect("spawn");
+
+        let mut collected = Vec::new();
+        let mut buf = [0u8; 512];
+        for _ in 0..200 {
+            wait_readable(spawned.master, 25);
+            match read_nonblocking(spawned.master, &mut buf) {
+                Ok(Some(0)) => {}
+                Ok(Some(n)) => collected.extend_from_slice(&buf[..n]),
+                _ => break,
+            }
+            if String::from_utf8_lossy(&collected).contains('\n') {
+                break;
+            }
+        }
+        close(spawned.master);
+        wait_for_exit(spawned.pid);
+        String::from_utf8_lossy(&collected).trim().to_string()
+    }
+
+    #[test]
+    fn no_new_privs_reaches_the_session_and_the_negative_control_proves_it() {
+        // P0-004 criterion 3, with kernel teeth: an unconfined session runs
+        // with PR_SET_NO_NEW_PRIVS, so execve will not grant it privilege from
+        // a setuid binary — sudo, pkexec and su all stop working inside it.
+        // "Unrestricted user" is a filesystem and process statement, not a
+        // route to root.
+        //
+        // The negative control comes FIRST, so a probe that could never report
+        // a 1 cannot masquerade as a working guard.
+        let without = spawned_no_new_privs(false);
+        assert!(
+            without.contains('0'),
+            "the probe never reports an unset flag, so it proves nothing: {without:?}"
+        );
+
+        let with = spawned_no_new_privs(true);
+        assert!(
+            with.contains('1'),
+            "the session did not get no_new_privs: {with:?}"
+        );
+    }
+
+    #[test]
+    fn the_flag_survives_into_the_processes_the_session_starts() {
+        // The property that makes it a boundary rather than a setting: a
+        // process cannot clear PR_SET_NO_NEW_PRIVS, and every descendant
+        // inherits it across fork and exec. A session that could shed it in a
+        // subshell would have gained nothing from it at all.
+        let spawned = spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "/bin/sh -c \"grep '^NoNewPrivs' /proc/self/status\"".to_string(),
+            ],
+            Path::new("/tmp"),
+            &[],
+            true,
+            true,
+            WinSize::FALLBACK,
+        )
+        .expect("spawn");
+
+        let mut collected = Vec::new();
+        let mut buf = [0u8; 512];
+        for _ in 0..200 {
+            wait_readable(spawned.master, 25);
+            match read_nonblocking(spawned.master, &mut buf) {
+                Ok(Some(0)) => {}
+                Ok(Some(n)) => collected.extend_from_slice(&buf[..n]),
+                _ => break,
+            }
+            if String::from_utf8_lossy(&collected).contains('\n') {
+                break;
+            }
+        }
+        close(spawned.master);
+        wait_for_exit(spawned.pid);
+        let text = String::from_utf8_lossy(&collected);
+        assert!(
+            text.contains('1'),
+            "a grandchild of the session lost no_new_privs: {text:?}"
+        );
     }
 }

@@ -74,6 +74,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::policy::{AgentPolicy, NetworkPolicy};
 use crate::protocol::SandboxPolicy;
 
 /// Environment variables every session keeps, regardless of adapter.
@@ -181,7 +182,15 @@ impl std::error::Error for SandboxError {}
 /// Everything needed to build one session's confinement.
 #[derive(Debug, Clone)]
 pub struct SandboxSpec {
-    pub policy: SandboxPolicy,
+    /// All six dimensions, not just the sandbox one.
+    ///
+    /// This module enforces two of them — the sandbox itself and, through
+    /// `--unshare-net`, the network — and carrying the whole policy is what
+    /// stops the two from being set from different objects. A `network` field
+    /// beside a separate `sandbox` field is a call site away from a `strict`
+    /// spec built with the network left open, and the argv would look correct
+    /// in every test that did not check for that exact combination.
+    pub policy: AgentPolicy,
     /// The user's home. Masked with a tmpfs unless the policy is unrestricted.
     pub home: PathBuf,
     /// `$XDG_RUNTIME_DIR`. Masked, so the ssh-agent and gpg-agent sockets go
@@ -225,7 +234,7 @@ pub struct SandboxSpec {
 
 impl SandboxSpec {
     /// A spec with nothing allowed beyond the defaults.
-    pub fn new(policy: SandboxPolicy, home: PathBuf, runtime_dir: PathBuf) -> SandboxSpec {
+    pub fn new(policy: AgentPolicy, home: PathBuf, runtime_dir: PathBuf) -> SandboxSpec {
         SandboxSpec {
             policy,
             home,
@@ -309,7 +318,7 @@ pub fn build_argv(
     program: &str,
     args: &[String],
 ) -> Result<Vec<String>, SandboxError> {
-    if !spec.policy.is_confined() {
+    if !spec.policy.sandbox.is_confined() {
         let mut argv = vec![program.to_string()];
         argv.extend(args.iter().cloned());
         return Ok(argv);
@@ -433,7 +442,12 @@ pub fn build_argv(
     push("--unshare-pid");
     push("--unshare-ipc");
     push("--unshare-uts");
-    if matches!(spec.policy, SandboxPolicy::Strict) {
+    // The NETWORK dimension decides this, not the sandbox one. `strict` still
+    // removes the network, because `effective_network` forces it to `offline`
+    // — but it does so as a policy floor rather than as a property of the
+    // sandbox mode, which is what lets `--sandbox project --network offline`
+    // exist and what P0-008's allowlist and brokered modes will hang off.
+    if spec.policy.effective_network() == NetworkPolicy::Offline {
         push("--unshare-net");
     }
 
@@ -547,7 +561,7 @@ mod tests {
 
     fn spec() -> SandboxSpec {
         let mut s = SandboxSpec::new(
-            SandboxPolicy::Project,
+            AgentPolicy::default(),
             PathBuf::from("/home/tester"),
             PathBuf::from("/run/user/1000"),
         );
@@ -577,7 +591,7 @@ mod tests {
     #[test]
     fn unrestricted_does_not_wrap_the_command_at_all() {
         let mut s = spec();
-        s.policy = SandboxPolicy::Unrestricted;
+        s.policy.sandbox = SandboxPolicy::Unrestricted;
         let a = build_argv(&s, "claude", &["hello".into()]).unwrap();
         assert_eq!(a, vec!["claude".to_string(), "hello".to_string()]);
         assert!(!a.iter().any(|x| x.contains("bwrap")));
@@ -708,7 +722,7 @@ mod tests {
     /// it. `cwd` is `/` because a per-session workdir does not exist here.
     fn live_spec() -> SandboxSpec {
         let home = crate::paths::home();
-        let mut s = SandboxSpec::new(SandboxPolicy::Project, home, crate::paths::runtime_dir());
+        let mut s = SandboxSpec::new(AgentPolicy::default(), home, crate::paths::runtime_dir());
         s.run_ro = resolv_binds();
         s.cwd = PathBuf::from("/");
         s
@@ -817,7 +831,7 @@ mod tests {
             return;
         }
         let mut s = live_spec();
-        s.policy = SandboxPolicy::Strict;
+        s.policy.sandbox = SandboxPolicy::Strict;
         let argv = build_argv(&s, "/usr/bin/true", &[]).expect("build");
         let out = std::process::Command::new(&argv[0])
             .args(&argv[1..])
@@ -965,16 +979,77 @@ mod tests {
     #[test]
     fn project_policy_keeps_the_network_and_strict_removes_it() {
         let mut s = spec();
-        s.policy = SandboxPolicy::Project;
+        s.policy.sandbox = SandboxPolicy::Project;
         assert!(pos(&argv(&s), "--unshare-net").is_none());
-        s.policy = SandboxPolicy::Strict;
+        s.policy.sandbox = SandboxPolicy::Strict;
         assert!(pos(&argv(&s), "--unshare-net").is_some());
+    }
+
+    #[test]
+    fn the_network_namespace_follows_the_network_dimension_not_the_sandbox_one() {
+        // §3.1 splits these. `strict` still removes the network — it forces
+        // the dimension to `offline` — but the argv now reads the dimension,
+        // which is what gives P0-008 somewhere to hang allowlist and brokered
+        // modes without touching the sandbox modes.
+        let mut s = spec();
+        s.policy.sandbox = SandboxPolicy::Project;
+        s.policy.network = NetworkPolicy::Offline;
+        assert!(pos(&argv(&s), "--unshare-net").is_some());
+
+        s.policy.network = NetworkPolicy::Open;
+        assert!(pos(&argv(&s), "--unshare-net").is_none());
+    }
+
+    #[test]
+    fn strict_is_project_plus_offline_and_produces_the_same_argv() {
+        // The two spellings must be one thing, or `strict` and the split
+        // dimensions would drift into two subtly different sandboxes.
+        let mut strict = spec();
+        strict.policy.sandbox = SandboxPolicy::Strict;
+
+        let mut split = spec();
+        split.policy.sandbox = SandboxPolicy::Project;
+        split.policy.network = NetworkPolicy::Offline;
+
+        assert_eq!(argv(&strict), argv(&split));
+    }
+
+    #[test]
+    fn a_strict_spec_cannot_be_built_with_the_network_left_open() {
+        // The floor, asserted where it is enforced rather than only where it
+        // is computed: a caller that sets `network: Open` on a strict spec
+        // still gets a network-isolated sandbox.
+        let mut s = spec();
+        s.policy.sandbox = SandboxPolicy::Strict;
+        for network in NetworkPolicy::ALL {
+            s.policy.network = *network;
+            assert!(
+                pos(&argv(&s), "--unshare-net").is_some(),
+                "strict lost its network isolation with network={network}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_native_permission_mode_changes_nothing_about_the_confinement() {
+        // P0-004 criterion 2, at the level where it is actually enforced.
+        // A field assertion proves the struct; this proves the argv that runs.
+        let baseline = argv(&spec());
+        for native in crate::policy::NativeMode::ALL {
+            let mut s = spec();
+            s.policy.native = *native;
+            assert_eq!(
+                argv(&s),
+                baseline,
+                "the {native} native mode changed the sandbox argv"
+            );
+        }
     }
 
     #[test]
     fn strict_keeps_every_project_restriction() {
         let mut s = spec();
-        s.policy = SandboxPolicy::Strict;
+        s.policy.sandbox = SandboxPolicy::Strict;
         let a = argv(&s);
         assert!(a.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == "/home/tester"));
         assert!(has_bind(&a, "--bind-try", "/home/tester/Projects/demo"));

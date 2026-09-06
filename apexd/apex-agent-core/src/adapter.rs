@@ -22,9 +22,25 @@
 //! `apex agent event`. Recognising a permission prompt by pattern-matching a
 //! TUI's output would break the first time upstream changed a string, and
 //! would report the wrong thing rather than nothing.
+//!
+//! ## The agent's own permission mode
+//!
+//! Dimension 1 of §3.1, and the only dimension that is a property of the
+//! upstream CLI rather than of APEX. Each adapter declares the arguments that
+//! select it, because every one of these tools spells it differently, and an
+//! adapter that cannot express a mode says so instead of silently ignoring it:
+//! a `--agent-bypass` that quietly did nothing would leave the user believing
+//! confirmations were off while the agent kept asking, or the reverse.
+//!
+//! The arguments below were read from the installed binaries' `--help`, not
+//! from memory. `codex` deliberately gets `-a never` rather than
+//! `--dangerously-bypass-approvals-and-sandbox`: that flag also removes
+//! *codex's own* sandbox, and dimension 1 is the approval policy. Removing a
+//! confinement layer nobody asked about is the exact collapse §3.1 forbids.
 
 use std::path::PathBuf;
 
+use crate::policy::NativeMode;
 use crate::sandbox::SandboxSpec;
 
 /// Toolchain state shared by every adapter, relative to `$HOME`.
@@ -85,6 +101,21 @@ pub struct Adapter {
     /// Environment variables carrying this agent's credentials or endpoint
     /// configuration, inherited when present. Nothing else is inherited.
     pub env_pass: &'static [&'static str],
+    /// Arguments that put this agent into [`NativeMode::Bypass`]. Empty when
+    /// its CLI has no such control.
+    pub native_bypass: &'static [&'static str],
+    /// Arguments that put this agent into [`NativeMode::Ask`]. Empty when its
+    /// CLI has no such control, which for most of them means asking is already
+    /// the default and there is nothing to select.
+    pub native_ask: &'static [&'static str],
+    /// Whether upstream itself refuses its bypass mode when the process is
+    /// root.
+    ///
+    /// Claude does — measured: it exits with "cannot be used with root/sudo
+    /// privileges for security reasons". The runtime supports running as root,
+    /// so without this the user would get an unexplained upstream error
+    /// instead of a refusal that says which of the two rules stopped them.
+    pub native_bypass_refused_as_root: bool,
 }
 
 /// Every adapter the runtime knows, in listing order.
@@ -107,6 +138,9 @@ pub const ADAPTERS: &[Adapter] = &[
             "CLAUDE_CODE_USE_BEDROCK",
             "CLAUDE_CODE_USE_VERTEX",
         ],
+        native_bypass: &["--permission-mode", "bypassPermissions"],
+        native_ask: &["--permission-mode", "manual"],
+        native_bypass_refused_as_root: true,
     },
     Adapter {
         id: "opencode",
@@ -120,6 +154,9 @@ pub const ADAPTERS: &[Adapter] = &[
             "ANTHROPIC_API_KEY",
             "OPENROUTER_API_KEY",
         ],
+        native_bypass: &["--auto"],
+        native_ask: &[],
+        native_bypass_refused_as_root: false,
     },
     Adapter {
         id: "codex",
@@ -128,6 +165,11 @@ pub const ADAPTERS: &[Adapter] = &[
         home_rw: &[".codex"],
         home_ro: &[],
         env_pass: &["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY"],
+        // Not `--dangerously-bypass-approvals-and-sandbox`: that also removes
+        // codex's own sandbox, and dimension 1 is the approval policy alone.
+        native_bypass: &["-a", "never"],
+        native_ask: &["-a", "on-request"],
+        native_bypass_refused_as_root: false,
     },
     Adapter {
         id: "gemini",
@@ -136,6 +178,12 @@ pub const ADAPTERS: &[Adapter] = &[
         home_rw: &[".gemini", ".config/google-generativeai"],
         home_ro: &[],
         env_pass: &["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI"],
+        // Left empty rather than guessed: the binary was not installed on the
+        // machine the others were read from, and a wrong flag here is a
+        // session that will not start.
+        native_bypass: &[],
+        native_ask: &[],
+        native_bypass_refused_as_root: false,
     },
     Adapter {
         id: "kimi",
@@ -144,6 +192,10 @@ pub const ADAPTERS: &[Adapter] = &[
         home_rw: &[".kimi", ".config/kimi"],
         home_ro: &[],
         env_pass: &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+        // `--auto`, not `-y/--yolo`: yolo still lets the agent ask questions.
+        native_bypass: &["--auto"],
+        native_ask: &[],
+        native_bypass_refused_as_root: false,
     },
     Adapter {
         id: "generic",
@@ -152,6 +204,9 @@ pub const ADAPTERS: &[Adapter] = &[
         home_rw: &[],
         home_ro: &[],
         env_pass: &[],
+        native_bypass: &[],
+        native_ask: &[],
+        native_bypass_refused_as_root: false,
     },
 ];
 
@@ -194,14 +249,62 @@ impl Adapter {
         }
     }
 
+    /// The arguments that select `mode` for this agent, or `None` when this
+    /// adapter has no way to express it.
+    ///
+    /// [`NativeMode::Inherit`] is always expressible and is always the empty
+    /// list: §4.1 says APEX passes nothing and lets the agent's own profile
+    /// decide, so "inherit" is the absence of a flag rather than a flag.
+    pub fn native_mode_args(&self, mode: NativeMode) -> Option<Vec<String>> {
+        let flags = match mode {
+            NativeMode::Inherit => return Some(Vec::new()),
+            NativeMode::Bypass => self.native_bypass,
+            NativeMode::Ask => self.native_ask,
+        };
+        if flags.is_empty() {
+            return None;
+        }
+        Some(flags.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// Why this adapter will not run in `mode`, or `None` when it will.
+    ///
+    /// A pure function of the adapter, the mode and whether the runtime is
+    /// root, so the refusal is testable without spawning anything.
+    pub fn refuses_native_mode(&self, mode: NativeMode, as_root: bool) -> Option<String> {
+        if self.native_mode_args(mode).is_none() {
+            return Some(format!(
+                "{} has no flag for the {mode} permission mode, so APEX cannot select it; \
+                 run with `--native inherit` and set it in the agent's own configuration",
+                self.display
+            ));
+        }
+        if as_root && mode == NativeMode::Bypass && self.native_bypass_refused_as_root {
+            return Some(format!(
+                "{} refuses its bypass permission mode when it runs as root, so the session \
+                 would exit immediately; run the agent as your own user, or use \
+                 `--native inherit`",
+                self.display
+            ));
+        }
+        None
+    }
+
     /// Build the argument list.
     ///
     /// A prompt is passed as a single trailing positional argument, which is
     /// the form every one of these CLIs accepts for an opening instruction.
-    /// No flags are invented: anything more specific belongs in `extra`, which
-    /// the user controls.
-    pub fn build_args(&self, prompt: Option<&str>, extra: &[String]) -> Vec<String> {
-        let mut args: Vec<String> = extra.to_vec();
+    /// No flags are invented beyond the permission mode the policy asked for,
+    /// and that one comes first so anything in `extra` — which the user
+    /// controls — still overrides it.
+    pub fn build_args(
+        &self,
+        native: NativeMode,
+        prompt: Option<&str>,
+        extra: &[String],
+    ) -> Vec<String> {
+        let mut args: Vec<String> = self.native_mode_args(native).unwrap_or_default();
+        args.extend(extra.iter().cloned());
         if let Some(p) = prompt {
             if !p.is_empty() {
                 args.push(p.to_string());
@@ -246,11 +349,10 @@ impl Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::SandboxPolicy;
 
     fn spec() -> SandboxSpec {
         SandboxSpec::new(
-            SandboxPolicy::Project,
+            crate::policy::AgentPolicy::default(),
             PathBuf::from("/home/tester"),
             PathBuf::from("/run/user/1000"),
         )
@@ -295,14 +397,99 @@ mod tests {
     #[test]
     fn a_prompt_becomes_the_last_positional_argument() {
         let a = by_id("claude").unwrap();
-        assert_eq!(a.build_args(Some("fix the tests"), &[]), ["fix the tests"]);
+        let inherit = NativeMode::Inherit;
         assert_eq!(
-            a.build_args(Some("go"), &["--verbose".to_string()]),
+            a.build_args(inherit, Some("fix the tests"), &[]),
+            ["fix the tests"]
+        );
+        assert_eq!(
+            a.build_args(inherit, Some("go"), &["--verbose".to_string()]),
             ["--verbose", "go"]
         );
-        assert!(a.build_args(None, &[]).is_empty());
+        assert!(a.build_args(inherit, None, &[]).is_empty());
         // An empty prompt is not an argument.
-        assert!(a.build_args(Some(""), &[]).is_empty());
+        assert!(a.build_args(inherit, Some(""), &[]).is_empty());
+    }
+
+    #[test]
+    fn inherit_passes_no_permission_flag_at_all() {
+        // §4.1: "If Claude's profile defaults to bypassPermissions, APEX should
+        // not override it." The only way to not override a setting is to say
+        // nothing about it, so inherit must add no argument for any adapter.
+        for a in ADAPTERS {
+            assert_eq!(
+                a.native_mode_args(NativeMode::Inherit),
+                Some(Vec::new()),
+                "{} added an argument for inherit",
+                a.id
+            );
+            assert!(a.build_args(NativeMode::Inherit, None, &[]).is_empty(), "{}", a.id);
+        }
+    }
+
+    #[test]
+    fn the_permission_mode_comes_first_so_the_user_can_still_override_it() {
+        let a = by_id("claude").unwrap();
+        let args = a.build_args(
+            NativeMode::Bypass,
+            Some("go"),
+            &["--permission-mode".to_string(), "plan".to_string()],
+        );
+        assert_eq!(
+            args,
+            [
+                "--permission-mode",
+                "bypassPermissions",
+                "--permission-mode",
+                "plan",
+                "go"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_adapter_that_cannot_express_a_mode_refuses_it_instead_of_ignoring_it() {
+        // Silently dropping the flag would leave the user believing
+        // confirmations were off while the agent kept asking.
+        let gemini = by_id("gemini").unwrap();
+        assert_eq!(gemini.native_mode_args(NativeMode::Bypass), None);
+        let why = gemini
+            .refuses_native_mode(NativeMode::Bypass, false)
+            .expect("a refusal");
+        assert!(why.contains("inherit"), "{why}");
+
+        // opencode can bypass but has no flag for forcing prompts.
+        let opencode = by_id("opencode").unwrap();
+        assert!(opencode.refuses_native_mode(NativeMode::Bypass, false).is_none());
+        assert!(opencode.refuses_native_mode(NativeMode::Ask, false).is_some());
+
+        // And inherit is never refused, by anything, ever.
+        for a in ADAPTERS {
+            for as_root in [false, true] {
+                assert!(
+                    a.refuses_native_mode(NativeMode::Inherit, as_root).is_none(),
+                    "{} refused inherit",
+                    a.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claudes_own_refusal_of_bypass_as_root_is_reported_before_the_session_starts() {
+        // Measured: `claude --permission-mode bypassPermissions` under sudo
+        // prints "cannot be used with root/sudo privileges for security
+        // reasons" and exits. The runtime supports root sessions, so the user
+        // needs to be told which rule stopped them rather than watching a
+        // session die on start.
+        let claude = by_id("claude").unwrap();
+        assert!(claude.refuses_native_mode(NativeMode::Bypass, false).is_none());
+        let why = claude
+            .refuses_native_mode(NativeMode::Bypass, true)
+            .expect("a refusal as root");
+        assert!(why.contains("root"), "{why}");
+        // The restriction is upstream's and applies to bypass alone.
+        assert!(claude.refuses_native_mode(NativeMode::Ask, true).is_none());
     }
 
     #[test]

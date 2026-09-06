@@ -1029,7 +1029,7 @@ fn cmd_rm(id: &str) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_agent_core::protocol::{AgentState, SandboxPolicy};
+    use apex_agent_core::protocol::AgentState;
 
     fn task() -> Task {
         Task {
@@ -1056,7 +1056,7 @@ mod tests {
             state: AgentState::Working,
             detail: None,
             paused: false,
-            sandbox: SandboxPolicy::Project,
+            policy: apex_agent_core::AgentPolicy::default(),
             pid: 1,
             started: 0,
             last_activity: 0,
