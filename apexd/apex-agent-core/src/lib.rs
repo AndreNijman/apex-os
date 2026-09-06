@@ -19,7 +19,8 @@
 //! apex-agentd  — unprivileged, per-user, systemd --user
 //!         ├─ PTY + session lifecycle       session.rs
 //!         ├─ the six permission dimensions policy.rs
-//!         ├─ where a request came from        origin.rs
+//!         ├─ where a request came from     origin.rs
+//!         ├─ what a screen lock means      lock.rs
 //!         ├─ sandbox policy                sandbox.rs
 //!         ├─ network destination policy    destination.rs
 //!         ├─ adapters                      adapter.rs
@@ -46,6 +47,7 @@ pub mod config;
 pub mod destination;
 pub mod git;
 pub mod layout;
+pub mod lock;
 pub mod origin;
 pub mod paths;
 pub mod policy;
