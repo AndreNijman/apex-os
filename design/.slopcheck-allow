@@ -1,0 +1,8 @@
+# Deliberate keeps in design/P0-025-hyprland-lua.md.
+#
+# The seven numbered migration rules are a verbatim block quote of ROADMAP.md
+# section 50. Rewriting Andre's own requirements to satisfy a prose style would
+# make the quote wrong, and the point of quoting is that the implementing agent
+# reads the requirement as written.
+Report any legacy directive that cannot be converted safely.
+Never silently discard custom keybinds, rules, monitor settings, or input settings.

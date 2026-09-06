@@ -1,0 +1,132 @@
+{
+  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
+  "updated": "2026-09-06T23:40+08:00",
+  "concurrency_ceiling": 6,
+  "units": [
+    { "id": "shell-orphans", "repo": "apex-shell", "items": ["P1-038"],
+      "title": "Port three orphaned pre-roadmap branches, then finish the labwc/Floating validation matrix",
+      "after": ["p0-018b"], "conflicts": ["p0-018b", "p1-039"],
+      "note": "fix/labwc-desktop-parity (10 commits), fix/popup-first-open-and-media-keys (5), fix/screenshot-off-hyprland (2) were never merged to main and are not in roadmap/v2.2. They branched around PR #4 in August; P0-016..025 have since rewritten Bar, status, popups and labwc. Port PER COMMIT, asking whether each bug still exists on the tip. List the superseded ones." },
+
+    { "id": "p0-014", "repo": "apex-os", "items": ["P0-014", "P0-015"],
+      "title": "Remote Control privilege policy and lock-state policy, wired end to end",
+      "after": ["p0-005", "p0-018b"], "conflicts": [],
+      "note": "Both are already implemented on task/p0-013-request-origin and land as `partial`. P0-014's remainder is a real FIDO/WebAuthn path behind --origin-policy remote. P0-015's remainder is that nothing reports lock state: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind reports LockedHint=no on a session locked for an hour. The shell half was recovered from a WIP snapshot and pushed as fix/locked-hint at 87c84f3 (LockedHintService.qml, qmldir, Lockscreen.qml wiring) — integrate that first. P0-015 criterion 2 also needs P0-007's session grants to exist." },
+
+    { "id": "p1-018", "repo": "apex-os", "items": ["P1-018", "P1-019"],
+      "title": "MCP auth helper integration and per-MCP sidecar sandboxing",
+      "after": ["p0-003"], "conflicts": ["p0-003"],
+      "note": "Depends on the credential broker landing. Sidecar sandboxing should reuse the bubblewrap profile work from P0-009 rather than inventing a second one." },
+
+    { "id": "p1-005", "repo": "apex-os", "items": ["P1-005", "P1-006", "P1-007"],
+      "title": "Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets",
+      "after": ["p1-002"], "conflicts": ["p1-002"] },
+
+    { "id": "p1-008", "repo": "apex-os", "items": ["P1-008", "P1-009", "P1-010"],
+      "title": "Cloudflare One, Workers AI and AI Gateway, Secrets Store",
+      "after": ["p1-002"], "conflicts": ["p1-002", "p1-005"] },
+
+    { "id": "p1-011", "repo": "apex-os", "items": ["P1-011", "P1-012", "P1-013"],
+      "title": "Temporary task credentials, transparent brokered wrangler/cloudflared/terraform, transactional deploy",
+      "after": ["p1-005"], "conflicts": ["p1-005", "p1-008"] },
+
+    { "id": "p1-014", "repo": "apex-os", "items": ["P1-014", "P1-015", "P1-016", "P1-017"],
+      "title": "Cloudflare environment protection, worktree preview environments, cost guardrails, MCP through the broker",
+      "after": ["p1-011", "p1-018"], "conflicts": ["p1-011"] },
+
+    { "id": "p1-020", "repo": "apex-shell", "items": ["P1-020", "P1-021", "P1-022"],
+      "title": "Agent/subagent graph in Agent Center, Claude statusline telemetry, notification bridge and deduplication",
+      "after": ["p0-018b"], "conflicts": ["p0-018b", "p1-023"],
+      "note": "P0-022 already rewrote the Agent Center to say what each agent is; the graph builds on that, it does not replace it." },
+
+    { "id": "p1-023", "repo": "both", "items": ["P1-023", "P1-024", "P1-029"],
+      "title": "Global push-to-talk routing, cross-agent handoff packet, local/remote/scheduled/cloud lifecycle types",
+      "after": ["p1-020"], "conflicts": ["p1-020"] },
+
+    { "id": "p1-025", "repo": "apex-os", "items": ["P1-025", "P1-026", "P1-027", "P1-028"],
+      "title": "Skill inventory and audit, plugin provenance and isolation, memory provider interface, connector trust planes",
+      "after": ["p1-018"], "conflicts": [] },
+
+    { "id": "p1-035", "repo": "apex-os", "items": ["P1-035", "P1-036", "P1-037"],
+      "title": "Screenshot/file injection into TUI agents, worktree test/conflict/PR status, agent disposable capsules",
+      "after": ["p1-030"], "conflicts": ["p1-030"] },
+
+    { "id": "p1-039", "repo": "both", "items": ["P1-039", "P1-040", "P1-041", "P1-042", "P1-043"],
+      "title": "Night Light, mixed-DPI scaling, creator colour management, creator input/audio, GPU parity",
+      "after": ["p0-018b", "shell-orphans"], "conflicts": ["p0-018b", "shell-orphans"],
+      "note": "All five touch AppearancePage and the display pages. Held until the P0-018 shell agent lands." },
+
+    { "id": "p1-044", "repo": "apex-os", "items": ["P1-044"],
+      "title": "Finish the default incoming firewall",
+      "after": [], "conflicts": [],
+      "note": "Policy, helper, unit, catalogue and suite all landed on roadmap/v2.2. Partial because nothing has loaded it on a real machine and the exception sets have never been applied against a live ruleset. Needs a katana run: load it, verify ssh survives, verify apex firewall allow/deny move a real port." },
+
+    { "id": "p1-048", "repo": "apex-shell", "items": ["P1-048", "P1-049"],
+      "title": "Redesign Blueprint as a guided experience, redesign Gaming settings around understandable toggles",
+      "after": ["p1-039"], "conflicts": ["p1-039"],
+      "note": "Both are settings pages and must obey the P0-023 vocabulary: four states (live/staged/applied/saved), four verbs (Apply/Save/Revert/Reset). settings-semantics.js will fail them otherwise." },
+
+    { "id": "p1-050", "repo": "apex-os", "items": ["P1-050", "P1-051", "P1-052"],
+      "title": "Provider-neutral APEX Remote agent protocol, secure device pairing, LAN and encrypted relay",
+      "after": ["p0-014"], "conflicts": [],
+      "note": "Gates the entire eight-task Android chain. The protocol decision here is the single highest-leverage design left in the roadmap." },
+
+    { "id": "p1-053a", "repo": "apex-android", "items": ["P1-053", "P1-054", "P1-055"],
+      "title": "Android app foundation, Agent Center parity, full PTY/TUI remote terminal",
+      "after": ["p1-050"], "conflicts": [],
+      "note": "No Android repo exists yet — creating it is part of P1-053. Decide the toolchain and whether it builds on katana before writing any UI." },
+
+    { "id": "p1-053b", "repo": "apex-android", "items": ["P1-056", "P1-057", "P1-058"],
+      "title": "Android Projects/Workspaces/Worktrees/Tasks/Review UX, capability approvals, push notifications",
+      "after": ["p1-053a"], "conflicts": ["p1-053a"] },
+
+    { "id": "p1-053c", "repo": "apex-android", "items": ["P1-059", "P1-060"],
+      "title": "Android voice, screenshot, file and clipboard handoff; ship as a production-quality application",
+      "after": ["p1-053b"], "conflicts": ["p1-053b"] },
+
+    { "id": "p1-061", "repo": "apex-os", "items": ["P1-061", "P1-062"],
+      "title": "Extend APEX capabilities to normal application permissions; destructive chaos/torture reliability infrastructure",
+      "after": ["p1-025"], "conflicts": [],
+      "note": "P1-062 must never run its destructive suite against Andre's machine or his data. It gets a disposable target or it does not run." },
+
+    { "id": "base-partials", "repo": "both", "items": ["BASE-002", "BASE-005", "BASE-009", "BASE-010", "BASE-013", "BASE-014", "BASE-016", "BASE-018"],
+      "title": "Close the eight BASE preservation items still marked partial",
+      "after": ["p1-039"], "conflicts": [],
+      "note": "These assert that v2.2 did not regress what v2.1 shipped. Each needs an actual check that the preserved thing still works, not a reading of the code." },
+
+    { "id": "p2-a", "repo": "apex-os", "items": ["P2-001", "P2-002", "P2-013"],
+      "title": "Encrypted backup framework, R2 backup backend, per-project identity binding",
+      "after": ["p1-005"], "conflicts": [] },
+
+    { "id": "p2-b", "repo": "both", "items": ["P2-003", "P2-004"],
+      "title": "Accessibility baseline and internationalisation baseline",
+      "after": ["p1-048"], "conflicts": ["p1-048"],
+      "note": "Accessibility is a real audit against a screen reader and keyboard-only navigation, not a sweep for missing labels." },
+
+    { "id": "p2-c", "repo": "apex-os", "items": ["P2-005", "P2-006", "P2-007"],
+      "title": "Printing/scanning/network-share, networking, Bluetooth/dock/peripheral maturity",
+      "after": [], "conflicts": [] },
+
+    { "id": "p2-d", "repo": "apex-os", "items": ["P2-008", "P2-009", "P2-012"],
+      "title": "First-party virtualization UX, disposable VM agent execution, secure browser automation capsule",
+      "after": ["p1-037"], "conflicts": [] },
+
+    { "id": "p2-e", "repo": "apex-os", "items": ["P2-010", "P2-011", "P2-014", "P2-015"],
+      "title": "Hardware qualification database, agent cgroup budgets, Storage Manager and disk health, firmware lifecycle",
+      "after": [], "conflicts": [] },
+
+    { "id": "p2-f", "repo": "both", "items": ["P2-016", "P2-017", "P2-018", "P2-019"],
+      "title": "Multi-user/guest/kiosk, APEX Online Accounts, guaranteed safe graphics failover, Fleet architecture",
+      "after": ["p2-a"], "conflicts": [] },
+
+    { "id": "later", "repo": "apex-os", "items": ["L-001", "L-002", "L-003"],
+      "title": "TPM and recovery qualification, then LUKS2 by default and TPM auto-unlock where safe",
+      "after": ["p2-e"], "conflicts": [],
+      "note": "L-002 and L-003 are blocked on L-001 and must stay blocked until a real TPM enrol-and-recover cycle has been done on hardware. Turning on full-disk encryption by default without a proven recovery path is how a user loses everything." },
+
+    { "id": "final", "repo": "both", "items": ["P0-001"],
+      "title": "Qualify the integrated image on real hardware, then merge to main",
+      "after": ["*"], "conflicts": [],
+      "note": "The last unit. Build the integrated image, boot the L16 onto it, qualify, then apex-shell roadmap/v2.2 -> main FIRST (Containerfile.base carries ARG APEX_SHELL_REF=main), then apex-os roadmap/v2.2 -> main. This is the only point at which GitHub CI is allowed to run." }
+  ]
+}

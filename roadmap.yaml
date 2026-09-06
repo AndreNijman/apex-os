@@ -1,0 +1,2322 @@
+meta:
+  title: APEX-OS Agent-First Roadmap
+  version: '2.2'
+  date: '2026-09-06'
+  canonical: true
+  markdown_companion: ROADMAP.md
+  status_values:
+  - verify_existing
+  - partial
+  - todo
+  - blocked
+  - done
+  priority_order:
+  - P0
+  - P1
+  - P2
+  - Later
+  source_snapshot:
+    apex_os_repo: https://github.com/AndreNijman/apex-os
+    apex_os_public_commit_count_observed: 377
+    apex_shell_repo: https://github.com/AndreNijman/apex-shell
+    apex_shell_public_commit_count_observed: 364
+    observed_date: '2026-09-06'
+    note: Agents must inspect the live repository before implementation; this snapshot is context, not a substitute for
+      current code.
+agent_profile_assumptions:
+  claude_default_permission_mode: bypassPermissions
+  remote_control: true
+  voice_push_to_talk: true
+  push_notifications: true
+  remote_mcp_memory: true
+  codex_inside_claude: true
+  large_local_skill_library: true
+  statusline_quota_and_context_telemetry: true
+security_invariants:
+- Agent-native bypass must not implicitly disable the APEX sandbox.
+- Unrestricted user access must not implicitly grant root.
+- Root/system grants must not implicitly export raw brokered secrets.
+- Managed agents should use capability-backed secrets instead of long-lived environment variables where practical.
+- Remote-origin capability requests must be distinguishable from local requests.
+- Unsafe-everything must remain an explicit owner-controlled break-glass mode with authentication, TTL, audit, and visible
+  warning state.
+- Kernel/container isolation remains authoritative even when agent hooks provide additional policy.
+tasks:
+- id: BASE-001
+  title: Preserve atomic bootc update and rollback architecture
+  priority: P0
+  status: done
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Atomic update path works
+  - Previous deployment rollback works
+  - System extensions do not mutate base deployment unexpectedly
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran live. sudo apex update --check on katana did a real GHCR round-trip; sudo apex rollback ran twice on
+    katana and bootOrder flipped default to rollback and back, with the machine byte-identical afterward. On L16,
+    /proc/mounts shows a composefs root with a sysext overlay stacking above /usr, and bootc status reports
+    incompatible false with 20 sysext packages merged, so extensions do not mutate the base deployment. guard_rpms
+    refuses kernel, glibc, systemd, bootc and ostree (files/system/libexec/apex-pkg:104). Not rebooted into the
+    rollback slot, since katana's rollback is a two-week-old pre-unification image.
+- id: BASE-002
+  title: Preserve upstream TUI agent PTY runtime
+  priority: P0
+  status: partial
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Claude/OpenCode/Codex/Gemini can run as native TUIs
+  - Attach/detach/persistence works
+  - Direct agent binaries remain usable
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran live with an isolated daemon on katana and L16. Attach, detach and persistence pass, a marker typed into a
+    detached session replayed exactly on reattach and survived a daemon kill and relaunch. Direct agent binaries
+    remain usable, claude, opencode, codex and kimi all print real upstream versions and resolve through npm paths
+    rather than an apex shim. Two defects block this. First, opencode and codex fail to start under the project
+    and strict sandboxes on the ordinary npm layout, because ~/.local/bin symlinks into ~/.local/lib/node_modules
+    and .local/lib is absent from TOOLCHAIN_RO (adapter.rs:50-56), so bwrap gets a dangling symlink; claude
+    survives only by falling back to a root-owned /usr/bin/claude that the other two do not have. Second,
+    Registry::new resets next_id to 1 on every daemon restart with no reconciliation against on-disk records
+    (apex-agentd/src/registry.rs:173-178), so sessions created after a restart overwrite earlier session records
+    and PTY logs at the same id.
+- id: BASE-003
+  title: Preserve project/strict/unrestricted sandbox modes
+  priority: P0
+  status: done
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Project mode confines filesystem correctly
+  - Strict mode removes network as designed
+  - Unrestricted remains explicit
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran live. Project mode confines correctly, the project is writable while the real HOME marker is invisible,
+    ~/.ssh is unreachable, /usr is read-only, /run is masked to the resolver bind, /proc shows 5 processes against
+    the host's hundreds and no /dev/video or /dev/snd. The fail-closed path holds too, --cwd on the home itself is
+    refused before any process starts. Strict removes network for real, curl reaches 1.1.1.1 and DNS resolves
+    under project and both fail under strict, with --unshare-net applied only under Strict (sandbox.rs:436-438).
+    Unrestricted stays explicit, the only config writer sets default_agent and never sandbox, so no CLI path makes
+    it a silent default. Minor cosmetic drift, /sys/class/net still lists host interface names under strict
+    because sysfs arrives through the --ro-bind, though no route or address exists in the namespace.
+- id: BASE-004
+  title: Preserve Projects, worktrees, checkpoints, and undo
+  priority: P0
+  status: done
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Project restore works
+  - Parallel worktree creation works
+  - Checkpoint/undo restores intended task state
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran live. Project registry persisted across a real daemon kill and relaunch with a new pid, and project info,
+    project list and agent list --all all reported identical prior state. Two worktree sessions launched truly
+    concurrently landed on distinct branches with each session attributed to its own tree. Checkpoint and undo
+    restored a mutated file, a new untracked file and a deleted tracked file, and unwound an intervening commit,
+    so undo reverts agent commits and not just files; undo is itself undoable, verified directly rather than taken
+    from the docs. Minor defect, racing two runs against the same worktree name makes one lose the git lock race
+    and fail hard instead of reattaching, which is what the docs promise for a sequential re-run.
+- id: BASE-005
+  title: Preserve APEX Capsules and development environments
+  priority: P0
+  status: partial
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Managed dev environments remain isolated from immutable host
+  - GPU/device profiles work where supported
+  - GUI export does not break host isolation
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran live on katana. apex env create gputest --gpu nvidia made a real rootless podman/distrobox container with
+    /dev/nvidia0 and /dev/nvidiactl present inside it; apex env export wrote only a .desktop whose Exec routes
+    through distrobox-enter, no root and no polkit. apex-env refuses to run as root (files/system/libexec/apex-
+    env:592-605) so host /usr is never touched. Harness test-apex-env.sh 253/253, test-apex-verbs.sh 44/44,
+    against shipped libexec byte-identical to the branch. Two qualifications, AMD and hw device profiles are argv-
+    pinned but not hardware-verified, and isolation here means the read-only OS layer, not a security sandbox,
+    since a capsule shares the real HOME and gets /run/host read-write as the user.
+- id: BASE-006
+  title: Preserve universal package abstraction
+  priority: P0
+  status: done
+  area: foundation
+  depends_on: []
+  acceptance:
+  - APEX package command resolves supported sources
+  - Atomic host invariants remain intact
+  - Advanced source selection remains available
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran live. test-apex-pkg.sh 78/78 and test-apex-resolve.sh 88/88 against the shipped apex-pkg, plus a real
+    merged sysext of 20 packages and 15 Flatpaks on L16. Atomic invariants hold, the booted deployment reports
+    incompatible false with the sysext merged and apex-pkg never touches rpm-ostree. Advanced selection is live.
+    Two defect classes found and fixed since the first pass: unprivileged reads of 0700 state reported as absence,
+    and multilib, where apex install steam could not work at all because the guard deleted every i686 library,
+    REFUSE_RE rejected the rest, resolution never asked for the 32-bit closure, /lib content never reached a
+    sysext, install died on relative /etc symlinks, and extracting both arches through one pass let a 32-bit
+    binary shadow 53 of the image's own.
+- id: BASE-007
+  title: Preserve declarative Blueprint and sync
+  priority: P0
+  status: done
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Blueprint can reproduce intended apps/settings
+  - Apply is idempotent where designed
+  - Sync does not leak secrets
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran live on katana. apex blueprint diff/apply applied a real change and the second apply was a no-op
+    (idempotent). Planted a sentinel token in ~/.local/state/apex/secrets/github.json, ran apex sync export,
+    sentinel absent from the bundle. Bundle carries only bundle-meta/blueprint/projects (apexd-
+    core/src/blueprint.rs:993-1000); collect_projects never touches the secret broker. Harness test-apex-
+    blueprint.sh 140/0.
+- id: BASE-008
+  title: Preserve APEX Modes and workload policy
+  priority: P0
+  status: done
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Daily/Gaming/Development/Creator/AI/Battery policy transitions work
+  - Mode changes are reversible
+  - Hardware policy is observable
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran live on katana. Cycled all six modes daily/gaming/development/creator/ai/battery and back, verified with
+    apex mode status after each, and the machine returned to its exact baseline. Policy is observable via apex
+    mode status, apex perf --json and apex workload reading real sysfs and nvidia-smi values. Over ssh apex mode
+    set is refused with AccessDenied because polkit allow_inactive=auth_admin, which is the design working.
+    Harness test-apex-modes.sh 67/0.
+- id: BASE-009
+  title: Preserve Gaming Mode and Performance Lab
+  priority: P0
+  status: partial
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Controller-first gaming path works where supported
+  - Desktop/Gaming transitions work
+  - Performance metrics remain accurate
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran live on katana, the machine with the gaming hardware. Performance metrics are accurate, apex perf --json
+    vram_used_bytes matched nvidia-smi at the same instant and frame time is reported unmeasurable rather than
+    substituted. The controller-first path cannot start today because gamescope and steam are not installed, which
+    is correct for the one-image on-demand design but means the path is unproven. Desktop to Gaming switching is
+    structurally ready, helper and sudoers rule both present, but a live switch needs a session change that was
+    not made. A probe defect found here is fixed on fix/gaming-signal-eacces.
+- id: BASE-010
+  title: Preserve local AI service abstraction
+  priority: P0
+  status: partial
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Local model service can route supported runtimes
+  - Model storage/VRAM lifecycle works
+  - Applications are not tied to one backend
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran live on katana. apex ai status --json detected the RTX 3070, accel list cuda/vulkan/cpu, VRAM budget
+    7492/8192 MiB. Backend independence holds through a per-user Unix socket, and apex ai serve --listen refuses
+    TCP with a stated no-peer-credential reason. Outstanding, no runtime or model is installed on either machine
+    so placement and the idle unload path have never run against a live model. Ollama and vllm are recognised but
+    deliberately refused with a reason each, so routing is real for llama.cpp only. Harness test-apex-ai.sh 44/0.
+- id: BASE-011
+  title: Preserve unified APEX Search/command surface
+  priority: P0
+  status: done
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Apps/files/settings/windows/projects/agents/commands remain searchable
+  - Provider API still works
+  - Destructive actions require appropriate confirmation
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran headless nested on katana. All ten providers are wired at SearchService.qml:113-123 (Calc, Apps, Commands,
+    Windows, Settings, Agents, Clipboard, Projects, Hosts, Files). search-test.js 234/0, check-unified-search.sh
+    168 passed with its own mutation self-test 15/0, measure-search-spawns.sh 12/0. The third-party provider
+    contract is identical to the built-ins and was exercised through a real plugin host, not a unit stub, in
+    plugin-host-test.qml cases 12 and 13 (94/0). Destructive actions are gated at commitDecision
+    (search.js:1179-1217), where Enter only previews and Ctrl+Enter commits. The preview panel's on-screen
+    rendering was not visually inspected.
+- id: BASE-012
+  title: Preserve APEX Shell plugin platform and permissions
+  priority: P0
+  status: done
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Plugin API remains versioned
+  - Permissions are enforced
+  - Plugin failures do not take down core shell where isolation exists
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran headless nested on katana. API_VERSION 1.1 with an apiCompatible gate, and a future-apiVersion plugin is
+    refused live with reason api-version-unsupported. apex-plugin-verdict.js reuses the same manifest.js as the
+    shell, so the OS-side CLI cannot disagree with the shell about a manifest. Enforcement is dual-layer and was
+    called for real, a load-time import scan refuses an undeclared Quickshell.Io reach (forbidden-import) and the
+    runtime gate refuses an undeclared network call and a path traversal outside the plugin directory. Crash
+    isolation proved live, a plugin that passes static checks then fails inside the QML engine is caught by the
+    Loader and the shell and every other plugin stay alive. test-apex-plugin.sh 117/0, plugin-host-test.qml 94/0.
+    Qualifier stated in the source itself (PluginService.qml:30-49), this is not a sandbox and does not confine a
+    plugin written to defeat the textual scan.
+- id: BASE-013
+  title: Preserve compositor abstraction
+  priority: P0
+  status: partial
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Floating/labwc, Hyprland, and niri use shared APEX settings model
+  - Generated config does not drift
+  - Compositor names remain implementation details for normal users
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran headless nested on katana. The shared model holds, one facade in CompositorService.qml with Hyprland,
+    Niri, Labwc and Null backends selected by URL, and consumers ask capabilities rather than compositor names;
+    compositor-facade-test 48/0 including live window and workspace enumeration under real labwc, and check-
+    compositor-backends.sh 36/0 proving hyprctl calls stay confined to the adapter with a working negative
+    control. Generated config does not drift, check-labwc-keybinds regenerates the keybind block and diffs it
+    against the shipped rc.xml with a negative control, and Hyprland --verify-config passes on the shipped config.
+    Criterion 3 FAILS. The greeter session picker prints raw compositor names to every user at every login,
+    GreetContext.qml:332-335 reads Name= from the session desktop file with no translation and the shipped files
+    are named Hyprland, niri and labwc (APEX). Settings, Misc offers a second raw-name choice. Hyprland and niri
+    backends were load and schema checked but not run against live instances.
+- id: BASE-014
+  title: Preserve modern Floating/labwc visual integration
+  priority: P0
+  status: partial
+  area: foundation
+  depends_on: []
+  acceptance:
+  - APEX theme, Material palette, rounded SSD/shadows, modern switcher, context UI and keybind reload work
+  - Emergency fallback menu remains available
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran headless nested on katana with a real screenshot. themerc-override wires the branding accent into border,
+    titlebar and OSD colours; rc.xml sets cornerRadius 10, dropShadows yes and a window switcher with previews and
+    outlines; the matugen pipeline is wired end to end. A screenshot of a real labwc toplevel shows a dark
+    titlebar, centred title and the chartreuse accent border matching the token. The emergency fallback is real
+    and passes, right-click launches the APEX menu via apex-desktop-menu which also restarts a dead shell, Super
+    plus right-click always reaches labwc's own menu.xml, and the session survives a corrupted rc.xml (18/0,
+    including screencopy, clipboard, layer-shell, session-lock and idle-notify). Unverified without a human at a
+    real GPU, rounded corners were not visible at headless size, drop shadow is indistinguishable on a black
+    backdrop, the context menu and switcher need a click to open, and whether a rebound key fires after labwc
+    --reconfigure was not tested.
+- id: BASE-015
+  title: Preserve recovery/doctor/factory-reset workflow
+  priority: P0
+  status: done
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Doctor reports system health
+  - Previous deployment/recovery path works
+  - Reset/repair clearly states data preservation
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran live. apex doctor passes on L16 against real hardware and service checks; test-apex-recover.sh --with-
+    binary is 189/189 on katana including JSON and text parity. apex recover status reports the previous
+    deployment as available, matching ostree admin status. Reset and repair dry-run enumerates what will be
+    removed, emptied and preserved, backs up before deleting, and refuses on a stale token, a symlink or root. One
+    defect, the unprivileged package row asserts no user packages as a verified fact when it merely could not read
+    0700 state.
+- id: BASE-016
+  title: Preserve disposable execution primitives
+  priority: P0
+  status: partial
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Disposable environment can run untrusted workloads
+  - Cleanup removes environment state
+  - File ingress/egress boundaries are explicit
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Ran live on katana. apex disposable run with --copy-in and --copy-out executed in a real container and tore
+    down completely, podman ps -a empty and the state tree gone, with copy-out content byte-identical on the host.
+    Ingress and egress are explicit and apex disposable plan prints the boundary including /run/host before
+    creating anything. Two gaps, the environment is not a security boundary by its own documentation and a write
+    to /run/host reached the real host filesystem when tested, so untrusted code is confined only by apex agent's
+    sandbox and not by this; and there is no tests/test-apex-disposable.sh, so the shipped shell script's teardown
+    fencing and image resolution have no shell-level coverage.
+- id: BASE-017
+  title: Preserve device handoff and remote compute primitives
+  priority: P0
+  status: done
+  area: foundation
+  depends_on: []
+  acceptance:
+  - Remote agent/build/inference paths remain functional
+  - Remote sessions remain visible locally
+  - Trust pairing is explicit
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Exercised between the two real machines. From katana, apex host add l16 probed L16 live and cached its true
+    capabilities; apex host run l16 -- id returned L16's real identity; apex agent list --host l16 and apex ai run
+    --on l16 both forwarded over ssh and returned L16's genuine state. Trust is an explicit APEX registry distinct
+    from raw ssh, and an unregistered host is refused by name. apex-shell surfaces the same through
+    RemoteAgentService.qml. Harnesses test-apex-host.sh 52/52 and test-apex-dispatch.sh 55/55. Note the transport
+    trust underneath is ordinary ssh key trust, with no separate APEX key exchange.
+- id: BASE-018
+  title: Preserve Boot v2 experimental path
+  priority: P0
+  status: partial
+  area: foundation
+  depends_on: []
+  acceptance:
+  - systemd-boot + signed UKI + composefs path remains testable
+  - Legacy GRUB production path remains intact
+  - Boot counting/rollback remains functional
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Verified earlier this session (test-boot-v2.sh 60/60 structural, 85/85 with --with-binary, plus a green CI run
+    booting signed, unsigned, foreign and tampered UKIs under Secure-Boot-enforcing OVMF with swtpm). Reopened
+    from done because the EACCES sweep found a real defect in the same surface: a whole-directory efivarfs refusal
+    takes LoaderInfo down with StubInfo, so detect_bootloader falls back to the kernel cmdline and answers grub,
+    and the rescue-target route then offers GRUB-menu instructions on a systemd-boot and UKI machine. That is
+    wrong recovery advice rather than a wrong label. Fixed on roadmap/v2.2 with bootloader_unavailable carried
+    through to the route, and the Surface.bootloader label itself still prints grub with no caveat in the same
+    case, which is outstanding.
+- id: P0-001
+  title: Qualify current integrated image on real hardware
+  priority: P0
+  status: partial
+  area: qualification
+  depends_on: []
+  acceptance:
+  - Daily and Gaming images build cleanly
+  - Fresh install and upgrade succeed
+  - Rollback succeeds
+  - Hyprland/niri/Floating boot and basic workflows pass
+  - NVIDIA/AMD/Intel baseline tested
+  - Suspend/resume, Wi-Fi, Bluetooth, audio, multi-monitor, portals, Steam and recovery tested
+  notes: Do not add large new architecture until the currently merged image is proven.
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Probed on both machines 2026-09-06, evidence in ROADMAP/evidence/P0-001-hardware-qualification.md. Both boot
+    digest sha256:308127d9 from different tags with the same ostree checksum, which is direct evidence the one-
+    image collapse and tag promotion work on real hardware; zero failed units on either; all three GPU vendors
+    clean at driver level, with the Optimus pair live on katana; WiFi, Bluetooth, audio and portals all working;
+    Steam and gamescope correctly absent, since the one-image design installs them on demand. Outstanding and
+    honestly so: fresh install needs a wipe and cannot be attempted; multi-monitor needs physical displays; per-
+    compositor workflow passes are unrecorded. The rollback reboot remains unverified for two reasons, katana has
+    been in use for gaming whenever it was free, and its rollback slot currently holds the same digest as the
+    booted one because the hotfix unlock created a second deployment of the same commit, so a reboot into it would
+    prove very little. Two findings stand: Secure Boot is disabled on katana against the stated end-state of both
+    machines enforcing, and suspend has never run there against 40 resumes on the L16.
+- id: P0-002
+  title: Introduce protected apex-secretd service
+  priority: P0
+  status: partial
+  area: secrets
+  depends_on: []
+  acceptance:
+  - Secrets are no longer stored in agent-readable home paths
+  - Normal API cannot return raw secret values
+  - Broker can execute credential-backed operations
+  - Audit entries exist for secret use
+  - Service is separate from apex-agentd and broad apexd responsibilities
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2. Two new crates, apex-secret-core and apex-secretd; apex-agent-core/src/secret.rs
+    deleted rather than emptied. Store is /var/lib/apex-secretd/users/<uid>/ at 0700 root-owned with the value in
+    its own 0600 file and metadata separate; grants and the audit trail moved behind the same boundary, where both
+    had been user-writable, so a session could previously grant itself a capability and then rewrite its own
+    audit. Criterion 2 is a type-system property rather than a policy: SecretValue implements neither Serialize
+    nor Deserialize while Response derives Serialize, so a reply carrying a credential does not compile, and three
+    tests hold it as the API grows including one pinning the response variant list. Criterion 3 is proved end to
+    end against a real git smart-HTTP server on loopback that 401s without auth, asserting the server received the
+    credential while no reply, output or audit line contained it. The daemon runs as root and drops privileges per
+    child with setgroups, setgid and setuid in pre_exec plus a getuid verification, because the store must be
+    unreadable by the user's uid while git must run as the user. Peer identity is SO_PEERCRED uid, with the pid
+    pinned as a /proc dirfd at accept so pid reuse fails closed. Partial because the daemon has never actually run
+    as root in testing, so the at-rest half of criterion 1 is argued from the unit file rather than measured. The
+    second reason is closed: P0-003's apex secret migrate reads the old broker's plaintext files, carries their
+    per-project grants, verifies by use and removes them, with a keyring-backed record named rather than deleted
+    because it holds no value to carry.
+- id: P0-003
+  title: Migrate agent-readable GitHub and MCP credentials to broker
+  priority: P0
+  status: partial
+  area: secrets
+  depends_on:
+  - P0-002
+  acceptance:
+  - GitHub PAT is absent from Claude environment
+  - MCP bearer secrets are brokered/helper-injected
+  - git/gh continue to work normally
+  - Secret values are not visible inside managed Claude
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    ROADMAP/evidence/P0-003-credential-migration.md. Branch task/p0-003-cred-broker, seven commits on roadmap/v2.2
+    at d31257a. Criterion 1 is enforced at spawn rather than left to a migration: the PAT lived in
+    ~/.claude/settings.json's env block, which Claude applies to every tool it runs, so --clearenv never saw it;
+    apex-agentd now binds a copy of that file with every credential-named entry removed over the real path, proved
+    in a real bwrap namespace by asserting a sentinel is absent from both the document and the environment.
+    Criterion 2 is the mcp-request capability, the only one with no arguments at all, so the endpoint can only be
+    the stored record's own; apex mcp bridge is a stdio MCP server the agent spawns normally and the credential
+    reaches curl on its stdin, proved against a loopback server that 401s without the header. Criterion 3 is a git
+    shim first on a confined session's PATH that brokers push, fetch and ls-remote and execs /usr/bin/git for
+    everything else; it holds no credential and enforces nothing, and gh inside a session is unauthenticated
+    before and after because ~/.config/gh was never in the profile table. apex secret migrate stores, verifies by
+    use, and only then removes, keeping the plaintext whenever the stored copy cannot be proved to work. Partial
+    because Andre's own credentials are deliberately not migrated - the migration is proved against a fixture home
+    with fake secrets - and because a per-project grant for a global MCP server is friction nobody has decided
+    about. 1466 tests, clippy clean, and 34 migration assertions against a fixture home.
+- id: P0-004
+  title: Split native bypass, sandbox, root, secret, network, and origin policy
+  priority: P0
+  status: done
+  area: agent-security
+  depends_on: []
+  acceptance:
+  - Each policy dimension is independently configurable
+  - bypassPermissions does not disable APEX sandbox
+  - unrestricted-user does not imply root
+  - root grant does not imply secret export
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2 (583698b). The six dimensions of ROADMAP.md section 3.1 were three, with nothing at all
+    for the agent's own permission mode, root, secrets or origin. policy.rs now holds NativeMode, SystemAccess,
+    SecretPolicy, NetworkPolicy and OriginPolicy beside SandboxPolicy, with six independent defaults and flags,
+    and the section 4 modes expressed as presets over them rather than as a closed enum, so a preset is a starting
+    point that flags apply on top of. --unshare-net follows the network dimension, with strict forcing offline as
+    a floor, which is where P0-008 puts allowlist and brokered. Every managed session now runs with
+    PR_SET_NO_NEW_PRIVS, including the unconfined ones, so unrestricted-user-does-not-imply-root is a kernel fact
+    rather than a field comparison, and sudo comes up unprivileged inside a session. --secrets none is enforced in
+    the broker from the policy recorded at fork time. The three invariants are tests over whole value sets in
+    tests/policy_invariants.rs, not sentences in a doc.
+- id: P0-005
+  title: Inherit agent-native permission mode by default
+  priority: P0
+  status: partial
+  area: agent-runtime
+  depends_on:
+  - P0-004
+  acceptance:
+  - Claude profile default bypassPermissions remains active under `a`
+  - APEX does not duplicate dangerous-mode warning
+  - Agent-native mode is visible in Agent Center
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Not the task itself, but the daemon half of the white-agents complaint was traced here and fixed on
+    roadmap/v2.2 (164e736). apex-agentd inherits TERM and COLORTERM into each session only when they are already
+    in its own environment, and systemd gives a user unit TERM=dumb while a long-running daemon had no TERM at
+    all, measured on the L16. Terminfo lookups then fail and TUIs emit no colour. The unit now sets
+    TERM=xterm-256color and COLORTERM=truecolor and the Containerfile asserts both. Proved on katana both ways, a
+    throwaway user unit gets dumb without the lines and xterm-256color with them, and a PTY with no TERM fails
+    tput colors where one with it answers 256.
+- id: P0-006
+  title: Implement owner break-glass unsafe-everything mode
+  priority: P0
+  status: partial
+  area: agent-security
+  depends_on:
+  - P0-004
+  acceptance:
+  - Requires local authentication
+  - Supports TTL
+  - Prominent red indicator shown
+  - Grant auto-expires
+  - Grant does not silently persist across reboot
+  - Permanent audit record created
+  gates:
+  - tests
+  - stop_slop
+- id: P0-007
+  title: Implement session-scoped system-access grants
+  priority: P0
+  status: partial
+  area: agent-security
+  depends_on:
+  - P0-004
+  acceptance:
+  - Grant is session-bound
+  - Grant is time-limited
+  - Grant is capability-scoped
+  - Agent cannot renew its own grant
+  - Authentication prompt occurs outside agent PTY
+  gates:
+  - tests
+  - stop_slop
+- id: P0-008
+  title: Add agent network modes
+  priority: P0
+  status: done
+  area: network-policy
+  depends_on:
+  - P0-004
+  acceptance:
+  - Supports open/allowlist/brokered/offline
+  - Strict mode remains fail-closed
+  - Destination policy is testable
+  - Cloud provider operations can work through broker
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2. Four modes. Three share one kernel fact, bwrap --unshare-net gives a namespace with no
+    route, resolver or address, and differ in what apex-agentd offers over a Unix socket afterwards, since AF_UNIX
+    is a filesystem object a network namespace does not touch. open enforces nothing; offline offers nothing;
+    brokered is offline plus the capability broker; allowlist adds a CONNECT proxy in the daemon whose bridge is
+    the session's parent inside the sandbox. The allowlist is not bypassable from inside, proxy variables only let
+    a client find the bridge and a session that unsets all six gets Could not resolve host, measured. Destination
+    policy is two pure functions in destination.rs, default deny, wildcards excluding the apex, and loopback,
+    RFC1918, link-local, ULA, CGNAT and multicast refused including the IPv4-mapped IPv6 form, with the daemon
+    connecting to an address it checked rather than re-resolving. strict still forces offline as a floor, now
+    asserted in the argv over the whole value set, and validate, build_argv and the unconfined path each refuse a
+    mode with no namespace. Verified behaviourally against an isolated daemon, allowed host 200, unlisted host
+    403, and a name allowed by policy refused after it resolved to 127.0.0.1. 1202 tests, clippy clean. Honest
+    limits recorded in the docs, a CONNECT tunnel is opaque so volume to an allowed host is unbounded, and non-
+    HTTP traffic fails outright rather than being filtered.
+- id: P0-009
+  title: Create APEX agent profile system
+  priority: P0
+  status: done
+  area: agent-profile
+  depends_on: []
+  acceptance:
+  - Profiles enumerate reusable vs machine-local state
+  - Claude profile export/import works
+  - Profile doctor reports config/hooks/plugins/MCP/skills
+  - Secrets are excluded from portable export
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2 (884d0ca), resumed from a rescued snapshot that was kept in full. Four classes rather
+    than two, because a credential is a capability and not merely machine-local, and because settings.json and
+    ~/.claude.json are genuinely both reusable and machine-local. The exclusion is enforced rather than listed:
+    Plan::verify re-derives every file's class before a byte is written, the secret heuristic can only move a path
+    out of the bundle and never into it, and any credential-named key has its value emptied. Anything the table
+    does not name is machine-local and is not carried, so the exclusion survives a Claude release nobody has read.
+    Verified against the real profile, 428 files and 1.9 MiB round-tripped onto a second home, and the doctor
+    reports model, permissions, statusline, hooks, 2 commands, 33 skills, 7 enabled plugins, 3 marketplaces and
+    both MCP servers. A real leak was found doing it, described in the evidence.
+- id: P0-010
+  title: Create read-only profile mounts and runtime overlays
+  priority: P0
+  status: done
+  area: agent-profile
+  depends_on:
+  - P0-009
+  acceptance:
+  - Claude config/skills/commands can be mounted read-only
+  - Writable session/plugin state is isolated
+  - Managed Claude works with project sandbox enabled
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2 (884d0ca). Config, skills and commands mount read-only from the same table that decides
+    what is exportable, so exportable-here cannot be writable-there. The writable overlay needs no bind at all:
+    HOME is a tmpfs and bwrap creates its own mount points, so ~/.claude is an empty writable directory with only
+    the listed entries mounted in, and anything unlisted is writable, session-private and gone at exit. Missing
+    writable directories are created before the session starts, because a --ro-bind-try of a missing path is a no-
+    op and the writes would silently vanish. Verified with real claude 2.1.261 under --sandbox project on katana,
+    reporting from inside its own namespace that skills, commands, CLAUDE.md and settings.json are read-only while
+    projects, todos and plugins/cache are writable, with 18 skills visible, no access to the real home and ~/.ssh
+    absent. What Claude writes at runtime was measured with find -newermt rather than assumed, and every path it
+    touched is a listed writable entry.
+- id: P0-011
+  title: Bridge Claude native hooks into apex-agentd
+  priority: P0
+  status: done
+  area: claude-adapter
+  depends_on: []
+  acceptance:
+  - Session/tool/task/subagent/notification/stop events reach apex-agentd
+  - Generic PTY fallback remains available
+  - State accuracy is better than PTY-idle inference
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2 (be207eb). Claude's own hook lifecycle now feeds apex-agentd: 19 event names checked
+    against the installed binary rather than assumed, with a live trace from a real session showing SessionStart,
+    UserPromptSubmit, PreToolUse, PostToolUse, Stop and SessionEnd arriving in order with tool detail. The PTY
+    fallback is intact and unchanged for every unintegrated agent, and is bounded at 15 minutes so a hook that
+    stops firing hands the decision back rather than freezing a stale state. Criterion 3 was measured rather than
+    asserted: on a 25-second quiet tool call the hook-published session read working for 25 of 25 samples where
+    inference read it for 0 of 25, and over a 180-second turn inference was wrong for 125 seconds against zero.
+    permission_request is unreachable by inference at all, proven over every state, signal and idle combination. A
+    real defect surfaced by running it, a confined session gets --clearenv and never received XDG_RUNTIME_DIR, so
+    every hook and every apex agent event reported the runtime as not running from inside a running session;
+    invisible on an ordinary login.
+- id: P0-012
+  title: Add Claude PreToolUse policy hook defense-in-depth
+  priority: P0
+  status: done
+  area: claude-adapter
+  depends_on:
+  - P0-011
+  - P0-008
+  acceptance:
+  - Policy can deny unsafe operations even with bypassPermissions
+  - Kernel sandbox remains authoritative
+  - Hook failure does not silently remove kernel/network restrictions
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2 (be207eb). Each denial mirrors one kernel refusal the sandbox already makes, and a test
+    rebuilds the argv to assert the mount or flag is genuinely present, so the honest answer to what the hook
+    stops that the sandbox does not is nothing. What it buys is earlier refusal, a stated reason, no partial side
+    effects and a daemon-side record; on a masked credential the read otherwise succeeds and returns empty, so the
+    hook turns a silent empty file into a stated refusal over the same mount. What it cannot stop is written down
+    and pinned by tests: anything past the first word of a Bash command, any mcp__ tool, a nested claude, every
+    call in an unrestricted session, and disableAllHooks on the agent's own command line. Criterion 3 is proved by
+    running a session with every hook silenced and bypassPermissions on, where zero events reached the daemon and
+    the operations still failed with read-only file system and the no-new-privileges refusal from sudo. No
+    protocol bump was needed, and a pre-hook client's wire form is pinned as still parsing.
+- id: P0-013
+  title: Track request_origin for privilege/capability requests
+  priority: P0
+  status: done
+  area: remote-control
+  depends_on:
+  - P0-004
+  acceptance:
+  - Local, Remote Control, MCP, subagent, scheduled and cloud origins are distinguishable
+  - Policies can differ by origin
+  - Audit graph records origin
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2 (720c1f8). All three criteria met. Origin is established rather than asserted: an
+    unsessioned peer is classified from /proc/<pid>/cgroup and its controlling terminal, where session-N.scope is
+    a login and user@N.service is a scheduled job with nobody present, and a process can choose neither; a
+    connection belonging to a session inherits that session's origin, since re-observing would answer local-
+    terminal for every Remote Control agent; and a client may declare only a narrower origin, with local-terminal
+    and apex-shell undeclarable. The narrowing rule is stated over both properties policy reads rather than a
+    trust rank, because mcp is less trusted for elevation and more permitted on lock, so one rank would let a
+    Remote Control session redeclare itself mcp and buy back the lock rule it was denied, asserted over all 49
+    pairs. Fail-closed, a /proc read that fails is refused with the path rather than defaulted to local. Carried
+    on SessionInfo, PrivilegeRequest and both audit logs beside origin_source, so a record saying claude-remote-
+    control also says whether the daemon observed it or a client asked. PROTOCOL_VERSION 3, and the brittle
+    assert_eq between it and the dimensions version was replaced by a guard that pins each version to a revision
+    that exists. 1255 tests on the integration branch.
+- id: P0-014
+  title: Remote Control privilege policy
+  priority: P0
+  status: partial
+  area: remote-control
+  depends_on:
+  - P0-013
+  - P0-007
+  acceptance:
+  - Project/test/push actions can run remotely
+  - Root/unsafe mode requires local approval by default
+  - Optional FIDO/WebAuthn remote elevation can be configured explicitly
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Implemented on task/p0-013-request-origin, awaiting rebase. Section 7's table is reproduced as
+    Capability::ruling with a test that writes the same table out again as data. Project edit, tests and push run
+    remotely, checked at the three places that could have refused, and the broker's may_use_broker takes no origin
+    at all, which is the strongest form that claim can take. Root and unsafe-everything need a human, which also
+    closed a real hole, a systemd user timer running apex request allow is not a session and the previous check
+    let it through. A remote request needing local approval surfaces as an Origin line in the one prompt renderer
+    behind show, pending, ask and the interactive confirm, plus an ORIGIN column in the list. Partial for two
+    reasons: --origin-policy remote parses, stores and is refused by validate, but there is no working FIDO or
+    WebAuthn path behind it; and the root approval path is argued from evidence rather than tested, because
+    testing it needs a real sudo prompt.
+- id: P0-015
+  title: Lock-state policy for autonomous sessions
+  priority: P0
+  status: partial
+  area: remote-control
+  depends_on:
+  - P0-014
+  acceptance:
+  - User controls whether agents/Remote Control continue on lock
+  - Short-lived root grants revoke on lock by default
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Policy landed on task/p0-013-request-origin, not wired, and it cannot be until apex-shell changes. LockState
+    has four answers with Unreadable treated as locked and NoDisplaySession as unlocked, since a headless box has
+    no screen and answering locked there stops everything rather than protecting anything. LockPolicy::default is
+    section 7 verbatim and decide is checked over 8 policies by 7 origins by 4 states. There is no reader because
+    there is nothing to read: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind
+    reports LockedHint no on a session locked for an hour exactly as on one nobody has touched. A control-socket
+    verb was considered and rejected, logind accepts the hint only from the session owner and the daemon cannot
+    tell the shell from a managed session running as the same user. Dispatched as fix/locked-hint in apex-shell.
+    Criterion 2 also has no subject yet, both SystemAccess::Session and Unsafe are refused today so no short-lived
+    root grant exists to revoke, which is P0-006 and P0-007.
+- id: P0-016
+  title: Add Agent Settings page with password-gated Always Unrestricted toggle
+  priority: P0
+  status: done
+  area: agent-settings
+  depends_on:
+  - P0-004
+  - P0-005
+  acceptance:
+  - Config contains a clear Agent Settings page.
+  - A single 'Always unrestricted agents' toggle controls the default APEX sandbox for newly started managed agents.
+  - OFF restores the normal default APEX protection policy while preserving the agent's native permission mode such as
+    Claude bypassPermissions.
+  - Enabling ON requires a real local Polkit/PAM password or configured strong local authentication outside the agent
+    PTY.
+  - Disabling the toggle is immediate and does not require authentication.
+  - The setting persists across reboot/login.
+  - The UI states plainly that this removes the APEX user-level project sandbox but does not automatically grant root
+    or raw brokered secrets.
+  - Current running sessions display their actual mode; changing the default does not lie about already-running sessions.
+  - A visible warning/status indicator appears while Always Unrestricted is enabled.
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2. A new Agent Settings page in Config with one Always Unrestricted toggle, persisted to
+    ~/.config/apex/agent.json, which is the runtime's own file rather than the shell's, so the same default
+    applies to 'a' from a terminal with no shell running; written atomically under umask 077 with JSON passed
+    positionally so a value cannot become shell syntax. OFF moves only the sandbox dimension and leaves the native
+    permission mode alone, and is immediate with no authentication. ON goes through a real polkit action. The
+    load-bearing find: the polkit action file was not valid XML, because it quoted a pkcheck command line inside
+    an XML comment and every flag starts with two hyphens, which an XML comment may not contain; polkitd silently
+    never registers an action it cannot parse, so pkcheck exited 127 forever and the toggle could never have been
+    enabled, with no other symptom. xmllint is red on the committed file and green on the fixed one. Running
+    sessions read their own recorded mode rather than the current default, so changing the toggle cannot relabel
+    an agent already running. The copy was also corrected against the code, an earlier draft warned that a warm
+    sudo timestamp is reachable from an unconfined agent and it is not, because PR_SET_NO_NEW_PRIVS is set for
+    every dimension except break-glass with a negative-control test. check-agent-settings.sh 65/0 with 13 mutants
+    all caught. Outstanding, the granted authentication path needs a human to type a password once.
+- id: P0-017
+  title: Make Dashboard top navigation responsive and non-overlapping
+  priority: P0
+  status: done
+  area: shell-ui
+  depends_on: []
+  acceptance:
+  - Home/System/Agents/Tasks/Apps/Config never overlap at supported screen sizes or scale factors.
+  - Dashboard width is responsive instead of relying on a fixed 900px layout where that causes clipping.
+  - At constrained widths the tab bar uses an intentional responsive solution such as compact labels, safe scrolling,
+    or an overflow menu.
+  - Keyboard focus and touch targets remain usable.
+  - Verified at 720p, 1080p, 1440p, 4K, 100%, 125%, 150%, 175%, and 200% representative scaling where compositor support
+    permits.
+  - Existing top-bar/tray clipping regressions are included in the test matrix.
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2. The reported overlap was not in the horizontal top navigation at all, which is why an
+    earlier headless screenshot at 1280x720 found nothing: it is the vertical settings column, which spaced nine
+    rows with (height minus n times rowHeight) divided by (n minus 1) and no floor, so the gap goes negative on
+    arithmetic no compositor has any input to. Reproduced on both of Andre's real modes at the scale the shell
+    derives for them, 2560x1080 and 1920x1200, at gaps of -19.9px and -39.9px, and it is not Hyprland-specific.
+    Strategy is compact labels dropped for the whole bar at once rather than an overflow menu or scrolling,
+    because six tabs is a small fixed set, hiding one behind a second click makes 'which page am I on' a two-step
+    question, and a row where one tab is spelt out and another is a bare icon reads as a rendering fault. The pill
+    is hard-clamped to its slot, which makes an overlap unrepresentable rather than unlikely, and the dashboard
+    width yields to the output with a floor. 3918 assertions across 12 compositor and resolution runs, zero
+    failures, and reverting the fix gives 140 failures across 6 distinct assertions. A second regression fix on
+    the branch had no test, so one was added and proven. Keyboard navigation of the tab bar is absent in both the
+    old and new versions and was left out of scope.
+- id: P0-018
+  title: Fix transactional monitor Apply / Keep / Revert flow
+  priority: P0
+  status: done
+  area: display-settings
+  depends_on: []
+  acceptance:
+  - Clicking Apply on staged monitor changes always applies the temporary configuration or reports an actionable error.
+  - A visible 15-second confirmation dialog always appears after a successful temporary apply.
+  - The dialog remains reachable after monitor layout/scale/primary-output changes and is shown on a safe active output.
+  - Keep persists the configuration.
+  - Revert or timeout restores the exact pre-apply configuration.
+  - If APEX Shell, the dialog, compositor adapter, or output transaction fails during the countdown, recovery logic reverts
+    safely.
+  - Failed apply does not discard the user's staged values.
+  - Automated tests cover confirm, timeout, manual revert, invalid mode, disconnected output, and shell restart during
+    transaction.
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Done on task/p0-018-display-finish (4419e89..a153b02), on top of the first half at 8f47bd7. The five
+    scenarios the roadmap recorded as uncovered were in fact covered by run-display-transaction-test.sh, which
+    passes 41 of 41 against a headless labwc with two virtual outputs — the evidence below was written from the
+    branch state, not from a run. What was genuinely missing was criterion 5's word "exact" and criterion 6's
+    recovery path, and testing those honestly needed outputs that can be created and destroyed, which labwc
+    cannot do. run-display-unplug-test.sh uses headless sway's create_output and `output <name> unplug`, 17
+    assertions, and found two defects. First: the guard wrote `state reverted` whether or not the restore had
+    worked, so an engine that failed during the countdown left the machine on an unconfirmed layout with a
+    record saying it had been put back, and reconcile at the next start believed it. It records revert-failed
+    now, retries, and the Display page says the screen was never confirmed. Second: a rollback naming an output
+    unplugged during the countdown made wlr-randr reject the whole invocation, so EVERY other output kept the
+    unconfirmed layout; restore now prunes the rollback against a fresh enumeration first. Criterion 5 is a
+    whole-enumeration comparison across four fields and two outputs, not one scale value. The watchdog is
+    apex-display-guard.sh, spawned by _begin() BEFORE the engine is called, so a dialog that fails to construct
+    cannot affect it. Still open, and not fixable from this repository: the compositor dying mid-countdown.
+    apex-display-apply persists on every apply — measured, one temporary apply writes kanshi/config and
+    apex-display.conf with the unconfirmed layout — so a session that dies comes back on it. That needs `apply
+    --no-persist` in apex-os; spelled out with the measurement in ROADMAP/design/P0-018-display-recovery.md.
+
+- id: P0-019
+  title: Make Input settings actually control hardware on all supported compositors
+  priority: P0
+  status: done
+  area: input-settings
+  depends_on:
+  - BASE-013
+  acceptance:
+  - Every visible Input control either changes the real device/compositor state or is explicitly disabled with a reason.
+  - Hyprland applies live through its supported runtime/config path and persists.
+  - niri writes valid generated configuration and live reloads where supported.
+  - labwc writes valid input configuration and reconfigures safely.
+  - Controls read back actual effective state rather than assuming writes succeeded.
+  - Per-device settings distinguish touchpad, mouse, trackpoint, tablet, touchscreen, and other supported inputs.
+  - Natural scroll, pointer speed, acceleration profile, tap, tap-drag, disable-while-typing, left-handed mode, scroll
+    method/factor, and other exposed controls are tested on real hardware.
+  - No fake/no-op toggles remain.
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2 in both repos. Every visible control now writes to all three compositors or is disabled
+    with a reason, and 22 of 22 read back on labwc and Hyprland, 21 of 22 on niri, with each readout labelled
+    compositor or file in the UI and divergence highlighted. The disabled cases are real limits stated plainly
+    rather than hidden: niri has no three-finger drag and configures input by device kind rather than by device
+    name, and neither Hyprland nor niri has a click method that produces no button, so Off is not offered there.
+    Per-device settings distinguish touchpad, trackpoint, mouse, touchscreen and keyboard, verified against real
+    hardware on both machines, including that the touchpad's companion mouse node is not a trackpoint because udev
+    writes ID_INPUT_POINTINGSTICK=0 on it, and a device-name collision found against the live compositor. test-
+    apex-input.sh went 61 to 109 assertions and fails 37 against the previous generator; a new live suite runs 22
+    assertions against a nested Hyprland and is 18/3 pre-fix; the shell page suite is 43/0 and 7/23 pre-fix. Two
+    real defects fixed on the way: one compositor rejecting its config stopped the other two, so a broken niri
+    meant a Hyprland user could not change a touchpad setting at all while the page reported success; and hyprctl
+    getoption returns booleans as bool but enums as int and hyphenates two names the Lua keys spell with
+    underscores, either of which would have made read-back silently wrong. Not verified and stated as such: no
+    libinput setting was watched changing on a physical device, because a headless nested Hyprland has no input
+    devices and the only alternative was Andre's own touchpad while he was typing on it.
+- id: P0-020
+  title: Disable mouse-wheel/touchpad-scroll value changes on all settings sliders
+  priority: P0
+  status: done
+  area: settings-ux
+  depends_on: []
+  acceptance:
+  - CfgSlider no longer changes value from mouse wheel or touchpad scrolling.
+  - Scrolling over a slider scrolls the containing settings page instead.
+  - Audit all settings controls for native/custom sliders with wheel-to-value behavior and disable it consistently.
+  - Drag/click and keyboard accessibility still work.
+  - Regression test verifies accidental page scrolling cannot mutate any value bar.
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2 as 9a28d78. CfgSlider's WheelHandler is gone and the value path is a single clamped
+    exit; keyboard support added (arrows step 1, PageUp/Down step 10, Home/End to the ends) with a visible focus
+    ring and activeFocusOnTab. Audited every wheel site in src/, removed five that mutate a value (CfgSlider, the
+    AudioControl and QuickControl channel columns, the QuickSettings brightness bar, both TimeInput fields) and
+    kept five that navigate rather than set a value (workspaces, tab switcher, carousel, tray protocol forwarding,
+    wallpaper grid), each allowlisted with its reason. The audit was then extended to stock QtQuick Controls
+    types, which handle the wheel internally and would not appear in a source grep for WheelHandler: src/ contains
+    no Slider, RangeSlider, SpinBox, Dial or Tumbler at all, and the only stock control present is ScrollBar,
+    where taking the wheel is the correct behaviour. tests/run-slider-wheel-test.sh posts real QWheelEvent,
+    QMouseEvent and QKeyEvent through QQuickWindow's delivery agent, 11/11, and against the pre-fix tree it is 4
+    passed 7 failed; an independent reviewer re-executed the suite and watched all assertions pass. tests/check-
+    wheel-value.sh is the source-level half, 16/16, with six self-test mutants and two inverse mutants, and it
+    names all six removed sites against the pre-fix tree. Both wired into CI. Not verified, real libinput wheel
+    and touchpad through a compositor, since neither machine has wlrctl or ydotool.
+- id: P0-021
+  title: Fix Agent Center and embedded agent terminal color rendering
+  priority: P0
+  status: partial
+  area: agent-ui
+  depends_on: []
+  acceptance:
+  - Agent cards, icons, state badges, and text use APEX theme tokens rather than hard-coded white.
+  - Working/waiting/blocked/failed/completed states are visually distinct in both light and dark palettes.
+  - If PTY/TUI output is embedded, ANSI 16-color, 256-color, bold/dim/underline, and truecolor where supported are preserved
+    instead of flattened to white.
+  - Claude, OpenCode, Codex, Gemini and generic PTY sessions render consistently.
+  - Contrast meets accessibility targets.
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Shell half complete on task/p0-018-display-finish (4419e89, corrected by ae61e9a), on top of a9aeb2e. The
+    named gap — the light palette computed and unreachable — is closed as a mechanism: WallpaperService has a
+    mode, persisted beside the scheme in wallpaper.json, passed to BOTH matugen invocations, so a light palette
+    is producible and the measured contrast figures describe something real. Verified: matugen 4.2.0 -m light
+    gives surface #fdf9f3 against #141311 dark on the shipped wallpaper, every template in matugen.toml.in
+    renders in light without error, and run-agent-state-render-test.sh drives both palettes through the real
+    Theme in a headless compositor, 17 of 17, worst light contrast 4.81:1. A Light/Dark toggle was written and
+    then deliberately removed: 212 `color:` bindings across src/ are Qt.rgba(1, 1, 1, alpha), a foreground that
+    reads only on a dark surface, 20 of them in the settings pages including the description under every section
+    heading — the switch would have handed the user a blank Settings window, and check-color-tokens.sh could not
+    see them because it bounds hex literals and the n/255 disguise, not that form. So light mode is documented as
+    unsupported in Colors.qml beside the values it blocks, reachable by setting "mode": "light" in wallpaper.json
+    for anyone working on it, and check-color-tokens.sh now ratchets those 212 sites so the count cannot rise and
+    cannot fall silently. Partial, not done, for two reasons that remain: those 212 sites, and that no human has
+    looked at the badge weights on a real panel.
+
+- id: P0-022
+  title: Add Agents and Workspaces help/onboarding inside the Agents tab
+  priority: P0
+  status: done
+  area: agent-help
+  depends_on: []
+  acceptance:
+  - Agents tab has a prominent but non-obstructive 'How Agents & Workspaces work' entry at the top.
+  - First-run onboarding explains how to start an agent, choose an agent/profile, attach/detach, send prompts, stop/pause,
+    use workspaces/projects, create worktrees, review diffs/tests, use checkpoints/undo, and understand sandbox modes.
+  - Help explains Always Unrestricted, system-access, and unsafe-everything without vague security wording.
+  - Help explains Remote Control / Android remote once available.
+  - Help contains keyboard shortcuts and CLI equivalents.
+  - Users can reopen the help at any time and dismiss first-run guidance permanently.
+  - The help is written for users who do not already understand APEX agent concepts.
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2. A permanent 'How Agents and Workspaces work' entry pinned above the Agents page body
+    so it shows in the empty and daemon-off states too, a first-run card with its own persistence, and a seven-
+    section guide (start, projects and workspaces, review, sandbox and permissions, other computers, keys and
+    commands, stuck sessions). Dismissal persists to XDG_STATE_HOME/apex-shell/agent-help.json rather than
+    settings.json, so Config Misc Reset all cannot resurrect the card. Every CLI verb documented was read out of
+    the clap enums and cited by line; two documentation bugs were found doing it and fixed separately. Features
+    that do not exist yet carry a NOT IN THIS BUILD block rather than being described as available. slopcheck
+    reports 0 with three identifier-only allow entries. check-agent-help.sh 18/0 with five mutants each caught
+    plus an inverse mutant, wired into CI; the smoke test gained a second half. Against the pre-change tree the
+    new assertions fail and the suite exits 1.
+- id: P0-023
+  title: Unify settings staging/apply/save/revert semantics across APEX Shell
+  priority: P0
+  status: done
+  area: settings-architecture
+  depends_on: []
+  acceptance:
+  - Every settings page clearly distinguishes live changes, staged changes, persisted changes, and changes requiring
+    relogin/reboot.
+  - Apply/Save/Revert labels mean the same thing throughout the shell.
+  - Unsaved/staged state cannot disappear silently when navigating between pages.
+  - Backend failure surfaces a visible error and keeps user intent recoverable.
+  - Dangerous changes use transactional confirmation where appropriate.
+  - Settings pages read back effective state after apply.
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    --evidence
+- id: P0-024
+  title: Create settings UI regression test harness
+  priority: P0
+  status: done
+  area: testing
+  depends_on:
+  - P0-017
+  - P0-018
+  - P0-019
+  - P0-020
+  acceptance:
+  - Automated/nested tests exercise every settings page and shared control.
+  - Tests cover navigation overflow, slider wheel behavior, staged changes, failed backend writes, display confirmation,
+    and input application.
+  - Visual snapshots or deterministic geometry assertions catch overlap/clipping regressions.
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    --evidence
+- id: P0-025
+  title: Migrate Hyprland compositor configuration from legacy hyprlang to Lua
+  priority: P0
+  status: done
+  area: compositor-config
+  depends_on:
+  - BASE-013
+  acceptance:
+  - hyprland.lua is the canonical active APEX compositor configuration, loading APEX-owned modules under ~/.config/hypr/apex/
+    through require().
+  - APEX-generated monitor, input, keybind, workspace, window/layer rule, appearance and autostart modules are Lua-native.
+  - APEX Settings writes Lua-native configuration rather than legacy .conf fragments for display, input, keybinds, workspace
+    rules, window rules and APEX-owned appearance.
+  - The Lua APIs used match the Hyprland version APEX ships rather than copied examples from an older release.
+  - Existing APEX users receive a timestamped, backed-up, idempotent migration on first boot/login after the change.
+  - Recognized user overrides are migrated and any legacy directive that cannot be converted safely is reported.
+  - No user custom keybind, rule, monitor or input state is silently discarded, and generation does not overwrite user-owned
+    custom Lua.
+  - hyprctl reload and hyprctl configerrors are clean after any generated change.
+  - CI rejects active legacy Hyprland compositor .conf generation and tests the shipped stable Hyprland build.
+  - hypridle, hyprlock and other hypr* tools are left on their own upstream config formats unless that tool itself requires
+    Lua.
+  gates:
+  - tests
+  - stop_slop
+  notes: Specified in ROADMAP.md section 50 and CURRENT_ISSUES.md UI-011 but absent from this file until 2026-09-06. Hyprland
+    0.55 deprecated hyprlang and upstream signalled removal in 0.57, so this blocks P0-018, P0-019 and any keybind work that
+    would otherwise persist deprecated hyprlang.
+  evidence: >-
+    Done on task/p0-018-display-finish (a153b02), carrying 8979d7d and completing the apex-shell half.
+    KeybindService already wrote apex/shell-keybinds.lua rather than the hyprlang fragment. Two defects remained,
+    both about config the user owns. apex-hypr-migrate converts a hand-edited ApexShellKeybinds.conf INTO
+    shell-keybinds.lua — the only name require can reach it by — and the shell rewrote that file whole on every
+    start, so the migration preserved a keybind and the next login silently deleted it. The generated module
+    carries an APEX-SHELL-GENERATED marker now and apex-keybinds-rescue.sh moves any unmarked file to
+    apex/shell-keybinds-user.lua, which the generated module requires last, so the binds keep working rather
+    than being backed up into silence. Second: a rebind claimed only the NEW combo, so moving Terminal off
+    SUPER+T left apex/keybindings.lua still opening one there, and unbinding it emitted nothing at all — a
+    regression from replacing hyprlang's indiscriminate unbind pass with disable(). Every default the user has
+    moved off or switched off is released by name now. hyprctl configerrors WAS verified, against a nested
+    Hyprland 0.56.2 with its own HYPRLAND_INSTANCE_SIGNATURE, runtime dir and HOME, asked by signature and
+    refusing to run if that matches the ambient one: clean with the module absent, after the first generated
+    write, after a rebind through the page's own path, and with a rescued user module loaded. Headless does not
+    work and the suite says so — 0.56.2 dies in CBackend::create() with AQ_BACKENDS=headless on a GPU machine
+    with no DRM master, and nested in a headless labwc it dies the same way, both measured — so it nests inside
+    a running Wayland session and skips where there is none.
+
+- id: P1-001
+  title: Create generic capability provider framework
+  priority: P1
+  status: done
+  area: capabilities
+  depends_on:
+  - P0-002
+  - P0-004
+  acceptance:
+  - Provider/operation/resource/project/session/origin/expiry/constraints modeled
+  - Provider plugins can be added without changing agent core
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Landed on roadmap/v2.2 (a141cee). A provider supplies four things and no policy: which operations exist, what
+    a resource name means, how a credential is presented, and how to mint a short-lived one. The framework fixes
+    the rest in order, each step able to refuse: peer uid from SO_PEERCRED, the operation exists, its arguments
+    are the declared ones, expiry, project, section 7 origin labels, the grant, the host pin, reading the value
+    once, scrubbing, and the audit line. The load-bearing choice is that bind and perform are separate calls
+    because the host pin sits between them; a provider that both resolved a name and acted on it would have to be
+    trusted to check where it was sending the credential, and the framework cannot re-derive that, since knowing
+    what my-bucket means is the provider's job. Split, the pin is an invariant for every provider written later,
+    and bind runs after the grant check so an ungranted request never forks a child in a caller-controlled repo.
+    Section 13.2's vocabulary is generic: OperationId parses provider.class.verb and the first segment routes, so
+    there is no operation-to-provider table, and a test runs the whole 32-name list through the parser asserting
+    each routes to cloudflare without any Cloudflare stub existing. An undeclared parameter is refused rather than
+    ignored. Two providers exercise it, git shipped and proven end to end against a loopback smart-HTTP server
+    that refuses without an Authorization header, and a test-only bearer-token HTTP provider that proves what git
+    cannot, that mint works, that the framework scrubs a minted credential too, and that the pin applies to a
+    provider that did nothing to earn it. 1477 tests, clippy clean. P1-002 adds Cloudflare as one module and one
+    register call, with nothing changing in apex-agent-core, apex-agentd or the CLI.
+- id: P1-002
+  title: Implement first-party Cloudflare provider
+  priority: P1
+  status: todo
+  area: cloudflare
+  depends_on:
+  - P1-001
+  acceptance:
+  - Account/zone/project binding works
+  - Provider supports semantic capability checks
+  - Cloudflare secrets are not directly exposed to managed agents
+  gates:
+  - tests
+  - stop_slop
+- id: P1-003
+  title: Cloudflare connection and identity UX
+  priority: P1
+  status: todo
+  area: cloudflare
+  depends_on:
+  - P1-002
+  acceptance:
+  - OAuth/scoped-token connection path exists
+  - Manual token fallback exists
+  - Project identity binds intended account/zone/environment
+  gates:
+  - tests
+  - stop_slop
+- id: P1-004
+  title: Cloudflare Workers capability set
+  priority: P1
+  status: todo
+  area: cloudflare
+  depends_on:
+  - P1-002
+  acceptance:
+  - read/upload-version/deploy/rollback/tail capabilities implemented
+  - Worker routes/static assets supported where applicable
+  gates:
+  - tests
+  - stop_slop
+- id: P1-005
+  title: Cloudflare R2 capability set
+  priority: P1
+  status: todo
+  area: cloudflare
+  depends_on:
+  - P1-002
+  acceptance:
+  - Bucket/object scoped read/write capabilities
+  - No broad token when narrower scope is possible
+  gates:
+  - tests
+  - stop_slop
+- id: P1-006
+  title: Cloudflare D1/KV/Queues/Hyperdrive capabilities
+  priority: P1
+  status: todo
+  area: cloudflare
+  depends_on:
+  - P1-002
+  acceptance:
+  - Semantic read/write/migrate/manage operations represented
+  - Project resource binding enforced
+  gates:
+  - tests
+  - stop_slop
+- id: P1-007
+  title: Cloudflare DNS capability set
+  priority: P1
+  status: todo
+  area: cloudflare
+  depends_on:
+  - P1-002
+  acceptance:
+  - read/create/update/delete separated
+  - Bound zone/record constraints supported
+  - Registrar/nameserver/DNSSEC-root changes require elevated class
+  gates:
+  - tests
+  - stop_slop
+- id: P1-008
+  title: Cloudflare One capability set
+  priority: P1
+  status: todo
+  area: cloudflare
+  depends_on:
+  - P1-002
+  acceptance:
+  - Access/service token/Tunnel operations brokered
+  - Created service secrets enter apex-secretd directly
+  gates:
+  - tests
+  - stop_slop
+- id: P1-009
+  title: Cloudflare Workers AI and AI Gateway provider
+  priority: P1
+  status: todo
+  area: cloudflare-ai
+  depends_on:
+  - P1-002
+  acceptance:
+  - APEX AI service can route through Cloudflare
+  - Provider auth remains brokered
+  - Usage can be associated with task/project
+  gates:
+  - tests
+  - stop_slop
+- id: P1-010
+  title: Cloudflare Secrets Store integration
+  priority: P1
+  status: todo
+  area: cloudflare
+  depends_on:
+  - P1-002
+  - P0-002
+  acceptance:
+  - Create/bind/rotate supported
+  - Provider-side non-readable secrets stored as references/metadata only
+  gates:
+  - tests
+  - stop_slop
+- id: P1-011
+  title: Temporary Cloudflare task credentials
+  priority: P1
+  status: todo
+  area: cloudflare
+  depends_on:
+  - P1-002
+  - P0-002
+  acceptance:
+  - Short-lived/scoped credentials used where provider supports them
+  - Broker-owned child process can use credential without revealing it to agent
+  gates:
+  - tests
+  - stop_slop
+- id: P1-012
+  title: Transparent brokered Wrangler/cloudflared/Terraform auth
+  priority: P1
+  status: todo
+  area: cloudflare
+  depends_on:
+  - P1-011
+  acceptance:
+  - Existing skills can continue invoking normal tools
+  - Tool wrappers/helpers request capabilities transparently
+  gates:
+  - tests
+  - stop_slop
+- id: P1-013
+  title: Transactional Worker preview and deploy flow
+  priority: P1
+  status: todo
+  area: cloudflare-deploy
+  depends_on:
+  - P1-004
+  acceptance:
+  - Version upload separated from traffic deployment
+  - Preview health checks supported
+  - Staged rollout supported
+  - Rollback path tested
+  gates:
+  - tests
+  - stop_slop
+- id: P1-014
+  title: Cloudflare environment protection policies
+  priority: P1
+  status: todo
+  area: cloudflare-deploy
+  depends_on:
+  - P1-013
+  acceptance:
+  - Preview/staging can be unattended
+  - Production approval is default
+  - Owner may explicitly enable unattended production
+  gates:
+  - tests
+  - stop_slop
+- id: P1-015
+  title: Cloudflare worktree preview environments
+  priority: P1
+  status: todo
+  area: cloudflare-preview
+  depends_on:
+  - P1-013
+  acceptance:
+  - Worktree can own preview Worker/hostname/resources
+  - Destroy plan shown before cleanup
+  - Worktree removal can clean ephemeral resources
+  gates:
+  - tests
+  - stop_slop
+- id: P1-016
+  title: Cloudflare cost guardrails
+  priority: P1
+  status: todo
+  area: cloudflare
+  depends_on:
+  - P1-002
+  acceptance:
+  - Per-task/project budget supported
+  - Operation caps supported
+  - Usage visible in task audit
+  gates:
+  - tests
+  - stop_slop
+- id: P1-017
+  title: Cloudflare MCP through APEX broker
+  priority: P1
+  status: todo
+  area: mcp
+  depends_on:
+  - P1-001
+  - P1-002
+  acceptance:
+  - MCP calls pass capability policy
+  - Provider credentials are not handed directly to model
+  gates:
+  - tests
+  - stop_slop
+- id: P1-018
+  title: MCP auth helper integration
+  priority: P1
+  status: todo
+  area: mcp
+  depends_on:
+  - P0-002
+  acceptance:
+  - Remote MCP bearer headers can be generated by broker helper
+  - Long-lived token absent from agent-readable config
+  gates:
+  - tests
+  - stop_slop
+- id: P1-019
+  title: Per-MCP sidecar sandboxing
+  priority: P1
+  status: todo
+  area: mcp
+  depends_on:
+  - P1-018
+  acceptance:
+  - Each MCP has explicit filesystem/network/secret policy
+  - MCP processes do not inherit full agent sandbox by default
+  gates:
+  - tests
+  - stop_slop
+- id: P1-020
+  title: Agent/subagent graph in Agent Center
+  priority: P1
+  status: todo
+  area: agent-ui
+  depends_on:
+  - P0-011
+  acceptance:
+  - Claude subagents/Codex plugin/MCP/tool processes can be represented hierarchically
+  - Resource and task accounting follow graph
+  gates:
+  - tests
+  - stop_slop
+- id: P1-021
+  title: Integrate Claude statusline telemetry
+  priority: P1
+  status: todo
+  area: agent-ui
+  depends_on:
+  - P0-011
+  acceptance:
+  - Model/project/branch/context/5h/7d/reset info shown without breaking terminal statusline
+  gates:
+  - tests
+  - stop_slop
+- id: P1-022
+  title: Notification bridge and deduplication
+  priority: P1
+  status: todo
+  area: agent-ui
+  depends_on:
+  - P0-011
+  acceptance:
+  - Claude push/input-needed notifications are enriched, not duplicated
+  - Focus/open-project actions work
+  gates:
+  - tests
+  - stop_slop
+- id: P1-023
+  title: Global push-to-talk routing
+  priority: P1
+  status: todo
+  area: voice
+  depends_on: []
+  acceptance:
+  - Works in Hyprland/niri/Floating
+  - Microphone indicator visible
+  - Target session explicit
+  gates:
+  - tests
+  - stop_slop
+- id: P1-024
+  title: Cross-agent handoff packet
+  priority: P1
+  status: todo
+  area: agent-runtime
+  depends_on:
+  - P1-020
+  acceptance:
+  - Goal/plan/worktree/test/checkpoint/memory summary portable
+  - Claude-to-Codex handoff works
+  gates:
+  - tests
+  - stop_slop
+- id: P1-025
+  title: Skill inventory/sync/audit
+  priority: P1
+  status: todo
+  area: agent-profile
+  depends_on:
+  - P0-009
+  acceptance:
+  - Skills have origin/hash/type metadata
+  - Executable skills distinguishable from reference skills
+  gates:
+  - tests
+  - stop_slop
+- id: P1-026
+  title: Plugin/marketplace provenance and isolation
+  priority: P1
+  status: todo
+  area: agent-profile
+  depends_on:
+  - P0-009
+  - P0-010
+  acceptance:
+  - Marketplace origin and commit/hash tracked
+  - Executable plugin content runs inside sandbox
+  gates:
+  - tests
+  - stop_slop
+- id: P1-027
+  title: Memory provider interface
+  priority: P1
+  status: todo
+  area: memory
+  depends_on: []
+  acceptance:
+  - Existing remote MCP memory remains authoritative
+  - Provider health/project mapping visible
+  - No forced migration into APEX-owned memory
+  gates:
+  - tests
+  - stop_slop
+- id: P1-028
+  title: Separate local and cloud-side connector trust planes
+  priority: P1
+  status: todo
+  area: agent-security
+  depends_on:
+  - P0-004
+  acceptance:
+  - Security UI distinguishes local vs remote connectors
+  - Hardened profiles can reduce cloud-side tools/connectors
+  gates:
+  - tests
+  - stop_slop
+- id: P1-029
+  title: Represent local/remote/scheduled/cloud agent lifecycle types
+  priority: P1
+  status: todo
+  area: agent-runtime
+  depends_on:
+  - P1-020
+  acceptance:
+  - Agent Center distinguishes PTY, Remote Control, recurring, cloud job, remote-host, subagent, MCP sidecar
+  gates:
+  - tests
+  - stop_slop
+- id: P1-030
+  title: Finish Fish agent integration
+  priority: P1
+  status: partial
+  area: shell
+  depends_on: []
+  acceptance:
+  - Aliases/completion/prompt integration work in Fish
+  gates:
+  - tests
+  - stop_slop
+- id: P1-031
+  title: Finish Nushell agent integration
+  priority: P1
+  status: partial
+  area: shell
+  depends_on: []
+  acceptance:
+  - Aliases/completion/prompt integration work in Nushell
+  gates:
+  - tests
+  - stop_slop
+- id: P1-032
+  title: Finish tmux integration
+  priority: P1
+  status: todo
+  area: terminal
+  depends_on: []
+  acceptance:
+  - Managed sessions/layouts can attach and restore cleanly through tmux
+  gates:
+  - tests
+  - stop_slop
+- id: P1-033
+  title: Finish Zellij integration
+  priority: P1
+  status: todo
+  area: terminal
+  depends_on: []
+  acceptance:
+  - Managed sessions/layouts can attach and restore cleanly through Zellij
+  gates:
+  - tests
+  - stop_slop
+- id: P1-034
+  title: Add editor/agent layout templates
+  priority: P1
+  status: todo
+  area: terminal
+  depends_on: []
+  acceptance:
+  - Editor+agent+terminal and multi-agent templates supported
+  gates:
+  - tests
+  - stop_slop
+- id: P1-035
+  title: Screenshot and file injection into TUI agents
+  priority: P1
+  status: todo
+  area: agent-ui
+  depends_on: []
+  acceptance:
+  - Screenshot/file copied into permitted path
+  - Path injected to correct PTY
+  gates:
+  - tests
+  - stop_slop
+- id: P1-036
+  title: Worktree test/conflict/PR status
+  priority: P1
+  status: todo
+  area: worktrees
+  depends_on: []
+  acceptance:
+  - Tests/conflicts/diff/PR readiness visible per worktree
+  gates:
+  - tests
+  - stop_slop
+- id: P1-037
+  title: Agent disposable capsule integration
+  priority: P1
+  status: todo
+  area: capsules
+  depends_on: []
+  acceptance:
+  - Agent task can run in disposable capsule and discard state
+  gates:
+  - tests
+  - stop_slop
+- id: P1-038
+  title: Complete Floating/labwc real-world validation matrix
+  priority: P1
+  status: partial
+  area: labwc
+  depends_on:
+  - P0-001
+  acceptance:
+  - Browser sharing/OBS/Discord/Flatpak/Steam/gamescope/Wine/JetBrains/Blender/multimonitor/VRR/suspend matrix passes
+  gates:
+  - tests
+  - stop_slop
+- id: P1-039
+  title: Compositor-neutral Night Light
+  priority: P1
+  status: todo
+  area: desktop
+  depends_on: []
+  acceptance:
+  - Hyprland/niri/Floating supported through shared APEX UX
+  gates:
+  - tests
+  - stop_slop
+- id: P1-040
+  title: Fix mixed-DPI shell scaling
+  priority: P1
+  status: partial
+  area: desktop
+  depends_on: []
+  acceptance:
+  - 4K+1080p and other mixed-scale layouts render consistently
+  gates:
+  - tests
+  - stop_slop
+- id: P1-041
+  title: Creator color-management stack
+  priority: P1
+  status: todo
+  area: creator
+  depends_on: []
+  acceptance:
+  - ICC/per-display profiles/HDR pipeline exposed and tested where upstream supports
+  gates:
+  - tests
+  - stop_slop
+- id: P1-042
+  title: Creator input/audio validation
+  priority: P1
+  status: todo
+  area: creator
+  depends_on: []
+  acceptance:
+  - Tablet/stylus/MIDI/pro-audio/USB audio tested
+  gates:
+  - tests
+  - stop_slop
+- id: P1-043
+  title: GPU parity across NVIDIA/AMD/Intel
+  priority: P1
+  status: partial
+  area: performance
+  depends_on:
+  - P0-001
+  acceptance:
+  - Performance Lab and safe controls work across tested GPU families
+  gates:
+  - tests
+  - stop_slop
+- id: P1-044
+  title: Default incoming firewall
+  priority: P1
+  status: partial
+  area: security
+  depends_on: []
+  acceptance:
+  - Incoming blocked by default
+  - APEX UI exposes explicit app/service exceptions
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    OS half landed on roadmap/v2.2. APEX shipped with no firewall at all, firewalld absent and nftables present
+    with an empty ruleset, so every bound port was reachable, seventeen of them on the L16 including a model
+    server and a Steam remote-play socket. files/system/nftables/apex.nft drops inbound, permits outbound and
+    drops forwarding; established/related, loopback, ICMP, IPv6 neighbour discovery, DHCP and mDNS pass, echo is
+    rate limited, and ssh is open because apex host run and remote agents are ssh. Exceptions go into two named
+    nftables sets, never into the ruleset, and apex firewall manages them by service name from a shipped
+    catalogue. The unit loads before network-pre.target and conflicts with nftables.service, and the image enables
+    it and asserts the policy parses under nft -c. tests/test-apex-firewall.sh 25/0. Criterion 1 is met; criterion
+    2 asks for the exceptions in the APEX UI, and only the CLI exists so far.
+- id: P1-045
+  title: Persistent-state migration framework
+  priority: P1
+  status: todo
+  area: updates
+  depends_on: []
+  acceptance:
+  - Forward schema migration and rollback compatibility are declared/tested
+  gates:
+  - tests
+  - stop_slop
+- id: P1-046
+  title: Update channels and staged rollout
+  priority: P1
+  status: todo
+  area: updates
+  depends_on: []
+  acceptance:
+  - stable/candidate/beta/edge supported
+  - Rollout can stop on opt-in health regressions
+  gates:
+  - tests
+  - stop_slop
+- id: P1-047
+  title: SBOM/provenance/trust status
+  priority: P1
+  status: partial
+  area: supply-chain
+  depends_on: []
+  acceptance:
+  - Image SBOM and signed provenance published
+  - '`apex status` surfaces trust'
+  gates:
+  - tests
+  - stop_slop
+  evidence: >-
+    Half landed on roadmap/v2.2. Signing already existed, cosign keyless on core, base and the image; what was
+    missing was any description of what is inside them. syft now generates an SPDX document from the pushed digest
+    read back out of the registry, and cosign attest signs it under the same keyless identity, so one verify-
+    attestation answers both who built it and what is in it. Deliberately not cosign attach sbom, which is
+    deprecated upstream and unsigned. Attached to the apex image alone, since core and base are build tiers nobody
+    boots and their contents are a strict subset. Two assertions guard it, the SBOM must list more than a hundred
+    packages because one describing nothing answers a CVE question with silence while looking authoritative, and
+    the job verifies its own signature and attestation against the workflow identity before promoting any tag.
+    Outstanding, apex status does not surface trust, which is the second criterion.
+- id: P1-048
+  title: Redesign Blueprint into a simple guided experience
+  priority: P1
+  status: todo
+  area: blueprint-ux
+  depends_on:
+  - BASE-007
+  acceptance:
+  - Blueprint page begins with a plain-language explanation of what a Blueprint is and what it will change.
+  - 'Primary actions are obvious: Use this device as Blueprint, Import, Preview changes, Apply, Sync/Export.'
+  - A visual current-vs-desired diff appears before apply.
+  - Apps, desktop, agents, packages, modes, identities, and cloud bindings are grouped into understandable sections.
+  - Advanced raw TOML/YAML editing remains available but is not the default workflow.
+  - Destructive removals are highlighted separately from additions/changes.
+  - Apply is transactional where feasible and reports rollback/recovery options.
+  - Empty/new-user state is useful instead of exposing unexplained internal concepts.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-049
+  title: Redesign Gaming settings around simple understandable toggles
+  priority: P1
+  status: todo
+  area: gaming-ux
+  depends_on:
+  - BASE-008
+  - BASE-009
+  acceptance:
+  - Gaming settings have a simple master 'Optimize games automatically' control.
+  - 'Common controls are understandable without Linux knowledge: performance boost while gaming, VRR, overlay, controller-first
+    Gaming Mode, background-update suppression, and per-game profile behavior.'
+  - Each toggle explains what it does in one short line.
+  - Advanced scheduler/GPU/gamescope knobs live in a separate Advanced section.
+  - Unsupported hardware options are hidden or disabled with a clear reason.
+  - Current active gaming policy is visible.
+  - Changing a toggle actually changes effective policy and reads back the result.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-050
+  title: Build provider-neutral APEX Remote agent protocol and desktop service
+  priority: P1
+  status: todo
+  area: remote-agents
+  depends_on:
+  - P1-020
+  - P0-013
+  acceptance:
+  - A per-user non-root remote service exposes APEX-managed agent sessions through a versioned protocol.
+  - Protocol supports session list/graph, PTY stream, input, prompts, lifecycle, project/workspace metadata, tasks, diffs/tests,
+    checkpoints, capability requests, and notifications.
+  - Works with Claude, OpenCode, Codex, Gemini, and generic managed PTY agents.
+  - No screen scraping is required.
+  - Secret values never transit to the remote client unless the user explicitly exports a secret through a separate protected
+    flow.
+  - Every remote action is associated with device identity and request_origin.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-051
+  title: Implement secure device pairing for APEX Remote
+  priority: P1
+  status: todo
+  area: remote-agents
+  depends_on:
+  - P1-050
+  acceptance:
+  - Desktop can display a QR code / short pairing flow from APEX Shell.
+  - Pairing establishes a persistent device identity using audited standard cryptographic libraries.
+  - Lost devices can be revoked from APEX Settings.
+  - Pairing cannot be completed silently by an agent.
+  - Paired-device list shows name, last seen, permissions, and revocation state.
+  - Biometric/device-lock requirement can be enforced on Android.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-052
+  title: Support direct LAN and encrypted internet relay for remote agents
+  priority: P1
+  status: todo
+  area: remote-agents
+  depends_on:
+  - P1-051
+  - P1-002
+  acceptance:
+  - LAN discovery/direct connection works without cloud dependency.
+  - Internet access requires no inbound router port forwarding.
+  - Cloudflare-backed rendezvous/relay is supported as the preferred managed fallback.
+  - Remote payload remains end-to-end encrypted so relay infrastructure cannot read agent terminal/task content.
+  - Reconnect/resume works across Wi-Fi/mobile-network changes.
+  - Connection quality/fallback state is visible in client and desktop.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-053
+  title: Create polished first-party APEX Remote Android app foundation
+  priority: P1
+  status: todo
+  area: android
+  depends_on:
+  - P1-050
+  - P1-051
+  acceptance:
+  - Native Android app uses a maintainable modern architecture and first-party APEX design language.
+  - Onboarding pairs a computer by QR and explains trust clearly.
+  - Supports multiple APEX computers.
+  - App lock supports Android biometrics/device credential.
+  - Dark/light/dynamic-color behavior is polished and accessible.
+  - No secrets, private keys, or session plaintext are written to insecure app storage.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-054
+  title: Android Agent Center parity
+  priority: P1
+  status: todo
+  area: android
+  depends_on:
+  - P1-053
+  - P1-020
+  acceptance:
+  - Shows agent graph, provider/model, project/workspace, mode, current activity, context/quota where available, elapsed
+    time, and status.
+  - Can start a new agent with selected profile/project/worktree.
+  - Can pause/stop/reconnect/attach supported sessions.
+  - Agent state/colors match desktop semantics.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-055
+  title: Android full PTY/TUI remote terminal
+  priority: P1
+  status: todo
+  area: android
+  depends_on:
+  - P1-053
+  - P1-050
+  acceptance:
+  - Streams real PTY output with ANSI 16/256/truecolor and text attributes.
+  - Supports normal text input plus Ctrl/Esc/Tab/arrows/function keys and configurable accessory row.
+  - Supports scrollback, search, text selection, copy/paste, reconnect, and orientation changes.
+  - Works with Claude/OpenCode/Codex/Gemini TUIs without rewriting them.
+  - Low-bandwidth/reconnect behavior is tested.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-056
+  title: Android Projects, Workspaces, Worktrees, Tasks and Review UX
+  priority: P1
+  status: todo
+  area: android
+  depends_on:
+  - P1-054
+  - P1-036
+  acceptance:
+  - Browse projects/workspaces/worktrees and active tasks.
+  - View changed files, diff summary, test status, conflicts, checkpoints, and PR readiness.
+  - Open/focus an agent associated with a task.
+  - Checkpoint/undo actions show consequences before execution.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-057
+  title: Android remote capability and deployment approvals
+  priority: P1
+  status: todo
+  area: android
+  depends_on:
+  - P1-054
+  - P0-014
+  - P1-014
+  acceptance:
+  - Cloud/GitHub/preview capability requests can be approved/denied from Android according to project policy.
+  - Production deployment approvals are clear and auditable.
+  - Root/system-access and unsafe-everything remain local-approval-only by default.
+  - If optional remote high-risk approval is enabled, it requires strong device/WebAuthn/FIDO-equivalent authentication
+    and explicit owner configuration.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-058
+  title: Android push notifications and input-needed workflow
+  priority: P1
+  status: todo
+  area: android
+  depends_on:
+  - P1-053
+  - P1-022
+  acceptance:
+  - Working-complete, failed, input-needed, permission/capability request, test failure, and deployment notifications
+    are supported.
+  - Notification content is encrypted/minimized so push infrastructure does not receive sensitive prompt/code content.
+  - Tapping a notification opens the exact task/session.
+  - Duplicate Claude/APEX notifications are deduplicated.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-059
+  title: Android voice, screenshot, file and clipboard handoff
+  priority: P1
+  status: todo
+  area: android
+  depends_on:
+  - P1-053
+  - P1-035
+  acceptance:
+  - Push-to-talk can target the selected agent.
+  - Photo/screenshot/file upload lands in an explicit permitted project/temp path and inserts a safe path into the agent
+    session.
+  - Clipboard send/receive is explicit and encrypted.
+  - No automatic access to the phone photo library/filesystem beyond Android-granted selections.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-060
+  title: Ship APEX Remote Android as a production-quality application
+  priority: P1
+  status: todo
+  area: android
+  depends_on:
+  - P1-054
+  - P1-055
+  - P1-056
+  - P1-057
+  - P1-058
+  - P1-059
+  acceptance:
+  - End-to-end tests cover pairing, LAN, relay, reconnect, PTY input/output, agent lifecycle, approvals, notifications,
+    and device revocation.
+  - Accessibility, talkback, large text, rotation, tablets/foldables, backgrounding, battery saver, and poor-network
+    states are tested.
+  - Signed release APK/AAB pipeline exists.
+  - Crash reporting is consent-based and redacts sensitive terminal/task content.
+  - The Android app has in-app help equivalent to desktop Agents/Workspaces help.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-061
+  title: Extend APEX capabilities to normal application permissions
+  priority: P1
+  status: todo
+  area: app-security
+  depends_on:
+  - P1-001
+  acceptance:
+  - Design unifies or brokers filesystem, camera, microphone, screen capture, USB/device, network, sensitive-directory,
+    and secret access where Linux/portal primitives permit.
+  - Flatpak/native apps can be represented without pretending they have identical enforcement mechanisms.
+  - Settings -> Privacy & Permissions shows effective capabilities and origin.
+  - Revocation behavior is explicit and tested.
+  gates:
+  - tests
+  - stop_slop
+- id: P1-062
+  title: Build destructive chaos/torture reliability test infrastructure
+  priority: P1
+  status: todo
+  area: testing
+  depends_on:
+  - P0-001
+  acceptance:
+  - Automated tests simulate power loss during update, full disk, network loss, shell/apexd crashes, expired cloud token,
+    killed agent during checkpoint, monitor hot-unplug, suspend during work, and failed rollback.
+  - Boot/update/install/rollback loops run continuously in VMs.
+  - Failures produce reproducible diagnostics and do not silently corrupt the installation.
+  gates:
+  - tests
+  - stop_slop
+- id: P2-001
+  title: Encrypted backup framework
+  priority: P2
+  status: todo
+  area: backup
+  depends_on:
+  - P0-002
+  acceptance:
+  - Local/NAS/SSH/S3/R2 targets
+  - Client-side encryption
+  - Versioned restore tested
+  gates:
+  - tests
+  - stop_slop
+- id: P2-002
+  title: Cloudflare R2 backup backend
+  priority: P2
+  status: todo
+  area: backup
+  depends_on:
+  - P2-001
+  - P1-005
+  acceptance:
+  - Bucket-scoped brokered credential
+  - Agent cannot read raw backup key
+  gates:
+  - tests
+  - stop_slop
+- id: P2-003
+  title: Accessibility baseline
+  priority: P2
+  status: todo
+  area: accessibility
+  depends_on: []
+  acceptance:
+  - Screen reader/magnifier/high-contrast/reduced-motion/keyboard-only installer validated
+  gates:
+  - tests
+  - stop_slop
+- id: P2-004
+  title: Internationalisation baseline
+  priority: P2
+  status: todo
+  area: i18n
+  depends_on: []
+  acceptance:
+  - Keyboard layout before password, IME/CJK/RTL/locales/timezones supported
+  gates:
+  - tests
+  - stop_slop
+- id: P2-005
+  title: Printing/scanning/network-share maturity
+  priority: P2
+  status: todo
+  area: desktop
+  depends_on: []
+  acceptance:
+  - Printing/scanning/SMB/NFS/WebDAV/MTP/cameras/SD validated
+  gates:
+  - tests
+  - stop_slop
+- id: P2-006
+  title: Networking maturity
+  priority: P2
+  status: todo
+  area: network
+  depends_on: []
+  acceptance:
+  - VPN/WireGuard/OpenVPN/enterprise Wi-Fi/captive portal/hotspot validated
+  gates:
+  - tests
+  - stop_slop
+- id: P2-007
+  title: Bluetooth/dock/peripheral maturity
+  priority: P2
+  status: todo
+  area: hardware
+  depends_on: []
+  acceptance:
+  - Headsets/codecs/Thunderbolt/USB-C docks/hotplug validated
+  gates:
+  - tests
+  - stop_slop
+- id: P2-008
+  title: First-party virtualization UX
+  priority: P2
+  status: todo
+  area: virtualization
+  depends_on: []
+  acceptance:
+  - KVM/QEMU/libvirt VM create/snapshot/share/USB/TPM/Secure Boot flows work
+  gates:
+  - tests
+  - stop_slop
+- id: P2-009
+  title: Disposable VM agent execution
+  priority: P2
+  status: todo
+  area: virtualization
+  depends_on:
+  - P2-008
+  acceptance:
+  - Agent task can run in disposable VM with explicit file egress
+  gates:
+  - tests
+  - stop_slop
+- id: P2-010
+  title: Hardware qualification database
+  priority: P2
+  status: todo
+  area: qualification
+  depends_on:
+  - P0-001
+  acceptance:
+  - Consent-based compatibility results can be stored and queried
+  gates:
+  - tests
+  - stop_slop
+- id: P2-011
+  title: Agent cgroup resource budgets
+  priority: P2
+  status: todo
+  area: agent-runtime
+  depends_on: []
+  acceptance:
+  - CPU/RAM/I/O/runtime budgets enforced and surfaced
+  gates:
+  - tests
+  - stop_slop
+- id: P2-012
+  title: Secure browser automation capsule
+  priority: P2
+  status: todo
+  area: browser-agent
+  depends_on:
+  - P1-001
+  acceptance:
+  - Isolated browser profile/cookies/downloads and capability auth
+  gates:
+  - tests
+  - stop_slop
+- id: P2-013
+  title: Per-project identity binding
+  priority: P2
+  status: todo
+  area: projects
+  depends_on:
+  - P1-001
+  acceptance:
+  - GitHub/Cloudflare/SSH/agent identity explicitly bound to project
+  gates:
+  - tests
+  - stop_slop
+- id: P2-014
+  title: Build APEX Storage Manager and disk-health UX
+  priority: P2
+  status: todo
+  area: storage
+  depends_on: []
+  acceptance:
+  - SMART/NVMe health, SSD wear, temperature, TRIM, filesystem health, free-space pressure, mount state, removable media,
+    and encryption state are visible.
+  - Destructive partition/filesystem operations require clear confirmation and recovery guidance.
+  - Disk-health warnings integrate with notifications and doctor.
+  gates:
+  - tests
+  - stop_slop
+- id: P2-015
+  title: Integrate firmware and hardware lifecycle management
+  priority: P2
+  status: todo
+  area: firmware
+  depends_on: []
+  acceptance:
+  - fwupd/LVFS firmware updates are surfaced in APEX Settings/update flow.
+  - BIOS/UEFI, dock, Thunderbolt, SSD, and supported device firmware states are understandable.
+  - Battery health/charge thresholds/calibration and major hardware lifecycle data are integrated where supported.
+  - Failure/recovery behavior is documented and tested.
+  gates:
+  - tests
+  - stop_slop
+- id: P2-016
+  title: Multi-user, guest, kiosk and shared-machine support
+  priority: P2
+  status: todo
+  area: multi-user
+  depends_on:
+  - P0-002
+  - P0-009
+  acceptance:
+  - Standard vs administrator accounts, fast switching, per-user agents/secrets/profiles, and session isolation work.
+  - Guest sessions can be disposable.
+  - Kiosk/shared-device policy is possible without weakening ordinary desktop use.
+  - Remote agent permissions are bound to the owning user/session.
+  gates:
+  - tests
+  - stop_slop
+- id: P2-017
+  title: APEX Online Accounts and brokered cloud identity layer
+  priority: P2
+  status: todo
+  area: online-accounts
+  depends_on:
+  - P1-001
+  - P0-002
+  acceptance:
+  - Architecture supports providers such as Nextcloud, Google, Microsoft, WebDAV and S3/R2 without spraying credentials
+    across user config.
+  - Apps/services receive scoped capabilities or standard portal/account integrations where possible.
+  - Account removal revokes local capabilities cleanly.
+  gates:
+  - tests
+  - stop_slop
+- id: P2-018
+  title: Guaranteed Safe Graphics / desktop failover mode
+  priority: P2
+  status: todo
+  area: recovery-graphics
+  depends_on:
+  - BASE-015
+  - BASE-018
+  acceptance:
+  - A graphics/compositor/shell failure can enter a conservative recovery desktop or safe graphical session.
+  - User can inspect failure, roll back deployment/driver, collect diagnostics, and reach files/network.
+  - Recovery does not depend on the broken normal compositor configuration.
+  gates:
+  - tests
+  - stop_slop
+- id: P2-019
+  title: Design APEX Fleet / managed-device architecture
+  priority: P2
+  status: todo
+  area: fleet
+  depends_on:
+  - BASE-007
+  - P1-046
+  acceptance:
+  - Blueprint/policy/update-ring architecture can scale from one machine to managed fleets.
+  - Design covers enrollment, inventory, compliance, update rings, managed secrets/certificates, app policy, remote health
+    and recovery.
+  - Enterprise/fleet support remains optional and does not turn personal APEX installs into managed devices by default.
+  gates:
+  - tests
+  - stop_slop
+- id: L-001
+  title: Real TPM and recovery qualification
+  priority: Later
+  status: partial
+  area: boot-security
+  depends_on:
+  - P0-001
+  acceptance:
+  - Real TPM, firmware update, TPM clear, suspend/resume, recovery key paths tested
+  gates:
+  - tests
+  - stop_slop
+- id: L-002
+  title: Enable LUKS2 by default
+  priority: Later
+  status: blocked
+  area: boot-security
+  depends_on:
+  - L-001
+  acceptance:
+  - Encryption default does not strand users across qualified hardware/recovery cases
+  gates:
+  - tests
+  - stop_slop
+- id: L-003
+  title: Enable TPM auto-unlock by default where safe
+  priority: Later
+  status: blocked
+  area: boot-security
+  depends_on:
+  - L-001
+  - L-002
+  acceptance:
+  - Measured boot + TPM unlock + recovery path validated
+  gates:
+  - tests
+  - stop_slop
+global_agent_rules:
+- Inspect the current APEX-OS and APEX Shell source before changing anything.
+- Verify an existing implementation before reimplementing it.
+- Preserve upstream TUI agent interfaces; APEX supervises and secures them rather than replacing them.
+- Never collapse agent-native bypass, APEX sandboxing, root/system grants, secret access, network policy, or remote-origin
+  policy into one switch.
+- 'Every task MUST run `/stop-slop` before it can be marked done. Apply it to all human-facing prose changed by the task:
+  UI copy, help, docs, errors, notifications, READMEs, release notes, comments intended for humans, PR/commit text prepared
+  by the agent. Do not rewrite code identifiers, commands, paths, logs, config keys, or machine protocols merely to satisfy
+  prose style.'
+- Do not mark a task done without tests/evidence satisfying its acceptance criteria.

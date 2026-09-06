@@ -1,0 +1,70 @@
+{
+  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
+  "updated": "2026-09-06T23:40+08:00",
+  "agents": [
+    {
+      "slug": "p0-003",
+      "items": ["P0-002", "P0-003"],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p0-003",
+      "branch": "task/p0-003-cred-broker",
+      "agent_id": "af08f6b4eacd4e8da",
+      "dispatched": "2026-09-06T16:20+08:00",
+      "resumed": "2026-09-06T23:24+08:00",
+      "title": "GitHub and MCP credentials into the broker"
+    },
+    {
+      "slug": "p0-005",
+      "items": ["P0-005", "P0-006", "P0-007"],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p0-005",
+      "branch": "task/p0-005-permission-modes",
+      "agent_id": "a907ffaca52c69e6b",
+      "dispatched": "2026-09-06T16:20+08:00",
+      "resumed": "2026-09-06T23:24+08:00",
+      "title": "native permission mode, break-glass, session-scoped grants"
+    },
+    {
+      "slug": "p0-018b",
+      "items": ["P0-018", "P0-021", "P0-025"],
+      "repo": "apex-shell",
+      "worktree": "/var/tmp/apex-work/wt-p0-018b",
+      "branch": "task/p0-018-display-finish",
+      "agent_id": "a3adb0a5651214af0",
+      "dispatched": "2026-09-06T16:20+08:00",
+      "resumed": "2026-09-06T23:24+08:00",
+      "title": "display apply/confirm, agent colours, Hyprland Lua — shell half"
+    },
+    {
+      "slug": "p1-030",
+      "items": ["P1-030", "P1-031", "P1-032", "P1-033", "P1-034"],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p1-030",
+      "branch": "task/p1-030-shell-integrations",
+      "agent_id": "a71f0340a7d470fc6",
+      "dispatched": "2026-09-06T16:20+08:00",
+      "resumed": "2026-09-06T23:24+08:00",
+      "title": "fish, nushell, tmux, zellij, editor/agent layouts"
+    },
+    {
+      "slug": "p1-045",
+      "items": ["P1-045", "P1-046", "P1-047"],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p1-045",
+      "branch": "task/p1-045-updates-trust",
+      "agent_id": "a8f13ad4ee7b9ad44",
+      "dispatched": "2026-09-06T23:33+08:00",
+      "title": "persistent-state migration, update channels, apex status trust"
+    },
+    {
+      "slug": "p1-002",
+      "items": ["P1-002", "P1-003", "P1-004"],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p1-002",
+      "branch": "task/p1-002-cloudflare",
+      "agent_id": "aa9d164c364916210",
+      "dispatched": "2026-09-06T23:33+08:00",
+      "title": "Cloudflare provider, connection identity, Workers capability set"
+    }
+  ]
+}
