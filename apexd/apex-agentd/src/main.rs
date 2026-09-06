@@ -559,17 +559,17 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
         // ── the secret broker ───────────────────────────────────────────────
         Request::SecretUse {
             service,
-            capability,
-            remote,
-            branch,
+            operation,
+            resource,
+            params,
             project,
         } => broker::use_capability(
             daemon,
             creds,
             &service,
-            &capability,
-            &remote,
-            branch.as_deref(),
+            &operation,
+            &resource,
+            &params,
             project.as_deref(),
         ),
 

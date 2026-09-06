@@ -64,10 +64,10 @@ pub mod store;
 pub mod value;
 
 pub use audit::{AuditEvent, AuditLine};
-pub use capability::{Capability, CapabilityError, CapabilityRecord};
+pub use capability::{CapabilityRecord, EndpointError};
 pub use operation::{
-    Effect, OperationId, OperationSpec, ParamSpec, Params, ProviderSpec, ResourceKind, Syntax,
-    VocabularyError,
+    Effect, OperationId, OperationInfo, OperationSpec, ParamInfo, ParamSpec, Params, ProviderSpec,
+    ResourceKind, Syntax, VocabularyError,
 };
 pub use protocol::{ErrorKind, Request, Response};
 pub use store::{Grants, ServiceInfo, Store, StoreError};

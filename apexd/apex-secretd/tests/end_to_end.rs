@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 
-use apex_secret_core::capability::{Capability, CapabilityRecord};
+use apex_secret_core::capability::CapabilityRecord;
 use apex_secret_core::client::Client;
 use apex_secret_core::protocol::{Request, Response};
 use apex_secret_core::SecretValue;
@@ -267,11 +267,8 @@ fn fixture_repo(dir: &Path, origin: &str) -> PathBuf {
     repo
 }
 
-fn record(provider: &str, capability: &str, remote: &str, project: &Path) -> CapabilityRecord {
-    let mut rec = CapabilityRecord::new(
-        provider,
-        Capability::parse(capability, remote, None).expect("capability"),
-    );
+fn record(provider: &str, operation: &str, remote: &str, project: &Path) -> CapabilityRecord {
+    let mut rec = CapabilityRecord::new(provider, operation, remote);
     rec.project = Some(project.to_string_lossy().into_owned());
     rec
 }
@@ -308,12 +305,12 @@ fn a_credential_backed_operation_runs_and_the_credential_never_comes_back() {
     let daemon = Daemon::start("perform");
     let provider = FakeGit::start();
     let repo = fixture_repo(&daemon.dir, &provider.url());
-    arrange(&daemon, provider.pin_host(), &repo, "git-ls-remote");
+    arrange(&daemon, provider.pin_host(), &repo, "git.ls-remote");
 
     let reply = daemon
         .client()
         .request(&Request::Use {
-            record: Box::new(record("demo", "git-ls-remote", "origin", &repo)),
+            record: Box::new(record("demo", "git.ls-remote", "origin", &repo)),
         })
         .expect("use");
 
@@ -357,7 +354,7 @@ fn a_credential_backed_operation_runs_and_the_credential_never_comes_back() {
         .find(|e| e.event == apex_secret_core::AuditEvent::Used)
         .expect("no `used` entry in the trail");
     assert_eq!(used.audit_id, record.audit_id);
-    assert_eq!(used.operation, "git-ls-remote");
+    assert_eq!(used.operation, "git.ls-remote");
     assert_eq!(used.resource, "origin");
     assert_eq!(used.exit_code, Some(0));
     assert_eq!(used.endpoint.as_deref(), Some("http://127.0.0.1"));
@@ -368,17 +365,17 @@ fn a_credential_backed_operation_runs_and_the_credential_never_comes_back() {
 
 #[test]
 fn a_fetch_is_brokered_the_same_way_a_read_only_capability_is() {
-    // git-ls-remote is the one the fixture proves most cheaply, but the
+    // git.ls-remote is the one the fixture proves most cheaply, but the
     // capability that people actually reach for must go down the same path.
     let daemon = Daemon::start("fetch");
     let provider = FakeGit::start();
     let repo = fixture_repo(&daemon.dir, &provider.url());
-    arrange(&daemon, provider.pin_host(), &repo, "git-fetch");
+    arrange(&daemon, provider.pin_host(), &repo, "git.fetch");
 
     let reply = daemon
         .client()
         .request(&Request::Use {
-            record: Box::new(record("demo", "git-fetch", "origin", &repo)),
+            record: Box::new(record("demo", "git.fetch", "origin", &repo)),
         })
         .expect("use");
     let Response::Performed {
@@ -399,7 +396,7 @@ fn nothing_the_socket_can_answer_contains_the_credential() {
     let daemon = Daemon::start("noleak");
     let provider = FakeGit::start();
     let repo = fixture_repo(&daemon.dir, &provider.url());
-    arrange(&daemon, provider.pin_host(), &repo, "git-ls-remote");
+    arrange(&daemon, provider.pin_host(), &repo, "git.ls-remote");
 
     let mut client = daemon.client();
     let mut replies = Vec::new();
@@ -410,21 +407,21 @@ fn nothing_the_socket_can_answer_contains_the_credential() {
         Request::Audit { lines: 100 },
         // A use that succeeds, and three that are refused at different steps.
         Request::Use {
-            record: Box::new(record("demo", "git-ls-remote", "origin", &repo)),
+            record: Box::new(record("demo", "git.ls-remote", "origin", &repo)),
         },
         Request::Use {
-            record: Box::new(record("demo", "git-push", "origin", &repo)),
+            record: Box::new(record("demo", "git.push", "origin", &repo)),
         },
         Request::Use {
-            record: Box::new(record("demo", "git-ls-remote", "elsewhere", &repo)),
+            record: Box::new(record("demo", "git.ls-remote", "elsewhere", &repo)),
         },
         Request::Use {
-            record: Box::new(record("nosuch", "git-ls-remote", "origin", &repo)),
+            record: Box::new(record("nosuch", "git.ls-remote", "origin", &repo)),
         },
         Request::Grant {
             project: repo.to_string_lossy().into_owned(),
             service: "demo".into(),
-            capability: "git-fetch".into(),
+            capability: "git.fetch".into(),
             revoke: false,
         },
         Request::Remove {
@@ -460,11 +457,11 @@ fn the_store_is_the_only_place_the_credential_exists() {
     let daemon = Daemon::start("store");
     let provider = FakeGit::start();
     let repo = fixture_repo(&daemon.dir, &provider.url());
-    arrange(&daemon, provider.pin_host(), &repo, "git-ls-remote");
+    arrange(&daemon, provider.pin_host(), &repo, "git.ls-remote");
     daemon
         .client()
         .request(&Request::Use {
-            record: Box::new(record("demo", "git-ls-remote", "origin", &repo)),
+            record: Box::new(record("demo", "git.ls-remote", "origin", &repo)),
         })
         .expect("use");
 
@@ -501,13 +498,50 @@ fn the_store_is_the_only_place_the_credential_exists() {
 }
 
 #[test]
+fn a_grant_written_under_the_old_spelling_still_matches() {
+    // P0-002 shipped `git-ls-remote`; P1-001 renamed it `git.ls-remote` so the
+    // vocabulary reads the way §13.2 asks. A machine that already granted the
+    // old name must not be told the capability it granted is not granted — and
+    // the trail must say one name for one operation, whichever was typed.
+    let daemon = Daemon::start("alias");
+    let provider = FakeGit::start();
+    let repo = fixture_repo(&daemon.dir, &provider.url());
+    arrange(&daemon, provider.pin_host(), &repo, "git-ls-remote");
+
+    // What the grant table holds is the canonical id, not what was typed.
+    let Response::Grants { projects } = daemon.client().call(&Request::Grants).expect("grants")
+    else {
+        panic!("expected grants");
+    };
+    let keys = projects
+        .get(&repo.to_string_lossy().into_owned())
+        .expect("a grant for the fixture repository");
+    assert_eq!(keys, &vec!["demo:git.ls-remote".to_string()]);
+
+    // And both spellings reach it.
+    for spelling in ["git-ls-remote", "git.ls-remote"] {
+        let reply = daemon
+            .client()
+            .request(&Request::Use {
+                record: Box::new(record("demo", spelling, "origin", &repo)),
+            })
+            .expect("use");
+        let Response::Performed { record, .. } = &reply else {
+            panic!("'{spelling}' was refused: {reply:?}");
+        };
+        assert_eq!(record.operation, "git.ls-remote", "{spelling} was not canonicalised");
+    }
+    assert_eq!(provider.authorizations().len(), 2, "both must have run");
+}
+
+#[test]
 fn a_remote_pointing_elsewhere_is_refused_before_anything_is_contacted() {
     // The hole this closes: a grant for one host turned into a request to
     // another, with the credential attached.
     let daemon = Daemon::start("hostpin");
     let provider = FakeGit::start();
     let repo = fixture_repo(&daemon.dir, &provider.url());
-    arrange(&daemon, provider.pin_host(), &repo, "git-ls-remote");
+    arrange(&daemon, provider.pin_host(), &repo, "git.ls-remote");
 
     for (remote, expected) in [
         ("elsewhere", "example.invalid"),
@@ -517,7 +551,7 @@ fn a_remote_pointing_elsewhere_is_refused_before_anything_is_contacted() {
         let reply = daemon
             .client()
             .request(&Request::Use {
-                record: Box::new(record("demo", "git-ls-remote", remote, &repo)),
+                record: Box::new(record("demo", "git.ls-remote", remote, &repo)),
             })
             .expect("use");
         let (_, message) = reply
@@ -537,13 +571,13 @@ fn a_capability_that_was_not_granted_is_refused_and_recorded() {
     let daemon = Daemon::start("ungranted");
     let provider = FakeGit::start();
     let repo = fixture_repo(&daemon.dir, &provider.url());
-    arrange(&daemon, provider.pin_host(), &repo, "git-ls-remote");
+    arrange(&daemon, provider.pin_host(), &repo, "git.ls-remote");
 
     // Granted for ls-remote only.
     let reply = daemon
         .client()
         .request(&Request::Use {
-            record: Box::new(record("demo", "git-push", "origin", &repo)),
+            record: Box::new(record("demo", "git.push", "origin", &repo)),
         })
         .expect("use");
     assert!(reply
@@ -563,7 +597,7 @@ fn a_capability_that_was_not_granted_is_refused_and_recorded() {
         entries
             .iter()
             .any(|e| e.event == apex_secret_core::AuditEvent::Refused
-                && e.operation == "git-push"),
+                && e.operation == "git.push"),
         "the refusal is not in the trail: {entries:#?}"
     );
 }

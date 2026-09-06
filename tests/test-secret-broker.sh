@@ -200,7 +200,7 @@ section "a stored credential grants nothing"
 "$APEX" secret grants 2>&1 | grep -q "nothing is granted" \
     && ok "storing a credential allows nothing" || bad "storing a credential allows nothing"
 
-out="$(cd "$PROJ" && "$APEX" secret use demo git-fetch origin 2>&1)"
+out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch origin 2>&1)"
 printf '%s' "$out" | grep -q "not granted" \
     && ok "an ungranted capability is refused" \
     || { bad "an ungranted capability is refused"; printf '      %s\n' "$out"; }
@@ -210,42 +210,58 @@ printf '%s' "$out" | grep -q "$SENTINEL" \
 
 # ── the vocabulary is closed ─────────────────────────────────────────────────
 section "the vocabulary is closed"
-for evil in exec sh git-clone curl run; do
+for evil in exec sh git.clone curl run cloudflare.dns.delete; do
     out="$(cd "$PROJ" && "$APEX" secret use demo "$evil" origin 2>&1)"
-    printf '%s' "$out" | grep -q "not a capability" \
-        && ok "'$evil' is not a capability" || bad "'$evil' is not a capability"
+    printf '%s' "$out" | grep -qE "not an operation" \
+        && ok "'$evil' is not an operation" \
+        || { bad "'$evil' is not an operation"; printf '      %s\n' "$out"; }
 done
 
-section "a remote may not be a URL"
+section "a resource may not be a URL"
 # The hole this closes: with a URL accepted, a session asks the broker to push
-# to a host it controls and the broker does it, with the token attached.
+# to a host it controls and the broker does it, with the token attached. The
+# rule is the framework's now, not git's, so it holds for every provider.
 for evil in "https://attacker.example/r" "git@github.com:a/b" "-f" "--force" "../x" "a b"; do
-    out="$(cd "$PROJ" && "$APEX" secret use demo git-fetch "$evil" 2>&1)"
-    printf '%s' "$out" | grep -qE "not a git remote name" \
-        && ok "refused as a remote: ${evil}" \
-        || { bad "refused as a remote: ${evil}"; printf '      %s\n' "$out"; }
+    out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch "$evil" 2>&1)"
+    printf '%s' "$out" | grep -qE "not a resource" \
+        && ok "refused as a resource: ${evil}" \
+        || { bad "refused as a resource: ${evil}"; printf '      %s\n' "$out"; }
 done
+
+section "an option the operation does not declare is refused"
+# What keeps "there is no command line here" true now that arguments are a map.
+out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch origin -o branch=main 2>&1)"
+printf '%s' "$out" | grep -q "has no 'branch' option" \
+    && ok "an undeclared option is refused rather than ignored" \
+    || { bad "an undeclared option is refused rather than ignored"; printf '      %s\n' "$out"; }
 
 # ── granting ─────────────────────────────────────────────────────────────────
 section "granting"
-out="$(cd "$PROJ" && "$APEX" secret grant demo git-fetch 2>&1)"
-printf '%s' "$out" | grep -q "allowed demo:git-fetch" \
+out="$(cd "$PROJ" && "$APEX" secret grant demo git.fetch 2>&1)"
+printf '%s' "$out" | grep -q "allowed demo:git.fetch" \
     && ok "a capability can be granted for the project" \
     || { bad "a capability can be granted for the project"; printf '      %s\n' "$out"; }
 
-out="$(cd "$PROJ" && "$APEX" secret grant nosuchservice git-fetch 2>&1)"
+# P0-002 shipped `git-fetch`; a machine that granted the old name must not be
+# told the capability it granted is not granted.
+out="$(cd "$PROJ" && "$APEX" secret grants 2>&1)"
+printf '%s' "$out" | grep -q "demo:git.fetch" \
+    && ok "a grant is stored under the canonical operation id" \
+    || { bad "a grant is stored under the canonical operation id"; printf '      %s\n' "$out"; }
+
+out="$(cd "$PROJ" && "$APEX" secret grant nosuchservice git.fetch 2>&1)"
 printf '%s' "$out" | grep -q "no credential stored" \
     && ok "a grant for an unknown service is refused, not silently stored" \
     || bad "a grant for an unknown service is refused, not silently stored"
 
-# A grant is per capability: git-fetch does not imply git-push.
-out="$(cd "$PROJ" && "$APEX" secret use demo git-push origin 2>&1)"
+# A grant is per capability: git.fetch does not imply git.push.
+out="$(cd "$PROJ" && "$APEX" secret use demo git.push origin 2>&1)"
 printf '%s' "$out" | grep -q "not granted" \
-    && ok "granting git-fetch does not allow git-push" \
-    || { bad "granting git-fetch does not allow git-push"; printf '      %s\n' "$out"; }
+    && ok "granting git.fetch does not allow git.push" \
+    || { bad "granting git.fetch does not allow git.push"; printf '      %s\n' "$out"; }
 
 section "a remote must point where the credential is for"
-out="$(cd "$PROJ" && "$APEX" secret use demo git-fetch elsewhere 2>&1)"
+out="$(cd "$PROJ" && "$APEX" secret use demo git-fetch elsewhere 2>&1)"  # old spelling, still accepted
 printf '%s' "$out" | grep -q "example.invalid" \
     && ok "a remote on another host is refused" \
     || { bad "a remote on another host is refused"; printf '      %s\n' "$out"; }
@@ -253,12 +269,12 @@ printf '%s' "$out" | grep -q "$SENTINEL" \
     && bad "the host mismatch does not leak the credential" \
     || ok "the host mismatch does not leak the credential"
 
-out="$(cd "$PROJ" && "$APEX" secret use demo git-fetch viassh 2>&1)"
+out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch viassh 2>&1)"
 printf '%s' "$out" | grep -q "not an http remote" \
     && ok "an ssh remote is refused with an explanation" \
     || { bad "an ssh remote is refused with an explanation"; printf '      %s\n' "$out"; }
 
-out="$(cd "$PROJ" && "$APEX" secret use demo git-fetch nosuchremote 2>&1)"
+out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch nosuchremote 2>&1)"
 printf '%s' "$out" | grep -q "no remote called" \
     && ok "an unconfigured remote is refused" || bad "an unconfigured remote is refused"
 
@@ -267,7 +283,7 @@ section "the credential never reaches the caller"
 # A granted capability, actually attempted. git will fail — 127.0.0.1:1 refuses
 # — and that is fine: what is asserted is that the credential stayed on the
 # daemon's side while the attempt was made.
-out="$(cd "$PROJ" && "$APEX" secret use demo git-fetch origin 2>"${WORK}/use.err")"
+out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch origin 2>"${WORK}/use.err")"
 err="$(cat "${WORK}/use.err")"
 printf '%s\n%s\n' "$out" "$err" | sed 's/^/      /' | head -8
 
@@ -288,8 +304,11 @@ if [ -s "$LOG" ]; then
     grep -q "$SENTINEL" "$LOG" \
         && bad "the audit trail does not contain the credential" \
         || ok "the audit trail does not contain the credential"
-    grep -q '"operation":"git-fetch"' "$LOG" \
+    grep -q '"operation":"git.fetch"' "$LOG" \
         && ok "the capability is recorded" || bad "the capability is recorded"
+    grep -q '"operation":"git-fetch"' "$LOG" \
+        && bad "the trail names one operation one way" \
+        || ok "the trail names one operation one way"
     grep -q '"event":"refused"' "$LOG" \
         && ok "refusals are recorded too" || bad "refusals are recorded too"
     grep -q '"event":"stored"' "$LOG" \
@@ -355,9 +374,9 @@ cat "${STORE}" 2>&1 | head -3
 echo "--- can it reach the secret service directly? ---"
 "${SESSION_APEX}" secret list 2>&1 | head -3
 echo "--- can it grant itself a capability? ---"
-"${SESSION_APEX}" secret grant demo git-push 2>&1
+"${SESSION_APEX}" secret grant demo git.push 2>&1
 echo "--- can it use the granted one? ---"
-"${SESSION_APEX}" secret use demo git-fetch origin 2>&1 | head -4
+"${SESSION_APEX}" secret use demo git.fetch origin 2>&1 | head -4
 echo "DONE"
 EOF
 chmod +x "${PROJ}/inside.sh"
@@ -444,7 +463,7 @@ else
             || bad "the session cannot grant itself a capability"
 
         # And the grant it attempted was not recorded.
-        "$APEX" secret grants 2>/dev/null | grep -q "git-push" \
+        "$APEX" secret grants 2>/dev/null | grep -q "git.push" \
             && bad "the session's self-grant was not recorded" \
             || ok "the session's self-grant was not recorded"
     fi
@@ -452,10 +471,10 @@ fi
 
 # ── revoke ───────────────────────────────────────────────────────────────────
 section "revoking"
-out="$(cd "$PROJ" && "$APEX" secret revoke demo git-fetch 2>&1)"
+out="$(cd "$PROJ" && "$APEX" secret revoke demo git.fetch 2>&1)"
 printf '%s' "$out" | grep -q "withdrew" \
     && ok "a capability can be withdrawn" || bad "a capability can be withdrawn"
-out="$(cd "$PROJ" && "$APEX" secret use demo git-fetch origin 2>&1)"
+out="$(cd "$PROJ" && "$APEX" secret use demo git.fetch origin 2>&1)"
 printf '%s' "$out" | grep -q "not granted" \
     && ok "a withdrawn capability is refused again" || bad "a withdrawn capability is refused again"
 

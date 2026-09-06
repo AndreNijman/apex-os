@@ -1,12 +1,21 @@
 //! `apex secret` — the user-facing half of the protected secret service (§11).
 //!
 //! ```text
-//! apex secret add github --host github.com     # credential on stdin
+//! apex secret add github --host github.com          # credential on stdin
 //! apex secret list
-//! apex secret grant github git-push
-//! apex secret use github git-push origin       # run by an agent
+//! apex secret capabilities                          # what the daemon offers
+//! apex secret grant github git.push
+//! apex secret use github git.push origin            # run by an agent
+//! apex secret use github git.push origin -o branch=main
 //! apex secret audit
 //! ```
+//!
+//! An operation is named the way §13.2 names one — `git.push`,
+//! `cloudflare.worker.deploy` — and this CLI knows none of them. The list comes
+//! from `apex-secretd`'s registry over the wire, and an operation's arguments
+//! are `-o name=value` pairs the daemon checks against what the provider
+//! declared. That is what lets P1-002 add Cloudflare without touching this
+//! file.
 //!
 //! Two daemons answer these, and which one is not arbitrary.
 //!
@@ -25,10 +34,10 @@ use std::io::Read;
 
 use anyhow::{bail, Result};
 use apex_agent_core::protocol::{
-    Request as AgentRequest, Response as AgentResponse, BROKERED_SECRET_SERVICE_VERSION,
+    Request as AgentRequest, Response as AgentResponse, GENERIC_CAPABILITY_VERSION,
 };
-use apex_secret_core::capability::Capability;
 use apex_secret_core::client::Client;
+use apex_secret_core::operation::{OperationId, OperationInfo};
 use apex_secret_core::protocol::{Request, Response};
 use apex_secret_core::store::valid_service_name;
 use apex_secret_core::SecretValue;
@@ -61,12 +70,12 @@ pub enum SecretCmd {
     },
     /// Delete a stored credential and every grant that named it.
     Remove { service: String },
-    /// The operations an agent can be granted.
+    /// The operations an agent can be granted, as the service offers them.
     Capabilities,
-    /// Allow a capability for the current project.
-    Grant { service: String, capability: String },
+    /// Allow an operation for the current project.
+    Grant { service: String, operation: String },
     /// Withdraw one.
-    Revoke { service: String, capability: String },
+    Revoke { service: String, operation: String },
     /// What is allowed, per project.
     Grants {
         #[arg(long)]
@@ -75,21 +84,26 @@ pub enum SecretCmd {
     /// Use a capability. The service performs it; you get the result.
     Use {
         service: String,
-        /// One of `apex secret capabilities`.
-        capability: String,
-        /// A git remote NAME, never a URL. The service resolves it against this
-        /// repository's own configuration — accepting a URL would let a session
-        /// choose where the credential gets sent.
+        /// One of `apex secret capabilities`, e.g. `git.push`.
+        operation: String,
+        /// What to act on, as a NAME — a git remote, a worker, a bucket.
+        /// Never a URL: the provider resolves the name against something you
+        /// do not control, and accepting a URL would let a session choose
+        /// where the credential gets sent.
         ///
         /// `allow_hyphen_values` so that `-f` reaches the validator and is
-        /// refused as "not a git remote name", rather than being rejected by
-        /// the argument parser as an unknown option — which is the right
-        /// outcome for the wrong reason, and reads as a bug in the CLI.
-        #[arg(default_value = "origin", allow_hyphen_values = true)]
-        remote: String,
-        /// Branch to push. Defaults to the current one.
-        #[arg(long)]
-        branch: Option<String>,
+        /// refused as "not a resource this operation can act on", rather than
+        /// being rejected by the argument parser as an unknown option — which
+        /// is the right outcome for the wrong reason, and reads as a bug.
+        #[arg(default_value = "", allow_hyphen_values = true)]
+        resource: String,
+        /// An option the operation declares, as `name=value`. Repeatable.
+        ///
+        /// Checked by the service against the provider's declaration; one it
+        /// does not declare is refused rather than ignored, so this is not a
+        /// way to pass a command line.
+        #[arg(long = "option", short = 'o', value_name = "NAME=VALUE")]
+        options: Vec<String>,
     },
     /// The audit trail: which capability was used, by what, and when.
     Audit {
@@ -108,25 +122,16 @@ pub fn main(cmd: SecretCmd) -> i32 {
         } => add(&service, &host, &username, &scheme),
         SecretCmd::List { json } => list(json),
         SecretCmd::Remove { service } => remove(&service),
-        SecretCmd::Capabilities => {
-            capabilities();
-            Ok(0)
-        }
-        SecretCmd::Grant {
-            service,
-            capability,
-        } => grant(&service, &capability, false),
-        SecretCmd::Revoke {
-            service,
-            capability,
-        } => grant(&service, &capability, true),
+        SecretCmd::Capabilities => capabilities(),
+        SecretCmd::Grant { service, operation } => grant(&service, &operation, false),
+        SecretCmd::Revoke { service, operation } => grant(&service, &operation, true),
         SecretCmd::Grants { json } => grants(json),
         SecretCmd::Use {
             service,
-            capability,
-            remote,
-            branch,
-        } => use_it(&service, &capability, &remote, branch.as_deref()),
+            operation,
+            resource,
+            options,
+        } => use_it(&service, &operation, &resource, &options),
         SecretCmd::Audit { lines } => audit(lines),
     };
     match result {
@@ -168,8 +173,10 @@ fn add(service: &str, host: &str, username: &str, scheme: &str) -> Result<i32> {
         &SecretValue::new(value.as_bytes().to_vec()),
     )?;
     println!("stored a credential for {service} ({scheme}://{host})");
-    println!("nothing is allowed yet — grant a capability with:");
-    println!("  apex secret grant {service} git-push");
+    println!("nothing is allowed yet. See what this service can do with:");
+    println!("  apex secret capabilities");
+    println!("then allow one for this project with:");
+    println!("  apex secret grant {service} <operation>");
     Ok(0)
 }
 
@@ -265,10 +272,24 @@ fn remove(service: &str) -> Result<i32> {
     Ok(0)
 }
 
-fn capabilities() {
+/// The vocabulary, read from the service rather than from a list kept here.
+///
+/// A provider registered in `apex-secretd` shows up in this output without the
+/// CLI being rebuilt around it. That is the point: §14 names seven more
+/// providers, and each one printing its own help would be seven edits here.
+fn capabilities() -> Result<i32> {
+    let vocabulary = match Client::connect()?.call(&Request::Hello)? {
+        Response::Hello { vocabulary, .. } => vocabulary,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    if vocabulary.is_empty() {
+        println!("this secret service offers no capabilities");
+        return Ok(0);
+    }
     println!("Capabilities an agent can be granted:\n");
-    for name in Capability::names() {
-        println!("  {:<14} {}", name, Capability::describe(name));
+    for op in &vocabulary {
+        println!("  {:<26} {}  ({})", op.id, op.summary, op.effect);
+        print_options(op);
     }
     println!(
         "\napex-secretd PERFORMS these; it never hands over the credential, and\n\
@@ -276,24 +297,46 @@ fn capabilities() {
          because git runs inside the sandbox and whatever the helper prints is\n\
          readable by the agent.\n\
          \n\
-         A remote is named, never given as a URL: the service resolves the name\n\
-         against the repository's own remotes and checks the host against the\n\
-         credential, so a grant cannot be turned into a push to anywhere else."
+         A resource is named, never given as a URL: the provider resolves the\n\
+         name against something you do not control, and the service then checks\n\
+         the host against the credential — so a grant cannot be turned into a\n\
+         request to anywhere else."
     );
+    Ok(0)
 }
 
-fn grant(service: &str, capability: &str, revoke: bool) -> Result<i32> {
+fn print_options(op: &OperationInfo) {
+    for param in &op.params {
+        let need = if param.required { "required" } else { "optional" };
+        println!("  {:<26}   -o {}=…  {} ({need})", "", param.name, param.summary);
+    }
+}
+
+/// Split `name=value`, refusing anything that is not one.
+///
+/// The service checks the value against the provider's declared syntax; what
+/// this owes the user is a clear message for `-o branch` with no `=`, which is
+/// otherwise sent as an option named `branch` with an empty value and refused
+/// for a reason that does not mention the typo.
+fn parse_option(text: &str) -> Result<(String, String)> {
+    match text.split_once('=') {
+        Some((name, value)) if !name.is_empty() => Ok((name.to_string(), value.to_string())),
+        _ => bail!("'{text}' is not an option; write one as name=value"),
+    }
+}
+
+fn grant(service: &str, operation: &str, revoke: bool) -> Result<i32> {
     let project = current_project_root()?;
     Client::connect()?.call(&Request::Grant {
         project: project.clone(),
         service: service.to_string(),
-        capability: capability.to_string(),
+        capability: operation.to_string(),
         revoke,
     })?;
     if revoke {
-        println!("withdrew {service}:{capability} for {project}");
+        println!("withdrew {service}:{operation} for {project}");
     } else {
-        println!("allowed {service}:{capability} for {project}");
+        println!("allowed {service}:{operation} for {project}");
     }
     Ok(0)
 }
@@ -324,12 +367,25 @@ fn grants(json: bool) -> Result<i32> {
 ///   0  the operation ran and succeeded
 ///   1  the service refused, or the operation failed
 ///   2  the request was malformed
-fn use_it(service: &str, capability: &str, remote: &str, branch: Option<&str>) -> Result<i32> {
-    // Validated locally first so a typo is immediate. Both daemons validate
-    // again and trust none of this.
-    if let Err(e) = Capability::parse(capability, remote, branch) {
+fn use_it(service: &str, operation: &str, resource: &str, options: &[String]) -> Result<i32> {
+    // Shape only, so a typo is immediate. This CLI does not know which
+    // operations exist — the service does, and telling it here would be a list
+    // to keep in step. Both daemons validate again and trust none of this.
+    if let Err(e) = OperationId::parse(operation) {
         eprintln!("apex secret: {e}");
         return Ok(2);
+    }
+    let mut params = std::collections::BTreeMap::new();
+    for option in options {
+        match parse_option(option) {
+            Ok((name, value)) => {
+                params.insert(name, value);
+            }
+            Err(e) => {
+                eprintln!("apex secret: {e}");
+                return Ok(2);
+            }
+        }
     }
 
     // Sent because `apex-agentd` cannot see this process's working directory.
@@ -342,9 +398,9 @@ fn use_it(service: &str, capability: &str, remote: &str, branch: Option<&str>) -
 
     match agent.call(&AgentRequest::SecretUse {
         service: service.to_string(),
-        capability: capability.to_string(),
-        remote: remote.to_string(),
-        branch: branch.map(str::to_string),
+        operation: operation.to_string(),
+        resource: resource.to_string(),
+        params,
         project,
     })? {
         AgentResponse::Brokered {
@@ -373,13 +429,15 @@ fn use_it(service: &str, capability: &str, remote: &str, branch: Option<&str>) -
     }
 }
 
-/// Refuse to ask a runtime that predates the secret service.
+/// Refuse to ask a runtime that cannot understand the request.
 ///
-/// A daemon below [`BROKERED_SECRET_SERVICE_VERSION`] has its own broker and
-/// its own store in `$HOME`, so it would look for the credential in a place
-/// `apex secret add` no longer writes to and answer "no credential stored" —
-/// a true sentence about the wrong store, and the most confusing possible
-/// reply to somebody who just added one.
+/// A daemon below [`GENERIC_CAPABILITY_VERSION`] expects `capability`, `remote`
+/// and `branch` where this sends `operation`, `resource` and `params`, so it
+/// reads a request for nothing and answers about a capability nobody named.
+/// Below that again it has its own broker and its own store in `$HOME`, and
+/// would look for the credential in a place `apex secret add` no longer writes
+/// to — "no credential stored" is a true sentence about the wrong store, and
+/// the most confusing possible reply to somebody who just added one.
 ///
 /// The guard names the constant rather than a literal, for the same reason the
 /// two before it do: a bare `< 4` is one careless edit away from meaning
@@ -390,9 +448,11 @@ fn require_a_runtime_that_forwards(agent: &mut apex_agent_core::client::Client) 
         // about, and guessing in the permissive direction is the failure mode.
         bail!("the agent runtime did not answer the protocol handshake");
     };
-    if version < BROKERED_SECRET_SERVICE_VERSION {
+    if version < GENERIC_CAPABILITY_VERSION {
         bail!(
-            "the running agent runtime speaks protocol {version} and still keeps its own              credentials, so it would not find one added to the secret service; restart it              with `systemctl --user restart apex-agentd`"
+            "the running agent runtime speaks protocol {version}, which predates generic \
+             capabilities and would not understand this request; restart it with \
+             `systemctl --user restart apex-agentd`"
         );
     }
     Ok(())
@@ -444,23 +504,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_capability_has_a_help_line() {
-        for name in Capability::names() {
-            assert!(
-                !Capability::describe(name).is_empty(),
-                "{name} has no description, so `apex secret capabilities` \
-                 would list it blank"
-            );
+    fn this_cli_knows_no_operation_names() {
+        // The property that makes P1-002 a change to `apex-secretd` alone. If
+        // a list of operations ever appears in this file, adding a provider
+        // becomes an edit here too — which is the coupling P1-001 removed.
+        // Everything above the test module — the test module names operations
+        // on purpose. The doc comment at the top shows the CLI being used,
+        // which is what a `--help` reader needs, so comments are exempt; what
+        // must not appear is a name in executable code.
+        let source = include_str!("secret.rs");
+        let shipped = source.split("#[cfg(test)]").next().expect("source");
+        for name in ["git.", "git-push", "git-fetch", "cloudflare."] {
+            let in_code: Vec<&str> = shipped
+                .lines()
+                .filter(|l| l.contains(name))
+                .filter(|l| !l.trim_start().starts_with("//") && !l.trim_start().starts_with("///"))
+                .collect();
+            assert!(in_code.is_empty(), "{name} is hardcoded in the CLI: {in_code:?}");
         }
     }
 
     #[test]
-    fn the_version_guard_names_the_revision_the_store_moved_in() {
-        // A literal here would be one careless edit from meaning nothing, and
-        // the failure it prevents is a "no credential stored" about a store
-        // the user never wrote to.
+    fn an_option_must_be_written_as_a_pair() {
         assert_eq!(
-            BROKERED_SECRET_SERVICE_VERSION,
+            parse_option("branch=main").unwrap(),
+            ("branch".to_string(), "main".to_string())
+        );
+        // An empty value is a value: a provider may declare an option whose
+        // presence is the point.
+        assert_eq!(
+            parse_option("force=").unwrap(),
+            ("force".to_string(), String::new())
+        );
+        for evil in ["branch", "=main", ""] {
+            assert!(parse_option(evil).is_err(), "'{evil}' was accepted");
+        }
+    }
+
+    #[test]
+    fn the_version_guard_names_the_revision_the_wire_changed_in() {
+        // A literal here would be one careless edit from meaning nothing, and
+        // the failure it prevents is a request an older daemon reads as naming
+        // no capability at all.
+        assert_eq!(
+            GENERIC_CAPABILITY_VERSION,
             apex_agent_core::protocol::PROTOCOL_VERSION,
             "the guard must name the current revision, or it can never fire"
         );
@@ -519,11 +606,14 @@ mod tests {
     fn the_capability_text_says_the_credential_is_never_handed_over() {
         // `apex secret capabilities` is where somebody decides whether to trust
         // this with a credential. If it stops saying what the service refuses
-        // to do, the one thing they needed is gone.
-        let mut text = String::new();
-        for name in Capability::names() {
-            text.push_str(Capability::describe(name));
+        // to do, the one thing they needed is gone. The operation list comes
+        // from the daemon; this sentence is the CLI's own and has to stay.
+        let source = include_str!("secret.rs");
+        for phrase in [
+            "never hands over the credential",
+            "never given as a URL",
+        ] {
+            assert!(source.contains(phrase), "`apex secret capabilities` no longer says: {phrase}");
         }
-        assert!(text.contains("remote"), "{text}");
     }
 }

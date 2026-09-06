@@ -25,8 +25,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use apex_secret_core::audit::{self, AuditEvent, AuditLine};
-use apex_secret_core::capability::{self, Capability, CapabilityError, CapabilityRecord};
-use apex_secret_core::operation::{OperationSpec, Params};
+use apex_secret_core::capability::{self, CapabilityRecord, EndpointError};
+use apex_secret_core::operation::OperationSpec;
 use apex_secret_core::protocol::{ErrorKind, Response};
 use apex_secret_core::store::{self, ServiceInfo, Store, StoreError};
 use apex_secret_core::SecretValue;
@@ -83,6 +83,7 @@ impl Service {
         Response::Hello {
             version: apex_secret_core::protocol::PROTOCOL_VERSION,
             capabilities: self.registry.operation_ids(),
+            vocabulary: self.registry.vocabulary(),
             protected: self.protected,
         }
     }
@@ -307,9 +308,6 @@ impl Service {
     pub fn use_capability(&self, peer: Peer, mut record: CapabilityRecord) -> Response {
         let audit_id = self.next_audit_id();
         record.audit_id = audit_id.clone();
-        // The record's own idea of what it touches is replaced by the
-        // operation's, so the two cannot disagree in the audit trail.
-        record.resource = record.operation.remote().to_string();
 
         let refuse = |record: &CapabilityRecord, reason: String, kind: ErrorKind| -> Response {
             self.record(AuditLine {
@@ -349,12 +347,14 @@ impl Service {
         // provider declares never reaches a credential — the same property
         // P0-002's closed enum had, held by the registry instead so that adding
         // a provider does not mean editing a type in `apex-secret-core`.
-        let (name, resource, params) = generic(&record.operation);
-        let (backend, op) = match self.registry.lookup(name) {
+        let (backend, op) = match self.registry.lookup(&record.operation) {
             Ok(found) => found,
             Err(e) => return refuse(&record, e.to_string(), ErrorKind::BadRequest),
         };
-        if let Err(e) = op.check(&resource, &params) {
+        // The canonical id replaces whatever spelling arrived, so the trail and
+        // the grant table cannot end up describing the same operation two ways.
+        record.operation = op.id.to_string();
+        if let Err(e) = op.check(&record.resource, &record.params) {
             return refuse(&record, e.to_string(), ErrorKind::BadRequest);
         }
 
@@ -417,8 +417,8 @@ impl Service {
         // allowed.
         let req = provider::Bind {
             operation: op,
-            resource: &resource,
-            params: &params,
+            resource: &record.resource,
+            params: &record.params,
             project: &project,
             service: &info,
             owner: &owner,
@@ -436,7 +436,7 @@ impl Service {
         {
             return refuse(
                 &record,
-                CapabilityError::HostMismatch {
+                EndpointError::HostMismatch {
                     remote_host: bound.endpoint.to_string(),
                     service_host: format!("{}://{}", info.scheme, info.host),
                 }
@@ -493,24 +493,6 @@ impl Service {
 enum Decision {
     Allowed(&'static str),
     Refused(String),
-}
-
-/// A P0-002 capability, as the generic pipeline sees it.
-///
-/// The bridge between the wire this build still speaks — a closed
-/// `Capability` enum with git's arguments as fields — and the framework, which
-/// takes an operation name, a resource and a declared parameter map. It goes
-/// when the wire does.
-fn generic(cap: &Capability) -> (&'static str, String, Params) {
-    let mut params = Params::new();
-    if let Capability::GitPush {
-        branch: Some(branch),
-        ..
-    } = cap
-    {
-        params.insert("branch".to_string(), branch.clone());
-    }
-    (cap.name(), cap.remote().to_string(), params)
 }
 
 /// Which protocol error a provider's refusal is.
@@ -599,10 +581,7 @@ mod tests {
     }
 
     fn record(provider: &str, cap: &str, remote: &str, project: &str) -> CapabilityRecord {
-        let mut rec = CapabilityRecord::new(
-            provider,
-            Capability::parse(cap, remote, None).expect("capability"),
-        );
+        let mut rec = CapabilityRecord::new(provider, cap, remote);
         rec.project = Some(project.to_string());
         rec
     }
@@ -614,6 +593,7 @@ mod tests {
             Response::Hello {
                 version,
                 capabilities,
+                vocabulary,
                 protected,
             } => {
                 assert_eq!(version, apex_secret_core::protocol::PROTOCOL_VERSION);
@@ -622,6 +602,12 @@ mod tests {
                 // spelling on its way out teaches people to use it.
                 assert!(capabilities.contains(&"git.fetch".to_string()), "{capabilities:?}");
                 assert!(!capabilities.contains(&"git-fetch".to_string()), "{capabilities:?}");
+                // And with enough beside each id that `apex secret
+                // capabilities` needs no list of its own.
+                let fetch = vocabulary.iter().find(|o| o.id == "git.fetch").expect("in vocabulary");
+                assert!(!fetch.summary.is_empty());
+                assert_eq!(fetch.effect, "read");
+                assert_eq!(vocabulary.len(), capabilities.len());
                 // A daemon running as an ordinary user must say so rather than
                 // implying a boundary it does not have.
                 assert!(!protected);
@@ -890,7 +876,10 @@ mod tests {
         let line = refused[0];
         assert!(!line.audit_id.is_empty());
         assert_eq!(line.provider, "demo");
-        assert_eq!(line.operation, "git-fetch");
+        // The request named the operation by its old spelling; the trail says
+        // the canonical one, so one operation cannot appear in an audit under
+        // two names depending on how the caller typed it.
+        assert_eq!(line.operation, "git.fetch");
         assert_eq!(line.resource, "origin");
         assert_eq!(line.uid, peer.uid);
         assert!(line.reason.as_deref().is_some_and(|r| r.contains("not granted")));

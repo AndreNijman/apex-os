@@ -14,9 +14,9 @@
 //!
 //! ## Why a declared vocabulary and not a closed enum
 //!
-//! P0-002's [`crate::Capability`] is a closed Rust enum, and the argument for
-//! it is in that module: *"a variant carrying a command line would be a way to
-//! run anything with a credential attached, and no reviewer can meaningfully
+//! P0-002 shipped a closed Rust enum, with git's arguments as its fields, and
+//! the argument for it was: *"a variant carrying a command line would be a way
+//! to run anything with a credential attached, and no reviewer can meaningfully
 //! approve that."* That argument is about **arguments**, not about enums, and
 //! this module keeps it while dropping the enum:
 //!
@@ -28,9 +28,9 @@
 //!   is what keeps "there is no command line here" true once parameters are a
 //!   map instead of enum fields;
 //! * no [`Syntax`] admits a string that could be read as a URL, a shell word or
-//!   an option. That is the same rule [`crate::capability::valid_remote_name`]
-//!   already enforces for git remotes, generalised: *a session that could name a
-//!   URL could ask the broker to send the credential to a host it chose.*
+//!   an option. That is the rule P0-002 enforced for git remote names,
+//!   generalised to every provider: *a session that could name a URL could ask
+//!   the broker to send the credential to a host it chose.*
 //!
 //! What the enum bought and this does not is a compile error when a provider
 //! adds an operation its runner does not handle. What it cost was that every
@@ -40,6 +40,8 @@
 //! serve a registry whose operation ids do not parse.
 
 use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 
 /// Longest an operation id may be, in bytes.
 pub const MAX_OPERATION_ID: usize = 128;
@@ -510,9 +512,8 @@ pub type Params = BTreeMap<String, String>;
 
 // ── the scalar grammars ─────────────────────────────────────────────────────
 
-/// One name segment: what [`crate::capability::valid_remote_name`] accepts,
-/// which is what git accepts minus anything that could be read as a URL or an
-/// option.
+/// One name segment: what git accepts for a remote, minus anything that could
+/// be read as a URL or an option — generalised from there to every provider.
 ///
 /// The leading-character rule is the one that matters. `-` first would be read
 /// as an option; `:` or `/` anywhere is how a URL looks.
@@ -545,8 +546,27 @@ pub fn valid_path(path: &str) -> bool {
 }
 
 /// A git-style ref: a branch, a tag, a version label.
+///
+/// git's own branch rules, tightened. Notably refused: a leading `-` (an
+/// option), `..` (a revision range), and every control character. A ref reaches
+/// a command line, and this is the check that keeps it from being read as
+/// something else.
 pub fn valid_ref(name: &str) -> bool {
-    crate::capability::valid_branch_name(name)
+    if name.is_empty() || name.len() > 255 {
+        return false;
+    }
+    if name.starts_with('-') || name.starts_with('/') || name.ends_with('/') {
+        return false;
+    }
+    if name.contains("..") || name.contains("//") {
+        return false;
+    }
+    if name.ends_with(".lock") || name == "@" {
+        return false;
+    }
+    name.chars().all(|c| {
+        (c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/' | '+')) && !c.is_control()
+    })
 }
 
 /// Bounded free text.
@@ -557,6 +577,55 @@ pub fn valid_text(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= MAX_TEXT
         && !text.chars().any(|c| c.is_control())
+}
+
+/// One operation, in a form that crosses the wire.
+///
+/// [`OperationSpec`] is `&'static` and cannot be sent; this is what
+/// `Response::Hello` carries so `apex secret capabilities` prints the vocabulary
+/// the daemon actually serves rather than one the CLI hardcoded and would have
+/// to keep in step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationInfo {
+    pub id: String,
+    pub summary: String,
+    pub effect: String,
+    /// `none`, `name` or `path` — what the caller must give as the resource.
+    pub resource: String,
+    #[serde(default)]
+    pub params: Vec<ParamInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParamInfo {
+    pub name: String,
+    pub summary: String,
+    pub required: bool,
+}
+
+impl OperationInfo {
+    pub fn of(op: &OperationSpec) -> OperationInfo {
+        OperationInfo {
+            id: op.id.to_string(),
+            summary: op.summary.to_string(),
+            effect: op.effect.as_str().to_string(),
+            resource: match op.resource {
+                ResourceKind::None => "none",
+                ResourceKind::Name => "name",
+                ResourceKind::Path => "path",
+            }
+            .to_string(),
+            params: op
+                .params
+                .iter()
+                .map(|p| ParamInfo {
+                    name: p.name.to_string(),
+                    summary: p.summary.to_string(),
+                    required: p.required,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -868,6 +937,31 @@ mod tests {
             write.check("thing", &many),
             Err(VocabularyError::TooManyParams(_))
         ));
+    }
+
+    #[test]
+    fn a_wire_form_carries_what_the_cli_needs_to_print() {
+        // The CLI prints the daemon's vocabulary rather than one of its own, so
+        // a provider added to the daemon shows up in `apex secret capabilities`
+        // without the CLI being rebuilt around it.
+        let info = OperationInfo::of(DEMO.operation("demo.thing.write").unwrap());
+        assert_eq!(info.id, "demo.thing.write");
+        assert_eq!(info.effect, "write");
+        assert_eq!(info.resource, "name");
+        assert_eq!(info.params.len(), 2);
+        assert!(info.params.iter().any(|p| p.name == "version" && p.required));
+        let text = serde_json::to_string(&info).unwrap();
+        assert_eq!(serde_json::from_str::<OperationInfo>(&text).unwrap(), info);
+    }
+
+    #[test]
+    fn a_ref_refuses_an_option_and_a_revision_range() {
+        for good in ["main", "feat/x-1.2", "v1.0.0+build"] {
+            assert!(valid_ref(good), "{good}");
+        }
+        for evil in ["-f", "a..b", "x/", "/x", "a//b", "a.lock", "@", "", "a\nb"] {
+            assert!(!valid_ref(evil), "'{}' was accepted as a ref", evil.escape_debug());
+        }
     }
 
     #[test]

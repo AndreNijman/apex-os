@@ -17,6 +17,8 @@
 //! Agent Center, so field renames are breaking changes and need the same care
 //! as `org.apexos.Apexd1`.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::origin::OriginSource;
@@ -48,7 +50,15 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// the two above and still worth naming: a daemon below this reads its OWN old
 /// store, so a credential added to the secret service is simply not found and
 /// the user is told they never stored it.
-pub const PROTOCOL_VERSION: u32 = 4;
+///
+/// 5 — capabilities became generic (§13.2, §14, P1-001). `SecretUse` carried
+/// git's arguments as fields — `capability`, `remote`, `branch` — which meant
+/// every provider §14 names would have had to widen this protocol. It now
+/// carries an operation id, a resource and a declared parameter map, so
+/// `cloudflare.worker.deploy` needs nothing here. A daemon below this does not
+/// understand `operation` and answers as though no capability was named, so the
+/// CLI refuses to ask one.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// The revision at which the credential store moved to `apex-secretd`.
 ///
@@ -56,12 +66,20 @@ pub const PROTOCOL_VERSION: u32 = 4;
 /// and a bare `< 4` in the CLI is one careless edit away from meaning nothing.
 pub const BROKERED_SECRET_SERVICE_VERSION: u32 = 4;
 
+/// The revision at which a capability stopped being git-shaped.
+///
+/// Below this, `SecretUse` has `capability`/`remote`/`branch` and no
+/// `operation`, so a request from a current CLI deserialises into a request for
+/// nothing. Named for the same reason as the three around it.
+pub const GENERIC_CAPABILITY_VERSION: u32 = 5;
+
 /// The guards arrive in order, checked when the crate compiles rather than
 /// when a test runs: they are facts about three constants, and a revision
 /// numbered behind the one before it would make a `<` comparison in the CLI
 /// mean something nobody intended.
 const _: () = assert!(POLICY_DIMENSIONS_VERSION < REQUEST_ORIGIN_VERSION);
 const _: () = assert!(REQUEST_ORIGIN_VERSION < BROKERED_SECRET_SERVICE_VERSION);
+const _: () = assert!(BROKERED_SECRET_SERVICE_VERSION < GENERIC_CAPABILITY_VERSION);
 
 /// The revision that first carried the six dimensions.
 ///
@@ -440,17 +458,32 @@ pub enum Request {
 
     // ── the secret broker (§4) ──────────────────────────────────────────────
     //
-    // Note what `SecretUse` does NOT carry: a session id, and a remote URL.
-    // The session comes from the connection's peer credentials, and the remote
-    // is a NAME the daemon resolves against the repository — a URL would let a
-    // session choose where its token gets sent.
+    // Note what `SecretUse` does NOT carry: a session id, and a URL. The
+    // session comes from the connection's peer credentials, and the resource is
+    // a NAME the provider resolves for itself — a URL would let a session
+    // choose where its token gets sent.
+    //
+    // Note also what it does not carry any more: git. `capability`, `remote`
+    // and `branch` were one provider's arguments in a protocol every provider
+    // has to fit through, and P1-001 replaced them with an operation id, a
+    // resource and a declared parameter map. This is what "provider plugins can
+    // be added without changing agent core" means concretely — a Cloudflare
+    // worker deployment is `operation: "cloudflare.worker.deploy"` and needs no
+    // line here.
     /// Ask the broker to perform a capability. The token never comes back.
     SecretUse {
         service: String,
-        capability: String,
-        remote: String,
+        /// The §13.2 operation id: `git.push`, `cloudflare.worker.deploy`.
+        operation: String,
+        /// What it acts on, as a NAME. Empty for an operation that names
+        /// nothing, such as reading an account.
         #[serde(default)]
-        branch: Option<String>,
+        resource: String,
+        /// The operation's own arguments. Checked by `apex-secretd` against
+        /// what the provider declared; an undeclared one is refused, so this
+        /// map is not a way to smuggle a command line through.
+        #[serde(default)]
+        params: BTreeMap<String, String>,
         /// The caller's project root.
         ///
         /// Honoured ONLY when the peer is not a managed session. A session's
@@ -953,9 +986,9 @@ mod tests {
             },
             Request::SecretUse {
                 service: "github".into(),
-                capability: "git-push".into(),
-                remote: "origin".into(),
-                branch: Some("feat/x".into()),
+                operation: "git.push".into(),
+                resource: "origin".into(),
+                params: BTreeMap::from([("branch".to_string(), "feat/x".to_string())]),
                 project: Some("/home/t/p".into()),
             },
             Request::Info { id: 1 },
@@ -1138,6 +1171,7 @@ mod tests {
             ("the six dimensions", POLICY_DIMENSIONS_VERSION),
             ("request_origin", REQUEST_ORIGIN_VERSION),
             ("the secret service", BROKERED_SECRET_SERVICE_VERSION),
+            ("generic capabilities", GENERIC_CAPABILITY_VERSION),
         ] {
             assert!(
                 since <= PROTOCOL_VERSION,
@@ -1147,7 +1181,7 @@ mod tests {
         }
         // The newest guard is the current revision: adding a wire field
         // without bumping the version is the fail-open these exist to catch.
-        assert_eq!(BROKERED_SECRET_SERVICE_VERSION, PROTOCOL_VERSION);
+        assert_eq!(GENERIC_CAPABILITY_VERSION, PROTOCOL_VERSION);
     }
 
     #[test]

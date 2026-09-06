@@ -31,14 +31,117 @@
 //! another one. Cloudflare's §13.4 scoped tokens are the case `mint` exists
 //! for.
 
-use apex_secret_core::capability::Capability;
 use apex_secret_core::operation::{
-    Effect, OperationSpec, ParamSpec, ProviderSpec, ResourceKind, Syntax,
+    self, Effect, OperationSpec, ParamSpec, ProviderSpec, ResourceKind, Syntax,
 };
 use apex_secret_core::SecretValue;
 
 use crate::broker;
 use crate::provider::{Bind, Bound, Endpoint, Performed, Provider, ProviderError};
+
+/// A git operation, typed, with its arguments.
+///
+/// P0-002 had this in `apex-secret-core` under the name `Capability`, where it
+/// was the whole vocabulary and every future provider would have had to edit
+/// it. It is now what it always was: **one provider's argv builder**, private
+/// to the git provider, and the thing that keeps a remote name from reaching
+/// `git` as anything other than a remote name.
+///
+/// [`crate::broker`] matches on it to build the command line, which is why it
+/// is `pub` within the crate rather than private to this module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitOp {
+    /// `git push <remote> <branch>` — remote by NAME, resolved by the daemon.
+    Push {
+        remote: String,
+        /// `None` means the current branch, resolved by git.
+        branch: Option<String>,
+    },
+    /// `git fetch <remote>`.
+    Fetch { remote: String },
+    /// `git ls-remote <remote>` — the refs the remote advertises.
+    LsRemote { remote: String },
+}
+
+/// Why the git provider refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitError {
+    /// Not one of the three operations this provider implements.
+    NotMine(String),
+    BadRemoteName(String),
+    BadBranchName(String),
+    /// The named remote is not configured in this repository.
+    NoSuchRemote(String),
+}
+
+impl std::fmt::Display for GitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GitError::NotMine(op) => write!(
+                f,
+                "the git provider was handed '{}', which it does not implement",
+                op.escape_debug()
+            ),
+            GitError::BadRemoteName(r) => write!(
+                f,
+                "'{}' is not a git remote name. The broker takes a NAME, never \
+                 a URL — a URL would let a session choose where your token gets \
+                 sent",
+                r.escape_debug()
+            ),
+            GitError::BadBranchName(b) => {
+                write!(f, "'{}' is not a valid branch name", b.escape_debug())
+            }
+            GitError::NoSuchRemote(r) => {
+                write!(f, "this repository has no remote called '{}'", r.escape_debug())
+            }
+        }
+    }
+}
+
+impl std::error::Error for GitError {}
+
+impl From<GitError> for ProviderError {
+    fn from(e: GitError) -> ProviderError {
+        match e {
+            GitError::NoSuchRemote(_) => ProviderError::NoSuchResource(e.to_string()),
+            GitError::NotMine(_) => ProviderError::Failed(e.to_string()),
+            other => ProviderError::Refused(other.to_string()),
+        }
+    }
+}
+
+impl GitOp {
+    pub fn remote(&self) -> &str {
+        match self {
+            GitOp::Push { remote, .. } | GitOp::Fetch { remote } | GitOp::LsRemote { remote } => {
+                remote
+            }
+        }
+    }
+
+    /// Whether the operation can change the remote.
+    ///
+    /// Decides which URL is resolved: git honours `remote.<name>.pushurl` and
+    /// `url.<base>.pushInsteadOf`, so a repository can send pushes somewhere
+    /// the fetch URL never mentions. Pinning the host against the fetch URL and
+    /// then pushing to the push URL would check the wrong thing.
+    pub fn is_write(&self) -> bool {
+        matches!(self, GitOp::Push { .. })
+    }
+
+    /// One line for the audit trail and the reply.
+    pub fn summary(&self) -> String {
+        match self {
+            GitOp::Push { remote, branch } => match branch {
+                Some(b) => format!("git push {remote} {b}"),
+                None => format!("git push {remote} (current branch)"),
+            },
+            GitOp::Fetch { remote } => format!("git fetch {remote}"),
+            GitOp::LsRemote { remote } => format!("git ls-remote {remote}"),
+        }
+    }
+}
 
 /// What a caller names: a git remote.
 const REMOTE: ResourceKind = ResourceKind::Name;
@@ -94,24 +197,28 @@ impl GitProvider {
     ///
     /// The framework has already established that the operation is one of the
     /// three, that the resource is a name and not a URL, and that `branch` — if
-    /// given — is a valid ref. This re-parses through
-    /// [`Capability::parse`] anyway rather than constructing the variant
-    /// directly: one validation path, and a provider that trusted the framework
+    /// given — is a valid ref. This checks all of it again rather than
+    /// constructing the variant directly: a provider that trusted the framework
     /// to have checked would be a provider that stops being correct the day the
-    /// framework's checks move.
-    fn capability(req: &Bind<'_>) -> Result<Capability, ProviderError> {
-        let legacy = match req.operation.id {
-            "git.push" => "git-push",
-            "git.fetch" => "git-fetch",
-            "git.ls-remote" => "git-ls-remote",
-            other => {
-                return Err(ProviderError::Failed(format!(
-                    "the git provider was handed '{other}', which it does not implement"
-                )))
+    /// framework's checks move, and this is the last place before a remote name
+    /// becomes a word on a command line.
+    fn op(req: &Bind<'_>) -> Result<GitOp, GitError> {
+        let remote = req.resource.to_string();
+        if !operation::valid_name(&remote) {
+            return Err(GitError::BadRemoteName(remote));
+        }
+        let branch = req.params.get("branch").cloned();
+        if let Some(b) = &branch {
+            if !operation::valid_ref(b) {
+                return Err(GitError::BadBranchName(b.clone()));
             }
-        };
-        let branch = req.params.get("branch").map(String::as_str);
-        Capability::parse(legacy, req.resource, branch).map_err(ProviderError::from)
+        }
+        match req.operation.id {
+            "git.push" => Ok(GitOp::Push { remote, branch }),
+            "git.fetch" => Ok(GitOp::Fetch { remote }),
+            "git.ls-remote" => Ok(GitOp::LsRemote { remote }),
+            other => Err(GitError::NotMine(other.to_string())),
+        }
     }
 }
 
@@ -127,11 +234,20 @@ impl Provider for GitProvider {
     /// mentions — and the framework pins whatever comes back, so resolving the
     /// wrong one would pin the wrong host.
     fn bind(&self, req: &Bind<'_>) -> Result<Bound, ProviderError> {
-        let cap = GitProvider::capability(req)?;
-        let url = broker::resolve_url(req.project, &cap, req.owner)?;
+        let op = GitProvider::op(req)?;
+        let url = broker::resolve_url(req.project, &op, req.owner)?;
+        let endpoint = Endpoint::from_url(&url).map_err(|e| {
+            // The framework says a destination is not http; git is the layer
+            // that knows why somebody hit this, which is an ssh remote.
+            ProviderError::Refused(format!(
+                "{e} — that remote is not an http remote, so a stored token is \
+                 not how it authenticates. An ssh remote uses your ssh agent, \
+                 which a confined session cannot reach, by design"
+            ))
+        })?;
         Ok(Bound {
-            endpoint: Endpoint::from_url(&url)?,
-            detail: cap.summary(),
+            endpoint,
+            detail: op.summary(),
         })
     }
 
@@ -143,8 +259,8 @@ impl Provider for GitProvider {
         _bound: &Bound,
         value: &SecretValue,
     ) -> Result<Performed, ProviderError> {
-        let cap = GitProvider::capability(req)?;
-        let out = broker::perform(req.project, &cap, req.service, value, req.owner)
+        let op = GitProvider::op(req)?;
+        let out = broker::perform(req.project, &op, req.service, value, req.owner)
             .map_err(ProviderError::Failed)?;
         Ok(Performed {
             code: out.code,
@@ -219,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn a_request_the_framework_checked_still_goes_through_the_capability_parser() {
+    fn a_request_the_framework_checked_is_checked_again_here() {
         let owner = broker::owner(unsafe { libc::getuid() }).expect("own uid");
         let info = service();
         let p = params(&[("branch", "feat/x-1.2")]);
@@ -231,11 +347,10 @@ mod tests {
             service: &info,
             owner: &owner,
         };
-        let cap = GitProvider::capability(&req).expect("a checked request must parse");
-        assert_eq!(cap.name(), "git-push");
-        assert_eq!(cap.remote(), "origin");
-        assert!(cap.is_write());
-        assert_eq!(cap.summary(), "git push origin feat/x-1.2");
+        let op = GitProvider::op(&req).expect("a checked request must parse");
+        assert_eq!(op.remote(), "origin");
+        assert!(op.is_write());
+        assert_eq!(op.summary(), "git push origin feat/x-1.2");
     }
 
     #[test]
@@ -253,7 +368,24 @@ mod tests {
             service: &info,
             owner: &owner,
         };
-        assert!(GitProvider::capability(&req).is_err());
+        assert!(matches!(
+            GitProvider::op(&req),
+            Err(GitError::BadRemoteName(_))
+        ));
+        // And a branch that is an option, however it got here.
+        let p = params(&[("branch", "-f")]);
+        let req = Bind {
+            operation: SPEC.operation("git.push").unwrap(),
+            resource: "origin",
+            params: &p,
+            project: "/home/x/p",
+            service: &info,
+            owner: &owner,
+        };
+        assert!(matches!(
+            GitProvider::op(&req),
+            Err(GitError::BadBranchName(_))
+        ));
     }
 
     #[test]

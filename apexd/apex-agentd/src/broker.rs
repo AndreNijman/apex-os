@@ -39,13 +39,14 @@
 //! have the network. The same property is why `git push` already works from a
 //! `strict` session today.
 //!
-//! Nothing in the network dimension is checked here, deliberately.
-//! [`Capability`] is the seam a cloud provider attaches to: adding a variant, a
-//! name in `Capability::names`, and an arm in `apex-secretd`'s runner is the
-//! whole of what P1-002's Cloudflare provider needs in order to be usable from
-//! a session with no network — the confinement, the grant check, the audit
-//! record and the namespace argument above all apply to a new capability
-//! unchanged. The one dimension that can shut this door is the secret one,
+//! Nothing in the network dimension is checked here, deliberately. Nothing
+//! about a *provider* is either, and after P1-001 that is a property rather
+//! than an omission: this module forwards an operation id, a resource and a
+//! parameter map without knowing what any of them mean, so P1-002's Cloudflare
+//! provider is registered in `apex-secretd` and reaches a session with no
+//! network through this path with no line changing here. The confinement, the
+//! grant check, the audit record and the namespace argument above all apply to
+//! it unchanged. The one dimension that can shut this door is the secret one,
 //! checked below, and `--network brokered --secrets none` is refused by
 //! `AgentPolicy::validate` before a session with both is ever started.
 //!
@@ -68,9 +69,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use std::collections::BTreeMap;
+
 use apex_agent_core::protocol::{ErrorKind, Response};
-use apex_secret_core::capability::{Capability, CapabilityRecord};
+use apex_secret_core::capability::CapabilityRecord;
 use apex_secret_core::client::Client;
+use apex_secret_core::operation::{OperationId, Params};
 use apex_secret_core::protocol as secret_protocol;
 
 use crate::peer::Peer;
@@ -98,15 +102,21 @@ pub fn use_capability(
     daemon: &Arc<Daemon>,
     peer: Option<Peer>,
     service: &str,
-    capability: &str,
-    remote: &str,
-    branch: Option<&str>,
+    operation: &str,
+    resource: &str,
+    params: &BTreeMap<String, String>,
     claimed_project: Option<&str>,
 ) -> Response {
-    let cap = match Capability::parse(capability, remote, branch) {
-        Ok(c) => c,
-        Err(e) => return Response::error(ErrorKind::BadRequest, e.to_string()),
-    };
+    // Shape only, and that is the whole of what this daemon knows about a
+    // capability. Which operations exist, what a resource means for one, and
+    // which options it takes are the provider's, declared in `apex-secretd`'s
+    // registry — so a provider added there needs nothing here. What is worth
+    // catching locally is a name that could not be an operation under any
+    // provider, because that is a typo and the round trip tells the user
+    // nothing extra.
+    if let Err(e) = OperationId::parse(operation) {
+        return Response::error(ErrorKind::BadRequest, e.to_string());
+    }
 
     let who = privilege::origin(daemon, peer);
 
@@ -156,7 +166,8 @@ pub fn use_capability(
         );
     };
 
-    let mut record = CapabilityRecord::new(service, cap);
+    let mut record = CapabilityRecord::new(service, operation, resource);
+    record.params = params.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Params>();
     record.project = Some(project);
     // Attribution, not authentication. `apex-secretd` cannot re-derive either
     // of these — it would have to trust a list of session pids published by a
@@ -213,8 +224,8 @@ fn perform(record: CapabilityRecord) -> Response {
             output,
         }) => Response::Brokered {
             service: record.provider.clone(),
-            capability: record.operation.name().to_string(),
-            detail: record.operation.summary(),
+            capability: record.operation.clone(),
+            detail: record.summary(),
             audit_id: record.audit_id.clone(),
             endpoint,
             exit_code,
@@ -252,10 +263,7 @@ mod tests {
     use apex_agent_core::policy::RequestOrigin;
 
     fn record() -> CapabilityRecord {
-        CapabilityRecord::new(
-            "demo",
-            Capability::parse("git-fetch", "origin", None).unwrap(),
-        )
+        CapabilityRecord::new("demo", "git.fetch", "origin")
     }
 
     #[test]
@@ -273,11 +281,18 @@ mod tests {
     }
 
     #[test]
-    fn a_capability_is_parsed_before_anything_is_sent() {
-        // The daemon refuses a malformed capability itself, so a typo does not
-        // become a connection to the secret service and a round trip.
-        for (cap, remote) in [("exec", "origin"), ("git-fetch", "https://x/y")] {
-            assert!(Capability::parse(cap, remote, None).is_err(), "{cap} {remote}");
+    fn an_operation_name_is_shape_checked_before_anything_is_sent() {
+        // A typo does not become a connection to the secret service and a
+        // round trip. What this daemon checks is the SHAPE — it does not know
+        // which operations exist, and must not, or a provider added to
+        // `apex-secretd` would need a line here too.
+        for evil in ["exec", "git push", "https://x/y", "", "GIT.PUSH"] {
+            assert!(OperationId::parse(evil).is_err(), "{evil}");
+        }
+        // Including names for providers this build has never heard of: the
+        // shape is all this layer is entitled to an opinion about.
+        for good in ["git.push", "cloudflare.r2.object.read", "aws.s3.object.write"] {
+            assert!(OperationId::parse(good).is_ok(), "{good}");
         }
     }
 

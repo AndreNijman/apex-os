@@ -58,9 +58,10 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use apex_secret_core::capability::{Capability, CapabilityError};
 use apex_secret_core::store::ServiceInfo;
 use apex_secret_core::SecretValue;
+
+use crate::providers::git::{GitError, GitOp};
 
 /// How long a brokered git operation may run.
 ///
@@ -176,11 +177,7 @@ pub fn valid_project(path: &str) -> bool {
 
 /// The URL a remote resolves to, in the same configuration the operation will
 /// run in.
-pub fn resolve_url(
-    project: &str,
-    cap: &Capability,
-    owner: &Owner,
-) -> Result<String, CapabilityError> {
+pub fn resolve_url(project: &str, cap: &GitOp, owner: &Owner) -> Result<String, GitError> {
     let mut args = vec!["-C".to_string(), project.to_string(), "remote".into(), "get-url".into()];
     if cap.is_write() {
         args.push("--push".into());
@@ -188,13 +185,13 @@ pub fn resolve_url(
     args.push(cap.remote().to_string());
 
     let out = run_git(&args, owner, None)
-        .map_err(|_| CapabilityError::NoSuchRemote(cap.remote().to_string()))?;
+        .map_err(|_| GitError::NoSuchRemote(cap.remote().to_string()))?;
     if out.code != 0 {
-        return Err(CapabilityError::NoSuchRemote(cap.remote().to_string()));
+        return Err(GitError::NoSuchRemote(cap.remote().to_string()));
     }
     let url = out.text.lines().next().unwrap_or("").trim().to_string();
     if url.is_empty() {
-        return Err(CapabilityError::NoSuchRemote(cap.remote().to_string()));
+        return Err(GitError::NoSuchRemote(cap.remote().to_string()));
     }
     Ok(url)
 }
@@ -210,7 +207,7 @@ pub struct Output {
 /// Returns the child's combined output with the credential scrubbed out of it.
 pub fn perform(
     project: &str,
-    cap: &Capability,
+    cap: &GitOp,
     info: &ServiceInfo,
     value: &SecretValue,
     owner: &Owner,
@@ -222,16 +219,16 @@ pub fn perform(
     let mut args: Vec<String> = vec!["-C".to_string(), project.to_string()];
     args.extend(hardening_flags());
     match cap {
-        Capability::GitPush { remote, branch } => {
+        GitOp::Push { remote, branch } => {
             args.push("push".into());
             args.push(remote.clone());
             args.push(branch.clone().unwrap_or_else(|| "HEAD".into()));
         }
-        Capability::GitFetch { remote } => {
+        GitOp::Fetch { remote } => {
             args.push("fetch".into());
             args.push(remote.clone());
         }
-        Capability::GitLsRemote { remote } => {
+        GitOp::LsRemote { remote } => {
             args.push("ls-remote".into());
             args.push(remote.clone());
         }

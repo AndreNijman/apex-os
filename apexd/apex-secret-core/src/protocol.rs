@@ -34,8 +34,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::capability::CapabilityRecord;
 use crate::audit::AuditLine;
+use crate::capability::CapabilityRecord;
+use crate::operation::OperationInfo;
 use crate::store::ServiceInfo;
 
 /// Bumped when a change is not backward compatible. Clients send nothing and
@@ -121,9 +122,20 @@ pub enum Response {
     /// Version and vocabulary.
     Hello {
         version: u32,
-        /// The capability names this build offers, so a client does not have to
-        /// hardcode them to print a help text.
+        /// The operation ids this build offers, so a client does not have to
+        /// hardcode them to print a help text. Canonical ids only — an alias is
+        /// an input the daemon accepts, never a spelling it teaches.
         capabilities: Vec<String>,
+        /// The same operations with what a person needs to use them: a summary,
+        /// whether they change anything, and their declared options.
+        ///
+        /// Beside `capabilities` rather than replacing it, so a client built
+        /// against the older reply still parses this one. It is what makes
+        /// `apex secret capabilities` a view of the daemon's registry instead
+        /// of a list the CLI keeps in step by hand — which is how a provider
+        /// gets added without the CLI changing.
+        #[serde(default)]
+        vocabulary: Vec<OperationInfo>,
         /// Whether the daemon holds the store behind a uid boundary, or is
         /// running as an ordinary user for a test. `apex secret list` says so
         /// when it is false, rather than letting a test instance look like a
@@ -226,20 +238,32 @@ impl Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::Capability;
     use crate::audit::{AuditEvent, AuditLine};
+    use crate::operation::ParamInfo;
 
     /// Every variant, constructed. A `Vec` rather than a `match`, because the
     /// point is to have one of each to serialise.
     fn every_response() -> Vec<Response> {
         let record = Box::new(CapabilityRecord::new(
             "demo",
-            Capability::parse("git-fetch", "origin", None).unwrap(),
+            "git.fetch",
+            "origin",
         ));
         vec![
             Response::Hello {
                 version: PROTOCOL_VERSION,
-                capabilities: Capability::names().iter().map(|s| s.to_string()).collect(),
+                capabilities: vec!["git.fetch".to_string(), "git.push".to_string()],
+                vocabulary: vec![OperationInfo {
+                    id: "git.push".into(),
+                    summary: "push a branch of this project to one of its own remotes".into(),
+                    effect: "write".into(),
+                    resource: "name".into(),
+                    params: vec![ParamInfo {
+                        name: "branch".into(),
+                        summary: "branch to push; defaults to the current one".into(),
+                        required: false,
+                    }],
+                }],
                 protected: true,
             },
             Response::Ok,
@@ -363,7 +387,8 @@ mod tests {
             Request::Use {
                 record: Box::new(CapabilityRecord::new(
                     "demo",
-                    Capability::parse("git-push", "origin", Some("main")).unwrap(),
+                    "git.push",
+                    "origin",
                 )),
             },
             Request::Audit { lines: 5 },

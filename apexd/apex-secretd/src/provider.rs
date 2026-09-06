@@ -55,8 +55,10 @@
 //! and reads a caller-controlled repository, and neither should happen for a
 //! request that was never allowed.
 
-use apex_secret_core::capability::{self, CapabilityError};
-use apex_secret_core::operation::{OperationSpec, Params, ProviderSpec, VocabularyError};
+use apex_secret_core::capability::{self, EndpointError};
+use apex_secret_core::operation::{
+    OperationInfo, OperationSpec, Params, ProviderSpec, VocabularyError,
+};
 use apex_secret_core::store::ServiceInfo;
 use apex_secret_core::SecretValue;
 
@@ -98,9 +100,9 @@ pub struct Endpoint {
 
 impl Endpoint {
     /// From a resolved http(s) URL, which is how most providers will build one.
-    pub fn from_url(url: &str) -> Result<Endpoint, CapabilityError> {
+    pub fn from_url(url: &str) -> Result<Endpoint, EndpointError> {
         let (scheme, host) = capability::http_endpoint(url)
-            .ok_or_else(|| CapabilityError::NotHttp(url.to_string()))?;
+            .ok_or_else(|| EndpointError::NotHttp(url.to_string()))?;
         Ok(Endpoint {
             scheme: scheme.to_string(),
             host,
@@ -161,15 +163,9 @@ impl std::fmt::Display for ProviderError {
     }
 }
 
-impl From<CapabilityError> for ProviderError {
-    fn from(e: CapabilityError) -> ProviderError {
-        match e {
-            CapabilityError::NoSuchRemote(_) => ProviderError::NoSuchResource(e.to_string()),
-            CapabilityError::HostMismatch { .. } | CapabilityError::SchemeMismatch { .. } => {
-                ProviderError::Refused(e.to_string())
-            }
-            other => ProviderError::Refused(other.to_string()),
-        }
+impl From<EndpointError> for ProviderError {
+    fn from(e: EndpointError) -> ProviderError {
+        ProviderError::Refused(e.to_string())
     }
 }
 
@@ -296,6 +292,19 @@ impl Registry {
             .collect();
         names.sort_unstable();
         names
+    }
+
+    /// Every operation with what a person needs to use it.
+    ///
+    /// Sent in `Response::Hello`, so `apex secret capabilities` prints the
+    /// registry rather than a list the CLI keeps in step by hand.
+    pub fn vocabulary(&self) -> Vec<OperationInfo> {
+        let mut out: Vec<OperationInfo> = self
+            .specs()
+            .flat_map(|spec| spec.operations.iter().map(OperationInfo::of))
+            .collect();
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
     }
 
     pub fn specs(&self) -> impl Iterator<Item = &'static ProviderSpec> + '_ {

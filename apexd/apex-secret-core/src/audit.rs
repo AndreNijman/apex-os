@@ -88,11 +88,11 @@ pub struct AuditLine {
     pub peer_pid: i32,
     /// The stored credential, by name.
     pub provider: String,
-    /// The capability name.
+    /// The §13.2 operation id, e.g. `git.push`.
     pub operation: String,
     /// The operation in words.
     pub detail: String,
-    /// What was asked for: a git remote NAME.
+    /// What was asked for: a NAME the provider resolved, never a URL.
     pub resource: String,
     /// Where the credential was actually sent, scheme and host, as the daemon
     /// resolved it. Absent when the request was refused before resolution.
@@ -137,8 +137,8 @@ impl AuditLine {
             uid,
             peer_pid,
             provider: record.provider.clone(),
-            operation: record.operation.name().to_string(),
-            detail: record.operation.summary(),
+            operation: record.operation.clone(),
+            detail: record.summary(),
             resource: record.resource.clone(),
             endpoint: None,
             project: record.project.clone(),
@@ -246,14 +246,14 @@ pub fn mint_id(counter: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::Capability;
 
     const SENTINEL: &str = "apex-sentinel-7f3a91c4-do-not-leak";
 
     fn record() -> CapabilityRecord {
         let mut rec = CapabilityRecord::new(
             "demo",
-            Capability::parse("git-fetch", "origin", None).unwrap(),
+            "git.fetch",
+            "origin",
         );
         rec.project = Some("/home/x/p".into());
         rec.agent_session = Some(7);
@@ -289,8 +289,10 @@ mod tests {
         }
         assert_eq!(json["event"], "used");
         assert_eq!(json["origin_source"], "unknown");
-        assert_eq!(json["operation"], "git-fetch");
-        assert_eq!(json["detail"], "git fetch origin");
+        assert_eq!(json["operation"], "git.fetch");
+        // The generic rendering: what the framework can say about a request
+        // without asking a provider, which is what a refusal has to work from.
+        assert_eq!(json["detail"], "git.fetch origin");
         assert_eq!(json["agent_session"], 7);
     }
 

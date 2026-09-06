@@ -731,8 +731,9 @@ a dedicated service. That service is `apex-secretd`.
 
 ```
 printf %s "$TOKEN" | apex secret add github --host github.com
-apex secret grant github git-push        # per project
-apex secret use github git-push origin   # run by the agent
+apex secret capabilities                 # what the service offers
+apex secret grant github git.push        # per project
+apex secret use github git.push origin   # run by the agent
 apex secret audit
 ```
 
@@ -767,8 +768,38 @@ own namespace, readable by the agent. A credential helper hands over the
 credential by construction.
 
 So the service performs the operation instead. The agent asks for
-`git-push origin`; `apex-agentd` says which session is asking and what it is
+`git.push origin`; `apex-agentd` says which session is asking and what it is
 allowed; `apex-secretd` runs the push and returns git's output.
+
+### Capabilities are provider-shaped, and the framework is not
+
+An operation is named the way §13.2 names one: `provider.thing.verb` —
+`git.push`, `cloudflare.worker.deploy`, `cloudflare.r2.object.read`. The first
+segment routes it, so nothing needs a table mapping operations to providers.
+
+A **provider** supplies four things and no policy: which operations it offers,
+what a resource name means (`bind`, which resolves the name and says which host
+the credential would reach), how a credential is presented (`perform` — a git
+credential helper, a bearer header, a signed request), and how to mint a
+short-lived credential if it can (`mint`, §13.4; the default is that it cannot).
+
+The **framework** fixes everything else, in `apex-secretd`, and a provider
+cannot get any of it wrong by omission: the caller's account from
+`SO_PEERCRED`, that the operation exists, that its arguments are the ones the
+provider declared, expiry, the project, §7's origin, the grant, **the host
+pin**, reading the value once and only after all of that, scrubbing it out of
+everything returned, and the audit line.
+
+`bind` and `perform` are separate calls because the pin sits between them. A
+provider that both resolved and acted would have to be trusted to check where it
+was sending your credential; splitting the call means the framework checks it,
+for every provider written from now on.
+
+Adding a provider is a module and one `register` call in `apex-secretd`. It
+needs no change to `apex-agent-core`, `apex-agentd` or the `apex` CLI: the wire
+carries an operation id, a resource and an option map, and `apex secret
+capabilities` prints the service's own registry rather than a list the CLI keeps
+in step by hand.
 
 ### The API cannot return a credential
 
@@ -786,7 +817,7 @@ the service has no verb it could attach to.
 
 ### The agent cannot name a URL
 
-`git-push` takes a remote **name**, and the service resolves it against the
+`git.push` takes a remote **name**, and the service resolves it against the
 repository's own configuration — in the same config environment the operation
 then runs in, because `git remote get-url` expands `insteadOf` and resolving
 with one environment while contacting with another would pin the wrong URL.
@@ -877,11 +908,14 @@ uid, and no reply the service can send contains one.
 
 ### What is not built
 
-`git-push`, `git-fetch` and `git-ls-remote`. `gh`-style API capabilities (read
-issues, open a PR) are a second vocabulary with a second validation surface.
-Scoped-credential *issuance* — asking GitHub for a narrower token per task — is
-§13.4 and is not here; the service uses the credential it was given. Migrating
-your real GitHub and MCP credentials onto it is P0-003.
+One provider, `git`, with `git.push`, `git.fetch` and `git.ls-remote`. It is the
+framework's reference implementation and the one that can be exercised without
+an account. Cloudflare is P1-002. `gh`-style API capabilities (read issues, open
+a PR) are a second vocabulary with a second validation surface. Scoped-credential
+*issuance* — asking a provider for a narrower token per task — is §13.4: the
+`mint` call exists on the provider trait and no shipped provider implements it,
+so the service uses the credential it was given. Migrating your real GitHub and
+MCP credentials onto it is P0-003.
 
 `http` is accepted only for a loopback host, where the credential does not cross
 a network. It exists so the credential path can be tested end to end against a
@@ -978,8 +1012,9 @@ By design, none of this is compulsory:
 Named because the roadmap asks for them and this does not do them:
 
 - **Scoped-token issuance.** The broker uses the token it is given; it does not
-  ask a provider for a narrower one per task. The brokering itself exists — see
-  *The secret broker* — with `git-push` and `git-fetch` as its vocabulary.
+  ask a provider for a narrower one per task. The seam is there — `Provider::mint`
+  — and no shipped provider implements it. The brokering itself exists, with
+  `git.push`, `git.fetch` and `git.ls-remote` as its vocabulary.
 - **`gh`-style API capabilities** (read issues, create a PR). A second
   vocabulary with a second validation surface.
 - **Unattended execution of a granted request.** "Allow for project" means the
