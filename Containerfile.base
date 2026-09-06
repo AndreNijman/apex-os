@@ -421,6 +421,18 @@ COPY files/desktop/shell/agent.sh /usr/share/apex/shell/agent.sh
 COPY files/desktop/fish/apex-agent.fish /usr/share/fish/vendor_conf.d/apex-agent.fish
 COPY files/desktop/fish/completions/ /usr/share/fish/vendor_completions.d/
 
+# And the same again for nushell, which is a third dialect: `def` and `extern`
+# are parse-time declarations, so nushell cannot even express the runtime
+# `command -v apex` guard the other three use.
+#
+# /usr/share/nushell/vendor/autoload is nushell's own — it is the first entry of
+# `nu -c '$nu.vendor-autoload-dirs'` — and the directory does not exist in the
+# image until this COPY makes it. Files there are read for every interactive
+# session, and ONLY for interactive sessions: `nu -c` and `nu script.nu` do not
+# read them, which is why the assertions below source the file by hand and check
+# the directory separately.
+COPY files/desktop/nushell/apex.nu /usr/share/nushell/vendor/autoload/apex.nu
+
 # One shared file, sourced system-wide from BOTH shell rc files so `a` exists for
 # every user in every interactive shell, root included -- not just those with a
 # seeded ~/.zshrc. bash reaches /etc/bashrc via a ~/.bashrc that sources it; zsh
@@ -504,6 +516,15 @@ RUN set -eux; \
     fish -c 'contains /usr/share/fish/vendor_completions.d $__fish_vendor_completionsdirs'; \
     grep -q 'APEX_NO_AGENT_ALIASES' /usr/share/fish/vendor_conf.d/apex-agent.fish; \
     grep -q 'apex_agent_prompt' /usr/share/fish/vendor_conf.d/apex-agent.fish; \
+    # The nushell half. `source` is the real parser AND the real loader, so a
+    # file that declares a bad signature fails here rather than at somebody's
+    # first prompt — and the directory is again asked of the shell, because a
+    # file installed one level off is never read and nothing says so.
+    test -s /usr/share/nushell/vendor/autoload/apex.nu; \
+    nu -n -c 'source /usr/share/nushell/vendor/autoload/apex.nu'; \
+    nu -n -c 'if ($nu.vendor-autoload-dirs | any {|d| $d == "/usr/share/nushell/vendor/autoload" }) { exit 0 } else { exit 1 }'; \
+    grep -q 'apex-agent-prompt' /usr/share/nushell/vendor/autoload/apex.nu; \
+    grep -q 'nu-complete apex sessions' /usr/share/nushell/vendor/autoload/apex.nu; \
     # Sourcing it and asserting `a` is defined happens in the apexd stage at the
     # end of this file, NOT here: agent.sh opens with
     # `command -v apex >/dev/null || return 0`, so with the binaries not yet
