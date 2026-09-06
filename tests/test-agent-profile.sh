@@ -364,6 +364,15 @@ r read_ssh              "$HOME/.ssh/id_ed25519"
 # block, which Claude would otherwise apply to every tool it runs.
 ( cat "$HOME/.claude/settings.json" ) > "${PWD}/probe-settings.json" 2>/dev/null
 ( env ) > "${PWD}/probe-env.txt" 2>/dev/null
+
+# P0-003 criterion 3, observed rather than reasoned about. `git` must be the
+# shim, `git --version` must still be the real git's answer, and whatever `gh`
+# says about its own authentication is recorded verbatim — the claim in the
+# report is about what it actually says, not about what the mount table implies
+# it would say.
+( command -v git ) > "${PWD}/probe-git.txt" 2>&1
+( git --version ) >> "${PWD}/probe-git.txt" 2>&1
+( command -v gh && gh auth status ) > "${PWD}/probe-gh.txt" 2>&1
 p done 0
 STUBEOF
 chmod 0755 "${STUB}/claude"
@@ -488,6 +497,28 @@ if [ -s "$SESSION_ENV" ]; then
 else
     bad "the session reported its environment"
 fi
+# ── P0-003 criterion 3: git is the shim, and gh is whatever gh is ────────────
+GIT_SEEN="${WORK}/proj/probe-git.txt"
+GH_SEEN="${WORK}/proj/probe-gh.txt"
+if [ -s "$GIT_SEEN" ]; then
+    grep -q 'bin/git' "$GIT_SEEN" \
+        && ok "the session's git is APEX's shim" \
+        || { bad "the session's git is APEX's shim"; cat "$GIT_SEEN"; }
+    grep -q 'git version' "$GIT_SEEN" \
+        && ok "and it still answers as git for everything it does not broker" \
+        || { bad "the shim did not pass through"; cat "$GIT_SEEN"; }
+else
+    bad "the session reported which git it found"
+fi
+# Recorded, not asserted either way: ~/.config/gh is not in the profile table,
+# so a session sees no gh configuration and gh is unauthenticated inside one —
+# before this change and after it. Printed so the claim is observed.
+printf '      gh inside the session: %s\n' \
+    "$(head -3 "$GH_SEEN" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g')"
+grep -q 'PRIVATE-SSH-KEY\|oauth_token' "$GH_SEEN" 2>/dev/null \
+    && bad "gh printed a credential inside the session" \
+    || ok "gh printed no credential inside the session"
+
 # Nothing under the fixture's own ~/.claude was edited to achieve any of this.
 grep -q 'PRIVATE-ENV-VALUE' "${C}/settings.json" \
     && ok "the user's own settings.json is untouched on disk" \

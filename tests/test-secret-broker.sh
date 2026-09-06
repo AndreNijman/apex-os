@@ -358,6 +358,12 @@ echo "--- can it grant itself a capability? ---"
 "${SESSION_APEX}" secret grant demo git-push 2>&1
 echo "--- can it use the granted one? ---"
 "${SESSION_APEX}" secret use demo git-fetch origin 2>&1 | head -4
+echo "--- which git does the session find first? ---"
+command -v git
+echo "--- does the shim pass anything else through? ---"
+git --version 2>&1 | head -1
+echo "--- does a plain git fetch reach the broker? ---"
+APEX_GIT_SERVICE=demo git fetch origin 2>&1 | head -3
 echo "DONE"
 EOF
 chmod +x "${PROJ}/inside.sh"
@@ -447,6 +453,24 @@ else
         "$APEX" secret grants 2>/dev/null | grep -q "git-push" \
             && bad "the session's self-grant was not recorded" \
             || ok "the session's self-grant was not recorded"
+
+        # ── §12: a skill's own `git` reaches the broker ──────────────────
+        #
+        # The point of the shim is that nothing had to be rewritten. `git
+        # fetch` is what a skill types; what it must produce is the broker's
+        # answer and not git's own "could not read Username".
+        printf '%s' "$logs" | grep -q 'bin/git' \
+            && ok "the session's git is the shim, not /usr/bin/git" \
+            || bad "the session's git is the shim, not /usr/bin/git"
+        printf '%s' "$logs" | grep -q 'git version' \
+            && ok "and the shim passes everything else through to the real git" \
+            || bad "and the shim passes everything else through to the real git"
+        printf '%s' "$logs" | grep -q 'against https://127.0.0.1' \
+            && ok "a plain git fetch was performed by the broker" \
+            || bad "a plain git fetch was performed by the broker"
+        printf '%s' "$logs" | grep -qi 'could not read Username\|terminal prompts disabled' \
+            && bad "git never asked the session for a credential" \
+            || ok "git never asked the session for a credential"
     fi
 fi
 
