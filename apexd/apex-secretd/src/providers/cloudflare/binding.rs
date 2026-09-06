@@ -1,0 +1,578 @@
+//! §13.1: what this project's Cloudflare names mean.
+//!
+//! The semantic half of the provider. `my-worker` is not a string the broker
+//! passes through — it is a name this project has to have bound to an account
+//! and an environment, or the request does not happen. `example.com` is a zone
+//! or it is nothing. That is what §13.2 means by *semantic operations, not one
+//! broad "Cloudflare write" permission*: the grant says which verb, and the
+//! binding says which thing.
+//!
+//! ```toml
+//! [identity.cloudflare]
+//! account = "example-account"
+//! account_id = "0123456789abcdef0123456789abcdef"
+//!
+//! [cloudflare]
+//! zone = "example.com"
+//! zone_id = "fedcba9876543210fedcba9876543210"
+//! buckets = ["example-assets"]
+//!
+//! [cloudflare.preview]
+//! worker = "project-preview"
+//!
+//! [cloudflare.production]
+//! worker = "project"
+//! ```
+//!
+//! §13.1's own example carries `account`, `zone` and a `worker` per
+//! environment. The two `_id` keys are here because of a constraint P1-001
+//! imposes and §13.1 could not have known about: [`crate::provider::Provider::bind`]
+//! **must not use a credential**, and Cloudflare's REST API addresses accounts
+//! and zones by 32-hex id, not by name. Turning `example-account` into an id is
+//! an authenticated `GET /accounts` — which is an operation in its own right
+//! (`cloudflare.account.read`), not a step hidden inside another one. So the
+//! id lives in the file, the name lives beside it for the people who read the
+//! file, and `apex cf status` is what fills the id in.
+//!
+//! ## Why a refusal here names what *is* bound
+//!
+//! An agent that asked to deploy `staging` and was told "no" learns nothing it
+//! can act on. Every refusal in this module names the file, the thing that was
+//! asked for, and the things this project actually binds — because the fix is
+//! always a line in that file, and the person reading the message is usually
+//! the one who has to write it.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use apex_secret_core::project::{ProjectConfig, ProjectError};
+
+/// Length of a Cloudflare account or zone id.
+const ID_LEN: usize = 32;
+
+/// What a project binds.
+#[derive(Debug, Clone, Default)]
+pub struct Binding {
+    /// The file it came from. Named in every refusal.
+    pub path: PathBuf,
+    /// `[identity.cloudflare] account` — the human label. Never sent anywhere.
+    pub account: Option<String>,
+    /// `[identity.cloudflare] account_id` — what the API is addressed by.
+    pub account_id: Option<String>,
+    /// `[cloudflare] zone`.
+    pub zone: Option<String>,
+    /// `[cloudflare] zone_id`.
+    pub zone_id: Option<String>,
+    /// `[cloudflare] buckets` — R2, so P1-005's. Resolvable now so that the
+    /// meaning of a name is decided in one place rather than per task.
+    pub buckets: Vec<String>,
+    /// `[cloudflare.<name>] worker`, by environment name.
+    pub environments: BTreeMap<String, String>,
+}
+
+/// Why a name did not resolve.
+///
+/// Separate from [`ProjectError`] because these are all the same shape — *this
+/// project does not bind that* — and they all have the same fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindingError {
+    /// The project file could not be read or parsed.
+    Project(ProjectError),
+    /// No `[identity.cloudflare]` at all.
+    Unbound { path: PathBuf },
+    /// A key that has to be a 32-hex id is not one.
+    BadId { path: PathBuf, key: String },
+    /// The account id is missing, so nothing can be addressed.
+    NoAccount { path: PathBuf, account: Option<String> },
+    /// No worker in any environment answers to that name.
+    NoWorker {
+        path: PathBuf,
+        named: String,
+        bound: Vec<String>,
+    },
+    /// That is not this project's zone.
+    NoZone {
+        path: PathBuf,
+        named: String,
+        bound: Option<String>,
+    },
+    /// That is not one of this project's buckets.
+    ///
+    /// Reachable only from [`Binding::bucket`], which no operation calls yet —
+    /// see that method for why it is here before P1-005 is.
+    #[allow(dead_code)]
+    NoBucket {
+        path: PathBuf,
+        named: String,
+        bound: Vec<String>,
+    },
+    /// The zone is named but its id is not, so a zone-scoped call cannot be
+    /// addressed.
+    NoZoneId { path: PathBuf, zone: String },
+}
+
+/// `a, b and c`, or `nothing` for an empty list.
+///
+/// Written out rather than printed as a debug list, because these appear in a
+/// sentence somebody reads under time pressure.
+fn listed(items: &[String]) -> String {
+    match items {
+        [] => "nothing".to_string(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+impl std::fmt::Display for BindingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BindingError::Project(e) => write!(f, "{e}"),
+            BindingError::Unbound { path } => write!(
+                f,
+                "{} does not bind a Cloudflare account. Add one, then this \
+                 project can name its own workers and zones:\n  \
+                 [identity.cloudflare]\n  account_id = \"…\"\n\
+                 `apex cf status` prints the ids this credential can see",
+                path.display()
+            ),
+            BindingError::BadId { path, key } => write!(
+                f,
+                "{} sets {key} to something that is not a Cloudflare id. One is \
+                 {ID_LEN} hexadecimal characters",
+                path.display()
+            ),
+            BindingError::NoAccount { path, account } => match account {
+                Some(name) => write!(
+                    f,
+                    "{} names the account '{}' but not its id, and the API is \
+                     addressed by id. Add `account_id` under \
+                     [identity.cloudflare]; `apex cf status` prints it",
+                    path.display(),
+                    name.escape_debug()
+                ),
+                None => write!(
+                    f,
+                    "{} does not set `account_id` under [identity.cloudflare], \
+                     so there is no account to act in. `apex cf status` prints \
+                     the ids this credential can see",
+                    path.display()
+                ),
+            },
+            BindingError::NoWorker { path, named, bound } => write!(
+                f,
+                "this project does not bind a worker called '{}'. {} binds {}. \
+                 A worker belongs to an environment:\n  \
+                 [cloudflare.production]\n  worker = \"{}\"",
+                named.escape_debug(),
+                path.display(),
+                listed(bound),
+                named.escape_debug()
+            ),
+            BindingError::NoZone { path, named, bound } => match bound {
+                Some(zone) => write!(
+                    f,
+                    "this project is bound to the zone {}, not to '{}'. Change \
+                     `zone` under [cloudflare] in {} if that is wrong",
+                    zone,
+                    named.escape_debug(),
+                    path.display()
+                ),
+                None => write!(
+                    f,
+                    "this project binds no zone, so '{}' is not one it may act \
+                     on. Set `zone` under [cloudflare] in {}",
+                    named.escape_debug(),
+                    path.display()
+                ),
+            },
+            BindingError::NoBucket { path, named, bound } => write!(
+                f,
+                "this project does not bind a bucket called '{}'. {} binds {}. \
+                 Add it to `buckets` under [cloudflare] if it should be there",
+                named.escape_debug(),
+                path.display(),
+                listed(bound)
+            ),
+            BindingError::NoZoneId { path, zone } => write!(
+                f,
+                "{} binds the zone {zone} but not its id, and a zone-scoped \
+                 call is addressed by id. Add `zone_id` under [cloudflare]",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BindingError {}
+
+impl From<ProjectError> for BindingError {
+    fn from(e: ProjectError) -> BindingError {
+        BindingError::Project(e)
+    }
+}
+
+/// A resolved account, and the label to call it by in a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub id: String,
+    pub label: Option<String>,
+}
+
+impl Account {
+    /// How the account is named to a person: its own name where the project
+    /// gave one, its id otherwise.
+    pub fn named(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.id)
+    }
+}
+
+/// A worker this project binds, and the environment that binds it.
+///
+/// The environment travels with it because §13.8 makes `production` different
+/// from `preview`, and P1-014 decides that from this field rather than by
+/// parsing a name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worker {
+    pub account: Account,
+    pub name: String,
+    pub environment: String,
+}
+
+/// A zone this project binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Zone {
+    pub id: String,
+    pub name: String,
+}
+
+/// A bucket this project binds.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bucket {
+    pub account: Account,
+    pub name: String,
+}
+
+fn valid_id(id: &str) -> bool {
+    id.len() == ID_LEN && id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+impl Binding {
+    /// Read `<project>/apex.toml` as the account the operation runs as.
+    pub fn read(project: &Path, owner_uid: u32, owner_name: &str) -> Result<Binding, BindingError> {
+        let config = ProjectConfig::read(project, owner_uid, owner_name)?;
+        Binding::of(&config)
+    }
+
+    /// Pull §13.1's keys out of a parsed project file.
+    pub fn of(config: &ProjectConfig) -> Result<Binding, BindingError> {
+        let path = config.path().to_path_buf();
+        let id = |key: &[&str]| -> Result<Option<String>, BindingError> {
+            match config.string(key)? {
+                None => Ok(None),
+                Some(value) if valid_id(value) => Ok(Some(value.to_string())),
+                Some(_) => Err(BindingError::BadId {
+                    path: path.clone(),
+                    key: key.join("."),
+                }),
+            }
+        };
+
+        let mut environments = BTreeMap::new();
+        for name in config.sections(&["cloudflare"]) {
+            if let Some(worker) = config.string(&["cloudflare", &name, "worker"])? {
+                environments.insert(name, worker.to_string());
+            }
+        }
+
+        Ok(Binding {
+            account: config.string(&["identity", "cloudflare", "account"])?.map(str::to_string),
+            account_id: id(&["identity", "cloudflare", "account_id"])?,
+            zone: config.string(&["cloudflare", "zone"])?.map(str::to_string),
+            zone_id: id(&["cloudflare", "zone_id"])?,
+            buckets: config.strings(&["cloudflare", "buckets"])?,
+            environments,
+            path,
+        })
+    }
+
+    /// Whether the file said anything about Cloudflare at all.
+    ///
+    /// Told apart from "bound, but not to that" because the fix is different:
+    /// one is a file to write, the other is a line to change.
+    pub fn is_empty(&self) -> bool {
+        self.account.is_none()
+            && self.account_id.is_none()
+            && self.zone.is_none()
+            && self.buckets.is_empty()
+            && self.environments.is_empty()
+    }
+
+    /// The account every account-scoped call is addressed to.
+    pub fn account(&self) -> Result<Account, BindingError> {
+        if self.is_empty() {
+            return Err(BindingError::Unbound {
+                path: self.path.clone(),
+            });
+        }
+        let Some(id) = self.account_id.clone() else {
+            return Err(BindingError::NoAccount {
+                path: self.path.clone(),
+                account: self.account.clone(),
+            });
+        };
+        Ok(Account {
+            id,
+            label: self.account.clone(),
+        })
+    }
+
+    /// The workers this project binds, sorted, for a message.
+    pub fn workers(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.environments.values().cloned().collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// What a worker NAME means: an account, and the environment that binds it.
+    ///
+    /// A name no environment binds is refused. That is the whole of "an
+    /// operation on a resource the project is not bound to is refused" for
+    /// §13.3's Workers surface, and it is why the grant can be per-operation
+    /// without also having to be per-worker.
+    pub fn worker(&self, named: &str) -> Result<Worker, BindingError> {
+        let account = self.account()?;
+        // Sorted by environment name, so a worker bound to two environments
+        // resolves the same way twice rather than by hash order.
+        let found = self
+            .environments
+            .iter()
+            .find(|(_, worker)| worker.as_str() == named);
+        let Some((environment, name)) = found else {
+            return Err(BindingError::NoWorker {
+                path: self.path.clone(),
+                named: named.to_string(),
+                bound: self.workers(),
+            });
+        };
+        Ok(Worker {
+            account,
+            name: name.clone(),
+            environment: environment.clone(),
+        })
+    }
+
+    /// What a zone NAME means. `example.com` resolves; anything else does not.
+    pub fn zone(&self, named: &str) -> Result<Zone, BindingError> {
+        let Some(zone) = self.zone.as_deref().filter(|z| *z == named) else {
+            return Err(BindingError::NoZone {
+                path: self.path.clone(),
+                named: named.to_string(),
+                bound: self.zone.clone(),
+            });
+        };
+        let Some(id) = self.zone_id.clone() else {
+            return Err(BindingError::NoZoneId {
+                path: self.path.clone(),
+                zone: zone.to_string(),
+            });
+        };
+        Ok(Zone {
+            id,
+            name: zone.to_string(),
+        })
+    }
+
+    /// What a bucket NAME means: an account, and a bucket in it.
+    ///
+    /// §13.5's, and therefore P1-005's. It is here, ahead of any operation
+    /// that calls it, because *what a Cloudflare name means* is one question
+    /// and answering it in one module is the point of this file — a second
+    /// resolver written next to R2's operations would be a second place for
+    /// "the project did not bind that" to be decided differently. Tested, and
+    /// `allow(dead_code)` until P1-005 declares an operation that reaches it.
+    #[allow(dead_code)]
+    pub fn bucket(&self, named: &str) -> Result<Bucket, BindingError> {
+        let account = self.account()?;
+        if !self.buckets.iter().any(|b| b == named) {
+            return Err(BindingError::NoBucket {
+                path: self.path.clone(),
+                named: named.to_string(),
+                bound: self.buckets.clone(),
+            });
+        }
+        Ok(Bucket {
+            account,
+            name: named.to_string(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FULL: &str = r#"
+[identity.cloudflare]
+account = "example-account"
+account_id = "0123456789abcdef0123456789abcdef"
+
+[cloudflare]
+zone = "example.com"
+zone_id = "fedcba9876543210fedcba9876543210"
+buckets = ["example-assets", "example-backups"]
+
+[cloudflare.preview]
+worker = "project-preview"
+
+[cloudflare.production]
+worker = "project"
+"#;
+
+    fn binding(text: &str) -> Binding {
+        let config = ProjectConfig::parse(Path::new("/p/apex.toml"), text).expect("parses");
+        Binding::of(&config).expect("binds")
+    }
+
+    #[test]
+    fn section_thirteen_ones_own_example_binds() {
+        // §13.1 verbatim, plus the two ids the REST API needs and §13.1 does
+        // not mention. If this stops working the documented shape has drifted.
+        let b = binding(FULL);
+        assert_eq!(b.account().unwrap().id, "0123456789abcdef0123456789abcdef");
+        assert_eq!(b.account().unwrap().named(), "example-account");
+        assert_eq!(b.workers(), vec!["project", "project-preview"]);
+        assert_eq!(b.zone("example.com").unwrap().name, "example.com");
+        assert_eq!(b.bucket("example-assets").unwrap().name, "example-assets");
+    }
+
+    #[test]
+    fn a_worker_resolves_to_an_account_and_the_environment_that_binds_it() {
+        // The semantic claim: a NAME is not passed through, it is resolved
+        // into a target, and the environment comes with it because §13.8
+        // treats production differently.
+        let b = binding(FULL);
+        let production = b.worker("project").expect("bound");
+        assert_eq!(production.environment, "production");
+        assert_eq!(production.account.id, "0123456789abcdef0123456789abcdef");
+        let preview = b.worker("project-preview").expect("bound");
+        assert_eq!(preview.environment, "preview");
+    }
+
+    #[test]
+    fn a_worker_this_project_does_not_bind_is_refused_and_the_message_says_what_is() {
+        // "Refused with a reason a human can act on" — the fix is a line in a
+        // file, so the message names the file and what is in it.
+        let b = binding(FULL);
+        let err = b.worker("somebody-elses-worker").unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("somebody-elses-worker"), "{text}");
+        assert!(text.contains("/p/apex.toml"), "{text}");
+        assert!(text.contains("project and project-preview"), "{text}");
+        assert!(text.contains("[cloudflare.production]"), "{text}");
+    }
+
+    #[test]
+    fn a_zone_that_is_not_this_project_s_zone_is_refused() {
+        let b = binding(FULL);
+        let err = b.zone("attacker.example").unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("example.com"), "{text}");
+        assert!(text.contains("attacker.example"), "{text}");
+        // ...and a project with no zone at all says that instead, because the
+        // fix is to add a line rather than to change one.
+        let none = binding("[identity.cloudflare]\naccount_id = \"0123456789abcdef0123456789abcdef\"\n");
+        assert!(none.zone("example.com").unwrap_err().to_string().contains("binds no zone"));
+    }
+
+    #[test]
+    fn a_zone_bound_by_name_but_not_by_id_says_which_key_is_missing() {
+        let b = binding("[cloudflare]\nzone = \"example.com\"\n");
+        let err = b.zone("example.com").unwrap_err();
+        assert!(matches!(err, BindingError::NoZoneId { .. }));
+        assert!(err.to_string().contains("zone_id"), "{err}");
+    }
+
+    #[test]
+    fn a_project_that_binds_nothing_is_told_apart_from_one_bound_elsewhere() {
+        // Two different fixes, so two different messages.
+        let empty = binding("[something.else]\nkey = \"value\"\n");
+        assert!(empty.is_empty());
+        let err = empty.worker("project").unwrap_err();
+        assert!(matches!(err, BindingError::Unbound { .. }), "{err:?}");
+        assert!(err.to_string().contains("[identity.cloudflare]"), "{err}");
+
+        let named = binding("[identity.cloudflare]\naccount = \"example-account\"\n");
+        let err = named.worker("project").unwrap_err();
+        assert!(matches!(err, BindingError::NoAccount { .. }), "{err:?}");
+        assert!(err.to_string().contains("example-account"), "{err}");
+        assert!(err.to_string().contains("account_id"), "{err}");
+    }
+
+    #[test]
+    fn an_id_that_is_not_an_id_is_refused_at_read_time() {
+        // The account id is interpolated into a URL path. A value that is not
+        // {ID_LEN} hex characters is refused here rather than being sent.
+        for evil in [
+            "0123456789abcdef0123456789abcde",   // one short
+            "0123456789abcdef0123456789abcdeff", // one long
+            "0123456789ABCDEF0123456789ABCDEF",  // upper case
+            "../../accounts/somebody-else000",
+            "0123456789abcdef0123456789abcde/",
+        ] {
+            let text = format!("[identity.cloudflare]\naccount_id = \"{evil}\"\n");
+            let config = ProjectConfig::parse(Path::new("/p/apex.toml"), &text).expect("parses");
+            let err = Binding::of(&config).unwrap_err();
+            assert!(
+                matches!(err, BindingError::BadId { .. }),
+                "'{evil}' was accepted as an id"
+            );
+        }
+        // ...and the shape a real one has is accepted.
+        assert!(binding(FULL).account().is_ok());
+    }
+
+    #[test]
+    fn an_environment_with_no_worker_is_not_an_environment() {
+        // A `[cloudflare.staging]` that sets something else must not make
+        // `staging` resolve to an empty worker name.
+        let b = binding(
+            "[identity.cloudflare]\naccount_id = \"0123456789abcdef0123456789abcdef\"\n\
+             [cloudflare.staging]\nnote = \"not a worker\"\n",
+        );
+        assert!(b.environments.is_empty());
+        assert!(b.worker("").is_err());
+    }
+
+    #[test]
+    fn a_bucket_this_project_does_not_bind_is_refused() {
+        let b = binding(FULL);
+        assert!(b.bucket("example-assets").is_ok());
+        let err = b.bucket("somebody-elses-bucket").unwrap_err();
+        assert!(err.to_string().contains("example-assets and example-backups"), "{err}");
+    }
+
+    #[test]
+    fn one_thing_bound_does_not_bind_the_others() {
+        // The point of a semantic binding: binding a worker does not bind a
+        // zone, and binding a zone does not bind a bucket. A provider that
+        // treated "the project is a Cloudflare project" as the check would
+        // pass all three.
+        let b = binding(
+            "[identity.cloudflare]\naccount_id = \"0123456789abcdef0123456789abcdef\"\n\
+             [cloudflare.production]\nworker = \"project\"\n",
+        );
+        assert!(b.worker("project").is_ok());
+        assert!(b.zone("example.com").is_err());
+        assert!(b.bucket("project").is_err());
+    }
+
+    #[test]
+    fn a_list_of_names_reads_as_a_sentence() {
+        assert_eq!(listed(&[]), "nothing");
+        assert_eq!(listed(&["a".into()]), "a");
+        assert_eq!(listed(&["a".into(), "b".into()]), "a and b");
+        assert_eq!(listed(&["a".into(), "b".into(), "c".into()]), "a, b and c");
+    }
+}

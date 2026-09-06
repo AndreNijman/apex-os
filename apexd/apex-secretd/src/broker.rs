@@ -196,6 +196,43 @@ pub fn resolve_url(project: &str, cap: &GitOp, owner: &Owner) -> Result<String, 
     Ok(url)
 }
 
+/// Arrange for a child to become the owner before it execs.
+///
+/// Shared by every provider that runs one, because getting it wrong once is
+/// enough: a child that failed to drop and reported success would run as root
+/// in a directory the caller controls, which is the outcome this whole
+/// arrangement exists to prevent.
+pub fn drop_privileges(cmd: &mut Command, owner: &Owner) {
+    let target_uid = owner.uid;
+    let target_gid = owner.gid;
+    let groups = owner.groups.clone();
+    // Safe: the closure runs between fork and exec in a single-threaded child
+    // and calls only async-signal-safe functions. The group list was resolved
+    // in the parent for exactly that reason.
+    unsafe {
+        cmd.pre_exec(move || {
+            // Safe: geteuid cannot fail.
+            if libc::geteuid() == 0 {
+                if libc::setgroups(groups.len(), groups.as_ptr()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setgid(target_gid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setuid(target_uid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            // Belt and braces. A drop that failed and reported success is the
+            // one failure mode with no second line of defence.
+            if libc::getuid() != target_uid || libc::geteuid() != target_uid {
+                return Err(std::io::Error::other("could not drop to the owner's uid"));
+            }
+            Ok(())
+        });
+    }
+}
+
 /// What a git run produced.
 pub struct Output {
     pub code: i32,
@@ -312,35 +349,7 @@ fn run_git(
             .env("APEX_GIT_TOKEN", token);
     }
 
-    let target_uid = owner.uid;
-    let target_gid = owner.gid;
-    let groups = owner.groups.clone();
-    // Safe: the closure runs between fork and exec in a single-threaded child
-    // and calls only async-signal-safe functions. The group list was resolved
-    // in the parent for exactly that reason.
-    unsafe {
-        cmd.pre_exec(move || {
-            // Safe: geteuid cannot fail.
-            if libc::geteuid() == 0 {
-                if libc::setgroups(groups.len(), groups.as_ptr()) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::setgid(target_gid) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::setuid(target_uid) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            // Belt and braces. A failed drop that reported success would run
-            // git as root in a caller-controlled repository, which is the one
-            // outcome this whole arrangement exists to prevent.
-            if libc::getuid() != target_uid || libc::geteuid() != target_uid {
-                return Err(std::io::Error::other("could not drop to the owner's uid"));
-            }
-            Ok(())
-        });
-    }
+    drop_privileges(&mut cmd, owner);
 
     let out = cmd
         .output()
