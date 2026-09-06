@@ -21,6 +21,7 @@ mod mode;
 mod ops;
 mod proxy;
 mod recover;
+mod qualify;
 mod schema;
 mod request;
 mod secret;
@@ -122,6 +123,16 @@ enum Cmd {
     Channel {
         #[command(subcommand)]
         cmd: channel::ChannelCmd,
+    },
+    /// What this class of machine is known to do, and who established it (§33).
+    ///
+    /// A local database, kept only with explicit consent and sent nowhere.
+    /// Every check has three answers rather than two: a row nobody has tried
+    /// reads as not known, with the sentence saying who can settle it, because
+    /// "nobody has suspended this machine" is not "suspend is broken".
+    Qualify {
+        #[command(subcommand)]
+        cmd: qualify::QualifyCmd,
     },
     /// Persistent state: which schema each store is on, and what a rollback
     /// would do to it (§25).
@@ -1206,6 +1217,7 @@ async fn main() {
         // `bootc switch`, which is in the privileged set below beside Update,
         // Rollback and Pin.
         Cmd::Channel { cmd } => channel::main(cmd),
+        Cmd::Qualify { cmd } => qualify::main(cmd),
         Cmd::Schema { cmd } => schema::main(cmd),
         Cmd::Trust(args) => trust::main(args),
         // Read-only except for `add`/`remove`/`probe`, which write only the

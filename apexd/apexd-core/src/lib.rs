@@ -62,6 +62,10 @@ pub mod migrate;
 pub mod mode;
 pub mod perf;
 pub mod profile;
+// §33's hardware qualification database. Pure, like its neighbours: it holds
+// the document shape and the consent rule, and the CLI hands it a probe of the
+// machine and resolves the path.
+pub mod qualify;
 pub mod recover;
 pub mod select;
 pub mod syswriter;
