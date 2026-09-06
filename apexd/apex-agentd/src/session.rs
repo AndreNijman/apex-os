@@ -288,6 +288,27 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         .push(("APEX_AGENT_NETWORK".into(), policy.effective_network().to_string()));
     spec.env_set
         .push(("TMPDIR".into(), scratch.to_string_lossy().into_owned()));
+    // Where the control socket is, because a session that cannot name its
+    // runtime directory cannot find the socket it was just handed. Resolved
+    // here rather than read later, so the name the session is given and the
+    // path the socket is bound at cannot be two different strings.
+    //
+    // Without this a confined session gets `--clearenv` and nothing to replace
+    // it, so `paths::runtime_dir` falls back to `/run/user/<uid>` — right on an
+    // ordinary login and wrong for any daemon with an `XDG_RUNTIME_DIR` of its
+    // own, where every `apex agent event` and every hook reports "the agent
+    // runtime is not running" from inside a session the runtime is
+    // demonstrably running.
+    //
+    // Before `req.env`, with the other variables the daemon owns: `resolved_env`
+    // is first-seen-wins, and a caller redirecting a session's reporting at
+    // another socket is not something a `--env` flag should be able to do.
+    spec.env_set.push((
+        "XDG_RUNTIME_DIR".into(),
+        sandbox::real_target(&spec.runtime_dir)
+            .to_string_lossy()
+            .into_owned(),
+    ));
     for (k, v) in &req.env {
         spec.env_set.push((k.clone(), v.clone()));
     }
@@ -423,10 +444,24 @@ fn install_hook_settings(adapter: &adapter::Adapter, scratch: &Path) -> Option<P
 ///
 /// Absolute because the hook runs inside the sandbox, whose `PATH` is the
 /// daemon's but whose filesystem is not: a bare `apex` would resolve against
-/// directories the home tmpfs has masked. `/usr/bin/apex` first, because that
-/// is where the image puts it and it is reachable under `--ro-bind / /`; the
-/// daemon's own `PATH` after, so a development build is testable.
+/// directories the home tmpfs has masked.
+///
+/// The daemon's own sibling first: `apex` and `apex-agentd` are built and
+/// shipped together, and a hook command that ran a different build from the
+/// daemon it reports to is the one pairing guaranteed to be wrong. Skipped when
+/// a session could not exec it anyway — the masked home and the private `/tmp`
+/// are the two places a confined process cannot see, which is the test
+/// [`bridge_program`] already applies. Then `/usr/bin/apex`, where the image
+/// puts it, and finally the daemon's `PATH`.
 fn apex_program() -> Option<PathBuf> {
+    let sibling = std::env::current_exe().ok().and_then(|exe| {
+        let p = exe.parent()?.join("apex");
+        let reachable = !p.starts_with("/tmp") && !p.starts_with(paths::home());
+        (p.is_file() && reachable).then_some(p)
+    });
+    if sibling.is_some() {
+        return sibling;
+    }
     let installed = PathBuf::from("/usr/bin/apex");
     if installed.is_file() {
         return Some(installed);

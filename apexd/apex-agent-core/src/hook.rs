@@ -1313,9 +1313,12 @@ mod tests {
         assert!(offline_argv.iter().any(|a| a == "--unshare-net"));
         assert!(offline.policy.effective_network().removes_direct_egress());
 
-        // NoNewPrivs: bwrap sets it for every confined session, so the setuid
-        // bit on sudo is inert. `no_new_privs` is the runtime's own record of
-        // that, and it is what the unconfined path passes to `pty::spawn`.
+        // NoNewPrivs: the one refusal that is not a mount, and therefore the
+        // one this argv cannot show. `bwrap` sets it for every confined
+        // session, and `pty::spawn` calls `prctl(PR_SET_NO_NEW_PRIVS)` itself
+        // for an unconfined one — refusing to spawn if the call fails, and
+        // proved there by a test with a negative control. So the deny holds in
+        // both, and what is asserted here is the policy this reads it from.
         assert!(verdict(&spec, "Bash", serde_json::json!({"command": "sudo id"})).is_deny());
         assert!(spec.policy.no_new_privs());
     }
