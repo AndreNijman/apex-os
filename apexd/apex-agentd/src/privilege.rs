@@ -1036,6 +1036,35 @@ mod tests {
     }
 
     #[test]
+    fn the_pair_a_remote_proxy_actually_declares_is_accepted() {
+        // `apex-remoted` runs as a systemd user service, so what it declares
+        // in production is `scheduled-job` -> `claude-remote-control`. Every
+        // test that drives it declares from a login session instead, because
+        // that is what `cargo test` is — so if this pair ever stopped being
+        // accepted, the feature would be dead in production while the whole
+        // suite stayed green.
+        //
+        // It has to be accepted for a reason worth stating: `scheduled-job`
+        // is already non-local, so the declaration buys no elevation. What it
+        // buys is the LOCK GATE, which `scheduled-job` does not carry and
+        // Remote Control does — a human elsewhere driving the machine past a
+        // locked screen is the case §7 says the owner is asked about.
+        let who = connection_origin(
+            Ok(RequestOrigin::ScheduledJob),
+            &latched(RequestOrigin::RemoteControl, Some("pixel-8")),
+        );
+        let got = who.request_origin.expect("an origin");
+        assert_eq!(got.origin, RequestOrigin::RemoteControl);
+        assert_eq!(got.source, OriginSource::Declared);
+        assert!(!got.origin.is_local(), "the production pair reached a local origin");
+        assert!(
+            got.origin.lock_gated() && !RequestOrigin::ScheduledJob.lock_gated(),
+            "the declaration did not take on the lock gate, which is what it is for"
+        );
+        assert_eq!(who.actor.as_deref(), Some("pixel-8"));
+    }
+
+    #[test]
     fn no_latch_leaves_the_observation_exactly_as_it_was() {
         for o in RequestOrigin::ALL {
             let who = connection_origin(Ok(*o), &Caller::new(None));
