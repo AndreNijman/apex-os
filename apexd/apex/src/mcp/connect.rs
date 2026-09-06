@@ -141,7 +141,7 @@ pub fn main(name: &str, url: Option<&str>, service: Option<&str>, dry_run: bool)
     println!("proved  the server answered an MCP handshake with the stored credential");
 
     // 3. Only now is anything the agent reads allowed to change.
-    write_bridge(&plan)?;
+    write_bridge(&home, &plan)?;
     println!("wrote   {} — it now names `apex mcp bridge {}`", plan.file_says(), plan.service);
     if plan.replaced_a_credential {
         println!("removed the credential that was in it");
@@ -360,37 +360,53 @@ fn probe(client: &mut Client, service: &str, project: &str) -> Result<()> {
     match reply {
         Response::Performed {
             exit_code, output, ..
-        } if exit_code == 0 => {
-            // Exit zero means curl reached the far end, which is not the same
-            // as the far end accepting the credential: a 401 is a successful
-            // request. The reply has to be an MCP message.
-            let messages = super::replies(&output);
-            let accepted = messages.iter().any(|m| {
-                serde_json::from_str::<Value>(m)
-                    .ok()
-                    .is_some_and(|v| v.get("result").is_some())
-            });
-            if accepted {
-                Ok(())
-            } else {
-                let said = messages
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| super::first_line(&output));
-                bail!("the server did not accept that credential: {said}")
-            }
-        }
-        Response::Performed { output, .. } => {
-            bail!("the server could not be reached: {}", super::first_line(&output))
-        }
+        } => accepted(exit_code, &output),
         Response::Error { message, .. } => bail!("{message}"),
         other => bail!("unexpected reply: {other:?}"),
     }
 }
 
+/// Whether an answer is the server accepting the credential.
+///
+/// The distinction the whole verb turns on, and neither half of the answer
+/// settles it alone.
+///
+/// The broker runs curl with `fail-with-body`, so an HTTP error status is a
+/// **non-zero** exit with the body still attached — measured, in
+/// `apex-secretd/tests/end_to_end.rs`: a refused credential comes back as exit
+/// 22 carrying `invalid_token`. That is the common case, and the body is where
+/// the reason is, so a non-zero exit reported as "could not reach the server"
+/// would be wrong about a server that answered.
+///
+/// A zero exit is not proof either. A server may answer `200` with a JSON-RPC
+/// `error` — which means it authenticated the request and then disliked
+/// something else — and a proxy in the way may answer `200` with an HTML page.
+/// So the test is the reply: an `initialize` that worked carries `result`, and
+/// nothing else counts.
+fn accepted(exit_code: i32, output: &str) -> Result<()> {
+    let messages = super::replies(output);
+    let ok = exit_code == 0
+        && messages.iter().any(|m| {
+            serde_json::from_str::<Value>(m)
+                .ok()
+                .is_some_and(|v| v.get("result").is_some())
+        });
+    if ok {
+        return Ok(());
+    }
+    let said = messages
+        .first()
+        .cloned()
+        .unwrap_or_else(|| super::first_line(output));
+    bail!("the server did not accept that credential: {said}")
+}
+
 /// Replace the definition with one that names the bridge.
-fn write_bridge(plan: &Plan) -> Result<()> {
-    let file = super::home().join(".claude.json");
+///
+/// `home` is a parameter rather than read here so that the write can be tested
+/// against a fixture without setting a variable the whole process shares.
+fn write_bridge(home: &Path, plan: &Plan) -> Result<()> {
+    let file = home.join(".claude.json");
     let bridged = serde_json::json!({
         "type": "stdio",
         "command": "apex",
@@ -587,36 +603,121 @@ mod tests {
 
     #[test]
     fn the_bridge_definition_replaces_the_one_that_held_the_token() {
-        let dir = std::env::temp_dir().join(format!("apex-connect-write-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
-        let file = dir.join(".claude.json");
+        // P1-018's second criterion at the one place that decides it: after
+        // this write, the file the agent reads holds no credential.
+        let home = std::env::temp_dir().join(format!(
+            "apex-connect-write-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        ));
+        std::fs::create_dir_all(&home).expect("dir");
+        let file = home.join(".claude.json");
         std::fs::write(
             &file,
             serde_json::json!({
                 "installMethod": "keep me",
-                "mcpServers": {"memory": {"type": "http", "url": "https://m/mcp",
-                                          "headers": {"Authorization": "Bearer sekrit"}}}
+                "mcpServers": {"memory": {"type": "http", "url": "https://m.example.com/mcp",
+                                          "headers": {"Authorization": "Bearer sekrit-9f3a"}}}
             })
             .to_string(),
         )
         .expect("write");
 
-        crate::migrate::edit_json(&file, |doc| {
-            let servers = ensure_object(doc, "mcpServers").expect("block");
-            servers.insert(
-                "memory".into(),
-                serde_json::json!({"type": "stdio", "command": "apex",
-                                   "args": ["mcp", "bridge", "memory"]}),
-            );
-        })
-        .expect("edit");
+        let found = servers::discover(&home, None);
+        let existing = found.iter().find(|s| s.name == "memory");
+        let plan = plan("memory", None, None, existing, &found).expect("a plan");
+        assert!(plan.replaced_a_credential);
+        write_bridge(&home, &plan).expect("write");
 
         let text = std::fs::read_to_string(&file).expect("read");
-        assert!(!text.contains("sekrit"), "the credential survived: {text}");
+        assert!(!text.contains("sekrit-9f3a"), "the credential survived: {text}");
         assert!(text.contains("keep me"), "an unrelated key was dropped: {text}");
         let doc: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(doc["mcpServers"]["memory"]["command"], "apex");
         assert_eq!(doc["mcpServers"]["memory"]["args"][2], "memory");
-        std::fs::remove_dir_all(&dir).ok();
+        // And the listing now answers the criterion the other way round.
+        let after = servers::discover(&home, None);
+        assert!(!after[0].credential.agent_readable());
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_directory_scoped_server_is_rewritten_in_its_own_block() {
+        // The failure this closes: writing the bridge into the top-level
+        // `mcpServers` for a server defined per directory leaves the original
+        // definition, credential and all, and adds a second server beside it.
+        let home = std::env::temp_dir().join(format!(
+            "apex-connect-dir-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        ));
+        let cwd = home.join("work");
+        std::fs::create_dir_all(&cwd).expect("dir");
+        let file = home.join(".claude.json");
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "projects": {cwd.to_string_lossy(): {"mcpServers": {
+                    "here": {"type": "http", "url": "https://m.example.com/mcp",
+                             "headers": {"Authorization": "Bearer local-only-token"}}
+                }}}
+            })
+            .to_string(),
+        )
+        .expect("write");
+
+        let found = servers::discover(&home, Some(&cwd));
+        let existing = found.iter().find(|s| s.name == "here");
+        let plan = plan("here", None, None, existing, &found).expect("a plan");
+        write_bridge(&home, &plan).expect("write");
+
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&file).expect("read"))
+            .expect("json");
+        let block = &doc["projects"][cwd.to_string_lossy().as_ref()]["mcpServers"]["here"];
+        assert_eq!(block["command"], "apex");
+        assert!(doc.get("mcpServers").is_none(), "a second server was added: {doc}");
+        assert!(
+            !std::fs::read_to_string(&file).unwrap().contains("local-only-token"),
+            "the credential survived"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_reply_that_is_not_the_server_accepting_is_not_taken_for_one() {
+        // Both halves of the answer are needed, and neither settles it alone.
+        accepted(0, r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}"#)
+            .expect("a result is the server accepting");
+        accepted(0, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n")
+            .expect("the same answer in event-stream framing");
+
+        // What a refused credential actually produces: curl runs with
+        // `fail-with-body`, so the status is a non-zero exit and the reason is
+        // in the body. Exit 22 and this body are what the end-to-end test
+        // measured against a real daemon and a loopback server.
+        let e = accepted(
+            22,
+            r#"{"error":"invalid_token","error_description":"the access token is invalid"}"#,
+        )
+        .expect_err("a 401 is not an acceptance")
+        .to_string();
+        assert!(e.contains("invalid_token"), "the reason has to survive: {e}");
+
+        for (code, refused) in [
+            // A JSON-RPC error over a 200: the server authenticated the request
+            // and then disliked something else, which proves nothing about the
+            // credential.
+            (0, r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"bad version"}}"#),
+            // A proxy in the way, answering 200 with a page.
+            (0, "<html><head><title>Authorization Required</title></head></html>"),
+            // Nothing at all.
+            (0, ""),
+            // And a result that arrived with a failing status is still not one.
+            (22, r#"{"jsonrpc":"2.0","id":1,"result":{}}"#),
+        ] {
+            let e = accepted(code, refused).expect_err(refused).to_string();
+            assert!(e.contains("did not accept"), "{code} {refused} -> {e}");
+        }
     }
 
     #[test]
