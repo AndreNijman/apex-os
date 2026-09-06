@@ -38,6 +38,16 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
+# The INSTALLED apex by default, which is the honest question for a shipped
+# doc: does the command a reader will type work on the machine they are typing
+# it on. It is the wrong question on a branch that adds a verb — the docs
+# describe the new CLI and the old binary refuses it — so point APEX at the
+# build:
+#
+#     APEX=target/debug/apex tests/check-doc-verbs.sh docs/*.md
+#
+# A false BAD from a verb this branch introduces is the tool working; a false
+# PASS from silently accepting one would not be.
 APEX=${APEX:-apex}
 ALLOW=${ALLOW:-tests/doc-verbs-allow}
 

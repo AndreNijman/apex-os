@@ -179,7 +179,7 @@ reporting none.
 Four values parse and are then refused, each naming the task that will
 implement it: `--system-access session`, `--system-access unsafe`,
 `--secrets export`, `--origin-policy remote`. A flag that parsed and then did
-nothing would read as a protection in `apex agent info` and in a script, with
+nothing would read as a protection in `apex agent status` and in a script, with
 nothing behind it.
 
 ---
