@@ -91,9 +91,34 @@ case "$TARGET" in
         printf 'refusing: %s is this machine\n' "$TARGET" >&2; exit 2 ;;
 esac
 
-CM="$(mktemp -u /tmp/apex-fw-ssh.%h.XXXXXX)"
-SSH=(ssh -o BatchMode=yes -o ConnectTimeout=10
-     -o ControlMaster=auto -o "ControlPath=$CM" -o ControlPersist=600)
+CM="$(mktemp -u /tmp/apex-fw-ssh.XXXXXX)"
+# ONE connection is made through the user's ssh config, because that is how a
+# person reaches the machine: --target is normally an alias carrying a user, a
+# key and a path-selection `Match exec`. Every command after it goes over that
+# master's socket with -F /dev/null, so the config is never read again.
+#
+# Both halves of that matter, and both were measured on the machine this was
+# written for:
+#
+#   * the `Match exec` on this fleet is `~/.ssh/lan-up`, a bare TCP connect to
+#     port 22 that never authenticates, and it runs once per ssh INVOCATION —
+#     multiplexing does not skip it, because the config is parsed before the
+#     socket is consulted. This suite makes about fifteen calls in ten seconds.
+#     OpenSSH's PerSourcePenalties counts every one of them as a connection
+#     without authentication and starts dropping new ones: measured, the driver
+#     was locked out of the target for about fifty seconds, mid-test, with the
+#     policy loaded. A firewall test that gets its operator banned by sshd is
+#     indistinguishable from a firewall test that stranded its operator.
+#     Six commands through the config open seven such connections; six over the
+#     socket open none.
+#   * re-reading the config per command lets a later command take a DIFFERENT
+#     path. The same alias here falls back to a tunnel, so the moment the LAN
+#     probe fails, ssh quietly reconnects through it — and "a new connection
+#     still gets in" would then be a fact about the tunnel.
+MASTER=(ssh -o BatchMode=yes -o ConnectTimeout=10
+        -o ControlMaster=auto -o "ControlPath=$CM" -o ControlPersist=600)
+SSH=(ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=10
+     -o ControlMaster=no -o "ControlPath=$CM")
 on() { "${SSH[@]}" "$TARGET" "$@"; }
 
 STAGED=0
@@ -116,7 +141,7 @@ cleanup() {
         # the exceptions in it are the user's.
         [ "${MADE_CONFDIR:-0}" = 1 ] && on 'sudo -n rm -rf /etc/apex/firewall.d' >/dev/null 2>&1
     fi
-    ssh -o "ControlPath=$CM" -O exit "$TARGET" >/dev/null 2>&1
+    ssh -F /dev/null -o "ControlPath=$CM" -O exit "$TARGET" >/dev/null 2>&1
     return $rc
 }
 trap cleanup EXIT INT TERM
@@ -124,11 +149,25 @@ trap cleanup EXIT INT TERM
 # ═════════════════════════════════════════════════════════════════════════════
 sec "the target is reachable and is not already firewalled"
 # ═════════════════════════════════════════════════════════════════════════════
-if ! on true; then
+if ! "${MASTER[@]}" "$TARGET" true; then
     skip "the whole suite" "cannot ssh to $TARGET"
     finish; exit $?
 fi
 ok "ssh to $TARGET works, and this connection is the one under test"
+
+# Everything below reads a non-zero exit as a fact about the target — "no table
+# is loaded", "the firewall is not shipped here". A multiplexed call that never
+# arrives fails in exactly the same shape, so prove the socket carries one
+# before believing any of them.
+# 7 is a status the target has to choose; ssh answers 255 of its own accord
+# when it never gets there.
+on 'exit 7'; muxrc=$?
+if [ "$muxrc" != 7 ]; then
+    bad "commands ride the master's socket rather than reconnecting" \
+        "a remote 'exit 7' came back as $muxrc; every check below would read as absence"
+    finish; exit $?
+fi
+ok "commands ride the master's socket rather than reconnecting"
 
 if on 'sudo -n nft list table inet apex' >/dev/null 2>&1; then
     bad "the target starts with no apex table" "one is already loaded; refusing to disturb it"
@@ -146,6 +185,10 @@ if [ -z "$PROBE" ]; then
     finish; exit $?
 fi
 ok "probes will go to $PROBE, the address this ssh arrives on"
+
+# A raw connect, which is the only kind of probe that tells a DROP apart from
+# a refusal: a dropped SYN times out, a closed port answers at once.
+tcp_open() { timeout 4 bash -c "</dev/tcp/$PROBE/$1" 2>/dev/null; }
 
 # The refusal above compares spellings, which an alias defeats: `ssh spare-box`
 # pointing back here passes it, and this would then load a default-drop policy
@@ -236,7 +279,7 @@ sec "loading it, over the connection it could break"
 # stay reachable and read as "nothing is being filtered". The port has to be
 # one the policy really closes.
 CLOSED_PORT="$(on "ss -tlnH 2>/dev/null | awk '\$4 ~ /^(0\\.0\\.0\\.0|\\[?::\\]?|\\*):/ { split(\$4,a,\":\"); p=a[length(a)]; if (p != 22 && p != 5353 && p != 5355) { print p; exit } }'")"
-if [ -n "$CLOSED_PORT" ] && timeout 4 bash -c "</dev/tcp/$PROBE/$CLOSED_PORT" 2>/dev/null; then
+if [ -n "$CLOSED_PORT" ] && tcp_open "$CLOSED_PORT"; then
     ok "port $CLOSED_PORT answers from off the machine before the policy loads"
     HAVE_PROBE=1
 else
@@ -271,18 +314,41 @@ fi
 # A NEW connection from the same outside host, to a port that was answering a
 # moment ago. Without this the case above proves only that ssh works.
 if [ "$HAVE_PROBE" = 1 ]; then
-    if timeout 4 bash -c "</dev/tcp/$PROBE/$CLOSED_PORT" 2>/dev/null; then
+    if tcp_open "$CLOSED_PORT"; then
         bad "a new connection to that port is now dropped" "it still answers; nothing is being filtered"
     else
         ok "a new connection to that port is now dropped"
     fi
 fi
 # And ssh from scratch, not through the multiplexed channel: a second person
-# must still be able to get in.
-if ssh -o BatchMode=yes -o ConnectTimeout=10 -o ControlPath=none "$TARGET" true 2>/dev/null; then
-    ok "a brand-new ssh connection still gets in"
+# must still be able to get in. It has to arrive on the SAME address as well.
+# An alias with a tunnel behind it — which is what this suite's own target is —
+# reconnects through the tunnel the instant the direct path stops answering,
+# and a green light there would be a fact about the tunnel.
+newconn=""
+for attempt in 1 2 3; do
+    newconn="$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o ControlPath=none \
+                   "$TARGET" 'printf "%s\n" "$SSH_CONNECTION"' 2>/dev/null | awk '{print $3}')"
+    [ -n "$newconn" ] && break
+    # A dropped SYN and a refusing sshd are different failures and only one of
+    # them belongs to this policy. If the handshake completes, the packet got
+    # through and sshd turned it away — PerSourcePenalties, most likely, having
+    # counted the config's own probes. Wait it out rather than reporting the
+    # firewall for stranding somebody.
+    tcp_open 22 || break
+    sleep 20
+done
+if [ "$newconn" = "$PROBE" ]; then
+    ok "a brand-new ssh connection still gets in, by the same route"
+elif [ -n "$newconn" ]; then
+    bad "a brand-new ssh connection still gets in, by the same route" \
+        "it arrived on $newconn rather than $PROBE; another route answered for it"
+elif tcp_open 22; then
+    bad "a brand-new ssh connection still gets in, by the same route" \
+        "port 22 completes a handshake, so sshd refused this, not the policy"
 else
-    bad "a brand-new ssh connection still gets in" "the machine is only reachable through the open channel"
+    bad "a brand-new ssh connection still gets in, by the same route" \
+        "the machine is only reachable through the already-open channel"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -307,7 +373,7 @@ sec "allow and deny, from off the machine"
 # ═════════════════════════════════════════════════════════════════════════════
 FW=/usr/libexec/apex-firewall
 [ "$STAGED" = 1 ] && FW=/run/apex-fw/libexec/apex-firewall
-reach() { timeout 4 bash -c "</dev/tcp/$PROBE/22000" 2>/dev/null; }
+reach() { tcp_open 22000; }
 
 LISTENER_PID="$(on 'setsid socat TCP4-LISTEN:22000,reuseaddr,fork PIPE >/dev/null 2>&1 & echo $!' 2>/dev/null | tr -dc "0-9")"
 sleep 0.6
@@ -329,7 +395,7 @@ if on 'ss -tlnH "sport = :22000"' | grep -q 22000; then
     on 'printf "tcp notaport\n" | sudo -n tee /etc/apex/firewall.d/broken.conf >/dev/null' >/dev/null 2>&1
     on "sudo -n $FW reload" >/dev/null 2>&1
     still_dropping=1
-    [ "$HAVE_PROBE" = 1 ] && { timeout 4 bash -c "</dev/tcp/$PROBE/$CLOSED_PORT" 2>/dev/null && still_dropping=0; }
+    [ "$HAVE_PROBE" = 1 ] && { tcp_open "$CLOSED_PORT" && still_dropping=0; }
     if on 'sudo -n nft list chain inet apex input' 2>/dev/null | grep -q 'policy drop' \
        && [ "$still_dropping" = 1 ]; then
         ok "a malformed exception leaves the base policy standing"
