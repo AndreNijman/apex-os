@@ -278,7 +278,7 @@ const CREDENTIAL_HELPER: &str =
 /// can write a `.git/config`. So the drop happens between fork and exec, and is
 /// then verified, because a drop that reported success without happening is the
 /// one failure this whole arrangement exists to prevent.
-fn drop_to(cmd: &mut Command, owner: &Owner) {
+pub(crate) fn drop_to(cmd: &mut Command, owner: &Owner) {
     let target_uid = owner.uid;
     let target_gid = owner.gid;
     let groups = owner.groups.clone();
