@@ -40,6 +40,15 @@ use crate::state::{Live, State};
 pub const HELLO_PAIR: u8 = b'P';
 pub const HELLO_SESSION: u8 = b'S';
 
+/// How long an unauthenticated peer may take to finish its handshake.
+///
+/// Applied by `main` on every accepted socket and cleared in [`session`] only
+/// after the device has been identified and authorised, so a peer that
+/// connects and says nothing is dropped rather than holding a thread. Long
+/// enough for a phone waking its radio on a bad connection; short enough that
+/// filling the thread pool takes deliberate effort rather than patience.
+pub const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Why a device connection ended.
 #[derive(Debug)]
 pub enum ServeError {
@@ -193,6 +202,13 @@ fn session(
         .into_transport()
         .map_err(|e| ServeError::Handshake(e.to_string()))?;
 
+    // Authenticated, so the handshake deadline comes off: a PTY may sit idle
+    // for hours and a read deadline on it would end the terminal. Cleared
+    // here and nowhere earlier — everything above this line runs against an
+    // unauthenticated peer.
+    socket.set_read_timeout(None).ok();
+    socket.set_write_timeout(None).ok();
+
     {
         let mut store = state
             .devices()
@@ -200,9 +216,14 @@ fn session(
         store.seen(&device_id, apex_remote_core::now_ms(), "lan");
         let _ = state.save_devices(&store);
     }
+    // The peer address is what identifies THIS connection among a device's
+    // several, so it is read once here: after the socket is shut down there
+    // is nothing to read it from, and `unregister` would then match nothing.
+    let peer = socket.peer_addr().ok();
     if let Ok(s) = socket.try_clone() {
         state.register(Live {
             device_id: device_id.clone(),
+            peer,
             socket: s,
         });
     }
@@ -216,7 +237,7 @@ fn session(
         &device_id,
         &device_name,
     );
-    state.unregister(&device_id, None);
+    state.unregister(&device_id, peer);
     result
 }
 
@@ -275,6 +296,19 @@ fn frames(
                             send(&sealer, f)?;
                         }
                         ptys.push(pty);
+                    }
+                    // A refused attach comes back as the daemon's own reply
+                    // where possible, so the device renders "no session 4"
+                    // rather than a channel that closed for no stated reason.
+                    Err(crate::proxy::ProxyError::NotAttached(reply)) => {
+                        send(&sealer, Frame::Control(reply))?;
+                        send(
+                            &sealer,
+                            Frame::Close {
+                                channel,
+                                reason: String::new(),
+                            },
+                        )?;
                     }
                     Err(e) => send(
                         &sealer,
@@ -373,6 +407,18 @@ impl PtyChannel {
     ) -> Result<(PtyChannel, Vec<u8>, Vec<u8>), crate::proxy::ProxyError> {
         let (stream, reply, buffered) =
             crate::proxy::Agentd::open(agentd, device_id)?.attach(request)?;
+        // The daemon turns a connection into a PTY only when it answers
+        // `attached`. Anything else — no such session, one that has exited,
+        // a malformed request — leaves the connection in control mode, and a
+        // pump thread reading THAT would deliver reply lines to the device as
+        // terminal output and leave a channel open onto nothing. The reply
+        // goes back either way; what changes is whether a channel is opened.
+        let attached = serde_json::from_slice::<serde_json::Value>(&reply)
+            .map(|v| v["reply"] == "attached")
+            .unwrap_or(false);
+        if !attached {
+            return Err(crate::proxy::ProxyError::NotAttached(reply));
+        }
         let mut read_half = stream.try_clone()?;
         let sealer = Arc::clone(sealer);
         let pump = std::thread::spawn(move || {

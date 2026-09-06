@@ -22,6 +22,13 @@ use apex_remote_core::pairing::Offer;
 pub struct Live {
     /// The device this connection authenticated as.
     pub device_id: String,
+    /// Which of that device's connections this is.
+    ///
+    /// Read once when the connection is registered, not on the way out: after
+    /// a `shutdown(2)` there is no address to read, so a version that asked
+    /// the socket at removal time would match nothing and the list would grow
+    /// one entry per connection for the daemon's life.
+    pub peer: Option<SocketAddr>,
     /// A handle that closes the socket when asked. `shutdown(2)` rather than
     /// a flag the connection thread checks, because the thread is blocked in
     /// a read and would not check anything until the phone sent something.
@@ -95,14 +102,19 @@ impl State {
         }
     }
 
-    /// Forget one, by the socket it holds.
+    /// Forget one connection, leaving the device's others alone.
+    ///
+    /// The first version of this ended its condition with `|| peer.is_none()`
+    /// and was called with `None`, so the retain predicate was true for every
+    /// entry and nothing was ever removed. A leak rather than a hole, and the
+    /// kind that is invisible until a daemon has been up for a week.
     pub fn unregister(&self, device_id: &str, peer: Option<SocketAddr>) {
         if let Ok(mut v) = self.live.lock() {
-            v.retain(|l| {
-                l.device_id != device_id || l.socket.peer_addr().ok() != peer || peer.is_none()
-            });
+            v.retain(|l| !(l.device_id == device_id && l.peer == peer));
         }
     }
+
+
 
     /// End every connection a device is holding.
     ///
@@ -150,6 +162,43 @@ pub fn control_socket() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connection_is_registered_and_then_forgotten() {
+        // The leak this had: `unregister` ended its condition with
+        // `|| peer.is_none()` and was called with `None`, so the predicate
+        // was true for every entry and the list only ever grew.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // The ACCEPTED sockets, which is what the daemon holds: their
+        // `peer_addr` is the client's ephemeral port and differs per
+        // connection. The client-side sockets all report the listener's one
+        // address, which is what made the first version of this test assert
+        // two equal values.
+        let _c1 = std::net::TcpStream::connect(addr).expect("connect");
+        let _c2 = std::net::TcpStream::connect(addr).expect("connect");
+        let (s1, _) = listener.accept().expect("accept");
+        let (s2, _) = listener.accept().expect("accept");
+        let p1 = s1.peer_addr().ok();
+        let p2 = s2.peer_addr().ok();
+        assert_ne!(p1, p2, "two connections share an address");
+
+        let live = Mutex::new(vec![
+            Live { device_id: "d".into(), peer: p1, socket: s1 },
+            Live { device_id: "d".into(), peer: p2, socket: s2 },
+        ]);
+        // Exercised through the same predicate the daemon uses, over a
+        // standalone list so no daemon has to be started.
+        let remove = |v: &mut Vec<Live>, id: &str, peer: Option<SocketAddr>| {
+            v.retain(|l| !(l.device_id == id && l.peer == peer));
+        };
+        let mut v = live.into_inner().expect("lock");
+        remove(&mut v, "d", p1);
+        assert_eq!(v.len(), 1, "the wrong number of connections survived");
+        assert_eq!(v[0].peer, p2, "the wrong connection was removed");
+        remove(&mut v, "d", p2);
+        assert!(v.is_empty());
+    }
 
     #[test]
     fn the_control_socket_is_beside_the_agent_runtimes_and_not_in_it() {

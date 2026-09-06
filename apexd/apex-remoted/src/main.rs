@@ -72,6 +72,12 @@ const USAGE: &str = "\
 apex-remoted — the desktop service for APEX Remote
 
   --port <n>          listen on this TCP port (default 7717)
+  --handshake-timeout-ms <n>
+                      how long an unauthenticated peer may take (default
+                      30000, clamped to 1000..120000). Lower it in a test;
+                      raising it past two minutes is refused, because the
+                      deadline is what stops an idle connection holding a
+                      thread on the only network listener in the stack.
   --relay <url>       the rendezvous to fall back to when no LAN path works
   --allow-foreground  run outside a systemd user unit (see below)
   --help
@@ -93,6 +99,18 @@ fn run(args: &[String]) -> Result<(), String> {
         .transpose()?
         .unwrap_or(DEFAULT_PORT);
     let relay = flag(args, "--relay");
+    let handshake = match flag(args, "--handshake-timeout-ms") {
+        None => serve::HANDSHAKE_TIMEOUT,
+        Some(v) => {
+            let ms: u64 = v
+                .parse()
+                .map_err(|_| format!("--handshake-timeout-ms {v} is not a number"))?;
+            // Clamped rather than trusted. This deadline is a denial-of-service
+            // guard, and a flag that could switch it off would be a way to ask
+            // for the bug it exists to prevent.
+            std::time::Duration::from_millis(ms.clamp(1_000, 120_000))
+        }
+    };
     let allow_foreground = args.iter().any(|a| a == "--allow-foreground");
 
     guard_placement(allow_foreground)?;
@@ -132,16 +150,18 @@ fn run(args: &[String]) -> Result<(), String> {
         let Ok(stream) = stream else { continue };
         // A dead connection must not hold a thread forever, and a live PTY
         // must not be killed by a read deadline. So the handshake gets a
-        // deadline and `serve` clears it once the connection is a session.
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
-            .ok();
+        // deadline and `serve::session` clears it once the connection has
+        // authenticated — an unauthenticated peer never reaches the clear.
+        //
+        // The first version of this set the deadline here and then cleared it
+        // as the first line of the spawned thread, which is the opposite of
+        // what its own comment said: a LAN peer that connected and sent
+        // nothing held a thread forever, on the only network listener in the
+        // stack.
+        stream.set_read_timeout(Some(handshake)).ok();
         let state = Arc::clone(&state);
         let agentd = agentd.clone();
-        std::thread::spawn(move || {
-            stream.set_read_timeout(None).ok();
-            serve::connection(stream, state, agentd);
-        });
+        std::thread::spawn(move || serve::connection(stream, state, agentd));
     }
     Ok(())
 }
@@ -244,6 +264,19 @@ mod tests {
             .unwrap_or_else(|| panic!("no port in {line:?}"));
         assert_eq!(port, DEFAULT_PORT);
         assert!(line.contains("tcp"), "{line}");
+    }
+
+    #[test]
+    fn the_handshake_deadline_cannot_be_switched_off() {
+        // It is a denial-of-service guard, so a flag that could raise it to an
+        // hour or drop it to nothing would be a way to ask for the bug it
+        // exists to prevent.
+        let clamp = |ms: u64| std::time::Duration::from_millis(ms.clamp(1_000, 120_000));
+        assert_eq!(clamp(0), std::time::Duration::from_secs(1));
+        assert_eq!(clamp(u64::MAX), std::time::Duration::from_secs(120));
+        assert_eq!(clamp(2_000), std::time::Duration::from_secs(2));
+        assert!(serve::HANDSHAKE_TIMEOUT >= std::time::Duration::from_secs(1));
+        assert!(serve::HANDSHAKE_TIMEOUT <= std::time::Duration::from_secs(120));
     }
 
     #[test]
