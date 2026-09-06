@@ -147,7 +147,14 @@ const MAX_NAME: usize = 128;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Blueprint {
-    /// File-format version. Absent means [`SCHEMA_VERSION`].
+    /// File-format version. Absent means **1**, the version that existed when
+    /// this key was introduced.
+    ///
+    /// It used to say "absent means [`SCHEMA_VERSION`]", which is a different
+    /// rule that happens to agree while `SCHEMA_VERSION` is 1. The day it
+    /// becomes 2, every blueprint written before the key existed would have
+    /// claimed to be a version 2 file and been read by version 2's rules — the
+    /// exact silent misread [`crate::migrate`] exists to make impossible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
     #[serde(default, skip_serializing_if = "Desktop::is_empty")]
@@ -246,6 +253,41 @@ impl Blueprint {
     /// names a compositor that does not exist is worse than one that fails to
     /// parse, because it converges "successfully" and changes nothing.
     pub fn parse(text: &str) -> Result<Blueprint> {
+        // The version is read BEFORE the strict parse, and this order is the
+        // whole point. `Blueprint` is `deny_unknown_fields`, so a file written
+        // by a newer APEX — which is what a `bootc rollback` leaves behind —
+        // fails on whichever key it happens to hit first, and the user is told
+        // "unknown field `foo` at line 12" about a file that is not wrong. The
+        // peek is shape-free, so it can answer "this is schema 2 and I read 1"
+        // for a document this build cannot otherwise make sense of.
+        //
+        // The forward direction is here too. A blueprint from an OLDER APEX
+        // used to be refused by `validate`'s `version != SCHEMA_VERSION`, which
+        // would have broken every existing user's file the day the schema
+        // moved. It is migrated in memory instead — never written back, because
+        // this is a file somebody typed, with comments a reserialise destroys.
+        let store = crate::migrate::store("blueprint")
+            .expect("the blueprint store is declared in migrate::STORES");
+        let migrated = match crate::migrate::peek(store, text) {
+            Ok(found) => match crate::migrate::plan(store, found) {
+                crate::migrate::Plan::TooNew { found, current } => bail!(
+                    "this blueprint is schema {found}, and this build of APEX reads schema \
+                     {current}. It was written by a newer APEX — the usual cause is a \
+                     rollback, because a blueprint does not roll back with the image. Boot \
+                     the newer deployment again to use it."
+                ),
+                crate::migrate::Plan::UpToDate => None,
+                _ => crate::migrate::migrate_text(store, text)
+                    .map_err(|e| anyhow::anyhow!("not a valid blueprint: {e}"))?,
+            },
+            // A document the peek could not read is a document the strict
+            // parse will refuse with a better message. Falling through is the
+            // right move: two error messages about the same syntax error, and
+            // only one of them names the line.
+            Err(_) => None,
+        };
+        let text = migrated.as_ref().map(|m| m.text.as_str()).unwrap_or(text);
+
         let mut bp: Blueprint = toml::from_str(text).map_err(|e| {
             // toml's own message already carries the line and column; the
             // prefix is what tells the user which file it is about.
@@ -278,11 +320,21 @@ impl Blueprint {
     pub fn validate(&self) -> Vec<String> {
         let mut out = Vec::new();
 
+        // Two directions, two different things to say. A file from the future
+        // is a rollback and the user can act on it; a file from the past has
+        // already been migrated by `parse`, so reaching here means a caller
+        // built the struct directly — `Bundle`, which carries a blueprint from
+        // another machine — and the honest answer is that it was not migrated.
         if let Some(v) = self.version {
-            if v != SCHEMA_VERSION {
+            if v > SCHEMA_VERSION {
                 out.push(format!(
-                    "version = {v} is not a schema this build understands \
-                     (expected {SCHEMA_VERSION})"
+                    "version = {v} was written by a newer APEX; this build reads \
+                     version {SCHEMA_VERSION}. Boot the newer deployment again to use it."
+                ));
+            } else if v < SCHEMA_VERSION {
+                out.push(format!(
+                    "version = {v} is older than version {SCHEMA_VERSION} and reached \
+                     validation without being migrated"
                 ));
             }
         }
@@ -1006,7 +1058,28 @@ impl AppliedState {
     }
 
     /// Parse, tolerating the header (TOML comments are ignored by the parser).
+    ///
+    /// The `schema` field is required and, until §25, was never read. That is
+    /// worse than not having it: a record written by a newer APEX is
+    /// `deny_unknown_fields`, so it failed on the new key, and the only caller
+    /// discards the error with `.ok()` — so a machine that had rolled back was
+    /// told no `apply` had ever run on it. The version is checked first now,
+    /// and a record from the future comes back as an error that names both
+    /// versions instead of a `None` that names nothing.
     pub fn parse(text: &str) -> Result<AppliedState> {
+        let store = crate::migrate::store("blueprint-state")
+            .expect("the blueprint-state store is declared in migrate::STORES");
+        if let Ok(found) = crate::migrate::peek(store, text) {
+            if let crate::migrate::Plan::TooNew { found, current } =
+                crate::migrate::plan(store, found)
+            {
+                bail!(
+                    "this apply record is schema {found}, and this build of APEX reads \
+                     schema {current}. It was written by a newer APEX. Deleting it loses \
+                     the record of the last convergence and nothing else."
+                );
+            }
+        }
         Ok(toml::from_str(text)?)
     }
 }

@@ -19,6 +19,7 @@ mod mode;
 mod ops;
 mod proxy;
 mod recover;
+mod schema;
 mod request;
 mod secret;
 mod task;
@@ -107,6 +108,19 @@ enum Cmd {
     Boot {
         #[command(subcommand)]
         cmd: boot::BootCmd,
+    },
+    /// Persistent state: which schema each store is on, and what a rollback
+    /// would do to it (§25).
+    ///
+    /// `bootc rollback` puts /usr back and leaves /etc, /var and your home
+    /// exactly as the newer build left them. `status` says which files that
+    /// applies to and whether the older APEX can still read each one;
+    /// `migrate` runs the machine-written ones forward, keeping a copy of what
+    /// each was. Neither needs root, and `migrate` is a dry run without
+    /// --commit.
+    Schema {
+        #[command(subcommand)]
+        cmd: schema::SchemaCmd,
     },
     /// Whether the image this machine runs is the one APEX published (§27).
     ///
@@ -1142,6 +1156,10 @@ async fn main() {
         // "is my operating system signed" must not cost a password, so the
         // offline half is file reads and `--verify` is the only path that
         // leaves the machine.
+        // Read-only for `status`, and a dry run for `migrate` unless it is
+        // given --commit. Every path it touches is in the user's own home, so
+        // there is no root gate and nothing here can raise a prompt.
+        Cmd::Schema { cmd } => schema::main(cmd),
         Cmd::Trust(args) => trust::main(args),
         // Read-only except for `add`/`remove`/`probe`, which write only the
         // registry and the probe cache in the user's own home. Nothing here

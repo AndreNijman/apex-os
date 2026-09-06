@@ -160,7 +160,10 @@ const MAX_AGENTS: usize = 8;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tasks {
-    /// File-format version. Absent means [`SCHEMA_VERSION`].
+    /// File-format version. Absent means **1**, the version that existed when
+    /// this key was introduced — never "whatever this build writes". See
+    /// [`crate::migrate::Store::unversioned`] for why the difference is only
+    /// visible once, and by then it is on somebody's machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
     /// Tasks by id.
@@ -259,9 +262,17 @@ pub enum TaskError {
 impl std::fmt::Display for TaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // Named the direction and the remedy since §25. A task list from
+            // a newer APEX is what a `bootc rollback` leaves behind — the file
+            // does not roll back with the image — and "understands up to 1" on
+            // its own leaves the user with a file they cannot open and no idea
+            // that booting the other deployment gets it back.
             Self::UnsupportedVersion(v) => write!(
                 f,
-                "tasks.toml is version {v}, but this apex understands up to {SCHEMA_VERSION}"
+                "tasks.toml is version {v}, and this build of APEX reads version \
+                 {SCHEMA_VERSION}. It was written by a newer APEX, which usually means a \
+                 rollback: a task list does not roll back with the image. Boot the newer \
+                 deployment again to use it."
             ),
             Self::BadId(id) => write!(
                 f,
@@ -596,18 +607,41 @@ pub fn valid_agent_id(name: &str) -> bool {
 
 // ── the generated half ───────────────────────────────────────────────────────
 
+/// Schema version of a task's state record.
+///
+/// Version 0 is the shape every record on disk today has: no `schema` key at
+/// all. It is a real version, not a missing one, which is why
+/// [`crate::migrate`] declares `unversioned: 0` for this store rather than
+/// treating an absent key as "current".
+pub const STATE_SCHEMA_VERSION: u32 = 1;
+
 /// `~/.local/state/apex/tasks/<id>.json` — what has been observed about a task.
 ///
 /// Not `deny_unknown_fields`, unlike [`Tasks`], and the reason is the same one
 /// [`crate::host::HostCaps`] gives inverted: nobody hand-edits this file, so an
 /// unrecognised key is not a typo somebody can act on, and refusing to read a
-/// measurement costs more than ignoring a field. Unknown keys are not preserved
-/// either — there is no second writer whose fields would be lost.
+/// measurement costs more than ignoring a field.
+///
+/// ── Why unknown keys are kept, which they were not ──────────────────────────
+///
+/// The previous version of this comment said they need not be, because "there
+/// is no second writer whose fields would be lost". On an atomic OS there is:
+/// the second writer is a newer build of this same program, on the other side
+/// of a `bootc rollback`. A newer APEX writes a field, the user rolls back, the
+/// older build reads the record, ignores the field, and rewrites it on the next
+/// `apex task resume` — and the field is gone before the user rolls forward
+/// again. `/usr` rolls back; `/var` does not. So the record keeps what it does
+/// not recognise, which is what makes this store's declared rollback answer
+/// (`ReadableByOlder`) true rather than hopeful.
 ///
 /// A file that cannot be parsed is treated as absent, for the same reason a
 /// corrupt probe cache is: it can be produced again.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TaskState {
+    /// File-format version. Absent means 0 — the shape before this key existed,
+    /// never "whatever this build writes".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<u32>,
     /// Unix seconds the task was created.
     #[serde(default)]
     pub created: u64,
@@ -617,6 +651,13 @@ pub struct TaskState {
     /// The checkpoint `apex task checkpoint` last took, by engine id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<String>,
+
+    /// Anything a newer APEX recorded that this build does not know.
+    ///
+    /// Carried through the read-modify-write untouched, so a rollback costs the
+    /// user nothing they cannot get back by rolling forward.
+    #[serde(flatten)]
+    pub unknown: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 // ── the resume planner ───────────────────────────────────────────────────────
@@ -1027,7 +1068,33 @@ mod tests {
     #[test]
     fn a_future_version_is_refused_rather_than_guessed_at() {
         let e = Tasks::parse(&format!("version = {}\n", SCHEMA_VERSION + 1)).unwrap_err();
-        assert!(format!("{e}").contains("understands up to"), "{e}");
+        let m = format!("{e}");
+        // The refusal was already correct; §25 gave it something to do about
+        // it. All four parts are asserted, because a message that names the
+        // problem and no remedy leaves a user with a file they cannot open.
+        assert!(m.contains(&format!("version {}", SCHEMA_VERSION + 1)), "{m}");
+        assert!(m.contains(&format!("reads version {SCHEMA_VERSION}")), "{m}");
+        assert!(m.contains("rollback"), "{m}");
+        assert!(m.contains("Boot the newer deployment"), "{m}");
+    }
+
+    #[test]
+    fn an_older_task_list_is_not_refused_the_way_a_newer_one_is() {
+        // The direction that has to stay open. `Tasks::validate` refuses only
+        // ABOVE its own version — a file from an older APEX is readable, which
+        // is what lets `migrate` have somewhere to go. The blueprint used `!=`
+        // here and would have refused every existing file the day its schema
+        // moved.
+        let store = crate::migrate::store("tasks").unwrap();
+        assert_eq!(store.current, SCHEMA_VERSION);
+        assert!(matches!(
+            crate::migrate::plan(store, SCHEMA_VERSION + 1),
+            crate::migrate::Plan::TooNew { .. }
+        ));
+        assert_eq!(
+            crate::migrate::plan(store, SCHEMA_VERSION),
+            crate::migrate::Plan::UpToDate
+        );
     }
 
     // ── the keys that exist only to be refused ───────────────────────────────
@@ -1581,9 +1648,11 @@ mod tests {
     #[test]
     fn state_round_trips_and_tolerates_a_key_it_does_not_know() {
         let s = TaskState {
+            schema: Some(STATE_SCHEMA_VERSION),
             created: 100,
             last_opened: 200,
             checkpoint: Some("1788439662000-a1b2c3d".into()),
+            unknown: Default::default(),
         };
         let back: TaskState = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
@@ -1593,6 +1662,35 @@ mod tests {
             serde_json::from_str(r#"{"last_opened":5,"invented_later":true}"#).unwrap();
         assert_eq!(tolerant.last_opened, 5);
         assert_eq!(tolerant.checkpoint, None);
+    }
+
+    #[test]
+    fn a_key_a_newer_apex_wrote_survives_this_build_rewriting_the_record() {
+        // The rollback case, end to end at the type level. A newer APEX records
+        // `focus_mode`; the user rolls back; this build reads the file and
+        // saves it again. If the key does not come back out, rolling forward
+        // finds it gone — and `/var` is the half that does not roll back, so
+        // there is nothing to restore it from.
+        let raw = r#"{"schema":1,"last_opened":5,"focus_mode":"deep","nested":{"a":1}}"#;
+        let s: TaskState = serde_json::from_str(raw).unwrap();
+        assert_eq!(s.last_opened, 5);
+        let out = serde_json::to_string(&s).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(back["focus_mode"], serde_json::json!("deep"));
+        assert_eq!(back["nested"], serde_json::json!({"a": 1}));
+    }
+
+    #[test]
+    fn a_record_with_no_schema_key_is_version_zero_not_the_current_one() {
+        // `unversioned: 0` in the migrate registry has to agree with what the
+        // type says an absent key means, or the framework migrates records
+        // that need no migration and skips ones that do.
+        let s: TaskState = serde_json::from_str(r#"{"last_opened":5}"#).unwrap();
+        assert_eq!(s.schema, None);
+        let store = crate::migrate::store("task-state").unwrap();
+        assert_eq!(store.unversioned, 0);
+        assert_eq!(crate::migrate::peek(store, r#"{"last_opened":5}"#).unwrap(), 0);
+        assert_eq!(store.current, STATE_SCHEMA_VERSION);
     }
 
     #[test]
