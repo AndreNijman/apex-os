@@ -21,6 +21,18 @@
 //!   arbitrary terminal output, and a wrong guess here is worse than no guess:
 //!   it would tell the user an agent is blocked when it is working, or the
 //!   reverse. Clients report it through `apex agent event`.
+//!
+//! ## The one thing a published event changes about inference
+//!
+//! Silence is ambiguous: an agent waiting on a person and an agent running
+//! `cargo test` both produce nothing. Output cannot tell them apart, so the
+//! idle rule picks the more common one and is wrong for the whole of every
+//! long tool call. A session that published a `PreToolUse` and has not yet
+//! published its `PostToolUse` has resolved the ambiguity, and `next_state`
+//! takes that answer — bounded, so a hook that stops firing hands the decision
+//! back rather than freezing the session. [`crate::hook`] is where those
+//! events come from for Claude; the parameter is a plain `Option<u64>` so any
+//! agent can supply it through the same open event protocol.
 
 use crate::protocol::AgentState;
 
@@ -40,6 +52,18 @@ pub const SCROLLBACK_BYTES: usize = 256 * 1024;
 /// three seconds would make the Agent Center flicker between states for the
 /// entire run.
 pub const IDLE_TO_WAITING_SECS: u64 = 10;
+
+/// How long a tool may be reported as running before the idle rule takes over
+/// again.
+///
+/// The in-flight flag is set by a `PreToolUse` hook and cleared by the
+/// `PostToolUse` that answers it. A hook that never fires — a crashed daemon,
+/// a `--bare` session, an agent that rewrote its own settings — would
+/// otherwise pin a session to `working` for as long as it existed. Fifteen
+/// minutes: Claude's own Bash tool tops out at ten, so this is above every
+/// real tool call and far below "forever". Past it the session is inferred
+/// from output again, which is exactly the fallback §6.1 keeps.
+pub const TOOL_IN_FLIGHT_MAX_SECS: u64 = 900;
 
 /// Largest OSC payload retained while scanning. Past this the sequence is
 /// abandoned and scanning returns to ground state — an OSC this long is
@@ -320,22 +344,39 @@ fn parse_osc(payload: &[u8]) -> Option<Signal> {
     }
 }
 
+/// Whether a published event says a tool is running, and for how long.
+///
+/// `None` is what every unintegrated agent has: no hook has ever said
+/// anything, so the idle rule decides on its own exactly as it did before.
+pub type ToolInFlight = Option<u64>;
+
 /// Decide the state a live session should report.
 ///
 /// `current` is what it reports now, `signals` is what the last read produced,
-/// `had_output` is whether that read produced any bytes at all, and
-/// `idle_secs` is how long it has been since the last output or event.
+/// `had_output` is whether that read produced any bytes at all, `idle_secs` is
+/// how long it has been since the last output or event, and `tool_in_flight`
+/// is how long ago a published event said a tool started, when one did.
 ///
 /// Terminal states are never left, and `permission_request` is never
 /// overwritten by inference — only the process exiting or another published
 /// event can move a session out of it. An agent that is genuinely blocked on a
 /// permission decision produces no output, and letting the idle rule rewrite
 /// that to `waiting_for_user` would discard the more specific truth.
+///
+/// `tool_in_flight` is the same argument applied to the other silent case.
+/// `cargo test` prints nothing for two minutes; the idle rule reads that
+/// silence as the user being asked a question and is wrong for a hundred and
+/// ten seconds of it. A session that told us a tool started and has not told
+/// us it finished is working, and silence is the evidence for that rather than
+/// against it. Bounded by [`TOOL_IN_FLIGHT_MAX_SECS`] so a hook that stopped
+/// firing hands the decision back to the idle rule instead of pinning the
+/// session to `working` forever.
 pub fn next_state(
     current: AgentState,
     signals: &[Signal],
     had_output: bool,
     idle_secs: u64,
+    tool_in_flight: ToolInFlight,
 ) -> AgentState {
     if current.is_terminal() {
         return current;
@@ -358,6 +399,9 @@ pub fn next_state(
     }
 
     if idle_secs >= IDLE_TO_WAITING_SECS {
+        if matches!(tool_in_flight, Some(secs) if secs < TOOL_IN_FLIGHT_MAX_SECS) {
+            return AgentState::Working;
+        }
         return AgentState::WaitingForUser;
     }
 
@@ -397,6 +441,17 @@ mod tests {
 
     fn scan(data: &[u8]) -> Vec<Signal> {
         OutputScanner::new().feed(data)
+    }
+
+    /// `next_state` for a session no hook has ever spoken for, which is every
+    /// agent but Claude and is what these cases are about.
+    fn infer(
+        current: AgentState,
+        signals: &[Signal],
+        had_output: bool,
+        idle_secs: u64,
+    ) -> AgentState {
+        next_state(current, signals, had_output, idle_secs, None)
     }
 
     #[test]
@@ -533,7 +588,7 @@ mod tests {
     #[test]
     fn output_alone_means_working() {
         assert_eq!(
-            next_state(AgentState::Starting, &[], true, 0),
+            infer(AgentState::Starting, &[], true, 0),
             AgentState::Working
         );
     }
@@ -541,12 +596,12 @@ mod tests {
     #[test]
     fn silence_past_the_threshold_means_waiting() {
         assert_eq!(
-            next_state(AgentState::Working, &[], false, IDLE_TO_WAITING_SECS),
+            infer(AgentState::Working, &[], false, IDLE_TO_WAITING_SECS),
             AgentState::WaitingForUser
         );
         // Just under the threshold, nothing changes.
         assert_eq!(
-            next_state(AgentState::Working, &[], false, IDLE_TO_WAITING_SECS - 1),
+            infer(AgentState::Working, &[], false, IDLE_TO_WAITING_SECS - 1),
             AgentState::Working
         );
     }
@@ -554,11 +609,11 @@ mod tests {
     #[test]
     fn a_signal_beats_the_idle_rule_and_raw_output() {
         assert_eq!(
-            next_state(AgentState::Working, &[Signal::Bell], true, 0),
+            infer(AgentState::Working, &[Signal::Bell], true, 0),
             AgentState::WaitingForUser
         );
         assert_eq!(
-            next_state(
+            infer(
                 AgentState::WaitingForUser,
                 &[Signal::CommandStarted],
                 false,
@@ -572,7 +627,7 @@ mod tests {
     fn the_last_signal_in_a_read_wins() {
         let signals = vec![Signal::Bell, Signal::CommandStarted];
         assert_eq!(
-            next_state(AgentState::Starting, &signals, true, 0),
+            infer(AgentState::Starting, &signals, true, 0),
             AgentState::Working
         );
     }
@@ -582,16 +637,16 @@ mod tests {
         // Neither output nor silence may downgrade a published permission
         // request; only another event or the process exiting.
         assert_eq!(
-            next_state(AgentState::PermissionRequest, &[], true, 0),
+            infer(AgentState::PermissionRequest, &[], true, 0),
             AgentState::PermissionRequest
         );
         assert_eq!(
-            next_state(AgentState::PermissionRequest, &[], false, 3600),
+            infer(AgentState::PermissionRequest, &[], false, 3600),
             AgentState::PermissionRequest
         );
         // An explicit signal still moves it.
         assert_eq!(
-            next_state(
+            infer(
                 AgentState::PermissionRequest,
                 &[Signal::CommandStarted],
                 false,
@@ -604,8 +659,8 @@ mod tests {
     #[test]
     fn terminal_states_are_never_left() {
         for s in [AgentState::Complete, AgentState::Failed, AgentState::Exited] {
-            assert_eq!(next_state(s, &[Signal::Bell], true, 0), s);
-            assert_eq!(next_state(s, &[], false, 9999), s);
+            assert_eq!(infer(s, &[Signal::Bell], true, 0), s);
+            assert_eq!(infer(s, &[], false, 9999), s);
         }
     }
 
@@ -627,5 +682,80 @@ mod tests {
         assert_eq!(signal_number("resume"), Some(libc::SIGCONT));
         assert_eq!(signal_number("nope"), None);
         assert_eq!(signal_number(""), None);
+    }
+
+    #[test]
+    fn a_tool_in_flight_holds_working_through_the_silence_the_idle_rule_misreads() {
+        // The case §6.1 exists for. `cargo test` prints nothing for two
+        // minutes; without the hook the idle rule calls that waiting_for_user
+        // after ten seconds and is wrong for the rest of the run.
+        let quiet = 120;
+        assert_eq!(
+            infer(AgentState::Working, &[], false, quiet),
+            AgentState::WaitingForUser,
+            "inference alone gets this wrong, which is the point"
+        );
+        assert_eq!(
+            next_state(AgentState::Working, &[], false, quiet, Some(quiet)),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn a_tool_that_never_reported_finishing_stops_pinning_the_session() {
+        // A crashed daemon, a --bare session or an agent that rewrote its own
+        // settings all end the event stream mid-call. The bound is what makes
+        // that a delay rather than a session stuck on `working` forever.
+        assert_eq!(
+            next_state(
+                AgentState::Working,
+                &[],
+                false,
+                TOOL_IN_FLIGHT_MAX_SECS,
+                Some(TOOL_IN_FLIGHT_MAX_SECS)
+            ),
+            AgentState::WaitingForUser
+        );
+        assert_eq!(
+            next_state(
+                AgentState::Working,
+                &[],
+                false,
+                TOOL_IN_FLIGHT_MAX_SECS,
+                Some(TOOL_IN_FLIGHT_MAX_SECS - 1)
+            ),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn a_tool_in_flight_changes_nothing_else_about_the_rule() {
+        // It is one condition on one branch. Output still means working, a
+        // signal still wins, a terminal state is still terminal, and a
+        // permission request is still not overwritten — otherwise the flag
+        // would be a second state machine racing the first.
+        for tool in [None, Some(0), Some(5), Some(TOOL_IN_FLIGHT_MAX_SECS + 1)] {
+            assert_eq!(
+                next_state(AgentState::Starting, &[], true, 0, tool),
+                AgentState::Working
+            );
+            assert_eq!(
+                next_state(AgentState::Working, &[Signal::Bell], false, 0, tool),
+                AgentState::WaitingForUser
+            );
+            assert_eq!(
+                next_state(AgentState::PermissionRequest, &[], false, 3600, tool),
+                AgentState::PermissionRequest
+            );
+            assert_eq!(
+                next_state(AgentState::Complete, &[], false, 3600, tool),
+                AgentState::Complete
+            );
+            // And below the idle threshold nothing moves either way.
+            assert_eq!(
+                next_state(AgentState::Working, &[], false, 1, tool),
+                AgentState::Working
+            );
+        }
     }
 }
