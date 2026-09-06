@@ -263,8 +263,14 @@ fn a_confined_session_is_told_where_its_runtime_directory_is() {
     }
     let id = reply["id"].as_u64().expect("session id");
 
+    // Thirty seconds, not fifteen. This binary now starts a daemon per test
+    // and cargo runs them all at once, so `bwrap` sets up a user namespace on
+    // a machine that is doing seven other things — which took longer than
+    // fifteen seconds often enough to fail about one run in three while the
+    // graph tests below were being written. The tolerance is for the machine,
+    // not for the assertion: what is checked afterwards is unchanged.
     let expected = format!("RUNTIME=[{}]", want.display());
-    let out = h.wait_for_output(id, "RUNTIME=[", 15);
+    let out = h.wait_for_output(id, "RUNTIME=[", 30);
     h.call(&format!(r#"{{"cmd":"signal","id":{id},"signal":"kill"}}"#));
     assert!(
         out.contains(&expected),
@@ -354,4 +360,159 @@ fn a_confined_session_is_judged_against_the_confinement_it_actually_has() {
     );
 
     h.call(&format!(r#"{{"cmd":"signal","id":{id},"signal":"kill"}}"#));
+}
+
+// ─── The session graph (P1-020) ─────────────────────────────────────────────
+//
+// `graph.rs` proves the bookkeeping against values. What it cannot prove is
+// that a `subagent_start` crossing the socket lands on the session's record —
+// which is the half P0-011 got wrong: the daemon received both subagent events
+// and threw `agent_id` and `agent_type` away, so the mapping was correct and
+// no subagent was recorded anywhere.
+//
+// These publish over the control socket rather than through `apex agent hook`,
+// so they run under `cargo test -p apex-agentd` without the CLI built. The
+// hook's own end of it — that `observe` carries the two fields out of the
+// payload — is asserted beside `observe` in `hook.rs`.
+
+impl Harness {
+    fn info(&self, id: u64) -> serde_json::Value {
+        self.call(&format!(r#"{{"cmd":"info","id":{id}}}"#))
+    }
+
+    /// Publish a lifecycle event the way `apex agent hook` does.
+    fn event(&self, id: u64, event: &str, agent_id: Option<&str>, agent_type: Option<&str>) {
+        let reply = self.call(
+            &serde_json::json!({
+                "cmd": "event",
+                "id": id,
+                "event": event,
+                "agent_id": agent_id,
+                "agent_type": agent_type,
+            })
+            .to_string(),
+        );
+        assert_eq!(reply["reply"], "ok", "publishing {event}: {reply}");
+    }
+
+    /// A session running `sleep`, or `None` when one will not start.
+    fn sleeper(&self, tag: &str) -> Option<u64> {
+        let run = serde_json::json!({
+            "cmd": "run",
+            "agent": "generic",
+            "args": ["sh", "-c", "sleep 60"],
+            "cwd": "/tmp",
+            "sandbox": "unrestricted",
+            "network": "open",
+            "cols": 80,
+            "rows": 24,
+        });
+        let reply = self.call(&run.to_string());
+        if reply["reply"] != "session" {
+            eprintln!("SKIP {tag}: {reply}");
+            return None;
+        }
+        reply["id"].as_u64()
+    }
+}
+
+/// The children of a session, as the shell would read them.
+fn children(info: &serde_json::Value) -> &Vec<serde_json::Value> {
+    info["children"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no children key on {info}"))
+}
+
+#[test]
+fn a_session_reports_an_empty_graph_rather_than_no_graph() {
+    // The distinction the shell depends on. A daemon that predates P1-020
+    // writes no `children` key at all, and a client that read that absence as
+    // "no subagents" would be reporting a fact it has no evidence for. A
+    // daemon that has the graph always writes the key, empty or not.
+    let h = harness!("graph-empty");
+    let Some(id) = h.sleeper("graph-empty") else {
+        return;
+    };
+    assert_eq!(children(&h.info(id)).len(), 0);
+    h.call(&format!(r#"{{"cmd":"signal","id":{id},"signal":"kill"}}"#));
+}
+
+#[test]
+fn a_subagent_start_and_stop_become_one_finished_child() {
+    let h = harness!("graph-pair");
+    let Some(id) = h.sleeper("graph-pair") else {
+        return;
+    };
+
+    h.event(id, "subagent_start", Some("agent-7"), Some("Explore"));
+    let kids = h.info(id);
+    let kids = children(&kids);
+    assert_eq!(kids.len(), 1, "the start was not recorded: {kids:?}");
+    assert_eq!(kids[0]["id"], "agent-7");
+    assert_eq!(kids[0]["kind"], "subagent");
+    assert_eq!(kids[0]["label"], "Explore");
+    assert!(kids[0]["ended"].is_null(), "it has not finished yet");
+
+    h.event(id, "subagent_stop", Some("agent-7"), Some("Explore"));
+    let kids = h.info(id);
+    let kids = children(&kids);
+    assert_eq!(kids.len(), 1, "the stop opened a second node: {kids:?}");
+    assert!(!kids[0]["ended"].is_null(), "the stop did not close it");
+    assert_eq!(kids[0]["ended_by"], "reported");
+
+    h.call(&format!(r#"{{"cmd":"signal","id":{id},"signal":"kill"}}"#));
+}
+
+#[test]
+fn the_end_of_a_turn_closes_a_subagent_whose_stop_never_arrived() {
+    // The failure mode the whole design is aimed at. `SubagentStop` is a hook,
+    // and §6.1 says a hook is advisory: it can be silenced, it can time out,
+    // and it does not run when the agent is killed mid-turn. Without this
+    // sweep the record would claim a subagent is working for as long as it
+    // survives, and a graph showing a dead agent as alive is worse than one
+    // showing nothing.
+    let h = harness!("graph-turn");
+    let Some(id) = h.sleeper("graph-turn") else {
+        return;
+    };
+
+    h.event(id, "subagent_start", Some("agent-1"), Some("Explore"));
+    h.event(id, "subagent_start", Some("agent-2"), Some("Plan"));
+    h.event(id, "stop", None, None);
+
+    let kids = h.info(id);
+    let kids = children(&kids);
+    assert_eq!(kids.len(), 2);
+    for kid in kids {
+        assert!(!kid["ended"].is_null(), "{kid} outlived the turn");
+        assert_eq!(kid["ended_by"], "parent_stop");
+    }
+
+    h.call(&format!(r#"{{"cmd":"signal","id":{id},"signal":"kill"}}"#));
+}
+
+#[test]
+fn a_killed_session_has_nothing_still_running_under_it() {
+    let h = harness!("graph-exit");
+    let Some(id) = h.sleeper("graph-exit") else {
+        return;
+    };
+
+    h.event(id, "subagent_start", Some("agent-1"), Some("Explore"));
+    h.call(&format!(r#"{{"cmd":"signal","id":{id},"signal":"kill"}}"#));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut info = h.info(id);
+    while Instant::now() < deadline && info["exit_signal"].is_null() && info["exit_code"].is_null()
+    {
+        std::thread::sleep(Duration::from_millis(100));
+        info = h.info(id);
+    }
+    let kids = children(&info);
+    assert_eq!(kids.len(), 1);
+    assert!(
+        !kids[0]["ended"].is_null(),
+        "a subagent survived its agent: {info}"
+    );
+    assert_eq!(kids[0]["ended_by"], "parent_exit");
 }

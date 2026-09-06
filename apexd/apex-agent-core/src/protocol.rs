@@ -361,6 +361,23 @@ pub struct SessionInfo {
     /// `None` until the agent has said, and for agents that never do.
     #[serde(default)]
     pub native_observed: Option<String>,
+    /// What this session started: subagents, and the processes it forked
+    /// (§P1-020).
+    ///
+    /// `#[serde(default)]` so a record written before the graph existed still
+    /// loads, and — the part that matters more — so the shell can tell an
+    /// ABSENT list from an empty one. A daemon that predates this key writes
+    /// no key at all, and a client that read the absence as "no subagents"
+    /// would report a fact it has no evidence for. Empty means the daemon
+    /// looked and found none.
+    ///
+    /// Written even when empty, which is the whole point: `skip_serializing_if`
+    /// would make a daemon that has the graph and found nothing indistinguishable
+    /// from one that does not have it.
+    ///
+    /// See [`crate::graph`] for why no entry here carries a state.
+    #[serde(default)]
+    pub children: Vec<crate::graph::ChildInfo>,
     /// PID of the session leader (the sandbox wrapper when confined).
     pub pid: i32,
     /// Unix seconds when the session was created.
@@ -469,6 +486,24 @@ pub enum Request {
         /// in exactly the way an agent reporting its own `detail` is.
         #[serde(default)]
         native: Option<String>,
+        /// Which subagent this event is about (§P1-020).
+        ///
+        /// Set only on `subagent_start` and `subagent_stop`, from the
+        /// `agent_id` Claude puts on the payload. Absent everywhere else, and
+        /// absent on those two when the harness sent no id — see
+        /// [`crate::graph::subagent_started`] for what happens then.
+        ///
+        /// Additive for the same reason `event` and `native` are: a daemon
+        /// that predates this drops the key and records exactly what it
+        /// recorded before, which is a session with no graph rather than a
+        /// session whose confinement is looser than the client believes. It is
+        /// not a protocol bump.
+        #[serde(default)]
+        agent_id: Option<String>,
+        /// What kind of subagent it is: `Explore`, `general-purpose`, the name
+        /// of a project's own agent definition. Display only.
+        #[serde(default)]
+        agent_type: Option<String>,
     },
     /// Ask whether a tool call this session is about to make is one its own
     /// confinement would refuse (§6.2).
@@ -1013,6 +1048,7 @@ mod tests {
             grant: None,
             grant_expires_ms: None,
             native_observed: None,
+            children: Vec::new(),
             pid: 42,
             started: 1,
             last_activity: 2,
@@ -1247,6 +1283,8 @@ mod tests {
                 event: Some("pre_tool_use".into()),
                 detail: Some("d".into()),
                 native: Some("bypassPermissions".into()),
+                agent_id: None,
+                agent_type: None,
             },
             Request::Event {
                 id: 1,
@@ -1254,6 +1292,17 @@ mod tests {
                 event: Some("task_created".into()),
                 detail: None,
                 native: None,
+                agent_id: None,
+                agent_type: None,
+            },
+            Request::Event {
+                id: 1,
+                state: Some("working".into()),
+                event: Some("subagent_start".into()),
+                detail: Some("Explore started".into()),
+                native: None,
+                agent_id: Some("a-1".into()),
+                agent_type: Some("Explore".into()),
             },
             Request::ToolCheck {
                 id: 1,
@@ -1288,6 +1337,8 @@ mod tests {
             event: None,
             detail: Some("line one\nline two".into()),
             native: None,
+            agent_id: None,
+            agent_type: None,
         };
         let text = serde_json::to_string(&req).unwrap();
         assert!(!text.contains('\n'), "{text}");
@@ -1445,6 +1496,7 @@ mod tests {
             grant: None,
             grant_expires_ms: None,
             native_observed: None,
+            children: Vec::new(),
             pid: 123,
             started: 0,
             last_activity: 0,
