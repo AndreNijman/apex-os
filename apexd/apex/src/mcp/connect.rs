@@ -497,7 +497,7 @@ mod tests {
                 source: Some("~/.claude/settings.json → env".into()),
             },
         );
-        let e = plan("plugin:github:github", None, None, Some(&s), &[s.clone()])
+        let e = plan("plugin:github:github", None, None, Some(&s), std::slice::from_ref(&s))
             .expect_err("a plugin's file is not ours to edit")
             .to_string();
         assert!(e.contains("replaced whenever the plugin updates"), "{e}");
@@ -516,7 +516,7 @@ mod tests {
             endpoint("https://x.example.com/mcp"),
             Credential::None,
         );
-        let e = plan("shared", None, None, Some(&s), &[s.clone()])
+        let e = plan("shared", None, None, Some(&s), std::slice::from_ref(&s))
             .expect_err("a repository's file is somebody else's")
             .to_string();
         assert!(e.contains("under version control"), "{e}");
@@ -536,7 +536,7 @@ mod tests {
             },
             Credential::None,
         );
-        let e = plan("memory", None, None, Some(&s), &[s.clone()])
+        let e = plan("memory", None, None, Some(&s), std::slice::from_ref(&s))
             .expect_err("stdio is not an endpoint")
             .to_string();
         assert!(e.contains("apex mcp run memory"), "{e}");
@@ -587,7 +587,7 @@ mod tests {
             .to_string();
         assert!(e.contains("--service"), "{e}");
         // And with a name of its own it is fine.
-        assert!(plan("memory", None, Some("memory-2"), Some(&mine), &[mine.clone()]).is_ok());
+        assert!(plan("memory", None, Some("memory-2"), Some(&mine), std::slice::from_ref(&mine)).is_ok());
     }
 
     #[test]
