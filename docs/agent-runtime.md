@@ -1207,6 +1207,91 @@ owned there. `tests/test-apex-dispatch.sh` covers these forms.
 
 ---
 
+## Terminal layouts
+
+`apex project layout open` builds a project's terminal work in tmux or zellij:
+an editor beside an agent beside a terminal, or several agents side by side.
+
+```
+apex project layout templates              # dev, review, agents
+apex project layout open                   # the one this project last used
+apex project layout open review
+apex project layout open agents --agents 3
+apex project layout open --mux zellij
+apex project layout open --dry-run         # print the panes, open nothing
+```
+
+| template | arrangement | panes |
+|---|---|---|
+| `dev` | one large pane left, the rest stacked right | editor, agent, terminal |
+| `review` | the same | editor, agent, `apex agent diff` |
+| `agents` | tiled | `--agents N` agent panes, up to 8 |
+
+The editor is `$VISUAL`, then `$EDITOR`, then the first of neovim, vim, helix
+or nano that is installed. A `$VISUAL` that is not installed falls through
+rather than being trusted — a pane whose command does not exist opens and dies.
+The multiplexer is `--mux`, then `$APEX_MUX`, then tmux, then zellij; one that
+is named but not installed is refused rather than quietly substituted.
+
+### The multiplexer is a viewport, not a host
+
+Both the daemon and a multiplexer own PTYs, so composing them has two possible
+shapes. APEX picks the one where **a multiplexer pane runs `apex agent
+attach`**, and the reasoning is worth stating because the other way round looks
+symmetrical and is not:
+
+- The daemon's PTY is the durable one. `apex agent attach` is only ever a
+  proxy, so killing the multiplexer, closing the terminal or logging out leaves
+  every agent running — and reopening the template finds them again.
+- Running a multiplexer *inside* an agent session would put the multiplexer
+  server inside that session's bwrap confinement: its socket, its other panes
+  and every program in them held to one agent's policy, and one session able to
+  hold only one agent.
+- It would also put the durable thing inside the ephemeral one, making the
+  multiplexer a single point of failure for agent state.
+
+Two consequences follow, and both are why this composes without special cases.
+Resize already works: `apex agent attach` turns SIGWINCH into a `Resize`
+control frame, so reattaching a tmux client at a different size reaches the
+daemon's PTY through `TIOCSWINSZ`. And the detach key, `ctrl-]`, collides with
+neither tmux's `C-b` nor zellij's `Ctrl-p`, so you can leave an agent pane
+without leaving the multiplexer.
+
+### Attach, and restore
+
+Reopening never rebuilds a session that is already there — it attaches to it.
+Each agent pane takes the next of this project's live sessions and attaches;
+when they run out, the pane starts one instead. So the same command does both
+halves of "attach and restore cleanly": after a reboot there are no sessions
+and the template starts fresh ones, and while agents are working it puts you
+back with those agents rather than starting duplicates beside them.
+
+The session is named `apex-<project>-<digest>` — the project's directory name,
+which is what a status bar shows, plus six hex of its path, because `~/work/api`
+and `~/oss/api` are two projects and sharing a session would silently attach one
+to the other's panes.
+
+### One layout record, not two
+
+This is the same `apex project layout` that remembers a project's desktop
+windows, and deliberately not a second mechanism beside it. `save` captures the
+windows somebody has open; `open` records the template it used. Both live in
+the one record, so `apex project layout show` reports both halves and `forget`
+discards both.
+
+tmux and zellij are driven through `/usr/libexec/apex-mux`, the same adapter
+shape as `apex-project-windows` for compositors: the multiplexer is the only
+per-backend part, so the CLI carries no tmux or zellij knowledge and the tests
+have one program to fake. `apex-mux kdl <arrangement> <plan>` prints the zellij
+layout that would be sent, which is also how the image build hands it back to
+zellij's own parser.
+
+Pane commands are passed as argv and never through a shell, for the reason
+window layouts store argv vectors: nothing in a pane command can be read as a
+shell metacharacter, because nothing parses it as one.
+
+---
+
 ## Shells
 
 The shortcuts, completion and the prompt indicator work in bash, zsh, fish and

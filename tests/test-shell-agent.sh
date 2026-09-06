@@ -69,6 +69,7 @@ case "\$*" in
     "secret capabilities")     printf 'capabilities:\n  repo.read\n  repo.write\n' ;;
     "request verbs")           printf 'verbs:\n  pkg.install\n  service.restart\n' ;;
     "request list --all --json") printf '[\n  {\n    "id": 1\n  }\n]\n' ;;
+    "project layout templates") printf 'NAME       ARRANGEMENT      OPENS\ndev        main-vertical    editor, agent, terminal\nagents     tiled            several agents\n' ;;
     *) printf 'STUB %s\n' "\$*" ;;
 esac
 EOF
@@ -299,6 +300,11 @@ functions -q apex_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
         || bad "completion asks the CLI for the capability vocabulary"
     printf '%s' "$(comp 'apex project layout ')" | grep -q '^restore' \
         && ok "completion offers the layout verbs" || bad "completion offers the layout verbs"
+    printf '%s' "$(comp 'apex project layout ')" | grep -q '^templates' \
+        && ok "completion offers the template verbs" || bad "completion offers the template verbs"
+    printf '%s' "$(comp 'apex project layout open ')" | grep -q '^dev' \
+        && ok "completion asks the CLI for the layout templates" \
+        || bad "completion asks the CLI for the layout templates"
     printf '%s' "$(comp 'aa ')" | grep -q '^4' \
         && ok "the aa shortcut completes session ids" || bad "the aa shortcut completes session ids"
     printf '%s' "$(comp 'ad ')" | grep -q '^4' \
@@ -462,6 +468,11 @@ $1" 2>&1)
     [ "$(nucomp 'nu-complete apex operations')" = "pkg.install service.restart" ] \
         && ok "nushell asks the CLI for the requestable verbs" \
         || bad "nushell asks the CLI for the requestable verbs"
+    [ "$(nucomp 'nu-complete apex templates')" = "dev agents" ] \
+        && ok "nushell asks the CLI for the layout templates" \
+        || bad "nushell asks the CLI for the layout templates (got '$(nucomp 'nu-complete apex templates')')"
+    printf '%s' "$(nucomp 'nu-complete apex layout')" | grep -q 'templates' \
+        && ok "nushell offers the new layout verbs" || bad "nushell offers the new layout verbs"
 
     # ── the runtime is down ──────────────────────────────────────────────────
     out="$( (cd "$PROJ" && env -i PATH="${DOWN}:/usr/bin:/bin" HOME="${WORK}/home" \

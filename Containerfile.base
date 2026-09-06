@@ -958,6 +958,13 @@ COPY --chmod=0755 files/system/libexec/apex-agent-review \
 # how the layout suite becomes deterministic and runnable with no compositor.
 COPY --chmod=0755 files/system/libexec/apex-project-windows \
      /usr/libexec/apex-project-windows
+
+# The multiplexer adapter, in the same shape and for the same reason as the
+# compositor one above: `apex project layout open` builds an editor/agent/
+# terminal layout, and tmux and zellij are the only per-backend part of that.
+# Keeping them here means the CLI carries no tmux or zellij knowledge and the
+# tests have one program to fake.
+COPY --chmod=0755 files/system/libexec/apex-mux /usr/libexec/apex-mux
 # Only what exists at this point in the build. The cross-checks against
 # /usr/share/apex/labwc/rc.xml live in the labwc section that populates it —
 # asserting a path before its COPY is a build failure, and this block did
@@ -1018,6 +1025,29 @@ RUN set -eux; \
         'import json,sys; assert json.load(sys.stdin) == [], "expected an empty list"'; \
     /usr/libexec/apex-project-windows compositor >/dev/null; \
     ! /usr/libexec/apex-project-windows nonsense-action 2>/dev/null; \
+    # The multiplexer adapter. It is /bin/sh and not python3, so the parser to
+    # ask is `sh -n`; and both multiplexers it drives have to be in the image,
+    # because a layout template that names a program nobody installed is the
+    # same defect the terminal-developer row already had once.
+    test -x /usr/libexec/apex-mux; \
+    sh -n /usr/libexec/apex-mux; \
+    test "$(/usr/libexec/apex-mux backends | sort | tr '\n' ' ')" = "tmux zellij "; \
+    ! /usr/libexec/apex-mux nonsense-verb 2>/dev/null; \
+    ! /usr/libexec/apex-mux has screen x 2>/dev/null; \
+    # A generated zellij layout that zellij's own parser rejects is the one
+    # failure mode this format has, and it would only show up at somebody's
+    # first `layout open`. So both arrangements are generated here and handed
+    # straight back to zellij.
+    printf 'editor\t/tmp\tnano\nagent\t/tmp\tapex\tagent\trun\nterminal\t/tmp\n' \
+        > /tmp/apex-mux-check.tsv; \
+    for arr in main-vertical tiled; do \
+        /usr/libexec/apex-mux kdl "$arr" /tmp/apex-mux-check.tsv > /tmp/apex-mux-check.kdl; \
+        grep -q 'tab name="apex"' /tmp/apex-mux-check.kdl; \
+        ! ZELLIJ_SOCKET_DIR=/tmp/apex-zcheck \
+            timeout 30 zellij --layout-string "$(cat /tmp/apex-mux-check.kdl)" 2>&1 \
+            | grep -q 'Failed to parse'; \
+    done; \
+    rm -rf /tmp/apex-mux-check.tsv /tmp/apex-mux-check.kdl /tmp/apex-zcheck; \
     echo "context menu + settings generators + agent helpers: installed and self-tested"
 RUN systemctl --global enable apex-shell-firstrun.service
 
