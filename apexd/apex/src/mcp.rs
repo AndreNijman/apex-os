@@ -60,8 +60,10 @@ use apex_agent_core::protocol::{
 };
 use clap::Subcommand;
 
+pub mod confine;
 pub mod connect;
 pub mod servers;
+pub mod sidecar;
 
 /// `apex mcp <verb>`.
 #[derive(Subcommand)]
@@ -105,6 +107,35 @@ pub enum McpCmd {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Run one MCP server inside its own sandbox.
+    ///
+    /// Meant to be spawned by an agent, not typed: `apex mcp confine` is what
+    /// puts it in the server's definition. Without a policy file the server
+    /// gets no network, no project, no access to the broker and a private home
+    /// of its own — `apex mcp policy <name>` prints what it will actually get.
+    Run {
+        /// The server, as `apex mcp list` names it.
+        name: String,
+        /// The server's own command, after `--`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+
+    /// Rewrite a local MCP server's definition so it starts confined.
+    Confine {
+        /// The server, as `apex mcp list` names it.
+        name: String,
+        /// Say what would happen and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// What each MCP server may reach, and where that was decided.
+    Policy {
+        /// One server. Every one this machine defines, when left out.
+        name: Option<String>,
+    },
 }
 
 pub fn main(cmd: McpCmd) -> i32 {
@@ -125,6 +156,17 @@ pub fn main(cmd: McpCmd) -> i32 {
             service,
             dry_run,
         } => report(connect::main(&name, url.as_deref(), service.as_deref(), dry_run)),
+        McpCmd::Run { name, command } => match sidecar::run(&name, &command) {
+            Ok(code) => code,
+            Err(e) => {
+                // stderr for the same reason the bridge uses it: stdout is the
+                // MCP transport, and English on it is a protocol error.
+                eprintln!("apex mcp run: {e:#}");
+                1
+            }
+        },
+        McpCmd::Confine { name, dry_run } => report(confine::main(&name, dry_run)),
+        McpCmd::Policy { name } => report(policy(name.as_deref())),
     }
 }
 
@@ -180,6 +222,58 @@ fn list(json: bool) -> Result<i32> {
         1 => println!("1 MCP credential is readable by any agent that runs as you"),
         n => println!("{n} MCP credentials are readable by any agent that runs as you"),
     }
+    Ok(0)
+}
+
+/// `apex mcp policy`.
+fn policy(only: Option<&str>) -> Result<i32> {
+    let cwd = std::env::current_dir().ok();
+    let found = servers::discover(&home(), cwd.as_deref());
+    let wanted: Vec<&servers::Server> = match only {
+        Some(name) => found.iter().filter(|s| s.name == name).collect(),
+        // Only the local ones: an endpoint is a request the broker makes, and
+        // there is no process of its own to confine.
+        None => found
+            .iter()
+            .filter(|s| matches!(s.transport, servers::Transport::Stdio { .. }))
+            .collect(),
+    };
+    if wanted.is_empty() {
+        match only {
+            Some(name) => bail!("no MCP server called '{name}' is defined here"),
+            None => println!("no MCP server on this machine is a program this could confine"),
+        }
+        return Ok(0);
+    }
+
+    for server in wanted {
+        println!("{}", server.name);
+        if let servers::Transport::Endpoint { .. } = server.transport {
+            println!("  this is an endpoint the broker reaches, not a program to confine");
+            println!();
+            continue;
+        }
+        let policy = sidecar::load(&server.name)?;
+        for line in policy.describe() {
+            println!("  {line}");
+        }
+        println!("  decided by  {}", policy.source.describe());
+        println!(
+            "  started     {}",
+            match &server.transport {
+                servers::Transport::Stdio { command, args }
+                    if servers::confined_server(command, args).as_deref()
+                        == Some(server.name.as_str()) =>
+                    "inside that sandbox".to_string(),
+                _ => format!(
+                    "with everything the agent session has — apex mcp confine {}",
+                    server.name
+                ),
+            }
+        );
+        println!();
+    }
+    println!("policies are read from {} then {}", sidecar::user_dir().display(), sidecar::MACHINE_DIR);
     Ok(0)
 }
 
