@@ -34,10 +34,18 @@ fi
 
 # --all-targets so tests and benches are linted too; -D warnings so a lint is a
 # failure rather than a line nobody reads.
-podman run --rm -v "$WORK:/w:z" -w /w/apexd \
+#
+# --network=host because `docker.io/library/rust:1` does NOT ship clippy: it
+# downloads it, and on katana a container without this gets no name resolution.
+# The image pull works either way, since that goes through the host, so the
+# failure only appears at `rustup component add` — which used to have its stderr
+# discarded, turning "Temporary failure in name resolution" into "could not add
+# the clippy component" and reading like a broken image. Both halves of that are
+# fixed here: the network, and saying what actually went wrong.
+podman run --rm --network=host -v "$WORK:/w:z" -w /w/apexd \
     -e CARGO_TARGET_DIR=/w/target-clippy \
     docker.io/library/rust:1 \
-    sh -c 'rustup component add clippy >/dev/null 2>&1 || { echo "could not add the clippy component" >&2; exit 2; }
+    sh -c 'rustup component add clippy || { echo "could not add the clippy component" >&2; exit 2; }
            cargo clippy --locked --all-targets -- -D warnings'
 rc=$?
 [ "$rc" = 0 ] && echo "PASS  clippy is clean" || echo "FAIL  clippy exited $rc"
