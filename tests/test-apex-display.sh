@@ -121,15 +121,31 @@ if [ -s "$K" ]; then
     grep -q 'scale 1.5' "$K" && ok "kanshi: fractional scale written" || bad "kanshi: fractional scale written"
 fi
 
-D="$H2/.config/hypr/apex-display.conf"
+D="$H2/.config/hypr/apex/monitors.lua"
 [ -s "$D" ] && ok "a Hyprland monitor file is written" || bad "a Hyprland monitor file is written"
 if [ -s "$D" ]; then
-    grep -q '^monitor=eDP-1,2560x1600@165,0x0,1.5$' "$D" \
-        && ok "hyprland: the monitor line matches Hyprland's own syntax" \
-        || bad "hyprland: the monitor line matches Hyprland's own syntax"
-    grep -q '^monitor=HDMI-A-1,disable$' "$D" \
+    grep -q '^hl.monitor({ output = "eDP-1", mode = "2560x1600@165", position = "0x0", scale = 1.5 })$' "$D" \
+        && ok "hyprland: the monitor call matches Hyprland's own Lua API" \
+        || bad "hyprland: the monitor call matches Hyprland's own Lua API"
+    grep -q '^hl.monitor({ output = "HDMI-A-1", disabled = true })$' "$D" \
         && ok "hyprland: a disabled output is disabled" || bad "hyprland: a disabled output is disabled"
+    # The catch-all used to live in the seeded hyprland.conf. It has to be the
+    # FIRST rule here now: later rules win, so a fallback emitted last would
+    # override every saved layout, and one emitted nowhere leaves a display
+    # plugged in after these settings were saved with no rule at all.
+    # Asserted on the first RULE, not the first N lines: the comment above it
+    # explains why it is there and would silently push it out of a line window.
+    [ "$(grep -m1 '^hl\.monitor(' "$D")" \
+      = 'hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1.0 })' ] \
+        && ok "hyprland: the catch-all rule comes first" \
+        || bad "hyprland: the catch-all rule comes first"
+    grep -q '^monitor=' "$D" \
+        && bad "hyprland: no hyprlang monitor= lines remain" \
+        || ok "hyprland: no hyprlang monitor= lines remain"
 fi
+[ -e "$H2/.config/hypr/apex-display.conf" ] \
+    && bad "hyprland: no legacy apex-display.conf is written" \
+    || ok "hyprland: no legacy apex-display.conf is written"
 
 # A written kanshi profile does nothing until kanshi re-reads it, so `save` has
 # to signal it. Asserted because the failure is silent: the file is correct, the
