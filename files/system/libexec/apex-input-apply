@@ -47,8 +47,31 @@ Every name here was checked against the compositor that consumes it:
 `--self-test` generates from the defaults and runs all three validators. Run it
 after touching any mapping in this file.
 
+## Nothing may be shown that cannot be done
+
+A settings page whose controls quietly do nothing is the complaint this file
+exists to answer, so three questions are answered here rather than guessed at
+in the QML:
+
+  --devices       what input devices are present, classified as touchpad,
+                  trackpoint, mouse, tablet, touchscreen or keyboard. Read from
+                  sysfs and udev's database, both world-readable: `libinput
+                  list-devices` needs the `input` group and a user who is not in
+                  it gets a permission error per device, which is not an empty
+                  list.
+  --capabilities  what each compositor can actually do, and the reason where it
+                  cannot. Settings disables the control and shows the reason;
+                  it never writes a value the compositor will ignore. Some
+                  answers depend on the hardware — four touchpad settings exist
+                  on Hyprland only as a named device.
+  --read-back     what is in effect now, and where that answer came from.
+                  `hyprctl getoption` is a real query; niri has no input query
+                  in `niri msg` and labwc has no IPC, so those two are read from
+                  the file the compositor loads and say so.
+
 usage:
   apex-input-apply [--model PATH] [--dry-run] [--no-reload] [--self-test]
+  apex-input-apply --devices | --capabilities | --read-back
 """
 import argparse
 import json
@@ -117,9 +140,323 @@ SCROLL_METHODS = ("none", "twofinger", "edge")
 #
 # Hyprland's `drag_3fg` is an enum: 0 off, 1 three fingers, 2 four.
 HYPR_DRAG_3FG = {False: 0, True: 1}
+# Hyprland's own spellings for input:scroll_method. Nothing catches a wrong one:
+# --verify-config accepts ANY string here and the compositor then matches none
+# of them, so "twofinger" parses clean and does nothing.
+HYPR_SCROLL_METHODS = {"twofinger": "2fg", "edge": "edge", "none": "no_scroll"}
 NIRI_SCROLL_METHODS = {"twofinger": "two-finger", "edge": "edge", "none": "no-scroll"}
 NIRI_CLICK_METHODS = {"clickfinger": "clickfinger", "buttonAreas": "button-areas"}
 NIRI_TAP_BUTTON_MAPS = {"lrm": "left-right-middle", "lmr": "left-middle-right"}
+
+
+# ── input devices ───────────────────────────────────────────────────────────
+# Six kinds, because that is what the kernel and libinput distinguish and what
+# a per-device page has to keep apart. A trackpoint is not a mouse: it reports
+# ID_INPUT_POINTINGSTICK *and* ID_INPUT_MOUSE, and a touchpad ships a companion
+# node that reports ID_INPUT_MOUSE alone. So the order below is what separates
+# the three pointing devices on a ThinkPad, and getting it wrong silently files
+# a touchpad under Mouse.
+DEVICE_TYPES = ("touchpad", "trackpoint", "tablet", "touchscreen", "mouse",
+                "keyboard", "other")
+UDEV_TYPE_FLAGS = (
+    ("ID_INPUT_TOUCHPAD", "touchpad"),
+    ("ID_INPUT_POINTINGSTICK", "trackpoint"),
+    ("ID_INPUT_TABLET", "tablet"),
+    ("ID_INPUT_TOUCHSCREEN", "touchscreen"),
+    ("ID_INPUT_MOUSE", "mouse"),
+    ("ID_INPUT_KEYBOARD", "keyboard"),
+)
+POINTING_TYPES = ("touchpad", "trackpoint", "mouse")
+
+# Which model keys a device of each type may carry. A tap setting on a mouse is
+# a user error the model should report, not carry to a generator that will emit
+# an option libinput ignores.
+TOUCH_ONLY_KEYS = ("tap", "tap_and_drag", "drag_lock", "tap_button_map",
+                   "disable_while_typing", "click_method", "scroll_method",
+                   "three_finger_drag")
+COMMON_DEVICE_KEYS = ("natural_scroll", "speed", "accel_profile", "left_handed",
+                      "scroll_factor", "middle_emulation", "enabled")
+DEVICE_KEYS_BY_TYPE = {
+    "touchpad":    COMMON_DEVICE_KEYS + TOUCH_ONLY_KEYS,
+    "trackpoint":  COMMON_DEVICE_KEYS,
+    "mouse":       COMMON_DEVICE_KEYS,
+    "tablet":      ("left_handed", "enabled"),
+    "touchscreen": ("enabled",),
+    "keyboard":    ("enabled",),
+    "other":       ("enabled",),
+}
+DEVICE_KEYS = tuple(sorted(set(COMMON_DEVICE_KEYS) | set(TOUCH_ONLY_KEYS)))
+
+
+def parse_udev_flags(text, prefix=""):
+    """ID_INPUT_* flags that are SET, from udev property lines.
+
+    The VALUE is the whole point. udev writes ID_INPUT_POINTINGSTICK=0 on a
+    device that is not one, and every touchpad ships a companion mouse node that
+    carries exactly that line — so reading the key's presence as the answer
+    files half the touchpads on the machine under Trackpoint.
+    """
+    flags = set()
+    for line in text.splitlines():
+        if prefix:
+            if not line.startswith(prefix):
+                continue
+            line = line[len(prefix):]
+        if line.startswith("ID_INPUT") and line.rstrip().endswith("=1"):
+            flags.add(line.split("=", 1)[0])
+    return flags
+
+
+def _udev_flags(minor):
+    """ID_INPUT_* flags for one event node, without udevadm and without root.
+
+    /run/udev/data/c13:<minor> is udev's own database record — mode 0644, the
+    same `E:` lines `udevadm info --query=property` prints. Reading it directly
+    keeps this working inside a container that has no udevadm, and costs nothing
+    where there is one. udevadm is the fallback, not the other way round.
+    """
+    try:
+        with open(f"/run/udev/data/c13:{minor}", encoding="utf-8", errors="replace") as fh:
+            return parse_udev_flags(fh.read(), prefix="E:")
+    except OSError:
+        pass
+    if not which("udevadm"):
+        return set()
+    try:
+        out = subprocess.run(
+            ["udevadm", "info", "--query=property", f"--name=/dev/char/13:{minor}"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return parse_udev_flags(out.stdout)
+
+
+def _hypr_name(name):
+    """The name Hyprland gives a device: lowercased, spaces to hyphens.
+
+    Checked against `hyprctl -j devices` on a machine with seven pointing
+    devices: "ELAN06DA:00 04F3:320B Touchpad" is elan06da:00-04f3:320b-touchpad
+    and "TPPS/2 Elan TrackPoint" is tpps/2-elan-trackpoint — the slash stays.
+    """
+    return name.lower().replace(" ", "-")
+
+
+def _hyprctl_names():
+    """Every device name the running Hyprland will match hl.device against.
+
+    Worth asking rather than deriving: Hyprland appends -1, -2 … to break ties
+    between devices whose derived names collide, and which suffix a device gets
+    depends on what else is plugged in. On this laptop a "Logitech G305" is both
+    a keyboard and a mouse, and the mouse is logitech-g305-1.
+
+    Returns None — not an empty set — when there is no Hyprland to ask, so the
+    caller can tell "no devices" from "did not look".
+    """
+    if not which("hyprctl") or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return None
+    try:
+        out = subprocess.run(["hyprctl", "-j", "devices"],
+                             capture_output=True, text=True, timeout=10)
+        data = json.loads(out.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
+        return None
+    names = []
+    for group in ("mice", "keyboards", "tablets", "touch", "switches"):
+        for entry in data.get(group) or []:
+            if isinstance(entry, dict) and entry.get("name"):
+                names.append(entry["name"])
+    return names
+
+
+def enumerate_devices():
+    """Every input device, classified. Returns (devices, notes).
+
+    Reads sysfs and udev's database, both world-readable, because the obvious
+    tool does not work: `libinput list-devices` opens /dev/input/event*, which
+    needs the `input` group, and a user who is not in it gets "Permission
+    denied" per device rather than a short list. A refusal reported as an empty
+    list is how a page comes to say "no touchpad found" on a laptop with one.
+    """
+    devices, notes = [], []
+    # A fixture, so a test can assert what is generated for a trackpoint on a
+    # machine that has none, and so the shell can hand back the enumeration it
+    # already made rather than paying for a second one.
+    fixture = os.environ.get("APEX_INPUT_DEVICES", "")
+    if fixture:
+        try:
+            with open(fixture, encoding="utf-8") as fh:
+                return json.load(fh), []
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            return [], [f"APEX_INPUT_DEVICES={fixture} is not usable ({e})"]
+
+    try:
+        nodes = sorted(os.listdir("/sys/class/input"))
+    except OSError as e:
+        return [], [f"cannot list input devices ({e}); no per-device settings"]
+
+    hypr_names = _hyprctl_names()
+    taken = set()
+    for node in nodes:
+        if not re.fullmatch(r"event\d+", node):
+            continue
+        base = os.path.join("/sys/class/input", node)
+        try:
+            with open(os.path.join(base, "device", "name"), encoding="utf-8",
+                      errors="replace") as fh:
+                name = fh.read().strip()
+            with open(os.path.join(base, "dev"), encoding="utf-8") as fh:
+                minor = fh.read().strip().split(":")[1]
+        except OSError:
+            continue
+        if not name:
+            continue
+
+        flags = _udev_flags(minor)
+        kind = "other"
+        for flag, typed in UDEV_TYPE_FLAGS:
+            if flag in flags:
+                kind = typed
+                break
+
+        derived = _hypr_name(name)
+        resolved, how = derived, "derived"
+        if hypr_names is not None:
+            # Exact name first, then the tie-break suffixes, and never a name
+            # another device already claimed.
+            for cand in [derived] + [f"{derived}-{i}" for i in range(1, 10)]:
+                if cand in hypr_names and cand not in taken:
+                    resolved, how = cand, "compositor"
+                    break
+        taken.add(resolved)
+        devices.append({
+            "name": name, "type": kind, "event": node,
+            "hypr_name": resolved, "hypr_name_source": how,
+        })
+
+    # Whether the Hyprland name was asked for or derived is recorded per device
+    # in hypr_name_source, not raised as a note: it is a property of the answer,
+    # and a note here would print on every single run in a niri session.
+    if not devices:
+        notes.append("/sys/class/input listed no usable event device")
+    return devices, notes
+
+
+# ── capabilities ────────────────────────────────────────────────────────────
+# What each compositor can actually do, and the reason where it cannot.
+#
+# This table is the answer to "changing Input configuration has no effect". A
+# control the running compositor cannot honour is disabled in Settings and shows
+# the reason from here — it is never written, never reported as applied, and
+# never quietly turned into the setting next to it.
+#
+# Every entry was established against the shipped binary: Hyprland by
+# --verify-config, niri by `niri validate`, labwc by labwc-config(5) and the
+# package's own rc.xml.all. Not from a wiki.
+#
+# The reasons are read by users. They say what the compositor will not do, in
+# the words of the setting, and they do not name config options.
+SUPPORTED = True
+
+CAPABILITIES = {
+    "touchpad.speed": {
+        "hyprland": "hyprland-touchpad-device",
+    },
+    "touchpad.accel_profile": {
+        "hyprland": "hyprland-touchpad-device",
+    },
+    "touchpad.left_handed": {
+        "hyprland": "hyprland-touchpad-device",
+    },
+    "touchpad.scroll_method": {
+        "hyprland": "hyprland-touchpad-device",
+    },
+    "touchpad.click_method": {
+        "hyprland": {"none": "Hyprland's touchpad can click by finger count or "
+                             "by button area, and has no way to stop a click "
+                             "producing a button at all"},
+        "niri": {"none": "niri's touchpad can click by finger count or by "
+                         "button area, and has no way to stop a click "
+                         "producing a button at all"},
+    },
+    "touchpad.three_finger_drag": {
+        "niri": "niri has no three-finger drag",
+    },
+    "pointer.middle_emulation": {
+        "hyprland": "hyprland-pointer-device",
+    },
+}
+
+# Filled in from the live enumeration, because whether Hyprland can do these
+# depends on whether there is a device to name.
+CONDITIONAL_REASONS = {
+    "hyprland-touchpad-device":
+        ("Hyprland sets this per device and APEX found no touchpad to name, so "
+         "the setting has nowhere to go"),
+    "hyprland-pointer-device":
+        ("Hyprland sets this per device and APEX found no mouse to name, so the "
+         "setting has nowhere to go"),
+}
+
+# Per-device settings, separately: two of the three compositors match a device
+# by its name and one does not.
+DEVICE_CAPABILITY = {
+    "hyprland": SUPPORTED,
+    "labwc": SUPPORTED,
+    "niri": ("niri configures input by device kind — touchpad, mouse, "
+             "trackpoint, tablet, touchscreen — and not by device name, so a "
+             "setting for one named device is not applied in a niri session"),
+}
+
+
+def running_compositor():
+    """hyprland, niri, labwc, or None. Same detection as apex-compositor-reload."""
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    for known in ("hyprland", "niri", "labwc"):
+        if known in desktop:
+            return known
+    for proc, known in (("Hyprland", "hyprland"), ("niri", "niri"), ("labwc", "labwc")):
+        if subprocess.run(["pgrep", "-x", proc], capture_output=True).returncode == 0:
+            return known
+    return None
+
+
+def capabilities(devices=None):
+    """The capability table, resolved against the devices actually present."""
+    if devices is None:
+        devices, _ = enumerate_devices()
+    kinds = {d["type"] for d in devices}
+    have = {
+        "hyprland-touchpad-device": "touchpad" in kinds,
+        "hyprland-pointer-device": bool(kinds & {"mouse", "trackpoint"}),
+    }
+
+    controls = {}
+    for control in sorted(
+            set(CAPABILITIES) | {f"{s}.{k}" for s in DEFAULTS for k in DEFAULTS[s]}):
+        entry = {}
+        for comp in ("hyprland", "niri", "labwc"):
+            rule = CAPABILITIES.get(control, {}).get(comp, SUPPORTED)
+            if isinstance(rule, str) and rule in CONDITIONAL_REASONS:
+                rule = SUPPORTED if have[rule] else CONDITIONAL_REASONS[rule]
+            if rule is SUPPORTED:
+                entry[comp] = {"supported": True}
+            elif isinstance(rule, dict):
+                entry[comp] = {"supported": True, "unsupported_values": rule}
+            else:
+                entry[comp] = {"supported": False, "reason": rule}
+        controls[control] = entry
+
+    return {
+        "running": running_compositor(),
+        "controls": controls,
+        "per_device": {
+            comp: ({"supported": True} if rule is SUPPORTED
+                   else {"supported": False, "reason": rule})
+            for comp, rule in DEVICE_CAPABILITY.items()
+        },
+        "device_types": list(DEVICE_TYPES),
+        "device_keys": {k: list(v) for k, v in DEVICE_KEYS_BY_TYPE.items()},
+    }
 
 
 # ── model ───────────────────────────────────────────────────────────────────
@@ -145,26 +482,70 @@ def load_model(path):
             model[section][key] = value
 
     # `devices` is a different shape from the three global sections — a map of
-    # libinput device name to its own settings — so it is merged separately
-    # rather than through the key-by-key loop above. Only Hyprland can express
-    # it (hl.device is per named device); labwc has device categories, not
-    # names, and niri has neither, so those two generators ignore it.
+    # kernel device name to that one device's settings — so it is merged
+    # separately rather than through the key-by-key loop above.
+    #
+    # It is keyed on the name the KERNEL reports ("ELAN06DA:00 04F3:320B
+    # Touchpad"), which is also the name labwc matches a device category
+    # against. Hyprland's own lowercased-and-hyphenated form is derived at
+    # generation time from the live enumeration, because its tie-break suffix
+    # depends on what else is plugged in and cannot be stored.
     model["devices"] = {}
     for name, settings in (user.get("devices") or {}).items():
         if not isinstance(settings, dict):
             notes.append(f"ignoring devices.{name}: not a table of settings")
             continue
-        kept = {}
+        kind = settings.get("type")
+        if kind not in DEVICE_KEYS_BY_TYPE:
+            notes.append(f"devices.{name}: unknown type {kind!r}, treating it as a mouse")
+            kind = "mouse"
+        allowed = DEVICE_KEYS_BY_TYPE[kind]
+        kept = {"type": kind}
         for key, value in settings.items():
+            if key == "type":
+                continue
             if key not in DEVICE_KEYS:
                 notes.append(f"ignoring unknown devices.{name}.{key}")
                 continue
+            if key not in allowed:
+                # Not a spelling mistake but a category one: a tap setting on a
+                # mouse is a control that should never have been shown.
+                notes.append(f"ignoring devices.{name}.{key}: a {kind} has no such setting")
+                continue
             kept[key] = value
-        if kept:
+        if len(kept) > 1:
             model["devices"][name] = kept
 
     notes += validate(model)
+    notes += validate_devices(model)
     return model, notes
+
+
+def validate_devices(model):
+    """Clamp and correct per-device values, the same way the global ones are."""
+    notes = []
+    for name, settings in model.get("devices", {}).items():
+        def fix(key, value, reason):
+            notes.append(f"devices.{name}.{key}: {reason}, dropped")
+            settings.pop(key, None)
+
+        if "speed" in settings and (
+                not isinstance(settings["speed"], (int, float))
+                or isinstance(settings["speed"], bool)
+                or not -1.0 <= settings["speed"] <= 1.0):
+            fix("speed", None, "must be between -1.0 and 1.0")
+        if "scroll_factor" in settings and (
+                not isinstance(settings["scroll_factor"], (int, float))
+                or isinstance(settings["scroll_factor"], bool)
+                or not 0.1 <= settings["scroll_factor"] <= 10.0):
+            fix("scroll_factor", None, "must be between 0.1 and 10.0")
+        for key, allowed in (("accel_profile", ACCEL_PROFILES),
+                             ("click_method", CLICK_METHODS),
+                             ("scroll_method", SCROLL_METHODS),
+                             ("tap_button_map", TAP_BUTTON_MAPS)):
+            if key in settings and settings[key] not in allowed:
+                fix(key, None, f"must be one of {allowed}")
+    return notes
 
 
 def validate(model):
@@ -224,24 +605,82 @@ def lua_value(value):
     return lua_str(value)
 
 
-# Per-device keys HL.DeviceSpec accepts that this model can fill. Verified
-# against /usr/share/hypr/stubs/hl.meta.lua for the Hyprland in the image, not
-# from the wiki: the stub is generated from the compositor's own option table,
-# so an entry here that Hyprland does not implement fails --self-test.
+# Model key -> HL.DeviceSpec field. Verified against
+# /usr/share/hypr/stubs/hl.meta.lua for the Hyprland in the image, not from the
+# wiki: the stub is generated from the compositor's own option table, so an
+# entry here that Hyprland does not implement fails --self-test.
 #
-# `hl.device` is per named device, which is what makes a "this touchpad only"
-# setting expressible at all — the input block above is global. P0-019's
-# per-device page fills `devices` in input.json and needs no new mechanism.
-DEVICE_KEYS = (
-    "natural_scroll", "sensitivity", "accel_profile", "tap_to_click",
-    "tap_and_drag", "drag_lock", "disable_while_typing", "left_handed",
-    "middle_button_emulation", "clickfinger_behavior", "scroll_method",
-    "scroll_factor", "scroll_button", "scroll_button_lock", "tap_button_map",
-    "enabled", "repeat_rate", "repeat_delay",
-)
+# The model does NOT speak Hyprland. It says `speed` and `tap`, labwc's words,
+# because labwc is the one with a spelling for every value; each generator
+# translates. A model in one compositor's vocabulary is how a settings page ends
+# up knowing which compositor is running, which is the thing this whole file
+# exists to avoid.
+HYPR_DEVICE_KEY = {
+    "natural_scroll": "natural_scroll",
+    "speed": "sensitivity",
+    "accel_profile": "accel_profile",
+    "left_handed": "left_handed",
+    "scroll_factor": "scroll_factor",
+    "middle_emulation": "middle_button_emulation",
+    "enabled": "enabled",
+    "tap": "tap_to_click",
+    "tap_and_drag": "tap_and_drag",
+    "drag_lock": "drag_lock",
+    "tap_button_map": "tap_button_map",
+    "disable_while_typing": "disable_while_typing",
+    "click_method": "clickfinger_behavior",
+    "scroll_method": "scroll_method",
+    "three_finger_drag": "drag_3fg",
+}
+
+LABWC_DEVICE_KEY = {
+    "natural_scroll": "naturalScroll",
+    "speed": "pointerSpeed",
+    "accel_profile": "accelProfile",
+    "left_handed": "leftHanded",
+    "scroll_factor": "scrollFactor",
+    "middle_emulation": "middleEmulation",
+    "enabled": "sendEventsMode",
+    "tap": "tap",
+    "tap_and_drag": "tapAndDrag",
+    "drag_lock": "dragLock",
+    "tap_button_map": "tapButtonMap",
+    "disable_while_typing": "disableWhileTyping",
+    "click_method": "clickMethod",
+    "scroll_method": "scrollMethod",
+    "three_finger_drag": "threeFingerDrag",
+}
+
+# The four touchpad settings Hyprland has NO touchpad-block option for. Proved
+# against the shipped 0.56.2 with --verify-config, which answers "unknown config
+# key 'input.touchpad.sensitivity'" for each: the touchpad block carries taps,
+# scrolling and clicks, and everything to do with pointer motion sits on the
+# parent `input` block, where it applies to every mouse as well.
+#
+# So writing them globally would set the user's mouse from the Touchpad page.
+# The only way to mean "this touchpad" is hl.device, by name — which is why
+# these four are the reason enumerate_devices() exists rather than a nicety.
+HYPR_TOUCHPAD_VIA_DEVICE = ("speed", "accel_profile", "left_handed", "scroll_method")
+# Same shape on the pointer side: there is no input:middle_button_emulation,
+# only input:touchpad:middle_button_emulation and the per-device field.
+HYPR_POINTER_VIA_DEVICE = ("middle_emulation",)
 
 
-def gen_hyprland(model):
+def hypr_device_value(key, value):
+    """One model value as its HL.DeviceSpec literal, or None where it has none."""
+    if key == "click_method":
+        # clickfinger_behavior is a boolean: on, or button areas. There is no
+        # third state, so "none" has no expression here at all.
+        return None if value == "none" else lua_value(value == "clickfinger")
+    if key == "scroll_method":
+        spelled = HYPR_SCROLL_METHODS.get(value)
+        return None if spelled is None else lua_str(spelled)
+    if key == "three_finger_drag":
+        return str(HYPR_DRAG_3FG[bool(value)])
+    return lua_value(value)
+
+
+def gen_hyprland(model, devices=None):
     """apex/input.lua — one hl.config call, plus one hl.device per named device.
 
     Loaded AFTER apex/input-defaults.lua by hyprland.lua, and hl.config is
@@ -292,13 +731,50 @@ def gen_hyprland(model):
         "",
     ]
 
-    for name in sorted(model.get("devices", {})):
-        settings = model["devices"][name]
+    # ── the per-device pass ─────────────────────────────────────────────────
+    # Two things land here. The user's own per-device overrides, and the four
+    # touchpad settings plus one pointer setting Hyprland has no global option
+    # for at all (HYPR_TOUCHPAD_VIA_DEVICE). Without the second group, Pointer
+    # speed, Acceleration, Left-handed and Scroll method on the Touchpad page
+    # are switches that write the model and change nothing — which is UI-003.
+    devices = devices if devices is not None else []
+    by_name = {d["name"]: d for d in devices}
+    routed = {}
+
+    def route(name, key, value):
+        routed.setdefault(name, {})[key] = value
+
+    for dev in devices:
+        if dev["type"] == "touchpad":
+            for key in HYPR_TOUCHPAD_VIA_DEVICE:
+                route(dev["name"], key, t[key])
+        elif dev["type"] in ("mouse", "trackpoint"):
+            for key in HYPR_POINTER_VIA_DEVICE:
+                route(dev["name"], key, p[key])
+
+    # The user's explicit choice for one device wins over the section-wide value
+    # routed to it above.
+    for name, settings in model.get("devices", {}).items():
+        for key, value in settings.items():
+            if key != "type":
+                route(name, key, value)
+
+    for name in sorted(routed):
+        dev = by_name.get(name)
+        hypr_name = dev["hypr_name"] if dev else _hypr_name(name)
+        emitted = []
+        for key in sorted(routed[name]):
+            field = HYPR_DEVICE_KEY.get(key)
+            literal = hypr_device_value(key, routed[name][key]) if field else None
+            if field is None or literal is None:
+                continue
+            emitted.append(f"    {field} = {literal},")
+        if not emitted:
+            continue
+        lines.append(f"-- {name}" + ("" if dev is None else f"  ({dev['type']})"))
         lines.append("hl.device({")
-        lines.append(f"    name = {lua_str(name)},")
-        for key in DEVICE_KEYS:
-            if key in settings:
-                lines.append(f"    {key} = {lua_value(settings[key])},")
+        lines.append(f"    name = {lua_str(hypr_name)},")
+        lines += emitted
         lines.append("})")
         lines.append("")
 
@@ -418,6 +894,34 @@ def libinput_element(model):
 
     device("touchpad", t, True)
     device("default", p, False)
+
+    # Per-device profiles, LAST, because labwc-config(5) says a category value
+    # that is not one of its keywords "will be used to match the device name
+    # directly" and a more specific profile is meant to win. Ordering them after
+    # the two category profiles is belt and braces on that.
+    for name in sorted(model.get("devices", {})):
+        settings = model["devices"][name]
+        dev = ET.SubElement(root, "device", {"category": name})
+        wrote = False
+        for key in sorted(settings):
+            if key == "type":
+                continue
+            tag = LABWC_DEVICE_KEY.get(key)
+            if tag is None:
+                continue
+            value = settings[key]
+            if key == "enabled":
+                text = yn(value)
+            elif key in ("speed", "scroll_factor"):
+                text = str(value)
+            elif isinstance(value, bool):
+                text = yn(value)
+            else:
+                text = str(value)
+            ET.SubElement(dev, tag).text = text
+            wrote = True
+        if not wrote:
+            root.remove(dev)
     return root
 
 
@@ -625,10 +1129,188 @@ def validate_niri(path):
 def reload_compositor():
     desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
     helper = "/usr/libexec/apex-compositor-reload"
-    if os.path.exists(helper):
-        subprocess.run([helper], check=False)
-        return f"reloaded via apex-compositor-reload ({desktop or 'unknown desktop'})"
-    return "no reload helper; the compositor will pick it up on next reload"
+    if not os.path.exists(helper):
+        return "no reload helper; the compositor will pick it up on next reload"
+    subprocess.run([helper], check=False)
+    note = f"reloaded via apex-compositor-reload ({desktop or 'unknown desktop'})"
+    # A reload that returns 0 is not a config that loaded. Hyprland keeps its
+    # complaints in `configerrors` and carries on with the last good values, so
+    # without this the page would report a successful apply over a config the
+    # compositor rejected.
+    if running_compositor() == "hyprland" and which("hyprctl"):
+        try:
+            out = subprocess.run(["hyprctl", "configerrors"],
+                                 capture_output=True, text=True, timeout=15)
+            errors = out.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return note
+        if errors and errors.lower() != "no errors.":
+            return f"{note}; Hyprland reports config errors: {errors}"
+    return note
+
+
+# ── reading back what is actually in effect ─────────────────────────────────
+# The control has to show what the compositor is doing, not what we asked it to
+# do. A page that writes and never reads cannot tell a working setting from one
+# whose option was renamed upstream, which is how this page came to be full of
+# switches that did nothing.
+#
+# `hyprctl getoption` is the only one of the three that answers at all: niri has
+# no input query in `niri msg` and labwc has no IPC. Those two are read back
+# from the file the compositor loads, which is weaker and is labelled as such
+# rather than dressed up as a device query.
+#
+# The paths are NOT the Lua keys. `tap_to_click` in hl.config is `tap-to-click`
+# to getoption, `tap_and_drag` is `tap-and-drag`, and the rest are underscored —
+# asking for the Lua spelling gets "no such option", which a naive reader would
+# report as "unset". tests/test-apex-input.sh asserts every path here answers.
+HYPR_GETOPTION = {
+    "touchpad.natural_scroll":       "input:touchpad:natural_scroll",
+    "touchpad.tap":                  "input:touchpad:tap-to-click",
+    "touchpad.tap_and_drag":         "input:touchpad:tap-and-drag",
+    "touchpad.drag_lock":            "input:touchpad:drag_lock",
+    "touchpad.disable_while_typing": "input:touchpad:disable_while_typing",
+    "touchpad.middle_emulation":     "input:touchpad:middle_button_emulation",
+    "touchpad.click_method":         "input:touchpad:clickfinger_behavior",
+    "touchpad.tap_button_map":       "input:touchpad:tap_button_map",
+    "touchpad.scroll_factor":        "input:touchpad:scroll_factor",
+    "touchpad.three_finger_drag":    "input:touchpad:drag_3fg",
+    "pointer.speed":                 "input:sensitivity",
+    "pointer.accel_profile":         "input:accel_profile",
+    "pointer.natural_scroll":        "input:natural_scroll",
+    "pointer.left_handed":           "input:left_handed",
+    "pointer.scroll_factor":         "input:scroll_factor",
+    "keyboard.repeat_rate":          "input:repeat_rate",
+    "keyboard.repeat_delay":         "input:repeat_delay",
+}
+
+BOOL_CONTROLS = {f"{s}.{k}" for s in DEFAULTS for k, v in DEFAULTS[s].items()
+                 if isinstance(v, bool)}
+
+
+def _from_hypr(control, answer):
+    """One getoption answer as a model value, or None where it says nothing."""
+    if control == "touchpad.click_method":
+        return "clickfinger" if answer.get("int") else "buttonAreas"
+    if control == "touchpad.three_finger_drag":
+        return bool(answer.get("int"))
+    if control in BOOL_CONTROLS:
+        return bool(answer.get("int"))
+    if "str" in answer:
+        text = answer["str"]
+        return None if text == "[[EMPTY]]" else text
+    if "float" in answer:
+        return round(float(answer["float"]), 4)
+    if "int" in answer:
+        return int(answer["int"])
+    return None
+
+
+def read_back_hyprland():
+    values, notes = {}, []
+    if not which("hyprctl") or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return values, ["Hyprland is not running, so nothing could be queried"]
+    for control, path in HYPR_GETOPTION.items():
+        try:
+            out = subprocess.run(["hyprctl", "-j", "getoption", path],
+                                 capture_output=True, text=True, timeout=10)
+            answer = json.loads(out.stdout)
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
+            notes.append(f"{control}: Hyprland did not answer for {path}")
+            continue
+        value = _from_hypr(control, answer)
+        if value is None:
+            continue
+        values[control] = {"value": value, "source": "compositor", "path": path}
+    return values, notes
+
+
+NIRI_READ = {
+    "touchpad.tap":                  (r"^\s+tap$", lambda m: True),
+    "touchpad.natural_scroll":       (r"^\s+natural-scroll$", lambda m: True),
+    "touchpad.disable_while_typing": (r"^\s+dwt$", lambda m: True),
+    "touchpad.drag_lock":            (r"^\s+drag-lock$", lambda m: True),
+    "touchpad.tap_and_drag":         (r"^\s+drag (true|false)$",
+                                      lambda m: m.group(1) == "true"),
+    "touchpad.speed":                (r"^\s+accel-speed (\S+)$", lambda m: float(m.group(1))),
+    "touchpad.accel_profile":        (r'^\s+accel-profile "(\w+)"$', lambda m: m.group(1)),
+    "touchpad.scroll_factor":        (r"^\s+scroll-factor (\S+)$", lambda m: float(m.group(1))),
+}
+
+
+def read_back(model_path):
+    """What is actually in effect, per control, and where the answer came from."""
+    comp = running_compositor()
+    if comp == "hyprland":
+        values, notes = read_back_hyprland()
+    elif comp == "niri":
+        # Only the touchpad block, because both blocks use the same option
+        # names and a whole-file regex cannot tell a mouse's from a touchpad's.
+        values, notes = {}, []
+        try:
+            with open(NIRI_OUT, encoding="utf-8") as fh:
+                whole = fh.read()
+            block = re.search(r"^    touchpad \{$(.*?)^    \}$", whole, re.M | re.S)
+            body = block.group(1) if block else ""
+        except OSError as e:
+            body, notes = "", [f"cannot read {NIRI_OUT}: {e}"]
+        for control, (pattern, cast) in NIRI_READ.items():
+            found = re.search(pattern, body, re.M)
+            values[control] = {"value": cast(found) if found else False,
+                               "source": "file", "path": NIRI_OUT}
+        notes.append("niri has no input query in `niri msg`, so these are read "
+                     "from the file niri loads rather than from the compositor")
+    elif comp == "labwc":
+        values, notes = {}, ["labwc has no IPC, so these are read from rc.xml "
+                             "rather than from the compositor"]
+        try:
+            with open(LABWC_RC, encoding="utf-8") as fh:
+                root = ET.fromstring(fh.read())
+        except (OSError, ET.ParseError) as e:
+            notes.append(f"cannot read {LABWC_RC}: {e}")
+            root = None
+        if root is not None:
+            for dev in root.iter("device"):
+                section = {"touchpad": "touchpad", "default": "pointer"}.get(
+                    dev.get("category", ""))
+                if section is None:
+                    continue
+                for tag, key in ((v, k) for k, v in LABWC_DEVICE_KEY.items()):
+                    child = dev.find(tag)
+                    if child is None or child.text is None:
+                        continue
+                    control = f"{section}.{key}"
+                    raw = child.text.strip()
+                    value = (raw in ("yes", "true") if control in BOOL_CONTROLS
+                             else raw)
+                    values[control] = {"value": value, "source": "file",
+                                       "path": LABWC_RC}
+    else:
+        values, notes = {}, ["no supported compositor is running, so nothing "
+                             "could be read back"]
+
+    model, model_notes = load_model(model_path)
+    wanted = {f"{s}.{k}": v for s in ("touchpad", "pointer", "keyboard")
+              for k, v in model[s].items()}
+    caps = capabilities()
+    diverged = []
+    for control, want in wanted.items():
+        seen = values.get(control)
+        if seen is None:
+            continue
+        cap = caps["controls"].get(control, {}).get(comp or "", {})
+        if not cap.get("supported", True):
+            continue
+        if isinstance(want, float) or isinstance(seen["value"], float):
+            same = abs(float(want) - float(seen["value"])) < 1e-4
+        else:
+            same = want == seen["value"]
+        if not same:
+            diverged.append({"control": control, "wanted": want,
+                             "effective": seen["value"], "source": seen["source"]})
+
+    return {"compositor": comp, "values": values, "diverged": diverged,
+            "notes": notes + model_notes}
 
 
 def atomic_write(path, text):
@@ -646,17 +1328,33 @@ def self_test():
     rc = 0
 
     # A device the defaults do not mention, so --self-test covers the hl.device
-    # path as well as the global block. P0-019's per-device page writes exactly
-    # this shape into input.json.
+    # path as well as the global block. In the MODEL's vocabulary, which is what
+    # the Settings page writes: `speed` and `tap`, not Hyprland's `sensitivity`
+    # and `tap_to_click`. If the translation table is wrong, the validators
+    # below are what says so.
     model["devices"] = {
-        "apex-self-test-touchpad": {
-            "natural_scroll": True, "tap_to_click": True, "sensitivity": 0.3,
+        "APEX Self Test Touchpad": {
+            "type": "touchpad",
+            "natural_scroll": True, "tap": True, "speed": 0.3,
             "accel_profile": "adaptive", "disable_while_typing": True,
-            "scroll_method": "2fg", "left_handed": False,
+            "scroll_method": "twofinger", "left_handed": False,
+            "click_method": "clickfinger", "three_finger_drag": True,
+        },
+        "APEX Self Test Mouse": {
+            "type": "mouse", "middle_emulation": True, "speed": -0.2,
         },
     }
+    # A synthetic touchpad in the enumeration too, so the routed pass — the
+    # four settings Hyprland can only express per device — is generated and
+    # validated even on a build host with no input devices at all.
+    fake_devices = [
+        {"name": "APEX Self Test Touchpad", "type": "touchpad",
+         "hypr_name": "apex-self-test-touchpad", "hypr_name_source": "derived"},
+        {"name": "APEX Self Test Mouse", "type": "mouse",
+         "hypr_name": "apex-self-test-mouse", "hypr_name_source": "derived"},
+    ]
 
-    hypr = gen_hyprland(model)
+    hypr = gen_hyprland(model, fake_devices)
     niri = gen_niri(model)
 
     with tempfile.TemporaryDirectory() as d:
@@ -678,7 +1376,13 @@ def self_test():
     # Asserted here as well as parsed above, because a file that happens to parse
     # as both is exactly the regression this migration exists to prevent.
     for want in ("hl.config({", "input = {", "hl.device({",
-                 'name = "apex-self-test-touchpad"'):
+                 'name = "apex-self-test-touchpad"',
+                 # The four Hyprland has no touchpad-block option for. If the
+                 # routed pass stops running, these vanish and the Touchpad
+                 # page silently loses pointer speed, acceleration, left-handed
+                 # and scroll method.
+                 "sensitivity = 0.3", 'accel_profile = "adaptive"',
+                 'scroll_method = "2fg"', "middle_button_emulation = true"):
         if want in hypr:
             print(f"PASS  hyprland emits: {want}")
         else:
@@ -744,16 +1448,37 @@ def main(argv=None):
     ap.add_argument("--no-reload", action="store_true")
     ap.add_argument("--self-test", action="store_true",
                     help="generate from defaults and run every compositor validator")
+    ap.add_argument("--devices", action="store_true",
+                    help="list the input devices present, classified, as JSON")
+    ap.add_argument("--capabilities", action="store_true",
+                    help="what each compositor can do, and the reason where it cannot")
+    ap.add_argument("--read-back", action="store_true",
+                    help="what is actually in effect, and where the answer came from")
     args = ap.parse_args(argv)
 
     if args.self_test:
         return self_test()
 
+    if args.devices:
+        devices, notes = enumerate_devices()
+        print(json.dumps({"devices": devices, "notes": notes}, indent=2))
+        return 0
+
+    if args.capabilities:
+        print(json.dumps(capabilities(), indent=2))
+        return 0
+
+    if args.read_back:
+        print(json.dumps(read_back(args.model), indent=2))
+        return 0
+
     model, notes = load_model(args.model)
+    devices, device_notes = enumerate_devices()
+    notes += device_notes
     for note in notes:
         print(f"apex-input: {note}", file=sys.stderr)
 
-    hypr = gen_hyprland(model)
+    hypr = gen_hyprland(model, devices)
     niri = gen_niri(model)
 
     if args.dry_run:
