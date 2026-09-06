@@ -744,9 +744,35 @@ jobs:
 
           # M6 + the per-user provisioner race fix.
           run 'test -x /usr/bin/apexd && test -x /usr/bin/apex' || fail "apexd/apex missing"
-          run 'test -s /usr/share/apex/hypr/hyprland.conf' || fail "APEX hyprland template missing"
+          run 'test -s /usr/share/apex/hypr/hyprland.lua' || fail "APEX hyprland template missing"
+          run 'test -d /usr/share/apex/hypr/apex' || fail "APEX hyprland modules missing"
+          run 'test -x /usr/libexec/apex-hypr-migrate' \
+            || fail "apex-hypr-migrate missing; an upgraded machine would keep its hyprlang config"
           run 'grep -q CRITICAL /usr/libexec/apex-shell-firstrun' \
             || fail "provisioner is missing the config-seeding race fix"
+
+          # ── no hyprlang compositor config, anywhere ────────────────────
+          # Hyprland 0.55 deprecated hyprlang with "1-2 releases" of life left
+          # and this image ships 0.56.2, so a .conf that comes back is a config
+          # that stops loading on the next Hyprland bump — and comes back
+          # SILENTLY, because 0.56.2 prefers hyprland.lua when both exist and
+          # never reports the one it ignored.
+          #
+          # Scoped to the compositor. hypridle, hyprlock and the other hypr*
+          # tools keep hyprlang; upstream said so, and src/config/hyprlock.conf
+          # is deliberately untouched.
+          run 'test ! -e /usr/share/apex/hypr/hyprland.conf' \
+            || fail "a hyprlang hyprland.conf is back in the image"
+          # The generators must not write one either. Their output paths are
+          # read out of the scripts rather than assumed, so a rename that
+          # skipped this check cannot pass it.
+          run 'grep -q "hypr/apex/input.lua" /usr/libexec/apex-input-apply' \
+            || fail "apex-input-apply no longer writes apex/input.lua"
+          run 'grep -q "hypr/apex/monitors.lua" /usr/libexec/apex-display-apply' \
+            || fail "apex-display-apply no longer writes apex/monitors.lua"
+          run '! grep -qE "hypr/apex-(input|display)\.conf" \
+                 /usr/libexec/apex-input-apply /usr/libexec/apex-display-apply' \
+            || fail "a settings generator still writes a legacy hyprlang .conf"
           run 'test ! -e /usr/share/wayland-sessions/hyprland-uwsm.desktop' \
             || fail "hyprland-uwsm.desktop present; it sorts first and bounce-loops"
 

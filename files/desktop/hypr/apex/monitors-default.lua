@@ -1,0 +1,28 @@
+-- The catch-all monitor rule. Loaded by ~/.config/hypr/hyprland.lua BEFORE the
+-- generated apex/monitors.lua, so a saved layout overrides it and a display
+-- that is not in that layout — one plugged in afterwards — still gets set up.
+--
+-- APEX-owned: `apex update` replaces this file.
+--
+-- It lives in a module of its own because apex/monitors.lua is GENERATED and
+-- absent until the user first opens Settings → Display. In the hyprlang layout
+-- this rule sat in the seeded hyprland.conf, which always existed; moving it
+-- into the generated file alone would have left a fresh install with no monitor
+-- rule at all. apex-display-apply emits the same rule at the top of what it
+-- writes, so the generated file is also correct standing on its own — Hyprland
+-- takes the last rule for a given selector, and these two are identical.
+--
+-- Fully generic, and it must STAY generic: this is seeded into every user's
+-- home on every machine, so it may not name a specific output or mode.
+--   ""        → match every monitor, however many, whatever they are called
+--   preferred → the panel's own native mode, read from EDID
+--   auto      → automatic placement (side by side, in probe order)
+--   1.0       → no scaling
+--
+-- Scale is a deliberate fixed 1.0 rather than `auto`. Hyprland's `auto` scale
+-- rejects ratios it cannot resolve to an integer buffer size for the given
+-- resolution and errors the monitor rule out entirely, which is a worse failure
+-- (no output configured) than a small UI. On a HiDPI panel the UI will look
+-- small at 1.0 — raise it in Settings → Display, or per machine with
+-- `hyprctl keyword monitor`.
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1.0 })
