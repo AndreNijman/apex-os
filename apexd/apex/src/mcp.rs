@@ -115,21 +115,27 @@ fn bridge(service: &str) -> Result<i32> {
         if n == 0 {
             return Ok(0);
         }
+        // A line that filled the bound without ending is a message this cannot
+        // carry, and reading on would parse its tail as the next message.
+        if n == MAX_MESSAGE_BYTES && !line.ends_with('\n') {
+            bail!("that message is longer than the {MAX_MESSAGE_BYTES} bytes this bridge carries");
+        }
         let message = line.trim();
         if message.is_empty() {
             continue;
         }
 
-        // Parsed here only to answer one question: does this message expect a
-        // reply? A JSON-RPC notification has no `id`, and the far end answers
-        // it with `202 Accepted` and an empty body. Writing anything back for
-        // one would be a reply to a request that was never made.
-        let wants_reply = serde_json::from_str::<serde_json::Value>(message)
+        // Parsed here for one thing: the `id`, which says whether this message
+        // expects a reply and what the reply has to be addressed to. A JSON-RPC
+        // notification has no `id` and the far end answers it with `202
+        // Accepted` and no body; answering one would be a reply to a request
+        // that was never made.
+        let id = serde_json::from_str::<serde_json::Value>(message)
             .ok()
             .and_then(|v| v.get("id").cloned())
-            .is_some_and(|id| !id.is_null());
+            .filter(|id| !id.is_null());
 
-        match agent.request(&AgentRequest::SecretUse {
+        let answer = match agent.request(&AgentRequest::SecretUse {
             service: service.to_string(),
             capability: "mcp-request".to_string(),
             remote: String::new(),
@@ -140,34 +146,53 @@ fn bridge(service: &str) -> Result<i32> {
             AgentResponse::Brokered {
                 exit_code, output, ..
             } => {
-                if exit_code != 0 {
-                    eprintln!(
-                        "apex mcp bridge: the broker could not carry that message \
-                         (exit {exit_code}): {}",
-                        first_line(&output)
-                    );
+                let replies = replies(&output);
+                if exit_code == 0 && !replies.is_empty() {
+                    replies
+                } else {
+                    // The far end answered something that is not a message —
+                    // a 401, an HTML error page, an empty body. The agent is
+                    // waiting on the `id` it sent, so it gets an error with
+                    // that `id` rather than silence.
+                    eprintln!("apex mcp bridge: {}", first_line(&output));
+                    vec![rpc_error(id.as_ref(), &first_line(&output))]
                 }
-                if !wants_reply {
-                    continue;
-                }
-                for reply in replies(&output) {
-                    writeln!(out, "{reply}")?;
-                }
-                out.flush()?;
             }
             AgentResponse::Error { message, .. } => {
-                // Not fatal. A refusal for one message — a capability that is
-                // not granted for this project — should not take the whole
-                // server down, because the agent would then report the memory
-                // server as broken rather than as unauthorised.
+                // Not fatal, and not silent. A capability that is not granted
+                // for this project refuses one message; answering nothing would
+                // hang the agent's handshake and be reported as a broken
+                // server rather than as an unauthorised one.
                 eprintln!("apex mcp bridge: {message}");
-                if wants_reply {
-                    continue;
-                }
+                vec![rpc_error(id.as_ref(), &message)]
             }
             other => bail!("unexpected reply: {other:?}"),
+        };
+
+        if id.is_none() {
+            continue;
         }
+        for reply in answer {
+            writeln!(out, "{reply}")?;
+        }
+        out.flush()?;
     }
+}
+
+/// A JSON-RPC error addressed to the message that caused it.
+///
+/// `-32603` is "internal error", the code for a failure that is not the
+/// caller's request being malformed — which it is not: the request was fine and
+/// the broker or the server would not carry it. Built with `serde_json` rather
+/// than `format!` so a message containing a quote cannot produce a document the
+/// agent's client refuses to parse, on top of an error it already had.
+fn rpc_error(id: Option<&serde_json::Value>, message: &str) -> String {
+    let doc = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id.cloned().unwrap_or(serde_json::Value::Null),
+        "error": {"code": -32603, "message": message},
+    });
+    doc.to_string()
 }
 
 /// The JSON-RPC messages in an HTTP reply body.
@@ -203,8 +228,13 @@ pub fn replies(body: &str) -> Vec<String> {
     out
 }
 
-fn first_line(text: &str) -> &str {
-    text.lines().next().unwrap_or("").trim()
+fn first_line(text: &str) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    if line.is_empty() {
+        "the broker returned nothing that is an MCP message".to_string()
+    } else {
+        line.to_string()
+    }
 }
 
 /// Refuse a runtime that would drop the message on the floor.
@@ -275,6 +305,38 @@ mod tests {
     fn several_events_in_one_body_become_several_lines() {
         let body = "data: {\"id\":1}\n\ndata: {\"id\":2}\n\n";
         assert_eq!(replies(body).len(), 2);
+    }
+
+    #[test]
+    fn a_refusal_is_answered_with_an_error_addressed_to_the_message() {
+        // The failure this closes: a refused message answered with silence
+        // leaves the agent waiting on the `id` it sent, so a server that is
+        // merely unauthorised is reported as one that is broken.
+        let id = serde_json::json!(7);
+        let reply = rpc_error(Some(&id), "'mcp-request' is not granted for this project");
+        let doc: serde_json::Value = serde_json::from_str(&reply).expect("valid json-rpc");
+        assert_eq!(doc["id"], 7);
+        assert_eq!(doc["jsonrpc"], "2.0");
+        assert_eq!(doc["error"]["code"], -32603);
+        assert!(doc["error"]["message"].as_str().unwrap().contains("not granted"));
+        assert!(!reply.contains('\n'), "the transport is line-delimited: {reply}");
+    }
+
+    #[test]
+    fn a_message_with_a_quote_in_it_still_produces_parseable_json() {
+        let reply = rpc_error(None, "the server said \"no\"\nand then stopped");
+        let doc: serde_json::Value = serde_json::from_str(&reply).expect("valid json-rpc");
+        assert!(doc["id"].is_null());
+        assert!(!reply.contains('\n'), "{reply}");
+    }
+
+    #[test]
+    fn an_empty_body_still_produces_a_message_a_client_can_read() {
+        // first_line of nothing must not be an empty error message: an MCP
+        // client shows it to the user, and "" says less than nothing.
+        assert!(!first_line("").is_empty());
+        assert!(!first_line("\n \n").is_empty());
+        assert_eq!(first_line("401 Unauthorized\nsecond"), "401 Unauthorized");
     }
 
     #[test]
