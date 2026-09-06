@@ -368,12 +368,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: request::RequestCmd,
     },
-    /// The secret broker: let an agent USE a credential without holding it.
+    /// The secret service: let an agent USE a credential without holding it.
     ///
-    /// The broker performs the operation and returns the result; the token
-    /// stays in a process the agent cannot see. A git credential helper cannot
-    /// do this — git runs inside the sandbox, so whatever the helper prints is
-    /// readable by the agent.
+    /// `apex-secretd` keeps every credential in a root-owned store, performs
+    /// the operation itself, and returns the result. It has no verb that
+    /// returns a credential. A git credential helper cannot achieve that — git
+    /// runs inside the sandbox, so whatever the helper prints is readable by
+    /// the agent.
     Secret {
         #[command(subcommand)]
         cmd: secret::SecretCmd,

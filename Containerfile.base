@@ -1835,8 +1835,10 @@ RUN set -eux; \
         /usr/bin/apex secret "$v" --help >/dev/null \
             || { echo "FATAL: apex secret $v is gone"; exit 1; }; \
     done; \
-    # The one thing the CLI must never grow: a verb that prints a credential.
-    ! /usr/bin/apex secret --help | grep -qiE '\b(show|reveal|export|cat|print|read)\b'; \
+    # The one thing the CLI must never grow: a verb that hands back a value.
+    # Anchored to the command column, because the descriptions legitimately say
+    # "read from stdin" and clap's own help verb says "Print this message".
+    ! /usr/bin/apex secret --help | grep -qE '^  (show|reveal|export|cat|print|read|dump|get)\b'; \
     # And the refusal that carries §14's central security decision has to be
     # live in the shipped binary, not just in the source. Asserted on both the
     # daemon and the CLI, because each has its own argument parser.
