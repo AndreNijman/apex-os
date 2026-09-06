@@ -28,6 +28,17 @@
       "note": "P1-047 measured this rather than suspecting it. /etc/containers/policy.json on both machines is byte-identical to the image's /usr/etc copy and holds one insecureAcceptAnything, and the booted deployment records the consequence in its own origin: container-image-reference=ostree-unverified-registry:. Every image is cosign-signed and self-verified in CI and none of that reaches a machine. The .sig tag is present for the digest both machines run and names build-image.yml@refs/heads/main; the .att tag is not, because the SBOM work has only ever been built on roadmap/v2.2. DANGEROUS TO GET WRONG: a policy that refuses the wrong thing leaves a machine unable to update, and on an atomic OS that is not a small mistake. Whoever takes this must prove the rollback path on katana BEFORE the L16 ever sees it, must keep a documented escape hatch, and must not enable enforcement in the same change that introduces the policy. cosign is not in the image; skopeo and openssl are."
     },
     {
+      "id": "p1-038-hardware",
+      "repo": "apex-shell",
+      "items": [
+        "P1-038"
+      ],
+      "title": "The 18 labwc matrix rows that need real applications",
+      "after": [],
+      "conflicts": [],
+      "note": "Automated already: screenshots, multi-monitor, lock and idle, scaling. The remainder needs real programs on a real session and is written out step by step in state/agents/p1-038.md: portals, Firefox and Chromium screen sharing, OBS, Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling, rotation, refresh rate, VRR, suspend and resume, dock hotplug. This one cannot be done headless and cannot be done on the L16 while Andre is using it \u2014 it is a katana job, or a job for Andre with a checklist. Do not pretend otherwise."
+    },
+    {
       "id": "integrate-cloudflare",
       "repo": "apex-os",
       "items": [
@@ -41,22 +52,6 @@
         "integrate-2"
       ],
       "note": "Its author probed the rebase on a throwaway branch and aborted, leaving a handover. (1) broker.rs conflicts because P0-003 extracted the same privilege-drop helper as drop_to on the same day: keep theirs, delete drop_privileges, fix the one call site in cloudflare/api.rs. (2) providers/mod.rs: default_registry() now takes run_dir and registers mcp::McpProvider; expected ids are cloudflare's 7 plus git's 3 plus mcp.request. (3) Service::add now takes NewService{..}; two call sites in cloudflare/tests.rs use the old 6-arg form. (4) bearer.rs: a fails_with_token field against the tip's NewService rewrite of the same fixtures. (5) The service.rs leak fix applies cleanly and should already have landed separately. Not a conflict but do it anyway: broker.rs now has run_curl + quoted, the same curl-config-on-stdin design the Cloudflare author reached independently, so cloudflare/api.rs should be rewritten on top of it rather than carrying its own copy. ServiceInfo also gained an auth field (bearer/raw) that the provider currently hardcodes."
-    },
-    {
-      "id": "shell-orphans",
-      "repo": "apex-shell",
-      "items": [
-        "P1-038"
-      ],
-      "title": "Port three orphaned pre-roadmap branches, then finish the labwc/Floating validation matrix",
-      "after": [
-        "p0-018b"
-      ],
-      "conflicts": [
-        "p0-018b",
-        "p1-039"
-      ],
-      "note": "fix/labwc-desktop-parity (10 commits), fix/popup-first-open-and-media-keys (5), fix/screenshot-off-hyprland (2) were never merged to main and are not in roadmap/v2.2. They branched around PR #4 in August; P0-016..025 have since rewritten Bar, status, popups and labwc. Port PER COMMIT, asking whether each bug still exists on the tip. List the superseded ones."
     },
     {
       "id": "p0-014",
@@ -254,22 +249,6 @@
       "after": [],
       "conflicts": [],
       "note": "Policy, helper, unit, catalogue and suite all landed on roadmap/v2.2. Partial because nothing has loaded it on a real machine and the exception sets have never been applied against a live ruleset. Needs a katana run: load it, verify ssh survives, verify apex firewall allow/deny move a real port."
-    },
-    {
-      "id": "p1-048",
-      "repo": "apex-shell",
-      "items": [
-        "P1-048",
-        "P1-049"
-      ],
-      "title": "Redesign Blueprint as a guided experience, redesign Gaming settings around understandable toggles",
-      "after": [
-        "p1-039"
-      ],
-      "conflicts": [
-        "p1-039"
-      ],
-      "note": "Both are settings pages and must obey the P0-023 vocabulary: four states (live/staged/applied/saved), four verbs (Apply/Save/Revert/Reset). settings-semantics.js will fail them otherwise."
     },
     {
       "id": "p1-050",

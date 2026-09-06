@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T00:41+08:00",
+  "updated": "2026-09-07T00:52+08:00",
   "agents": [
     {
       "slug": "integrate-2",
@@ -27,19 +27,6 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T00:10+08:00",
       "title": "prove the default-drop firewall on real hardware and in a netns"
-    },
-    {
-      "slug": "p1-038",
-      "items": [
-        "P1-038"
-      ],
-      "repo": "apex-shell",
-      "worktree": "/var/tmp/apex-work/wt-p1-038",
-      "branch": "task/p1-038-labwc-parity",
-      "agent_id": "a14bfb5557d9f0b18",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T00:12+08:00",
-      "title": "port 17 orphaned August commits, then finish the labwc validation matrix"
     },
     {
       "slug": "p2-005",
@@ -84,6 +71,21 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T00:45+08:00",
       "title": "agent/subagent graph, statusline telemetry, notification bridge and dedup"
+    },
+    {
+      "slug": "p1-048",
+      "items": [
+        "(test hygiene)",
+        "P1-048",
+        "P1-049"
+      ],
+      "repo": "apex-shell",
+      "worktree": "/var/tmp/apex-work/wt-p1-048",
+      "branch": "task/p1-048-guided-settings",
+      "agent_id": "a7d8be8771b5ff609",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T01:05+08:00",
+      "title": "stop four test runners opening windows on Andre's desktop, then redesign Blueprint and Gaming settings"
     }
   ]
 }

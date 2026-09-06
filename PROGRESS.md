@@ -301,6 +301,48 @@ fixed on `roadmap/v2.2`:
   whose name appears at a different EVR for the host arch is now dropped as an
   application fork rather than a multilib library.
 
+### The landed-check was wrong, and it cost an agent run
+
+`ROADMAP/state/unlanded.py` sampled the lines a commit added and asked whether
+they were on the integration tip. That reads "landed in August, then four lines
+rewritten in September for a better reason" as "still unlanded", and on that
+basis this file claimed three apex-shell branches held 17 commits of orphaned
+work. They did not. All three were squash-merged as PRs #5, #6 and #7, and
+`git diff <branch-tip> <squash>` is empty for each — byte-identical trees. The
+merge-bases were the tell: each branch forked from the *previous* branch's
+squash commit.
+
+The check now runs an exact test first, before any heuristic: **if any commit on
+the integration branch has the same content as the branch tip across the files
+that branch touched, the branch landed**, whatever its patch-ids say. Bounded by
+the branch's own footprint rather than by history, so it is fast. It labels
+those branches "squash-merged, safe to delete", and it immediately caught a
+fourth — `task/p0-016-agent-settings` — that the old check would also have sent
+someone after. The per-commit heuristic still runs for what survives, and the
+report now says in the output that it is a heuristic and gives the command that
+settles it.
+
+Fixed in the shipped skill too (`~/.claude/skills/resume-guard/`), because the
+same wrong check would have misled every project that installed it.
+
+The run was not wasted. Inverting the question — *did the last 82 commits break
+any of that August work?* — found a defect nobody was looking for: Caffeine
+gated the logind idle inhibitor on `Compositor.isLabwc`, on the belief that the
+Wayland surface inhibitor covered Hyprland. Hyprland ignores idle inhibitors on
+layer-shell surfaces, and the bar is one. **Caffeine did nothing at all on the
+primary compositor**, while the labwc work aimed the one working mechanism at
+the compositor that did not need it.
+
+### Four shipped test runners open windows on Andre's desktop
+
+`run-service-tier-test.sh`, `run-popup-smoke.sh`, `run-compositor-facade-test.sh`
+and `run-nested-labwc.sh` all use the inherited `WAYLAND_DISPLAY` with no
+headless backend — the last one says "nested inside the current Wayland session"
+in its own first line — and `service-tier-test.qml` instantiates PopupWindows.
+The constraint Andre complained about is violated by the repository's own test
+scripts, not only by careless agents. `run-nav-geometry-test.sh` is the model to
+copy.
+
 ### Nobody could have been running clippy, and three reports said they were
 
 `clippy` is installed on neither the L16 nor katana, and neither machine has

@@ -1577,6 +1577,8 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-039
   title: Compositor-neutral Night Light
   priority: P1
