@@ -13,6 +13,7 @@ use apex_agent_core::client::SESSION_ENV;
 use apex_agent_core::paths;
 use apex_agent_core::config;
 use apex_agent_core::policy::{NetworkPolicy, PolicyError};
+use apex_agent_core::profile;
 use apex_agent_core::project;
 use apex_agent_core::protocol::{AgentState, ErrorKind, Response, RunRequest, SessionInfo};
 use apex_agent_core::sandbox::{self, EgressBridge, SandboxError, SandboxSpec, BRIDGE_PORT};
@@ -224,6 +225,13 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         spec.ro.push(path.clone());
     }
 
+    // P0-003's first criterion, enforced at spawn rather than left to whether
+    // somebody has run the migration yet. `settings.json` is bound read-only
+    // above; this puts a copy of it, with the credential values gone, on top.
+    if let Some((from, at)) = install_redacted_settings(adapter, &scratch, &spec.home) {
+        spec.ro_at.push((from, at));
+    }
+
     // The profile's writable directories have to exist before the sandbox binds
     // them: bwrap binds with `-try`, and a `-try` for a path that is not there
     // is a no-op, so the entry would resolve inside the tmpfs that masks $HOME.
@@ -349,6 +357,10 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     for p in spec.mask.iter_mut() {
         *p = sandbox::real_target(p);
     }
+    for (from, at) in spec.ro_at.iter_mut() {
+        *from = sandbox::real_target(from);
+        *at = sandbox::real_target(at);
+    }
 
     let argv = sandbox::build_argv(&spec, &program, &args).map_err(SandboxRefused)?;
     let env = sandbox::resolved_env(&spec);
@@ -401,6 +413,63 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
 
     Ok(info)
 }
+
+/// Write a credential-free copy of the agent's settings file, and say where it
+/// goes and what it replaces.
+///
+/// The file Claude reads for its model, its hooks and its theme is also the
+/// file it reads an `env` block from, and that block is applied to every tool
+/// the session runs. A PAT put there reaches the session's tools whatever the
+/// sandbox does with the environment it started the process in, because it does
+/// not arrive through the environment at all. So the copy, and a bind of the
+/// copy over the original.
+///
+/// `None` when there is nothing to strip, which is the common case and the one
+/// the machine should end up in permanently once `apex secret migrate` has run.
+/// Also `None` when the copy could not be written — best-effort in the same
+/// sense the hook bridge is, and for the same reason: it is logged, and a
+/// session that would otherwise start is not refused over it. What that costs
+/// is stated where it happens.
+fn install_redacted_settings(
+    adapter: &adapter::Adapter,
+    scratch: &Path,
+    home: &Path,
+) -> Option<(PathBuf, PathBuf)> {
+    let profile = adapter.profile()?;
+    let entry = profile.entry_for(profile::Base::Root, Path::new(SETTINGS_FILE))?;
+    let real = profile.entry_path(home, entry);
+    let raw = std::fs::read(&real).ok()?;
+    let (redacted, names) = profile::settings_without_credentials(&raw)?;
+
+    let copy = scratch.join(REDACTED_SETTINGS_FILE);
+    if let Err(e) = std::fs::write(&copy, redacted) {
+        eprintln!(
+            "apex-agentd: could not write {} ({e}), so {} starts with {} as it is — \
+             {} reach the session's tools",
+            copy.display(),
+            adapter.id,
+            real.display(),
+            names.join(", ")
+        );
+        return None;
+    }
+    eprintln!(
+        "apex-agentd: {} is bound without {} — store credentials with \
+         `apex secret add` and remove them from that file with `apex secret migrate`",
+        real.display(),
+        names.join(", ")
+    );
+    Some((copy, real))
+}
+
+/// The agent settings file a credential can arrive through.
+const SETTINGS_FILE: &str = "settings.json";
+
+/// What the redacted copy is called inside the session scratch. Not
+/// `settings.json`: the scratch is bound writable and visible, and two files
+/// with the same name and different contents is how somebody debugging this
+/// ends up reading the wrong one.
+const REDACTED_SETTINGS_FILE: &str = "claude-settings-redacted.json";
 
 /// Write the hook subscriptions for a session, and say where they went.
 ///
