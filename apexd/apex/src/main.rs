@@ -9,6 +9,7 @@ mod ai;
 mod blueprint;
 mod channel;
 mod boot;
+mod cloudflare;
 mod dispatch;
 mod disposable;
 mod gaming;
@@ -408,6 +409,19 @@ enum Cmd {
         #[command(subcommand)]
         cmd: request::RequestCmd,
     },
+    /// Connect a Cloudflare account, and see what this project binds.
+    ///
+    /// `apex cf connect` runs OAuth by device code: it prints a URL and a short
+    /// code for you to enter on any device that has a browser, and launches
+    /// nothing here. `--token` pastes a scoped token instead, from stdin.
+    /// Either way the credential goes into `apex-secretd`'s root-owned store —
+    /// not a dotfile, which an agent could read.
+    #[command(visible_alias = "cf")]
+    Cloudflare {
+        #[command(subcommand)]
+        cmd: cloudflare::CloudflareCmd,
+    },
+
     /// The secret service: let an agent USE a credential without holding it.
     ///
     /// `apex-secretd` keeps every credential in a root-owned store, performs
@@ -1120,6 +1134,7 @@ async fn main() {
         // connects to the system bus, for the reason `apex ai` is.
         Cmd::Task(args) => task::run(args),
         Cmd::Request { cmd } => request::main(cmd),
+        Cmd::Cloudflare { cmd } => cloudflare::main(cmd),
         Cmd::Secret { cmd } => secret::main(cmd),
         Cmd::Mcp { cmd } => mcp::main(cmd),
         Cmd::GitShim { args } => gitshim::main(args),
