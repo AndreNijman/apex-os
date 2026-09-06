@@ -301,6 +301,47 @@ fixed on `roadmap/v2.2`:
   whose name appears at a different EVR for the host arch is now dropped as an
   application fork rather than a multilib library.
 
+### The resume system, rebuilt (23:20–23:50)
+
+Andre: *"stop losing work when we hit usage limits"* and then, after watching
+the recovery, *"it cost 10% of my usage just for you to bring back the agents,
+that is not good at all."* He was right. The snapshot timer had protected every
+file, but reviving four agents meant replaying four transcripts of 2.1–2.4 MB
+through the model, and working out the state beforehand took fifteen git
+commands. Both halves are now shell work.
+
+- **`ROADMAP/resume.sh`** prints the whole program's state on one page for no
+  model usage: roadmap counts, every agent with whether it is alive and what its
+  next action was, branches carrying unlanded work, the timer's health, and the
+  ready queue. The cron prompts are now four sentences that point at it.
+- **`ROADMAP/state/`** holds `dispatch.json` (who owns what), `queue.json` (28
+  ordered dispatch units covering all 83 remaining items, with `after` and
+  `conflicts` per unit) and `agents/<slug>.md`, one card per agent, **written by
+  that agent as it works**. `NEXT` is the load-bearing field: everything else can
+  be re-derived from git, the next action cannot.
+- **A dead agent is never revived by messaging it.** A fresh agent gets the
+  card. 2 KB against 2.4 MB.
+- **`apex-roadmap-resume.timer`** replaces the in-session cron, which died with
+  the session and so did nothing about a shutdown. `Persistent=true`, so a
+  firing missed while the machine was off happens once on the next boot. It
+  always refreshes the report for free and continues the run only while
+  `state/AUTORESUME` exists.
+- The snapshot timer now also pushes `ROADMAP/` itself to
+  `refs/wip/roadmap-state` on apex-os, so the plan survives losing the disk.
+  Recovery proven, not assumed.
+
+**It launched a second orchestrator on its first firing**, alongside this live
+one. Two orchestrators dispatching from the same queue would have fought over
+the same branches. It now refuses to start while the orchestrator's own process
+is alive or any agent has written output in the last twenty minutes — both arms
+checked against a live and a dead pid.
+
+Packaged as a skill for every project: **`~/.claude/skills/resume-guard/`**.
+`install.sh <project> [--auto-resume]` sets it up; `selftest.sh` proves the net
+catches an untracked file, leaves HEAD and the stash alone, and can recover the
+plan from the remote. 8/0, and mutation-proved twice: a snapshot that only takes
+tracked files goes to 6/1, one that commits in the real tree goes to 5/3.
+
 ### The 19:53 usage limit, and the four agents it stopped
 
 All four in-flight agents died at 19:53 on the same session limit. The
