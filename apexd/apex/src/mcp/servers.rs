@@ -576,6 +576,40 @@ pub fn as_json(found: &[Server]) -> Value {
     })
 }
 
+/// The server an `apex mcp run <name> -- …` definition confines, and the
+/// command it confines.
+///
+/// The counterpart to [`bridged_service`], and matched the same way: on the
+/// argument vector, so a program that merely has `apex` in its name is not
+/// mistaken for the wrapper.
+pub fn confined(command: &str, args: &[String]) -> Option<(String, Vec<String>)> {
+    let program = Path::new(command).file_name()?.to_str()?;
+    if program != "apex" {
+        return None;
+    }
+    let mut rest = args.iter();
+    if rest.next().map(String::as_str) != Some("mcp") {
+        return None;
+    }
+    if rest.next().map(String::as_str) != Some("run") {
+        return None;
+    }
+    let name = rest.next()?.clone();
+    if rest.next().map(String::as_str) != Some("--") {
+        return None;
+    }
+    let inner: Vec<String> = rest.cloned().collect();
+    if inner.is_empty() {
+        return None;
+    }
+    Some((name, inner))
+}
+
+/// Just the name, for a caller that only wants to know whether it is wrapped.
+pub fn confined_server(command: &str, args: &[String]) -> Option<String> {
+    confined(command, args).map(|(name, _)| name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
