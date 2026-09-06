@@ -1391,8 +1391,16 @@ fn red(text: &str) -> String {
     }
 }
 
+/// The grants, and for each one the state word and the sentence.
+///
+/// Parallel vectors because that is the wire shape: the daemon computes the
+/// state, since it depends on the running kernel's boot id and a client
+/// deriving it could get a different answer from the daemon that issued the
+/// grant.
+type GrantListing = (Vec<SystemGrant>, Vec<(String, String)>);
+
 /// Ask the daemon for its grants.
-fn fetch_grants() -> Result<(Vec<SystemGrant>, Vec<(String, String)>)> {
+fn fetch_grants() -> Result<GrantListing> {
     let mut c = Client::connect()?;
     match c.call(&Request::SystemGrants)? {
         Response::SystemGrants { grants, states } => Ok((grants, states)),
