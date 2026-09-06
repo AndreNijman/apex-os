@@ -201,7 +201,8 @@ fn answer(method: &str, path: &str) -> (u16, String) {
             ok(&format!(r#"{{"id":"{ACCOUNT}","name":"example-account"}}"#))
         }
         ("GET", p) if p == format!("/zones/{ZONE}/workers/routes") => ok(
-            r#"[{"id":"route1","pattern":"example.com/*","script":"project"}]"#,
+            r#"[{"id":"route1","pattern":"example.com/*","script":"project"},
+                {"id":"route2","pattern":"admin.example.com/*","script":"somebody-else"}]"#,
         ),
         ("GET", p) if p.ends_with("/settings") => {
             ok(r#"{"bindings":[],"compatibility_date":"2026-09-01","usage_model":"standard"}"#)
@@ -690,6 +691,23 @@ fn a_rollback_is_told_apart_from_a_deploy_on_the_wire() {
     assert!(sent[1].path.ends_with("/deployments?force=true"), "{}", sent[1].path);
     assert!(sent[0].body.contains("v-new"));
     assert!(sent[1].body.contains("v-old"));
+}
+
+#[test]
+fn a_route_read_answers_about_the_worker_that_was_named_and_no_other() {
+    // The zone endpoint returns every route in the zone. The caller named one
+    // worker, the grant is for one worker, and the audit line claims the
+    // answer is about that worker — so the answer has to be.
+    let f = Fixture::new("routes", Mode::Normal, &["cloudflare.worker.route.read"]);
+    let reply = f.use_it(f.record("cloudflare.worker.route.read", "project"));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("refused: {reply:?}");
+    };
+    assert!(output.contains("route1"), "{output}");
+    assert!(
+        !output.contains("somebody-else") && !output.contains("route2"),
+        "the rest of the zone's routing came back: {output}"
+    );
 }
 
 #[test]
