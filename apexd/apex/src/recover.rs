@@ -971,40 +971,61 @@ fn probe(sys: &Sys) -> Surface {
     // systemd-boot path — GRUB's menu is editable regardless of what booted.
     // A refused StubInfo read only matters there, so it is the one case that
     // gets its own arm rather than picking a side.
-    routes.push(match (&chain.booted_from_uki, chain.bootloader) {
-        (Err(why), "systemd-boot") => Route {
+    routes.push(if let Some(why) = &chain.bootloader_unavailable {
+        // A directory-wide efivarfs refusal takes LoaderInfo down with
+        // StubInfo, and `chain.bootloader` then fell back to the cmdline
+        // heuristic without ever having a chance to see "systemd-boot". That
+        // fallback is "grub" on every APEX image's cmdline, and trusting it
+        // here would un-gate this route on exactly the systemd-boot+UKI
+        // machine it must not exist on — so bootloader identity itself being
+        // unavailable outranks everything below.
+        Route {
             id: "rescue-target",
             available: None,
             how: format!(
-                "cannot be determined: whether this boot used a Unified Kernel \
-                 Image could not be read ({why}), and that decides whether the \
-                 kernel command line at the boot menu is editable."
+                "cannot be determined: which bootloader is in use could not be \
+                 established ({why}), and that decides whether the kernel command \
+                 line at the boot menu is editable at all."
             ),
-        },
-        (uki, bootloader) => {
-            let uki = uki.clone().unwrap_or(false);
-            let cmdline_editable = bootloader == "grub" || (bootloader == "systemd-boot" && !uki);
-            Route {
+        }
+    } else {
+        match (&chain.booted_from_uki, chain.bootloader) {
+            (Err(why), "systemd-boot") => Route {
                 id: "rescue-target",
-                available: Some(rescue_present && cmdline_editable),
-                how: if cmdline_editable {
-                    format!(
-                        "at the {bootloader} menu, edit the entry ({}) and append \
-                         `systemd.unit=rescue.target` to the kernel command line. It \
-                         asks for the root password.",
-                        if bootloader == "grub" { "`e`, then Ctrl-X" } else { "`e`" }
-                    )
-                } else if uki {
-                    "not available: this machine booted a Unified Kernel Image, whose \
-                     command line is inside the signed image and cannot be edited at \
-                     the menu. Use the boot counter or the previous deployment."
-                        .to_string()
-                } else {
-                    format!(
-                        "not available: the bootloader is {bootloader} and rescue.target is {}.",
-                        if rescue_present { "present" } else { "absent from this image" }
-                    )
-                },
+                available: None,
+                how: format!(
+                    "cannot be determined: whether this boot used a Unified Kernel \
+                     Image could not be read ({why}), and that decides whether the \
+                     kernel command line at the boot menu is editable."
+                ),
+            },
+            (uki, bootloader) => {
+                let uki = uki.clone().unwrap_or(false);
+                let cmdline_editable =
+                    bootloader == "grub" || (bootloader == "systemd-boot" && !uki);
+                Route {
+                    id: "rescue-target",
+                    available: Some(rescue_present && cmdline_editable),
+                    how: if cmdline_editable {
+                        format!(
+                            "at the {bootloader} menu, edit the entry ({}) and append \
+                             `systemd.unit=rescue.target` to the kernel command line. It \
+                             asks for the root password.",
+                            if bootloader == "grub" { "`e`, then Ctrl-X" } else { "`e`" }
+                        )
+                    } else if uki {
+                        "not available: this machine booted a Unified Kernel Image, whose \
+                         command line is inside the signed image and cannot be edited at \
+                         the menu. Use the boot counter or the previous deployment."
+                            .to_string()
+                    } else {
+                        format!(
+                            "not available: the bootloader is {bootloader} and rescue.target \
+                             is {}.",
+                            if rescue_present { "present" } else { "absent from this image" }
+                        )
+                    },
+                }
             }
         }
     });
@@ -2267,6 +2288,49 @@ mod tests {
         assert!(
             route.how.contains("cannot be determined"),
             "the route should say it could not be determined, got: {}",
+            route.how
+        );
+    }
+
+    #[test]
+    fn a_directory_wide_efivarfs_refusal_does_not_default_the_rescue_route_to_grub() {
+        // The gap the single-file seal above cannot reach: a refusal on the
+        // *directory* takes LoaderInfo down together with StubInfo, so
+        // `chain.bootloader` falls back to the cmdline heuristic and reports
+        // "grub" — every APEX cmdline carries ostree=, UKI or not. Trusting
+        // that here would offer the rescue route on exactly the
+        // systemd-boot+UKI machine it must not exist on.
+        let m = Machine::new("route-efivars-eacces");
+        let efivars = m.0.join("sys/firmware/efi/efivars");
+        std::fs::create_dir_all(&efivars).unwrap();
+        std::fs::write(
+            efivars.join(format!("LoaderInfo-{TEST_LOADER_GUID}")),
+            b"\x07\x00\x00\x00s\x00y\x00s\x00t\x00e\x00m\x00d\x00-\x00b\x00o\x00o\x00t\x00",
+        )
+        .unwrap();
+        std::fs::write(efivars.join(format!("StubInfo-{TEST_LOADER_GUID}")), b"\x07\x00\x00\x00")
+            .unwrap();
+        let target = format!("sys/firmware/efi/efivars/LoaderInfo-{TEST_LOADER_GUID}");
+        let sealed =
+            seal(&m.0, "sys/firmware/efi/efivars", |root| std::fs::read(root.join(&target)).map(|_| ()));
+        if !sealed {
+            return; // the caller overrides the mode bit; it proves nothing here
+        }
+        let route = m.route("rescue-target");
+        assert!(
+            route.available.is_none(),
+            "bootloader identity being unreadable must not settle the rescue \
+             route either way, got {:?}",
+            route.available
+        );
+        assert!(
+            !route.how.contains("grub"),
+            "must not fall back to the cmdline guess and call it a bootloader, got: {}",
+            route.how
+        );
+        assert!(
+            route.how.contains("cannot be determined"),
+            "got: {}",
             route.how
         );
     }
