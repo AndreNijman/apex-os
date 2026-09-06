@@ -292,6 +292,30 @@ def parse(text):
             if stack:
                 stack.pop()
             continue
+        # A block opened and closed on one line: `general { gaps_out = 24 }`.
+        # hyprlang accepts this at the top level — verified against the image's
+        # own Hyprland, which parses it and reports "config ok" — so a user's
+        # config really can contain it.
+        #
+        # Without this it fell through to the `=` split below and produced the
+        # name `general { gaps_out` with the value `24 }`. That is not a
+        # cosmetic mis-parse: it became an hl.config key Hyprland rejects, which
+        # made the whole generated module invalid, which made the migration
+        # refuse and change nothing. One line the parser did not know cost the
+        # user every setting in the file.
+        one_line = re.match(r"^([A-Za-z_][\w-]*)\s*\{\s*(.+?)\s*\}$", line)
+        if one_line:
+            inner = one_line.group(2).strip()
+            if "=" in inner:
+                iname, _, ivalue = inner.partition("=")
+                out.append(Directive(
+                    "keyword", iname.strip(), ivalue.strip(), number, raw,
+                    ".".join(stack + [one_line.group(1)])))
+            else:
+                out.append(Directive("unknown", "", line, number, raw,
+                                     ".".join(stack)))
+            continue
+
         block = re.match(r"^([A-Za-z_][\w-]*)\s*\{$", line)
         if block:
             stack.append(block.group(1))
@@ -542,6 +566,20 @@ def convert(text, variables=None, source="hyprland.conf"):
         if not parent:
             result.note(d, "a top-level setting with no section; "
                            "hl.config needs to know which section it belongs to")
+            continue
+        # The safety net. Every key that reaches hl.config has to be a plain
+        # identifier, because Hyprland rejects an unknown one and a single
+        # rejected key invalidates the whole module — which makes the migration
+        # refuse and the user keep their hyprlang config.
+        #
+        # Anything that fails this is a line the parser did not understand, so
+        # it is reported like any other unconvertible directive. That is a much
+        # better failure than emitting it and discovering at validation time
+        # that nothing could be migrated at all.
+        if not all(re.match(r"^[A-Za-z_][\w-]*$", part)
+                   for part in full.split(".") if part):
+            result.note(d, "this does not parse as a setting; "
+                           "the name would not be a valid config key")
             continue
         settings.setdefault(parent, {})[leaf] = value
         result.kept += 1
@@ -830,6 +868,16 @@ general {
     gaps_in = 5
     gaps_out = 42
 }
+# A block opened and closed on one line. hyprlang accepts this at the top
+# level, and the parser used to turn it into the config key
+# `misc { disable_hyprland_logo`, which Hyprland rejects — invalidating the
+# whole generated module and refusing the entire migration.
+misc { disable_splash_rendering = false }
+# The same shape NESTED, which hyprlang itself rejects. It must be reported,
+# never emitted as a key.
+input {
+    touchpad { middle_button_emulation = true }
+}
 bind = $mainMod, T, exec, $terminal
 bind = $mainMod, Q, killactive
 bind = $mainMod, T, exec, kitty
@@ -904,6 +952,10 @@ def self_test():
           "scroll_factor = 1.4," in text)
     check("an APEX default inside the same block is dropped",
           "gaps_in" not in text)
+    check("a one-line block is parsed, not mangled into a broken key",
+          "disable_splash_rendering = false," in text)
+    check("...and the mangled key it used to produce is gone",
+          "misc { disable_splash_rendering" not in text)
     check("a user bindm becomes a drag bind, not a directional move",
           'hl.bind("SUPER + ALT + mouse:272", hl.dsp.window.drag(), { drag = true })' in text)
     check("...and never the { mouse = true } upstream's own example still uses",
@@ -935,6 +987,12 @@ def self_test():
           any("source" in r for r in reasons) and "my-extra.conf" in raws)
     check("a malformed gesture is reported rather than guessed at",
           any("gesture" in r for r in reasons) and "sideways" in raws)
+    # hyprlang REJECTS a nested one-line block ("config option
+    # <input:touchpad { middle_button_emulation> does not exist"), so this
+    # setting was never active for the user. Converting it is the honest read of
+    # what they wrote, and it repairs a line that had silently done nothing.
+    check("a nested one-line block is parsed rather than mangled",
+          "middle_button_emulation = true," in text)
     check("the APEX source lines are NOT reported",
           "apex-input.conf" not in raws)
 
