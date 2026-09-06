@@ -1,0 +1,57 @@
+APEX ROADMAP — resume report — 2026-09-06 23:44 AWST
+
+────────────────────────────────────────────────────────────────────────────
+  roadmap
+────────────────────────────────────────────────────────────────────────────
+              done   partial      todo   blocked
+  BASE          10         8         -         -
+  L              -         1         -         2
+  P0            16         9         -         -
+  P1             1         7        54         -
+  P2             -         -        19         -
+  ALL           27        25        73         2   of 127
+
+  P0 not done: P0-001(part), P0-002(part), P0-003(part), P0-005(part), P0-006(part), P0-007(part), P0-014(part), P0-015(part), P0-021(part)
+
+────────────────────────────────────────────────────────────────────────────
+  agents
+────────────────────────────────────────────────────────────────────────────
+  p0-003     dead 15m   P0-002,P0-003                      task/p0-003-cred-broker
+             head 12d75a5 feat(secret): the old broker's leftovers migrate whole
+             dirty 0 file(s), 0 unpushed, card 3m
+             NEXT Nothing — finished 23:29. The branch is with the integration agent
+
+  p0-005     ALIVE      P0-005,P0-006,P0-007               task/p0-005-permission-modes
+             head 6399ba2 docs(agent): what a system-access grant is, where its 
+             dirty 0 file(s), 0 unpushed, card 4m
+             NEXT Nothing. Everything is committed and pushed on both branches; the 
+
+  p0-018b    dead 14m   P0-018,P0-021,P0-025               task/p0-018-display-finish
+             head 7004c2d test(display): "the snapshot differs" is not four fiel
+             dirty 0 file(s), 0 unpushed, card 3m
+             NEXT Nothing — finished 23:29. The branch is with the integration agent
+
+  p1-030     ALIVE      P1-030,P1-031,P1-032,P1-033,P1-034 task/p1-030-shell-integrations
+             head 63493c7 fix(image): the zellij layout check must not leave a s
+             dirty 0 file(s), 0 unpushed, card 3m
+             NEXT Nothing in flight. All five items implemented, verified locally an
+
+  p1-045     ALIVE      P1-045,P1-046,P1-047               task/p1-045-updates-trust
+             head a141cee fix(secret): a grant recorded under an old spelling ca
+             dirty 2 file(s), ? unpushed, card 3m
+             NEXT Wire the new `apexd/apex/src/trust.rs` into `apexd/apex/src/main.r
+
+  p1-002     ALIVE      P1-002,P1-003,P1-004               task/p1-002-cloudflare
+             head a141cee fix(secret): a grant recorded under an old spelling ca
+             dirty 4 file(s), ? unpushed, card 4m
+             NEXT Write apexd/apex-secret-core/src/project.rs — the generic project-
+
+  integrate-1 ALIVE      (integration only)                 roadmap/v2.2
+             head a141cee fix(secret): a grant recorded under an old spelling ca
+             dirty 0 file(s), 0 unpushed, card -
+             NEXT (no card)
+
+
+────────────────────────────────────────────────────────────────────────────
+  unlanded work (content-checked against roadmap/v2.2)
+────────────────────────────────────────────────────────────────────────────

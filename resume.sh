@@ -90,7 +90,7 @@ for a in agents:
     ahead = sh('git','-C',wt,'rev-list','--count',f"origin/{a['branch']}..HEAD") if exists else ''
     # alive: any tasks/<agent_id>.output written in the last 10 minutes
     alive, age = 'no worktree' if not exists else 'unknown', None
-    for d in glob.glob(a.get('output_glob', tglob)):
+    for d in glob.glob(a.get('output_glob', tglob), recursive=True):
         p = os.path.join(d, a.get('agent_id','') + '.output')
         if os.path.exists(p):
             age = now - os.stat(p).st_mtime
