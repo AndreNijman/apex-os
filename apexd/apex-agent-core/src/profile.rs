@@ -900,7 +900,10 @@ fn split_bundle_path(p: &Path) -> (Base, &Path) {
 ///
 /// Symbolic links are not followed and not carried: a link is a statement about
 /// this machine's filesystem, and following one out of the profile is how an
-/// export grows a copy of something nobody meant to send.
+/// export grows a copy of something nobody meant to send. A link is reported in
+/// [`Plan::excluded`] like anything else left behind — `~/.claude/skills/x ->
+/// ~/repos/x` is a real layout, and a skill that quietly did not travel would
+/// be found on the other machine rather than here.
 pub fn plan_export(profile: &Profile, home: &Path) -> io::Result<Plan> {
     let mut items = Vec::new();
     let mut excluded = Vec::new();
@@ -923,8 +926,10 @@ pub fn plan_export(profile: &Profile, home: &Path) -> io::Result<Plan> {
         }
         if meta.is_dir() {
             let mut found = Vec::new();
-            walk(&source, &source, &mut found)?;
+            let mut links = Vec::new();
+            walk(&source, &source, &mut found, &mut links)?;
             found.sort();
+            excluded.extend(links.into_iter().map(|p| (p, Class::MachineLocal)));
             for rel_in_entry in found {
                 let rel = Path::new(entry.path).join(&rel_in_entry);
                 let class = profile.classify(entry.base, &rel);
@@ -966,17 +971,24 @@ pub fn plan_export(profile: &Profile, home: &Path) -> io::Result<Plan> {
     })
 }
 
-/// Collect the files under `dir`, as paths relative to `base`.
-fn walk(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+/// Collect the files under `dir`, as paths relative to `base`, and the links
+/// that were skipped, as absolute paths for the caller to report.
+fn walk(
+    base: &Path,
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    links: &mut Vec<PathBuf>,
+) -> io::Result<()> {
     for e in std::fs::read_dir(dir)? {
         let e = e?;
         let path = e.path();
         let ft = e.file_type()?;
         if ft.is_symlink() {
+            links.push(path);
             continue;
         }
         if ft.is_dir() {
-            walk(base, &path, out)?;
+            walk(base, &path, out, links)?;
         } else if let Ok(rel) = path.strip_prefix(base) {
             out.push(rel.to_path_buf());
         }
@@ -1089,8 +1101,9 @@ fn copy_exec_bit(from: &Path, to: &Path) -> io::Result<()> {
 /// edits had been written against `env`. The entry now names `headers` too, and
 /// this net is what stops the next such key from waiting to be noticed.
 ///
-/// Names are kept and only values are emptied, so a false positive costs an
-/// importing machine one value it has to supply and never costs a leak.
+/// Names are kept and only one value is emptied, so a false positive costs an
+/// importing machine one value it has to supply — never a leak, and never a
+/// definition. [`blank_secret_keys`] is what makes the second half true.
 fn secret_key(name: &str) -> bool {
     let name = name.to_ascii_lowercase().replace(['-', '_', ' '], "");
     [
@@ -1110,52 +1123,59 @@ fn secret_key(name: &str) -> bool {
     .any(|needle| name.contains(needle))
 }
 
-/// Null every scalar at or below `v`, and answer with the names emptied.
-///
-/// Structure and names survive: a key called `credentials` holding a map of
-/// account names to keys becomes the same map with the keys gone, which is what
-/// tells the importing machine which accounts it has to fill in.
-fn blank_scalars(v: &mut Value, name: &str, out: &mut Vec<String>) {
-    match v {
-        Value::Object(map) => {
-            for (k, inner) in map.iter_mut() {
-                let k = k.clone();
-                blank_scalars(inner, &k, out);
-            }
-        }
-        Value::Array(items) => {
-            for inner in items.iter_mut() {
-                blank_scalars(inner, name, out);
-            }
-        }
-        Value::Null => {}
-        scalar => {
-            *scalar = Value::Null;
-            out.push(name.to_string());
-        }
-    }
-}
-
 /// Walk the whole document and empty the value of every key that is a
 /// credential by name. Answers with the names emptied.
+///
+/// A credential is a *value*, so only a string or a number is emptied. The name
+/// alone is not enough, and treating it as enough is how a net stops costing a
+/// value and starts costing a definition:
+///
+/// * an MCP server called `github-token-broker` is an object. Emptying what is
+///   under it would null its `type` and its `url`, and an import skips nulls —
+///   so the server would quietly fail to arrive.
+/// * `"password-manager@mkt": true` under `enabledPlugins` is a flag. A boolean
+///   is never a credential, and nulling it disables the plugin.
+/// * `"secret-sauce"` under `extraKnownMarketplaces` is a marketplace. Its
+///   repository is not a secret because of what its owner called it.
+///
+/// So a matching key holding an object is descended into and its children are
+/// judged by their own names. A matching key holding a list has its string and
+/// number elements emptied, because a list of tokens is still a list of tokens.
+/// Emptying a whole block by name is what [`Edit::RedactValues`] is for, and the
+/// table uses it for `env` and `headers`.
 fn blank_secret_keys(v: &mut Value, out: &mut Vec<String>) {
-    match v {
-        Value::Object(map) => {
-            for (k, inner) in map.iter_mut() {
-                if secret_key(k) {
-                    let k = k.clone();
-                    blank_scalars(inner, &k, out);
-                } else {
-                    blank_secret_keys(inner, out);
-                }
-            }
-        }
-        Value::Array(items) => {
+    let Some(map) = v.as_object_mut() else {
+        if let Some(items) = v.as_array_mut() {
             for inner in items.iter_mut() {
                 blank_secret_keys(inner, out);
             }
         }
-        _ => {}
+        return;
+    };
+    for (k, inner) in map.iter_mut() {
+        if !secret_key(k) {
+            blank_secret_keys(inner, out);
+            continue;
+        }
+        match inner {
+            Value::String(_) | Value::Number(_) => {
+                *inner = Value::Null;
+                out.push(k.clone());
+            }
+            Value::Array(items) => {
+                let mut hit = false;
+                for item in items.iter_mut() {
+                    if matches!(item, Value::String(_) | Value::Number(_)) {
+                        *item = Value::Null;
+                        hit = true;
+                    }
+                }
+                if hit {
+                    out.push(k.clone());
+                }
+            }
+            other => blank_secret_keys(other, out),
+        }
     }
 }
 
@@ -1884,7 +1904,7 @@ pub fn inspect(profile: &Profile, home: &Path) -> Vec<Found> {
             let files = match &meta {
                 Some(m) if m.is_dir() => {
                     let mut v = Vec::new();
-                    walk(&path, &path, &mut v).ok();
+                    walk(&path, &path, &mut v, &mut Vec::new()).ok();
                     v.len()
                 }
                 Some(_) => 1,
@@ -2233,7 +2253,7 @@ mod tests {
         export(&CLAUDE, &f.home, &dest).unwrap();
 
         let mut files = Vec::new();
-        walk(&dest, &dest, &mut files).unwrap();
+        walk(&dest, &dest, &mut files, &mut Vec::new()).unwrap();
         for file in &files {
             let text = std::fs::read_to_string(dest.join(file)).unwrap_or_default();
             assert!(!text.contains("secret work"), "{file:?} carries transcript text");
@@ -2328,6 +2348,46 @@ mod tests {
     }
 
     #[test]
+    fn the_key_net_empties_a_value_and_never_a_definition() {
+        // What a name-only net costs. Every one of these is a thing somebody
+        // called after a credential, and none of them is one: an import skips
+        // nulls, so nulling what is under the name deletes the server, the
+        // marketplace or the plugin rather than protecting anything.
+        let f = Fixture::new("keynet-fp");
+        std::fs::write(
+            f.home.join(".claude.json"),
+            r#"{"mcpServers":{
+                 "github-token-broker":{"type":"http","url":"https://broker.example/mcp"},
+                 "vault-password-store":{"command":"npx","args":["-y","pw"]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            f.home.join(".claude/settings.json"),
+            r#"{"enabledPlugins":{"password-manager@mkt":true},
+                "extraKnownMarketplaces":{"secret-sauce":{"source":{"source":"github","repo":"a/b"}}},
+                "tokens":["tok-one","tok-two"]}"#,
+        )
+        .unwrap();
+        let dest = f.home.join("bundle");
+        export(&CLAUDE, &f.home, &dest).unwrap();
+
+        let mcp: Value =
+            serde_json::from_slice(&std::fs::read(dest.join("home/.claude.json")).unwrap()).unwrap();
+        assert_eq!(mcp["mcpServers"]["github-token-broker"]["url"], "https://broker.example/mcp");
+        assert_eq!(mcp["mcpServers"]["vault-password-store"]["command"], "npx");
+        assert_eq!(mcp["mcpServers"]["vault-password-store"]["args"][0], "-y");
+
+        let set: Value =
+            serde_json::from_slice(&std::fs::read(dest.join("profile/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(set["enabledPlugins"]["password-manager@mkt"], true);
+        assert_eq!(set["extraKnownMarketplaces"]["secret-sauce"]["source"]["repo"], "a/b");
+        // A list under a name like that is still a list of tokens.
+        assert!(set["tokens"][0].is_null(), "{set}");
+        assert!(set["tokens"][1].is_null(), "{set}");
+    }
+
+    #[test]
     fn the_key_net_reads_a_name_the_way_a_person_would() {
         for yes in [
             "token",
@@ -2393,7 +2453,23 @@ mod tests {
     #[test]
     fn what_the_export_left_behind_is_reported_rather_than_dropped_in_silence() {
         let f = Fixture::new("excluded");
+        // A skill kept in a repository and linked into the profile is a real
+        // layout. The link is not followed and not carried, so it has to be
+        // reported here rather than found missing on the other machine.
+        std::os::unix::fs::symlink(
+            f.home.join("elsewhere"),
+            f.home.join(".claude/skills/linked"),
+        )
+        .unwrap();
         let report = export(&CLAUDE, &f.home, &f.home.join("bundle")).unwrap();
+        assert!(
+            report
+                .excluded
+                .iter()
+                .any(|(p, _)| p.ends_with("skills/linked")),
+            "a linked skill left without a word: {:?}",
+            report.excluded
+        );
         let names: Vec<String> = report
             .excluded
             .iter()
