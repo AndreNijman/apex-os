@@ -38,7 +38,7 @@
 #  those are polkit actions, and a status command that raises an authentication
 #  dialog is a status command nobody runs twice.
 #
-#  Usage: apex devices [print|scan|share|network|bluetooth|dock|all]
+#  Usage: apex devices [print|scan|share|media|network|bluetooth|dock|all]
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -51,6 +51,14 @@ SYSFS="${APEX_DEVICES_SYSFS:-/sys}"
 ETCDIR="${APEX_DEVICES_ETC:-/etc}"
 SPADIR="${APEX_DEVICES_SPA:-/usr/lib64/spa-0.2/bluez5}"
 NMVPNDIR="${APEX_DEVICES_NMVPN:-/usr/lib/NetworkManager/VPN}"
+# The gvfs back-ends and /dev/bus/usb were hardcoded here until a test could not
+# reach either branch: the share reader's "no gvfs-fuse" case was only green
+# because the machine writing it happened to lack the package, so the day the
+# package lands the case stops being exercised anywhere, on any machine.
+LIBEXEC="${APEX_DEVICES_LIBEXEC:-/usr/libexec}"
+DEVDIR="${APEX_DEVICES_DEV:-/dev}"
+MEDIADIR="${APEX_DEVICES_MEDIA:-/run/media}"
+NMLIBDIR="${APEX_DEVICES_NMLIB:-/usr/lib64/NetworkManager}"
 
 readonly FW_CONF_DIR="$ETCDIR/apex/firewall.d"
 
@@ -81,17 +89,21 @@ dir_state() {
 }
 
 # Echoes the file's contents, or the token ABSENT / UNREADABLE.
+#
+# The error text is captured on the failing path only, and never through a
+# predictable name under /tmp: a diagnostic that writes to /tmp/.thing.$$ is a
+# diagnostic anyone on the machine can pre-create as a symlink.
 read_attr() {
     local f="$1" out err
-    out=$(cat -- "$f" 2>/tmp/.apexdev.$$ ); err=$(cat /tmp/.apexdev.$$ 2>/dev/null); rm -f /tmp/.apexdev.$$
-    if [ -n "$err" ]; then
-        case "$err" in
-            *"No such file or directory"*) printf 'ABSENT' ;;
-            *)                             printf 'UNREADABLE' ;;
-        esac
+    if out=$(cat -- "$f" 2>/dev/null); then
+        printf '%s' "$out"
         return
     fi
-    printf '%s' "$out"
+    err=$(cat -- "$f" 2>&1 >/dev/null)
+    case "$err" in
+        *"No such file or directory"*) printf 'ABSENT' ;;
+        *)                             printf 'UNREADABLE' ;;
+    esac
 }
 
 # A directory whose state is not a number: one line saying which, or nothing.
@@ -113,7 +125,7 @@ unit_state() {  # enabled | disabled | masked | not-found | unknown
         enabled|enabled-runtime) printf 'enabled' ;;
         masked|masked-runtime)   printf 'masked' ;;
         disabled)                printf 'disabled' ;;
-        static|indirect|alias|generated|transient) printf "$s" ;;
+        static|indirect|alias|generated|transient) printf '%s' "$s" ;;
         *)                       printf 'not-found' ;;
     esac
 }
@@ -127,15 +139,41 @@ unit_active() {
 # and never shells out to the helper. What it CANNOT see unprivileged is the
 # live ruleset, so it never claims a port is open — only whether an exception
 # was recorded, and it says which question it answered.
-firewall_enforcing() { unit_active apex-firewall.service; }
+# active | failed | inactive | absent | unknown. The same three-answer rule the
+# device readers hold to, applied to the thing doing the blocking: a policy that
+# FAILED to load leaves the machine unfiltered, and reporting that as "not
+# running" tells the user their traffic is filtered by something else's default.
+firewall_state() {
+    have systemctl || { printf 'unknown'; return; }
+    case "$(run 5 systemctl is-active apex-firewall.service | tail -1)" in
+        active) printf 'active'; return ;;
+        failed) printf 'failed'; return ;;
+    esac
+    case "$(unit_state apex-firewall.service)" in
+        not-found) printf 'absent' ;;
+        *)         printf 'inactive' ;;
+    esac
+}
+firewall_enforcing() { [ "$(firewall_state)" = active ]; }
 firewall_has()       { [ -e "$FW_CONF_DIR/$1.conf" ]; }
 
 # Say what stands between a service this machine offers and the rest of the LAN.
 firewall_verdict() {  # $1 = service name, $2 = what it is in words
-    if ! firewall_enforcing; then
-        note "the APEX firewall is not running here, so nothing of APEX's is in the way"
-        return
-    fi
+    case "$(firewall_state)" in
+        failed)
+            note "the APEX firewall FAILED to load, so nothing is in the way of $2 —"
+            note "and nothing is in the way of anything else either. This machine is"
+            note "unfiltered, which is not what it was configured to be:"
+            note "    systemctl status apex-firewall"
+            return ;;
+        absent|inactive)
+            note "the APEX firewall is not running here, so nothing of APEX's is in the way"
+            return ;;
+        unknown)
+            note "systemd could not be asked whether the firewall is running, so whether"
+            note "the policy stands in front of $2 is not known from here"
+            return ;;
+    esac
     if firewall_has "$1"; then
         note "'$1' is in the exception list, so the policy allows it"
         note "(whether the live ruleset has it needs root: sudo apex firewall status)"
@@ -258,9 +296,9 @@ do_scan() {
         # An empty list from an unseated session is EACCES wearing a disguise:
         # without a seat there is no uaccess ACL on /dev/bus/usb, so a USB
         # scanner is there and unreadable.
-        local usbstate; usbstate=$(dir_state /dev/bus/usb)
+        local usbstate; usbstate=$(dir_state "$DEVDIR/bus/usb")
         if [ "$usbstate" = unreadable ]; then
-            item "scanners" "unavailable — /dev/bus/usb cannot be read"
+            item "scanners" "unavailable — $DEVDIR/bus/usb cannot be read"
             note "this session has no seat, so udev granted it no access to USB devices."
             note "A USB scanner would be invisible; a network one would still be found."
         else
@@ -281,7 +319,7 @@ do_share() {
     # gvfs-fuse decides whether a mount exists for anything but GTK. Without it
     # Thunar can open smb://server/share and a terminal in the same session
     # cannot see it, which reads as "the share did not mount" and is not that.
-    if [ -x /usr/libexec/gvfsd-fuse ]; then
+    if [ -x "$LIBEXEC/gvfsd-fuse" ]; then
         local mnt="/run/user/$(id -u)/gvfs"
         if grep -qs " $mnt " /proc/self/mountinfo; then
             item "GIO mounts on disk" "yes, at $mnt"
@@ -298,7 +336,7 @@ do_share() {
 
     for spec in "gvfsd-smb SMB" "gvfsd-dav WebDAV" "gvfsd-nfs NFS" "gvfsd-mtp MTP" "gvfsd-gphoto2 cameras"; do
         set -- $spec
-        [ -x "/usr/libexec/$1" ] && item "$2 (file manager)" "yes" \
+        [ -x "$LIBEXEC/$1" ] && item "$2 (file manager)" "yes" \
                                  || item "$2 (file manager)" "no — $1 is absent"
     done
     have mount.cifs && item "SMB as a real mount" "yes (mount.cifs)" \
@@ -317,6 +355,80 @@ do_share() {
         firewall_verdict nfs "a client trying to mount the export"
     fi
     [ "$serving" = 0 ] && item "this machine serves" "nothing (no smbd, no nfs-server)"
+}
+
+# ── removable media ─────────────────────────────────────────────────────────
+do_media() {
+    head_ "Removable media"
+
+    # An internal SD slot registers an MMC host. A USB card reader does not — it
+    # is usb-storage and arrives as a disk — so "no MMC host" is not "no way to
+    # read a card", and reporting it as one would send somebody to buy a reader
+    # they already own.
+    local mh; mh=$(dir_state "$SYSFS/class/mmc_host")
+    case "$mh" in
+        absent)     item "SD card slot" "none — this kernel registered no MMC host"
+                    note "a USB card reader is not one of these: it arrives over usb-storage" ;;
+        unreadable) item "SD card slot" "unavailable — $SYSFS/class/mmc_host could not be read"
+                    note "this is not the same as having no slot" ;;
+        empty)      item "SD card slot" "none registered" ;;
+        *)          local h c hosts=0 cards=0
+                    for h in "$SYSFS"/class/mmc_host/*; do
+                        [ -e "$h" ] || continue
+                        hosts=$((hosts+1))
+                        # A card in the slot binds as mmcN:XXXX under its host.
+                        for c in "$h"/mmc*:*; do [ -e "$c" ] && cards=$((cards+1)); done
+                    done
+                    item "SD card slot" "$hosts, with $cards card(s) in" ;;
+    esac
+
+    # udisks2 is what mounts an inserted card or a plugged-in USB disk. With it
+    # gone the block device appears and nothing acts on it, and no part of the
+    # desktop says why.
+    case "$(unit_state udisks2.service)" in
+        not-found) item "auto-mount" "udisks2 is not installed"
+                   note "a card or a USB disk appears in $DEVDIR and is mounted by nothing" ;;
+        masked)    item "auto-mount" "udisks2 is MASKED"
+                   note "no removable disk will appear in the file manager at all:"
+                   note "    sudo systemctl unmask udisks2.service" ;;
+        unknown)   item "auto-mount" "could not ask systemd about udisks2" ;;
+        *)         if unit_active udisks2.service; then
+                       item "auto-mount" "udisks2 running"
+                   else
+                       item "auto-mount" "udisks2 installed, not running"
+                       note "it is D-Bus activated, so this is normal until something asks"
+                   fi ;;
+    esac
+
+    # The refusal that reads as an absence. udisks2 asks polkit, and the rule for
+    # mounting removable media wants an active local session; an ssh login has no
+    # seat, so the disk is there and will not mount. Nothing in the file manager
+    # distinguishes that from an empty slot.
+    if [ -n "${XDG_SEAT:-}" ]; then
+        item "this session's seat" "$XDG_SEAT"
+    else
+        item "this session's seat" "none"
+        note "udisks2 will refuse to mount a card or a USB disk for a session with no"
+        note "seat — an ssh login, or anything started by a service. The device is"
+        note "present and unmountable: that is a refusal, not an absence."
+    fi
+
+    local me md; me=$(id -un); md=$(dir_state "$MEDIADIR/$me")
+    case "$md" in
+        absent|empty) item "mounted removable media" "none" ;;
+        unreadable)   item "mounted removable media" "unavailable — $MEDIADIR/$me could not be read"
+                      note "this is not the same as nothing being mounted" ;;
+        *)            item "mounted removable media" "$md"
+                      local m; for m in "$MEDIADIR/$me"/*; do
+                          [ -e "$m" ] && note "$(basename "$m")"
+                      done ;;
+    esac
+
+    # Cameras and phones never arrive as disks: MTP and PTP are userspace
+    # protocols the file manager reaches through gvfs, so an empty slot list says
+    # nothing about them. `apex devices share` has that half.
+    have gphoto2 && item "camera (PTP) tooling" "yes (gphoto2)" \
+                 || item "camera (PTP) tooling" "no — gphoto2 is absent"
 }
 
 # ── network ─────────────────────────────────────────────────────────────────
@@ -381,6 +493,8 @@ do_network() {
         note "to import a provider's .conf with"
     fi
 
+    report_enterprise_wifi
+
     # A hotspot needs three things and this machine may be missing all of them.
     local blockers=() caveats=()
     if have dnsmasq; then
@@ -403,10 +517,95 @@ do_network() {
     if [ "${#blockers[@]}" -eq 0 ]; then
         item "hotspot / tethering" "nothing known is in the way"
     else
-        item "hotspot / tethering" "${#blockers[@]} things would stop it"
+        local n=${#blockers[@]}
+        item "hotspot / tethering" "$n thing$([ "$n" = 1 ] || echo s) would stop it"
         local b; for b in "${blockers[@]}"; do note "$b"; done
     fi
     local c; for c in "${caveats[@]:-}"; do [ -n "$c" ] && note "$c"; done
+}
+
+# Enterprise Wi-Fi (WPA-Enterprise / 802.1X): eduroam, a campus or an office.
+# Four things have to line up and not one of them announces its own absence — a
+# machine missing any of them simply fails to associate, which reads as a bad
+# password.
+report_enterprise_wifi() {
+    local f wifiplug=no
+    for f in "$NMLIBDIR"/*/libnm-device-plugin-wifi.so; do
+        [ -e "$f" ] && wifiplug=yes
+    done
+    if [ "$wifiplug" = no ]; then
+        item "Wi-Fi in NetworkManager" "NO — libnm-device-plugin-wifi.so is not installed"
+        note "NetworkManager's Wi-Fi support is a separate package. Without it no"
+        note "wireless device appears at all, enterprise or otherwise."
+        return
+    fi
+
+    # NM drives either wpa_supplicant or iwd, and only one of them is installed
+    # here. A conf.d file naming the other leaves Wi-Fi dead with no message.
+    local backend
+    backend=$(sed -n 's/^[[:space:]]*wifi\.backend[[:space:]]*=[[:space:]]*//p' \
+              "$ETCDIR"/NetworkManager/conf.d/*.conf 2>/dev/null | tail -1)
+    backend="${backend:-wpa_supplicant}"
+    if have "$backend"; then
+        item "Wi-Fi backend" "$backend"
+    else
+        item "Wi-Fi backend" "$backend — AND IT IS NOT INSTALLED"
+        note "a conf.d file selects $backend and no such program is on this machine,"
+        note "so NetworkManager will bring up no wireless connection at all"
+    fi
+
+    # An 802.1X profile with no CA certificate is the failure that never looks
+    # like one. NetworkManager does not refuse it — nm-settings(5) says the
+    # property "can be unset even if the EAP method supports CA certificates, but
+    # this allows man-in-the-middle attacks and is NOT recommended" — so the
+    # network joins, works, and validates nothing. Every reader here would call
+    # that a working connection, which is why it gets named.
+    local names ent=0 nocert=0 name d eap ca sysca
+    local findings=()
+    names=$(run 10 nmcli -t -f TYPE,NAME connection show \
+            | sed -n 's/^802-11-wireless://p' | sed 's/\\:/:/g')
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        d=$(run 10 nmcli -t -f 802-1x.eap,802-1x.ca-cert,802-1x.system-ca-certs \
+                 connection show "$name")
+        eap=$(sed -n 's/^802-1x\.eap://p' <<<"$d")
+        case "$eap" in ''|'--') continue ;; esac
+        ent=$((ent+1))
+        ca=$(sed -n 's/^802-1x\.ca-cert://p' <<<"$d")
+        sysca=$(sed -n 's/^802-1x\.system-ca-certs://p' <<<"$d")
+        case "$ca" in
+            ''|'--') if [ "$sysca" != yes ]; then
+                         nocert=$((nocert+1))
+                         findings+=("$name: EAP $eap, no CA certificate, system CA certs off")
+                     fi ;;
+        esac
+    done <<<"$names"
+
+    if [ "$ent" -eq 0 ]; then
+        item "enterprise Wi-Fi (802.1X)" "no saved profile uses it"
+        return
+    fi
+    item "enterprise Wi-Fi (802.1X)" "$ent saved profile(s), $nocert validating nothing"
+    local g; for g in "${findings[@]:-}"; do [ -n "$g" ] && note "$g"; done
+    if [ "$nocert" -gt 0 ]; then
+        note "These connect. They just trust whatever answers to the network's name, so"
+        note "an access point standing in for the real one collects the MSCHAPv2"
+        note "exchange, and that is crackable offline at leisure. Fix by setting"
+        note "802-1x.ca-cert on the profile, or 802-1x.system-ca-certs=yes."
+    fi
+
+    # Whether a given AP authenticates cannot be answered from here. What can be
+    # answered is whether the trust store an EAP method reads is present at all.
+    local bundle="$ETCDIR/pki/tls/certs/ca-bundle.crt"
+    if [ -r "$bundle" ]; then
+        item "system CA trust store" "readable"
+    elif [ -e "$bundle" ]; then
+        item "system CA trust store" "present and unreadable — $bundle"
+    else
+        item "system CA trust store" "MISSING — $bundle"
+        note "every EAP method that checks the server's certificate has nothing to"
+        note "check it against, so a correct password still fails to associate"
+    fi
 }
 
 # ── bluetooth ───────────────────────────────────────────────────────────────
@@ -476,6 +675,28 @@ do_bluetooth() {
 # ── dock ────────────────────────────────────────────────────────────────────
 do_dock() {
     head_ "Thunderbolt, USB4 and docks"
+
+    # Hotplug first, because nothing below it means anything without this. udev
+    # is what creates the device node, applies the uaccess ACL that lets your
+    # session near it, and wakes the daemon that would authorise a dock. With
+    # udevd down, a device you just plugged in is electrically present and
+    # invisible to every program on the machine — and every reader below would
+    # honestly report an absence.
+    if ! have systemctl; then
+        item "hotplug (udev)" "could not ask systemd"
+    elif unit_active systemd-udevd.service; then
+        item "hotplug (udev)" "systemd-udevd is running"
+    else
+        item "hotplug (udev)" "systemd-udevd is NOT running"
+        note "a device plugged in now gets no node, no permissions and no daemon"
+        note "woken to claim it. Nothing here would see it, correctly."
+    fi
+
+    report_thunderbolt
+    report_typec
+}
+
+report_thunderbolt() {
     local tb="$SYSFS/bus/thunderbolt/devices"
     local st; st=$(dir_state "$tb")
     case "$st" in
@@ -485,7 +706,7 @@ do_dock() {
         empty)      item "Thunderbolt" "a controller with nothing attached" ; return ;;
     esac
 
-    local boltd=no; [ -x /usr/libexec/boltd ] && boltd=yes
+    local boltd=no; [ -x "$LIBEXEC/boltd" ] && boltd=yes
     local d unauthorised=0
     for d in "$tb"/*; do
         [ -e "$d" ] || continue
@@ -521,14 +742,44 @@ do_dock() {
     else
         item "boltd" "installed (udev starts it when a device appears)"
     fi
+}
 
-    local tc; tc=$(dir_state "$SYSFS/class/typec")
+# USB-C, which is where most docks actually are. A `portN-partner` entry is the
+# other end of a plugged-in cable — a charger, a monitor, a dock — so it is the
+# cheapest place on the machine to see that hotplug reached userspace at all: it
+# appears when the cable goes in and disappears when it comes out.
+report_typec() {
+    local root="$SYSFS/class/typec"
+    local tc; tc=$(dir_state "$root")
     case "$tc" in
-        absent)     item "USB-C ports" "the kernel exposes no Type-C class" ;;
-        unreadable) item "USB-C ports" "unavailable — $SYSFS/class/typec could not be read" ;;
-        empty)      item "USB-C ports" "none registered" ;;
-        *)          item "USB-C ports" "$(ls "$SYSFS/class/typec" 2>/dev/null | grep -c '^port[0-9]*$') ports, $tc entries" ;;
+        absent)     item "USB-C ports" "the kernel exposes no Type-C class"
+                    note "the ports may still work as plain USB; what is missing is the"
+                    note "kernel's view of role, power and what is on the other end" ; return ;;
+        unreadable) item "USB-C ports" "unavailable — $root could not be read"
+                    note "this is not the same as having no USB-C ports" ; return ;;
+        empty)      item "USB-C ports" "none registered" ; return ;;
     esac
+
+    local port n ports=0 partners=0
+    for port in "$root"/port[0-9]*; do
+        case "$port" in *-partner|*-cable) continue ;; esac
+        [ -e "$port" ] || continue
+        ports=$((ports+1))
+    done
+    for port in "$root"/port[0-9]*-partner; do
+        [ -e "$port" ] && partners=$((partners+1))
+    done
+    item "USB-C ports" "$ports, $partners with something plugged in"
+    for port in "$root"/port[0-9]*; do
+        case "$port" in *-partner|*-cable) continue ;; esac
+        [ -e "$port" ] || continue
+        n=$(basename "$port")
+        if [ -e "$root/$n-partner" ]; then
+            note "$(printf '%-8s %-22s something is attached' "$n" "$(read_attr "$port/data_role")")"
+        else
+            note "$(printf '%-8s %-22s nothing attached' "$n" "$(read_attr "$port/data_role")")"
+        fi
+    done
 }
 
 usage() {
@@ -541,9 +792,10 @@ Areas:
   print       printers, CUPS queues, mDNS discovery, sharing
   scan        scanners, and why the list may not arrive
   share       SMB, NFS, WebDAV, MTP, cameras — and whether they exist outside GTK
-  network     links, captive portals, VPN protocols, WireGuard, hotspot
+  media       SD cards, USB disks, auto-mounting, and the seat it needs
+  network     links, captive portals, VPN, WireGuard, enterprise Wi-Fi, hotspot
   bluetooth   adapters, radio blocks, paired devices, headset codecs
-  dock        Thunderbolt, USB4 authorisation, USB-C ports
+  dock        hotplug, Thunderbolt authorisation, USB-C ports and partners
   all         every area (the default)
 
 Reading only. It pairs nothing, scans for nothing and changes no connection,
@@ -555,10 +807,11 @@ case "${1:-all}" in
     print)     do_print ;;
     scan)      do_scan ;;
     share)     do_share ;;
+    media)     do_media ;;
     network)   do_network ;;
     bluetooth) do_bluetooth ;;
     dock)      do_dock ;;
-    all)       do_print; do_scan; do_share; do_network; do_bluetooth; do_dock; echo ;;
+    all)       do_print; do_scan; do_share; do_media; do_network; do_bluetooth; do_dock; echo ;;
     -h|--help) usage ;;
     *)         usage >&2; exit 2 ;;
 esac

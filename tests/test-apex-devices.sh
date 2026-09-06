@@ -77,10 +77,14 @@ export STATE
 # Run the helper in a fixture world. $1 = area, rest = env assignments.
 devices() {
     local area=$1; shift
-    env APEX_DEVICES_SYSFS="$WORK/sys" \
+    env -u XDG_SEAT APEX_DEVICES_SYSFS="$WORK/sys" \
         APEX_DEVICES_ETC="$WORK/etc" \
         APEX_DEVICES_SPA="$WORK/spa" \
         APEX_DEVICES_NMVPN="$WORK/nmvpn" \
+        APEX_DEVICES_LIBEXEC="$WORK/libexec" \
+        APEX_DEVICES_DEV="$WORK/dev" \
+        APEX_DEVICES_MEDIA="$WORK/media" \
+        APEX_DEVICES_NMLIB="$WORK/nmlib" \
         "$@" bash "$HELPER_ABS" "$area" 2>&1
 }
 
@@ -93,8 +97,14 @@ case_silent() {  # the opposite: it must NOT say this
 }
 
 reset_world() {
-    rm -rf "$WORK/sys" "$WORK/etc" "$WORK/spa" "$WORK/nmvpn" "$STATE"
-    mkdir -p "$WORK/sys/class" "$WORK/sys/bus" "$WORK/etc" "$WORK/spa" "$WORK/nmvpn" "$STATE"
+    chmod -R u+rwX "$WORK/sys" "$WORK/dev" "$WORK/media" 2>/dev/null
+    rm -rf "$WORK/sys" "$WORK/etc" "$WORK/spa" "$WORK/nmvpn" "$WORK/libexec" \
+           "$WORK/dev" "$WORK/media" "$WORK/nmlib" "$STATE"
+    mkdir -p "$WORK/sys/class" "$WORK/sys/bus" "$WORK/etc" "$WORK/spa" "$WORK/nmvpn" \
+             "$WORK/libexec" "$WORK/dev" "$WORK/media" "$WORK/nmlib/1.54.3" "$STATE"
+    # A Wi-Fi-capable NetworkManager unless a case says otherwise: without the
+    # plugin the enterprise reader stops before anything else it checks.
+    : > "$WORK/nmlib/1.54.3/libnm-device-plugin-wifi.so"
 }
 
 # ── absence and refusal are different answers ───────────────────────────────
@@ -303,17 +313,134 @@ case_says "a dnsmasq no package owns is flagged as impermanent" "$out" "system e
 # ── shares outside GTK ──────────────────────────────────────────────────────
 echo
 echo "── a share that is mounted and still unusable ─────────────────────────"
+# Both halves are reachable now that $LIBEXEC is a fixture. They were not: the
+# helper hardcoded /usr/libexec, so this case was green only on a machine that
+# happened to lack the package, and would have gone permanently unexercised the
+# day the package landed in the image.
 reset_world
 out=$(devices share)
-if [ -x /usr/libexec/gvfsd-fuse ]; then
-    skipped "no gvfs-fuse is called out as mounts existing only inside GTK" \
-            "this machine has gvfs-fuse, so the branch cannot be reached from here"
+case_says "no gvfs-fuse is called out as mounts existing only inside GTK" "$out" "nowhere else" \
+          "the file manager opens the share and nothing else in the session can see it"
+case_says "and it names the two states that differ" "$out" "Mounted and usable" \
+          "'not mounted' is what a user would otherwise conclude, and it is wrong"
+
+reset_world
+: > "$WORK/libexec/gvfsd-fuse"; chmod +x "$WORK/libexec/gvfsd-fuse"
+out=$(devices share)
+case_silent "with gvfs-fuse present it stops saying mounts are invisible" "$out" "nowhere else" \
+            "the warning has to go away when the thing it warns about is installed"
+
+# ── a firewall that meant to be running and is not ──────────────────────────
+echo
+echo "── a firewall unit that failed, which is not a firewall that is off ────"
+reset_world
+echo failed  > "$STATE/active.apex-firewall.service"
+echo enabled > "$STATE/enabled.apex-firewall.service"
+printf '_share_printers=1\n' > "$STATE/cupsctl"
+out=$(devices print)
+case_says "a failed firewall unit is reported as a failure" "$out" "FAILED to load" \
+          "the machine is unfiltered and was configured not to be; 'not running' hides that"
+case_silent "and it is not blamed for the printer" "$out" "THE FIREWALL IS WHY" \
+            "a policy that never loaded is not what is stopping the print job"
+
+# ── removable media ─────────────────────────────────────────────────────────
+echo
+echo "── SD cards, USB disks, and the seat that has to exist to mount one ────"
+reset_world
+out=$(devices media)
+case_says "no MMC host reads as no SD slot" "$out" "none" \
+          "this laptop genuinely has none, and that is a measurement"
+case_says "and a USB card reader is excluded from that claim" "$out" "usb-storage" \
+          "'no SD slot' would otherwise tell someone their card reader cannot work"
+case_says "no udisks2 means nothing mounts what appears" "$out" "mounted by nothing" \
+          "the block device is created either way; the mount is what goes missing"
+
+reset_world
+mkdir -p "$WORK/sys/class/mmc_host/mmc0/mmc0:0001"
+echo active > "$STATE/active.udisks2.service"
+echo enabled > "$STATE/enabled.udisks2.service"
+out=$(devices media)
+case_says "a card in the slot is counted" "$out" "1 card(s) in" \
+          "a host with no card and a host with one are different answers"
+
+reset_world
+mkdir -p "$WORK/sys/class/mmc_host/mmc0"
+chmod 0000 "$WORK/sys/class/mmc_host"
+if ls "$WORK/sys/class/mmc_host" >/dev/null 2>&1; then
+    chmod 0755 "$WORK/sys/class/mmc_host"
+    skipped "an unreadable mmc_host reads as UNAVAILABLE" "the 0000 seal did not hold"
 else
-    case_says "no gvfs-fuse is called out as mounts existing only inside GTK" "$out" "nowhere else" \
-              "the file manager opens the share and nothing else in the session can see it"
-    case_says "and it names the two states that differ" "$out" "Mounted and usable" \
-              "'not mounted' is what a user would otherwise conclude, and it is wrong"
+    out=$(devices media)
+    chmod 0755 "$WORK/sys/class/mmc_host"
+    case_says "an unreadable mmc_host reads as UNAVAILABLE" "$out" "could not be read" \
+              "a refused read of the subsystem is not a laptop without a card slot"
 fi
+
+reset_world
+echo masked > "$STATE/enabled.udisks2.service"
+out=$(devices media)
+case_says "a masked udisks2 is reported as masked" "$out" "MASKED" \
+          "no removable disk appears anywhere in the desktop and nothing says why"
+
+reset_world
+out=$(devices media)
+case_says "a session with no seat is told mounting will be refused" "$out" "refusal, not an absence" \
+          "over ssh the disk is present and unmountable, which reads as a dead port"
+out=$(devices media XDG_SEAT=seat0)
+case_silent "and a seated session is not warned about it" "$out" "refusal, not an absence" \
+            "the warning is about this session, not about the machine"
+
+# ── enterprise Wi-Fi ────────────────────────────────────────────────────────
+echo
+echo "── WPA-Enterprise: the plugin, the backend and the certificate ────────"
+reset_world
+rm -f "$WORK/nmlib"/*/libnm-device-plugin-wifi.so
+out=$(devices network)
+case_says "a NetworkManager with no Wi-Fi plugin is named" "$out" "libnm-device-plugin-wifi.so" \
+          "without it no wireless device appears at all, and nmcli says only 'no device'"
+
+reset_world
+mkdir -p "$WORK/etc/NetworkManager/conf.d"
+printf '[device]\nwifi.backend=iwd\n' > "$WORK/etc/NetworkManager/conf.d/10-backend.conf"
+out=$(devices network)
+case_says "a backend selected in conf.d and absent is named" "$out" "IT IS NOT INSTALLED" \
+          "NM brings up no wireless connection at all and reports nothing about why"
+
+reset_world
+printf '802-11-wireless:eduroam\n' > "$STATE/nmcli.-t -f TYPE,NAME connection show"
+printf '802-1x.eap:peap\n802-1x.ca-cert:--\n802-1x.system-ca-certs:no\n' \
+    > "$STATE/nmcli.-t -f 802-1x.eap,802-1x.ca-cert,802-1x.system-ca-certs connection show eduroam"
+out=$(devices network)
+case_says "an 802.1X profile with no CA certificate is counted" "$out" "validating nothing" \
+          "it connects and works, so nothing else on the machine will ever mention it"
+case_says "and what that costs is stated" "$out" "crackable offline" \
+          "'no CA certificate' means nothing to somebody whose Wi-Fi works"
+
+printf '802-1x.eap:peap\n802-1x.ca-cert:--\n802-1x.system-ca-certs:yes\n' \
+    > "$STATE/nmcli.-t -f 802-1x.eap,802-1x.ca-cert,802-1x.system-ca-certs connection show eduroam"
+out=$(devices network)
+case_silent "system-ca-certs=yes is not flagged" "$out" "crackable offline" \
+            "the system trust store is a CA certificate; flagging it would be noise"
+
+# ── hotplug ─────────────────────────────────────────────────────────────────
+echo
+echo "── hotplug, and the USB-C ports a missing controller used to hide ─────"
+reset_world
+out=$(devices dock)
+case_says "a stopped udevd is named before anything is enumerated" "$out" "systemd-udevd is NOT running" \
+          "with it down every reader below reports an absence, honestly and uselessly"
+
+reset_world
+echo active > "$STATE/active.systemd-udevd.service"
+mkdir -p "$WORK/sys/class/typec/port0" "$WORK/sys/class/typec/port0-partner" \
+         "$WORK/sys/class/typec/port1"
+echo '[host] device' > "$WORK/sys/class/typec/port0/data_role"
+echo 'host [device]' > "$WORK/sys/class/typec/port1/data_role"
+out=$(devices dock)
+case_says "no Thunderbolt controller no longer hides the USB-C ports" "$out" "USB-C ports" \
+          "a machine with no TB controller still has ports, and docks live on them"
+case_says "a plugged-in Type-C partner is counted" "$out" "1 with something plugged in" \
+          "a partner appears on hotplug, so it is where hotplug can be seen working"
 
 echo
 printf 'apex-devices: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"

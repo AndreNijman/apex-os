@@ -1130,6 +1130,54 @@ RUN set -eux; \
     test -L /etc/systemd/system/multi-user.target.wants/apex-firewall.service; \
     echo "firewall: default-drop policy present, parses, and is enabled"
 
+# ── What is attached, what is not, and what could not be looked at ──────────
+# The third answer is why this ships. A failed stat is falsy and an empty list
+# is falsy, so a device reader that does not separate them tells a user with a
+# scanner they have none — which this codebase has now fixed in fourteen places
+# and would rather not add a fifteenth.
+COPY --chmod=0755 files/system/libexec/apex-devices /usr/libexec/apex-devices
+RUN set -eux; \
+    bash -n /usr/libexec/apex-devices; \
+    # Read-only and unprivileged. Anything setuid here would change what it
+    # reports rather than reveal more: root walks through the 0000 directory
+    # whose refusal is the interesting answer.
+    test ! -u /usr/libexec/apex-devices; \
+    test ! -g /usr/libexec/apex-devices; \
+    # Every area `apex devices` can be asked for has to be an area this file
+    # knows. The CLI and the helper are separate programs, so a word that only
+    # one of them knows is not a compile error — it is `apex devices dock`
+    # printing usage to stderr and exiting 2.
+    for a in print scan share media network bluetooth dock all; do \
+        /usr/libexec/apex-devices --help | grep -qE "^  $a  *[A-Za-z]" \
+          || { echo "apex-devices: '$a' is missing from its own usage"; exit 1; }; \
+    done; \
+    # The promise the help text makes about prompts is the reason the desktop
+    # can run this from a menu. Losing it silently would be worse than losing
+    # the command.
+    /usr/libexec/apex-devices --help | grep -q 'never raises an authentication prompt'; \
+    # A shared printer that does not work because of a firewall nobody mentioned
+    # is the worst outcome this command has available to it.
+    grep -q 'THE FIREWALL IS WHY' /usr/libexec/apex-devices; \
+    grep -q 'apex firewall allow' /usr/libexec/apex-devices; \
+    # It must run against a machine that has none of what it looks for, and say
+    # so, rather than fail. This build container is exactly that machine: no
+    # systemd, no seat, no /sys worth reading.
+    env APEX_DEVICES_SYSFS=/nonexistent-sys APEX_DEVICES_ETC=/nonexistent-etc \
+        APEX_DEVICES_SPA=/nonexistent-spa APEX_DEVICES_NMVPN=/nonexistent-vpn \
+        APEX_DEVICES_LIBEXEC=/nonexistent-libexec APEX_DEVICES_DEV=/nonexistent-dev \
+        APEX_DEVICES_MEDIA=/nonexistent-media APEX_DEVICES_NMLIB=/nonexistent-nmlib \
+        /usr/libexec/apex-devices all > /tmp/apex-devices-all.txt 2>&1; \
+    for h in Printing Scanning "Network shares" "Removable media" Networking \
+             Bluetooth Thunderbolt; do \
+        grep -q "$h" /tmp/apex-devices-all.txt \
+          || { echo "apex-devices: no '$h' section in the full report"; exit 1; }; \
+    done; \
+    # An absence must never come back worded as a refusal, and this run has
+    # nothing to refuse it: every root it was given does not exist.
+    ! grep -q 'could not be read' /tmp/apex-devices-all.txt; \
+    rm -f /tmp/apex-devices-all.txt; \
+    echo "apex-devices: every area dispatches, and an absent world reads as absent"
+
 COPY --chmod=0755 files/system/libexec/apex-disposable /usr/libexec/apex-disposable
 RUN set -eux; \
     bash -n /usr/libexec/apex-disposable; \
