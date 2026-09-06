@@ -481,6 +481,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         checkpoint: checkpoint_id,
         cols: size.cols,
         rows: size.rows,
+        injected: 0,
     };
 
     let handle = {

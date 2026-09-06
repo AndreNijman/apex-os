@@ -987,6 +987,15 @@ jobs:
       - name: Run privilege-request assertions
         run: ./tests/test-privilege-requests.sh
 
+      # P1-035's three claims, none of which a unit test can reach: the typed
+      # path arrives at the session it was addressed to and at no other; nothing
+      # that arrives can submit the line; and a managed session may not use the
+      # verb at all. All three need a real daemon, a real PTY and a real socket,
+      # and the suite builds its own — its own XDG_RUNTIME_DIR, its own state,
+      # killed by pid.
+      - name: Run file-injection assertions
+        run: ./tests/test-agent-inject.sh
+
       # §5's two claims, neither of which the unit tests can reach: a portable
       # bundle carries no credential and no conversation, from a profile on a
       # real filesystem; and a confined session cannot rewrite the instructions

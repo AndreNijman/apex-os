@@ -19,6 +19,7 @@
 mod broker;
 mod egress;
 mod grants;
+mod inject;
 mod origin;
 mod peer;
 mod privilege;
@@ -476,6 +477,8 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
                 Err(e) => Response::error(ErrorKind::Internal, e.to_string()),
             }
         }
+
+        Request::Inject { id, source } => inject::handle(daemon, creds, id, &source),
 
         Request::Signal { id, signal } => {
             let Some(number) = apex_agent_core::session::signal_number(&signal) else {

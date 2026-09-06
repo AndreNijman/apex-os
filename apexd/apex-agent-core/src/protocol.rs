@@ -377,6 +377,16 @@ pub struct SessionInfo {
     pub checkpoint: Option<String>,
     pub cols: u16,
     pub rows: u16,
+    /// How many files have been handed to this session with
+    /// [`Request::Inject`].
+    ///
+    /// Shown by `apex agent info` and by the Agent Center, because typing into
+    /// somebody's agent is the kind of thing that should be countable from
+    /// outside it. `#[serde(default)]` so a record written by a daemon that
+    /// predates this still loads: a missing count reads as none, which is what
+    /// it was.
+    #[serde(default)]
+    pub injected: u32,
 }
 
 impl SessionInfo {
@@ -426,6 +436,23 @@ pub enum Request {
     },
     /// Tell the PTY its window changed. Sent on its own connection.
     Resize { id: u32, cols: u16, rows: u16 },
+    /// Hand a file to a running session: copy it somewhere the session can
+    /// read, and type that path into its PTY (P1-035).
+    ///
+    /// `source` is a path on the HOST, read by the daemon with the daemon's
+    /// own access. That is the point — a confined session cannot see
+    /// `~/Pictures/Screenshots`, and the daemon can — and it is also the
+    /// reason this verb is refused to a caller that resolves to a managed
+    /// session. A session allowed to ask for this could name `~/.ssh/id_ed25519`
+    /// and have the daemon carry it across the sandbox boundary for it.
+    ///
+    /// Nothing about the destination or the typed text comes from the caller;
+    /// see [`crate::inject`] for what is written and why.
+    ///
+    /// Not a protocol bump, for the reason [`Request::ToolCheck`] is not: a
+    /// daemon that predates this answers "unknown request" and the CLI says so.
+    /// The failure loses a feature, never a restriction.
+    Inject { id: u32, source: String },
     /// Deliver a signal by name (`int`, `term`, `kill`, `stop`, `cont`).
     Signal { id: u32, signal: String },
     /// Publish a state transition. This is the open event protocol: any client
@@ -752,6 +779,20 @@ pub enum Response {
     Sessions { sessions: Vec<SessionInfo> },
     /// Attach accepted; the connection is now a raw PTY pipe.
     Attached { id: u32 },
+    /// A file was handed to a session.
+    ///
+    /// `path` is both where the copy landed and, verbatim, the text written to
+    /// the session's PTY — one field rather than two, so a caller cannot be
+    /// shown a path different from the one the agent was given.
+    Injected {
+        id: u32,
+        path: String,
+        /// Whether the text was wrapped as a bracketed paste, which happens
+        /// only when the program on that PTY has asked for the mode. Reported
+        /// so `apex agent send` can say whether the agent will see it as a
+        /// paste or as typing.
+        bracketed: bool,
+    },
     Logs {
         id: u32,
         /// UTF-8 lossy transcript tail.
@@ -1022,6 +1063,7 @@ mod tests {
             checkpoint: None,
             cols: 80,
             rows: 24,
+            injected: 0,
         }
     }
 
@@ -1042,6 +1084,11 @@ mod tests {
                 sessions: vec![sample_session(), sample_session()],
             },
             Response::Attached { id: 3 },
+            Response::Injected {
+                id: 3,
+                path: "/tmp/apex-agent/3/inbox/001-shot.png".into(),
+                bracketed: true,
+            },
             Response::Logs {
                 id: 3,
                 text: "output\n".into(),
@@ -1180,6 +1227,10 @@ mod tests {
     fn every_request_variant_round_trips() {
         let variants = vec![
             Request::Hello,
+            Request::Inject {
+                id: 3,
+                source: "/home/t/Pictures/Screenshots/shot.png".into(),
+            },
             Request::Run(RunRequest {
                 agent: Some("claude".into()),
                 prompt: Some("go".into()),
@@ -1454,6 +1505,7 @@ mod tests {
             checkpoint: None,
             cols: 80,
             rows: 24,
+            injected: 0,
         };
         assert!(info.is_live());
         assert_eq!(info.exit_summary(), None);

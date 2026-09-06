@@ -697,6 +697,82 @@ inferred states.
 
 ---
 
+## Handing a file to a session
+
+A screenshot, a log, a crash dump: something in front of you that the agent
+already running should look at.
+
+```
+apex agent send 3 ~/Downloads/backtrace.txt
+apex agent send 3 --last-screenshot
+```
+
+The runtime copies the file into the session's own scratch directory, then
+types that path into the session's terminal. The sandbox already binds that
+directory read-write, and the session takes it with it when it ends.
+
+`--last-screenshot` takes no picture and opens no selection overlay. It reads
+the newest file in `~/Pictures/Screenshots`, which is where APEX Shell's Print
+keybind writes. Press Print, then run it.
+
+### It does not press Enter
+
+The path is left on the agent's input line, and you send it. That is the whole
+of what keeps a person in the loop, because the channel a file arrives on is
+the same one your keyboard uses.
+
+### What a program reading that terminal can and cannot tell
+
+Bytes written to a PTY arrive as keystrokes. There is no field in a terminal
+for "this came from somewhere else", so a language model reading its own input
+cannot tell an injected byte from a typed one. Four things make the difference
+not matter:
+
+* **Only a path travels on that channel, never the contents.** The file
+  reaches the model through its own read tool, where its harness already treats
+  the result as data rather than as instruction. Handing a file over makes it
+  as trusted as `cat` would, and no more.
+* **The runtime composes the text, not you.** You name a source; the
+  destination is built from the session's scratch path, a counter and a name
+  reduced to letters, digits, dot, dash and underscore. A file called
+  `x⏎/quit⏎.png` cannot put a newline on the terminal, because the bytes on the
+  terminal were never yours. A name carrying a control character gets a refusal
+  rather than a repair.
+* **Nothing is submitted.** No newline, no carriage return.
+* **Every one lands somewhere the session cannot reach**: the systemd journal,
+  which also holds the mirror of every system-access grant.
+
+  ```
+  journalctl --user -t apex-agentd APEX_INJECT_SESSION=3
+  ```
+
+Two costs, said plainly. The bytes land wherever that terminal's foreground
+process is reading, so if the agent has opened an editor or a pager the path
+goes into that instead. And someone who has just been shown a path can be
+talked into pressing Enter: staging is a speed bump in front of a human, not a
+boundary.
+
+One in-band signal does exist. A terminal application that has asked for
+bracketed paste (`DECSET 2004`) receives pasted text wrapped in markers, which
+is how a TUI tells a paste from typing. The runtime owns the session's
+terminal, so it knows whether the application asked, and it sends the markers
+only then. That gives the *application* a way to know. It still gives the model
+none, because whether the distinction survives into the prompt is the
+application's choice.
+
+### Refused to an agent
+
+A session may not use this verb, on another session or on itself. The runtime
+reads the source with its own access, outside every sandbox, so a session that
+could ask for this could name `~/.ssh/id_ed25519` and have the file carried
+across the boundary for it. The daemon resolves the caller from `SO_PEERCRED`
+and `/proc` ancestry, the same way it resolves a privilege request's, and
+refuses anything that lands on a managed session.
+
+`apex agent status <id>` counts the files a session has taken.
+
+---
+
 ## Project layouts
 
 §6 asks APEX to remember the windows and terminals of a project and restore

@@ -74,6 +74,33 @@ pub enum AgentCmd {
         #[arg(long, default_value = "term")]
         signal: String,
     },
+    /// Hand a file to a running session: a screenshot, a log, a crash dump.
+    ///
+    /// The runtime copies it somewhere the session can read — a confined
+    /// session cannot see `~/Pictures` — and types that path into the
+    /// session's terminal. It does NOT press Enter: the path is left on the
+    /// agent's input line and you send it, which is what keeps a person in the
+    /// loop when the channel a file arrives on is the same one your keyboard
+    /// uses.
+    ///
+    /// The session id is required and never guessed. Typing into the wrong
+    /// agent is worse than typing a number.
+    Send {
+        id: u32,
+        /// Files to hand over, in the order given.
+        #[arg(value_name = "FILE")]
+        files: Vec<String>,
+        /// Hand over the newest screenshot instead of naming it.
+        ///
+        /// Press Print, then run this. It reads the directory APEX Shell's
+        /// screenshot keybind writes to (`~/Pictures/Screenshots`), so it
+        /// takes no picture itself and opens no selection overlay.
+        #[arg(long)]
+        last_screenshot: bool,
+        /// Machine-readable output, one object per file.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a session's transcript.
     Logs {
         id: u32,
@@ -649,6 +676,12 @@ pub fn agent(cmd: AgentCmd) -> i32 {
         AgentCmd::Pause { id } => signal(id, "stop", "paused"),
         AgentCmd::Resume { id } => signal(id, "cont", "resumed"),
         AgentCmd::Kill { id, signal: sig } => signal(id, &sig, "signalled"),
+        AgentCmd::Send {
+            id,
+            files,
+            last_screenshot,
+            json,
+        } => send(id, files, last_screenshot, json),
         AgentCmd::Logs { id, bytes } => logs(id, bytes),
         AgentCmd::Status { id } => status(id),
         AgentCmd::Default { agent } => default_agent(agent),
@@ -1160,6 +1193,121 @@ fn signal(id: u32, name: &str, past_tense: &str) -> Result<i32> {
     Ok(0)
 }
 
+/// Where APEX Shell's screenshot keybind puts its files.
+///
+/// The same directory `src/scripts/screenshot.sh` writes to in apex-shell, and
+/// the path is spelled here rather than asked of the shell because this command
+/// has to work on a machine running any compositor, or none. The environment
+/// override is what lets the suite point it at a directory of its own; it is
+/// the same device `apex-disposable` uses for `APEX_DISPOSABLE_ROOT`.
+fn screenshot_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("APEX_SCREENSHOT_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    apex_agent_core::paths::home().join("Pictures/Screenshots")
+}
+
+/// The most recently modified regular file in the screenshots directory.
+///
+/// By modification time and not by name: the name carries a timestamp, but it
+/// is the timestamp of the capture rather than of the file, and a screenshot
+/// edited after it was taken is still the one the user is looking at.
+fn newest_screenshot() -> Result<PathBuf> {
+    let dir = screenshot_dir();
+    let entries = std::fs::read_dir(&dir)
+        .with_context(|| format!("no screenshots to hand over: cannot read {}", dir.display()))?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(when) = meta.modified() else { continue };
+        let better = match &best {
+            None => true,
+            Some((best_when, _)) => when > *best_when,
+        };
+        if better {
+            best = Some((when, entry.path()));
+        }
+    }
+    best.map(|(_, path)| path).ok_or_else(|| {
+        anyhow!(
+            "{} holds no screenshots yet. Press Print to take one",
+            dir.display()
+        )
+    })
+}
+
+/// `apex agent send`.
+fn send(id: u32, files: Vec<String>, last_screenshot: bool, json: bool) -> Result<i32> {
+    let mut sources: Vec<PathBuf> = Vec::new();
+    if last_screenshot {
+        sources.push(newest_screenshot()?);
+    }
+    for f in &files {
+        // Canonicalised here rather than in the daemon: the daemon's working
+        // directory is not yours, so a relative path would name a different
+        // file there — and it is refused there, so this is where a plain
+        // `apex agent send 3 shot.png` has to become a path.
+        sources.push(
+            std::fs::canonicalize(f).with_context(|| format!("cannot hand over {f}"))?,
+        );
+    }
+    if sources.is_empty() {
+        bail!("name a file to hand over, or --last-screenshot");
+    }
+
+    let mut client = Client::connect()?;
+    let mut bracketed_anywhere = false;
+    for source in &sources {
+        let resp = client.call(&Request::Inject {
+            id,
+            source: source.to_string_lossy().into_owned(),
+        })?;
+        let Response::Injected {
+            path, bracketed, ..
+        } = resp
+        else {
+            bail!("the runtime answered something other than an injection: {resp:?}");
+        };
+        bracketed_anywhere |= bracketed;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "session": id,
+                    "source": source.to_string_lossy(),
+                    "path": path,
+                    "bracketed": bracketed,
+                })
+            );
+        } else {
+            eprintln!("apex: {} -> session {id} as {path}", source.display());
+        }
+    }
+    if !json {
+        // Said every time, and deliberately. A user who believes the agent has
+        // already been asked will wait for an answer that is not coming.
+        eprintln!(
+            "apex: {} typed into session {id}'s terminal and NOT entered — press Enter there{}",
+            if sources.len() == 1 {
+                "path".to_string()
+            } else {
+                format!("{} paths", sources.len())
+            },
+            if bracketed_anywhere {
+                ". That agent reads pasted text as a paste"
+            } else {
+                ""
+            }
+        );
+    }
+    Ok(0)
+}
+
 fn logs(id: u32, bytes: usize) -> Result<i32> {
     let text = client::logs(id, bytes)?;
     print!("{text}");
@@ -1313,6 +1461,12 @@ fn print_session(s: &SessionInfo) {
     println!("pid          {}", s.pid);
     println!("terminal     {}x{}", s.cols, s.rows);
     println!("attached     {}", s.attached);
+    // Only when there have been some. A line of "files 0" on every session
+    // would be noise on every session that has never been handed one, which
+    // is almost all of them.
+    if s.injected > 0 {
+        println!("files sent   {}", s.injected);
+    }
     if let Some(summary) = s.exit_summary() {
         println!("outcome      {summary}");
     }
