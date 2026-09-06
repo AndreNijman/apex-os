@@ -28,6 +28,7 @@
 //!         ├─ adapters                      adapter.rs
 //!         ├─ agent profiles                profile.rs
 //!         ├─ claude's own hook lifecycle   hook.rs
+//!         ├─ handing a file to a session   inject.rs
 //!         ├─ projects + worktrees          project.rs
 //!         ├─ project window layouts        layout.rs
 //!         ├─ checkpoints                   checkpoint.rs
@@ -53,6 +54,7 @@ pub mod destination;
 pub mod git;
 pub mod grant;
 pub mod hook;
+pub mod inject;
 pub mod journal;
 pub mod layout;
 pub mod mux;
