@@ -10,13 +10,15 @@ use apex_agent_core::adapter;
 use apex_agent_core::checkpoint;
 use apex_agent_core::client::SESSION_ENV;
 use apex_agent_core::paths;
-use apex_agent_core::policy::PolicyError;
+use apex_agent_core::config;
+use apex_agent_core::policy::{NetworkPolicy, PolicyError};
 use apex_agent_core::project;
 use apex_agent_core::protocol::{AgentState, ErrorKind, Response, RunRequest, SessionInfo};
-use apex_agent_core::sandbox::{self, SandboxError, SandboxSpec};
+use apex_agent_core::sandbox::{self, EgressBridge, SandboxError, SandboxSpec, BRIDGE_PORT};
 use apex_agent_core::session as logic;
 use apex_agent_core::term::WinSize;
 
+use crate::egress;
 use crate::pty;
 use crate::registry::{self, now_secs, Handle};
 use crate::Daemon;
@@ -72,7 +74,12 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
     // against a newer vocabulary, is refused here rather than granted a
     // dimension nothing in this build enforces.
     let policy = req.policy.normalised();
-    policy.validate().map_err(PolicyRefused)?;
+    // The allowlist is read fresh rather than taken from the daemon's cached
+    // configuration. A destination policy that only changed on a daemon
+    // restart is one people widen once and never narrow again, and this is the
+    // daemon reading its own user's file — nothing the session can write.
+    let allowlist = config::Config::load().allowlist();
+    policy.validate_for(&allowlist).map_err(PolicyRefused)?;
 
     // Dimension 1 is the agent's own, and only the adapter knows whether this
     // one can express it. Refused rather than dropped: a `--agent-bypass` that
@@ -172,6 +179,27 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
     }
     adapter.apply_sandbox(&mut spec);
 
+    // The allowlist's only route out. Started before the session, so an agent
+    // that resolves a proxy on its first line finds one there; and inside the
+    // scratch directory, which is already bound read-write, so it needs no
+    // mount of its own and cannot disturb the ordering the `/run` mask
+    // depends on. `finish` deletes that directory and the proxy stops with it.
+    //
+    // The `?` is the fail-closed half: a session that asked for an allowlist
+    // and whose proxy did not start does not run with the host's network, and
+    // does not run at all.
+    if policy.effective_network() == NetworkPolicy::Allowlist {
+        let socket = scratch.join("egress.sock");
+        egress::start(id, &socket, allowlist.clone())
+            .with_context(|| format!("starting the egress proxy for session {id}"))?;
+        spec.egress = Some(EgressBridge {
+            program: std::env::current_exe()
+                .context("finding this runtime's own binary, which is the egress bridge")?,
+            socket,
+            port: BRIDGE_PORT,
+        });
+    }
+
     spec.env_set.push(("HOME".into(), paths::home().to_string_lossy().into_owned()));
     spec.env_set.push(("PWD".into(), workdir.to_string_lossy().into_owned()));
     spec.env_set.push(("PATH".into(), inherited_path()));
@@ -212,6 +240,12 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
     }
     if !spec.control_socket.as_os_str().is_empty() {
         spec.control_socket = sandbox::real_target(&spec.control_socket);
+    }
+    if let Some(bridge) = spec.egress.as_mut() {
+        // Resolved for the same reason as the scratch directory it sits in:
+        // the bridge connects to this path from inside the sandbox, where the
+        // bind was made against the real one.
+        bridge.socket = sandbox::real_target(&bridge.socket);
     }
     for p in spec.rw.iter_mut() {
         *p = sandbox::real_target(p);

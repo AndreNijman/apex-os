@@ -17,6 +17,7 @@
 //! exactly what the kernel is good at.
 
 mod broker;
+mod egress;
 mod peer;
 mod privilege;
 mod pty;
@@ -55,6 +56,21 @@ impl Daemon {
 }
 
 fn main() {
+    // The in-sandbox half of the `allowlist` network mode, answered before any
+    // daemon state exists. The same binary is used rather than a sibling so
+    // both ends of the egress protocol are compiled together and there is no
+    // second path for the sandbox to have to be able to see. See egress.rs.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(bridge) = egress::parse_bridge_argv(&argv) {
+        match bridge {
+            Ok(b) => std::process::exit(egress::run_bridge(b)),
+            Err(e) => {
+                eprintln!("apex-agentd: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     if let Err(e) = run() {
         eprintln!("apex-agentd: {e:#}");
         std::process::exit(1);
