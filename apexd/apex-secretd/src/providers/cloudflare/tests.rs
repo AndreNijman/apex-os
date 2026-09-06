@@ -694,6 +694,52 @@ fn a_rollback_is_told_apart_from_a_deploy_on_the_wire() {
 }
 
 #[test]
+fn a_message_with_a_quote_in_it_survives_two_layers_of_escaping() {
+    // `message` is Syntax::Text, which admits a quote and a backslash. It is
+    // then escaped by serde_json, and the deployment body is escaped AGAIN by
+    // the curl config writer, and curl unescapes once. Three transformations
+    // and no test on the round trip is how every quoted deploy message ends up
+    // as malformed JSON at Cloudflare — which is a functional bug a scrub test
+    // and a binding test would both pass straight over.
+    let f = Fixture::new("quoting", Mode::Normal, &granted_everything());
+    with_module(&f);
+    let awkward = r#"say "hi" \ and "then" stop"#;
+
+    // The JSON body path: through `quoted()` into a curl config line.
+    f.use_it(
+        f.record("cloudflare.worker.deploy", "project")
+            .param("version", "1c4dd6be-0000-4000-8000-abcdefabcdef")
+            .param("message", awkward),
+    );
+    // The multipart path: written to a file as raw bytes, no curl escaping.
+    f.use_it(
+        f.record("cloudflare.worker.upload-version", "project")
+            .param("script", "dist/worker.js")
+            .param("message", awkward),
+    );
+
+    let sent = f.fake.seen();
+    let deploy: serde_json::Value = serde_json::from_str(&sent[0].body)
+        .unwrap_or_else(|e| panic!("the deployment body is not JSON: {e}\n{}", sent[0].body));
+    assert_eq!(
+        deploy["annotations"]["workers/message"].as_str(),
+        Some(awkward),
+        "the message did not survive the round trip"
+    );
+
+    // The metadata part is JSON inside a multipart body; pull it back out.
+    let body = &sent[1].body;
+    let start = body.find('{').expect("metadata json");
+    let end = body[start..].find("\r\n--").map(|i| start + i).unwrap_or(body.len());
+    let metadata: serde_json::Value = serde_json::from_str(body[start..end].trim())
+        .unwrap_or_else(|e| panic!("the metadata part is not JSON: {e}\n{body}"));
+    assert_eq!(
+        metadata["annotations"]["workers/message"].as_str(),
+        Some(awkward)
+    );
+}
+
+#[test]
 fn a_route_read_answers_about_the_worker_that_was_named_and_no_other() {
     // The zone endpoint returns every route in the zone. The caller named one
     // worker, the grant is for one worker, and the audit line claims the
