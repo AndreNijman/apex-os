@@ -286,6 +286,22 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     if !spec.control_socket.as_os_str().is_empty() {
         spec.control_socket = sandbox::real_target(&spec.control_socket);
     }
+    // The session is told where its runtime directory is, because that is how
+    // it finds the control socket it was just given. Set from the RESOLVED
+    // path, and set after the resolution above rather than beside the other
+    // variables, so the name the session reads and the path the socket was
+    // bound at cannot be two different strings.
+    //
+    // Without this a session inherits nothing and `paths::runtime_dir` falls
+    // back to `/run/user/<uid>` — which is right on an ordinary login and wrong
+    // for any daemon started with an `XDG_RUNTIME_DIR` of its own, where every
+    // `apex agent event` and every hook reports "the agent runtime is not
+    // running" from inside a session the runtime is demonstrably running.
+    spec.env_set.push((
+        "XDG_RUNTIME_DIR".into(),
+        spec.runtime_dir.to_string_lossy().into_owned(),
+    ));
+
     if let Some(bridge) = spec.egress.as_mut() {
         // Resolved for the same reason as the scratch directory it sits in:
         // the bridge connects to this path from inside the sandbox, where the
@@ -396,10 +412,24 @@ fn install_hook_settings(adapter: &adapter::Adapter, scratch: &Path) -> Option<P
 ///
 /// Absolute because the hook runs inside the sandbox, whose `PATH` is the
 /// daemon's but whose filesystem is not: a bare `apex` would resolve against
-/// directories the home tmpfs has masked. `/usr/bin/apex` first, because that
-/// is where the image puts it and it is reachable under `--ro-bind / /`; the
-/// daemon's own `PATH` after, so a development build is testable.
+/// directories the home tmpfs has masked.
+///
+/// The daemon's own sibling first: `apex` and `apex-agentd` are built and
+/// shipped together, and a hook command that ran a different build from the
+/// daemon it reports to is the one pairing guaranteed to be wrong. Skipped when
+/// a session could not exec it anyway — the masked home and the private `/tmp`
+/// are the two places a confined process cannot see, which is the test
+/// [`bridge_program`] already applies. Then `/usr/bin/apex`, where the image
+/// puts it, and finally the daemon's `PATH`.
 fn apex_program() -> Option<PathBuf> {
+    let sibling = std::env::current_exe().ok().and_then(|exe| {
+        let p = exe.parent()?.join("apex");
+        let reachable = !p.starts_with("/tmp") && !p.starts_with(paths::home());
+        (p.is_file() && reachable).then_some(p)
+    });
+    if sibling.is_some() {
+        return sibling;
+    }
     let installed = PathBuf::from("/usr/bin/apex");
     if installed.is_file() {
         return Some(installed);
