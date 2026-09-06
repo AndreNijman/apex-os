@@ -24,3 +24,7 @@ output/
 # development; its cache must never ship in the image build context.
 __pycache__/
 *.pyc
+
+# tests/run-clippy.sh builds here so it never shares a target dir with cargo test
+/target-clippy/
+apexd/target-clippy/
