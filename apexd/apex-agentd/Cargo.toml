@@ -18,3 +18,10 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
+
+# The integration test drives a real daemon over its socket and reads the
+# replies as JSON. It needs the protocol types to check them against §7's
+# vocabulary rather than against string literals it could get wrong.
+[dev-dependencies]
+apex-agent-core = { path = "../apex-agent-core" }
+serde_json.workspace = true

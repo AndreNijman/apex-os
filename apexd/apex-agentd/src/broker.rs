@@ -141,6 +141,8 @@ pub fn use_capability(
                 session: who.session,
                 agent: who.agent.as_deref(),
                 project: Some(&project),
+                origin: who.request_origin.map(|o| o.origin),
+                origin_source: who.request_origin.map(|o| o.source),
                 exit_code: None,
             },
         );
@@ -167,6 +169,8 @@ pub fn use_capability(
                 session: who.session,
                 agent: who.agent.as_deref(),
                 project: Some(&project),
+                origin: who.request_origin.map(|o| o.origin),
+                origin_source: who.request_origin.map(|o| o.source),
                 exit_code: None,
             },
         );
@@ -195,6 +199,8 @@ pub fn use_capability(
             session: who.session,
             agent: who.agent.as_deref(),
             project: Some(&project),
+            origin: who.request_origin.map(|o| o.origin),
+            origin_source: who.request_origin.map(|o| o.source),
             exit_code: Some(code),
         },
     );

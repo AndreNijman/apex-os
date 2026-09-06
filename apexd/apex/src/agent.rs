@@ -2030,7 +2030,7 @@ mod tests {
                     origin_policy: Some(OriginPolicy::RemoteElevationAllowed),
                     ..run_args()
                 },
-                "approve it locally",
+                "Approve the operation locally",
             ),
         ];
         for (args, expect) in cases {

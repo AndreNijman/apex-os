@@ -258,6 +258,167 @@ pub fn child_of(parent: RequestOrigin) -> RequestOrigin {
     }
 }
 
+// ── §7's default policy table ───────────────────────────────────────────────
+
+/// A row of §7's "Recommended default policy" table.
+///
+/// The rows are capability *classes*, not the individual operations that fall
+/// into them: §7 writes one line for "GitHub push" and means every brokered
+/// push. [`Capability::ruling`] is the table read across, and
+/// `section_seven_table_is_reproduced_exactly` is the table read down, so the
+/// two cannot drift.
+///
+/// Deliberately not merged into `secret::Capability`, which is the vocabulary
+/// of operations the broker can actually perform. This is policy over classes
+/// of operation, several of which nothing in this build performs at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capability {
+    /// Write to the files of the project a session was started in.
+    EditProject,
+    /// Run the project's own test suite.
+    RunTests,
+    /// A brokered push to a git remote.
+    GitHubPush,
+    /// A brokered deploy to a preview environment.
+    CloudflarePreviewDeploy,
+    /// A brokered deploy to production.
+    ProductionDeploy,
+    /// Receive the value of a brokered credential.
+    ReadRawSecret,
+    /// Anything that needs root: §4's system-access grant, and every verb in
+    /// [`crate::request::Verb`].
+    RootCapability,
+    /// §4.5's break-glass mode.
+    UnsafeEverything,
+}
+
+/// A cell of that table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ruling {
+    /// "allow" — it happens, with no separate decision.
+    Allow,
+    /// "configurable" — the owner decides, and until they have, it does not
+    /// happen. Configurable is not a synonym for allowed.
+    Configurable,
+    /// "local auth" — a human at this machine authenticates. Distinct from
+    /// [`Ruling::LocalApproval`] because the human is the one asking.
+    LocalAuth,
+    /// "local approval required" — the request came from elsewhere and a
+    /// human at this machine has to approve it.
+    LocalApproval,
+    /// "deny" — from every origin, including the local one.
+    Deny,
+}
+
+impl Ruling {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Ruling::Allow => "allow",
+            Ruling::Configurable => "configurable",
+            Ruling::LocalAuth => "local auth",
+            Ruling::LocalApproval => "local approval required",
+            Ruling::Deny => "deny",
+        }
+    }
+
+    /// Whether this happens without anybody being asked.
+    ///
+    /// Only `allow`. `configurable` is not included and that is the point:
+    /// the owner has not configured it, so the answer today is no.
+    pub fn is_unattended(&self) -> bool {
+        matches!(self, Ruling::Allow)
+    }
+
+    /// Whether satisfying this needs a human at this machine.
+    pub fn needs_local_human(&self) -> bool {
+        matches!(self, Ruling::LocalAuth | Ruling::LocalApproval)
+    }
+}
+
+impl std::fmt::Display for Ruling {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+impl Capability {
+    pub const ALL: &'static [Capability] = &[
+        Capability::EditProject,
+        Capability::RunTests,
+        Capability::GitHubPush,
+        Capability::CloudflarePreviewDeploy,
+        Capability::ProductionDeploy,
+        Capability::ReadRawSecret,
+        Capability::RootCapability,
+        Capability::UnsafeEverything,
+    ];
+
+    /// The row label, as §7 writes it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Capability::EditProject => "edit project",
+            Capability::RunTests => "run tests",
+            Capability::GitHubPush => "github push",
+            Capability::CloudflarePreviewDeploy => "cloudflare preview deploy",
+            Capability::ProductionDeploy => "production deploy",
+            Capability::ReadRawSecret => "read raw brokered secret",
+            Capability::RootCapability => "root capability",
+            Capability::UnsafeEverything => "unsafe everything",
+        }
+    }
+
+    /// §7's answer for this capability from this origin.
+    ///
+    /// The table has two columns — Local and Claude Remote Control — and the
+    /// other five origins are not in it. They are read as the remote column,
+    /// because the property the table is really keyed on is whether a human
+    /// is at this machine, and a scheduled job has less of one than Remote
+    /// Control does, not more.
+    ///
+    /// Note the two rows where remote is *not* more restricted than local:
+    /// the first four are `allow` from both, which is §7's actual position and
+    /// the reason Remote Control is described there as a normal workflow. A
+    /// policy that quietly tightened them would be a different policy.
+    pub fn ruling(&self, origin: RequestOrigin) -> Ruling {
+        self.ruling_when(origin.is_local())
+    }
+
+    /// [`Capability::ruling`], keyed on the only property the table branches
+    /// on.
+    ///
+    /// For the caller that has "a human is present" as a boolean and no
+    /// origin to name — a record with none, which is not local and therefore
+    /// gets the remote column without having to borrow an origin it never
+    /// had.
+    pub fn ruling_when(&self, local: bool) -> Ruling {
+        match self {
+            // "Remote Control is a normal workflow, not an edge case."
+            Capability::EditProject
+            | Capability::RunTests
+            | Capability::GitHubPush
+            | Capability::CloudflarePreviewDeploy => Ruling::Allow,
+            Capability::ProductionDeploy => Ruling::Configurable,
+            // The one row with the same answer in both columns for the
+            // opposite reason: §3.2's brokered-not-exported rule holds even
+            // for a human sitting at the keyboard.
+            Capability::ReadRawSecret => Ruling::Deny,
+            Capability::RootCapability | Capability::UnsafeEverything => {
+                if local {
+                    Ruling::LocalAuth
+                } else {
+                    Ruling::LocalApproval
+                }
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Capability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,6 +599,138 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["origin"], "claude-remote-control");
         assert_eq!(v["source"], "declared");
+    }
+
+    #[test]
+    fn section_seven_table_is_reproduced_exactly() {
+        // ROADMAP.md §7, transcribed. Written as data rather than as
+        // assertions over `ruling`'s branches, so this fails if the code is
+        // edited to say something the roadmap does not.
+        //
+        // | Capability                | Local        | Claude Remote Control    |
+        let table: &[(Capability, Ruling, Ruling)] = &[
+            (Capability::EditProject, Ruling::Allow, Ruling::Allow),
+            (Capability::RunTests, Ruling::Allow, Ruling::Allow),
+            (Capability::GitHubPush, Ruling::Allow, Ruling::Allow),
+            (Capability::CloudflarePreviewDeploy, Ruling::Allow, Ruling::Allow),
+            (
+                Capability::ProductionDeploy,
+                Ruling::Configurable,
+                Ruling::Configurable,
+            ),
+            (Capability::ReadRawSecret, Ruling::Deny, Ruling::Deny),
+            (
+                Capability::RootCapability,
+                Ruling::LocalAuth,
+                Ruling::LocalApproval,
+            ),
+            (
+                Capability::UnsafeEverything,
+                Ruling::LocalAuth,
+                Ruling::LocalApproval,
+            ),
+        ];
+        assert_eq!(table.len(), Capability::ALL.len(), "a row is missing");
+        for (cap, local, remote) in table {
+            assert_eq!(
+                cap.ruling(RequestOrigin::LocalTerminal),
+                *local,
+                "{cap} from a local terminal"
+            );
+            assert_eq!(
+                cap.ruling(RequestOrigin::ApexShell),
+                *local,
+                "{cap} from the shell"
+            );
+            assert_eq!(
+                cap.ruling(RequestOrigin::RemoteControl),
+                *remote,
+                "{cap} from remote control"
+            );
+        }
+    }
+
+    #[test]
+    fn the_work_andre_does_remotely_is_allowed_remotely() {
+        // §7's opening line: "Remote Control is a normal workflow, not an edge
+        // case." Four rows of the table say so, and a policy that tightened
+        // them because remote sounds riskier would be the wrong policy rather
+        // than a cautious one.
+        for cap in [
+            Capability::EditProject,
+            Capability::RunTests,
+            Capability::GitHubPush,
+            Capability::CloudflarePreviewDeploy,
+        ] {
+            for origin in RequestOrigin::ALL {
+                let r = cap.ruling(*origin);
+                assert_eq!(r, Ruling::Allow, "{cap} from {origin}");
+                assert!(r.is_unattended());
+                assert!(!r.needs_local_human());
+            }
+        }
+    }
+
+    #[test]
+    fn elevation_needs_a_local_human_from_every_origin_including_a_local_one() {
+        // The two rows §7 never lets happen unattended. Both columns end at a
+        // human at this machine; what differs is whether that human is also
+        // the one asking.
+        for cap in [Capability::RootCapability, Capability::UnsafeEverything] {
+            for origin in RequestOrigin::ALL {
+                let r = cap.ruling(*origin);
+                assert!(r.needs_local_human(), "{cap} from {origin} needs nobody");
+                assert!(!r.is_unattended(), "{cap} from {origin} runs unattended");
+                assert_eq!(
+                    r == Ruling::LocalAuth,
+                    origin.is_local(),
+                    "{cap} from {origin}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unattended_origin_is_read_as_the_remote_column_not_the_local_one() {
+        // §7's table names only two columns. A scheduled job, an MCP server, a
+        // subagent and a cloud job are in neither by name, and reading them as
+        // the local one — they are, after all, running on this machine — is
+        // the mistake this pins.
+        for origin in [
+            RequestOrigin::ScheduledJob,
+            RequestOrigin::Mcp,
+            RequestOrigin::Subagent,
+            RequestOrigin::CloudJob,
+        ] {
+            for cap in [Capability::RootCapability, Capability::UnsafeEverything] {
+                assert_eq!(cap.ruling(origin), Ruling::LocalApproval, "{cap}/{origin}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_raw_secret_is_refused_from_the_keyboard_too() {
+        // The row where the two columns agree for the opposite reason to the
+        // first four. §3.2 does not have a "unless a human asks" clause.
+        for origin in RequestOrigin::ALL {
+            assert_eq!(
+                Capability::ReadRawSecret.ruling(*origin),
+                Ruling::Deny,
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn configurable_is_not_a_synonym_for_allowed() {
+        // Production deploy is `configurable` in both columns, and the
+        // tempting reading of that is "allowed once somebody sets it up",
+        // which in an unconfigured build means allowed.
+        for origin in RequestOrigin::ALL {
+            let r = Capability::ProductionDeploy.ruling(*origin);
+            assert_eq!(r, Ruling::Configurable);
+            assert!(!r.is_unattended(), "{origin} deployed to production unasked");
+        }
     }
 
     #[test]

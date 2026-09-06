@@ -93,13 +93,29 @@ pub fn origin(daemon: &Arc<Daemon>, peer: Option<Peer>) -> Origin {
              no way to tell where it came from",
         );
     };
+    // Where a connection came from is a question about the process, not about
+    // which account it runs as, so it is answered before the uid is looked at.
+    //
+    // That ordering matters for exactly one caller and it is the important
+    // one: `apex request approve` runs under `sudo`, so it reaches this socket
+    // as uid 0. It is still a human at a terminal, and §4's whole approval
+    // path is that command. Classifying it from its cgroup — which is
+    // world-readable and which sudo does not let a process choose — is what
+    // keeps that true without widening anything: root can already read the
+    // request files and run the operation directly.
+    let observed = crate::origin::observe(&peer);
+
     if !peer::is_own_user(&peer) {
-        // Should be unreachable: the socket sits in a 0700 directory inside
-        // $XDG_RUNTIME_DIR. Treated as unidentified rather than trusted.
-        return Origin::unreadable(format!(
-            "this connection belongs to uid {}, not to the user this runtime runs for",
-            peer.uid
-        ));
+        // Not this user's process, so it is not one of this user's sessions —
+        // the ancestry walk below would be attributing a foreign process to a
+        // session it cannot be inside. The origin still stands.
+        return match observed {
+            Ok(o) => Origin {
+                request_origin: Some(SessionOrigin::observed(o)),
+                ..Origin::default()
+            },
+            Err(why) => Origin::unreadable(why),
+        };
     }
 
     // Snapshot (pid, id) pairs, then release the lock: the ancestry walk does
@@ -123,8 +139,9 @@ pub fn origin(daemon: &Arc<Daemon>, peer: Option<Peer>) -> Origin {
 
     let Some(found) = matched.and_then(|f| live.iter().find(|(pid, _)| *pid == f).map(|(_, id)| *id))
     else {
-        // Not a managed session. Classify the peer itself.
-        return match crate::origin::observe(&peer) {
+        // Not a managed session, so the peer's own classification is the
+        // answer.
+        return match observed {
             Ok(o) => Origin {
                 request_origin: Some(SessionOrigin::observed(o)),
                 ..Origin::default()
@@ -366,6 +383,44 @@ pub fn decide(daemon: &Arc<Daemon>, peer: Option<Peer>, id: u32, decision: Decis
             format!(
                 "session {session} cannot decide its own privilege request; \
                  a human decides with `apex request allow|deny`"
+            ),
+        );
+    }
+
+    // §7, both columns: "Root capability — Local: local auth. Claude Remote
+    // Control: local approval required." Every verb in the vocabulary is a
+    // root capability, so both columns end in the same place — a human at
+    // this machine — and this is the check that makes that true.
+    //
+    // Without it, a systemd user timer running `apex request allow 3` is an
+    // unattended approval of root: it is not a session, so the check above
+    // lets it through, and it is not a human either. That is the hole this
+    // closes, and it is the whole of "root/unsafe mode requires local
+    // approval by default".
+    //
+    // Refused rather than defaulted when the origin could not be established.
+    // The message names what could not be read, because the alternative to
+    // being able to act on it is a machine on which nothing can be approved
+    // and nothing says why.
+    let Some(decider) = who.request_origin else {
+        return Response::error(
+            ErrorKind::PermissionDenied,
+            format!(
+                "{}, so this connection cannot be shown to be a human at this machine — and \
+                 §7 reserves approving a root operation for one",
+                who.origin_unreadable
+                    .unwrap_or_else(|| "the origin could not be established".to_string())
+            ),
+        );
+    };
+    if !decider.is_local() {
+        return Response::error(
+            ErrorKind::PermissionDenied,
+            format!(
+                "a {} request cannot approve a root operation; §7 reserves that for a human at \
+                 this machine, whichever origin filed it. Approve it from a terminal or from \
+                 the Agent Center",
+                decider.origin
             ),
         );
     }

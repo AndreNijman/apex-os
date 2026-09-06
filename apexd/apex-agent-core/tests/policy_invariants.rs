@@ -29,7 +29,9 @@
 //! the daemon and the CLI actually use.
 
 use apex_agent_core::adapter;
-use apex_agent_core::origin::{may_declare, OriginError, OriginSource, SessionOrigin};
+use apex_agent_core::origin::{
+    may_declare, Capability, OriginError, OriginSource, Ruling, SessionOrigin,
+};
 use apex_agent_core::policy::{
     AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset, RequestOrigin,
     SandboxPolicy, SecretPolicy, SystemAccess,
@@ -580,6 +582,125 @@ fn the_approval_prompt_says_which_column_of_section_sevens_table_applies() {
         assert!(p.contains(origin.as_str()), "{origin}: {p}");
         assert!(p.contains("observed"), "{origin}: {p}");
     }
+}
+
+// ── P0-014: the Remote Control policy ───────────────────────────────────────
+
+#[test]
+fn a_remote_session_may_still_edit_run_tests_and_push() {
+    // P0-014's first criterion, and the one most easily lost by being
+    // careful: §7 opens with "Remote Control is a normal workflow, not an
+    // edge case", and four of its eight rows are `allow` from both columns.
+    // A build that tightened them would be safer and wrong.
+    for origin in RequestOrigin::ALL {
+        for cap in [
+            Capability::EditProject,
+            Capability::RunTests,
+            Capability::GitHubPush,
+            Capability::CloudflarePreviewDeploy,
+        ] {
+            assert!(
+                cap.ruling(*origin).is_unattended(),
+                "{cap} needed a decision from {origin}"
+            );
+        }
+    }
+
+    // The three places that could have refused a remote session and must not:
+    //
+    // - starting one. No dimension is derived from the origin, so a session
+    //   runs under the same six wherever it is driven from.
+    for origin in RequestOrigin::ALL {
+        let p = AgentPolicy::default();
+        assert_eq!(p.validate(), Ok(()), "{origin}");
+        assert_eq!(p.sandbox, SandboxPolicy::Project);
+    }
+    // - reaching the broker, which is dimension 4's question and takes no
+    //   origin at all. `may_use_broker(&self)` has no parameter to pass one
+    //   to, which is the strongest form this claim can take.
+    assert!(SecretPolicy::Brokered.may_use_broker());
+    // - the secret dimension itself, which a remote origin does not move.
+    for origin in RequestOrigin::ALL {
+        assert_eq!(
+            AgentPolicy::default().secrets,
+            SecretPolicy::Brokered,
+            "{origin}"
+        );
+    }
+}
+
+#[test]
+fn a_root_request_is_never_decided_without_a_local_human() {
+    // P0-014's second criterion, as a property of the request rather than of
+    // the daemon that enforces it. Every verb in the vocabulary is a root
+    // capability, so there is no request in this build that §7 lets happen
+    // unattended.
+    for name in Verb::names() {
+        let args = if matches!(*name, "install" | "remove") {
+            vec!["clang".to_string()]
+        } else {
+            vec![]
+        };
+        let verb = Verb::parse(name, &args).expect("a real verb");
+        assert_eq!(
+            verb.capability(),
+            Capability::RootCapability,
+            "{name} is not treated as a root operation"
+        );
+
+        for origin in RequestOrigin::ALL {
+            let mut r = sample_request();
+            r.verb = verb.clone();
+            r.request_origin = Some(*origin);
+            let ruling = r.ruling();
+            assert!(!ruling.is_unattended(), "{name} from {origin} ran unasked");
+            assert!(ruling.needs_local_human(), "{name} from {origin}");
+            assert_eq!(
+                ruling == Ruling::LocalAuth,
+                origin.is_local(),
+                "{name} from {origin}"
+            );
+        }
+
+        // And a request with no recorded origin gets the remote column, not
+        // the local one.
+        let mut r = sample_request();
+        r.verb = verb;
+        r.request_origin = None;
+        assert_eq!(r.ruling(), Ruling::LocalApproval, "{name} with no origin");
+    }
+}
+
+#[test]
+fn remote_elevation_is_configurable_and_refused_until_it_can_be_authenticated() {
+    // P0-014's third criterion, honestly. §7 allows an owner to opt into
+    // remote elevation "with strong WebAuthn/FIDO2 authentication", and
+    // nothing in this build can ask for a security key. The setting exists,
+    // parses and round-trips — so the vocabulary is there for the task that
+    // implements it — and it is refused, because a policy that relaxed the
+    // local-approval rule with nothing in its place would be worse than not
+    // having the setting.
+    assert_eq!(
+        OriginPolicy::parse("remote"),
+        Some(OriginPolicy::RemoteElevationAllowed)
+    );
+    let p = AgentPolicy {
+        origin: OriginPolicy::RemoteElevationAllowed,
+        ..AgentPolicy::default()
+    };
+    let err = p.validate().expect_err("must be refused");
+    let msg = err.to_string();
+    assert!(msg.contains("WebAuthn") || msg.contains("FIDO"), "{msg}");
+    // The refusal has to say what is missing rather than that the value is
+    // wrong: the owner asked for something §7 permits.
+    assert!(msg.contains("locally"), "{msg}");
+
+    // The default is the one this build enforces, and it is the restrictive
+    // one.
+    assert_eq!(
+        AgentPolicy::default().origin,
+        OriginPolicy::LocalElevationOnly
+    );
 }
 
 fn sample_request() -> PrivilegeRequest {
