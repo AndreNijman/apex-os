@@ -374,6 +374,22 @@ COPY files/desktop/shell/apex-greeting.sh /usr/share/apex/shell/greeting.sh
 # from the seeded ~/.zshrc; the bash side is appended to /etc/bashrc here rather
 # than in core, because a core edit rebuilds the whole image tier.
 COPY files/desktop/shell/agent.sh /usr/share/apex/shell/agent.sh
+
+# The same shortcuts, completion and prompt indicator for fish. A SEPARATE file
+# and not a second copy of the same one: fish is not a POSIX shell, so agent.sh
+# cannot be sourced there at all — a `. agent.sh` in a fish config is a syntax
+# error, not a degraded experience.
+#
+# These paths are fish's own, not APEX's: `fish -c 'echo $__fish_vendor_confdirs'`
+# lists /usr/share/fish/vendor_conf.d, and $__fish_vendor_completionsdirs lists
+# vendor_completions.d. Dropping files there is how a distribution package adds
+# fish support without editing anybody's dotfile, which is why there is no
+# fish equivalent of the /etc/bashrc append below. The completions are autoloaded
+# by command NAME, so apex.fish, a.fish, aa.fish, ad.fish and ap.fish cost
+# nothing until somebody presses tab.
+COPY files/desktop/fish/apex-agent.fish /usr/share/fish/vendor_conf.d/apex-agent.fish
+COPY files/desktop/fish/completions/ /usr/share/fish/vendor_completions.d/
+
 # One shared file, sourced system-wide from BOTH shell rc files so `a` exists for
 # every user in every interactive shell, root included -- not just those with a
 # seeded ~/.zshrc. bash reaches /etc/bashrc via a ~/.bashrc that sources it; zsh
@@ -437,6 +453,26 @@ RUN set -eux; \
     grep -q 'agent.sh' /etc/zshrc; \
     grep -q 'agent.sh' /usr/share/apex/zsh/zshrc; \
     grep -q 'APEX_NO_AGENT_ALIASES' /usr/share/apex/shell/agent.sh; \
+    # The fish half. Two things have to hold and they fail in different ways: a
+    # syntax error breaks every fish shell on the image, and a file in the wrong
+    # directory breaks nothing visibly — it is simply never read, and the feature
+    # silently does not exist. So the parser is asked about the files, and fish
+    # itself is asked whether the directory they were installed into is one it
+    # reads. Hardcoding "/usr/share/fish/vendor_conf.d looks right" is the check
+    # that would pass on the day fish changes it.
+    test -s /usr/share/fish/vendor_conf.d/apex-agent.fish; \
+    fish -n  /usr/share/fish/vendor_conf.d/apex-agent.fish; \
+    for f in /usr/share/fish/vendor_completions.d/apex.fish \
+             /usr/share/fish/vendor_completions.d/a.fish \
+             /usr/share/fish/vendor_completions.d/aa.fish \
+             /usr/share/fish/vendor_completions.d/ad.fish \
+             /usr/share/fish/vendor_completions.d/ap.fish; do \
+        test -s "$f"; fish -n "$f"; \
+    done; \
+    fish -c 'contains /usr/share/fish/vendor_conf.d $__fish_vendor_confdirs'; \
+    fish -c 'contains /usr/share/fish/vendor_completions.d $__fish_vendor_completionsdirs'; \
+    grep -q 'APEX_NO_AGENT_ALIASES' /usr/share/fish/vendor_conf.d/apex-agent.fish; \
+    grep -q 'apex_agent_prompt' /usr/share/fish/vendor_conf.d/apex-agent.fish; \
     # Sourcing it and asserting `a` is defined happens in the apexd stage at the
     # end of this file, NOT here: agent.sh opens with
     # `command -v apex >/dev/null || return 0`, so with the binaries not yet
