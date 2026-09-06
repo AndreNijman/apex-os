@@ -254,7 +254,15 @@ remove_env_container() {
     # `rm` on a capsule APEX has no record of is refused by the engine unless
     # --force, and that refusal is correct here too: a container called
     # disp-<x> that APEX did not create is not ours to destroy.
-    "$ENV_ENGINE" rm "$name" >&2 \
+    #
+    # --keep-home: the engine's own `rm` never deletes a capsule's home
+    # directory (it is not this program's to destroy), and its normal
+    # behaviour is to say so — "the capsule's home directory is left in
+    # place". Here that would be a lie: remove_env_dir, called right after
+    # this, deletes that exact directory. --keep-home's only effect is
+    # suppressing that one line, which is exactly what disposing of the home
+    # ourselves a moment later calls for.
+    "$ENV_ENGINE" rm --keep-home "$name" >&2 \
         || warn "the capsule engine could not remove the container '${name}'; the container may survive"
 }
 
@@ -491,6 +499,13 @@ cmd_plan() {
 # real home, and "delete the entire environment when closed" would mean
 # deleting the user's home — which is why this flag is not optional here even
 # though it is optional in apex-env.
+#
+# ${image} is passed through exactly as given — a bare alias name (`fedora`,
+# `cuda`, `python`, ...) or a full reference — and is NOT resolved here.
+# apex-env owns the alias table (alias_image() et al.) and resolves an alias
+# given through --image itself, not only one given as the capsule name. A
+# second table in this file would be a second place "what does 'fedora' mean"
+# could answer differently, which is the bug this file used to have.
 create_argv() {
     local name="$1" image="$2"
     printf '%s\n' create "$name" "--image=${image}" "--home=$(env_home "$name")" --gpu=none

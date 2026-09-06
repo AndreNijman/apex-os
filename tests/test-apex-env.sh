@@ -434,6 +434,58 @@ is "an explicit profile overrides the alias" 0 "$rc"
 is "…and is what gets recorded" "none" "$(jq -r .gpu "$WORK/records/rocm.json")"
 hasnt "…so no device flags were passed" "/dev/kfd" "$(cat "$CALLS")"
 
+echo "── an alias given through --image resolves too, not just as the name ──"
+# apex-disposable never gives a capsule name that is itself an alias — it
+# always calls `create disp-xxxxxxxxxx --image=<alias-or-ref>` — so a capsule
+# name is not the only place this table has to be read from. This is the
+# defect that let `apex disposable run --image python` reach distrobox with
+# the literal string "python", not the image the alias names.
+out=$(run_env create work --image fedora); rc=$?
+is  "a non-alias name with --image=fedora succeeds" 0 "$rc"
+has "…and distrobox got the resolved image, not the literal alias" \
+    "fedora-toolbox:" "$(cat "$CALLS")"
+hasnt "…never the bare word 'fedora' as the image" "<--image> <fedora>" "$(cat "$CALLS")"
+is "…and the record keeps the alias" "fedora" "$(jq -r .alias "$WORK/records/work.json")"
+
+out=$(run_env create pybox --image python); rc=$?
+is  "a non-alias name with --image=python succeeds" 0 "$rc"
+calls=$(cat "$CALLS")
+has "…resolves to the toolbox image, not upstream python" "fedora-toolbox:" "$calls"
+hasnt "…never docker.io/library/python" "library/python" "$calls"
+has "…and brings the python packages with it" "python3-pip" "$calls"
+is "…recorded with dnf as its package manager" "dnf" "$(jq -r .package_manager "$WORK/records/pybox.json")"
+
+# --image=cuda with no --gpu picks up cuda's device profile exactly as
+# `create cuda` would — one table, read from either place, one answer.
+out=$(run_env create cudabox --image cuda); rc=$?
+is  "a non-alias name with --image=cuda succeeds" 0 "$rc"
+calls=$(cat "$CALLS")
+has "…and gets the nvidia profile the alias implies" "<--nvidia>" "$calls"
+is  "…recorded with the nvidia profile" "nvidia" "$(jq -r .gpu "$WORK/records/cudabox.json")"
+is  "…and the record keeps the image-side alias" "cuda" "$(jq -r .alias "$WORK/records/cudabox.json")"
+
+# An explicit --image that merely repeats the alias the NAME already implied
+# must resolve too — the name-is-alias branch leaves an explicit --image
+# alone by design (never overriding what the caller said), so this is the one
+# case that needs the fallback resolution after both branches.
+out=$(run_env create fedora --image fedora); rc=$?
+is  "create <alias> --image <same alias> succeeds" 0 "$rc"
+has "…and still resolves, not the literal word" "fedora-toolbox:" "$(cat "$CALLS")"
+
+# An ordinary image reference through --image is untouched: it is not an
+# alias, so is_alias refuses it and it passes through exactly as given.
+out=$(run_env create otherbox --image docker.io/library/httpd:2.4); rc=$?
+is  "a real reference through --image is not touched" 0 "$rc"
+has "…passed through exactly" "docker.io/library/httpd:2.4" "$(cat "$CALLS")"
+is  "…and no alias is recorded for it" "" "$(jq -r '.alias // empty' "$WORK/records/otherbox.json")"
+
+# Clean up every capsule this section created: the very next check counts
+# every record on disk, and this section exists to prove image-alias
+# resolution, not to leave capsules behind for later assertions to trip over.
+for n in work pybox cudabox fedora otherbox; do
+    run_env rm "$n" >/dev/null 2>&1
+done
+
 echo "── list and info read back what create wrote ──────────────────────────"
 out=$(run_env list)
 has "list shows the capsule" "cuda" "$out"

@@ -682,7 +682,26 @@ cmd_create() {
         [ -n "$image" ] || image="$(alias_image "$name")"
         [ -n "$gpu" ]   || gpu="$(alias_gpu "$name")"
         packages="$(alias_packages "$name")"
+    elif [ -n "$image" ] && is_alias "$image"; then
+        # apex-disposable is the reason this branch exists: it always calls
+        # `create <throwaway-name> --image=<alias-or-ref>`, and its name is a
+        # generated `disp-xxxxxxxxxx` that is never itself one of these
+        # aliases, so the branch above never fires for it. Without this,
+        # `--image=cuda` reached distrobox as the literal string "cuda" — not
+        # the image the cuda alias names — and podman's own registry
+        # shortname matching silently resolved it to something else.
+        alias_used="$image"
+        [ -n "$gpu" ] || gpu="$(alias_gpu "$image")"
+        packages="$(alias_packages "$image")"
     fi
+    # However it got here, resolve --image itself if it still names an alias
+    # rather than a real reference — including `create fedora --image fedora`,
+    # where the branch above ran for the NAME and left an explicit --image
+    # untouched. This is the one place "what does 'fedora' mean" is answered:
+    # apex-disposable, and anything else that hands this a bare alias through
+    # --image, gets exactly the table `apex env create <alias>` uses, never a
+    # second one to fall out of step with.
+    is_alias "$image" && image="$(alias_image "$image")"
     [ -n "$image" ] || image="$(alias_image fedora)"
     [ -n "$gpu" ]   || gpu=none
     valid_gpu_profile "$gpu" || die "unknown device profile '${gpu}' (nvidia, amd, hw, none)"
