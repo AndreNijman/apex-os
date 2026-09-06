@@ -118,6 +118,16 @@ COPY files/system/units/sing-box.service /usr/lib/systemd/system/sing-box.servic
 # would be a regression invented by a fix for someone else's laptop.
 COPY files/system/NetworkManager/20-apex-wifi-powersave.conf \
      /etc/NetworkManager/conf.d/20-apex-wifi-powersave.conf
+
+# ── Captive portals, which were invisible ───────────────────────────────────
+# NetworkManager's connectivity check was off, so NM had two states for a
+# connection — up or down — and a hotel or campus network that has associated
+# you, addressed you and will answer nothing until you accept its terms reads as
+# up. The desktop then says the network is fine while nothing loads. The check
+# adds the `portal` state, which is the one anything can act on. The file states
+# what it costs; see it for why the endpoint is Fedora's.
+COPY files/system/NetworkManager/21-apex-connectivity.conf \
+     /etc/NetworkManager/conf.d/21-apex-connectivity.conf
 COPY --chmod=0755 files/system/system-sleep/apex-wifi-resume \
      /usr/lib/systemd/system-sleep/apex-wifi-resume
 RUN set -eux; \
@@ -128,7 +138,13 @@ RUN set -eux; \
     # resume. Both guards are asserted here rather than assumed.
     grep -qF '= "post" ]' /usr/lib/systemd/system-sleep/apex-wifi-resume; \
     grep -qF 'mt7925e' /usr/lib/systemd/system-sleep/apex-wifi-resume; \
-    grep -qF 'wifi.powersave = 2' /etc/NetworkManager/conf.d/20-apex-wifi-powersave.conf
+    grep -qF 'wifi.powersave = 2' /etc/NetworkManager/conf.d/20-apex-wifi-powersave.conf; \
+    # Both keys, because either one missing turns the check into a no-op that
+    # still reads as configured: no uri and NM checks nothing, no response and
+    # a portal returning 200 with its own login page counts as connectivity.
+    grep -qE '^enabled=true' /etc/NetworkManager/conf.d/21-apex-connectivity.conf; \
+    grep -qE '^uri=' /etc/NetworkManager/conf.d/21-apex-connectivity.conf; \
+    grep -qE '^response=' /etc/NetworkManager/conf.d/21-apex-connectivity.conf
 RUN systemctl enable apexd.service
 
 # ── agent runtime (apex-agentd) ─────────────────────────────────────────────
