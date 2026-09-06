@@ -74,6 +74,7 @@ apex agent pause 4 / resume 4 / kill 4
 apex agent logs 4
 apex agent diff 4
 apex agent undo 4
+apex agent allow api.example.com
 apex agent default opencode
 apex project info / worktrees / checkpoints
 ```
@@ -157,16 +158,92 @@ asserted over the whole value set of the dimension that drives it:
 `--sandbox strict --network open` is refused rather than quietly tightened.
 Nothing loosens: `unrestricted` does not imply an open network.
 
-`--sandbox unrestricted --network offline` is refused too. Nothing is there to
-unshare, so the session would run with a network while reporting none.
+`--sandbox unrestricted` with any network mode but `open` is refused. Each of
+the other three is enforced by unsharing the session's network namespace, and
+an unconfined session has none to unshare, so it would run with a network while
+reporting none.
 
 ### What is refused until it is built
 
-Six values parse and are then refused, each naming the task that will implement
-it: `--network allowlist`, `--network brokered`, `--system-access session`,
-`--system-access unsafe`, `--secrets export`, `--origin-policy remote`. A flag
-that parsed and then did nothing would read as a protection in `apex agent
-info` and in a script, with nothing behind it.
+Four values parse and are then refused, each naming the task that will
+implement it: `--system-access session`, `--system-access unsafe`,
+`--secrets export`, `--origin-policy remote`. A flag that parsed and then did
+nothing would read as a protection in `apex agent info` and in a script, with
+nothing behind it.
+
+---
+
+## Network modes
+
+Four, and three of them are the same kernel fact. `bwrap --unshare-net` gives
+the session a namespace with nothing in it but loopback: no route, no resolver,
+no addresses. What differs is what `apex-agentd` offers on the far side of a
+Unix socket afterwards — `AF_UNIX` is a filesystem object, and a network
+namespace does not touch it.
+
+| mode | IP egress | what reaches the network for it | measured |
+|---|---|---|---|
+| `open` | everything | the session itself | `curl https://example.com` → 200 |
+| `allowlist` | none | the egress proxy, for named destinations | allowed host → 200, other host → 403 |
+| `brokered` | none | the capability broker, for named operations | `apex secret grants` answers, `curl` cannot resolve |
+| `offline` | none | nothing | `curl` cannot resolve |
+
+### `brokered`
+
+`--unshare-net` plus the broker. The daemon runs the operation, outside the
+namespace, and returns its result; the credential never enters the session.
+This is how `git push` already works from a `strict` session, and it is the
+mode a cloud provider's operations are meant to be used from — `Capability` in
+`apex-agent-core/src/secret.rs` is the slot a provider adds to.
+
+`--network brokered --secrets none` is refused. The broker is the session's
+only way out and `--secrets none` is what shuts it, so the pair is an offline
+session under another name.
+
+### `allowlist`
+
+`--unshare-net` plus one route back:
+
+```text
+inside the namespace                      outside it
+
+  agent  ──HTTP CONNECT──▶  bridge  ──▶  socket  ──▶  apex-agentd  ──▶  internet
+         127.0.0.1:3128    (no policy)   AF_UNIX      (decides)
+```
+
+The bridge is `apex-agentd` re-executed with `--net-bridge`, running as the
+session's parent process. It has to be inside the sandbox because the loopback
+an HTTP client can reach is the session's own. It carries bytes and holds no
+policy, so replacing it gains an agent nothing: the far end is still the daemon.
+
+`HTTPS_PROXY` and its five spellings are set so a client can find the bridge,
+but they are not the enforcement. A session that unsets all six does not get a
+direct connection — it gets `Could not resolve host`, measured.
+
+**Destinations** live in `agent.json` as `network_allow`, managed with
+`apex agent allow`. One `host` or `host:port` per entry; no port means 443 and
+nothing else; `*.example.com` covers subdomains and not `example.com`. `*.com`
+and `*` are refused. One unreadable entry empties the whole list and says
+which, so the mode then refuses to start rather than running one line shorter
+than it looks. An empty list is refused for the same reason.
+
+The daemon checks the name, resolves it, checks every address that came back,
+and connects to an address it checked — handing the name back to `connect()`
+would resolve it twice, and the second answer is the one an attacker chooses.
+An address on this machine or its LAN is refused unless a rule wrote that exact
+address down: `localtest.me` is a public name that resolves to `127.0.0.1`, and
+allowing it by name still does not reach anything, measured.
+
+**What it does not stop.** Only proxy-aware HTTPS goes through it: there is no
+resolver in the namespace, so `ssh`, raw TCP and UDP do not work at all. A
+`CONNECT` tunnel is opaque, so a session allowed to reach a host may send it
+anything, in any volume — this is a destination policy, not a data-loss one.
+And a name on the list is only as trustworthy as its DNS; the local-address
+guard covers the case that matters here, and the client's own TLS validation is
+the rest.
+
+Both decisions are pure functions in `apex-agent-core/src/destination.rs`, so
+the whole table is asserted without a network.
 
 ---
 
@@ -181,7 +258,11 @@ Three policies. `project` is the default.
 | `/usr`, `/etc` | rw as you | read-only | read-only |
 | other processes | all | own PID namespace | own PID namespace |
 | camera, microphone | yes | **no** | **no** |
-| network | yes | yes | **no** |
+| network | yes | follows `--network` | **no** |
+
+The network row is the one the sandbox does not own: `strict` is `project` with
+the network dimension forced to `offline`, and a `project` session gets
+whatever `--network` says. See **Network modes** above.
 
 Measured on APEX-OS 43, kernel 7.1.5, bubblewrap 0.11.0:
 
@@ -589,8 +670,8 @@ was given.
 | `$XDG_STATE_HOME/apex/agent/secret-grants.json` | per-project capability grants |
 | `$XDG_STATE_HOME/apex/agent/secret-audit.jsonl` | append-only capability audit |
 | `$XDG_STATE_HOME/apex/agent/privilege-audit.jsonl` | append-only privilege audit |
-| `$XDG_CONFIG_HOME/apex/agent.json` | default agent, the six permission dimensions, detach key |
-| `/tmp/apex-agent/<id>/` | per-session scratch, removed with the session |
+| `$XDG_CONFIG_HOME/apex/agent.json` | default agent, the six permission dimensions, the network allowlist, detach key |
+| `/tmp/apex-agent/<id>/` | per-session scratch, and an allowlisted session's egress socket; removed with the session |
 
 Transcripts are a record of your work and are readable only by you.
 
@@ -672,8 +753,10 @@ Named because the roadmap asks for them and this does not do them:
 - **Test status and merge conflicts per worktree** in the Agent Center (§7).
   The worktree a session is on is shown; whether its tests pass is not.
 - **Disposable environments** and capsules.
-- **Enforcement for six permission values.** `--network allowlist`,
-  `--network brokered`, both `--system-access` grants, `--secrets export` and
-  `--origin-policy remote` parse and then refuse. The vocabulary is here so the
-  enforcement slots in without moving anything else; see *Six permission
-  dimensions*.
+- **Enforcement for four permission values.** Both `--system-access` grants,
+  `--secrets export` and `--origin-policy remote` parse and then refuse. The
+  vocabulary is here so the enforcement slots in without moving anything else;
+  see *Six permission dimensions*. All four network modes are enforced.
+- **A per-project network allowlist.** The list is the runtime's, one per user.
+  A project that needs a destination no other project should reach has to be
+  given it globally, and §36's per-project identity is where that belongs.
