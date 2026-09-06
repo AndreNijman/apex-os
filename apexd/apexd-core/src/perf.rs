@@ -514,12 +514,25 @@ pub fn read_temps(sys: &Path) -> Signal<Vec<Temp>> {
 /// the state, it never switches anything.
 pub fn read_scheduler(sys: &Path) -> Signal<SchedulerState> {
     let base = sys.join("kernel/sched_ext");
-    let src = base.join("state").display().to_string();
-    let Some(state) = read_trim(&base.join("state")) else {
-        return Signal::unavailable(
-            "this kernel has no sched_ext support (CONFIG_SCHED_CLASS_EXT)",
-            src,
-        );
+    let state_path = base.join("state");
+    let src = state_path.display().to_string();
+    // `read_trim`'s `.ok()` cannot tell "this kernel has no sched_ext" from
+    // "sched_ext exists and this read was refused" — both landed on the same
+    // Unavailable state, but with the same misdiagnosis: a confined
+    // environment or an unusual permission would be told to go check
+    // CONFIG_SCHED_CLASS_EXT, which is not what was wrong. `state` is
+    // ordinarily world-readable (0444) on a kernel that ships it, so ENOENT
+    // is the expected shape of "no support" and everything else gets its own
+    // reason instead of borrowing that one.
+    let state = match std::fs::read_to_string(&state_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Signal::unavailable(
+                "this kernel has no sched_ext support (CONFIG_SCHED_CLASS_EXT)",
+                src,
+            );
+        }
+        Err(e) => return Signal::unavailable(format!("{}: {e}", state_path.display()), src),
     };
     // The scheduler's own name lives under `root/` on kernels that publish it;
     // several do not, so its absence is reported as None rather than guessed at

@@ -346,6 +346,42 @@ fn a_loaded_scx_scheduler_is_named_when_the_kernel_publishes_it() {
     assert_eq!(s.rejected, Some(3));
 }
 
+#[test]
+fn a_refused_sched_ext_state_read_is_not_diagnosed_as_missing_kernel_support() {
+    // `state` exists at 0444 on a kernel that ships sched_ext, so a genuinely
+    // refused read is a confined environment rather than an absent feature —
+    // and `read_trim`'s `.ok()` could not tell that apart from ENOENT, so the
+    // Unavailable reason told the reader to go check CONFIG_SCHED_CLASS_EXT
+    // for a problem that was never that.
+    let f = Fixture::new("scx-eacces");
+    f.write("sys/kernel/sched_ext/state", "disabled\n");
+    let state = f.sys().join("kernel/sched_ext/state");
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&state).unwrap().permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(&state, perms).unwrap();
+    let sealed = matches!(
+        fs::read_to_string(&state),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied
+    );
+
+    let s = read_scheduler(&f.sys());
+
+    let mut perms = fs::metadata(&state).unwrap().permissions();
+    perms.set_mode(0o644);
+    fs::set_permissions(&state, perms).ok();
+
+    if !sealed {
+        return; // the caller overrides the mode bit; it proves nothing here
+    }
+    assert!(!s.is_measured());
+    assert!(
+        !s.reason().unwrap_or("").contains("CONFIG_SCHED_CLASS_EXT"),
+        "a refused read must not be diagnosed as missing kernel support, got {:?}",
+        s.reason()
+    );
+}
+
 // ── the game cpuset ──────────────────────────────────────────────────────────
 
 #[test]
