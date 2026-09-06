@@ -201,13 +201,26 @@ pub enum Base {
 /// asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edit {
-    /// Discard every top-level key but these.
-    KeepOnly(&'static [&'static str]),
+    /// At every object this path selects, discard each key that is not named.
+    /// An empty path is the document itself.
+    KeepOnly(&'static [&'static str], &'static [&'static str]),
     /// Replace each value under this path with null, keeping the names.
     RedactValues(&'static [&'static str]),
     /// Remove the key this path ends at.
     Drop(&'static [&'static str]),
 }
+
+/// The keys of an MCP server definition that are the definition.
+///
+/// Default-deny at the level a credential is most likely to be invented at: a
+/// server is a transport, an address and the names of what it needs, and a key
+/// nobody here has heard of is dropped rather than carried. `env` and `headers`
+/// stay so their *names* can be kept and their values emptied — an importing
+/// machine that is not told the server wants an `Authorization` header has a
+/// definition it cannot use.
+const MCP_KEYS: &[&str] = &[
+    "type", "command", "args", "url", "cwd", "timeout", "disabled", "env", "headers",
+];
 
 /// One named piece of a profile.
 #[derive(Debug, Clone, Copy)]
@@ -574,8 +587,12 @@ pub const CLAUDE: Profile = Profile {
             role: Role::Mcp,
             what: "account, machine id, per-project history — and MCP servers",
             edits: &[
-                Edit::KeepOnly(&["mcpServers"]),
+                Edit::KeepOnly(&[], &["mcpServers"]),
+                Edit::KeepOnly(&["mcpServers", "*"], MCP_KEYS),
                 Edit::RedactValues(&["mcpServers", "*", "env"]),
+                // An HTTP server's bearer token lives here, not in `env`. Found
+                // by exporting a real profile and reading the bundle.
+                Edit::RedactValues(&["mcpServers", "*", "headers"]),
             ],
         },
         // ── credentials ─────────────────────────────────────────────────────
@@ -975,6 +992,88 @@ fn copy_exec_bit(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Key names whose value is a credential, wherever a mixed file puts one.
+///
+/// The JSON counterpart of [`secret_component`], and there for the same reason.
+/// A path the table does not name is machine-local by default, so the *file*
+/// list is an allowlist; but a mixed file is carried by naming what it gives
+/// up, and that is a blocklist, which is wrong the moment upstream adds a key.
+///
+/// This is not theoretical. Exporting a real profile put an MCP server's bearer
+/// token in the bundle: it sits in `headers.Authorization`, and the entry's
+/// edits had been written against `env`. The entry now names `headers` too, and
+/// this net is what stops the next such key from waiting to be noticed.
+///
+/// Names are kept and only values are emptied, so a false positive costs an
+/// importing machine one value it has to supply and never costs a leak.
+fn secret_key(name: &str) -> bool {
+    let name = name.to_ascii_lowercase().replace(['-', '_', ' '], "");
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "apikey",
+        "authorization",
+        "credential",
+        "bearer",
+        "privatekey",
+        "accesskey",
+        "sessionkey",
+    ]
+    .iter()
+    .any(|needle| name.contains(needle))
+}
+
+/// Null every scalar at or below `v`, and answer with the names emptied.
+///
+/// Structure and names survive: a key called `credentials` holding a map of
+/// account names to keys becomes the same map with the keys gone, which is what
+/// tells the importing machine which accounts it has to fill in.
+fn blank_scalars(v: &mut Value, name: &str, out: &mut Vec<String>) {
+    match v {
+        Value::Object(map) => {
+            for (k, inner) in map.iter_mut() {
+                let k = k.clone();
+                blank_scalars(inner, &k, out);
+            }
+        }
+        Value::Array(items) => {
+            for inner in items.iter_mut() {
+                blank_scalars(inner, name, out);
+            }
+        }
+        Value::Null => {}
+        scalar => {
+            *scalar = Value::Null;
+            out.push(name.to_string());
+        }
+    }
+}
+
+/// Walk the whole document and empty the value of every key that is a
+/// credential by name. Answers with the names emptied.
+fn blank_secret_keys(v: &mut Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(map) => {
+            for (k, inner) in map.iter_mut() {
+                if secret_key(k) {
+                    let k = k.clone();
+                    blank_scalars(inner, &k, out);
+                } else {
+                    blank_secret_keys(inner, out);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for inner in items.iter_mut() {
+                blank_secret_keys(inner, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Apply a mixed file's edits, returning the new bytes and a description of
 /// what was given up, for the export report.
 fn apply_edits(raw: &[u8], edits: &[Edit]) -> io::Result<(Vec<u8>, Vec<String>)> {
@@ -982,17 +1081,16 @@ fn apply_edits(raw: &[u8], edits: &[Edit]) -> io::Result<(Vec<u8>, Vec<String>)>
     let mut gave_up = Vec::new();
     for edit in edits {
         match edit {
-            Edit::KeepOnly(keys) => {
-                if let Some(map) = doc.as_object_mut() {
-                    let dropped: Vec<String> = map
-                        .keys()
-                        .filter(|k| !keys.contains(&k.as_str()))
-                        .cloned()
-                        .collect();
-                    if !dropped.is_empty() {
-                        gave_up.push(format!("{} machine-local keys", dropped.len()));
+            Edit::KeepOnly(path, keys) => {
+                let mut dropped = 0usize;
+                visit(&mut doc, path, &mut |v| {
+                    if let Some(map) = v.as_object_mut() {
+                        dropped += map.keys().filter(|k| !keys.contains(&k.as_str())).count();
+                        map.retain(|k, _| keys.contains(&k.as_str()));
                     }
-                    map.retain(|k, _| keys.contains(&k.as_str()));
+                });
+                if dropped > 0 {
+                    gave_up.push(format!("{dropped} machine-local keys"));
                 }
             }
             Edit::RedactValues(path) => {
@@ -1029,6 +1127,15 @@ fn apply_edits(raw: &[u8], edits: &[Edit]) -> io::Result<(Vec<u8>, Vec<String>)>
                 }
             }
         }
+    }
+    // Last, over whatever the edits left: the net that does not depend on
+    // anyone having remembered a key.
+    let mut caught = Vec::new();
+    blank_secret_keys(&mut doc, &mut caught);
+    if !caught.is_empty() {
+        caught.sort();
+        caught.dedup();
+        gave_up.push(format!("values of {}", caught.join(", ")));
     }
     let mut out = serde_json::to_vec_pretty(&doc)?;
     out.push(b'\n');
@@ -1600,17 +1707,22 @@ pub fn doctor(profile: &Profile, home: &Path) -> Report {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or(if def.get("url").is_some() { "http" } else { "stdio" });
-        let env: Vec<String> = def
-            .get("env")
-            .and_then(Value::as_object)
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default();
-        lines.push(if env.is_empty() {
+        // Both places a definition keeps a credential. An HTTP server's bearer
+        // token is a header, not an environment variable, and a report that
+        // named only the environment would say a server needs nothing while it
+        // carries the one value the export refuses to send.
+        let mut needs: Vec<String> = Vec::new();
+        for key in ["env", "headers"] {
+            if let Some(map) = def.get(key).and_then(Value::as_object) {
+                needs.extend(map.keys().cloned());
+            }
+        }
+        lines.push(if needs.is_empty() {
             format!("{name:<20} {kind}")
         } else {
             format!(
                 "{name:<20} {kind}  needs {} (values not exported)",
-                env.join(", ")
+                needs.join(", ")
             )
         });
     }
@@ -1790,7 +1902,11 @@ mod tests {
             std::fs::write(
                 home.join(".claude.json"),
                 r#"{"userID":"u1","machineID":"m1",
-                    "mcpServers":{"memory":{"command":"npx","env":{"API":"sk-real"}}}}"#,
+                    "mcpServers":{
+                      "memory":{"command":"npx","env":{"API":"sk-real"}},
+                      "vault":{"type":"http","url":"https://vault.example/mcp",
+                               "headers":{"Authorization":"Bearer tok-real"},
+                               "oauthAccount":{"emailAddress":"someone@example"}}}}"#,
             )
             .unwrap();
             Fixture { home }
@@ -2062,6 +2178,99 @@ mod tests {
         // And nothing else from the sidecar came with it.
         assert!(!mcp.contains("machineID"), "{mcp}");
         assert!(!mcp.contains("userID"), "{mcp}");
+    }
+
+    #[test]
+    fn an_http_mcp_server_does_not_carry_its_bearer_token() {
+        // A real leak, found by exporting a real profile and reading the
+        // bundle: an HTTP server keeps its credential in `headers`, and the
+        // entry's edits had been written against `env`.
+        let f = Fixture::new("mcp-header");
+        let dest = f.home.join("bundle");
+        export(&CLAUDE, &f.home, &dest).unwrap();
+        let out = std::fs::read_to_string(dest.join("home/.claude.json")).unwrap();
+        assert!(!out.contains("tok-real"), "{out}");
+        // The name stays: a machine not told the server wants an Authorization
+        // header has a definition it cannot use.
+        assert!(out.contains("Authorization"), "{out}");
+        assert!(out.contains("vault.example"), "the definition was lost: {out}");
+    }
+
+    #[test]
+    fn a_key_of_an_mcp_server_that_nobody_named_is_dropped() {
+        // Default-deny at the level where a credential is most likely to be
+        // invented. `oauthAccount` is a real key Claude writes beside an HTTP
+        // server, and it is this machine's account.
+        let f = Fixture::new("mcp-unknown");
+        let dest = f.home.join("bundle");
+        export(&CLAUDE, &f.home, &dest).unwrap();
+        let out = std::fs::read_to_string(dest.join("home/.claude.json")).unwrap();
+        assert!(!out.contains("oauthAccount"), "{out}");
+        assert!(!out.contains("someone@example"), "{out}");
+    }
+
+    #[test]
+    fn a_credential_by_key_name_is_emptied_wherever_a_mixed_file_puts_it() {
+        // The net under the per-file edits, and the reason the edits being a
+        // blocklist is survivable. Nothing in the table names any of these.
+        let f = Fixture::new("keynet");
+        std::fs::write(
+            f.home.join(".claude/settings.json"),
+            r#"{"model":"opus",
+                "apiKeyHelper":"sk-inline",
+                "awsAuth":{"accessKeyId":"AKIAREAL","region":"ap-southeast-2"},
+                "nested":{"clientSecret":"cs-real"}}"#,
+        )
+        .unwrap();
+        let dest = f.home.join("bundle");
+        let report = export(&CLAUDE, &f.home, &dest).unwrap();
+        let out = std::fs::read_to_string(dest.join("profile/settings.json")).unwrap();
+        for value in ["sk-inline", "AKIAREAL", "cs-real"] {
+            assert!(!out.contains(value), "{value} reached the bundle: {out}");
+        }
+        // Names and everything that is not a credential survive.
+        for name in ["apiKeyHelper", "accessKeyId", "clientSecret", "ap-southeast-2"] {
+            assert!(out.contains(name), "{name} was dropped: {out}");
+        }
+        assert!(
+            report
+                .edited
+                .iter()
+                .any(|(p, said)| p.ends_with("settings.json") && said.contains("accessKeyId")),
+            "the report did not say what was emptied: {:?}",
+            report.edited
+        );
+    }
+
+    #[test]
+    fn the_key_net_reads_a_name_the_way_a_person_would() {
+        for yes in [
+            "token",
+            "GITHUB_TOKEN",
+            "api-key",
+            "apiKeyHelper",
+            "Authorization",
+            "clientSecret",
+            "AWS_SECRET_ACCESS_KEY",
+            "private_key",
+            "password",
+        ] {
+            assert!(secret_key(yes), "{yes}");
+        }
+        // The words a real settings.json is made of.
+        for no in [
+            "model",
+            "permissions",
+            "enabledPlugins",
+            "extraKnownMarketplaces",
+            "statusLine",
+            "author",
+            "source",
+            "installLocation",
+            "hooks",
+        ] {
+            assert!(!secret_key(no), "{no}");
+        }
     }
 
     #[test]
