@@ -74,8 +74,45 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::policy::AgentPolicy;
+use crate::policy::{AgentPolicy, NetworkPolicy};
 use crate::protocol::SandboxPolicy;
+
+/// The port the egress bridge listens on inside a session's own namespace.
+///
+/// Fixed, and safe to fix: the namespace is empty apart from loopback and the
+/// bridge, so there is nothing for it to collide with. 3128 because a proxy on
+/// 3128 is what every HTTP client's documentation shows.
+pub const BRIDGE_PORT: u16 = 3128;
+
+/// The flag that turns the runtime binary into the in-sandbox bridge.
+pub const BRIDGE_FLAG: &str = "--net-bridge";
+
+/// The way out of an `allowlist` session, and the only one it has.
+///
+/// A session in this mode runs with `--unshare-net`, so nothing inside it can
+/// reach an address. What it can reach is a Unix socket, because `AF_UNIX` is
+/// a filesystem object and a network namespace does not touch it — and the
+/// daemon holds the other end of that socket, outside the namespace, where the
+/// destination policy is applied and the connection is actually made.
+///
+/// The gap between the two is that no HTTP client speaks to a proxy over a
+/// Unix socket. So a small bridge runs *inside* the namespace as the session's
+/// parent process: it listens on loopback, carries bytes to the socket, and
+/// contains no policy at all. Replacing it buys an agent nothing — the far end
+/// is still the daemon, still deciding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressBridge {
+    /// The bridge program. `apex-agentd` re-executed with [`BRIDGE_FLAG`]:
+    /// both ends of the socket protocol then live in one binary and there is
+    /// no sibling to look up on a path the sandbox may not have.
+    pub program: PathBuf,
+    /// The daemon's egress socket, inside the session's scratch directory —
+    /// already bound read-write, so it needs no mount of its own and cannot
+    /// disturb the ordering the `/run` mask depends on.
+    pub socket: PathBuf,
+    /// Where the bridge listens inside the session's namespace.
+    pub port: u16,
+}
 
 /// Environment variables every session keeps, regardless of adapter.
 ///
@@ -151,6 +188,11 @@ pub enum SandboxError {
     ForbiddenWritable(PathBuf),
     /// A path that must be absolute was not.
     NotAbsolute(PathBuf),
+    /// The policy needs a network namespace and the sandbox has none to give.
+    NetworkWithoutNamespace(NetworkPolicy),
+    /// An `allowlist` session was built without the bridge that is its only
+    /// way onto the network.
+    EgressUnavailable,
 }
 
 impl std::fmt::Display for SandboxError {
@@ -173,6 +215,17 @@ impl std::fmt::Display for SandboxError {
             SandboxError::NotAbsolute(p) => {
                 write!(f, "{} must be an absolute path", p.display())
             }
+            SandboxError::NetworkWithoutNamespace(mode) => write!(
+                f,
+                "the {mode} network mode is enforced by unsharing the session's network \
+                 namespace, and an unconfined session has none; use `--sandbox project`"
+            ),
+            SandboxError::EgressUnavailable => write!(
+                f,
+                "an allowlisted session reaches the network only through the runtime's \
+                 egress bridge, and this one was built without it; re-run with \
+                 `--network offline` or start the agent runtime again"
+            ),
         }
     }
 }
@@ -230,6 +283,14 @@ pub struct SandboxSpec {
     /// Variable names inherited from the daemon's environment when present.
     /// Adapters use this to declare the credentials their agent needs.
     pub env_pass: Vec<String>,
+    /// The session's only route onto the network, for the `allowlist` mode.
+    ///
+    /// Required by that mode and ignored by every other one: `open` needs no
+    /// route because it has the host's, and `offline` and `brokered` are
+    /// supposed not to have one. A spec in `allowlist` mode without it is
+    /// refused rather than built, because the argv that came back would be a
+    /// session with no network at all reporting an allowlist.
+    pub egress: Option<EgressBridge>,
 }
 
 impl SandboxSpec {
@@ -248,6 +309,7 @@ impl SandboxSpec {
             mask: Vec::new(),
             env_set: Vec::new(),
             env_pass: Vec::new(),
+            egress: None,
         }
     }
 }
@@ -318,10 +380,28 @@ pub fn build_argv(
     program: &str,
     args: &[String],
 ) -> Result<Vec<String>, SandboxError> {
+    let network = spec.policy.effective_network();
+
     if !spec.policy.sandbox.is_confined() {
+        // The unconfined path returns the command untouched, which for any
+        // network mode but `open` would be a session running with the host's
+        // network under a policy that said otherwise. `AgentPolicy::validate`
+        // already refuses that combination; this refuses it again at the point
+        // where the argv is built, because that is the last place a mistake
+        // can still be caught and the first place it would be invisible.
+        if network.removes_direct_egress() {
+            return Err(SandboxError::NetworkWithoutNamespace(network));
+        }
         let mut argv = vec![program.to_string()];
         argv.extend(args.iter().cloned());
         return Ok(argv);
+    }
+
+    // The allowlist's route out has to exist before the session does. Checked
+    // here rather than where the bridge is filled in, so a caller that forgets
+    // gets a refusal instead of a session that quietly cannot reach anything.
+    if network == NetworkPolicy::Allowlist && spec.egress.is_none() {
+        return Err(SandboxError::EgressUnavailable);
     }
 
     for p in spec.rw.iter().chain(std::iter::once(&spec.scratch)) {
@@ -454,7 +534,7 @@ pub fn build_argv(
     // over a Unix socket afterwards. Asked of the policy rather than matched
     // on `Offline` here, so a mode added later cannot arrive with the
     // namespace quietly left shared.
-    if spec.policy.effective_network().removes_direct_egress() {
+    if network.removes_direct_egress() {
         push("--unshare-net");
     }
 
@@ -477,6 +557,23 @@ pub fn build_argv(
     push("--die-with-parent");
 
     push("--");
+
+    // 11. The egress bridge, when there is one, as the session's parent
+    //     process. It has to be inside the sandbox because the loopback it
+    //     listens on is the session's own — a listener in the daemon would be
+    //     on the host's loopback, which the session cannot see. It carries
+    //     bytes and holds no policy; the far end of its socket is where the
+    //     destination is decided.
+    if let Some(bridge) = spec.egress.as_ref().filter(|_| network == NetworkPolicy::Allowlist) {
+        push(&bridge.program.to_string_lossy());
+        push(BRIDGE_FLAG);
+        push(&bridge.socket.to_string_lossy());
+        push(&bridge.port.to_string());
+        // A second separator, so the agent's own arguments cannot be read as
+        // the bridge's for the same reason the first one exists.
+        push("--");
+    }
+
     push(program);
     for arg in args {
         a.push(arg.clone());
@@ -490,6 +587,34 @@ pub fn build_argv(
 pub fn resolved_env(spec: &SandboxSpec) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
     let seen = |env: &[(String, String)], k: &str| env.iter().any(|(n, _)| n == k);
+
+    // The proxy variables first, so nothing an adapter or a caller sets can
+    // point a session's HTTP client somewhere the bridge is not. They are not
+    // the enforcement — the namespace is, and a client that ignores them
+    // simply fails to connect — but without them nothing in the session knows
+    // the bridge is there.
+    //
+    // Both cases of each name: curl reads the lowercase forms and deliberately
+    // ignores an uppercase `HTTP_PROXY`, because that one is settable by a CGI
+    // request header. Tools that read only the uppercase forms are at least as
+    // common. Setting both is the only way to be understood by both.
+    if let Some(bridge) = spec
+        .egress
+        .as_ref()
+        .filter(|_| spec.policy.effective_network() == NetworkPolicy::Allowlist)
+    {
+        let url = format!("http://127.0.0.1:{}", bridge.port);
+        for name in [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            env.push((name.to_string(), url.clone()));
+        }
+    }
 
     // Explicit values win over anything inherited.
     for (k, v) in &spec.env_set {
@@ -1015,8 +1140,9 @@ mod tests {
         // decision about its namespace fails here instead of shipping with the
         // host's network.
         for network in NetworkPolicy::ALL {
-            let mut s = spec();
-            s.policy.sandbox = SandboxPolicy::Project;
+            // Built from the allowlisted spec so every mode has what it needs;
+            // the bridge is ignored by the three that are not allowlisted.
+            let mut s = allowlisted();
             s.policy.network = *network;
             assert_eq!(
                 pos(&argv(&s), "--unshare-net").is_some(),
@@ -1024,6 +1150,138 @@ mod tests {
                 "{network} got the wrong network namespace"
             );
         }
+    }
+
+    /// A spec in `allowlist` mode, with the bridge the mode requires.
+    fn allowlisted() -> SandboxSpec {
+        let mut s = spec();
+        s.policy.sandbox = SandboxPolicy::Project;
+        s.policy.network = NetworkPolicy::Allowlist;
+        s.egress = Some(EgressBridge {
+            program: PathBuf::from("/usr/bin/apex-agentd"),
+            socket: PathBuf::from("/tmp/apex-agent/1/egress.sock"),
+            port: BRIDGE_PORT,
+        });
+        s
+    }
+
+    #[test]
+    fn an_allowlisted_session_has_no_network_of_its_own_and_runs_under_the_bridge() {
+        // The two halves of the mode, in the argv that runs. The namespace is
+        // what makes it enforcement rather than a request; the bridge is the
+        // one route back, and it is the session's parent process because the
+        // loopback a client can reach is the session's own.
+        let a = argv(&allowlisted());
+        assert!(pos(&a, "--unshare-net").is_some(), "{a:?}");
+
+        let sep = pos(&a, "--").expect("separator");
+        assert_eq!(a[sep + 1], "/usr/bin/apex-agentd");
+        assert_eq!(a[sep + 2], BRIDGE_FLAG);
+        assert_eq!(a[sep + 3], "/tmp/apex-agent/1/egress.sock");
+        assert_eq!(a[sep + 4], BRIDGE_PORT.to_string());
+        // A second separator, so an agent argument that looks like a bridge
+        // flag stays an agent argument.
+        assert_eq!(a[sep + 5], "--");
+        assert_eq!(a[sep + 6], "claude");
+        assert_eq!(a[sep + 7], "--help");
+        assert_eq!(sep + 8, a.len());
+    }
+
+    #[test]
+    fn an_allowlisted_session_without_a_bridge_is_refused_not_run() {
+        // The fail-closed case that matters most. Without this the argv comes
+        // back as an ordinary confined session with `--unshare-net` and no way
+        // out — which reports `allowlist` and behaves as `offline`, so the
+        // user believes they have a network policy and the agent believes the
+        // machine is offline.
+        let mut s = allowlisted();
+        s.egress = None;
+        assert_eq!(
+            build_argv(&s, "claude", &[]).unwrap_err(),
+            SandboxError::EgressUnavailable
+        );
+    }
+
+    #[test]
+    fn a_network_mode_needing_a_namespace_is_refused_on_the_unconfined_path() {
+        // `build_argv` returns the bare command for an unrestricted session,
+        // so without this check every mode but `open` would come back as a
+        // command running on the host's network. The policy refuses that pair
+        // too; this is the last place the mistake can still be caught.
+        for network in NetworkPolicy::ALL {
+            let mut s = spec();
+            s.policy.sandbox = SandboxPolicy::Unrestricted;
+            s.policy.network = *network;
+            let built = build_argv(&s, "claude", &[]);
+            if *network == NetworkPolicy::Open {
+                assert!(built.is_ok(), "{network}");
+            } else {
+                assert_eq!(
+                    built.unwrap_err(),
+                    SandboxError::NetworkWithoutNamespace(*network),
+                    "an unconfined session was built with {network}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_an_allowlisted_session_is_told_where_the_proxy_is() {
+        // The variables are not the enforcement — the namespace is — but a
+        // client that does not know about the bridge cannot use it, and one
+        // told about a bridge that is not there would fail every request.
+        let names = [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ];
+        let env = resolved_env(&allowlisted());
+        for name in names {
+            assert_eq!(
+                env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str()),
+                Some(format!("http://127.0.0.1:{BRIDGE_PORT}").as_str()),
+                "{name}"
+            );
+        }
+
+        // Every other mode gets none of them, including one that was handed a
+        // bridge it is not supposed to use.
+        for network in [
+            NetworkPolicy::Open,
+            NetworkPolicy::Offline,
+            NetworkPolicy::Brokered,
+        ] {
+            let mut s = allowlisted();
+            s.policy.network = network;
+            let env = resolved_env(&s);
+            for name in names {
+                assert!(
+                    !env.iter().any(|(k, _)| k == name),
+                    "{network} was told about a proxy"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_proxy_variables_cannot_be_pointed_somewhere_else_by_an_adapter() {
+        // They come first, and first wins in `resolved_env`. An adapter that
+        // set HTTPS_PROXY — or a daemon environment carrying one — must not
+        // be able to route a confined session's traffic past the bridge.
+        let mut s = allowlisted();
+        s.env_set = vec![("HTTPS_PROXY".into(), "http://elsewhere.example:8080".into())];
+        s.env_pass = vec!["HTTPS_PROXY".into()];
+        let env = resolved_env(&s);
+        let found: Vec<&String> = env
+            .iter()
+            .filter(|(k, _)| k == "HTTPS_PROXY")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(found.len(), 1, "{env:?}");
+        assert_eq!(found[0], &format!("http://127.0.0.1:{BRIDGE_PORT}"));
     }
 
     #[test]

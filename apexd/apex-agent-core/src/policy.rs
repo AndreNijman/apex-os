@@ -65,10 +65,10 @@
 //!
 //! ## Fail closed on what is not built yet
 //!
-//! Five values in this vocabulary describe policy the runtime cannot enforce
-//! today: one network mode, both system-access modes, raw secret export and
-//! remote elevation. [`AgentPolicy::validate`] refuses each one and names the
-//! task that will implement it.
+//! Four values in this vocabulary describe policy the runtime cannot enforce
+//! today: both system-access modes, raw secret export and remote elevation.
+//! [`AgentPolicy::validate`] refuses each one and names the task that will
+//! implement it. All four network modes are enforced.
 //!
 //! Refusing is the only honest option. A `--network allowlist` that parsed and
 //! then ran with an open network would be worse than no flag at all: it would
@@ -281,8 +281,9 @@ pub enum NetworkPolicy {
     #[default]
     Open,
     /// Only the destinations a policy names, reached through the daemon's
-    /// egress proxy. Refused until that proxy exists, on the same grounds as
-    /// every other value with no enforcement point.
+    /// egress proxy. `destination.rs` decides which those are; the daemon's
+    /// `egress` module resolves and connects. Needs a non-empty allowlist —
+    /// see [`AgentPolicy::validate_for`].
     Allowlist,
     /// No direct egress; outbound work goes through the capability broker,
     /// which owns the credential and the destination. `git push` already
@@ -578,9 +579,9 @@ impl AgentPolicy {
         let network = self.effective_network();
         match network {
             NetworkPolicy::Open => {}
-            // Both are `--unshare-net`, and an unconfined session has no
+            // All three are `--unshare-net`, and an unconfined session has no
             // namespace to unshare.
-            NetworkPolicy::Offline | NetworkPolicy::Brokered if self.sandbox.is_confined() => {}
+            _ if self.sandbox.is_confined() => {}
             other => return Err(PolicyError::NetworkUnenforceable(other)),
         }
         if network.needs_broker() && !self.secrets.may_use_broker() {
@@ -594,6 +595,31 @@ impl AgentPolicy {
         }
         if self.origin == OriginPolicy::RemoteElevationAllowed {
             return Err(PolicyError::RemoteElevationUnavailable);
+        }
+        Ok(())
+    }
+
+    /// [`AgentPolicy::validate`], plus the destinations an `allowlist` session
+    /// would actually be allowed to reach.
+    ///
+    /// Separate because the allowlist is not part of the policy: it lives in
+    /// the daemon's configuration, not in the request, so that a session
+    /// cannot name its own destinations. [`AgentPolicy`] stays `Copy` and on
+    /// the wire; the list stays where the thing being confined cannot write
+    /// it.
+    ///
+    /// An empty list is refused rather than run. It would be fail-closed
+    /// either way — an allowlist with nothing on it denies everything — but a
+    /// session that can reach nothing while reporting `allowlist` is an
+    /// offline session that nobody asked for, and the failure would arrive
+    /// minutes later as a network error inside the agent.
+    pub fn validate_for(
+        &self,
+        allowlist: &crate::destination::Allowlist,
+    ) -> Result<(), PolicyError> {
+        self.validate()?;
+        if self.effective_network() == NetworkPolicy::Allowlist && allowlist.is_empty() {
+            return Err(PolicyError::AllowlistEmpty);
         }
         Ok(())
     }
@@ -627,6 +653,8 @@ pub enum PolicyError {
     NetworkUnenforceable(NetworkPolicy),
     /// Brokered egress with the broker switched off.
     BrokeredNetworkNeedsBroker,
+    /// An allowlisted session with nothing on its allowlist.
+    AllowlistEmpty,
     /// A system-access mode whose grant machinery does not exist.
     SystemAccessUnavailable(SystemAccess),
     /// Raw secret values in the session environment.
@@ -644,17 +672,25 @@ impl std::fmt::Display for PolicyError {
                  sandbox has one; use `--sandbox strict`, or `--sandbox project --network \
                  offline`"
             ),
-            PolicyError::NetworkUnenforceable(NetworkPolicy::Brokered) => write!(
-                f,
-                "brokered egress takes the session's network namespace away and hands the \
-                 outbound work to apex-agentd, and an unrestricted sandbox has no namespace \
-                 to take; use `--sandbox project --network brokered`"
-            ),
+            PolicyError::NetworkUnenforceable(mode @ (NetworkPolicy::Brokered | NetworkPolicy::Allowlist)) => {
+                write!(
+                    f,
+                    "the {mode} network mode takes the session's network namespace away and \
+                     hands its outbound work to apex-agentd, and an unrestricted sandbox has \
+                     no namespace to take; use `--sandbox project --network {mode}`"
+                )
+            }
             PolicyError::NetworkUnenforceable(mode) => write!(
                 f,
                 "the {mode} network mode is not enforced by this build, and running with an \
                  open network instead would report a restriction that is not there; use \
-                 `--network open`, `--network brokered` or `--network offline`"
+                 `--network open` or `--network offline`"
+            ),
+            PolicyError::AllowlistEmpty => write!(
+                f,
+                "`--network allowlist` with nothing on the allowlist is an offline session \
+                 under another name; add a destination with `apex agent allow <host>`, or \
+                 use `--network offline` if reaching nothing is what you meant"
             ),
             PolicyError::BrokeredNetworkNeedsBroker => write!(
                 f,
@@ -951,7 +987,11 @@ mod tests {
         // Every mode but `open` is `--unshare-net`, and an unrestricted
         // session has no namespace to unshare — so it would run with the
         // network. Failing closed is the only answer that does not lie.
-        for network in [NetworkPolicy::Offline, NetworkPolicy::Brokered] {
+        for network in [
+            NetworkPolicy::Offline,
+            NetworkPolicy::Brokered,
+            NetworkPolicy::Allowlist,
+        ] {
             let p = AgentPolicy {
                 sandbox: SandboxPolicy::Unrestricted,
                 network,
@@ -1010,6 +1050,39 @@ mod tests {
     }
 
     #[test]
+    fn an_allowlist_with_nothing_on_it_is_refused_rather_than_run() {
+        use crate::destination::Allowlist;
+
+        let p = AgentPolicy {
+            sandbox: SandboxPolicy::Project,
+            network: NetworkPolicy::Allowlist,
+            ..AgentPolicy::default()
+        };
+        // The dimension itself is enforceable — that is `validate`'s question,
+        // and the answer is yes.
+        assert_eq!(p.validate(), Ok(()));
+        // What is refused is the pair of an allowlist mode and no allowlist.
+        assert_eq!(
+            p.validate_for(&Allowlist::default()),
+            Err(PolicyError::AllowlistEmpty)
+        );
+        let allow = Allowlist::parse(&["api.example.com"]).expect("parse");
+        assert_eq!(p.validate_for(&allow), Ok(()));
+
+        // No other mode cares whether the list is empty: `open` was never
+        // going to consult it, and the two offline modes are not supposed to
+        // reach anything.
+        for network in [
+            NetworkPolicy::Open,
+            NetworkPolicy::Offline,
+            NetworkPolicy::Brokered,
+        ] {
+            let p = AgentPolicy { network, ..p };
+            assert_eq!(p.validate_for(&Allowlist::default()), Ok(()), "{network}");
+        }
+    }
+
+    #[test]
     fn only_open_leaves_the_session_on_the_host_network() {
         // The property the sandbox reads. A mode added without a decision
         // about its namespace fails here rather than shipping with one.
@@ -1034,10 +1107,6 @@ mod tests {
     #[test]
     fn unbuilt_dimension_values_are_refused_and_name_their_remedy() {
         let cases: Vec<(AgentPolicy, PolicyError)> = vec![
-            (
-                AgentPolicy { network: NetworkPolicy::Allowlist, ..Default::default() },
-                PolicyError::NetworkUnenforceable(NetworkPolicy::Allowlist),
-            ),
             (
                 AgentPolicy { system: SystemAccess::Session, ..Default::default() },
                 PolicyError::SystemAccessUnavailable(SystemAccess::Session),
@@ -1075,6 +1144,7 @@ mod tests {
             AgentPolicy { secrets: SecretPolicy::None, ..Default::default() },
             AgentPolicy { network: NetworkPolicy::Offline, ..Default::default() },
             AgentPolicy { network: NetworkPolicy::Brokered, ..Default::default() },
+            AgentPolicy { network: NetworkPolicy::Allowlist, ..Default::default() },
         ] {
             assert_eq!(p.validate(), Ok(()), "{p:?}");
         }
