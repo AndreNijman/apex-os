@@ -459,10 +459,19 @@ mod tests {
         // A literal here would be one careless edit from meaning nothing, and
         // the failure it prevents is a "no credential stored" about a store
         // the user never wrote to.
-        assert_eq!(
-            BROKERED_SECRET_SERVICE_VERSION,
-            apex_agent_core::protocol::PROTOCOL_VERSION,
-            "the guard must name the current revision, or it can never fire"
+        //
+        // At or below the current revision, not equal to it: the protocol
+        // moves on for reasons that have nothing to do with the store, and
+        // pinning this to equality would make every later bump edit a guard
+        // whose subject had not changed — which is how a boundary ends up
+        // pointing at the wrong revision.
+        assert!(
+            BROKERED_SECRET_SERVICE_VERSION <= apex_agent_core::protocol::PROTOCOL_VERSION,
+            "the guard must name a revision that exists, or it can never fire"
+        );
+        assert!(
+            BROKERED_SECRET_SERVICE_VERSION > apex_agent_core::protocol::REQUEST_ORIGIN_VERSION,
+            "the store moved after request_origin, so the guard must be above it"
         );
     }
 

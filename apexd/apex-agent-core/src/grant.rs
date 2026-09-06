@@ -40,7 +40,7 @@
 //! grant that merely vanishes is also wrong, because the owner who authorised
 //! fifteen minutes of break-glass and then rebooted has no way to tell whether
 //! the window is still open. So a grant is stamped with the boot it was issued
-//! under, [`SystemGrant::state_at`] reports [`GrantState::EndedAtReboot`] when
+//! under, [`SystemGrant::state_at`] reports [`ClosureReason::Reboot`] when
 //! that stamp does not match the running kernel's, and the daemon says so —
 //! once, in the audit trail and in `apex agent grants` — the next time it
 //! starts. The machine answers the question rather than losing it.
@@ -350,17 +350,66 @@ pub struct SystemGrant {
     /// How the human proved they were present — the polkit action id that was
     /// satisfied.
     pub authenticated_by: String,
-    /// When a human revoked it, if they did.
-    #[serde(default)]
-    pub revoked_ms: Option<u64>,
-    /// When APEX first observed and recorded that this grant had ended.
+    /// How this grant ended, once APEX has observed and recorded that it did.
     ///
-    /// Distinct from [`SystemGrant::expires_ms`], which is when it was *due*
-    /// to end, and from [`SystemGrant::revoked_ms`]. It exists so the audit
-    /// line for an ending is written exactly once: the first sweep that sees a
-    /// non-active grant with no `closed_ms` records the ending and stamps it.
+    /// Distinct from [`SystemGrant::expires_ms`], which is only when it was
+    /// *due* to end. A grant can stop applying for four different reasons and
+    /// they are not interchangeable to somebody reading the trail afterwards,
+    /// so the reason is stored rather than re-derived: by the time anybody
+    /// looks, the clock has moved past all of them and every ending would read
+    /// as "expired".
+    ///
+    /// It is also what makes the audit line get written exactly once. The
+    /// first sweep that sees an ended grant with no closure records it and
+    /// stamps this.
     #[serde(default)]
-    pub closed_ms: Option<u64>,
+    pub closed: Option<GrantClosure>,
+}
+
+/// How a grant ended, and when APEX recorded that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantClosure {
+    pub ms: u64,
+    pub why: ClosureReason,
+}
+
+/// The four ways a grant stops applying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClosureReason {
+    /// A human took it back.
+    Revoked,
+    /// Its TTL ran out. §3.4's "automatic expiry".
+    Expired,
+    /// It was still live when the machine went down. §3.4's "no silent
+    /// persistence after reboot".
+    Reboot,
+    /// `apex-agentd` restarted while it was live.
+    ///
+    /// A grant's authority is the daemon's memory, so a restart ends every
+    /// grant. That is fail-closed and deliberate — re-adopting a grant from a
+    /// file the granted session can write would be reading permission out of
+    /// something its own subject controls. It is recorded as its own reason
+    /// because "the runtime restarted" and "your fifteen minutes were up" are
+    /// different things to have happened.
+    RuntimeRestart,
+}
+
+impl ClosureReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ClosureReason::Revoked => "revoked",
+            ClosureReason::Expired => "expired",
+            ClosureReason::Reboot => "ended-at-reboot",
+            ClosureReason::RuntimeRestart => "ended-with-the-runtime",
+        }
+    }
+}
+
+impl std::fmt::Display for ClosureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
 }
 
 /// Where a grant stands, at a given moment on a given boot.
@@ -368,16 +417,13 @@ pub struct SystemGrant {
 pub enum GrantState {
     /// In force, with this long left.
     Active { remaining_ms: u64 },
-    /// A human took it back.
-    Revoked { at_ms: u64 },
-    /// Its TTL ran out. `at_ms` is when, which is `expires_ms`.
-    Expired { at_ms: u64 },
-    /// It was still live when the machine went down.
+    /// Over, for this reason, at this moment.
     ///
-    /// The state §3.4's "no silent persistence after reboot" is really about.
-    /// The grant is not in force and never was after the reboot; this variant
-    /// is what lets the machine *say* that instead of quietly forgetting.
-    EndedAtReboot { issued_boot: String, running_boot: String },
+    /// One variant rather than four, because every caller either wants the
+    /// reason — and gets it as a value it can print or match on — or only
+    /// wants to know that the grant is not active. Four variants meant four
+    /// arms in every renderer and an easy fifth to forget.
+    Ended { why: ClosureReason, at_ms: u64 },
 }
 
 impl GrantState {
@@ -385,13 +431,19 @@ impl GrantState {
         matches!(self, GrantState::Active { .. })
     }
 
+    /// The reason, when it has ended.
+    pub fn reason(&self) -> Option<ClosureReason> {
+        match self {
+            GrantState::Active { .. } => None,
+            GrantState::Ended { why, .. } => Some(*why),
+        }
+    }
+
     /// The word `apex agent grants` prints in its STATE column.
     pub fn as_str(&self) -> &'static str {
         match self {
             GrantState::Active { .. } => "active",
-            GrantState::Revoked { .. } => "revoked",
-            GrantState::Expired { .. } => "expired",
-            GrantState::EndedAtReboot { .. } => "ended-at-reboot",
+            GrantState::Ended { why, .. } => why.as_str(),
         }
     }
 }
@@ -405,35 +457,63 @@ impl std::fmt::Display for GrantState {
 impl SystemGrant {
     /// Where this grant stands.
     ///
-    /// Pure, over three arguments the caller reads once. The order of the
-    /// checks is the order the things could have happened in, and it matters:
+    /// Pure, over two arguments the caller reads once. The order of the checks
+    /// is the order the things could have happened in, and it matters:
     ///
-    /// 1. **revoked** first, because a human taking a grant back is a decision
-    ///    and should be reported as one even if the TTL had also run out;
+    /// 1. **an ending already recorded** first. Once APEX has written down how
+    ///    a grant finished, that is the answer forever — otherwise every
+    ///    ending would read as "expired" a day later, when the clock has moved
+    ///    past all of them, and the trail would lose the only part of it
+    ///    somebody reads it for.
     /// 2. **a boot that is not this one** next, and split by `btime` — a grant
     ///    whose TTL ran out *before* the machine went down expired on its own,
     ///    and saying it "ended at the reboot" would misdescribe it;
     /// 3. **expiry** against the clock;
     /// 4. otherwise active.
+    ///
+    /// Note what is not here: a daemon restart. This function cannot see one,
+    /// so the sweep that runs at startup is what records
+    /// [`ClosureReason::RuntimeRestart`], and rule 1 is what makes it stick.
     pub fn state_at(&self, now_ms: u64, boot: &BootStamp) -> GrantState {
-        if let Some(at_ms) = self.revoked_ms {
-            return GrantState::Revoked { at_ms };
-        }
-        if self.boot_id != boot.id {
-            if self.expires_ms <= boot.booted_ms {
-                return GrantState::Expired { at_ms: self.expires_ms };
-            }
-            return GrantState::EndedAtReboot {
-                issued_boot: self.boot_id.clone(),
-                running_boot: boot.id.clone(),
+        if let Some(closed) = self.closed {
+            return GrantState::Ended {
+                why: closed.why,
+                at_ms: closed.ms,
             };
         }
+        if self.boot_id != boot.id {
+            let why = if self.expires_ms <= boot.booted_ms {
+                ClosureReason::Expired
+            } else {
+                ClosureReason::Reboot
+            };
+            let at_ms = match why {
+                ClosureReason::Expired => self.expires_ms,
+                _ => boot.booted_ms.max(self.issued_ms),
+            };
+            return GrantState::Ended { why, at_ms };
+        }
         if self.expires_ms <= now_ms {
-            return GrantState::Expired { at_ms: self.expires_ms };
+            return GrantState::Ended {
+                why: ClosureReason::Expired,
+                at_ms: self.expires_ms,
+            };
         }
         GrantState::Active {
             remaining_ms: self.expires_ms - now_ms,
         }
+    }
+
+    /// Record how this grant ended, if it has not been recorded already.
+    ///
+    /// Returns whether anything changed, so the caller writes one audit line
+    /// per ending rather than one per sweep.
+    pub fn close(&mut self, why: ClosureReason, at_ms: u64) -> bool {
+        if self.closed.is_some() {
+            return false;
+        }
+        self.closed = Some(GrantClosure { ms: at_ms, why });
+        true
     }
 
     /// What the machine says about this grant, in one sentence.
@@ -442,33 +522,36 @@ impl SystemGrant {
     /// that a grant does not *silently* stop applying, and a state nothing can
     /// render is silent whatever the enum says.
     pub fn describe(&self, now_ms: u64, boot: &BootStamp) -> String {
+        let who = format!("grant {} ({} for session {})", self.id, self.kind, self.session);
+        let window = format_ms(self.expires_ms.saturating_sub(self.issued_ms));
         match self.state_at(now_ms, boot) {
-            GrantState::Active { remaining_ms } => format!(
-                "grant {} ({} for session {}) is active with {} left",
-                self.id,
-                self.kind,
-                self.session,
-                format_ms(remaining_ms)
+            GrantState::Active { remaining_ms } => {
+                format!("{who} is active with {} of its {window} left", format_ms(remaining_ms))
+            }
+            GrantState::Ended {
+                why: ClosureReason::Revoked,
+                ..
+            } => format!("{who} was revoked"),
+            GrantState::Ended {
+                why: ClosureReason::Expired,
+                ..
+            } => format!("{who} expired after {window}"),
+            GrantState::Ended {
+                why: ClosureReason::Reboot,
+                at_ms,
+            } => format!(
+                "{who} ended when the machine rebooted, with {} of its {window} window unused. \
+                 It was not carried across and nothing has been re-authorised",
+                format_ms(self.expires_ms.saturating_sub(at_ms))
             ),
-            GrantState::Revoked { .. } => format!(
-                "grant {} ({} for session {}) was revoked",
-                self.id, self.kind, self.session
-            ),
-            GrantState::Expired { .. } => format!(
-                "grant {} ({} for session {}) expired after {}",
-                self.id,
-                self.kind,
-                self.session,
-                format_ms(self.expires_ms.saturating_sub(self.issued_ms))
-            ),
-            GrantState::EndedAtReboot { .. } => format!(
-                "grant {} ({} for session {}) ended when the machine rebooted, with {} of its \
-                 {} window unused; it was not carried across and nothing has been re-authorised",
-                self.id,
-                self.kind,
-                self.session,
-                format_ms(self.expires_ms.saturating_sub(boot.booted_ms.max(self.issued_ms))),
-                format_ms(self.expires_ms.saturating_sub(self.issued_ms))
+            GrantState::Ended {
+                why: ClosureReason::RuntimeRestart,
+                at_ms,
+            } => format!(
+                "{who} ended when the agent runtime restarted, with {} of its {window} window \
+                 unused. A grant lives in the running daemon and is not adopted from disk, so \
+                 nothing has been re-authorised",
+                format_ms(self.expires_ms.saturating_sub(at_ms))
             ),
         }
     }
@@ -630,8 +713,7 @@ mod tests {
             boot_id: boot_id.to_string(),
             request_origin: RequestOrigin::LocalTerminal,
             authenticated_by: "org.apexos.agent.break-glass".into(),
-            revoked_ms: None,
-            closed_ms: None,
+            closed: None,
         }
     }
 
@@ -648,8 +730,9 @@ mod tests {
             GrantState::Active { remaining_ms: 1 }
         );
         // The boundary is closed at the top: at the expiry instant it is gone.
-        assert_eq!(g.state_at(910_000, &b), GrantState::Expired { at_ms: 910_000 });
-        assert_eq!(g.state_at(910_001, &b), GrantState::Expired { at_ms: 910_000 });
+        let gone = GrantState::Ended { why: ClosureReason::Expired, at_ms: 910_000 };
+        assert_eq!(g.state_at(910_000, &b), gone);
+        assert_eq!(g.state_at(910_001, &b), gone);
     }
 
     #[test]
@@ -663,13 +746,8 @@ mod tests {
         // grant was issued and before it was due to expire.
         let now = boot("boot-b", issued + 300_000);
         let state = g.state_at(issued + 400_000, &now);
-        assert_eq!(
-            state,
-            GrantState::EndedAtReboot {
-                issued_boot: "boot-a".into(),
-                running_boot: "boot-b".into(),
-            }
-        );
+        assert_eq!(state.reason(), Some(ClosureReason::Reboot));
+        assert_eq!(state.as_str(), "ended-at-reboot");
         assert!(!state.is_active());
         // And it says so in words, naming the reboot and the unused window.
         let said = g.describe(issued + 400_000, &now);
@@ -687,15 +765,15 @@ mod tests {
         let now = boot("boot-b", issued + 900_000);
         assert_eq!(
             g.state_at(issued + 5_000_000, &now),
-            GrantState::Expired { at_ms: issued + 900_000 }
+            GrantState::Ended { why: ClosureReason::Expired, at_ms: issued + 900_000 }
         );
         // One millisecond of the window left when the machine went down is
         // still the other answer.
         let now = boot("boot-b", issued + 899_999);
-        assert!(matches!(
-            g.state_at(issued + 5_000_000, &now),
-            GrantState::EndedAtReboot { .. }
-        ));
+        assert_eq!(
+            g.state_at(issued + 5_000_000, &now).reason(),
+            Some(ClosureReason::Reboot)
+        );
     }
 
     #[test]
@@ -704,21 +782,50 @@ mod tests {
         // conservative answer is the one that does not assert something about
         // a window it cannot place in time.
         let g = grant(GrantKind::BreakGlass, 1_000_000, 900_000, "boot-a");
-        assert!(matches!(
-            g.state_at(9_000_000, &boot("boot-b", 0)),
-            GrantState::EndedAtReboot { .. }
-        ));
+        assert_eq!(
+            g.state_at(9_000_000, &boot("boot-b", 0)).reason(),
+            Some(ClosureReason::Reboot)
+        );
     }
 
     #[test]
-    fn revocation_wins_over_every_other_ending() {
-        // A human taking a grant back is a decision and is reported as one,
-        // even when the TTL had also run out and even across a reboot.
-        let mut g = grant(GrantKind::SystemAccess, 1_000, 60_000, "boot-a");
-        g.revoked_ms = Some(30_000);
-        for b in [boot("boot-a", 0), boot("boot-b", 40_000)] {
-            assert_eq!(g.state_at(9_000_000, &b), GrantState::Revoked { at_ms: 30_000 });
+    fn a_recorded_ending_is_the_answer_forever() {
+        // The reason a grant carries how it ended rather than having it
+        // re-derived. Once the clock has moved past every deadline, every
+        // ending would read as "expired" — and which of the four it really
+        // was is the only part of the trail anybody reads it for.
+        for why in [
+            ClosureReason::Revoked,
+            ClosureReason::Reboot,
+            ClosureReason::RuntimeRestart,
+        ] {
+            let mut g = grant(GrantKind::SystemAccess, 1_000, 60_000, "boot-a");
+            assert!(g.close(why, 30_000), "the first close must take");
+            for b in [boot("boot-a", 0), boot("boot-b", 40_000)] {
+                assert_eq!(
+                    g.state_at(9_000_000, &b),
+                    GrantState::Ended { why, at_ms: 30_000 },
+                    "{why} was re-derived as something else"
+                );
+            }
+            // And closing again changes nothing, so the audit line for one
+            // ending is written once however many sweeps see it.
+            assert!(!g.close(ClosureReason::Expired, 999_999));
+            assert_eq!(g.state_at(9_000_000, &boot("boot-a", 0)).reason(), Some(why));
         }
+    }
+
+    #[test]
+    fn a_restart_ending_says_so_rather_than_claiming_the_window_ran_out() {
+        // A daemon restart ends every grant, because authority is the
+        // daemon's memory. Reporting that as "expired" would tell the owner
+        // their fifteen minutes were up when two of them had been used.
+        let mut g = grant(GrantKind::BreakGlass, 1_000_000, 900_000, "boot-a");
+        g.close(ClosureReason::RuntimeRestart, 1_120_000);
+        let said = g.describe(9_000_000, &boot("boot-a", 0));
+        assert!(said.contains("agent runtime restarted"), "{said}");
+        assert!(said.contains("13m"), "unused window not reported: {said}");
+        assert!(said.contains("nothing has been re-authorised"), "{said}");
     }
 
     #[test]
@@ -838,8 +945,8 @@ mod tests {
         let g = grant(GrantKind::BreakGlass, 5, 10, "boot-a");
         let text = serde_json::to_string(&g).expect("serialise");
         assert_eq!(serde_json::from_str::<SystemGrant>(&text).unwrap(), g);
-        // `revoked_ms` and `closed_ms` default, so a record written before
-        // either existed still loads rather than making the listing blind.
+        // `closed` defaults, so a record written before it existed still
+        // loads rather than making the listing blind.
         let older = serde_json::json!({
             "id": 2, "kind": "system_access", "session": 3, "agent": "claude",
             "project": null, "capabilities": [], "issued_ms": 1, "expires_ms": 2,
@@ -847,8 +954,7 @@ mod tests {
             "authenticated_by": "org.apexos.agent.system-access",
         });
         let parsed: SystemGrant = serde_json::from_value(older).expect("parse");
-        assert_eq!(parsed.revoked_ms, None);
-        assert_eq!(parsed.closed_ms, None);
+        assert_eq!(parsed.closed, None);
     }
 
     #[test]

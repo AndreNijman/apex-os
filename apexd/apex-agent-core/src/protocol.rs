@@ -48,7 +48,19 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// the two above and still worth naming: a daemon below this reads its OWN old
 /// store, so a credential added to the secret service is simply not found and
 /// the user is told they never stored it.
-pub const PROTOCOL_VERSION: u32 = 4;
+///
+/// 5 — system-access grants (§4.4, §4.5). `--system-access` and
+/// `--unsafe-everything` used to be refused by every build, so a client could
+/// send them to any daemon and get the same honest no. Now they are a request
+/// for a grant, carrying a `ttl_ms` a daemon below this drops — and a
+/// break-glass session that started with no TTL would be a break-glass session
+/// that never expires, which is the one thing §3.4 forbids outright. The CLI
+/// refuses to send either mode to a daemon below
+/// [`SYSTEM_GRANT_VERSION`].
+pub const PROTOCOL_VERSION: u32 = 5;
+
+/// The revision that first issued system-access grants.
+pub const SYSTEM_GRANT_VERSION: u32 = 5;
 
 /// The revision at which the credential store moved to `apex-secretd`.
 ///
@@ -62,6 +74,8 @@ pub const BROKERED_SECRET_SERVICE_VERSION: u32 = 4;
 /// mean something nobody intended.
 const _: () = assert!(POLICY_DIMENSIONS_VERSION < REQUEST_ORIGIN_VERSION);
 const _: () = assert!(REQUEST_ORIGIN_VERSION < BROKERED_SECRET_SERVICE_VERSION);
+const _: () = assert!(BROKERED_SECRET_SERVICE_VERSION < SYSTEM_GRANT_VERSION);
+const _: () = assert!(SYSTEM_GRANT_VERSION <= PROTOCOL_VERSION);
 
 /// The revision that first carried the six dimensions.
 ///
@@ -265,6 +279,36 @@ pub struct SessionInfo {
     /// How [`SessionInfo::request_origin`] was arrived at.
     #[serde(default)]
     pub origin_source: Option<OriginSource>,
+    /// The system-access grant this session runs under, when it has one.
+    ///
+    /// Present exactly when `policy.system` is not `none`, because the daemon
+    /// will not start such a session without a grant. It is the id, not the
+    /// grant: the record is on disk and the state depends on the clock, so a
+    /// field carrying "active" would be stale the moment it was written.
+    #[serde(default)]
+    pub grant: Option<u32>,
+    /// Unix milliseconds at which that grant runs out.
+    ///
+    /// Carried beside the id so the Agent Center and `apex agent list` can
+    /// render a countdown without a second round trip, and so the red
+    /// indicator §3.4 asks for can say how much of the window is left. The
+    /// grant record remains the authority.
+    #[serde(default)]
+    pub grant_expires_ms: Option<u64>,
+    /// The agent's own report of its own permission mode (dimension 1).
+    ///
+    /// §4.1 says APEX passes no permission flag and lets the agent's profile
+    /// decide, so `policy.native` reads `inherit` for the normal case — which
+    /// says what APEX did, not what the agent is doing. Claude reports its
+    /// real mode on every hook event, and this is where that lands, so the
+    /// Agent Center can show `bypassPermissions` rather than `inherit`.
+    ///
+    /// Deliberately NOT a permission input. Dimension 1 is the agent's own
+    /// layer and APEX does not enforce it; this is the agent describing
+    /// itself, in the same class as `detail`, and nothing branches on it.
+    /// `None` until the agent has said, and for agents that never do.
+    #[serde(default)]
+    pub native_observed: Option<String>,
     /// PID of the session leader (the sandbox wrapper when confined).
     pub pid: i32,
     /// Unix seconds when the session was created.
@@ -438,6 +482,40 @@ pub enum Request {
         key: Option<String>,
     },
 
+    // ── system-access grants (§4.4, §4.5) ───────────────────────────────────
+    //
+    // Named `SystemGrant*` and not `Grant*`: the four verbs above are
+    // P0-013's per-project verb grants, which are a different thing with a
+    // different store, and one vocabulary meaning two things is how a client
+    // ends up revoking the wrong one.
+    //
+    // None of these carries a session id either, for the same reason
+    // `PrivilegeRequest` does not.
+    /// Every system-access grant on record, with the state each is in now.
+    SystemGrants,
+    /// Take a grant back before its TTL runs out.
+    ///
+    /// Refused when the connection belongs to a managed session: a session
+    /// revoking its own grant is harmless, but a session revoking ANOTHER
+    /// session's is not, and the daemon does not have to tell the two apart
+    /// if neither is allowed.
+    RevokeSystemGrant { id: u32 },
+    /// Extend a grant that is still active.
+    ///
+    /// P0-007's fourth criterion — "the agent cannot renew its own grant" —
+    /// is enforced here, and it is the reason this verb exists at all rather
+    /// than renewal being a side effect of asking again. The refusal is not
+    /// "are you the user": the agent *is* the user. It is that the connection
+    /// resolves, through `SO_PEERCRED` and `/proc` ancestry, to a managed
+    /// session — and nothing running inside one can present a connection that
+    /// does not.
+    RenewSystemGrant {
+        id: u32,
+        /// The new window, from now. Bounded like any other, and it is a
+        /// fresh authentication rather than an extension of the old consent.
+        ttl_ms: u64,
+    },
+
     // ── the secret broker (§4) ──────────────────────────────────────────────
     //
     // Note what `SecretUse` does NOT carry: a session id, and a remote URL.
@@ -511,6 +589,18 @@ pub struct RunRequest {
     /// Take a checkpoint before starting.
     #[serde(default)]
     pub checkpoint: bool,
+    /// How long a system-access grant should last, in milliseconds (§3.4's
+    /// `--ttl`).
+    ///
+    /// Meaningless without an elevated `policy.system`, and the daemon refuses
+    /// the pair rather than ignoring it: a `--ttl` on an ordinary session is a
+    /// user who believes they asked for something they did not.
+    ///
+    /// `None` with `--system-access session` takes the default window;
+    /// `None` with `--unsafe-everything` is refused, because §3.4 asks for the
+    /// window to be explicit. See [`crate::grant::ttl_for`].
+    #[serde(default)]
+    pub ttl_ms: Option<u64>,
     pub cols: u16,
     pub rows: u16,
     /// Environment additions, applied after the sandbox is built.
@@ -559,6 +649,17 @@ pub enum Response {
     /// Per-project grants: project root -> grant keys.
     Grants {
         projects: std::collections::BTreeMap<String, Vec<String>>,
+    },
+    /// System-access grants, each with the state it is in right now.
+    ///
+    /// The state is computed by the daemon and sent, rather than left for the
+    /// client to derive: it depends on the running kernel's boot id, and a
+    /// client deriving it would have to read `/proc` itself and could get a
+    /// different answer from the daemon that issued the grant.
+    SystemGrants {
+        grants: Vec<crate::grant::SystemGrant>,
+        /// Same order as `grants`: the state word, and the sentence.
+        states: Vec<(String, String)>,
     },
     /// A brokered capability ran. Carries the RESULT, never the credential.
     Brokered {
@@ -786,6 +887,9 @@ mod tests {
             policy: AgentPolicy::default(),
             request_origin: Some(RequestOrigin::LocalTerminal),
             origin_source: Some(OriginSource::Observed),
+            grant: None,
+            grant_expires_ms: None,
+            native_observed: None,
             pid: 42,
             started: 1,
             last_activity: 2,
@@ -930,6 +1034,7 @@ mod tests {
                 request_origin: Some(RequestOrigin::RemoteControl),
                 worktree: Some("issue-217".into()),
                 checkpoint: true,
+                ttl_ms: None,
                 cols: 80,
                 rows: 24,
                 env: vec![("K".into(), "V".into())],
@@ -947,6 +1052,9 @@ mod tests {
             },
             Request::RequestExecuted { id: 1, exit_code: 0 },
             Request::Grants,
+            Request::SystemGrants,
+            Request::RevokeSystemGrant { id: 3 },
+            Request::RenewSystemGrant { id: 3, ttl_ms: 900_000 },
             Request::Revoke {
                 project: "/home/t/p".into(),
                 key: Some("install:clang".into()),
@@ -1138,6 +1246,7 @@ mod tests {
             ("the six dimensions", POLICY_DIMENSIONS_VERSION),
             ("request_origin", REQUEST_ORIGIN_VERSION),
             ("the secret service", BROKERED_SECRET_SERVICE_VERSION),
+            ("system-access grants", SYSTEM_GRANT_VERSION),
         ] {
             assert!(
                 since <= PROTOCOL_VERSION,
@@ -1147,7 +1256,7 @@ mod tests {
         }
         // The newest guard is the current revision: adding a wire field
         // without bumping the version is the fail-open these exist to catch.
-        assert_eq!(BROKERED_SECRET_SERVICE_VERSION, PROTOCOL_VERSION);
+        assert_eq!(SYSTEM_GRANT_VERSION, PROTOCOL_VERSION);
     }
 
     #[test]
@@ -1167,6 +1276,9 @@ mod tests {
             policy: AgentPolicy::default(),
             request_origin: None,
             origin_source: None,
+            grant: None,
+            grant_expires_ms: None,
+            native_observed: None,
             pid: 123,
             started: 0,
             last_activity: 0,

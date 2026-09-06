@@ -166,6 +166,32 @@ impl Verb {
         }
     }
 
+    /// This verb's name, without its arguments.
+    ///
+    /// What a system-access grant is scoped by (§4.4's "capability-scoped").
+    /// Deliberately coarser than [`Verb::grant_key`], which pins the exact
+    /// arguments: a per-project grant is a standing decision and has to name
+    /// the packages, while a session grant is a bounded window in which the
+    /// user has said "this session may install things" — pinning the argument
+    /// there would mean the grant covered nothing the user had not already
+    /// approved individually, which is a grant that buys nothing.
+    ///
+    /// Every name here is in [`Verb::names`], and a test holds the two
+    /// together, so a verb added to the vocabulary cannot arrive with a name
+    /// no grant can be written against.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Verb::Install { .. } => "install",
+            Verb::Remove { .. } => "remove",
+            Verb::PkgUpgrade => "pkg-upgrade",
+            Verb::PkgRebuild => "pkg-rebuild",
+            Verb::PkgRollback => "pkg-rollback",
+            Verb::Pin => "pin",
+            Verb::Rollback => "rollback",
+            Verb::Update => "update",
+        }
+    }
+
     /// Every verb name accepted by [`Verb::parse`], for `--help` and
     /// completion.
     pub fn names() -> &'static [&'static str] {
@@ -746,6 +772,31 @@ impl Grants {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_verb_name_is_one_a_grant_can_be_written_against() {
+        // `Verb::name` is what a system-access grant is scoped by, and
+        // `Verb::names` is what the CLI lists and what a grant is built from.
+        // A verb whose `name()` was not in `names()` would be uncoverable by
+        // any grant — silently, and only for that one operation.
+        for name in Verb::names() {
+            let args = if matches!(*name, "install" | "remove") {
+                vec!["clang".to_string()]
+            } else {
+                vec![]
+            };
+            let verb = Verb::parse(name, &args).expect("a real verb");
+            assert_eq!(verb.name(), *name, "{name} round-trips to a different name");
+            // And the coarse name is a prefix of the exact key, so the two
+            // scopes cannot be about different operations.
+            assert!(
+                verb.grant_key().starts_with(verb.name()),
+                "{name}: {} does not start with {}",
+                verb.grant_key(),
+                verb.name()
+            );
+        }
+    }
 
     fn req(verb: Verb) -> PrivilegeRequest {
         PrivilegeRequest {
