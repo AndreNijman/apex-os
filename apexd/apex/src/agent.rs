@@ -22,6 +22,8 @@ use apex_agent_core::protocol::{
     POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION, SYSTEM_GRANT_VERSION,
 };
 use apex_agent_core::hook::{self as hook_core, HookEvent};
+use apex_agent_core::paths;
+use apex_agent_core::statusline as statusline_core;
 use apex_agent_core::term::{self, RawMode, WinSize};
 use apex_agent_core::{adapter, checkpoint, config, git, layout, profile, project};
 use clap::{Args, Subcommand};
@@ -205,6 +207,23 @@ pub enum AgentCmd {
         /// session_start | pre_tool_use | post_tool_use | stop | …
         event: String,
     },
+    /// Claude's status line, wrapped (§P1-021).
+    ///
+    /// Not meant to be typed either. `apex-agentd` points a managed session's
+    /// `statusLine` here, the payload arrives on stdin as the JSON document
+    /// Claude produces, and what this prints is what appears under the prompt.
+    ///
+    /// It does two things and the ORDER is the point. First it runs the user's
+    /// own status-line command with the same payload and copies its output —
+    /// so the terminal status line is byte-for-byte what it was, which is the
+    /// criterion. Second it publishes the model, context and rate-limit
+    /// numbers to the daemon, which is the only way any of them reach the
+    /// Agent Center.
+    ///
+    /// Always exits 0. A status line that failed would be a broken daemon
+    /// putting an error where the user's prompt used to be.
+    #[command(hide = true)]
+    Statusline,
     /// Narrow where this session says it is driven from (§7).
     ///
     /// Run from inside a managed session — the runtime works out which session
@@ -648,6 +667,7 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             detail,
         } => event(state, session, detail),
         AgentCmd::Hook { event } => return hook(&event),
+        AgentCmd::Statusline => return statusline(),
         AgentCmd::Origin { origin } => declare_origin(&origin),
         AgentCmd::Rm { id } => remove(id),
         AgentCmd::Prune => prune(),
@@ -1851,6 +1871,79 @@ fn hook(event: &str) -> i32 {
         eprintln!("apex agent hook: {parsed} not published: {e:#}");
     }
     0
+}
+
+/// `apex agent statusline` — the wrapper around the user's own status line.
+///
+/// Returns an exit code directly rather than a `Result`, for the same reason
+/// [`hook`] does: there is only one, and it is 0. Claude treats a non-zero
+/// exit from a status line as an error, and every failure here — no daemon, a
+/// payload that will not parse, a user command that is not installed — must
+/// leave the prompt looking exactly as it did.
+///
+/// ## Why the user's own command runs FIRST
+///
+/// It is what the person sees. The publish is a round trip to a Unix socket
+/// and the daemon may be busy or gone; doing it first would put its latency in
+/// front of every status-line refresh, and a daemon that hangs would blank the
+/// line rather than merely lose a measurement.
+fn statusline() -> i32 {
+    use std::io::{Read, Write};
+
+    // Bounded for the reason `read_payload` is: it is a document the agent's
+    // own state ends up inside, and this process has no reason to hold a large
+    // one. Generous, because the status-line payload carries the whole
+    // workspace description and a `pr` block.
+    const MAX_PAYLOAD: u64 = 1024 * 1024;
+    let mut raw = Vec::new();
+    let _ = std::io::stdin()
+        .take(MAX_PAYLOAD)
+        .read_to_end(&mut raw);
+
+    // 1. The user's line, unchanged. `project_dir` rather than `current_dir`,
+    //    because that is the root a project's own `.claude/settings.json` sits
+    //    at and the daemon read the same three sources in the same order when
+    //    it wrote the overlay.
+    let doc: serde_json::Value = serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
+    let project = doc
+        .get("workspace")
+        .and_then(|w| w.get("project_dir"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+    let user = statusline_core::user_status_line(&paths::home(), project.as_deref());
+    if let Some(command) = user.as_ref().and_then(|u| u.command.as_deref()) {
+        if let Some(out) = statusline_core::chain(command, &raw) {
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(&out);
+            let _ = stdout.flush();
+        }
+    }
+
+    // 2. The measurement. Nothing below this line can change what was printed.
+    let Some(id) = client::current_session() else {
+        return 0;
+    };
+    let telemetry = statusline_core::parse(&doc, now_secs());
+    if telemetry.is_empty() {
+        // Nothing worth a round trip. A status line runs once a minute per
+        // session, and publishing an empty record would rewrite every
+        // session's file on a timer to say nothing.
+        return 0;
+    }
+    if let Err(e) = client::publish_telemetry(id, &telemetry) {
+        // Including a daemon that predates this request and answered with a
+        // parse error. The status line has already printed; this is a
+        // measurement that did not arrive.
+        eprintln!("apex agent statusline: not published: {e:#}");
+    }
+    0
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Read the payload Claude writes to a hook's stdin.
