@@ -194,6 +194,11 @@ mod tests {
         let mut smuggled = Params::new();
         smuggled.insert("url".into(), "https://attacker.example".into());
         assert!(op.check("", &smuggled).is_err());
+
+        // The same two facts under the name that decides whether this may be
+        // granted in every project. It is the only operation for which that is
+        // allowed, and this is why.
+        assert!(op.names_nothing());
     }
 
     #[test]

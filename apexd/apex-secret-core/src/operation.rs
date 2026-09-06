@@ -424,6 +424,21 @@ impl OperationSpec {
         self.id == name || self.aliases.contains(&name)
     }
 
+    /// Whether the caller names nothing at all: no resource, no parameters.
+    ///
+    /// The one property that makes a grant safe to hold in every project. An
+    /// operation like this can only reach the endpoint pinned when its
+    /// credential was stored, so where it is asked for changes nothing about
+    /// what it reaches. `git.push` fails this — it acts on a remote resolved
+    /// out of whatever repository the caller is standing in, so the same grant
+    /// would be a different permission in every directory.
+    ///
+    /// Every parameter counts, not only the required ones: an optional
+    /// `branch` is still something the caller names.
+    pub fn names_nothing(&self) -> bool {
+        matches!(self.resource, ResourceKind::None) && self.params.is_empty()
+    }
+
     fn param(&self, name: &str) -> Option<&'static ParamSpec> {
         self.params.iter().find(|p| p.name == name)
     }
@@ -860,6 +875,38 @@ mod tests {
             },
         ],
     };
+
+    #[test]
+    fn naming_nothing_means_no_resource_and_no_parameters_of_any_kind() {
+        // The gate on a grant that is held in every project, and both halves
+        // of it. No shipped operation today is `ResourceKind::None` *with*
+        // parameters, so a version that only looked at the resource would pass
+        // every other test in this workspace — and the first provider to
+        // declare one would silently become grantable everywhere. Hence a
+        // declaration written for this, rather than one borrowed from a real
+        // provider.
+        assert!(DEMO.operations[0].names_nothing(), "no resource, no parameters");
+        assert!(!DEMO.operations[1].names_nothing(), "a resource and parameters");
+        assert!(!DEMO.operations[2].names_nothing(), "a path resource");
+
+        const NAMES_ONLY_A_PARAMETER: OperationSpec = OperationSpec {
+            id: "demo.account.read",
+            summary: "read the account, in a way",
+            effect: Effect::Read,
+            resource: ResourceKind::None,
+            // Optional, which is the case that matters: an operation the
+            // caller *may* narrow is still one the caller narrows, and the
+            // narrowing is resolved wherever the caller is standing.
+            params: &[ParamSpec {
+                name: "note",
+                syntax: Syntax::Text,
+                required: false,
+                summary: "an annotation",
+            }],
+            aliases: &[],
+        };
+        assert!(!NAMES_ONLY_A_PARAMETER.names_nothing());
+    }
 
     #[test]
     fn a_provider_that_declares_an_operation_it_does_not_own_is_refused() {

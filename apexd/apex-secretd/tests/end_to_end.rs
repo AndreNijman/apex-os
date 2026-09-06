@@ -1074,3 +1074,104 @@ fn a_credential_the_server_refuses_still_comes_back_as_a_successful_operation() 
     // And the credential is still not in anything the caller can read.
     assert!(!output.contains(SENTINEL), "{output}");
 }
+
+#[test]
+fn a_grant_held_in_every_project_is_only_for_an_operation_that_names_nothing() {
+    // MCP servers are global and grants are per project, so a memory server
+    // defined once in `~/.claude.json` is present in every directory and
+    // unauthorised in every new worktree until somebody grants it again. The
+    // `*` key closes that — and is refused for anything that acts on something
+    // the caller names, because the same grant there would be a different
+    // permission in every directory.
+    let provider = FakeMcp::start(false);
+    let daemon = Daemon::start("everywhere");
+    let granted = daemon.dir.join("granted");
+    let elsewhere = daemon.dir.join("a-new-worktree");
+    for dir in [&granted, &elsewhere] {
+        std::fs::create_dir_all(dir).expect("project dir");
+    }
+    // Adds the credential and grants `mcp-request` for `granted` only.
+    arrange_mcp(&daemon, provider.port, &granted);
+
+    let use_from = |project: &std::path::Path| {
+        let mut rec = CapabilityRecord::new("memory", "mcp.request", "");
+        rec.project = Some(project.to_string_lossy().into_owned());
+        daemon
+            .client()
+            .use_with_body(rec, br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+            .expect("a reply")
+    };
+
+    // The failure this exists to fix, measured first: the same server, one
+    // directory across, refused.
+    match use_from(&elsewhere) {
+        Response::Error { message, .. } => {
+            assert!(message.contains("not granted"), "{message}");
+            // And the refusal names the way out, because this message is what
+            // an agent relays to the person standing in the new worktree.
+            assert!(message.contains("--everywhere"), "{message}");
+        }
+        other => panic!("a project with no grant was allowed: {other:?}"),
+    }
+
+    // `git.push` acts on a remote resolved out of the caller's repository, so
+    // it is refused the key outright.
+    let refused = daemon
+        .client()
+        .call(&Request::Grant {
+            project: "*".into(),
+            service: "memory".into(),
+            capability: "git.push".into(),
+            revoke: false,
+        })
+        .expect_err("git.push must not be grantable everywhere")
+        .to_string();
+    assert!(refused.contains("acts on something you name"), "{refused}");
+
+    // `mcp.request` names nothing, so it is accepted.
+    daemon
+        .client()
+        .call(&Request::Grant {
+            project: "*".into(),
+            service: "memory".into(),
+            capability: "mcp.request".into(),
+            revoke: false,
+        })
+        .expect("grant everywhere");
+
+    // The same call from the same directory now works, and the credential
+    // still only reaches the endpoint it was stored for.
+    match use_from(&elsewhere) {
+        Response::Performed {
+            exit_code,
+            endpoint,
+            output,
+            ..
+        } => {
+            assert_eq!(exit_code, 0, "{output}");
+            assert_eq!(endpoint, "http://127.0.0.1", "{endpoint}");
+            assert!(!output.contains(SENTINEL), "{output}");
+        }
+        other => panic!("the grant did not apply: {other:?}"),
+    }
+
+    // Withdrawn everywhere by the same key, in one call rather than per
+    // directory — and the project's own grant is untouched by it.
+    daemon
+        .client()
+        .call(&Request::Grant {
+            project: "*".into(),
+            service: "memory".into(),
+            capability: "mcp.request".into(),
+            revoke: true,
+        })
+        .expect("revoke everywhere");
+    assert!(
+        matches!(use_from(&elsewhere), Response::Error { .. }),
+        "the withdrawn grant still applied"
+    );
+    assert!(
+        matches!(use_from(&granted), Response::Performed { .. }),
+        "revoking the wildcard took the project's own grant with it"
+    );
+}

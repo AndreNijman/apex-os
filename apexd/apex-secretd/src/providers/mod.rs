@@ -81,4 +81,22 @@ mod tests {
             assert_eq!(op.id, new);
         }
     }
+
+    #[test]
+    fn only_an_operation_that_names_nothing_can_be_granted_in_every_project() {
+        // The gate on `apex secret grant --everywhere`, checked against the
+        // whole shipped vocabulary rather than against the one operation it
+        // was written for — so a provider added later that takes a resource
+        // cannot quietly become grantable everywhere by inheriting a default.
+        let registry = default_registry(std::env::temp_dir()).expect("registry");
+        for id in registry.operation_ids() {
+            let (_, op) = registry.lookup(&id).expect("declared");
+            assert_eq!(
+                op.names_nothing(),
+                id == "mcp.request",
+                "'{id}' names nothing: {}",
+                op.names_nothing()
+            );
+        }
+    }
 }
