@@ -65,10 +65,11 @@ ENGINE=$(cd "$(dirname "$ENGINE")" && pwd)/$(basename "$ENGINE")
 WORK=$(mktemp -d /tmp/apex-env-test.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
-pass=0; fail=0
+pass=0; fail=0; skip=0
 
 ok()  { printf 'PASS  %-52s\n' "$1"; pass=$((pass+1)); }
 bad() { printf 'FAIL  %-52s %s\n' "$1" "$2"; fail=$((fail+1)); }
+skipped() { printf 'SKIP  %-52s %s\n' "$1" "$2"; skip=$((skip+1)); }
 
 is() {
     local name=$1 want=$2 got=$3
@@ -450,6 +451,46 @@ out=$(run_env info nosuch); rc=$?
 is  "info on an unknown capsule fails" 1 "$rc"
 has "…and suggests the listing" "apex env list" "$out"
 
+echo "── an unreadable record is not the same finding as no record at all ───"
+# `[ -f ]` — the previous test — answers false for a record that was never
+# written and for one this process may not look at alike, and `create` then
+# offered to make a SECOND capsule over 'cuda', which already has one.  Root
+# walks through 0000, so each case is skipped rather than silently passing
+# where the mode bit proves nothing.
+chmod 000 "$WORK/records"
+if cat "$WORK/records/cuda.json" >/dev/null 2>&1; then
+    skipped "record_kind on an unsearchable directory is unreadable" \
+        "this user overrides the mode bit"
+    skipped "create refuses rather than guessing when it is unreadable" "as above"
+    skipped "info refuses rather than saying 'no capsule' when unreadable" "as above"
+    skipped "enter refuses rather than saying 'no capsule' when unreadable" "as above"
+    skipped "rm without --force refuses rather than saying 'no capsule'" "as above"
+else
+    is "record_kind on an unsearchable directory is unreadable" \
+        unreadable "$(call record_kind cuda)"
+
+    out=$(run_env create cuda); rc=$?
+    is  "create refuses rather than guessing when it is unreadable" 1 "$rc"
+    has "…and says so, not 'already exists'" "unreadable" "$out"
+
+    out=$(run_env info cuda); rc=$?
+    is  "info refuses rather than saying 'no capsule' when unreadable" 1 "$rc"
+    has "…naming the permission problem" "could not be read" "$out"
+    hasnt "…and does not claim it does not exist" "no capsule called" "$out"
+
+    out=$(run_env enter cuda); rc=$?
+    is  "enter refuses rather than saying 'no capsule' when unreadable" 1 "$rc"
+    has "…naming the permission problem, not a typo" "could not be read" "$out"
+
+    out=$(run_env rm cuda); rc=$?
+    is  "rm without --force refuses rather than saying 'no capsule'" 1 "$rc"
+    has "…and says whether APEX made it is unknown" "unknown" "$out"
+    has "…and still names the --force override" "--force" "$out"
+fi
+chmod 755 "$WORK/records"
+is "the record itself is untouched by any of the above" \
+    "nvidia" "$(jq -r .gpu "$WORK/records/cuda.json")"
+
 echo "── enter and exec refuse an unknown capsule before running anything ───"
 out=$(run_env enter nosuch); rc=$?
 is  "enter refuses an unknown capsule" 1 "$rc"
@@ -750,5 +791,5 @@ if [ -z "$stray" ]; then ok "the fake HOME is still empty"
 else bad "the fake HOME is still empty" "found: $(tr '\n' ' ' <<<"$stray")"; fi
 
 echo
-printf 'apex-env: %d passed, %d failed\n' "$pass" "$fail"
+printf 'apex-env: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" = 0 ]
