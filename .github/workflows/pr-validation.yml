@@ -793,6 +793,21 @@ jobs:
           APEX_DISPLAY_NO_LIVE: "1"
         run: ./tests/test-apex-display.sh
 
+      # The seeded Hyprland Lua tree in a REAL Hyprland, not just through
+      # --verify-config. Three things only a running instance can answer:
+      # `hyprctl configerrors` is clean; `hyprctl reload` re-reads a generated
+      # module rewritten under it (Lua caches modules, and a loader that did not
+      # clear the cache would make every saved display layout a no-op); and
+      # `hyprctl keyword` is refused under a Lua config, which is why the live
+      # paths use `hyprctl eval`.
+      #
+      # Nests Hyprland inside a HEADLESS labwc, so it draws nothing and cannot
+      # reach a developer's real session. Skips with status 0 where neither
+      # binary is installed, which is what the runner will normally do — the
+      # value is on a machine that has them.
+      - name: Run the Hyprland Lua config assertions
+        run: ./tests/test-apex-hypr-lua.sh
+
       # §17's fourth generator. The shell has written Hyprland .conf/.lua and
       # niri .kdl on every keybind edit for a long time; labwc got nothing,
       # because it has no IPC to push bindings over and no include mechanism to
