@@ -47,6 +47,55 @@ is no root one) — a failure to look, not an absence. Fixed, then 5/5 rc=0.
   (new control_socket_in) -> expect interaction with the Cloudflare branch.
 FALLBACK: `git reset --hard bc4f06e` (pushed).
 
+## APEX-SHELL DONE AND PUSHED: roadmap/v2.2 = 8d081ff (was 0fd12ee)
+fix/locked-hint landed as 8d081ff. ZERO conflicts (only 7c4e78d touched
+Lockscreen.qml/qmldir since its base 05d9412, different regions).
+Suites, run from the REPOSITORY ROOT, before -> after, all unchanged:
+  check-no-conflict-markers  PASS -> PASS
+  settings-semantics         33/0 -> 33/0
+  settings-pages             15/0 -> 15/0
+  check-color-tokens         22/0 -> 22/0   EXPECT_WHITE_FG 211, unchanged
+NOTE: origin/fix/locked-hint (87c84f3) and refs/wip-remote/wt-lockhint-
+(2f12fe5) are two snapshots of the SAME tree — `git diff` between them is
+empty. No later work was stranded.
+Gave it a real commit message; the original was the WIP snapshot placeholder
+"wip snapshot of fix/locked-hint in wt-lockhint-". Author preserved as
+AndreNijman. JUDGEMENT CALL — flagged; not a trailer rewrite.
+
+## LOCKED-HINT REVIEW (it was unreviewed; verdict: LAND IT, with caveats)
+Verified rather than assumed:
+- `onSecureStateChanged` LOOKS wrong (property is `secure`) but is RIGHT.
+  /usr/lib64/qt6/qml/Quickshell/Wayland/quickshell-wayland.qmltypes:
+  Property `secure` has `notify: "secureStateChanged"` (and `locked` has
+  `lockStateChanged`). Qt allows a notify name that is not <prop>Changed.
+  qmllint on Lockscreen.qml reports no unknown-signal warning.
+- `Quickshell.env(variable)` exists (quickshell-core.qmltypes, returns QVariant).
+- The whole read-only chain, run live on the L16:
+  `loginctl show-user andre -p Display --value` -> `3`
+  `busctl ... GetSession s 3` -> `o "/org/freedesktop/login1/session/_33"`
+  which confirms the comment's escaping claim EXACTLY (3 -> _33), and the
+  regex /"([^"]+)"/ matches that output.
+  `loginctl show-session 3 -p LockedHint` -> `LockedHint=no` — the live defect.
+- NO POLKIT. org.freedesktop.login1.policy has no action for the lock hint
+  (only inhibit-* and lock-sessions, which is for OTHER users' sessions).
+  SetLockedHint is on the Session interface and logind checks the caller owns
+  the session. Verified by READING the policy, not by calling it — I did not
+  call SetLockedHint on Andre's live session.
+- qmllint: rc=0. Its only 3 warnings are `QProcess::ExitStatus ... not found`
+  on onExited, which is PRE-EXISTING codebase-wide (PowerProfileService.qml
+  has the same one). Not introduced here.
+- Binds `secure` (compositor-acknowledged) not `locked` — a lock that fails to
+  engage is never reported to logind as engaged. Correct, and the point.
+CAVEATS TO REPORT (none blocking):
+ 1. NO TEST of any kind. Nothing asserts the qmldir entry exists or that
+    Lockscreen still wires it; a later edit could silently drop it and every
+    shell suite would stay green.
+ 2. No initial sync. `onSecureStateChanged` fires on CHANGE, so if the shell
+    restarts while logind still believes the session is locked, LockedHint
+    stays "yes" until the next real lock/unlock.
+ 3. Never exercised end-to-end. It cannot be, headless, without locking
+    Andre's session — which I will not do.
+
 ## REMAINING ORDER (do not let added scope orphan the shell work)
 1. p1-018: `git cherry-pick 526e16c..16fc8ae` (9 commits; 526e16c is ALREADY
    upstream as my 7f14a00 — `git cherry` confirms it as `-`). It carries the
