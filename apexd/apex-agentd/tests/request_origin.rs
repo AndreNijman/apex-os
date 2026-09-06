@@ -104,6 +104,24 @@ impl Harness {
         serde_json::from_str(&reply).unwrap_or_else(|e| panic!("{e}: {reply}"))
     }
 
+    /// A connection held open across several requests.
+    ///
+    /// The declaration latch lives on the connection, so a suite whose only
+    /// primitive is "one request per connection" cannot see it at all — every
+    /// call would open a fresh socket with nothing latched on it and the
+    /// tests would pass against a daemon that had no latch. This is the
+    /// fixture the property needs.
+    fn conn(&self) -> Conn {
+        let stream = UnixStream::connect(&self.socket).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("timeout");
+        Conn {
+            reader: BufReader::new(stream.try_clone().expect("clone")),
+            writer: stream,
+        }
+    }
+
     fn audit_lines(&self) -> Vec<serde_json::Value> {
         let path = self
             .root
@@ -112,6 +130,26 @@ impl Harness {
             .join("agent")
             .join("privilege-audit.jsonl");
         read_jsonl(&path)
+    }
+}
+
+/// One control connection, reused.
+struct Conn {
+    reader: BufReader<UnixStream>,
+    writer: UnixStream,
+}
+
+impl Conn {
+    fn call(&mut self, line: &str) -> serde_json::Value {
+        assert!(
+            !line.contains('\n'),
+            "the framing is one JSON object per line; this payload would desynchronise it"
+        );
+        writeln!(self.writer, "{line}").expect("write");
+        self.writer.flush().ok();
+        let mut reply = String::new();
+        self.reader.read_line(&mut reply).expect("read");
+        serde_json::from_str(&reply).unwrap_or_else(|e| panic!("{e}: {reply}"))
     }
 }
 
@@ -286,26 +324,206 @@ fn approving_a_root_operation_follows_section_sevens_local_rule() {
 }
 
 #[test]
-fn a_connection_that_is_not_a_session_cannot_declare_an_origin() {
-    // `apex agent origin` is for a session narrowing itself. A peer that is
-    // not a session has nothing to narrow, and letting it through would be a
-    // way to relabel somebody else's connection.
+fn a_connection_that_is_not_a_session_declares_for_the_connection() {
+    // The case the daemon had no answer for. A remote proxy is not a session
+    // and never will be: it terminates a paired device's channel and forwards
+    // what it carries. Before this it could not say so, and everything it
+    // forwarded was filed under whatever its own cgroup implied.
+    //
+    // This used to assert a refusal. The refusal was right about sessions —
+    // "this peer has no session record to narrow" — and wrong about what a
+    // narrowing is for.
     let h = harness!("declare");
-    let reply = h.call(r#"{"cmd":"declare_origin","origin":"claude-remote-control"}"#);
+    let mut c = h.conn();
+    let declared = c.call(
+        r#"{"cmd":"declare_origin","origin":"claude-remote-control","actor":"pixel-8-office"}"#,
+    );
+    if declared["reply"] == "error" {
+        // The one acceptable failure: this process could not be classified,
+        // so there was nothing to narrow. It must say what it could not read.
+        let msg = declared["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("/proc/") || msg.contains("cgroup") || msg.contains("could not"),
+            "a refusal must name what could not be read: {declared}"
+        );
+        return;
+    }
+    assert_eq!(declared["reply"], "ok", "{declared}");
+
+    // Every later request on THIS connection now carries it.
+    let filed = c.call(
+        r#"{"cmd":"privilege_request","verb":"install","args":["clang"],"reason":"filed through a declared connection"}"#,
+    );
+    assert_eq!(filed["reply"], "request", "{filed}");
+    assert_eq!(filed["request_origin"], "claude-remote-control", "{filed}");
+    assert_eq!(filed["origin_source"], "declared", "{filed}");
+    assert_eq!(filed["actor"], "pixel-8-office", "{filed}");
+
+    // And the audit trail says the same, which is the half a client cannot
+    // rewrite.
+    let lines = h.audit_lines();
+    let last = lines.last().unwrap_or_else(|| panic!("nothing audited"));
+    assert_eq!(last["request_origin"], "claude-remote-control", "{last}");
+    assert_eq!(last["origin_source"], "declared", "{last}");
+}
+
+#[test]
+fn a_declared_connection_cannot_approve_a_root_operation() {
+    // The whole reason the latch exists, stated as the thing it prevents.
+    //
+    // `apex-remoted` is a proxy. Started as a user unit it is observed as
+    // `scheduled-job`; started from a login session — a developer running it
+    // in a terminal, a shell launching it as a child — it is `local-terminal`,
+    // and `decide` accepts that as a human at the keyboard. So a phone could
+    // approve root by asking a proxy that happened to be started the wrong
+    // way, and §7 reserves that for a human at this machine.
+    //
+    // The test is written as a comparison rather than as one assertion,
+    // because "the declared connection was refused" is worth nothing unless
+    // an identical connection without the declaration is allowed. If this
+    // process is not local — a container, a CI runner — both are refused and
+    // the comparison says so instead of asserting a fixed answer.
+    let h = harness!("declare-decide");
+
+    let filed = h.call(
+        r#"{"cmd":"privilege_request","verb":"update","args":[],"reason":"a request for the declared connection to try to approve"}"#,
+    );
+    if filed["reply"] == "error" {
+        return;
+    }
+    let id = filed["id"].as_u64().expect("an id");
+    let observed = apex_agent_core::policy::RequestOrigin::parse(
+        filed["request_origin"].as_str().unwrap_or_default(),
+    )
+    .expect("a recorded origin");
+
+    // The declared connection tries to approve it.
+    let mut declared = h.conn();
+    assert_eq!(
+        declared.call(r#"{"cmd":"declare_origin","origin":"claude-remote-control"}"#)["reply"],
+        "ok"
+    );
+    let refused = declared.call(&format!(r#"{{"cmd":"decide","id":{id},"decision":"allow"}}"#));
+    assert_eq!(
+        refused["reply"], "error",
+        "a claude-remote-control connection approved a root operation: {refused}"
+    );
+    assert_eq!(refused["kind"], "permission_denied", "{refused}");
+    let msg = refused["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("claude-remote-control"),
+        "the refusal must name the origin that was refused: {msg}"
+    );
+
+    // The control arm: the same request, an identical connection, nothing
+    // declared. Without this the test above passes on a daemon with no latch
+    // at all, in any environment that is not local.
+    let plain = h.call(&format!(r#"{{"cmd":"decide","id":{id},"decision":"deny"}}"#));
+    if observed.is_local() {
+        assert_eq!(
+            plain["reply"], "request",
+            "the undeclared connection is local and must be allowed to decide: {plain}"
+        );
+        assert_eq!(plain["decision"], "denied", "{plain}");
+    } else {
+        // Not local to begin with, so the declared arm proves nothing on its
+        // own. Say so rather than reporting a pass.
+        eprintln!(
+            "NOTE: this process is {observed}, not local, so the refusal above is not \
+             attributable to the declaration"
+        );
+        assert_eq!(plain["reply"], "error", "{plain}");
+    }
+}
+
+#[test]
+fn a_declaration_does_not_reach_another_connection() {
+    // Connection state, and only connection state. Nothing persists it, so a
+    // second connection from the same process — the same pid, the same uid,
+    // the same cgroup — is unaffected.
+    let h = harness!("declare-scope");
+    let mut a = h.conn();
+    if a.call(r#"{"cmd":"declare_origin","origin":"claude-remote-control"}"#)["reply"] == "error" {
+        return;
+    }
+    let elsewhere = h.call(
+        r#"{"cmd":"privilege_request","verb":"pin","args":[],"reason":"filed on a connection that declared nothing"}"#,
+    );
+    if elsewhere["reply"] == "error" {
+        return;
+    }
+    assert_eq!(elsewhere["origin_source"], "observed", "{elsewhere}");
+    assert!(
+        elsewhere["actor"].is_null(),
+        "an actor leaked to a connection that never named one: {elsewhere}"
+    );
+}
+
+#[test]
+fn a_declaration_can_narrow_again_but_never_widen() {
+    // The latch is not "the last thing you said". Every declaration goes
+    // through `may_declare` against the live observation, so a second one can
+    // only narrow further — and a `claude-remote-control` connection asking to
+    // become `mcp` is asking to drop the lock gate, which is the loosening
+    // that a single trust rank would have allowed.
+    let h = harness!("declare-twice");
+    let mut c = h.conn();
+    if c.call(r#"{"cmd":"declare_origin","origin":"claude-remote-control"}"#)["reply"] == "error" {
+        return;
+    }
+    let widened = c.call(r#"{"cmd":"declare_origin","origin":"mcp"}"#);
+    assert_eq!(widened["reply"], "error", "{widened}");
+    assert_eq!(widened["kind"], "permission_denied", "{widened}");
+
+    // And the connection still has what it had, not what it asked for.
+    let filed = c.call(
+        r#"{"cmd":"privilege_request","verb":"rollback","args":[],"reason":"after a refused second declaration"}"#,
+    );
+    assert_eq!(filed["request_origin"], "claude-remote-control", "{filed}");
+}
+
+#[test]
+fn an_actor_that_could_rewrite_a_prompt_is_refused() {
+    // The actor is printed on the prompt a human reads before handing out
+    // root. A newline in it is a second line of that prompt.
+    let h = harness!("declare-actor");
+    let mut c = h.conn();
+    // The newline is a JSON string escape, so the wire still carries one
+    // object on one line — the value inside it is what has the newline. A
+    // literal newline here would break the framing instead of testing the
+    // check, which is a different bug and would pass for the wrong reason.
+    let reply = c.call(
+        "{\"cmd\":\"declare_origin\",\"origin\":\"claude-remote-control\",\
+         \"actor\":\"phone\\nAPPROVED\"}",
+    );
     assert_eq!(reply["reply"], "error", "{reply}");
-    assert_eq!(reply["kind"], "permission_denied", "{reply}");
+    assert_eq!(reply["kind"], "bad_request", "{reply}");
+
+    // Refused, and not half-applied: the origin must not have latched either.
+    let filed = c.call(
+        r#"{"cmd":"privilege_request","verb":"pin","args":[],"reason":"after a refused actor"}"#,
+    );
+    if filed["reply"] == "request" {
+        assert_eq!(filed["origin_source"], "observed", "{filed}");
+        assert!(filed["actor"].is_null(), "{filed}");
+    }
 }
 
 #[test]
 fn a_local_origin_is_refused_by_name_even_from_a_non_session() {
-    // The refusal a client gets for the one thing that must never work. The
-    // message has to name the value, so the caller can tell "not allowed to
-    // ask for that" from "not allowed to ask at all".
+    // The one thing that must never work, and the reason a connection latch
+    // is safe to have at all: `may_be_declared` refuses the two local origins
+    // by name, whatever was observed and whoever is asking. A connection that
+    // is already `apex-shell` cannot even restate what it is.
     let h = harness!("declare-local");
-    let reply = h.call(r#"{"cmd":"declare_origin","origin":"local-terminal"}"#);
-    assert_eq!(reply["reply"], "error", "{reply}");
-    let msg = reply["message"].as_str().unwrap_or_default();
-    assert!(!msg.is_empty(), "{reply}");
+    for name in ["local-terminal", "apex-shell"] {
+        let mut c = h.conn();
+        let reply = c.call(&format!(r#"{{"cmd":"declare_origin","origin":"{name}"}}"#));
+        assert_eq!(reply["reply"], "error", "{name}: {reply}");
+        assert_eq!(reply["kind"], "permission_denied", "{name}: {reply}");
+        let msg = reply["message"].as_str().unwrap_or_default();
+        assert!(msg.contains(name), "the refusal must name the value: {msg}");
+    }
 }
 
 #[test]

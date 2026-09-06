@@ -71,6 +71,16 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// break-glass session that never expires, which is the one thing §3.4 forbids
 /// outright. The CLI refuses to send either mode to a daemon below
 /// [`SYSTEM_GRANT_VERSION`].
+///
+/// Still 5 after `DeclareOrigin` grew `actor` and began latching a
+/// non-session connection, and the reason is the rule the numbers above are
+/// applying rather than an exception to it. A daemon below this refuses a
+/// declaration from a connection that is not a session — loudly, with
+/// `permission_denied` — so a proxy that needs one cannot get a silent
+/// nothing and carry on forwarding remote requests under a local origin. The
+/// dropped key beside it is `actor`, which is a display string. A version
+/// number exists to catch a fail-open, and this change fails closed on its
+/// own.
 pub const PROTOCOL_VERSION: u32 = 5;
 
 /// The revision at which the credential store moved to `apex-secretd`.
@@ -331,6 +341,20 @@ pub struct SessionInfo {
     /// How [`SessionInfo::request_origin`] was arrived at.
     #[serde(default)]
     pub origin_source: Option<OriginSource>,
+    /// Which remote actor the origin was declared for, when one was named.
+    ///
+    /// Set from [`Request::DeclareOrigin`]'s `actor` on the connection that
+    /// asked for this session — a paired device id for APEX Remote, and
+    /// nothing at all for a session started locally. `request_origin` says
+    /// *what kind* of thing is driving the session and this says *which one*,
+    /// which is the difference between an audit trail that can answer "was it
+    /// my phone" and one that cannot.
+    ///
+    /// Never a key or a token. It is a display string, shown in the Agent
+    /// Center beside the origin, and a client that puts a credential here has
+    /// put a credential in a world-readable record.
+    #[serde(default)]
+    pub actor: Option<String>,
     /// The system-access grant this session runs under, when it has one.
     ///
     /// Present exactly when `policy.system` is not `none`, because the daemon
@@ -584,7 +608,34 @@ pub enum Request {
     /// This is what Remote Control uses. It is enabled after `claude` has
     /// started, so the session was genuinely local when it was created and
     /// nothing observable about the connection ever changes.
-    DeclareOrigin { origin: String },
+    ///
+    /// A connection that is **not** a session declares for the connection
+    /// instead of for a session record, and the declaration then stands for
+    /// every later request on that connection. That is the case a remote
+    /// proxy is in: `apex-remoted` terminates a paired device's channel and
+    /// forwards what it carries, and without this the origin of everything it
+    /// forwards would be whatever its own cgroup happens to say — which for a
+    /// service started from a login session is `local-terminal`, the origin §7
+    /// reserves root approval for. The latch is checked by
+    /// [`crate::origin::may_declare`] against the live observation on every
+    /// request, so it can only ever cost the connection something and can
+    /// never reach a local origin.
+    DeclareOrigin {
+        origin: String,
+        /// Who, on the far side of that connection, this is being declared
+        /// for: a paired device id, an fqdn, a job name.
+        ///
+        /// Recorded beside the origin on sessions and privilege requests, so
+        /// an audit trail says *which* remote device asked rather than only
+        /// that a remote something did. Never a key, a token or a secret —
+        /// it is written to records the user reads, and to the audit log.
+        ///
+        /// `#[serde(default)]` so every existing client keeps working: an
+        /// absent actor is "the origin is all that is known", which is what
+        /// every record written before this said.
+        #[serde(default)]
+        actor: Option<String>,
+    },
 
     // ── privilege requests (§4) ─────────────────────────────────────────────
     //
@@ -1053,6 +1104,7 @@ mod tests {
             decision: crate::request::Decision::Pending,
             request_origin: Some(RequestOrigin::LocalTerminal),
             origin_source: Some(OriginSource::Inherited),
+            actor: None,
             created_ms: 1_700_000_000_000,
             decided_ms: None,
             executed_ms: None,
@@ -1077,6 +1129,7 @@ mod tests {
             policy: AgentPolicy::default(),
             request_origin: Some(RequestOrigin::LocalTerminal),
             origin_source: Some(OriginSource::Observed),
+            actor: Some("pixel-8-office".into()),
             grant: None,
             grant_expires_ms: None,
             native_observed: None,
@@ -1347,6 +1400,7 @@ mod tests {
             Request::Prune,
             Request::DeclareOrigin {
                 origin: "claude-remote-control".into(),
+                actor: Some("pixel-8-office".into()),
             },
         ];
 
@@ -1526,6 +1580,7 @@ mod tests {
             policy: AgentPolicy::default(),
             request_origin: None,
             origin_source: None,
+            actor: None,
             grant: None,
             grant_expires_ms: None,
             native_observed: None,

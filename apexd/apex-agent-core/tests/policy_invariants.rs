@@ -715,6 +715,7 @@ fn sample_request() -> PrivilegeRequest {
         project: Some("/home/tester/Projects/demo".into()),
         request_origin: None,
         origin_source: None,
+        actor: None,
         decision: Decision::Pending,
         created_ms: 1_700_000_000_000,
         decided_ms: None,
