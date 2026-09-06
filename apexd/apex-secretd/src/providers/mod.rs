@@ -17,6 +17,7 @@ use crate::provider::Registry;
 /// service behind it would be worse than not having one.
 #[cfg(test)]
 pub mod bearer;
+pub mod cloudflare;
 pub mod git;
 pub mod mcp;
 
@@ -33,6 +34,7 @@ pub mod mcp;
 pub fn default_registry(run_dir: std::path::PathBuf) -> Result<Registry, String> {
     let mut registry = Registry::new();
     registry.register(Box::new(git::GitProvider))?;
+    registry.register(Box::new(cloudflare::CloudflareProvider::new()))?;
     registry.register(Box::new(mcp::McpProvider::new(run_dir)))?;
     Ok(registry)
 }
@@ -43,10 +45,23 @@ mod tests {
 
     #[test]
     fn the_shipped_registry_builds_and_offers_every_provider_s_vocabulary() {
-        let registry = default_registry(std::env::temp_dir()).expect("every shipped provider must declare validly");
+        let registry = default_registry(std::env::temp_dir())
+            .expect("every shipped provider must declare validly");
         assert_eq!(
             registry.operation_ids(),
-            vec!["git.fetch", "git.ls-remote", "git.push", "mcp.request"]
+            vec![
+                "cloudflare.account.read",
+                "cloudflare.worker.deploy",
+                "cloudflare.worker.read",
+                "cloudflare.worker.rollback",
+                "cloudflare.worker.route.read",
+                "cloudflare.worker.tail",
+                "cloudflare.worker.upload-version",
+                "git.fetch",
+                "git.ls-remote",
+                "git.push",
+                "mcp.request",
+            ]
         );
     }
 
