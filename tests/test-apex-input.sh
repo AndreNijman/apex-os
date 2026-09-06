@@ -58,7 +58,16 @@ mkhome() {
     sed 's/@ACCENT@/#D9F99D/g' "${TMPL}/themerc-override" > "$h/.config/labwc/themerc-override"
 }
 
-run_gen() { HOME="$1" python3 "$GEN" --no-reload "${@:2}"; }
+# Every generator run in this suite gets a FIXTURED device list, because the
+# per-device pass reads real hardware: without this the output depends on what
+# is plugged into the machine running the suite, and — where a Hyprland is
+# running — on what that compositor happens to call it. NODEV is the empty list,
+# so the sections that are not about devices generate the same bytes on a laptop
+# and on a CI runner. The per-device section overrides it with its own.
+NODEV="${WORK}/no-devices.json"
+echo '[]' > "$NODEV"
+run_gen() { HOME="$1" APEX_INPUT_DEVICES="${APEX_INPUT_DEVICES:-$NODEV}" \
+            python3 "$GEN" --no-reload "${@:2}"; }
 
 section "the generator runs and self-tests"
 python3 -c "import ast,sys; ast.parse(open('$GEN').read())" \
@@ -88,6 +97,48 @@ for want in '<naturalScroll>yes</naturalScroll>' '<tap>yes</tap>' \
         | grep -qF "$want" \
         && ok "default reproduces ${want}" || bad "default reproduces ${want}"
 done
+
+# The same property on Hyprland, which nothing checked. It matters more there:
+# the seeded apex/input-defaults.lua set two touchpad options out of ten, so a
+# user who moved one slider on the Input page also silently gained drag lock,
+# disable-while-typing and clickfinger clicking — the page changing three things
+# nobody asked it to.
+SEED="${ROOT}/files/desktop/hypr/apex/input-defaults.lua"
+if [ ! -f "$SEED" ]; then
+    bad "the seeded Hyprland input defaults are where this suite looks"
+else
+    python3 - "$h/.config/hypr/apex/input.lua" "$SEED" <<'PY' \
+        && ok "the seeded Hyprland defaults match what the defaults generate" \
+        || bad "the seeded Hyprland defaults match what the defaults generate"
+import re, sys
+generated, seeded = (open(p, encoding="utf-8").read() for p in sys.argv[1:3])
+
+def blocks(text):
+    """The input block's own keys, and the touchpad sub-block's, kept apart.
+
+    Both carry natural_scroll and scroll_factor with different meanings — one
+    is the mouse's and one the touchpad's — so a flat key scan compares the
+    touchpad's value against the mouse's and reports a difference that is not
+    one.
+    """
+    pad = re.search(r"^\s+touchpad = \{$(.*?)^\s+\},$", text, re.M | re.S)
+    body = pad.group(1) if pad else ""
+    outer = text.replace(body, "") if pad else text
+    pairs = lambda s: {k: v.strip() for k, v in re.findall(r"^\s+(\w+)\s+=\s+(.+),$", s, re.M)}
+    return pairs(outer), pairs(body)
+
+gen_outer, gen_pad = blocks(generated)
+seed_outer, seed_pad = blocks(seeded)
+wrong = []
+for label, want, have in (("input", gen_outer, seed_outer), ("touchpad", gen_pad, seed_pad)):
+    for key, value in want.items():
+        if have.get(key) != value:
+            wrong.append(f"{label}.{key}: generated {value}, seeded {have.get(key, 'nothing')}")
+for w in wrong:
+    print("      " + w)
+sys.exit(1 if wrong else 0)
+PY
+fi
 
 section "the rc.xml edit is lossless outside what it owns"
 # rc.xml is the only file labwc reads, so the generator writes into a file full
@@ -319,7 +370,11 @@ PY
 
 # Real hardware, read-only: the enumeration has to work for a user who is not in
 # the `input` group, which is every APEX user. `libinput list-devices` cannot.
-if [ -d /sys/class/input ]; then
+#
+# Guarded on an actual event node rather than on the directory: a CI container
+# has /sys/class/input and nothing in it, and "the directory exists" would turn
+# that into a failure instead of the skip it is.
+if compgen -G "/sys/class/input/event*" >/dev/null; then
     real="$(python3 "$GEN" --devices 2>/dev/null)"
     printf '%s' "$real" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["devices"] else 1)' \
         && ok "the enumeration finds devices without the input group" \
@@ -332,7 +387,7 @@ sys.exit(1 if bad else 0)' \
         && ok "every enumerated device carries a known kind" \
         || bad "every enumerated device carries a known kind"
 else
-    skp "no /sys/class/input: the enumeration is not exercised against real devices"
+    skp "no input event nodes: the enumeration is not exercised against real devices"
 fi
 
 section "the four settings Hyprland can only express per device"
