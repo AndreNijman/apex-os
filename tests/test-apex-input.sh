@@ -132,11 +132,25 @@ tp | grep -q threeFingerDrag \
 grep -q '<leftHanded>yes</leftHanded>' "$h/.config/labwc/rc.xml" \
     && ok "labwc: leftHanded reaches the pointer device" || bad "labwc: leftHanded reaches the pointer device"
 
-H="$h/.config/hypr/apex-input.conf"
-grep -q 'tap-to-click = false' "$H" && ok "hyprland: tap-to-click applied" || bad "hyprland: tap-to-click applied"
-grep -q 'left_handed = true'   "$H" && ok "hyprland: left_handed applied"   || bad "hyprland: left_handed applied"
-grep -q 'repeat_rate = 40'     "$H" && ok "hyprland: repeat_rate applied"   || bad "hyprland: repeat_rate applied"
-grep -q 'tap_button_map = lmr' "$H" && ok "hyprland: tap_button_map applied" || bad "hyprland: tap_button_map applied"
+# The Hyprland half is a Lua module hyprland.lua requires, not a hyprlang
+# fragment it sources. hyprlang's `tap-to-click` is spelled `tap_to_click` in
+# Lua, and a wrong key is REJECTED rather than ignored — which is what makes
+# the generator's own --self-test meaningful.
+H="$h/.config/hypr/apex/input.lua"
+[ -s "$H" ] && ok "hyprland: a Lua input module is written" \
+            || bad "hyprland: a Lua input module is written"
+grep -q 'tap_to_click            = false' "$H" && ok "hyprland: tap_to_click applied" || bad "hyprland: tap_to_click applied"
+grep -q 'left_handed    = true'  "$H" && ok "hyprland: left_handed applied"   || bad "hyprland: left_handed applied"
+grep -q 'repeat_rate    = 40'    "$H" && ok "hyprland: repeat_rate applied"   || bad "hyprland: repeat_rate applied"
+grep -q 'tap_button_map          = "lmr"' "$H" && ok "hyprland: tap_button_map applied" || bad "hyprland: tap_button_map applied"
+# The old hyprlang fragment must not come back beside it: 0.56.2 loads
+# hyprland.lua and never mentions the .conf it ignored, so a regression here is
+# a settings page that appears to work and changes nothing.
+[ -e "$h/.config/hypr/apex-input.conf" ] \
+    && bad "hyprland: no legacy apex-input.conf is written" \
+    || ok "hyprland: no legacy apex-input.conf is written"
+grep -q 'hl.config({' "$H" && ok "hyprland: the module is Lua, not hyprlang" \
+                           || bad "hyprland: the module is Lua, not hyprlang"
 
 N="$h/.config/apex-shell/ApexShellInput.kdl"
 # niri expresses a false boolean by OMITTING the flag, so `tap` must be absent.

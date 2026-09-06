@@ -23,8 +23,10 @@ trap 'rm -rf "$WORK"' EXIT
 
 pass=0
 fail=0
-ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
-bad() { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
+skipped=0
+ok()   { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
+bad()  { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
+skip() { printf 'SKIP  %s\n' "$1"; skipped=$((skipped + 1)); }
 section() { printf '\n── %s ──\n' "$1"; }
 
 extract() {
@@ -292,7 +294,8 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 section "Hyprland rule migration agrees with the template"
 
-HYPR_TMPL="${ROOT}/files/desktop/hypr/hyprland.conf"
+HYPR_TMPL="${ROOT}/files/desktop/hypr/hyprland.lua"
+HYPR_MODULES="${ROOT}/files/desktop/hypr/apex"
 if [ ! -f "$HYPR_TMPL" ]; then
     bad "the Hyprland template is present"
 else
@@ -304,12 +307,16 @@ else
     } > "$mig"
 
     # Run the real block against it, not a copy of the sed.
+    # HYPR_LEGACY_CONF, not HYPR_CONF: since P0-025 the seeded config is
+    # hyprland.lua and HYPR_CONF names it, while this block is precisely the one
+    # that still has to reach a leftover hyprlang hyprland.conf — it runs before
+    # apex-hypr-migrate converts it.
     HOME="${WORK}/mighome" bash -c '
         set -euo pipefail
         log() { :; }
         KB_LAYOUT=us; KB_VARIANT=; APEX_ACCENT="#D9F99D"
         render_hypr_tmpl() { cat "$1"; }
-        HYPR_CONF="$2"
+        HYPR_LEGACY_CONF="$2"
         mkdir -p "$(dirname "$2")"
         source "$1"
     ' -- "${WORK}/hypr-mig-block.sh" "$mig" >/dev/null 2>&1 || true
@@ -318,12 +325,19 @@ else
         grep -qF "$want" "$mig" \
             && ok "migration produces: ${want}" || bad "migration produces: ${want}"
     done
-    # And the produced spelling is the one the template actually ships.
-    for want in 'suppress_event maximize, match:class' 'no_focus on'; do
-        grep -qF "$want" "$HYPR_TMPL" \
-            && ok "the template ships the same: ${want}" \
-            || bad "the template ships the same: ${want}"
+    # And the shipped tree expresses the same two rules. It cannot ship the same
+    # SPELLING any more — the rules are hl.window_rule calls in apex/rules.lua
+    # since P0-025 — so the invariant is checked semantically: both rules are
+    # present, and the pre-0.54 spellings the sed above removes are absent from
+    # the tree the sed can no longer reach.
+    for want in 'suppress_event = "maximize"' 'no_focus = true'; do
+        grep -qF "$want" "${HYPR_MODULES}/rules.lua" \
+            && ok "the shipped rules module expresses: ${want}" \
+            || bad "the shipped rules module expresses: ${want}"
     done
+    grep -qE 'suppressevent|nofocus,' "${HYPR_MODULES}/rules.lua" \
+        && bad "the shipped rules module carries no pre-0.54 spelling" \
+        || ok "the shipped rules module carries no pre-0.54 spelling"
     # Nothing may still carry the pre-0.54 spelling after migrating.
     grep -qE 'suppressevent|nofocus,' "$mig" \
         && bad "no pre-0.54 spelling survives migration" \
@@ -331,48 +345,83 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Every per-user file the Hyprland template `source=`s must be pre-created.
+#  Every generated module the template requires must be SAFE TO BE MISSING.
 #
-#  Hyprland treats a `source =` with no matching file as a FATAL config error —
-#  "source= globbing error: found no match" — and refuses the ENTIRE config. On
-#  boot #1 none of these files exists yet, because the shell and the settings
-#  generators write them later, so a source line without a matching pre-create
-#  means a first login with no keybinds and no window rules at all.
+#  This section used to assert the opposite, because hyprlang needed it:
+#  Hyprland treats a `source =` with no matching file as a FATAL config error
+#  and refuses the ENTIRE config, so on boot #1 — before the shell and the
+#  settings generators have written anything — every sourced file had to be
+#  pre-created or the user got no keybinds and no window rules at all.
 #
-#  This derives the list from the template instead of hardcoding it. Adding a
-#  new generated source line and forgetting the pre-create is the exact mistake
-#  this catches, and it has already happened once per file added.
+#  Lua removed the need and replaced it with a sharper failure. An uncaught
+#  `require` of a missing module does not just fail: it aborts the config AND
+#  skips every hl.* call below it. hyprland.lua's loader therefore asks
+#  package.searchpath first and treats absent as "not generated yet".
+#
+#  So the invariant is now the reverse one, and it is checked the only way that
+#  proves anything: build the seeded tree with the generated modules genuinely
+#  absent and hand it to the Hyprland in this image.
 # ─────────────────────────────────────────────────────────────────────────────
-section "every sourced per-user file is pre-created"
+section "a generated module that does not exist yet is survivable"
 
-awk '/^for _variant in conf kdl lua/{f=1} f{print} /^for _gen in/{g=1} g&&/^done$/{exit}' \
-    "$SRC" > "${WORK}/precreate-block.sh"
-
-if [ ! -s "${WORK}/precreate-block.sh" ]; then
-    bad "the pre-create block was found in the provisioner"
-elif [ ! -f "$HYPR_TMPL" ]; then
+if [ ! -f "$HYPR_TMPL" ]; then
     bad "the Hyprland template is present"
 else
-    ok "the pre-create block was found in the provisioner"
-    PH="${WORK}/precreate-home"
-    mkdir -p "$PH/.config/apex-shell"
-    # The real block, run against a throwaway HOME, with only the two variables
-    # it reads supplied from the provisioner's own definitions.
-    HOME="$PH" CFG_DIR="$PH/.config/apex-shell" \
-        bash -c 'set -eu; source "$1"' -- "${WORK}/precreate-block.sh" >/dev/null 2>&1
+    # The loader has to look before it leaps. Asserted separately from the parse
+    # below because a template that dropped the guard would still parse here —
+    # the modules are absent, so a bare require would abort, but a template that
+    # required nothing at all would pass a parse check while doing nothing.
+    grep -q 'package.searchpath' "$HYPR_TMPL" \
+        && ok "the loader checks package.searchpath before requiring" \
+        || bad "the loader checks package.searchpath before requiring"
 
-    # Every @HOME@-rooted source line in the template, as a path under HOME.
-    srcs="$(sed -n 's|^source = @HOME@/\(.*\)$|\1|p' "$HYPR_TMPL")"
-    if [ -z "$srcs" ]; then
-        bad "the template has at least one per-user source line"
+    # Every generated module is named, and none of them is shipped.
+    for gen in monitors input shell-keybinds user-overrides; do
+        if grep -q "^apex(\"${gen}\")" "$HYPR_TMPL"; then
+            ok "the template requires the generated module: ${gen}"
+        else
+            bad "the template requires the generated module: ${gen}"
+        fi
+        [ -e "${HYPR_MODULES}/${gen}.lua" ] \
+            && bad "${gen}.lua is generated, so the image must not ship one" \
+            || ok "${gen}.lua is generated, so the image must not ship one"
+    done
+
+    if ! command -v Hyprland >/dev/null 2>&1; then
+        skip "Hyprland is not installed; cannot parse the seeded tree"
     else
-        ok "the template has at least one per-user source line"
-        while IFS= read -r rel; do
-            [ -n "$rel" ] || continue
-            [ -f "${PH}/${rel}" ] \
-                && ok "pre-created: ${rel}" \
-                || bad "pre-created: ${rel} (Hyprland would refuse the whole config)"
-        done <<< "$srcs"
+        CH="${WORK}/cfghome"
+        mkdir -p "${CH}/apex"
+        sed -e 's|@KB_LAYOUT@|us|g' -e 's|@KB_VARIANT@||g' "$HYPR_TMPL" > "${CH}/hyprland.lua"
+        for f in "${HYPR_MODULES}"/*.lua; do
+            sed -e 's|@KB_LAYOUT@|us|g' -e 's|@KB_VARIANT@||g' "$f" \
+                > "${CH}/apex/$(basename "$f")"
+        done
+        rt="$(mktemp -d)"; chmod 0700 "$rt"
+        out="$(XDG_RUNTIME_DIR="$rt" timeout 60 env -u WAYLAND_DISPLAY \
+                 -u HYPRLAND_INSTANCE_SIGNATURE Hyprland --i-am-really-stupid \
+                 --verify-config --config "${CH}/hyprland.lua" 2>&1 || true)"
+        rm -rf "$rt"
+        case "$out" in
+            *"config ok"*) ok "the seeded tree parses with every generated module absent" ;;
+            *) bad "the seeded tree parses with every generated module absent: ${out##*Config parsing result:}" ;;
+        esac
+
+        # ...and a module that is present but BROKEN must not take the rest with
+        # it. This is the half that pays for the loader's pcall: the defaults
+        # are already applied by the time a bad generated file is reached, so a
+        # settings page writing one wrong line costs that page, not the desktop.
+        printf 'this is not lua(((\n' > "${CH}/apex/monitors.lua"
+        rt="$(mktemp -d)"; chmod 0700 "$rt"
+        out="$(XDG_RUNTIME_DIR="$rt" timeout 60 env -u WAYLAND_DISPLAY \
+                 -u HYPRLAND_INSTANCE_SIGNATURE Hyprland --i-am-really-stupid \
+                 --verify-config --config "${CH}/hyprland.lua" 2>&1 || true)"
+        rm -rf "$rt"
+        case "$out" in
+            *"config ok"*) bad "a broken generated module is REPORTED, not swallowed" ;;
+            *monitors*)    ok "a broken generated module is reported by name" ;;
+            *)             bad "a broken generated module is reported by name: ${out##*Config parsing result:}" ;;
+        esac
     fi
 fi
 
@@ -541,5 +590,5 @@ else
     fi
 fi
 
-printf '\napex-shell-firstrun: %d passed, %d failed\n' "$pass" "$fail"
+printf '\napex-shell-firstrun: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ]
