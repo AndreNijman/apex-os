@@ -1,0 +1,168 @@
+# ──────────────────────────────────────────────────────────────────────────────
+#  Promote a digest onto stable, candidate or beta. Roadmap §26.
+#
+#  `edge` is not here. It is moved by build-image.yml with `apex`, `daily`,
+#  `gaming-mesa` and `gaming-nvidia`, because edge IS every successful build of
+#  main and a channel that lagged its own definition would be a lie the first
+#  time somebody switched onto it.
+#
+#  The other three exist to be slower, so they move only when a person says so.
+#  Two things are checked before anything is written, and both are the kind of
+#  mistake that is invisible until somebody's laptop will not boot:
+#
+#   1. The digest must be cosign-signed under this repository's build-image.yml
+#      identity on refs/heads/main. A channel tag is what a machine's bootc
+#      origin points at; pointing one at an unsigned image, or at a fork's, is
+#      the whole supply chain undone by one dispatch with a pasted digest.
+#      release-shell.yml already refuses to build on an unverified platform for
+#      the same reason.
+#
+#   2. The digest must ALREADY be on the channel above the target. `apex channel
+#      list` promises stable is "only builds that have run on the other channels
+#      first"; without this check that sentence is a hope, and the first
+#      violation of it is a stable user taking a build nobody ran. edge is above
+#      beta, beta above candidate, candidate above stable.
+#
+#  Nothing here fires on a push. It is workflow_dispatch only, and it shares
+#  build-image.yml's concurrency group so a promotion cannot interleave with a
+#  publish.
+# ──────────────────────────────────────────────────────────────────────────────
+name: Promote a channel
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Which channel to move"
+        type: choice
+        options: [candidate, beta, stable]
+        required: true
+      digest:
+        description: "The image digest to move it to (sha256:...)"
+        type: string
+        required: true
+
+concurrency:
+  group: apex-image-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/andrenijman/apex-os
+
+jobs:
+  promote:
+    name: Promote ${{ inputs.channel }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Install skopeo
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+
+      - name: Check the digest is well formed
+        env:
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          set -euo pipefail
+          # Before anything reaches a registry command. A malformed digest here
+          # becomes a confusing skopeo error three steps later, and a digest
+          # with a shell metacharacter in it becomes something worse.
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "::error::digest must start with sha256:"; exit 1 ;;
+          esac
+          hex="${DIGEST#sha256:}"
+          if [ "${#hex}" -ne 64 ] || ! printf '%s' "$hex" | grep -qE '^[0-9a-f]{64}$'; then
+            echo "::error::'$DIGEST' is not a sha256 digest"
+            exit 1
+          fi
+
+      - name: Log in to the registry
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$GHCR_TOKEN" | cosign login "$REGISTRY" -u "$GHCR_USER" --password-stdin
+
+      - name: The digest must be signed by this repository's build workflow
+        env:
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          set -euo pipefail
+          IDENTITY="https://github.com/${{ github.repository }}/.github/workflows/build-image.yml@refs/heads/main"
+          cosign verify \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$IMAGE@$DIGEST" > /dev/null
+          echo "signed by $IDENTITY"
+
+      - name: The digest must already be on the channel above this one
+        env:
+          DIGEST: ${{ inputs.digest }}
+          TARGET: ${{ inputs.channel }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          creds="$GHCR_USER:$GHCR_TOKEN"
+          case "$TARGET" in
+            beta)      above=edge ;;
+            candidate) above=beta ;;
+            stable)    above=candidate ;;
+            *) echo "::error::unknown channel '$TARGET'"; exit 1 ;;
+          esac
+          got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$above" 2>/dev/null || echo MISSING)"
+          if [ "$got" != "$DIGEST" ]; then
+            echo "::error::$IMAGE:$above is at '$got', not '$DIGEST'. A build reaches $TARGET only after it has been on $above — promote $above first."
+            exit 1
+          fi
+          echo "  ok   :$above is already at this digest"
+
+      - name: Move the tag
+        env:
+          DIGEST: ${{ inputs.digest }}
+          TARGET: ${{ inputs.channel }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          creds="$GHCR_USER:$GHCR_TOKEN"
+          skopeo copy --retry-times 3 --src-creds "$creds" --dest-creds "$creds" \
+            "docker://$IMAGE@$DIGEST" "docker://$IMAGE:$TARGET"
+
+      - name: Read the tag back out of the registry
+        env:
+          DIGEST: ${{ inputs.digest }}
+          TARGET: ${{ inputs.channel }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # skopeo exiting zero proves skopeo exited zero. What a machine
+          # following this channel will actually receive is what the registry
+          # answers, so that is what is asserted — the same rule build-image.yml
+          # applies to the migration tags.
+          creds="$GHCR_USER:$GHCR_TOKEN"
+          got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$TARGET" 2>/dev/null || echo MISSING)"
+          if [ "$got" != "$DIGEST" ]; then
+            echo "::error::$IMAGE:$TARGET resolves to '$got', expected '$DIGEST'"
+            exit 1
+          fi
+          echo "  ok   :$TARGET -> $got"
+          {
+            echo "### Channel promoted"
+            echo ""
+            echo "\`$IMAGE:$TARGET\` now resolves to \`$DIGEST\`."
+            echo ""
+            echo "Machines following it take it on their next \`apex update\`."
+          } >> "$GITHUB_STEP_SUMMARY"

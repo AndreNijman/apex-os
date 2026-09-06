@@ -465,7 +465,7 @@ pub struct Registry {
 /// GVariant metadata. `rpm-ostree` answers over its system D-Bus service, which
 /// works unprivileged — `bootc status` does not. This is only ever called on
 /// the `--verify` path, so the offline report still spawns nothing.
-fn booted_digest() -> Result<String, String> {
+pub fn booted_digest() -> Result<String, String> {
     let out = Command::new("/usr/bin/rpm-ostree")
         .args(["status", "--json"])
         .output()

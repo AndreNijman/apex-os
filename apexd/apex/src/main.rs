@@ -7,6 +7,7 @@
 mod agent;
 mod ai;
 mod blueprint;
+mod channel;
 mod boot;
 mod dispatch;
 mod disposable;
@@ -105,6 +106,18 @@ enum Cmd {
     Boot {
         #[command(subcommand)]
         cmd: boot::BootCmd,
+    },
+    /// Which update channel this machine follows, and how the last update
+    /// went (§26).
+    ///
+    /// stable, candidate, beta and edge are four tags on one image. `status`
+    /// says which one this machine is on — including the answer for a machine
+    /// installed before channels existed, which is edge under an older name.
+    /// `set` moves between them; moving toward stable usually deploys an older
+    /// image, so that direction pins the current deployment first.
+    Channel {
+        #[command(subcommand)]
+        cmd: channel::ChannelCmd,
     },
     /// Persistent state: which schema each store is on, and what a rollback
     /// would do to it (§25).
@@ -873,6 +886,14 @@ struct UpdateArgs {
     /// Skip updating Flatpak applications.
     #[arg(long)]
     skip_flatpak: bool,
+    /// Update even though the last one left this machine with a regression.
+    ///
+    /// §26's rollout stop refuses a second update on a machine that came back
+    /// from the first one broken, because that is how one bad release becomes
+    /// two. This is the way past it when you know better — for instance when
+    /// the fix is in the release being held.
+    #[arg(long)]
+    force: bool,
     /// Keep ostree's per-object fsync on during the pull. Roughly halves update
     /// speed (measured: ~8 MiB/s with it, ~14.6 without, because 179k objects at
     /// 2.98 ms of fsync each outweighs the download itself) in exchange for
@@ -997,6 +1018,13 @@ fn privileged_verb(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Update(_) => Some("update"),
         Cmd::Rollback => Some("rollback"),
         Cmd::Pin => Some("pin"),
+        // Only `set`. It is `bootc switch`, which rewrites the deployment
+        // origin, and on the backwards direction `ostree admin pin` as well.
+        // `status`, `list` and `report` read the origin file, /etc/machine-id
+        // and /var/lib/apex — all world-readable — so gating them would put a
+        // password in front of "which channel am I on", which is the question
+        // somebody asks when they are already in trouble.
+        Cmd::Channel { cmd: channel::ChannelCmd::Set { .. } } => Some("channel set"),
         // `--source capsule` writes nothing the system owns: it installs into
         // a rootless per-user container. Demanding root for it would be worse
         // than pointless — root has no capsules, so `sudo apex install
@@ -1130,6 +1158,10 @@ async fn main() {
         // Read-only for `status`, and a dry run for `migrate` unless it is
         // given --commit. Every path it touches is in the user's own home, so
         // there is no root gate and nothing here can raise a prompt.
+        // `status`, `list` and `report` are read-only and root-free. `set` is
+        // `bootc switch`, which is in the privileged set below beside Update,
+        // Rollback and Pin.
+        Cmd::Channel { cmd } => channel::main(cmd),
         Cmd::Schema { cmd } => schema::main(cmd),
         Cmd::Trust(args) => trust::main(args),
         // Read-only except for `add`/`remove`/`probe`, which write only the
@@ -1158,6 +1190,7 @@ async fn main() {
             keep_fsync: args.fsync,
             skip_packages: args.skip_packages,
             skip_flatpak: args.skip_flatpak,
+            force: args.force,
         }),
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Metrics(args) => cmd_metrics(args).await,
@@ -2531,6 +2564,39 @@ mod tests {
     #[test]
     fn the_cli_definition_is_internally_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn only_the_channel_verb_that_writes_needs_root() {
+        // The whole point of the readout is that it works when the machine is
+        // in trouble. A password prompt in front of "which channel am I on"
+        // would be exactly the wrong time to ask.
+        for argv in [
+            vec!["apex", "channel", "status"],
+            vec!["apex", "channel", "list"],
+            vec!["apex", "channel", "report"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).expect("parses");
+            assert_eq!(privileged_verb(&cli.command), None, "{argv:?}");
+        }
+        let cli = Cli::try_parse_from(["apex", "channel", "set", "stable"]).expect("parses");
+        assert_eq!(privileged_verb(&cli.command), Some("channel set"));
+        // A name nobody has heard of is refused by clap, BEFORE the root gate.
+        // It was the other way round, and the user was told to type sudo and
+        // then told they had made a typo.
+        let e = match Cli::try_parse_from(["apex", "channel", "set", "nightly"]) {
+            Ok(_) => panic!("an invented channel must not parse"),
+            Err(e) => e.to_string(),
+        };
+        for name in ["stable", "candidate", "beta", "edge"] {
+            assert!(e.contains(name), "the refusal must name {name}: {e}");
+        }
+        assert!(!e.contains("root"), "the refusal must not ask for a password: {e}");
+        // And a dry run still needs it: it is the same verb, and classifying
+        // by flag is how a refusal ends up depending on argument order.
+        let cli =
+            Cli::try_parse_from(["apex", "channel", "set", "stable", "--dry-run"]).expect("parses");
+        assert_eq!(privileged_verb(&cli.command), Some("channel set"));
     }
 
     #[test]

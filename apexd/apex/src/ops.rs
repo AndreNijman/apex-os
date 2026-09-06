@@ -304,6 +304,8 @@ pub struct UpdateOptions {
     pub skip_packages: bool,
     /// Skip updating Flatpak applications.
     pub skip_flatpak: bool,
+    /// Ignore §26's rollout stop and update anyway.
+    pub force: bool,
 }
 
 /// The system-extension package engine behind `apex install`/`remove`/`pkg`.
@@ -512,7 +514,30 @@ pub fn update(opts: UpdateOptions) -> i32 {
         return worst;
     }
 
+    // §26's rollout stop, and the reason it lives here rather than in the
+    // channel verb: a stop nobody's update path consults is a report. The gate
+    // permits every uncertain state — an unreadable file, a digest it could not
+    // resolve, an update that has not been rebooted into — and refuses exactly
+    // one: this machine took the last update and came back with a regression
+    // an image change could have caused. Advancing it again is how one bad
+    // release becomes two, and the user is at the keyboard of the machine that
+    // would do it.
+    if !opts.firmware_only && !opts.force {
+        if let Some(why) = crate::channel::halt_reason() {
+            eprint!("{why}");
+            return 1;
+        }
+    }
+
     if !opts.firmware_only {
+        // What the machine is running BEFORE the pull, so the next run can tell
+        // whether this one was rebooted into. Written first: a record written
+        // after a successful upgrade would be missing for exactly the update
+        // that crashed the machine, which is the one the gate exists for.
+        match crate::channel::current_tag() {
+            Ok(tag) => crate::channel::record_update(&tag),
+            Err(e) => eprintln!("apex: the update health gate is not armed: {e}"),
+        }
         // fsync off for the pull, restored when this drops — including on the
         // error paths below. See FsyncGuard for the measurements and the trade.
         let _fsync = if opts.keep_fsync {
