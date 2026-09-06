@@ -47,6 +47,18 @@ is no root one) — a failure to look, not an absence. Fixed, then 5/5 rc=0.
   (new control_socket_in) -> expect interaction with the Cloudflare branch.
 FALLBACK: `git reset --hard bc4f06e` (pushed).
 
+## REMAINING ORDER (do not let added scope orphan the shell work)
+1. p1-018: `git cherry-pick 526e16c..16fc8ae` (9 commits; 526e16c is ALREADY
+   upstream as my 7f14a00 — `git cherry` confirms it as `-`). It carries the
+   run-clippy.sh fix as 16fc8ae.
+2. per-commit build over the 9, then push.
+3. katana + L16 clippy runs (independent machines).
+4. api.rs-on-run_curl decision (feature vs resolution).
+5. apex-shell fix/locked-hint.
+6. report.
+GUARD ADDED to runtests.sh + percommit.sh: refuse to run on a dirty tree
+(exit 3). Mutation-proved: dirtied cloudflare.rs -> rc=3, restored -> runs.
+
 ## BRANCH 3 RESOLUTIONS
 - broker.rs (ddc80fa, 1 hunk): kept HEAD `drop_to`, deleted the branch's
   `pub fn drop_privileges` (37 lines) that auto-merge had left ALONGSIDE it.
