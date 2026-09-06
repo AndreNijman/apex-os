@@ -231,8 +231,25 @@ impl Probe {
         for entry in entries.flatten() {
             let path = entry.path();
             let caps = path.join("capabilities/key");
-            let Ok(bitmap) = std::fs::read_to_string(&caps) else {
-                continue;
+            let bitmap = match std::fs::read_to_string(&caps) {
+                Ok(b) => b,
+                // Most entries under /sys/class/input are leaf nodes
+                // (eventN, mouseN, jsN) with no capabilities file of their
+                // own — that absence is the ordinary shape of the listing,
+                // not a refusal, and skipping it is what makes the loop find
+                // the `inputN` entries that do carry one.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                // Anything else is a refused read on a device this loop
+                // could not check. Silently skipping it would let a
+                // permission problem masquerade as "not a gamepad", and the
+                // whole answer would then certify an empty list as complete
+                // when it is not.
+                Err(e) => {
+                    return Signal::unavailable(
+                        format!("{}: {e}", caps.display()),
+                        dir.display().to_string(),
+                    );
+                }
             };
             if !has_key_bit(&bitmap, BTN_GAMEPAD) {
                 continue;
@@ -841,6 +858,46 @@ mod tests {
         );
         // …and it is still not a blocker: Big Picture works with a keyboard.
         assert!(r.is_ready());
+    }
+
+    #[test]
+    fn an_unreadable_capabilities_file_is_unavailable_rather_than_no_gamepad() {
+        // The bug: `continue` on any read failure, including a refused one,
+        // means a controller this loop could not check is silently treated
+        // the same as a device confirmed not to be a gamepad. An empty
+        // result then certifies "no controller attached" off a read that
+        // never happened.
+        let f = gaming_edition("pad-eacces");
+        f.write(
+            "sys/class/input/input5/capabilities/key",
+            &bitmap_with(BTN_GAMEPAD),
+        );
+        f.write("sys/class/input/input5/name", "Microsoft X-Box 360 pad\n");
+        use std::os::unix::fs::PermissionsExt;
+        let caps = f.0.join("sys/class/input/input5/capabilities/key");
+        let mut perms = std::fs::metadata(&caps).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&caps, perms).unwrap();
+        let sealed = matches!(
+            std::fs::read_to_string(&caps),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied
+        );
+
+        let r = f.probe().report();
+
+        let mut perms = std::fs::metadata(&caps).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&caps, perms).ok();
+
+        if !sealed {
+            return; // the caller overrides the mode bit; it proves nothing here
+        }
+        assert!(
+            !r.gamepad.is_measured(),
+            "a refused capabilities read must not be reported as a measured \
+             (and empty) controller list, got {:?}",
+            r.gamepad.value()
+        );
     }
 
     #[test]

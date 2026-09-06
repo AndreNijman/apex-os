@@ -203,6 +203,53 @@ fn the_mains_supply_is_found_by_type_never_by_name() {
 }
 
 #[test]
+fn an_unreadable_online_file_does_not_measure_the_machine_onto_battery() {
+    // `read_trim(...).ok()` answered a refused read the same way it answered
+    // "0": the machine went to Battery/efficiency mode off a stat that never
+    // completed. sysfs power_supply attributes are ordinarily world-readable,
+    // so this guards a confined environment rather than a permission bit seen
+    // in the field — but the code must not assume that always holds.
+    let f = Fixture::new("mains-eacces");
+    f.write("sys/class/power_supply/ADP1/type", "Mains\n");
+    f.write("sys/class/power_supply/ADP1/online", "1\n");
+    let online = f.0.join("sys/class/power_supply/ADP1/online");
+    let mut perms = fs::metadata(&online).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o000);
+    fs::set_permissions(&online, perms).unwrap();
+    let sealed = matches!(
+        fs::read_to_string(&online),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied
+    );
+
+    let sig = read_on_ac(&f.roots());
+
+    let mut perms = fs::metadata(&online).unwrap().permissions();
+    perms.set_mode(0o644);
+    fs::set_permissions(&online, perms).ok();
+
+    if !sealed {
+        return; // the caller overrides the mode bit; it proves nothing here
+    }
+    assert!(
+        !sig.is_measured(),
+        "a refused online read must not be reported as 'on battery', got {:?}",
+        sig.value()
+    );
+}
+
+#[test]
+fn a_genuinely_offline_mains_supply_is_still_measured_on_battery() {
+    // The other half: a mains adapter that is present but unplugged (online=0,
+    // read successfully) must stay a measured fact, or the fix above would
+    // turn the ordinary "on battery" case into a permanent gap.
+    let f = Fixture::new("mains-offline");
+    f.write("sys/class/power_supply/ADP1/type", "Mains\n");
+    f.write("sys/class/power_supply/ADP1/online", "0\n");
+    assert_eq!(read_on_ac(&f.roots()).value(), Some(&false));
+}
+
+#[test]
 fn psi_is_parsed_from_the_some_line_not_the_full_line() {
     // `full` counts time when EVERY task stalled, which on a desktop is almost
     // always zero. Reading it instead of `some` makes the busy signal inert.

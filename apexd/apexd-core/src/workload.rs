@@ -354,20 +354,45 @@ pub fn read_on_ac(roots: &Roots) -> Signal<bool> {
     };
     let mut saw_mains = false;
     let mut online = false;
+    // Recorded rather than acted on immediately: a refused read on one Mains
+    // supply must not overrule "online" confirmed through another, so the
+    // whole loop runs before this decides anything.
+    let mut unreadable: Option<String> = None;
     for e in entries.flatten() {
         let p = e.path();
         if read_trim(&p.join("type")).as_deref() != Some("Mains") {
             continue;
         }
         saw_mains = true;
-        if read_trim(&p.join("online")).as_deref() == Some("1") {
-            online = true;
-        }
+        let online_path = p.join("online");
+        match std::fs::read_to_string(&online_path) {
+            Ok(s) if s.trim() == "1" => online = true,
+            // Either "0", or a driver that reports Mains with no `online`
+            // attribute at all — both are a measured "not this one".
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // sysfs power_supply attributes are ordinarily world-readable, so
+            // this is not the common case — but `read_trim().ok()` turned a
+            // refused read into the same value "0" gives, and that value
+            // switches the machine to Battery/efficiency mode even though it
+            // may be sitting on the charger.
+            Err(e) => {
+                unreadable.get_or_insert_with(|| format!("{}: {e}", online_path.display()));
+            }
+        };
     }
     if !saw_mains {
         // A desktop with no mains supply object is always on AC, but saying so
         // would be an inference. Report the gap and let the caller decide.
         return Signal::unavailable("no supply reports type=Mains", src);
+    }
+    if !online {
+        if let Some(why) = unreadable {
+            return Signal::unavailable(
+                format!("{why} — AC state could not be confirmed"),
+                src,
+            );
+        }
     }
     Signal::measured(online, src)
 }
