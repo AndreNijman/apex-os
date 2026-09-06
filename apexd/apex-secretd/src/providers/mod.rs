@@ -26,10 +26,14 @@ pub mod mcp;
 /// quietly dropped a provider would answer "that is not an operation this
 /// build offers" for a capability the owner had granted, which is the most
 /// confusing possible refusal.
-pub fn default_registry() -> Result<Registry, String> {
+/// `run_dir` is the store's own scratch directory, which only root may write.
+/// Passed in rather than derived here so a provider cannot pick a directory of
+/// its own: where a root process writes a file an unprivileged child then reads
+/// is the framework's business, not a provider's.
+pub fn default_registry(run_dir: std::path::PathBuf) -> Result<Registry, String> {
     let mut registry = Registry::new();
     registry.register(Box::new(git::GitProvider))?;
-    registry.register(Box::new(mcp::McpProvider::new()))?;
+    registry.register(Box::new(mcp::McpProvider::new(run_dir)))?;
     Ok(registry)
 }
 
@@ -39,7 +43,7 @@ mod tests {
 
     #[test]
     fn the_shipped_registry_builds_and_offers_every_provider_s_vocabulary() {
-        let registry = default_registry().expect("every shipped provider must declare validly");
+        let registry = default_registry(std::env::temp_dir()).expect("every shipped provider must declare validly");
         assert_eq!(
             registry.operation_ids(),
             vec!["git.fetch", "git.ls-remote", "git.push", "mcp.request"]
@@ -51,7 +55,7 @@ mod tests {
         // Grants written before P1-001 say `git-push` and `mcp-request`. The
         // registry canonicalises them, so an owner does not have to re-grant
         // anything to keep a machine working across the upgrade.
-        let registry = default_registry().expect("registry");
+        let registry = default_registry(std::env::temp_dir()).expect("registry");
         for (old, new) in [
             ("git-push", "git.push"),
             ("git-fetch", "git.fetch"),

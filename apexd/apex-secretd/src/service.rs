@@ -608,14 +608,10 @@ mod tests {
             store::now_ms()
         ));
         std::fs::remove_dir_all(&dir).ok();
-        (
-            Service::new(
-                Store::new(dir.clone()),
-                false,
-                crate::providers::default_registry().expect("the shipped registry"),
-            ),
-            dir,
-        )
+        let store = Store::new(dir.clone());
+        let registry =
+            crate::providers::default_registry(store.run_dir()).expect("the shipped registry");
+        (Service::new(store, false, registry), dir)
     }
 
     /// The audit trail of a temp service, by path rather than through the
