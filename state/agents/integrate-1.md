@@ -5,16 +5,21 @@ worktree: /var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell
 branch: roadmap/v2.2
 
 ## NEXT
-Round 2/10: resolve apexd/apex-agentd/src/broker.rs (compose roadmap's
-operation/resource/params shape-check with P0-003's body pass-through +
-client.use_with_body). Then apex-agentd/src/main.rs.
+apex-os round 3/10 (e635c54, TempFile/run_dir hardening): resolve
+apexd/apex-secretd/src/broker.rs then apexd/apex-secretd/src/service.rs.
+The service.rs half is likely the `use_capability` MCP branch that no longer
+exists after the port -- the run_dir now belongs to providers/mcp.rs.
 
 ## DONE
 - baseline verified on roadmap/v2.2 @ a141cee: cargo test = 1477 passed / 0 failed
 - tag int-os-prelanding set on a141cee (recovery point)
 - rebase started; round 1/10 (a0fad9d, profile/sandbox/session) applied clean
 
-## RESOLVED THIS ROUND
+## ROUND 2/10 COMMITTED as 9854884 -- cargo test 1500 passed / 0 failed
+(baseline 1477). All P0-003 MCP end-to-end tests pass against the ported
+provider, including the loopback bearer-token server and the SSE variant.
+
+## RESOLVED IN ROUND 2
 - apex-secret-core/src/capability.rs -> roadmap (P1-001) side wholesale.
   P0-003's `Capability::McpRequest` variant, `remote() -> Option`, `resource()`,
   `is_git()` and its two enum tests all describe a type P1-001 deleted. The MCP
@@ -29,11 +34,31 @@ client.use_with_body). Then apex-agentd/src/main.rs.
   operation/resource/params (roadmap) AND body: Option<String> (P0-003).
   Both entries kept in the version-guard test list; both assert_eq'd.
 
+- apex-agentd/src/{broker,main}.rs -> composed, mechanical: roadmap's
+  operation/resource/params parameter list PLUS P0-003's body pass-through.
+- apex-secretd/src/broker.rs -> roadmap's GitOp signatures for resolve_url and
+  perform (P0-003's Option<remote> handling existed only for McpRequest);
+  P0-003's perform_http/run_curl/quote/TempFile/mcp_session_id kept whole.
+  Dropped P0-003's unreachable `Capability::McpRequest` arm in perform().
+- apex-secretd/src/service.rs -> roadmap's framework flow wholesale, PLUS
+  P0-003's `body: Vec<u8>` parameter, handed to the provider through a new
+  `Bind::body` field. P0-003's is_git()/else branch deleted: the registry
+  routes it. P0-003's Service.mcp_sessions map MOVED into McpProvider (a map
+  of MCP sessions in the framework is the coupling P1-001 removed).
+- NEW apex-secretd/src/providers/mcp.rs -> P0-003's McpRequest re-expressed as
+  a Provider: operation `mcp.request`, alias `mcp-request`, ResourceKind::None,
+  no params, Effect::Write. bind() = Endpoint::from_url(service.url()) plus
+  P0-003's two refusals (no --path, empty message). perform() calls
+  broker::perform_http unchanged.
+- apex-secretd/tests/end_to_end.rs -> roadmap's `git.` spellings + P0-003's
+  body_len framing; P0-003's 4 MCP tests kept, retargeted at
+  CapabilityRecord::new(svc, "mcp.request", "").
+- apex/src/secret.rs -> roadmap's generic CLI; P0-003's SecretUse gains body.
+  Both version-guard tests kept (see FOUND).
+- apex/src/mcp.rs -> sends operation "mcp.request", resource "", params {}.
+
 ## IN PROGRESS
-- round 2/10 = 885930b "the broker carries an mcp message". 8 files conflicted:
-  apex-agent-core/src/protocol.rs, apex-agentd/src/{broker,main}.rs,
-  apex-secret-core/src/capability.rs, apex-secretd/src/{broker,service}.rs,
-  apex-secretd/tests/end_to_end.rs, apex/src/secret.rs
+- round 3/10 = e635c54
 
 ## FOUND
 - THE HEADLINE: the task brief says the roadmap side is "P0-002's secretd
