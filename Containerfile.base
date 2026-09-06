@@ -57,6 +57,7 @@ RUN set -eux; cd /build/apexd; cargo build --release --locked; \
     install -Dm755 target/release/apexd       /out/usr/bin/apexd; \
     install -Dm755 target/release/apex        /out/usr/bin/apex; \
     install -Dm755 target/release/apex-agentd /out/usr/bin/apex-agentd; \
+    install -Dm755 target/release/apex-secretd /out/usr/bin/apex-secretd; \
     install -Dm755 target/release/apex-aid    /out/usr/bin/apex-aid
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -135,6 +136,18 @@ RUN systemctl enable apexd.service
 # daemon holding PTYs should not start for people who never run an agent. The
 # CLI prints the enable command when the socket is absent.
 COPY files/system/units/apex-agentd.service /usr/lib/systemd/user/apex-agentd.service
+
+# ── protected secret service (apex-secretd, §11) ────────────────────────────
+# A SYSTEM unit, and enabled — the opposite of apex-agentd, on purpose. It holds
+# every brokered credential and has no verb that returns one, so a git
+# credential helper, the CLI and the agent runtime all depend on it being
+# reachable; a service somebody has to remember to start is a service each of
+# those needs a fallback for. It is idle until asked.
+#
+# Root, because the store must be unreadable by the user's uid AND the git
+# operation must run as the user. The unit file itself carries the argument.
+COPY files/system/units/apex-secretd.service /usr/lib/systemd/system/apex-secretd.service
+RUN systemctl enable apex-secretd.service
 
 # ── local inference service (apex-aid, §14) ─────────────────────────────────
 # A USER unit, and — exactly like apex-agentd — deliberately NOT
@@ -242,7 +255,23 @@ RUN set -eux; \
     # Opt-in by design: a per-user daemon holding PTYs must not be enabled for
     # users who never run an agent. Assert it is NOT wired into any target.
     test ! -e /usr/lib/systemd/user/default.target.wants/apex-agentd.service; \
-    echo "agent sandbox: bwrap functional; agentd unit present, coloured and opt-in"
+    # The secret service is the other way round: a SYSTEM unit, and enabled,
+    # because everything that brokers a credential depends on it answering.
+    test -s /usr/lib/systemd/system/apex-secretd.service; \
+    grep -q '^ExecStart=/usr/bin/apex-secretd$' /usr/lib/systemd/system/apex-secretd.service; \
+    test -L /usr/lib/systemd/system/multi-user.target.wants/apex-secretd.service; \
+    # The two lines that make the store a boundary rather than a directory. A
+    # StateDirectoryMode that drifted to 0755 would leave every credential
+    # readable by the account it belongs to, which is the whole of P0-002's
+    # first criterion, and nothing at runtime would complain.
+    grep -q '^StateDirectory=apex-secretd$' /usr/lib/systemd/system/apex-secretd.service; \
+    grep -q '^StateDirectoryMode=0700$' /usr/lib/systemd/system/apex-secretd.service; \
+    # And it must NOT have been given a User=: dropping to the owner for the
+    # git child needs CAP_SETUID, which a non-root unit does not have, and the
+    # daemon would refuse every operation with an error nobody would connect to
+    # this line.
+    ! grep -q '^User=' /usr/lib/systemd/system/apex-secretd.service; \
+    echo "agent sandbox: bwrap functional; agentd opt-in; secretd enabled with a 0700 store"
 
 # Default browser (system-wide XDG): Firefox is the only baked browser, but set
 # the http/https/html handlers explicitly so any "open link" honours it without
@@ -1705,7 +1734,7 @@ RUN set -eux; \
     systemctl enable greetd.service; \
     systemctl set-default graphical.target
 
-# ── Stage 6z: apexd, apex and apex-agentd ───────────────────────────────────
+# ── Stage 6z: apexd, apex, apex-agentd, apex-secretd and apex-aid ───────────
 # LAST, and deliberately so. These are the most volatile artefacts in the image
 # — every apexd commit changes them — and `podman build --cache-to` pushes each
 # intermediate layer to the registry separately, so a cache miss high in this
@@ -1728,6 +1757,7 @@ RUN set -eux; \
     test -x /usr/bin/apexd; \
     test -x /usr/bin/apex; \
     test -x /usr/bin/apex-agentd; \
+    test -x /usr/bin/apex-secretd; \
     test -x /usr/bin/apex-aid; \
     # The CLI must actually run in the image it ships in, not merely be present:
     # a dynamic-link or glibc mismatch against core is exactly the failure that
@@ -1795,6 +1825,18 @@ RUN set -eux; \
     # link or glibc mismatch against core is exactly what a file-existence check
     # misses. `--help` is a pure print and binds no socket.
     /usr/bin/apex-aid --help >/dev/null; \
+    # Same rule for the secret service: `--help` is a pure print and binds no
+    # socket, so it proves the binary runs against this image's glibc.
+    /usr/bin/apex-secretd --help >/dev/null; \
+    # Every `apex secret` verb by name. A renamed one is a silent no-op in the
+    # skills and shell functions that call it, and §12's whole point is that
+    # those keep working unchanged.
+    for v in add list remove capabilities grant revoke grants use audit; do \
+        /usr/bin/apex secret "$v" --help >/dev/null \
+            || { echo "FATAL: apex secret $v is gone"; exit 1; }; \
+    done; \
+    # The one thing the CLI must never grow: a verb that prints a credential.
+    ! /usr/bin/apex secret --help | grep -qiE '\b(show|reveal|export|cat|print|read)\b'; \
     # And the refusal that carries §14's central security decision has to be
     # live in the shipped binary, not just in the source. Asserted on both the
     # daemon and the CLI, because each has its own argument parser.
@@ -1820,7 +1862,7 @@ RUN set -eux; \
     APEXHOME="$(mktemp -d)"; \
     env -i HOME="$APEXHOME" TERM=xterm PATH=/usr/bin:/bin zsh -ic 'whence -w a >/dev/null' </dev/null; \
     rm -rf "$APEXHOME"; \
-    echo "apexd/apex/apex-agentd/apex-aid installed and runnable; shell verbs and `a` intact"
+    echo "apexd/apex/apex-agentd/apex-secretd/apex-aid installed and runnable; shell verbs and `a` intact"
 
 # ── Stage 7: bootc container sanity lint (informational) ───────────────────
 RUN bootc container lint || true

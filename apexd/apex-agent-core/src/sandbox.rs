@@ -1493,6 +1493,28 @@ mod tests {
     }
 
     #[test]
+    fn the_secret_service_socket_is_not_bound_into_a_confined_session() {
+        // P0-002 puts the credential store behind `apex-secretd`, whose socket
+        // is `/run/apex-secretd/control.sock`. A confined session has no
+        // business opening it: brokered use goes through `apex-agentd`, which
+        // is outside the sandbox and is the only thing that knows which session
+        // is asking. Talking to the service directly would let a session
+        // present itself as an unsessioned caller.
+        //
+        // The `/run` tmpfs already achieves this — nothing under `/run` is
+        // visible unless it is bound back, and only the agent runtime's own
+        // socket is. Asserted rather than assumed, because the whole reason
+        // `/run` is masked is that a `--ro-bind / /` once made every socket in
+        // it reachable, and the fix is one line away from being reverted.
+        let a = argv(&spec());
+        assert!(a.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == "/run"));
+        assert!(
+            !a.iter().any(|arg| arg.contains("apex-secretd")),
+            "the secret service socket reached a confined session's argv: {a:?}"
+        );
+    }
+
+    #[test]
     fn preflight_is_a_no_op_for_unrestricted() {
         assert_eq!(preflight(SandboxPolicy::Unrestricted), Ok(()));
     }

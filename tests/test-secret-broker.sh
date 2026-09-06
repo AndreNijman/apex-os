@@ -1,26 +1,37 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  End-to-end assertions for the APEX secret broker (roadmap §4).
+#  End-to-end assertions for the APEX secret broker (roadmap §3.2, §11).
 #
-#  §4's claim is one sentence: "agents should be able to use credentials without
-#  receiving the raw secret". Everything else in the broker is plumbing. So the
-#  central test here stores a SENTINEL token, uses a capability from inside a
-#  real confined session, and asserts the sentinel appears in
+#  The claim is one sentence: agents use credentials without receiving them.
+#  Everything else is plumbing. So the central test here stores a SENTINEL
+#  credential, uses a capability from inside a real confined session, and
+#  asserts the sentinel appears in
 #
 #      * the command's stdout
 #      * the command's stderr
 #      * the session's own PTY transcript
-#      * the audit log
+#      * the audit trail
 #
-#  ...in none of them. If it appears anywhere, the broker has failed at the only
-#  thing it exists for.
+#  ...in none of them. If it appears anywhere, the service has failed at the
+#  only thing it exists for.
+#
+#  TWO DAEMONS, and which one answers is the point. apex-secretd owns the store
+#  and performs the operation; apex-agentd owns the session, its secret policy
+#  and its project, and forwards a capability record. Neither alone can do what
+#  P0-002 asks: the agent runtime runs as the user, so a store it owned would be
+#  a store the agent owned.
 #
 #  NO NETWORK IS USED. The fixture remote points at https://127.0.0.1:1/, which
-#  refuses instantly, so git fails fast and the token is sent nowhere. The point
-#  is not that the push succeeds — it is that the credential stayed on the
-#  daemon's side of the namespace boundary while it was attempted.
+#  refuses instantly, so git fails fast and the credential is sent nowhere. The
+#  point is not that the fetch succeeds — that is proven hermetically by the
+#  Rust suite in apexd/apex-secretd/tests/end_to_end.rs, against a real
+#  credential-checking server — it is that the credential stayed on the
+#  service's side while the attempt was made.
 #
-#  NO ROOT. Nothing here needs privilege; the broker is unprivileged by design.
+#  NO ROOT. apex-secretd is started with --store and --socket and runs as the
+#  invoking user, so it reports `protected: false`. That costs this suite the
+#  at-rest half of the boundary, which needs a uid it does not have; the API
+#  half is the same code either way.
 #
 #      ./tests/test-secret-broker.sh
 # ─────────────────────────────────────────────────────────────────────────────
@@ -43,13 +54,25 @@ bad() { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
 section() { printf '\n── %s ──\n' "$1"; }
 
 DAEMON_PID=""
+SECRETD_PID=""
+# Only ever this script's own children, by recorded pid. Never by name: the
+# developer's own apex-agentd is usually running, and a previous version of a
+# suite like this one killed it.
 cleanup() {
-    [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null
+    for pid in "$DAEMON_PID" "$SECRETD_PID"; do
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null
+    done
     for _ in 1 2 3 4 5; do
-        [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null || break
+        alive=0
+        for pid in "$DAEMON_PID" "$SECRETD_PID"; do
+            [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && alive=1
+        done
+        [ "$alive" = 0 ] && break
         sleep 0.2
     done
-    [ -n "$DAEMON_PID" ] && kill -9 "$DAEMON_PID" 2>/dev/null
+    for pid in "$DAEMON_PID" "$SECRETD_PID"; do
+        [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
+    done
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -77,13 +100,14 @@ done
 
 section "the binaries"
 cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
-    --bin apex-agentd --bin apex >/dev/null 2>&1 || {
-    bad "apex-agentd and apex build"
+    --bin apex-agentd --bin apex-secretd --bin apex >/dev/null 2>&1 || {
+    bad "apex-agentd, apex-secretd and apex build"
     printf '\nsecret-broker: %d passed, %d failed\n' "$pass" "$fail"; exit 1; }
-ok "apex-agentd and apex build"
+ok "apex-agentd, apex-secretd and apex build"
 
-BIN="${ROOT}/apexd/target/debug"
+BIN="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug"
 AGENTD="${BIN}/apex-agentd"
+SECRETD="${BIN}/apex-secretd"
 APEX="${BIN}/apex"
 
 # ── an isolated runtime ──────────────────────────────────────────────────────
@@ -96,7 +120,28 @@ chmod 0700 "$XDG_RUNTIME_DIR"
 # THE sentinel. Distinctive enough that a grep for it cannot match by accident.
 SENTINEL="apex-sentinel-7f3a91c4-do-not-leak"
 
-section "the daemon"
+section "the secret service"
+# Its own socket and its own store, both under $WORK. The variable is what the
+# CLI and apex-agentd both read, and apex-agentd is started afterwards so it
+# inherits it.
+export APEX_SECRETD_SOCKET="${WORK}/secretd.sock"
+SECRET_STORE="${WORK}/secretd-store"
+"$SECRETD" --socket "$APEX_SECRETD_SOCKET" --store "$SECRET_STORE" \
+    > "${WORK}/secretd.log" 2>&1 &
+SECRETD_PID=$!
+for _ in $(seq 1 50); do [ -S "$APEX_SECRETD_SOCKET" ] && break; sleep 0.1; done
+[ -S "$APEX_SECRETD_SOCKET" ] && ok "the secret service came up" || {
+    bad "the secret service came up"
+    sed 's/^/      /' "${WORK}/secretd.log"
+    printf '\nsecret-broker: %d passed, %d failed\n' "$pass" "$fail"; exit 1; }
+
+# Every local account must be able to reach it; who they are is decided from
+# SO_PEERCRED, not from a mode bit.
+sockmode="$(stat -c '%a' "$APEX_SECRETD_SOCKET" 2>/dev/null)"
+[ "$sockmode" = "666" ] && ok "the socket is reachable by any local account (is ${sockmode})" \
+                        || bad "the socket is reachable by any local account (is ${sockmode})"
+
+section "the agent runtime"
 "$AGENTD" > "${WORK}/agentd.log" 2>&1 &
 DAEMON_PID=$!
 SOCK="${XDG_RUNTIME_DIR}/apex-agentd/control.sock"
@@ -124,10 +169,22 @@ out="$("$APEX" secret list 2>&1)"
 printf '%s' "$out" | grep -q "demo" \
     && ok "the service is listed" || { bad "the service is listed"; printf '      %s\n' "$out"; }
 printf '%s' "$out" | grep -q "$SENTINEL" \
-    && bad "`list` does not print the token" || ok "\`list\` does not print the token"
+    && bad "\`list\` does not print the credential" || ok "\`list\` does not print the credential"
 
-STORE="${XDG_STATE_HOME}/apex/agent/secrets/demo.json"
-[ -f "$STORE" ] && ok "the credential is on disk" || bad "the credential is on disk"
+# The credential lives in the secret service's store, in a file of its own, and
+# NOT beside the session records. That split is what lets the wire types refuse
+# to serialise a value at all: nothing hands one to serde.
+STORE="${SECRET_STORE}/users/$(id -u)/demo.secret"
+META="${SECRET_STORE}/users/$(id -u)/demo.json"
+[ -f "$STORE" ] && ok "the credential is in the service's store" \
+                || bad "the credential is in the service's store"
+grep -q "$SENTINEL" "$META" 2>/dev/null \
+    && bad "the metadata record holds no credential" \
+    || ok "the metadata record holds no credential"
+grep -rq "$SENTINEL" "$XDG_STATE_HOME" 2>/dev/null \
+    && bad "nothing under the agent runtime's state holds the credential" \
+    || ok "nothing under the agent runtime's state holds the credential"
+
 mode="$(stat -c '%a' "$STORE" 2>/dev/null)"
 [ "$mode" = "600" ] && ok "the credential file is 0600 (is ${mode})" \
                     || bad "the credential file is 0600 (is ${mode})"
@@ -136,7 +193,7 @@ dirmode="$(stat -c '%a' "$(dirname "$STORE")" 2>/dev/null)"
                        || bad "its directory is 0700 (is ${dirmode})"
 
 printf '%s' "$("$APEX" secret list --json 2>/dev/null)" | grep -q "$SENTINEL" \
-    && bad "--json does not include the token" || ok "--json does not include the token"
+    && bad "--json does not include the credential" || ok "--json does not include the credential"
 
 # ── nothing is allowed by default ────────────────────────────────────────────
 section "a stored credential grants nothing"
@@ -148,7 +205,8 @@ printf '%s' "$out" | grep -q "not granted" \
     && ok "an ungranted capability is refused" \
     || { bad "an ungranted capability is refused"; printf '      %s\n' "$out"; }
 printf '%s' "$out" | grep -q "$SENTINEL" \
-    && bad "the refusal does not leak the token" || ok "the refusal does not leak the token"
+    && bad "the refusal does not leak the credential" \
+    || ok "the refusal does not leak the credential"
 
 # ── the vocabulary is closed ─────────────────────────────────────────────────
 section "the vocabulary is closed"
@@ -192,10 +250,11 @@ printf '%s' "$out" | grep -q "example.invalid" \
     && ok "a remote on another host is refused" \
     || { bad "a remote on another host is refused"; printf '      %s\n' "$out"; }
 printf '%s' "$out" | grep -q "$SENTINEL" \
-    && bad "the host mismatch does not leak the token" || ok "the host mismatch does not leak the token"
+    && bad "the host mismatch does not leak the credential" \
+    || ok "the host mismatch does not leak the credential"
 
 out="$(cd "$PROJ" && "$APEX" secret use demo git-fetch viassh 2>&1)"
-printf '%s' "$out" | grep -q "not an https remote" \
+printf '%s' "$out" | grep -q "not an http remote" \
     && ok "an ssh remote is refused with an explanation" \
     || { bad "an ssh remote is refused with an explanation"; printf '      %s\n' "$out"; }
 
@@ -204,7 +263,7 @@ printf '%s' "$out" | grep -q "no remote called" \
     && ok "an unconfigured remote is refused" || bad "an unconfigured remote is refused"
 
 # ── THE assertion ────────────────────────────────────────────────────────────
-section "the token never reaches the caller"
+section "the credential never reaches the caller"
 # A granted capability, actually attempted. git will fail — 127.0.0.1:1 refuses
 # — and that is fine: what is asserted is that the credential stayed on the
 # daemon's side while the attempt was made.
@@ -213,31 +272,46 @@ err="$(cat "${WORK}/use.err")"
 printf '%s\n%s\n' "$out" "$err" | sed 's/^/      /' | head -8
 
 printf '%s' "$out" | grep -q "$SENTINEL" \
-    && bad "the token is not in stdout" || ok "the token is not in stdout"
+    && bad "the credential is not in stdout" || ok "the credential is not in stdout"
 printf '%s' "$err" | grep -q "$SENTINEL" \
-    && bad "the token is not in stderr" || ok "the token is not in stderr"
+    && bad "the credential is not in stderr" || ok "the credential is not in stderr"
 printf '%s\n%s' "$out" "$err" | grep -qE "127\.0\.0\.1|Could not resolve|refused|unable to access" \
     && ok "the operation was genuinely attempted" \
     || bad "the operation was genuinely attempted (nothing suggests git ran)"
 
-section "the audit log records the use and not the secret"
-LOG="${XDG_STATE_HOME}/apex/agent/secret-audit.jsonl"
-[ -s "$LOG" ] && ok "an audit log was written" || bad "an audit log was written"
+section "the audit trail records the use and not the credential"
+# The trail lives with the store, not with the caller: in the image that
+# directory is root-owned, so the audited party cannot rewrite the audit.
+LOG="${SECRET_STORE}/audit.jsonl"
+[ -s "$LOG" ] && ok "an audit trail was written" || bad "an audit trail was written"
 if [ -s "$LOG" ]; then
     grep -q "$SENTINEL" "$LOG" \
-        && bad "the audit log does not contain the token" \
-        || ok "the audit log does not contain the token"
-    grep -q '"capability": *"git-fetch"' "$LOG" \
+        && bad "the audit trail does not contain the credential" \
+        || ok "the audit trail does not contain the credential"
+    grep -q '"operation":"git-fetch"' "$LOG" \
         && ok "the capability is recorded" || bad "the capability is recorded"
-    grep -q '"event": *"refused"' "$LOG" \
+    grep -q '"event":"refused"' "$LOG" \
         && ok "refusals are recorded too" || bad "refusals are recorded too"
-    python3 - "$LOG" <<'PY' && ok "every line is one JSON object" || bad "every line is one JSON object"
-import json,sys
+    grep -q '"event":"stored"' "$LOG" \
+        && ok "storing a credential is recorded too" \
+        || bad "storing a credential is recorded too"
+    python3 - "$LOG" <<'PYEOF' && ok "every line carries the record from section 11" || bad "every line carries the record from section 11"
+import json, sys
+want = {'audit_id', 'ms', 'event', 'uid', 'peer_pid', 'provider', 'operation',
+        'detail', 'resource', 'project', 'agent_session', 'request_origin',
+        'approval_policy', 'constraints'}
 for line in open(sys.argv[1]):
     if line.strip():
         o = json.loads(line)
-        assert {'ms','event','service','capability'} <= set(o), o
-PY
+        missing = want - set(o)
+        assert not missing, (missing, o)
+PYEOF
+    "$APEX" secret audit 2>&1 | grep -q "git fetch origin" \
+        && ok "\`apex secret audit\` reads the trail back" \
+        || bad "\`apex secret audit\` reads the trail back"
+    "$APEX" secret audit 2>&1 | grep -q "$SENTINEL" \
+        && bad "\`apex secret audit\` does not print the credential" \
+        || ok "\`apex secret audit\` does not print the credential"
 fi
 
 # ── from inside a confined session ───────────────────────────────────────────
@@ -261,6 +335,8 @@ export XDG_CONFIG_HOME="${XDG_CONFIG_HOME}"
 cd "${PROJ}" || exit 1
 echo "--- can the session read the credential file directly? ---"
 cat "${STORE}" 2>&1 | head -3
+echo "--- can it reach the secret service directly? ---"
+"${SESSION_APEX}" secret list 2>&1 | head -3
 echo "--- can it grant itself a capability? ---"
 "${SESSION_APEX}" secret grant demo git-push 2>&1
 echo "--- can it use the granted one? ---"
@@ -332,12 +408,21 @@ else
         ok "the session's script actually ran"
 
         printf '%s' "$logs" | grep -q "$SENTINEL" \
-            && bad "the session's transcript does not contain the token" \
-            || ok "the session's transcript does not contain the token"
+            && bad "the session's transcript does not contain the credential" \
+            || ok "the session's transcript does not contain the credential"
         printf '%s' "$logs" | grep -qE "No such file|Permission denied|cannot open" \
             && ok "the credential file is unreachable from inside the sandbox" \
             || bad "the credential file is unreachable from inside the sandbox"
-        printf '%s' "$logs" | grep -q "cannot change its own capabilities" \
+        # Two locks on the same door, and both are asserted because either one
+        # alone is a line away from being removed. The sandbox masks /run and
+        # binds back only the agent runtime's own socket, so a confined session
+        # cannot open the secret service at all; and the service refuses a
+        # mutating verb from any caller inside a session, which is what covers
+        # an UNCONFINED one.
+        printf '%s' "$logs" | grep -qE "secret service is not running|cannot reach the secret service" \
+            && ok "the secret service is unreachable from inside the sandbox" \
+            || bad "the secret service is unreachable from inside the sandbox"
+        printf '%s' "$logs" | grep -qE "cannot change its own capabilities|agent session cannot|secret service is not running|cannot reach the secret service" \
             && ok "the session cannot grant itself a capability" \
             || bad "the session cannot grant itself a capability"
 
@@ -362,12 +447,14 @@ section "removing"
 [ ! -f "$STORE" ] && ok "removing deletes the stored credential" \
                   || bad "removing deletes the stored credential"
 
-# Nothing anywhere under the isolated state may still hold the sentinel.
-if grep -rq "$SENTINEL" "$XDG_STATE_HOME" 2>/dev/null; then
-    printf '      still present in: %s\n' "$(grep -rl "$SENTINEL" "$XDG_STATE_HOME" 2>/dev/null | tr '\n' ' ')"
-    bad "no trace of the token remains in the state directory"
+# Nothing anywhere under either daemon's state may still hold the sentinel. The
+# audit trail is deliberately in scope: it outlives the credential, and if the
+# credential were in it, deleting the credential would not have deleted it.
+if grep -rq "$SENTINEL" "$SECRET_STORE" "$XDG_STATE_HOME" 2>/dev/null; then
+    printf '      still present in: %s\n' "$(grep -rl "$SENTINEL" "$SECRET_STORE" "$XDG_STATE_HOME" 2>/dev/null | tr '\n' ' ')"
+    bad "no trace of the credential remains on disk"
 else
-    ok "no trace of the token remains in the state directory"
+    ok "no trace of the credential remains on disk"
 fi
 
 printf '\nsecret-broker: %d passed, %d failed\n' "$pass" "$fail"
