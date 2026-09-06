@@ -211,7 +211,7 @@ mod tests {
 
     use crate::peer::Peer;
     use crate::provider::Registry;
-    use crate::service::Service;
+    use crate::service::{NewService, Service};
 
     /// Distinctive enough that a grep for it cannot match by accident.
     const STORED: &str = "apex-sentinel-9d1e77a3-do-not-leak";
@@ -325,13 +325,15 @@ mod tests {
         assert_eq!(
             service.add(
                 peer,
-                "api",
-                "127.0.0.1",
-                "http",
-                None,
-                "",
-                None,
-                None,
+                NewService {
+                    service: "api",
+                    host: "127.0.0.1",
+                    scheme: "http",
+                    username: None,
+                    path: "",
+                    auth: None,
+                    port: None,
+                },
                 SecretValue::new(STORED.as_bytes().to_vec()),
             ),
             Response::Ok
@@ -421,13 +423,15 @@ mod tests {
         assert_eq!(
             f.service.add(
                 peer,
-                "elsewhere",
-                "example.invalid",
-                "https",
-                None,
-                "",
-                None,
-                None,
+                NewService {
+                    service: "elsewhere",
+                    host: "example.invalid",
+                    scheme: "https",
+                    username: None,
+                    path: "",
+                    auth: None,
+                    port: None,
+                },
                 SecretValue::new(STORED.as_bytes().to_vec()),
             ),
             Response::Ok
