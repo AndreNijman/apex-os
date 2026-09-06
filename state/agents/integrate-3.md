@@ -154,6 +154,33 @@ FEATURE CHANGE and not a resolution, so I did not do it blind:
   left anywhere in the tree.
 - The message I changed ("acts on something you name") had exactly ONE
   assertion on it, in end_to_end.rs. Swept *.rs *.sh *.md *.yml *.qml.
+- check-doc-verbs.sh on the FINAL tip, run properly (paths + APEX= set, since
+  the no-arg form is a phantom pass): 61 valid, 1 deliberate, 0 BAD.
+- p1-018 shipped NO docs. Neither `apex mcp connect` nor `--everywhere`
+  appears anywhere in docs/ — a real gap, since the refusal message and the
+  CLI hint both point users at those verbs.
+
+## COUNT HONESTY (do not let the report imply every run was clean)
+1801/0 was measured on TWO COMPLETE runs (test-final.log, test-final2.log),
+both rc=0, 29 binaries, from a clean committed tree with the dirty-tree guard
+armed. ONE EARLIER RUN did not complete: it hung on the documented
+`apex-agentd pty::tests::spawning_runs_the_real_program_on_a_real_terminal`
+contention flake with FOUR other agents' cargo runs live (futex_do_wait, 0 CPU,
+5.5 min). I killed ONLY my own two test-binary PIDs in my own target dir —
+`/var/tmp/apex-build-cache/int3/debug/deps/apex_agentd-<hash>` — after
+confirming the real `/usr/bin/apex-agentd` daemons (pids 4599, 5426) were
+untouched. `cargo test -p apex-agentd` alone then gave 109/0 in 2.02s, matching
+integrate-2's recorded 86/0 in 2.01s for the same binary. Contention, not
+regression.
+
+## LIMITATION OF MY OWN GATE FIX (say it plainly)
+`may_be_granted_everywhere` is a hardcoded allow-list. The next names-nothing
+operation any provider adds is refused `--everywhere` by default — fail-closed,
+which is correct — but p1-018's registry test will still PASS silently for it,
+because it only asserts `== (id == "mcp.request")`. Intended behaviour, not a
+defect, but the `same_everywhere` declaration fact is the real fix.
+CONSEQUENCE THE COORDINATOR NEEDS: `cloudflare.account.read` is per-project
+only now, which bounds what `apex cf status` can be granted for.
 GUARD ADDED to runtests.sh + percommit.sh: refuse to run on a dirty tree
 (exit 3). Mutation-proved: dirtied cloudflare.rs -> rc=3, restored -> runs.
 

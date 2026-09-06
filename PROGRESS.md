@@ -301,6 +301,53 @@ fixed on `roadmap/v2.2`:
   whose name appears at a different EVR for the host arch is now dropped as an
   application fork rather than a multilib library.
 
+### A security hole that only existed once two branches met
+
+P1-018 shipped `apex secret grant <svc> <op> --everywhere`, gated in the daemon
+on `OperationSpec::names_nothing()` — no resource **and** no parameters. The
+reasoning was sound on the tree it was written against: an operation that names
+nothing can only ever reach the endpoint pinned when its credential was stored,
+so granting it everywhere widens *where* it may be asked for and not *what* it
+reaches. `git.push` resolves a remote out of the caller's repository, so it was
+correctly refused.
+
+P1-002 landed the first counterexample. **`cloudflare.account.read` declares no
+resource and no params, and still resolves its account from the project's own
+`apex.toml`** — bound it is `GET /accounts/{id}`, unbound it is `GET /accounts`.
+So `*` would have let an agent in a project the owner never approved read that
+project's account.
+
+Neither branch was wrong on its own. The hole existed only in their
+composition, and **P1-018's own test caught it during integration** — which is
+the argument for writing the test that states the intent rather than the one
+that matches the code. The integrator fixed P1-018 against its stated intent
+rather than relaxing the test: an explicit allow-list shared by the gate and the
+CLI hint, so the two cannot disagree, plus a runtime test. Mutation pair 109/2
+against 111/0.
+
+That fix is fail-closed but not final: the registry test will pass silently for
+the next such operation. The real fix is `same_everywhere` as a declared fact on
+`OperationSpec`, and it is queued.
+
+### The clippy wrapper paid for itself on its first real run
+
+P1-002's author recorded that clippy could not be run. On the first run over
+that code it found two genuine lints — `type_complexity` and `useless_format` —
+both fixed, bytes identical before and after, 13/0 either way.
+
+### An integrator pushed a tip that did not compile, and said so
+
+`cherry-pick -n` then `git apply` without `--index` then `commit -C` commits the
+**index**, so the fix was not in the commit — while cargo, reading the working
+tree, reported 1750 passing. The tip was wrong for about four minutes. Caught on
+one line of `git status`, re-picked with the fix staged, force-pushed, and a
+dirty-tree guard (exit 3) added to the runner scripts and mutation-proved, plus
+a per-commit build loop over all fifteen commits.
+
+Worth recording for the same reason the other self-reports are: the failure mode
+is that **the working tree and the commit disagree, and every test reads the
+working tree.**
+
 ### It was twelve runners, not four, and the fix had two bugs of its own
 
 The survey said four test runners reached Andre's session. A proper sweep found

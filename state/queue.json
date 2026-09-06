@@ -4,6 +4,17 @@
   "concurrency_ceiling": 6,
   "units": [
     {
+      "id": "followups-integrate-3",
+      "repo": "apex-os",
+      "items": [
+        "(hardening)"
+      ],
+      "title": "Four follow-ups the third integration round routed onward",
+      "after": [],
+      "conflicts": [],
+      "note": "1. SECURITY, and the real fix for a hole caught during integration: p1-018's --everywhere grant is gated on OperationSpec::names_nothing(), reasoning that an operation naming nothing can only reach the endpoint pinned when its credential was stored. P1-002 landed the first counterexample -- cloudflare.account.read declares no resource AND no params, yet resolves its account from the project's own apex.toml (bound: GET /accounts/{id}; unbound: GET /accounts), so `*` would let an agent in a project the owner never approved read that project's account. p1-018's own test caught it and the integrator fixed it with an explicit allow-list shared by the gate and the CLI hint. That is fail-closed but the registry test will pass SILENTLY for the next such operation. The real fix is `same_everywhere` as a declared fact on OperationSpec. Consequence of the interim fix: cloudflare.account.read is per-project only. 2. SECURITY: broker.rs's run_curl invokes a bare `curl` off PATH with no -q, while setting HOME to the owner's -- so a root daemon's curl reads the owner's ~/.curlrc. api.rs already uses /usr/bin/curl -q. 3. cloudflare/api.rs should move onto broker::run_curl, but this is a FEATURE not a resolution: run_curl returns curl's exit code rather than the HTTP status the Cloudflare Reply model needs, and appends stderr onto the body, which breaks its status parse. Fix run_curl first. 4. p1-018 shipped no docs: neither `apex mcp connect` nor --everywhere appears under docs/, though the refusal message and the CLI hint point users at both."
+    },
+    {
       "id": "trust-enforcement",
       "repo": "apex-os",
       "items": [

@@ -777,16 +777,7 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Policy landed on task/p0-013-request-origin, not wired, and it cannot be until apex-shell changes. LockState
-    has four answers with Unreadable treated as locked and NoDisplaySession as unlocked, since a headless box has
-    no screen and answering locked there stops everything rather than protecting anything. LockPolicy::default is
-    section 7 verbatim and decide is checked over 8 policies by 7 origins by 4 states. There is no reader because
-    there is nothing to read: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind
-    reports LockedHint no on a session locked for an hour exactly as on one nobody has touched. A control-socket
-    verb was considered and rejected, logind accepts the hint only from the session owner and the daemon cannot
-    tell the shell from a managed session running as the same user. Dispatched as fix/locked-hint in apex-shell.
-    Criterion 2 also has no subject yet, both SystemAccess::Session and Unsafe are refused today so no short-lived
-    root grant exists to revoke, which is P0-006 and P0-007.
+    --evidence
 - id: P0-016
   title: Add Agent Settings page with password-gated Always Unrestricted toggle
   priority: P0

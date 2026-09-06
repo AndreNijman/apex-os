@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T05:21+08:00",
+  "updated": "2026-09-07T05:30+08:00",
   "agents": [
     {
       "slug": "p1-020",
@@ -16,19 +16,6 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T04:25+08:00 (fresh agent, resumed from card after the 01:11 limit)",
       "title": "agent/subagent graph, statusline telemetry, notification bridge and dedup"
-    },
-    {
-      "slug": "integrate-3",
-      "items": [
-        "(integration only)"
-      ],
-      "repo": "both",
-      "worktree": "/var/tmp/apex-work/int-os",
-      "branch": "roadmap/v2.2",
-      "agent_id": "a79fe29f588310de6",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T04:50+08:00",
-      "title": "land chore/run-clippy, task/p1-045-updates-trust, task/p1-002-cloudflare, fix/locked-hint"
     },
     {
       "slug": "p1-050",
@@ -92,6 +79,20 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T05:35+08:00",
       "title": "hardware qualification database, agent cgroup budgets, Storage Manager, firmware lifecycle"
+    },
+    {
+      "slug": "p0-014",
+      "items": [
+        "P0-014",
+        "P0-015"
+      ],
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/wt-p0-014",
+      "branch": "task/p0-014-remote-lock",
+      "agent_id": "aea4c89ecac1a21da",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T05:45+08:00",
+      "title": "finish the Remote Control privilege policy and the lock-state policy \u2014 closes P0"
     }
   ]
 }
