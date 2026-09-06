@@ -598,9 +598,47 @@ extract_rpms() {
     # in guard_rpms. This throwaway root has an empty keyring, so leaving it on
     # would print a NOKEY warning per package that means nothing.
     rpm --root "$root" --initdb
-    rpm --root "$root" -Uvh --nodeps --noscripts --notriggers --noplugins \
-        --nosignature --replacefiles --replacepkgs --excludepath /boot \
-        "$destdir"/*.rpm >&2 || die "extraction failed"
+
+    # Multilib is extracted in a SECOND pass, taking libraries only.
+    #
+    # A 32-bit package is not a 32-bit version of an application; it is the
+    # libraries a 32-bit application needs. `fontconfig.i686` still carries
+    # /usr/bin/fc-list, /usr/share and /etc, byte-for-byte the same paths as the
+    # x86_64 build. One `rpm -Uvh --replacefiles` over both arches lets whichever
+    # lands last win, and on this machine i686 won: /usr/bin/fc-list became an
+    # ELF 32-bit i386 binary shadowing the image's own, `fc-list` then returned
+    # zero fonts, and Steam drew its interface with no text at all. dnf never
+    # hits this because multilib packages are filtered to libraries before they
+    # are ever unpacked together.
+    #
+    # So: native and noarch first, then the rest with everything that is not a
+    # library excluded. `--excludepath` takes the path as it appears in the
+    # header, and 32-bit content lives in /usr/lib and /lib (never /usr/lib64),
+    # so excluding these four leaves exactly the libraries behind.
+    local -a native=() foreign=() host
+    host="$(uname -m)"
+    local f arch
+    for f in "$destdir"/*.rpm; do
+        arch="$(rpm -qp --nosignature --qf '%{ARCH}' -- "$f" 2>/dev/null)"
+        if [ "$arch" = "$host" ] || [ "$arch" = noarch ]; then
+            native+=("$f")
+        else
+            foreign+=("$f")
+        fi
+    done
+
+    if [ ${#native[@]} -gt 0 ]; then
+        rpm --root "$root" -Uvh --nodeps --noscripts --notriggers --noplugins \
+            --nosignature --replacefiles --replacepkgs --excludepath /boot \
+            "${native[@]}" >&2 || die "extraction failed"
+    fi
+    if [ ${#foreign[@]} -gt 0 ]; then
+        rpm --root "$root" -Uvh --nodeps --noscripts --notriggers --noplugins \
+            --nosignature --replacefiles --replacepkgs --excludepath /boot \
+            --excludepath /usr/bin --excludepath /usr/sbin \
+            --excludepath /usr/share --excludepath /etc \
+            "${foreign[@]}" >&2 || die "extraction of the multilib set failed"
+    fi
     rm -rf "${root}/usr/share/rpm" "${root}/var/lib/rpm" "${root}/usr/lib/sysimage/rpm"
 }
 
