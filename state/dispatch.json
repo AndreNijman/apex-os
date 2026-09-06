@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T04:32+08:00",
+  "updated": "2026-09-07T04:47+08:00",
   "agents": [
     {
       "slug": "p1-044",
@@ -73,6 +73,19 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T04:25+08:00 (fresh agent, resumed from card after the 01:11 limit)",
       "title": "stop four test runners opening windows on Andre's desktop, then redesign Blueprint and Gaming settings"
+    },
+    {
+      "slug": "integrate-3",
+      "items": [
+        "(integration only)"
+      ],
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/int-os",
+      "branch": "roadmap/v2.2",
+      "agent_id": "a79fe29f588310de6",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T04:50+08:00",
+      "title": "land chore/run-clippy, task/p1-045-updates-trust, task/p1-002-cloudflare, fix/locked-hint"
     }
   ]
 }
