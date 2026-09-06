@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use apex_agent_core::origin::{OriginSource, SessionOrigin};
 use apex_agent_core::paths;
 use apex_agent_core::policy::AgentPolicy;
 use apex_agent_core::protocol::{ErrorKind, Response};
@@ -26,11 +27,12 @@ use apex_agent_core::request::{
 use crate::peer::{self, Peer};
 use crate::Daemon;
 
-/// Which session a connection belongs to, and what that session was doing.
+/// Which session a connection belongs to, what that session was doing, and
+/// where it is being driven from.
 ///
-/// `None` for a connection from an ordinary terminal — the user's own shell
-/// running `apex request approve`, or APEX Shell. That is not an error: an
-/// unsessioned peer is the human, and the human is who decides.
+/// `session` is `None` for a connection from an ordinary terminal — the user's
+/// own shell running `apex request approve`, or APEX Shell. That is not an
+/// error: an unsessioned peer is the human, and the human is who decides.
 #[derive(Debug, Clone, Default)]
 pub struct Origin {
     pub session: Option<u32>,
@@ -43,21 +45,61 @@ pub struct Origin {
     /// looser one. An unsessioned peer is the human, whose policy is whatever
     /// their shell allows, so the default applies.
     pub policy: AgentPolicy,
+    /// Where the connection came from (§7's `request_origin`), when that could
+    /// be established.
+    pub request_origin: Option<SessionOrigin>,
+    /// Why [`Origin::request_origin`] is not a measurement, when it is not
+    /// one.
+    ///
+    /// A separate field rather than a `Result`, so `Origin::default()` and the
+    /// callers that only want `session` keep working, and so the reason
+    /// survives to the refusal the user reads. `None` here with `None` above
+    /// cannot happen from [`origin`]: one of the two is always set.
+    pub origin_unreadable: Option<String>,
 }
 
-/// Resolve a connection to the session that owns it.
+impl Origin {
+    /// An origin the daemon could not establish, with the reason.
+    ///
+    /// Deliberately not a fallback to [`RequestOrigin::default`], which is
+    /// `local-terminal` — the origin §7 reserves root and break-glass for.
+    /// "Could not tell" and "a human is at the keyboard" are different
+    /// answers, and this is the whole defect this field exists to avoid.
+    fn unreadable(why: impl Into<String>) -> Origin {
+        Origin {
+            origin_unreadable: Some(why.into()),
+            ..Origin::default()
+        }
+    }
+
+}
+
+/// Resolve a connection to the session that owns it, and to §7's origin.
 ///
 /// The pid comes from `SO_PEERCRED` and is walked up its `/proc` ancestry until
 /// it meets a pid the daemon recorded when it forked a session. Nothing the
 /// client sent is consulted.
+///
+/// A connection that belongs to a session **inherits that session's origin**
+/// rather than being classified afresh. That is the point: a Remote Control
+/// session's agent files a request from a local process, so re-observing it
+/// would answer `local-terminal` every time and the second column of §7's
+/// table would be unreachable. The session's origin is what is actually
+/// driving it, and the daemon recorded it when it forked the session.
 pub fn origin(daemon: &Arc<Daemon>, peer: Option<Peer>) -> Origin {
     let Some(peer) = peer else {
-        return Origin::default();
+        return Origin::unreadable(
+            "the kernel would not report the peer credentials of this connection, so there is \
+             no way to tell where it came from",
+        );
     };
     if !peer::is_own_user(&peer) {
         // Should be unreachable: the socket sits in a 0700 directory inside
-        // $XDG_RUNTIME_DIR. Treated as unsessioned rather than trusted.
-        return Origin::default();
+        // $XDG_RUNTIME_DIR. Treated as unidentified rather than trusted.
+        return Origin::unreadable(format!(
+            "this connection belongs to uid {}, not to the user this runtime runs for",
+            peer.uid
+        ));
     }
 
     // Snapshot (pid, id) pairs, then release the lock: the ancestry walk does
@@ -72,33 +114,56 @@ pub fn origin(daemon: &Arc<Daemon>, peer: Option<Peer>) -> Origin {
             })
             .collect()
     };
-    if live.is_empty() {
-        return Origin::default();
-    }
 
-    let matched = peer::resolve_by_ancestry(peer.pid, |p| live.iter().any(|(pid, _)| *pid == p));
-    let Some(found) = matched else {
-        return Origin::default();
+    let matched = if live.is_empty() {
+        None
+    } else {
+        peer::resolve_by_ancestry(peer.pid, |p| live.iter().any(|(pid, _)| *pid == p))
     };
-    let Some((_, id)) = live.iter().find(|(pid, _)| *pid == found) else {
-        return Origin::default();
+
+    let Some(found) = matched.and_then(|f| live.iter().find(|(pid, _)| *pid == f).map(|(_, id)| *id))
+    else {
+        // Not a managed session. Classify the peer itself.
+        return match crate::origin::observe(&peer) {
+            Ok(o) => Origin {
+                request_origin: Some(SessionOrigin::observed(o)),
+                ..Origin::default()
+            },
+            Err(why) => Origin::unreadable(why),
+        };
     };
 
     // Re-take the lock for the details, so the snapshot above stays short.
     let reg = daemon.registry.lock().expect("registry lock");
-    match reg.get(*id).and_then(|h| {
-        h.lock()
-            .ok()
-            .map(|s| (s.info.agent.clone(), s.info.project.clone(), s.info.policy))
-    }) {
-        Some((agent, project, policy)) => Origin {
-            session: Some(*id),
+    let found_session = reg.get(found).and_then(|h| {
+        h.lock().ok().map(|s| {
+            (
+                s.info.agent.clone(),
+                s.info.project.clone(),
+                s.info.policy,
+                s.info.request_origin,
+            )
+        })
+    });
+    match found_session {
+        Some((agent, project, policy, recorded)) => Origin {
+            session: Some(found),
             agent: Some(agent),
             project,
             policy,
+            request_origin: recorded.map(SessionOrigin::inherited),
+            // A session record from a daemon that predates origin tracking.
+            // Not treated as local: the field was never written, and an
+            // absent field is not a measurement.
+            origin_unreadable: recorded.is_none().then(|| {
+                format!(
+                    "session {found} was started before this runtime recorded origins, so where \
+                     it is driven from was never established"
+                )
+            }),
         },
         None => Origin {
-            session: Some(*id),
+            session: Some(found),
             agent: None,
             project: None,
             // A session whose record vanished between the ancestry walk and
@@ -106,7 +171,99 @@ pub fn origin(daemon: &Arc<Daemon>, peer: Option<Peer>) -> Origin {
             // every dimension. Failing toward the loose one here would make a
             // race into a permission.
             policy: AgentPolicy::default(),
+            request_origin: None,
+            origin_unreadable: Some(format!(
+                "session {found} disappeared while this request was being attributed"
+            )),
         },
+    }
+}
+
+/// Record a session's own, narrower, origin (§7).
+///
+/// Only a session may call this, and only about itself — the session comes
+/// from the peer credentials, so there is no id to get wrong or to forge. The
+/// declaration is checked by [`apex_agent_core::origin::may_declare`], which
+/// accepts it only when it gives something up.
+///
+/// This is the route Remote Control takes. It is switched on after `claude`
+/// has started, so nothing observable about the connection ever changes and
+/// an observation alone could never reach §7's second column.
+pub fn declare(daemon: &Arc<Daemon>, peer: Option<Peer>, wanted: &str) -> Response {
+    use apex_agent_core::policy::RequestOrigin;
+
+    let Some(wanted) = RequestOrigin::parse(wanted) else {
+        return Response::error(
+            ErrorKind::BadRequest,
+            format!(
+                "'{wanted}' is not an origin; use one of {}",
+                RequestOrigin::ALL
+                    .iter()
+                    .filter(|o| o.may_be_declared())
+                    .map(|o| o.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    };
+
+    let who = origin(daemon, peer);
+    let Some(session) = who.session else {
+        return Response::error(
+            ErrorKind::PermissionDenied,
+            "only a managed session can narrow its own origin; this connection is not one"
+                .to_string(),
+        );
+    };
+    let Some(current) = who.request_origin else {
+        return Response::error(
+            ErrorKind::PermissionDenied,
+            who.origin_unreadable
+                .unwrap_or_else(|| "this session has no recorded origin".to_string()),
+        );
+    };
+    let narrowed = match current.declare(wanted) {
+        Ok(o) => o,
+        Err(e) => return Response::error(ErrorKind::PermissionDenied, e.to_string()),
+    };
+
+    let reg = daemon.registry.lock().expect("registry lock");
+    let Some(handle) = reg.get(session) else {
+        return Response::error(ErrorKind::NoSuchSession, format!("no session {session}"));
+    };
+    let mut s = handle.lock().expect("session lock");
+    s.info.request_origin = Some(narrowed.origin);
+    s.info.origin_source = Some(narrowed.source);
+    crate::registry::write_record(&s.info);
+    Response::Session(Box::new(s.info.clone()))
+}
+
+/// The origin a new session gets, and the error when it cannot have one.
+///
+/// Split out of `session::start` so the rule is one readable function: a Run
+/// from inside a session produces a child of that session's origin, a Run from
+/// anywhere else is classified from the connection, and a declaration is
+/// applied on top of whichever it was.
+pub fn for_new_session(
+    who: &Origin,
+    declared: Option<apex_agent_core::policy::RequestOrigin>,
+) -> Result<SessionOrigin, String> {
+    let base = match (&who.request_origin, who.session) {
+        (Some(parent), Some(_)) => SessionOrigin {
+            origin: apex_agent_core::origin::child_of(parent.origin),
+            source: OriginSource::Inherited,
+        },
+        (Some(observed), None) => *observed,
+        (None, _) => {
+            return Err(who
+                .origin_unreadable
+                .clone()
+                .unwrap_or_else(|| "the origin of this connection could not be established".into()))
+        }
+    };
+    match declared {
+        None => Ok(base),
+        Some(wanted) => base.declare(wanted).map_err(|e| e.to_string()),
     }
 }
 
@@ -128,6 +285,23 @@ pub fn file(daemon: &Arc<Daemon>, peer: Option<Peer>, verb: &str, args: &[String
     };
 
     let who = origin(daemon, peer);
+
+    // Every verb in this vocabulary is a root operation, and §7's table gives
+    // a different answer for a remote origin than a local one. A request the
+    // daemon cannot attribute to an origin therefore cannot be filed: the
+    // human deciding it would be reading a prompt that could not tell them
+    // which column of that table they were in.
+    let Some(source) = who.request_origin else {
+        return Response::error(
+            ErrorKind::PermissionDenied,
+            format!(
+                "{}, so this request cannot be attributed to an origin and will not be filed",
+                who.origin_unreadable
+                    .unwrap_or_else(|| "the origin could not be established".to_string())
+            ),
+        );
+    };
+
     let dir = request::requests_dir();
     let grants = Grants::load(&request::grants_file());
     let pre_approved = grants.allows(who.project.as_deref(), &parsed);
@@ -140,6 +314,8 @@ pub fn file(daemon: &Arc<Daemon>, peer: Option<Peer>, verb: &str, args: &[String
         session: who.session,
         agent: who.agent,
         project: who.project,
+        request_origin: Some(source.origin),
+        origin_source: Some(source.source),
         decision: if pre_approved {
             Decision::AllowForProject
         } else {

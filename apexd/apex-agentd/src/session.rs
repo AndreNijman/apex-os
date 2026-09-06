@@ -19,6 +19,7 @@ use apex_agent_core::session as logic;
 use apex_agent_core::term::WinSize;
 
 use crate::egress;
+use crate::peer::Peer;
 use crate::pty;
 use crate::registry::{self, now_secs, Handle};
 use crate::Daemon;
@@ -30,7 +31,13 @@ use crate::Daemon;
 const POLL_INTERVAL_MS: i32 = 1000;
 
 /// Start a session.
-pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
+///
+/// `peer` is the connection's credentials, and it is what establishes the
+/// session's origin (§7). It is passed rather than looked up for the same
+/// reason the privilege verbs take it: the origin has to come from the
+/// kernel's view of who connected, and a handler that could reach for the
+/// request instead would eventually do so.
+pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Result<SessionInfo> {
     let cwd = PathBuf::from(&req.cwd);
     if !cwd.is_absolute() {
         bail!("working directory {} must be absolute", cwd.display());
@@ -92,6 +99,20 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
     // Fail closed before anything is created: a session must never start with
     // weaker confinement than was asked for.
     sandbox::preflight(policy.sandbox).map_err(SandboxRefused)?;
+
+    // Dimension 6's companion: where this session will be driven from.
+    //
+    // Established here, once, from the connection that asked for it — and
+    // never afterwards from anything the session says, because a session that
+    // could name its own origin could name the local one. `--origin` on the
+    // command line is a DECLARATION and is checked against the observation
+    // before it is accepted; a local origin is refused whatever is sent.
+    //
+    // Refused rather than defaulted when it cannot be established: the default
+    // is `local-terminal`, which is what §7 reserves root for.
+    let who = crate::privilege::origin(daemon, peer);
+    let session_origin = crate::privilege::for_new_session(&who, req.request_origin)
+        .map_err(OriginRefused)?;
 
     // Resolve the project, then the worktree, then the working directory. Each
     // step can change where the session actually runs.
@@ -278,6 +299,8 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest) -> Result<SessionInfo> {
         detail: None,
         paused: false,
         policy,
+        request_origin: Some(session_origin.origin),
+        origin_source: Some(session_origin.source),
         pid: spawned.pid,
         started: now_secs(),
         last_activity: now_secs(),
@@ -387,6 +410,23 @@ impl std::fmt::Display for PolicyRefused {
 
 impl std::error::Error for PolicyRefused {}
 
+/// An origin that could not be established, or a declaration that was refused.
+///
+/// Its own type, because the remedy is neither of the two above: nothing about
+/// the sandbox or the six dimensions will help, and the message already says
+/// which `/proc` read failed or which restriction the declaration tried to
+/// drop.
+#[derive(Debug)]
+pub struct OriginRefused(pub String);
+
+impl std::fmt::Display for OriginRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for OriginRefused {}
+
 /// Map a `start` failure to a response, keeping the distinctions the client
 /// needs in order to explain what to do next.
 pub fn run_error(e: anyhow::Error) -> Response {
@@ -398,6 +438,9 @@ pub fn run_error(e: anyhow::Error) -> Response {
     }
     if e.downcast_ref::<PolicyRefused>().is_some() {
         return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
+    }
+    if e.downcast_ref::<OriginRefused>().is_some() {
+        return Response::error(ErrorKind::PermissionDenied, format!("{e:#}"));
     }
     Response::error(ErrorKind::BadRequest, format!("{e:#}"))
 }

@@ -427,6 +427,13 @@ pub enum RequestOrigin {
     /// The desktop shell's Agent Center.
     ApexShell,
     /// Claude Remote Control, driving a session from elsewhere.
+    ///
+    /// Renamed explicitly: kebab-case would serialise this as
+    /// `remote-control`, and §7's name — the one [`RequestOrigin::as_str`]
+    /// prints and the one a user types — is `claude-remote-control`. Two
+    /// spellings of one origin is how a record written by the daemon stops
+    /// matching a policy written by a human.
+    #[serde(rename = "claude-remote-control")]
     RemoteControl,
     /// A timer, with nobody present.
     ScheduledJob,

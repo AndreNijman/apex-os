@@ -1,9 +1,9 @@
 //! The permission dimensions' acceptance criteria, as tests.
 //!
 //! P0-004 split the six dimensions and this file was its acceptance suite;
-//! P0-008 filled in the network one and added its criteria at the bottom,
-//! rather than starting a second file that would assert over the same value
-//! sets in a different shape.
+//! P0-008 filled in the network one and P0-013/P0-014 filled in the origin
+//! one, both adding their criteria here rather than starting a second file
+//! that would assert over the same value sets in a different shape.
 //!
 //! §3.1 says the six permission layers "must never be collapsed into one
 //! switch". Three of those non-collapses are acceptance criteria in their own
@@ -29,11 +29,13 @@
 //! the daemon and the CLI actually use.
 
 use apex_agent_core::adapter;
+use apex_agent_core::origin::{may_declare, OriginError, OriginSource, SessionOrigin};
 use apex_agent_core::policy::{
     AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset, RequestOrigin,
     SandboxPolicy, SecretPolicy, SystemAccess,
 };
 use apex_agent_core::destination::Allowlist;
+use apex_agent_core::request::{Decision, PrivilegeRequest, Verb};
 use apex_agent_core::sandbox::{build_argv, EgressBridge, SandboxSpec, BRIDGE_PORT};
 
 use std::path::PathBuf;
@@ -471,4 +473,131 @@ fn a_remote_origin_cannot_authorise_what_section_seven_reserves_for_a_local_one(
     }
     assert!(!RequestOrigin::RemoteControl.is_local());
     assert!(!RequestOrigin::ScheduledJob.is_local());
+}
+
+// ── P0-013: remote-origin requests are distinguishable from local ones ──────
+//
+// roadmap.yaml's security_invariants: "Remote-origin capability requests must
+// be distinguishable from local requests." That is one sentence and three
+// separate claims, so it is three tests:
+//
+//   1. the value is carried, and a request that has none does not read as
+//      local;
+//   2. nothing a client sends can produce a local one;
+//   3. the human deciding is shown which it is.
+//
+// Written against the same public API the daemon and the CLI use, so a change
+// that broke any of them for a real caller breaks these too.
+
+#[test]
+fn a_remote_origin_request_is_distinguishable_from_a_local_one() {
+    // Criterion 1, and the security invariant in its plainest form. Two
+    // requests identical in every other field must not compare equal on the
+    // only question §7's table branches on.
+    let mut local = sample_request();
+    local.request_origin = Some(RequestOrigin::LocalTerminal);
+    local.origin_source = Some(OriginSource::Observed);
+
+    let mut remote = local.clone();
+    remote.request_origin = Some(RequestOrigin::RemoteControl);
+    remote.origin_source = Some(OriginSource::Declared);
+
+    assert!(local.is_local());
+    assert!(!remote.is_local());
+    assert_ne!(local.origin_summary(), remote.origin_summary());
+    assert_ne!(local.prompt(), remote.prompt());
+
+    // And every origin in the vocabulary lands on one side or the other, so
+    // "distinguishable" holds for the whole value set rather than the pair
+    // above.
+    for origin in RequestOrigin::ALL {
+        let mut r = local.clone();
+        r.request_origin = Some(*origin);
+        assert_eq!(r.is_local(), origin.is_local(), "{origin}");
+        assert!(r.prompt().contains(origin.as_str()), "{origin}");
+    }
+}
+
+#[test]
+fn an_unrecorded_origin_is_not_a_local_one() {
+    // The fail-open this invariant is most likely to be broken by, since
+    // `RequestOrigin::default()` is `local-terminal`: a record written before
+    // origin tracking, or a field a future serde attribute lets default,
+    // would silently join the column §7 reserves root for.
+    let mut r = sample_request();
+    r.request_origin = None;
+    r.origin_source = None;
+    assert!(!r.is_local());
+    assert!(r.origin_summary().contains("unknown"), "{}", r.origin_summary());
+
+    // The same claim about the value the daemon would fall back to.
+    assert!(
+        RequestOrigin::default().is_local(),
+        "if this ever stops being true the test above stops testing anything"
+    );
+}
+
+#[test]
+fn no_declaration_can_turn_a_remote_request_into_a_local_one() {
+    // Criterion 2. A field that can be set by the thing being restricted is
+    // not a restriction, so this is asserted over the whole 7×7 product of
+    // starting points and requested values rather than over the interesting
+    // pairs.
+    for from in RequestOrigin::ALL {
+        for to in RequestOrigin::ALL {
+            let after = SessionOrigin::observed(*from).declare(*to);
+            if let Ok(after) = after {
+                assert!(
+                    !after.is_local(),
+                    "{from} declared itself {to} and became local"
+                );
+                assert_eq!(after.source, OriginSource::Declared);
+            }
+        }
+    }
+    // Both spellings of local are refused by name, so the failure message
+    // says which rule stopped it.
+    for local in [RequestOrigin::LocalTerminal, RequestOrigin::ApexShell] {
+        assert_eq!(
+            may_declare(RequestOrigin::RemoteControl, local),
+            Err(OriginError::NotDeclarable(local))
+        );
+    }
+}
+
+#[test]
+fn the_approval_prompt_says_which_column_of_section_sevens_table_applies() {
+    // Criterion 3. Distinguishable to a program is not distinguishable to the
+    // human being asked for root. `prompt()` is the one renderer behind
+    // `apex request show`, `pending`, `ask` and the interactive confirm, so
+    // asserting it here covers all four.
+    for origin in RequestOrigin::ALL {
+        let mut r = sample_request();
+        r.request_origin = Some(*origin);
+        r.origin_source = Some(OriginSource::Observed);
+        let p = r.prompt();
+        assert!(p.contains("Origin:"), "{origin}: {p}");
+        assert!(p.contains(origin.as_str()), "{origin}: {p}");
+        assert!(p.contains("observed"), "{origin}: {p}");
+    }
+}
+
+fn sample_request() -> PrivilegeRequest {
+    PrivilegeRequest {
+        id: 1,
+        verb: Verb::Install {
+            packages: vec!["clang".into()],
+        },
+        reason: "Required to compile the project".into(),
+        session: Some(4),
+        agent: Some("claude".into()),
+        project: Some("/home/tester/Projects/demo".into()),
+        request_origin: None,
+        origin_source: None,
+        decision: Decision::Pending,
+        created_ms: 1_700_000_000_000,
+        decided_ms: None,
+        executed_ms: None,
+        exit_code: None,
+    }
 }
