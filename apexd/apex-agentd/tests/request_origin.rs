@@ -153,10 +153,19 @@ fn the_daemon_speaks_the_revision_that_carries_origins() {
     let h = harness!("hello");
     let reply = h.call(r#"{"cmd":"hello"}"#);
     assert_eq!(reply["reply"], "hello", "{reply}");
+    // At least, not exactly. What this suite needs is a daemon that carries
+    // origins; pinning the equality made every later revision — the secret
+    // service moved the store at 4 — fail here for a reason that has nothing
+    // to do with §7.
+    let version = reply["version"].as_u64().unwrap_or_default();
+    assert!(
+        version >= u64::from(apex_agent_core::protocol::REQUEST_ORIGIN_VERSION),
+        "the daemon speaks protocol {version}, which predates request_origin: {reply}"
+    );
     assert_eq!(
-        reply["version"].as_u64(),
-        Some(u64::from(apex_agent_core::protocol::REQUEST_ORIGIN_VERSION)),
-        "{reply}"
+        version,
+        u64::from(apex_agent_core::protocol::PROTOCOL_VERSION),
+        "the daemon under test is not the one this suite was built against: {reply}"
     );
 }
 
