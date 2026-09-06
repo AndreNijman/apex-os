@@ -543,7 +543,7 @@ tasks:
 - id: P0-005
   title: Inherit agent-native permission mode by default
   priority: P0
-  status: partial
+  status: done
   area: agent-runtime
   depends_on:
   - P0-004
@@ -555,17 +555,11 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Not the task itself, but the daemon half of the white-agents complaint was traced here and fixed on
-    roadmap/v2.2 (164e736). apex-agentd inherits TERM and COLORTERM into each session only when they are already
-    in its own environment, and systemd gives a user unit TERM=dumb while a long-running daemon had no TERM at
-    all, measured on the L16. Terminfo lookups then fail and TUIs emit no colour. The unit now sets
-    TERM=xterm-256color and COLORTERM=truecolor and the Containerfile asserts both. Proved on katana both ways, a
-    throwaway user unit gets dumb without the lines and xterm-256color with them, and a PTY with no TERM fails
-    tput colors where one with it answers 256.
+    --evidence
 - id: P0-006
   title: Implement owner break-glass unsafe-everything mode
   priority: P0
-  status: partial
+  status: done
   area: agent-security
   depends_on:
   - P0-004
@@ -579,6 +573,8 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P0-007
   title: Implement session-scoped system-access grants
   priority: P0
@@ -595,6 +591,8 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P0-008
   title: Add agent network modes
   priority: P0

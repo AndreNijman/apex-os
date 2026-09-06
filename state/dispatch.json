@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-06T23:40+08:00",
+  "updated": "2026-09-07T00:18+08:00",
   "agents": [
     {
       "slug": "p0-003",
@@ -32,7 +32,8 @@
       "dispatched": "2026-09-06T16:20+08:00",
       "resumed": "2026-09-06T23:24+08:00",
       "title": "native permission mode, break-glass, session-scoped grants",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "status": "FINISHED 00:0x \u2014 P0-005 done, P0-006 done, P0-007 partial (capabilities whitelist is unconditional; needs one --capabilities flag). apex-os tip ee51ef4, apex-shell task/p0-005-agent-center-modes d9cdb37. Both await integration."
     },
     {
       "slug": "p0-018b",
@@ -67,7 +68,8 @@
       "dispatched": "2026-09-06T16:20+08:00",
       "resumed": "2026-09-06T23:24+08:00",
       "title": "fish, nushell, tmux, zellij, editor/agent layouts",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "status": "FINISHED 23:5x \u2014 all five done, tip 63493c7. Awaits integration."
     },
     {
       "slug": "p1-045",

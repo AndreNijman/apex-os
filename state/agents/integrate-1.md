@@ -11,6 +11,12 @@ touched -- the orchestrator updates it after reading the report.
 ## APEX-SHELL RESULT
 - roadmap/v2.2: 321e3a5 -> d2d1f33 (6 landed commits + 1 of mine), pushed
   with --force-with-lease.
+- Also run, though not in the brief: P0-023's own two suites, which are the
+  direct test of whether the staging layer survived P0-018's 359-line
+  KeybindService.qml rewrite underneath it (git auto-merged those two with no
+  conflict, so nothing else exercised the seam):
+    run-settings-staged-test.sh    21/0
+    run-settings-controls-test.sh  16/0
 - TWO files conflicted, not one. The brief named DisplayPage.qml;
   .github/workflows/ci.yml also conflicted, because P0-019 and P0-018 each add
   a CI step at the same anchor. Both steps kept, YAML re-parsed clean.
@@ -31,7 +37,8 @@ touched -- the orchestrator updates it after reading the report.
   (mtime still 6 Sep 09:01), only /var/tmp/apex-shell-xdg/config/qt6ct created.
 
 ## APEX-OS RESULT
-- roadmap/v2.2: a141cee -> ba087f4 (10 commits), pushed with --force-with-lease.
+- roadmap/v2.2: a141cee -> 9a24d2b (10 landed commits + 1 of mine), pushed
+  with --force-with-lease.
 - cargo test: 1477 before -> 1512 after, 0 failed.
 - cargo clippy --locked --all-targets -- -D warnings: clean (run in
   docker.io/library/rust:1.97 + `rustup component add clippy`; there is NO
@@ -148,6 +155,18 @@ provider, including the loopback bearer-token server and the SSE variant.
 
 ## IN PROGRESS
 - nothing
+
+## FOUND ALSO (post-push, found by reading)
+- tests/test-secret-migrate.sh had TWO assertions that read back the spelling
+  they typed in -- true under P0-002's closed enum, false under P1-001's
+  canonicalising registry. `secret grants` now prints `legacy-git:git.ls-remote`
+  and the trail says `mcp.request`. Fixed in 9a24d2b and pushed. These are image
+  tests (need a built image + root apex-secretd) so they cannot be run here;
+  found by grepping every shell test / Containerfile / workflow for the old
+  spellings rather than by a failure.
+- Author AND committer on all 17 pushed commits across both repos is
+  AndreNijman <AndreNijman@users.noreply.github.com>. No AI attribution
+  anywhere, per CLAUDE.md and the brief.
 
 ## FOUND
 - THE HEADLINE: the task brief says the roadmap side is "P0-002's secretd
