@@ -882,6 +882,16 @@ jobs:
       - name: Run privilege-request assertions
         run: ./tests/test-privilege-requests.sh
 
+      # §5's two claims, neither of which the unit tests can reach: a portable
+      # bundle carries no credential and no conversation, from a profile on a
+      # real filesystem; and a confined session cannot rewrite the instructions
+      # it was started with, enforced by the mount namespace rather than by an
+      # argument list. The agent is a stub on PATH, so this needs no account,
+      # no network and no API call, and it touches nobody's own profile — the
+      # fixture home is under /var/tmp, because the sandbox masks /tmp.
+      - name: Run agent-profile assertions
+        run: ./tests/test-agent-profile.sh
+
       # The compositor adapter is faked through APEX_WINDOW_ADAPTER, so this
       # runs with no compositor at all — which is the whole reason the adapter
       # is a separate program. `restore` is only ever called with --dry-run, so

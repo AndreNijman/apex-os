@@ -90,11 +90,15 @@ mkdir -p "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME"
 chmod 0700 "$XDG_RUNTIME_DIR"
 
 C="${HOME}/.claude"
-mkdir -p "${C}/skills/demo" "${C}/commands" "${C}/projects/proj" \
+# `agents` is here so the read-only assertion on it is a real one: a `-try`
+# bind of a path that is not on the machine mounts nothing, and a write that
+# fails with ENOENT would pass a test written for EROFS.
+mkdir -p "${C}/skills/demo" "${C}/commands" "${C}/agents" "${C}/projects/proj" \
          "${C}/shell-snapshots" "${C}/plugins/marketplaces/mkt" "${C}/daemon"
 printf 'be brief\n'                      > "${C}/CLAUDE.md"
 printf '# demo skill\n'                  > "${C}/skills/demo/SKILL.md"
 printf 'go\n'                            > "${C}/commands/go.md"
+printf '---\nname: helper\n---\n'        > "${C}/agents/helper.md"
 printf '#!/bin/sh\necho status\n'        > "${C}/statusline.sh"
 chmod 0755 "${C}/statusline.sh"
 printf '{"conversation":"PRIVATE-TRANSCRIPT"}\n' > "${C}/projects/proj/chat.jsonl"
