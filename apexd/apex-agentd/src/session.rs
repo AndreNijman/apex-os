@@ -525,7 +525,8 @@ fn absorb(handle: &Handle, data: &[u8]) {
     let mut s = handle.lock().expect("session lock");
     let signals = s.scanner.feed(data);
     s.absorb(data);
-    let next = logic::next_state(s.info.state, &signals, true, 0);
+    let in_flight = s.tool_in_flight();
+    let next = logic::next_state(s.info.state, &signals, true, 0, in_flight);
     let detail = signals
         .iter()
         .rev()
@@ -540,7 +541,8 @@ fn update_idle_state(handle: &Handle) {
         return;
     }
     let idle = s.idle_secs();
-    let next = logic::next_state(s.info.state, &[], false, idle);
+    let in_flight = s.tool_in_flight();
+    let next = logic::next_state(s.info.state, &[], false, idle, in_flight);
     if next != s.info.state {
         s.set_state(next, None);
         // Recording only on a change keeps an idle session from rewriting its

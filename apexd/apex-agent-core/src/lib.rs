@@ -24,6 +24,7 @@
 //!         ├─ sandbox policy                sandbox.rs
 //!         ├─ network destination policy    destination.rs
 //!         ├─ adapters                      adapter.rs
+//!         ├─ claude's own hook lifecycle   hook.rs
 //!         ├─ projects + worktrees          project.rs
 //!         ├─ project window layouts        layout.rs
 //!         ├─ checkpoints                   checkpoint.rs
@@ -45,6 +46,7 @@ pub mod client;
 pub mod config;
 pub mod destination;
 pub mod git;
+pub mod hook;
 pub mod layout;
 pub mod lock;
 pub mod origin;

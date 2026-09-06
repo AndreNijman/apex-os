@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::paths;
-use crate::protocol::{ErrorKind, Request, Response, SessionInfo};
+use crate::protocol::{AgentState, ErrorKind, Request, Response, SessionInfo};
 
 /// How long to wait for the daemon to answer a control request.
 ///
@@ -179,7 +179,30 @@ pub fn session(id: u32) -> Result<SessionInfo> {
 pub fn publish_event(id: u32, state: &str, detail: Option<String>) -> Result<()> {
     call(&Request::Event {
         id,
-        state: state.to_string(),
+        state: Some(state.to_string()),
+        event: None,
+        detail,
+    })?;
+    Ok(())
+}
+
+/// Publish one of Claude's lifecycle events (§6.1).
+///
+/// Separate from [`publish_event`] because the two carry different things: a
+/// state is an opinion about what the session is doing, and an event is a fact
+/// about what happened. Some events imply a state and some do not, and
+/// [`crate::hook::observe`] is what decides which — not this function, and not
+/// the daemon.
+pub fn publish_hook(
+    id: u32,
+    event: crate::hook::HookEvent,
+    state: Option<AgentState>,
+    detail: Option<String>,
+) -> Result<()> {
+    call(&Request::Event {
+        id,
+        state: state.map(|s| s.as_str().to_string()),
+        event: Some(event.as_str().to_string()),
         detail,
     })?;
     Ok(())
