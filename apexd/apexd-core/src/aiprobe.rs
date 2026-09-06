@@ -227,6 +227,25 @@ pub fn on_battery(roots: &Roots) -> bool {
     saw_mains
 }
 
+/// Whether a model's weights blob is present, or why that could not be told.
+///
+/// A plain `bool` has no room for "I don't know", and that is exactly what
+/// forced a refused blob stat into the same `false` a genuinely deleted blob
+/// produces — which [`resolve`] then reported as "weights are missing, re-pull
+/// it", advice that does nothing for a permission problem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Presence {
+    /// The blob was found.
+    Present,
+    /// The blob's manifest entry names it, and it is not there. A
+    /// half-finished `apex ai rm` or a hand-deleted file looks like this.
+    Absent,
+    /// The stat was refused rather than answered, with the reason. Not the
+    /// same finding as `Absent`: it says nothing about whether the blob
+    /// exists, only that this read could not tell.
+    Unavailable(String),
+}
+
 /// Every model in the store, with whether its blob is actually there.
 ///
 /// A manifest whose blob is missing is what a half-finished `apex ai rm` or a
@@ -236,11 +255,21 @@ pub fn on_battery(roots: &Roots) -> bool {
 /// A manifest that fails validation is skipped with a warning rather than
 /// failing the listing: one bad file must not make `apex ai models` refuse to
 /// print the others.
-pub fn installed(store: &Store) -> Vec<(Manifest, bool)> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(store.manifests_dir()) else {
-        return out;
+///
+/// `Err` only when the manifest directory itself exists and refused the
+/// listing. `STORE_ROOT` ships world-readable, but a permission refusal must
+/// still surface as "unavailable" rather than the same empty `Vec` an
+/// untouched store gives — `apex ai models` printed "No models are installed"
+/// off a directory it never actually read.
+pub fn installed(store: &Store) -> Result<Vec<(Manifest, Presence)>, String> {
+    let manifests_dir = store.manifests_dir();
+    let entries = match std::fs::read_dir(&manifests_dir) {
+        Ok(entries) => entries,
+        // Absence is the common case: most machines pull nothing.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{}: {e}", manifests_dir.display())),
     };
+    let mut out = Vec::new();
     let mut paths: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
@@ -253,13 +282,20 @@ pub fn installed(store: &Store) -> Vec<(Manifest, bool)> {
         };
         match Manifest::parse(&text) {
             Ok(m) => {
-                let present = store.blob(&m.digest).map(|b| b.exists()).unwrap_or(false);
-                out.push((m, present));
+                let presence = match store.blob(&m.digest) {
+                    Ok(blob) => match std::fs::metadata(&blob) {
+                        Ok(_) => Presence::Present,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Presence::Absent,
+                        Err(e) => Presence::Unavailable(format!("{}: {e}", blob.display())),
+                    },
+                    Err(e) => Presence::Unavailable(e.to_string()),
+                };
+                out.push((m, presence));
             }
             Err(e) => eprintln!("apex: ignoring {}: {e}", path.display()),
         }
     }
-    out
+    Ok(out)
 }
 
 /// Render the store as the control protocol reports it.
@@ -267,21 +303,29 @@ pub fn model_infos(
     store: &Store,
     selected: Option<&str>,
     loaded: Option<&str>,
-) -> Vec<ModelInfo> {
-    installed(store)
+) -> Result<Vec<ModelInfo>, String> {
+    Ok(installed(store)?
         .into_iter()
-        .map(|(m, present)| ModelInfo {
-            selected: selected == Some(m.id.as_str()),
-            loaded: loaded == Some(m.id.as_str()),
-            id: m.id,
-            digest: m.digest,
-            weights_mib: m.weights_mib,
-            runtime: m.runtime,
-            max_context: m.max_context,
-            present,
-            user_supplied_digest: m.user_supplied_digest,
+        .map(|(m, presence)| {
+            let (present, present_unavailable) = match presence {
+                Presence::Present => (true, None),
+                Presence::Absent => (false, None),
+                Presence::Unavailable(reason) => (false, Some(reason)),
+            };
+            ModelInfo {
+                selected: selected == Some(m.id.as_str()),
+                loaded: loaded == Some(m.id.as_str()),
+                id: m.id,
+                digest: m.digest,
+                weights_mib: m.weights_mib,
+                runtime: m.runtime,
+                max_context: m.max_context,
+                present,
+                present_unavailable,
+                user_supplied_digest: m.user_supplied_digest,
+            }
         })
-        .collect()
+        .collect())
 }
 
 /// Where a runtime was found, and which one it is.
@@ -386,7 +430,7 @@ pub fn resolve(
     endpoints: &Endpoints,
     smi: &dyn NvidiaSmi,
 ) -> Result<Resolved, String> {
-    let listed = installed(store);
+    let listed = installed(store)?;
     if listed.is_empty() {
         return Err(format!(
             "no models are installed in {}. Pull one with `apex ai pull <name>`, or see what \
@@ -401,7 +445,7 @@ pub fn resolve(
     let wanted = selected
         .map(str::to_string)
         .or_else(|| settings.model.clone());
-    let (manifest, present) = match wanted {
+    let (manifest, presence) = match wanted {
         Some(id) => listed
             .into_iter()
             .find(|(m, _)| m.id == id)
@@ -419,14 +463,25 @@ pub fn resolve(
             ));
         }
     };
-    if !present {
-        return Err(format!(
-            "{} has a manifest but its weights are missing from {}. Re-pull it with \
-             `sudo apex ai pull {}`",
-            manifest.id,
-            store.blobs_dir().display(),
-            manifest.id
-        ));
+    match presence {
+        Presence::Absent => {
+            return Err(format!(
+                "{} has a manifest but its weights are missing from {}. Re-pull it with \
+                 `sudo apex ai pull {}`",
+                manifest.id,
+                store.blobs_dir().display(),
+                manifest.id
+            ));
+        }
+        Presence::Unavailable(reason) => {
+            return Err(format!(
+                "{}'s weights could not be checked ({reason}), so whether they are present is \
+                 unknown — that is not the same as missing, and re-pulling will not fix a \
+                 permission problem",
+                manifest.id
+            ));
+        }
+        Presence::Present => {}
     }
 
     let runtime_kind = manifest.runtime().ok_or_else(|| {
@@ -747,28 +802,145 @@ mod tests {
         // And a file that is not a manifest at all, which must not stop the rest.
         std::fs::write(store.manifests_dir().join("broken.json"), "{ not json").unwrap();
 
-        let listed = installed(&store);
+        let listed = installed(&store).unwrap();
         assert_eq!(listed.len(), 2, "{listed:?}");
-        let by_id: Vec<(String, bool)> =
+        let by_id: Vec<(String, Presence)> =
             listed.into_iter().map(|(m, p)| (m.id, p)).collect();
         assert_eq!(
             by_id,
-            vec![("gone".to_string(), false), ("here".to_string(), true)],
+            vec![("gone".to_string(), Presence::Absent), ("here".to_string(), Presence::Present)],
             "sorted by file name, and presence must reflect the blob"
         );
 
-        let infos = model_infos(&store, Some("here"), Some("here"));
+        let infos = model_infos(&store, Some("here"), Some("here")).unwrap();
         let here = infos.iter().find(|i| i.id == "here").unwrap();
-        assert!(here.selected && here.loaded && here.present);
+        assert!(here.selected && here.loaded && here.present && here.present_unavailable.is_none());
         let gone = infos.iter().find(|i| i.id == "gone").unwrap();
-        assert!(!gone.selected && !gone.loaded && !gone.present);
+        assert!(!gone.selected && !gone.loaded && !gone.present && gone.present_unavailable.is_none());
 
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn an_empty_or_absent_store_lists_nothing_rather_than_failing() {
-        assert!(installed(&Store::new(Path::new("/nonexistent/apex-ai"))).is_empty());
+        assert_eq!(installed(&Store::new(Path::new("/nonexistent/apex-ai"))), Ok(Vec::new()));
+    }
+
+    // ── EACCES vs ENOENT ─────────────────────────────────────────────────────
+    //
+    // `STORE_ROOT` ships world-readable, but `installed` must not assume that
+    // holds on every machine: a refused `read_dir` on the manifest directory
+    // collapsed into the same empty `Vec` an untouched store gives, and a
+    // refused blob stat collapsed into the same `false` a genuinely deleted
+    // blob gives — which `resolve` then reported as "weights are missing,
+    // re-pull it", advice that does nothing for a permission problem. These
+    // tests seal the directory the read depends on to 0000 and require the
+    // exact `PermissionDenied` kind, skipping out loud when the caller
+    // overrides DAC (root and CAP_DAC_OVERRIDE walk through 0000 regardless of
+    // the mode bit).
+
+    fn seal(dir: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dir).expect("stat").permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(dir, perms).expect("chmod");
+        matches!(std::fs::read_dir(dir), Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied)
+    }
+
+    fn unseal(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dir).expect("stat").permissions();
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(dir, perms);
+    }
+
+    #[test]
+    fn an_unreadable_manifest_directory_is_unavailable_rather_than_no_models() {
+        let root = fixture("manifests-eacces");
+        let store = Store::new(&root);
+        std::fs::create_dir_all(store.manifests_dir()).unwrap();
+        std::fs::create_dir_all(store.blobs_dir()).unwrap();
+
+        let sealed = seal(&store.manifests_dir());
+        let result = installed(&store);
+        unseal(&store.manifests_dir());
+        std::fs::remove_dir_all(&root).ok();
+
+        if !sealed {
+            return; // the caller overrides the mode bit; it proves nothing here
+        }
+        assert!(
+            result.is_err(),
+            "a refused manifest listing must not be reported as 'no models', got {result:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_blobs_directory_is_unavailable_rather_than_missing() {
+        let root = fixture("blobs-eacces");
+        let store = Store::new(&root);
+        std::fs::create_dir_all(store.manifests_dir()).unwrap();
+        std::fs::create_dir_all(store.blobs_dir()).unwrap();
+        let m = Manifest {
+            version: SCHEMA_VERSION,
+            id: "tiny".into(),
+            digest: format!("sha256:{}", "5".repeat(64)),
+            runtime: "llama.cpp".into(),
+            ..Default::default()
+        };
+        std::fs::write(store.manifest("tiny").unwrap(), m.to_json().unwrap()).unwrap();
+        std::fs::write(store.blob(&m.digest).unwrap(), b"weights").unwrap();
+
+        // `metadata` on the blob needs only search permission on its parent —
+        // its own mode bit is irrelevant — so the seal goes on `blobs_dir`,
+        // not on the blob file.
+        let sealed = seal(&store.blobs_dir());
+        let listed = installed(&store);
+        unseal(&store.blobs_dir());
+        std::fs::remove_dir_all(&root).ok();
+
+        if !sealed {
+            return;
+        }
+        let listed = listed.unwrap();
+        let (_, presence) = listed.iter().find(|(m, _)| m.id == "tiny").unwrap();
+        assert!(
+            matches!(presence, Presence::Unavailable(_)),
+            "a refused blob stat must not be reported as absent, got {presence:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_blob_refuses_without_recommending_a_repull() {
+        // `resolve` is what a running `apex-aid` acts on, so this is the
+        // consequential half: a stat it could not complete must not produce
+        // the same "re-pull it" advice a genuinely deleted blob earns —
+        // re-pulling does nothing for a permission problem.
+        let (root, store, endpoints, _fake) = resolvable("blob-eacces");
+        let sealed = seal(&store.blobs_dir());
+        let e = resolve(
+            &store,
+            &Roots { prefix: root.clone() },
+            &Settings::default(),
+            None,
+            &endpoints,
+            &NoSmi,
+        )
+        .unwrap_err();
+        unseal(&store.blobs_dir());
+        std::fs::remove_dir_all(&root).ok();
+
+        if !sealed {
+            return;
+        }
+        assert!(
+            e.contains("could not be checked"),
+            "a refused stat must say so, got: {e}"
+        );
+        assert!(
+            !e.contains("weights are missing") && !e.contains("apex ai pull"),
+            "a refused stat must not recommend a re-pull, got: {e}"
+        );
     }
 
     // ── locating a runtime ───────────────────────────────────────────────────
@@ -848,7 +1020,7 @@ mod tests {
     #[test]
     fn a_model_whose_weights_are_missing_refuses_and_says_to_re_pull() {
         let (root, store, endpoints, _fake) = resolvable("noblob");
-        let m = installed(&store).remove(0).0;
+        let m = installed(&store).unwrap().remove(0).0;
         std::fs::remove_file(store.blob(&m.digest).unwrap()).unwrap();
         let e = resolve(
             &store,
@@ -916,7 +1088,7 @@ mod tests {
     fn a_manifest_naming_an_unknown_runtime_refuses_and_blames_version_skew() {
         // Reachable after `bootc rollback`: a model pulled by a newer apex.
         let (root, store, endpoints, _fake) = resolvable("skew");
-        let mut m = installed(&store).remove(0).0;
+        let mut m = installed(&store).unwrap().remove(0).0;
         m.runtime = "tensorrt".into();
         std::fs::write(store.manifest("tiny").unwrap(), m.to_json().unwrap()).unwrap();
         let e = resolve(

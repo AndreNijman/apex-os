@@ -835,11 +835,19 @@ fn models(available: bool, json: bool) -> i32 {
     // Installed. Read the store directly, so this works with no daemon — and
     // ask the daemon only for which model is selected and resident.
     let st = ask_status().ok();
-    let list = aiprobe::model_infos(
+    let list = match aiprobe::model_infos(
         &store(),
         st.as_ref().and_then(|s| s.selected.as_deref()),
         st.as_ref().and_then(|s| s.loaded.as_deref()),
-    );
+    ) {
+        Ok(l) => l,
+        Err(e) => {
+            // Never the same message an empty store prints: "no models are
+            // installed" would be a claim about a directory this never read.
+            eprintln!("apex: {e} — installed models are unknown, not necessarily absent");
+            return 1;
+        }
+    };
     if json {
         match serde_json::to_string_pretty(&list) {
             Ok(s) => println!("{s}"),
@@ -870,7 +878,13 @@ fn print_models(list: &[ModelInfo]) {
         if m.selected {
             state.push("selected".to_string());
         }
-        if !m.present {
+        // Checked first: a refused blob stat is not the same finding as a
+        // confirmed-missing one, and must never print as "WEIGHTS MISSING" —
+        // that tells the user to re-pull, which does nothing for a
+        // permission problem.
+        if let Some(why) = &m.present_unavailable {
+            state.push(format!("weights unavailable: {why}"));
+        } else if !m.present {
             state.push("WEIGHTS MISSING".to_string());
         }
         if m.user_supplied_digest {
@@ -1172,7 +1186,13 @@ fn rm(name: &str) -> i32 {
             return 1;
         }
     };
-    let listed = aiprobe::installed(&store);
+    let listed = match aiprobe::installed(&store) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("apex: {e} — installed models are unknown, not necessarily absent");
+            return 1;
+        }
+    };
     let Some((target, _)) = listed.iter().find(|(m, _)| m.id == name) else {
         eprintln!(
             "apex: no model named {name:?} in {}. `apex ai models` lists what is installed",
