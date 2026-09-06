@@ -167,7 +167,18 @@ fn local_caller(peer: Option<crate::peer::Peer>) -> Result<(), String> {
     if !crate::peer::is_own_user(&peer) {
         return Err("that connection does not belong to this user".to_string());
     }
-    let origin = apex_agent_core::origin::observe_pid(peer.pid)?;
+    may_pair(apex_agent_core::origin::observe_pid(peer.pid)?)
+}
+
+/// The rule, over a value.
+///
+/// Split out from [`local_caller`] because of what a mutation found: with the
+/// check replaced by `if true`, every test in this file still passed. They all
+/// run as whatever `cargo test` is, which on a developer's machine is a login
+/// session and therefore local, so nothing ever reached the refusal. A test
+/// that cannot fail is not a test, and the way to make this one able to fail
+/// is to ask the rule about all seven origins rather than about this process.
+pub fn may_pair(origin: RequestOrigin) -> Result<(), String> {
     if MAY_PAIR.contains(&origin) {
         return Ok(());
     }
@@ -273,6 +284,30 @@ mod tests {
     fn a_connection_with_no_peer_credentials_may_not_pair() {
         let why = local_caller(None).expect_err("an unidentifiable peer paired a device");
         assert!(why.contains("a human is at this machine"), "{why}");
+    }
+
+    #[test]
+    fn exactly_the_two_local_origins_may_pair_and_the_other_five_are_refused_by_name() {
+        // Over §7's whole vocabulary, not over whatever this process happens
+        // to be. The version of this file that asked only about the running
+        // process passed with the check replaced by `if true`.
+        let mut allowed = 0;
+        for o in RequestOrigin::ALL {
+            match may_pair(*o) {
+                Ok(()) => {
+                    assert!(o.is_local(), "{o} was allowed to pair a device");
+                    allowed += 1;
+                }
+                Err(why) => {
+                    assert!(!o.is_local(), "{o} was refused");
+                    assert!(why.contains(o.as_str()), "{why} does not name {o}");
+                    // And it says what to do instead, because the person
+                    // reading it is looking at a command that just failed.
+                    assert!(why.contains("apex remote pair"), "{why}");
+                }
+            }
+        }
+        assert_eq!(allowed, 2, "the wrong number of origins may pair");
     }
 
     #[test]
