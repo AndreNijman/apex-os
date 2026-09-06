@@ -505,6 +505,24 @@ fn without_the_tail_url(body: &str) -> String {
     out
 }
 
+/// The routes in a zone that point at one worker.
+///
+/// `GET /zones/{id}/workers/routes` answers with every route in the zone, and
+/// the caller named a worker. Returning the lot would answer a question nobody
+/// asked and would put the rest of the zone's routing in front of an agent
+/// scoped to one worker — and the audit line would say "the routes zone X
+/// sends to Y" about a list that is not that.
+fn only_this_worker_s_routes(body: &str, worker: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.to_string();
+    };
+    let Some(routes) = value.get_mut("result").and_then(|r| r.as_array_mut()) else {
+        return body.to_string();
+    };
+    routes.retain(|route| route.get("script").and_then(|s| s.as_str()) == Some(worker));
+    serde_json::to_string(&value).unwrap_or_else(|_| body.to_string())
+}
+
 impl Provider for CloudflareProvider {
     fn spec(&self) -> &'static ProviderSpec {
         &SPEC
@@ -547,10 +565,16 @@ impl Provider for CloudflareProvider {
         // Everything the far side or the child chose comes back as output, not
         // as an error: the framework scrubs a result and does not scrub a
         // refusal reason.
-        let body = if req.operation.id == "cloudflare.worker.tail" && reply.ok() {
-            without_the_tail_url(&reply.body)
-        } else {
-            reply.body.clone()
+        let body = match req.operation.id {
+            "cloudflare.worker.tail" if reply.ok() => without_the_tail_url(&reply.body),
+            "cloudflare.worker.route.read" if reply.ok() => {
+                let name = match &target {
+                    Target::Route { worker, .. } => worker.name.as_str(),
+                    _ => "",
+                };
+                only_this_worker_s_routes(&reply.body, name)
+            }
+            _ => reply.body.clone(),
         };
         let output = if reply.ok() {
             body
