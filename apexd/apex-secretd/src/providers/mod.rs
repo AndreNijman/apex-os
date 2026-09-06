@@ -17,6 +17,7 @@ use crate::provider::Registry;
 /// service behind it would be worse than not having one.
 #[cfg(test)]
 pub mod bearer;
+pub mod cloudflare;
 pub mod git;
 
 /// Every provider, registered.
@@ -28,6 +29,7 @@ pub mod git;
 pub fn default_registry() -> Result<Registry, String> {
     let mut registry = Registry::new();
     registry.register(Box::new(git::GitProvider))?;
+    registry.register(Box::new(cloudflare::CloudflareProvider::new()))?;
     Ok(registry)
 }
 
@@ -36,11 +38,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_shipped_registry_builds_and_offers_the_git_vocabulary() {
+    fn the_shipped_registry_builds_and_offers_every_provider_s_vocabulary() {
         let registry = default_registry().expect("every shipped provider must declare validly");
         assert_eq!(
             registry.operation_ids(),
-            vec!["git.fetch", "git.ls-remote", "git.push"]
+            vec![
+                "cloudflare.account.read",
+                "cloudflare.worker.deploy",
+                "cloudflare.worker.read",
+                "cloudflare.worker.rollback",
+                "cloudflare.worker.route.read",
+                "cloudflare.worker.tail",
+                "cloudflare.worker.upload-version",
+                "git.fetch",
+                "git.ls-remote",
+                "git.push",
+            ]
         );
     }
 }
