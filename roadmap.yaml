@@ -1324,7 +1324,7 @@ tasks:
 - id: P1-018
   title: MCP auth helper integration
   priority: P1
-  status: todo
+  status: done
   area: mcp
   depends_on:
   - P0-002
@@ -1334,10 +1334,12 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-019
   title: Per-MCP sidecar sandboxing
   priority: P1
-  status: todo
+  status: done
   area: mcp
   depends_on:
   - P1-018
@@ -1347,6 +1349,8 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-020
   title: Agent/subagent graph in Agent Center
   priority: P1

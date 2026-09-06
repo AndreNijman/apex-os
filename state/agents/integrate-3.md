@@ -42,6 +42,25 @@ FALLBACK: `git reset --hard 5cbf072` (pushed).
     message" (mcp), so empty is right. Same adaptation integrate-2 made.
   * added `NewService` to the `use crate::service::{..}` import.
 - api.rs: `crate::broker::drop_privileges` -> `crate::broker::drop_to`.
+- **A SIXTH BREAK THE HANDOVER DID NOT LIST**, in 3d2dc43's new file
+  apex/src/cloudflare.rs:201 `store()`. This is a DIFFERENT `add` — the CLI
+  client `apex_secret_core::client::Client::add`, which P0-003 grew from 5
+  args to 8: `path: &str`, `auth: &str`, `port: Option<u16>`.
+  Passed `path: ""`, `auth: "bearer"`, `port: None`.
+  `auth` is NOT cosmetic and is the one real judgement here. Evidence it is
+  right, not guessed:
+  * store.rs `header_value()` maps "raw" => the value verbatim, anything else
+    => `format!("Bearer {value}")`. The Cloudflare provider hardcodes
+    `Authorization: Bearer {token}` (api.rs:323), so "bearer" reproduces the
+    branch's own behaviour byte for byte; "raw" would have sent the token
+    unprefixed and broken every call.
+  * `apex secret add` clap default is `default_value = "bearer"` (secret.rs:82).
+  * migrate.rs's rule is bare token => "bearer", full header => "raw"; a
+    Cloudflare API token is a bare token.
+  * store.rs `default_auth()` is "bearer", `default_username()` is
+    "x-access-token" (which the branch already passes explicitly).
+  Folded INTO 1322181 rather than added on top, so every commit on the tip
+  builds (integrate-2's precedent, and the reason I re-picked the last two).
 
 ## PLAN
 1. apex-os chore/run-clippy (1 commit) -> roadmap/v2.2 e4e221f
