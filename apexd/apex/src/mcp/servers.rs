@@ -191,13 +191,29 @@ pub fn shape_of(value: &str) -> Shape {
         return Shape::Empty;
     }
     let lower = trimmed.to_ascii_lowercase();
+    // Substring markers. Every one is long enough, or punctuated enough, that
+    // no credential contains it by accident.
     for marker in [
-        "replace", "your-", "your_", "yourtoken", "changeme", "change-me", "placeholder", "todo",
-        "xxxxx", "<", "insert", "put-your", "example.com", "abc123", "sk-...", "…",
+        "replace", "your-", "your_", "yourtoken", "changeme", "change-me", "placeholder",
+        "xxxxx", "<", "put-your", "example.com", "sk-...", "…",
     ] {
         if lower.contains(marker) {
             return Shape::Placeholder;
         }
+    }
+    // Matched as whole words rather than as substrings, because these three are
+    // short enough to turn up *inside* a token by chance: `abc123` is six
+    // hexadecimal characters, so a 64-character hex credential carries it about
+    // once in three hundred thousand, and `todo` is four base64 ones. The cost
+    // of being wrong in that direction is telling somebody to replace a
+    // credential that works. Delimited they are unambiguous, so `TODO`,
+    // `abc123` and `INSERT YOUR TOKEN HERE` are all still named — which
+    // deleting the markers outright would have given up.
+    if lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| matches!(word, "todo" | "insert" | "abc123"))
+    {
+        return Shape::Placeholder;
     }
     // Nothing but capitals, digits and underscores, with at least one
     // underscore and short enough to be a name: that is a SHOUTING_NAME, which
@@ -559,12 +575,32 @@ pub fn as_json(found: &[Server]) -> Value {
                     "shape": defined.map(|s| s.describe()), "source": source,
                 }),
             };
+            // The definition's literal argv is what `address` reports, because
+            // that is the fact on disk. `confined` is the thing derived from
+            // it, so a reader of `--json` learns what the text listing shows
+            // without having to re-implement the wrapper match. The *policy* is
+            // deliberately not here: it is a file, `apex mcp policy` names the
+            // file, and a listing that paraphrased it would be a second place
+            // to read the same settings out of date.
+            let confined = match &s.transport {
+                Transport::Stdio { command, args } => confined(command, args)
+                    .map(|(name, inner)| {
+                        serde_json::json!({
+                            "as": name,
+                            "command": inner[0],
+                            "args": inner[1..],
+                        })
+                    })
+                    .unwrap_or(Value::Null),
+                _ => Value::Null,
+            };
             serde_json::json!({
                 "name": s.name,
                 "transport": transport,
                 "address": address,
                 "credential": credential,
                 "agentReadable": s.credential.agent_readable(),
+                "confined": confined,
                 "definedIn": s.surface.describe(),
                 "rewritable": s.surface.is_writable_here(),
             })
@@ -659,6 +695,81 @@ mod tests {
         ] {
             assert_eq!(shape_of(real), Shape::Opaque, "{real}");
         }
+    }
+
+    #[test]
+    fn a_short_marker_inside_a_token_is_not_a_placeholder_but_the_same_word_is() {
+        // The two halves of one rule, which is why they are one test: `todo`,
+        // `insert` and `abc123` are short enough to fall inside a real token —
+        // `abc123` is six hexadecimal characters — so they are matched as
+        // delimited words. Deleting them instead would have been the other
+        // way to stop the false positive, and it would have given up all three
+        // of the placeholders below.
+        for placeholder in [
+            "TODO",
+            "todo",
+            "abc123",
+            "INSERT YOUR TOKEN HERE",
+            "Bearer TODO",
+            "insert token",
+        ] {
+            assert_eq!(shape_of(placeholder), Shape::Placeholder, "{placeholder}");
+        }
+
+        // The same letters inside an undelimited run are part of a token.
+        for real in [
+            "ghp_todoNOTaMarker16C7e42F292c6912E7710c8",
+            "9f86abc123884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a0",
+            "sk-ant-api03-InsertedKeyMaterial9xQ",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhYmMxMjMifQ.dBjftJeZ4CVPtodoX",
+        ] {
+            assert_eq!(shape_of(real), Shape::Opaque, "{real}");
+        }
+    }
+
+    #[test]
+    fn the_json_listing_names_the_wrapper_the_text_listing_unwraps() {
+        // Parity: `apex mcp list` prints a `sandbox` line, so `--json` has to
+        // carry the same fact or a script would have to re-implement the
+        // wrapper match to learn it. The definition's own argv stays in
+        // `address`, because that is what is on disk.
+        let home = fixture("json-confined");
+        write(
+            &home.join(".claude.json"),
+            &serde_json::json!({"mcpServers": {
+                "memory": {"command": "apex", "args": [
+                    "mcp", "run", "memory", "--", "npx", "-y", "@modelcontextprotocol/server-memory"]},
+                "plain": {"command": "node", "args": ["server.js"]},
+                "remote": {"type": "http", "url": "https://m.example.org/mcp"}
+            }})
+            .to_string(),
+        );
+        let doc = as_json(&discover(&home, None));
+        let by_name = |name: &str| {
+            doc["servers"]
+                .as_array()
+                .expect("servers")
+                .iter()
+                .find(|s| s["name"] == name)
+                .expect(name)
+                .clone()
+        };
+
+        let wrapped = by_name("memory");
+        assert_eq!(wrapped["confined"]["as"], "memory");
+        assert_eq!(wrapped["confined"]["command"], "npx");
+        assert_eq!(
+            wrapped["confined"]["args"],
+            serde_json::json!(["-y", "@modelcontextprotocol/server-memory"])
+        );
+        // The definition itself is still reported verbatim.
+        assert_eq!(wrapped["address"]["command"], "apex");
+
+        // And the two shapes that are not confined report so, rather than
+        // omitting the key and leaving a reader to guess.
+        assert!(by_name("plain")["confined"].is_null());
+        assert!(by_name("remote")["confined"].is_null());
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]

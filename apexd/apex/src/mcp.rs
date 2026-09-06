@@ -205,6 +205,12 @@ fn list(json: bool) -> Result<i32> {
         println!("{}", server.name);
         println!("  transport   {}", describe_transport(&server.transport));
         println!("  credential  {}", describe_credential(&server.credential));
+        if let servers::Transport::Stdio { command, args } = &server.transport {
+            // Only for a program, because only a program is a thing to confine:
+            // an endpoint's request is made by apex-secretd, in a process this
+            // machine's agent never starts.
+            println!("  sandbox     {}", describe_sandbox(&server.name, command, args));
+        }
         println!("  defined in  {}", server.surface.describe());
         if server.credential.agent_readable() {
             readable += 1;
@@ -277,10 +283,74 @@ fn policy(only: Option<&str>) -> Result<i32> {
     Ok(0)
 }
 
+/// Whether a local server starts confined, and what it gets if it does.
+///
+/// A line in the listing rather than only in `apex mcp policy`, because the
+/// listing is where somebody looks to find out what their machine runs — and a
+/// server that starts with everything the session has should say so there.
+fn describe_sandbox(name: &str, command: &str, args: &[String]) -> String {
+    let Some(confined) = servers::confined_server(command, args) else {
+        return format!("none — everything the session has (apex mcp confine {name})");
+    };
+    match sidecar::load(&confined) {
+        Ok(policy) => format!("its own, {}", summarise(&policy)),
+        // Not "none", and not silence: an unreadable policy is not an absent
+        // one, and a listing that fell back to describing the default would
+        // describe a confinement the server is not going to get.
+        Err(e) => format!("its own, but the policy could not be read: {e:#}"),
+    }
+}
+
+/// One line: every dimension a policy opened, and where it was opened.
+///
+/// The three lines `apex mcp policy` prints are too much for a listing, and a
+/// bare "its own" would read identically for a server that is closed and one
+/// whose file opened every dimension — which is the single mistake a listing
+/// about confinement must not make.
+fn summarise(policy: &sidecar::McpPolicy) -> String {
+    let mut widened = Vec::new();
+    if policy.network {
+        widened.push("the network");
+    }
+    if policy.project {
+        widened.push("the project");
+    }
+    if policy.broker {
+        widened.push("the broker");
+    }
+    if !policy.read.is_empty() {
+        widened.push("paths it reads");
+    }
+    if !policy.write.is_empty() {
+        widened.push("paths it writes");
+    }
+    if !policy.env.is_empty() {
+        widened.push("variables from the session");
+    }
+    if widened.is_empty() {
+        return "closed in every dimension".to_string();
+    }
+    format!(
+        "opened to {} by {}",
+        widened.join(", "),
+        policy.source.describe()
+    )
+}
+
 fn describe_transport(t: &servers::Transport) -> String {
     match t {
         servers::Transport::Stdio { command, args } => {
-            let mut line = command.clone();
+            // The server's own command, not the wrapper's. `apex mcp run memory
+            // --` says nothing about what runs, and the listing is where
+            // somebody looks to find out.
+            let (command, args) = match servers::confined(command, args) {
+                Some((_, inner)) => {
+                    let (program, rest) = inner.split_first().expect("confined() refuses an empty command");
+                    (program.clone(), rest.to_vec())
+                }
+                None => (command.clone(), args.clone()),
+            };
+            let mut line = command;
             for a in args.iter().take(4) {
                 line.push(' ');
                 line.push_str(a);
@@ -568,6 +638,100 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&reply).expect("valid json-rpc");
         assert!(doc["id"].is_null());
         assert!(!reply.contains('\n'), "{reply}");
+    }
+
+    #[test]
+    fn the_listing_shows_the_server_that_runs_and_not_the_wrapper_around_it() {
+        // The regression this closes: once `apex mcp confine` has run, every
+        // local server's definition begins `apex mcp run`, and a listing that
+        // reported the definition verbatim would say `stdio, apex mcp run
+        // memory --` for all of them — turning the one place a person looks to
+        // find out what their machine runs into a list of the same four words.
+        let wrapped = servers::Transport::Stdio {
+            command: "apex".to_string(),
+            args: ["mcp", "run", "memory", "--", "npx", "-y", "@modelcontextprotocol/server-memory"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        };
+        assert_eq!(
+            describe_transport(&wrapped),
+            "stdio, npx -y @modelcontextprotocol/server-memory"
+        );
+
+        // And an unwrapped definition is still reported as itself, so the
+        // unwrapping cannot be what produces the command.
+        let plain = servers::Transport::Stdio {
+            command: "npx".to_string(),
+            args: vec!["-y".to_string(), "@modelcontextprotocol/server-memory".to_string()],
+        };
+        assert_eq!(
+            describe_transport(&plain),
+            "stdio, npx -y @modelcontextprotocol/server-memory"
+        );
+
+        // A command that merely looks like the wrapper is not unwrapped: this
+        // must match on the argv, not on the word `apex`.
+        let lookalike = servers::Transport::Stdio {
+            command: "apex-helper".to_string(),
+            args: vec!["mcp".to_string(), "run".to_string(), "x".to_string(), "--".to_string()],
+        };
+        assert!(describe_transport(&lookalike).starts_with("stdio, apex-helper"));
+    }
+
+    #[test]
+    fn a_server_that_starts_unconfined_says_so_and_says_what_to_run() {
+        // Pure: no policy file is read for a definition that has no wrapper in
+        // it, so this branch cannot depend on the machine it runs on.
+        let line = describe_sandbox("memory", "npx", &["-y".to_string()]);
+        assert!(line.starts_with("none —"), "{line}");
+        assert!(line.contains("apex mcp confine memory"), "{line}");
+    }
+
+    #[test]
+    fn a_widened_policy_cannot_read_the_same_as_a_closed_one() {
+        // The mistake a one-line summary is most likely to make: "its own"
+        // printed for a server whose policy file handed back the network, the
+        // project and the broker, which is every dimension P1-019 has.
+        let closed = summarise(&sidecar::McpPolicy::closed("memory"));
+        assert_eq!(closed, "closed in every dimension");
+
+        let mut open = sidecar::McpPolicy::closed("memory");
+        open.network = true;
+        open.project = true;
+        open.broker = true;
+        open.source = sidecar::Source::File("/etc/apex/mcp/memory.toml".into());
+        let line = summarise(&open);
+        assert!(line.contains("the network"), "{line}");
+        assert!(line.contains("the project"), "{line}");
+        assert!(line.contains("the broker"), "{line}");
+        // Where it was decided, because the next question after "opened" is
+        // "by which file".
+        assert!(line.contains("/etc/apex/mcp/memory.toml"), "{line}");
+        assert_ne!(line, closed);
+
+        // Each of the quieter three on its own, so none of them can be widened
+        // without the listing saying a word about it.
+        for (mutate, expected) in [
+            (
+                Box::new(|p: &mut sidecar::McpPolicy| p.read = vec!["/usr/share/dict".into()])
+                    as Box<dyn Fn(&mut sidecar::McpPolicy)>,
+                "paths it reads",
+            ),
+            (
+                Box::new(|p: &mut sidecar::McpPolicy| p.write = vec!["/tmp/notes".into()]),
+                "paths it writes",
+            ),
+            (
+                Box::new(|p: &mut sidecar::McpPolicy| p.env = vec!["NODE_OPTIONS".to_string()]),
+                "variables from the session",
+            ),
+        ] {
+            let mut policy = sidecar::McpPolicy::closed("memory");
+            mutate(&mut policy);
+            let line = summarise(&policy);
+            assert!(line.contains(expected), "{expected} was silent: {line}");
+        }
     }
 
     #[test]
