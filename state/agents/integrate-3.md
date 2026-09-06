@@ -94,6 +94,28 @@ inheriting a default." It is the gate working, not a broken test.
 DO NOT "fix" this by relaxing the test to `names_nothing() == whatever`; that
 silently hands cloudflare.account.read an --everywhere grant nobody reviewed.
 
+### HOW I RESOLVED IT (3e4795b) — JUDGEMENT CALL, FLAG IN REPORT
+Fixed p1-018 against its OWN stated intent, using the case it never had.
+Not reconciling two authors: the test WAS the spec ("only mcp.request"), the
+runtime gate was the looser implementation of it.
+- NEW `service::may_be_granted_everywhere(op)` = `names_nothing() && id ==
+  "mcp.request"`. An explicit list, not a predicate over the declaration, so a
+  provider added later cannot inherit `*` by declaring no resource.
+- BOTH sites now use it: the gate (service.rs:237) and the `decided_by` hint
+  (service.rs:327). Using it for the hint too closes the loop where the CLI
+  would suggest `--everywhere` for an operation the daemon then refuses.
+- p1-018's registry test now asserts the GATE instead of `names_nothing()`,
+  which is what its own comment says it protects. Intent unchanged.
+- NEW runtime test in cloudflare/tests.rs proving `grant("*",
+  cloudflare.account.read)` is refused AND the named project still works
+  (the declaration test alone proves nothing about runtime).
+MUTATION PAIR: `may_be_granted_everywhere` reverted to plain `names_nothing()`
+-> apex-secretd bin 109 passed / 2 failed (exactly my two); restored -> 111/0.
+REJECTED alternatives: changing account.read to `resource: NAMED` breaks
+`apex cf status` (a P1-002 feature change); adding a `same_everywhere` fact to
+OperationSpec is the right long-term design but is feature work, not
+integration — ROUTE IT TO THE COORDINATOR.
+
 ## BRANCH 3 RESOLUTIONS
 - broker.rs (ddc80fa, 1 hunk): kept HEAD `drop_to`, deleted the branch's
   `pub fn drop_privileges` (37 lines) that auto-merge had left ALONGSIDE it.
