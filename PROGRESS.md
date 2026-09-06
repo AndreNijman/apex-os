@@ -301,6 +301,24 @@ fixed on `roadmap/v2.2`:
   whose name appears at a different EVR for the host arch is now dropped as an
   application fork rather than a multilib library.
 
+### The clippy wrapper I wrote had the defect it was written to prevent
+
+`tests/run-clippy.sh` could not run on katana at all. Its `podman run` had no
+`--network=host`, `docker.io/library/rust:1` does not ship clippy but downloads
+it, and the container therefore had no DNS. The `>/dev/null 2>&1` on
+`rustup component add` then threw away `Temporary failure in name resolution`
+and printed "could not add the clippy component" — which reads like a broken
+image rather than a network problem.
+
+That is **a failure to look reported as an absence**, the exact defect class
+this codebase already swept for in about fourteen places, written into the fix
+for a different instance of it. It passed on the L16 only because the L16's
+podman has working DNS, so the wrapper looked correct on the one machine it was
+tested on. Found by the P1-018 agent when it tried to use it on the other.
+
+Corrected on `task/p1-018-mcp-auth` at `16fc8ae`, and the integration agent was
+told to land that version rather than the one I pushed.
+
 ### A test count read through a pipe is not a test count
 
 `cargo test --locked 2>&1 | grep -E '^test result' | tail -12` reported **810

@@ -13,10 +13,39 @@ BRANCH 3 p1-002 IN PROGRESS (SKIP 8110944, already landed as bb5b355):
   9af2b08 -> 16a32e3  CLEAN (Cargo.lock auto-merged, --locked build ok)
   ddc80fa -> a66b457  2 conflicts resolved + 5 compile adaptations (see below)
   74f1055 -> 54e9779  CLEAN
-  3d2dc43 -> 1322181  CLEAN textually; 1 compile adaptation folded IN (see below)
-  2514e09 -> 34b2903  CLEAN
-Next action: full suite running on 34b2903; expect ~1750.
-FALLBACK: `git reset --hard 5cbf072` (pushed).
+  3d2dc43 -> 7eebd86  CLEAN textually; 1 compile adaptation folded IN (see below)
+  2514e09 -> bc4f06e  CLEAN
+BRANCH 3 PUSHED at bc4f06e. 1750/0 (+65, zero removed). secret-broker 65/0.
+Per-commit build check: all 5 rc=0.
+
+## MY OWN ERROR, CAUGHT AND FIXED (report it)
+I ran `git cherry-pick -n 3d2dc43`, then `git apply <fix>` (working tree ONLY,
+not staged), then `git commit -C 3d2dc43` — which commits the INDEX. The fix
+was therefore NOT in the commit. cargo build/test read the WORKING TREE, so
+they were green (1750/0) while the committed tip did not compile. I pushed
+that tip (34b2903) before spotting the `M apexd/apex/src/cloudflare.rs` in
+`git status`. Fixed by re-picking with `git apply --index` and verifying
+`git show HEAD:<file>` rather than the working tree; force-pushed bc4f06e over
+it. Broken-remote window ~4 minutes.
+LESSON, now a habit for the rest of this job: after every commit, assert
+`git status --porcelain` is EMPTY, and verify content with `git show HEAD:path`,
+never by reading the working tree.
+Added a per-commit build check (percommit.sh) so "every commit builds" is
+measured, not asserted. NOTE its first run reported 5/5 FAILURES that were the
+SCRIPT's bug (built from the repo root; the manifest is apexd/Cargo.toml, there
+is no root one) — a failure to look, not an absence. Fixed, then 5/5 rc=0.
+
+## COORDINATOR MESSAGE (mid-task)
+- chore/run-clippy as landed is DEFECTIVE: podman run has no --network=host,
+  rust:1 downloads clippy, so no DNS on katana; and `>/dev/null 2>&1` on
+  `rustup component add` hides "Temporary failure in name resolution" and
+  reports it as "could not add the clippy component" — a failure to look
+  reported as an absence. Corrected version is on task/p1-018-mcp-auth at
+  16fc8ae. Take it, and VERIFY ON KATANA.
+- ALSO LAND task/p1-018-mcp-auth (8 commits, tip 16fc8ae) after the three.
+  Carries security fix c38075f. Touches apex-secret-core::paths
+  (new control_socket_in) -> expect interaction with the Cloudflare branch.
+FALLBACK: `git reset --hard bc4f06e` (pushed).
 
 ## BRANCH 3 RESOLUTIONS
 - broker.rs (ddc80fa, 1 hunk): kept HEAD `drop_to`, deleted the branch's
