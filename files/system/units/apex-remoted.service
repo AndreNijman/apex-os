@@ -1,0 +1,70 @@
+# APEX-OS — APEX Remote desktop service (systemd USER service).
+#
+# Terminates a paired device's encrypted channel and forwards what it carries
+# into `apex-agentd`. Per-user, unprivileged, and NOT enabled by default.
+#
+# WHY THIS IS A SEPARATE SERVICE FROM apex-agentd
+# It is the only thing in the agent stack that listens on a network. Giving
+# apex-agentd a TCP listener would put that attack surface on the process that
+# owns every agent PTY on the machine; here it is a client of that process,
+# with an origin the runtime assigns and no privileges of its own. A
+# compromise of this service buys a `claude-remote-control` origin: project
+# edits, tests and pushes — never a root approval, never break-glass, never a
+# raw secret.
+#
+# It also has a different lifetime. Most people who run an agent locally never
+# pair a phone, so `apex agent enable` must not start this.
+#
+# WHY THE PORT IS STILL CLOSED AFTER THIS UNIT STARTS
+# APEX ships a default-drop firewall. Starting this service does not open
+# 7717; `sudo apex firewall allow apex-remote` does, and that is a separate
+# decision because the relay path needs no inbound port at all. A service that
+# opened a port because it had been enabled would make the firewall a list of
+# things somebody once turned on.
+#
+# Turn it on with:
+#   apex remote enable
+
+[Unit]
+Description=APEX Remote (paired devices, encrypted channel to the agent runtime)
+Documentation=man:apex(1)
+# Not Requires=: the runtime may be started later, and a device that connects
+# before it is up gets a readable error rather than a failed unit.
+Wants=apex-agentd.service
+After=apex-agentd.service
+
+# A crash loop must not spin.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/apex-remoted
+
+# The service refuses to start unless its own cgroup says it is a user
+# service, because `apex-agentd` classifies a caller from that cgroup and a
+# proxy started from a login session would be classified as a human at the
+# keyboard. Running it here is what makes that check pass.
+Restart=on-failure
+RestartSec=2
+
+# Hardening. Stronger than apex-agentd's, because this process launches
+# nothing and needs no view of the user's projects: everything it does goes
+# through apex-agentd's socket in $XDG_RUNTIME_DIR, and its own state is one
+# key and one device list under $XDG_STATE_HOME.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# AF_UNIX for the two sockets, AF_INET/AF_INET6 for the listener and for an
+# outbound relay connection. Nothing else, so a compromised process cannot
+# open a netlink or packet socket.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target
