@@ -7,6 +7,16 @@
 
 use crate::provider::Registry;
 
+/// A second provider, compiled only for tests.
+///
+/// An abstraction with one implementation is a description of that
+/// implementation. This one is an HTTP API — bearer header, path resources, a
+/// short-lived credential — and it shares nothing with git except the framework
+/// between them. It is not registered below: it exists so the framework is
+/// tested by something real that is not git, and shipping a provider with no
+/// service behind it would be worse than not having one.
+#[cfg(test)]
+pub mod bearer;
 pub mod git;
 
 /// Every provider, registered.

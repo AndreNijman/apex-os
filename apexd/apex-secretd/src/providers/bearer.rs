@@ -1,0 +1,601 @@
+//! A second provider, so the framework is tested by something that is not git.
+//!
+//! An abstraction with one implementation is a description of that
+//! implementation. This is an HTTP API provider — bearer token in a header,
+//! resources addressed as paths, a short-lived credential minted per operation
+//! — which shares nothing with git except the framework between them. It is the
+//! shape §14's `CloudflareProvider`, `AWSProvider` and `GCPProvider` will have,
+//! and P1-002 can read it as the worked example.
+//!
+//! It is compiled only for tests, and that is deliberate rather than a
+//! shortcut. A provider that shipped would need a real service behind it to be
+//! honest about, and the point here is the *framework*: every step of
+//! `Service::use_capability` runs against it for real, with a real socket, a
+//! real credential in a real store, and a real HTTP request that a loopback
+//! server answers only when the header is right.
+//!
+//! What that proves, and a mock could not:
+//!
+//! * a provider with a different **credential presentation** (a header, not a
+//!   git credential helper) needs no framework change;
+//! * a provider with a different **resource shape** (`bucket/key`, not a remote
+//!   name) needs no framework change;
+//! * the **host pin** is applied to it without it doing anything, because the
+//!   framework applies it between `bind` and `perform`;
+//! * `mint` works, and the framework scrubs the **minted** credential as well
+//!   as the stored one — which §13.4 requires and which no git test can reach.
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+
+use apex_secret_core::operation::{
+    Effect, OperationSpec, ParamSpec, ProviderSpec, ResourceKind, Syntax,
+};
+use apex_secret_core::SecretValue;
+
+use crate::provider::{Bind, Bound, Endpoint, Performed, Provider, ProviderError};
+
+pub const SPEC: ProviderSpec = ProviderSpec {
+    id: "demo",
+    summary: "an http api, used to test the framework against something not git",
+    operations: &[
+        OperationSpec {
+            id: "demo.account.read",
+            summary: "read the account this credential belongs to",
+            effect: Effect::Read,
+            resource: ResourceKind::None,
+            params: &[],
+            aliases: &[],
+        },
+        OperationSpec {
+            id: "demo.object.read",
+            summary: "read an object",
+            effect: Effect::Read,
+            resource: ResourceKind::Path,
+            params: &[],
+            aliases: &[],
+        },
+        OperationSpec {
+            id: "demo.object.write",
+            summary: "write an object",
+            effect: Effect::Write,
+            resource: ResourceKind::Path,
+            params: &[ParamSpec {
+                name: "note",
+                syntax: Syntax::Text,
+                required: false,
+                summary: "an annotation to store with it",
+            }],
+            aliases: &[],
+        },
+    ],
+};
+
+/// The provider, carrying its own configuration.
+///
+/// A real one carries the same kind of thing: P1-002's Cloudflare provider
+/// carries §13.1's account and zone binding. The framework never looks inside
+/// it.
+pub struct BearerProvider {
+    pub port: u16,
+    /// Whether [`Provider::mint`] exchanges the stored credential for a
+    /// short-lived one. §13.4's path, off by default so both are exercised.
+    pub mints: bool,
+}
+
+/// What `mint` hands back. Distinct from the stored value so a test can tell
+/// which one reached the far side, and so both must be scrubbed.
+pub const MINTED: &str = "apex-minted-2c8f04b1-do-not-leak";
+
+impl BearerProvider {
+    fn path(&self, req: &Bind<'_>) -> String {
+        match req.resource {
+            "" => "/account".to_string(),
+            resource => format!("/{resource}"),
+        }
+    }
+
+    fn url(&self, req: &Bind<'_>) -> String {
+        format!("http://{}:{}{}", req.service.host, self.port, self.path(req))
+    }
+}
+
+impl Provider for BearerProvider {
+    fn spec(&self) -> &'static ProviderSpec {
+        &SPEC
+    }
+
+    /// What a resource name means here: a path under this provider's own base.
+    ///
+    /// Nothing resolves it against anything the caller controls, unlike git —
+    /// which is the other half of the point. The framework does not care which
+    /// it is; it cares that the provider names an endpoint before it is given a
+    /// credential.
+    fn bind(&self, req: &Bind<'_>) -> Result<Bound, ProviderError> {
+        let url = self.url(req);
+        Ok(Bound {
+            endpoint: Endpoint::from_url(&url)?,
+            detail: format!("{} {}", req.operation.id, self.path(req)),
+        })
+    }
+
+    /// §13.4: a scoped credential for this one operation.
+    fn mint(
+        &self,
+        _req: &Bind<'_>,
+        _bound: &Bound,
+        _value: &SecretValue,
+    ) -> Result<Option<SecretValue>, ProviderError> {
+        if !self.mints {
+            return Ok(None);
+        }
+        Ok(Some(SecretValue::new(MINTED.as_bytes().to_vec())))
+    }
+
+    /// How the credential is presented: `Authorization: Bearer`.
+    fn perform(
+        &self,
+        req: &Bind<'_>,
+        _bound: &Bound,
+        value: &SecretValue,
+    ) -> Result<Performed, ProviderError> {
+        let token = value
+            .as_str()
+            .ok_or_else(|| ProviderError::Failed("that credential is not text".into()))?;
+        let method = if req.operation.effect.is_write() {
+            "PUT"
+        } else {
+            "GET"
+        };
+        let (status, body) = call(&req.service.host, self.port, &self.path(req), method, token)
+            .map_err(|e| ProviderError::Failed(format!("reaching the api: {e}")))?;
+        Ok(Performed {
+            code: if status == 200 { 0 } else { 1 },
+            // Deliberately unscrubbed. The far side echoes the header back, the
+            // way a badly written API reports an auth failure, and the
+            // framework is what keeps that out of the caller's hands.
+            output: format!("{status} {body}"),
+        })
+    }
+}
+
+/// One HTTP/1.1 request, hand-rolled.
+///
+/// No dependency for a test provider. P1-002 decides between a `wrangler` child
+/// and an HTTP crate on its own merits.
+fn call(
+    host: &str,
+    port: u16,
+    path: &str,
+    method: &str,
+    token: &str,
+) -> std::io::Result<(u16, String)> {
+    let mut stream = TcpStream::connect((host, port))?;
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\n\
+         Connection: close\r\n\r\n"
+    )?;
+    stream.flush()?;
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line)?;
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
+            break;
+        }
+    }
+    let mut body = String::new();
+    reader.read_to_string(&mut body)?;
+    Ok((status, body.trim().to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    use apex_secret_core::audit::{self, AuditEvent};
+    use apex_secret_core::capability::CapabilityRecord;
+    use apex_secret_core::protocol::{ErrorKind, Request, Response};
+    use apex_secret_core::store::Store;
+
+    use crate::peer::Peer;
+    use crate::provider::Registry;
+    use crate::service::Service;
+
+    /// Distinctive enough that a grep for it cannot match by accident.
+    const STORED: &str = "apex-sentinel-9d1e77a3-do-not-leak";
+
+    /// An API that answers only with a bearer token, and says which one it saw.
+    struct Api {
+        port: u16,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Api {
+        fn start() -> Api {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+            let port = listener.local_addr().expect("addr").port();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let recorder = Arc::clone(&seen);
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let recorder = Arc::clone(&recorder);
+                    std::thread::spawn(move || serve(stream, &recorder));
+                }
+            });
+            Api { port, seen }
+        }
+
+        fn authorizations(&self) -> Vec<String> {
+            self.seen.lock().expect("lock").clone()
+        }
+    }
+
+    fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<String>>>) {
+        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut first = String::new();
+        if reader.read_line(&mut first).is_err() {
+            return;
+        }
+        let mut authorization = None;
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => return,
+            }
+            if line.trim().is_empty() {
+                break;
+            }
+            if let Some(value) = line.trim().strip_prefix("Authorization: ") {
+                authorization = Some(value.to_string());
+            }
+        }
+        let Some(authorization) = authorization else {
+            let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+            return;
+        };
+        recorder.lock().expect("lock").push(authorization.clone());
+        // Echoing the credential back is what a badly written API does, and the
+        // framework's scrub is what makes it not matter.
+        let body = format!("ok, you sent {authorization}");
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+    }
+
+    struct Fixture {
+        service: Service,
+        dir: PathBuf,
+        api: Api,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    fn me() -> Peer {
+        // Safe: getuid/getgid cannot fail.
+        Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        }
+    }
+
+    /// A service serving ONLY the bearer provider, with a credential stored for
+    /// the fixture and one operation granted.
+    fn fixture(name: &str, mints: bool, granted: &str) -> Fixture {
+        let api = Api::start();
+        let dir = std::env::temp_dir().join(format!(
+            "apex-bearer-{name}-{}-{}",
+            std::process::id(),
+            api.port
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+
+        let mut registry = Registry::new();
+        registry
+            .register(Box::new(BearerProvider {
+                port: api.port,
+                mints,
+            }))
+            .expect("register");
+        let service = Service::new(Store::new(dir.clone()), false, registry);
+
+        let peer = me();
+        // `http` is allowed for a loopback host: the credential does not cross
+        // a network, which is the whole reason the carve-out exists.
+        assert_eq!(
+            service.add(
+                peer,
+                "api",
+                "127.0.0.1",
+                "http",
+                None,
+                SecretValue::new(STORED.as_bytes().to_vec()),
+            ),
+            Response::Ok
+        );
+        assert!(service
+            .grant(peer, "/tmp/apex-bearer-project", "api", granted, false)
+            .as_error()
+            .is_none());
+        Fixture { service, dir, api }
+    }
+
+    fn record(operation: &str, resource: &str) -> CapabilityRecord {
+        let mut rec = CapabilityRecord::new("api", operation, resource);
+        rec.project = Some("/tmp/apex-bearer-project".into());
+        rec
+    }
+
+    #[test]
+    fn a_provider_that_is_not_git_runs_end_to_end_through_the_framework() {
+        // Every step of the pipeline, against a provider that shares nothing
+        // with git: a header instead of a credential helper, a path instead of
+        // a remote name, and a real HTTP request on a real socket that the far
+        // side refuses without the credential.
+        let f = fixture("run", false, "demo.object.read");
+        let reply = f
+            .service
+            .use_capability(me(), record("demo.object.read", "bucket/logs/today.json"));
+
+        let Response::Performed {
+            record,
+            endpoint,
+            exit_code,
+            output,
+        } = &reply
+        else {
+            panic!("refused: {reply:?}");
+        };
+        assert_eq!(*exit_code, 0, "{output}");
+        assert_eq!(endpoint, "http://127.0.0.1");
+        assert_eq!(record.operation, "demo.object.read");
+        assert_eq!(record.approval_policy, "grant");
+
+        // The credential DID reach the provider — so this was a real
+        // credential-backed operation and not a no-op that exited zero.
+        assert_eq!(
+            f.api.authorizations(),
+            vec![format!("Bearer {STORED}")],
+            "the credential did not reach the api"
+        );
+        // ...and did NOT reach the caller, even though the far side echoed it
+        // straight back. That is the framework's scrub, not the provider's.
+        assert!(!output.contains(STORED), "{output}");
+        assert!(output.contains("«redacted»"), "{output}");
+        assert!(!serde_json::to_string(&reply).unwrap().contains(STORED));
+    }
+
+    #[test]
+    fn a_minted_credential_is_the_one_used_and_is_scrubbed_too() {
+        // §13.4: prefer a short-lived credential where the provider has one,
+        // and do not hand even that to the agent. No git test can reach this —
+        // the git provider has no short-lived form.
+        let f = fixture("mint", true, "demo.object.read");
+        let reply = f
+            .service
+            .use_capability(me(), record("demo.object.read", "bucket/key"));
+        let Response::Performed { output, .. } = &reply else {
+            panic!("refused: {reply:?}");
+        };
+
+        // The minted one went to the provider; the stored one never left.
+        assert_eq!(f.api.authorizations(), vec![format!("Bearer {MINTED}")]);
+        assert!(!output.contains(MINTED), "the minted token came back: {output}");
+        assert!(!output.contains(STORED), "{output}");
+    }
+
+    #[test]
+    fn the_host_pin_applies_to_a_provider_that_does_nothing_to_earn_it() {
+        // The framework compares where the provider says it is going with where
+        // the credential was stored for, between `bind` and `perform`. This
+        // provider contains no such check and cannot skip one.
+        let f = fixture("pin", false, "demo.object.read");
+        let peer = me();
+        // Re-store the credential for a different host. The provider still
+        // builds its URL from `service.host`, so make them disagree the only
+        // way a caller can: by storing for one host and asking the framework to
+        // pin against another.
+        assert_eq!(
+            f.service.add(
+                peer,
+                "elsewhere",
+                "example.invalid",
+                "https",
+                None,
+                SecretValue::new(STORED.as_bytes().to_vec()),
+            ),
+            Response::Ok
+        );
+        assert!(f
+            .service
+            .grant(peer, "/tmp/apex-bearer-project", "elsewhere", "demo.object.read", false)
+            .as_error()
+            .is_none());
+
+        let mut rec = record("demo.object.read", "bucket/key");
+        rec.provider = "elsewhere".into();
+        let reply = f.service.use_capability(peer, rec);
+        let (kind, message) = reply.as_error().expect("the pin must refuse this");
+        assert_eq!(kind, ErrorKind::PermissionDenied);
+        assert!(message.contains("example.invalid"), "{message}");
+        assert!(
+            f.api.authorizations().is_empty(),
+            "a refused request still reached the api"
+        );
+    }
+
+    #[test]
+    fn an_ungranted_operation_never_reaches_the_provider() {
+        // The grant check runs before `bind`, so a request that was never
+        // allowed does not cause the provider to touch anything.
+        let f = fixture("ungranted", false, "demo.object.read");
+        let reply = f
+            .service
+            .use_capability(me(), record("demo.object.write", "bucket/key"));
+        assert_eq!(reply.as_error().map(|(k, _)| k), Some(ErrorKind::PermissionDenied));
+        assert!(f.api.authorizations().is_empty());
+    }
+
+    #[test]
+    fn the_declared_shape_is_enforced_for_a_provider_the_framework_never_saw() {
+        // Resource kind, parameter names and parameter syntax, all from the
+        // provider's own declaration, all checked by the framework.
+        let f = fixture("shape", false, "demo.object.write");
+        let peer = me();
+        for (operation, resource, param) in [
+            // `demo.object.write` takes a path, not an absolute one and not a
+            // URL.
+            ("demo.object.write", "/etc/passwd", None),
+            ("demo.object.write", "https://attacker.example/x", None),
+            ("demo.object.write", "a/../b", None),
+            // ...and `demo.account.read` takes no resource at all.
+            ("demo.account.read", "something", None),
+            // An option it does not declare is refused, not ignored.
+            ("demo.object.write", "bucket/key", Some(("branch", "main"))),
+            // ...and one it does declare must be the shape declared: `note` is
+            // Text, which is one printable line.
+            ("demo.object.write", "bucket/key", Some(("note", "two\nlines"))),
+        ] {
+            let mut rec = record(operation, resource);
+            if let Some((name, value)) = param {
+                rec = rec.param(name, value);
+            }
+            let reply = f.service.use_capability(peer, rec);
+            let (kind, message) = reply
+                .as_error()
+                .unwrap_or_else(|| panic!("{operation} {resource} {param:?} was accepted"));
+            assert_eq!(kind, ErrorKind::BadRequest, "{message}");
+        }
+        assert!(f.api.authorizations().is_empty());
+
+        // And the one that IS the declared shape goes through.
+        let rec = record("demo.object.write", "bucket/key").param("note", "released by apex");
+        assert!(
+            matches!(f.service.use_capability(peer, rec), Response::Performed { .. }),
+            "a well-formed request was refused"
+        );
+    }
+
+    #[test]
+    fn the_trail_records_the_provider_s_own_words_and_none_of_its_credential() {
+        let f = fixture("trail", true, "demo.object.read");
+        f.service
+            .use_capability(me(), record("demo.object.read", "bucket/key"));
+
+        let path = Store::new(f.dir.clone()).audit_path();
+        let lines = audit::tail(&path, 10);
+        let used = lines
+            .iter()
+            .find(|l| l.event == AuditEvent::Used)
+            .expect("a use was recorded");
+        assert_eq!(used.operation, "demo.object.read");
+        assert_eq!(used.resource, "bucket/key");
+        // `Bound::detail` — the provider's own rendering, not the framework's
+        // fallback.
+        assert_eq!(used.detail, "demo.object.read /bucket/key");
+        assert_eq!(used.endpoint.as_deref(), Some("http://127.0.0.1"));
+        assert_eq!(used.exit_code, Some(0));
+        assert_eq!(used.approval_policy, "grant");
+
+        let text = std::fs::read_to_string(&path).expect("the trail");
+        assert!(!text.contains(STORED), "the trail holds the credential");
+        assert!(!text.contains(MINTED), "the trail holds the minted credential");
+    }
+
+    #[test]
+    fn the_service_advertises_this_provider_without_knowing_what_it_is() {
+        // `apex secret capabilities` over the wire. A provider registered here
+        // reaches the CLI's help with no CLI change, which is the second
+        // acceptance criterion in one assertion.
+        let f = fixture("hello", false, "demo.object.read");
+        let Response::Hello {
+            capabilities,
+            vocabulary,
+            ..
+        } = f.service.hello()
+        else {
+            panic!("expected hello");
+        };
+        assert_eq!(
+            capabilities,
+            vec![
+                "demo.account.read".to_string(),
+                "demo.object.read".to_string(),
+                "demo.object.write".to_string(),
+            ]
+        );
+        let write = vocabulary
+            .iter()
+            .find(|o| o.id == "demo.object.write")
+            .expect("in the vocabulary");
+        assert_eq!(write.effect, "write");
+        assert_eq!(write.resource, "path");
+        assert_eq!(write.params.len(), 1);
+        assert_eq!(write.params[0].name, "note");
+    }
+
+    #[test]
+    fn a_grant_is_keyed_on_the_operation_and_does_not_spread_to_its_siblings() {
+        // `demo.object.read` and `demo.object.write` share a class. Granting
+        // one must not grant the other — the semantic vocabulary §13.2 asks for
+        // is only worth having if the grant table respects it.
+        let f = fixture("siblings", false, "demo.object.read");
+        let Response::Grants { projects } = f.service.grants(me()) else {
+            panic!("expected grants");
+        };
+        assert_eq!(
+            projects.get("/tmp/apex-bearer-project"),
+            Some(&vec!["api:demo.object.read".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_request_for_an_operation_no_registered_provider_offers_is_refused() {
+        // The vocabulary is closed by the registry: this service serves only
+        // the bearer provider, so git's operations do not exist for it.
+        let f = fixture("closed", false, "demo.object.read");
+        for evil in ["git.push", "demo.object.delete", "exec", "demo.account.write"] {
+            let reply = f.service.use_capability(me(), record(evil, "bucket/key"));
+            assert_eq!(
+                reply.as_error().map(|(k, _)| k),
+                Some(ErrorKind::BadRequest),
+                "'{evil}' was not refused"
+            );
+        }
+        assert!(f.api.authorizations().is_empty());
+    }
+
+    #[test]
+    fn the_request_verb_carries_this_provider_unchanged() {
+        // The wire type, with a provider `apex-agent-core` has never heard of.
+        // If this needed a new field, the protocol would still be
+        // provider-shaped.
+        let rec = record("demo.object.write", "bucket/key").param("note", "hello");
+        let req = Request::Use {
+            record: Box::new(rec.clone()),
+        };
+        let text = serde_json::to_string(&req).expect("serialise");
+        assert!(!text.contains('\n'));
+        assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), req);
+    }
+}

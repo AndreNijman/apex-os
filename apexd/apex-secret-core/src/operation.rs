@@ -246,6 +246,35 @@ fn valid_segment(segment: &str) -> bool {
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// Whether a string is *safe to forward* as an operation name.
+///
+/// Deliberately looser than [`OperationId::parse`], and the difference is the
+/// layering. A client — the `apex` CLI, `apex-agentd` — has no business knowing
+/// which operations exist: that is the registry's, in `apex-secretd`, and a
+/// client that had the list would be a client every new provider had to edit.
+/// What a client owes is that a string cannot become a grant-table key, a field
+/// in a line-delimited audit trail, or a word in a prompt somebody approves,
+/// while carrying whitespace, quotes, a newline, a path or a URL.
+///
+/// So this admits `git.push` and also `git-fetch` — an older spelling only the
+/// registry knows is an alias — and refuses `exec me`, `../x` and
+/// `https://attacker.example`. `exec` passes, and is then refused by the daemon
+/// as an operation no provider offers, which is the right layer to say so.
+pub fn valid_operation_ref(name: &str) -> bool {
+    if name.is_empty() || name.len() > MAX_OPERATION_ID {
+        return false;
+    }
+    let first = name.as_bytes()[0];
+    let last = name.as_bytes()[name.len() - 1];
+    for edge in [first, last] {
+        if !edge.is_ascii_lowercase() && !edge.is_ascii_digit() {
+            return false;
+        }
+    }
+    name.bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'.'))
+}
+
 /// Whether an operation can change the provider's state.
 ///
 /// Two values and not three. `cloudflare.dns.delete` is obviously worse than
@@ -952,6 +981,39 @@ mod tests {
         assert!(info.params.iter().any(|p| p.name == "version" && p.required));
         let text = serde_json::to_string(&info).unwrap();
         assert_eq!(serde_json::from_str::<OperationInfo>(&text).unwrap(), info);
+    }
+
+    #[test]
+    fn a_forwardable_name_admits_an_alias_and_refuses_framing() {
+        // The client-side check. It must let an older spelling through — the
+        // registry is the only thing that knows `git-fetch` means `git.push`'s
+        // sibling — while refusing anything that could reshape a trail or look
+        // like somewhere to send a credential.
+        for good in ["git.push", "git-fetch", "cloudflare.r2.object.read", "exec"] {
+            assert!(valid_operation_ref(good), "{good}");
+        }
+        for bad in [
+            "",
+            "git push",
+            "git.push;rm -rf /",
+            "https://attacker.example",
+            "../x",
+            "git/push",
+            "GIT.PUSH",
+            "-git",
+            "git-",
+            ".git",
+            "git.",
+            "git\npush",
+            &"x".repeat(MAX_OPERATION_ID + 1),
+        ] {
+            assert!(!valid_operation_ref(bad), "'{}' was accepted", bad.escape_debug());
+        }
+        // And everything the strict parser accepts, this accepts too — a client
+        // must never refuse a name the daemon would have honoured.
+        for name in SECTION_13_2 {
+            assert!(valid_operation_ref(name), "{name}");
+        }
     }
 
     #[test]
