@@ -967,45 +967,72 @@ fn probe(sys: &Sys) -> Surface {
     // the loader's name: systemd-boot booting a type #1 entry still has an
     // editable command line.
     let rescue_present = sys.exists("/usr/lib/systemd/system/rescue.target");
-    let cmdline_editable = chain.bootloader == "grub"
-        || (chain.bootloader == "systemd-boot" && !chain.booted_from_uki);
-    routes.push(Route {
-        id: "rescue-target",
-        available: Some(rescue_present && cmdline_editable),
-        how: if cmdline_editable {
-            format!(
-                "at the {} menu, edit the entry ({}) and append \
-                 `systemd.unit=rescue.target` to the kernel command line. It \
-                 asks for the root password.",
-                chain.bootloader,
-                if chain.bootloader == "grub" { "`e`, then Ctrl-X" } else { "`e`" }
-            )
-        } else if chain.booted_from_uki {
-            "not available: this machine booted a Unified Kernel Image, whose \
-             command line is inside the signed image and cannot be edited at \
-             the menu. Use the boot counter or the previous deployment."
-                .to_string()
-        } else {
-            format!(
-                "not available: the bootloader is {} and rescue.target is {}.",
-                chain.bootloader,
-                if rescue_present { "present" } else { "absent from this image" }
-            )
+    // Whether the command line is editable needs `booted_from_uki` only on the
+    // systemd-boot path — GRUB's menu is editable regardless of what booted.
+    // A refused StubInfo read only matters there, so it is the one case that
+    // gets its own arm rather than picking a side.
+    routes.push(match (&chain.booted_from_uki, chain.bootloader) {
+        (Err(why), "systemd-boot") => Route {
+            id: "rescue-target",
+            available: None,
+            how: format!(
+                "cannot be determined: whether this boot used a Unified Kernel \
+                 Image could not be read ({why}), and that decides whether the \
+                 kernel command line at the boot menu is editable."
+            ),
         },
+        (uki, bootloader) => {
+            let uki = uki.clone().unwrap_or(false);
+            let cmdline_editable = bootloader == "grub" || (bootloader == "systemd-boot" && !uki);
+            Route {
+                id: "rescue-target",
+                available: Some(rescue_present && cmdline_editable),
+                how: if cmdline_editable {
+                    format!(
+                        "at the {bootloader} menu, edit the entry ({}) and append \
+                         `systemd.unit=rescue.target` to the kernel command line. It \
+                         asks for the root password.",
+                        if bootloader == "grub" { "`e`, then Ctrl-X" } else { "`e`" }
+                    )
+                } else if uki {
+                    "not available: this machine booted a Unified Kernel Image, whose \
+                     command line is inside the signed image and cannot be edited at \
+                     the menu. Use the boot counter or the previous deployment."
+                        .to_string()
+                } else {
+                    format!(
+                        "not available: the bootloader is {bootloader} and rescue.target is {}.",
+                        if rescue_present { "present" } else { "absent from this image" }
+                    )
+                },
+            }
+        }
     });
-    routes.push(Route {
-        id: "boot-counting",
-        available: Some(chain.boot_counting),
-        how: if chain.boot_counting {
-            "three boots that do not reach boot-complete.target and \
-             systemd-boot selects the previous blessed entry by itself. \
-             `apex boot status` shows the tally."
-                .to_string()
-        } else {
-            "not in effect: this machine boots through GRUB, which is the \
-             default for every published APEX image. Automatic boot counting is \
-             the opt-in systemd-boot path — see docs/boot-v2.md."
-                .to_string()
+    routes.push(match &chain.boot_counting {
+        Ok(true) => Route {
+            id: "boot-counting",
+            available: Some(true),
+            how: "three boots that do not reach boot-complete.target and \
+                  systemd-boot selects the previous blessed entry by itself. \
+                  `apex boot status` shows the tally."
+                .to_string(),
+        },
+        Ok(false) => Route {
+            id: "boot-counting",
+            available: Some(false),
+            how: "not in effect: this machine boots through GRUB, which is the \
+                  default for every published APEX image. Automatic boot counting \
+                  is the opt-in systemd-boot path — see docs/boot-v2.md."
+                .to_string(),
+        },
+        Err(why) => Route {
+            id: "boot-counting",
+            available: None,
+            how: format!(
+                "cannot be determined: the LoaderBootCountPath EFI variable could \
+                 not be read ({why}), so whether boot counting is in effect is \
+                 unknown."
+            ),
         },
     });
     routes.push(Route {
@@ -2159,6 +2186,109 @@ mod tests {
                 unseal(&p);
             }
         }
+    }
+
+    impl Machine {
+        fn route(&self, id: &str) -> Route {
+            probe(&self.sys())
+                .routes
+                .into_iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("no route {id}"))
+        }
+    }
+
+    /// `apexd/apex/src/boot.rs`'s vendor GUID, duplicated here rather than
+    /// imported: it is a private constant of that module, and the fixture
+    /// byte layout below is the one `tests/test-boot-v2.sh` already uses.
+    const TEST_LOADER_GUID: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+
+    #[test]
+    fn an_unreadable_stubinfo_does_not_settle_the_rescue_route_either_way() {
+        // `chain.booted_from_uki` gates the rescue-target route only on the
+        // systemd-boot path — GRUB's menu is editable regardless of what
+        // booted. Force systemd-boot via LoaderInfo, then refuse the
+        // StubInfo read: the route must say "cannot be determined", not pick
+        // "UKI" or "no UKI" off a read that never happened.
+        let m = Machine::new("route-stubinfo-eacces");
+        let efivars = m.0.join("sys/firmware/efi/efivars");
+        std::fs::create_dir_all(&efivars).unwrap();
+        std::fs::write(
+            efivars.join(format!("LoaderInfo-{TEST_LOADER_GUID}")),
+            b"\x07\x00\x00\x00s\x00y\x00s\x00t\x00e\x00m\x00d\x00-\x00b\x00o\x00o\x00t\x00",
+        )
+        .unwrap();
+        std::fs::write(efivars.join(format!("StubInfo-{TEST_LOADER_GUID}")), b"\x07\x00\x00\x00")
+            .unwrap();
+        // Seal the StubInfo file itself, not its directory: chmod 0000 on the
+        // file blocks the read (open() needs the file's own read bit) without
+        // also blocking the LoaderInfo read next to it that bootloader
+        // detection depends on.
+        let target = format!("sys/firmware/efi/efivars/StubInfo-{TEST_LOADER_GUID}");
+        let sealed = seal(&m.0, &target, |root| std::fs::read(root.join(&target)).map(|_| ()));
+        if !sealed {
+            return; // the caller overrides the mode bit; it proves nothing here
+        }
+        let route = m.route("rescue-target");
+        assert!(
+            route.available.is_none(),
+            "a refused StubInfo read must not settle the rescue route either way, got {:?}",
+            route.available
+        );
+        assert!(
+            route.how.contains("cannot be determined"),
+            "the route should say it could not be determined, got: {}",
+            route.how
+        );
+    }
+
+    #[test]
+    fn an_unreadable_loaderbootcountpath_does_not_settle_boot_counting_either_way() {
+        let m = Machine::new("route-bootcount-eacces");
+        let efivars = m.0.join("sys/firmware/efi/efivars");
+        std::fs::create_dir_all(&efivars).unwrap();
+        std::fs::write(
+            efivars.join(format!("LoaderBootCountPath-{TEST_LOADER_GUID}")),
+            b"\x07\x00\x00\x00",
+        )
+        .unwrap();
+        let target = format!("sys/firmware/efi/efivars/LoaderBootCountPath-{TEST_LOADER_GUID}");
+        let sealed = seal(&m.0, &target, |root| std::fs::read(root.join(&target)).map(|_| ()));
+        if !sealed {
+            return;
+        }
+        let route = m.route("boot-counting");
+        assert!(
+            route.available.is_none(),
+            "a refused LoaderBootCountPath read must not settle boot counting \
+             either way, got {:?}",
+            route.available
+        );
+        assert!(
+            route.how.contains("cannot be determined"),
+            "the route should say it could not be determined, got: {}",
+            route.how
+        );
+    }
+
+    #[test]
+    fn a_genuinely_absent_stubinfo_still_reports_the_rescue_route_on_grub() {
+        // The other half: on a plain GRUB machine (Machine::new's default),
+        // StubInfo and LoaderInfo are both genuinely absent, and the route
+        // must still be reported rather than turned into a permanent
+        // "cannot be determined" by an over-broad fix.
+        let m = Machine::new("route-stubinfo-absent");
+        let route = m.route("rescue-target");
+        assert!(route.available.is_some());
+        assert!(route.how.contains("grub"));
+    }
+
+    #[test]
+    fn a_genuinely_absent_loaderbootcountpath_still_reports_boot_counting_on_grub() {
+        let m = Machine::new("route-bootcount-absent");
+        let route = m.route("boot-counting");
+        assert_eq!(route.available, Some(false));
+        assert!(route.how.contains("GRUB"));
     }
 
     #[test]

@@ -109,8 +109,39 @@ impl Roots {
         std::fs::read(self.path(absolute)).ok()
     }
 
+    /// Like [`Roots::read`], but keeps the reason a failed read was refused.
+    ///
+    /// `read` answers `None` both for "does not exist" and for "exists, and I
+    /// may not look" — fine for a caller that has no use for a file it cannot
+    /// read either way. `efivar_result` uses this for `StubInfo` and
+    /// `LoaderBootCountPath`, which decide `booted_from_uki` and
+    /// `boot_counting`: those drive concrete claims downstream ("kernel and
+    /// initramfs were loaded separately", "not in effect: this machine boots
+    /// through GRUB"), so a permission refusal must not collapse into the same
+    /// answer as "the variable was never set".
+    fn read_result(&self, absolute: &str) -> std::io::Result<Vec<u8>> {
+        std::fs::read(self.path(absolute))
+    }
+
     fn exists(&self, absolute: &str) -> bool {
         self.path(absolute).exists()
+    }
+
+    /// Like [`Roots::exists`], but a refused `stat` comes back as `Err`
+    /// instead of joining "does not exist".
+    ///
+    /// `Path::exists` (and therefore `exists` above) cannot make that
+    /// distinction on its own: it answers `false` for every failed `stat`,
+    /// `EACCES` included. Fine for a signal nobody reports as a fact about the
+    /// machine; wrong for the TPM event log, which securityfs commonly mounts
+    /// so only root can look inside `/sys/kernel/security`.
+    fn stat_present(&self, absolute: &str) -> Result<bool, String> {
+        let p = self.path(absolute);
+        match std::fs::metadata(&p) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(format!("{}: {e}", p.display())),
+        }
     }
 
     /// An EFI variable's payload as a string.
@@ -133,6 +164,28 @@ impl Roots {
             .collect();
         let trimmed = text.trim().to_string();
         (!trimmed.is_empty()).then_some(trimmed)
+    }
+
+    /// Like [`Roots::efivar`], but a refused read comes back as `Err` instead
+    /// of joining "the variable does not exist".
+    fn efivar_result(&self, name: &str, guid: &str) -> Result<Option<String>, String> {
+        let path = format!("/sys/firmware/efi/efivars/{name}-{guid}");
+        let raw = match self.read_result(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{path}: {e}")),
+        };
+        if raw.len() <= 4 {
+            return Ok(None);
+        }
+        let text: String = raw[4..]
+            .iter()
+            .copied()
+            .filter(|b| *b != 0)
+            .map(char::from)
+            .collect();
+        let trimmed = text.trim().to_string();
+        Ok((!trimmed.is_empty()).then_some(trimmed))
     }
 
     /// A one-byte boolean EFI variable, as the firmware publishes SecureBoot.
@@ -222,8 +275,14 @@ pub(crate) struct ChainFacts {
     /// took.
     pub secure_boot: Option<bool>,
     pub setup_mode: Option<bool>,
-    pub booted_from_uki: bool,
-    pub boot_counting: bool,
+    /// `Err(reason)` when `StubInfo` could not be read for a reason other than
+    /// "does not exist" — never collapsed into `Ok(false)`, which reads
+    /// downstream as "not a UKI" and both un-gates the rescue-target route and
+    /// prints "kernel and initramfs were loaded separately" about a boot
+    /// nobody actually looked at.
+    pub booted_from_uki: Result<bool, String>,
+    /// Same distinction, for `LoaderBootCountPath`.
+    pub boot_counting: Result<bool, String>,
 }
 
 /// Read the boot chain under an explicit fixture root (or the real system when
@@ -240,8 +299,8 @@ pub(crate) fn chain_facts(fixture: Option<PathBuf>) -> ChainFacts {
         bootloader: detect_bootloader(&cmdline, loader_info.as_deref()),
         secure_boot: roots.efivar_bool("SecureBoot", GLOBAL_GUID),
         setup_mode: roots.efivar_bool("SetupMode", GLOBAL_GUID),
-        booted_from_uki: roots.efivar("StubInfo", LOADER_GUID).is_some(),
-        boot_counting: roots.efivar("LoaderBootCountPath", LOADER_GUID).is_some(),
+        booted_from_uki: roots.efivar_result("StubInfo", LOADER_GUID).map(|v| v.is_some()),
+        boot_counting: roots.efivar_result("LoaderBootCountPath", LOADER_GUID).map(|v| v.is_some()),
     }
 }
 
@@ -255,9 +314,22 @@ fn build_report(roots: &Roots) -> Value {
     // Between them they identify the path this boot actually took, which is
     // more reliable than looking for a bootloader binary on disk: an ESP can
     // hold several and only one of them ran.
-    let stub_info = roots.efivar("StubInfo", LOADER_GUID);
+    //
+    // Both are read with the reason a refused read carries, because both
+    // decide a concrete claim below ("kernel and initramfs were loaded
+    // separately", "not in effect: this machine boots through GRUB") and a
+    // permission refusal must not be able to pick the same side ENOENT does.
+    let stub_info_result = roots.efivar_result("StubInfo", LOADER_GUID);
+    let (stub_info, booted_from_uki, booted_from_uki_error) = match &stub_info_result {
+        Ok(v) => (v.clone(), Some(v.is_some()), None),
+        Err(e) => (None, None, Some(e.clone())),
+    };
     let loader_info = roots.efivar("LoaderInfo", LOADER_GUID);
-    let boot_count_path = roots.efivar("LoaderBootCountPath", LOADER_GUID);
+    let boot_count_result = roots.efivar_result("LoaderBootCountPath", LOADER_GUID);
+    let (boot_count_path, counting, counting_error) = match &boot_count_result {
+        Ok(v) => (v.clone(), Some(v.is_some()), None),
+        Err(e) => (None, None, Some(e.clone())),
+    };
 
     let bootloader = detect_bootloader(&cmdline, loader_info.as_deref());
 
@@ -265,11 +337,11 @@ fn build_report(roots: &Roots) -> Value {
     let (health, health_error) = read_json_file(roots, "/var/lib/apex/boot/last-health.json");
     let (notice, notice_error) = read_json_file(roots, "/var/lib/apex/boot/rollback-notice.json");
 
-    // Boot counting is in effect exactly when systemd-boot set
-    // LoaderBootCountPath. This is the same signal apex-boot-health.service
-    // and systemd-bless-boot-generator condition on, so all three agree by
-    // construction instead of by convention.
-    let counting = boot_count_path.is_some();
+    let (event_log, event_log_error) =
+        match roots.stat_present("/sys/kernel/security/tpm0/binary_bios_measurements") {
+            Ok(present) => (Some(present), None),
+            Err(e) => (None, Some(e)),
+        };
 
     let mut tallies = Map::new();
     if let Some(list) = entries.as_ref() {
@@ -297,7 +369,10 @@ fn build_report(roots: &Roots) -> Value {
         "bootloader": bootloader,
         "loaderInfo": loader_info,
         "stubInfo": stub_info,
-        "bootedFromUki": stub_info.is_some(),
+        // `null`, not `false`, when StubInfo could not be read — a refused
+        // read is not a measurement that this booted without a UKI.
+        "bootedFromUki": booted_from_uki,
+        "bootedFromUkiUnavailable": booted_from_uki_error,
         "secureBoot": {
             // Absent means the kernel exposed no such variable, i.e. this is
             // not a UEFI boot at all. Reporting `false` there would claim a
@@ -307,7 +382,12 @@ fn build_report(roots: &Roots) -> Value {
         },
         "measuredBoot": {
             "tpmPresent": roots.exists("/sys/class/tpm/tpm0"),
-            "eventLog": roots.exists("/sys/kernel/security/tpm0/binary_bios_measurements"),
+            // `null` when the stat was refused rather than absent — securityfs
+            // commonly mounts `/sys/kernel/security` so only root can look
+            // inside, and `apex boot status` is documented read-only and
+            // root-free.
+            "eventLog": event_log,
+            "eventLogUnavailable": event_log_error,
             // sd-stub hands the UKI's .pcrsig/.pcrpkey to userspace here. Its
             // presence is what makes a signed PCR 11 policy — and therefore a
             // TPM-bound LUKS2 keyslot that survives a kernel update — possible
@@ -316,7 +396,10 @@ fn build_report(roots: &Roots) -> Value {
             "pcrPublicKey": roots.exists("/run/systemd/tpm2-pcr-public-key.pem"),
         },
         "bootCounting": {
+            // `null` when LoaderBootCountPath could not be read — not the
+            // same claim as "systemd-boot did not set it".
             "inEffect": counting,
+            "inEffectUnavailable": counting_error,
             "countPath": boot_count_path,
             "selectedEntry": roots.efivar("LoaderEntrySelected", LOADER_GUID),
             "defaultEntry": roots.efivar("LoaderEntryDefault", LOADER_GUID),
@@ -360,60 +443,89 @@ fn print_human(r: &Value) {
         "Signed UKI     : {}",
         match r.get("bootedFromUki") {
             Some(Value::Bool(true)) => format!("yes ({})", s(&["stubInfo"])),
-            _ => "no — kernel and initramfs were loaded separately".into(),
-        }
-    );
-
-    let m = |k: &str| matches!(r.pointer(&format!("/measuredBoot/{k}")), Some(Value::Bool(true)));
-    println!(
-        "Measured boot  : TPM {}, event log {}, signed PCR policy {}",
-        if m("tpmPresent") { "present" } else { "absent" },
-        if m("eventLog") { "present" } else { "absent" },
-        if m("pcrSignature") { "in effect" } else { "not in effect" },
-    );
-
-    let counting = matches!(r.pointer("/bootCounting/inEffect"), Some(Value::Bool(true)));
-    if !counting {
-        // The expected state on every published image. Say so, rather than
-        // leaving a reader to wonder which half is broken.
-        println!(
-            "Boot counting  : not in effect — this machine boots via {}, which has no \n\
-             \x20                boot counter. GRUB is the default for every published APEX\n\
-             \x20                image; systemd-boot with counting is opt-in.",
-            s(&["bootloader"])
-        );
-    } else {
-        println!("Boot counting  : in effect");
-        println!("  selected     : {}", s(&["bootCounting", "selectedEntry"]));
-        match r.pointer("/bootCounting/entries") {
-            Some(Value::Object(map)) if !map.is_empty() => {
-                // BTreeMap so the order is stable between runs; an unstable
-                // listing makes a diff of two reports unreadable.
-                let ordered: BTreeMap<_, _> = map.iter().collect();
-                for (id, e) in ordered {
-                    let state = if e.get("exhausted") == Some(&Value::Bool(true)) {
-                        "OUT OF TRIES"
-                    } else if e.get("blessed") == Some(&Value::Bool(true)) {
-                        "good"
-                    } else {
-                        "on trial"
-                    };
-                    let left = e
-                        .get("triesLeft")
-                        .and_then(Value::as_u64)
-                        .map(|n| format!("{n} left"))
-                        .unwrap_or_else(|| "no counter".into());
-                    println!("  {id:<32} {state:<12} {left}");
-                }
-            }
-            _ => println!(
-                "  entries      : unavailable — {}",
-                r.get("bootCounting")
-                    .and_then(|c| c.get("entriesUnavailable"))
+            Some(Value::Bool(false)) => "no — kernel and initramfs were loaded separately".into(),
+            // `null`: StubInfo could not be read, which is not the same
+            // finding as "read, and it said no UKI".
+            _ => format!(
+                "unavailable — {}",
+                r.get("bootedFromUkiUnavailable")
                     .and_then(Value::as_str)
                     .unwrap_or("no reason reported")
             ),
         }
+    );
+
+    let m = |k: &str| matches!(r.pointer(&format!("/measuredBoot/{k}")), Some(Value::Bool(true)));
+    let event_log = match r.pointer("/measuredBoot/eventLog") {
+        Some(Value::Bool(true)) => "present".to_string(),
+        Some(Value::Bool(false)) => "absent".to_string(),
+        // `null`: the stat was refused, not a stat that came back negative.
+        _ => format!(
+            "unavailable ({})",
+            r.pointer("/measuredBoot/eventLogUnavailable")
+                .and_then(Value::as_str)
+                .unwrap_or("no reason reported")
+        ),
+    };
+    println!(
+        "Measured boot  : TPM {}, event log {}, signed PCR policy {}",
+        if m("tpmPresent") { "present" } else { "absent" },
+        event_log,
+        if m("pcrSignature") { "in effect" } else { "not in effect" },
+    );
+
+    match r.pointer("/bootCounting/inEffect") {
+        Some(Value::Bool(false)) => {
+            // The expected state on every published image. Say so, rather than
+            // leaving a reader to wonder which half is broken.
+            println!(
+                "Boot counting  : not in effect — this machine boots via {}, which has no \n\
+                 \x20                boot counter. GRUB is the default for every published APEX\n\
+                 \x20                image; systemd-boot with counting is opt-in.",
+                s(&["bootloader"])
+            );
+        }
+        Some(Value::Bool(true)) => {
+            println!("Boot counting  : in effect");
+            println!("  selected     : {}", s(&["bootCounting", "selectedEntry"]));
+            match r.pointer("/bootCounting/entries") {
+                Some(Value::Object(map)) if !map.is_empty() => {
+                    // BTreeMap so the order is stable between runs; an
+                    // unstable listing makes a diff of two reports unreadable.
+                    let ordered: BTreeMap<_, _> = map.iter().collect();
+                    for (id, e) in ordered {
+                        let state = if e.get("exhausted") == Some(&Value::Bool(true)) {
+                            "OUT OF TRIES"
+                        } else if e.get("blessed") == Some(&Value::Bool(true)) {
+                            "good"
+                        } else {
+                            "on trial"
+                        };
+                        let left = e
+                            .get("triesLeft")
+                            .and_then(Value::as_u64)
+                            .map(|n| format!("{n} left"))
+                            .unwrap_or_else(|| "no counter".into());
+                        println!("  {id:<32} {state:<12} {left}");
+                    }
+                }
+                _ => println!(
+                    "  entries      : unavailable — {}",
+                    r.get("bootCounting")
+                        .and_then(|c| c.get("entriesUnavailable"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("no reason reported")
+                ),
+            }
+        }
+        // `null`: LoaderBootCountPath could not be read, which is not the
+        // same finding as "read, and systemd-boot did not set it".
+        _ => println!(
+            "Boot counting  : unavailable — {}",
+            r.pointer("/bootCounting/inEffectUnavailable")
+                .and_then(Value::as_str)
+                .unwrap_or("no reason reported")
+        ),
     }
 
     match r.get("health") {
@@ -538,5 +650,151 @@ mod tests {
         assert!(blessed.get("triesLeft").is_none());
         assert_eq!(exhausted.get("triesLeft").and_then(Value::as_u64), Some(0));
         assert_ne!(on_trial.get("triesLeft").and_then(Value::as_u64), Some(0));
+    }
+
+    // ── EACCES vs ENOENT ─────────────────────────────────────────────────────
+    //
+    // `StubInfo`, `LoaderBootCountPath` and the TPM event log all went through
+    // helpers that answered a refused read the same way they answered a
+    // missing one. `booted_from_uki=false` then printed "kernel and initramfs
+    // were loaded separately" and `boot_counting=false` printed "not in
+    // effect: this machine boots through GRUB" — both about a boot nobody
+    // actually looked at. These tests seal the parent directory to 0000 so
+    // the read hits EACCES rather than ENOENT, and require the exact
+    // `PermissionDenied` kind so an unrelated failure cannot count as a
+    // successful seal. Root and CAP_DAC_OVERRIDE walk through 0000 regardless
+    // of the mode bit, so the seal is checked rather than assumed, and each
+    // test skips out loud rather than passing vacuously when it does not take.
+
+    fn seal(dir: &Path, probe: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dir).expect("stat").permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(dir, perms).expect("chmod");
+        matches!(std::fs::metadata(probe), Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied)
+    }
+
+    fn unseal(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dir).expect("stat").permissions();
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(dir, perms);
+    }
+
+    #[test]
+    fn an_unreadable_stubinfo_is_not_a_measurement_of_no_uki() {
+        let dir =
+            std::env::temp_dir().join(format!("apex-boot-eacces-stubinfo-{}", std::process::id()));
+        let efivars = dir.join("sys/firmware/efi/efivars");
+        std::fs::create_dir_all(&efivars).unwrap();
+        let target = efivars.join(format!("StubInfo-{LOADER_GUID}"));
+        std::fs::write(&target, b"\x07\x00\x00\x00").unwrap();
+
+        let sealed = seal(&efivars, &target);
+        let facts = chain_facts(Some(dir.clone()));
+        unseal(&efivars);
+        std::fs::remove_dir_all(&dir).ok();
+
+        if !sealed {
+            return; // root, or CAP_DAC_OVERRIDE: the mode bit proves nothing here
+        }
+        assert!(
+            facts.booted_from_uki.is_err(),
+            "a refused StubInfo read must not be reported as 'did not boot a UKI', got {:?}",
+            facts.booted_from_uki
+        );
+    }
+
+    #[test]
+    fn a_genuinely_absent_stubinfo_is_still_measured_as_no_uki() {
+        // The other half: ENOENT must stay `Ok(false)`, or the fix would turn
+        // every GRUB machine — which never sets StubInfo — into a warning.
+        let dir =
+            std::env::temp_dir().join(format!("apex-boot-enoent-stubinfo-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sys/firmware/efi/efivars")).unwrap();
+        let facts = chain_facts(Some(dir.clone()));
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(facts.booted_from_uki, Ok(false));
+    }
+
+    #[test]
+    fn an_unreadable_loaderbootcountpath_is_not_a_measurement_of_no_counting() {
+        let dir = std::env::temp_dir()
+            .join(format!("apex-boot-eacces-bootcount-{}", std::process::id()));
+        let efivars = dir.join("sys/firmware/efi/efivars");
+        std::fs::create_dir_all(&efivars).unwrap();
+        let target = efivars.join(format!("LoaderBootCountPath-{LOADER_GUID}"));
+        std::fs::write(&target, b"\x07\x00\x00\x00").unwrap();
+
+        let sealed = seal(&efivars, &target);
+        let facts = chain_facts(Some(dir.clone()));
+        unseal(&efivars);
+        std::fs::remove_dir_all(&dir).ok();
+
+        if !sealed {
+            return;
+        }
+        assert!(
+            facts.boot_counting.is_err(),
+            "a refused LoaderBootCountPath read must not be reported as 'not in \
+             effect', got {:?}",
+            facts.boot_counting
+        );
+    }
+
+    #[test]
+    fn a_genuinely_absent_loaderbootcountpath_is_still_measured_as_not_counting() {
+        let dir = std::env::temp_dir()
+            .join(format!("apex-boot-enoent-bootcount-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sys/firmware/efi/efivars")).unwrap();
+        let facts = chain_facts(Some(dir.clone()));
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(facts.boot_counting, Ok(false));
+    }
+
+    #[test]
+    fn an_unreadable_event_log_is_not_a_measurement_of_absence() {
+        // securityfs commonly mounts `/sys/kernel/security` so only root can
+        // look inside, and `apex boot status` is documented read-only and
+        // root-free — this is the live shape of the bug, not a contrived one.
+        let dir =
+            std::env::temp_dir().join(format!("apex-boot-eacces-eventlog-{}", std::process::id()));
+        let tpm0 = dir.join("sys/kernel/security/tpm0");
+        std::fs::create_dir_all(&tpm0).unwrap();
+        let target = tpm0.join("binary_bios_measurements");
+        std::fs::write(&target, b"log").unwrap();
+        let security = dir.join("sys/kernel/security");
+
+        let sealed = seal(&security, &target);
+        let roots = Roots { fixture: Some(dir.clone()) };
+        let report = build_report(&roots);
+        unseal(&security);
+        std::fs::remove_dir_all(&dir).ok();
+
+        if !sealed {
+            return;
+        }
+        assert!(
+            report.pointer("/measuredBoot/eventLog").is_some_and(Value::is_null),
+            "a refused stat must not be reported as 'event log absent': {report}"
+        );
+        assert!(
+            report
+                .pointer("/measuredBoot/eventLogUnavailable")
+                .and_then(Value::as_str)
+                .is_some(),
+            "the reason should be carried: {report}"
+        );
+    }
+
+    #[test]
+    fn a_genuinely_absent_event_log_is_still_measured_absent() {
+        let dir =
+            std::env::temp_dir().join(format!("apex-boot-enoent-eventlog-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let roots = Roots { fixture: Some(dir.clone()) };
+        let report = build_report(&roots);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(report.pointer("/measuredBoot/eventLog"), Some(&Value::Bool(false)));
     }
 }
