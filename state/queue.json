@@ -4,6 +4,17 @@
   "concurrency_ceiling": 6,
   "units": [
     {
+      "id": "integrate-clippy",
+      "repo": "apex-os",
+      "items": [
+        "(tooling)"
+      ],
+      "title": "Land chore/run-clippy \u2014 the only working way to run clippy here",
+      "after": [],
+      "conflicts": [],
+      "note": "One commit, two files (tests/run-clippy.sh, .gitignore). Should apply cleanly onto roadmap/v2.2 at any time. Neither machine has clippy or rustup, so cargo clippy exits 'no such command'; this runs it in docker.io/library/rust:1 against any ref. Mutation-proved: a &Vec<String> parameter fails it with clippy::ptr_arg at exit 101 and passes RUSTFLAGS=-D warnings cargo build at exit 0, which is exactly the gap that let three reports claim a check nobody ran."
+    },
+    {
       "id": "integrate-cloudflare",
       "repo": "apex-os",
       "items": [

@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T00:21+08:00",
+  "updated": "2026-09-07T00:35+08:00",
   "agents": [
     {
       "slug": "p1-045",
@@ -15,21 +15,6 @@
       "agent_id": "a8f13ad4ee7b9ad44",
       "dispatched": "2026-09-06T23:33+08:00",
       "title": "persistent-state migration, update channels, apex status trust",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
-    },
-    {
-      "slug": "p1-002",
-      "items": [
-        "P1-002",
-        "P1-003",
-        "P1-004"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-002",
-      "branch": "task/p1-002-cloudflare",
-      "agent_id": "aa9d164c364916210",
-      "dispatched": "2026-09-06T23:33+08:00",
-      "title": "Cloudflare provider, connection identity, Workers capability set",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
