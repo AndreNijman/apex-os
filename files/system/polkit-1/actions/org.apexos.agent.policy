@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+
+<!--
+  APEX agent runtime — the two passwords behind dimension 3.
+
+  ROADMAP.md section 3.3 says root is delegated, not inherited: a managed agent
+  does not become root because the user ran sudo an hour ago, because the agent
+  is in native bypass mode, because the sandbox is unrestricted, or because
+  Remote Control is driving it. Section 3.4 and section 7 both then say what it
+  does take, and they say the same thing: local authentication.
+
+  These are the two actions that ask. apex-agentd runs pkcheck against the
+  process on the far end of its control socket, with user interaction allowed,
+  and mints a grant only when that exits 0. The command line lives in
+  apexd/apex-agent-core/src/auth.rs and not in this comment, because an XML
+  comment may not contain two consecutive hyphens and every flag it passes
+  begins with two. A polkit action file that is not well formed is not
+  reported as an error: polkitd simply never registers the action, pkcheck
+  exits 127 forever, and nothing else says why. That is exactly how P0-016's
+  first attempt shipped, so this file is validated with xmllint at image build
+  time.
+
+  == why the subject is the caller and not the daemon =====================
+
+  polkit dispatches an authentication challenge to the agent registered for
+  the SUBJECT's login session. apex-agentd passes the peer of the control
+  connection, which it has already established is not inside any managed
+  session, so the dialog appears wherever that human is sitting. Passing the
+  daemon, or the agent's own process, would put the prompt somewhere the agent
+  could reach; section 4.4's "the user authenticates outside the agent PTY" is
+  this choice of subject and nothing else.
+
+  == auth_admin, not auth_self ===========================================
+
+  P0-016's Always Unrestricted toggle uses auth_self, correctly: it moves the
+  sandbox and grants no root at all. These two do grant root. A session grant
+  pre-approves named privileged operations; break-glass clears no_new_privs,
+  so setuid binaries work and the session can genuinely become root. Asking
+  for administrator authentication is asking the question that is actually
+  being answered.
+
+  == and never the _keep variants ========================================
+
+  auth_admin_keep caches the authorization for the rest of the login session,
+  which is a window in which the answer is yes and nobody was asked. The whole
+  value here is that every grant and every renewal is a fresh prompt: an agent
+  that cannot renew its own grant gains nothing if a cached yes renews it
+  instead. auth.rs states the same rule in code, and a change to one without
+  the other is a bug in whichever was not changed.
+
+  == allow_inactive and allow_any are no =================================
+
+  A switched-away session and a remote one are both "nobody is at this
+  keyboard". Section 7 reserves elevation for a local origin, and there is no
+  password that makes a remote caller local, so they are refused outright
+  rather than challenged. apex-agentd refuses them before it reaches polkit,
+  from the connection's cgroup rather than from anything the caller claims;
+  this is the same rule stated where an administrator can read it.
+
+  Install (regular systemd host):
+    sudo install -Dm644 files/system/polkit-1/actions/org.apexos.agent.policy \
+         /usr/share/polkit-1/actions/org.apexos.agent.policy
+
+  APEX-OS ships it read-only at that path from Containerfile.base.
+-->
+
+<policyconfig>
+
+  <vendor>APEX-OS</vendor>
+  <vendor_url>https://github.com/AndreNijman/apex-os</vendor_url>
+
+  <!-- Section 4.4: a session-bound, capability-scoped, time-limited grant.
+       The session stays under no_new_privs and keeps the secret broker; what
+       it gains is that named privileged operations it files stop needing a
+       separate decision until the grant runs out. -->
+  <action id="org.apexos.agent.system-access">
+    <description>Grant an agent session scoped system access</description>
+    <message>Authentication is required to let this agent session perform named privileged operations without asking again.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Section 4.5: break-glass. This one clears no_new_privs, so the session
+       can use sudo and become root. Deliberately a separate action from the
+       one above: allowing the smaller thing must not allow this. -->
+  <action id="org.apexos.agent.break-glass">
+    <description>Run an agent session with the APEX protections removed</description>
+    <message>Authentication is required to remove the APEX root boundary for this agent session. It will be able to become root until the time limit runs out.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>

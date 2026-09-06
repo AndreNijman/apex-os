@@ -93,9 +93,40 @@ COPY files/system/dbus-1/system.d/org.apexos.Apexd1.conf \
      /usr/share/dbus-1/system.d/org.apexos.Apexd1.conf
 COPY files/system/polkit-1/actions/org.apexos.apexd.policy \
      /usr/share/polkit-1/actions/org.apexos.apexd.policy
+COPY files/system/polkit-1/actions/org.apexos.agent.policy \
+     /usr/share/polkit-1/actions/org.apexos.agent.policy
 COPY files/system/polkit-1/rules.d/49-apex-singbox.rules \
      /usr/share/polkit-1/rules.d/49-apex-singbox.rules
 COPY files/system/units/sing-box.service /usr/lib/systemd/system/sing-box.service
+
+# A polkit action file that is not well formed is not an error anybody sees.
+# polkitd skips it, pkcheck then exits 127 for that action for the life of the
+# image, and there is no other symptom — which is how P0-016 shipped an
+# unregisterable action in apex-shell. The two things that make an action file
+# unparseable are both checked here: the XML itself, and the fact that an XML
+# comment may not contain two consecutive hyphens, which is what a quoted
+# command line in a comment always produces.
+RUN set -eux; \
+    for f in /usr/share/polkit-1/actions/org.apexos.*.policy; do \
+        xmllint --noout --nonet "$f"; \
+    done; \
+    # The four action ids the runtime and the daemon actually name. A renamed
+    # action registers cleanly and authorises nothing, which is the same
+    # silence in a different place.
+    grep -q 'id="org.apexos.apexd.manage-power"' \
+        /usr/share/polkit-1/actions/org.apexos.apexd.policy; \
+    grep -q 'id="org.apexos.apexd.manage-battery"' \
+        /usr/share/polkit-1/actions/org.apexos.apexd.policy; \
+    grep -q 'id="org.apexos.agent.system-access"' \
+        /usr/share/polkit-1/actions/org.apexos.agent.policy; \
+    grep -q 'id="org.apexos.agent.break-glass"' \
+        /usr/share/polkit-1/actions/org.apexos.agent.policy; \
+    # §3.3: root is delegated. Neither elevation action may be reachable
+    # without a human, and neither may cache the answer — `_keep` is a window
+    # in which the answer is yes and nobody was asked.
+    ! grep -q '_keep' /usr/share/polkit-1/actions/org.apexos.agent.policy; \
+    ! grep -q '<allow_any>yes' /usr/share/polkit-1/actions/org.apexos.agent.policy; \
+    ! grep -q '<allow_inactive>yes' /usr/share/polkit-1/actions/org.apexos.agent.policy
 
 # ── MT7925 Wi-Fi: survive a suspend ──────────────────────────────────────────
 # The L16's mt7925e comes back from s2idle with its receive path wedged. The
