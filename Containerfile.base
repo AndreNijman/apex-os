@@ -271,13 +271,6 @@ RUN set -eux; \
     # daemon would refuse every operation with an error nobody would connect to
     # this line.
     ! grep -q '^User=' /usr/lib/systemd/system/apex-secretd.service; \
-    # The broker execs these to perform an operation. Asserted for the reason
-    # apex-pkg's list is: a missing one turns `apex secret use` into a runtime
-    # failure on the user's machine instead of a failed build here, and the
-    # message would be about a child process rather than about a missing tool.
-    for t in git curl; do \
-        command -v "$t" >/dev/null || { echo "FATAL: apex-secretd brokers with $t"; exit 1; }; \
-    done; \
     echo "agent sandbox: bwrap functional; agentd opt-in; secretd enabled with a 0700 store"
 
 # Default browser (system-wide XDG): Firefox is the only baked browser, but set
@@ -1894,10 +1887,23 @@ RUN set -eux; \
     # Every `apex secret` verb by name. A renamed one is a silent no-op in the
     # skills and shell functions that call it, and §12's whole point is that
     # those keep working unchanged.
-    for v in add list remove capabilities grant revoke grants use audit; do \
+    for v in add list remove capabilities grant revoke grants use migrate audit; do \
         /usr/bin/apex secret "$v" --help >/dev/null \
             || { echo "FATAL: apex secret $v is gone"; exit 1; }; \
     done; \
+    # The two programs the broker execs to perform an operation. Asserted for
+    # the reason apex-pkg's list is: a missing one turns `apex secret use` into
+    # a runtime failure on the user's machine instead of a failed build here,
+    # and the message would be about a child process rather than a missing tool.
+    for t in git curl; do \
+        command -v "$t" >/dev/null \
+            || { echo "FATAL: apex-secretd brokers with $t"; exit 1; }; \
+    done; \
+    # The MCP bridge is what replaces a bearer token in ~/.claude.json, so a
+    # rename here is a machine whose memory server stops answering after an
+    # update, with the definition still pointing at a verb that is gone.
+    /usr/bin/apex mcp bridge --help >/dev/null \
+        || { echo "FATAL: apex mcp bridge is gone"; exit 1; }; \
     # The one thing the CLI must never grow: a verb that hands back a value.
     # Anchored to the command column, because the descriptions legitimately say
     # "read from stdin" and clap's own help verb says "Print this message".
