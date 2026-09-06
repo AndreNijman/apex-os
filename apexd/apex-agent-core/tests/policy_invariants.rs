@@ -943,10 +943,11 @@ fn a_grant_is_bound_to_one_session_and_a_bounded_window() {
     }
 
     // §3.4's "explicit short TTL", read as written: break-glass will not
-    // default its own window, and its cap is the shorter of the two.
+    // default its own window. That its cap is the shorter of the two is a fact
+    // about two constants and is asserted where the compiler can settle it,
+    // beside them in `grant.rs`.
     assert!(ttl_for(GrantKind::BreakGlass, None).is_err());
     assert!(ttl_for(GrantKind::SystemAccess, None).is_ok());
-    assert!(MAX_BREAK_GLASS_MS < MAX_SESSION_ACCESS_MS);
 }
 
 #[test]
