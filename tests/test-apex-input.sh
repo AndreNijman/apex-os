@@ -599,6 +599,32 @@ if command -v xmllint >/dev/null 2>&1; then
         && ok "nonsense input still yields valid XML" || bad "nonsense input still yields valid XML"
 fi
 
+section "one compositor's broken validator is not a veto over the other two"
+# A machine with a half-installed niri could not change a touchpad setting in a
+# Hyprland session: the generator refused to write ANYTHING when either
+# validator said no, the page reported success, and the reason went to a stderr
+# line about a compositor the user does not run.
+h="${WORK}/veto"; mkhome "$h"
+mkdir -p "$h/.config/hypr" "${WORK}/vetobin"
+printf '#!/bin/sh\nexit 127\n' > "${WORK}/vetobin/niri"
+chmod 0755 "${WORK}/vetobin/niri"
+echo '{"touchpad":{"tap":false}}' > "$h/.config/apex-shell/input.json"
+out="$(HOME="$h" APEX_INPUT_DEVICES="$NODEV" PATH="${WORK}/vetobin:$PATH" \
+       python3 "$GEN" --no-reload 2>&1)"
+printf '%s\n' "$out" | grep -q 'niri config was rejected' \
+    && ok "it says the niri half was refused" || bad "it says the niri half was refused"
+grep -q '<tap>no</tap>' "$h/.config/labwc/rc.xml" \
+    && ok "labwc is still written when niri refuses" \
+    || bad "labwc is still written when niri refuses"
+grep -q 'tap_to_click            = false' "$h/.config/hypr/apex/input.lua" \
+    && ok "Hyprland is still written when niri refuses" \
+    || bad "Hyprland is still written when niri refuses"
+# And the file the refusing compositor reads is untouched rather than replaced
+# with something it just rejected.
+[ -e "$h/.config/apex-shell/ApexShellInput.kdl" ] \
+    && bad "the refused niri config is not written" \
+    || ok "the refused niri config is not written"
+
 section "an unparseable rc.xml is never overwritten"
 h="${WORK}/broken"; mkhome "$h"
 printf '<?xml version="1.0"?>\n<labwc_config><core>\n' > "$h/.config/labwc/rc.xml"
