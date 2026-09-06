@@ -59,6 +59,7 @@ LIBEXEC="${APEX_DEVICES_LIBEXEC:-/usr/libexec}"
 DEVDIR="${APEX_DEVICES_DEV:-/dev}"
 MEDIADIR="${APEX_DEVICES_MEDIA:-/run/media}"
 NMLIBDIR="${APEX_DEVICES_NMLIB:-/usr/lib64/NetworkManager}"
+NMCONFD="${APEX_DEVICES_NMCONFD:-/usr/lib/NetworkManager/conf.d}"
 
 readonly FW_CONF_DIR="$ETCDIR/apex/firewall.d"
 
@@ -459,22 +460,35 @@ do_network() {
     # `nmcli networking connectivity` reads the cached state. `… connectivity
     # check` re-runs it, and that is a polkit action; a status command must not
     # be the thing that raises an authentication dialog.
-    local conn; conn=$(run 10 nmcli -t networking connectivity | tail -1)
-    case "$conn" in
-        portal)
-            item "captive portal" "YES — this network is holding the connection"
-            note "open any http:// page in a browser to reach the login form" ;;
-        full)    item "connectivity" "full" ;;
-        limited) item "connectivity" "limited — addressed, but nothing beyond the LAN" ;;
-        none)    item "connectivity" "none" ;;
-        unknown|"")
-            item "captive portal" "not detected — the check is off"
-            note "with connectivity checking disabled, a hotel or campus network that"
-            note "has addressed you and will answer nothing reads as 'connected'."
-            note "APEX ships $ETCDIR/NetworkManager/conf.d/21-apex-connectivity.conf to"
-            note "turn it on; something later in conf.d may be switching it back off." ;;
-        *)       item "connectivity" "$conn" ;;
-    esac
+    #
+    # And `full` is only a measurement if NetworkManager checked. With no
+    # connectivity URI it answers FULL for any connected link without asking
+    # anybody — measured on the machine this was written on:
+    # ConnectivityCheckAvailable false, ConnectivityCheckEnabled false,
+    # ConnectivityCheckUri empty, `nmcli -t networking connectivity` full. That
+    # is this file's own bug wearing network clothes: "I did not look" arriving
+    # as a positive result.
+    local checking conn
+    checking=$(connectivity_checking)
+    conn=$(run 10 nmcli -t networking connectivity | tail -1)
+    if [ "$conn" = portal ]; then
+        item "captive portal" "YES — this network is holding the connection"
+        note "open any http:// page in a browser to reach the login form"
+    elif [ "$checking" = yes ]; then
+        case "$conn" in
+            full)    item "connectivity" "full, and checked" ;;
+            limited) item "connectivity" "limited — addressed, nothing beyond the LAN" ;;
+            none)    item "connectivity" "none" ;;
+            *)       item "connectivity" "$conn" ;;
+        esac
+    else
+        item "captive portal" "not detected, because nothing checked"
+        note "NetworkManager has no connectivity URI here, so it answers '$conn' for any"
+        note "connected link without asking anyone. A hotel or campus network that has"
+        note "addressed you and will answer nothing looks exactly like a working one."
+        note "APEX ships $ETCDIR/NetworkManager/conf.d/21-apex-connectivity.conf to turn"
+        note "the check on; on this machine it is not in effect."
+    fi
 
     local vpn; vpn=$(dir_state "$NMVPNDIR")
     case "$vpn" in
@@ -523,6 +537,30 @@ do_network() {
         local b; for b in "${blockers[@]}"; do note "$b"; done
     fi
     local c; for c in "${caveats[@]:-}"; do [ -n "$c" ] && note "$c"; done
+}
+
+# yes | no | unknown — did NetworkManager check the connection, or assume it?
+#
+# The property read is on the system bus and needs no privilege; it is not
+# `nmcli networking connectivity check`, which re-runs the probe and is a polkit
+# action. Without busctl the configuration is the next best answer, and "no file
+# sets a uri" is reported as unknown rather than as no: a guess about a config
+# is not the same as an answer from the daemon.
+connectivity_checking() {
+    if have busctl; then
+        case "$(run 5 busctl get-property org.freedesktop.NetworkManager \
+                    /org/freedesktop/NetworkManager org.freedesktop.NetworkManager \
+                    ConnectivityCheckEnabled | tail -1)" in
+            *true*)  printf 'yes'; return ;;
+            *false*) printf 'no';  return ;;
+        esac
+    fi
+    if grep -rqs '^[[:space:]]*uri[[:space:]]*=' \
+         "$ETCDIR/NetworkManager/conf.d" "$NMCONFD" 2>/dev/null; then
+        printf 'yes'
+    else
+        printf 'unknown'
+    fi
 }
 
 # Enterprise Wi-Fi (WPA-Enterprise / 802.1X): eduroam, a campus or an office.

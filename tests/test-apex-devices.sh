@@ -67,6 +67,7 @@ shim bluetoothctl 'cat "$STATE/bluetoothctl" 2>/dev/null'
 shim rfkill      'cat "$STATE/rfkill" 2>/dev/null'
 shim scanimage   'if [ -e "$STATE/scanimage.hang" ]; then sleep 300; fi; cat "$STATE/scanimage" 2>/dev/null'
 shim rpm         'exit "$(cat "$STATE/rpm.rc" 2>/dev/null || echo 0)"'
+shim busctl      'cat "$STATE/busctl" 2>/dev/null'
 shim dnsmasq     'true'
 shim wg          'true'
 
@@ -85,6 +86,7 @@ devices() {
         APEX_DEVICES_DEV="$WORK/dev" \
         APEX_DEVICES_MEDIA="$WORK/media" \
         APEX_DEVICES_NMLIB="$WORK/nmlib" \
+        APEX_DEVICES_NMCONFD="$WORK/nmconfd" \
         "$@" bash "$HELPER_ABS" "$area" 2>&1
 }
 
@@ -99,9 +101,10 @@ case_silent() {  # the opposite: it must NOT say this
 reset_world() {
     chmod -R u+rwX "$WORK/sys" "$WORK/dev" "$WORK/media" 2>/dev/null
     rm -rf "$WORK/sys" "$WORK/etc" "$WORK/spa" "$WORK/nmvpn" "$WORK/libexec" \
-           "$WORK/dev" "$WORK/media" "$WORK/nmlib" "$STATE"
+           "$WORK/dev" "$WORK/media" "$WORK/nmlib" "$WORK/nmconfd" "$STATE"
     mkdir -p "$WORK/sys/class" "$WORK/sys/bus" "$WORK/etc" "$WORK/spa" "$WORK/nmvpn" \
-             "$WORK/libexec" "$WORK/dev" "$WORK/media" "$WORK/nmlib/1.54.3" "$STATE"
+             "$WORK/libexec" "$WORK/dev" "$WORK/media" "$WORK/nmlib/1.54.3" \
+             "$WORK/nmconfd" "$STATE"
     # A Wi-Fi-capable NetworkManager unless a case says otherwise: without the
     # plugin the enterprise reader stops before anything else it checks.
     : > "$WORK/nmlib/1.54.3/libnm-device-plugin-wifi.so"
@@ -275,12 +278,24 @@ out=$(devices network)
 case_says "a captive portal is reported as one" "$out" "captive portal" \
           "NM's portal state is the only signal a hotel network gives"
 
+# The one that fires on the shipped image. With no connectivity URI configured,
+# NetworkManager answers FULL for any connected link without asking anyone —
+# measured on the L16: ConnectivityCheckEnabled false, connectivity full. That is
+# "I did not look" arriving as a positive result, which is this suite's subject.
 reset_world
 printf 'wlp3s0:wifi:connected\n' > "$STATE/nmcli"
-printf 'unknown\n' > "$STATE/nmcli.-t networking connectivity"
+printf 'full\n' > "$STATE/nmcli.-t networking connectivity"
+printf 'b false\n' > "$STATE/busctl"
 out=$(devices network)
-case_says "connectivity 'unknown' reads as detection being off" "$out" "the check is off" \
-          "with the check off, a portal reads as a working connection and nothing says so"
+case_says "an unchecked 'full' is not passed off as a working connection" "$out" "nothing checked" \
+          "a portal looks exactly like this, and nothing else on the machine says so"
+case_silent "and it is not described as checked" "$out" "and checked" \
+            "NetworkManager assumed; describing that as a check would be the lie"
+
+printf 'b true\n' > "$STATE/busctl"
+out=$(devices network)
+case_says "a 'full' that was actually checked says so" "$out" "full, and checked" \
+          "the distinction is worthless unless the good case is distinguishable too"
 
 reset_world
 printf 'wlp3s0:wifi:connected\n' > "$STATE/nmcli"

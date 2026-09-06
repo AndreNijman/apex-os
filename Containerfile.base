@@ -1166,6 +1166,7 @@ RUN set -eux; \
         APEX_DEVICES_SPA=/nonexistent-spa APEX_DEVICES_NMVPN=/nonexistent-vpn \
         APEX_DEVICES_LIBEXEC=/nonexistent-libexec APEX_DEVICES_DEV=/nonexistent-dev \
         APEX_DEVICES_MEDIA=/nonexistent-media APEX_DEVICES_NMLIB=/nonexistent-nmlib \
+        APEX_DEVICES_NMCONFD=/nonexistent-nmconfd \
         /usr/libexec/apex-devices all > /tmp/apex-devices-all.txt 2>&1; \
     for h in Printing Scanning "Network shares" "Removable media" Networking \
              Bluetooth Thunderbolt; do \
