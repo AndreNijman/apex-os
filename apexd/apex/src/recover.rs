@@ -189,6 +189,18 @@ impl Sys {
         std::fs::read_to_string(self.path(absolute)).ok()
     }
 
+    /// Like [`Sys::read`], but keeps the reason the read failed.
+    ///
+    /// `read` answers `None` for "absent" and for "present, and you may not
+    /// look at it", which are different answers to a user. The `/proc` and
+    /// `/sys` callers do not care, because a file they cannot read is a file
+    /// they cannot use either way. A caller that reports the *state of the
+    /// machine* does care: saying "no packages installed" when the truth is
+    /// "0700, ask root" tells the user something false about their own system.
+    fn read_result(&self, absolute: &str) -> std::io::Result<String> {
+        std::fs::read_to_string(self.path(absolute))
+    }
+
     fn exists(&self, absolute: &str) -> bool {
         self.path(absolute).exists()
     }
@@ -920,16 +932,36 @@ fn package_row(sys: &Sys, running_version: &str) -> Row {
     const STATE: &str = "/var/lib/apex/pkg/state.json";
     let id = "package-extensions";
     let label = "Package extensions";
-    let Some(text) = sys.read(STATE) else {
-        return Row {
-            id,
-            label,
-            state: Health::Verified,
-            // Absence is a checked fact, and it is the common case: most
-            // machines install nothing with `apex install`.
-            detail: "no user packages on this machine".to_string(),
-            action: None,
-        };
+    let text = match sys.read_result(STATE) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Row {
+                id,
+                label,
+                state: Health::Verified,
+                // Absence is a checked fact, and it is the common case: most
+                // machines install nothing with `apex install`.
+                detail: "no user packages on this machine".to_string(),
+                action: None,
+            };
+        }
+        Err(e) => {
+            // `/var/lib/apex/pkg` is 0700 root:root by a tmpfiles.d rule
+            // (Containerfile.base), and `apex recover status` is something a
+            // desktop session runs as itself. Treating that refusal as absence
+            // told every non-root user on every machine with packages
+            // installed that they had none, and marked the lie `Verified`.
+            // `apex boot status` already gets this right for the ESP, which is
+            // 0700 for the same reason, by reporting the read as unavailable
+            // with the reason rather than inventing an empty answer.
+            return Row {
+                id,
+                label,
+                state: Health::Unavailable,
+                detail: format!("{STATE} could not be read: {e}"),
+                action: Some("sudo apex recover status".to_string()),
+            };
+        }
     };
     let doc: Value = match serde_json::from_str(&text) {
         Ok(v) => v,
@@ -1817,6 +1849,62 @@ mod tests {
         assert_eq!(m.get("VARIANT_ID").map(String::as_str), Some("gaming"));
         assert!(!m.contains_key("# a comment"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_package_state_we_may_not_read_is_unavailable_rather_than_none() {
+        // The live bug: /var/lib/apex/pkg is 0700 root:root, `apex recover
+        // status` runs as the desktop user, and the row asserted "no user
+        // packages on this machine" as Verified on every machine that had
+        // some. The suite missed it because its fixtures are owned by whoever
+        // runs the tests, so nothing ever hit EACCES.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("apex-recover-eacces-{}", std::process::id()));
+        let pkg = dir.join("var/lib/apex/pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("state.json"), "{\"requested\":[\"ncdu\"]}").unwrap();
+
+        let mut perms = std::fs::metadata(&pkg).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&pkg, perms).unwrap();
+
+        let sys = Sys { fixture: Some(dir.clone()) };
+        let sealed = sys.read_result("/var/lib/apex/pkg/state.json").is_err();
+        let row = package_row(&sys, "43");
+
+        let mut perms = std::fs::metadata(&pkg).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&pkg, perms).ok();
+        std::fs::remove_dir_all(&dir).ok();
+
+        if !sealed {
+            return; // root, or CAP_DAC_OVERRIDE: the mode bit proves nothing
+        }
+        assert_eq!(
+            row.state,
+            Health::Unavailable,
+            "a refused read must not be reported as a verified absence"
+        );
+        assert!(
+            !row.detail.contains("no user packages"),
+            "the row claimed absence it never established: {}",
+            row.detail
+        );
+        assert!(row.action.is_some(), "the user needs to be told how to see it");
+    }
+
+    #[test]
+    fn a_genuinely_absent_package_state_is_still_verified_none() {
+        // The other half: ENOENT must stay a checked fact, or the fix would
+        // turn the common case (nothing installed) into a permanent warning.
+        let dir = std::env::temp_dir().join(format!("apex-recover-noenoent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sys = Sys { fixture: Some(dir.clone()) };
+        let row = package_row(&sys, "43");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(row.state, Health::Verified);
+        assert!(row.detail.contains("no user packages"));
     }
 
     #[test]
