@@ -220,13 +220,13 @@ pub enum ProfileCmd {
         #[arg(long)]
         force: bool,
     },
-    /// Apply an exported profile to this machine.
+    /// Bring this machine's profile up to date with an exported one.
     ///
     /// Files are added and updated; nothing local is deleted, and the two
     /// files that hold both reusable and machine-local state are merged key by
     /// key rather than overwritten — so importing a profile cannot remove the
     /// environment values the export refused to carry.
-    #[command(visible_alias = "sync")]
+    #[command(name = "sync", visible_alias = "import")]
     Import {
         /// Which agent. Defaults to the configured one.
         agent: Option<String>,
@@ -1300,8 +1300,8 @@ fn profile_list(json: bool) -> Result<i32> {
         return Ok(0);
     }
     println!(
-        "{:<10} {:<24} {:<10} {}",
-        "AGENT", "ROOT", "INSTALLED", "REUSABLE / LOCAL / SECRET"
+        "{:<10} {:<24} {:<10} REUSABLE / LOCAL / SECRET",
+        "AGENT", "ROOT", "INSTALLED"
     );
     for p in profile::PROFILES {
         let s = profile::summary(p, &home);
@@ -1347,8 +1347,8 @@ fn profile_inspect(agent: Option<String>, json: bool) -> Result<i32> {
     println!("{} — {}", p.display, profile::display_home(&p.root_dir(&home), &home));
     println!();
     println!(
-        "{:<42} {:<14} {:<10} {:<14} {}",
-        "PATH", "CLASS", "MOUNT", "ROLE", "FILES"
+        "{:<42} {:<14} {:<10} {:<14} FILES",
+        "PATH", "CLASS", "MOUNT", "ROLE"
     );
     for f in &found {
         println!(

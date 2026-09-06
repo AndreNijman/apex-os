@@ -266,6 +266,7 @@ Three policies. `project` is the default.
 |---|---|---|---|
 | project files | rw | rw | rw |
 | rest of `$HOME` | visible | **not present** | **not present** |
+| the agent's own profile | rw | **reusable half read-only** | **reusable half read-only** |
 | `/usr`, `/etc` | rw as you | read-only | read-only |
 | other processes | all | own PID namespace | own PID namespace |
 | camera, microphone | yes | **no** | **no** |
@@ -284,6 +285,11 @@ Measured on APEX-OS 43, kernel 7.1.5, bubblewrap 0.11.0:
 | `/dev/snd` nodes | 14 | 0 |
 | `~/.ssh` readable | yes | no |
 | project readable/writable | yes | yes |
+| `~/.claude/skills` writable | yes | **no** |
+| `~/.claude/CLAUDE.md` writable | yes | **no** |
+| `~/.claude/projects` writable | yes | yes |
+
+The last three are the agent profile, below.
 
 ### Default-deny, not a blocklist
 
@@ -339,6 +345,135 @@ apex agent run --sandbox unrestricted …
   `$XDG_RUNTIME_DIR`, so a confined agent cannot open GUI applications. The
   *system* bus is masked with `/run`, so it cannot reach `apexd` either — a
   system change has to go through `apex request` (below).
+
+---
+
+## The agent profile
+
+An agent installation is a profile, not just a binary. `claude` is an
+executable plus a directory of instructions, skills, slash commands, plugins
+and MCP definitions that decides what the executable does — which is why two
+machines on the same version behave differently.
+
+```bash
+apex agent profile list
+apex agent profile inspect claude
+apex agent profile doctor claude
+apex agent profile export claude --to ~/claude-profile
+apex agent profile sync claude --from ~/claude-profile
+```
+
+### Reusable, machine-local, mixed, secret
+
+Every part of the profile has a class, and the class decides both what an
+export carries and how a confined session mounts it. One table, so the two
+answers cannot drift apart.
+
+| class | what it is | exported | mounted |
+|---|---|---|---|
+| reusable | instructions, skills, commands, subagents | whole | read-only |
+| mixed | reusable and machine-local in one file | in part | read-only, except `~/.claude.json` |
+| machine-local | transcripts, caches, plugin state, install paths | no | writable |
+| secret | credentials | **never** | writable |
+
+**Anything the table does not name is machine-local.** That is what makes the
+exclusion hold without a blocklist: a directory a future Claude release invents
+is out of the bundle the day it ships, with nobody editing anything.
+
+Two files are genuinely both, and file-level exclusion cannot say so:
+
+- `settings.json` carries the model, hooks and enabled plugins beside an `env`
+  block whose values are environment values, which is where a token goes. The
+  export keeps the names and drops the values, so the importing machine knows
+  what to ask for.
+- `~/.claude.json` is mostly this machine — the account, the machine id, the
+  per-directory history — around the one thing worth carrying: the MCP server
+  definitions. The export takes those and leaves the rest.
+
+An import merges those two key by key rather than overwriting them. A
+whole-file copy would replace the target's `env` with the bundle's blanks and so
+delete the token on the machine that had one.
+
+### What an export refuses
+
+`apex agent profile export` walks the reusable entries and nothing else, then
+re-derives the class of every file it is about to write and refuses the whole
+bundle if any of them is not exportable. Nothing is half-written: the check runs
+before the directory is created.
+
+On top of that, any key that is a credential by name — token, secret, password,
+api key, authorization, bearer, private key, access key — has its value emptied
+wherever it appears in a file the export edits. That net is not decoration. It
+was added because exporting a real profile put an HTTP MCP server's bearer token
+in the bundle: it lives in `headers.Authorization`, and the rules had been
+written against `env`.
+
+Everything left behind is listed by name and class rather than dropped in
+silence.
+
+### Read-only mounts and the runtime overlay
+
+A confined session gets the profile path by path. The reusable half is bound
+read-only, so a session cannot rewrite the instructions the next one will be
+started with. Session and plugin state — transcripts, shell snapshots, todos,
+the plugin cache — is bound writable, because Claude writes all of it while it
+runs and a read-only profile is an agent that starts and then fails in a way
+that looks like a bug in Claude.
+
+The profile directory itself is bound by nothing. `$HOME` is a tmpfs and
+`bwrap` creates its own mount points, so `~/.claude` exists inside the session
+as an empty writable directory with the listed entries mounted into it. That is
+the runtime overlay: a file the agent invents there is writable, is private to
+the session, and is gone when the session ends.
+
+Measured with a real `claude` session under `--sandbox project`:
+
+```
+~/.claude/skills        read-only
+~/.claude/commands      read-only
+~/.claude/CLAUDE.md     read-only
+~/.claude/settings.json read-only
+~/.claude/projects      writable
+~/.claude/todos         writable
+~/.claude/plugins/cache writable
+skills=18 home=0 ssh=absent
+```
+
+Everything that session persisted — the transcript, the session environment,
+the settings backup, the rate-limit cache and `~/.claude.json` — landed on a
+path the table names writable. Nothing landed outside it.
+
+Writable directories are created before the session starts. `bwrap` binds with
+`-try`, and a `-try` for a path that is not there is a no-op, so a machine where
+Claude has never run would write its first transcripts into the tmpfs and lose
+them at exit — which reads as the agent forgetting, not as a dropped mount.
+
+### The doctor
+
+`apex agent profile doctor` reads and reports; it repairs nothing, so it is
+usable for finding out what state you are in. It covers config, the status line,
+hooks, commands, skills, subagents, plugins, marketplaces, MCP servers and
+credentials, and exits non-zero when something is wrong — a skill directory with
+no `SKILL.md`, a status line that is not executable, a plugin enabled from a
+marketplace this machine has never heard of.
+
+Two things it gets right that are easy to get wrong: `enabledPlugins` is an
+object in Claude 2.1 and was a list of strings before it, and a reader that
+knows only the list reports a clean bill of health for a machine running seven
+plugins; and `extraKnownMarketplaces` is a marketplace source in its own right,
+which is the one that survives a `profile sync` onto a machine that has not run
+Claude yet.
+
+Credentials are named, never read. The doctor says where they are and that the
+export does not carry them.
+
+### Only Claude, so far
+
+`codex`, `gemini`, `kimi` and `opencode` have no profile description, and
+`apex agent profile doctor codex` says so rather than reporting an empty one.
+Their sandbox keeps the whole-directory behaviour: `~/.codex` goes in writable.
+Guessing which half of a directory nobody has read off a real installation is a
+session store would produce exactly the failure this exists to prevent.
 
 ---
 
@@ -771,6 +906,9 @@ Only you can add a service record, and the host is pinned from then on.
 | `$XDG_STATE_HOME/apex/agent/privilege-audit.jsonl` | append-only privilege audit |
 | `$XDG_CONFIG_HOME/apex/agent.json` | default agent, the six permission dimensions, the network allowlist, detach key |
 | `/tmp/apex-agent/<id>/` | per-session scratch, and an allowlisted session's egress socket; removed with the session |
+
+The agent's own profile is not APEX's to keep, and APEX keeps no copy of it.
+`apex agent profile inspect` prints where every part of it lives.
 
 Transcripts are a record of your work and are readable only by you.
 

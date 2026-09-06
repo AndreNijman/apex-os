@@ -22,6 +22,24 @@
 //! set, so an `ANTHROPIC_API_KEY` or `GITHUB_TOKEN` sitting in the user's shell
 //! does not leak into a session that never asked for it.
 //!
+//! ## The agent's own profile is not one allowlist entry
+//!
+//! What comes back into the masked home is decided by [`crate::adapter`], and
+//! for an agent APEX has a [`crate::profile`] description of it comes back path
+//! by path rather than as a directory. The reusable half — instructions,
+//! skills, slash commands, subagent definitions, settings — is in [`spec.ro`],
+//! so a session cannot rewrite what the next one will be started with; the
+//! session and plugin state it writes as it runs is in [`spec.rw`].
+//!
+//! The profile directory itself is in neither, which is what makes the rest of
+//! it an overlay: the home is a tmpfs and `bwrap` creates its own mount points,
+//! so `~/.claude` is an empty writable directory inside the session with the
+//! listed entries mounted into it. A path a later release invents there is
+//! writable, private to the session, and gone with it.
+//!
+//! [`spec.ro`]: SandboxSpec::ro
+//! [`spec.rw`]: SandboxSpec::rw
+//!
 //! ## Why `/run` is masked, and why a socket denylist would not do
 //!
 //! `--ro-bind / /` made the whole of `/run` visible, including
@@ -54,6 +72,8 @@
 //! | system bus reachable | yes | **no** |
 //! | `org.apexos.Apexd1` callable | yes | **no** |
 //! | DNS resolution | yes | yes |
+//! | `~/.claude/skills` writable | yes | **no** |
+//! | `~/.claude/projects` writable | yes | yes |
 //!
 //! The last three are what the `/run` tmpfs changed. DNS is in the table
 //! because masking `/run` breaks it by default: `/etc/resolv.conf` is a symlink
