@@ -6,8 +6,8 @@ worktree: /var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell
 branch: roadmap/v2.2
 
 ## NEXT
-Orienting. Nothing edited yet. Next action: verify branch tips + baseline
-test count on int-os.
+BRANCH 1 LANDED (not yet pushed): roadmap/v2.2 = 7f14a00. Baseline reverified
+at 1614/0. Next action: rebase task/p1-045-updates-trust onto 7f14a00.
 
 ## PLAN
 1. apex-os chore/run-clippy (1 commit) -> roadmap/v2.2 e4e221f
