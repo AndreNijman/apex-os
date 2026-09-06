@@ -340,9 +340,7 @@
         "P2-004"
       ],
       "title": "Accessibility baseline and internationalisation baseline",
-      "after": [
-        "p1-048"
-      ],
+      "after": [],
       "conflicts": [
         "p1-048"
       ],

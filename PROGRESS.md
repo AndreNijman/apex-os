@@ -301,6 +301,41 @@ fixed on `roadmap/v2.2`:
   whose name appears at a different EVR for the host arch is now dropped as an
   application fork rather than a multilib library.
 
+### It was twelve runners, not four, and the fix had two bugs of its own
+
+The survey said four test runners reached Andre's session. A proper sweep found
+**nineteen scripts that launch a graphical client, twelve of them on the
+inherited `WAYLAND_DISPLAY`.** All twelve now bring their own headless wlroots
+compositor, private runtime dir and private HOME; the other seven were already
+headless inline and pass the guard on their own merits.
+
+Verifying by *running* rather than parsing found two defects in the fix itself:
+
+- **`set -e` exempts only the LEFT operand of `&&`.** `[ -n "$pid" ] && kill -9
+  "$pid"` aborted the cleanup function whenever the pid had already been reaped
+  — the normal case, three tenths of a second after the first kill. The function
+  never reached its `rm -rf` or its `return 0`, and an EXIT trap ending on a
+  failure hands that status to the script. **A suite printing "5 passed, 0
+  failed" exited 1**, and every run leaked its sandbox; five were sitting in
+  `/tmp`.
+- The guard itself read `command -p X` as a lookup. `-v` and `-V` print a path;
+  **`-p` runs the command.** The author's own mutants missed it because, in their
+  words, they were written from the same wrong model as the code. That is the
+  sharpest statement of the mutation-testing limit anyone has made in this
+  program: a mutant tests whether the code matches your model, not whether your
+  model is right.
+
+The guard has four rules because a hand mutation defeated the first three:
+`export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"` placed after
+`headless_begin` satisfies A, B and C and still lands the run on the desk. And
+it was unreachable until wired into `ci.yml`, which lists every check by name —
+a guard nothing runs is a comment.
+
+**Fact worth keeping:** Hyprland comes up nested inside a *headless* labwc and
+`configerrors`, `reload` and `version` all answer — but the host labwc must not
+be pixman. Aquamarine wants a dmabuf, and the only symptom is a silent
+`CBackend::create()` failure.
+
 ### Five firewall defects that only a real machine could show
 
 The policy had been read, parsed and asserted for a day. Loading it into a

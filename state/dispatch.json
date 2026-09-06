@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T05:11+08:00",
+  "updated": "2026-09-07T05:21+08:00",
   "agents": [
     {
       "slug": "p1-020",
@@ -16,21 +16,6 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T04:25+08:00 (fresh agent, resumed from card after the 01:11 limit)",
       "title": "agent/subagent graph, statusline telemetry, notification bridge and dedup"
-    },
-    {
-      "slug": "p1-048",
-      "items": [
-        "(test hygiene)",
-        "P1-048",
-        "P1-049"
-      ],
-      "repo": "apex-shell",
-      "worktree": "/var/tmp/apex-work/wt-p1-048",
-      "branch": "task/p1-048-guided-settings",
-      "agent_id": "a9d3dd1972f20e56d",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T04:25+08:00 (fresh agent, resumed from card after the 01:11 limit)",
-      "title": "stop four test runners opening windows on Andre's desktop, then redesign Blueprint and Gaming settings"
     },
     {
       "slug": "integrate-3",
@@ -91,6 +76,22 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T05:25+08:00",
       "title": "screenshot/file injection into TUI agents, worktree status, disposable capsules"
+    },
+    {
+      "slug": "p2-010",
+      "items": [
+        "P2-010",
+        "P2-011",
+        "P2-014",
+        "P2-015"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p2-010",
+      "branch": "task/p2-010-hardware-storage",
+      "agent_id": "afe0623c24f524eaa",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T05:35+08:00",
+      "title": "hardware qualification database, agent cgroup budgets, Storage Manager, firmware lifecycle"
     }
   ]
 }

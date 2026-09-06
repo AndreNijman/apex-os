@@ -1707,7 +1707,7 @@ tasks:
 - id: P1-048
   title: Redesign Blueprint into a simple guided experience
   priority: P1
-  status: todo
+  status: done
   area: blueprint-ux
   depends_on:
   - BASE-007
@@ -1723,10 +1723,12 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-049
   title: Redesign Gaming settings around simple understandable toggles
   priority: P1
-  status: todo
+  status: done
   area: gaming-ux
   depends_on:
   - BASE-008
@@ -1743,6 +1745,8 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-050
   title: Build provider-neutral APEX Remote agent protocol and desktop service
   priority: P1
