@@ -540,12 +540,12 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request) -> Response {
                 return Response::error(ErrorKind::Internal, "the state lock is poisoned");
             };
             let loaded = state.running.as_ref().map(|r| r.model.clone());
-            Response::Models {
-                models: probe::model_infos(
-                    &daemon.store,
-                    state.selected.as_deref(),
-                    loaded.as_deref(),
-                ),
+            match probe::model_infos(&daemon.store, state.selected.as_deref(), loaded.as_deref())
+            {
+                Ok(models) => Response::Models { models },
+                // Never fall back to an empty list: that reads as "nothing is
+                // installed" to a client with no way to tell the difference.
+                Err(e) => Response::error(ErrorKind::Internal, e),
             }
         }
 
@@ -553,10 +553,11 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request) -> Response {
             if let Err(e) = ai::validate_model_id(&model) {
                 return Response::error(ErrorKind::BadRequest, e.to_string());
             }
-            if !probe::installed(&daemon.store)
-                .iter()
-                .any(|(m, _)| m.id == model)
-            {
+            let installed = match probe::installed(&daemon.store) {
+                Ok(l) => l,
+                Err(e) => return Response::error(ErrorKind::Internal, e),
+            };
+            if !installed.iter().any(|(m, _)| m.id == model) {
                 return Response::error(
                     ErrorKind::NoSuchModel,
                     format!(
