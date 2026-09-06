@@ -29,8 +29,10 @@
 //! ## The exclusion is a property, not a list
 //!
 //! [`classify`](Profile::classify) returns [`Class::MachineLocal`] for anything
-//! the table does not name, and the export copies [`Class::Reusable`] and
-//! nothing else. So a directory Claude invents in its next release is excluded
+//! the table does not name, and the export carries the reusable state and
+//! nothing else — a [`Class::Reusable`] file whole, a [`Class::Mixed`] one down
+//! to the part its [`Edit`]s leave standing. So a directory Claude invents in
+//! its next release is excluded
 //! the day it appears, with nobody editing anything — the same default-deny
 //! reasoning [`crate::sandbox`] uses for mounts.
 //!
@@ -702,8 +704,9 @@ pub struct PlanItem {
     pub source: PathBuf,
     /// Where it goes inside the bundle, relative to the bundle root.
     pub bundle: PathBuf,
-    /// Its class. Always [`Class::Reusable`]; [`Plan::verify`] is what makes
-    /// that a checked fact rather than a comment.
+    /// Its class. Always an exportable one — [`Class::Reusable`] carried whole
+    /// or [`Class::Mixed`] carried in part; [`Plan::verify`] is what makes that
+    /// a checked fact rather than a comment.
     pub class: Class,
     /// Edits applied on the way in.
     pub edits: &'static [Edit],
@@ -2329,6 +2332,76 @@ mod tests {
         let report = doctor(&CLAUDE, &f.home);
         assert!(
             report.problems.iter().any(|p| p.contains("nowhere")),
+            "{:?}",
+            report.problems
+        );
+    }
+
+    #[test]
+    fn plugins_are_counted_whichever_shape_the_settings_are_in() {
+        // Claude 2.1 writes `enabledPlugins` as an object keyed by
+        // `name@marketplace`; it was a list of strings before. A reader that
+        // knows only the list reports zero plugins on a current install — a
+        // clean bill of health for a machine running seven of them, which is
+        // worse than reporting nothing at all. Measured against a real 2.1
+        // settings.json.
+        let f = Fixture::new("pluginshape");
+        std::fs::write(
+            f.home.join(".claude/settings.json"),
+            r#"{"enabledPlugins":{"p@mkt":true,"ghost@nowhere":true,"old@mkt":false}}"#,
+        )
+        .unwrap();
+        let report = doctor(&CLAUDE, &f.home);
+        let plugins = report
+            .sections
+            .iter()
+            .find(|s| s.title == "plugins")
+            .expect("a plugins section");
+        // p@mkt and ghost@nowhere. old@mkt is a name that is present and
+        // switched off, which is not one of the enabled ones.
+        assert!(
+            plugins.lines.iter().any(|l| l == "2 enabled"),
+            "{:?}",
+            plugins.lines
+        );
+        assert!(
+            report.problems.iter().any(|p| p.contains("ghost@nowhere")),
+            "the object form was not read: {:?}",
+            report.problems
+        );
+        assert!(
+            !report.problems.iter().any(|p| p.contains("old@mkt")),
+            "a disabled plugin was reported as a problem: {:?}",
+            report.problems
+        );
+    }
+
+    #[test]
+    fn a_marketplace_declared_in_settings_counts_as_known() {
+        // `extraKnownMarketplaces` is the second marketplace source, and it is
+        // the one that carries across a `profile sync`: a machine that has
+        // imported a profile and not yet run Claude has the declaration and no
+        // checkout. Reading only known_marketplaces.json reports every plugin
+        // on that machine as enabled from nowhere.
+        let f = Fixture::new("extramkt");
+        std::fs::write(
+            f.home.join(".claude/settings.json"),
+            r#"{"enabledPlugins":{"p@extra":true},
+                "extraKnownMarketplaces":{"extra":{"source":{"source":"github","repo":"a/b"}}}}"#,
+        )
+        .unwrap();
+        let report = doctor(&CLAUDE, &f.home);
+        assert!(
+            !report.problems.iter().any(|p| p.contains("not known here")),
+            "{:?}",
+            report.problems
+        );
+        // Known but not fetched is still worth saying, and says what to run.
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("checkout is missing")),
             "{:?}",
             report.problems
         );
