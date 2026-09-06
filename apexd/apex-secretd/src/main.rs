@@ -135,18 +135,15 @@ fn run(socket: &Path, store_root: &Path) -> Result<(), String> {
     // Fatal, not a warning. A daemon that dropped a provider would answer
     // "that is not an operation this build offers" for a capability the owner
     // had granted, which is the most confusing possible refusal.
-    let registry = match providers::default_registry() {
+    let store = Store::new(store_root.to_path_buf());
+    let registry = match providers::default_registry(store.run_dir()) {
         Ok(registry) => registry,
         Err(e) => {
             eprintln!("apex-secretd: a shipped provider does not declare validly: {e}");
             std::process::exit(1);
         }
     };
-    let service = Arc::new(Service::new(
-        Store::new(store_root.to_path_buf()),
-        protected,
-        registry,
-    ));
+    let service = Arc::new(Service::new(store, protected, registry));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {

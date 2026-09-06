@@ -45,6 +45,7 @@
 //! named here rather than hidden behind a map that pretends otherwise.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use apex_secret_core::operation::{Effect, OperationSpec, ProviderSpec, ResourceKind};
@@ -74,15 +75,25 @@ pub const SPEC: ProviderSpec = ProviderSpec {
     }],
 };
 
-/// The provider, carrying the conversations it is in the middle of.
-#[derive(Default)]
+/// The provider, carrying the conversations it is in the middle of and the
+/// directory a message is staged in.
+///
+/// `run_dir` is the store's own, which only root may write. The child runs as
+/// the owner and has to read the message by name, and a root write to a name an
+/// ordinary account could have created first as a symlink is a root write to
+/// wherever that symlink points — so the directory is part of the provider's
+/// configuration rather than something it picks at call time.
 pub struct McpProvider {
+    run_dir: PathBuf,
     sessions: Mutex<BTreeMap<(u32, String), String>>,
 }
 
 impl McpProvider {
-    pub fn new() -> McpProvider {
-        McpProvider::default()
+    pub fn new(run_dir: PathBuf) -> McpProvider {
+        McpProvider {
+            run_dir,
+            sessions: Mutex::new(BTreeMap::new()),
+        }
     }
 
     fn session(&self, uid: u32, service: &str) -> Option<String> {
@@ -146,6 +157,7 @@ impl Provider for McpProvider {
             req.body,
             carried.as_deref(),
             req.owner,
+            &self.run_dir,
         )
         .map_err(ProviderError::Failed)?;
         if let Some(id) = http.session {
@@ -216,7 +228,7 @@ mod tests {
             service: &service,
             owner: &owner,
         };
-        let e = McpProvider::new().bind(&req).expect_err("no path, no endpoint");
+        let e = McpProvider::new(std::env::temp_dir()).bind(&req).expect_err("no path, no endpoint");
         assert!(e.to_string().contains("--path"), "{e}");
     }
 
@@ -246,7 +258,7 @@ mod tests {
             service: &service,
             owner: &owner,
         };
-        let provider = McpProvider::new();
+        let provider = McpProvider::new(std::env::temp_dir());
         assert!(provider.bind(&req).is_err());
 
         // ...and with a message, the endpoint is the stored record's own, port
@@ -265,7 +277,7 @@ mod tests {
         // Two accounts talking to the same server are two conversations. A
         // single slot would replay one account's session id into the other's
         // request.
-        let p = McpProvider::new();
+        let p = McpProvider::new(std::env::temp_dir());
         assert_eq!(p.session(1000, "memory"), None);
         p.remember(1000, "memory", "s-1".into());
         p.remember(1001, "memory", "s-2".into());
