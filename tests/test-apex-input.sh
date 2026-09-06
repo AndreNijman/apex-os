@@ -292,6 +292,238 @@ sed -n '/^    touchpad {/,/^    }/p' "$h/.config/apex-shell/ApexShellInput.kdl" 
     && ok "niri: drag lock on is written as the bare flag" \
     || bad "niri: drag lock on is written as the bare flag"
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Per-device settings, and the four Hyprland can express no other way.
+#
+#  Hyprland's `input.touchpad` block has no sensitivity, accel_profile,
+#  left_handed or scroll_method — --verify-config answers "unknown config key"
+#  for each. They live on the parent `input` block, where they apply to the
+#  mouse as well, so the Touchpad page's Pointer speed, Acceleration,
+#  Left-handed and Scroll method can only mean "this touchpad" through
+#  hl.device, by name. That is why the generator enumerates devices at all.
+#
+#  The enumeration is fixtured here. Asserting against whatever is plugged into
+#  the machine running the suite is how a test comes to pass on a laptop and
+#  fail on a build runner.
+# ─────────────────────────────────────────────────────────────────────────────
+section "input devices are classified, and a value of 0 is not a yes"
+python3 - "$GEN" <<'PY' && ok "udev's ID_INPUT_POINTINGSTICK=0 is not read as a trackpoint" \
+                        || bad "udev's ID_INPUT_POINTINGSTICK=0 is not read as a trackpoint"
+import importlib.machinery, importlib.util, sys
+spec = importlib.util.spec_from_loader("gen", importlib.machinery.SourceFileLoader("gen", sys.argv[1]))
+gen = importlib.util.module_from_spec(spec); spec.loader.exec_module(gen)
+# The real udev record of a touchpad's companion mouse node, verbatim.
+flags = gen.parse_udev_flags("E:ID_INPUT=1\nE:ID_INPUT_POINTINGSTICK=0\nE:ID_INPUT_MOUSE=1\n", prefix="E:")
+sys.exit(0 if flags == {"ID_INPUT", "ID_INPUT_MOUSE"} else 1)
+PY
+
+# Real hardware, read-only: the enumeration has to work for a user who is not in
+# the `input` group, which is every APEX user. `libinput list-devices` cannot.
+if [ -d /sys/class/input ]; then
+    real="$(python3 "$GEN" --devices 2>/dev/null)"
+    printf '%s' "$real" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["devices"] else 1)' \
+        && ok "the enumeration finds devices without the input group" \
+        || bad "the enumeration finds devices without the input group"
+    printf '%s' "$real" | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+bad = [x for x in d["devices"] if x["type"] not in
+       ("touchpad","trackpoint","tablet","touchscreen","mouse","keyboard","other")]
+sys.exit(1 if bad else 0)' \
+        && ok "every enumerated device carries a known kind" \
+        || bad "every enumerated device carries a known kind"
+else
+    skp "no /sys/class/input: the enumeration is not exercised against real devices"
+fi
+
+section "the four settings Hyprland can only express per device"
+DEVFIX="${WORK}/devices.json"
+cat > "$DEVFIX" <<'JSON'
+[ {"name":"Fixture Touchpad","type":"touchpad","hypr_name":"fixture-touchpad","hypr_name_source":"derived"},
+  {"name":"Fixture TrackPoint","type":"trackpoint","hypr_name":"fixture-trackpoint","hypr_name_source":"derived"},
+  {"name":"Fixture Mouse","type":"mouse","hypr_name":"fixture-mouse","hypr_name_source":"derived"},
+  {"name":"Fixture Tablet","type":"tablet","hypr_name":"fixture-tablet","hypr_name_source":"derived"},
+  {"name":"Fixture Touchscreen","type":"touchscreen","hypr_name":"fixture-touchscreen","hypr_name_source":"derived"} ]
+JSON
+run_dev() { HOME="$1" APEX_INPUT_DEVICES="$DEVFIX" python3 "$GEN" --no-reload "${@:2}"; }
+
+h="${WORK}/perdev"; mkhome "$h"
+cat > "$h/.config/apex-shell/input.json" <<'JSON'
+{ "touchpad": { "speed": 0.4, "accel_profile": "flat", "left_handed": true,
+                "scroll_method": "edge" },
+  "pointer":  { "speed": -0.3, "middle_emulation": true },
+  "devices":  { "Fixture Mouse": { "type": "mouse", "speed": 0.9, "natural_scroll": true },
+                "Fixture TrackPoint": { "type": "trackpoint", "tap": true } } }
+JSON
+notes="$(run_dev "$h" 2>&1)"
+H="$h/.config/hypr/apex/input.lua"
+RC="$h/.config/labwc/rc.xml"
+
+tpdev() { sed -n '/name = "fixture-touchpad"/,/^})/p' "$H"; }
+tpdev | grep -q 'sensitivity = 0.4' \
+    && ok "hyprland: touchpad pointer speed reaches the touchpad, by name" \
+    || bad "hyprland: touchpad pointer speed reaches the touchpad, by name"
+tpdev | grep -q 'accel_profile = "flat"' \
+    && ok "hyprland: touchpad acceleration reaches the touchpad, by name" \
+    || bad "hyprland: touchpad acceleration reaches the touchpad, by name"
+tpdev | grep -q 'left_handed = true' \
+    && ok "hyprland: touchpad left-handed reaches the touchpad, by name" \
+    || bad "hyprland: touchpad left-handed reaches the touchpad, by name"
+# The one spelling nothing else catches: --verify-config accepts any string for
+# scroll_method and the compositor then matches none of them, so the model's
+# own word would parse clean and do nothing.
+tpdev | grep -q 'scroll_method = "2fg"' \
+    && bad "hyprland: the touchpad scroll method is Hyprland's spelling" \
+    || ok "hyprland: the touchpad scroll method is Hyprland's spelling"
+tpdev | grep -q 'scroll_method = "edge"' \
+    && ok "hyprland: the touchpad scroll method reaches the touchpad, by name" \
+    || bad "hyprland: the touchpad scroll method reaches the touchpad, by name"
+grep -q 'scroll_method *= *"twofinger"' "$H" \
+    && bad "hyprland: the model's own scroll-method word never reaches the config" \
+    || ok "hyprland: the model's own scroll-method word never reaches the config"
+
+# The mouse must NOT pick up the touchpad's pointer speed. That is exactly what
+# writing these four globally would do, and why they are routed per device.
+sed -n '/^    input = {/,/^        touchpad = {/p' "$H" | grep -q 'sensitivity    = -0.3' \
+    && ok "hyprland: the global input block still carries the mouse's speed" \
+    || bad "hyprland: the global input block still carries the mouse's speed"
+
+# Middle-click emulation has no global Hyprland option at all.
+sed -n '/name = "fixture-mouse"/,/^})/p' "$H" | grep -q 'middle_button_emulation = true' \
+    && ok "hyprland: mouse middle-click emulation reaches the mouse, by name" \
+    || bad "hyprland: mouse middle-click emulation reaches the mouse, by name"
+sed -n '/name = "fixture-trackpoint"/,/^})/p' "$H" | grep -q 'middle_button_emulation = true' \
+    && ok "hyprland: a trackpoint counts as a pointer for middle-click emulation" \
+    || bad "hyprland: a trackpoint counts as a pointer for middle-click emulation"
+
+# A per-device override beats the section-wide value routed to the same device.
+sed -n '/name = "fixture-mouse"/,/^})/p' "$H" | grep -q 'sensitivity = 0.9' \
+    && ok "hyprland: a per-device speed beats the section it belongs to" \
+    || bad "hyprland: a per-device speed beats the section it belongs to"
+sed -n '/name = "fixture-mouse"/,/^})/p' "$H" | grep -q 'natural_scroll = true' \
+    && ok "hyprland: a per-device override is written by name" \
+    || bad "hyprland: a per-device override is written by name"
+
+# labwc matches a device by name too — labwc-config(5): a category that is not
+# one of its keywords "will be used to match the device name directly".
+grep -q '<device category="Fixture Mouse">' "$RC" \
+    && ok "labwc: a per-device override becomes a named device profile" \
+    || bad "labwc: a per-device override becomes a named device profile"
+sed -n '/<device category="Fixture Mouse">/,/<\/device>/p' "$RC" | grep -q '<pointerSpeed>0.9</pointerSpeed>' \
+    && ok "labwc: the named profile carries the value in labwc's own words" \
+    || bad "labwc: the named profile carries the value in labwc's own words"
+# Order is the argument: a name profile has to come after the category ones.
+[ "$(grep -n '<device category=' "$RC" | tail -1 | grep -c 'Fixture')" = 1 ] \
+    && ok "labwc: named profiles are written after the category profiles" \
+    || bad "labwc: named profiles are written after the category profiles"
+
+# A tap setting on a trackpoint is a category error, not a typo.
+printf '%s\n' "$notes" | grep -q 'a trackpoint has no such setting' \
+    && ok "a touchpad-only setting on a trackpoint is refused and named" \
+    || bad "a touchpad-only setting on a trackpoint is refused and named"
+
+# And the whole thing still has to be a config the compositors accept.
+st="$(APEX_INPUT_DEVICES="$DEVFIX" python3 "$GEN" --self-test 2>&1)"
+printf '%s\n' "$st" | grep -q '^FAIL' \
+    && bad "the per-device output is accepted by every installed compositor" \
+    || ok "the per-device output is accepted by every installed compositor"
+
+section "a control no compositor can honour is disabled with a reason"
+caps() { APEX_INPUT_DEVICES="$1" python3 "$GEN" --capabilities; }
+NOPAD="${WORK}/nopad.json"
+echo '[{"name":"Fixture Mouse","type":"mouse","hypr_name":"fixture-mouse","hypr_name_source":"derived"}]' > "$NOPAD"
+
+caps "$DEVFIX" | python3 -c '
+import json, sys
+c = json.load(sys.stdin)["controls"]
+sys.exit(0 if c["touchpad.speed"]["hyprland"]["supported"] else 1)' \
+    && ok "with a touchpad present, Hyprland can do touchpad speed" \
+    || bad "with a touchpad present, Hyprland can do touchpad speed"
+
+caps "$NOPAD" | python3 -c '
+import json, sys
+e = json.load(sys.stdin)["controls"]["touchpad.speed"]["hyprland"]
+sys.exit(0 if not e["supported"] and "no touchpad" in e["reason"] else 1)' \
+    && ok "with no touchpad, it is disabled and the reason says why" \
+    || bad "with no touchpad, it is disabled and the reason says why"
+
+caps "$DEVFIX" | python3 -c '
+import json, sys
+c = json.load(sys.stdin)["controls"]
+e = c["touchpad.three_finger_drag"]["niri"]
+v = c["touchpad.click_method"]["niri"]
+sys.exit(0 if (not e["supported"] and e["reason"]
+               and "none" in v.get("unsupported_values", {})) else 1)' \
+    && ok "niri declares its three-finger-drag and click-method gaps" \
+    || bad "niri declares its three-finger-drag and click-method gaps"
+
+caps "$DEVFIX" | python3 -c '
+import json, sys
+p = json.load(sys.stdin)["per_device"]
+sys.exit(0 if (p["hyprland"]["supported"] and p["labwc"]["supported"]
+               and not p["niri"]["supported"] and p["niri"]["reason"]) else 1)' \
+    && ok "per-device settings are declared unsupported on niri, with a reason" \
+    || bad "per-device settings are declared unsupported on niri, with a reason"
+
+# Every reason a user can be shown must be a sentence, not an option name.
+caps "$DEVFIX" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+reasons = [e["reason"] for c in d["controls"].values() for e in c.values()
+           if not e["supported"]]
+reasons += [v["reason"] for v in d["per_device"].values() if not v["supported"]]
+reasons += [r for c in d["controls"].values() for e in c.values()
+            for r in e.get("unsupported_values", {}).values()]
+bad = [r for r in reasons if len(r) < 20 or "_" in r or r.endswith(".")]
+sys.exit(1 if bad else 0)' \
+    && ok "every disabled reason reads as an explanation, not an option name" \
+    || bad "every disabled reason reads as an explanation, not an option name"
+
+section "the page can read back what is actually in effect"
+# Divergence is the property worth having: a control that writes and never reads
+# cannot tell a working setting from one whose option was renamed upstream.
+h="${WORK}/readback"; mkhome "$h"
+mkdir -p "$h/.config/niri"
+echo '{"touchpad":{"tap":false,"natural_scroll":false,"speed":0.25}}' \
+    > "$h/.config/apex-shell/input.json"
+run_dev "$h" >/dev/null 2>&1
+rb="$(HOME="$h" APEX_INPUT_DEVICES="$DEVFIX" XDG_CURRENT_DESKTOP=niri \
+      python3 "$GEN" --read-back --model "$h/.config/apex-shell/input.json" 2>/dev/null)"
+printf '%s' "$rb" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+v = d["values"]
+ok = (d["compositor"] == "niri"
+      and v["touchpad.tap"]["value"] is False
+      and v["touchpad.natural_scroll"]["value"] is False
+      and abs(v["touchpad.speed"]["value"] - 0.25) < 1e-6
+      and not d["diverged"])
+sys.exit(0 if ok else 1)' \
+    && ok "niri: the generated file reads back as the values that were written" \
+    || bad "niri: the generated file reads back as the values that were written"
+
+# Every niri value must say it came from a file, because niri has no input query
+# and claiming a device read would be a lie the user cannot check.
+printf '%s' "$rb" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+sys.exit(0 if all(v["source"] == "file" for v in d["values"].values())
+         and any("no input query" in n for n in d["notes"]) else 1)' \
+    && ok "niri: the read-back says it came from the file, not the compositor" \
+    || bad "niri: the read-back says it came from the file, not the compositor"
+
+# Now break the file behind the page's back. A read-back that still agrees with
+# the model is not reading anything.
+sed -i 's/^        tap$//' "$h/.config/apex-shell/ApexShellInput.kdl"
+sed -i 's/^        drag true$/        drag false/' "$h/.config/apex-shell/ApexShellInput.kdl"
+HOME="$h" APEX_INPUT_DEVICES="$DEVFIX" XDG_CURRENT_DESKTOP=niri \
+    python3 "$GEN" --read-back --model "$h/.config/apex-shell/input.json" 2>/dev/null \
+    | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+sys.exit(0 if any(x["control"] == "touchpad.tap_and_drag" for x in d["diverged"]) else 1)' \
+    && ok "a value changed behind the page is reported as diverged" \
+    || bad "a value changed behind the page is reported as diverged"
+
 section "bad input is corrected, not obeyed"
 h="${WORK}/bad"; mkhome "$h"
 cat > "$h/.config/apex-shell/input.json" <<'JSON'
