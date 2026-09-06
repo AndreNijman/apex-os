@@ -48,6 +48,16 @@ pub struct Config {
     /// Dimension 6: applied when `--origin-policy` is not given.
     #[serde(default)]
     pub origin: OriginPolicy,
+    /// Destinations an `allowlist` session may reach, one `host` or
+    /// `host:port` per entry.
+    ///
+    /// Configuration rather than a flag, and the daemon's configuration rather
+    /// than the request's, so a session cannot name its own destinations —
+    /// which would be an allowlist the thing being confined gets to write.
+    /// Empty by default, and an empty list denies everything: an `allowlist`
+    /// session is refused rather than started with nothing it can reach.
+    #[serde(default)]
+    pub network_allow: Vec<String>,
     /// Key that detaches from an attached session.
     #[serde(default = "default_detach_key")]
     pub detach_key: String,
@@ -77,6 +87,7 @@ impl Default for Config {
             secrets: SecretPolicy::default(),
             network: NetworkPolicy::default(),
             origin: OriginPolicy::default(),
+            network_allow: Vec::new(),
             detach_key: default_detach_key(),
             auto_checkpoint: false,
             extra: serde_json::Map::new(),
@@ -85,6 +96,16 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The configured destinations, parsed.
+    ///
+    /// Never fails: [`Config::normalise`] has already emptied a list with an
+    /// unparseable entry in it and said which one, so what is here parses. An
+    /// empty list is the default and denies everything, which is what the
+    /// caller has to handle either way.
+    pub fn allowlist(&self) -> crate::destination::Allowlist {
+        crate::destination::Allowlist::parse(&self.network_allow).unwrap_or_default()
+    }
+
     /// The configured defaults as one policy.
     ///
     /// What `apex agent run` starts from before applying a preset and then the
@@ -151,6 +172,16 @@ impl Config {
         if let Err(e) = self.policy().validate() {
             fixed.push(format!("{e}; using the default permission dimensions"));
             self.set_policy(AgentPolicy::default());
+        }
+        // One unreadable destination empties the whole allowlist, not just
+        // that entry. Keeping the rest would tighten the policy, which is the
+        // safe direction, but it would do it silently — and an allowlist that
+        // is quietly one line shorter than it looks is exactly the thing this
+        // file must not produce. Emptied and named, so `--network allowlist`
+        // then refuses to start rather than starting with a hole or a gap.
+        if let Err(e) = crate::destination::Allowlist::parse(&self.network_allow) {
+            fixed.push(format!("{e}; the network allowlist is empty until it is fixed"));
+            self.network_allow.clear();
         }
         fixed
     }
@@ -310,6 +341,33 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("system-access"), "{notes:?}");
         assert_eq!(cfg.policy().validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_network_allowlist_is_empty_by_default_and_parses_what_it_holds() {
+        let cfg = from_str("{}").expect("parse");
+        assert!(cfg.network_allow.is_empty());
+        assert!(cfg.allowlist().is_empty(), "an unset allowlist must deny everything");
+
+        let cfg = from_str(r#"{"network_allow":["api.anthropic.com","*.githubusercontent.com"]}"#)
+            .expect("parse");
+        assert_eq!(cfg.allowlist().len(), 2);
+    }
+
+    #[test]
+    fn one_unreadable_destination_empties_the_allowlist_and_names_itself() {
+        // Not "drop the bad line and keep the rest": an allowlist that is
+        // quietly one entry shorter than it looks is the failure this file
+        // exists to avoid. Emptied, reported, and `--network allowlist` then
+        // refuses to start.
+        let mut cfg = Config {
+            network_allow: vec!["api.example.com".into(), "*.com".into()],
+            ..Config::default()
+        };
+        let notes = cfg.normalise();
+        assert!(cfg.network_allow.is_empty());
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("*.com"), "{notes:?}");
     }
 
     #[test]
