@@ -491,7 +491,64 @@ host_desktop_files() {
 
 # ── records ─────────────────────────────────────────────────────────────────
 record_path() { printf '%s/%s.json' "$ENV_ROOT" "$1"; }
-has_record()  { [ -f "$(record_path "$1")" ]; }
+
+# Whether a capsule's record can be read, and if not, whether we are entitled
+# to say it does not exist.
+#
+# Prints `ok`, `absent` or `unreadable`.
+#
+# `[ -f "$(record_path "$1")" ]` — the previous test — answers false for a
+# record that was never written and for one this process may not look at
+# alike. `write_record` chmods $ENV_ROOT to 0700, and while that is
+# ordinarily this same user's own directory, a symlink cycle, a non-directory
+# ancestor, or a mode the user themselves tightened all produce the identical
+# false a name that was never used gives. `create` then offers to make a
+# SECOND capsule under a name that already has one, and `provision` would
+# silently attempt the same thing on the way to a language capsule.
+#
+# So: read it. Absence is only a safe conclusion when the read failed AND
+# every directory on the way to the record was one we could actually look
+# inside. Mirrors `apex-pkg`'s `state_kind`, which this codebase already
+# reviewed for the same class of bug.
+record_kind() {
+    local target; target="$(record_path "$1")"
+    if cat -- "$target" >/dev/null 2>&1; then
+        printf 'ok\n'
+        return
+    fi
+    # A symlink whose target is missing or loops still exists as a name.
+    if [ -L "$target" ]; then
+        printf 'unreadable\n'
+        return
+    fi
+    # Walk up to the first ancestor that exists. If it is not a searchable,
+    # readable directory then the read failed because we could not look, not
+    # because there was nothing there.
+    local d="$target" prev=
+    while :; do
+        d="$(dirname -- "$d")"
+        [ "$d" = "$prev" ] && break
+        prev="$d"
+        if [ -e "$d" ]; then
+            if [ -d "$d" ] && [ -r "$d" ] && [ -x "$d" ]; then
+                break
+            fi
+            printf 'unreadable\n'
+            return
+        fi
+        [ "$d" = "/" ] && break
+    done
+    if [ -e "$target" ]; then
+        printf 'unreadable\n'
+    else
+        printf 'absent\n'
+    fi
+}
+
+# `ok` only. Every caller that needs to tell "unreadable" apart from "absent"
+# — the ones where that difference changes what happens, not just what is
+# printed — calls `record_kind` directly instead.
+has_record() { [ "$(record_kind "$1")" = ok ]; }
 
 # Everything APEX knows about a capsule, written atomically. The digest is
 # recorded as whatever podman resolved the reference to at create time and is
@@ -695,7 +752,13 @@ cmd_create() {
     require_tools
     require_subid
 
-    has_record "$name" && die "capsule '${name}' already exists (apex env rm ${name} to replace it)"
+    # Fails closed on `unreadable`, not only on `ok`: a record this process
+    # cannot look at is not proof the name is free, and creating a second
+    # capsule over it would be the wrong side of the guess either way.
+    case "$(record_kind "$name")" in
+        ok) die "capsule '${name}' already exists (apex env rm ${name} to replace it)" ;;
+        unreadable) die "cannot tell whether '${name}' already exists: $(record_path "$name") is unreadable" ;;
+    esac
     if container_exists "$name"; then
         die "a container called '${name}' already exists but APEX did not create it; pick another name or remove it with 'distrobox rm ${name}'"
     fi
@@ -762,7 +825,11 @@ cmd_info() {
     [ "$#" -ge 1 ] || die "usage: apex env info <name>"
     local name="$1"
     valid_env_name "$name" || die "'${name}' is not a usable capsule name"
-    has_record "$name" || die "no capsule called '${name}' (apex env list)"
+    case "$(record_kind "$name")" in
+        ok) ;;
+        unreadable) die "$(record_path "$name") exists but could not be read; reading it may need a permission fix" ;;
+        *) die "no capsule called '${name}' (apex env list)" ;;
+    esac
     cat "$(record_path "$name")"
 }
 
@@ -772,7 +839,11 @@ cmd_info() {
 require_capsule() {
     local name="$1"
     valid_env_name "$name" || die "'${name}' is not a usable capsule name"
-    has_record "$name" || die "no capsule called '${name}' (apex env list, or apex env create ${name})"
+    case "$(record_kind "$name")" in
+        ok) ;;
+        unreadable) die "$(record_path "$name") exists but could not be read; reading it may need a permission fix" ;;
+        *) die "no capsule called '${name}' (apex env list, or apex env create ${name})" ;;
+    esac
 }
 
 cmd_enter() {
@@ -936,10 +1007,18 @@ cmd_provision() {
     require_rootless "$capsule"
     require_tools
 
-    if ! has_record "$capsule"; then
-        msg "provisioning ${language}: creating capsule '${capsule}'"
-        cmd_create "$capsule"
-    fi
+    # Only `absent` triggers a create. `unreadable` must not: `cmd_create`'s
+    # own overwrite guard would then be racing the same unreadable record,
+    # and silently attempting to create a capsule that may already exist is
+    # the wrong side of that guess regardless of which check catches it.
+    case "$(record_kind "$capsule")" in
+        ok) ;;
+        unreadable) die "$(record_path "$capsule") exists but could not be read; reading it may need a permission fix" ;;
+        *)
+            msg "provisioning ${language}: creating capsule '${capsule}'"
+            cmd_create "$capsule"
+            ;;
+    esac
 
     # Already provided: nothing to do, and say so with the capsule's name so a
     # user reading `apex apply` output can go and use it.
@@ -996,10 +1075,17 @@ cmd_rm() {
     done
     [ -n "$name" ] || die "usage: apex env rm <name>"
     valid_env_name "$name" || die "'${name}' is not a usable capsule name"
-    if ! has_record "$name"; then
-        [ "$force" = 1 ] \
-            || die "no capsule called '${name}'; APEX only removes containers it created (--force overrides)"
-    fi
+    case "$(record_kind "$name")" in
+        ok) ;;
+        unreadable)
+            [ "$force" = 1 ] \
+                || die "$(record_path "$name") exists but could not be read, so whether APEX created '${name}' is unknown (--force overrides)"
+            ;;
+        *)
+            [ "$force" = 1 ] \
+                || die "no capsule called '${name}'; APEX only removes containers it created (--force overrides)"
+            ;;
+    esac
     require_tools
     # distrobox rm --force stops a running container first. Without it the
     # command fails on exactly the capsule the user is most likely to be
