@@ -104,7 +104,7 @@ pub struct TrustArgs {
 /// ever taken from the environment; `skopeo` and `cosign` are absolute paths
 /// and under a fixture root neither is executed at all.
 pub struct Roots {
-    fixture: Option<PathBuf>,
+    pub(crate) fixture: Option<PathBuf>,
 }
 
 impl Roots {
@@ -112,7 +112,7 @@ impl Roots {
         Self { fixture: std::env::var_os("APEX_TRUST_ROOT").map(PathBuf::from) }
     }
 
-    fn path(&self, absolute: &str) -> PathBuf {
+    pub(crate) fn path(&self, absolute: &str) -> PathBuf {
         match &self.fixture {
             // `absolute` always starts with '/'; without the strip, `join`
             // discards the prefix and reads the real machine, which is a
@@ -463,19 +463,30 @@ pub struct Registry {
 ///
 /// It is not on disk in any plain file: ostree keeps it in the commit object's
 /// GVariant metadata. `rpm-ostree` answers over its system D-Bus service, which
-/// works unprivileged — `bootc status` does not. This is only ever called on
-/// the `--verify` path, so the offline report still spawns nothing.
-pub fn booted_digest() -> Result<String, String> {
-    let out = Command::new("/usr/bin/rpm-ostree")
-        .args(["status", "--json"])
-        .output()
-        .map_err(|e| format!("could not run rpm-ostree: {e}"))?;
-    if !out.status.success() {
-        let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(if why.is_empty() { "rpm-ostree status failed".into() } else { why });
-    }
-    let doc: Value = serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("could not parse rpm-ostree status: {e}"))?;
+/// works unprivileged — `bootc status` does not.
+///
+/// Under a fixture root it reads a pre-rendered `rpm-ostree-status.json`
+/// instead of spawning anything, the same shape `apex boot status` uses for
+/// `bootctl list`. Without that, every path needing the booted digest is
+/// unreachable from a test — including §26's rollout stop, and the one thing a
+/// rollout stop has to do is stop.
+pub fn booted_digest(roots: &Roots) -> Result<String, String> {
+    let doc: Value = if roots.fixture.is_some() {
+        let p = roots.path("/rpm-ostree-status.json");
+        let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?
+    } else {
+        let out = Command::new("/usr/bin/rpm-ostree")
+            .args(["status", "--json"])
+            .output()
+            .map_err(|e| format!("could not run rpm-ostree: {e}"))?;
+        if !out.status.success() {
+            let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(if why.is_empty() { "rpm-ostree status failed".into() } else { why });
+        }
+        serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("could not parse rpm-ostree status: {e}"))?
+    };
     let deployments = doc
         .get("deployments")
         .and_then(Value::as_array)
@@ -561,7 +572,7 @@ fn verify_registry(roots: &Roots, image_reference: &str) -> Registry {
             _ => image_reference.to_string(),
         });
 
-    let (digest, digest_error) = match booted_digest() {
+    let (digest, digest_error) = match booted_digest(roots) {
         Ok(d) => (Some(d), None),
         Err(e) => (None, Some(e)),
     };
