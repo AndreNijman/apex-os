@@ -36,14 +36,17 @@
 //! and each records WHICH of those closed it, so "finished" and "we stopped
 //! being able to tell" are different words on the screen.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 /// What kind of thing a child is.
 ///
-/// Two variants because the two are learned from different evidence and fail
-/// in different ways: a subagent is reported by the agent and can therefore go
-/// unreported, and a process is observed in `/proc` and can therefore be seen
-/// after the agent has forgotten about it.
+/// Two variants because the two are learned from different evidence and fail in
+/// different ways. A subagent is reported by the agent, so it can go
+/// unreported, and what is written down about it is history. A process is read
+/// out of `/proc` at the moment the graph is asked for, so it is never history
+/// and never stale — it is either there or it is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChildKind {
@@ -65,11 +68,12 @@ impl ChildKind {
 
 /// Why a child stopped being open.
 ///
-/// Recorded rather than collapsed to a boolean because the four are not the
-/// same news. `Reported` is a subagent that finished and said so. The other
-/// three are all "it is not running any more", arrived at by three different
-/// routes, and a reader who is debugging a hook that never fires needs to be
-/// able to tell them apart.
+/// Recorded rather than collapsed to a boolean because the three are not the
+/// same news. `Reported` is a subagent that finished and said so; the other two
+/// are the daemon noticing that it cannot still be running. A reader debugging
+/// a hook that never fires needs to be able to tell those apart, and a user
+/// reading the graph needs "finished" and "we stopped being able to tell" to
+/// be different words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChildEnd {
@@ -81,8 +85,11 @@ pub enum ChildEnd {
     ParentStop,
     /// The session's own process is gone.
     ParentExit,
-    /// A process that was in the table and is not any more.
-    Gone,
+    // There is deliberately no `Gone`. A process child is not remembered
+    // between reads — it is observed in `/proc` at the moment the graph is
+    // asked for, and one that is not there is simply not in the answer. A
+    // variant this crate never produces would be a wire value a client could
+    // reasonably branch on and never see.
 }
 
 impl ChildEnd {
@@ -91,7 +98,6 @@ impl ChildEnd {
             ChildEnd::Reported => "reported",
             ChildEnd::ParentStop => "parent_stop",
             ChildEnd::ParentExit => "parent_exit",
-            ChildEnd::Gone => "gone",
         }
     }
 }
@@ -112,9 +118,19 @@ pub struct ChildInfo {
     /// Unix seconds at which it stopped, once something has said so.
     #[serde(default)]
     pub ended: Option<u64>,
-    /// Which of the four routes in [`ChildEnd`] closed it.
+    /// Which of the three routes in [`ChildEnd`] closed it.
     #[serde(default)]
     pub ended_by: Option<ChildEnd>,
+    /// The id of the child this one hangs off, when it is not the session
+    /// itself.
+    ///
+    /// This is what makes the graph a graph rather than a list: an MCP server
+    /// forked by a language server forked by the agent is three levels down,
+    /// and flattening it would put the agent's own runtime beside the thing it
+    /// started. A subagent is always directly under the session, because
+    /// nesting is not something the hook payload describes.
+    #[serde(default)]
+    pub parent: Option<String>,
     /// The process, for [`ChildKind::Process`].
     #[serde(default)]
     pub pid: Option<i32>,
@@ -188,6 +204,10 @@ pub fn subagent_started(
             started: at,
             ended: None,
             ended_by: None,
+            // A subagent hangs off the session, never off another node: the
+            // hook payload says nothing about a subagent that delegated
+            // further, and drawing a guessed nesting would be inventing one.
+            parent: None,
             pid: None,
             rss_kb: None,
         },
@@ -240,6 +260,7 @@ pub fn subagent_stopped(
             started: at,
             ended: Some(at),
             ended_by: Some(ChildEnd::Reported),
+            parent: None,
             pid: None,
             rss_kb: None,
         },
@@ -390,6 +411,251 @@ pub fn clamp_label(raw: Option<&str>) -> String {
     kept.chars().take(MAX_LABEL).collect()
 }
 
+// ---------------------------------------------------------------------------
+// The other half of the graph: what the session actually forked
+// ---------------------------------------------------------------------------
+//
+// MCP servers, language servers, the compiler a tool call started. None of
+// them publish anything, and none of them need to: they are processes, and the
+// kernel already has the answer.
+//
+// This works for a confined session too. `bwrap --unshare-pid` gives the
+// session its own pid namespace, so a process inside sees only itself — but
+// the daemon is outside that namespace and the host `/proc` still lists every
+// descendant with its host pid. The tree is therefore readable for every
+// adapter, confined or not, without asking the agent anything.
+
+/// One process, as `/proc` describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcEntry {
+    pub pid: i32,
+    pub ppid: i32,
+    /// `/proc/<pid>/comm` — the executable name, at most 15 characters.
+    pub comm: String,
+    /// Unix seconds at which the process started.
+    pub started: u64,
+}
+
+/// Most process children reported for one session.
+///
+/// Lower than [`MAX_CHILDREN`] because this list is rebuilt on every read and
+/// travels down the socket each time, and because the tail of a large one is
+/// noise: a `cargo test` is briefly a hundred `rustc` processes, and the
+/// hundredth tells a supervisor nothing the ninety-ninth did not. The walk is
+/// breadth-first, so what survives the cap is what is nearest the agent.
+pub const MAX_PROCESS_CHILDREN: usize = 64;
+
+/// The descendants of `root`, nearest first, as graph nodes.
+///
+/// `root` itself is excluded: it is the session, and a session that is its own
+/// child would be drawn under itself.
+pub fn process_tree(procs: &[ProcEntry], root: i32) -> Vec<ChildInfo> {
+    let mut by_parent: std::collections::BTreeMap<i32, Vec<&ProcEntry>> =
+        std::collections::BTreeMap::new();
+    for p in procs {
+        by_parent.entry(p.ppid).or_default().push(p);
+    }
+
+    let mut out: Vec<ChildInfo> = Vec::new();
+    let mut queue: std::collections::VecDeque<(i32, Option<String>)> =
+        std::collections::VecDeque::new();
+    queue.push_back((root, None));
+    // A pid cannot be its own ancestor, but `/proc` is read without a lock and
+    // a recycled pid could in principle close a cycle between two reads. The
+    // seen set costs one allocation and turns that into a missing node rather
+    // than a daemon thread that never returns.
+    let mut seen: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+    seen.insert(root);
+
+    while let Some((pid, parent)) = queue.pop_front() {
+        let Some(kids) = by_parent.get(&pid) else {
+            continue;
+        };
+        for kid in kids {
+            if out.len() >= MAX_PROCESS_CHILDREN {
+                return out;
+            }
+            if !seen.insert(kid.pid) {
+                continue;
+            }
+            let id = format!("pid:{}", kid.pid);
+            out.push(ChildInfo {
+                id: id.clone(),
+                kind: ChildKind::Process,
+                label: clamp_process_label(&kid.comm),
+                started: kid.started,
+                // A process observed in `/proc` is running by definition. It
+                // is never closed, because it is never remembered: the next
+                // read either sees it or does not.
+                ended: None,
+                ended_by: None,
+                parent: parent.clone(),
+                pid: Some(kid.pid),
+                // Filled by `fill_rss` when a caller wants the number. The
+                // walk itself must stay cheap enough to run on every read.
+                rss_kb: None,
+            });
+            queue.push_back((kid.pid, Some(id)));
+        }
+    }
+    out
+}
+
+/// Read every process the kernel is showing.
+///
+/// `proc_root` is a parameter so the parser can be driven from a fixture
+/// directory: the shape of `/proc/<pid>/stat` is the part that is easy to get
+/// wrong, and a comm containing a space or a bracket has broken more than one
+/// process-tree reader.
+///
+/// One file per process, not three. The name is field 2 of `stat` and the
+/// parent is field 4, so `comm` need not be opened at all, and `statm` is read
+/// afterwards for the handful of processes that turn out to be descendants —
+/// see [`fill_rss`]. On this machine, with 524 processes, three files each
+/// cost 16.6 ms and one costs 7.3 ms; the walk runs on every `apex agent list`
+/// and the Agent Center asks twice a second while it is open.
+///
+/// Anything unreadable is skipped rather than reported as an error. A process
+/// exiting between the directory listing and the read is the normal case, not
+/// a fault.
+pub fn read_processes(proc_root: &Path) -> Vec<ProcEntry> {
+    let boot = boot_time(proc_root);
+    let ticks = clock_ticks().max(1);
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Ok(pid) = name.parse::<i32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(parsed) = parse_stat(&stat) else {
+            continue;
+        };
+        out.push(ProcEntry {
+            pid,
+            ppid: parsed.ppid,
+            comm: parsed.comm,
+            started: boot.saturating_add(parsed.start_ticks / ticks),
+        });
+    }
+    out
+}
+
+/// Read the resident set size of each node in a tree, in place.
+///
+/// Separate from [`read_processes`] because it is the expensive half and it is
+/// only ever wanted for a few dozen processes. A node whose `statm` has gone —
+/// the process exited between the two passes — keeps `None`, which the shell
+/// draws as no number rather than as zero: a process using no memory and a
+/// process that has just left are different facts.
+pub fn fill_rss(proc_root: &Path, tree: &mut [ChildInfo]) {
+    let page_kb = page_size_kb();
+    for node in tree.iter_mut() {
+        let Some(pid) = node.pid else { continue };
+        node.rss_kb = std::fs::read_to_string(proc_root.join(pid.to_string()).join("statm"))
+            .ok()
+            .and_then(|s| parse_statm(&s))
+            .map(|pages| pages.saturating_mul(page_kb));
+    }
+}
+
+/// What one `/proc/<pid>/stat` line says.
+#[derive(Debug, PartialEq, Eq)]
+struct Stat {
+    comm: String,
+    ppid: i32,
+    start_ticks: u64,
+}
+
+/// Parse one `/proc/<pid>/stat` line.
+///
+/// The parse everybody gets wrong. Field 2 is the executable name in
+/// parentheses and it is NOT escaped: a process called `foo) 0 (bar` produces
+/// a line that splitting on whitespace reads as six fields with the wrong
+/// values in them — including a ppid that points at another real process,
+/// which is a session showing somebody else's tree as its own. Splitting after
+/// the LAST `)` is the only correct way, and it is what the kernel's own
+/// documentation tells readers to do.
+fn parse_stat(line: &str) -> Option<Stat> {
+    let close = line.rfind(')')?;
+    let open = line.find('(')?;
+    if open >= close {
+        return None;
+    }
+    let fields: Vec<&str> = line[close + 1..].split_whitespace().collect();
+    // The remainder begins at field 3 (state), so field N is at index N - 3.
+    Some(Stat {
+        comm: line[open + 1..close].to_string(),
+        ppid: fields.get(1)?.parse().ok()?,
+        start_ticks: fields.get(19)?.parse().ok()?,
+    })
+}
+
+/// Resident pages out of `/proc/<pid>/statm` — the second of seven numbers.
+fn parse_statm(line: &str) -> Option<u64> {
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Unix seconds at which the machine booted, from `/proc/stat`.
+///
+/// Zero when it cannot be read, which makes every `started` a small number
+/// rather than a wrong-looking future one: an elapsed time computed against it
+/// is visibly absurd instead of quietly plausible.
+fn boot_time(proc_root: &Path) -> u64 {
+    std::fs::read_to_string(proc_root.join("stat"))
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|l| l.strip_prefix("btime "))
+                .and_then(|v| v.trim().parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+fn clock_ticks() -> u64 {
+    // SAFETY: `sysconf` reads a static configuration value and touches nothing
+    // the caller owns.
+    let v = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if v > 0 {
+        v as u64
+    } else {
+        100
+    }
+}
+
+fn page_size_kb() -> u64 {
+    // SAFETY: as above.
+    let v = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if v > 0 {
+        (v as u64) / 1024
+    } else {
+        4
+    }
+}
+
+/// A process name, bounded and printable.
+///
+/// `comm` is fifteen characters and is chosen by the process itself, so it is
+/// short already; this exists because a thread can rename itself to anything a
+/// byte string can hold and the result is rendered.
+fn clamp_process_label(comm: &str) -> String {
+    let kept: String = comm
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_LABEL)
+        .collect();
+    if kept.trim().is_empty() {
+        return "process".to_string();
+    }
+    kept
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,6 +761,7 @@ mod tests {
                 started: 100,
                 ended: None,
                 ended_by: None,
+                parent: None,
                 pid: Some(10),
                 rss_kb: Some(4096),
             },
@@ -504,7 +771,8 @@ mod tests {
                 label: "gone".into(),
                 started: 100,
                 ended: Some(150),
-                ended_by: Some(ChildEnd::Gone),
+                ended_by: Some(ChildEnd::ParentStop),
+                parent: None,
                 pid: Some(11),
                 rss_kb: Some(9999),
             },
@@ -544,6 +812,161 @@ mod tests {
         assert_eq!(clamp_label(Some("   ")), "subagent");
         assert_eq!(clamp_label(Some("Explore\nagent")), "Explore agent");
         assert_eq!(clamp_label(Some(&"x".repeat(400))).chars().count(), MAX_LABEL);
+    }
+
+    fn proc(pid: i32, ppid: i32, comm: &str) -> ProcEntry {
+        ProcEntry {
+            pid,
+            ppid,
+            comm: comm.into(),
+            started: 1000,
+        }
+    }
+
+    fn stat(comm: &str, ppid: i32, start_ticks: u64) -> Option<Stat> {
+        Some(Stat {
+            comm: comm.into(),
+            ppid,
+            start_ticks,
+        })
+    }
+
+    #[test]
+    fn the_tree_is_the_descendants_and_never_the_session_itself() {
+        //   9 (the session leader)
+        //   └ 10 node          ← an MCP server
+        //     └ 12 rg          ← something the MCP server ran
+        //   └ 11 cargo
+        //   13 unrelated, under init
+        let procs = vec![
+            proc(9, 1, "bwrap"),
+            proc(10, 9, "node"),
+            proc(11, 9, "cargo"),
+            proc(12, 10, "rg"),
+            proc(13, 1, "firefox"),
+        ];
+        let tree = process_tree(&procs, 9);
+        let ids: Vec<&str> = tree.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["pid:10", "pid:11", "pid:12"], "breadth first, root out");
+        assert!(
+            tree.iter().all(|c| c.pid != Some(13)),
+            "a process that is not a descendant is not in the tree"
+        );
+        assert_eq!(tree[0].parent, None, "a direct child hangs off the session");
+        assert_eq!(
+            tree[2].parent.as_deref(),
+            Some("pid:10"),
+            "the grandchild hangs off the child, not off the session"
+        );
+        assert!(tree.iter().all(|c| c.is_open()));
+        assert!(tree.iter().all(|c| c.kind == ChildKind::Process));
+    }
+
+    #[test]
+    fn a_recycled_pid_closing_a_cycle_does_not_hang_the_walk() {
+        // /proc is read without a lock, so a self-consistent tree is not
+        // guaranteed. A cycle must cost a missing node, never a daemon thread
+        // that never returns.
+        let procs = vec![proc(10, 9, "a"), proc(9, 10, "b")];
+        let tree = process_tree(&procs, 9);
+        assert_eq!(tree.len(), 1);
+    }
+
+    #[test]
+    fn the_tree_is_bounded() {
+        let mut procs = vec![proc(9, 1, "leader")];
+        for i in 0..(MAX_PROCESS_CHILDREN + 20) {
+            procs.push(proc(100 + i as i32, 9, "child"));
+        }
+        assert_eq!(process_tree(&procs, 9).len(), MAX_PROCESS_CHILDREN);
+    }
+
+    #[test]
+    fn a_process_name_with_a_bracket_in_it_does_not_shift_every_field() {
+        // The parse everybody gets wrong. `comm` is not escaped in
+        // /proc/<pid>/stat, so a process that renamed itself to something
+        // containing ") 0 (" turns a whitespace split into six fields with
+        // plausible wrong values — a ppid that points at another real process,
+        // which is a session showing somebody else's processes as its own.
+        let honest = "42 (node) S 9 42 42 0 -1 4194304 100 0 0 0 1 2 0 0 20 0                       12 0 777777 1 2 3";
+        assert_eq!(parse_stat(honest), stat("node", 9, 777_777));
+
+        let hostile = "42 (evil) 0 (x) S 9 42 42 0 -1 4194304 100 0 0 0 1 2 0 0                        20 0 12 0 777777 1 2 3";
+        assert_eq!(
+            parse_stat(hostile),
+            stat("evil) 0 (x", 9, 777_777),
+            "the split must be after the LAST bracket"
+        );
+    }
+
+    #[test]
+    fn a_stat_line_that_is_not_one_is_skipped_rather_than_guessed() {
+        assert_eq!(parse_stat(""), None);
+        assert_eq!(parse_stat("42 (node) S 9"), None, "too few fields");
+        assert_eq!(parse_stat("42 node S 9 42"), None, "no bracket at all");
+    }
+
+    #[test]
+    fn resident_pages_come_from_the_second_number() {
+        assert_eq!(parse_statm("2000 512 300 1 0 400 0"), Some(512));
+        assert_eq!(parse_statm(""), None);
+    }
+
+    #[test]
+    fn a_fixture_proc_reads_as_processes() {
+        // The reader against a directory shaped like /proc, so the three file
+        // formats are asserted together rather than one at a time.
+        let root = std::env::temp_dir().join(format!(
+            "apex-graph-proc-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("stat"), "cpu 1 2 3
+btime 1700000000
+").unwrap();
+        for (pid, ppid, comm, start, pages) in
+            [(9, 1, "bwrap", 0u64, 50u64), (10, 9, "node", 100, 512)]
+        {
+            let dir = root.join(pid.to_string());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("stat"),
+                format!(
+                    "{pid} ({comm}) S {ppid} 0 0 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 {start} 0 0"
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.join("comm"), format!("{comm}
+")).unwrap();
+            std::fs::write(dir.join("statm"), format!("9999 {pages} 0 0 0 0 0")).unwrap();
+        }
+        // A directory that is not a pid, and a pid whose files vanished — both
+        // are the normal case in a real /proc and neither may abort the read.
+        std::fs::create_dir_all(root.join("self")).unwrap();
+        std::fs::create_dir_all(root.join("77")).unwrap();
+
+        let mut got = read_processes(&root);
+        got.sort_by_key(|p| p.pid);
+        let root_kept = root.clone();
+
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[1].pid, 10);
+        assert_eq!(got[1].ppid, 9);
+        assert_eq!(got[1].comm, "node");
+        assert_eq!(got[1].started, 1_700_000_000 + 100 / clock_ticks());
+
+        let mut tree = process_tree(&got, 9);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].label, "node");
+        assert_eq!(tree[0].rss_kb, None, "the walk itself reads no statm");
+
+        fill_rss(&root_kept, &mut tree);
+        assert_eq!(tree[0].rss_kb, Some(512 * page_size_kb()));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

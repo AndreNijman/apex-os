@@ -54,9 +54,15 @@ impl Harness {
         std::fs::create_dir_all(&runtime).ok()?;
         std::fs::create_dir_all(&state).ok()?;
 
+        // Its own scratch root as well as its own runtime and state. Session
+        // ids are allocated against a daemon's own store, so every daemon here
+        // hands out id 1 — and on the shared default they would each remove
+        // the others' `/tmp/apex-agent/1` on teardown, which surfaces as
+        // `bwrap: Can't open source` in whichever test was slowest.
         let child = Command::new(env!("CARGO_BIN_EXE_apex-agentd"))
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
+            .env("APEX_AGENT_SCRATCH", root.join("scratch"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -263,14 +269,8 @@ fn a_confined_session_is_told_where_its_runtime_directory_is() {
     }
     let id = reply["id"].as_u64().expect("session id");
 
-    // Thirty seconds, not fifteen. This binary now starts a daemon per test
-    // and cargo runs them all at once, so `bwrap` sets up a user namespace on
-    // a machine that is doing seven other things — which took longer than
-    // fifteen seconds often enough to fail about one run in three while the
-    // graph tests below were being written. The tolerance is for the machine,
-    // not for the assertion: what is checked afterwards is unchanged.
     let expected = format!("RUNTIME=[{}]", want.display());
-    let out = h.wait_for_output(id, "RUNTIME=[", 30);
+    let out = h.wait_for_output(id, "RUNTIME=[", 15);
     h.call(&format!(r#"{{"cmd":"signal","id":{id},"signal":"kill"}}"#));
     assert!(
         out.contains(&expected),
@@ -424,17 +424,85 @@ fn children(info: &serde_json::Value) -> &Vec<serde_json::Value> {
 }
 
 #[test]
-fn a_session_reports_an_empty_graph_rather_than_no_graph() {
+fn a_session_reports_a_graph_even_when_it_has_delegated_nothing() {
     // The distinction the shell depends on. A daemon that predates P1-020
     // writes no `children` key at all, and a client that read that absence as
     // "no subagents" would be reporting a fact it has no evidence for. A
-    // daemon that has the graph always writes the key, empty or not.
+    // daemon that has the graph always writes the key.
     let h = harness!("graph-empty");
     let Some(id) = h.sleeper("graph-empty") else {
         return;
     };
-    assert_eq!(children(&h.info(id)).len(), 0);
+    let info = h.info(id);
+    let kids = children(&info);
+    assert!(
+        kids.iter().all(|k| k["kind"] == "process"),
+        "nothing delegated, so nothing may claim to be a subagent: {kids:?}"
+    );
     h.call(&format!(r#"{{"cmd":"signal","id":{id},"signal":"kill"}}"#));
+}
+
+#[test]
+fn the_processes_a_session_forked_are_in_its_graph() {
+    // The half no agent reports: MCP servers, language servers, the compiler a
+    // tool call started. None of them publish anything and none of them have
+    // to — they are processes, and the kernel already has the list.
+    //
+    // `sh` execs its last command, so the probe needs a background job to
+    // fork at all. The name is deliberate: `comm` is fifteen characters and
+    // this one has to survive being read out of /proc/<pid>/stat's own
+    // brackets.
+    let h = harness!("graph-procs");
+    // Its own directory, so a concurrent test cannot be running a probe of the
+    // same name — the assertion below is "a process called apexprobe is under
+    // THIS session", and a shared /tmp would make that ambiguous.
+    let probe_dir = h.root.join("probe");
+    std::fs::create_dir_all(&probe_dir).expect("probe directory");
+    let run = serde_json::json!({
+        "cmd": "run",
+        "agent": "generic",
+        "args": ["sh", "-c", "cp /bin/sleep ./apexprobe && ./apexprobe 90 & sleep 90"],
+        "cwd": probe_dir.to_str().expect("probe directory"),
+        "sandbox": "unrestricted",
+        "network": "open",
+        "cols": 80,
+        "rows": 24,
+    });
+    let reply = h.call(&run.to_string());
+    if reply["reply"] != "session" {
+        eprintln!("SKIP graph-procs: {reply}");
+        return;
+    }
+    let id = reply["id"].as_u64().expect("session id");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut found = serde_json::Value::Null;
+    while Instant::now() < deadline {
+        let info = h.info(id);
+        if let Some(node) = children(&info)
+            .iter()
+            .find(|k| k["kind"] == "process" && k["label"] == "apexprobe")
+        {
+            found = node.clone();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    h.call(&format!(r#"{{"cmd":"signal","id":{id},"signal":"kill"}}"#));
+
+    assert!(
+        !found.is_null(),
+        "a process the session forked is not in its graph"
+    );
+    assert!(found["pid"].as_i64().unwrap_or(0) > 0, "{found}");
+    assert!(
+        found["rss_kb"].as_u64().unwrap_or(0) > 0,
+        "resource accounting has to carry a number: {found}"
+    );
+    assert!(
+        found["ended"].is_null(),
+        "a process read out of /proc is running by definition: {found}"
+    );
 }
 
 #[test]

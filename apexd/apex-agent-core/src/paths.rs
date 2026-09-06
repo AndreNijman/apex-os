@@ -209,11 +209,36 @@ pub fn data_home() -> PathBuf {
     home().join(".local/share")
 }
 
-/// The scratch directory a sandboxed session may write to. Deliberately under
-/// `/tmp` and not `$XDG_RUNTIME_DIR`: agents generate build output here and
-/// `XDG_RUNTIME_DIR` is a small tmpfs that other software depends on.
+/// Where per-session scratch directories live.
+///
+/// `/tmp/apex-agent`, and deliberately not `$XDG_RUNTIME_DIR`: agents generate
+/// build output here and `XDG_RUNTIME_DIR` is a small tmpfs that other
+/// software depends on.
+///
+/// `$APEX_AGENT_SCRATCH` overrides it, for the case the fixed path cannot
+/// serve: a SECOND daemon on one machine. Session ids are allocated against a
+/// daemon's own store, so two daemons with different `XDG_STATE_HOME`s both
+/// hand out id 1 — and the second one's teardown then removes the first one's
+/// scratch out from under a running session. That is not hypothetical; it is
+/// what `bwrap: Can't open source /tmp/apex-agent/1` means, and it took an
+/// afternoon to stop reading as a flaky test. The integration suite sets it,
+/// and so should a container or a second user session.
+///
+/// Read from the DAEMON's environment. Nothing inside a session resolves this
+/// path — the sandbox binds the directory in and the settings file is named by
+/// absolute path — so an agent cannot move its own scratch by setting it.
+pub fn scratch_root() -> PathBuf {
+    if let Some(dir) = std::env::var_os("APEX_AGENT_SCRATCH") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    PathBuf::from("/tmp/apex-agent")
+}
+
+/// The scratch directory a sandboxed session may write to.
 pub fn scratch_dir(id: u32) -> PathBuf {
-    PathBuf::from(format!("/tmp/apex-agent/{id}"))
+    scratch_root().join(id.to_string())
 }
 
 /// Create `dir` and every missing parent with `0700`.
