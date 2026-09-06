@@ -396,6 +396,21 @@ struct Surface {
     routes: Vec<Route>,
 }
 
+/// The recovery surface's rows as `(id, health, detail)`, for §26's post-update
+/// health verdict.
+///
+/// One prober, two callers — the same rule `boot::chain_facts` follows. A
+/// second implementation of "is the GPU driver bound" would be the one nobody
+/// keeps correct, and it would be the one deciding whether to refuse somebody's
+/// update.
+pub(crate) fn health_rows() -> Vec<(String, Health, String)> {
+    probe(&Sys::from_env())
+        .rows
+        .into_iter()
+        .map(|r| (r.id.to_string(), r.state, r.detail))
+        .collect()
+}
+
 /// Deployments present under `/ostree/deploy/*/deploy`.
 ///
 /// Counted from the filesystem rather than asked of `bootc status`, because a

@@ -18,6 +18,10 @@ apexd-core = { path = "../apexd-core" }
 apex-agent-core = { path = "../apex-agent-core" }
 anyhow.workspace = true
 serde_json.workspace = true
+# `apex channel` reads ~/.config/apex/channel.toml, which is where every other
+# user-facing APEX config lives. Already in the build graph through apexd-core,
+# so the direct edge costs nothing but says what this crate actually uses.
+toml.workspace = true
 libc.workspace = true
 zbus.workspace = true
 zvariant.workspace = true
