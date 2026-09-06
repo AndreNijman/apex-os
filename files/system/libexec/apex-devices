@@ -1,0 +1,564 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-devices — printers, scanners, shares, links, radios and docks: what is
+#  there, what is not, and what could not be looked at.
+#
+#  ── Why the third answer exists ─────────────────────────────────────────────
+#  This codebase has already swept "permission denied reported as absence" out
+#  of fourteen places. `apex recover status` told every non-privileged user with
+#  packages installed that they had none, and marked it Verified. The reason it
+#  keeps happening is that the two cases arrive at the caller identically: a
+#  failed stat is falsy, an empty list is falsy, and one line of code turns both
+#  into "no devices".
+#
+#  Every reader here answers one of three things instead — there is one, there
+#  is none, or I could not look and here is why — and the third is never folded
+#  into the second. `Health::Unavailable` is documented elsewhere in this tree
+#  as never a synonym for fine; the same rule holds for a device.
+#
+#  ── The second rule: name the firewall at the point of failure ──────────────
+#  APEX drops inbound traffic by default and ipp, samba and nfs are shut. So a
+#  shared printer on this machine is invisible to the rest of the house, and the
+#  symptom is a printer that does not work rather than a port that is closed.
+#  Anything here that reports a service this machine offers says whether the
+#  firewall is in front of it and what to type. It says that only when the
+#  firewall is actually running: claiming a policy blocks something on a machine
+#  where no policy is loaded would be its own lie.
+#
+#  ── The third rule: nothing waits forever ───────────────────────────────────
+#  Every external command runs under `timeout`. That is not caution in the
+#  abstract: `scanimage -L` on a machine whose avahi is unavailable does not
+#  return at all — hplip's backend probes the network through libavahi-client
+#  and waits past 400 seconds — and a diagnostic that hangs is worse than no
+#  diagnostic, because the person running it concludes the machine is wedged.
+#
+#  ── What it will not do ─────────────────────────────────────────────────────
+#  It reads. It does not scan for Bluetooth devices, pair anything, rescan
+#  Wi-Fi, authorise a Thunderbolt device or change a connection. Several of
+#  those are polkit actions, and a status command that raises an authentication
+#  dialog is a status command nobody runs twice.
+#
+#  Usage: apex devices [print|scan|share|network|bluetooth|dock|all]
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+# Subprocess messages are parsed here to tell ENOENT from EACCES, so they have
+# to be the messages this file was written against.
+export LC_ALL=C
+
+# Overridable so the tests can point at a fixture tree instead of the machine.
+SYSFS="${APEX_DEVICES_SYSFS:-/sys}"
+ETCDIR="${APEX_DEVICES_ETC:-/etc}"
+SPADIR="${APEX_DEVICES_SPA:-/usr/lib64/spa-0.2/bluez5}"
+NMVPNDIR="${APEX_DEVICES_NMVPN:-/usr/lib/NetworkManager/VPN}"
+
+readonly FW_CONF_DIR="$ETCDIR/apex/firewall.d"
+
+head_()  { printf '\n%s\n' "$1"; }
+item()   { printf '  %-26s %s\n' "$1" "$2"; }
+note()   { printf '      %s\n' "$1"; }
+
+# ── the three-answer readers ────────────────────────────────────────────────
+# `test -e` is the trap. It is false for a path that does not exist AND for a
+# path whose parent directory refuses to be searched, and those are different
+# facts. These ask the kernel through a command that reports which.
+
+# Echoes: absent | unreadable | empty | <number of entries>
+dir_state() {
+    local d="$1" err
+    err=$(ls -d -- "$d" 2>&1 >/dev/null)
+    if [ -n "$err" ]; then
+        case "$err" in
+            *"No such file or directory"*) printf 'absent' ;;
+            *)                             printf 'unreadable' ;;
+        esac
+        return
+    fi
+    err=$(ls -A -- "$d" 2>&1 >/dev/null)
+    [ -n "$err" ] && { printf 'unreadable'; return; }
+    local n; n=$(ls -A -- "$d" 2>/dev/null | wc -l)
+    if [ "$n" -eq 0 ]; then printf 'empty'; else printf '%s' "$n"; fi
+}
+
+# Echoes the file's contents, or the token ABSENT / UNREADABLE.
+read_attr() {
+    local f="$1" out err
+    out=$(cat -- "$f" 2>/tmp/.apexdev.$$ ); err=$(cat /tmp/.apexdev.$$ 2>/dev/null); rm -f /tmp/.apexdev.$$
+    if [ -n "$err" ]; then
+        case "$err" in
+            *"No such file or directory"*) printf 'ABSENT' ;;
+            *)                             printf 'UNREADABLE' ;;
+        esac
+        return
+    fi
+    printf '%s' "$out"
+}
+
+# A directory whose state is not a number: one line saying which, or nothing.
+explain_dir() {  # $1 = state, $2 = path, $3 = what "empty" means here
+    case "$1" in
+        absent)     note "$2 does not exist on this kernel" ;;
+        unreadable) note "$2 could not be read — this is not the same as finding nothing" ;;
+        empty)      note "$3" ;;
+    esac
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+run()  { timeout "${1}" "${@:2}" 2>&1; }         # every external call is capped
+
+unit_state() {  # enabled | disabled | masked | not-found | unknown
+    have systemctl || { printf 'unknown'; return; }
+    local s; s=$(run 5 systemctl is-enabled "$1" | tail -1)
+    case "$s" in
+        enabled|enabled-runtime) printf 'enabled' ;;
+        masked|masked-runtime)   printf 'masked' ;;
+        disabled)                printf 'disabled' ;;
+        static|indirect|alias|generated|transient) printf "$s" ;;
+        *)                       printf 'not-found' ;;
+    esac
+}
+unit_active() {
+    have systemctl || return 1
+    [ "$(run 5 systemctl is-active "$1" | tail -1)" = active ]
+}
+
+# ── the firewall, consulted rather than assumed ─────────────────────────────
+# /etc/apex/firewall.d is world-readable on purpose, so this needs no privilege
+# and never shells out to the helper. What it CANNOT see unprivileged is the
+# live ruleset, so it never claims a port is open — only whether an exception
+# was recorded, and it says which question it answered.
+firewall_enforcing() { unit_active apex-firewall.service; }
+firewall_has()       { [ -e "$FW_CONF_DIR/$1.conf" ]; }
+
+# Say what stands between a service this machine offers and the rest of the LAN.
+firewall_verdict() {  # $1 = service name, $2 = what it is in words
+    if ! firewall_enforcing; then
+        note "the APEX firewall is not running here, so nothing of APEX's is in the way"
+        return
+    fi
+    if firewall_has "$1"; then
+        note "'$1' is in the exception list, so the policy allows it"
+        note "(whether the live ruleset has it needs root: sudo apex firewall status)"
+    else
+        note "THE FIREWALL IS WHY: inbound is dropped by default and '$1' is not open,"
+        note "so $2 cannot reach this machine. Open it with:"
+        note "    sudo apex firewall allow $1"
+    fi
+}
+
+# ── print ───────────────────────────────────────────────────────────────────
+avahi_state() { unit_state avahi-daemon.service; }
+
+report_avahi() {
+    local st; st=$(avahi_state)
+    case "$st" in
+        masked)
+            item "mDNS (avahi)" "MASKED"
+            note "a printer that announces itself over DNS-SD cannot be found, and a"
+            note ".local name resolves to nothing. A mask lives in /etc and survives"
+            note "every image update, so no update will put this right. Undo it with:"
+            note "    sudo systemctl unmask avahi-daemon.service avahi-daemon.socket"
+            note "    sudo systemctl start avahi-daemon.socket"
+            ;;
+        not-found)  item "mDNS (avahi)" "not installed" ;;
+        disabled)   item "mDNS (avahi)" "installed, not enabled"
+                    note "driverless printer discovery is off until it runs" ;;
+        unknown)    item "mDNS (avahi)" "could not ask systemd" ;;
+        *)          if unit_active avahi-daemon.service; then
+                        item "mDNS (avahi)" "running"
+                    else
+                        item "mDNS (avahi)" "$st, not running"
+                        note "it is socket-activated, so this is normal until something asks"
+                    fi ;;
+    esac
+}
+
+do_print() {
+    head_ "Printing"
+    report_avahi
+
+    if ! have lpstat; then
+        item "CUPS" "not installed"
+        note "nothing on this machine can print"
+        return
+    fi
+    item "cups.socket" "$(unit_state cups.socket)"
+
+    # This starts cupsd through socket activation, the same as opening any
+    # print dialog does. Worth saying, because a reader watching systemd will
+    # see a daemon appear because they ran a status command.
+    local out rc
+    out=$(run 15 lpstat -p); rc=$?
+    if [ "$rc" -eq 124 ]; then
+        item "queues" "unavailable — lpstat did not answer in 15s"
+        note "cupsd may be wedged; try: systemctl status cups"
+    elif grep -qiE 'no destinations added|no printers' <<<"$out"; then
+        item "queues" "none configured"
+        note "a driverless printer on this network is added by name; see the mDNS line above"
+    elif grep -qiE 'unable to connect|bad file descriptor|connection refused' <<<"$out"; then
+        item "queues" "unavailable — could not reach cupsd"
+        note "$(head -1 <<<"$out")"
+        note "this is not the same as having no printers"
+    elif [ -n "$out" ]; then
+        item "queues" "$(grep -c '^printer' <<<"$out") configured"
+        grep '^printer' <<<"$out" | while read -r _ name rest; do note "$name $rest"; done
+    else
+        item "queues" "none configured"
+    fi
+
+    # Sharing this machine's printer, which is where the firewall bites.
+    if have cupsctl; then
+        local share; share=$(run 10 cupsctl)
+        if grep -q '_share_printers=1' <<<"$share"; then
+            item "sharing a printer" "on"
+            firewall_verdict ipp "another machine's print job"
+        elif grep -q '_share_printers=0' <<<"$share"; then
+            item "sharing a printer" "off"
+        else
+            item "sharing a printer" "could not ask cupsd"
+            note "reading the server settings needs cupsd to answer"
+        fi
+    fi
+}
+
+# ── scan ────────────────────────────────────────────────────────────────────
+do_scan() {
+    head_ "Scanning"
+    if ! have scanimage; then
+        item "SANE" "not installed"
+        return
+    fi
+
+    # The order here is the whole point. With avahi unavailable, hplip's hpaio
+    # backend probes the network through libavahi-client and never returns, so
+    # asking for a device list first would hang this command. Measured on two
+    # machines running the same image: 400+ seconds with avahi masked, twelve
+    # seconds with it running.
+    local av; av=$(avahi_state)
+    if [ "$av" = masked ]; then
+        item "scanners" "unavailable — avahi is masked"
+        note "enumerating scanners will not return while avahi is masked: hplip's hpaio"
+        note "backend waits on it. This is not 'no scanner'; it is 'cannot look'."
+        note "    sudo systemctl unmask avahi-daemon.service avahi-daemon.socket"
+        note "then run this again. Removing hpaio from $ETCDIR/sane.d/dll.d/hpaio also"
+        note "works and costs HP's USB scanner support."
+        return
+    fi
+
+    local out rc
+    out=$(run 30 scanimage -L); rc=$?
+    if [ "$rc" -eq 124 ]; then
+        item "scanners" "unavailable — the device list did not arrive in 30s"
+        note "hplip's hpaio backend is the usual cause; it probes the network and can"
+        note "wait indefinitely. Check avahi is running, or comment hpaio out of"
+        note "$ETCDIR/sane.d/dll.d/hpaio"
+        return
+    fi
+    if ! grep -q '^device' <<<"$out"; then
+        # An empty list from an unseated session is EACCES wearing a disguise:
+        # without a seat there is no uaccess ACL on /dev/bus/usb, so a USB
+        # scanner is there and unreadable.
+        local usbstate; usbstate=$(dir_state /dev/bus/usb)
+        if [ "$usbstate" = unreadable ]; then
+            item "scanners" "unavailable — /dev/bus/usb cannot be read"
+            note "this session has no seat, so udev granted it no access to USB devices."
+            note "A USB scanner would be invisible; a network one would still be found."
+        else
+            item "scanners" "none found"
+            note "network scanners are found over eSCL and WSD by sane-airscan;"
+            note "USB ones need the machine to be plugged in and powered."
+        fi
+    else
+        item "scanners" "$(grep -c '^device' <<<"$out") found"
+        grep '^device' <<<"$out" | while read -r line; do note "$line"; done
+    fi
+}
+
+# ── share ───────────────────────────────────────────────────────────────────
+do_share() {
+    head_ "Network shares"
+
+    # gvfs-fuse decides whether a mount exists for anything but GTK. Without it
+    # Thunar can open smb://server/share and a terminal in the same session
+    # cannot see it, which reads as "the share did not mount" and is not that.
+    if [ -x /usr/libexec/gvfsd-fuse ]; then
+        local mnt="/run/user/$(id -u)/gvfs"
+        if grep -qs " $mnt " /proc/self/mountinfo; then
+            item "GIO mounts on disk" "yes, at $mnt"
+        else
+            item "GIO mounts on disk" "not mounted yet"
+            note "$mnt appears when the first share is opened"
+        fi
+    else
+        item "GIO mounts on disk" "NO — gvfs-fuse is not installed"
+        note "a share opened in the file manager exists inside GTK and nowhere else:"
+        note "no /run/user/$(id -u)/gvfs, so a terminal, an editor or an installer"
+        note "cannot reach it. Mounted and usable are different states."
+    fi
+
+    for spec in "gvfsd-smb SMB" "gvfsd-dav WebDAV" "gvfsd-nfs NFS" "gvfsd-mtp MTP" "gvfsd-gphoto2 cameras"; do
+        set -- $spec
+        [ -x "/usr/libexec/$1" ] && item "$2 (file manager)" "yes" \
+                                 || item "$2 (file manager)" "no — $1 is absent"
+    done
+    have mount.cifs && item "SMB as a real mount" "yes (mount.cifs)" \
+                    || item "SMB as a real mount" "no — cifs-utils is absent, so nothing in fstab"
+    have mount.nfs  && item "NFS as a real mount" "yes (mount.nfs)" \
+                    || item "NFS as a real mount" "no — nfs-utils is absent"
+
+    # Shares this machine offers, which is the half the firewall closes.
+    local serving=0
+    if unit_active smb.service || unit_active smbd.service; then
+        serving=1; item "this machine serves SMB" "yes"
+        firewall_verdict samba "a Windows machine looking for the share"
+    fi
+    if unit_active nfs-server.service; then
+        serving=1; item "this machine serves NFS" "yes"
+        firewall_verdict nfs "a client trying to mount the export"
+    fi
+    [ "$serving" = 0 ] && item "this machine serves" "nothing (no smbd, no nfs-server)"
+}
+
+# ── network ─────────────────────────────────────────────────────────────────
+do_network() {
+    head_ "Networking"
+    if ! have nmcli; then
+        item "NetworkManager" "nmcli is not installed"
+        return
+    fi
+    local devs rc
+    devs=$(run 10 nmcli -t -f DEVICE,TYPE,STATE device); rc=$?
+    if [ "$rc" -eq 124 ]; then
+        item "links" "unavailable — nmcli did not answer in 10s"
+    elif [ "$rc" -ne 0 ]; then
+        item "links" "unavailable — could not reach NetworkManager"
+        note "$(head -1 <<<"$devs")"
+        note "this is not the same as having no network interfaces"
+    elif [ -z "$devs" ]; then
+        item "links" "none"
+    else
+        item "links" "$(grep -c . <<<"$devs")"
+        while IFS=: read -r d t s; do
+            [ -n "$d" ] && note "$(printf '%-14s %-10s %s' "$d" "$t" "$s")"
+        done <<<"$devs"
+    fi
+
+    # `nmcli networking connectivity` reads the cached state. `… connectivity
+    # check` re-runs it, and that is a polkit action; a status command must not
+    # be the thing that raises an authentication dialog.
+    local conn; conn=$(run 10 nmcli -t networking connectivity | tail -1)
+    case "$conn" in
+        portal)
+            item "captive portal" "YES — this network is holding the connection"
+            note "open any http:// page in a browser to reach the login form" ;;
+        full)    item "connectivity" "full" ;;
+        limited) item "connectivity" "limited — addressed, but nothing beyond the LAN" ;;
+        none)    item "connectivity" "none" ;;
+        unknown|"")
+            item "captive portal" "not detected — the check is off"
+            note "with connectivity checking disabled, a hotel or campus network that"
+            note "has addressed you and will answer nothing reads as 'connected'."
+            note "APEX ships $ETCDIR/NetworkManager/conf.d/21-apex-connectivity.conf to"
+            note "turn it on; something later in conf.d may be switching it back off." ;;
+        *)       item "connectivity" "$conn" ;;
+    esac
+
+    local vpn; vpn=$(dir_state "$NMVPNDIR")
+    case "$vpn" in
+        absent|empty)
+            item "VPN protocols" "none"
+            note "NetworkManager has no built-in VPN beyond WireGuard: each protocol is a"
+            note "separate service in $NMVPNDIR, so a .ovpn file cannot be imported at all" ;;
+        unreadable) item "VPN protocols" "unavailable — $NMVPNDIR could not be read" ;;
+        *)          item "VPN protocols" "$(ls "$NMVPNDIR" 2>/dev/null | sed 's/^nm-//;s/-service\.name$//' | tr '\n' ' ')" ;;
+    esac
+
+    if have wg; then
+        item "WireGuard" "yes (wg, wg-quick)"
+    else
+        item "WireGuard" "kernel yes, tools no"
+        note "NetworkManager speaks WireGuard natively, but with no wg there is nothing"
+        note "to import a provider's .conf with"
+    fi
+
+    # A hotspot needs three things and this machine may be missing all of them.
+    local blockers=() caveats=()
+    if have dnsmasq; then
+        # An atomic-OS distinction that matters here: a binary in /usr can come
+        # from the image or from a merged system extension, and the second kind
+        # goes away when the extension does. On the machine this was written on,
+        # /usr/bin/dnsmasq was owned by no package at all — it arrived with an
+        # `apex install waydroid` — so a hotspot would have worked by coincidence
+        # and stopped working the day that extension was removed.
+        if have rpm && ! rpm -q dnsmasq >/dev/null 2>&1; then
+            caveats+=("dnsmasq is here but no system package owns it: it came with a system extension and goes when that does")
+        fi
+    else
+        blockers+=("dnsmasq is not installed, so there is no DHCP or DNS server for clients")
+    fi
+    if firewall_enforcing; then
+        blockers+=("the firewall drops forwarded traffic, so no client packet is routed")
+        blockers+=("the firewall's DHCP rule matches replies, not a client's request on port 67")
+    fi
+    if [ "${#blockers[@]}" -eq 0 ]; then
+        item "hotspot / tethering" "nothing known is in the way"
+    else
+        item "hotspot / tethering" "${#blockers[@]} things would stop it"
+        local b; for b in "${blockers[@]}"; do note "$b"; done
+    fi
+    local c; for c in "${caveats[@]:-}"; do [ -n "$c" ] && note "$c"; done
+}
+
+# ── bluetooth ───────────────────────────────────────────────────────────────
+do_bluetooth() {
+    head_ "Bluetooth"
+    local st; st=$(dir_state "$SYSFS/class/bluetooth")
+    case "$st" in
+        absent)     item "adapters" "none — the kernel has no bluetooth class"
+                    note "no driver claimed an adapter, or this kernel has BT compiled out" ;;
+        unreadable) item "adapters" "unavailable — $SYSFS/class/bluetooth could not be read"
+                    note "this is not the same as having no adapter" ;;
+        empty)      item "adapters" "none"
+                    note "the subsystem is there and no adapter is bound to it" ;;
+        *)          item "adapters" "$st"
+                    # Deliberately not printing an address: this kernel exposes no
+                    # `address` attribute under /sys/class/bluetooth, and inventing a
+                    # field that reads UNREADABLE for everyone is noise, not honesty.
+                    local a; for a in "$SYSFS"/class/bluetooth/*; do
+                        [ -e "$a" ] || continue
+                        note "$(basename "$a")" 
+                    done ;;
+    esac
+
+    if have rfkill; then
+        local rk; rk=$(run 5 rfkill list bluetooth)
+        if grep -q 'Soft blocked: yes' <<<"$rk"; then
+            item "radio" "SOFT BLOCKED"
+            note "nothing will pair until: rfkill unblock bluetooth"
+        elif grep -q 'Hard blocked: yes' <<<"$rk"; then
+            item "radio" "HARD BLOCKED"
+            note "a physical switch or a firmware setting is holding it off"
+        elif [ -n "$rk" ]; then
+            item "radio" "not blocked"
+        else
+            item "radio" "rfkill listed nothing for bluetooth"
+        fi
+    fi
+
+    # bluetoothctl prints an empty list and exits 0 when bluetoothd is down, so
+    # asking it without checking would report no devices on a machine that has
+    # them paired.
+    if unit_active bluetooth.service; then
+        local paired; paired=$(run 10 bluetoothctl devices Paired)
+        if grep -q '^Device' <<<"$paired"; then
+            item "paired devices" "$(grep -c '^Device' <<<"$paired")"
+            grep '^Device' <<<"$paired" | while read -r line; do note "$line"; done
+        else
+            item "paired devices" "none"
+        fi
+    else
+        item "paired devices" "unavailable — bluetoothd is not running"
+        note "bluetoothctl answers with an empty list and exit 0 when it is down,"
+        note "which would read as having nothing paired"
+    fi
+
+    local cs; cs=$(dir_state "$SPADIR")
+    case "$cs" in
+        absent|unreadable) item "headset codecs" "unavailable — $SPADIR ($cs)" ;;
+        empty)             item "headset codecs" "none — only SBC will work" ;;
+        *)  local codecs
+            codecs=$(ls "$SPADIR" 2>/dev/null | sed -n 's/^libspa-codec-bluez5-\(.*\)\.so$/\1/p' | tr '\n' ' ')
+            item "headset codecs" "${codecs:-none beyond SBC}"
+            grep -q aptx <<<"$codecs" || note "no aptX: a Qualcomm headset will fall back to SBC" ;;
+    esac
+}
+
+# ── dock ────────────────────────────────────────────────────────────────────
+do_dock() {
+    head_ "Thunderbolt, USB4 and docks"
+    local tb="$SYSFS/bus/thunderbolt/devices"
+    local st; st=$(dir_state "$tb")
+    case "$st" in
+        absent)     item "Thunderbolt" "no controller on this machine" ; return ;;
+        unreadable) item "Thunderbolt" "unavailable — $tb could not be read"
+                    note "this is not the same as having no controller" ; return ;;
+        empty)      item "Thunderbolt" "a controller with nothing attached" ; return ;;
+    esac
+
+    local boltd=no; [ -x /usr/libexec/boltd ] && boltd=yes
+    local d unauthorised=0
+    for d in "$tb"/*; do
+        [ -e "$d" ] || continue
+        local n; n=$(basename "$d")
+        case "$n" in
+            domain*)
+                item "$n" "security=$(read_attr "$d/security")  iommu=$(read_attr "$d/iommu_dma_protection")"
+                ;;
+            *)
+                local auth name
+                auth=$(read_attr "$d/authorized")
+                name=$(read_attr "$d/device_name")
+                [ "$name" = ABSENT ] && name="(host router)"
+                case "$auth" in
+                    1)          item "$n" "authorised — $name" ;;
+                    0)          item "$n" "NOT AUTHORISED — $name"; unauthorised=$((unauthorised+1)) ;;
+                    UNREADABLE) item "$n" "unavailable — the authorized attribute could not be read" ;;
+                    ABSENT)     item "$n" "$name" ;;
+                    *)          item "$n" "authorized=$auth — $name" ;;
+                esac
+                ;;
+        esac
+    done
+
+    if [ "$unauthorised" -gt 0 ] && [ "$boltd" = no ]; then
+        note ""
+        note "$unauthorised device(s) are attached and not authorised, and boltd is not"
+        note "installed — so nothing on this machine will ever authorise them. A dock in"
+        note "this state passes no video, no USB and no network, with no error anywhere."
+    elif [ "$boltd" = no ]; then
+        item "boltd" "not installed"
+        note "a device attached later will sit at authorized=0 with nothing to act on it"
+    else
+        item "boltd" "installed (udev starts it when a device appears)"
+    fi
+
+    local tc; tc=$(dir_state "$SYSFS/class/typec")
+    case "$tc" in
+        absent)     item "USB-C ports" "the kernel exposes no Type-C class" ;;
+        unreadable) item "USB-C ports" "unavailable — $SYSFS/class/typec could not be read" ;;
+        empty)      item "USB-C ports" "none registered" ;;
+        *)          item "USB-C ports" "$(ls "$SYSFS/class/typec" 2>/dev/null | grep -c '^port[0-9]*$') ports, $tc entries" ;;
+    esac
+}
+
+usage() {
+    cat <<'EOF'
+What is attached, what is not, and what could not be looked at.
+
+Usage: apex devices [area]
+
+Areas:
+  print       printers, CUPS queues, mDNS discovery, sharing
+  scan        scanners, and why the list may not arrive
+  share       SMB, NFS, WebDAV, MTP, cameras — and whether they exist outside GTK
+  network     links, captive portals, VPN protocols, WireGuard, hotspot
+  bluetooth   adapters, radio blocks, paired devices, headset codecs
+  dock        Thunderbolt, USB4 authorisation, USB-C ports
+  all         every area (the default)
+
+Reading only. It pairs nothing, scans for nothing and changes no connection,
+so it never raises an authentication prompt.
+EOF
+}
+
+case "${1:-all}" in
+    print)     do_print ;;
+    scan)      do_scan ;;
+    share)     do_share ;;
+    network)   do_network ;;
+    bluetooth) do_bluetooth ;;
+    dock)      do_dock ;;
+    all)       do_print; do_scan; do_share; do_network; do_bluetooth; do_dock; echo ;;
+    -h|--help) usage ;;
+    *)         usage >&2; exit 2 ;;
+esac
