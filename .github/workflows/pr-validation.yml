@@ -49,7 +49,14 @@ jobs:
           # exactly the change most likely to introduce an id `apex ai pull`
           # would refuse. `config/` is small and every file in it is read by the
           # binary this job builds.
-          grep -Eq '^(apexd/|config/|tests/)' <<<"$files" && rust=true
+          # files/desktop/{fish,nushell,shell}/ and the multiplexer adapter are
+          # in the RUST selector as well as the engine one, because the suites
+          # that assert them (test-shell-agent.sh, test-mux-layouts.sh) run in
+          # the rust job — it is the only one with a toolchain to build `apex`.
+          # A PR touching only one of those files would otherwise set
+          # engine=true, rust=false, skip the job, and pass: a skipped job counts
+          # as success. Fourth instance of this bug in this file.
+          grep -Eq '^(apexd/|config/|tests/|files/desktop/(fish|nushell|shell)/|files/system/libexec/apex-mux)' <<<"$files" && rust=true
           grep -Eq '^installer/' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
@@ -939,12 +946,17 @@ jobs:
           fish --version
           nu_ver=0.99.1
           url="https://github.com/nushell/nushell/releases/download/${nu_ver}/nu-${nu_ver}-x86_64-unknown-linux-musl.tar.gz"
-          if curl -fsSL --retry 2 "$url" -o /tmp/nu.tgz; then
-            tar xzf /tmp/nu.tgz -C /tmp
-            sudo install -m0755 "/tmp/nu-${nu_ver}-x86_64-unknown-linux-musl/nu" /usr/local/bin/nu
+          # The whole fetch is the `if` condition, not just the curl: a step runs
+          # under `bash -e`, so an extraction that failed after a successful
+          # download would be a red build rather than the skip promised above.
+          # The member path is `nu-<ver>-x86_64-unknown-linux-musl/nu`, checked
+          # with `tar tzf` against the real asset.
+          if curl -fsSL --retry 2 "$url" -o /tmp/nu.tgz \
+             && tar xzf /tmp/nu.tgz -C /tmp \
+             && sudo install -m0755 "/tmp/nu-${nu_ver}-x86_64-unknown-linux-musl/nu" /usr/local/bin/nu; then
             nu --version
           else
-            echo "note: nushell ${nu_ver} did not download; its section will skip out loud"
+            echo "note: nushell ${nu_ver} is unavailable; its section will skip out loud"
           fi
 
       - name: Run fish and nushell agent-integration assertions
@@ -962,12 +974,12 @@ jobs:
           tmux -V
           zj=v0.45.1
           url="https://github.com/zellij-org/zellij/releases/download/${zj}/zellij-x86_64-unknown-linux-musl.tar.gz"
-          if curl -fsSL --retry 2 "$url" -o /tmp/zellij.tgz; then
-            sudo tar xzf /tmp/zellij.tgz -C /usr/local/bin zellij
-            sudo chmod 0755 /usr/local/bin/zellij
+          if curl -fsSL --retry 2 "$url" -o /tmp/zellij.tgz \
+             && sudo tar xzf /tmp/zellij.tgz -C /usr/local/bin zellij \
+             && sudo chmod 0755 /usr/local/bin/zellij; then
             zellij --version
           else
-            echo "note: zellij ${zj} did not download; its section will skip out loud"
+            echo "note: zellij ${zj} is unavailable; its section will skip out loud"
           fi
 
       # Both multiplexers run on an isolated socket (TMUX_TMPDIR,
