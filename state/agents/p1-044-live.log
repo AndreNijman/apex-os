@@ -1,0 +1,53 @@
+
+── the target is reachable and is not already firewalled ──
+PASS  ssh to katana works, and this connection is the one under test
+PASS  commands ride the master's socket rather than reconnecting
+PASS  the target starts with no apex table
+PASS  probes will go to 192.168.1.245, the address this ssh arrives on
+PASS  192.168.1.245 is not an address of this machine
+
+── where the policy is going to come from ──
+PASS  the staged files carry the labels their shipped originals do
+  the unit differs from the shipped one only in these lines:
+    18c18
+    < ExecStart=/usr/sbin/nft -f /usr/share/apex/nftables/apex.nft
+    ---
+    > ExecStart=/usr/sbin/nft -f /run/apex-fw/nftables/apex.nft
+    21c21
+    < ExecStart=-/usr/libexec/apex-firewall reload
+    ---
+    > ExecStart=-/run/apex-fw/libexec/apex-firewall reload
+PASS  only the two ExecStart paths were rewritten
+
+── the dead-man's switch, armed and verified before anything loads ──
+PASS  the target will un-firewall itself in 300s if this run dies
+
+── loading it, over the connection it could break ──
+PASS  port 27036 answers from off the machine before the policy loads
+PASS  the unit started (the shipped unit with two paths rewritten to /run)
+PASS  the ssh connection that loaded the policy is still carrying commands
+PASS  and the policy really is enforcing while that connection lives
+PASS  a new connection to that port is now dropped
+PASS  a brand-new ssh connection still gets in, by the same route
+
+── the machine does not look broken ──
+PASS  DNS still resolves
+PASS  ping still works outbound
+SKIP  ping6 still works outbound — this machine may have no IPv6 route
+PASS  the IPv6 neighbour cache is still populating
+PASS  avahi is still running and answering on 5353
+
+── allow and deny, from off the machine ──
+PASS  a listener on 22000 is unreachable until it is allowed
+PASS  allow really opens it, from another machine
+PASS  the exception survives a real systemctl restart
+PASS  a malformed exception leaves the base policy standing
+PASS  and does not close the exception next to it
+PASS  deny really closes it again
+
+── boot ordering, in systemd's own resolved graph ──
+PASS  systemd-analyze verify has nothing to say about the unit
+PASS  network-pre.target waits for apex-firewall.service
+PASS  and NetworkManager waits for network-pre.target
+
+apex firewall ssh: 27 passed, 0 failed, 1 skipped

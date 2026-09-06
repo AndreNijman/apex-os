@@ -6,8 +6,12 @@ worktree: /var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell
 branch: roadmap/v2.2
 
 ## NEXT
-BRANCH 1 LANDED (not yet pushed): roadmap/v2.2 = 7f14a00. Baseline reverified
-at 1614/0. Next action: rebase task/p1-045-updates-trust onto 7f14a00.
+BRANCH 1 PUSHED: 7f14a00 (baseline reverified 1614/0, 28 bins).
+BRANCH 2 PUSHED: 5cbf072. 1685/0 (+71, zero removed). ZERO CONFLICTS.
+  shell suites schema 44/0, trust 25/0, channel 57/0; doc-verbs 18 valid 0 bad.
+Next action: BRANCH 3 p1-002 — cherry-pick 9af2b08 ddc80fa 74f1055 3d2dc43
+2514e09 (SKIP 8110944, already landed as bb5b355).
+FALLBACK: `git reset --hard 5cbf072` (pushed).
 
 ## PLAN
 1. apex-os chore/run-clippy (1 commit) -> roadmap/v2.2 e4e221f
