@@ -1359,6 +1359,14 @@ cmd_list() {
               end' "$STATE"
         printf '  (+%s pulled in as dependencies)\n' \
             "$(( $(jq -r '.resolved | length' "$STATE") - $(jq -r '.requested | length' "$STATE") ))"
+    elif [ -e "$STATE" ] || ! [ -r "${PKG_ROOT}" ]; then
+        # `$PKG_ROOT` is 0700 root:root, and `apex pkg list` is something a
+        # desktop session runs as itself. `[ -f ]` is false both when the file
+        # is missing and when the directory above it refuses the stat, so
+        # reporting "none" here told every non-root user with packages
+        # installed that they had none. Say which it is instead.
+        echo "packages (system extension): cannot read ${STATE}"
+        echo "  reading it needs root; try: sudo apex pkg list"
     else
         echo "packages (system extension): none"
     fi
