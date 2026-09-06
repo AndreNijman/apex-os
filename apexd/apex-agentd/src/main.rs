@@ -443,6 +443,37 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             Response::Ok
         }
 
+        Request::ToolCheck {
+            id,
+            tool_name,
+            tool_input,
+        } => {
+            // Every failure below answers "no opinion", never "deny". A policy
+            // point that refused when it could not decide would stop an agent
+            // for reasons nobody could state, and the layer that actually
+            // enforces this — the sandbox the session is already inside — has
+            // not gone anywhere.
+            let Some(handle) = lookup(daemon, id) else {
+                return Response::ToolDecision { deny: None };
+            };
+            let s = handle.lock().expect("session lock");
+            let Some(confinement) = s.confinement.as_ref() else {
+                return Response::ToolDecision { deny: None };
+            };
+            let payload = apex_agent_core::hook::Payload {
+                tool_name: Some(tool_name),
+                tool_input,
+                ..Default::default()
+            };
+            let decision =
+                apex_agent_core::hook::decide(&payload, &confinement.spec, &confinement.allowlist);
+            let deny = match decision {
+                apex_agent_core::hook::Decision::Allow => None,
+                apex_agent_core::hook::Decision::Deny { reason, .. } => Some(reason),
+            };
+            Response::ToolDecision { deny }
+        }
+
         Request::Logs { id, bytes } => {
             // Bound the request so a client cannot ask the daemon to read a
             // 32 MiB transcript into memory by accident.

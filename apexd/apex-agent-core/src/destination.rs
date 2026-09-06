@@ -92,6 +92,58 @@ impl Destination {
         Ok(Destination { host, port })
     }
 
+    /// The destination a URL names.
+    ///
+    /// §6.2's policy point is handed a `WebFetch` URL, and the broker on the
+    /// far end of the egress socket is handed a CONNECT authority. They have to
+    /// become the same object or the hook would be predicting the broker's
+    /// answer against a different idea of where the request was going. The
+    /// scheme supplies the port a proxy would have been given.
+    ///
+    /// Not a general URL parser: userinfo, path, query and fragment are
+    /// discarded and nothing is percent-decoded, because the only question
+    /// asked of the result is which host and port a rule has to match.
+    pub fn from_url(url: &str) -> Result<Destination, DestinationError> {
+        let (scheme, rest) = url
+            .split_once("://")
+            .ok_or_else(|| DestinationError::Malformed(url.to_string()))?;
+        let default_port = match scheme.to_ascii_lowercase().as_str() {
+            "https" => 443u16,
+            "http" => 80,
+            // A scheme with no proxy port is not a destination this can judge,
+            // and inventing one would produce a verdict about a request nobody
+            // made.
+            _ => return Err(DestinationError::Malformed(url.to_string())),
+        };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let authority = authority
+            .rsplit_once('@')
+            .map(|(_, a)| a)
+            .unwrap_or(authority);
+        if authority.is_empty() {
+            return Err(DestinationError::Malformed(url.to_string()));
+        }
+        match split_authority(authority) {
+            Some((host, port)) => {
+                let port: u16 = port
+                    .parse()
+                    .ok()
+                    .filter(|p| *p != 0)
+                    .ok_or_else(|| DestinationError::BadPort(port.to_string()))?;
+                Destination::new(host, port)
+            }
+            // No port. A bracketed IPv6 literal keeps its brackets through
+            // `split_authority` only when it has one, so strip them here.
+            None => {
+                let host = authority
+                    .strip_prefix('[')
+                    .and_then(|h| h.strip_suffix(']'))
+                    .unwrap_or(authority);
+                Destination::new(host, default_port)
+            }
+        }
+    }
+
     pub fn host(&self) -> &str {
         &self.host
     }
