@@ -295,6 +295,44 @@ fn the_servers_polling_interval_is_honoured_when_it_asks_for_a_slower_one() {
 }
 
 #[test]
+fn status_looks_up_the_keys_section_thirteen_one_actually_defines() {
+    // `status` itself talks to the daemon and is not exercised here — see the
+    // report. What IS load-bearing and testable is the key paths it reads: a
+    // typo in one of these would print nothing and read as "this project binds
+    // nothing", sending somebody to edit a file that is already correct.
+    let config = ProjectConfig::parse(
+        std::path::Path::new("/p/apex.toml"),
+        "[identity.cloudflare]\naccount = \"acme\"\n\
+         account_id = \"0123456789abcdef0123456789abcdef\"\n\
+         [cloudflare]\nzone = \"example.com\"\n\
+         zone_id = \"fedcba9876543210fedcba9876543210\"\n\
+         [cloudflare.production]\nworker = \"project\"\n",
+    )
+    .expect("§13.1's own shape parses");
+
+    let found: Vec<(&str, String)> = identity_keys()
+        .into_iter()
+        .filter_map(|(label, keys)| {
+            config.string(keys).ok().flatten().map(|v| (label, v.to_string()))
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("account:", "acme".to_string()),
+            ("account_id:", "0123456789abcdef0123456789abcdef".to_string()),
+            ("zone:", "example.com".to_string()),
+            ("zone_id:", "fedcba9876543210fedcba9876543210".to_string()),
+        ]
+    );
+    assert_eq!(config.sections(&["cloudflare"]), vec!["production"]);
+    assert_eq!(
+        config.string(&["cloudflare", "production", "worker"]).unwrap(),
+        Some("project")
+    );
+}
+
+#[test]
 fn the_endpoints_are_the_ones_wrangler_uses() {
     // Read out of workers-sdk rather than reconstructed. The device endpoint
     // has to be on the same auth domain as the token endpoint it is paired
