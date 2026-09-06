@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapter;
 use crate::paths;
-use crate::policy::{AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, SecretPolicy, SystemAccess};
+use crate::policy::{
+    AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyError, SecretPolicy, SystemAccess,
+};
 use crate::protocol::SandboxPolicy;
 use crate::term::DEFAULT_DETACH_KEY;
 
@@ -145,12 +147,27 @@ impl Config {
         // A stored default this build cannot enforce is corrected here rather
         // than refused at every `apex agent run`. Refusing would be the safe
         // reflex, but the failure lands on a command the user did not connect
-        // to a file they edited weeks ago — and the correction is toward the
-        // stricter value in every case, because the defaults are the strict
-        // ones.
-        if let Err(e) = self.policy().validate() {
-            fixed.push(format!("{e}; using the default permission dimensions"));
-            self.set_policy(AgentPolicy::default());
+        // to a file they edited weeks ago.
+        //
+        // ONE dimension at a time, never the whole policy. A file written by a
+        // build that has P0-007 says `system: session`, and this build cannot
+        // enforce it — but resetting all six would take `sandbox: strict` down
+        // to `project` with it, and silently unconfining somebody because a
+        // newer APEX Shell wrote a key is exactly the weakening the split
+        // exists to prevent. Each `PolicyError` names one dimension, so each
+        // pass clears one; four passes is the whole vocabulary, and the
+        // all-default policy always validates.
+        for _ in 0..4 {
+            let Err(e) = self.policy().validate() else {
+                break;
+            };
+            fixed.push(format!("{e}; using the default for that one setting"));
+            match e {
+                PolicyError::NetworkUnenforceable(_) => self.network = NetworkPolicy::default(),
+                PolicyError::SystemAccessUnavailable(_) => self.system = SystemAccess::default(),
+                PolicyError::SecretExportUnavailable => self.secrets = SecretPolicy::default(),
+                PolicyError::RemoteElevationUnavailable => self.origin = OriginPolicy::default(),
+            }
         }
         fixed
     }
@@ -300,7 +317,7 @@ mod tests {
     fn a_stored_default_this_build_cannot_enforce_is_corrected_and_reported() {
         // Hand-edited, or written by a newer build. Failing every later
         // `apex agent run` with the same error is a worse outcome than
-        // correcting toward the default, which is the stricter value.
+        // correcting the one setting that cannot be honoured.
         let mut cfg = Config {
             system: SystemAccess::Unsafe,
             ..Config::default()
@@ -310,6 +327,42 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("system-access"), "{notes:?}");
         assert_eq!(cfg.policy().validate(), Ok(()));
+    }
+
+    #[test]
+    fn correcting_one_dimension_does_not_take_the_others_with_it() {
+        // The cross-version case: a build with P0-007 writes `system: session`
+        // into a file this one reads. Resetting all six would take the strict
+        // sandbox down to project as well, and unconfine somebody because a
+        // newer APEX Shell wrote a key they never typed.
+        let mut cfg = Config {
+            sandbox: SandboxPolicy::Strict,
+            system: SystemAccess::Session,
+            secrets: SecretPolicy::None,
+            ..Config::default()
+        };
+        let notes = cfg.normalise();
+        assert_eq!(cfg.system, SystemAccess::None, "the unenforceable one is cleared");
+        assert_eq!(cfg.sandbox, SandboxPolicy::Strict, "the sandbox must survive");
+        assert_eq!(cfg.secrets, SecretPolicy::None, "a tighter setting must survive");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(cfg.policy().validate(), Ok(()));
+    }
+
+    #[test]
+    fn several_unenforceable_settings_are_all_corrected_and_all_reported() {
+        // The loop has to converge, and every correction has to be audible:
+        // a note that named one of three problems would leave two silent.
+        let mut cfg = Config {
+            system: SystemAccess::Unsafe,
+            secrets: SecretPolicy::Export,
+            origin: OriginPolicy::RemoteElevationAllowed,
+            network: NetworkPolicy::Allowlist,
+            ..Config::default()
+        };
+        let notes = cfg.normalise();
+        assert_eq!(cfg.policy(), AgentPolicy::default());
+        assert_eq!(notes.len(), 4, "{notes:?}");
     }
 
     #[test]

@@ -110,7 +110,7 @@ separate flag with a separate default:
 | 3 | APEX system/root capability | `--system-access` | `none` `session` `unsafe` | `none` |
 | 4 | APEX secret capability | `--secrets` | `brokered` `none` `export` | `brokered` |
 | 5 | network policy | `--network` | `open` `allowlist` `brokered` `offline` | `open` |
-| 6 | remote-origin policy | `--origin-policy` | `local` `remote` | `local` |
+| 6 | remote-origin policy | `--origin-policy` | `local-elevation-only` `remote-elevation-allowed` | `local-elevation-only` |
 
 `apex agent status <id>` prints all six for a session, and `apex agent status`
 with no id prints the configured defaults — six sibling keys in `agent.json`.
@@ -131,6 +131,11 @@ five names stays reachable — break-glass with the broker switched off, say.
 
 The secret column does not move, even for break-glass. §3.4: *"broker secrets
 are still not conveniently dumped into the agent environment."*
+
+A mode writes only the **bold** columns — the ones it raises above the default.
+The rest keep whatever your configuration set, so `--agent-bypass` on a machine
+configured for `strict` stays strict, and break-glass does not hand back a
+broker you had switched off.
 
 ### The three invariants
 

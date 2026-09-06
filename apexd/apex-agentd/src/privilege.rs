@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use apex_agent_core::paths;
-use apex_agent_core::policy::AgentPolicy;
+use apex_agent_core::policy::{AgentPolicy, SecretPolicy};
 use apex_agent_core::protocol::{ErrorKind, Response};
 use apex_agent_core::request::{
     self, Decision, Grants, PrivilegeRequest, RequestError, Verb,
@@ -102,10 +102,16 @@ pub fn origin(daemon: &Arc<Daemon>, peer: Option<Peer>) -> Origin {
             agent: None,
             project: None,
             // A session whose record vanished between the ancestry walk and
-            // this lookup gets the default, which is the strict value for
-            // every dimension. Failing toward the loose one here would make a
-            // race into a permission.
-            policy: AgentPolicy::default(),
+            // this lookup. The default is the strict value for five of the six
+            // dimensions but not for the secret one — `Brokered` is the
+            // default because that is what a session normally gets, and using
+            // it here would let a race hand out broker access. Denied instead:
+            // this arm is reached only when the daemon has lost track of the
+            // caller, which is never a moment to grant anything.
+            policy: AgentPolicy {
+                secrets: SecretPolicy::None,
+                ..AgentPolicy::default()
+            },
         },
     }
 }

@@ -176,7 +176,9 @@ pub struct RunArgs {
     /// open | allowlist | brokered | offline. Network policy (dimension 5).
     #[arg(long, value_parser = parse_network)]
     pub network: Option<NetworkPolicy>,
-    /// local | remote. Which origins may authorise elevation (dimension 6).
+    /// Which origins may authorise elevation (dimension 6):
+    /// local-elevation-only | remote-elevation-allowed, or `local` / `remote`
+    /// for short.
     #[arg(long, value_parser = parse_origin_policy)]
     pub origin_policy: Option<OriginPolicy>,
     /// §4.5 break-glass: take the APEX protections off.
@@ -480,7 +482,11 @@ dimension_parser!(parse_sandbox, SandboxPolicy, "strict, project or unrestricted
 dimension_parser!(parse_system_access, SystemAccess, "none, session or unsafe");
 dimension_parser!(parse_secrets, SecretPolicy, "brokered, none or export");
 dimension_parser!(parse_network, NetworkPolicy, "open, allowlist, brokered or offline");
-dimension_parser!(parse_origin_policy, OriginPolicy, "local or remote");
+dimension_parser!(
+    parse_origin_policy,
+    OriginPolicy,
+    "local-elevation-only or remote-elevation-allowed, or `local` / `remote` for short"
+);
 
 /// Resolve the six permission dimensions for one invocation.
 ///
@@ -500,13 +506,15 @@ pub fn resolve_policy(cfg: &config::Config, args: &RunArgs) -> Result<AgentPolic
     let mut policy = cfg.policy();
 
     // 2. the preset, when a mode flag named one.
+    //
+    // `with_preset` moves only the dimensions the mode raises above the
+    // default, so a configured `sandbox: strict` or `secrets: none` survives
+    // both of these. §4.2's "APEX project sandbox ON" describes the default,
+    // not an instruction to take a stricter setting down to it.
     if args.unsafe_everything {
-        policy = PolicyPreset::UnsafeEverything.policy();
+        policy = policy.with_preset(PolicyPreset::UnsafeEverything);
     } else if args.agent_bypass {
-        // Only dimension 1 moves. §4.2's whole point is that the other five
-        // stay where the user's configuration left them, so this is not the
-        // preset's full six-tuple.
-        policy.native = NativeMode::Bypass;
+        policy = policy.with_preset(PolicyPreset::AgentBypass);
     }
 
     // 3. the explicit flags, which win over everything.
@@ -1783,6 +1791,21 @@ mod tests {
         // the secret dimension, which the flag set to a value that is allowed.
         let err = resolve_policy(&cfg, &args).expect_err("break-glass is not built yet");
         assert!(err.to_string().contains("system-access"), "{err}");
+
+        // And a preset must not undo a tightening the configuration already
+        // made. `--agent-bypass` on a machine configured for `strict` keeps
+        // strict, or reaching for §4.2's mode would silently unconfine.
+        let strict = config::Config {
+            sandbox: SandboxPolicy::Strict,
+            secrets: SecretPolicy::None,
+            ..config::Config::default()
+        };
+        let args = RunArgs { agent_bypass: true, ..run_args() };
+        let p = resolve_policy(&strict, &args).expect("resolve");
+        assert_eq!(p.native, NativeMode::Bypass);
+        assert_eq!(p.sandbox, SandboxPolicy::Strict);
+        assert_eq!(p.secrets, SecretPolicy::None);
+        assert_eq!(p.network, NetworkPolicy::Offline);
     }
 
     #[test]

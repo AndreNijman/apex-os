@@ -513,6 +513,30 @@ impl AgentPolicy {
         !matches!(self.system, SystemAccess::Unsafe)
     }
 
+    /// This policy with `preset`'s elevations applied on top.
+    ///
+    /// A preset moves only the dimensions where it differs from the default,
+    /// and leaves the rest of `self` alone. That rule is what makes
+    /// `--agent-bypass` and `--unsafe-everything` behave the same way, and it
+    /// is the only rule that cannot loosen: a preset's coordinates that equal
+    /// the default carry no intent — §4.2 lists "APEX project sandbox ON"
+    /// because project is the default, not because the mode wants to take a
+    /// configured `strict` down to it. Copying the whole six-tuple would do
+    /// exactly that, and would quietly undo a `secrets: none` a user had set
+    /// in their configuration the moment they reached for break-glass.
+    pub fn with_preset(self, preset: PolicyPreset) -> AgentPolicy {
+        let want = preset.policy();
+        let base = AgentPolicy::default();
+        AgentPolicy {
+            native: if want.native == base.native { self.native } else { want.native },
+            sandbox: if want.sandbox == base.sandbox { self.sandbox } else { want.sandbox },
+            system: if want.system == base.system { self.system } else { want.system },
+            secrets: if want.secrets == base.secrets { self.secrets } else { want.secrets },
+            network: if want.network == base.network { self.network } else { want.network },
+            origin: if want.origin == base.origin { self.origin } else { want.origin },
+        }
+    }
+
     /// The policy with every derivation applied, ready to be stored.
     ///
     /// The daemon records this rather than what was asked for, so a session
@@ -1015,6 +1039,45 @@ mod tests {
         // The two elevated presets are refused until P0-006 and P0-007 land.
         assert!(sys.validate().is_err());
         assert!(breakglass.validate().is_err());
+    }
+
+    #[test]
+    fn a_preset_raises_what_it_names_and_leaves_a_tighter_setting_alone() {
+        // Applied over a configuration that is already stricter than the
+        // default. Break-glass removes the APEX protections the mode is about;
+        // it must not hand back a broker the user switched off, or reopen a
+        // network they closed.
+        let configured = AgentPolicy {
+            secrets: SecretPolicy::None,
+            network: NetworkPolicy::Offline,
+            ..AgentPolicy::default()
+        };
+        let p = configured.with_preset(PolicyPreset::UnsafeEverything);
+        assert_eq!(p.system, SystemAccess::Unsafe, "the mode's own dimension moves");
+        assert_eq!(p.sandbox, SandboxPolicy::Unrestricted);
+        assert_eq!(p.native, NativeMode::Bypass);
+        assert_eq!(p.secrets, SecretPolicy::None, "a configured tightening survives");
+        assert_eq!(p.network, NetworkPolicy::Offline, "so does this one");
+
+        // And the same rule for the one-coordinate mode: §4.2 turns off the
+        // agent's confirmations and touches nothing else, so a configured
+        // `strict` is still strict afterwards.
+        let configured = AgentPolicy {
+            sandbox: SandboxPolicy::Strict,
+            ..AgentPolicy::default()
+        };
+        let p = configured.with_preset(PolicyPreset::AgentBypass);
+        assert_eq!(p.native, NativeMode::Bypass);
+        assert_eq!(p.sandbox, SandboxPolicy::Strict, "the mode must not unconfine");
+
+        // Over the defaults, a preset is exactly its own six-tuple.
+        for preset in PolicyPreset::ALL {
+            assert_eq!(
+                AgentPolicy::default().with_preset(*preset),
+                preset.policy(),
+                "{preset}"
+            );
+        }
     }
 
     #[test]
