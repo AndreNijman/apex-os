@@ -733,8 +733,16 @@ a dedicated service. That service is `apex-secretd`.
 printf %s "$TOKEN" | apex secret add github --host github.com
 apex secret grant github git-push        # per project
 apex secret use github git-push origin   # run by the agent
+apex secret migrate                      # move what is already in plaintext
 apex secret audit
 ```
+
+You rarely type the third line. A managed session finds a `git` on its PATH
+that sends `push`, `fetch` and `ls-remote` here and execs `/usr/bin/git` for
+everything else, so a skill keeps running `git push` and nothing was rewritten
+— §12's requirement. That shim holds no credential and enforces nothing:
+`/usr/bin/git` is still there and reaches the same remotes with no credential
+at all, which is exactly what happens if an agent goes round it.
 
 ### Why it is a separate daemon, and why it is root
 
@@ -769,6 +777,62 @@ credential by construction.
 So the service performs the operation instead. The agent asks for
 `git-push origin`; `apex-agentd` says which session is asking and what it is
 allowed; `apex-secretd` runs the push and returns git's output.
+
+### MCP servers, and the one line of JSON that undid the store
+
+An HTTP MCP server keeps its credential in `headers.Authorization` in
+`~/.claude.json`. That file is bound **writable** into a managed session,
+because Claude records onboarding state in it on every run — so the bearer
+token was readable by the agent, and the store's whole argument with it.
+
+The `mcp-request` capability closes that. It is the only capability with no
+arguments at all, which is the point: the endpoint comes entirely from the
+stored record's own host, port and path, so a session has nowhere to put a
+destination of its own. `apex mcp bridge <service>` is an MCP server on stdin
+and stdout that an agent spawns and talks to normally; each message goes through
+`apex-agentd` — which stamps the session and checks its secret dimension — to
+`apex-secretd`, which attaches the credential and makes the request.
+
+```json
+"claude-memory": {"type": "stdio", "command": "apex",
+                  "args": ["mcp", "bridge", "claude-memory"]}
+```
+
+The credential reaches `curl` on its **stdin**, as a configuration file: not
+argv, which `/proc` makes world-readable, and not a file, which would leave it
+at rest for the length of the request. The message goes in a file instead —
+only one of the two can have stdin, and the message is the caller's own.
+
+Not carried: a server-initiated notification down a stream the server holds
+open. Each message is one request and one reply. And an `Mcp-Session-Id` is
+remembered per account and service, so two sessions talking to one server share
+that server's idea of the conversation.
+
+### Moving what a machine already has
+
+`apex secret migrate` reads each plaintext credential, stores it, proves the
+stored copy works, and **only then** removes the original — in that order, and
+idempotent, so an interrupted run leaves a machine that still has its
+credentials. It reads the old broker's `$XDG_STATE_HOME/apex/agent/secrets`,
+Claude's `settings.json` `env` block, and an HTTP MCP server's
+`headers.Authorization`.
+
+There is no read-back, because the protocol has no verb that returns a value.
+So verification is a *use*: `git-ls-remote` for a git credential, an MCP
+`initialize` for an endpoint one. Where that cannot run — no grant yet, no
+network, no repository on the right host — the credential is stored and the
+plaintext is **kept**, with the reason printed. Two copies is a nuisance; none
+is an outage.
+
+It will not guess. A credential-named variable whose host nobody can work out is
+named and left alone: pinning it to the wrong host and then deleting the working
+copy is the one failure a migration must not have. A stdio MCP server's `env`
+block is named and left too — a broker can stand in front of an endpoint, not in
+front of a program running on this machine.
+
+It refuses to run inside a session, and refuses while a `claude` with the same
+`HOME` is running: that process holds `~/.claude.json` in memory and writes it
+back on exit, so an edit made under it would be silently reverted.
 
 ### The API cannot return a credential
 
@@ -877,11 +941,17 @@ uid, and no reply the service can send contains one.
 
 ### What is not built
 
-`git-push`, `git-fetch` and `git-ls-remote`. `gh`-style API capabilities (read
-issues, open a PR) are a second vocabulary with a second validation surface.
+`git-push`, `git-fetch`, `git-ls-remote` and `mcp-request`. `gh`-style API
+capabilities (read issues, open a PR) are a second vocabulary with a second
+validation surface, and `gh` inside a managed session is unauthenticated:
+`~/.config/gh` is not in the profile table, so a session sees no gh
+configuration at all. That was true before the broker existed and is true now.
+Outside a session `gh` is untouched and works from its own `hosts.yml`, which
+is also what `git push` uses there, through the `gh auth git-credential` helper
+your `~/.gitconfig` already names.
+
 Scoped-credential *issuance* — asking GitHub for a narrower token per task — is
-§13.4 and is not here; the service uses the credential it was given. Migrating
-your real GitHub and MCP credentials onto it is P0-003.
+§13.4 and is not here; the service uses the credential it was given.
 
 `http` is accepted only for a loopback host, where the credential does not cross
 a network. It exists so the credential path can be tested end to end against a
