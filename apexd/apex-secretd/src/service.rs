@@ -60,10 +60,6 @@ impl Service {
         }
     }
 
-    pub fn store(&self) -> &Store {
-        &self.store
-    }
-
     fn next_audit_id(&self) -> String {
         audit::mint_id(self.audit_counter.fetch_add(1, Ordering::Relaxed))
     }
@@ -425,7 +421,7 @@ fn refuse_capability(e: CapabilityError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     const SENTINEL: &str = "apex-sentinel-7f3a91c4-do-not-leak";
 
@@ -437,6 +433,13 @@ mod tests {
         ));
         std::fs::remove_dir_all(&dir).ok();
         (Service::new(Store::new(dir.clone()), false), dir)
+    }
+
+    /// The audit trail of a temp service, by path rather than through the
+    /// service: the daemon has no reason to expose its own store, and a test
+    /// that needs an accessor added for it is a test shaping the API.
+    fn trail(dir: &Path) -> PathBuf {
+        Store::new(dir.to_path_buf()).audit_path()
     }
 
     fn me() -> Peer {
@@ -517,7 +520,7 @@ mod tests {
             );
         }
         // And the trail did not either.
-        let trail = std::fs::read_to_string(svc.store().audit_path()).unwrap_or_default();
+        let trail = std::fs::read_to_string(trail(&dir)).unwrap_or_default();
         assert!(!trail.contains(SENTINEL), "{trail}");
 
         std::fs::remove_dir_all(&dir).ok();
@@ -708,7 +711,7 @@ mod tests {
         svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
         svc.use_capability(peer, record("demo", "git-fetch", "origin", "/tmp/p"));
 
-        let lines = audit::tail(&svc.store().audit_path(), 10);
+        let lines = audit::tail(&trail(&dir), 10);
         let refused: Vec<&AuditLine> = lines
             .iter()
             .filter(|l| l.event == AuditEvent::Refused)
@@ -800,7 +803,7 @@ mod tests {
         assert!(resp
             .as_error()
             .is_some_and(|(_, m)| m.contains("loopback")), "{resp:?}");
-        assert!(svc.store().info(peer.uid, "demo").is_none());
+        assert!(Store::new(dir.clone()).info(peer.uid, "demo").is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -96,7 +96,6 @@ pub fn credentials(stream: &UnixStream) -> Option<Peer> {
 #[derive(Debug)]
 pub struct ProcHandle {
     fd: RawFd,
-    pid: libc::pid_t,
 }
 
 impl ProcHandle {
@@ -119,11 +118,7 @@ impl ProcHandle {
         if fd < 0 {
             return None;
         }
-        Some(ProcHandle { fd, pid })
-    }
-
-    pub fn pid(&self) -> libc::pid_t {
-        self.pid
+        Some(ProcHandle { fd })
     }
 
     /// Read a file from this process's `/proc` directory.
@@ -301,8 +296,6 @@ mod tests {
     fn a_handle_reads_this_process_through_its_own_dirfd() {
         let me = std::process::id() as libc::pid_t;
         let handle = ProcHandle::open(me).expect("open /proc/self");
-        assert_eq!(handle.pid(), me);
-
         let status = handle.read("status").expect("status");
         assert!(status.contains("PPid:"), "{status}");
         assert_eq!(handle.parent(), parse_ppid(&status));
