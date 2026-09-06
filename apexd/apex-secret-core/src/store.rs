@@ -451,9 +451,9 @@ mod tests {
 
     fn temp_store(tag: &str) -> (Store, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "apex-secret-store-{}-{tag}-{:?}",
+            "apex-secret-store-{}-{tag}-{}",
             std::process::id(),
-            std::thread::current().id()
+            now_ms()
         ));
         std::fs::remove_dir_all(&dir).ok();
         (Store::new(dir.clone()), dir)
