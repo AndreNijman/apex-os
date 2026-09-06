@@ -5,10 +5,9 @@ worktree: /var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell
 branch: roadmap/v2.2
 
 ## NEXT
-apex-os round 3/10 (e635c54, TempFile/run_dir hardening): resolve
-apexd/apex-secretd/src/broker.rs then apexd/apex-secretd/src/service.rs.
-The service.rs half is likely the `use_capability` MCP branch that no longer
-exists after the port -- the run_dir now belongs to providers/mcp.rs.
+apex-os round 6/10 (03e6ad2, `apex secret migrate`): resolve
+apexd/apex/src/secret.rs, then port apexd/apex/src/migrate.rs off the deleted
+`Capability` enum (it is the only file that imports it directly).
 
 ## DONE
 - baseline verified on roadmap/v2.2 @ a141cee: cargo test = 1477 passed / 0 failed
@@ -57,8 +56,25 @@ provider, including the loopback bearer-token server and the SSE variant.
   Both version-guard tests kept (see FOUND).
 - apex/src/mcp.rs -> sends operation "mcp.request", resource "", params {}.
 
+- ROUND 3/10 committed 73bd136 (1503 passed). broker.rs doc hunk -> incoming
+  text with the `mcp.request` correction. service.rs -> framework flow kept;
+  the incoming `run_dir` argument to perform_http is now McpProvider's own
+  field, threaded through default_registry(run_dir) from secretd main.rs.
+- ROUND 4/10 committed 13ececb (1503 passed). service.rs -> incoming
+  NewService struct for add(), roadmap's longer "evil capability" list kept
+  (it names the new `git.clone`/`cloudflare.dns.delete` spellings too).
+  Converted the add() call sites I had written in round 2, plus bearer.rs's.
+- ROUND 5/10 committed 14d4e69 (1509 passed). apex/src/secret.rs -> roadmap's
+  generic "a resource is named" paragraph PLUS P0-003's gitshim paragraph.
+  tests/test-secret-broker.sh -> roadmap's `git.fetch` spelling PLUS P0-003's
+  four shim checks. gitshim.rs ported: capability_for now returns `git.push`
+  etc. (canonical §13.2 ids) and SecretUse carries operation/resource/params.
+  NOTE: its `("git-push", ...)` match arms had to move with it -- the test
+  `the_three_brokered_operations_are_recognised` caught that, which is the
+  only actual regression this landing produced and it is fixed.
+
 ## IN PROGRESS
-- round 3/10 = e635c54
+- round 6/10 = 03e6ad2
 
 ## FOUND
 - THE HEADLINE: the task brief says the roadmap side is "P0-002's secretd
