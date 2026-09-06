@@ -124,7 +124,6 @@ table inet apex {
         tcp dport 22 accept
 
         # Whatever the user allowed, by name, through `apex firewall allow`.
-        tcp dport @allowed_tcp accept
         udp dport @allowed_udp accept
     }
 
