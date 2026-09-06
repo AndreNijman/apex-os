@@ -81,6 +81,10 @@ pub struct BearerProvider {
     /// Whether [`Provider::mint`] exchanges the stored credential for a
     /// short-lived one. §13.4's path, off by default so both are exercised.
     pub mints: bool,
+    /// Whether [`Provider::perform`] fails with the credential in its error
+    /// message — the mistake a provider makes when it hands back whatever the
+    /// tool it drove said about a failed request.
+    pub fails_with_token: bool,
 }
 
 /// What `mint` hands back. Distinct from the stored value so a test can tell
@@ -142,6 +146,15 @@ impl Provider for BearerProvider {
         let token = value
             .as_str()
             .ok_or_else(|| ProviderError::Failed("that credential is not text".into()))?;
+        if self.fails_with_token {
+            // Badly written, on purpose. The framework is what makes it not
+            // matter, and a provider written next year will do this by
+            // accident.
+            return Err(ProviderError::Failed(format!(
+                "the api rejected the request: upstream said `Bearer {token}` \
+                 was not accepted"
+            )));
+        }
         let method = if req.operation.effect.is_write() {
             "PUT"
         } else {
@@ -302,6 +315,10 @@ mod tests {
     /// A service serving ONLY the bearer provider, with a credential stored for
     /// the fixture and one operation granted.
     fn fixture(name: &str, mints: bool, granted: &str) -> Fixture {
+        fixture_with(name, mints, false, granted)
+    }
+
+    fn fixture_with(name: &str, mints: bool, fails_with_token: bool, granted: &str) -> Fixture {
         let api = Api::start();
         let dir = std::env::temp_dir().join(format!(
             "apex-bearer-{name}-{}-{}",
@@ -315,6 +332,7 @@ mod tests {
             .register(Box::new(BearerProvider {
                 port: api.port,
                 mints,
+                fails_with_token,
             }))
             .expect("register");
         let service = Service::new(Store::new(dir.clone()), false, registry);
@@ -407,6 +425,30 @@ mod tests {
         assert_eq!(f.api.authorizations(), vec![format!("Bearer {MINTED}")]);
         assert!(!output.contains(MINTED), "the minted token came back: {output}");
         assert!(!output.contains(STORED), "{output}");
+    }
+
+    #[test]
+    fn a_provider_that_puts_the_credential_in_an_error_does_not_get_to_hand_it_over() {
+        // `refuse` was the one path out of `use_capability` that ran no scrub.
+        // Everything else either cannot carry a value or goes through
+        // `scrub_all` — so a provider that failed AFTER the value was read put
+        // the credential in the reply and in the trail, both of which an agent
+        // can see. There is nothing hypothetical about the mistake: handing
+        // back whatever the tool said is the obvious way to write `perform`.
+        let f = fixture_with("failing", false, true, "demo.object.read");
+        let reply = f
+            .service
+            .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new());
+        let (_, message) = reply.as_error().expect("the provider failed");
+        assert!(message.contains("not accepted"), "{message}");
+        assert!(!message.contains(STORED), "the refusal carries the credential");
+        assert!(message.contains("«redacted»"), "{message}");
+        assert!(!serde_json::to_string(&reply).unwrap().contains(STORED));
+
+        let path = Store::new(f.dir.clone()).audit_path();
+        let trail = std::fs::read_to_string(&path).expect("the trail");
+        assert!(!trail.contains(STORED), "the trail carries the credential");
+        assert!(trail.contains("refused"), "it was recorded as a refusal");
     }
 
     #[test]
