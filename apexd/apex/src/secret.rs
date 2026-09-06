@@ -40,7 +40,7 @@ use apex_agent_core::protocol::{
 use apex_secret_core::client::Client;
 use apex_secret_core::operation::{self, OperationInfo};
 use apex_secret_core::protocol::{Request, Response};
-use apex_secret_core::store::valid_service_name;
+use apex_secret_core::store::{valid_service_name, ANY_PROJECT};
 use apex_secret_core::SecretValue;
 use clap::Subcommand;
 
@@ -96,9 +96,28 @@ pub enum SecretCmd {
     /// The operations an agent can be granted, as the service offers them.
     Capabilities,
     /// Allow an operation for the current project.
-    Grant { service: String, operation: String },
+    Grant {
+        service: String,
+        operation: String,
+        /// Allow it in every project instead of this one.
+        ///
+        /// Only for an operation that names nothing — `mcp.request` is the one
+        /// there is. Such an operation can only reach the endpoint pinned when
+        /// its credential was stored, so this widens *where* it may be asked
+        /// for and not *what* it reaches. An MCP server is defined once and is
+        /// therefore present in every directory; without this, every new
+        /// worktree is one where it is unauthorised until somebody notices.
+        #[arg(long)]
+        everywhere: bool,
+    },
     /// Withdraw one.
-    Revoke { service: String, operation: String },
+    Revoke {
+        service: String,
+        operation: String,
+        /// Withdraw the grant made with `--everywhere`, not this project's.
+        #[arg(long)]
+        everywhere: bool,
+    },
     /// What is allowed, per project.
     Grants {
         #[arg(long)]
@@ -161,8 +180,16 @@ pub fn main(cmd: SecretCmd) -> i32 {
         SecretCmd::List { json } => list(json),
         SecretCmd::Remove { service } => remove(&service),
         SecretCmd::Capabilities => capabilities(),
-        SecretCmd::Grant { service, operation } => grant(&service, &operation, false),
-        SecretCmd::Revoke { service, operation } => grant(&service, &operation, true),
+        SecretCmd::Grant {
+            service,
+            operation,
+            everywhere,
+        } => grant(&service, &operation, false, everywhere),
+        SecretCmd::Revoke {
+            service,
+            operation,
+            everywhere,
+        } => grant(&service, &operation, true, everywhere),
         SecretCmd::Grants { json } => grants(json),
         SecretCmd::Use {
             service,
@@ -379,20 +406,40 @@ fn parse_option(text: &str) -> Result<(String, String)> {
     }
 }
 
-fn grant(service: &str, operation: &str, revoke: bool) -> Result<i32> {
-    let project = current_project_root()?;
+fn grant(service: &str, operation: &str, revoke: bool, everywhere: bool) -> Result<i32> {
+    // `--everywhere` does not need to be standing in a project, and requiring
+    // one would be a strange thing to insist on for a grant that is not about
+    // where you are.
+    let project = if everywhere {
+        ANY_PROJECT.to_string()
+    } else {
+        current_project_root()?
+    };
     Client::connect()?.call(&Request::Grant {
         project: project.clone(),
         service: service.to_string(),
         capability: operation.to_string(),
         revoke,
     })?;
+    let scope = describe_scope(&project);
     if revoke {
-        println!("withdrew {service}:{operation} for {project}");
+        println!("withdrew {service}:{operation} {scope}");
     } else {
-        println!("allowed {service}:{operation} for {project}");
+        println!("allowed {service}:{operation} {scope}");
     }
     Ok(0)
+}
+
+/// A grant's project key, in words.
+///
+/// `*` is not a path, and printing it raw would read as a directory called `*`
+/// — which is a thing a shell can produce, so the ambiguity is not theoretical.
+fn describe_scope(project: &str) -> String {
+    if project == ANY_PROJECT {
+        "in every project".to_string()
+    } else {
+        format!("for {project}")
+    }
 }
 
 fn grants(json: bool) -> Result<i32> {
@@ -409,7 +456,11 @@ fn grants(json: bool) -> Result<i32> {
         return Ok(0);
     }
     for (project, keys) in &projects {
-        println!("{project}");
+        if project == ANY_PROJECT {
+            println!("every project");
+        } else {
+            println!("{project}");
+        }
         for k in keys {
             println!("    {k}");
         }

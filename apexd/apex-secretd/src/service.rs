@@ -217,7 +217,8 @@ impl Service {
         capability: &str,
         revoke: bool,
     ) -> Response {
-        if !broker::valid_project(project) {
+        let everywhere = project == store::ANY_PROJECT;
+        if !everywhere && !broker::valid_project(project) {
             return Response::error(
                 ErrorKind::BadRequest,
                 "a grant is keyed on an absolute project path".to_string(),
@@ -230,6 +231,25 @@ impl Service {
             Ok((_, op)) => op,
             Err(e) => return Response::error(ErrorKind::BadRequest, e.to_string()),
         };
+        // The gate on `*`, here rather than in the CLI, because the CLI is not
+        // the trust boundary: this socket takes a request from anything running
+        // as the account. An operation that names nothing can only ever reach
+        // the endpoint pinned when its credential was stored, so granting it
+        // everywhere widens where it may be asked for and not what it reaches.
+        // One that acts on a resource, or takes a parameter, resolves that
+        // against the directory the caller is standing in — so the same key
+        // there would be a different permission in every directory.
+        //
+        if everywhere && !op.names_nothing() {
+            return Response::error(
+                ErrorKind::BadRequest,
+                format!(
+                    "'{}' acts on something you name, so it is granted where you name it \
+                     and not everywhere. Run `apex secret grant` in the project.",
+                    op.id
+                ),
+            );
+        }
         let capability = op.id;
         if !store::valid_service_name(service) {
             return refuse_store(StoreError::BadServiceName(service.to_string()));
@@ -304,9 +324,22 @@ impl Service {
         {
             return Decision::Allowed("grant");
         }
+        // The one message somebody reads in a worktree where a global MCP
+        // server has stopped working, relayed to them by the agent as a
+        // JSON-RPC error. It has to carry the way out, and for an operation
+        // that names nothing the way out is usually `--everywhere` rather than
+        // running the same grant again in each new directory.
+        let everywhere = if op.names_nothing() {
+            format!(
+                ", or in every project with `apex secret grant {provider} {} --everywhere`",
+                op.id
+            )
+        } else {
+            String::new()
+        };
         Decision::Refused(format!(
             "'{}' on '{provider}' is not granted for this project; allow it with \
-             `apex secret grant {provider} {}`",
+             `apex secret grant {provider} {}`{everywhere}",
             op.id, op.id
         ))
     }
