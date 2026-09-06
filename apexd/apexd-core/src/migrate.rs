@@ -764,6 +764,50 @@ mod tests {
     }
 
     #[test]
+    fn a_toml_document_survives_the_round_trip_the_framework_puts_it_through() {
+        // Dead code today: every TOML store declares no steps, so `plan`
+        // answers UpToDate and `serialise` is never reached. The first
+        // blueprint migration would run `toml::to_string_pretty` over a
+        // `serde_json::Map` for the first time on somebody's machine, and the
+        // types are not obviously compatible — TOML has no null and its tables
+        // must come after its scalars.
+        static TOMLSTEPS: &[Step] = &[Step {
+            from: 1,
+            to: 2,
+            summary: "added a nested table",
+            apply: |d| {
+                let mut inner = Map::new();
+                inner.insert("nested".into(), Value::from("value"));
+                d.insert("added".into(), Value::Object(inner));
+                Ok(())
+            },
+        }];
+        static TOMLSTORE: Store = Store {
+            id: "toml-round-trip",
+            what: "a TOML store that exists only in this test module",
+            path: "/nonexistent/round-trip.toml",
+            format: Format::Toml,
+            authored: Authored::Machine,
+            version_key: "version",
+            unversioned: 1,
+            current: 2,
+            rollback: Rollback::ReadableByOlder,
+            steps: TOMLSTEPS,
+            sample: "version = 1\ntitle = \"a task\"\ncount = 3\nflags = [\"a\", \"b\"]\n\n[section]\nkey = \"v\"\n",
+        };
+        let o = migrate_text(&TOMLSTORE, TOMLSTORE.sample).unwrap().unwrap();
+        let back = document(&TOMLSTORE, &o.text).unwrap();
+        assert_eq!(back["version"], Value::from(2));
+        assert_eq!(back["title"], Value::from("a task"));
+        assert_eq!(back["count"], Value::from(3));
+        assert_eq!(back["flags"], serde_json::json!(["a", "b"]));
+        assert_eq!(back["section"]["key"], Value::from("v"));
+        assert_eq!(back["added"]["nested"], Value::from("value"));
+        // And the additive claim holds through a format that reorders keys.
+        additive_only(&TOMLSTORE, TOMLSTORE.sample).unwrap();
+    }
+
+    #[test]
     fn store_ids_are_unique_and_stable_shaped() {
         let mut ids: Vec<&str> = STORES.iter().map(|s| s.id).collect();
         let n = ids.len();
