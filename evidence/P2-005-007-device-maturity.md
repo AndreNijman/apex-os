@@ -1,59 +1,63 @@
 # P2-005 / P2-006 / P2-007 — device maturity evidence
 
-Branch `task/p2-005-device-maturity` in apex-os, commits `36232f5`, `c823974`,
-`f9ab0e7`, `3142bbd`, `5a7d0c6`, `fce0a99`, `5d5441b`.
+Branch `task/p2-005-device-maturity` in apex-os. Commits `36232f5`, `c823974`,
+`f9ab0e7`, `3142bbd`, `5a7d0c6`, `fce0a99`, `5d5441b`, `1adbdb2`.
 
-Three suites, all mutation-proved:
+Four suites, every one run here rather than quoted, and every one
+mutation-proved:
 
 | Suite | Result | Mutations |
 |---|---|---|
-| `tests/test-device-image.sh` | 41 passed | 40/1 ×5, 39/2, 40/1; restored 41/0 |
-| `tests/test-device-services-netns.sh` | 12 passed | 11/1, 9/3, 9/3, 11/1; restored 12/0 |
-| `tests/test-apex-devices.sh` | 53 passed | 49/4, 52/1 ×5, 51/2; restored 53/0 |
+| `tests/test-device-image.sh` | 39 passed, 0 failed | 37/2 at `3142bbd` |
+| `tests/test-device-services-netns.sh` | 12 passed, 0 failed | 11/1, 9/3, 9/3, 11/1 |
+| `tests/test-apex-devices.sh` | 55 passed, 0 failed | 49/4, 52/1 ×5, 51/2, 54/1, 53/2 |
+| `cargo test -p apex` | 315 passed, 0 failed | — |
 
-`cargo test -p apex`: 315 passed. `tests/run-clippy.sh` (container, `rust:1`):
-clean.
+`tests/run-clippy.sh` (container, `rust:1`, `--all-targets -D warnings`): clean.
 
 ## What is demonstrated and what is reasoned
 
-There is no printer and no scanner attached to either machine, no dock, no SD
-card, no enterprise access point and no VPN endpoint. Nothing below claims one.
+There is no printer, scanner, dock, SD card, enterprise access point, VPN
+endpoint or Bluetooth headset attached to either machine. Nothing below claims
+one.
 
 | Item | Criterion | Verdict | How |
 |---|---|---|---|
-| P2-005 | Printing | PARTIAL, demonstrated | The packages are asserted at build. Discovery reaches the machine through the shipped firewall (netns, positive control on 5353); IPP inbound is silent until 631 is in `allowed_tcp`, and `apex devices print` names that at the point a shared printer fails. **No print job has been sent to a printer.** |
-| P2-005 | Scanning | DEMONSTRATED | katana finds `airscan:w1:CANON INC. TR4600 series` over WSD in a 6.9 s whole-run. The L16, whose avahi is masked, refuses to enumerate and says why — the same program, two machines, one image. |
-| P2-005 | SMB / NFS / WebDAV / MTP / cameras | PARTIAL, demonstrated at the floor | `cifs-utils`, `samba-client`, `gvfs-fuse`, `gvfs-nfs`, `gvfs-gphoto2` were absent from the image and are added. `apex devices share` reads the live state of each on both machines. **No share has been mounted from a server.** |
-| P2-005 | SD | REASONED, with one measurement | Neither machine has an MMC host, and both report that as an absence with the usb-storage caveat. The mount path (udisks2 + a seat) is measured in the negative on katana over ssh: no seat, so udisks2 would refuse. **No card has been inserted.** |
-| P2-006 | Captive portal | PARTIAL, demonstrated | `21-apex-connectivity.conf` ships, and both machines now report `full` rather than `unknown`. The `portal` branch is fixture-tested. **No hotel network has been joined.** |
-| P2-006 | WireGuard / OpenVPN | REASONED | `wireguard-tools` and the three NM VPN plugins were absent and are added; the reader reports both. **No tunnel has been established.** |
-| P2-006 | Enterprise Wi-Fi | PARTIAL, demonstrated | Two saved 802.1X profiles on the L16, both EAP PEAP, both with no CA certificate and `system-ca-certs` off, found and named. The plugin, backend and trust-store branches are fixture-tested. **No EAP handshake has been run.** |
-| P2-006 | Hotspot | DEMONSTRATED as blocked | Measured in three namespaces: the shipped policy drops forwarded traffic, its DHCP rule matches the reply direction rather than a client's request, and port 53 is shut. Reported to P1-044, not fixed here. |
-| P2-007 | Headsets and codecs | PARTIAL, demonstrated | The codec list is read from `/usr/lib64/spa-0.2/bluez5` on both machines: aac, faststream, g722, lc3, ldac, opus, sbc, and no aptX. `pipewire-codec-aptx` is added to the image. **No headset has been connected.** |
-| P2-007 | Thunderbolt | DEMONSTRATED as broken, fix reasoned | L16: `domain0`/`domain1` at `security=user`, `iommu_dma_protection=1`, two host routers authorised, and no boltd, so an attached device would sit at `authorized=0` forever. `bolt` is added to the image. **No Thunderbolt device has been attached.** |
-| P2-007 | USB-C docks | PARTIAL, demonstrated | L16 has two Type-C ports and one live partner; katana has no Thunderbolt controller at all, which is why the USB-C reader no longer sits behind that early return. **No dock has been attached.** |
-| P2-007 | Hotplug | REASONED, with one live reading | udevd is checked before anything is enumerated, and the Type-C partner is the one thing on these machines that appears and disappears with a cable. **No plug event has been watched end to end.** |
+| P2-005 | Printing | PARTIAL, demonstrated | Packages asserted at build. Discovery reaches the machine through the shipped firewall (netns, positive control on 5353); IPP inbound stays silent until 631 is in `allowed_tcp`, and `apex devices print` names that where a shared printer fails. No print job has been sent. |
+| P2-005 | Scanning | DEMONSTRATED | katana finds `airscan:w1:CANON INC. TR4600 series` over WSD, whole run 6.9 s. The L16, whose avahi is masked, refuses to enumerate and says why. One program, two machines, one image. |
+| P2-005 | SMB / NFS / WebDAV / MTP / cameras | PARTIAL, floor demonstrated | `cifs-utils`, `samba-client`, `gvfs-fuse`, `gvfs-nfs`, `gvfs-gphoto2` were missing from the image and are added. `apex devices share` reads each one live on both machines. No share has been mounted from a server. |
+| P2-005 | SD | REASONED, one measurement | Neither machine has an MMC host and both report that with the usb-storage caveat. The mount path is measured in the negative on katana: no seat over ssh, so udisks2 would refuse. No card has been inserted. |
+| P2-006 | Captive portal | DEMONSTRATED as absent | Measured: `ConnectivityCheckAvailable` false, `ConnectivityCheckEnabled` false, `ConnectivityCheckUri` empty, and `nmcli` answering `full` anyway on both machines. The shipped image cannot see a portal, and its `full` is an assumption. `21-apex-connectivity.conf` turns the check on and is not on either machine yet. No portal network has been joined. |
+| P2-006 | WireGuard / OpenVPN | REASONED | `wireguard-tools` and the three NM VPN plugins were missing and are added; the reader reports both. No tunnel has been established. |
+| P2-006 | Enterprise Wi-Fi | PARTIAL, demonstrated | Two saved 802.1X profiles on the L16, both EAP PEAP, both with no CA certificate and `system-ca-certs` off, found and named. Plugin, backend and trust-store branches are fixture-tested. No EAP handshake has been run. |
+| P2-006 | Hotspot | DEMONSTRATED as blocked | Three namespaces: the policy drops forwarded traffic, its DHCP rule matches the reply direction rather than a client's request, and port 53 is shut. Handed to P1-044. |
+| P2-007 | Headsets and codecs | PARTIAL, demonstrated | Codec list read from `/usr/lib64/spa-0.2/bluez5` on both: aac, faststream, g722, lc3, ldac, opus, sbc, no aptX. `pipewire-codec-aptx` is added. No headset has been connected. |
+| P2-007 | Thunderbolt | DEMONSTRATED as broken, fix reasoned | L16: `domain0`/`domain1` at `security=user`, `iommu_dma_protection=1`, two host routers authorised, no boltd, so an attached device would sit at `authorized=0` forever. `bolt` is added. No Thunderbolt device has been attached. |
+| P2-007 | USB-C docks | PARTIAL, demonstrated | L16 has two Type-C ports and one live partner; katana has no Thunderbolt controller and does have ports, which is why the USB-C reader no longer sits behind that early return. No dock has been attached. |
+| P2-007 | Hotplug | REASONED, one live reading | udevd is checked before anything is enumerated, and the Type-C partner is the one thing on these machines that comes and goes with a cable. No plug event has been watched end to end. |
 
-## The refusals that a naive reader would have called absences
+## Refusals a naive reader would have called absences
 
-Four of these fired on real hardware rather than in a fixture:
+Five fired on real hardware rather than in a fixture:
 
-1. **avahi masked on the L16.** `scanimage -L` does not return; the reader says
-   "unavailable — avahi is masked", gives the unmask command, and does not run
-   the probe. katana, with avahi running, finds a real scanner.
-2. **No seat over ssh on katana.** udisks2 would refuse to mount a card. The
-   reader says so instead of reporting an empty slot.
-3. **`apex-firewall.service` is not installed on either machine.** Neither run
-   blames a firewall for anything, because there is no policy loaded to blame.
-4. **dnsmasq on the L16 is owned by no package.** It arrived with an `apex
-   install waydroid` system extension, so the hotspot would have worked by
-   coincidence and stopped the day that extension went. katana, with no
-   extension, reports it plainly absent.
+1. **avahi masked on the L16.** `scanimage -L` does not return. The reader says
+   "unavailable, avahi is masked", gives the unmask command, and skips the
+   probe. katana, with avahi running, finds a real scanner.
+2. **No seat over ssh on katana.** udisks2 would refuse to mount a card, so the
+   reader says that instead of reporting an empty slot.
+3. **`apex-firewall.service` is on neither machine.** Neither run blames a
+   firewall for anything, because no policy is loaded to blame.
+4. **dnsmasq on the L16 belongs to no package.** It arrived with an `apex
+   install waydroid` extension, so a hotspot would have worked by coincidence
+   and stopped the day that extension went. katana reports it plainly absent.
+5. **NetworkManager's `full`.** Both machines report a fully connected link
+   that nothing checked, and the first version of this reader passed that
+   through as good news.
 
 ## The two runs
 
 ```
-### L16 (apex, 21SCCTO1WW) — 2026-09-07T05:01:06+08:00
+### L16 (Lenovo ThinkPad L16, 21SCCTO1WW) — 2026-09-07T05:07:34+08:00
 
 Printing
   mDNS (avahi)               MASKED
@@ -103,7 +107,12 @@ Networking
       lo             loopback   connected (externally)
       p2p-dev-wlp3s0 wifi-p2p   disconnected
       enp1s0f0       ethernet   unavailable
-  connectivity               full
+  captive portal             not detected, because nothing checked
+      NetworkManager has no connectivity URI here, so it answers 'full' for any
+      connected link without asking anyone. A hotel or campus network that has
+      addressed you and will answer nothing looks exactly like a working one.
+      APEX ships /etc/NetworkManager/conf.d/21-apex-connectivity.conf to turn
+      the check on; on this machine it is not in effect.
   VPN protocols              none
       NetworkManager has no built-in VPN beyond WireGuard: each protocol is a
       separate service in /usr/lib/NetworkManager/VPN, so a .ovpn file cannot be imported at all
@@ -146,7 +155,7 @@ Thunderbolt, USB4 and docks
 ```
 
 ```
-### katana (Katana GF76 12UG) — 2026-09-07T05:01:07+08:00
+### katana (Katana GF76 12UG), over ssh — 2026-09-07T05:07:35+08:00
 
 Printing
   mDNS (avahi)               running
@@ -158,7 +167,7 @@ Printing
 Scanning
   scanners                   2 found
       device `v4l:/dev/video0' is a Noname HD Webcam: HD Webcam virtual device
-      device `airscan:w1:CANON INC. TR4600 series' is a WSD CANON INC. TR4600 series ip=fe80::6e3c:7cff:fea4:d053%3
+      device `airscan:w1:CANON INC. TR4600 series' is a WSD CANON INC. TR4600 series ip=192.168.1.121
 
 Network shares
   GIO mounts on disk         NO — gvfs-fuse is not installed
@@ -191,7 +200,12 @@ Networking
       lo             loopback   connected (externally)
       p2p-dev-wlo1   wifi-p2p   disconnected
       enp5s0         ethernet   unavailable
-  connectivity               full
+  captive portal             not detected, because nothing checked
+      NetworkManager has no connectivity URI here, so it answers 'full' for any
+      connected link without asking anyone. A hotel or campus network that has
+      addressed you and will answer nothing looks exactly like a working one.
+      APEX ships /etc/NetworkManager/conf.d/21-apex-connectivity.conf to turn
+      the check on; on this machine it is not in effect.
   VPN protocols              none
       NetworkManager has no built-in VPN beyond WireGuard: each protocol is a
       separate service in /usr/lib/NetworkManager/VPN, so a .ovpn file cannot be imported at all
@@ -218,5 +232,5 @@ Thunderbolt, USB4 and docks
       the ports may still work as plain USB; what is missing is the
       kernel's view of role, power and what is on the other end
 
-timeout 150 bash /tmp/apex-devices-p2005 all  0.19s user 0.25s system 6% cpu 6.932 total
+timeout 150 bash /tmp/apex-devices-p2005 all  0.12s user 0.12s system 3% cpu 6.747 total
 ```

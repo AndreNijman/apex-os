@@ -59,6 +59,41 @@ FALLBACK: `git reset --hard bc4f06e` (pushed).
 GUARD ADDED to runtests.sh + percommit.sh: refuse to run on a dirty tree
 (exit 3). Mutation-proved: dirtied cloudflare.rs -> rc=3, restored -> runs.
 
+## BRANCH 4 p1-018 IN PROGRESS — tip 8011c33 (NOT PUSHED), 1799/1 FAILED
+Picks: 023f08c 3a3dea9 05e2db2 b6027e9 bb44763 d079134 f605d3a d23c48e 8011c33
+One conflict-free landing EXCEPT one auto-merge defect I fixed inside the pick:
+- apex/Cargo.toml gained `toml.workspace = true` TWICE (p1-045 added it with a
+  comment; p1-018 added it again). cargo: "duplicate key". Kept p1-045's
+  commented line, dropped p1-018's bare one, folded into 05e2db2 (=34016f8).
+  Verified via `git show HEAD:` this time, not the working tree.
+
+### THE REAL FINDING — a cross-branch SECURITY interaction, unresolved
+`providers::tests::only_an_operation_that_names_nothing_can_be_granted_in_every_project`
+FAILS: `'cloudflare.account.read' names nothing: true`, expected false.
+
+p1-018 (853475a) adds `apex secret grant --everywhere` (ANY_PROJECT) gated at
+RUNTIME on `op.names_nothing()` (= `resource == None && params.is_empty()`).
+Its justification: an operation that names nothing "can only ever reach the
+endpoint pinned when its credential was stored, so granting it everywhere
+widens where it may be asked for and NOT what it reaches."
+
+That justification is FALSE for `cloudflare.account.read`, which p1-002 added:
+  mod.rs:251 resolve() -> if the project's apex.toml binds an account,
+    Target::Account(account) -> GET /accounts/{id}   (THE PROJECT'S account)
+    else Target::Accounts     -> GET /accounts       (every account the token sees)
+So it takes no resource ARGUMENT but still resolves against the directory the
+caller stands in. Granting it `--everywhere` therefore DOES widen what it
+reaches: an agent in a project the owner never approved could read that
+project's bound account with the one stored token.
+
+`names_nothing()` is a STRUCTURAL proxy for "reaches the same thing in every
+project", and Cloudflare is the first provider for which the proxy is wrong.
+The p1-018 test caught exactly what its own comment says it exists to catch:
+"a provider added later ... cannot quietly become grantable everywhere by
+inheriting a default." It is the gate working, not a broken test.
+DO NOT "fix" this by relaxing the test to `names_nothing() == whatever`; that
+silently hands cloudflare.account.read an --everywhere grant nobody reviewed.
+
 ## BRANCH 3 RESOLUTIONS
 - broker.rs (ddc80fa, 1 hunk): kept HEAD `drop_to`, deleted the branch's
   `pub fn drop_privileges` (37 lines) that auto-merge had left ALONGSIDE it.

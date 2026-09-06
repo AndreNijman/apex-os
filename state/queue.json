@@ -218,10 +218,10 @@
       "items": [
         "P1-044"
       ],
-      "title": "Finish the default incoming firewall",
+      "title": "Integrate the firewall branches (work is finished, not merged)",
       "after": [],
       "conflicts": [],
-      "note": "Policy, helper, unit, catalogue and suite all landed on roadmap/v2.2. Partial because nothing has loaded it on a real machine and the exception sets have never been applied against a live ruleset. Needs a katana run: load it, verify ssh survives, verify apex firewall allow/deny move a real port."
+      "note": "DONE and pushed: task/p1-044-firewall-live 4cc3f4b (apex-os) and task/p1-044-firewall-settings e51412b (apex-shell). Optional follow-up its author names: apex firewall status --json so the shell page stops parsing prose. Two policy scope questions stay open on purpose -- LLMNR accepted on every interface, and mDNS accepting unicast from any source. Also open: katana's installed apex predates the firewall subcommand, and whether the page should stop offering commands that image cannot run is a judgement nobody has made."
     },
     {
       "id": "p1-050",

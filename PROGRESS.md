@@ -301,6 +301,44 @@ fixed on `roadmap/v2.2`:
   whose name appears at a different EVR for the host arch is now dropped as an
   application fork rather than a multilib library.
 
+### Five firewall defects that only a real machine could show
+
+The policy had been read, parsed and asserted for a day. Loading it into a
+kernel on katana found five things reading never would:
+
+- **SELinux.** `/usr/sbin/nft` is `iptables_exec_t`, so systemd transitions it
+  to `iptables_t`, which cannot read `var_run_t` — a policy staged under `/run`
+  failed to load as root. The shipped `/usr/share` path works for the mirror
+  reason, `usr_t` being readable by the confined `nft`. Nobody had exercised
+  either.
+- **katana's sshd banned the driver.** `Match exec` runs `~/.ssh/lan-up` on
+  every invocation, multiplexing does not skip it, each one is a bare
+  unauthenticated connect to port 22, and `PerSourcePenalties` locked the driver
+  out for about 50 seconds **while the policy was loaded** — which is
+  indistinguishable from the firewall stranding its operator. Measured: six
+  calls through the config open seven such connections; six over the control
+  socket open none.
+- **`%h` in the ControlPath expands differently with and without the config**, so
+  every multiplexed call silently failed. And "no table is loaded" is a non-zero
+  exit, so the absence of a connection was being read as a fact about the target.
+- `--target` was an ssh destination and a TCP address at once, so the suite could
+  not run against any machine reached by an alias — which is every machine it is
+  for.
+- The shell page rendered one reassuring sentence for an empty exception list.
+  Three machines produce that list and it is true of one: on katana, whose image
+  predates `apex firewall`, the page told the user their ports were reachable
+  only locally, three lines under its own headline saying nothing was filtering
+  them.
+
+The dead-man's switch was proven to **fire**, not merely to be scheduled, and
+`established,related` was shown doing the work rather than assumed: port 27036
+answered from the L16 before the load and timed out after it, while the ssh that
+loaded the policy kept carrying commands and a brand-new ssh still got in on the
+same address. One mutation was deliberately **not** run — of the ssh accept rule
+against katana — because that is an outage on Andre's machine and the namespace
+suite already measured that half. Refusing a test is a legitimate result when you
+say which one and why.
+
 ### The clippy wrapper I wrote had the defect it was written to prevent
 
 `tests/run-clippy.sh` could not run on katana at all. Its `podman run` had no

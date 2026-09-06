@@ -1,20 +1,7 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T05:03+08:00",
+  "updated": "2026-09-07T05:09+08:00",
   "agents": [
-    {
-      "slug": "p1-044",
-      "items": [
-        "P1-044"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-044",
-      "branch": "task/p1-044-firewall-live",
-      "agent_id": "a7062a098c9969f55",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T04:25+08:00 (fresh agent, resumed from card after the 01:11 limit)",
-      "title": "prove the default-drop firewall on real hardware and in a netns"
-    },
     {
       "slug": "p2-005",
       "items": [
@@ -87,6 +74,23 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T05:05+08:00",
       "title": "provider-neutral remote agent protocol, device pairing, LAN and relay transport"
+    },
+    {
+      "slug": "p1-039",
+      "items": [
+        "P1-039",
+        "P1-040",
+        "P1-041",
+        "P1-042",
+        "P1-043"
+      ],
+      "repo": "apex-shell",
+      "worktree": "/var/tmp/apex-work/wt-p1-039",
+      "branch": "task/p1-039-display-colour",
+      "agent_id": "abf5f52382e24938e",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T05:15+08:00",
+      "title": "Night Light, mixed-DPI scaling, creator colour management, creator input/audio, GPU parity"
     }
   ]
 }

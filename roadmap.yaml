@@ -1662,15 +1662,7 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    OS half landed on roadmap/v2.2. APEX shipped with no firewall at all, firewalld absent and nftables present
-    with an empty ruleset, so every bound port was reachable, seventeen of them on the L16 including a model
-    server and a Steam remote-play socket. files/system/nftables/apex.nft drops inbound, permits outbound and
-    drops forwarding; established/related, loopback, ICMP, IPv6 neighbour discovery, DHCP and mDNS pass, echo is
-    rate limited, and ssh is open because apex host run and remote agents are ssh. Exceptions go into two named
-    nftables sets, never into the ruleset, and apex firewall manages them by service name from a shipped
-    catalogue. The unit loads before network-pre.target and conflicts with nftables.service, and the image enables
-    it and asserts the policy parses under nft -c. tests/test-apex-firewall.sh 25/0. Criterion 1 is met; criterion
-    2 asks for the exceptions in the APEX UI, and only the CLI exists so far.
+    --evidence
 - id: P1-045
   title: Persistent-state migration framework
   priority: P1
