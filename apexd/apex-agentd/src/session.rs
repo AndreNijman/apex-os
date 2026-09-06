@@ -229,6 +229,11 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     // somebody has run the migration yet. `settings.json` is bound read-only
     // above; this puts a copy of it, with the credential values gone, on top.
     if let Some((from, at)) = install_redacted_settings(adapter, &scratch, &spec.home) {
+        // The copy itself goes on the read-only list too, for the reason the
+        // hook settings do: the scratch directory is bound writable, so a copy
+        // that were writable through its own path would be one the session
+        // could edit — and both files should have the same story.
+        spec.ro.push(from.clone());
         spec.ro_at.push((from, at));
     }
 

@@ -405,38 +405,42 @@ pub struct HttpOutput {
 ///
 /// Not on the command line: `/proc/<pid>/cmdline` is world-readable, and the
 /// whole point of the store is that this value is not readable by the account
-/// the child runs as. Not in a file either, which would leave it at rest for
-/// as long as the request takes. It goes down the child's **stdin**, as a curl
+/// the child runs as. Not in a file either, which would leave it at rest for as
+/// long as the request takes. It goes down the child's **stdin**, as a curl
 /// configuration file — `--config -` — which is the one channel between this
 /// process and that one that no third party can read.
 ///
-/// The body goes in a file for the mirror-image reason: only one of the two can
-/// have stdin, and the body is the caller's own message rather than a
-/// credential. It is written `0600` and owned by the account the child runs as,
-/// and removed when the child is done.
+/// The message goes in a file for the mirror-image reason: only one of the two
+/// can have stdin, and the message is the caller's own rather than a
+/// credential. `dir` is a root-owned directory the owner may traverse and not
+/// write, and the file is created with `O_EXCL` — this process is root, and a
+/// root write to a path an ordinary account could have replaced with a symlink
+/// first is how an owner turns "carry my message" into "write this anywhere".
+///
+/// Response headers come back on **stdout**, ahead of the body, rather than
+/// through a second file, so there is one fewer path for that argument to
+/// apply to. [`strip_http_headers`] separates them again.
 ///
 /// ## Where the request goes
 ///
-/// `info.url()`, built from the host, scheme and path pinned when the
+/// `info.url()`, built from the host, port, scheme and path pinned when the
 /// credential was stored. Nothing the caller sent contributes to it —
 /// `Capability::McpRequest` has no fields — so a session cannot aim this at a
-/// server of its own choosing. `--proto` and `--location` are set so a
-/// *redirect* cannot do it either: curl follows nothing, and would refuse a
-/// non-https hop even if it did.
+/// server of its own choosing. Redirects are not followed, so the far end
+/// cannot aim it either.
 pub fn perform_http(
     info: &ServiceInfo,
     value: &SecretValue,
     body: &[u8],
     session: Option<&str>,
     owner: &Owner,
+    dir: &Path,
 ) -> Result<HttpOutput, String> {
     let token = value
         .as_str()
         .ok_or_else(|| "that credential is not text, so it cannot become a header".to_string())?;
 
-    let scratch = TempFile::create(&format!("apex-secretd-body-{}", std::process::id()), owner)?;
-    scratch.write(body)?;
-    let headers = TempFile::create(&format!("apex-secretd-hdr-{}", std::process::id()), owner)?;
+    let message = TempFile::create(dir, body)?;
 
     let mut config = String::new();
     config.push_str(&format!("url = {}\n", quote(&info.url())));
@@ -447,33 +451,64 @@ pub fn perform_http(
     ));
     config.push_str("header = \"Content-Type: application/json\"\n");
     config.push_str("header = \"Accept: application/json, text/event-stream\"\n");
+    // Suppressed so there is exactly one header block on stdout. curl sends
+    // `Expect: 100-continue` for a body over a kilobyte, and a server that
+    // honours it answers `100 Continue` first — two blocks, and a stripper
+    // written for one would hand the caller a reply with HTTP in front of it.
+    config.push_str("header = \"Expect:\"\n");
     if let Some(id) = session {
         config.push_str(&format!("header = {}\n", quote(&format!("Mcp-Session-Id: {id}"))));
     }
-    config.push_str(&format!("data-binary = {}\n", quote(&format!("@{}", scratch.path))));
-    config.push_str(&format!("dump-header = {}\n", quote(&headers.path)));
+    config.push_str(&format!("data-binary = {}\n", quote(&format!("@{}", message.path))));
+    config.push_str("dump-header = \"-\"\n");
     config.push_str("silent\nshow-error\nfail-with-body\n");
     config.push_str("proto = \"=https,http\"\n");
     config.push_str(&format!("max-filesize = {HTTP_MAX_BYTES}\n"));
     config.push_str(&format!("max-time = {GIT_TIMEOUT_SECS}\n"));
 
     let mut out = run_curl(&config, owner)?;
-    out.text = scrub(&scrub(&out.text, token), &info.header_value(token));
-    let session = std::fs::read_to_string(&headers.path)
-        .ok()
-        .and_then(|h| mcp_session_id(&h));
-    Ok(HttpOutput { out, session })
+    let (headers, rest) = strip_http_headers(&out.text);
+    out.text = scrub(&scrub(&rest, token), &info.header_value(token));
+    Ok(HttpOutput {
+        out,
+        session: mcp_session_id(&headers),
+    })
+}
+
+/// Split curl's stdout into the header blocks it dumped and the body.
+///
+/// `dump-header = "-"` writes every response's headers before the body, and
+/// there can be more than one — a redirect that was not followed still has its
+/// own, and an intermediate `100 Continue` is a block of its own. Every leading
+/// block is taken, so what is left is the body and only the body.
+pub fn strip_http_headers(text: &str) -> (String, String) {
+    let mut headers = String::new();
+    let mut rest = text;
+    while rest.starts_with("HTTP/") {
+        let end = match (rest.find("\r\n\r\n"), rest.find("\n\n")) {
+            (Some(a), Some(b)) if b < a => (b, 2),
+            (Some(a), _) => (a, 4),
+            (None, Some(b)) => (b, 2),
+            (None, None) => break,
+        };
+        headers.push_str(&rest[..end.0]);
+        headers.push('\n');
+        rest = &rest[end.0 + end.1..];
+    }
+    (headers, rest.to_string())
 }
 
 /// The `Mcp-Session-Id` in a header dump, if there is one.
 ///
-/// Bounded and character-checked before it is kept: it is replayed into a
-/// later request's headers, and a value carrying a newline would let the far
-/// end write headers of its own choosing into the next one.
+/// Bounded and character-checked before it is kept: it is replayed into a later
+/// request's headers, and a value carrying a newline would let the far end
+/// write headers of its own choosing into the next one.
 pub fn mcp_session_id(headers: &str) -> Option<String> {
     for line in headers.lines() {
-        let (name, value) = line.split_once(':')?;
-        if !name.eq_ignore_ascii_case("mcp-session-id") {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("mcp-session-id") {
             continue;
         }
         let value = value.trim();
@@ -556,39 +591,59 @@ fn quote(value: &str) -> String {
     out
 }
 
-/// A file the child can read and nothing else can, removed when it is dropped.
+/// A file the child can read, in a directory only root can write, removed when
+/// it is dropped.
+///
+/// `create_new` is the whole of the safety argument. This process is root; the
+/// account the child runs as must be able to read the file; and a root write to
+/// a name an ordinary account could have created first as a symlink is a root
+/// write to wherever that symlink points. `O_EXCL` refuses a name that already
+/// exists, and the directory it lives in is not writable by that account
+/// anyway, so there are two independent reasons the race cannot be won.
 struct TempFile {
     path: String,
 }
 
 impl TempFile {
-    fn create(prefix: &str, owner: &Owner) -> Result<TempFile, String> {
+    /// Create the directory brokered messages are written in.
+    ///
+    /// `0711`: root writes here, and the account the child runs as needs to
+    /// traverse it to open a file by name and nothing more. It cannot list the
+    /// directory, create a name in it, or replace one.
+    pub fn prepare_dir(dir: &Path) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
-        let path = format!(
-            "/tmp/{prefix}-{}-{}",
-            owner.uid,
+        std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711))
+            .map_err(|e| format!("securing {}: {e}", dir.display()))
+    }
+
+    fn create(dir: &Path, contents: &[u8]) -> Result<TempFile, String> {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        TempFile::prepare_dir(dir)?;
+        let path = dir.join(format!(
+            "message-{}-{}",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
-        );
-        std::fs::write(&path, b"").map_err(|e| format!("creating {path}: {e}"))?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("securing {path}: {e}"))?;
-        // The child runs as the owner and has to be able to read it. Only
-        // meaningful when this daemon is root; a no-op in a test, where the
-        // file already belongs to the account that will read it.
-        // Safe: chown on a path this function just created, with owned CString.
-        if let Ok(c) = std::ffi::CString::new(path.as_str()) {
-            unsafe {
-                libc::chown(c.as_ptr(), owner.uid, owner.gid);
-            }
-        }
-        Ok(TempFile { path })
-    }
-
-    fn write(&self, bytes: &[u8]) -> Result<(), String> {
-        std::fs::write(&self.path, bytes).map_err(|e| format!("writing {}: {e}", self.path))
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(&path)
+            .map_err(|e| format!("creating {}: {e}", path.display()))?;
+        file.write_all(contents)
+            .map_err(|e| format!("writing {}: {e}", path.display()))?;
+        // Set again after the write: the mode above is masked by the process
+        // umask, and a child that cannot read its own message fails with a
+        // curl error about a file rather than anything a reader could act on.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .map_err(|e| format!("securing {}: {e}", path.display()))?;
+        Ok(TempFile {
+            path: path.to_string_lossy().into_owned(),
+        })
     }
 }
 

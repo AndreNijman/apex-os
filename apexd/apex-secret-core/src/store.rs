@@ -330,6 +330,16 @@ impl Store {
         self.root.join("audit.jsonl")
     }
 
+    /// Where a brokered operation puts a file its child has to read.
+    ///
+    /// Inside the store root, which only root may write, rather than in `/tmp`,
+    /// where any account may create a name first. Nothing here is a credential;
+    /// what is at stake is that this daemon is root and must not be tricked
+    /// into writing through somebody else's symlink.
+    pub fn run_dir(&self) -> PathBuf {
+        self.root.join("run")
+    }
+
     /// Store a credential, replacing any previous one under the same name.
     ///
     /// The value goes to its own file and is never logged, never included in an

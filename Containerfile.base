@@ -271,6 +271,13 @@ RUN set -eux; \
     # daemon would refuse every operation with an error nobody would connect to
     # this line.
     ! grep -q '^User=' /usr/lib/systemd/system/apex-secretd.service; \
+    # The broker execs these to perform an operation. Asserted for the reason
+    # apex-pkg's list is: a missing one turns `apex secret use` into a runtime
+    # failure on the user's machine instead of a failed build here, and the
+    # message would be about a child process rather than about a missing tool.
+    for t in git curl; do \
+        command -v "$t" >/dev/null || { echo "FATAL: apex-secretd brokers with $t"; exit 1; }; \
+    done; \
     echo "agent sandbox: bwrap functional; agentd opt-in; secretd enabled with a 0700 store"
 
 # Default browser (system-wide XDG): Firefox is the only baked browser, but set

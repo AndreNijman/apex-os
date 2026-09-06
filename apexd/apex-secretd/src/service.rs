@@ -466,7 +466,14 @@ impl Service {
             }
         } else {
             let carried = self.mcp_session(peer.uid, &record.provider);
-            match broker::perform_http(&info, &value, &body, carried.as_deref(), &owner) {
+            match broker::perform_http(
+                &info,
+                &value,
+                &body,
+                carried.as_deref(),
+                &owner,
+                &self.store.run_dir(),
+            ) {
                 Ok(http) => {
                     if let Some(id) = http.session {
                         self.remember_mcp_session(peer.uid, &record.provider, id);
