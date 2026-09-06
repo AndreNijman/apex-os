@@ -37,6 +37,15 @@
 #  must be named, must not resolve to a local address, and the operator has to
 #  say out loud that this machine may lose its network.
 #
+#  ── THE TARGET IS TWO THINGS ────────────────────────────────────────────────
+#
+#  --target is an ssh destination, and an ssh destination is usually an alias
+#  out of ~/.ssh/config with a user and a key attached: `katana`, not a name
+#  the resolver has ever heard of. The probes here are raw TCP from the driver,
+#  so they need an address. It is taken from SSH_CONNECTION on the target —
+#  the far end of the path already under test — rather than from a name lookup
+#  that would fail on exactly the machines this is for.
+#
 #  Usage:
 #    tests/test-apex-firewall-ssh.sh --target HOST --yes-this-host-may-lose-its-network
 #                                   [--deadman SECONDS] [--keep]
@@ -102,6 +111,10 @@ cleanup() {
         [ "$STAGED" = 1 ] && on 'sudo -n rm -f /etc/systemd/system/apex-firewall.service
                                  sudo -n rm -rf /run/apex-fw
                                  sudo -n systemctl daemon-reload' >/dev/null 2>&1
+        # `allow` creates /etc/apex/firewall.d and nothing puts it back. Only
+        # when this run is what created it: on a machine that already had one,
+        # the exceptions in it are the user's.
+        [ "${MADE_CONFDIR:-0}" = 1 ] && on 'sudo -n rm -rf /etc/apex/firewall.d' >/dev/null 2>&1
     fi
     ssh -o "ControlPath=$CM" -O exit "$TARGET" >/dev/null 2>&1
     return $rc
@@ -122,6 +135,31 @@ if on 'sudo -n nft list table inet apex' >/dev/null 2>&1; then
     finish; exit $?
 fi
 ok "the target starts with no apex table"
+
+# The address the target sees this connection arriving on. It needs no
+# resolver, it is the same path every probe below crosses, and it works when
+# --target is an ssh alias, which is the normal case.
+PROBE="$(on 'printf "%s\n" "$SSH_CONNECTION"' 2>/dev/null | awk '{print $3}')"
+if [ -z "$PROBE" ]; then
+    bad "the target's own address is knowable from this connection" \
+        "SSH_CONNECTION came back empty; every probe below would be aimed at nothing"
+    finish; exit $?
+fi
+ok "probes will go to $PROBE, the address this ssh arrives on"
+
+# The refusal above compares spellings, which an alias defeats: `ssh spare-box`
+# pointing back here passes it, and this would then load a default-drop policy
+# on the machine running the test. Compare addresses instead, now that there
+# is one.
+if ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qxF "$PROBE"; then
+    printf 'refusing: %s is an address of this machine\n' "$PROBE" >&2
+    exit 2
+fi
+ok "$PROBE is not an address of this machine"
+
+# Whether the exception directory is this run's to delete afterwards.
+MADE_CONFDIR=0
+on 'test -d /etc/apex/firewall.d' || MADE_CONFDIR=1
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "where the policy is going to come from"
@@ -198,7 +236,7 @@ sec "loading it, over the connection it could break"
 # stay reachable and read as "nothing is being filtered". The port has to be
 # one the policy really closes.
 CLOSED_PORT="$(on "ss -tlnH 2>/dev/null | awk '\$4 ~ /^(0\\.0\\.0\\.0|\\[?::\\]?|\\*):/ { split(\$4,a,\":\"); p=a[length(a)]; if (p != 22 && p != 5353 && p != 5355) { print p; exit } }'")"
-if [ -n "$CLOSED_PORT" ] && timeout 4 bash -c "</dev/tcp/$TARGET/$CLOSED_PORT" 2>/dev/null; then
+if [ -n "$CLOSED_PORT" ] && timeout 4 bash -c "</dev/tcp/$PROBE/$CLOSED_PORT" 2>/dev/null; then
     ok "port $CLOSED_PORT answers from off the machine before the policy loads"
     HAVE_PROBE=1
 else
@@ -233,7 +271,7 @@ fi
 # A NEW connection from the same outside host, to a port that was answering a
 # moment ago. Without this the case above proves only that ssh works.
 if [ "$HAVE_PROBE" = 1 ]; then
-    if timeout 4 bash -c "</dev/tcp/$TARGET/$CLOSED_PORT" 2>/dev/null; then
+    if timeout 4 bash -c "</dev/tcp/$PROBE/$CLOSED_PORT" 2>/dev/null; then
         bad "a new connection to that port is now dropped" "it still answers; nothing is being filtered"
     else
         ok "a new connection to that port is now dropped"
@@ -269,7 +307,7 @@ sec "allow and deny, from off the machine"
 # ═════════════════════════════════════════════════════════════════════════════
 FW=/usr/libexec/apex-firewall
 [ "$STAGED" = 1 ] && FW=/run/apex-fw/libexec/apex-firewall
-reach() { timeout 4 bash -c "</dev/tcp/$TARGET/22000" 2>/dev/null; }
+reach() { timeout 4 bash -c "</dev/tcp/$PROBE/22000" 2>/dev/null; }
 
 LISTENER_PID="$(on 'setsid socat TCP4-LISTEN:22000,reuseaddr,fork PIPE >/dev/null 2>&1 & echo $!' 2>/dev/null | tr -dc "0-9")"
 sleep 0.6
@@ -291,7 +329,7 @@ if on 'ss -tlnH "sport = :22000"' | grep -q 22000; then
     on 'printf "tcp notaport\n" | sudo -n tee /etc/apex/firewall.d/broken.conf >/dev/null' >/dev/null 2>&1
     on "sudo -n $FW reload" >/dev/null 2>&1
     still_dropping=1
-    [ "$HAVE_PROBE" = 1 ] && { timeout 4 bash -c "</dev/tcp/$TARGET/$CLOSED_PORT" 2>/dev/null && still_dropping=0; }
+    [ "$HAVE_PROBE" = 1 ] && { timeout 4 bash -c "</dev/tcp/$PROBE/$CLOSED_PORT" 2>/dev/null && still_dropping=0; }
     if on 'sudo -n nft list chain inet apex input' 2>/dev/null | grep -q 'policy drop' \
        && [ "$still_dropping" = 1 ]; then
         ok "a malformed exception leaves the base policy standing"
