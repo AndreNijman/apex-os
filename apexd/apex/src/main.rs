@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use apexd_core::tier::Tier;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::ops::LocalView;
 use crate::proxy::{
@@ -325,6 +325,10 @@ enum Cmd {
     /// instead of guessing.
     ///
     /// Unprivileged: plugins live in your own `~/.config/apex-shell/plugins`.
+    Plugin {
+        #[command(subcommand)]
+        cmd: PluginCmd,
+    },
     /// The incoming firewall: what is dropped, and the exceptions you opened.
     ///
     /// APEX drops inbound traffic by default. Reading needs no privilege;
@@ -333,9 +337,28 @@ enum Cmd {
         #[command(subcommand)]
         cmd: FirewallCmd,
     },
-    Plugin {
-        #[command(subcommand)]
-        cmd: PluginCmd,
+    /// Printers, scanners, shares, cards, links, radios and docks: what is
+    /// there, what is not, and what could not be looked at.
+    ///
+    /// The third answer is the point. A failed stat is falsy and an empty list
+    /// is falsy, so one line of code turns "permission denied" and "there are
+    /// none" into the same report — which is how `apex recover status` came to
+    /// tell users with packages installed that they had none. Nothing here
+    /// folds an unreadable path, an absent daemon or a refused D-Bus call into
+    /// an absence.
+    ///
+    /// It also names the firewall where a service this machine offers is what
+    /// the policy is dropping, because "the printer does not work" is what the
+    /// user sees and "631 is closed" is what is true.
+    ///
+    /// Unprivileged, and read-only: it pairs nothing, scans for nothing,
+    /// authorises no dock and changes no connection. Every one of those is a
+    /// polkit action, and a status command that raises an authentication dialog
+    /// is a status command nobody runs twice.
+    Devices {
+        /// Which area to report. Everything, if you do not say.
+        #[arg(value_enum)]
+        area: Option<DeviceArea>,
     },
     /// Projects, agent worktrees and checkpoints.
     Project {
@@ -766,6 +789,30 @@ enum FirewallCmd {
     },
     /// Reapply the recorded exceptions. Requires root.
     Reload,
+}
+
+/// The areas `apex devices` can report on.
+///
+/// A `ValueEnum` rather than a free string so a misspelling is answered by clap
+/// with the list of real areas, before anything is executed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum DeviceArea {
+    /// Printers, CUPS queues, mDNS discovery, and sharing one from here.
+    Print,
+    /// Scanners, and why the list may not arrive at all.
+    Scan,
+    /// SMB, NFS, WebDAV, MTP, cameras — and whether they exist outside GTK.
+    Share,
+    /// SD cards, USB disks, auto-mounting, and the seat it needs.
+    Media,
+    /// Links, captive portals, VPN, WireGuard, enterprise Wi-Fi, hotspot.
+    Network,
+    /// Adapters, radio blocks, paired devices, headset codecs.
+    Bluetooth,
+    /// Hotplug, Thunderbolt authorisation, USB-C ports and partners.
+    Dock,
+    /// Every area.
+    All,
 }
 
 #[derive(Subcommand)]
@@ -1224,6 +1271,7 @@ async fn main() {
         }
         Cmd::Env { cmd } => ops::env(&env_argv(cmd)),
         Cmd::Firewall { cmd } => ops::firewall(&firewall_argv(cmd)),
+        Cmd::Devices { area } => ops::devices(&devices_argv(area)),
         Cmd::Plugin { cmd } => ops::plugin(&plugin_argv(cmd)),
     };
     std::process::exit(code);
@@ -1356,6 +1404,23 @@ fn firewall_argv(cmd: FirewallCmd) -> Vec<String> {
         FirewallCmd::Deny { name } => vec!["deny".to_string(), name],
         FirewallCmd::Reload => vec!["reload".to_string()],
     }
+}
+
+/// Pure, like `firewall_argv`: the helper is a separate process, so a wrong
+/// word here is not a compile error but a diagnostic that reports the wrong
+/// area — or, with no default, no area at all.
+fn devices_argv(area: Option<DeviceArea>) -> Vec<String> {
+    vec![match area.unwrap_or(DeviceArea::All) {
+        DeviceArea::Print => "print",
+        DeviceArea::Scan => "scan",
+        DeviceArea::Share => "share",
+        DeviceArea::Media => "media",
+        DeviceArea::Network => "network",
+        DeviceArea::Bluetooth => "bluetooth",
+        DeviceArea::Dock => "dock",
+        DeviceArea::All => "all",
+    }
+    .to_string()]
 }
 
 fn plugin_argv(cmd: PluginCmd) -> Vec<String> {
@@ -2972,6 +3037,66 @@ mod tests {
             vec!["apex", "status"],
             vec!["apex", "tier"],
             vec!["apex", "fan", "status"],
+        ] {
+            assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
+        }
+    }
+
+    // ── apex devices ────────────────────────────────────────────────────────
+
+    fn devices(argv: &[&str]) -> Vec<String> {
+        match Cli::try_parse_from(argv).expect("parses").command {
+            Cmd::Devices { area } => devices_argv(area),
+            _ => panic!("not a devices verb"),
+        }
+    }
+
+    #[test]
+    fn every_area_reaches_the_helper_by_the_name_the_helper_dispatches_on() {
+        // The helper's `case` arms are these words. A rename on one side is not
+        // a compile error on the other: it is `apex devices dock` printing the
+        // usage text and exiting 2.
+        for (typed, sent) in [
+            ("print", "print"),
+            ("scan", "scan"),
+            ("share", "share"),
+            ("media", "media"),
+            ("network", "network"),
+            ("bluetooth", "bluetooth"),
+            ("dock", "dock"),
+            ("all", "all"),
+        ] {
+            assert_eq!(devices(&["apex", "devices", typed]), vec![sent]);
+        }
+    }
+
+    #[test]
+    fn no_area_asks_for_everything_rather_than_for_nothing() {
+        // The helper defaults to `all` on its own, but only because nothing is
+        // passed. Sending an empty argv would work by coincidence; sending the
+        // word means the default survives a change to the helper's dispatch.
+        assert_eq!(devices(&["apex", "devices"]), vec!["all"]);
+    }
+
+    #[test]
+    fn an_area_that_does_not_exist_is_refused_before_anything_runs() {
+        // A free-string argument would hand "dcok" to the helper, which prints
+        // usage to stderr and exits 2. clap answers with the list instead, and
+        // no subprocess starts.
+        assert!(Cli::try_parse_from(["apex", "devices", "dcok"]).is_err());
+    }
+
+    #[test]
+    fn reading_the_devices_is_never_a_privileged_verb() {
+        // Root would report something different rather than something more: it
+        // walks through the 0000 directory whose refusal is the answer, it has
+        // no seat, and its bluetoothctl sees a different set of paired devices
+        // than the session asking the question.
+        for argv in [
+            vec!["apex", "devices"],
+            vec!["apex", "devices", "media"],
+            vec!["apex", "devices", "network"],
+            vec!["apex", "devices", "dock"],
         ] {
             assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
         }
