@@ -1207,6 +1207,76 @@ owned there. `tests/test-apex-dispatch.sh` covers these forms.
 
 ---
 
+## Shells
+
+The shortcuts, completion and the prompt indicator work in bash, zsh, fish and
+nushell — the four the image ships. Not one file: bash and zsh share
+`agent.sh`, and fish and nushell each get their own, because neither can source
+a POSIX script. A `.` of `agent.sh` in a fish config is a syntax error, not a
+degraded experience.
+
+| shell | file | installed to |
+|---|---|---|
+| bash, zsh | `files/desktop/shell/agent.sh` | `/usr/share/apex/shell/`, sourced from `/etc/bashrc` and `/etc/zshrc` |
+| fish | `files/desktop/fish/apex-agent.fish` | `/usr/share/fish/vendor_conf.d/` |
+| fish (completion) | `files/desktop/fish/completions/*.fish` | `/usr/share/fish/vendor_completions.d/` |
+| nushell | `files/desktop/nushell/apex.nu` | `/usr/share/nushell/vendor/autoload/` |
+
+Every one of those directories is the shell's own, asked of the shell rather
+than assumed: `fish -c 'echo $__fish_vendor_confdirs'` and
+`nu -c '$nu.vendor-autoload-dirs'` both name them. So no dotfile is edited and
+nothing has to run at first login. The image build asserts both that each file
+parses and that the shell really reads the directory it went into — a file one
+level off is never read, and nothing tells you.
+
+`tests/test-shell-agent.sh` runs a real `fish` and a real `nu` for every
+assertion, and compares the prompt output byte-for-byte with what `agent.sh`
+produces from the same session records. It skips out loud where a shell is not
+installed, and refuses to report success if every section skipped.
+
+### What differs, and why
+
+- **The opt-out.** `APEX_NO_AGENT_ALIASES` works in bash, zsh and fish. It
+  cannot in nushell: `def`, `alias` and `extern` are parse-time declarations,
+  and putting one inside an `if` does not define it conditionally — it defines
+  nothing. nushell's own opt-out is `hide`, in `~/.config/nushell/config.nu`:
+
+  ```nu
+  hide a; hide aa; hide al; hide ad; hide aw; hide ap
+  ```
+
+- **The prompt is opt-in everywhere**, and fork-free everywhere, which is the
+  only way a hook that runs before every command is acceptable. fish uses
+  `read -z` with a file redirect and `string match` with named capture groups;
+  nushell uses `open` and `from json`. Both are builtins, so neither spawns a
+  process — measured at about 0.2 ms, against the 0.25 ms bash and zsh pay.
+
+  ```fish
+  # ~/.config/fish/config.fish
+  function fish_prompt
+      apex_agent_prompt
+      # …your prompt…
+  end
+  ```
+
+  ```nu
+  # ~/.config/nushell/config.nu
+  $env.PROMPT_COMMAND = {|| $"(apex-agent-prompt)(pwd)" }
+  ```
+
+- **nushell completion is `extern` declarations**, which are signatures for an
+  external command rather than wrappers. An unknown flag or an extra argument
+  goes straight through to `apex`, so a signature that falls behind the CLI
+  costs a completion and never refuses a command that works. That property is
+  asserted, because an `extern` that rejected valid arguments would make a
+  working command look unsupported — strictly worse than no completion.
+
+- **nushell reads its autoload directory in the REPL only.** `nu -c '…'` and
+  `nu script.nu` do not see it, so a script that wants `a` has to
+  `source /usr/share/nushell/vendor/autoload/apex.nu` itself.
+
+---
+
 ## Escape hatches
 
 By design, none of this is compulsory:
@@ -1234,17 +1304,7 @@ Named because the roadmap asks for them and this does not do them:
   runs with nobody present. That would need a privileged executor reachable
   from an agent's request, and minting a new root surface is not something to
   do casually. See below.
-- **Terminal layouts** as a designed grid (§3's editor/agent split), and
-  tmux/zellij integration. Restoring a project's windows now exists — see
-  *Project layouts* — but choosing a layout template does not.
-- **Fish and nushell** shell integration. Bash and zsh are covered, including
-  the `a`/`aa`/`al`/`ad`/`aw`/`ap` shortcuts, completion, and the optional
-  prompt indicator (`apex_agent_prompt`, which is fork-free: it reads the
-  session records the daemon already writes, at about 0.25 ms per prompt).
 - **Screenshots and drag-and-drop into an agent** (§3's clipboard section).
-- **tmux and zellij integration**, and layout TEMPLATES (§3's editor/agent
-  grid). Restoring a project's own windows exists; choosing a layout shape does
-  not.
 - **Test status and merge conflicts per worktree** in the Agent Center (§7).
   The worktree a session is on is shown; whether its tests pass is not.
 - **Disposable environments** and capsules.

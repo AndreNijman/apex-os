@@ -324,6 +324,215 @@ functions -q apex_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  nushell
+# ─────────────────────────────────────────────────────────────────────────────
+section "nushell"
+if ! command -v nu >/dev/null 2>&1; then
+    skipped "nushell integration" "nu is not installed on this machine"
+elif [ ! -r "$NU_FILE" ]; then
+    bad "nushell: ${NU_FILE} exists"
+else
+    sections_run=$((sections_run + 1))
+
+    # nushell reads vendor autoload files in the REPL only — `nu -c` and
+    # `nu script.nu` do not see them. So the behaviour assertions `source` the
+    # file explicitly, and the install PATH is asserted separately, by asking
+    # nushell itself rather than by trusting a hardcoded directory.
+    nurun() { # cwd extra-env… -- code
+        local cwd="$1"; shift
+        local -a extra=()
+        while [ "$1" != "--" ]; do extra+=("$1"); shift; done
+        shift
+        (cd "$cwd" && env -i PATH="${BIN}:/usr/bin:/bin" HOME="${WORK}/home" \
+            "${extra[@]}" nu -n -c "source ${NU_FILE}
+$1" 2>&1)
+    }
+
+    out="$(nurun "$PROJ" -- 'print SOURCED')"
+    [ "$out" = "SOURCED" ] && ok "the nushell file loads with no error" \
+        || { bad "the nushell file loads with no error"; printf '      %s\n' "$out"; }
+
+    # The install directory, asked of nushell. A file in the wrong place breaks
+    # nothing visibly — it is simply never read — so "it looks right" is exactly
+    # the check that would pass on the day nushell changes it.
+    out="$(env -i PATH="/usr/bin:/bin" HOME="${WORK}/home" nu -n -c \
+        '$nu.vendor-autoload-dirs | to text' 2>&1)"
+    printf '%s' "$out" | grep -qx '/usr/share/nushell/vendor/autoload' \
+        && ok "nushell reads the directory the image installs into" \
+        || { bad "nushell reads the directory the image installs into"; printf '      %s\n' "$out"; }
+
+    # ── the shortcuts ────────────────────────────────────────────────────────
+    : > "$CALLS"
+    nurun "$PROJ" -- 'a --agent claude "fix the tests"' >/dev/null
+    grep -qx 'agent run --agent claude fix the tests' "$CALLS" \
+        && ok "nushell \`a\` runs \`apex agent run\` with its arguments" \
+        || { bad "nushell \`a\` runs \`apex agent run\` with its arguments"; sed 's/^/      /' "$CALLS"; }
+
+    : > "$CALLS"
+    nurun "$PROJ" -- 'al --all' >/dev/null
+    grep -qx 'agent list --all' "$CALLS" \
+        && ok "nushell \`al\` forwards flags to \`apex agent list\`" \
+        || bad "nushell \`al\` forwards flags to \`apex agent list\`"
+
+    : > "$CALLS"
+    nurun "$PROJ" -- 'ap layout show' >/dev/null
+    grep -qx 'project layout show' "$CALLS" \
+        && ok "nushell \`ap\` forwards to \`apex project\`" || bad "nushell \`ap\` forwards to \`apex project\`"
+
+    : > "$CALLS"
+    nurun "$PROJ" -- 'aa' >/dev/null
+    grep -qx 'agent attach 4' "$CALLS" \
+        && ok "nushell \`aa\` attaches to the only running session" \
+        || { bad "nushell \`aa\` attaches to the only running session"; sed 's/^/      /' "$CALLS"; }
+
+    : > "$CALLS"
+    nurun "$PROJ" -- 'aa 9 --replay' >/dev/null
+    grep -qx 'agent attach 9 --replay' "$CALLS" \
+        && ok "nushell \`aa\` forwards an id and its flags verbatim" \
+        || { bad "nushell \`aa\` forwards an id and its flags verbatim"; sed 's/^/      /' "$CALLS"; }
+
+    : > "$CALLS"
+    nurun "$PROJ" -- 'aw feature-x "do the thing"' >/dev/null
+    grep -qx 'agent run --worktree feature-x do the thing' "$CALLS" \
+        && ok "nushell \`aw\` puts the worktree on the command line" \
+        || { bad "nushell \`aw\` puts the worktree on the command line"; sed 's/^/      /' "$CALLS"; }
+
+    out="$(nurun "$PROJ" -- 'aw')"
+    printf '%s' "$out" | grep -q 'usage: aw <worktree-name>' \
+        && ok "nushell \`aw\` with no worktree explains itself" \
+        || { bad "nushell \`aw\` with no worktree explains itself"; printf '      %s\n' "$out"; }
+
+    # ── externs are a signature, not a gate ──────────────────────────────────
+    # The property that makes shipping them safe. An `extern` that refused an
+    # argument the CLI accepts would be strictly worse than no completion: it
+    # would make a working command look unsupported.
+    : > "$CALLS"
+    nurun "$PROJ" -- 'apex agent attach 3 --json --not-a-real-flag extra' >/dev/null
+    grep -qx 'agent attach 3 --json --not-a-real-flag extra' "$CALLS" \
+        && ok "an extern passes unknown flags straight through to apex" \
+        || { bad "an extern passes unknown flags straight through to apex"; sed 's/^/      /' "$CALLS"; }
+
+    : > "$CALLS"
+    nurun "$PROJ" -- 'apex doctor --deep' >/dev/null
+    grep -qx 'doctor --deep' "$CALLS" \
+        && ok "a subcommand with no extern is untouched" || bad "a subcommand with no extern is untouched"
+
+    # ── the prompt indicator ─────────────────────────────────────────────────
+    got="$(nurun "$PROJ" XDG_STATE_HOME="$STATE" -- 'print -n (apex-agent-prompt)')"
+    want="$(bash_prompt "$PROJ" "$STATE")"
+    [ -n "$want" ] && [ "$got" = "$want" ] \
+        && ok "the nushell prompt is byte-identical to the bash one" \
+        || { bad "the nushell prompt is byte-identical to the bash one"
+             printf '      nu:   %s\n      bash: %s\n' "$got" "$want"; }
+
+    got="$(nurun "$OUTSIDE" XDG_STATE_HOME="$STATE" -- 'print -n (apex-agent-prompt)')"
+    want="$(bash_prompt "$OUTSIDE" "$STATE")"
+    [ -n "$want" ] && [ "$got" = "$want" ] \
+        && ok "another project's prompt counts only its own sessions (nushell)" \
+        || { bad "another project's prompt counts only its own sessions (nushell)"
+             printf '      nu:   %s\n      bash: %s\n' "$got" "$want"; }
+
+    got="$(nurun "${WORK}" XDG_STATE_HOME="$STATE" -- 'print -n (apex-agent-prompt)')"
+    [ -z "$got" ] && ok "a directory no session is working in shows nothing (nushell)" \
+                  || bad "a directory no session is working in shows nothing (nushell) (got '${got}')"
+
+    got="$(nurun "$PROJ" XDG_STATE_HOME="${WORK}/no-such-state" -- 'print -n (apex-agent-prompt)')"
+    [ -z "$got" ] && ok "no state directory at all is not an error (nushell)" \
+                  || bad "no state directory at all is not an error (nushell) (got '${got}')"
+
+    : > "$CALLS"
+    nurun "$PROJ" XDG_STATE_HOME="$STATE" -- 'apex-agent-prompt | ignore' >/dev/null
+    [ ! -s "$CALLS" ] && ok "the nushell prompt never runs apex" \
+                      || { bad "the nushell prompt never runs apex"; sed 's/^/      /' "$CALLS"; }
+
+    # ── completion sources ───────────────────────────────────────────────────
+    nucomp() { nurun "$PROJ" -- "print (($1) | str join ' ')"; }
+    [ "$(nucomp 'nu-complete apex sessions')" = "4 7" ] \
+        && ok "nushell completes session ids, exited ones included" \
+        || bad "nushell completes session ids, exited ones included (got '$(nucomp 'nu-complete apex sessions')')"
+    [ "$(nucomp 'nu-complete apex agents')" = "claude codex" ] \
+        && ok "nushell completes agent names with the default marker stripped" \
+        || bad "nushell completes agent names with the default marker stripped"
+    [ "$(nucomp 'nu-complete apex services')" = "github openai" ] \
+        && ok "nushell asks the CLI for the stored services" \
+        || bad "nushell asks the CLI for the stored services"
+    [ "$(nucomp 'nu-complete apex capabilities')" = "repo.read repo.write" ] \
+        && ok "nushell asks the CLI for the capability vocabulary" \
+        || bad "nushell asks the CLI for the capability vocabulary"
+    [ "$(nucomp 'nu-complete apex operations')" = "pkg.install service.restart" ] \
+        && ok "nushell asks the CLI for the requestable verbs" \
+        || bad "nushell asks the CLI for the requestable verbs"
+
+    # ── the runtime is down ──────────────────────────────────────────────────
+    out="$( (cd "$PROJ" && env -i PATH="${DOWN}:/usr/bin:/bin" HOME="${WORK}/home" \
+        nu -n -c "source ${NU_FILE}
+print -n ((nu-complete apex sessions) | str join ' ')" 2>&1) )"
+    [ -z "$out" ] && ok "nushell completion with the runtime down is silent and empty" \
+                  || { bad "nushell completion with the runtime down is silent and empty"; printf '      %s\n' "$out"; }
+
+    # ── the autoload path, end to end ────────────────────────────────────────
+    # Everything above sourced the file by hand, which proves the code but not
+    # the install. This drives a real nushell REPL over a pty with the file in a
+    # fixture vendor-autoload directory, because the REPL is the only mode that
+    # reads one. Answering the cursor-position query is required: reedline asks
+    # for it and waits.
+    ND="${WORK}/nudata"
+    mkdir -p "${ND}/nushell/vendor/autoload" "${WORK}/nucfg/nushell" "${WORK}/nucache"
+    cp "$NU_FILE" "${ND}/nushell/vendor/autoload/"
+    # Empty config and env files, present so nushell does not open its
+    # "create one with defaults (Y/n)" prompt — which would otherwise eat the
+    # scripted keystrokes and make this look like an autoload failure.
+    : > "${WORK}/nucfg/nushell/config.nu"
+    : > "${WORK}/nucfg/nushell/env.nu"
+    cat > "${WORK}/replrun.py" <<'PY'
+import os, pty, select, sys, time
+cmd = sys.argv[1:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(cmd[0], cmd)
+script = [b'print $"AUTOLOAD-(apex-agent-prompt | describe)"\r', b"exit\r"]
+# Sends are keyed on the shell's own OSC 133 markers, never on a timer. A timed
+# send races reedline: the second line arrives before the first was submitted,
+# the two concatenate, and the failure then looks like a missing command when it
+# is really a missing keystroke. 133;B ends a prompt, 133;D ends a command.
+# Enter is CR, not LF — a terminal in raw mode gets what the key sends.
+out, sent, ready, deadline = b"", 0, False, time.time() + 30
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.3)
+    if r:
+        try:
+            d = os.read(fd, 65536)
+        except OSError:
+            break            # the pty closed: `exit` worked
+        if not d:
+            break
+        out += d
+        if b"\x1b[6n" in d:  # reedline asks where the cursor is and WAITS
+            os.write(fd, b"\x1b[1;1R")
+        if sent == 0:
+            ready = ready or b"133;B" in d
+        elif b"133;D" in d:
+            ready = True
+    if ready and sent < len(script):
+        os.write(fd, script[sent]); sent += 1; ready = False
+sys.stdout.write(out.decode("utf-8", "replace"))
+PY
+    repl="$( (cd "$PROJ" && env -i PATH="${BIN}:/usr/bin:/bin" HOME="${WORK}/home" \
+        XDG_DATA_HOME="$ND" XDG_CONFIG_HOME="${WORK}/nucfg" XDG_CACHE_HOME="${WORK}/nucache" \
+        XDG_STATE_HOME="$STATE" TERM=xterm \
+        python3 "${WORK}/replrun.py" nu --no-history 2>&1 | tr -d '\r') )"
+    if printf '%s' "$repl" | grep -q 'AUTOLOAD-string'; then
+        ok "a real nushell REPL autoloads the file from the vendor directory"
+    elif printf '%s' "$repl" | grep -qi 'not found'; then
+        bad "a real nushell REPL autoloads the file from the vendor directory"
+        printf '%s' "$repl" | tail -5 | sed 's/^/      /'
+    else
+        skipped "the nushell REPL autoload check" \
+                "could not drive a reedline REPL on this machine"
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 printf '\nshell-agent: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 if [ "$sections_run" -eq 0 ]; then
     echo "FATAL: every section skipped — this run asserted nothing" >&2
