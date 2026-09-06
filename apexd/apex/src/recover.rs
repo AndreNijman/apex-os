@@ -403,26 +403,48 @@ struct Surface {
 /// tool changes its JSON, it needs no subprocess, and it is presentable as a
 /// fixture. A deployment is `<checksum>.<serial>`; the sibling
 /// `<checksum>.<serial>.origin` file is not one.
-fn deployment_count(sys: &Sys) -> Option<usize> {
+///
+/// Every failed read propagates instead of shrinking the count. A partial
+/// enumeration reported as complete is the answer that hides a rollback
+/// target: one stateroot we cannot list turns "2 deployments present, there is
+/// one to go back to" into "only the booted deployment exists". The `Err` side
+/// carries the path and the errno so the row can say which read failed.
+fn deployment_count(sys: &Sys) -> Result<usize, String> {
     let root = sys.path("/ostree/deploy");
-    let stateroots = std::fs::read_dir(&root).ok()?;
+    let at = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    let stateroots = std::fs::read_dir(&root).map_err(|e| at(&root, e))?;
     let mut n = 0usize;
-    for sr in stateroots.flatten() {
+    for sr in stateroots {
+        let sr = sr.map_err(|e| at(&root, e))?;
         let deploy = sr.path().join("deploy");
-        if let Ok(entries) = std::fs::read_dir(&deploy) {
-            for e in entries.flatten() {
-                let name = e.file_name();
-                let name = name.to_string_lossy();
-                if name.ends_with(".origin") {
-                    continue;
-                }
-                if e.path().is_dir() {
-                    n += 1;
-                }
+        let entries = match std::fs::read_dir(&deploy) {
+            Ok(entries) => entries,
+            // A stateroot with no `deploy/` yet holds no deployments. That is
+            // a read that succeeded in saying "nothing here", not one we were
+            // refused.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(at(&deploy, e)),
+        };
+        for e in entries {
+            let e = e.map_err(|e| at(&deploy, e))?;
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".origin") {
+                continue;
+            }
+            // `Path::is_dir` answers false for every failed stat, so a
+            // deployment we may not look at would simply not be counted.
+            match std::fs::metadata(e.path()) {
+                Ok(m) if m.is_dir() => n += 1,
+                Ok(_) => {}
+                // Removed between the readdir and the stat, or a dangling
+                // link: not a deployment either way.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(at(&e.path(), err)),
             }
         }
     }
-    Some(n)
+    Ok(n)
 }
 
 /// The booted deployment's ostree checksum, from the kernel command line.
@@ -523,7 +545,13 @@ fn gpu_modules(vendor: &apexd_core::GpuVendor) -> &'static [&'static str] {
 }
 
 fn probe(sys: &Sys) -> Surface {
-    let cmdline = sys.read("/proc/cmdline").unwrap_or_default();
+    // A `/proc/cmdline` that could not be read is not a `/proc/cmdline`
+    // without an `ostree=` argument. Collapsing the two put an `Attention` row
+    // on a machine nobody had looked at.
+    let (cmdline, cmdline_error) = match sys.read_result("/proc/cmdline") {
+        Ok(text) => (text, None),
+        Err(e) => (String::new(), Some(e.to_string())),
+    };
     let osr = os_release(sys);
     let chain = crate::boot::chain_facts(sys.fixture.clone());
     let ostree_booted = sys.exists("/run/ostree-booted");
@@ -533,8 +561,8 @@ fn probe(sys: &Sys) -> Surface {
     let deployment = booted_deployment(&cmdline);
     let variant = osr.get("VARIANT_ID").cloned().unwrap_or_default();
     let version = osr.get("VERSION_ID").cloned().unwrap_or_default();
-    rows.push(match (ostree_booted, deployment.as_deref()) {
-        (true, Some(csum)) => Row {
+    rows.push(match (ostree_booted, deployment.as_deref(), &cmdline_error) {
+        (true, Some(csum), _) => Row {
             id: "current-deployment",
             label: "Current deployment",
             state: Health::Verified,
@@ -547,7 +575,18 @@ fn probe(sys: &Sys) -> Surface {
             ),
             action: None,
         },
-        (true, None) => Row {
+        (true, None, Some(why)) => Row {
+            id: "current-deployment",
+            label: "Current deployment",
+            state: Health::Unavailable,
+            detail: format!(
+                "/proc/cmdline could not be read ({why}), so the booted \
+                 deployment was never looked for. Reporting a missing ostree= \
+                 argument here would be a claim about a file nobody read."
+            ),
+            action: None,
+        },
+        (true, None, None) => Row {
             id: "current-deployment",
             label: "Current deployment",
             state: Health::Attention,
@@ -557,7 +596,7 @@ fn probe(sys: &Sys) -> Surface {
                 .to_string(),
             action: Some("apex changelog".to_string()),
         },
-        (false, _) => Row {
+        (false, ..) => Row {
             id: "current-deployment",
             label: "Current deployment",
             state: Health::Unavailable,
@@ -578,8 +617,8 @@ fn probe(sys: &Sys) -> Surface {
     // CLI*, so the row reports whether there is anything to roll back to and
     // names the command a button runs.
     let deployments = deployment_count(sys);
-    rows.push(match deployments {
-        Some(n) if n >= 2 => Row {
+    rows.push(match &deployments {
+        Ok(n) if *n >= 2 => Row {
             id: "previous-deployment",
             label: "Previous deployment",
             state: Health::Available,
@@ -591,7 +630,7 @@ fn probe(sys: &Sys) -> Surface {
             ),
             action: Some("sudo apex rollback".to_string()),
         },
-        Some(1) => Row {
+        Ok(1) => Row {
             id: "previous-deployment",
             label: "Previous deployment",
             state: Health::Attention,
@@ -600,22 +639,23 @@ fn probe(sys: &Sys) -> Surface {
                 .to_string(),
             action: None,
         },
-        Some(n) => Row {
+        Ok(n) => Row {
             id: "previous-deployment",
             label: "Previous deployment",
             state: Health::Unavailable,
             detail: format!("/ostree/deploy holds {n} deployments, which should be impossible"),
             action: None,
         },
-        None => Row {
+        Err(why) => Row {
             id: "previous-deployment",
             label: "Previous deployment",
             state: Health::Unavailable,
-            detail: "/ostree/deploy could not be read, so the deployment count \
-                     is unknown. An empty answer here would be indistinguishable \
-                     from 'nothing to roll back to', which is the answer that \
-                     would hide a rollback."
-                .to_string(),
+            detail: format!(
+                "/ostree/deploy could not be read ({why}), so the deployment \
+                 count is unknown. An empty answer here would be \
+                 indistinguishable from 'nothing to roll back to', which is the \
+                 answer that would hide a rollback."
+            ),
             action: None,
         },
     });
@@ -694,24 +734,15 @@ fn probe(sys: &Sys) -> Surface {
     });
 
     // ── GPU driver ──────────────────────────────────────────────────────────
-    let modules = sys.read("/proc/modules").unwrap_or_default();
-    let loaded: Vec<&str> = modules
-        .lines()
-        .filter_map(|l| l.split_whitespace().next())
-        .collect();
+    //
+    // The module list is read, and a read that failed is not a list with
+    // nothing in it. This row is the one that recommends `sudo apex rollback`,
+    // so an empty list here proposed reverting the machine's operating system
+    // on the strength of a file nobody managed to open. Absence is not carved
+    // out: a kernel built with CONFIG_MODULES=n has no /proc/modules and every
+    // driver compiled in, so "no module loaded" would be just as wrong there.
+    let modules = sys.read_result("/proc/modules");
     let fp = apexd_core::Fingerprint::detect_from(&sys.path("/proc"), &sys.path("/sys"));
-    let mut missing: Vec<String> = Vec::new();
-    let mut present: Vec<String> = Vec::new();
-    for g in &fp.gpus {
-        let want = gpu_modules(&g.vendor);
-        if want.is_empty() {
-            continue;
-        }
-        match want.iter().find(|m| loaded.contains(m)) {
-            Some(m) => present.push(format!("{} via {}", g.vendor.as_str(), m)),
-            None => missing.push(format!("{} (wanted one of {})", g.vendor.as_str(), want.join("/"))),
-        }
-    }
     rows.push(if fp.gpus.is_empty() {
         Row {
             id: "gpu-driver",
@@ -723,29 +754,67 @@ fn probe(sys: &Sys) -> Surface {
                 .to_string(),
             action: None,
         }
-    } else if missing.is_empty() {
-        Row {
-            id: "gpu-driver",
-            label: "GPU driver",
-            state: Health::Verified,
-            detail: format!("{} — {}", present.len(), present.join(", ")),
-            action: None,
-        }
     } else {
-        Row {
-            id: "gpu-driver",
-            label: "GPU driver",
-            state: Health::Attention,
-            detail: format!(
-                "no kernel module loaded for {}{}",
-                missing.join(", "),
-                if present.is_empty() {
-                    String::new()
-                } else {
-                    format!("; working: {}", present.join(", "))
+        match &modules {
+            Err(e) => Row {
+                id: "gpu-driver",
+                label: "GPU driver",
+                state: Health::Unavailable,
+                detail: format!(
+                    "/proc/modules could not be read ({e}), so the loaded \
+                     modules were never listed. This row recommends a rollback \
+                     when a driver is missing, and it must not do that off a \
+                     file it did not read."
+                ),
+                action: None,
+            },
+            Ok(text) => {
+                let loaded: Vec<&str> = text
+                    .lines()
+                    .filter_map(|l| l.split_whitespace().next())
+                    .collect();
+                let mut missing: Vec<String> = Vec::new();
+                let mut present: Vec<String> = Vec::new();
+                for g in &fp.gpus {
+                    let want = gpu_modules(&g.vendor);
+                    if want.is_empty() {
+                        continue;
+                    }
+                    match want.iter().find(|m| loaded.contains(m)) {
+                        Some(m) => present.push(format!("{} via {}", g.vendor.as_str(), m)),
+                        None => missing.push(format!(
+                            "{} (wanted one of {})",
+                            g.vendor.as_str(),
+                            want.join("/")
+                        )),
+                    }
                 }
-            ),
-            action: Some("sudo apex rollback".to_string()),
+                if missing.is_empty() {
+                    Row {
+                        id: "gpu-driver",
+                        label: "GPU driver",
+                        state: Health::Verified,
+                        detail: format!("{} — {}", present.len(), present.join(", ")),
+                        action: None,
+                    }
+                } else {
+                    Row {
+                        id: "gpu-driver",
+                        label: "GPU driver",
+                        state: Health::Attention,
+                        detail: format!(
+                            "no kernel module loaded for {}{}",
+                            missing.join(", "),
+                            if present.is_empty() {
+                                String::new()
+                            } else {
+                                format!("; working: {}", present.join(", "))
+                            }
+                        ),
+                        action: Some("sudo apex rollback".to_string()),
+                    }
+                }
+            }
         }
     });
 
@@ -754,13 +823,53 @@ fn probe(sys: &Sys) -> Surface {
     // The same two facts `apex-shell-firstrun` checks, in the same order: the
     // image has to carry the shell (otherwise it is an image-build defect and
     // no user action helps), and this account has to be provisioned.
+    //
+    // Both halves keep the reason a stat failed. `(false, _)` tells the user to
+    // roll their machine back, and `(true, false)` tells them their account was
+    // never set up; neither is something to conclude from a stat that returned
+    // an error nobody looked at. On a stock image `/usr/share/apex-shell` is
+    // 0755 and the home is the caller's own, so this is the shape of the defect
+    // rather than a refusal users are hitting today.
     let shell_qml = sys.path("/usr/share/apex-shell/shell.qml");
-    let shipped = std::fs::metadata(&shell_qml).map(|m| m.len() > 0).unwrap_or(false);
-    let provisioned = user_home()
-        .map(|h| h.join(".config/apex-shell").is_dir())
-        .unwrap_or(false);
-    rows.push(match (shipped, provisioned) {
-        (true, true) => Row {
+    let shipped = match std::fs::metadata(&shell_qml) {
+        Ok(m) => Ok(m.len() > 0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("{}: {e}", shell_qml.display())),
+    };
+    let provisioned = match user_home() {
+        None => Err("$HOME is unset, or does not name a usable home directory".to_string()),
+        Some(h) => {
+            let dir = h.join(".config/apex-shell");
+            match std::fs::metadata(&dir) {
+                Ok(m) => Ok(m.is_dir()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(format!("{}: {e}", dir.display())),
+            }
+        }
+    };
+    rows.push(match (&shipped, &provisioned) {
+        (Err(why), _) => Row {
+            id: "apex-shell",
+            label: "APEX Shell",
+            state: Health::Unavailable,
+            detail: format!(
+                "{why} — so whether the image carries APEX Shell is unknown. \
+                 Reporting it as missing here would recommend a rollback off a \
+                 stat that failed."
+            ),
+            action: None,
+        },
+        (Ok(true), Err(why)) => Row {
+            id: "apex-shell",
+            label: "APEX Shell",
+            state: Health::Unavailable,
+            detail: format!(
+                "the image carries the shell, but whether this account is \
+                 provisioned could not be established: {why}"
+            ),
+            action: None,
+        },
+        (Ok(true), Ok(true)) => Row {
             id: "apex-shell",
             label: "APEX Shell",
             state: Health::Verified,
@@ -769,7 +878,7 @@ fn probe(sys: &Sys) -> Surface {
                 .to_string(),
             action: None,
         },
-        (true, false) => Row {
+        (Ok(true), Ok(false)) => Row {
             id: "apex-shell",
             label: "APEX Shell",
             state: Health::Attention,
@@ -779,7 +888,7 @@ fn probe(sys: &Sys) -> Surface {
                 .to_string(),
             action: Some("apex recover repair --commit".to_string()),
         },
-        (false, _) => Row {
+        (Ok(false), _) => Row {
             id: "apex-shell",
             label: "APEX Shell",
             state: Health::Unavailable,
@@ -793,12 +902,16 @@ fn probe(sys: &Sys) -> Surface {
     });
 
     // ── network ─────────────────────────────────────────────────────────────
-    let route = sys.read("/proc/net/route").unwrap_or_default();
+    //
     // `Available` is the ceiling here on purpose. Nothing was contacted, so
     // nothing was verified — claiming `verified` would be claiming a
     // reachability test this row deliberately does not perform.
-    rows.push(if has_default_route(&route) {
-        Row {
+    //
+    // And a routing table that could not be read is not a routing table with no
+    // default in it. The unread case sent the user looking at their network on
+    // a machine whose network was fine.
+    rows.push(match sys.read_result("/proc/net/route") {
+        Ok(route) if has_default_route(&route) => Row {
             id: "network",
             label: "Network",
             state: Health::Available,
@@ -806,9 +919,8 @@ fn probe(sys: &Sys) -> Surface {
                      about reachability is claimed."
                 .to_string(),
             action: None,
-        }
-    } else {
-        Row {
+        },
+        Ok(_) => Row {
             id: "network",
             label: "Network",
             state: Health::Attention,
@@ -816,7 +928,18 @@ fn probe(sys: &Sys) -> Surface {
                      one; every verb on this surface does not."
                 .to_string(),
             action: None,
-        }
+        },
+        Err(e) => Row {
+            id: "network",
+            label: "Network",
+            state: Health::Unavailable,
+            detail: format!(
+                "/proc/net/route could not be read ({e}), so the routing table \
+                 was never looked at. That is not the same as having no default \
+                 route."
+            ),
+            action: None,
+        },
     });
 
     // ── package extensions ──────────────────────────────────────────────────
@@ -826,7 +949,9 @@ fn probe(sys: &Sys) -> Surface {
     let mut routes: Vec<Route> = Vec::new();
     routes.push(Route {
         id: "previous-deployment",
-        available: deployments.map(|n| n >= 2),
+        // `None` when the count could not be read, which is the route's own
+        // "cannot be determined" and not a claim that there is nowhere to go.
+        available: deployments.as_ref().ok().map(|n| *n >= 2),
         how: "`sudo apex rollback` then reboot, or select the previous entry in \
               the boot menu. /etc and /var — including /var/home — are preserved."
             .to_string(),
@@ -1911,6 +2036,339 @@ mod tests {
 
         assert_eq!(row.state, Health::Verified);
         assert!(row.detail.contains("no user packages"));
+    }
+
+    // ── reads that were refused, and reads that found nothing ────────────────
+    //
+    // The whole surface is file reads, and `unwrap_or_default()` answered both
+    // questions with the same empty string. Every row below then reported the
+    // empty string as a measurement of the machine — and the GPU one attached
+    // `sudo apex rollback` to it.
+
+    /// A whole machine, presented as a tree. The same shape
+    /// `tests/test-apex-recover.sh` builds, small enough to keep in the crate
+    /// so the individual rows can be pinned without spawning the binary.
+    struct Machine(PathBuf);
+
+    impl Machine {
+        fn new(name: &str) -> Machine {
+            let dir = std::env::temp_dir()
+                .join(format!("apex-recover-{name}-{}", std::process::id()));
+            std::fs::remove_dir_all(&dir).ok();
+            let w = |rel: &str, body: &str| {
+                let p = dir.join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, body).unwrap();
+            };
+            let csum = "8f14e45fceea167a5a36dedd4bea2543f14e45fceea167a5a36dedd4bea25431";
+            w("run/ostree-booted", "");
+            w(
+                "proc/cmdline",
+                &format!("BOOT_IMAGE=/vmlinuz root=UUID=x ostree=/ostree/boot.1/apex/{csum}/0 rw\n"),
+            );
+            w("proc/mounts", "overlay / overlay ro,relatime 0 0\n");
+            w("proc/modules", "amdgpu 1 0 - Live 0x0\ndrm 1 0 - Live 0x0\n");
+            w(
+                "proc/net/route",
+                "Iface\tDestination\tGateway\nwlan0\t00000000\t0101A8C0\t0003\n",
+            );
+            w("etc/os-release", "NAME=\"APEX-OS\"\nVERSION_ID=43\nVARIANT_ID=gaming\n");
+            w("usr/share/apex-shell/shell.qml", "shell\n");
+            // An AMD display controller, so the GPU row has something to check.
+            w("sys/bus/pci/devices/0000:03:00.0/class", "0x030000\n");
+            w("sys/bus/pci/devices/0000:03:00.0/vendor", "0x1002\n");
+            w("sys/bus/pci/devices/0000:03:00.0/device", "0x1636\n");
+            std::fs::create_dir_all(dir.join(format!("ostree/deploy/apex/deploy/{csum}.0")))
+                .unwrap();
+            std::fs::create_dir_all(dir.join("ostree/deploy/apex/deploy/aaaa.0")).unwrap();
+            Machine(dir)
+        }
+
+        fn sys(&self) -> Sys {
+            Sys { fixture: Some(self.0.clone()) }
+        }
+
+        fn row(&self, id: &str) -> Row {
+            probe(&self.sys())
+                .rows
+                .into_iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("no row {id}"))
+        }
+    }
+
+    impl Drop for Machine {
+        fn drop(&mut self) {
+            unseal(&self.0);
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    /// Take every mode bit off `rel`, then check with `probe` that the access
+    /// the row depends on really is refused now.
+    ///
+    /// `probe` is spelled out per call site because the mode bit that stops one
+    /// access does not stop another: a 0000 *file* still stats fine, since stat
+    /// needs only search permission on the parent. Sealing a file and then
+    /// asserting about a `metadata` call would assert nothing.
+    ///
+    /// Root and anything holding `CAP_DAC_OVERRIDE` walk through 0000, so the
+    /// question asked is whether the access now fails with `PermissionDenied` —
+    /// not whether the caller looks like root, which would be a guess. Any
+    /// other error is a broken fixture rather than a seal, and panics instead
+    /// of quietly leaving an assertion with nothing to assert.
+    fn seal(root: &Path, rel: &str, probe: impl FnOnce(&Path) -> std::io::Result<()>) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let p = root.join(rel);
+        let mut perms = std::fs::metadata(&p).expect("stat").permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&p, perms).expect("chmod");
+        match probe(root) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => true,
+            Ok(()) => false, // root, or CAP_DAC_OVERRIDE
+            Err(e) => panic!("expected PermissionDenied while sealing {rel}, got {e:?}"),
+        }
+    }
+
+    fn read(rel: &'static str) -> impl FnOnce(&Path) -> std::io::Result<()> {
+        move |root| std::fs::read(root.join(rel)).map(|_| ())
+    }
+
+    fn list(rel: &'static str) -> impl FnOnce(&Path) -> std::io::Result<()> {
+        move |root| std::fs::read_dir(root.join(rel)).map(|_| ())
+    }
+
+    fn stat(rel: &'static str) -> impl FnOnce(&Path) -> std::io::Result<()> {
+        move |root| std::fs::metadata(root.join(rel)).map(|_| ())
+    }
+
+    /// Put the mode bits back on everything under `root`, so the fixture can be
+    /// removed and a failing assertion does not leave a 0000 directory behind.
+    fn unseal(root: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(entries) = std::fs::read_dir(root) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            let mut perms = match std::fs::symlink_metadata(&p) {
+                Ok(m) => m.permissions(),
+                Err(_) => continue,
+            };
+            perms.set_mode(if p.is_dir() { 0o755 } else { 0o644 });
+            let _ = std::fs::set_permissions(&p, perms);
+            if p.is_dir() {
+                unseal(&p);
+            }
+        }
+    }
+
+    #[test]
+    fn a_module_list_we_may_not_read_never_recommends_a_rollback() {
+        // The worst outcome in the class: `/proc/modules` read into an empty
+        // string, every GPU therefore missing its driver, and the row telling
+        // the user to roll their operating system back.
+        let m = Machine::new("modules-eacces");
+        if !seal(&m.0, "proc/modules", read("proc/modules")) {
+            return; // the caller overrides the mode bit; it proves nothing here
+        }
+        let row = m.row("gpu-driver");
+        assert_eq!(
+            row.state,
+            Health::Unavailable,
+            "a refused read is not a measurement that no module is loaded"
+        );
+        assert!(
+            !row.detail.contains("no kernel module loaded"),
+            "the row claimed a module list it never read: {}",
+            row.detail
+        );
+        assert_eq!(
+            row.action, None,
+            "nothing read the file, so nothing may propose a rollback"
+        );
+    }
+
+    #[test]
+    fn a_module_list_that_is_absent_is_also_not_a_missing_driver() {
+        // CONFIG_MODULES=n: no /proc/modules at all, and every driver compiled
+        // into the kernel. "No module loaded" is exactly as false there as it
+        // is under EACCES, so absence is not carved out.
+        let m = Machine::new("modules-enoent");
+        std::fs::remove_file(m.0.join("proc/modules")).unwrap();
+        let row = m.row("gpu-driver");
+        assert_eq!(row.state, Health::Unavailable);
+        assert_eq!(row.action, None);
+    }
+
+    #[test]
+    fn a_gpu_with_no_module_in_a_readable_list_is_still_attention() {
+        // The other half. A module list that WAS read and does not carry the
+        // driver is the real fault this row exists to report, and it must keep
+        // naming the rollback.
+        let m = Machine::new("modules-missing");
+        std::fs::write(m.0.join("proc/modules"), "drm 1 0 - Live 0x0\n").unwrap();
+        let row = m.row("gpu-driver");
+        assert_eq!(row.state, Health::Attention);
+        assert!(row.detail.contains("no kernel module loaded"), "{}", row.detail);
+        assert_eq!(row.action.as_deref(), Some("sudo apex rollback"));
+    }
+
+    #[test]
+    fn a_routing_table_we_may_not_read_is_not_a_machine_without_a_route() {
+        let m = Machine::new("route-eacces");
+        if !seal(&m.0, "proc/net/route", read("proc/net/route")) {
+            return;
+        }
+        let row = m.row("network");
+        assert_eq!(
+            row.state,
+            Health::Unavailable,
+            "a refused read is not a measurement that there is no route"
+        );
+        assert!(
+            row.detail.contains("could not be read"),
+            "the row must say the read failed, not describe the network: {}",
+            row.detail
+        );
+    }
+
+    #[test]
+    fn a_routing_table_with_no_default_route_is_still_attention() {
+        let m = Machine::new("route-none");
+        std::fs::write(m.0.join("proc/net/route"), "Iface\tDestination\tGateway\n").unwrap();
+        let row = m.row("network");
+        assert_eq!(row.state, Health::Attention);
+        assert!(row.detail.contains("no default route"), "{}", row.detail);
+    }
+
+    #[test]
+    fn a_command_line_we_may_not_read_is_not_a_command_line_without_ostree() {
+        // `/run/ostree-booted` exists, so the machine demonstrably booted a
+        // deployment. Saying the command line carries no `ostree=` argument
+        // when the command line was never read puts an Attention on a machine
+        // nobody looked at.
+        let m = Machine::new("cmdline-eacces");
+        if !seal(&m.0, "proc/cmdline", read("proc/cmdline")) {
+            return;
+        }
+        let row = m.row("current-deployment");
+        assert_eq!(row.state, Health::Unavailable);
+        assert!(
+            !row.detail.contains("no ostree= argument"),
+            "the row claimed a command line it never read: {}",
+            row.detail
+        );
+    }
+
+    #[test]
+    fn a_command_line_that_really_carries_no_ostree_argument_is_still_attention() {
+        let m = Machine::new("cmdline-no-ostree");
+        std::fs::write(m.0.join("proc/cmdline"), "root=UUID=x rw quiet\n").unwrap();
+        let row = m.row("current-deployment");
+        assert_eq!(row.state, Health::Attention);
+        assert!(row.detail.contains("no ostree= argument"), "{}", row.detail);
+    }
+
+    #[test]
+    fn a_stateroot_we_may_not_list_is_not_a_smaller_deployment_count() {
+        // A partial count reported as complete is what hides a rollback target.
+        // One stateroot is unreadable and another holds a single deployment, so
+        // skipping the unreadable one and reporting the rest told the user
+        // "only the booted deployment exists, so there is nothing to roll back
+        // to yet" on a machine that had somewhere to go.
+        let m = Machine::new("deploy-eacces");
+        std::fs::create_dir_all(m.0.join("ostree/deploy/spare/deploy/cccc.0")).unwrap();
+        if !seal(&m.0, "ostree/deploy/apex/deploy", list("ostree/deploy/apex/deploy")) {
+            return;
+        }
+        assert!(
+            deployment_count(&m.sys()).is_err(),
+            "a directory we may not list must not shrink the count"
+        );
+        let row = m.row("previous-deployment");
+        assert_eq!(
+            row.state,
+            Health::Unavailable,
+            "a partial enumeration must not be reported as a complete count"
+        );
+        assert!(
+            row.detail.contains("could not be read"),
+            "the row must say the read failed: {}",
+            row.detail
+        );
+    }
+
+    #[test]
+    fn deployments_we_may_not_stat_are_not_deployments_that_are_absent() {
+        // The second half of the enumeration. Mode 0400 on the deploy directory
+        // lists the names and refuses every stat, and `Path::is_dir` answers
+        // false for a refused stat exactly as it does for a missing path — so
+        // both deployments vanished from the count.
+        use std::os::unix::fs::PermissionsExt;
+        let m = Machine::new("deploy-nostat");
+        let d = m.0.join("ostree/deploy/apex/deploy");
+        let mut perms = std::fs::metadata(&d).unwrap().permissions();
+        perms.set_mode(0o400);
+        std::fs::set_permissions(&d, perms).unwrap();
+        assert!(
+            std::fs::read_dir(&d).is_ok(),
+            "0400 must still list: the whole point is a stat that fails after a \
+             readdir that did not"
+        );
+        match std::fs::metadata(d.join("aaaa.0")) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Ok(_) => return, // root, or CAP_DAC_OVERRIDE
+            Err(e) => panic!("expected PermissionDenied, got {e:?}"),
+        }
+        let row = m.row("previous-deployment");
+        assert_eq!(row.state, Health::Unavailable);
+        assert!(
+            row.detail.contains("could not be read"),
+            "the row must name the refused stat rather than report a count of 0: {}",
+            row.detail
+        );
+    }
+
+    #[test]
+    fn a_stateroot_with_no_deploy_directory_yet_still_counts_the_others() {
+        // Absence stays absence: a stateroot mid-creation contributes nothing
+        // and must not turn the whole count into a shrug.
+        let m = Machine::new("deploy-partial");
+        std::fs::create_dir_all(m.0.join("ostree/deploy/fresh")).unwrap();
+        assert_eq!(deployment_count(&m.sys()), Ok(2));
+        assert_eq!(m.row("previous-deployment").state, Health::Available);
+    }
+
+    #[test]
+    fn a_shell_we_may_not_stat_does_not_become_an_image_build_defect() {
+        // The `(false, _)` arm tells the user the image did not ship APEX Shell
+        // and to roll back. On a stock image /usr/share/apex-shell is 0755, so
+        // this is the shape of the defect rather than a refusal users hit — but
+        // the recommendation is a rollback, and a failed stat must not produce
+        // one.
+        let m = Machine::new("shell-eacces");
+        // The parent, not the file: a 0000 file still stats, and `shipped` is
+        // a stat.
+        if !seal(&m.0, "usr/share/apex-shell", stat("usr/share/apex-shell/shell.qml")) {
+            return;
+        }
+        let row = m.row("apex-shell");
+        assert_eq!(row.state, Health::Unavailable);
+        assert!(
+            !row.detail.contains("did not ship APEX Shell"),
+            "the row claimed a stat it never made: {}",
+            row.detail
+        );
+        assert_eq!(row.action, None);
+    }
+
+    #[test]
+    fn a_shell_that_is_really_missing_is_still_an_image_build_defect() {
+        let m = Machine::new("shell-enoent");
+        std::fs::remove_file(m.0.join("usr/share/apex-shell/shell.qml")).unwrap();
+        let row = m.row("apex-shell");
+        assert_eq!(row.state, Health::Unavailable);
+        assert!(row.detail.contains("did not ship APEX Shell"), "{}", row.detail);
+        assert_eq!(row.action.as_deref(), Some("sudo apex rollback"));
     }
 
     #[test]
