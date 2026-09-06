@@ -235,8 +235,21 @@ pub fn subagent_stopped(
         .filter(|s| !s.is_empty())
         .map(clamp_id);
 
+    // A named child that is open, or one a SWEEP closed. The second half is
+    // what keeps [`close_open`] from being a lie: a subagent can outlive the
+    // turn that started it — Claude's own harness says a delegated agent runs
+    // in the background and reports back later — so `Stop` closing it is a
+    // provisional answer, taken because a subagent shown as working under an
+    // agent that has finished is the worse of the two wrong answers. When the
+    // real `subagent_stop` turns up, evidence replaces inference: the true end
+    // time lands and `ended_by` becomes `Reported`.
+    //
+    // A child already marked `Reported` is never rewritten. That would be a
+    // duplicate hook, and the first report is the one that saw the event.
+    let correctable =
+        |c: &ChildInfo| c.is_open() || c.ended_by != Some(ChildEnd::Reported);
     let found = match named.as_deref() {
-        Some(id) => children.iter_mut().find(|c| c.id == id && c.is_open()),
+        Some(id) => children.iter_mut().find(|c| c.id == id && correctable(c)),
         None => children
             .iter_mut()
             .find(|c| c.is_open() && c.id.starts_with("anon:")),
@@ -275,6 +288,14 @@ pub fn subagent_stopped(
 /// daemon knows about on its own — the turn ending and the process exiting —
 /// both sweep the list, and an entry left open past either of those is a bug
 /// in this file rather than a subagent that is still working.
+///
+/// A `ParentStop` close is PROVISIONAL, and the distinction is why `ended_by`
+/// exists at all. A subagent can outlive the turn that delegated it, so the
+/// sweep is the daemon saying "I can no longer tell", not "it finished" — and
+/// [`subagent_stopped`] overwrites it if the real report arrives afterwards.
+/// A client must render the two differently: "finished" for `Reported`, and
+/// something hedged for a child a sweep closed under a parent that is still
+/// running.
 pub fn close_open(children: &mut [ChildInfo], why: ChildEnd, at: u64) -> usize {
     let mut closed = 0;
     for child in children.iter_mut() {
@@ -724,6 +745,38 @@ mod tests {
         assert_eq!(c[0].ended_by, Some(ChildEnd::Reported));
         assert_eq!(c[1].ended_by, Some(ChildEnd::ParentExit));
         assert_eq!(close_open(&mut c, ChildEnd::ParentExit, 300), 0);
+    }
+
+    #[test]
+    fn a_report_that_arrives_after_the_turn_ended_corrects_the_sweep() {
+        // A subagent can outlive the turn that delegated it. Closing it on
+        // `Stop` is the right provisional answer — a subagent shown as working
+        // under an agent that has finished is the worse wrong answer — but it
+        // is provisional, and the record must accept the correction rather
+        // than keep the guess and drop the fact.
+        let mut c = kids();
+        subagent_started(&mut c, Some("a1"), Some("Explore"), 100);
+        close_open(&mut c, ChildEnd::ParentStop, 150);
+        assert_eq!(c[0].ended_by, Some(ChildEnd::ParentStop));
+
+        subagent_stopped(&mut c, Some("a1"), None, 400);
+        assert_eq!(c.len(), 1, "the correction opened a second node");
+        assert_eq!(c[0].ended, Some(400), "the true end time did not land");
+        assert_eq!(c[0].ended_by, Some(ChildEnd::Reported));
+    }
+
+    #[test]
+    fn a_second_report_does_not_rewrite_the_first() {
+        // A hook that ran twice. The first report is the one that saw the
+        // event, and moving the end time on a duplicate would make a
+        // subagent's duration depend on how many times a settings file
+        // subscribed the same hook.
+        let mut c = kids();
+        subagent_started(&mut c, Some("a1"), Some("Explore"), 100);
+        subagent_stopped(&mut c, Some("a1"), None, 160);
+        subagent_stopped(&mut c, Some("a1"), None, 900);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].ended, Some(160));
     }
 
     #[test]
