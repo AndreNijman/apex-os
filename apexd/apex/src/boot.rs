@@ -133,8 +133,13 @@ impl Roots {
     /// `Path::exists` (and therefore `exists` above) cannot make that
     /// distinction on its own: it answers `false` for every failed `stat`,
     /// `EACCES` included. Fine for a signal nobody reports as a fact about the
-    /// machine; wrong for the TPM event log, which securityfs commonly mounts
-    /// so only root can look inside `/sys/kernel/security`.
+    /// machine; wrong for the TPM event log. On a stock machine `stat` on
+    /// `/sys/kernel/security/tpm0/binary_bios_measurements` succeeds for any
+    /// user — the directories are `0755` and only the leaf file is `0440
+    /// root:tss` — so a bare DAC refusal on the directory chain is not the
+    /// likely trigger here. A confined execution environment (a container
+    /// with securityfs masked or restricted, an LSM policy denying the stat)
+    /// is; either way, a refused `stat` must not report as "no event log".
     fn stat_present(&self, absolute: &str) -> Result<bool, String> {
         let p = self.path(absolute);
         match std::fs::metadata(&p) {
@@ -270,6 +275,14 @@ fn detect_bootloader(cmdline: &str, loader_info: Option<&str>) -> &'static str {
 /// `apex boot status` uses.
 pub(crate) struct ChainFacts {
     pub bootloader: &'static str,
+    /// Set when `LoaderInfo` itself could not be read — meaning `bootloader`
+    /// fell back to the cmdline heuristic (or "unknown") without ever having
+    /// a chance to see "systemd-boot". A directory-wide efivarfs refusal (a
+    /// container with it masked, an LSM policy) takes `LoaderInfo` down with
+    /// `StubInfo`/`LoaderBootCountPath`, and a caller that trusts `bootloader`
+    /// as "grub" in that case can un-gate the rescue-target route on exactly
+    /// the systemd-boot+UKI machine where it must not exist.
+    pub bootloader_unavailable: Option<String>,
     /// `None` means the kernel exposed no `SecureBoot` variable at all — not a
     /// UEFI boot. Reporting `false` there would claim a measurement nobody
     /// took.
@@ -294,9 +307,14 @@ pub(crate) fn chain_facts(fixture: Option<PathBuf>) -> ChainFacts {
         .read("/proc/cmdline")
         .map(|b| String::from_utf8_lossy(&b).trim().to_string())
         .unwrap_or_default();
-    let loader_info = roots.efivar("LoaderInfo", LOADER_GUID);
+    let (loader_info, bootloader_unavailable) = match roots.efivar_result("LoaderInfo", LOADER_GUID)
+    {
+        Ok(v) => (v, None),
+        Err(e) => (None, Some(e)),
+    };
     ChainFacts {
         bootloader: detect_bootloader(&cmdline, loader_info.as_deref()),
+        bootloader_unavailable,
         secure_boot: roots.efivar_bool("SecureBoot", GLOBAL_GUID),
         setup_mode: roots.efivar_bool("SetupMode", GLOBAL_GUID),
         booted_from_uki: roots.efivar_result("StubInfo", LOADER_GUID).map(|v| v.is_some()),
@@ -324,7 +342,15 @@ fn build_report(roots: &Roots) -> Value {
         Ok(v) => (v.clone(), Some(v.is_some()), None),
         Err(e) => (None, None, Some(e.clone())),
     };
-    let loader_info = roots.efivar("LoaderInfo", LOADER_GUID);
+    // A directory-wide efivarfs refusal takes LoaderInfo down with StubInfo
+    // and LoaderBootCountPath, and `detect_bootloader` cannot tell "LoaderInfo
+    // says no" from "LoaderInfo could not be read" from an `Option` alone —
+    // the first is a fact, the second must not silently become "grub".
+    let loader_info_result = roots.efivar_result("LoaderInfo", LOADER_GUID);
+    let (loader_info, bootloader_unavailable) = match &loader_info_result {
+        Ok(v) => (v.clone(), None),
+        Err(e) => (None, Some(e.clone())),
+    };
     let boot_count_result = roots.efivar_result("LoaderBootCountPath", LOADER_GUID);
     let (boot_count_path, counting, counting_error) = match &boot_count_result {
         Ok(v) => (v.clone(), Some(v.is_some()), None),
@@ -367,6 +393,10 @@ fn build_report(roots: &Roots) -> Value {
 
     json!({
         "bootloader": bootloader,
+        // Set when LoaderInfo could not be read — `bootloader` above then
+        // came only from the cmdline heuristic, not from ever having seen
+        // whether systemd-boot set its marker.
+        "bootloaderUnavailable": bootloader_unavailable,
         "loaderInfo": loader_info,
         "stubInfo": stub_info,
         // `null`, not `false`, when StubInfo could not be read — a refused
@@ -382,10 +412,12 @@ fn build_report(roots: &Roots) -> Value {
         },
         "measuredBoot": {
             "tpmPresent": roots.exists("/sys/class/tpm/tpm0"),
-            // `null` when the stat was refused rather than absent — securityfs
-            // commonly mounts `/sys/kernel/security` so only root can look
-            // inside, and `apex boot status` is documented read-only and
-            // root-free.
+            // `null` when the stat was refused rather than absent. On a stock
+            // machine the directory chain is world-searchable and only the
+            // leaf file is root:tss, so DAC alone will not usually trigger
+            // this; a confined environment (a container, an LSM policy) can,
+            // and `apex boot status` is documented read-only and root-free
+            // either way.
             "eventLog": event_log,
             "eventLogUnavailable": event_log_error,
             // sd-stub hands the UKI's .pcrsig/.pcrpkey to userspace here. Its
@@ -430,6 +462,15 @@ fn print_human(r: &Value) {
     };
 
     println!("Bootloader     : {}", s(&["bootloader"]));
+    if let Some(why) = r.get("bootloaderUnavailable").and_then(Value::as_str) {
+        // The identity above is a heuristic guess made without ever seeing
+        // whether systemd-boot's own marker was there — say so, rather than
+        // let "grub" read as a measurement it is not.
+        println!(
+            "                 LoaderInfo could not be read ({why}); this is the \
+             cmdline fallback, not a confirmed identity"
+        );
+    }
     if let Some(info) = r.get("loaderInfo").and_then(Value::as_str) {
         println!("                 {info}");
     }
@@ -754,9 +795,13 @@ mod tests {
 
     #[test]
     fn an_unreadable_event_log_is_not_a_measurement_of_absence() {
-        // securityfs commonly mounts `/sys/kernel/security` so only root can
-        // look inside, and `apex boot status` is documented read-only and
-        // root-free — this is the live shape of the bug, not a contrived one.
+        // On a stock machine `/sys/kernel/security` and `tpm0/` are
+        // world-searchable and only the leaf file is `0440 root:tss`, so a
+        // bare DAC refusal on this directory chain is contrived — this test
+        // proves the code path rather than a permission bit seen in the
+        // field. A confined environment (a container with securityfs masked,
+        // an LSM policy) is the plausible real trigger, and `apex boot
+        // status` is documented read-only and root-free either way.
         let dir =
             std::env::temp_dir().join(format!("apex-boot-eacces-eventlog-{}", std::process::id()));
         let tpm0 = dir.join("sys/kernel/security/tpm0");
