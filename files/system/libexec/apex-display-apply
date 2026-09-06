@@ -7,7 +7,7 @@ live and then persisted so it survives a logout and a hotplug.
     ~/.config/apex-shell/display.json      the model (written by APEX Settings)
               |
     live      +--> wlr-randr                    labwc, niri
-              +--> hyprctl keyword monitor       Hyprland
+              +--> hyprctl eval hl.monitor{...}  Hyprland
               |
     persist   +--> ~/.config/kanshi/config      labwc, niri  (reapplied on hotplug)
               +--> ~/.config/hypr/apex/monitors.lua   Hyprland (required)
@@ -25,9 +25,12 @@ or removed. Hyprland has that built in via monitor rules, so its persistence is
 a generated module hyprland.lua requires.
 
 `hl.monitor` calls, not `monitor=` lines: hyprlang was deprecated in Hyprland
-0.55 and the image ships 0.56.2 (P0-025). The LIVE half above is unchanged —
-`hyprctl keyword monitor` speaks the old comma-separated value form and is IPC
-rather than config, so it is not affected by the config language at all.
+0.55 and the image ships 0.56.2 (P0-025). The LIVE half moved with it. Being
+IPC rather than config did NOT make `hyprctl keyword` immune: it refuses
+against a Lua config with "keyword can't work with non-legacy parsers. Use
+eval." and changes nothing, so `apply` would have reported success and moved no
+display. `hyprctl eval` takes a Lua chunk, so the live call and the persisted
+module are now the same expression.
 
 ## Enumeration is never guessed
 
@@ -298,16 +301,37 @@ def hypr_monitor_line(o):
 
 
 def apply_hypr(model, dry_run):
+    """Apply the layout to the RUNNING Hyprland.
+
+    `hyprctl eval`, not `hyprctl keyword`. keyword refuses outright against a
+    Lua config — it answers
+
+        keyword can't work with non-legacy parsers. Use eval.
+
+    and changes nothing, so every "Apply" in Settings → Display would report
+    success and move no display. eval takes a Lua chunk, which means the live
+    call and the persisted module are now the same `hl.monitor` expression
+    instead of two spellings of one layout that could drift.
+
+    Both forms are still emitted, because this script also runs on machines
+    whose hyprland.conf has not been migrated yet: eval first, and keyword only
+    if eval is not understood.
+    """
     notes = []
     for o in model["outputs"]:
-        line = hypr_monitor_line(o)
-        value = line.split("=", 1)[1]
+        call = hypr_monitor_call(o)
         if dry_run:
-            notes.append(f"would run: hyprctl keyword monitor {value}")
+            notes.append(f"would run: hyprctl eval {call}")
             continue
-        res = run(["hyprctl", "keyword", "monitor", value])
-        if res.returncode != 0 or "ok" not in res.stdout.lower():
-            notes.append(f"hyprctl rejected {o['name']}: {(res.stdout + res.stderr).strip()[:160]}")
+        res = run(["hyprctl", "eval", call])
+        if res.returncode == 0 and "ok" in res.stdout.lower():
+            continue
+        # A pre-P0-025 hyprlang session: eval exists but the Lua state does not.
+        legacy = run(["hyprctl", "keyword", "monitor",
+                      hypr_monitor_line(o).split("=", 1)[1]])
+        if legacy.returncode != 0 or "ok" not in legacy.stdout.lower():
+            notes.append(f"hyprctl rejected {o['name']}: "
+                         f"{(res.stdout + res.stderr).strip()[:160]}")
     return notes
 
 
