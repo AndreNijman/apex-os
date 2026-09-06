@@ -791,11 +791,11 @@ COPY --chmod=0755 files/system/libexec/apex-session-logout \
 # Settings generators. Each takes ONE APEX model and writes whatever the three
 # compositors need, so a settings page never has to know which one is running.
 #
-#   apex-input-apply    -> Hyprland conf + niri KDL + the <libinput> element
-#                          inside labwc's rc.xml. labwc has no include
+#   apex-input-apply    -> Hyprland apex/input.lua + niri KDL + the <libinput>
+#                          element inside labwc's rc.xml. labwc has no include
 #                          mechanism, which is why its half is an in-place span
 #                          replacement rather than a generated file.
-#   apex-display-apply  -> Hyprland monitor conf + a kanshi profile, applied
+#   apex-display-apply  -> Hyprland apex/monitors.lua + a kanshi profile, applied
 #                          live through hyprctl or wlr-randr. Two actions on
 #                          purpose: `save` writes persistence only, `apply`
 #                          also reaches the RUNNING compositor. Only `apply`
@@ -812,6 +812,12 @@ COPY --chmod=0755 files/system/libexec/apex-display-apply \
      /usr/libexec/apex-display-apply
 COPY --chmod=0755 files/system/libexec/apex-labwc-keybinds \
      /usr/libexec/apex-labwc-keybinds
+# Not a generator: the one-way move from the hyprlang config every earlier image
+# seeded to the Lua module layout. Run by apex-shell-firstrun on every login and
+# idempotent by construction, so it converts an upgraded machine once and is a
+# no-op thereafter.
+COPY --chmod=0755 files/system/libexec/apex-hypr-migrate \
+     /usr/libexec/apex-hypr-migrate
 
 # Agent Center helpers. Both exist so APEX Shell never has to know which
 # compositor is running (§6's adapter-layer rule) and never has to decide
@@ -844,10 +850,17 @@ RUN set -eux; \
         test -x "/usr/libexec/$h"; \
         bash -n "/usr/libexec/$h"; \
     done; \
-    for g in apex-input-apply apex-display-apply apex-labwc-keybinds; do \
+    for g in apex-input-apply apex-display-apply apex-labwc-keybinds apex-hypr-migrate; do \
         test -x "/usr/libexec/$g"; \
         python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "/usr/libexec/$g"; \
     done; \
+    # The hyprlang -> Lua migration, over a config with APEX defaults, user
+    # rebinds, user settings and directives that cannot be converted. It asserts
+    # both halves that matter: an APEX default is recognised and dropped rather
+    # than duplicated, and an unconvertible line survives verbatim. A migration
+    # that quietly loses a user's keybinds is the one failure here that cannot
+    # be undone from the machine it happens on.
+    /usr/libexec/apex-hypr-migrate --self-test; \
     # The input generator's self-test runs every installed compositor's own
     # validator over its output. Names are verified rather than remembered
     # because labwc ignores an unknown element in silence — which is how
@@ -1178,59 +1191,104 @@ RUN set -eux; \
 COPY --chmod=0755 files/scripts/apex-debrand-runtime.sh \
      /usr/libexec/apex-debrand-runtime
 
-# Default APEX Hyprland config template, seeded per-user by the provisioner
-# (@HOME@ substituted at seed time). Ships the APEX keybinds + $terminal=alacritty
-# etc. so a fresh login is the intended APEX session, not the stock hyprland
-# example (which binds dolphin/wofi that aren't installed). apex-logs 16.
-COPY files/desktop/hypr/hyprland.conf /usr/share/apex/hypr/hyprland.conf
+# Default APEX Hyprland config, seeded per-user by the provisioner. Ships the
+# APEX keybinds + alacritty/thunar etc. so a fresh login is the intended APEX
+# session, not the stock hyprland example (which binds dolphin/wofi that aren't
+# installed). apex-logs 16.
+#
+# Lua, not hyprlang, since P0-025: Hyprland 0.55 deprecated hyprlang with "1-2
+# releases" of life left and this image ships 0.56.2. hyprland.lua is the user's
+# entry point, seeded once; apex/*.lua are APEX-owned and refreshed every login.
+COPY files/desktop/hypr/hyprland.lua /usr/share/apex/hypr/hyprland.lua
+COPY files/desktop/hypr/apex/ /usr/share/apex/hypr/apex/
 
-# Guards for the seeded Hyprland template (apex-logs 14):
+# Guards for the seeded Hyprland tree (apex-logs 14):
 #   1. the autostart must be the libexec launcher. The retired
 #      ~/.local/bin/apex-shell-autostart shim is deleted by the provisioner, so a
-#      template still naming it seeds a dead exec-once and the session comes up
+#      template still naming it seeds a dead autostart and the session comes up
 #      with no bar at all.
-#   2. the template must NOT contain the value localectl prints for an unset
-#      keymap. apex-shell-firstrun greps seeded configs for it, so shipping it —
-#      even inside a comment — made a correct, brand-new install fail its own
+#   2. the tree must NOT contain the value localectl prints for an unset keymap.
+#      apex-shell-firstrun greps seeded configs for it, so shipping it — even
+#      inside a comment — made a correct, brand-new install fail its own
 #      provisioning check. The check strips comments now; this keeps the string
-#      out of the file so neither half of the bug can return.
+#      out of the files so neither half of the bug can return.
 #   3. parse the seeded form with the Hyprland version in this image. Hyprland
 #      regularly removes config directives, and a valid old template otherwise
 #      turns an image update into a login-blocking compositor failure.
+#   4. no hyprlang anywhere. That is the whole point of P0-025, and a `source =`
+#      or an `exec-once =` surviving in this tree would be silently dead: 0.56.2
+#      loads hyprland.lua and never looks at a .conf beside it.
 RUN set -eux; \
-    grep -q '^exec-once = /usr/libexec/apex-shell-autostart' /usr/share/apex/hypr/hyprland.conf; \
-    ! grep -q 'local/bin/apex-shell-autostart' /usr/share/apex/hypr/hyprland.conf; \
-    ! grep -q '(unset)' /usr/share/apex/hypr/hyprland.conf; \
-    grep -q '@KB_LAYOUT@' /usr/share/apex/hypr/hyprland.conf; \
-    grep -q '@HOME@' /usr/share/apex/hypr/hyprland.conf; \
-    # Each generated file the template sources must actually be sourced — a
-    # generator whose output nothing reads is worse than no generator, because
-    # the settings page appears to work.
-    grep -q '^source = @HOME@/.config/hypr/apex-input.conf$' /usr/share/apex/hypr/hyprland.conf; \
-    grep -q '^source = @HOME@/.config/hypr/apex-display.conf$' /usr/share/apex/hypr/hyprland.conf; \
-    grep -q '^source = @HOME@/.config/apex-shell/ApexShellKeybinds.conf$' /usr/share/apex/hypr/hyprland.conf; \
-    # Every generated file needs a path that EXISTS for the verify run. Hyprland
-    # treats a `source=` with no match as a FATAL config error, so one left
-    # pointing at an unwritten user path fails the whole verification for a
-    # reason that has nothing to do with the template being tested.
+    grep -q 'exec_cmd("/usr/libexec/apex-shell-autostart")' /usr/share/apex/hypr/apex/session.lua; \
+    ! grep -rq 'local/bin/apex-shell-autostart' /usr/share/apex/hypr/; \
+    ! grep -rq '(unset)' /usr/share/apex/hypr/; \
+    # The keymap substitution moved out of hyprland.lua and into the module that
+    # actually sets it. Asserted in BOTH directions so the two cannot drift: the
+    # token must be where the provisioner substitutes it, and must NOT be left
+    # behind in the entry point that no longer carries it.
+    grep -q '@KB_LAYOUT@' /usr/share/apex/hypr/apex/input-defaults.lua; \
+    grep -q '@KB_VARIANT@' /usr/share/apex/hypr/apex/input-defaults.lua; \
+    ! grep -q '@KB_LAYOUT@' /usr/share/apex/hypr/hyprland.lua; \
+    # @HOME@ is gone on purpose: `require` resolves against the config file's own
+    # directory and apex/session.lua reads os.getenv("HOME"), so there is no
+    # absolute path left to substitute. Asserting its ABSENCE is what stops one
+    # creeping back in and seeding a config that only works for one home.
+    ! grep -rq '@HOME@' /usr/share/apex/hypr/; \
+    # No hyprlang left anywhere in the tree.
+    ! grep -rqE '^[[:space:]]*(source|exec-once|bind[a-z]*|windowrule|monitor|env)[[:space:]]*=' \
+        /usr/share/apex/hypr/; \
+    # Each generated module must actually be required — a generator whose output
+    # nothing reads is worse than no generator, because the settings page appears
+    # to work. These three are the write targets of apex-display-apply,
+    # apex-input-apply and the shell's KeybindService.
+    grep -q '^apex("monitors")' /usr/share/apex/hypr/hyprland.lua; \
+    grep -q '^apex("input")' /usr/share/apex/hypr/hyprland.lua; \
+    grep -q '^apex("shell-keybinds")' /usr/share/apex/hypr/hyprland.lua; \
+    # ...and so must the module apex-hypr-migrate writes a user's converted
+    # hyprlang into, or the migration silently loses every one of their edits.
+    grep -q '^apex("user-overrides")' /usr/share/apex/hypr/hyprland.lua; \
+    # Every static module named in the entry point has to exist, and every module
+    # shipped has to be named. Both directions, so adding a file without wiring
+    # it up fails here rather than doing nothing on a user's machine.
+    for m in $(sed -n 's/^apex("\([a-z-]*\)").*/\1/p' /usr/share/apex/hypr/hyprland.lua); do \
+        case "$m" in monitors|input|shell-keybinds|user-overrides) continue ;; esac; \
+        test -f "/usr/share/apex/hypr/apex/${m}.lua"; \
+    done; \
+    for f in /usr/share/apex/hypr/apex/*.lua; do \
+        m="$(basename "$f" .lua)"; \
+        grep -q "^apex(\"${m}\")" /usr/share/apex/hypr/hyprland.lua; \
+    done; \
+    # Parse the seeded form with this image's Hyprland. The tree is copied into a
+    # config directory first because `require("apex.x")` resolves against the
+    # CONFIG FILE's own directory — verifying the template where it sits would
+    # test a package.path that no user will ever have.
     #
-    # Stubbing is generic rather than one sed per file, and then asserted: the
-    # named-file version fell behind the template the first time a second source
-    # line was added, and this cannot. They can share one empty stub — sourcing
-    # nothing twice is fine.
-    config="$(mktemp)"; stub="$(mktemp)"; runtime="$(mktemp -d)"; \
+    # The generated modules are deliberately NOT stubbed. hyprland.lua's loader
+    # calls package.searchpath before requiring, so absent is a legal state, and
+    # this run is what proves it: a regression that made a missing generated
+    # module fatal again would fail here rather than on a user's first boot.
+    runtime="$(mktemp -d)"; cfg="$(mktemp -d)"; \
     chmod 0700 "$runtime"; \
-    sed -e "s|^source = @HOME@/.*$|source = ${stub}|" \
-        -e 's|@HOME@|/tmp/apex-home|g' \
-        -e 's|@KB_LAYOUT@|us|g' \
-        -e 's|@KB_VARIANT@||g' \
-        /usr/share/apex/hypr/hyprland.conf > "$config"; \
-    # The stubbing kept up: no per-user source line survived into the file being
-    # verified. This is what makes the guard self-maintaining.
-    ! grep -qE '^source = (@HOME@|/tmp/apex-home)' "$config"; \
+    mkdir -p "$cfg/apex"; \
+    sed -e 's|@KB_LAYOUT@|us|g' -e 's|@KB_VARIANT@||g' \
+        /usr/share/apex/hypr/hyprland.lua > "$cfg/hyprland.lua"; \
+    for f in /usr/share/apex/hypr/apex/*.lua; do \
+        sed -e 's|@KB_LAYOUT@|us|g' -e 's|@KB_VARIANT@||g' \
+            "$f" > "$cfg/apex/$(basename "$f")"; \
+    done; \
+    ! grep -rq '@KB_LAYOUT@' "$cfg"; \
     XDG_RUNTIME_DIR="$runtime" Hyprland --i-am-really-stupid \
-        --verify-config --config "$config" | grep -q 'config ok'; \
-    rm -rf "$config" "$stub" "$runtime"
+        --verify-config --config "$cfg/hyprland.lua" | grep -q 'config ok'; \
+    rm -rf "$cfg" "$runtime"
+
+# The bind options the migration turned on, asserted because both are silent
+# when wrong. `{ mouse = true }` is accepted by 0.56.2 and does NOTHING — the
+# resulting keybind reports mouse=false, drag=false — and upstream's own
+# /usr/share/hypr/hyprland.lua still uses it, so it is the exact thing a future
+# edit would copy in. `{ drag = true }` is what makes SUPER+drag move a window.
+RUN set -eux; \
+    grep -q 'drag = true' /usr/share/apex/hypr/apex/keybindings.lua; \
+    ! grep -rq 'mouse = true' /usr/share/apex/hypr/
 
 # The same guard for niri, which had none because it has no APEX template to
 # grep: niri's config is seeded from niri's OWN default and the APEX additions
@@ -1556,11 +1614,9 @@ RUN set -eux; \
     # until someone changes their default and wonders why SUPER+W ignores it.
     test -x /usr/libexec/apex-open-browser; \
     bash -n /usr/libexec/apex-open-browser; \
-    grep -q '^\$browser     = /usr/libexec/apex-open-browser$' \
-        /usr/share/apex/hypr/hyprland.conf \
-        || grep -q 'browser.*= /usr/libexec/apex-open-browser' \
-           /usr/share/apex/hypr/hyprland.conf; \
-    ! grep -qE '^\$browser\s*=\s*(firefox|zen)' /usr/share/apex/hypr/hyprland.conf; \
+    grep -q 'local browser *= *"/usr/libexec/apex-open-browser"' \
+        /usr/share/apex/hypr/apex/keybindings.lua; \
+    ! grep -qE 'local browser *= *"(firefox|zen)' /usr/share/apex/hypr/apex/keybindings.lua; \
     echo "zen: first-boot flatpak; firefox keeps the web handlers; SUPER+W follows the default"
 
 # The whole apex-greet tree lands at /usr/share/apex-greet so the QML's
