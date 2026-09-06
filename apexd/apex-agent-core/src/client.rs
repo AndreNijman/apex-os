@@ -239,6 +239,18 @@ pub fn publish_hook(id: u32, obs: &crate::hook::Observation) -> Result<()> {
     Ok(())
 }
 
+/// Publish what Claude's status line reported (§P1-021).
+///
+/// Separate from [`publish_hook`] because a status line is not an event:
+/// nothing happened, a timer fired. See [`Request::Telemetry`].
+pub fn publish_telemetry(id: u32, t: &crate::statusline::Telemetry) -> Result<()> {
+    call(&Request::Telemetry {
+        id,
+        telemetry: Box::new(t.clone()),
+    })?;
+    Ok(())
+}
+
 /// Read the session id from the environment, for a process running *inside* a
 /// session that wants to report on itself.
 ///

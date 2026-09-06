@@ -218,7 +218,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     // by design — a session whose hooks could not be installed reports its
     // state from the PTY scanner, which is the fallback §6.1 keeps and not a
     // reason to refuse to start. `hook_settings` says what went wrong, once.
-    let hook_settings = install_hook_settings(adapter, &scratch);
+    let hook_settings = install_hook_settings(adapter, &scratch, detected.as_ref().map(|p| std::path::Path::new(&p.root)));
 
     // §12: the shim's directory goes first on the session's PATH, so a skill's
     // own `git push` reaches the broker without the skill knowing there is one.
@@ -475,6 +475,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         // Empty, not absent: this daemon has the graph, and a session that has
         // delegated nothing yet must be distinguishable from one whose runtime
         // cannot tell. See `SessionInfo::children`.
+        telemetry: None,
         children: Vec::new(),
         pid: spawned.pid,
         started: now_secs(),
@@ -624,7 +625,11 @@ const REDACTED_SETTINGS_FILE: &str = "claude-settings-redacted.json";
 /// the PTY scanner decides state, exactly as it does for an agent nobody has
 /// integrated. The failures are logged because a silently unintegrated Claude
 /// looks identical to a working one until somebody measures the state.
-fn install_hook_settings(adapter: &adapter::Adapter, scratch: &Path) -> Option<PathBuf> {
+fn install_hook_settings(
+    adapter: &adapter::Adapter,
+    scratch: &Path,
+    project: Option<&Path>,
+) -> Option<PathBuf> {
     if !adapter.hooks {
         return None;
     }
@@ -639,8 +644,13 @@ fn install_hook_settings(adapter: &adapter::Adapter, scratch: &Path) -> Option<P
             return None;
         }
     };
+    // The user's own status line, read here rather than inside the settings
+    // document, because `hook::settings_json` is pure and this is a filesystem
+    // question. See `statusline::overlay` for why the presentation keys have
+    // to travel with it and why the command must not.
+    let status = apex_agent_core::statusline::user_status_line(&paths::home(), project);
     let path = hook::settings_path(scratch);
-    let document = hook::settings_json(&apex).to_string();
+    let document = hook::settings_json(&apex, status.as_ref()).to_string();
     match std::fs::write(&path, document) {
         Ok(()) => Some(path),
         Err(e) => {
