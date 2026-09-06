@@ -12,8 +12,12 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use apex_agent_core::client::{self, Client};
+use apex_agent_core::policy::{
+    AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset, SecretPolicy, SystemAccess,
+};
 use apex_agent_core::protocol::{
     AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo,
+    POLICY_DIMENSIONS_VERSION,
 };
 use apex_agent_core::term::{self, RawMode, WinSize};
 use apex_agent_core::{adapter, checkpoint, config, git, layout, project};
@@ -140,9 +144,44 @@ pub struct RunArgs {
     /// Which agent to run. Defaults to the configured one.
     #[arg(long, short)]
     pub agent: Option<String>,
-    /// strict | project | unrestricted. Defaults to the configured policy.
-    #[arg(long, short)]
-    pub sandbox: Option<String>,
+    /// strict | project | unrestricted. The APEX filesystem and process
+    /// sandbox (dimension 2). Defaults to the configured policy.
+    #[arg(long, short, value_parser = parse_sandbox)]
+    pub sandbox: Option<SandboxPolicy>,
+
+    // ── §3.1: the other five permission dimensions ──────────────────────────
+    //
+    // Six separate flags rather than one mode word, because these are six
+    // separate controls. A preset below sets several at once for the modes
+    // §4 names; these override whatever a preset chose.
+    //
+    // Parsed into their own types here rather than carried as strings, so an
+    // unknown value is refused by the argument parser with the list of real
+    // ones, and so nothing downstream can be handed a dimension value that was
+    // never checked.
+    /// inherit | ask | bypass. The agent's OWN permission mode (dimension 1).
+    /// `inherit` leaves the agent's profile alone, which is the default.
+    #[arg(long, value_parser = parse_native)]
+    pub native: Option<NativeMode>,
+    /// §4.2. The agent stops asking for confirmations. The APEX sandbox, root
+    /// boundary, secret broker and audit are all untouched.
+    #[arg(long, conflicts_with = "native")]
+    pub agent_bypass: bool,
+    /// none | session | unsafe. The root capability layer (dimension 3).
+    #[arg(long, value_parser = parse_system_access)]
+    pub system_access: Option<SystemAccess>,
+    /// brokered | none | export. The secret capability layer (dimension 4).
+    #[arg(long, value_parser = parse_secrets)]
+    pub secrets: Option<SecretPolicy>,
+    /// open | allowlist | brokered | offline. Network policy (dimension 5).
+    #[arg(long, value_parser = parse_network)]
+    pub network: Option<NetworkPolicy>,
+    /// local | remote. Which origins may authorise elevation (dimension 6).
+    #[arg(long, value_parser = parse_origin_policy)]
+    pub origin_policy: Option<OriginPolicy>,
+    /// §4.5 break-glass: take the APEX protections off.
+    #[arg(long)]
+    pub unsafe_everything: bool,
     /// Run in a dedicated git worktree, creating it if needed.
     #[arg(long, short)]
     pub worktree: Option<String>,
@@ -196,14 +235,36 @@ impl RunArgs {
             out.push(p.clone());
         }
         for (flag, value) in [
-            ("--agent", self.agent.as_ref()),
-            ("--sandbox", self.sandbox.as_ref()),
-            ("--worktree", self.worktree.as_ref()),
+            ("--agent", self.agent.clone()),
+            ("--worktree", self.worktree.clone()),
         ] {
             if let Some(v) = value {
                 out.push(flag.to_string());
-                out.push(v.clone());
+                out.push(v);
             }
+        }
+        // Every permission dimension, or a remote run would silently get the
+        // remote's defaults instead of what was asked for. Losing
+        // `--network offline` on the way to another machine is the kind of
+        // omission nobody notices until it matters.
+        for (flag, value) in [
+            ("--sandbox", self.sandbox.map(|v| v.as_str())),
+            ("--native", self.native.map(|v| v.as_str())),
+            ("--system-access", self.system_access.map(|v| v.as_str())),
+            ("--secrets", self.secrets.map(|v| v.as_str())),
+            ("--network", self.network.map(|v| v.as_str())),
+            ("--origin-policy", self.origin_policy.map(|v| v.as_str())),
+        ] {
+            if let Some(v) = value {
+                out.push(flag.to_string());
+                out.push(v.to_string());
+            }
+        }
+        if self.agent_bypass {
+            out.push("--agent-bypass".to_string());
+        }
+        if self.unsafe_everything {
+            out.push("--unsafe-everything".to_string());
         }
         if self.checkpoint {
             out.push("--checkpoint".to_string());
@@ -401,21 +462,115 @@ fn report(result: Result<i32>) -> i32 {
     }
 }
 
+/// The `value_parser`s for the six dimension flags.
+///
+/// One per dimension rather than one generic helper, because each has to name
+/// its own values in the refusal: a user who mistypes `--network allow` needs
+/// to be shown `allowlist`, not told that something was invalid.
+macro_rules! dimension_parser {
+    ($name:ident, $ty:ty, $choices:literal) => {
+        fn $name(s: &str) -> std::result::Result<$ty, String> {
+            <$ty>::parse(s).ok_or_else(|| format!("use {}", $choices))
+        }
+    };
+}
+
+dimension_parser!(parse_native, NativeMode, "inherit, ask or bypass");
+dimension_parser!(parse_sandbox, SandboxPolicy, "strict, project or unrestricted");
+dimension_parser!(parse_system_access, SystemAccess, "none, session or unsafe");
+dimension_parser!(parse_secrets, SecretPolicy, "brokered, none or export");
+dimension_parser!(parse_network, NetworkPolicy, "open, allowlist, brokered or offline");
+dimension_parser!(parse_origin_policy, OriginPolicy, "local or remote");
+
+/// Resolve the six permission dimensions for one invocation.
+///
+/// Three layers, each overriding the one before it: the configured defaults,
+/// then the preset a mode flag names, then each explicit dimension flag. So
+/// `--unsafe-everything --secrets none` is break-glass with the secret layer
+/// still off, and no combination is unreachable because a preset claimed it.
+///
+/// Pure, so the resolution order is asserted directly rather than inferred
+/// from what a session ended up with.
+pub fn resolve_policy(cfg: &config::Config, args: &RunArgs) -> Result<AgentPolicy> {
+    if args.unsafe_everything && args.agent_bypass {
+        bail!("--unsafe-everything already turns the agent's own confirmations off");
+    }
+
+    // 1. the configured defaults.
+    let mut policy = cfg.policy();
+
+    // 2. the preset, when a mode flag named one.
+    if args.unsafe_everything {
+        policy = PolicyPreset::UnsafeEverything.policy();
+    } else if args.agent_bypass {
+        // Only dimension 1 moves. §4.2's whole point is that the other five
+        // stay where the user's configuration left them, so this is not the
+        // preset's full six-tuple.
+        policy.native = NativeMode::Bypass;
+    }
+
+    // 3. the explicit flags, which win over everything.
+    if let Some(v) = args.native {
+        policy.native = v;
+    }
+    if let Some(v) = args.sandbox {
+        policy.sandbox = v;
+    }
+    if let Some(v) = args.system_access {
+        policy.system = v;
+    }
+    if let Some(v) = args.secrets {
+        policy.secrets = v;
+    }
+    if let Some(v) = args.network {
+        // The contradiction is caught here rather than in the policy type,
+        // because only the CLI can tell "the user typed --network open" from
+        // "an older client sent no network key at all". Silently tightening
+        // would leave somebody believing they had a network they did not.
+        if policy.sandbox == SandboxPolicy::Strict && v != NetworkPolicy::Offline {
+            bail!(
+                "`--sandbox strict` removes the network, so it cannot be combined with \
+                 `--network {v}`; use `--sandbox project --network {v}` to keep the network \
+                 under project confinement"
+            );
+        }
+        policy.network = v;
+    }
+    if let Some(v) = args.origin_policy {
+        policy.origin = v;
+    }
+
+    // Refuse anything this build cannot enforce, here as well as in the
+    // daemon: the message is better in front of the user who typed the flag.
+    policy.validate()?;
+    Ok(policy.normalised())
+}
+
+/// The dimensions this invocation moved away from the safe default.
+///
+/// Used for the version check and for the banner: only a dimension that is
+/// doing something needs saying.
+fn non_default_dimensions(policy: &AgentPolicy) -> Vec<(&'static str, &'static str)> {
+    let base = AgentPolicy::default();
+    policy
+        .dimensions()
+        .into_iter()
+        .zip(base.dimensions())
+        .filter(|((_, got), (_, want))| got != want)
+        .map(|((name, got), _)| (name, got))
+        .collect()
+}
+
 fn run(args: RunArgs) -> Result<i32> {
     let cfg = config::Config::load();
-    let cwd = match args.cwd {
+    let cwd = match args.cwd.as_ref() {
         Some(dir) => dir
             .canonicalize()
             .with_context(|| format!("{} does not exist", dir.display()))?,
         None => std::env::current_dir().context("reading the current directory")?,
     };
 
-    let sandbox = match args.sandbox.as_deref() {
-        Some(name) => SandboxPolicy::parse(name).with_context(|| {
-            format!("unknown sandbox policy {name:?}; use strict, project or unrestricted")
-        })?,
-        None => cfg.sandbox,
-    };
+    let policy = resolve_policy(&cfg, &args)?;
 
     let size = term::stdout_window_size();
     let request = RunRequest {
@@ -423,7 +578,7 @@ fn run(args: RunArgs) -> Result<i32> {
         prompt: args.prompt.clone(),
         args: args.args.clone(),
         cwd: cwd.to_string_lossy().into_owned(),
-        sandbox,
+        policy,
         worktree: args.worktree.clone(),
         checkpoint: args.checkpoint,
         cols: size.cols,
@@ -432,6 +587,7 @@ fn run(args: RunArgs) -> Result<i32> {
     };
 
     let mut c = Client::connect()?;
+    check_daemon_understands(&mut c, &policy)?;
     let info = match c.call(&Request::Run(request))? {
         Response::Session(info) => *info,
         other => bail!("unexpected reply: {other:?}"),
@@ -456,10 +612,57 @@ fn run(args: RunArgs) -> Result<i32> {
     }
 
     eprintln!(
-        "apex: session {} ({}, sandbox {}) — detach with {}",
-        info.id, info.agent, info.sandbox, cfg.detach_key
+        "apex: session {} ({}, {}) — detach with {}",
+        info.id,
+        info.agent,
+        describe_policy(&info.policy),
+        cfg.detach_key
     );
     attach_session(info.id, true, &cfg)
+}
+
+/// One line naming the sandbox and anything else that is not at its default.
+fn describe_policy(policy: &AgentPolicy) -> String {
+    let mut parts = vec![format!("sandbox {}", policy.sandbox)];
+    for (name, value) in non_default_dimensions(policy) {
+        if name != "sandbox" {
+            parts.push(format!("{name} {value}"));
+        }
+    }
+    parts.join(", ")
+}
+
+/// Refuse to send a dimension a daemon that old would drop.
+///
+/// A daemon predating the split reads `sandbox` and ignores the other five
+/// keys, so `--network offline` would come back as a session with a network
+/// and nothing anywhere would say so. That is the fail-open a protocol version
+/// exists to catch, and the check is skipped entirely when every dimension is
+/// at its default, so an all-defaults run still works against an old daemon.
+fn check_daemon_understands(c: &mut Client, policy: &AgentPolicy) -> Result<()> {
+    let moved = non_default_dimensions(policy);
+    let beyond_sandbox: Vec<&str> = moved
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| *name != "sandbox")
+        .collect();
+    if beyond_sandbox.is_empty() {
+        return Ok(());
+    }
+    let Response::Hello { version, .. } = c.call(&Request::Hello)? else {
+        // A daemon that cannot answer Hello is one this cannot reason about,
+        // and guessing in the permissive direction is the whole failure mode.
+        bail!("the agent runtime did not answer the protocol handshake");
+    };
+    if version < POLICY_DIMENSIONS_VERSION {
+        bail!(
+            "the running agent runtime speaks protocol {version} and would ignore {}; \
+             restart it with `systemctl --user restart apex-agentd` so the setting takes \
+             effect",
+            beyond_sandbox.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn list(all: bool, json: bool) -> Result<i32> {
@@ -503,7 +706,7 @@ fn list(all: bool, json: bool) -> Result<i32> {
             // 20 fits the longest real value, "killed by signal 15".
             truncate(&state, 20),
             truncate(&project, 22),
-            s.sandbox,
+            s.policy.sandbox,
             short_path(&s.cwd)
         );
     }
@@ -647,7 +850,9 @@ fn status(id: Option<u32>) -> Result<i32> {
             println!("runtime      {}", if running { "running" } else { "stopped" });
             println!("socket       {}", client::socket_path().display());
             println!("default      {}", cfg.default_agent);
-            println!("sandbox      {}", cfg.sandbox);
+            for (name, value) in cfg.policy().dimensions() {
+                println!("{name:<12} {value}");
+            }
             println!("detach key   {}", cfg.detach_key);
             if !running {
                 println!();
@@ -760,7 +965,9 @@ fn print_session(s: &SessionInfo) {
     if let Some(detail) = &s.detail {
         println!("detail       {detail}");
     }
-    println!("sandbox      {}", s.sandbox);
+    for (name, value) in s.policy.dimensions() {
+        println!("{name:<12} {value}");
+    }
     println!("cwd          {}", s.cwd);
     if let Some(p) = &s.project_name {
         println!("project      {p}");
@@ -1512,6 +1719,205 @@ fn format_age(unix_secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `run` invocation with nothing set, so a test can turn on exactly the
+    /// one flag it is about.
+    fn run_args() -> RunArgs {
+        RunArgs {
+            prompt: None,
+            agent: None,
+            sandbox: None,
+            native: None,
+            agent_bypass: false,
+            system_access: None,
+            secrets: None,
+            network: None,
+            origin_policy: None,
+            unsafe_everything: false,
+            worktree: None,
+            checkpoint: false,
+            cwd: None,
+            detach: false,
+            args: Vec::new(),
+            host: None,
+            remote_path: None,
+            allow_dirty: false,
+        }
+    }
+
+    #[test]
+    fn no_flags_at_all_resolves_to_the_configured_defaults() {
+        let cfg = config::Config::default();
+        let p = resolve_policy(&cfg, &run_args()).expect("resolve");
+        assert_eq!(p, AgentPolicy::default());
+    }
+
+    #[test]
+    fn agent_bypass_moves_dimension_one_and_leaves_the_other_five() {
+        // §4.2. The flag that most invites a collapse: the obvious "helpful"
+        // edit is to have it also loosen the sandbox, and that is criterion 2.
+        let cfg = config::Config::default();
+        let args = RunArgs {
+            agent_bypass: true,
+            ..run_args()
+        };
+        let p = resolve_policy(&cfg, &args).expect("resolve");
+        assert_eq!(p.native, NativeMode::Bypass);
+        assert_eq!(p, AgentPolicy { native: NativeMode::Bypass, ..AgentPolicy::default() });
+    }
+
+    #[test]
+    fn a_flag_overrides_the_preset_it_was_given_alongside() {
+        // Presets are a starting point, not a fence. Break-glass with the
+        // secret layer explicitly off must be expressible, or the named modes
+        // would be the only reachable points in the space.
+        let cfg = config::Config::default();
+        let args = RunArgs {
+            unsafe_everything: true,
+            secrets: Some(SecretPolicy::None),
+            ..run_args()
+        };
+        // The policy itself is refused until P0-006 lands, so this asserts the
+        // resolution order through the error rather than the value: the
+        // refusal names system access, which is what break-glass set, and not
+        // the secret dimension, which the flag set to a value that is allowed.
+        let err = resolve_policy(&cfg, &args).expect_err("break-glass is not built yet");
+        assert!(err.to_string().contains("system-access"), "{err}");
+    }
+
+    #[test]
+    fn the_configured_default_is_the_starting_point_and_flags_win() {
+        let cfg = config::Config {
+            sandbox: SandboxPolicy::Strict,
+            native: NativeMode::Bypass,
+            ..config::Config::default()
+        };
+        // Nothing given: the configuration stands.
+        let p = resolve_policy(&cfg, &run_args()).expect("resolve");
+        assert_eq!(p.sandbox, SandboxPolicy::Strict);
+        assert_eq!(p.native, NativeMode::Bypass);
+        assert_eq!(p.network, NetworkPolicy::Offline, "strict normalises to offline");
+
+        // A flag beats it.
+        let args = RunArgs {
+            sandbox: Some(SandboxPolicy::Project),
+            ..run_args()
+        };
+        let p = resolve_policy(&cfg, &args).expect("resolve");
+        assert_eq!(p.sandbox, SandboxPolicy::Project);
+        assert_eq!(p.network, NetworkPolicy::Open);
+    }
+
+    #[test]
+    fn an_explicit_contradiction_is_refused_rather_than_quietly_tightened() {
+        // `--sandbox strict --network open` cannot be honoured. Tightening it
+        // in silence would leave somebody believing they had a network; this
+        // is the one check the CLI has to make, because only the CLI can tell
+        // a typed `--network open` from a client that sent no network key.
+        let cfg = config::Config::default();
+        let args = RunArgs {
+            sandbox: Some(SandboxPolicy::Strict),
+            network: Some(NetworkPolicy::Open),
+            ..run_args()
+        };
+        let err = resolve_policy(&cfg, &args).expect_err("a contradiction");
+        assert!(err.to_string().contains("removes the network"), "{err}");
+
+        // The same pair spelled compatibly is fine.
+        let args = RunArgs {
+            sandbox: Some(SandboxPolicy::Strict),
+            network: Some(NetworkPolicy::Offline),
+            ..run_args()
+        };
+        assert!(resolve_policy(&cfg, &args).is_ok());
+    }
+
+    #[test]
+    fn an_unenforceable_dimension_is_refused_in_front_of_the_user_who_typed_it() {
+        let cfg = config::Config::default();
+        let cases: [(RunArgs, &str); 4] = [
+            (
+                RunArgs { network: Some(NetworkPolicy::Allowlist), ..run_args() },
+                "not enforced by this build",
+            ),
+            (
+                RunArgs { system_access: Some(SystemAccess::Session), ..run_args() },
+                "apex request",
+            ),
+            (
+                RunArgs { secrets: Some(SecretPolicy::Export), ..run_args() },
+                "never placed in a session",
+            ),
+            (
+                RunArgs {
+                    origin_policy: Some(OriginPolicy::RemoteElevationAllowed),
+                    ..run_args()
+                },
+                "approve it locally",
+            ),
+        ];
+        for (args, expect) in cases {
+            let err = resolve_policy(&cfg, &args).expect_err(expect);
+            assert!(err.to_string().contains(expect), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_misspelled_dimension_value_names_the_ones_that_exist() {
+        // Refused by the argument parser, so nothing downstream is ever handed
+        // a dimension value that was not checked.
+        let err = parse_network("allow").expect_err("a typo");
+        assert!(err.contains("allowlist"), "{err}");
+        assert!(err.contains("offline"), "{err}");
+        assert_eq!(parse_network("offline"), Ok(NetworkPolicy::Offline));
+        assert!(parse_native("yolo").is_err());
+        assert!(parse_sandbox("loose").is_err());
+    }
+
+    #[test]
+    fn a_remote_run_carries_every_dimension_it_was_given() {
+        // Losing `--network offline` on the way to another machine would run
+        // the agent with a network on a host nobody was watching.
+        let args = RunArgs {
+            agent_bypass: true,
+            native: None,
+            sandbox: Some(SandboxPolicy::Project),
+            system_access: Some(SystemAccess::Session),
+            secrets: Some(SecretPolicy::None),
+            network: Some(NetworkPolicy::Offline),
+            origin_policy: Some(OriginPolicy::LocalElevationOnly),
+            host: Some("katana".into()),
+            ..run_args()
+        };
+        let forwarded = args.forward_argv().join(" ");
+        for flag in [
+            "--sandbox project",
+            "--system-access session",
+            "--secrets none",
+            "--network offline",
+            "--origin-policy local_elevation_only",
+            "--agent-bypass",
+        ] {
+            assert!(forwarded.contains(flag), "{flag} was not forwarded: {forwarded}");
+        }
+        // The local-only flags still stay behind.
+        assert!(!forwarded.contains("--host"), "{forwarded}");
+    }
+
+    #[test]
+    fn only_the_dimensions_that_moved_are_announced() {
+        let p = AgentPolicy {
+            native: NativeMode::Bypass,
+            ..AgentPolicy::default()
+        };
+        assert_eq!(
+            non_default_dimensions(&p),
+            vec![("native", "bypass")],
+            "a banner that listed all six would be noise on every run"
+        );
+        assert!(non_default_dimensions(&AgentPolicy::default()).is_empty());
+        assert_eq!(describe_policy(&p), "sandbox project, native bypass");
+    }
 
     #[test]
     fn truncation_keeps_the_column_width() {

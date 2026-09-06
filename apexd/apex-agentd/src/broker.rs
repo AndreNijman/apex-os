@@ -59,6 +59,23 @@ pub fn use_capability(
 
     let who = privilege::origin(daemon, peer);
 
+    // Dimension 4, checked before anything else about the request.
+    //
+    // The session's own secret policy, read from what the daemon recorded when
+    // it forked the session — a session that could name its own policy could
+    // name a looser one. This is the enforcement point that makes
+    // `--secrets none` mean something: a task with no business touching a
+    // credential cannot reach the broker at all, and the refusal happens
+    // before the project, the grant or the remote is even resolved.
+    if !who.policy.secrets.may_use_broker() {
+        return Response::error(
+            ErrorKind::PermissionDenied,
+            "this session was started with the secret capability layer off, so it cannot use \
+             brokered credentials; start it without `--secrets none` if it needs them"
+                .to_string(),
+        );
+    }
+
     // The project.
     //
     // For a SESSION it is what the daemon recorded when it forked it, and

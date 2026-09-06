@@ -12,18 +12,42 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapter;
 use crate::paths;
+use crate::policy::{AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, SecretPolicy, SystemAccess};
 use crate::protocol::SandboxPolicy;
 use crate::term::DEFAULT_DETACH_KEY;
 
 /// The runtime's user configuration.
+///
+/// The six permission dimensions are six sibling keys here rather than one
+/// nested `policy` object. `sandbox` has been a top-level key since before the
+/// split, and `extra` swallows anything this build does not recognise — so
+/// nesting it would have moved a security setting into the catch-all and
+/// silently downgraded every configuration file that already sets it. Six
+/// siblings and [`Config::policy`] to assemble them costs a few lines and
+/// cannot do that.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Adapter id `a` and an unqualified `apex agent run` use.
     #[serde(default = "default_agent")]
     pub default_agent: String,
-    /// Policy applied when `--sandbox` is not given.
+    /// Dimension 1: applied when `--native` and `--agent-bypass` are not given.
+    #[serde(default)]
+    pub native: NativeMode,
+    /// Dimension 2: applied when `--sandbox` is not given.
     #[serde(default)]
     pub sandbox: SandboxPolicy,
+    /// Dimension 3: applied when `--system-access` is not given.
+    #[serde(default)]
+    pub system: SystemAccess,
+    /// Dimension 4: applied when `--secrets` is not given.
+    #[serde(default)]
+    pub secrets: SecretPolicy,
+    /// Dimension 5: applied when `--network` is not given.
+    #[serde(default)]
+    pub network: NetworkPolicy,
+    /// Dimension 6: applied when `--origin-policy` is not given.
+    #[serde(default)]
+    pub origin: OriginPolicy,
     /// Key that detaches from an attached session.
     #[serde(default = "default_detach_key")]
     pub detach_key: String,
@@ -47,7 +71,12 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             default_agent: default_agent(),
+            native: NativeMode::default(),
             sandbox: SandboxPolicy::default(),
+            system: SystemAccess::default(),
+            secrets: SecretPolicy::default(),
+            network: NetworkPolicy::default(),
+            origin: OriginPolicy::default(),
             detach_key: default_detach_key(),
             auto_checkpoint: false,
             extra: serde_json::Map::new(),
@@ -56,6 +85,31 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The configured defaults as one policy.
+    ///
+    /// What `apex agent run` starts from before applying a preset and then the
+    /// individual flags.
+    pub fn policy(&self) -> AgentPolicy {
+        AgentPolicy {
+            native: self.native,
+            sandbox: self.sandbox,
+            system: self.system,
+            secrets: self.secrets,
+            network: self.network,
+            origin: self.origin,
+        }
+    }
+
+    /// Store a policy back as the six defaults.
+    pub fn set_policy(&mut self, p: AgentPolicy) {
+        self.native = p.native;
+        self.sandbox = p.sandbox;
+        self.system = p.system;
+        self.secrets = p.secrets;
+        self.network = p.network;
+        self.origin = p.origin;
+    }
+
     /// Load the user's configuration.
     ///
     /// A missing file is the defaults, not an error. A *corrupt* file is also
@@ -87,6 +141,16 @@ impl Config {
                 self.detach_key
             ));
             self.detach_key = default_detach_key();
+        }
+        // A stored default this build cannot enforce is corrected here rather
+        // than refused at every `apex agent run`. Refusing would be the safe
+        // reflex, but the failure lands on a command the user did not connect
+        // to a file they edited weeks ago — and the correction is toward the
+        // stricter value in every case, because the defaults are the strict
+        // ones.
+        if let Err(e) = self.policy().validate() {
+            fixed.push(format!("{e}; using the default permission dimensions"));
+            self.set_policy(AgentPolicy::default());
         }
         fixed
     }
@@ -199,6 +263,53 @@ mod tests {
         let text = serde_json::to_string(&cfg).unwrap();
         let back = from_str(&text).unwrap();
         assert_eq!(back.sandbox, SandboxPolicy::Strict);
+    }
+
+    #[test]
+    fn every_dimension_has_its_own_key_and_its_own_default() {
+        // Criterion 1 at the configuration layer: six settings, not one.
+        let cfg = from_str("{}").expect("parse");
+        assert_eq!(cfg.policy(), AgentPolicy::default());
+
+        let cfg = from_str(
+            r#"{"native":"bypass","sandbox":"strict","secrets":"none","network":"offline"}"#,
+        )
+        .expect("parse");
+        assert_eq!(cfg.native, NativeMode::Bypass);
+        assert_eq!(cfg.sandbox, SandboxPolicy::Strict);
+        assert_eq!(cfg.secrets, SecretPolicy::None);
+        assert_eq!(cfg.network, NetworkPolicy::Offline);
+        // Untouched dimensions keep their defaults rather than following the
+        // ones that were set.
+        assert_eq!(cfg.system, SystemAccess::None);
+        assert_eq!(cfg.origin, OriginPolicy::LocalElevationOnly);
+    }
+
+    #[test]
+    fn a_pre_split_configuration_file_keeps_its_sandbox_setting() {
+        // The file a user already has. `sandbox` must stay a top-level key and
+        // must not fall into `extra`, where it would be preserved on write and
+        // ignored on read — a strict user silently downgraded to project.
+        let cfg = from_str(r#"{"default_agent":"codex","sandbox":"strict"}"#).expect("parse");
+        assert_eq!(cfg.sandbox, SandboxPolicy::Strict);
+        assert!(!cfg.extra.contains_key("sandbox"), "{:?}", cfg.extra);
+        assert_eq!(cfg.policy().sandbox, SandboxPolicy::Strict);
+    }
+
+    #[test]
+    fn a_stored_default_this_build_cannot_enforce_is_corrected_and_reported() {
+        // Hand-edited, or written by a newer build. Failing every later
+        // `apex agent run` with the same error is a worse outcome than
+        // correcting toward the default, which is the stricter value.
+        let mut cfg = Config {
+            system: SystemAccess::Unsafe,
+            ..Config::default()
+        };
+        let notes = cfg.normalise();
+        assert_eq!(cfg.system, SystemAccess::None);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("system-access"), "{notes:?}");
+        assert_eq!(cfg.policy().validate(), Ok(()));
     }
 
     #[test]
