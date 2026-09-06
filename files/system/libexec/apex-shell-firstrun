@@ -958,8 +958,11 @@ if [ -f "${SRC_DIR}/shell.qml" ] && [ -x /usr/libexec/apex-shell-autostart ]; th
     if command -v hyprctl >/dev/null 2>&1 && hyprctl version >/dev/null 2>&1; then
         setsid /usr/libexec/apex-shell-autostart >/dev/null 2>&1 &
         log "compositor already running — started APEX Shell for this session"
-        # Now that ApexShellKeybinds.conf exists, re-read the config so the
-        # shell's keybinds work without a re-login too.
+        # Re-read the config so the shell's keybinds work without a
+        # re-login too. `hyprctl reload` re-runs the whole Lua config, and
+        # hyprland.lua clears package.loaded for every apex.* module first, so
+        # a module written since login is genuinely re-read rather than served
+        # from Lua's cache.
         hyprctl reload >/dev/null 2>&1 || true
     elif command -v niri >/dev/null 2>&1 && niri msg version >/dev/null 2>&1; then
         setsid /usr/libexec/apex-shell-autostart >/dev/null 2>&1 &
