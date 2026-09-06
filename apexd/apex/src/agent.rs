@@ -10,7 +10,7 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use apex_agent_core::client::{self, Client};
 use apex_agent_core::policy::{
     AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset, RequestOrigin, SecretPolicy,
@@ -22,7 +22,7 @@ use apex_agent_core::protocol::{
 };
 use apex_agent_core::hook::{self as hook_core, HookEvent};
 use apex_agent_core::term::{self, RawMode, WinSize};
-use apex_agent_core::{adapter, checkpoint, config, git, layout, profile, project};
+use apex_agent_core::{adapter, checkpoint, config, git, layout, mux, profile, project};
 use clap::{Args, Subcommand};
 
 use crate::ops;
@@ -503,6 +503,32 @@ pub enum LayoutCmd {
     },
     /// Discard the saved layout.
     Forget,
+    /// The terminal layout templates, and what each one opens.
+    Templates,
+    /// Open this project's terminal layout in tmux or zellij.
+    ///
+    /// An editor beside an agent beside a terminal, or several agents side by
+    /// side. The multiplexer is a VIEWPORT: every agent pane attaches to a
+    /// session apex-agentd owns, so closing the multiplexer leaves the agents
+    /// running and reopening finds them again.
+    ///
+    /// Reopening never rebuilds a session that is already there — it attaches
+    /// to it.
+    Open {
+        /// Template name; `apex project layout templates` lists them. Defaults
+        /// to the one last opened for this project, then to `dev`.
+        template: Option<String>,
+        /// tmux or zellij. Defaults to $APEX_MUX, then to whichever is
+        /// installed.
+        #[arg(long)]
+        mux: Option<String>,
+        /// How many agent panes, for a template that repeats one.
+        #[arg(long, default_value_t = 1)]
+        agents: usize,
+        /// Print the panes that would be opened, and open nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // ── agent verbs ─────────────────────────────────────────────────────────────
@@ -1859,6 +1885,10 @@ pub fn project_cmd(cmd: ProjectCmd) -> i32 {
             LayoutCmd::Show { json } => layout_show(json),
             LayoutCmd::Restore { dry_run } => layout_restore(dry_run),
             LayoutCmd::Forget => layout_forget(),
+            LayoutCmd::Templates => layout_templates(),
+            LayoutCmd::Open { template, mux, agents, dry_run } => {
+                layout_open(template, mux, agents, dry_run)
+            }
         },
     };
     report(result)
@@ -1938,6 +1968,16 @@ fn layout_show(json: bool) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&l)?);
         return Ok(0);
     }
+    if let Some(t) = &l.template {
+        println!(
+            "terminal template: {t} in {} — reopen with `apex project layout open`",
+            l.mux.as_deref().unwrap_or("tmux")
+        );
+        if l.entries.is_empty() {
+            return Ok(0);
+        }
+        println!();
+    }
     println!("{:<4} {:<14} {:<10} COMMAND", "WS", "APP", "KIND");
     for e in &l.entries {
         println!(
@@ -1957,6 +1997,19 @@ fn layout_restore(dry_run: bool) -> Result<i32> {
         println!("no layout saved for {}", p.name);
         return Ok(1);
     };
+    if l.entries.is_empty() {
+        // A record can hold a terminal template and no captured windows, which
+        // is what `layout open` alone leaves behind. Saying "started 0 windows"
+        // there would read as a failure rather than as nothing having been
+        // captured yet.
+        println!(
+            "no windows are saved for {} — `apex project layout save` captures them \n\
+             while they are open. Its terminal template opens with \
+             `apex project layout open`.",
+            p.name
+        );
+        return Ok(1);
+    }
 
     let term = layout::choose_terminal(
         std::env::var("TERMINAL").ok().as_deref(),
@@ -2066,8 +2119,9 @@ fn project_switch(name: Option<String>) -> Result<i32> {
     let Some((workspace, count)) = counts.iter().max_by_key(|(_, n)| **n).map(|(w, n)| (*w, *n))
     else {
         bail!(
-            "the saved layout for {} records no workspace — the compositor it \n\
-             was captured under does not report one (labwc does not)",
+            "the saved layout for {} records no workspace. Either no windows were \n\
+             captured yet (`apex project layout save`), or the compositor it was \n\
+             captured under does not report one (labwc does not).",
             p.name
         );
     };
@@ -2098,6 +2152,179 @@ fn layout_forget() -> Result<i32> {
     layout::forget(&p.slug)?;
     println!("discarded the saved layout for {}", p.name);
     Ok(0)
+}
+
+// ── terminal layout templates ───────────────────────────────────────────────
+//
+// The multiplexer half of a project's layout. `layout save` captures the
+// desktop windows a project has open; this opens the SHAPE its terminal work
+// takes, from a named template. Same command tree, same record, same `forget`.
+//
+// Every agent pane runs `apex agent attach` or `apex agent run` — the daemon
+// owns each agent's PTY and the multiplexer is a viewport onto sessions it
+// owns, never a host for them. The reasoning is in `apex_agent_core::mux`.
+
+/// Where the multiplexer adapter lives. A fixed path, like the window adapter
+/// and the sandbox's bwrap: resolving it through `PATH` would let a shadowing
+/// script decide what "open my project layout" runs.
+const MUX_ADAPTER: &str = "/usr/libexec/apex-mux";
+
+fn mux_adapter() -> String {
+    std::env::var("APEX_MUX_ADAPTER").unwrap_or_else(|_| MUX_ADAPTER.to_string())
+}
+
+fn layout_templates() -> Result<i32> {
+    println!("{:<10} {:<16} OPENS", "NAME", "ARRANGEMENT");
+    for t in mux::TEMPLATES {
+        println!(
+            "{:<10} {:<16} {}{}",
+            t.name,
+            t.arrangement.as_str(),
+            t.summary,
+            if t.repeats_agent { "  (--agents N)" } else { "" }
+        );
+    }
+    Ok(0)
+}
+
+/// This project's live session ids, most recent first.
+///
+/// Most recent first because a template with one agent pane should land on the
+/// agent you were last talking to. A daemon that is not running is not an
+/// error here: it means there is nothing to attach to, so every agent pane
+/// starts a session instead — and `apex agent run` will report the daemon
+/// being down in the pane, which is where somebody can act on it.
+fn live_project_sessions(root: &str) -> Vec<u32> {
+    let mut mine: Vec<&SessionInfo> = Vec::new();
+    let sessions = client::sessions().unwrap_or_default();
+    for s in &sessions {
+        if s.is_live() && s.project.as_deref() == Some(root) {
+            mine.push(s);
+        }
+    }
+    mine.sort_by(|a, b| b.started.cmp(&a.started).then(b.id.cmp(&a.id)));
+    mine.iter().map(|s| s.id).collect()
+}
+
+fn layout_open(
+    template: Option<String>,
+    requested_mux: Option<String>,
+    agents: usize,
+    dry_run: bool,
+) -> Result<i32> {
+    let p = current_project()?;
+    let stored = layout::load(&p.slug);
+
+    // No argument reopens what this project was last opened as, so the second
+    // time is just `apex project layout open`.
+    let name = template
+        .or_else(|| stored.as_ref().and_then(|l| l.template.clone()))
+        .unwrap_or_else(|| "dev".to_string());
+    let Some(t) = mux::template(&name) else {
+        bail!(
+            "no template called {name} — `apex project layout templates` lists them"
+        );
+    };
+
+    let preferred = requested_mux
+        .or_else(|| std::env::var("APEX_MUX").ok())
+        .filter(|m| !m.is_empty());
+    let backend = mux::choose_backend(preferred.as_deref(), |n| which(n).is_some())
+        .map_err(|e| anyhow!(e))?;
+
+    let editor = mux::choose_editor(
+        std::env::var("VISUAL").ok().as_deref(),
+        std::env::var("EDITOR").ok().as_deref(),
+        |n| which(n).is_some(),
+    );
+    if editor.is_none() {
+        eprintln!(
+            "apex: no editor found; the editor pane will be a shell. \n\
+             set $VISUAL, or install one of: {}",
+            mux::EDITOR_CANDIDATES.join(", ")
+        );
+    }
+
+    let live = live_project_sessions(&p.root);
+    let plan = mux::build(
+        t,
+        &p.name,
+        Path::new(&p.root),
+        editor.as_deref(),
+        &live,
+        agents.max(1),
+    );
+
+    let adapter = mux_adapter();
+    let existing = Command::new(&adapter)
+        .args(["has", &backend, &plan.session])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if dry_run {
+        println!(
+            "{} in {}: {} ({})",
+            plan.session,
+            backend,
+            if existing { "already open — would attach to it" } else { "would be built" },
+            plan.arrangement
+        );
+        for pane in &plan.panes {
+            println!(
+                "  {:<10} {}",
+                pane.title,
+                if pane.argv.is_empty() { "<shell>".to_string() } else { pane.argv.join(" ") }
+            );
+        }
+        return Ok(0);
+    }
+
+    // The plan goes to the adapter as a FILE and not on stdin: opening ends by
+    // handing the terminal to tmux or zellij, so stdin has to still be the
+    // terminal. It lands beside the layout record, 0700, and is left there —
+    // it is also the honest answer to "what did that last open actually run".
+    let text = mux::encode(&plan).map_err(|e| anyhow!(e))?;
+    let plan_path = layout::layout_path(&p.slug).with_extension("plan");
+    let dir = plan_path.parent().context("layout path has no parent")?;
+    apex_agent_core::paths::ensure_private_dir(dir)?;
+    std::fs::write(&plan_path, text.as_bytes())
+        .with_context(|| format!("writing {}", plan_path.display()))?;
+
+    // Remember the template on the project's ONE layout record, so reopening
+    // needs no argument and `layout show` reports both halves.
+    let mut record = stored.unwrap_or_default();
+    record.template = Some(t.name.to_string());
+    record.mux = Some(backend.clone());
+    layout::save(&p.slug, &record)?;
+    project::remember(&p)?;
+
+    if existing {
+        println!("{} is already open — attaching", plan.session);
+    } else {
+        println!(
+            "opening {} in {}: {}",
+            plan.session,
+            backend,
+            plan.panes
+                .iter()
+                .map(|p| p.title.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    let status = Command::new(&adapter)
+        .args([
+            "open",
+            &backend,
+            &plan.session,
+            plan.arrangement,
+            &plan_path.to_string_lossy(),
+        ])
+        .status()
+        .with_context(|| format!("running {adapter} open"))?;
+    Ok(status.code().unwrap_or(1))
 }
 
 fn current_project() -> Result<project::Project> {

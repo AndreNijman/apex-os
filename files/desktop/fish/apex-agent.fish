@@ -85,6 +85,11 @@ if command -q apex
                 | string match -rag '"id"\s*:\s*([0-9]+)'
         end
 
+        function _apex_layout_templates --description 'terminal layout templates'
+            apex project layout templates 2>/dev/null | tail -n +2 \
+                | string replace -r '\s.*$' '' | string match -rv '^$'
+        end
+
         # The requestable verbs, asked of the CLI rather than duplicated here.
         # The vocabulary is a security boundary, so a completion list that
         # drifts out of step with it would offer operations the daemon refuses

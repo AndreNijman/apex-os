@@ -223,5 +223,24 @@ export extern "apex secret use" [
     capability?: string@"nu-complete apex capabilities"
 ]
 
-def "nu-complete apex layout" [] { ["save" "show" "restore" "forget"] }
+def "nu-complete apex layout" [] {
+    ["save" "show" "restore" "forget" "templates" "open"]
+}
+
+# Templates, asked of the CLI. A hardcoded list would go stale the moment one is
+# added, and offering a template that does not exist teaches a command that
+# fails.
+def "nu-complete apex templates" [] {
+    let r = (^apex project layout templates | complete)
+    if $r.exit_code != 0 { return [] }
+    $r.stdout | lines | skip 1 | each { |l| $l | split row -r '\s+' | get 0? | default "" }
+        | where { |n| $n != "" }
+}
+
 export extern "apex project layout" [ verb?: string@"nu-complete apex layout" ]
+export extern "apex project layout open" [
+    template?: string@"nu-complete apex templates"
+    --mux: string
+    --agents: int
+    --dry-run
+]

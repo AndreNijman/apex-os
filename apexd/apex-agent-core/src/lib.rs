@@ -49,6 +49,7 @@ pub mod destination;
 pub mod git;
 pub mod hook;
 pub mod layout;
+pub mod mux;
 pub mod lock;
 pub mod origin;
 pub mod paths;

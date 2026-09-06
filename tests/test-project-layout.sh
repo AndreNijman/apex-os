@@ -66,7 +66,10 @@ if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" --bin apex >/dev/nul
     exit 1
 fi
 ok "apex builds"
-APEX="${ROOT}/apexd/target/debug/apex"
+# $CARGO_TARGET_DIR, when set, moves the whole target directory — so the
+# hardcoded path was a "No such file or directory" for every assertion, and the
+# suite reported 19 failures that had nothing to do with layouts.
+APEX="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug/apex"
 
 # Isolated state, so the developer's own saved layouts are never touched.
 export XDG_STATE_HOME="${WORK}/state"

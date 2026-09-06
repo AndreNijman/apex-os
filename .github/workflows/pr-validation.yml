@@ -924,6 +924,34 @@ jobs:
       - name: Run fish and nushell agent-integration assertions
         run: ./tests/test-shell-agent.sh
 
+      # The layout templates open panes in a real multiplexer, so a real one has
+      # to be here. tmux is in Ubuntu's archive; zellij is not in any distro, so
+      # it comes from the same pinned upstream release Containerfile.core does —
+      # the version is kept in step by hand, and a failed download degrades that
+      # section to a LOUD SKIP rather than a red build.
+      - name: Install tmux and zellij
+        run: |
+          set -uo pipefail
+          sudo apt-get install -y -qq tmux
+          tmux -V
+          zj=v0.45.1
+          url="https://github.com/zellij-org/zellij/releases/download/${zj}/zellij-x86_64-unknown-linux-musl.tar.gz"
+          if curl -fsSL --retry 2 "$url" -o /tmp/zellij.tgz; then
+            sudo tar xzf /tmp/zellij.tgz -C /usr/local/bin zellij
+            sudo chmod 0755 /usr/local/bin/zellij
+            zellij --version
+          else
+            echo "note: zellij ${zj} did not download; its section will skip out loud"
+          fi
+
+      # Both multiplexers run on an isolated socket (TMUX_TMPDIR,
+      # ZELLIJ_SOCKET_DIR under the suite's own temp dir), and XDG_RUNTIME_DIR
+      # is a fixture with no control socket — so this cannot reach an agent
+      # runtime, and every agent pane resolves to `apex agent run` against a
+      # stub on PATH.
+      - name: Run terminal layout template assertions
+        run: ./tests/test-mux-layouts.sh
+
       # §4's whole claim is "agents use credentials without receiving the raw
       # secret". This stores a sentinel token, uses a capability from inside a
       # real CONFINED session, and asserts the sentinel appears in neither

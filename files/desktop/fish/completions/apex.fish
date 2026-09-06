@@ -101,8 +101,10 @@ complete -c apex -n '__apex_group project; and __apex_at 2' -a forget -d 'stop t
 complete -c apex -n '__apex_group project; and __apex_at 2' -a env -d 'the capsule this project builds in'
 complete -c apex -n '__apex_group project; and __apex_at 2' -a layout -d 'windows and terminals'
 complete -c apex -n '__apex_group project; and __apex_at 2' -a switch -d 'go to a project'
-complete -c apex -n '__apex_verb project layout' \
-    -a 'save show restore forget' -d 'layout verb'
+complete -c apex -n '__apex_verb project layout; and __apex_at 3' \
+    -a 'save show restore forget templates open' -d 'layout verb'
+complete -c apex -n '__apex_verb project layout; and __apex_at 4' \
+    -a '(_apex_layout_templates)' -d template
 
 # ── apex request ────────────────────────────────────────────────────────────
 complete -c apex -n '__apex_group request; and __apex_at 2' -a ask -d 'ask for a privileged operation'
