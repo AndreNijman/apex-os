@@ -1123,10 +1123,24 @@ fn secret_key(name: &str) -> bool {
     .any(|needle| name.contains(needle))
 }
 
-/// Walk the whole document and empty the value of every key that is a
-/// credential by name. Answers with the names emptied.
+/// What happens to a credential-valued key, and why the two differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Redaction {
+    /// Replaced with `null`. The export uses this: an importing machine has to
+    /// be told which values it must supply, and a name that vanished is a
+    /// machine that silently starts without a credential it needed.
+    Blank,
+    /// Removed. A running session uses this: a name whose value is gone is an
+    /// `env` entry that would be exported as an empty string, and an empty
+    /// `GITHUB_PERSONAL_ACCESS_TOKEN` authenticates nothing while looking to
+    /// every tool that reads it exactly like a token that does.
+    Drop,
+}
+
+/// Walk the whole document and redact the value of every key that is a
+/// credential by name. Answers with the names redacted.
 ///
-/// A credential is a *value*, so only a string or a number is emptied. The name
+/// A credential is a *value*, so only a string or a number is touched. The name
 /// alone is not enough, and treating it as enough is how a net stops costing a
 /// value and starts costing a definition:
 ///
@@ -1139,44 +1153,97 @@ fn secret_key(name: &str) -> bool {
 ///   repository is not a secret because of what its owner called it.
 ///
 /// So a matching key holding an object is descended into and its children are
-/// judged by their own names. A matching key holding a list has its string and
-/// number elements emptied, because a list of tokens is still a list of tokens.
-/// Emptying a whole block by name is what [`Edit::RedactValues`] is for, and the
-/// table uses it for `env` and `headers`.
-fn blank_secret_keys(v: &mut Value, out: &mut Vec<String>) {
-    let Some(map) = v.as_object_mut() else {
-        if let Some(items) = v.as_array_mut() {
-            for inner in items.iter_mut() {
-                blank_secret_keys(inner, out);
-            }
+/// judged by their own names. A matching key holding a list is a list of
+/// tokens and is redacted whole. Emptying a whole block by name is what
+/// [`Edit::RedactValues`] is for, and the table uses it for `env` and
+/// `headers`.
+fn redact_secret_keys(v: &mut Value, how: Redaction, out: &mut Vec<String>) {
+    if let Some(items) = v.as_array_mut() {
+        for inner in items.iter_mut() {
+            redact_secret_keys(inner, how, out);
         }
         return;
+    }
+    let Some(map) = v.as_object_mut() else {
+        return;
     };
+    // Collected rather than removed in the loop: the iteration holds the map.
+    let mut remove: Vec<String> = Vec::new();
     for (k, inner) in map.iter_mut() {
         if !secret_key(k) {
-            blank_secret_keys(inner, out);
+            redact_secret_keys(inner, how, out);
             continue;
         }
         match inner {
             Value::String(_) | Value::Number(_) => {
-                *inner = Value::Null;
                 out.push(k.clone());
+                match how {
+                    Redaction::Blank => *inner = Value::Null,
+                    Redaction::Drop => remove.push(k.clone()),
+                }
             }
             Value::Array(items) => {
-                let mut hit = false;
-                for item in items.iter_mut() {
-                    if matches!(item, Value::String(_) | Value::Number(_)) {
-                        *item = Value::Null;
-                        hit = true;
-                    }
+                let hit = items
+                    .iter()
+                    .any(|i| matches!(i, Value::String(_) | Value::Number(_)));
+                if !hit {
+                    continue;
                 }
-                if hit {
-                    out.push(k.clone());
+                out.push(k.clone());
+                match how {
+                    Redaction::Blank => {
+                        for item in items.iter_mut() {
+                            if matches!(item, Value::String(_) | Value::Number(_)) {
+                                *item = Value::Null;
+                            }
+                        }
+                    }
+                    Redaction::Drop => remove.push(k.clone()),
                 }
             }
-            other => blank_secret_keys(other, out),
+            other => redact_secret_keys(other, how, out),
         }
     }
+    for k in remove {
+        map.remove(&k);
+    }
+}
+
+fn blank_secret_keys(v: &mut Value, out: &mut Vec<String>) {
+    redact_secret_keys(v, Redaction::Blank, out)
+}
+
+/// A copy of Claude's `settings.json` with every credential-valued entry taken
+/// out, and the names taken out — or `None` when there is nothing to take.
+///
+/// This is how P0-003's first criterion is enforced rather than asserted.
+/// `settings.json` has an `env` block, Claude reads that block itself and
+/// applies it to every tool it runs, and the machine this was written on kept a
+/// GitHub PAT there. So the sandbox's `--clearenv` — which does stop a token
+/// sitting in the user's shell — never sees this one: it arrives after the
+/// process has started, from a file the session is entitled to read.
+///
+/// The daemon writes what comes back into the session scratch and binds it over
+/// the real file, so a confined session reads a settings document with the
+/// model, the hooks and the theme in it and no credential. The real file is not
+/// touched: moving what is in it is a migration the owner runs, and a daemon
+/// that edited `~/.claude` on every session start would be doing it behind
+/// them.
+///
+/// `None` for a file that is not JSON, and that is not a hole. Claude parses
+/// the same file with the same rules; a document it cannot read sets no
+/// variables in the first place.
+pub fn settings_without_credentials(raw: &[u8]) -> Option<(Vec<u8>, Vec<String>)> {
+    let mut doc: Value = serde_json::from_slice(raw).ok()?;
+    let mut names = Vec::new();
+    redact_secret_keys(&mut doc, Redaction::Drop, &mut names);
+    if names.is_empty() {
+        return None;
+    }
+    names.sort();
+    names.dedup();
+    let bytes = serde_json::to_vec_pretty(&doc).ok()?;
+    Some((bytes, names))
 }
 
 /// Apply a mixed file's edits, returning the new bytes and a description of
@@ -2416,6 +2483,70 @@ mod tests {
         ] {
             assert!(!secret_key(no), "{no}");
         }
+    }
+
+    /// The name the machine this was written on actually kept a PAT under, and
+    /// a value shaped like one. Neither is real: the point of every assertion
+    /// below is that this string is *absent*.
+    const FAKE_PAT: &str = "ghp_notarealtokenjustasentinel00000000";
+
+    #[test]
+    fn a_credential_in_the_settings_env_block_does_not_reach_a_session() {
+        // The vector this closes: --clearenv stops a token in the user's shell,
+        // and does nothing about one Claude reads out of its own settings file
+        // after it has started.
+        let raw = format!(
+            r#"{{"model":"opus","env":{{"GITHUB_PERSONAL_ACCESS_TOKEN":"{FAKE_PAT}",
+               "CLAUDE_CODE_ENABLE_TELEMETRY":"1"}},"theme":"dark"}}"#
+        );
+        let (out, names) = settings_without_credentials(raw.as_bytes()).expect("something to strip");
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains(FAKE_PAT), "{text}");
+        assert_eq!(names, vec!["GITHUB_PERSONAL_ACCESS_TOKEN"]);
+
+        // Everything a session needs is still there — a copy that lost the
+        // model or the theme would be a visible regression for the user and a
+        // reason to turn this off.
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["model"], "opus");
+        assert_eq!(doc["theme"], "dark");
+        // ...and the name is gone with the value, not left holding an empty
+        // string. Several tools treat an empty token as an attempt to
+        // authenticate and fail differently from having none at all.
+        assert!(doc["env"].get("GITHUB_PERSONAL_ACCESS_TOKEN").is_none(), "{text}");
+        assert_eq!(doc["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"], "1");
+    }
+
+    #[test]
+    fn a_settings_file_with_no_credential_is_left_alone_entirely() {
+        // `None` means "bind the real file", so this is the state the machine
+        // should be in after a migration, and binding a copy anyway would be a
+        // second file to keep in step for no reason.
+        let raw = br#"{"model":"opus","enabledPlugins":{"password-manager@mkt":true}}"#;
+        assert!(settings_without_credentials(raw).is_none());
+    }
+
+    #[test]
+    fn a_settings_file_that_is_not_json_is_not_guessed_at() {
+        // Claude parses the same bytes with the same rules. A document it
+        // cannot read sets no variables, so there is nothing to strip and
+        // nothing this could usefully do but stand back.
+        assert!(settings_without_credentials(b"{ not json").is_none());
+        assert!(settings_without_credentials(b"").is_none());
+    }
+
+    #[test]
+    fn a_flag_named_like_a_credential_survives_the_copy() {
+        // A boolean is never a credential. Dropping `password-manager@mkt`
+        // would silently disable the plugin, which is the failure mode the
+        // export's own net is written to avoid — the copy uses the same net and
+        // must inherit the same care.
+        let raw = br#"{"enabledPlugins":{"secret-agent@mkt":true},
+                       "env":{"API_TOKEN":"x"}}"#;
+        let (out, names) = settings_without_credentials(raw).unwrap();
+        let doc: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(doc["enabledPlugins"]["secret-agent@mkt"], true);
+        assert_eq!(names, vec!["API_TOKEN"]);
     }
 
     #[test]

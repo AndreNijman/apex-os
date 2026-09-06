@@ -294,6 +294,17 @@ pub struct SandboxSpec {
     /// Read-only paths bound back into the masked home: toolchain caches,
     /// the agent's own configuration, anything `--allow-ro`ed.
     pub ro: Vec<PathBuf>,
+    /// Read-only binds whose source is not their destination: `(from, at)`.
+    ///
+    /// One thing needs this, and it is the reason it exists. Claude's
+    /// `settings.json` has to be in the session — it carries the model, the
+    /// hooks and the theme — and it also carries an `env` block that Claude
+    /// applies to every tool it runs, which on this machine is where a GitHub
+    /// PAT lived. Neither binding the file nor leaving it out is right, so the
+    /// daemon writes a copy with the credential values gone and binds that
+    /// copy *at* the real path. Applied after [`SandboxSpec::ro`], so the copy
+    /// lands on top of the original rather than racing it.
+    pub ro_at: Vec<(PathBuf, PathBuf)>,
     /// Files to blank out *after* the allowlists have been applied.
     ///
     /// Needed because some allowlist entries are directories that a toolchain
@@ -331,6 +342,7 @@ impl SandboxSpec {
             cwd: PathBuf::from("/"),
             rw: Vec::new(),
             ro: Vec::new(),
+            ro_at: Vec::new(),
             mask: Vec::new(),
             env_set: Vec::new(),
             env_pass: Vec::new(),
@@ -528,6 +540,19 @@ pub fn build_argv(
         push("--bind-try");
         push(&p.to_string_lossy());
         push(&p.to_string_lossy());
+    }
+
+    // 7b. Redacted copies, bound over what step 7 just put there. After the
+    //     allowlists and before the masks, because this is the same idea as a
+    //     mask with a file instead of /dev/null: the session gets a document it
+    //     needs, minus the part it may not have.
+    for (from, at) in &spec.ro_at {
+        if from.as_os_str().is_empty() || at.as_os_str().is_empty() {
+            continue;
+        }
+        push("--ro-bind-try");
+        push(&from.to_string_lossy());
+        push(&at.to_string_lossy());
     }
 
     // 8. Blank out credential files that sit inside an allowlisted directory.
@@ -1386,6 +1411,71 @@ mod tests {
         assert!(a.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == "/home/tester"));
         assert!(has_bind(&a, "--bind-try", "/home/tester/Projects/demo"));
         assert!(pos(&a, "--unshare-pid").is_some());
+    }
+
+    #[test]
+    fn a_redacted_copy_is_bound_over_the_file_it_replaces() {
+        // The whole mechanism in one assertion: the real settings file is
+        // bound, and then the copy lands on the same path. Reversed, the
+        // session reads the original and the credential is back.
+        let mut s = spec();
+        let real = PathBuf::from("/home/tester/.claude/settings.json");
+        let copy = PathBuf::from("/tmp/apex-agent/1/claude-settings-redacted.json");
+        s.ro.push(real.clone());
+        s.ro_at.push((copy.clone(), real.clone()));
+        let a = argv(&s);
+
+        let original = a
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind-try" && w[1] == real.to_str().unwrap())
+            .expect("the real settings file is bound");
+        let over = a
+            .windows(3)
+            .position(|w| {
+                w[0] == "--ro-bind-try"
+                    && w[1] == copy.to_str().unwrap()
+                    && w[2] == real.to_str().unwrap()
+            })
+            .expect("the copy is bound at the real path");
+        assert!(
+            original < over,
+            "the copy must come after what it replaces: {a:?}"
+        );
+    }
+
+    #[test]
+    fn a_redacted_copy_is_bound_before_the_credential_masks() {
+        // Step 8 is "nothing bound above can bring a credential back", and a
+        // bind that ran after it would be exactly that.
+        let mut s = spec();
+        s.ro_at.push((
+            PathBuf::from("/tmp/apex-agent/1/copy.json"),
+            PathBuf::from("/home/tester/.claude/settings.json"),
+        ));
+        s.mask.push(PathBuf::from("/home/tester/.cargo/credentials.toml"));
+        let a = argv(&s);
+        let over = a
+            .windows(3)
+            .position(|w| w[1] == "/tmp/apex-agent/1/copy.json")
+            .expect("the copy");
+        let mask = a
+            .windows(3)
+            .position(|w| w[1] == "/dev/null")
+            .expect("the mask");
+        assert!(over < mask, "{a:?}");
+    }
+
+    #[test]
+    fn an_empty_redacted_copy_entry_binds_nothing() {
+        // Same rule as every other list here: an empty path would become
+        // `--ro-bind-try "" ""`, which bwrap reads as a bind of the working
+        // directory.
+        let mut s = spec();
+        s.ro_at.push((PathBuf::new(), PathBuf::from("/home/tester/x")));
+        s.ro_at.push((PathBuf::from("/tmp/y"), PathBuf::new()));
+        let a = argv(&s);
+        assert!(!a.iter().any(|x| x.is_empty()), "{a:?}");
+        assert!(!a.iter().any(|x| x == "/tmp/y"), "{a:?}");
     }
 
     #[test]
