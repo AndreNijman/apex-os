@@ -327,7 +327,11 @@ fn capabilities() -> Result<i32> {
          A resource is named, never given as a URL. The provider resolves the\n\
          name against something you do not control, and the service checks the\n\
          host against the credential, so nobody can turn a grant into a request\n\
-         to somewhere else."
+         to somewhere else.\n\
+         \n\
+         You do not have to type any of this. A managed session finds a `git` on\n\
+         its PATH that sends push, fetch and ls-remote here and execs the real\n\
+         git for everything else, so a skill keeps running `git push`."
     );
     Ok(0)
 }
