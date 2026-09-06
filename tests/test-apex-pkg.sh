@@ -394,6 +394,56 @@ else
     bad "a 32-bit sibling of a protected package is allowed" "REFUSE_RE still rejects i686 siblings the image never ships"
 fi
 
+# 5. A 32-bit package is not a 32-bit application; it is the libraries one
+#    needs. fontconfig.i686 carries /usr/bin/fc-list at the same path as the
+#    x86_64 build, so a single --replacefiles pass over both arches let i686
+#    win: /usr/bin/fc-list became an ELF 32-bit i386 binary shadowing the
+#    image's, fc-list returned zero fonts, and Steam drew no text at all.
+XR=$WORK/extract
+mkdir -p "$XR/rpms" "$XR/stub"
+: > "$XR/rpms/native.rpm"; : > "$XR/rpms/lib32.rpm"; : > "$XR/rpms/any.rpm"
+cat > "$XR/stub/rpm" <<STUB
+#!/bin/sh
+# Answer %{ARCH} by file name so extract_rpms can sort the set, and record the
+# argv of every install pass so the assertions can read it back.
+case "\$*" in
+  *--qf*ARCH*)
+     case "\$*" in
+       *native.rpm*) echo "$(uname -m)" ;;
+       *lib32.rpm*)  echo i686 ;;
+       *)            echo noarch ;;
+     esac
+     exit 0 ;;
+  *--initdb*) exit 0 ;;
+esac
+echo "\$@" >> "$XR/passes"
+exit 0
+STUB
+chmod +x "$XR/stub/rpm"
+rm -f "$XR/passes"
+PATH="$XR/stub:$PATH" call extract_rpms "$XR/rpms" "$XR/root" >/dev/null 2>&1
+
+native_pass="$(grep -F 'native.rpm' "$XR/passes" 2>/dev/null | head -1)"
+lib32_pass="$(grep -F 'lib32.rpm' "$XR/passes" 2>/dev/null | head -1)"
+
+if [ -n "$native_pass" ] && [ -n "$lib32_pass" ] && [ "$native_pass" != "$lib32_pass" ]; then
+    ok "multilib is extracted in a pass of its own"
+else
+    bad "multilib is extracted in a pass of its own" "one pass carried both arches"
+fi
+case "$lib32_pass" in
+    *"--excludepath /usr/bin"*) ok "the multilib pass keeps its hands off /usr/bin" ;;
+    *) bad "the multilib pass keeps its hands off /usr/bin" "a 32-bit binary can shadow the image's" ;;
+esac
+case "$lib32_pass" in
+    *"--excludepath /usr/share"*) ok "and off /usr/share" ;;
+    *) bad "and off /usr/share" "32-bit /usr/share would shadow the image's" ;;
+esac
+case "$native_pass" in
+    *"--excludepath /usr/bin"*) bad "the native pass still installs binaries" "excluded /usr/bin from the native set too" ;;
+    *) ok "the native pass still installs binaries" ;;
+esac
+
 echo
 printf 'apex-pkg: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" = 0 ]
