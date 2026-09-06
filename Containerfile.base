@@ -57,6 +57,7 @@ RUN set -eux; cd /build/apexd; cargo build --release --locked; \
     install -Dm755 target/release/apexd       /out/usr/bin/apexd; \
     install -Dm755 target/release/apex        /out/usr/bin/apex; \
     install -Dm755 target/release/apex-agentd /out/usr/bin/apex-agentd; \
+    install -Dm755 target/release/apex-remoted /out/usr/bin/apex-remoted; \
     install -Dm755 target/release/apex-secretd /out/usr/bin/apex-secretd; \
     install -Dm755 target/release/apex-aid    /out/usr/bin/apex-aid
 
@@ -184,6 +185,17 @@ RUN systemctl enable apexd.service
 # CLI prints the enable command when the socket is absent.
 COPY files/system/units/apex-agentd.service /usr/lib/systemd/user/apex-agentd.service
 
+# ── APEX Remote (apex-remoted, §46) ─────────────────────────────────────────
+# A USER unit, and not enabled, for the same reason as apex-agentd plus one
+# more: this is the only thing in the agent stack that listens on a network,
+# and a network listener that starts because the image contains it is not a
+# decision anybody made. `apex remote enable` is that decision.
+#
+# The firewall stays shut either way. The port is in the catalogue as
+# `apex-remote` and needs `sudo apex firewall allow apex-remote`, which the
+# relay path does not need at all.
+COPY files/system/units/apex-remoted.service /usr/lib/systemd/user/apex-remoted.service
+
 # ── protected secret service (apex-secretd, §11) ────────────────────────────
 # A SYSTEM unit, and enabled — the opposite of apex-agentd, on purpose. It holds
 # every brokered credential and has no verb that returns one, so a git
@@ -302,6 +314,13 @@ RUN set -eux; \
     # Opt-in by design: a per-user daemon holding PTYs must not be enabled for
     # users who never run an agent. Assert it is NOT wired into any target.
     test ! -e /usr/lib/systemd/user/default.target.wants/apex-agentd.service; \
+    # APEX Remote: the same opt-in rule, and the stronger reason for it. This
+    # is the only unit in the agent stack that opens a network listener, so an
+    # image that enabled it would put one on every machine that installed the
+    # image rather than on every machine whose owner asked for one.
+    test -s /usr/lib/systemd/user/apex-remoted.service; \
+    grep -q '^ExecStart=/usr/bin/apex-remoted$' /usr/lib/systemd/user/apex-remoted.service; \
+    test ! -e /usr/lib/systemd/user/default.target.wants/apex-remoted.service; \
     # The secret service is the other way round: a SYSTEM unit, and enabled,
     # because everything that brokers a credential depends on it answering.
     test -s /usr/lib/systemd/system/apex-secretd.service; \
@@ -1251,6 +1270,13 @@ RUN set -eux; \
     # Exceptions are applied into named sets, never by rewriting the policy.
     grep -q 'tcp dport @allowed_tcp accept' /usr/share/apex/nftables/apex.nft; \
     test -s /usr/share/apex/firewall/services; \
+    # APEX Remote's port is in the catalogue and is NOT opened. A network
+    # listener whose port the image opened would make `apex firewall` a record
+    # of what shipped rather than of what the owner allowed — and the relay
+    # path works with it shut, so opening it is a choice about speed and
+    # privacy rather than a requirement.
+    grep -q '^apex-remote  *tcp  *7717 ' /usr/share/apex/firewall/services; \
+    ! grep -q 'apex-remote' /usr/share/apex/nftables/apex.nft; \
     # Enabled by default. A firewall that ships disabled is documentation.
     systemctl enable apex-firewall.service; \
     test -L /etc/systemd/system/multi-user.target.wants/apex-firewall.service; \

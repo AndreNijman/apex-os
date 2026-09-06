@@ -99,10 +99,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "apex-agent-core",
+ "apex-remote-core",
  "apex-secret-core",
  "apexd-core",
  "clap",
  "libc",
+ "serde",
  "serde_json",
  "tokio",
  "toml",

@@ -21,6 +21,7 @@ mod mode;
 mod ops;
 mod proxy;
 mod recover;
+mod remote;
 mod schema;
 mod request;
 mod secret;
@@ -397,6 +398,20 @@ enum Cmd {
         /// Which area to report. Everything, if you do not say.
         #[arg(value_enum)]
         area: Option<DeviceArea>,
+    },
+    /// APEX Remote: pair a phone with this machine, and take it away again.
+    ///
+    /// The phone talks to `apex-remoted`, a per-user unprivileged service that
+    /// is a client of the agent runtime rather than part of it. Everything it
+    /// forwards is recorded as `claude-remote-control`, so a remote request can
+    /// edit a project, run tests and push — and cannot approve a root
+    /// operation or start a break-glass session, whichever device asks.
+    ///
+    /// Reading and revoking need no privilege. Pairing needs you: an agent
+    /// cannot pair a device on your behalf.
+    Remote {
+        #[command(subcommand)]
+        cmd: remote::RemoteCmd,
     },
     /// Projects, agent worktrees and checkpoints.
     Project {
@@ -1353,6 +1368,7 @@ async fn main() {
         Cmd::Env { cmd } => ops::env(&env_argv(cmd)),
         Cmd::Firewall { cmd } => ops::firewall(&firewall_argv(cmd)),
         Cmd::Devices { area } => ops::devices(&devices_argv(area)),
+        Cmd::Remote { cmd } => remote::remote(cmd),
         Cmd::Plugin { cmd } => ops::plugin(&plugin_argv(cmd)),
     };
     std::process::exit(code);
