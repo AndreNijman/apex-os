@@ -34,6 +34,15 @@ use apex_secret_core::store::valid_service_name;
 use apex_secret_core::SecretValue;
 use clap::Subcommand;
 
+/// A literal at the comparison would be one careless edit from meaning nothing,
+/// and the failure it prevents is a "no credential stored" about a store the
+/// user never wrote to. A floor rather than the current revision: later
+/// revisions add capabilities, and a daemon that has the store in the right
+/// place still serves `git-push` correctly.
+const _: () = assert!(BROKERED_SECRET_SERVICE_VERSION > 0);
+const _: () =
+    assert!(BROKERED_SECRET_SERVICE_VERSION <= apex_agent_core::protocol::PROTOCOL_VERSION);
+
 /// `apex secret <verb>`.
 #[derive(Subcommand)]
 pub enum SecretCmd {
@@ -497,20 +506,6 @@ mod tests {
                  would list it blank"
             );
         }
-    }
-
-    #[test]
-    fn the_version_guard_names_the_revision_the_store_moved_in() {
-        // A literal here would be one careless edit from meaning nothing, and
-        // the failure it prevents is a "no credential stored" about a store
-        // the user never wrote to. It is a floor rather than the current
-        // revision — later revisions add capabilities, and a daemon that has
-        // the store in the right place still serves `git-push` correctly.
-        assert!(
-            BROKERED_SECRET_SERVICE_VERSION <= apex_agent_core::protocol::PROTOCOL_VERSION,
-            "the guard names a revision ahead of the protocol, so it can never fire"
-        );
-        assert!(BROKERED_SECRET_SERVICE_VERSION > 0);
     }
 
     #[test]

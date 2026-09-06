@@ -93,6 +93,11 @@ pub fn main(cmd: McpCmd) -> i32 {
 /// daemon closing the connection.
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
+/// A guard ahead of the protocol can never fire, which is the fail-open the
+/// three named revisions exist to catch. Checked when the crate compiles rather
+/// than when a test runs: it is a fact about two constants.
+const _: () = assert!(MCP_BRIDGE_VERSION <= apex_agent_core::protocol::PROTOCOL_VERSION);
+
 fn bridge(service: &str) -> Result<i32> {
     let mut agent = apex_agent_core::client::Client::connect()?;
     require_a_runtime_that_carries_a_body(&mut agent)?;
@@ -339,10 +344,4 @@ mod tests {
         assert_eq!(first_line("401 Unauthorized\nsecond"), "401 Unauthorized");
     }
 
-    #[test]
-    fn the_guard_names_a_revision_the_protocol_has_reached() {
-        // A guard ahead of the protocol can never fire, which is the fail-open
-        // this and the two beside it exist to catch.
-        assert!(MCP_BRIDGE_VERSION <= apex_agent_core::protocol::PROTOCOL_VERSION);
-    }
 }
