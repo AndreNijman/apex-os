@@ -34,7 +34,8 @@ use std::io::Read;
 
 use anyhow::{bail, Result};
 use apex_agent_core::protocol::{
-    Request as AgentRequest, Response as AgentResponse, GENERIC_CAPABILITY_VERSION,
+    Request as AgentRequest, Response as AgentResponse, BROKERED_SECRET_SERVICE_VERSION,
+    GENERIC_CAPABILITY_VERSION,
 };
 use apex_secret_core::client::Client;
 use apex_secret_core::operation::{self, OperationInfo};
@@ -42,6 +43,15 @@ use apex_secret_core::protocol::{Request, Response};
 use apex_secret_core::store::valid_service_name;
 use apex_secret_core::SecretValue;
 use clap::Subcommand;
+
+/// A literal at the comparison would be one careless edit from meaning nothing,
+/// and the failure it prevents is a "no credential stored" about a store the
+/// user never wrote to. A floor rather than the current revision: later
+/// revisions add capabilities, and a daemon that has the store in the right
+/// place still serves `git-push` correctly.
+const _: () = assert!(BROKERED_SECRET_SERVICE_VERSION > 0);
+const _: () =
+    assert!(BROKERED_SECRET_SERVICE_VERSION <= apex_agent_core::protocol::PROTOCOL_VERSION);
 
 /// `apex secret <verb>`.
 #[derive(Subcommand)]
@@ -552,9 +562,6 @@ fn current_project_root() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Test-only: the CLI's own guard names GENERIC_CAPABILITY_VERSION now, and
-    // this is the assertion that the older boundary still sits behind it.
-    use apex_agent_core::protocol::BROKERED_SECRET_SERVICE_VERSION;
 
     #[test]
     fn this_cli_knows_no_operation_names() {
@@ -595,25 +602,11 @@ mod tests {
     }
 
     #[test]
-    fn the_store_guard_never_names_a_revision_ahead_of_the_protocol() {
-        // A literal here would be one careless edit from meaning nothing, and
-        // the failure it prevents is a "no credential stored" about a store
-        // the user never wrote to. It is a floor rather than the current
-        // revision — later revisions add capabilities, and a daemon that has
-        // the store in the right place still serves the older spellings
-        // correctly.
-        assert!(BROKERED_SECRET_SERVICE_VERSION > 0);
-        assert!(
-            BROKERED_SECRET_SERVICE_VERSION <= apex_agent_core::protocol::PROTOCOL_VERSION,
-            "the guard names a revision ahead of the protocol, so it can never fire"
-        );
-    }
-
-    #[test]
     fn the_version_guard_names_the_revision_the_wire_changed_in() {
-        // A literal here would be one careless edit from meaning nothing, and
-        // the failure it prevents is a request an older daemon reads as naming
-        // no capability at all.
+        // The one guard that is NOT just a fact about two constants, so it
+        // stays a test: it says the newest named revision IS the current one,
+        // which is a claim about what a future edit must remember to do. The
+        // store guard beside it is a floor and is checked at compile time.
         assert_eq!(
             GENERIC_CAPABILITY_VERSION,
             apex_agent_core::protocol::PROTOCOL_VERSION,
