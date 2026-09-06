@@ -608,6 +608,21 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             Response::Ok
         }
 
+        Request::Telemetry { id, telemetry } => {
+            let Some(handle) = lookup(daemon, id) else {
+                return no_such_session(id);
+            };
+            let mut s = handle.lock().expect("session lock");
+            // `last_activity` is deliberately NOT touched. A status line runs
+            // on a timer, so treating it as activity would keep every idle
+            // session looking busy — and `session::next_state`'s idle rule,
+            // which decides `waiting_for_user`, reads exactly that field. The
+            // session is described here, not observed doing anything.
+            s.info.telemetry = Some(*telemetry);
+            registry::write_record(&s.info);
+            Response::Ok
+        }
+
         Request::ToolCheck {
             id,
             tool_name,

@@ -371,6 +371,21 @@ pub struct SessionInfo {
     /// would report a fact it has no evidence for. Empty means the daemon
     /// looked and found none.
     ///
+    /// What Claude's own status line last reported about this session
+    /// (§P1-021): the model it is on, how full its context window is, and how
+    /// much of the account's rate-limit windows is gone.
+    ///
+    /// `None` until a status line has run — an agent with none configured, an
+    /// adapter that has no status line, or a session that has not refreshed
+    /// yet. Deliberately not a default-filled struct: "we have never heard"
+    /// and "we heard, and everything was zero" are different facts and only
+    /// one of them is worth drawing.
+    ///
+    /// Carries its own `observed_at`, because a status line runs on a timer
+    /// and on events, so an observation can be a minute or an hour old
+    /// depending on whether the session is doing anything.
+    #[serde(default)]
+    pub telemetry: Option<crate::statusline::Telemetry>,
     /// Written even when empty, which is the whole point: `skip_serializing_if`
     /// would make a daemon that has the graph and found nothing indistinguishable
     /// from one that does not have it.
@@ -504,6 +519,23 @@ pub enum Request {
         /// of a project's own agent definition. Display only.
         #[serde(default)]
         agent_type: Option<String>,
+    },
+    /// Publish what Claude's status line reported (§P1-021).
+    ///
+    /// A request of its own rather than another optional field on
+    /// [`Request::Event`], because it is not an event: nothing happened, a
+    /// timer fired and a program described the session. Folding it into
+    /// `Event` would mean `last_activity` moved every minute for a session
+    /// nobody is using, and the idle rule that decides `waiting_for_user`
+    /// reads exactly that field.
+    ///
+    /// A daemon that predates this answers with a parse error, which
+    /// `apex agent statusline` swallows — the status line still prints, and
+    /// the Agent Center shows no telemetry rather than the session showing no
+    /// status line.
+    Telemetry {
+        id: u32,
+        telemetry: Box<crate::statusline::Telemetry>,
     },
     /// Ask whether a tool call this session is about to make is one its own
     /// confinement would refuse (§6.2).
@@ -1048,7 +1080,8 @@ mod tests {
             grant: None,
             grant_expires_ms: None,
             native_observed: None,
-            children: Vec::new(),
+            telemetry: None,
+        children: Vec::new(),
             pid: 42,
             started: 1,
             last_activity: 2,
@@ -1496,7 +1529,8 @@ mod tests {
             grant: None,
             grant_expires_ms: None,
             native_observed: None,
-            children: Vec::new(),
+            telemetry: None,
+        children: Vec::new(),
             pid: 123,
             started: 0,
             last_activity: 0,
