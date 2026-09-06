@@ -105,6 +105,11 @@ pub struct EgressBridge {
     /// The bridge program. `apex-agentd` re-executed with [`BRIDGE_FLAG`]:
     /// both ends of the socket protocol then live in one binary and there is
     /// no sibling to look up on a path the sandbox may not have.
+    ///
+    /// It has to be a path the *session* can see, which `/usr/bin/apex-agentd`
+    /// is and a development build under `/tmp` or `$HOME` is not — both of
+    /// those are masked. The daemon checks before it starts a session rather
+    /// than leaving it to fail as an exec error inside somebody's terminal.
     pub program: PathBuf,
     /// The daemon's egress socket, inside the session's scratch directory —
     /// already bound read-write, so it needs no mount of its own and cannot
