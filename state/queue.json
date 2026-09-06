@@ -221,7 +221,7 @@
       "title": "Integrate the firewall branches (work is finished, not merged)",
       "after": [],
       "conflicts": [],
-      "note": "DONE and pushed: task/p1-044-firewall-live 4cc3f4b (apex-os) and task/p1-044-firewall-settings e51412b (apex-shell). Optional follow-up its author names: apex firewall status --json so the shell page stops parsing prose. Two policy scope questions stay open on purpose -- LLMNR accepted on every interface, and mDNS accepting unicast from any source. Also open: katana's installed apex predates the firewall subcommand, and whether the page should stop offering commands that image cannot run is a judgement nobody has made."
+      "note": "DONE and pushed: task/p1-044-firewall-live 4cc3f4b (apex-os) and task/p1-044-firewall-settings e51412b (apex-shell). Optional follow-up its author names: apex firewall status --json so the shell page stops parsing prose. Two policy scope questions stay open on purpose -- LLMNR accepted on every interface, and mDNS accepting unicast from any source. Also open: katana's installed apex predates the firewall subcommand, and whether the page should stop offering commands that image cannot run is a judgement nobody has made. ALSO, from the P2-005 agent, measured with positive controls: a hotspot cannot work under the shipped policy, three independent ways -- forward is policy drop, the DHCP rule matches replies rather than a client's DISCOVER, and port 53 is shut. The exception mechanism itself is sound (631/445/2049 reopen immediately). And two lines in `apex devices network` state the current policy as fact and go stale the day it changes; ping task/p2-005-device-maturity when the policy moves."
     },
     {
       "id": "p1-050",

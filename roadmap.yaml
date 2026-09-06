@@ -2025,7 +2025,7 @@ tasks:
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2
-  status: todo
+  status: partial
   area: desktop
   depends_on: []
   acceptance:
@@ -2033,10 +2033,12 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P2-006
   title: Networking maturity
   priority: P2
-  status: todo
+  status: partial
   area: network
   depends_on: []
   acceptance:
@@ -2044,10 +2046,12 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P2-007
   title: Bluetooth/dock/peripheral maturity
   priority: P2
-  status: todo
+  status: partial
   area: hardware
   depends_on: []
   acceptance:
@@ -2055,6 +2059,8 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P2-008
   title: First-party virtualization UX
   priority: P2

@@ -1,22 +1,7 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T05:09+08:00",
+  "updated": "2026-09-07T05:11+08:00",
   "agents": [
-    {
-      "slug": "p2-005",
-      "items": [
-        "P2-005",
-        "P2-006",
-        "P2-007"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p2-005",
-      "branch": "task/p2-005-device-maturity",
-      "agent_id": "aeab351cdb106d1fb",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T04:25+08:00 (fresh agent, resumed from card after the 01:11 limit)",
-      "title": "printing/scanning/shares, networking, Bluetooth/dock maturity"
-    },
     {
       "slug": "p1-020",
       "items": [
@@ -91,6 +76,21 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T05:15+08:00",
       "title": "Night Light, mixed-DPI scaling, creator colour management, creator input/audio, GPU parity"
+    },
+    {
+      "slug": "p1-035",
+      "items": [
+        "P1-035",
+        "P1-036",
+        "P1-037"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p1-035",
+      "branch": "task/p1-035-agent-tooling",
+      "agent_id": "a982ab6a7fa671176",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T05:25+08:00",
+      "title": "screenshot/file injection into TUI agents, worktree status, disposable capsules"
     }
   ]
 }
