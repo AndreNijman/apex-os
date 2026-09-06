@@ -1098,7 +1098,7 @@ tasks:
 - id: P1-002
   title: Implement first-party Cloudflare provider
   priority: P1
-  status: todo
+  status: done
   area: cloudflare
   depends_on:
   - P1-001
@@ -1109,10 +1109,12 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-003
   title: Cloudflare connection and identity UX
   priority: P1
-  status: todo
+  status: partial
   area: cloudflare
   depends_on:
   - P1-002
@@ -1123,10 +1125,12 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-004
   title: Cloudflare Workers capability set
   priority: P1
-  status: todo
+  status: partial
   area: cloudflare
   depends_on:
   - P1-002
@@ -1136,6 +1140,8 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    --evidence
 - id: P1-005
   title: Cloudflare R2 capability set
   priority: P1

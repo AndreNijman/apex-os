@@ -4,6 +4,21 @@
   "concurrency_ceiling": 6,
   "units": [
     {
+      "id": "integrate-cloudflare",
+      "repo": "apex-os",
+      "items": [
+        "(integration only)"
+      ],
+      "title": "Land task/p1-002-cloudflare (2514e09, 6 commits) onto roadmap/v2.2",
+      "after": [
+        "integrate-2"
+      ],
+      "conflicts": [
+        "integrate-2"
+      ],
+      "note": "Its author probed the rebase on a throwaway branch and aborted, leaving a handover. (1) broker.rs conflicts because P0-003 extracted the same privilege-drop helper as drop_to on the same day: keep theirs, delete drop_privileges, fix the one call site in cloudflare/api.rs. (2) providers/mod.rs: default_registry() now takes run_dir and registers mcp::McpProvider; expected ids are cloudflare's 7 plus git's 3 plus mcp.request. (3) Service::add now takes NewService{..}; two call sites in cloudflare/tests.rs use the old 6-arg form. (4) bearer.rs: a fails_with_token field against the tip's NewService rewrite of the same fixtures. (5) The service.rs leak fix applies cleanly and should already have landed separately. Not a conflict but do it anyway: broker.rs now has run_curl + quoted, the same curl-config-on-stdin design the Cloudflare author reached independently, so cloudflare/api.rs should be rewritten on top of it rather than carrying its own copy. ServiceInfo also gained an auth field (bearer/raw) that the provider currently hardcodes."
+    },
+    {
       "id": "shell-orphans",
       "repo": "apex-shell",
       "items": [
@@ -60,11 +75,12 @@
       ],
       "title": "Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets",
       "after": [
-        "p1-002"
+        "integrate-cloudflare"
       ],
       "conflicts": [
         "p1-002"
-      ]
+      ],
+      "note": "26 of section 13.2's 32 operations remain after P1-002 took seven. Two framework gaps the Cloudflare author hit and worked around locally, which P1-005 should fix generally rather than repeat: Bound carries no provider payload, so bind cannot hand what it resolved to perform \u2014 Cloudflare re-resolves and refuses on mismatch, but git does NOT, which makes git's host pin a TOCTOU rather than a guarantee; and mint cannot reach a companion service, which is why OAuth refresh could not be expressed as mint and why P1-011 will hit the same wall."
     },
     {
       "id": "p1-008",

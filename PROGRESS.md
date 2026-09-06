@@ -301,6 +301,42 @@ fixed on `roadmap/v2.2`:
   whose name appears at a different EVR for the host arch is now dropped as an
   application fork rather than a multilib library.
 
+### Nobody could have been running clippy, and three reports said they were
+
+`clippy` is installed on neither the L16 nor katana, and neither machine has
+`rustup`, so `cargo clippy` exits with "no such command". Checked on both, after
+the P1-002 agent said so. Every unqualified "clippy clean" in this file before
+2026-09-07 is therefore unverified as written.
+
+Two agents did run it honestly, in a container — `docker.io/library/rust:1` plus
+`rustup component add clippy` — and that is now the only accepted method, wrapped
+as `apex-os/tests/run-clippy.sh [<ref>]` so nobody has to rediscover it. What is
+**not** accepted is `RUSTFLAGS="-D warnings" cargo build --all-targets` reported
+as clippy: it is a strictly weaker check that misses every clippy-specific lint,
+and one report substituted it without saying so until asked.
+
+The result itself holds, which is worth saying plainly rather than leaving the
+correction sounding worse than it is: `9a24d2b` was run through the container and
+came back **exit 0, zero warnings across the workspace**. What was wrong was the
+evidence, not the code.
+
+### Findings against P1-001 that its own evidence could not have seen
+
+The first provider written on top of the framework found two gaps, and both are
+worth more than the provider:
+
+- **`Bound` carries no provider payload**, so `bind` cannot hand what it resolved
+  to `perform`. Cloudflare works around it by re-resolving and refusing on
+  mismatch. **git does not** — which means git's host pin, the invariant P1-001's
+  evidence called "an invariant for every provider written later", is a TOCTOU
+  rather than a guarantee.
+- **`mint` cannot reach a companion service**, which is why Cloudflare's OAuth
+  refresh could not be expressed as `mint`. P1-011 (temporary task credentials)
+  will hit the same wall.
+
+Also found and still live on the integration tip when reported: a refusal path
+out of a credential use that scrubs nothing.
+
 ### The resume system, rebuilt (23:20–23:50)
 
 Andre: *"stop losing work when we hit usage limits"* and then, after watching
