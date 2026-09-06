@@ -37,7 +37,7 @@ use apex_agent_core::protocol::{
     Request as AgentRequest, Response as AgentResponse, GENERIC_CAPABILITY_VERSION,
 };
 use apex_secret_core::client::Client;
-use apex_secret_core::operation::{OperationId, OperationInfo};
+use apex_secret_core::operation::{self, OperationInfo};
 use apex_secret_core::protocol::{Request, Response};
 use apex_secret_core::store::valid_service_name;
 use apex_secret_core::SecretValue;
@@ -308,7 +308,7 @@ fn capabilities() -> Result<i32> {
 fn print_options(op: &OperationInfo) {
     for param in &op.params {
         let need = if param.required { "required" } else { "optional" };
-        println!("  {:<26}   -o {}=…  {} ({need})", "", param.name, param.summary);
+        println!("      -o {}=…  {} ({need})", param.name, param.summary);
     }
 }
 
@@ -368,11 +368,16 @@ fn grants(json: bool) -> Result<i32> {
 ///   1  the service refused, or the operation failed
 ///   2  the request was malformed
 fn use_it(service: &str, operation: &str, resource: &str, options: &[String]) -> Result<i32> {
-    // Shape only, so a typo is immediate. This CLI does not know which
-    // operations exist — the service does, and telling it here would be a list
-    // to keep in step. Both daemons validate again and trust none of this.
-    if let Err(e) = OperationId::parse(operation) {
-        eprintln!("apex secret: {e}");
+    // Shape only. This CLI does not know which operations exist — the service
+    // does, and a list here would be one to keep in step with every provider
+    // added. An older spelling has to reach the service too, because only its
+    // registry knows one. Both daemons validate again and trust none of this.
+    if !operation::valid_operation_ref(operation) {
+        eprintln!(
+            "apex secret: '{}' is not an operation name. One looks like \
+             `provider.thing.verb` — see `apex secret capabilities`",
+            operation.escape_debug()
+        );
         return Ok(2);
     }
     let mut params = std::collections::BTreeMap::new();

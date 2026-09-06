@@ -74,7 +74,7 @@ use std::collections::BTreeMap;
 use apex_agent_core::protocol::{ErrorKind, Response};
 use apex_secret_core::capability::CapabilityRecord;
 use apex_secret_core::client::Client;
-use apex_secret_core::operation::{OperationId, Params};
+use apex_secret_core::operation::{self, Params};
 use apex_secret_core::protocol as secret_protocol;
 
 use crate::peer::Peer;
@@ -110,12 +110,22 @@ pub fn use_capability(
     // Shape only, and that is the whole of what this daemon knows about a
     // capability. Which operations exist, what a resource means for one, and
     // which options it takes are the provider's, declared in `apex-secretd`'s
-    // registry — so a provider added there needs nothing here. What is worth
-    // catching locally is a name that could not be an operation under any
-    // provider, because that is a typo and the round trip tells the user
-    // nothing extra.
-    if let Err(e) = OperationId::parse(operation) {
-        return Response::error(ErrorKind::BadRequest, e.to_string());
+    // registry — so a provider added there needs nothing here.
+    //
+    // `valid_operation_ref` and not `OperationId::parse`: an older spelling
+    // like `git-fetch` is a name only the registry can resolve, and a daemon
+    // that refused it here would refuse a capability the owner has granted.
+    // What this does refuse is a string that could carry framing into a grant
+    // key or an audit line.
+    if !operation::valid_operation_ref(operation) {
+        return Response::error(
+            ErrorKind::BadRequest,
+            format!(
+                "'{}' is not an operation name. One looks like `provider.thing.verb` \
+                 — lower case, dot-separated, e.g. `git.push`",
+                operation.escape_debug()
+            ),
+        );
     }
 
     let who = privilege::origin(daemon, peer);
@@ -167,7 +177,7 @@ pub fn use_capability(
     };
 
     let mut record = CapabilityRecord::new(service, operation, resource);
-    record.params = params.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Params>();
+    record.params = Params::from(params.clone());
     record.project = Some(project);
     // Attribution, not authentication. `apex-secretd` cannot re-derive either
     // of these — it would have to trust a list of session pids published by a
@@ -281,18 +291,26 @@ mod tests {
     }
 
     #[test]
-    fn an_operation_name_is_shape_checked_before_anything_is_sent() {
-        // A typo does not become a connection to the secret service and a
-        // round trip. What this daemon checks is the SHAPE — it does not know
-        // which operations exist, and must not, or a provider added to
-        // `apex-secretd` would need a line here too.
-        for evil in ["exec", "git push", "https://x/y", "", "GIT.PUSH"] {
-            assert!(OperationId::parse(evil).is_err(), "{evil}");
+    fn an_operation_name_is_shape_checked_and_nothing_more() {
+        // What this daemon checks is the SHAPE. It does not know which
+        // operations exist and must not, or a provider added to `apex-secretd`
+        // would need a line here too — including names for providers this
+        // build has never heard of, and older spellings only the registry can
+        // resolve.
+        for good in [
+            "git.push",
+            "git-fetch",
+            "cloudflare.r2.object.read",
+            "aws.s3.object.write",
+            "exec",
+        ] {
+            assert!(operation::valid_operation_ref(good), "{good}");
         }
-        // Including names for providers this build has never heard of: the
-        // shape is all this layer is entitled to an opinion about.
-        for good in ["git.push", "cloudflare.r2.object.read", "aws.s3.object.write"] {
-            assert!(OperationId::parse(good).is_ok(), "{good}");
+        // `exec` above is deliberate: it is well-shaped and no provider offers
+        // it, so the refusal belongs to `apex-secretd`. What is refused here is
+        // anything that could carry framing into a grant key or an audit line.
+        for evil in ["git push", "https://x/y", "", "GIT.PUSH", "git.push;sh"] {
+            assert!(!operation::valid_operation_ref(evil), "{evil}");
         }
     }
 
