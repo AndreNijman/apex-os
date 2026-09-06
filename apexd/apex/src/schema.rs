@@ -197,7 +197,7 @@ fn status(as_json: bool) -> i32 {
     }
 
     println!("Persistent state — what does NOT roll back with the image\n");
-    println!("{:<18}{:<14}{}", "STORE", "WRITTEN BY", "STATE");
+    println!("{:<18}{:<14}STATE", "STORE", "WRITTEN BY");
     for r in &rows {
         let who = match r.authored {
             Authored::Human => "you",

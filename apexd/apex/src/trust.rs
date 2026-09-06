@@ -351,7 +351,7 @@ fn classify(reqs: &Value) -> Policy {
         .iter()
         .filter_map(|r| r.get("type").and_then(Value::as_str))
         .collect();
-    if types.iter().any(|t| *t == "insecureAcceptAnything") {
+    if types.contains(&"insecureAcceptAnything") {
         return Policy::AcceptsAnything;
     }
     if let Some(t) = types
@@ -817,8 +817,13 @@ pub fn render_block(r: &Report) -> String {
 
 fn pull_sentence(p: &Pull) -> String {
     match p {
+        // Deliberately not naming a scheme. `ostree-unverified-registry:` and
+        // `ostree-unverified-image:` both land here, and printing the first
+        // for a machine deployed with the second would be a small, confident
+        // lie in the one report whose value is that it does not tell any.
         Pull::Unverified => {
-            "no signature was checked (ostree-unverified-registry)".to_string()
+            "no signature was checked — the deployment's origin records an unverified pull"
+                .to_string()
         }
         Pull::ImageSigned => "the signature policy was applied".to_string(),
         Pull::Remote(name) => format!("verified against ostree remote {name}"),
