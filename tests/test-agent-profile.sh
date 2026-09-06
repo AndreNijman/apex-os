@@ -357,6 +357,13 @@ r read_skills           "$HOME/.claude/skills/demo/SKILL.md"
 r read_instructions     "$HOME/.claude/CLAUDE.md"
 r read_credentials      "$HOME/.claude/.credentials.json"
 r read_ssh              "$HOME/.ssh/id_ed25519"
+
+# P0-003 criterion 1. The settings document as the session reads it, and the
+# whole environment, both copied out so the sentinel can be looked for rather
+# than reasoned about. The fixture's settings.json carries a PAT in its `env`
+# block, which Claude would otherwise apply to every tool it runs.
+( cat "$HOME/.claude/settings.json" ) > "${PWD}/probe-settings.json" 2>/dev/null
+( env ) > "${PWD}/probe-env.txt" 2>/dev/null
 p done 0
 STUBEOF
 chmod 0755 "${STUB}/claude"
@@ -451,6 +458,40 @@ done
 [ "$(probe read_ssh)" != "0" ] \
     && ok "the rest of the home is still not there" \
     || { bad "the rest of the home is still not there"; cat "$LOG"; }
+
+# ── P0-003 criterion 1: the credential in settings.json is not in the session ─
+#
+# Asserted as an absence of the sentinel, in the file the session reads and in
+# the environment it runs with. The value is a fake; what is real is the path it
+# would take — Claude reads its own `env` block after the process has started,
+# so `--clearenv` never sees it.
+SETTINGS_SEEN="${WORK}/proj/probe-settings.json"
+SESSION_ENV="${WORK}/proj/probe-env.txt"
+if [ -s "$SETTINGS_SEEN" ]; then
+    ok "the session read a settings document"
+    grep -q 'PRIVATE-ENV-VALUE' "$SETTINGS_SEEN" \
+        && bad "the settings document the session read still carries the PAT" \
+        || ok "the settings document the session read carries no credential"
+    grep -q '"GITHUB_TOKEN"' "$SETTINGS_SEEN" \
+        && bad "the name is still there, so the session exports an empty token" \
+        || ok "the credential's name went with its value"
+    grep -q 'opus' "$SETTINGS_SEEN" \
+        && ok "and the model, hooks and theme survived the copy" \
+        || { bad "the copy lost settings the session needs"; cat "$SETTINGS_SEEN"; }
+else
+    bad "the session read a settings document"
+fi
+if [ -s "$SESSION_ENV" ]; then
+    grep -q 'PRIVATE-ENV-VALUE' "$SESSION_ENV" \
+        && bad "the PAT is in the session's environment" \
+        || ok "no credential reached the session's environment"
+else
+    bad "the session reported its environment"
+fi
+# Nothing under the fixture's own ~/.claude was edited to achieve any of this.
+grep -q 'PRIVATE-ENV-VALUE' "${C}/settings.json" \
+    && ok "the user's own settings.json is untouched on disk" \
+    || bad "the daemon edited the user's settings.json"
 
 printf '\nprofile: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
