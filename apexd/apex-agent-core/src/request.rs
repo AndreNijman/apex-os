@@ -492,6 +492,16 @@ pub struct PrivilegeRequest {
     /// Exit status of the operation, when it has run.
     #[serde(default)]
     pub exit_code: Option<i32>,
+    /// The §4.4 system-access grant that covered this request, when one did.
+    ///
+    /// A decided request has one of two authorities behind it, and an audit is
+    /// read to tell them apart: a standing per-project grant the human left in
+    /// `grants.json`, or a short-lived session grant that was authenticated at
+    /// the top of this session and dies with it. Recording the grant id lets
+    /// the two trails be joined — this record, and the `APEX_GRANT_ID` line
+    /// journald holds for the same grant.
+    #[serde(default)]
+    pub system_grant: Option<u32>,
 }
 
 impl PrivilegeRequest {
@@ -686,6 +696,10 @@ pub fn audit(path: &Path, event: &str, req: &PrivilegeRequest) -> std::io::Resul
         "request_origin": req.request_origin.map(|o| o.as_str()),
         "origin_source": req.origin_source.map(|s| s.as_str()),
         "decision": req.decision.as_str(),
+        // Which authority decided it. A session grant is not a standing
+        // project grant, and a line that cannot tell them apart cannot answer
+        // "what was root allowed to do while that window was open".
+        "system_grant": req.system_grant,
         "exit_code": req.exit_code,
     });
     let mut file = std::fs::OpenOptions::new()
@@ -813,6 +827,7 @@ mod tests {
             decided_ms: None,
             executed_ms: None,
             exit_code: None,
+            system_grant: None,
         }
     }
 
@@ -1346,6 +1361,37 @@ mod tests {
         let last: serde_json::Value =
             serde_json::from_str(text.lines().last().unwrap()).expect("JSON");
         assert!(last["request_origin"].is_null(), "{last}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn the_audit_line_names_the_system_grant_that_decided_the_request() {
+        // §4.4's audit criterion. A request decided by a session grant and one
+        // decided by a standing project grant look identical in the trail
+        // unless the line says which — and only one of them is still true five
+        // minutes later.
+        let d = tmpdir("audit-grant");
+        let log = d.join("audit.jsonl");
+        let mut r = req(Verb::Update);
+        r.decision = Decision::AllowOnce;
+        r.system_grant = Some(3);
+        audit(&log, "requested-and-covered", &r).expect("audit");
+
+        let text = std::fs::read_to_string(&log).expect("read");
+        let v: serde_json::Value = serde_json::from_str(text.trim()).expect("one JSON object");
+        assert_eq!(v["event"], "requested-and-covered");
+        assert_eq!(v["decision"], "allow_once");
+        assert_eq!(v["system_grant"], 3, "the line must join to the grant: {v}");
+
+        // A request no grant covered says so with a null, rather than leaving
+        // the key out and letting a reader assume the previous line's answer.
+        r.system_grant = None;
+        r.decision = Decision::Pending;
+        audit(&log, "requested", &r).expect("audit");
+        let text = std::fs::read_to_string(&log).expect("read");
+        let last: serde_json::Value =
+            serde_json::from_str(text.lines().last().unwrap()).expect("JSON");
+        assert!(last["system_grant"].is_null(), "{last}");
         std::fs::remove_dir_all(&d).ok();
     }
 

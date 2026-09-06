@@ -239,11 +239,20 @@ impl GrantAuthority {
 
     /// Whether an in-force grant for `session` covers `verb`.
     pub fn covers(&self, session: Option<u32>, verb: &str, now_ms: u64) -> bool {
-        let Some(session) = session else {
-            return false;
-        };
+        self.covering_grant(session, verb, now_ms).is_some()
+    }
+
+    /// The id of the in-force grant that covers `verb` for `session`.
+    ///
+    /// The same decision as [`GrantAuthority::covers`], but saying *which*
+    /// grant, because a request decided by a session grant has to record the
+    /// authority that decided it or the audit cannot tell it apart from a
+    /// standing project grant.
+    pub fn covering_grant(&self, session: Option<u32>, verb: &str, now_ms: u64) -> Option<u32> {
+        let session = session?;
         self.active_for(session, now_ms)
-            .is_some_and(|g| g.covers(verb))
+            .filter(|g| g.covers(verb))
+            .map(|g| g.id)
     }
 
     /// Take a grant back.
@@ -592,6 +601,42 @@ mod tests {
         // A verb outside the vocabulary is not covered, so a grant cannot be
         // widened by inventing a name.
         assert!(!a.covers(Some(7), "rm-rf", now));
+    }
+
+    #[test]
+    fn the_authority_says_which_grant_covered_a_verb_not_only_that_one_did() {
+        // The request record has to name the grant, so `covers` cannot be the
+        // only answer available: a bool cannot be joined to the journal line
+        // for the same window.
+        let (a, _dir) = isolated();
+        let now = 10_000;
+        let g = a.issue(
+            proof(),
+            GrantKind::SystemAccess,
+            7,
+            "claude",
+            None,
+            60_000,
+            RequestOrigin::LocalTerminal,
+            now,
+        );
+        assert_eq!(a.covering_grant(Some(7), "install", now), Some(g.id));
+        assert_eq!(
+            a.covering_grant(Some(8), "install", now),
+            None,
+            "another session"
+        );
+        assert_eq!(a.covering_grant(None, "install", now), None, "no session");
+        assert_eq!(
+            a.covering_grant(Some(7), "rm-rf", now),
+            None,
+            "a verb outside the vocabulary"
+        );
+        assert_eq!(
+            a.covering_grant(Some(7), "install", now + 60_001),
+            None,
+            "after the window"
+        );
     }
 
     #[test]
