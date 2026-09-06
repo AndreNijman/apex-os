@@ -200,6 +200,33 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     }
     adapter.apply_sandbox(&mut spec);
 
+    // The profile's writable directories have to exist before the sandbox binds
+    // them: bwrap binds with `-try`, and a `-try` for a path that is not there
+    // is a no-op, so the entry would resolve inside the tmpfs that masks $HOME.
+    // The agent would write its transcripts and its trusted-directory list into
+    // memory and lose both at exit — which reads as the agent forgetting, not
+    // as a sandbox that dropped a mount. Not fatal: a session with a
+    // session-local plugin cache still runs, and refusing to start over a
+    // directory nobody has needed yet would be worse.
+    if policy.sandbox.is_confined() {
+        if let Some(profile) = adapter.profile() {
+            match profile.prepare(&spec.home) {
+                Ok(made) if !made.is_empty() => eprintln!(
+                    "apex-agentd: created {} missing {} profile director{}",
+                    made.len(),
+                    adapter.id,
+                    if made.len() == 1 { "y" } else { "ies" }
+                ),
+                Ok(_) => {}
+                Err(e) => eprintln!(
+                    "apex-agentd: could not prepare the {} profile ({e}); \
+                     anything it writes below a missing directory stays in the session",
+                    adapter.id
+                ),
+            }
+        }
+    }
+
     // The allowlist's only route out. Started before the session, so an agent
     // that resolves a proxy on its first line finds one there; and inside the
     // scratch directory, which is already bound read-write, so it needs no

@@ -184,6 +184,25 @@ impl std::fmt::Display for Role {
     }
 }
 
+/// Whether an entry is a directory or a single file.
+///
+/// Recorded rather than guessed from the name, because it decides what the
+/// runtime creates before a confined session starts. `bwrap`'s `-try` binds are
+/// no-ops for a path that is not there, and a writable entry that was not bound
+/// lands in the tmpfs that masks `$HOME` — so a machine where Claude has never
+/// run would start its first confined session, write its transcripts and its
+/// trusted-directory list into memory, and lose both at exit. It would look
+/// like Claude forgetting, which is the hardest kind of bug to attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A directory. Created before a session when it is writable and missing.
+    Dir,
+    /// A single file. Never created: an empty `settings.json` is not the same
+    /// as no `settings.json`, and every one of these is a file the agent writes
+    /// itself the first time it has something to put in it.
+    File,
+}
+
 /// What a path is relative to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Base {
@@ -227,6 +246,8 @@ const MCP_KEYS: &[&str] = &[
 pub struct Entry {
     /// Path relative to [`Entry::base`].
     pub path: &'static str,
+    /// Directory or file.
+    pub kind: Kind,
     /// What it is relative to.
     pub base: Base,
     /// Reusable, machine-local or secret.
@@ -271,6 +292,7 @@ pub const CLAUDE: Profile = Profile {
         // ── reusable ────────────────────────────────────────────────────────
         Entry {
             path: "CLAUDE.md",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::Reusable,
             mount: Mount::ReadOnly,
@@ -280,6 +302,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "settings.json",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::Mixed,
             mount: Mount::ReadOnly,
@@ -291,6 +314,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "remote-settings.json",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::Reusable,
             mount: Mount::ReadOnly,
@@ -300,6 +324,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "statusline.sh",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::Reusable,
             mount: Mount::ReadOnly,
@@ -309,6 +334,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "commands",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::Reusable,
             mount: Mount::ReadOnly,
@@ -318,6 +344,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "skills",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::Reusable,
             mount: Mount::ReadOnly,
@@ -327,6 +354,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "agents",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::Reusable,
             mount: Mount::ReadOnly,
@@ -336,6 +364,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "plugins/known_marketplaces.json",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::Mixed,
             mount: Mount::ReadOnly,
@@ -352,6 +381,7 @@ pub const CLAUDE: Profile = Profile {
         // ── machine-local, still mounted ────────────────────────────────────
         Entry {
             path: "plugins/marketplaces",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::ReadOnly,
@@ -361,6 +391,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "plugins/cache",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -370,6 +401,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "plugins/data",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -379,6 +411,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "plugins/installed_plugins.json",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -388,6 +421,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "plugins/.last_inuse_sweep",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -397,6 +431,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "projects",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -406,6 +441,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "sessions",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -415,6 +451,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "session-env",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -424,6 +461,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "shell-snapshots",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -433,6 +471,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "todos",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -442,6 +481,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "tasks",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -451,6 +491,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "jobs",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -460,6 +501,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "file-history",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -469,6 +511,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "history.jsonl",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -478,6 +521,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "paste-cache",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -487,6 +531,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "backups",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -496,6 +541,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "cache",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -505,6 +551,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "statsig",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -514,6 +561,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "stats-cache.json",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -523,6 +571,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "policy-limits.json",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -532,6 +581,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: ".last-cleanup",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -541,6 +591,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: ".last-update-result.json",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -550,6 +601,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: ".claude.json",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -559,6 +611,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "daemon.lock",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -568,6 +621,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "daemon.status.json",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::MachineLocal,
             mount: Mount::Writable,
@@ -578,6 +632,7 @@ pub const CLAUDE: Profile = Profile {
         // ── the sidecar in $HOME ────────────────────────────────────────────
         Entry {
             path: ".claude.json",
+            kind: Kind::File,
             base: Base::Home,
             class: Class::Mixed,
             // Writable, and the one exportable thing that is: Claude records
@@ -598,6 +653,7 @@ pub const CLAUDE: Profile = Profile {
         // ── credentials ─────────────────────────────────────────────────────
         Entry {
             path: ".credentials.json",
+            kind: Kind::File,
             base: Base::Root,
             class: Class::Secret,
             mount: Mount::Writable,
@@ -607,6 +663,7 @@ pub const CLAUDE: Profile = Profile {
         },
         Entry {
             path: "daemon",
+            kind: Kind::Dir,
             base: Base::Root,
             class: Class::Secret,
             mount: Mount::Writable,
@@ -689,6 +746,34 @@ impl Profile {
         self.entry_for(base, rel)
             .map(|e| e.class)
             .unwrap_or(Class::MachineLocal)
+    }
+
+    /// Create the writable directories a confined session needs, and answer
+    /// with the ones that had to be made.
+    ///
+    /// Called before the session is spawned, because `bwrap` binds with `-try`
+    /// and a `-try` for a path that does not exist is a no-op: the entry then
+    /// resolves inside the tmpfs that masks `$HOME`, the agent writes there
+    /// happily, and the writes are gone when the session ends. Directories
+    /// only — see [`Kind::File`].
+    ///
+    /// Errors are not fatal to the caller's judgement but are returned, because
+    /// a home that cannot be written to is worth reporting once rather than
+    /// discovering as an agent that will not save anything.
+    pub fn prepare(&self, home: &Path) -> io::Result<Vec<PathBuf>> {
+        let mut made = Vec::new();
+        for e in self.entries {
+            if e.mount != Mount::Writable || e.kind != Kind::Dir {
+                continue;
+            }
+            let p = self.entry_path(home, e);
+            if p.symlink_metadata().is_ok() {
+                continue;
+            }
+            std::fs::create_dir_all(&p)?;
+            made.push(p);
+        }
+        Ok(made)
     }
 
     /// Home-relative paths a confined session gets, split by how.
@@ -2665,14 +2750,53 @@ mod tests {
     fn the_mount_lists_cover_every_entry_and_overlap_in_nothing() {
         let (ro, rw) = CLAUDE.mounts();
         assert_eq!(ro.len() + rw.len(), CLAUDE.entries.len());
-        for p in &ro {
-            assert!(!rw.contains(p), "{p} is both read-only and writable");
+        // Not merely different strings: the sandbox binds the read-only list
+        // and then the writable one, so a writable path *under* a read-only
+        // one silently reopens it. `plugins/known_marketplaces.json` is
+        // read-only beside three writable `plugins/…` siblings, which is the
+        // shape one edit away from that.
+        for a in ro.iter().chain(rw.iter()) {
+            for b in ro.iter().chain(rw.iter()) {
+                if std::ptr::eq(a, b) {
+                    continue;
+                }
+                let under = Path::new(b)
+                    .components()
+                    .zip(Path::new(a).components())
+                    .all(|(x, y)| x == y)
+                    && Path::new(b).components().count() < Path::new(a).components().count();
+                assert!(!under, "{a} is inside {b}, so the inner mount wins");
+                assert_ne!(a, b, "{a} is bound twice");
+            }
         }
         // Every path is under the home, and the profile root is never itself
         // one of them: binding the whole directory is what P0-010 replaced.
         for p in ro.iter().chain(rw.iter()) {
             assert!(!p.starts_with('/'), "{p}");
             assert_ne!(p.as_str(), CLAUDE.root, "the whole profile was bound");
+        }
+    }
+
+    #[test]
+    fn the_writable_half_is_session_and_plugin_state_and_nothing_else() {
+        // P0-010 criterion 2 read the other way round. Every writable entry is
+        // one of: state a session accumulates, plugin state a plugin rewrites,
+        // recomputable cache, or a credential the agent itself manages. A
+        // writable entry with any other role is a piece of the profile a
+        // confined session was handed the ability to rewrite.
+        for e in CLAUDE.entries {
+            if e.mount != Mount::Writable {
+                continue;
+            }
+            assert!(
+                matches!(
+                    e.role,
+                    Role::Session | Role::Plugins | Role::Cache | Role::Credential | Role::Mcp
+                ),
+                "{} is writable and is {} state",
+                e.path,
+                e.role
+            );
         }
     }
 }
