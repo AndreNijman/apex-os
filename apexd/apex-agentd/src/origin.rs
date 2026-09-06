@@ -161,6 +161,36 @@ mod tests {
     }
 
     #[test]
+    fn an_orphan_of_a_session_is_still_not_a_human_at_this_machine() {
+        // The escape from the ancestry check, and why the cgroup check covers
+        // it. `peer::resolve_by_ancestry` finds a session by walking /proc
+        // parents, so a process that orphans itself — double-fork, or simply
+        // outliving its parent — is reparented and the walk no longer reaches
+        // the session's pid. It looks like an ordinary process of this user.
+        //
+        // It is not reparented to pid 1. Under systemd a user process is
+        // reparented inside the user manager, so its cgroup is under
+        // `user@N.service`, which is what this reads as a scheduled job —
+        // nobody is present. §7 gives that the remote column, so a grant is
+        // refused there too.
+        //
+        // The two mechanisms are not redundant: ancestry catches the ordinary
+        // case and attributes it to the right session for the audit trail,
+        // and this catches the case ancestry loses. Neither alone would do.
+        for cg in [
+            "/user.slice/user-1000.slice/user@1000.service/apex-agentd.service",
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/apex-agentd.service",
+            "/user.slice/user-1000.slice/user@1000.service/init.scope",
+        ] {
+            for tty in [true, false] {
+                let got = classify(cg, tty).expect("classified");
+                assert_eq!(got, RequestOrigin::ScheduledJob, "{cg}");
+                assert!(!got.is_local(), "{cg} was called local");
+            }
+        }
+    }
+
+    #[test]
     fn a_placement_that_is_neither_is_refused_rather_than_assumed_local() {
         // The fail-open this module exists to avoid. `RequestOrigin`'s Default
         // is `local-terminal`, so any path that returns a default here hands
