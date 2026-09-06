@@ -35,8 +35,11 @@ sudo ostree admin pin 0          # pin the current (index-0) deployment
 sudo ostree admin pin --unpin 2
 ```
 
-`apex pin` (M3, the CLI over apexd+bootc) wraps this and auto-pins before
-kernel-channel switches.
+`apex pin` (M3, the CLI over apexd+bootc) wraps this. `sudo apex channel set`
+pins automatically when the move is toward `stable`, which usually deploys an
+older image: bootc keeps the booted deployment and one more, so a switch
+backwards followed by one update can evict the deployment you would return to.
+Until §26 nothing auto-pinned before anything, and this line promised it.
 
 ## 2. Source ↔ image mapping (the git side)
 
@@ -49,9 +52,14 @@ skopeo inspect docker://ghcr.io/andrenijman/apex-os:daily \
 
 That SHA is a commit on `main`. So "roll the OS back to how it was on
 2026-07-21" and "check out that commit" are the same operation from two ends.
-Promotions to a stable channel get an annotated git tag (`good-YYYYMMDD`),
-and the matching image is tagged the same — pinning a deployment and checking
-out its tag land you on identical state.
+
+An earlier version of this section said promotions to a stable channel get an
+annotated git tag (`good-YYYYMMDD`) and the image is tagged the same. No such
+tag has ever been created, and until §26 there was no stable channel to promote
+to. What exists now is `.github/workflows/promote-channel.yml`, which moves a
+`stable`, `candidate` or `beta` tag onto a digest; the git commit is still
+recoverable from that digest through the `org.opencontainers.image.revision`
+label above, which is the link that has always been real.
 
 ## 3. Rebuild-from-git drill (the full loop)
 
