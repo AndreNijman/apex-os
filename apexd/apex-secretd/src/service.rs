@@ -468,13 +468,30 @@ impl Service {
         // explicit that it is not handed to the agent either.
         let minted = match backend.mint(&req, &bound, &stored) {
             Ok(minted) => minted,
-            Err(e) => return refuse(&record, e.to_string(), kind_of(&e)),
+            // Scrubbed, like every refusal from here on. See the note below.
+            Err(e) => {
+                let reason = scrub_all(&e.to_string(), &[Some(&stored)]);
+                return refuse(&record, reason, kind_of(&e));
+            }
         };
         let presented = minted.as_ref().unwrap_or(&stored);
 
         let out = match backend.perform(&req, &bound, presented) {
             Ok(out) => out,
-            Err(e) => return refuse(&record, e.to_string(), kind_of(&e)),
+            // A provider is not supposed to put a credential in an error, and
+            // one that does is not hypothetical: the natural way to write
+            // `perform` is to hand back whatever the tool said, and what a
+            // tool says about a failed request is often the request. Before
+            // this, `refuse` was the one path out of `use_capability` that ran
+            // no scrub — everything else either cannot carry a value
+            // (`Response` does not implement it) or goes through `scrub_all`
+            // below — so an `Err` raised after the value was read at the line
+            // above put the credential in the reply AND in the audit trail.
+            // Refusals before that point cannot: there is nothing read yet.
+            Err(e) => {
+                let reason = scrub_all(&e.to_string(), &[Some(&stored), minted.as_ref()]);
+                return refuse(&record, reason, kind_of(&e));
+            }
         };
         let output = scrub_all(&out.output, &[Some(&stored), minted.as_ref()]);
 
