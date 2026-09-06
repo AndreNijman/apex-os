@@ -483,14 +483,10 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             project.as_deref(),
         ),
 
-        Request::SecretGrant {
-            project,
-            service,
-            capability,
-            revoke,
-        } => broker::grant(daemon, creds, &project, &service, &capability, revoke),
-
-        Request::SecretGrants => broker::grants(),
+        // Granting is NOT here. A grant changes what is allowed, and
+        // `apex-secretd` refuses one from any caller inside a session —
+        // which covers a session that skips this daemon and opens the
+        // socket itself, something a check here could not see.
     }
 }
 

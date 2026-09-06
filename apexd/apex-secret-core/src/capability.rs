@@ -233,9 +233,26 @@ pub struct CapabilityRecord {
     /// Attribution only. Forwarded by `apex-agentd`; not verified.
     #[serde(default)]
     pub agent_session: Option<u32>,
-    /// Attribution only: `local`, `remote-control`, `unknown`.
+    /// §7's request origin, as `apex-agentd` established it from the
+    /// connection: one of the seven names, or `unknown` when the daemon could
+    /// not read the peer's placement.
+    ///
+    /// Attribution only. `apex-secretd` cannot re-derive it — the connection it
+    /// sees is `apex-agentd`'s, not the session's — so it checks the shape and
+    /// records the claim. What makes the claim worth having is that the daemon
+    /// which does make it observes it from the kernel rather than reading it
+    /// off the request.
     #[serde(default = "unknown_origin")]
     pub request_origin: String,
+    /// How [`CapabilityRecord::request_origin`] was arrived at: `observed`,
+    /// `inherited`, `declared`, or `unknown`.
+    ///
+    /// Separate from the origin rather than inferred from it, because "the
+    /// daemon worked this out" and "something asked for this and was allowed"
+    /// are different claims about the same value. A trail that cannot tell them
+    /// apart cannot answer the only question worth asking of it.
+    #[serde(default = "unknown_origin")]
+    pub origin_source: String,
     /// When the decision stops being valid, ms since the epoch.
     ///
     /// A capability request is not a bearer token here — the daemon performs
@@ -274,10 +291,26 @@ impl CapabilityRecord {
             project: None,
             agent_session: None,
             request_origin: unknown_origin(),
+            origin_source: unknown_origin(),
             expiry: None,
             constraints: Vec::new(),
             approval_policy: grant_policy(),
             audit_id: String::new(),
+        }
+    }
+
+    /// Name the agent that asked, as a constraint.
+    ///
+    /// §11 fixes the record's fields and "which agent" is not one of them, but
+    /// a trail that says `claude` rather than only `session 7` is the one an
+    /// owner can read a week later. `constraints` is the field for things the
+    /// caller applied to itself, and this is one — recorded, never enforced.
+    pub fn agent_session_agent(&mut self, agent: Option<&str>) {
+        if let Some(agent) = agent {
+            let entry = format!("agent={agent}");
+            if !self.constraints.contains(&entry) {
+                self.constraints.push(entry);
+            }
         }
     }
 
@@ -355,6 +388,25 @@ pub fn http_endpoint(url: &str) -> Option<(&'static str, String)> {
         return None;
     }
     Some((scheme, host.to_ascii_lowercase()))
+}
+
+/// Whether a string is one of §7's origin names, or `unknown`.
+///
+/// A *shape* check, not a vocabulary one, and the difference is deliberate.
+/// The vocabulary lives in `apex_agent_core::policy::RequestOrigin`, which is
+/// where the value is produced from a typed enum; copying the seven names here
+/// would put the same list in two crates and let them drift. What this crate
+/// owes the audit trail is that a caller cannot write a paragraph, a newline or
+/// a lookalike into the field — so the shape is bounded and kebab-case, and the
+/// record says plainly that the content is a claim.
+pub fn valid_origin_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 32
+        && label
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !label.starts_with('-')
+        && !label.ends_with('-')
 }
 
 /// Whether a host names this machine and nothing else.
@@ -528,6 +580,37 @@ mod tests {
     }
 
     #[test]
+    fn an_origin_label_is_bounded_and_cannot_carry_framing() {
+        // The trail is line-delimited JSON an administrator greps. A label
+        // that could hold a newline, a quote or a paragraph would let the
+        // audited party shape what the audit looks like.
+        for good in [
+            "local-terminal",
+            "apex-shell",
+            "claude-remote-control",
+            "scheduled-job",
+            "mcp",
+            "subagent",
+            "cloud-job",
+            "unknown",
+        ] {
+            assert!(valid_origin_label(good), "{good}");
+        }
+        for bad in [
+            "",
+            "-leading",
+            "trailing-",
+            "Local-Terminal",
+            "local terminal",
+            "local\nterminal",
+            "local\"terminal",
+            &"x".repeat(33),
+        ] {
+            assert!(!valid_origin_label(bad), "'{}' was accepted", bad.escape_debug());
+        }
+    }
+
+    #[test]
     fn loopback_is_recognised_as_an_address_not_as_a_prefix() {
         for host in ["127.0.0.1", "127.9.9.9", "localhost", "::1"] {
             assert!(is_loopback_host(host), "{host}");
@@ -562,6 +645,7 @@ mod tests {
             "project",
             "agent_session",
             "request_origin",
+            "origin_source",
             "expiry",
             "constraints",
             "approval_policy",
@@ -601,6 +685,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rec.request_origin, "unknown");
+        assert_eq!(rec.origin_source, "unknown");
         assert_eq!(rec.approval_policy, "grant");
         assert_eq!(rec.expiry, None);
         assert!(rec.constraints.is_empty());

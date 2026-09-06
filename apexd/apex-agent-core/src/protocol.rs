@@ -401,16 +401,6 @@ pub enum Request {
         #[serde(default)]
         project: Option<String>,
     },
-    /// Allow or withdraw a capability for a project.
-    SecretGrant {
-        project: String,
-        service: String,
-        capability: String,
-        #[serde(default)]
-        revoke: bool,
-    },
-    /// Per-project capability grants.
-    SecretGrants,
 }
 
 fn default_replay() -> usize {
@@ -513,13 +503,18 @@ pub enum Response {
         capability: String,
         /// The operation in words, for the log and the transcript.
         detail: String,
+        /// The secret service's audit id for this operation, so a report can
+        /// cite the trail entry rather than describing it.
+        #[serde(default)]
+        audit_id: String,
+        /// Scheme and host the credential was sent to, as `apex-secretd`
+        /// resolved it from the repository. The caller sees where its operation
+        /// went without being able to choose it.
+        #[serde(default)]
+        endpoint: String,
         exit_code: i32,
-        /// git's own output, with the token scrubbed out.
+        /// git's own output, with the credential scrubbed out.
         output: String,
-    },
-    /// Per-project capability grants: project root -> `service:capability`.
-    SecretGrants {
-        projects: std::collections::BTreeMap<String, Vec<String>>,
     },
     /// Verb succeeded and has nothing to say.
     Ok,
@@ -769,13 +764,10 @@ mod tests {
                 service: "github".into(),
                 capability: "git-push".into(),
                 detail: "git push origin feat/x".into(),
+                audit_id: "1a07-1-0".into(),
+                endpoint: "https://github.com".into(),
                 exit_code: 0,
                 output: "Everything up-to-date".into(),
-            },
-            Response::SecretGrants {
-                projects: [("/home/t/p".to_string(), vec!["github:git-push".to_string()])]
-                    .into_iter()
-                    .collect(),
             },
             Response::Ok,
             Response::error(ErrorKind::Internal, "boom"),
@@ -888,13 +880,6 @@ mod tests {
                 branch: Some("feat/x".into()),
                 project: Some("/home/t/p".into()),
             },
-            Request::SecretGrant {
-                project: "/home/t/p".into(),
-                service: "github".into(),
-                capability: "git-push".into(),
-                revoke: false,
-            },
-            Request::SecretGrants,
             Request::Info { id: 1 },
             Request::Attach {
                 id: 1,

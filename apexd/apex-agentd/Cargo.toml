@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 apex-agent-core = { path = "../apex-agent-core" }
+apex-secret-core = { path = "../apex-secret-core" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
