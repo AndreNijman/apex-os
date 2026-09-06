@@ -447,6 +447,15 @@ jobs:
       - name: §25 schema — every store declares its rollback answer, and no version key defaults to current
         run: ./tests/test-apex-schema.sh
 
+      # §26's channels, structural half, and this one has to be in `static`:
+      # every assertion compares .github/workflows against apexd/, which are
+      # different path selectors. A PR touching only build-image.yml sets
+      # rust=false, and the drift that ships is `stable` quietly advancing on
+      # every build — a user who chose it would be taking edge's risk while
+      # believing they had opted out.
+      - name: §26 channels — edge moves with every build, the slower ones do not, and a promotion cannot skip a channel
+        run: ./tests/test-apex-channel.sh
+
       # §19's disposable engine, and the structural rules its teardown depends
       # on. In `static` for the reason boot-v2's structural half is: the
       # `engine` selector is ^(files/|tests/) and the `rust` selector is
@@ -647,6 +656,19 @@ jobs:
           cargo build -p apex --locked --manifest-path apexd/Cargo.toml
           test -x "$APEX"
           ./tests/test-apex-schema.sh --with-binary
+
+      # §26's binary half: `apex channel` against fixture machines on each of
+      # the four channel tags and on the legacy alias every installed machine
+      # actually follows.
+      - name: §26 channels — apex channel against a machine on each tag
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-channel.sh --with-binary
 
       # §19's binary half: the recovery surface against whole fixture machines,
       # `apex doctor --json`, and the factory reset.

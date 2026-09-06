@@ -1297,6 +1297,19 @@ jobs:
           for f in apex daily gaming-mesa gaming-nvidia; do
             promote "$f"
           done
+          # §26. `edge` is a NAME for what those four already are: every
+          # successful build of main, as soon as it is published. It is moved
+          # here, with them, because a channel that lagged its own definition
+          # would be a lie the first time somebody switched onto it.
+          #
+          # stable, candidate and beta are deliberately NOT moved here. A
+          # channel that advanced on every build is edge with a different
+          # spelling, and three of those would be worse than none — a user who
+          # chose `stable` would be taking the same risk while believing they
+          # had opted out of it. They move only through promote-channel.yml,
+          # which is a dispatch a person runs, and which refuses a digest that
+          # is not already on the channel above the one being moved.
+          promote edge
 
       # The migration promise, measured. Reading the digest back out of the
       # registry is the only thing that proves a machine tracking `:gaming-mesa`
@@ -1312,7 +1325,7 @@ jobs:
           creds="$GHCR_USER:$GHCR_TOKEN"
           want="${{ steps.push.outputs.digest }}"
           fail=0
-          for t in apex daily gaming-mesa gaming-nvidia \
+          for t in apex daily gaming-mesa gaming-nvidia edge \
                    platform-apex platform-daily platform-gaming-mesa platform-gaming-nvidia \
                    "daily-${{ github.sha }}"; do
             got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$t" 2>/dev/null || echo MISSING)"
