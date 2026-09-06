@@ -699,6 +699,52 @@ fn a_rollback_is_told_apart_from_a_deploy_on_the_wire() {
 }
 
 #[test]
+fn a_message_with_a_quote_in_it_survives_two_layers_of_escaping() {
+    // `message` is Syntax::Text, which admits a quote and a backslash. It is
+    // then escaped by serde_json, and the deployment body is escaped AGAIN by
+    // the curl config writer, and curl unescapes once. Three transformations
+    // and no test on the round trip is how every quoted deploy message ends up
+    // as malformed JSON at Cloudflare — which is a functional bug a scrub test
+    // and a binding test would both pass straight over.
+    let f = Fixture::new("quoting", Mode::Normal, &granted_everything());
+    with_module(&f);
+    let awkward = r#"say "hi" \ and "then" stop"#;
+
+    // The JSON body path: through `quoted()` into a curl config line.
+    f.use_it(
+        f.record("cloudflare.worker.deploy", "project")
+            .param("version", "1c4dd6be-0000-4000-8000-abcdefabcdef")
+            .param("message", awkward),
+    );
+    // The multipart path: written to a file as raw bytes, no curl escaping.
+    f.use_it(
+        f.record("cloudflare.worker.upload-version", "project")
+            .param("script", "dist/worker.js")
+            .param("message", awkward),
+    );
+
+    let sent = f.fake.seen();
+    let deploy: serde_json::Value = serde_json::from_str(&sent[0].body)
+        .unwrap_or_else(|e| panic!("the deployment body is not JSON: {e}\n{}", sent[0].body));
+    assert_eq!(
+        deploy["annotations"]["workers/message"].as_str(),
+        Some(awkward),
+        "the message did not survive the round trip"
+    );
+
+    // The metadata part is JSON inside a multipart body; pull it back out.
+    let body = &sent[1].body;
+    let start = body.find('{').expect("metadata json");
+    let end = body[start..].find("\r\n--").map(|i| start + i).unwrap_or(body.len());
+    let metadata: serde_json::Value = serde_json::from_str(body[start..end].trim())
+        .unwrap_or_else(|e| panic!("the metadata part is not JSON: {e}\n{body}"));
+    assert_eq!(
+        metadata["annotations"]["workers/message"].as_str(),
+        Some(awkward)
+    );
+}
+
+#[test]
 fn a_route_read_answers_about_the_worker_that_was_named_and_no_other() {
     // The zone endpoint returns every route in the zone. The caller named one
     // worker, the grant is for one worker, and the audit line claims the
@@ -956,6 +1002,18 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
         }
         assert!(listed.contains(&op.id), "'{}' is not in §13.2", op.id);
     }
+    // Six of §13.2's thirty-two, and one addition. The arithmetic is asserted
+    // because the module note states it and a later task will read that note
+    // to work out what is left.
+    let from_13_2 = SPEC
+        .operations
+        .iter()
+        .filter(|op| listed.contains(&op.id))
+        .count();
+    assert_eq!(from_13_2, 6);
+    assert_eq!(SPEC.operations.len(), 7);
+    assert_eq!(SECTION_13_2.len() - from_13_2, 26, "still unimplemented");
+
     // Nothing is declared twice, and every summary reads as a sentence about
     // what the owner is being asked to allow.
     let mut ids: Vec<&str> = SPEC.operations.iter().map(|op| op.id).collect();
