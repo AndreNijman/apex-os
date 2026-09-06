@@ -30,7 +30,10 @@ set -uo pipefail
 set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GEN="${ROOT}/files/system/libexec/apex-input-apply"
+# Overridable so a change can be proven to FAIL against the generator it
+# replaces: point APEX_INPUT_GEN at the previous revision and the assertions
+# added with a fix go red. Defaults to the tree's own copy, so CI is unaffected.
+GEN="${APEX_INPUT_GEN:-${ROOT}/files/system/libexec/apex-input-apply}"
 TMPL="${ROOT}/files/desktop/labwc"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -86,11 +89,28 @@ for want in '<naturalScroll>yes</naturalScroll>' '<tap>yes</tap>' \
         && ok "default reproduces ${want}" || bad "default reproduces ${want}"
 done
 
-section "the rc.xml edit is lossless outside <libinput>"
-diff <(sed '/<libinput>/,/<\/libinput>/d' "${WORK}/rc.orig") \
-     <(sed '/<libinput>/,/<\/libinput>/d' "$h/.config/labwc/rc.xml") >/dev/null \
-    && ok "everything outside <libinput> is byte-identical" \
-    || bad "everything outside <libinput> is byte-identical"
+section "the rc.xml edit is lossless outside what it owns"
+# rc.xml is the only file labwc reads, so the generator writes into a file full
+# of the user's keybinds, theme and window rules. It owns exactly two spans:
+# <libinput>, and the repeat rate/delay pair inside <keyboard>. Everything else
+# has to come back byte-for-byte, which is what this strips down to.
+strip_owned() {
+    sed -e '/<libinput>/,/<\/libinput>/d' \
+        -e '/<repeatRate>/d' -e '/<repeatDelay>/d' "$1"
+}
+diff <(strip_owned "${WORK}/rc.orig") <(strip_owned "$h/.config/labwc/rc.xml") >/dev/null \
+    && ok "everything the generator does not own is byte-identical" \
+    || bad "everything the generator does not own is byte-identical"
+
+# And the converse: nothing else was added. Counting the added lines is what
+# separates "wrote two elements" from "wrote two elements and reindented the
+# file", which the diff above would forgive if the reindent were symmetric.
+added="$(diff <(sed '/<libinput>/,/<\/libinput>/d' "${WORK}/rc.orig") \
+              <(sed '/<libinput>/,/<\/libinput>/d' "$h/.config/labwc/rc.xml") \
+         | grep -c '^>')"
+[ "$added" = 2 ] \
+    && ok "exactly two lines are added outside <libinput>" \
+    || bad "exactly two lines are added outside <libinput> (got ${added})"
 
 # The header comment sits OUTSIDE the root element, where an ElementTree
 # round-trip cannot represent it. This is the assertion that caught that.
@@ -173,6 +193,104 @@ elif [ -n "${APEX_REQUIRE_NIRI:-}" ]; then
 else
     skp "niri unavailable: the generated file is not validated with non-default values"
 fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  UI-003: no control may write the model and change nothing.
+#
+#  Every assertion in this section covers a switch or slider that was on the
+#  Input page, wrote input.json, ran the generator, reported success — and did
+#  not reach the compositor, because the generator never emitted the option.
+#  A user changed the setting and nothing happened, which is the complaint.
+#
+#  Each one names a real option in the shipped compositor, checked against that
+#  compositor's own validator, not against its wiki.
+# ─────────────────────────────────────────────────────────────────────────────
+section "every control reaches the compositor that can do it"
+h="${WORK}/noop"; mkhome "$h"
+mkdir -p "$h/.config/niri"
+cat > "$h/.config/apex-shell/input.json" <<'JSON'
+{ "touchpad": { "left_handed": true, "drag_lock": false, "tap_and_drag": false,
+                "scroll_method": "edge", "three_finger_drag": true },
+  "pointer":  { "left_handed": true, "middle_emulation": true },
+  "keyboard": { "repeat_rate": 42, "repeat_delay": 275 } }
+JSON
+run_gen "$h" >/dev/null 2>&1
+N="$h/.config/apex-shell/ApexShellInput.kdl"
+H="$h/.config/hypr/apex/input.lua"
+RC="$h/.config/labwc/rc.xml"
+
+ntp() { sed -n '/^    touchpad {/,/^    }/p' "$N"; }
+nms() { sed -n '/^    mouse {/,/^    }/p' "$N"; }
+
+# niri. Six options niri 26.04 accepts and the generator never wrote.
+ntp | grep -qE '^\s+left-handed$' \
+    && ok "niri: touchpad left-handed is written" || bad "niri: touchpad left-handed is written"
+ntp | grep -qE '^\s+drag false$' \
+    && ok "niri: tap-and-drag off is written, not omitted" \
+    || bad "niri: tap-and-drag off is written, not omitted"
+ntp | grep -qE '^\s+scroll-method "edge"$' \
+    && ok "niri: touchpad scroll-method is written" || bad "niri: touchpad scroll-method is written"
+nms | grep -qE '^\s+left-handed$' \
+    && ok "niri: mouse left-handed is written" || bad "niri: mouse left-handed is written"
+nms | grep -qE '^\s+middle-emulation$' \
+    && ok "niri: mouse middle-emulation is written" || bad "niri: mouse middle-emulation is written"
+# drag-lock is a BARE flag in niri: `drag-lock false` is a parse error, so off
+# has to be absence. Asserted both ways below.
+ntp | grep -qE '^\s+drag-lock$' \
+    && bad "niri: drag lock off is absent, not written false" \
+    || ok "niri: drag lock off is absent, not written false"
+
+# Hyprland. drag_3fg is an enum the touchpad block accepts and never got.
+grep -qE 'drag_3fg *= *1,' "$H" \
+    && ok "hyprland: three-finger drag reaches the touchpad block" \
+    || bad "hyprland: three-finger drag reaches the touchpad block"
+
+# labwc. Keyboard repeat is not a libinput setting there, so it went nowhere.
+grep -qF '<repeatRate>42</repeatRate>' "$RC" \
+    && ok "labwc: repeat rate reaches <keyboard>" || bad "labwc: repeat rate reaches <keyboard>"
+grep -qF '<repeatDelay>275</repeatDelay>' "$RC" \
+    && ok "labwc: repeat delay reaches <keyboard>" || bad "labwc: repeat delay reaches <keyboard>"
+# Inside the block labwc reads, not merely somewhere in the file.
+sed -n '/<keyboard[ >]/,/<\/keyboard>/p' "$RC" | grep -qF '<repeatRate>42</repeatRate>' \
+    && ok "labwc: the repeat rate is inside <keyboard>" \
+    || bad "labwc: the repeat rate is inside <keyboard>"
+# The keybind markers another generator writes between must survive the edit.
+grep -qF 'APEX-KEYBINDS-END' "$RC" \
+    && ok "labwc: the keybind markers survive the keyboard edit" \
+    || bad "labwc: the keybind markers survive the keyboard edit"
+
+# Re-running must not stack a second pair of elements.
+run_gen "$h" >/dev/null 2>&1
+[ "$(grep -c '<repeatRate>' "$RC")" = 1 ] \
+    && ok "labwc: a second run replaces the repeat rate rather than adding one" \
+    || bad "labwc: a second run replaces the repeat rate rather than adding one ($(grep -c '<repeatRate>' "$RC"))"
+
+if command -v xmllint >/dev/null 2>&1; then
+    xmllint --noout "$RC" 2>/dev/null \
+        && ok "labwc: rc.xml is still well-formed after the keyboard edit" \
+        || bad "labwc: rc.xml is still well-formed after the keyboard edit"
+else
+    skp "xmllint unavailable: the keyboard edit is not XML-checked"
+fi
+
+if command -v niri >/dev/null 2>&1; then
+    niri validate --config "$N" >/dev/null 2>&1 \
+        && ok "niri validates the file with every newly-written option" \
+        || bad "niri validates the file with every newly-written option"
+elif [ -n "${APEX_REQUIRE_NIRI:-}" ]; then
+    bad "niri is present (APEX_REQUIRE_NIRI is set)"
+else
+    skp "niri unavailable: the newly-written options are not validated"
+fi
+
+# drag-lock ON, in its own run, because absence proves nothing on its own.
+h="${WORK}/draglock"; mkhome "$h"
+echo '{"touchpad":{"drag_lock":true,"tap_and_drag":true}}' > "$h/.config/apex-shell/input.json"
+run_gen "$h" >/dev/null 2>&1
+sed -n '/^    touchpad {/,/^    }/p' "$h/.config/apex-shell/ApexShellInput.kdl" \
+    | grep -qE '^\s+drag-lock$' \
+    && ok "niri: drag lock on is written as the bare flag" \
+    || bad "niri: drag lock on is written as the bare flag"
 
 section "bad input is corrected, not obeyed"
 h="${WORK}/bad"; mkhome "$h"
