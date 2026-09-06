@@ -119,12 +119,47 @@ pub fn state_dir() -> PathBuf {
 
 /// One JSON record per session, named by id.
 pub fn session_record(id: u32) -> PathBuf {
-    state_dir().join("sessions").join(format!("{id}.json"))
+    session_record_in(&state_dir(), id)
 }
 
 /// The full PTY transcript for a session.
 pub fn session_log(id: u32) -> PathBuf {
-    state_dir().join("logs").join(format!("{id}.log"))
+    session_log_in(&state_dir(), id)
+}
+
+/// Where session records live.
+pub fn sessions_dir() -> PathBuf {
+    sessions_dir_in(&state_dir())
+}
+
+/// Where session transcripts live.
+pub fn logs_dir() -> PathBuf {
+    logs_dir_in(&state_dir())
+}
+
+// The `_in` forms take the store root explicitly. The daemon always passes
+// `state_dir()`; a test passes a directory of its own, so it can exercise the
+// real record and transcript layout without writing into the user's history.
+// The layout itself is stated once, here, and nowhere else.
+
+/// [`sessions_dir`] under an explicit store root.
+pub fn sessions_dir_in(store: &Path) -> PathBuf {
+    store.join("sessions")
+}
+
+/// [`logs_dir`] under an explicit store root.
+pub fn logs_dir_in(store: &Path) -> PathBuf {
+    store.join("logs")
+}
+
+/// [`session_record`] under an explicit store root.
+pub fn session_record_in(store: &Path, id: u32) -> PathBuf {
+    sessions_dir_in(store).join(format!("{id}.json"))
+}
+
+/// [`session_log`] under an explicit store root.
+pub fn session_log_in(store: &Path, id: u32) -> PathBuf {
+    logs_dir_in(store).join(format!("{id}.log"))
 }
 
 /// Registered projects, keyed by a slug of their path.

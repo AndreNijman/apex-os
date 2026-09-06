@@ -5,15 +5,18 @@
 //! megabytes of output never blocks `apex agent list`.
 //!
 //! Locking rule, and the reason this stays deadlock-free: the registry lock is
-//! only ever held long enough to clone an `Arc` out of the map. Session locks
-//! are taken *after* the registry lock is released, never the other way round,
-//! and no code path holds two session locks at once.
+//! held long enough to clone an `Arc` out of the map, and — once per session
+//! start — long enough to reserve an id against the store, which is a directory
+//! listing and one exclusive create. Session locks are taken *after* the
+//! registry lock is released, never the other way round, and no code path holds
+//! two session locks at once.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::io::RawFd;
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -163,25 +166,72 @@ pub fn now_secs() -> u64 {
 pub type Handle = Arc<Mutex<Session>>;
 
 /// The table of live sessions.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Registry {
+    /// Root of the on-disk session store — `sessions/` and `logs/` hang off
+    /// this. A field rather than a call to [`paths::state_dir`] at every use,
+    /// so a test can drive a real store without writing into the user's.
+    store: PathBuf,
+    /// Lowest id this process will hand out next. Only a floor: the store
+    /// decides what is actually free. Keeping it stops an id being reused
+    /// within one run after `apex agent rm` deleted the record at it.
     next_id: u32,
     sessions: HashMap<u32, Handle>,
 }
 
+impl Default for Registry {
+    fn default() -> Registry {
+        Registry::new()
+    }
+}
+
 impl Registry {
     pub fn new() -> Registry {
+        Registry::with_store(paths::state_dir())
+    }
+
+    /// A registry over an explicit store root.
+    pub fn with_store(store: PathBuf) -> Registry {
         Registry {
+            store,
             next_id: 1,
             sessions: HashMap::new(),
         }
     }
 
-    /// Allocate the next session id.
-    pub fn allocate(&mut self) -> u32 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
+    /// Take the next session id, reserving it on disk before returning it.
+    ///
+    /// Ids have to be unique against what is *on disk*, not against what this
+    /// process happens to remember. Sessions outlive the daemon — their records
+    /// and transcripts are the whole point of `$XDG_STATE_HOME` — so a daemon
+    /// that starts counting from 1 again writes session 1's record and PTY log
+    /// straight over the previous session 1's. Restart the daemon, run one
+    /// agent, and yesterday's transcript is gone.
+    ///
+    /// The starting point is the highest id any record *or* transcript still
+    /// uses, plus one — deliberately not the number of records. `apex agent
+    /// prune` and `apex agent rm` leave gaps, and counting records would step
+    /// back into the range below a gap and destroy exactly the history the user
+    /// chose to keep. Transcripts count as well as records, because a `.log`
+    /// whose `.json` has gone is still a session's output.
+    ///
+    /// Nothing here reads a record's *contents*: the id is in the filename. A
+    /// truncated or malformed record therefore cannot make allocation reuse an
+    /// id, so the fail-open/fail-closed question does not arise for it — the
+    /// file is still counted, and `reconcile_stale_records` deals with the
+    /// unreadable content separately.
+    ///
+    /// Where it does arise is the directory scan and the reservation, and they
+    /// are answered differently on purpose. The scan is a hint and fails open:
+    /// if `sessions/` cannot be listed, allocation walks up from the floor and
+    /// the exclusive create still decides. The reservation fails closed: an
+    /// error that is not "that id is taken" means the store is unwritable, and
+    /// starting a session whose record cannot exist is how history gets
+    /// overwritten in the first place. The user gets the error instead.
+    pub fn allocate(&mut self) -> Result<Reservation> {
+        let reservation = reserve_id(&self.store, self.next_id)?;
+        self.next_id = reservation.id.saturating_add(1);
+        Ok(reservation)
     }
 
     /// Add a session, opening its transcript.
@@ -193,7 +243,7 @@ impl Registry {
         pgid: libc::pid_t,
     ) -> Handle {
         let id = info.id;
-        let log = open_log(id);
+        let log = open_log(&self.store, id);
         let handle = Arc::new(Mutex::new(Session {
             info,
             master,
@@ -238,8 +288,116 @@ impl Registry {
     }
 }
 
-fn open_log(id: u32) -> Option<File> {
-    let path = paths::session_log(id);
+/// A session id that is reserved on disk but not yet owned by a session.
+///
+/// The reservation *is* the record file, created empty and exclusively. That
+/// makes taking an id atomic against the filesystem rather than against one
+/// process's counter, which matters because two daemons sharing a store is not
+/// hypothetical: they are kept apart by the control socket, and the socket
+/// lives in `$XDG_RUNTIME_DIR` while the store lives in `$XDG_STATE_HOME`.
+/// Point one daemon at a different runtime directory — which is exactly how the
+/// runtime is tested — and both write to the same `sessions/`.
+///
+/// Dropping a reservation without [`Reservation::commit`] gives the id back, so
+/// a run that failed between allocation and spawn leaves no stub behind.
+#[derive(Debug)]
+pub struct Reservation {
+    id: u32,
+    store: PathBuf,
+    committed: bool,
+}
+
+impl Reservation {
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// The session exists and owns its record now; stop guarding the id.
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            forget_record_in(&self.store, self.id);
+        }
+    }
+}
+
+/// Reserve the lowest free session id at or above `floor`.
+fn reserve_id(store: &Path, floor: u32) -> Result<Reservation> {
+    let dir = paths::sessions_dir_in(store);
+    paths::ensure_private_dir(&dir)
+        .with_context(|| format!("preparing the session store {}", dir.display()))?;
+
+    let mut id = floor.max(highest_used_id(store).saturating_add(1)).max(1);
+    loop {
+        // A transcript with no record beside it still belongs to a session the
+        // user can read back, so an id carrying one is not free either. Checked
+        // here as well as in the scan so it holds while walking upwards.
+        if !paths::session_log_in(store, id).exists() {
+            let path = paths::session_record_in(store, id);
+            match OpenOptions::new().create_new(true).write(true).open(&path) {
+                Ok(_) => {
+                    // Same reasoning as the transcript: a record describes the
+                    // user's work and nobody else needs to read it.
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ =
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                    return Ok(Reservation {
+                        id,
+                        store: store.to_path_buf(),
+                        committed: false,
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("reserving session {id} at {}", path.display())
+                    })
+                }
+            }
+        }
+        id = id
+            .checked_add(1)
+            .context("every session id is taken; run `apex agent prune`")?;
+    }
+}
+
+/// The largest id the store still has a record or a transcript for.
+///
+/// Filenames only. Reading a record to learn its id would make a corrupt file
+/// able to lower the mark, which is the one thing this must never do.
+fn highest_used_id(store: &Path) -> u32 {
+    let mut high = 0;
+    for (dir, ext) in [
+        (paths::sessions_dir_in(store), "json"),
+        (paths::logs_dir_in(store), "log"),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some(ext) {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<u32>().ok());
+            if let Some(id) = id {
+                high = high.max(id);
+            }
+        }
+    }
+    high
+}
+
+fn open_log(store: &Path, id: u32) -> Option<File> {
+    let path = paths::session_log_in(store, id);
     let dir = path.parent()?;
     paths::ensure_private_dir(dir).ok()?;
     let file = OpenOptions::new()
@@ -258,7 +416,11 @@ fn open_log(id: u32) -> Option<File> {
 /// Persist a session record so `apex agent list` can describe it after the
 /// daemon has restarted.
 pub fn write_record(info: &SessionInfo) {
-    let path = paths::session_record(info.id);
+    write_record_in(&paths::state_dir(), info)
+}
+
+fn write_record_in(store: &Path, info: &SessionInfo) {
+    let path = paths::session_record_in(store, info.id);
     let Some(dir) = path.parent() else { return };
     if paths::ensure_private_dir(dir).is_err() {
         return;
@@ -274,8 +436,12 @@ pub fn write_record(info: &SessionInfo) {
 
 /// Delete a session's record and transcript.
 pub fn forget_record(id: u32) {
-    let _ = std::fs::remove_file(paths::session_record(id));
-    let _ = std::fs::remove_file(paths::session_log(id));
+    forget_record_in(&paths::state_dir(), id)
+}
+
+fn forget_record_in(store: &Path, id: u32) {
+    let _ = std::fs::remove_file(paths::session_record_in(store, id));
+    let _ = std::fs::remove_file(paths::session_log_in(store, id));
 }
 
 /// Read the tail of a session's transcript from disk.
@@ -300,13 +466,26 @@ pub fn read_log(id: u32, bytes: usize) -> Result<String> {
 /// a record still claiming `working` at startup is stale, and leaving it would
 /// show the user a session they can neither attach to nor kill.
 pub fn reconcile_stale_records() {
-    let dir = paths::state_dir().join("sessions");
+    reconcile_stale_records_in(&paths::state_dir())
+}
+
+fn reconcile_stale_records_in(store: &Path) {
+    let dir = paths::sessions_dir_in(store);
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        // An empty record is a reservation, not a corrupt session: another
+        // daemon may be between taking that id and writing the session out.
+        // Deleting it would free the id back to the daemon starting here, and
+        // then both would write a record and truncate a transcript at it —
+        // the exact collision the exclusive create exists to stop. A retired
+        // id costs nothing; a shared one costs the user's transcript.
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() == 0) {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -326,13 +505,13 @@ pub fn reconcile_stale_records() {
         if info.exit_code.is_none() && info.exit_signal.is_none() {
             info.exit_code = Some(-1);
         }
-        write_record(&info);
+        write_record_in(store, &info);
     }
 }
 
 /// Every persisted record, for listing sessions the current daemon does not own.
 pub fn historical_records() -> Vec<SessionInfo> {
-    let dir = paths::state_dir().join("sessions");
+    let dir = paths::sessions_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -365,6 +544,42 @@ pub fn terminate(session: &mut Session) {
 mod tests {
     use super::*;
     use apex_agent_core::protocol::SandboxPolicy;
+
+    /// A store of this test's own.
+    ///
+    /// Every registry test here writes real files. Before the store became a
+    /// field these ran against `$XDG_STATE_HOME`, so `cargo test` truncated the
+    /// transcripts of the developer's own sessions 1, 2 and 3. The name carries
+    /// a counter as well as the pid because the suite runs in parallel.
+    struct Store(PathBuf);
+
+    impl Store {
+        fn new() -> Store {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "apex-agentd-registry-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::remove_dir_all(&dir).ok();
+            Store(dir)
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.clone()
+        }
+
+        fn registry(&self) -> Registry {
+            Registry::with_store(self.path())
+        }
+    }
+
+    impl Drop for Store {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
 
     fn info(id: u32) -> SessionInfo {
         SessionInfo {
@@ -410,20 +625,176 @@ mod tests {
 
     #[test]
     fn ids_are_allocated_in_order_and_never_reused() {
-        let mut r = Registry::new();
-        let a = r.allocate();
-        let b = r.allocate();
-        assert_eq!((a, b), (1, 2));
-        r.insert(info(a), -1, 0, 0);
-        r.remove(a);
+        let store = Store::new();
+        let mut r = store.registry();
+        let a = r.allocate().unwrap();
+        let b = r.allocate().unwrap();
+        assert_eq!((a.id(), b.id()), (1, 2));
+        r.insert(info(a.id()), -1, 0, 0);
+        r.remove(a.id());
         // Removing a session must not let the next one take its id: a stale
         // `apex agent attach 1` would otherwise reach a different session.
-        assert_eq!(r.allocate(), 3);
+        assert_eq!(r.allocate().unwrap().id(), 3);
+    }
+
+    #[test]
+    fn a_restart_neither_reuses_an_id_nor_overwrites_the_record_at_it() {
+        // The defect this exists for: `Registry::new` started counting at 1
+        // with no reference to the store, so the first session after a daemon
+        // restart wrote its record and transcript over session 1's. A restart
+        // is all it took to lose yesterday's work.
+        let store = Store::new();
+
+        let mut first = store.registry();
+        let reserved = first.allocate().unwrap();
+        let id = reserved.id();
+        assert_eq!(id, 1);
+        let mut original = info(id);
+        original.program = "the first session".into();
+        write_record_in(&store.path(), &original);
+        paths::ensure_private_dir(&paths::logs_dir_in(&store.path())).unwrap();
+        std::fs::write(paths::session_log_in(&store.path(), id), b"the first transcript").unwrap();
+        reserved.commit();
+        drop(first);
+
+        // The daemon restarts. Nothing is in memory; the store is all there is.
+        let mut second = store.registry();
+        let next = second.allocate().unwrap();
+        assert_ne!(next.id(), id, "a restart handed out an id that is already in use");
+        let mut replacement = info(next.id());
+        replacement.program = "the second session".into();
+        write_record_in(&store.path(), &replacement);
+        next.commit();
+
+        let kept = std::fs::read_to_string(paths::session_record_in(&store.path(), id)).unwrap();
+        let kept: SessionInfo = serde_json::from_str(&kept).unwrap();
+        assert_eq!(kept.program, "the first session", "the earlier record was overwritten");
+        assert_eq!(
+            std::fs::read(paths::session_log_in(&store.path(), id)).unwrap(),
+            b"the first transcript",
+            "the earlier transcript was overwritten"
+        );
+    }
+
+    #[test]
+    fn a_gap_left_by_prune_is_not_filled_again() {
+        // Counting records instead of taking the highest would allocate 3 here
+        // and destroy session 3. Pruning is normal use, so gaps are normal.
+        let store = Store::new();
+        {
+            let mut r = store.registry();
+            for _ in 0..3 {
+                r.allocate().unwrap().commit();
+            }
+        }
+        forget_record_in(&store.path(), 2);
+
+        let mut after = store.registry();
+        assert_eq!(after.allocate().unwrap().id(), 4);
+    }
+
+    #[test]
+    fn a_transcript_without_a_record_still_holds_its_id() {
+        // A record can be lost — a failed write, a half-finished prune — while
+        // the transcript survives. The transcript is the part the user reads
+        // back, so it must not be truncated by the next session.
+        let store = Store::new();
+        let logs = paths::logs_dir_in(&store.path());
+        paths::ensure_private_dir(&logs).unwrap();
+        std::fs::write(logs.join("7.log"), b"output nobody has a record for").unwrap();
+
+        let mut r = store.registry();
+        assert_eq!(r.allocate().unwrap().id(), 8);
+    }
+
+    #[test]
+    fn a_reservation_dropped_without_a_session_gives_the_id_back() {
+        // A run that fails between allocation and spawn must not retire an id
+        // or leave an empty record for `apex agent list` to trip over.
+        let store = Store::new();
+        let mut r = store.registry();
+        let abandoned = r.allocate().unwrap().id();
+        assert!(!paths::session_record_in(&store.path(), abandoned).exists());
+
+        // Within the run the floor still moves on, so a stale id is never
+        // reissued to a client that already saw it fail.
+        assert_eq!(r.allocate().unwrap().id(), abandoned + 1);
+    }
+
+    #[test]
+    fn a_reservation_survives_another_daemon_starting_up() {
+        // Startup reconciliation deletes records it cannot parse, and a
+        // reservation is an empty file that cannot be parsed. Deleting one
+        // would hand the id straight back while the daemon that took it is
+        // still starting its session, and both would then write over it.
+        let store = Store::new();
+        let mut holder = store.registry();
+        let held = holder.allocate().unwrap();
+
+        // Live record from a daemon that went away, plus a genuinely corrupt
+        // one, so the reconciliation this guards is still doing its own job.
+        let mut running = info(50);
+        running.state = AgentState::Working;
+        write_record_in(&store.path(), &running);
+        let corrupt = paths::session_record_in(&store.path(), 51);
+        std::fs::write(&corrupt, "{not json").unwrap();
+
+        reconcile_stale_records_in(&store.path());
+
+        assert!(
+            paths::session_record_in(&store.path(), held.id()).exists(),
+            "a reservation in flight was deleted"
+        );
+        assert!(!corrupt.exists(), "a corrupt record was left in place");
+        let text =
+            std::fs::read_to_string(paths::session_record_in(&store.path(), 50)).unwrap();
+        let reconciled: SessionInfo = serde_json::from_str(&text).unwrap();
+        assert_eq!(reconciled.state, AgentState::Exited);
+
+        // And the id is still not free to the daemon that just reconciled.
+        let mut other = store.registry();
+        assert_ne!(other.allocate().unwrap().id(), held.id());
+    }
+
+    #[test]
+    fn two_registries_sharing_a_store_never_hand_out_the_same_id() {
+        // Two daemons over one store is not hypothetical: they are kept apart
+        // by a socket in $XDG_RUNTIME_DIR while the store is in
+        // $XDG_STATE_HOME, so pointing one at another runtime directory is
+        // enough. An in-memory counter cannot see the other process at all.
+        let store = Store::new();
+        let per_thread = 25;
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let dir = store.path();
+                std::thread::spawn(move || {
+                    let mut r = Registry::with_store(dir);
+                    (0..per_thread)
+                        .map(|_| {
+                            let res = r.allocate().unwrap();
+                            let id = res.id();
+                            res.commit();
+                            id
+                        })
+                        .collect::<Vec<u32>>()
+                })
+            })
+            .collect();
+
+        let mut ids: Vec<u32> = threads
+            .into_iter()
+            .flat_map(|t| t.join().expect("thread panicked"))
+            .collect();
+        let handed_out = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), handed_out, "two registries took the same id");
     }
 
     #[test]
     fn sessions_are_listed_in_id_order() {
-        let mut r = Registry::new();
+        let store = Store::new();
+        let mut r = store.registry();
         for id in [3u32, 1, 2] {
             r.insert(info(id), -1, 0, 0);
         }
