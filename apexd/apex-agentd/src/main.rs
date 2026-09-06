@@ -18,6 +18,7 @@
 
 mod broker;
 mod egress;
+mod origin;
 mod peer;
 mod privilege;
 mod pty;
@@ -282,7 +283,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             }
         }
 
-        Request::Run(req) => match session::start(daemon, req) {
+        Request::Run(req) => match session::start(daemon, req, creds) {
             Ok(info) => Response::Session(Box::new(info)),
             Err(e) => session::run_error(e),
         },
@@ -411,6 +412,8 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             registry::forget_record(id);
             Response::Ok
         }
+
+        Request::DeclareOrigin { origin } => privilege::declare(daemon, creds, &origin),
 
         Request::Prune => {
             let handles = daemon.registry.lock().expect("registry lock").list();

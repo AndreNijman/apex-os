@@ -19,7 +19,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::policy::AgentPolicy;
+use crate::origin::OriginSource;
+use crate::policy::{AgentPolicy, RequestOrigin};
 
 /// Protocol revision. Bumped when a change is not backward compatible; the
 /// daemon reports it in [`Response::Hello`] so a mismatched CLI can say so
@@ -32,7 +33,14 @@ use crate::policy::AgentPolicy;
 /// runs with the network, which is exactly the fail-open a version number
 /// exists to catch. The CLI compares this against [`Response::Hello`] and
 /// refuses to send a non-default dimension to a daemon that predates it.
-pub const PROTOCOL_VERSION: u32 = 2;
+///
+/// 3 — `request_origin` (§7). Same failure shape and the worse instance of
+/// it: a daemon that predates this drops a declared `claude-remote-control`
+/// and records the session as whatever it observed, which is local. A remote
+/// session filed under a local origin is precisely the thing
+/// `request_origin` exists to prevent, so the CLI refuses to send a
+/// declaration to a daemon below [`REQUEST_ORIGIN_VERSION`].
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The revision that first carried the six dimensions.
 ///
@@ -40,6 +48,9 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// is a security boundary and a bare `< 2` in the CLI is one careless edit away
 /// from meaning nothing.
 pub const POLICY_DIMENSIONS_VERSION: u32 = 2;
+
+/// The revision that first carried `request_origin`, for the same reason.
+pub const REQUEST_ORIGIN_VERSION: u32 = 3;
 
 /// What a session is doing. The five user-facing values come straight from the
 /// roadmap's agent event protocol; `Starting` and `Exited` are the lifecycle
@@ -216,6 +227,23 @@ pub struct SessionInfo {
     /// moved the key and silently reported every old session as `project`.
     #[serde(flatten)]
     pub policy: AgentPolicy,
+    /// Where this session is driven from (§7's `request_origin`).
+    ///
+    /// Established by the daemon when it forked the session, from the
+    /// connection that asked for it — never from the request. `None` is a
+    /// record written before origin tracking existed, and it is deliberately
+    /// not `local-terminal`: an absent field must not read as the origin §7
+    /// reserves root for. Policy treats `None` as non-local.
+    ///
+    /// `request_origin`, not `origin`, because [`AgentPolicy`] is flattened
+    /// into this struct and already owns the `origin` key for dimension 6.
+    /// The two are different things: dimension 6 is which origins may
+    /// authorise elevation, this is which origin is asking.
+    #[serde(default)]
+    pub request_origin: Option<RequestOrigin>,
+    /// How [`SessionInfo::request_origin`] was arrived at.
+    #[serde(default)]
+    pub origin_source: Option<OriginSource>,
     /// PID of the session leader (the sandbox wrapper when confined).
     pub pid: i32,
     /// Unix seconds when the session was created.
@@ -301,6 +329,21 @@ pub enum Request {
     Remove { id: u32 },
     /// Forget every exited session.
     Prune,
+
+    /// Narrow the calling session's own origin (§7).
+    ///
+    /// No session id, for the same reason the privilege verbs have none: the
+    /// daemon resolves the session from the connection's peer credentials, so
+    /// a session can only ever speak about itself. `origin` must be one
+    /// [`RequestOrigin::may_be_declared`] accepts and must be at least as
+    /// restricted as what the session already has — a session cannot declare
+    /// its way back to local, and a Remote Control session cannot declare its
+    /// way out of the lock gate.
+    ///
+    /// This is what Remote Control uses. It is enabled after `claude` has
+    /// started, so the session was genuinely local when it was created and
+    /// nothing observable about the connection ever changes.
+    DeclareOrigin { origin: String },
 
     // ── privilege requests (§4) ─────────────────────────────────────────────
     //
@@ -400,6 +443,15 @@ pub struct RunRequest {
     /// final word, because a client is free to send any combination.
     #[serde(flatten)]
     pub policy: AgentPolicy,
+    /// A declared origin for the new session (§7).
+    ///
+    /// `None` — the usual case — means "observe it", and the daemon derives
+    /// the origin from the connection asking. A value here is a *declaration*,
+    /// checked by [`crate::origin::may_declare`] against what was observed and
+    /// only ever accepted when it gives something up. A local origin is never
+    /// accepted here, whatever is sent.
+    #[serde(default)]
+    pub request_origin: Option<RequestOrigin>,
     /// Create/reuse this git worktree under the project and run there.
     #[serde(default)]
     pub worktree: Option<String>,
@@ -640,6 +692,8 @@ mod tests {
             agent: Some("claude".into()),
             project: Some("/home/t/p".into()),
             decision: crate::request::Decision::Pending,
+            request_origin: Some(RequestOrigin::LocalTerminal),
+            origin_source: Some(OriginSource::Inherited),
             created_ms: 1_700_000_000_000,
             decided_ms: None,
             executed_ms: None,
@@ -661,6 +715,8 @@ mod tests {
             detail: None,
             paused: false,
             policy: AgentPolicy::default(),
+            request_origin: Some(RequestOrigin::LocalTerminal),
+            origin_source: Some(OriginSource::Observed),
             pid: 42,
             started: 1,
             last_activity: 2,
@@ -801,6 +857,7 @@ mod tests {
                     sandbox: SandboxPolicy::Strict,
                     ..AgentPolicy::default()
                 },
+                request_origin: Some(RequestOrigin::RemoteControl),
                 worktree: Some("issue-217".into()),
                 checkpoint: true,
                 cols: 80,
@@ -862,6 +919,9 @@ mod tests {
             Request::Logs { id: 1, bytes: 100 },
             Request::Remove { id: 1 },
             Request::Prune,
+            Request::DeclareOrigin {
+                origin: "claude-remote-control".into(),
+            },
         ];
 
         for v in variants {
@@ -956,11 +1016,26 @@ mod tests {
     }
 
     #[test]
-    fn the_protocol_version_moved_with_the_dimensions() {
-        // The CLI refuses to send a non-default dimension to a daemon older
-        // than this, because an old daemon would drop the key and run the
-        // session without the restriction.
-        assert_eq!(PROTOCOL_VERSION, POLICY_DIMENSIONS_VERSION);
+    fn every_version_guard_names_a_revision_that_exists() {
+        // The CLI refuses to send a setting to a daemon older than the
+        // revision that introduced it, because an old daemon drops the key
+        // and runs without the restriction. Each guard therefore has to name
+        // a revision at or below the current one — a guard pointing at a
+        // future version would refuse every daemon, and one pointing past the
+        // current version cannot be reached at all.
+        for (name, since) in [
+            ("the six dimensions", POLICY_DIMENSIONS_VERSION),
+            ("request_origin", REQUEST_ORIGIN_VERSION),
+        ] {
+            assert!(
+                since <= PROTOCOL_VERSION,
+                "{name} claims to arrive in protocol {since}, which is ahead of {PROTOCOL_VERSION}"
+            );
+            assert!(since > 0, "{name} has no revision");
+        }
+        // The newest guard is the current revision: adding a wire field
+        // without bumping the version is the fail-open these exist to catch.
+        assert_eq!(REQUEST_ORIGIN_VERSION, PROTOCOL_VERSION);
     }
 
     #[test]
@@ -978,6 +1053,8 @@ mod tests {
             detail: None,
             paused: false,
             policy: AgentPolicy::default(),
+            request_origin: None,
+            origin_source: None,
             pid: 123,
             started: 0,
             last_activity: 0,

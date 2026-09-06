@@ -13,11 +13,12 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use apex_agent_core::client::{self, Client};
 use apex_agent_core::policy::{
-    AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset, SecretPolicy, SystemAccess,
+    AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset, RequestOrigin, SecretPolicy,
+    SystemAccess,
 };
 use apex_agent_core::protocol::{
     AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo,
-    POLICY_DIMENSIONS_VERSION,
+    POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION,
 };
 use apex_agent_core::term::{self, RawMode, WinSize};
 use apex_agent_core::{adapter, checkpoint, config, git, layout, project};
@@ -140,6 +141,19 @@ pub enum AgentCmd {
         #[arg(long)]
         detail: Option<String>,
     },
+    /// Narrow where this session says it is driven from (§7).
+    ///
+    /// Run from inside a managed session — the runtime works out which session
+    /// that is from the connection, so there is no id to pass and no way to
+    /// speak about another session.
+    ///
+    /// The declaration can only ever cost the session something. A local
+    /// session may hand itself to Remote Control; nothing may declare itself
+    /// local, and a Remote Control session may not declare its way back out.
+    Origin {
+        /// claude-remote-control | scheduled-job | mcp | subagent | cloud-job
+        origin: String,
+    },
     /// Forget a finished session and delete its transcript.
     Rm { id: u32 },
     /// Forget every finished session.
@@ -196,6 +210,21 @@ pub struct RunArgs {
     /// local | remote. Which origins may authorise elevation (dimension 6).
     #[arg(long, value_parser = parse_origin_policy)]
     pub origin_policy: Option<OriginPolicy>,
+
+    // ── §7: where the session is driven from ────────────────────────────────
+    /// Declare where this session is driven from (§7's request_origin).
+    ///
+    /// Not the same thing as `--origin-policy`, which decides which origins
+    /// may authorise elevation. This says which origin THIS session is, and
+    /// it can only ever narrow: the daemon establishes the origin from the
+    /// connection, and a declaration is accepted only when it gives something
+    /// up. The two local origins cannot be declared at all.
+    ///
+    /// For a wrapper starting a session on somebody else's behalf — a
+    /// scheduler, an MCP bridge, Remote Control. A session already running
+    /// narrows itself with `apex agent origin` instead.
+    #[arg(long, value_name = "ORIGIN", value_parser = parse_request_origin)]
+    pub origin: Option<RequestOrigin>,
     /// §4.5 break-glass: take the APEX protections off.
     #[arg(long)]
     pub unsafe_everything: bool,
@@ -271,6 +300,7 @@ impl RunArgs {
             ("--secrets", self.secrets.map(|v| v.as_str())),
             ("--network", self.network.map(|v| v.as_str())),
             ("--origin-policy", self.origin_policy.map(|v| v.as_str())),
+            ("--origin", self.origin.map(|v| v.as_str())),
         ] {
             if let Some(v) = value {
                 out.push(flag.to_string());
@@ -466,6 +496,7 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             session,
             detail,
         } => event(state, session, detail),
+        AgentCmd::Origin { origin } => declare_origin(&origin),
         AgentCmd::Rm { id } => remove(id),
         AgentCmd::Prune => prune(),
         AgentCmd::Enable => enable(),
@@ -502,6 +533,31 @@ dimension_parser!(parse_system_access, SystemAccess, "none, session or unsafe");
 dimension_parser!(parse_secrets, SecretPolicy, "brokered, none or export");
 dimension_parser!(parse_network, NetworkPolicy, "open, allowlist, brokered or offline");
 dimension_parser!(parse_origin_policy, OriginPolicy, "local or remote");
+
+/// `--origin`, which is not a dimension and does not accept every value.
+///
+/// The two local origins parse — they are real §7 names and `RequestOrigin`
+/// has to read them back off a record — but they are refused here, at the
+/// only place a human types one. A flag that accepted `local-terminal` and
+/// left the daemon to refuse it would read like something that works.
+fn parse_request_origin(s: &str) -> std::result::Result<RequestOrigin, String> {
+    let declarable = || {
+        RequestOrigin::ALL
+            .iter()
+            .filter(|o| o.may_be_declared())
+            .map(|o| o.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match RequestOrigin::parse(s) {
+        Some(o) if o.may_be_declared() => Ok(o),
+        Some(o) => Err(format!(
+            "{o} is established by the runtime from the connection, not declared; use {}",
+            declarable()
+        )),
+        None => Err(format!("use {}", declarable())),
+    }
+}
 
 /// Resolve the six permission dimensions for one invocation.
 ///
@@ -602,6 +658,7 @@ fn run(args: RunArgs) -> Result<i32> {
         args: args.args.clone(),
         cwd: cwd.to_string_lossy().into_owned(),
         policy,
+        request_origin: args.origin,
         worktree: args.worktree.clone(),
         checkpoint: args.checkpoint,
         cols: size.cols,
@@ -610,7 +667,7 @@ fn run(args: RunArgs) -> Result<i32> {
     };
 
     let mut c = Client::connect()?;
-    check_daemon_understands(&mut c, &policy)?;
+    check_daemon_understands(&mut c, &policy, args.origin)?;
     let info = match c.call(&Request::Run(request))? {
         Response::Session(info) => *info,
         other => bail!("unexpected reply: {other:?}"),
@@ -662,14 +719,25 @@ fn describe_policy(policy: &AgentPolicy) -> String {
 /// and nothing anywhere would say so. That is the fail-open a protocol version
 /// exists to catch, and the check is skipped entirely when every dimension is
 /// at its default, so an all-defaults run still works against an old daemon.
-fn check_daemon_understands(c: &mut Client, policy: &AgentPolicy) -> Result<()> {
+fn check_daemon_understands(
+    c: &mut Client,
+    policy: &AgentPolicy,
+    origin: Option<RequestOrigin>,
+) -> Result<()> {
     let moved = non_default_dimensions(policy);
-    let beyond_sandbox: Vec<&str> = moved
+    let mut needs: Vec<(&str, u32)> = moved
         .iter()
         .map(|(name, _)| *name)
         .filter(|name| *name != "sandbox")
+        .map(|name| (name, POLICY_DIMENSIONS_VERSION))
         .collect();
-    if beyond_sandbox.is_empty() {
+    // A declared origin is the same failure and a worse one. A daemon that
+    // predates it drops the key and records whatever it observed, which for
+    // Remote Control is the local origin §7 reserves root for.
+    if origin.is_some() {
+        needs.push(("--origin", REQUEST_ORIGIN_VERSION));
+    }
+    if needs.is_empty() {
         return Ok(());
     }
     let Response::Hello { version, .. } = c.call(&Request::Hello)? else {
@@ -677,12 +745,17 @@ fn check_daemon_understands(c: &mut Client, policy: &AgentPolicy) -> Result<()> 
         // and guessing in the permissive direction is the whole failure mode.
         bail!("the agent runtime did not answer the protocol handshake");
     };
-    if version < POLICY_DIMENSIONS_VERSION {
+    let ignored: Vec<&str> = needs
+        .iter()
+        .filter(|(_, since)| version < *since)
+        .map(|(name, _)| *name)
+        .collect();
+    if !ignored.is_empty() {
         bail!(
             "the running agent runtime speaks protocol {version} and would ignore {}; \
              restart it with `systemctl --user restart apex-agentd` so the setting takes \
              effect",
-            beyond_sandbox.join(", ")
+            ignored.join(", ")
         );
     }
     Ok(())
@@ -1138,6 +1211,35 @@ fn event(state: String, session: Option<u32>, detail: Option<String>) -> Result<
     }
     client::publish_event(id, &state, detail)?;
     Ok(0)
+}
+
+/// `apex agent origin <origin>` — narrow the calling session's own origin.
+///
+/// The session is resolved by the daemon from the connection, so this cannot
+/// be pointed at another session and does not read `$APEX_AGENT_SESSION`.
+/// Handing a session id to a verb that changes a permission-relevant property
+/// is exactly what the privilege verbs avoid, and for the same reason.
+fn declare_origin(origin: &str) -> Result<i32> {
+    let wanted = parse_request_origin(origin).map_err(|e| anyhow::anyhow!("{e}"))?;
+    match client::call(&Request::DeclareOrigin {
+        origin: wanted.as_str().to_string(),
+    })? {
+        Response::Session(info) => {
+            eprintln!(
+                "apex: session {} is now {} (declared)",
+                info.id,
+                info.request_origin
+                    .map(|o| o.to_string())
+                    .unwrap_or_else(|| "unrecorded".into())
+            );
+            Ok(0)
+        }
+        Response::Error { message, .. } => {
+            eprintln!("apex: {message}");
+            Ok(1)
+        }
+        other => bail!("unexpected reply: {other:?}"),
+    }
 }
 
 fn remove(id: u32) -> Result<i32> {
@@ -1811,6 +1913,7 @@ mod tests {
             secrets: None,
             network: None,
             origin_policy: None,
+            origin: None,
             unsafe_everything: false,
             worktree: None,
             checkpoint: false,

@@ -47,6 +47,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::origin::OriginSource;
+use crate::policy::RequestOrigin;
+
 /// The complete set of privileged operations an agent may ask for.
 ///
 /// Deliberately an enum over `apex`'s existing root-only verbs. There is no
@@ -418,6 +421,18 @@ pub struct PrivilegeRequest {
     /// Project root the session was running in.
     #[serde(default)]
     pub project: Option<String>,
+    /// Where the request came from (§7's `request_origin`).
+    ///
+    /// Established by the daemon: inherited from the asking session, or
+    /// observed from the connection when the peer is not a session. `None` is
+    /// a record filed before origin tracking existed — deliberately not
+    /// `local-terminal`, because an absent field must not read as the origin
+    /// §7 reserves root for.
+    #[serde(default)]
+    pub request_origin: Option<RequestOrigin>,
+    /// How [`PrivilegeRequest::request_origin`] was arrived at.
+    #[serde(default)]
+    pub origin_source: Option<OriginSource>,
     pub decision: Decision,
     /// Milliseconds since the epoch, when filed.
     pub created_ms: u64,
@@ -445,6 +460,29 @@ impl PrivilegeRequest {
         self.verb.argv()
     }
 
+    /// Where this request came from, for display.
+    ///
+    /// A request filed before origin tracking existed has none recorded, and
+    /// that is shown as `unknown` rather than guessed at. The distinction
+    /// matters at exactly the moment the prompt is being read: a human
+    /// deciding whether to hand out root should not be told "local" by a
+    /// record that never said so.
+    pub fn origin_summary(&self) -> String {
+        match (self.request_origin, self.origin_source) {
+            (Some(o), Some(s)) => format!("{o} ({s})"),
+            (Some(o), None) => o.to_string(),
+            (None, _) => "unknown — filed before origins were recorded".to_string(),
+        }
+    }
+
+    /// Whether a human was at this machine when the request was made.
+    ///
+    /// `false` for a record with no origin: an unrecorded origin is not
+    /// evidence of presence, and §7 reserves root for evidence of presence.
+    pub fn is_local(&self) -> bool {
+        self.request_origin.is_some_and(|o| o.is_local())
+    }
+
     /// The §4 prompt, rendered.
     pub fn prompt(&self) -> String {
         let who = self.agent.as_deref().unwrap_or("An agent");
@@ -454,6 +492,11 @@ impl PrivilegeRequest {
         if let Some(p) = &self.project {
             out.push_str(&format!("Project:\n  {p}\n"));
         }
+        // Last, and never omitted. §7's table has a different answer for a
+        // remote origin than a local one, so the line the human reads before
+        // approving has to say which column they are in — including when the
+        // answer is that nobody recorded it.
+        out.push_str(&format!("Origin:\n  {}\n", self.origin_summary()));
         out
     }
 }
@@ -578,6 +621,12 @@ pub fn audit(path: &Path, event: &str, req: &PrivilegeRequest) -> std::io::Resul
         "session": req.session,
         "agent": req.agent,
         "project": req.project,
+        // §7 and P0-013's third criterion: the audit graph records origin.
+        // Both halves — a line saying `claude-remote-control` without saying
+        // whether the daemon observed that or a client asked for it answers
+        // half the question an audit is read to answer.
+        "request_origin": req.request_origin.map(|o| o.as_str()),
+        "origin_source": req.origin_source.map(|s| s.as_str()),
         "decision": req.decision.as_str(),
         "exit_code": req.exit_code,
     });
@@ -674,6 +723,8 @@ mod tests {
             session: Some(4),
             agent: Some("claude".into()),
             project: Some("/home/tester/Projects/demo".into()),
+            request_origin: Some(RequestOrigin::LocalTerminal),
+            origin_source: Some(OriginSource::Inherited),
             decision: Decision::Pending,
             created_ms: 1_700_000_000_000,
             decided_ms: None,
@@ -885,6 +936,57 @@ mod tests {
         assert!(p.contains("Reason"), "{p}");
         assert!(p.contains("Effect"), "{p}");
         assert!(p.contains("/home/tester/Projects/demo"), "{p}");
+    }
+
+    #[test]
+    fn the_prompt_names_the_origin_the_request_came_from() {
+        // §7's table has two columns and the human reading this prompt is
+        // deciding which one applies. A prompt that did not say would be
+        // asking them to authorise root without telling them who is asking.
+        let mut r = req(Verb::Update);
+        r.request_origin = Some(RequestOrigin::RemoteControl);
+        r.origin_source = Some(OriginSource::Declared);
+        let p = r.prompt();
+        assert!(p.contains("Origin:"), "{p}");
+        assert!(p.contains("claude-remote-control"), "{p}");
+        assert!(p.contains("declared"), "{p}");
+        assert!(!r.is_local());
+
+        r.request_origin = Some(RequestOrigin::LocalTerminal);
+        r.origin_source = Some(OriginSource::Observed);
+        assert!(r.prompt().contains("local-terminal"), "{}", r.prompt());
+        assert!(r.is_local());
+    }
+
+    #[test]
+    fn a_request_with_no_recorded_origin_is_shown_as_unknown_not_as_local() {
+        // A record filed before origin tracking existed. `local-terminal` is
+        // the enum's Default, so the failure mode this guards is the field
+        // deserialising to the one origin §7 reserves root for.
+        let mut r = req(Verb::Update);
+        r.request_origin = None;
+        r.origin_source = None;
+        assert!(!r.is_local(), "an unrecorded origin is not evidence of presence");
+        let summary = r.origin_summary();
+        assert!(summary.contains("unknown"), "{summary}");
+        assert!(r.prompt().contains("unknown"), "{}", r.prompt());
+    }
+
+    #[test]
+    fn a_stored_request_without_an_origin_key_loads_without_becoming_local() {
+        // The on-disk half of the same property: the JSON an older daemon
+        // wrote has no `request_origin` at all.
+        let r = req(Verb::Pin);
+        let text = serde_json::to_string(&r).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        {
+            let obj = v.as_object_mut().unwrap();
+            assert!(obj.remove("request_origin").is_some(), "never written");
+            assert!(obj.remove("origin_source").is_some(), "never written");
+        }
+        let old: PrivilegeRequest = serde_json::from_value(v).expect("an old record still loads");
+        assert_eq!(old.request_origin, None);
+        assert!(!old.is_local());
     }
 
     #[test]
@@ -1131,6 +1233,36 @@ mod tests {
             })
             .collect();
         assert_eq!(events, ["requested", "approved", "executed"]);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn the_audit_line_records_the_origin_and_how_it_was_established() {
+        // P0-013's third criterion. The origin alone is not enough: a line
+        // saying `claude-remote-control` without saying whether the daemon
+        // observed it or a client asked for it cannot answer the question an
+        // audit trail is read to answer.
+        let d = tmpdir("audit-origin");
+        let log = d.join("audit.jsonl");
+        let mut r = req(Verb::Update);
+        r.request_origin = Some(RequestOrigin::RemoteControl);
+        r.origin_source = Some(OriginSource::Declared);
+        audit(&log, "requested", &r).expect("audit");
+
+        let text = std::fs::read_to_string(&log).expect("read");
+        let v: serde_json::Value = serde_json::from_str(text.trim()).expect("one JSON object");
+        assert_eq!(v["request_origin"], "claude-remote-control");
+        assert_eq!(v["origin_source"], "declared");
+
+        // And a request with none recorded says so with a null rather than
+        // borrowing the previous line's answer or the enum's default.
+        r.request_origin = None;
+        r.origin_source = None;
+        audit(&log, "requested", &r).expect("audit");
+        let text = std::fs::read_to_string(&log).expect("read");
+        let last: serde_json::Value =
+            serde_json::from_str(text.lines().last().unwrap()).expect("JSON");
+        assert!(last["request_origin"].is_null(), "{last}");
         std::fs::remove_dir_all(&d).ok();
     }
 

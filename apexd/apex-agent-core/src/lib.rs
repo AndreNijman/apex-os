@@ -19,6 +19,7 @@
 //! apex-agentd  — unprivileged, per-user, systemd --user
 //!         ├─ PTY + session lifecycle       session.rs
 //!         ├─ the six permission dimensions policy.rs
+//!         ├─ where a request came from        origin.rs
 //!         ├─ sandbox policy                sandbox.rs
 //!         ├─ network destination policy    destination.rs
 //!         ├─ adapters                      adapter.rs
@@ -45,6 +46,7 @@ pub mod config;
 pub mod destination;
 pub mod git;
 pub mod layout;
+pub mod origin;
 pub mod paths;
 pub mod policy;
 pub mod project;

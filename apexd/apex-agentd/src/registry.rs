@@ -594,6 +594,8 @@ mod tests {
             detail: None,
             paused: false,
             policy: apex_agent_core::AgentPolicy::default(),
+            request_origin: Some(apex_agent_core::policy::RequestOrigin::LocalTerminal),
+            origin_source: Some(apex_agent_core::origin::OriginSource::Observed),
             pid: 0,
             started: 0,
             last_activity: 0,
