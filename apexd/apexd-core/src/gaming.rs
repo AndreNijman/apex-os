@@ -144,20 +144,49 @@ impl Probe {
     /// Present or absent, with the path looked at. Absence is a *measurement*,
     /// so it is `Measured(false)` rather than `Unavailable` — the latter is
     /// reserved for "could not tell", which is a different and worse answer.
+    ///
+    /// `Path::exists` cannot make that distinction: it answers false for every
+    /// failed `stat`, including `EACCES`. `SWITCH_SUDOERS` lives in
+    /// `/etc/sudoers.d`, which is `0750 root:root`, and `apex gaming` is
+    /// documented as read-only and needs no root — so an unprivileged run
+    /// could not stat the file and reported the correctly installed sudoers
+    /// rule as missing, every time. Match on the error instead.
     fn file(&self, rel: &str) -> Signal<bool> {
         let p = self.at(rel);
-        Signal::measured(p.exists(), p.display().to_string())
+        match std::fs::metadata(&p) {
+            Ok(_) => Signal::measured(true, p.display().to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Signal::measured(false, p.display().to_string())
+            }
+            Err(e) => Signal::unavailable(
+                format!("could not read the path: {e}"),
+                p.display().to_string(),
+            ),
+        }
     }
 
     /// Present, and executable. A COPY that lost `--chmod=0755` produces a
     /// session that exists and cannot start, which is the failure this
     /// distinguishes from a missing file.
+    ///
+    /// Carries the same `EACCES` distinction as `file`: a mode we cannot read
+    /// is not a mode without the executable bit.
     fn executable(&self, rel: &str) -> Signal<bool> {
+        use std::os::unix::fs::PermissionsExt;
         let p = self.at(rel);
-        if !p.exists() {
-            return Signal::measured(false, p.display().to_string());
+        match std::fs::metadata(&p) {
+            Ok(m) => Signal::measured(
+                m.is_file() && m.permissions().mode() & 0o111 != 0,
+                p.display().to_string(),
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Signal::measured(false, p.display().to_string())
+            }
+            Err(e) => Signal::unavailable(
+                format!("could not read the path: {e}"),
+                p.display().to_string(),
+            ),
         }
-        Signal::measured(is_executable(&p), p.display().to_string())
     }
 
     /// Which session the greeter will preselect at the next boot.
@@ -562,6 +591,86 @@ mod tests {
     #[test]
     fn the_real_probe_does_look_at_path() {
         assert!(Probe::new().probes_programs());
+    }
+
+    // ── a stat we are not allowed to make ────────────────────────────────────
+
+    /// Take away every mode bit on the parent so `stat` on a child fails with
+    /// `EACCES` instead of `ENOENT`.
+    ///
+    /// Returns whether the seal actually took. Root walks through a 0000
+    /// directory, and so does anyone holding `CAP_DAC_OVERRIDE`, so the check
+    /// is whether the child became unreadable rather than whether the caller
+    /// looks like root. That keeps the test honest under `sudo cargo test` and
+    /// inside a privileged container, where a uid comparison would be a guess.
+    fn seal(dir: &Path, child: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dir).expect("stat").permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(dir, perms).expect("chmod");
+        matches!(std::fs::metadata(child), Err(e) if e.kind() != std::io::ErrorKind::NotFound)
+    }
+
+    fn unseal(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dir).expect("stat").permissions();
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(dir, perms);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_unavailable_rather_than_absent() {
+        // `/etc/sudoers.d` is 0750 root:root and `apex gaming` runs
+        // unprivileged, so this is the real shape of the bug: the sudoers rule
+        // is installed correctly and the probe could not look at it. Reporting
+        // that as absent sent users chasing a file that was already there.
+        let f = gaming_edition("eacces");
+        let child = f.0.join(SWITCH_SUDOERS);
+        let parent = child.parent().expect("has a parent").to_path_buf();
+        if !seal(&parent, &child) {
+            unseal(&parent);
+            return; // the caller overrides the mode bit; it proves nothing here
+        }
+        let r = f.probe().report();
+        unseal(&parent);
+
+        assert!(
+            !r.switch_sudoers.is_measured(),
+            "a stat refused with EACCES is not a measurement of absence"
+        );
+        assert!(
+            r.switch_sudoers.reason().unwrap_or("").contains("could not read"),
+            "the reason should say the path could not be read, got {:?}",
+            r.switch_sudoers.reason()
+        );
+    }
+
+    #[test]
+    fn an_unreadable_executable_is_unavailable_rather_than_absent() {
+        let f = gaming_edition("eacces-exec");
+        let child = f.0.join(SWITCH_HELPER);
+        let parent = child.parent().expect("has a parent").to_path_buf();
+        if !seal(&parent, &child) {
+            unseal(&parent);
+            return;
+        }
+        let r = f.probe().report();
+        unseal(&parent);
+
+        assert!(
+            !r.switch_helper.is_measured(),
+            "a mode we cannot read is not a mode without the executable bit"
+        );
+    }
+
+    #[test]
+    fn a_genuinely_missing_file_is_still_measured_absent() {
+        // The other half of the distinction: ENOENT must stay a measurement,
+        // or the fix would turn every real absence into "could not tell".
+        let f = Fixture::new("enoent");
+        let r = f.probe().report();
+        assert!(r.switch_sudoers.is_measured());
+        assert_eq!(r.switch_sudoers.value(), Some(&false));
     }
 
     // ── the report ───────────────────────────────────────────────────────────
