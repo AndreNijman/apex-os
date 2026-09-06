@@ -758,4 +758,139 @@ mod tests {
             );
         }
     }
+    /// One turn, replayed a second at a time, counting the seconds the
+    /// reported state disagrees with what the session was actually doing.
+    ///
+    /// The timeline is written out rather than derived, because it is the
+    /// ground truth the two answers are scored against: the agent works from
+    /// the prompt until `stop_at`, and a tool runs quietly in the middle of
+    /// that. Output lands when the tool prints its result and when the agent
+    /// prints its answer — the silence in between is the whole problem.
+    ///
+    /// Returns (seconds a running agent was called idle, seconds a finished
+    /// turn was called working). The daemon's own order is reproduced: output
+    /// is absorbed first and a published event overrides it, which is what
+    /// happens when Claude prints its answer and then runs its `Stop` hook.
+    fn misreported(hooks: bool, tool_at: u64, tool_secs: u64, stop_at: u64, turn: u64) -> (u64, u64) {
+        let tool_end = tool_at + tool_secs;
+        let mut state = AgentState::Working;
+        let mut last_activity = 0u64;
+        let mut tool_started: Option<u64> = None;
+        let (mut called_idle, mut called_working) = (0, 0);
+
+        for now in 1..=turn {
+            let output = now == tool_end || now == stop_at;
+            if output {
+                last_activity = now;
+            }
+            let in_flight = tool_started.map(|at| now - at);
+            state = next_state(state, &[], output, now - last_activity, in_flight);
+
+            if hooks {
+                let event = match now {
+                    n if n == tool_at => Some(crate::hook::HookEvent::PreToolUse),
+                    n if n == tool_end => Some(crate::hook::HookEvent::PostToolUse),
+                    n if n == stop_at => Some(crate::hook::HookEvent::Stop),
+                    _ => None,
+                };
+                if let Some(e) = event {
+                    let o = crate::hook::observe(e, &crate::hook::Payload::default());
+                    match o.tool {
+                        crate::hook::ToolTransition::Started => tool_started = Some(now),
+                        crate::hook::ToolTransition::Finished => tool_started = None,
+                        crate::hook::ToolTransition::Unchanged => {}
+                    }
+                    if let Some(published) = o.state {
+                        state = published;
+                    }
+                    last_activity = now;
+                }
+            }
+
+            let working = now < stop_at;
+            match (working, state == AgentState::Working) {
+                (true, false) => called_idle += 1,
+                (false, true) => called_working += 1,
+                _ => {}
+            }
+        }
+        (called_idle, called_working)
+    }
+
+    #[test]
+    fn the_hook_bridge_is_measurably_more_accurate_than_the_idle_rule() {
+        // Acceptance criterion 3 of P0-011 as a number rather than a claim. A
+        // two-minute quiet tool call five seconds into a turn that ends at
+        // 130s, watched for three minutes.
+        let (tool_at, tool_secs, stop_at, turn) = (5, 120, 130, 180);
+        let (idle_wrong, idle_late) = misreported(false, tool_at, tool_secs, stop_at, turn);
+        let (hook_wrong, hook_late) = misreported(true, tool_at, tool_secs, stop_at, turn);
+
+        // Inference: wrong from the tenth second of silence until the tool
+        // printed — 115 of the 129 seconds the agent was working — and then
+        // wrong the other way for the ten seconds after the turn ended, while
+        // it waited for the silence to reach the threshold. 125 seconds of a
+        // 180-second turn reported as the opposite of what was happening.
+        assert_eq!(idle_wrong, tool_at + tool_secs - IDLE_TO_WAITING_SECS);
+        assert_eq!(idle_wrong, 115);
+        assert_eq!(idle_late, IDLE_TO_WAITING_SECS);
+        assert_eq!(idle_wrong + idle_late, 125);
+
+        // Hooks: right every second of the turn.
+        assert_eq!((hook_wrong, hook_late), (0, 0));
+    }
+
+    #[test]
+    fn the_idle_rule_cannot_reach_permission_request_at_all() {
+        // The other half of criterion 3, and the larger half: no sequence of
+        // output, silence or signals produces this state, because no pattern
+        // match on arbitrary terminal output can recognise a permission prompt.
+        // A hook publishes it directly. Accuracy for this state is therefore
+        // not "better" — it is zero against one.
+        let every_signal = [
+            Signal::Bell,
+            Signal::CommandStarted,
+            Signal::PromptReady,
+            Signal::Notification(String::new()),
+        ];
+        for current in [
+            AgentState::Starting,
+            AgentState::Working,
+            AgentState::WaitingForUser,
+        ] {
+            for had_output in [true, false] {
+                for idle in [0, 1, IDLE_TO_WAITING_SECS, 3600] {
+                    for tool in [None, Some(0), Some(TOOL_IN_FLIGHT_MAX_SECS + 1)] {
+                        assert_ne!(
+                            next_state(current, &[], had_output, idle, tool),
+                            AgentState::PermissionRequest
+                        );
+                        for sig in &every_signal {
+                            assert_ne!(
+                                next_state(
+                                    current,
+                                    std::slice::from_ref(sig),
+                                    had_output,
+                                    idle,
+                                    tool
+                                ),
+                                AgentState::PermissionRequest,
+                                "{sig:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // And the hook is the one thing that does produce it.
+        assert_eq!(
+            crate::hook::observe(
+                crate::hook::HookEvent::PermissionRequest,
+                &crate::hook::Payload::default()
+            )
+            .state,
+            Some(AgentState::PermissionRequest)
+        );
+    }
+
 }

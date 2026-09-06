@@ -359,6 +359,29 @@ pub enum Request {
         #[serde(default)]
         detail: Option<String>,
     },
+    /// Ask whether a tool call this session is about to make is one its own
+    /// confinement would refuse (§6.2).
+    ///
+    /// Asked by `apex agent hook pre_tool_use`, which runs inside the sandbox
+    /// and so knows three environment variables and nothing about the mounts.
+    /// The daemon holds the spec it built, so the decision is made where the
+    /// evidence is.
+    ///
+    /// Not a protocol bump, for the same reason the optional keys on
+    /// [`Request::Event`] are not: a daemon that predates this answers "unknown
+    /// request", the hook prints nothing, Claude proceeds, and the sandbox that
+    /// daemon did build refuses the operation exactly as it always would have.
+    /// The failure loses a message, never a restriction — which is the test the
+    /// version guards above are applying.
+    ToolCheck {
+        id: u32,
+        tool_name: String,
+        /// The tool's own arguments, verbatim from Claude. Untyped because
+        /// every tool shapes them differently and a typed union would break on
+        /// the next tool added upstream.
+        #[serde(default)]
+        tool_input: serde_json::Value,
+    },
     /// Read the tail of a session's transcript.
     Logs {
         id: u32,
@@ -555,6 +578,17 @@ pub enum Response {
         exit_code: i32,
         /// git's own output, with the credential scrubbed out.
         output: String,
+    },
+    /// The §6.2 policy point's answer to one `PreToolUse`.
+    ///
+    /// `deny` absent is an allow, and absent is also what every failure on the
+    /// way here produces — an unreachable daemon, a session that has gone, a
+    /// request an older daemon does not know. A hook that cannot get an answer
+    /// must not invent a refusal, and it does not need to: the sandbox is what
+    /// enforces this, and it is still there.
+    ToolDecision {
+        #[serde(default)]
+        deny: Option<String>,
     },
     /// Verb succeeded and has nothing to say.
     Ok,
@@ -809,6 +843,10 @@ mod tests {
                 exit_code: 0,
                 output: "Everything up-to-date".into(),
             },
+            Response::ToolDecision { deny: None },
+            Response::ToolDecision {
+                deny: Some("no".into()),
+            },
             Response::Ok,
             Response::error(ErrorKind::Internal, "boom"),
         ];
@@ -947,6 +985,11 @@ mod tests {
                 state: None,
                 event: Some("task_created".into()),
                 detail: None,
+            },
+            Request::ToolCheck {
+                id: 1,
+                tool_name: "Bash".into(),
+                tool_input: serde_json::json!({"command": "ls"}),
             },
             Request::Logs { id: 1, bytes: 100 },
             Request::Remove { id: 1 },

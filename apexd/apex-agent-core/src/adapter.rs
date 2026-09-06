@@ -133,6 +133,14 @@ pub struct Adapter {
     /// so without this the user would get an unexplained upstream error
     /// instead of a refusal that says which of the two rules stopped them.
     pub native_bypass_refused_as_root: bool,
+    /// Whether this agent publishes a hook lifecycle APEX can subscribe to
+    /// (§6.1), and can be pointed at a settings file that does the subscribing.
+    ///
+    /// One adapter today. It is a field rather than an `id == "claude"` test
+    /// because the next agent to grow hooks should be one line here, and
+    /// because the sandbox and argv code that reads it should not have to know
+    /// which agent it is looking at.
+    pub hooks: bool,
 }
 
 /// Every adapter the runtime knows, in listing order.
@@ -162,6 +170,7 @@ pub const ADAPTERS: &[Adapter] = &[
         native_bypass: &["--permission-mode", "bypassPermissions"],
         native_ask: &["--permission-mode", "manual"],
         native_bypass_refused_as_root: true,
+        hooks: true,
     },
     Adapter {
         id: "opencode",
@@ -178,6 +187,7 @@ pub const ADAPTERS: &[Adapter] = &[
         native_bypass: &["--auto"],
         native_ask: &[],
         native_bypass_refused_as_root: false,
+        hooks: false,
     },
     Adapter {
         id: "codex",
@@ -191,6 +201,7 @@ pub const ADAPTERS: &[Adapter] = &[
         native_bypass: &["-a", "never"],
         native_ask: &["-a", "on-request"],
         native_bypass_refused_as_root: false,
+        hooks: false,
     },
     Adapter {
         id: "gemini",
@@ -205,6 +216,7 @@ pub const ADAPTERS: &[Adapter] = &[
         native_bypass: &[],
         native_ask: &[],
         native_bypass_refused_as_root: false,
+        hooks: false,
     },
     Adapter {
         id: "kimi",
@@ -217,6 +229,7 @@ pub const ADAPTERS: &[Adapter] = &[
         native_bypass: &["--auto"],
         native_ask: &[],
         native_bypass_refused_as_root: false,
+        hooks: false,
     },
     Adapter {
         id: "generic",
@@ -228,6 +241,7 @@ pub const ADAPTERS: &[Adapter] = &[
         native_bypass: &[],
         native_ask: &[],
         native_bypass_refused_as_root: false,
+        hooks: false,
     },
 ];
 
@@ -342,6 +356,22 @@ impl Adapter {
     /// exactly the failure P0-010 exists to avoid.
     pub fn profile(&self) -> Option<&'static crate::profile::Profile> {
         crate::profile::by_agent(self.id)
+    }
+
+    /// The arguments that point this agent at APEX's hook subscriptions.
+    ///
+    /// Empty for an adapter that has no hooks, so a caller can append the
+    /// result unconditionally. `--settings` *adds* a settings source rather
+    /// than replacing the user's — measured against the installed binary's
+    /// `--help` — so Andre's own hooks keep running beside APEX's.
+    pub fn hook_settings_args(&self, settings: &std::path::Path) -> Vec<String> {
+        if !self.hooks {
+            return Vec::new();
+        }
+        vec![
+            "--settings".to_string(),
+            settings.to_string_lossy().into_owned(),
+        ]
     }
 
     /// Add this adapter's home requirements, the shared toolchain state and the

@@ -20,6 +20,7 @@ use apex_agent_core::protocol::{
     AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo,
     POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION,
 };
+use apex_agent_core::hook::{self as hook_core, HookEvent};
 use apex_agent_core::term::{self, RawMode, WinSize};
 use apex_agent_core::{adapter, checkpoint, config, git, layout, profile, project};
 use clap::{Args, Subcommand};
@@ -150,6 +151,23 @@ pub enum AgentCmd {
         /// Text shown alongside the state.
         #[arg(long)]
         detail: Option<String>,
+    },
+    /// Report one of Claude's own lifecycle events (§6.1), and for
+    /// `pre_tool_use` ask APEX whether the tool call is one this session's
+    /// sandbox would refuse (§6.2).
+    ///
+    /// Not meant to be typed. `apex-agentd` writes a settings file that runs
+    /// this once per event, and the payload arrives on stdin as the JSON
+    /// document Claude produces. It takes no session id: `$APEX_AGENT_SESSION`
+    /// is set by the sandbox, and an id on the command line would be an id the
+    /// agent could edit into another session's.
+    ///
+    /// It always exits 0 and prints nothing it does not have to. A hook that
+    /// failed loudly would be a broken daemon stopping the agent from working.
+    #[command(hide = true)]
+    Hook {
+        /// session_start | pre_tool_use | post_tool_use | stop | …
+        event: String,
     },
     /// Narrow where this session says it is driven from (§7).
     ///
@@ -568,6 +586,7 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             session,
             detail,
         } => event(state, session, detail),
+        AgentCmd::Hook { event } => return hook(&event),
         AgentCmd::Origin { origin } => declare_origin(&origin),
         AgentCmd::Rm { id } => remove(id),
         AgentCmd::Prune => prune(),
@@ -1531,6 +1550,86 @@ fn event(state: String, session: Option<u32>, detail: Option<String>) -> Result<
     }
     client::publish_event(id, &state, detail)?;
     Ok(0)
+}
+
+/// `apex agent hook <event>` — the bridge from Claude's own lifecycle.
+///
+/// Returns an exit code directly rather than a `Result`, because there is only
+/// one: **0**, always. Claude reads a non-zero exit from a `PreToolUse` as a
+/// reason to stop the tool call, and 2 as a reason to block it and hand the
+/// agent the stderr — so a daemon that is down, a payload that will not parse
+/// or an event name from a newer settings file must not become a refusal. Every
+/// one of those is a hook that said nothing, and a hook that says nothing
+/// leaves the sandbox doing the enforcing, which is where §6.2 puts it anyway.
+///
+/// Diagnostics go to stderr, which Claude shows in its transcript in verbose
+/// mode and otherwise discards. stdout carries the deny document and nothing
+/// else — anything else there would be read as a malformed hook response.
+fn hook(event: &str) -> i32 {
+    let Some(parsed) = HookEvent::parse(event) else {
+        eprintln!("apex agent hook: unknown event {event:?}; ignoring");
+        return 0;
+    };
+    let payload = read_payload();
+
+    // The policy point first, because its answer decides whether the tool runs
+    // at all and it is the only part with a deadline the agent can feel.
+    if parsed.is_policy_point() {
+        if let Some(doc) = policy_decision(&payload) {
+            println!("{doc}");
+        }
+    }
+
+    let Some(id) = client::current_session() else {
+        // Not inside a managed session: a user's own `~/.claude/settings.json`
+        // pointing here, or a nested agent. Nothing to report to.
+        return 0;
+    };
+    let observation = hook_core::observe(parsed, &payload);
+    if let Err(e) = client::publish_hook(id, parsed, observation.state, observation.detail) {
+        eprintln!("apex agent hook: {parsed} not published: {e:#}");
+    }
+    0
+}
+
+/// Read the payload Claude writes to a hook's stdin.
+///
+/// An unreadable or unparseable document is an empty payload, not an error:
+/// the event still happened and the state it implies does not depend on the
+/// detail. Bounded, because this is a document an agent's own tool arguments
+/// end up inside and the process has no reason to hold a large one.
+fn read_payload() -> hook_core::Payload {
+    use std::io::Read;
+    const MAX_PAYLOAD: u64 = 1024 * 1024;
+    let mut text = String::new();
+    if std::io::stdin()
+        .take(MAX_PAYLOAD)
+        .read_to_string(&mut text)
+        .is_err()
+    {
+        return hook_core::Payload::default();
+    }
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+/// Ask the daemon whether this tool call is one the sandbox would refuse, and
+/// render the answer as the document Claude expects.
+///
+/// `None` for anything but a refusal, including every failure. See [`hook`].
+fn policy_decision(payload: &hook_core::Payload) -> Option<String> {
+    let id = client::current_session()?;
+    let tool_name = payload.tool_name.clone()?;
+    let reply = client::call(&Request::ToolCheck {
+        id,
+        tool_name,
+        tool_input: payload.tool_input.clone(),
+    });
+    let deny = match reply {
+        Ok(Response::ToolDecision { deny }) => deny?,
+        // An older daemon that does not know this request, or no daemon at all.
+        Ok(_) | Err(_) => return None,
+    };
+    Some(hook_core::deny_document(&deny).to_string())
 }
 
 /// `apex agent origin <origin>` — narrow the calling session's own origin.

@@ -2,12 +2,13 @@
 
 use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use apex_agent_core::adapter;
 use apex_agent_core::checkpoint;
+use apex_agent_core::hook;
 use apex_agent_core::client::SESSION_ENV;
 use apex_agent_core::paths;
 use apex_agent_core::config;
@@ -173,6 +174,19 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     paths::ensure_private_dir(&scratch)
         .with_context(|| format!("preparing the session scratch directory {}", scratch.display()))?;
 
+    // §6.1: the settings document that subscribes Claude to its own lifecycle,
+    // written into the scratch directory the sandbox already binds. Best-effort
+    // by design — a session whose hooks could not be installed reports its
+    // state from the PTY scanner, which is the fallback §6.1 keeps and not a
+    // reason to refuse to start. `hook_settings` says what went wrong, once.
+    let hook_settings = install_hook_settings(adapter, &scratch);
+    let mut extra = extra;
+    if let Some(path) = hook_settings.as_ref() {
+        let mut with_hooks = adapter.hook_settings_args(path);
+        with_hooks.append(&mut extra);
+        extra = with_hooks;
+    }
+
     let args = adapter.build_args(policy.native, req.prompt.as_deref(), &extra);
     let size = WinSize {
         cols: req.cols,
@@ -199,6 +213,16 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         }
     }
     adapter.apply_sandbox(&mut spec);
+    // Read-only, and that is the one part of this bridge an agent cannot undo.
+    // `build_argv` applies the read-only allowlist after the scratch bind, so
+    // this lands on top of a directory the session can otherwise write: the
+    // hook subscriptions are fixed at spawn. It does not make the hook
+    // authoritative — `--bare`, a nested agent and `disableAllHooks` in the
+    // agent's own writable `~/.claude` all still silence it — which is why
+    // nothing downstream is allowed to depend on the hook having run.
+    if let Some(path) = hook_settings.as_ref() {
+        spec.ro.push(path.clone());
+    }
 
     // The profile's writable directories have to exist before the sandbox binds
     // them: bwrap binds with `-try`, and a `-try` for a path that is not there
@@ -343,12 +367,73 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         let mut reg = daemon.registry.lock().expect("registry lock");
         reg.insert(info.clone(), spawned.master, spawned.pid, spawned.pgid)
     };
+    // The spec as built, not as it could be rebuilt later: §6.2 must judge a
+    // tool call against the confinement the session is actually running under.
+    handle.lock().expect("session lock").confinement = Some(Box::new(registry::Confinement {
+        spec,
+        allowlist,
+    }));
     registry::write_record(&info);
     // The session owns its record now, so the id stops being a reservation.
     reservation.commit();
     spawn_reader(Arc::clone(daemon), handle, id);
 
     Ok(info)
+}
+
+/// Write the hook subscriptions for a session, and say where they went.
+///
+/// `None` when this adapter has no way to be told about a settings file — every
+/// agent but Claude today — and also when the write failed or the `apex` binary
+/// could not be found. All three are the same thing downstream: no hooks, so
+/// the PTY scanner decides state, exactly as it does for an agent nobody has
+/// integrated. The failures are logged because a silently unintegrated Claude
+/// looks identical to a working one until somebody measures the state.
+fn install_hook_settings(adapter: &adapter::Adapter, scratch: &Path) -> Option<PathBuf> {
+    if !adapter.hooks {
+        return None;
+    }
+    let apex = match apex_program() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "apex-agentd: no `apex` on PATH, so {} runs without its hook bridge and \
+                 reports state from terminal output",
+                adapter.id
+            );
+            return None;
+        }
+    };
+    let path = hook::settings_path(scratch);
+    let document = hook::settings_json(&apex).to_string();
+    match std::fs::write(&path, document) {
+        Ok(()) => Some(path),
+        Err(e) => {
+            eprintln!(
+                "apex-agentd: writing {} failed ({e}), so {} runs without its hook bridge",
+                path.display(),
+                adapter.id
+            );
+            None
+        }
+    }
+}
+
+/// The `apex` binary a hook command will exec, as an absolute path.
+///
+/// Absolute because the hook runs inside the sandbox, whose `PATH` is the
+/// daemon's but whose filesystem is not: a bare `apex` would resolve against
+/// directories the home tmpfs has masked. `/usr/bin/apex` first, because that
+/// is where the image puts it and it is reachable under `--ro-bind / /`; the
+/// daemon's own `PATH` after, so a development build is testable.
+fn apex_program() -> Option<PathBuf> {
+    let installed = PathBuf::from("/usr/bin/apex");
+    if installed.is_file() {
+        return Some(installed);
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join("apex"))
+        .find(|p| p.is_file())
 }
 
 /// The `PATH` a session inherits.

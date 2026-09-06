@@ -23,7 +23,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use apex_agent_core::paths;
 use apex_agent_core::protocol::{AgentState, SessionInfo};
+use apex_agent_core::destination::Allowlist;
 use apex_agent_core::hook::ToolTransition;
+use apex_agent_core::sandbox::SandboxSpec;
 use apex_agent_core::session::{self as logic, OutputScanner, Scrollback, SCROLLBACK_BYTES};
 
 use crate::pty;
@@ -49,6 +51,13 @@ pub const LOG_LIMIT_BYTES: u64 = 32 * 1024 * 1024;
 /// the unresponsive viewer is disconnected, and it can reattach.
 const ATTACH_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// What a session is confined by, kept for the §6.2 policy point.
+#[derive(Debug, Clone)]
+pub struct Confinement {
+    pub spec: SandboxSpec,
+    pub allowlist: Allowlist,
+}
+
 /// One live session.
 #[derive(Debug)]
 pub struct Session {
@@ -65,6 +74,15 @@ pub struct Session {
     /// it finished. `None` for every session no hook speaks for, which is what
     /// leaves the idle rule deciding on its own exactly as it did before.
     tool_started: Option<u64>,
+    /// The confinement this session was actually started with, and the
+    /// allowlist that was in force when it was.
+    ///
+    /// Kept so the §6.2 policy point can be answered from the evidence rather
+    /// than from a spec rebuilt at decision time out of whatever the config
+    /// says now — a session started an hour ago against a smaller allowlist
+    /// must be judged against the one it is running under. `None` for a session
+    /// the runtime adopted rather than built.
+    pub confinement: Option<Box<Confinement>>,
     log: Option<File>,
     log_bytes: u64,
     log_capped: bool,
@@ -283,6 +301,7 @@ impl Registry {
             scanner: OutputScanner::new(),
             attachers: Vec::new(),
             tool_started: None,
+            confinement: None,
             log,
             log_bytes: 0,
             log_capped: false,
@@ -649,6 +668,7 @@ mod tests {
             scanner: OutputScanner::new(),
             attachers: Vec::new(),
             tool_started: None,
+            confinement: None,
             log: None,
             log_bytes: 0,
             log_capped: false,
