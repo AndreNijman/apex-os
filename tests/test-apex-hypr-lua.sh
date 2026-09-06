@@ -300,6 +300,54 @@ else
     bad "...and every keybind from the other modules still applied"
 fi
 
+sec "a claimed combo leaves exactly one bind"
+
+# What replaces the hyprlang generator's unbind-then-rebind dance, and the
+# failure it exists to prevent: Hyprland fires BOTH actions for a doubly-bound
+# combo, which is how SUPER+Q once closed the window AND opened the launcher.
+#
+# apex/keybindings.lua binds SUPER+T. A generated module claims it, and the
+# count for that combo must come back to ONE — the claimant's. Counted through
+# `hyprctl binds` on purpose: that is the list APEX Shell reads to warn about
+# conflicting shortcuts, so a default left listed-but-inert would make the
+# warning lie. It is also why disable() removes rather than disabling — a
+# disabled bind is still listed, with no field saying it does nothing.
+rm -f "$H/.config/hypr/apex/monitors.lua"
+cat > "$H/.config/hypr/apex/shell-keybinds.lua" <<'GENERATED'
+local ok, defaults = pcall(require, "apex.keybindings")
+local function claim(mods, key)
+    if ok and defaults and defaults.disable then defaults.disable(mods, key) end
+end
+claim("SUPER", "T")
+hl.bind("SUPER + T", hl.dsp.exec_cmd("kitty"))
+GENERATED
+hc reload >/dev/null
+sleep 1
+n="$(hc binds -j | python3 -c '
+import json, sys
+binds = json.load(sys.stdin)
+print(sum(1 for b in binds if b.get("key") == "T" and b.get("modmask") == 64))')"
+if [ "$n" = "1" ]; then
+    ok "claiming SUPER+T leaves exactly one bind on it"
+else
+    bad "claiming SUPER+T leaves exactly one bind on it (found ${n})"
+fi
+
+# ...and it is the claimant's, not the default that was replaced.
+if hc binds -j | python3 -c '
+import json, sys
+binds = [b for b in json.load(sys.stdin)
+         if b.get("key") == "T" and b.get("modmask") == 64]
+sys.exit(0 if binds and not binds[0].get("has_description") else 1)'; then
+    ok "...and the surviving bind is the one that claimed it"
+else
+    bad "...and the surviving bind is the one that claimed it"
+fi
+
+rm -f "$H/.config/hypr/apex/shell-keybinds.lua"
+hc reload >/dev/null
+sleep 1
+
 sec "an absent generated module is not an error"
 
 rm -f "$H/.config/hypr/apex/monitors.lua"
