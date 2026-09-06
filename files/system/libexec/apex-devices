@@ -161,9 +161,9 @@ firewall_has()       { [ -e "$FW_CONF_DIR/$1.conf" ]; }
 firewall_verdict() {  # $1 = service name, $2 = what it is in words
     case "$(firewall_state)" in
         failed)
-            note "the APEX firewall FAILED to load, so nothing is in the way of $2 —"
-            note "and nothing is in the way of anything else either. This machine is"
-            note "unfiltered, which is not what it was configured to be:"
+            note "the APEX firewall FAILED to load. Nothing stands in front of $2, and"
+            note "nothing stands in front of anything else either: this machine is"
+            note "unfiltered, and somebody set it up to filter."
             note "    systemctl status apex-firewall"
             return ;;
         absent|inactive)
@@ -232,7 +232,7 @@ do_print() {
         note "cupsd may be wedged; try: systemctl status cups"
     elif grep -qiE 'no destinations added|no printers' <<<"$out"; then
         item "queues" "none configured"
-        note "a driverless printer on this network is added by name; see the mDNS line above"
+        note "you add a driverless printer on this network by name; see the mDNS line above"
     elif grep -qiE 'unable to connect|bad file descriptor|connection refused' <<<"$out"; then
         item "queues" "unavailable — could not reach cupsd"
         note "$(head -1 <<<"$out")"
@@ -287,8 +287,9 @@ do_scan() {
     out=$(run 30 scanimage -L); rc=$?
     if [ "$rc" -eq 124 ]; then
         item "scanners" "unavailable — the device list did not arrive in 30s"
-        note "hplip's hpaio backend is the usual cause; it probes the network and can"
-        note "wait indefinitely. Check avahi is running, or comment hpaio out of"
+        note "hplip's hpaio backend is the usual cause: it probes the network and has"
+        note "waited past 400 seconds here. Check avahi is running, or comment hpaio"
+        note "out of"
         note "$ETCDIR/sane.d/dll.d/hpaio"
         return
     fi
@@ -325,7 +326,7 @@ do_share() {
             item "GIO mounts on disk" "yes, at $mnt"
         else
             item "GIO mounts on disk" "not mounted yet"
-            note "$mnt appears when the first share is opened"
+            note "$mnt appears the first time you open a share"
         fi
     else
         item "GIO mounts on disk" "NO — gvfs-fuse is not installed"
@@ -387,7 +388,7 @@ do_media() {
     # desktop says why.
     case "$(unit_state udisks2.service)" in
         not-found) item "auto-mount" "udisks2 is not installed"
-                   note "a card or a USB disk appears in $DEVDIR and is mounted by nothing" ;;
+                   note "a card or a USB disk appears in $DEVDIR and nothing mounts it" ;;
         masked)    item "auto-mount" "udisks2 is MASKED"
                    note "no removable disk will appear in the file manager at all:"
                    note "    sudo systemctl unmask udisks2.service" ;;
@@ -409,15 +410,15 @@ do_media() {
     else
         item "this session's seat" "none"
         note "udisks2 will refuse to mount a card or a USB disk for a session with no"
-        note "seat — an ssh login, or anything started by a service. The device is"
-        note "present and unmountable: that is a refusal, not an absence."
+        note "seat: an ssh login, or anything started by a service. The device is"
+        note "present and unmountable, which is a refusal rather than an absence."
     fi
 
     local me md; me=$(id -un); md=$(dir_state "$MEDIADIR/$me")
     case "$md" in
         absent|empty) item "mounted removable media" "none" ;;
         unreadable)   item "mounted removable media" "unavailable — $MEDIADIR/$me could not be read"
-                      note "this is not the same as nothing being mounted" ;;
+                      note "this is not the same as an empty list" ;;
         *)            item "mounted removable media" "$md"
                       local m; for m in "$MEDIADIR/$me"/*; do
                           [ -e "$m" ] && note "$(basename "$m")"
@@ -489,7 +490,7 @@ do_network() {
         item "WireGuard" "yes (wg, wg-quick)"
     else
         item "WireGuard" "kernel yes, tools no"
-        note "NetworkManager speaks WireGuard natively, but with no wg there is nothing"
+        note "NetworkManager has WireGuard built in, but with no wg there is nothing"
         note "to import a provider's .conf with"
     fi
 
@@ -588,10 +589,10 @@ report_enterprise_wifi() {
     item "enterprise Wi-Fi (802.1X)" "$ent saved profile(s), $nocert validating nothing"
     local g; for g in "${findings[@]:-}"; do [ -n "$g" ] && note "$g"; done
     if [ "$nocert" -gt 0 ]; then
-        note "These connect. They just trust whatever answers to the network's name, so"
-        note "an access point standing in for the real one collects the MSCHAPv2"
-        note "exchange, and that is crackable offline at leisure. Fix by setting"
-        note "802-1x.ca-cert on the profile, or 802-1x.system-ca-certs=yes."
+        note "These connect. They trust whatever answers to the network's name, so an"
+        note "access point standing in for the real one collects the MSCHAPv2 exchange,"
+        note "and that is crackable offline at leisure. Set 802-1x.ca-cert on the"
+        note "profile, or 802-1x.system-ca-certs=yes."
     fi
 
     # Whether a given AP authenticates cannot be answered from here. What can be
@@ -689,7 +690,8 @@ do_dock() {
     else
         item "hotplug (udev)" "systemd-udevd is NOT running"
         note "a device plugged in now gets no node, no permissions and no daemon"
-        note "woken to claim it. Nothing here would see it, correctly."
+        note "woken to claim it. Every reader below would report an absence and be"
+        note "right to."
     fi
 
     report_thunderbolt
@@ -734,7 +736,7 @@ report_thunderbolt() {
     if [ "$unauthorised" -gt 0 ] && [ "$boltd" = no ]; then
         note ""
         note "$unauthorised device(s) are attached and not authorised, and boltd is not"
-        note "installed — so nothing on this machine will ever authorise them. A dock in"
+        note "installed, so nothing on this machine will ever authorise them. A dock in"
         note "this state passes no video, no USB and no network, with no error anywhere."
     elif [ "$boltd" = no ]; then
         item "boltd" "not installed"
