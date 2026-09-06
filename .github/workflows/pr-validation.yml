@@ -447,6 +447,14 @@ jobs:
       - name: §25 schema — every store declares its rollback answer, and no version key defaults to current
         run: ./tests/test-apex-schema.sh
 
+      # §33's qualification database, structural half. The two properties it
+      # guards are both one-line changes away: a consent gate that reads
+      # "not declined" instead of "granted" starts recording on a machine
+      # nobody asked, and a verdict collapsed to a bool turns every row nobody
+      # has tried into a fault report about working hardware.
+      - name: §33 qualify — nothing is recorded without consent, and a check nobody tried is not a check that failed
+        run: ./tests/test-apex-qualify.sh
+
       # §26's channels, structural half, and this one has to be in `static`:
       # every assertion compares .github/workflows against apexd/, which are
       # different path selectors. A PR touching only build-image.yml sets
@@ -656,6 +664,21 @@ jobs:
           cargo build -p apex --locked --manifest-path apexd/Cargo.toml
           test -x "$APEX"
           ./tests/test-apex-schema.sh --with-binary
+
+      # §33's binary half: `apex qualify` against a whole fixture machine —
+      # DMI, PCI, cpuinfo, cmdline and an EFI variable — including a serial
+      # number sitting in DMI next to the model, which must not reach the
+      # database, and a sealed SecureBoot variable, which must read as not
+      # checked rather than as a firmware that fails.
+      - name: §33 qualify — apex qualify against a fixture machine, consent gate and all
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-qualify.sh --with-binary
 
       # §26's binary half: `apex channel` against fixture machines on each of
       # the four channel tags and on the legacy alias every installed machine
