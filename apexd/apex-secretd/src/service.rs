@@ -233,19 +233,14 @@ impl Service {
         };
         // The gate on `*`, here rather than in the CLI, because the CLI is not
         // the trust boundary: this socket takes a request from anything running
-        // as the account. An operation that names nothing can only ever reach
-        // the endpoint pinned when its credential was stored, so granting it
-        // everywhere widens where it may be asked for and not what it reaches.
-        // One that acts on a resource, or takes a parameter, resolves that
-        // against the directory the caller is standing in — so the same key
-        // there would be a different permission in every directory.
-        //
-        if everywhere && !op.names_nothing() {
+        // as the account. See [`may_be_granted_everywhere`] for what earns it.
+        if everywhere && !may_be_granted_everywhere(op) {
             return Response::error(
                 ErrorKind::BadRequest,
                 format!(
-                    "'{}' acts on something you name, so it is granted where you name it \
-                     and not everywhere. Run `apex secret grant` in the project.",
+                    "'{}' resolves against the project it is asked in, so it is granted \
+                     where you name it and not everywhere. Run `apex secret grant` in \
+                     the project.",
                     op.id
                 ),
             );
@@ -329,7 +324,7 @@ impl Service {
         // JSON-RPC error. It has to carry the way out, and for an operation
         // that names nothing the way out is usually `--everywhere` rather than
         // running the same grant again in each new directory.
-        let everywhere = if op.names_nothing() {
+        let everywhere = if may_be_granted_everywhere(op) {
             format!(
                 ", or in every project with `apex secret grant {provider} {} --everywhere`",
                 op.id
@@ -646,6 +641,32 @@ pub struct NewService<'a> {
 
 fn valid_host_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_')
+}
+
+/// Whether `*` (every project) is a safe key for this operation.
+///
+/// P1-018 gated `--everywhere` on [`OperationSpec::names_nothing`], reasoning
+/// that an operation naming nothing "can only ever reach the endpoint pinned
+/// when its credential was stored, so granting it everywhere widens where it
+/// may be asked for and not what it reaches".
+///
+/// P1-002 landed the first provider for which that is false. `names_nothing`
+/// is a check on the *declaration* — no resource argument, no parameters — and
+/// `cloudflare.account.read` declares neither, yet resolves the account out of
+/// the project's own `apex.toml`: bound, it is `GET /accounts/{id}` for THAT
+/// project's account; unbound, `GET /accounts` for every account the token can
+/// see. So it does reach a different thing in a different directory, and a `*`
+/// grant would let an agent in a project the owner never approved read that
+/// project's account with the one stored token.
+///
+/// The property that actually matters is "reaches the same thing in every
+/// project", which no declaration currently states. Until one does, this is a
+/// list rather than a predicate over the declaration: a provider added later
+/// cannot inherit `*` by declaring no resource, which is what the gate was for.
+pub(crate) fn may_be_granted_everywhere(op: &'static OperationSpec) -> bool {
+    // `mcp.request` reaches only the endpoint pinned when its credential was
+    // stored; the project it is asked in changes nothing about the call.
+    op.names_nothing() && op.id == "mcp.request"
 }
 
 fn refuse_store(e: StoreError) -> Response {
