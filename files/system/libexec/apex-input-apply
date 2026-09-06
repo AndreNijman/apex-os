@@ -1642,27 +1642,41 @@ def main(argv=None):
 
     # Validate before replacing anything, per compositor, so one bad value
     # cannot take a session down.
+    #
+    # PER COMPOSITOR, and that is the whole point of the word. This used to
+    # refuse to write ANYTHING when either validator said no, which meant a
+    # machine with a broken or half-installed niri could not change a touchpad
+    # setting in a Hyprland session: the page reported success, no config was
+    # written, and the reason went to a stderr line about niri. One compositor's
+    # opinion of its own config is not a veto over the other two.
     with tempfile.TemporaryDirectory() as d:
-        if validate_hyprland(hypr) is False:
-            print("apex-input: the generated Hyprland config was rejected; nothing written",
-                  file=sys.stderr)
-            return 1
+        hypr_ok = validate_hyprland(hypr) is not False
         np_ = os.path.join(d, "input.kdl")
         with open(np_, "w", encoding="utf-8") as fh:
             fh.write(niri)
-        if validate_niri(np_) is False:
-            print("apex-input: the generated niri config was rejected; nothing written",
-                  file=sys.stderr)
-            return 1
+        niri_ok = validate_niri(np_) is not False
 
-    atomic_write(HYPR_OUT, hypr)
-    atomic_write(NIRI_OUT, niri)
+    if not hypr_ok:
+        print("apex-input: the generated Hyprland config was rejected; the "
+              "previous one is left in place", file=sys.stderr)
+    if not niri_ok:
+        print("apex-input: the generated niri config was rejected; the previous "
+              "one is left in place", file=sys.stderr)
+    # Refusing every write is only right when the model itself is the problem,
+    # which is what both validators disagreeing with it means.
+    if not hypr_ok and not niri_ok:
+        return 1
+
+    if hypr_ok:
+        atomic_write(HYPR_OUT, hypr)
+    if niri_ok:
+        atomic_write(NIRI_OUT, niri)
     for note in write_labwc(LABWC_RC, model, args.dry_run):
         print(f"apex-input: {note}", file=sys.stderr)
 
     if not args.no_reload:
         print(f"apex-input: {reload_compositor()}")
-    return 0
+    return 0 if (hypr_ok and niri_ok) else 1
 
 
 if __name__ == "__main__":
