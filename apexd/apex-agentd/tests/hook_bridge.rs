@@ -513,8 +513,11 @@ fn a_subagent_start_and_stop_become_one_finished_child() {
     };
 
     h.event(id, "subagent_start", Some("agent-7"), Some("Explore"));
-    let kids = h.info(id);
-    let kids = children(&kids);
+    let info = h.info(id);
+    let kids: Vec<&serde_json::Value> = children(&info)
+        .iter()
+        .filter(|k| k["kind"] == "subagent")
+        .collect();
     assert_eq!(kids.len(), 1, "the start was not recorded: {kids:?}");
     assert_eq!(kids[0]["id"], "agent-7");
     assert_eq!(kids[0]["kind"], "subagent");
@@ -522,8 +525,11 @@ fn a_subagent_start_and_stop_become_one_finished_child() {
     assert!(kids[0]["ended"].is_null(), "it has not finished yet");
 
     h.event(id, "subagent_stop", Some("agent-7"), Some("Explore"));
-    let kids = h.info(id);
-    let kids = children(&kids);
+    let info = h.info(id);
+    let kids: Vec<&serde_json::Value> = children(&info)
+        .iter()
+        .filter(|k| k["kind"] == "subagent")
+        .collect();
     assert_eq!(kids.len(), 1, "the stop opened a second node: {kids:?}");
     assert!(!kids[0]["ended"].is_null(), "the stop did not close it");
     assert_eq!(kids[0]["ended_by"], "reported");
@@ -548,13 +554,27 @@ fn the_end_of_a_turn_closes_a_subagent_whose_stop_never_arrived() {
     h.event(id, "subagent_start", Some("agent-2"), Some("Plan"));
     h.event(id, "stop", None, None);
 
-    let kids = h.info(id);
-    let kids = children(&kids);
+    let info = h.info(id);
+    let kids: Vec<&serde_json::Value> = children(&info)
+        .iter()
+        .filter(|k| k["kind"] == "subagent")
+        .collect();
     assert_eq!(kids.len(), 2);
-    for kid in kids {
+    for kid in &kids {
         assert!(!kid["ended"].is_null(), "{kid} outlived the turn");
         assert_eq!(kid["ended_by"], "parent_stop");
     }
+
+    // And the sweep yields to the truth. A subagent can outlive the turn that
+    // delegated it, so `parent_stop` is the daemon saying it can no longer
+    // tell — not that the subagent finished. The real report replaces it.
+    h.event(id, "subagent_stop", Some("agent-1"), Some("Explore"));
+    let info = h.info(id);
+    let corrected = children(&info)
+        .iter()
+        .find(|k| k["id"] == "agent-1")
+        .expect("agent-1 is still in the graph");
+    assert_eq!(corrected["ended_by"], "reported", "{corrected}");
 
     h.call(&format!(r#"{{"cmd":"signal","id":{id},"signal":"kill"}}"#));
 }
@@ -576,7 +596,10 @@ fn a_killed_session_has_nothing_still_running_under_it() {
         std::thread::sleep(Duration::from_millis(100));
         info = h.info(id);
     }
-    let kids = children(&info);
+    let kids: Vec<&serde_json::Value> = children(&info)
+        .iter()
+        .filter(|k| k["kind"] == "subagent")
+        .collect();
     assert_eq!(kids.len(), 1);
     assert!(
         !kids[0]["ended"].is_null(),
