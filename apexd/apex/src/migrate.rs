@@ -82,7 +82,13 @@ enum Removal {
 
 pub fn main(dry_run: bool) -> Result<i32> {
     refuse_from_inside_a_session()?;
-    refuse_while_an_agent_is_running()?;
+    // Only for a run that writes. A dry run is how somebody sees what this
+    // would do to their machine, and refusing it because they have Claude open
+    // means the only way to find out is to close Claude first — which is a
+    // worse thing to ask than the check is worth.
+    if !dry_run {
+        refuse_while_an_agent_is_running()?;
+    }
 
     let home = home();
     let mut found = Vec::new();
@@ -580,7 +586,7 @@ fn refuse_from_inside_a_session() -> Result<()> {
 /// therefore to another home.
 fn refuse_while_an_agent_is_running() -> Result<()> {
     let home = home();
-    for pid in running("claude") {
+    for pid in running_claude() {
         if process_home(pid).as_deref() == Some(home.as_path()) {
             bail!(
                 "claude is running as you, in this home. It holds {}/.claude.json in \
@@ -593,15 +599,43 @@ fn refuse_while_an_agent_is_running() -> Result<()> {
     Ok(())
 }
 
-/// Pids of every process with this exact name.
-fn running(name: &str) -> Vec<u32> {
-    let Ok(out) = std::process::Command::new("pgrep").args(["-x", name]).output() else {
+/// Pids of every Claude process on this machine.
+///
+/// Matched on the *program* in `argv[0]`, not on the process name. Measured
+/// here rather than assumed: `pgrep -x claude` finds only some of them, because
+/// the shipped binary is called `claude.exe` and the daemon and the PTY hosts
+/// run under that name. A guard that missed those would let a migration edit
+/// `~/.claude.json` under a live session and be reverted minutes later, which
+/// is the one failure it exists to prevent.
+fn running_claude() -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.trim().parse().ok())
-        .collect()
+    let mut pids = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == std::process::id() {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        let Some(argv0) = raw.split(|b| *b == 0).next() else {
+            continue;
+        };
+        let program = String::from_utf8_lossy(argv0);
+        let name = program.rsplit('/').next().unwrap_or_default();
+        if name == "claude" || name == "claude.exe" {
+            pids.push(pid);
+        }
+    }
+    pids
 }
 
 /// The `HOME` a process was started with, when it can be read.
