@@ -12,7 +12,7 @@
 //! daemon's existing tier engine and fan controller, which have their own
 //! restore paths.
 
-use crate::gpu::{self, NvidiaGpu};
+use crate::gpu::{self, GpuDevice, NvidiaGpu, SysfsGpuPrior};
 use crate::irq::{self, IrqEntry};
 use crate::profile::{CpusetPolicy, GameModeConfig, IrqPolicy};
 use crate::tier::Action;
@@ -67,6 +67,12 @@ pub struct GameInputs<'a> {
     pub cfg: &'a GameModeConfig,
     pub topo: &'a CoreTopology,
     pub nvidia: &'a [NvidiaGpu],
+    /// Every GPU under `/sys/class/drm`, with its prior control values already
+    /// read. The prior values are an INPUT rather than something the planner
+    /// goes and fetches, for the same reason the fan's are: a plan has to be
+    /// buildable against a fixture, and a planner that reads the live machine
+    /// cannot be.
+    pub gpus: &'a [(GpuDevice, SysfsGpuPrior)],
     pub irqs: &'a [IrqEntry],
     pub pids: &'a [PidPlacement],
     /// Value for `cpuset.mems` (normally the root cgroup's effective mems).
@@ -85,8 +91,14 @@ pub struct GamePlan {
     pub cpus: Vec<u32>,
     /// CPUs everything else is pushed onto.
     pub housekeeping: Vec<u32>,
-    /// GPU indices whose clocks the plan asks to lock.
+    /// GPU indices whose clocks the plan asks to lock (NVIDIA, by nvidia-smi
+    /// index).
     pub gpus_locked: Vec<u32>,
+    /// DRM cards whose sysfs controls the plan asks to change (AMD, Intel), by
+    /// `cardN`. Separate from `gpus_locked` because the two are different
+    /// identifiers for different things and merging them would produce a list
+    /// nothing could look anything up in.
+    pub gpus_controlled: Vec<String>,
     /// How many interrupts the plan ATTEMPTS to move.
     ///
     /// Named for what it is. It used to be called `irqs_steered` and was handed
@@ -251,6 +263,38 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
         notes.push("no NVIDIA GPU reported by nvidia-smi — GPU clock locking skipped".into());
     }
 
+    // ── 3b. The AMD and Intel GPUs, which had nothing at all ─────────────────
+    //
+    // Same shape as the NVIDIA locks above: enter, and an exit built from what
+    // was read before the change rather than from a default. The exit goes on
+    // the FRONT of the exit plan, like the NVIDIA unlock, so the GPU is handed
+    // back before the cgroup that pins the game is torn down.
+    let mut sysfs_controlled = Vec::new();
+    for (dev, prior) in inputs.gpus {
+        let (mut enter_gpu, mut gpu_notes) = gpu::plan_sysfs_enter(&cfg.gpu, dev, prior);
+        notes.append(&mut gpu_notes);
+        if enter_gpu.is_empty() {
+            continue;
+        }
+        sysfs_controlled.push(dev.card.clone());
+        enter.append(&mut enter_gpu);
+        let mut restore = gpu::plan_sysfs_exit(prior);
+        restore.append(&mut exit);
+        exit = restore;
+    }
+    if cfg.gpu.enabled && sysfs_controlled.is_empty() && !inputs.gpus.is_empty() {
+        let vendors: Vec<String> = inputs
+            .gpus
+            .iter()
+            .map(|(d, _)| format!("{} ({})", d.card, d.vendor.label()))
+            .collect();
+        notes.push(format!(
+            "no sysfs GPU control was applied to {} — either the profile leaves \
+             the knob at its default or this driver does not publish one",
+            vendors.join(", ")
+        ));
+    }
+
     // ── exit: IRQs, then release the cgroup ──────────────────────────────────
     exit.append(&mut irq_restore);
     if !cpus.is_empty() && cfg.cpuset_policy() != CpusetPolicy::Off {
@@ -279,6 +323,7 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
         cpus,
         housekeeping,
         gpus_locked,
+        gpus_controlled: sysfs_controlled,
         irqs_attempted,
         notes,
     }

@@ -702,6 +702,29 @@ pub fn perf_main(args: PerfArgs) -> i32 {
 
     println!();
     println!("── GPU ──");
+    // Every card, before the headline figures, because on a hybrid laptop the
+    // headline is about ONE of them and there is no honest way to say which
+    // without naming it. `*` marks the card the rows below describe.
+    if snap.gpu.devices.len() > 1 {
+        for d in &snap.gpu.devices {
+            let lead = if snap.gpu.clock_mhz.source() == d.clock_mhz.source() {
+                "*"
+            } else {
+                " "
+            };
+            kv(
+                &format!("{lead}{}", d.card),
+                &format!(
+                    "{} {}{} — clock {}, busy {}",
+                    d.vendor,
+                    d.driver.as_deref().unwrap_or("no driver bound"),
+                    if d.boot_vga { ", boot display" } else { "" },
+                    show(&d.clock_mhz, |v| format!("{v} MHz")),
+                    show(&d.busy_percent, |v| format!("{v:.0}%")),
+                ),
+            );
+        }
+    }
     kv("clock", &show(&snap.gpu.clock_mhz, |v| format!("{v} MHz")));
     kv(
         "busy",
