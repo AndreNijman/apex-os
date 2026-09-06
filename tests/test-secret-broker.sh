@@ -299,7 +299,7 @@ if [ -s "$LOG" ]; then
 import json, sys
 want = {'audit_id', 'ms', 'event', 'uid', 'peer_pid', 'provider', 'operation',
         'detail', 'resource', 'project', 'agent_session', 'request_origin',
-        'approval_policy', 'constraints'}
+        'origin_source', 'approval_policy', 'constraints'}
 for line in open(sys.argv[1]):
     if line.strip():
         o = json.loads(line)
@@ -312,6 +312,23 @@ PYEOF
     "$APEX" secret audit 2>&1 | grep -q "$SENTINEL" \
         && bad "\`apex secret audit\` does not print the credential" \
         || ok "\`apex secret audit\` does not print the credential"
+
+    # P0-013's provenance has to survive the store moving. A trail that says
+    # WHERE a request came from but not whether the daemon observed that or
+    # something asked for it cannot answer the only question it is for.
+    grep -q '"origin_source":"observed"' "$LOG" \
+        && ok "the trail says how the origin was arrived at" \
+        || { bad "the trail says how the origin was arrived at"
+             grep -o '"origin_source":"[^"]*"' "$LOG" | sort -u | sed 's/^/      /'; }
+    python3 - "$LOG" <<'PYEOF2' && ok "no line claims a local origin it did not observe" || bad "no line claims a local origin it did not observe"
+import json, sys
+for line in open(sys.argv[1]):
+    if not line.strip():
+        continue
+    o = json.loads(line)
+    if o['request_origin'] in ('local-terminal', 'apex-shell'):
+        assert o['origin_source'] == 'observed', o
+PYEOF2
 fi
 
 # ── from inside a confined session ───────────────────────────────────────────

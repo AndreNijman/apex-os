@@ -40,7 +40,28 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// session filed under a local origin is precisely the thing
 /// `request_origin` exists to prevent, so the CLI refuses to send a
 /// declaration to a daemon below [`REQUEST_ORIGIN_VERSION`].
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// 4 — the credential store left this daemon (§11, P0-002). `SecretGrant` and
+/// `SecretGrants` are gone from this protocol, because a grant is now a change
+/// to `apex-secretd`'s own store and the CLI asks it directly; `Brokered`
+/// gained `audit_id` and `endpoint`. The failure this guards is quieter than
+/// the two above and still worth naming: a daemon below this reads its OWN old
+/// store, so a credential added to the secret service is simply not found and
+/// the user is told they never stored it.
+pub const PROTOCOL_VERSION: u32 = 4;
+
+/// The revision at which the credential store moved to `apex-secretd`.
+///
+/// Named for the same reason the two below it are: the check is a boundary,
+/// and a bare `< 4` in the CLI is one careless edit away from meaning nothing.
+pub const BROKERED_SECRET_SERVICE_VERSION: u32 = 4;
+
+/// The guards arrive in order, checked when the crate compiles rather than
+/// when a test runs: they are facts about three constants, and a revision
+/// numbered behind the one before it would make a `<` comparison in the CLI
+/// mean something nobody intended.
+const _: () = assert!(POLICY_DIMENSIONS_VERSION < REQUEST_ORIGIN_VERSION);
+const _: () = assert!(REQUEST_ORIGIN_VERSION < BROKERED_SECRET_SERVICE_VERSION);
 
 /// The revision that first carried the six dimensions.
 ///
@@ -1011,6 +1032,7 @@ mod tests {
         for (name, since) in [
             ("the six dimensions", POLICY_DIMENSIONS_VERSION),
             ("request_origin", REQUEST_ORIGIN_VERSION),
+            ("the secret service", BROKERED_SECRET_SERVICE_VERSION),
         ] {
             assert!(
                 since <= PROTOCOL_VERSION,
@@ -1020,7 +1042,7 @@ mod tests {
         }
         // The newest guard is the current revision: adding a wire field
         // without bumping the version is the fail-open these exist to catch.
-        assert_eq!(REQUEST_ORIGIN_VERSION, PROTOCOL_VERSION);
+        assert_eq!(BROKERED_SECRET_SERVICE_VERSION, PROTOCOL_VERSION);
     }
 
     #[test]

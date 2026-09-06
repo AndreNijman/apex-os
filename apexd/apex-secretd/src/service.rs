@@ -648,14 +648,18 @@ mod tests {
             .as_error()
             .is_some_and(|(_, m)| m.contains("origin_source")));
 
-        // ...and a well-formed pair gets past this check to the next one.
+        // ...and a well-formed pair gets past this check to the next one. The
+        // refusal that follows is about the repository, not about the label —
+        // matched on the FIELD names, because the remote in this fixture is
+        // itself called `origin` and a looser match passes for the wrong
+        // reason.
         let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
         rec.request_origin = "claude-remote-control".into();
         rec.origin_source = "declared".into();
-        assert!(svc
-            .use_capability(peer, rec)
-            .as_error()
-            .is_some_and(|(_, m)| !m.contains("origin")));
+        let resp = svc.use_capability(peer, rec);
+        let (_, message) = resp.as_error().expect("no repository at /tmp/p");
+        assert!(!message.contains("request_origin"), "{message}");
+        assert!(!message.contains("origin_source"), "{message}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

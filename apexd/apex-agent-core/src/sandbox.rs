@@ -1045,11 +1045,16 @@ mod tests {
 
     #[test]
     fn the_secret_store_is_unreachable() {
-        // The broker's credential file lives under $XDG_STATE_HOME, i.e. inside
-        // $HOME, which is masked. This is the property that lets the broker
-        // keep a token in a plain 0600 file at all.
+        // Two stores, and neither is reachable for a different reason.
+        //
+        // `apex-secretd` owns credentials now and keeps them in
+        // /var/lib/apex-secretd, which is root-owned and would be unreadable
+        // even if it were bound — but it is not bound, and P0-002's leftovers
+        // from the old broker are still under $XDG_STATE_HOME on an upgraded
+        // machine. $HOME is masked, so those stay out of reach as well.
         let a = argv(&spec()).join(" ");
         for path in [
+            "/var/lib/apex-secretd",
             "/home/tester/.local/state/apex/agent/secrets",
             "/home/tester/.local/state",
         ] {

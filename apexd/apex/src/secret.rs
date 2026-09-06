@@ -24,8 +24,9 @@
 use std::io::Read;
 
 use anyhow::{bail, Result};
-use apex_agent_core::client as agent_client;
-use apex_agent_core::protocol::{Request as AgentRequest, Response as AgentResponse};
+use apex_agent_core::protocol::{
+    Request as AgentRequest, Response as AgentResponse, BROKERED_SECRET_SERVICE_VERSION,
+};
 use apex_secret_core::capability::Capability;
 use apex_secret_core::client::Client;
 use apex_secret_core::protocol::{Request, Response};
@@ -336,7 +337,10 @@ fn use_it(service: &str, capability: &str, remote: &str, branch: Option<&str>) -
     // knows.
     let project = current_project_root().ok();
 
-    match agent_client::call(&AgentRequest::SecretUse {
+    let mut agent = apex_agent_core::client::Client::connect()?;
+    require_a_runtime_that_forwards(&mut agent)?;
+
+    match agent.call(&AgentRequest::SecretUse {
         service: service.to_string(),
         capability: capability.to_string(),
         remote: remote.to_string(),
@@ -367,6 +371,31 @@ fn use_it(service: &str, capability: &str, remote: &str, branch: Option<&str>) -
         }
         other => bail!("unexpected reply: {other:?}"),
     }
+}
+
+/// Refuse to ask a runtime that predates the secret service.
+///
+/// A daemon below [`BROKERED_SECRET_SERVICE_VERSION`] has its own broker and
+/// its own store in `$HOME`, so it would look for the credential in a place
+/// `apex secret add` no longer writes to and answer "no credential stored" —
+/// a true sentence about the wrong store, and the most confusing possible
+/// reply to somebody who just added one.
+///
+/// The guard names the constant rather than a literal, for the same reason the
+/// two before it do: a bare `< 4` is one careless edit away from meaning
+/// nothing.
+fn require_a_runtime_that_forwards(agent: &mut apex_agent_core::client::Client) -> Result<()> {
+    let AgentResponse::Hello { version, .. } = agent.call(&AgentRequest::Hello)? else {
+        // A daemon that cannot answer the handshake is one this cannot reason
+        // about, and guessing in the permissive direction is the failure mode.
+        bail!("the agent runtime did not answer the protocol handshake");
+    };
+    if version < BROKERED_SECRET_SERVICE_VERSION {
+        bail!(
+            "the running agent runtime speaks protocol {version} and still keeps its own              credentials, so it would not find one added to the secret service; restart it              with `systemctl --user restart apex-agentd`"
+        );
+    }
+    Ok(())
 }
 
 fn audit(lines: usize) -> Result<i32> {
@@ -423,6 +452,18 @@ mod tests {
                  would list it blank"
             );
         }
+    }
+
+    #[test]
+    fn the_version_guard_names_the_revision_the_store_moved_in() {
+        // A literal here would be one careless edit from meaning nothing, and
+        // the failure it prevents is a "no credential stored" about a store
+        // the user never wrote to.
+        assert_eq!(
+            BROKERED_SECRET_SERVICE_VERSION,
+            apex_agent_core::protocol::PROTOCOL_VERSION,
+            "the guard must name the current revision, or it can never fire"
+        );
     }
 
     #[test]

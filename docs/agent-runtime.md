@@ -699,9 +699,22 @@ itself: the endpoint the credential was sent to, and the exit code.
 apex secret audit
 ```
 
-You see your own account's lines. `agent_session` is **attribution, not
-authentication**: it is forwarded by `apex-agentd`, which runs as you, so a
-process with your uid can forge it. It labels the trail; it authorises nothing.
+`origin_source` says whether §7's `request_origin` was `observed` from the
+connection, `inherited` from the session, or `declared` by a client — and
+`unknown` where the daemon could not read the peer's placement, never
+`local-terminal`, because "could not tell" and "a human is at the keyboard" are
+different answers.
+
+You see your own account's lines. `agent_session` and `request_origin` are
+**attribution, not authentication**: both are forwarded by `apex-agentd`, which
+runs as you, so a process with your uid can forge them. `apex-secretd` checks
+their shape — the trail is one JSON object per line and somebody greps it — and
+records them as claims. They label the trail; they authorise nothing.
+
+Origin does not gate a brokered operation, and that is §7's position rather
+than an omission: its table answers `allow` for "github push" from every
+origin, local and remote alike. The row it denies everywhere is "read raw
+brokered secret", which this build implements by having nowhere to put it.
 
 ### What this does not protect against
 
