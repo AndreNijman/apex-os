@@ -1217,13 +1217,20 @@ BOOL_CONTROLS = {f"{s}.{k}" for s in DEFAULTS for k, v in DEFAULTS[s].items()
 
 
 def _from_hypr(control, answer):
-    """One getoption answer as a model value, or None where it says nothing."""
+    """One getoption answer as a model value, or None where it says nothing.
+
+    Hyprland reports the TYPE it holds an option as, and which one that is is
+    not predictable from the config key: drag_3fg comes back as `int` and
+    tap-to-click as `bool`. Reading only `int` made every boolean control read
+    False — the page then showed a setting the user had just turned on as off,
+    and reported it diverged. So the answer is taken from whichever key is
+    there rather than from a guess per option.
+    """
+    truth = answer.get("bool", answer.get("int"))
     if control == "touchpad.click_method":
-        return "clickfinger" if answer.get("int") else "buttonAreas"
-    if control == "touchpad.three_finger_drag":
-        return bool(answer.get("int"))
-    if control in BOOL_CONTROLS:
-        return bool(answer.get("int"))
+        return None if truth is None else ("clickfinger" if truth else "buttonAreas")
+    if control == "touchpad.three_finger_drag" or control in BOOL_CONTROLS:
+        return None if truth is None else bool(truth)
     if "str" in answer:
         text = answer["str"]
         return None if text == "[[EMPTY]]" else text
