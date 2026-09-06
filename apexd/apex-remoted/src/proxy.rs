@@ -60,6 +60,11 @@ pub struct Agentd {
 pub enum ProxyError {
     /// The daemon is not running, or would not accept a connection.
     Unreachable(String),
+    /// The daemon answered an `attach` with something other than `attached`.
+    ///
+    /// Carries the daemon's own reply, so the device is told "no session 4"
+    /// rather than being handed a channel that closes for no stated reason.
+    NotAttached(Vec<u8>),
     /// The daemon refused the origin declaration.
     ///
     /// Fatal for the connection, and deliberately not recoverable. A daemon
@@ -81,6 +86,11 @@ impl std::fmt::Display for ProxyError {
                 "the agent runtime would not record this connection as remote ({w}), so nothing \
                  was forwarded: a remote request filed under a local origin is what §7 exists to \
                  prevent"
+            ),
+            ProxyError::NotAttached(reply) => write!(
+                f,
+                "the agent runtime did not attach: {}",
+                String::from_utf8_lossy(reply)
             ),
             ProxyError::Io(e) => write!(f, "{e}"),
         }
