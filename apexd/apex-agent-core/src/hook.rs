@@ -281,6 +281,17 @@ pub struct Observation {
     /// One line for the Agent Center, already trimmed and bounded.
     pub detail: Option<String>,
     pub tool: ToolTransition,
+    /// The agent's own permission mode, as the agent reported it (§4.1).
+    ///
+    /// §4.1's third criterion is that the agent-native mode is visible in the
+    /// Agent Center, and until this existed there was nothing to show:
+    /// `policy.native` is `inherit` for the default case, which describes what
+    /// APEX did — pass no flag — rather than what the agent is doing.
+    ///
+    /// Bounded and stripped for the same reason `detail` is: it lands in a
+    /// session record that the shell renders, and it comes off a document the
+    /// agent writes.
+    pub native: Option<String>,
 }
 
 /// Longest detail line a hook may publish.
@@ -324,7 +335,41 @@ pub fn observe(event: HookEvent, payload: &Payload) -> Observation {
         state,
         detail: detail_for(event, payload),
         tool: event.tool_transition(),
+        native: native_mode(payload),
     }
+}
+
+/// Longest permission-mode name kept.
+///
+/// Claude's are `default`, `acceptEdits`, `plan` and `bypassPermissions`. The
+/// bound is not about those — it is about the field being read off a document
+/// the agent writes, into a record the shell renders in a fixed-width column.
+const MAX_NATIVE: usize = 32;
+
+/// The agent's own permission mode, as it reported it.
+///
+/// Passed through rather than mapped onto [`crate::policy::NativeMode`], and
+/// that is the point of the field. §4.1 says APEX passes no permission flag
+/// and lets the agent's profile decide, so the interesting value is precisely
+/// the one APEX has no vocabulary for: `bypassPermissions`, `acceptEdits`,
+/// `plan`. Folding those three into "not ask" would answer the question
+/// criterion 3 asks — what mode is this agent in — with a summary of what
+/// APEX did about it, which is the thing the user can already see.
+///
+/// Bounded and stripped of anything that is not a plain identifier, because it
+/// is rendered in a table by a client that trusts the record.
+fn native_mode(payload: &Payload) -> Option<String> {
+    let raw = payload.permission_mode.as_deref()?.trim();
+    if raw.is_empty() || raw.chars().count() > MAX_NATIVE {
+        return None;
+    }
+    if !raw
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    Some(raw.to_string())
 }
 
 /// The one line the Agent Center shows beside the state.
