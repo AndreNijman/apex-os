@@ -1847,13 +1847,7 @@ fn hook(event: &str) -> i32 {
         return 0;
     };
     let observation = hook_core::observe(parsed, &payload);
-    if let Err(e) = client::publish_hook(
-        id,
-        parsed,
-        observation.state,
-        observation.detail,
-        observation.native,
-    ) {
+    if let Err(e) = client::publish_hook(id, &observation) {
         eprintln!("apex agent hook: {parsed} not published: {e:#}");
     }
     0

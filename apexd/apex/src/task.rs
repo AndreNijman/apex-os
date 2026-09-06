@@ -1062,6 +1062,7 @@ mod tests {
             grant: None,
             grant_expires_ms: None,
             native_observed: None,
+            children: Vec::new(),
             pid: 1,
             started: 0,
             last_activity: 0,
