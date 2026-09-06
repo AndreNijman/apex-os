@@ -271,13 +271,22 @@ fn list(all: bool, json: bool) -> Result<i32> {
         );
         return Ok(0);
     }
-    println!("{:<4} {:<18} {:<10} OPERATION", "ID", "STATE", "AGENT");
+    // Origin is a column and not a detail. §7 answers a root request
+    // differently depending on it, so a listing that left it to `show` would
+    // be a listing somebody could work from without ever seeing it.
+    println!(
+        "{:<4} {:<18} {:<10} {:<22} OPERATION",
+        "ID", "STATE", "AGENT", "ORIGIN"
+    );
     for r in &requests {
         println!(
-            "{:<4} {:<18} {:<10} apex {}",
+            "{:<4} {:<18} {:<10} {:<22} apex {}",
             r.id,
             r.decision.as_str(),
             r.agent.as_deref().unwrap_or("-"),
+            r.request_origin
+                .map(|o| o.as_str())
+                .unwrap_or("unknown"),
             r.argv().join(" ")
         );
     }

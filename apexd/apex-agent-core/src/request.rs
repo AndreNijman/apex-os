@@ -47,7 +47,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::origin::OriginSource;
+use crate::origin::{Capability, OriginSource, Ruling};
 use crate::policy::RequestOrigin;
 
 /// The complete set of privileged operations an agent may ask for.
@@ -251,6 +251,26 @@ impl Verb {
             Verb::Pin => "pin the current deployment so an update cannot garbage-collect it".into(),
             Verb::Rollback => "boot the previous deployment on the next restart".into(),
             Verb::Update => "update the OS image and firmware".into(),
+        }
+    }
+
+    /// Which row of §7's policy table this verb falls under.
+    ///
+    /// Every one of them is [`Capability::RootCapability`], and that is not a
+    /// simplification: the vocabulary was chosen to be exactly `apex`'s
+    /// root-only subcommands, so there is no verb here that is not a root
+    /// operation. A `match` rather than a constant, so a verb added later has
+    /// to state its row rather than inherit this one.
+    pub fn capability(&self) -> Capability {
+        match self {
+            Verb::Install { .. }
+            | Verb::Remove { .. }
+            | Verb::PkgUpgrade
+            | Verb::PkgRebuild
+            | Verb::PkgRollback
+            | Verb::Pin
+            | Verb::Rollback
+            | Verb::Update => Capability::RootCapability,
         }
     }
 
@@ -481,6 +501,18 @@ impl PrivilegeRequest {
     /// evidence of presence, and §7 reserves root for evidence of presence.
     pub fn is_local(&self) -> bool {
         self.request_origin.is_some_and(|o| o.is_local())
+    }
+
+    /// §7's answer for this request.
+    ///
+    /// [`Ruling::LocalAuth`] for one filed locally, [`Ruling::LocalApproval`]
+    /// for one filed from anywhere else — and the same for one with no
+    /// recorded origin, because an unrecorded origin is not a local one.
+    /// Either way a human at this machine decides, which is why the two do not
+    /// need different code paths in `apex-agentd`; they need different words
+    /// in the prompt, and they get them.
+    pub fn ruling(&self) -> Ruling {
+        self.verb.capability().ruling_when(self.is_local())
     }
 
     /// The §4 prompt, rendered.

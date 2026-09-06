@@ -626,6 +626,18 @@ pub struct AuditEntry<'a> {
     pub session: Option<u32>,
     pub agent: Option<&'a str>,
     pub project: Option<&'a str>,
+    /// Where the request came from (§7's `request_origin`), when the daemon
+    /// could establish it.
+    ///
+    /// Recorded, never enforced on. §7's table allows a GitHub push and a
+    /// preview deploy from Remote Control as plainly as from a keyboard, and
+    /// a broker that quietly refused a remote push would be a different
+    /// policy than the one the roadmap wrote down. The origin is here so the
+    /// log can answer "who pushed that", which is the question actually asked
+    /// afterwards.
+    pub origin: Option<crate::policy::RequestOrigin>,
+    /// How `origin` was arrived at.
+    pub origin_source: Option<crate::origin::OriginSource>,
     pub exit_code: Option<i32>,
 }
 
@@ -643,6 +655,8 @@ pub fn audit(path: &Path, entry: &AuditEntry<'_>) -> std::io::Result<()> {
         session,
         agent,
         project,
+        origin,
+        origin_source,
         exit_code,
     } = entry;
 
@@ -658,6 +672,8 @@ pub fn audit(path: &Path, entry: &AuditEntry<'_>) -> std::io::Result<()> {
         "session": session,
         "agent": agent,
         "project": project,
+        "request_origin": origin.map(|o| o.as_str()),
+        "origin_source": origin_source.map(|s| s.as_str()),
         "exit_code": exit_code,
     });
     let mut file = std::fs::OpenOptions::new()
@@ -1002,6 +1018,8 @@ mod tests {
             session: Some(4),
             agent: Some("claude"),
             project: Some("/p/demo"),
+            origin: Some(crate::policy::RequestOrigin::RemoteControl),
+            origin_source: Some(crate::origin::OriginSource::Declared),
             exit_code: Some(0),
         };
         audit(&log, &base).expect("audit");
@@ -1021,6 +1039,10 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(line).expect("json per line");
             assert_eq!(v["service"], "github");
             assert_eq!(v["capability"], "git-push");
+            // §7 allows a push from Remote Control, so the log has to be able
+            // to say afterwards that it was one. Recorded, never enforced on.
+            assert_eq!(v["request_origin"], "claude-remote-control");
+            assert_eq!(v["origin_source"], "declared");
             assert!(v["detail"].as_str().unwrap().contains("origin"));
             assert!(v.get("ms").is_some());
         }
