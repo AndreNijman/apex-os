@@ -46,6 +46,27 @@ StartLimitBurst=5
 [Service]
 Type=simple
 ExecStart=/usr/bin/apex-agentd
+
+# Every agent this daemon starts is a TUI in a PTY, and terminfo is what tells a
+# TUI whether it may emit colour. `sandbox.rs` passes TERM and COLORTERM into
+# the session when they are in the daemon's own environment, and systemd gives a
+# user unit neither: measured on a live machine the daemon's environ held
+# TERMINAL=alacritty and no TERM at all, and a freshly started unit gets
+# TERM=dumb. Both answer the same way. With no usable TERM, `tput colors` fails
+# outright with "No value for $TERM" and every terminfo lookup behind it does
+# too, so Claude, opencode and codex rendered in one colour. That is the daemon
+# half of "agents display only in white".
+#
+# A daemon started by hand from a shell inherits a real TERM and looks correct,
+# which is why this survived so long: it reproduces only under systemd, so the
+# fix has to live where systemd can see it.
+#
+# xterm-256color is the safe broad default rather than the truth. The PTY is
+# created when the session starts, before anyone attaches, so the daemon cannot
+# know which terminal will end up rendering the bytes. Override per machine with
+# `systemctl --user edit apex-agentd`.
+Environment=TERM=xterm-256color
+Environment=COLORTERM=truecolor
 # The daemon reaps its own children and stops sessions on SIGTERM; give it time
 # to signal every process group before systemd escalates.
 KillSignal=SIGTERM
