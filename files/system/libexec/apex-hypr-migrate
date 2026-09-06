@@ -1,0 +1,1013 @@
+#!/usr/bin/env python3
+"""Move a user's hyprlang Hyprland config to the Lua module layout.
+
+Hyprland 0.55 deprecated hyprlang and gave it "1-2 releases starting from
+0.55". The image ships 0.56.2, so every ~/.config/hypr/hyprland.conf APEX has
+ever seeded is one release from not loading. This converts one.
+
+    ~/.config/hypr/hyprland.conf                 ~/.config/hypr/hyprland.lua
+    ~/.config/hypr/apex-input.conf         ──►   ~/.config/hypr/apex/input.lua
+    ~/.config/hypr/apex-display.conf             ~/.config/hypr/apex/monitors.lua
+    ~/.config/apex-shell/ApexShellKeybinds.conf  ~/.config/hypr/apex/shell-keybinds.lua
+                                                 ~/.config/hypr/apex/user-overrides.lua
+
+## The rule that matters
+
+Andre's own seeded hyprland.conf tells the reader "it is your file now, edits
+here persist". So the config INVITED people to edit it, and a directive this
+script does not understand must never be dropped on the floor. Anything not
+recognised is written verbatim into a comment block in apex/user-overrides.lua
+and listed in the migration report next to it. The worst outcome allowed here
+is a setting the user has to re-apply by hand from a file that tells them so.
+Silently losing one is not on the list.
+
+## How APEX's own lines are told apart from the user's
+
+Not by diffing against the shipped template. A config seeded by an OLDER image
+does not line-match the current one — `$browser` used to be `firefox`, and the
+window rules were spelled `suppressevent` / `nofocus` before 0.54 — so a text
+diff would call almost every line a user edit and then duplicate the whole APEX
+default set on top of the new modules.
+
+Instead every APEX default this project has shipped is listed below and matched
+SEMANTICALLY: a bind by its combo and its action, a setting by its section, key
+and value. A bind whose combo is an APEX default but whose action differs is a
+deliberate user rebind, and it is emitted as a disable() of the default plus the
+user's own bind — never as a second bind on the same combo, which would
+double-fire.
+
+## Idempotence
+
+By construction, not by a flag: the legacy files are RENAMED to timestamped
+backups rather than copied, and the script refuses to run at all when
+hyprland.lua already exists. A second run therefore finds nothing to migrate.
+That also means a hyprland.lua the user has since edited is never rewritten.
+
+usage:
+  apex-hypr-migrate [--home DIR] [--dry-run] [--force] [--self-test]
+"""
+import argparse
+import datetime
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+BANNER = "Converted from hyprlang by apex-hypr-migrate"
+
+# ── what APEX has ever shipped ───────────────────────────────────────────────
+# Matched semantically, so an old seeded config is recognised as APEX's work
+# even though it does not line-match the current template.
+
+# Values that have stood in for these variables across image generations.
+APEX_VARS = {
+    "terminal":    {"alacritty"},
+    "browser":     {"/usr/libexec/apex-open-browser", "firefox", "zen"},
+    "fileManager": {"thunar"},
+    "shellDir":    {"/usr/share/apex-shell"},
+    "qsIpc":       {"qs -p /usr/share/apex-shell ipc call"},
+    "mainMod":     {"SUPER"},
+}
+
+# (canonical mods, key, dispatcher, arg). `arg` is None where the dispatcher
+# takes none. exec args are matched after variable expansion.
+APEX_DEFAULT_BINDS = {
+    ("SUPER", "T", "exec", "alacritty"),
+    ("SUPER", "Q", "killactive", None),
+    ("SUPER", "W", "exec", "/usr/libexec/apex-open-browser"),
+    ("SUPER", "W", "exec", "firefox"),
+    ("SUPER", "W", "exec", "zen"),
+    ("SUPER", "E", "exec", "thunar"),
+    ("SUPER", "L", "exec", "apex shell lock"),
+    ("", "PRINT", "exec", "bash /usr/share/apex-shell/src/scripts/screenshot.sh area"),
+    ("SUPER", "PRINT", "exec", "bash /usr/share/apex-shell/src/scripts/screenshot.sh screen"),
+    ("SUPER", "F", "fullscreen", "0"),
+    ("SHIFT+SUPER", "SPACE", "togglefloating", None),
+    ("SUPER", "P", "pseudo", None),
+    ("SUPER", "J", "layoutmsg", "togglesplit"),
+    ("SUPER", "S", "togglespecialworkspace", "magic"),
+    ("SHIFT+SUPER", "S", "movetoworkspace", "special:magic"),
+    ("SUPER", "MOUSE_DOWN", "workspace", "e+1"),
+    ("SUPER", "MOUSE_UP", "workspace", "e-1"),
+    ("SUPER", "MOUSE:272", "movewindow", None),
+    ("SUPER", "MOUSE:273", "resizewindow", None),
+    # Pre-0.54 spellings that the provisioner used to rewrite in place.
+    ("SUPER", "J", "togglesplit", None),
+}
+for _key, _dir in (("LEFT", "l"), ("RIGHT", "r"), ("UP", "u"), ("DOWN", "d")):
+    APEX_DEFAULT_BINDS.add(("SUPER", _key, "movefocus", _dir))
+    APEX_DEFAULT_BINDS.add(("SHIFT+SUPER", _key, "movewindow", _dir))
+for _i in range(1, 11):
+    APEX_DEFAULT_BINDS.add(("SUPER", str(_i % 10), "workspace", str(_i)))
+    APEX_DEFAULT_BINDS.add(("SHIFT+SUPER", str(_i % 10), "movetoworkspace", str(_i)))
+for _key, _cmd in (
+    ("XF86AUDIORAISEVOLUME", "wpctl set-volume  @DEFAULT_AUDIO_SINK@ 5%+"),
+    ("XF86AUDIOLOWERVOLUME", "wpctl set-volume  @DEFAULT_AUDIO_SINK@ 5%-"),
+    ("XF86AUDIOMUTE", "wpctl set-mute    @DEFAULT_AUDIO_SINK@ toggle"),
+    ("XF86AUDIOMICMUTE", "wpctl set-mute    @DEFAULT_AUDIO_SOURCE@ toggle"),
+    ("XF86MONBRIGHTNESSUP", "brightnessctl set 5%+"),
+    ("XF86MONBRIGHTNESSDOWN", "brightnessctl set 5%-"),
+    ("XF86AUDIOPLAY", "playerctl play-pause"),
+    ("XF86AUDIONEXT", "playerctl next"),
+    ("XF86AUDIOPREV", "playerctl previous"),
+):
+    # Whitespace inside a command is squeezed before comparison, so the padded
+    # spelling in the shipped template and an unpadded hand-copy both match.
+    APEX_DEFAULT_BINDS.add(("", _key, "exec", " ".join(_cmd.split())))
+
+# section -> key -> values APEX has shipped. A key set to one of these is the
+# APEX default and is dropped; anything else is a user override.
+APEX_DEFAULT_SETTINGS = {
+    "general": {
+        "gaps_in": {"5"}, "gaps_out": {"10"}, "border_size": {"2"},
+        "col.active_border": {"rgba(a1c999ee) rgba(8d748cee) 45deg"},
+        "col.inactive_border": {"rgba(252733aa)"},
+        "layout": {"dwindle"}, "resize_on_border": {"true"},
+    },
+    "decoration": {"rounding": {"10"}},
+    "decoration.blur": {"enabled": {"true"}, "size": {"6"}, "passes": {"2"}},
+    "decoration.shadow": {"enabled": {"true"}, "range": {"8"}, "render_power": {"3"}},
+    "animations": {"enabled": {"true"}},
+    "dwindle": {"preserve_split": {"true"}, "pseudotile": {"true"}},
+    "misc": {
+        "disable_hyprland_logo": {"true"},
+        "disable_splash_rendering": {"true"},
+        "force_default_wallpaper": {"0"},
+    },
+    "input": {"follow_mouse": {"1"}, "sensitivity": {"0"}},
+    "input.touchpad": {"natural_scroll": {"true"}, "tap-to-click": {"true"},
+                       "tap_to_click": {"true"}},
+}
+
+APEX_DEFAULT_ENV = {
+    "XCURSOR_SIZE": {"24"},
+    "HYPRCURSOR_SIZE": {"24"},
+}
+
+APEX_DEFAULT_EXEC_ONCE = {
+    "awww-daemon",
+    "/usr/libexec/apex-shell-autostart",
+    "/usr/libexec/polkit-mate-authentication-agent-1",
+    "wl-paste --type text --watch cliphist store",
+    "wl-paste --type image --watch cliphist store",
+    "command -v fcitx5 >/dev/null && fcitx5 -d -r",
+}
+
+# The window rules APEX ships, in every spelling it has shipped them.
+APEX_DEFAULT_WINDOWRULES = {
+    "suppress_event maximize, match:class .*",
+    "suppressevent maximize, class:.*",
+    ("match:class ^$, match:title ^$, match:xwayland 1, match:float 1, "
+     "match:fullscreen 0, match:pin 0, no_focus on"),
+    ("nofocus, class:^$, title:^$, xwayland:1, floating:1, fullscreen:0, pinned:0"),
+}
+
+APEX_DEFAULT_GESTURES = {"3, horizontal, workspace"}
+
+# Markers that say a hyprland.conf is APEX's work rather than something the user
+# brought from another distro. Any one of them is enough.
+APEX_MARKERS = (
+    "APEX-OS",
+    "apex-shell-autostart",
+    "ApexShellKeybinds",
+    "/usr/share/apex-shell",
+)
+
+# hyprlang bind verbs and the Lua bind options they become.
+BIND_VERBS = {
+    "bind":   {},
+    "bindm":  {"drag": True},      # NOT { mouse = true }: accepted, does nothing
+    "bindl":  {"locked": True},
+    "binde":  {"repeating": True},
+    "bindel": {"locked": True, "repeating": True},
+    "bindr":  {"release": True},
+    "bindn":  {"non_consuming": True},
+    "bindt":  {"transparent": True},
+    "bindi":  {"dont_inhibit": True},
+}
+
+# hyprlang dispatcher -> the Lua expression that replaces it. A callable takes
+# the hyprlang argument and returns the expression; None means "no Lua
+# equivalent is known", and the bind is reported rather than guessed at.
+DIRECTIONS = {"l": "left", "r": "right", "u": "up", "d": "down",
+              "left": "left", "right": "right", "up": "up", "down": "down"}
+
+
+def lua_str(value):
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _focus_dir(arg):
+    d = DIRECTIONS.get(arg.strip().lower())
+    return f"hl.dsp.focus({{ direction = {lua_str(d)} }})" if d else None
+
+
+def _move_dir(arg):
+    # `movewindow` with no direction is the drag-move used by bindm, not a
+    # directional move with a missing argument. Reporting it as unconvertible
+    # would cost the user SUPER+drag, which is the single most-used bind there is.
+    if not arg.strip():
+        return "hl.dsp.window.drag()"
+    d = DIRECTIONS.get(arg.strip().lower())
+    return f"hl.dsp.window.move({{ direction = {lua_str(d)} }})" if d else None
+
+
+def _workspace(arg):
+    a = arg.strip()
+    return f"hl.dsp.focus({{ workspace = {a if a.isdigit() else lua_str(a)} }})"
+
+
+def _move_to_workspace(arg):
+    a = arg.strip()
+    return f"hl.dsp.window.move({{ workspace = {a if a.isdigit() else lua_str(a)} }})"
+
+
+DISPATCHERS = {
+    "exec":                   lambda a: f"hl.dsp.exec_cmd({lua_str(a)})",
+    "killactive":             lambda a: "hl.dsp.window.close()",
+    "closewindow":            lambda a: "hl.dsp.window.close()",
+    "fullscreen":             lambda a: "hl.dsp.window.fullscreen({ mode = %s })"
+                                        % (a.strip() or "0"),
+    "togglefloating":         lambda a: 'hl.dsp.window.float({ action = "toggle" })',
+    "pseudo":                 lambda a: "hl.dsp.window.pseudo()",
+    "pin":                    lambda a: "hl.dsp.window.pin()",
+    "centerwindow":           lambda a: "hl.dsp.window.center()",
+    "layoutmsg":              lambda a: f"hl.dsp.layout({lua_str(a.strip())})",
+    "movefocus":              _focus_dir,
+    "movewindow":             _move_dir,
+    "workspace":              _workspace,
+    "movetoworkspace":        _move_to_workspace,
+    "movetoworkspacesilent":  _move_to_workspace,
+    "togglespecialworkspace": lambda a: f"hl.dsp.workspace.toggle_special({lua_str(a.strip() or 'special')})",
+    "exit":                   lambda a: "hl.dsp.exit()",
+    "forcerendererreload":    lambda a: "hl.dsp.force_renderer_reload()",
+    "resizewindow":           lambda a: "hl.dsp.window.resize()",
+    "togglesplit":            lambda a: 'hl.dsp.layout("togglesplit")',
+    "swapwindow":             _move_dir,
+    "cyclenext":              lambda a: "hl.dsp.window.cycle_next()",
+    "bringactivetotop":       lambda a: "hl.dsp.window.bring_to_top()",
+    "dpms":                   lambda a: f"hl.dsp.dpms({lua_str(a.strip())})",
+    "submap":                 lambda a: f"hl.dsp.submap({lua_str(a.strip())})",
+    "global":                 lambda a: f"hl.dsp.global({lua_str(a.strip())})",
+}
+
+
+# ── parsing ──────────────────────────────────────────────────────────────────
+class Directive:
+    """One hyprlang statement, with where it came from."""
+
+    def __init__(self, kind, name, value, line, raw, section=""):
+        self.kind = kind        # "set" | "keyword" | "bind" | "block-open" ...
+        self.name = name
+        self.value = value
+        self.line = line
+        self.raw = raw
+        self.section = section
+
+    def __repr__(self):
+        return f"Directive({self.kind!r}, {self.name!r}, {self.value!r})"
+
+
+def strip_comment(text):
+    """Drop a trailing `#` comment that is not inside a value.
+
+    hyprlang has no string quoting, so this is the same naive rule hyprlang
+    itself uses: a `#` starts a comment wherever it appears.
+    """
+    hashes = text.find("#")
+    return text if hashes == -1 else text[:hashes]
+
+
+def parse(text):
+    """hyprlang source -> [Directive]. Blocks become dotted section names."""
+    out = []
+    stack = []
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = strip_comment(raw).strip()
+        if not line:
+            continue
+        if line == "}":
+            if stack:
+                stack.pop()
+            continue
+        block = re.match(r"^([A-Za-z_][\w-]*)\s*\{$", line)
+        if block:
+            stack.append(block.group(1))
+            continue
+        if "=" not in line:
+            out.append(Directive("unknown", "", line, number, raw, ".".join(stack)))
+            continue
+        name, _, value = line.partition("=")
+        name, value = name.strip(), value.strip()
+        section = ".".join(stack)
+        if name.startswith("$"):
+            out.append(Directive("var", name[1:], value, number, raw, section))
+        elif name in BIND_VERBS:
+            out.append(Directive("bind", name, value, number, raw, section))
+        else:
+            out.append(Directive("keyword", name, value, number, raw, section))
+    return out
+
+
+def expand_vars(value, variables):
+    """Substitute $name, longest name first so $shellDir beats $shell."""
+    for key in sorted(variables, key=len, reverse=True):
+        value = value.replace("$" + key, variables[key])
+    return value
+
+
+def canon_mods(mods):
+    """"SUPER SHIFT" and "shift + super" both become "SHIFT+SUPER"."""
+    parts = [p for p in re.split(r"[\s+]+", mods.upper()) if p]
+    return "+".join(sorted(parts))
+
+
+# ── conversion ───────────────────────────────────────────────────────────────
+class Result:
+    def __init__(self):
+        self.lines = []          # apex/user-overrides.lua body
+        self.unconverted = []    # (line number, raw text, why)
+        self.kept = 0            # directives converted as user overrides
+        self.dropped = 0         # directives recognised as APEX defaults
+
+    def note(self, directive, why):
+        self.unconverted.append((directive.line, directive.raw.rstrip(), why))
+
+
+def convert_bind(directive, variables, result, disables):
+    """One bind line -> a Lua hl.bind, or a report entry."""
+    value = expand_vars(directive.value, variables)
+    parts = [p.strip() for p in value.split(",")]
+    if len(parts) < 3:
+        result.note(directive, "a bind needs at least modifiers, key and dispatcher")
+        return
+    mods, key, dispatcher = parts[0], parts[1], parts[2].lower()
+    arg = ", ".join(parts[3:]).strip()
+
+    combo = (canon_mods(mods), key.upper(), dispatcher, " ".join(arg.split()) or None)
+    if combo in APEX_DEFAULT_BINDS:
+        result.dropped += 1
+        return
+
+    make = DISPATCHERS.get(dispatcher)
+    if make is None:
+        result.note(directive, f"no Lua equivalent is known for the `{dispatcher}` dispatcher")
+        return
+    expression = make(arg)
+    if expression is None:
+        result.note(directive, f"`{dispatcher} {arg}` has no Lua equivalent that is safe to guess")
+        return
+
+    # The combo IS an APEX default but the action is not: a deliberate rebind.
+    # Disable the default rather than binding the same keys twice.
+    if any(mods_ == combo[0] and key_ == combo[1]
+           for mods_, key_, _, _ in APEX_DEFAULT_BINDS):
+        disables.add((canon_mods(mods).replace("+", " "), key))
+
+    options = dict(BIND_VERBS[directive.name])
+    lua_combo = " + ".join([p for p in re.split(r"[\s+]+", mods) if p] + [key])
+    if options:
+        rendered = ", ".join(f"{k} = {'true' if v else 'false'}"
+                             for k, v in sorted(options.items()))
+        result.lines.append(f"hl.bind({lua_str(lua_combo)}, {expression}, {{ {rendered} }})")
+    else:
+        result.lines.append(f"hl.bind({lua_str(lua_combo)}, {expression})")
+    result.kept += 1
+
+
+def convert_monitor(value):
+    """A hyprlang `monitor=` value -> an hl.monitor call."""
+    parts = [p.strip() for p in value.split(",")]
+    name = parts[0]
+    if len(parts) >= 2 and parts[1].lower() in ("disable", "disabled"):
+        return f"hl.monitor({{ output = {lua_str(name)}, disabled = true }})"
+    fields = ["output = " + lua_str(name)]
+    if len(parts) > 1 and parts[1]:
+        fields.append("mode = " + lua_str(parts[1].replace("Hz", "")))
+    if len(parts) > 2 and parts[2]:
+        fields.append("position = " + lua_str(parts[2]))
+    if len(parts) > 3 and parts[3]:
+        fields.append("scale = " + lua_str(parts[3]))
+    # Trailing key/value pairs: transform, 3, vrr, 1
+    rest = parts[4:]
+    for i in range(0, len(rest) - 1, 2):
+        key, val = rest[i].lower(), rest[i + 1]
+        if key in ("transform", "vrr", "bitdepth"):
+            fields.append(f"{key} = {val}")
+    return "hl.monitor({ " + ", ".join(fields) + " })"
+
+
+def lua_setting_value(value):
+    """A hyprlang scalar as a Lua literal."""
+    low = value.strip().lower()
+    if low in ("true", "yes", "on", "1") and low not in ("1",):
+        return "true"
+    if low in ("false", "no", "off"):
+        return "false"
+    try:
+        int(value)
+        return value.strip()
+    except ValueError:
+        pass
+    try:
+        float(value)
+        return value.strip()
+    except ValueError:
+        pass
+    return lua_str(value.strip())
+
+
+def convert(text, variables=None, source="hyprland.conf"):
+    """A hyprlang config -> (Result, list of disable() calls)."""
+    result = Result()
+    disables = set()
+    variables = dict(variables or {})
+    directives = parse(text)
+
+    # Variables first: a bind on line 10 can use a $var defined on line 200.
+    for d in directives:
+        if d.kind == "var":
+            variables[d.name] = d.value
+
+    execs = []
+    settings = {}
+
+    for d in directives:
+        if d.kind == "var":
+            if d.value not in APEX_VARS.get(d.name, set()):
+                result.note(d, f"a custom $ variable; `{d.name}` is used where it appears above")
+            continue
+
+        if d.kind == "unknown":
+            result.note(d, "not a recognised hyprlang statement")
+            continue
+
+        if d.kind == "bind":
+            convert_bind(d, variables, result, disables)
+            continue
+
+        name, value = d.name, expand_vars(d.value, variables)
+        section = d.section
+
+        if name == "source":
+            # The three APEX fragments are migrated by their own converters.
+            if any(marker in value for marker in
+                   ("apex-input.conf", "apex-display.conf", "ApexShellKeybinds.conf")):
+                result.dropped += 1
+            else:
+                result.note(d, "a `source` of a file APEX does not manage; "
+                               "convert that file and require it here")
+            continue
+
+        if name == "unbind":
+            mods, _, key = value.partition(",")
+            disables.add((canon_mods(mods).replace("+", " "), key.strip()))
+            result.kept += 1
+            continue
+
+        if name == "monitor":
+            if value.split(",")[0].strip() == "" :
+                # The generic catch-all; apex/monitors.lua emits its own.
+                result.dropped += 1
+            else:
+                result.lines.append(convert_monitor(value))
+                result.kept += 1
+            continue
+
+        if name == "env":
+            key, _, val = value.partition(",")
+            key, val = key.strip(), val.strip()
+            if val in APEX_DEFAULT_ENV.get(key, set()):
+                result.dropped += 1
+            elif key == "PATH" and ".local/bin" in val:
+                result.dropped += 1     # apex/session.lua exports this itself
+            else:
+                result.lines.append(f"hl.env({lua_str(key)}, {lua_str(val)})")
+                result.kept += 1
+            continue
+
+        if name in ("exec-once", "exec_once"):
+            if " ".join(value.split()) in APEX_DEFAULT_EXEC_ONCE:
+                result.dropped += 1
+            else:
+                execs.append(value)
+                result.kept += 1
+            continue
+
+        if name == "exec":
+            execs.append(value)
+            result.kept += 1
+            continue
+
+        if name == "gesture":
+            if " ".join(value.split()) in APEX_DEFAULT_GESTURES:
+                result.dropped += 1
+                continue
+            parts = [p.strip() for p in value.split(",")]
+            if len(parts) >= 3 and parts[0].isdigit():
+                result.lines.append(
+                    "hl.gesture({ fingers = %s, direction = %s, action = %s })"
+                    % (parts[0], lua_str(parts[1]), lua_str(parts[2])))
+                result.kept += 1
+            else:
+                result.note(d, "a gesture whose shape this does not recognise")
+            continue
+
+        if name in ("windowrule", "windowrulev2", "layerrule", "workspace"):
+            if " ".join(value.split()) in APEX_DEFAULT_WINDOWRULES:
+                result.dropped += 1
+            else:
+                # Rule matching changed shape between hyprlang and Lua, and a
+                # wrong rule is silent. Reported, never guessed.
+                result.note(d, f"a `{name}` — the Lua form takes a match table, "
+                               "which cannot be derived from this safely")
+            continue
+
+        if name in ("bezier", "animation"):
+            result.note(d, f"a custom `{name}`; the Lua form is hl.curve / hl.animation")
+            continue
+
+        if name == "submap":
+            result.note(d, "a submap; the Lua form is hl.define_submap")
+            continue
+
+        # Anything else is a plain setting inside (or outside) a block.
+        full = f"{section}.{name}" if section else name
+        parent, _, leaf = full.rpartition(".")
+        if value in APEX_DEFAULT_SETTINGS.get(parent, {}).get(leaf, set()):
+            result.dropped += 1
+            continue
+        if not parent:
+            result.note(d, "a top-level setting with no section; "
+                           "hl.config needs to know which section it belongs to")
+            continue
+        settings.setdefault(parent, {})[leaf] = value
+        result.kept += 1
+
+    return result, disables, settings, execs, variables
+
+
+def render_settings(settings):
+    """{'input.touchpad': {...}} -> a nested hl.config call."""
+    if not settings:
+        return []
+    tree = {}
+    for path, values in sorted(settings.items()):
+        node = tree
+        for part in path.split("."):
+            node = node.setdefault(part, {})
+        for key, value in sorted(values.items()):
+            # `col.active_border` inside a block is a dotted key, not nesting.
+            node[key] = value
+
+    def render(node, depth):
+        pad = "    " * depth
+        out = []
+        for key, value in node.items():
+            if isinstance(value, dict):
+                out.append(f"{pad}{key} = {{")
+                out += render(value, depth + 1)
+                out.append(f"{pad}}},")
+            else:
+                safe = key if re.match(r"^[A-Za-z_]\w*$", key) else f"[{lua_str(key)}]"
+                out.append(f"{pad}{safe} = {lua_setting_value(value)},")
+        return out
+
+    return ["hl.config({"] + render(tree, 1) + ["})"]
+
+
+# ── file plumbing ────────────────────────────────────────────────────────────
+def stamp():
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def is_apex_managed(text):
+    return any(marker in text for marker in APEX_MARKERS)
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def atomic_write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".apex-hypr-migrate.")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+def validate_lua(module, text):
+    """Run one generated module through the Hyprland in this image."""
+    if not shutil.which("Hyprland"):
+        return None
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", tempfile.mkdtemp())
+    with tempfile.TemporaryDirectory() as d:
+        os.mkdir(os.path.join(d, "apex"))
+        with open(os.path.join(d, "apex", module + ".lua"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        # A converted module may disable an APEX default, so the module it takes
+        # those handles from has to resolve. Stubbed rather than copied from the
+        # image: this runs BEFORE the provisioner seeds apex/keybindings.lua, and
+        # a validation that depended on seeding order would fail on exactly the
+        # machines this migration exists for.
+        if module != "keybindings":
+            with open(os.path.join(d, "apex", "keybindings.lua"), "w", encoding="utf-8") as fh:
+                fh.write("return { binds = {}, key = function() return '' end,\n"
+                         "         disable = function() return true end }\n")
+        wrapper = os.path.join(d, "hyprland.lua")
+        with open(wrapper, "w", encoding="utf-8") as fh:
+            fh.write(f'require("apex.{module}")\n')
+        try:
+            res = subprocess.run(
+                ["Hyprland", "--i-am-really-stupid", "--verify-config", "--config", wrapper],
+                capture_output=True, text=True, env=env, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return "config ok" in (res.stdout + res.stderr)
+
+
+HEADER = """-- {banner} on {when}.
+--
+-- Your own edits to ~/.config/hypr/hyprland.conf, converted. APEX never
+-- rewrites this file, and hyprland.lua loads it LAST — after the shipped
+-- defaults AND after the modules APEX Settings generates — so anything here
+-- wins. That is deliberate: these are lines you typed by hand, and a generator
+-- default should not quietly take them back.
+--
+-- The config this came from is kept next to it as {backup}.
+{report_note}"""
+
+
+def module_text(body, when, backup, report_note=""):
+    head = HEADER.format(banner=BANNER, when=when, backup=backup,
+                         report_note=report_note)
+    return head + "\n\n" + "\n".join(body) + "\n"
+
+
+def migrate(home, dry_run=False, force=False):
+    """Returns (exit code, report lines)."""
+    hypr = os.path.join(home, ".config/hypr")
+    conf = os.path.join(hypr, "hyprland.conf")
+    lua = os.path.join(hypr, "hyprland.lua")
+    report = []
+
+    def say(line):
+        report.append(line)
+
+    if os.path.exists(lua):
+        say(f"{lua} already exists; nothing to migrate.")
+        return 0, report
+
+    if not os.path.exists(conf):
+        say(f"no {conf}; nothing to migrate.")
+        return 0, report
+
+    text = read(conf)
+    if text is None:
+        say(f"cannot read {conf}; refusing to touch it.")
+        return 1, report
+
+    if not is_apex_managed(text) and not force:
+        say(f"{conf} carries no APEX marker, so it is not a config APEX seeded.")
+        say("Refusing to convert someone else's config. Re-run with --force to")
+        say("convert it anyway; the original is renamed, never deleted.")
+        return 2, report
+
+    when = stamp()
+    result, disables, settings, execs, variables = convert(text)
+
+    # The three generated fragments. Converted here rather than left to their
+    # generators: a generator only re-runs when the user next opens that
+    # settings page, and until then the session would be missing every popup
+    # keybind, every saved monitor and every input override.
+    generated = [
+        (os.path.join(hypr, "apex-input.conf"), "input"),
+        (os.path.join(hypr, "apex-display.conf"), "monitors"),
+        (os.path.join(home, ".config/apex-shell/ApexShellKeybinds.conf"), "shell-keybinds"),
+    ]
+
+    modules = {}
+    for path, module in generated:
+        body = read(path)
+        if not body or not body.strip():
+            continue
+        sub, sub_disables, sub_settings, sub_execs, _ = convert(body, variables, path)
+        disables |= sub_disables
+        lines = list(sub.lines) + render_settings(sub_settings)
+        for command in sub_execs:
+            lines.append(f"hl.on(\"hyprland.start\", function() hl.exec_cmd({lua_str(command)}) end)")
+        if lines:
+            modules[module] = (path, lines, sub)
+        result.unconverted += [(n, raw, f"{os.path.basename(path)}: {why}")
+                               for n, raw, why in sub.unconverted]
+
+    # ── the user-overrides module ────────────────────────────────────────────
+    body = []
+    if disables:
+        body.append("-- Rebinds: the APEX default on these combos is switched off first, so")
+        body.append("-- the key does one thing rather than firing both actions.")
+        body.append('local defaults = require("apex.keybindings")')
+        for mods, key in sorted(disables):
+            body.append(f"defaults.disable({lua_str(mods)}, {lua_str(key)})")
+        body.append("")
+
+    if settings:
+        body += render_settings(settings)
+        body.append("")
+
+    body += result.lines
+    if result.lines:
+        body.append("")
+
+    if execs:
+        body.append('hl.on("hyprland.start", function()')
+        for command in execs:
+            body.append(f"    hl.exec_cmd({lua_str(command)})")
+        body.append("end)")
+        body.append("")
+
+    if result.unconverted:
+        body.append("-- ── NOT CONVERTED ───────────────────────────────────────────────────────")
+        body.append("-- These lines were in your hyprland.conf and this migration could not")
+        body.append("-- express them in Lua without guessing. They are NOT active. They are")
+        body.append("-- here verbatim so nothing is lost: translate the ones you still want")
+        body.append("-- and delete the rest. https://wiki.hypr.land/Configuring/Start/")
+        for number, raw, why in result.unconverted:
+            body.append(f"--")
+            body.append(f"-- line {number}: {why}")
+            body.append(f"--     {raw}")
+
+    backup_conf = f"hyprland.conf.pre-lua.{when}"
+    report_path = os.path.join(hypr, f"apex-hypr-migration.{when}.txt")
+    note = ""
+    if result.unconverted:
+        note = (f"--\n-- {len(result.unconverted)} line(s) could not be converted. They are listed\n"
+                f"-- at the bottom of this file and in {os.path.basename(report_path)}.")
+
+    overrides = module_text(body, when, backup_conf, note)
+
+    say(f"{conf}: {result.kept} directive(s) carried over, "
+        f"{result.dropped} recognised as APEX defaults and dropped, "
+        f"{len(result.unconverted)} could not be converted.")
+    for module, (path, lines, sub) in sorted(modules.items()):
+        say(f"{path} -> apex/{module}.lua ({len(lines)} line(s))")
+    if result.unconverted:
+        say("")
+        say("NOT CONVERTED — these are in apex/user-overrides.lua verbatim, inactive:")
+        for number, raw, why in result.unconverted:
+            say(f"  hyprland.conf:{number}  {why}")
+            say(f"      {raw}")
+
+    if dry_run:
+        say("")
+        say("--dry-run: nothing was written.")
+        say("")
+        say(f"--- {os.path.join(hypr, 'apex/user-overrides.lua')} ---")
+        report.extend(overrides.splitlines())
+        for module, (_, lines, _) in sorted(modules.items()):
+            say("")
+            say(f"--- {os.path.join(hypr, 'apex', module + '.lua')} ---")
+            report.extend(lines)
+        return 0, report
+
+    # Validate every module before anything is moved. A migration that leaves
+    # the user with a config Hyprland rejects is worse than one that refuses.
+    for module, text_ in [("user-overrides", overrides)] + \
+                         [(m, "\n".join(l) + "\n") for m, (_, l, _) in modules.items()]:
+        if validate_lua(module, text_) is False:
+            say(f"the generated apex/{module}.lua was rejected by Hyprland; "
+                "nothing has been changed.")
+            return 1, report
+
+    atomic_write(os.path.join(hypr, "apex/user-overrides.lua"), overrides)
+    for module, (_, lines, _) in modules.items():
+        atomic_write(os.path.join(hypr, "apex", module + ".lua"), "\n".join(lines) + "\n")
+
+    # Rename rather than copy: a second run then finds no hyprland.conf and
+    # stops, which is what makes this idempotent without a state file.
+    os.replace(conf, os.path.join(hypr, backup_conf))
+    say(f"{conf} -> {backup_conf}")
+    for path, _ in generated:
+        if os.path.exists(path):
+            moved = f"{path}.pre-lua.{when}"
+            os.replace(path, moved)
+            say(f"{path} -> {os.path.basename(moved)}")
+
+    atomic_write(report_path, "\n".join(report) + "\n")
+    say(f"report written to {report_path}")
+    return 0, report
+
+
+# ── self-test ────────────────────────────────────────────────────────────────
+SAMPLE = """\
+# APEX-OS — default Hyprland config
+$mainMod = SUPER
+$terminal = alacritty
+$browser = firefox
+monitor = , preferred, auto, 1.0
+monitor = eDP-1, 2560x1600@165, 0x0, 1.5
+env = XCURSOR_SIZE,24
+env = MOZ_ENABLE_WAYLAND,1
+exec-once = awww-daemon
+exec-once = my-own-daemon --flag
+input {
+    kb_layout = us
+    follow_mouse = 1
+    touchpad {
+        natural_scroll = true
+        scroll_factor = 1.4
+    }
+}
+general {
+    gaps_in = 5
+    gaps_out = 42
+}
+bind = $mainMod, T, exec, $terminal
+bind = $mainMod, Q, killactive
+bind = $mainMod, T, exec, kitty
+bind = $mainMod, G, exec, gimp
+bind = $mainMod SHIFT, left, movewindow, l
+bindm = $mainMod, mouse:272, movewindow
+bindm = $mainMod ALT, mouse:272, movewindow
+bindel = , XF86AudioRaiseVolume, exec, wpctl set-volume  @DEFAULT_AUDIO_SINK@ 5%+
+bindel = $mainMod, F5, exec, my-repeating-thing
+bindl = , XF86AudioPlay, exec, playerctl play-pause
+windowrule = suppress_event maximize, match:class .*
+windowrule = float, match:class ^(pavucontrol)$
+bezier = mine, 0.1, 0.2, 0.3, 0.4
+source = /home/u/.config/hypr/apex-input.conf
+source = /home/u/.config/hypr/my-extra.conf
+gesture = 3, horizontal, workspace
+gesture = 4, vertical, special
+gesture = sideways
+"""
+
+
+def self_test():
+    rc = 0
+    result, disables, settings, execs, _ = convert(SAMPLE)
+    body = []
+    if disables:
+        body.append('local defaults = require("apex.keybindings")')
+        for mods, key in sorted(disables):
+            body.append(f"defaults.disable({lua_str(mods)}, {lua_str(key)})")
+    body += render_settings(settings)
+    body += result.lines
+    if execs:
+        body.append('hl.on("hyprland.start", function()')
+        for command in execs:
+            body.append(f"    hl.exec_cmd({lua_str(command)})")
+        body.append("end)")
+    text = "\n".join(body)
+
+    def check(label, condition):
+        nonlocal rc
+        print(("PASS  " if condition else "FAIL  ") + label)
+        if not condition:
+            rc = 1
+
+    # APEX defaults are recognised and dropped, in the OLD spellings too.
+    check("the APEX terminal bind is dropped as a default",
+          'hl.bind("SUPER + T", hl.dsp.exec_cmd("alacritty"))' not in text)
+    check("the APEX killactive bind is dropped as a default",
+          "hl.dsp.window.close()" not in text)
+    check("$browser = firefox is recognised as an old APEX default",
+          "firefox" not in text)
+    check("the generic catch-all monitor is dropped",
+          'output = ""' not in text)
+    check("the APEX gesture is dropped",
+          'direction = "horizontal"' not in text)
+    check("the APEX window rule is dropped",
+          "suppress_event" not in text)
+
+    # User overrides survive.
+    check("a user monitor is converted",
+          'hl.monitor({ output = "eDP-1", mode = "2560x1600@165", '
+          'position = "0x0", scale = "1.5" })' in text)
+    check("a user bind is converted",
+          'hl.bind("SUPER + G", hl.dsp.exec_cmd("gimp"))' in text)
+    check("a user env is converted",
+          'hl.env("MOZ_ENABLE_WAYLAND", "1")' in text)
+    check("a user exec-once is converted",
+          'hl.exec_cmd("my-own-daemon --flag")' in text)
+    check("a user setting inside a block is converted",
+          "gaps_out = 42," in text)
+    check("a nested block setting is converted",
+          "scroll_factor = 1.4," in text)
+    check("an APEX default inside the same block is dropped",
+          "gaps_in" not in text)
+    check("a user bindm becomes a drag bind, not a directional move",
+          'hl.bind("SUPER + ALT + mouse:272", hl.dsp.window.drag(), { drag = true })' in text)
+    check("...and never the { mouse = true } upstream's own example still uses",
+          "mouse = true" not in text)
+    check("a user bindel becomes locked + repeating",
+          'hl.bind("SUPER + F5", hl.dsp.exec_cmd("my-repeating-thing"), '
+          "{ locked = true, repeating = true })" in text)
+    check("an APEX bindm is still recognised as a default and dropped",
+          'hl.bind("SUPER + mouse:272"' not in text)
+    check("an APEX bindl is still recognised as a default and dropped",
+          "playerctl play-pause" not in text)
+    check("a user gesture is converted",
+          'hl.gesture({ fingers = 4, direction = "vertical", action = "special" })' in text)
+
+    # A rebind of an APEX combo disables the default instead of doubling it.
+    check("rebinding SUPER+T disables the APEX default",
+          'defaults.disable("SUPER", "T")' in text)
+    check("...and binds the user's command",
+          'hl.bind("SUPER + T", hl.dsp.exec_cmd("kitty"))' in text)
+
+    # Nothing is silently lost.
+    reasons = {why for _, _, why in result.unconverted}
+    raws = " ".join(raw for _, raw, _ in result.unconverted)
+    check("an unconvertible window rule is reported",
+          any("windowrule" in r for r in reasons) and "pavucontrol" in raws)
+    check("a custom bezier is reported",
+          any("bezier" in r for r in reasons))
+    check("a foreign source is reported",
+          any("source" in r for r in reasons) and "my-extra.conf" in raws)
+    check("a malformed gesture is reported rather than guessed at",
+          any("gesture" in r for r in reasons) and "sideways" in raws)
+    check("the APEX source lines are NOT reported",
+          "apex-input.conf" not in raws)
+
+    valid = validate_lua("selftest", text)
+    if valid is None:
+        print("SKIP  Hyprland not installed; cannot validate the converted Lua")
+    else:
+        check("Hyprland accepts the converted Lua", valid)
+
+    # Idempotence and the marker check, against a real directory.
+    with tempfile.TemporaryDirectory() as home:
+        os.makedirs(os.path.join(home, ".config/hypr"))
+        conf = os.path.join(home, ".config/hypr/hyprland.conf")
+        with open(conf, "w", encoding="utf-8") as fh:
+            fh.write(SAMPLE)
+        code, _ = migrate(home)
+        check("a first migration succeeds", code == 0)
+        check("hyprland.conf is renamed away",
+              not os.path.exists(conf))
+        backups = [f for f in os.listdir(os.path.join(home, ".config/hypr"))
+                   if f.startswith("hyprland.conf.pre-lua.")]
+        check("the backup is timestamped", len(backups) == 1)
+        check("apex/user-overrides.lua is written",
+              os.path.exists(os.path.join(home, ".config/hypr/apex/user-overrides.lua")))
+        check("a migration report is written",
+              any(f.startswith("apex-hypr-migration.")
+                  for f in os.listdir(os.path.join(home, ".config/hypr"))))
+        before = sorted(os.listdir(os.path.join(home, ".config/hypr")))
+        code, _ = migrate(home)
+        check("a second migration is a no-op", code == 0)
+        check("...and changes nothing",
+              sorted(os.listdir(os.path.join(home, ".config/hypr"))) == before)
+
+    with tempfile.TemporaryDirectory() as home:
+        os.makedirs(os.path.join(home, ".config/hypr"))
+        with open(os.path.join(home, ".config/hypr/hyprland.conf"), "w") as fh:
+            fh.write("bind = SUPER, K, killactive\n")
+        code, _ = migrate(home)
+        check("a config with no APEX marker is refused", code == 2)
+        check("...and is left alone",
+              os.path.exists(os.path.join(home, ".config/hypr/hyprland.conf")))
+
+    with tempfile.TemporaryDirectory() as home:
+        os.makedirs(os.path.join(home, ".config/hypr"))
+        for name, body_ in (("hyprland.conf", SAMPLE), ("hyprland.lua", "-- mine\n")):
+            with open(os.path.join(home, ".config/hypr", name), "w") as fh:
+                fh.write(body_)
+        code, _ = migrate(home)
+        check("an existing hyprland.lua is never overwritten", code == 0)
+        check("...and keeps its contents",
+              read(os.path.join(home, ".config/hypr/hyprland.lua")) == "-- mine\n")
+
+    return rc
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Convert an APEX hyprlang config to the Lua module layout.")
+    ap.add_argument("--home", default=os.path.expanduser("~"))
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true",
+                    help="convert even when the config carries no APEX marker")
+    ap.add_argument("--self-test", action="store_true")
+    args = ap.parse_args(argv)
+
+    if args.self_test:
+        return self_test()
+
+    code, report = migrate(args.home, args.dry_run, args.force)
+    for line in report:
+        print(line)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
