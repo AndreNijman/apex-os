@@ -199,11 +199,42 @@ pub fn data_home() -> PathBuf {
     home().join(".local/share")
 }
 
-/// The scratch directory a sandboxed session may write to. Deliberately under
-/// `/tmp` and not `$XDG_RUNTIME_DIR`: agents generate build output here and
+/// Where session scratch directories live. Deliberately under `/tmp` and not
+/// `$XDG_RUNTIME_DIR`: agents generate build output here, and
 /// `XDG_RUNTIME_DIR` is a small tmpfs that other software depends on.
+pub const SCRATCH_ROOT: &str = "/tmp/apex-agent";
+
+/// The environment variable that moves it.
+///
+/// The one path in this module that no XDG variable reaches, which made it the
+/// one path a test daemon shared with the user's real one — and a session reap
+/// runs `remove_dir_all` on its own id's directory, so a fixture daemon that
+/// numbered a session the same as a live one would delete a running session's
+/// scratch. Every suite in this repository fixtures `XDG_RUNTIME_DIR` and
+/// `XDG_STATE_HOME`; this is what lets one fixture the last of it.
+///
+/// Read from the daemon's own environment and never from a request, so it has
+/// exactly the trust of `XDG_RUNTIME_DIR`: a session cannot set it, because the
+/// daemon's environment is fixed before any session exists.
+pub const SCRATCH_ROOT_ENV: &str = "APEX_AGENT_SCRATCH_ROOT";
+
+/// The scratch directory a sandboxed session may write to.
 pub fn scratch_dir(id: u32) -> PathBuf {
-    PathBuf::from(format!("/tmp/apex-agent/{id}"))
+    scratch_root().join(id.to_string())
+}
+
+/// The root the scratch directories sit in.
+pub fn scratch_root() -> PathBuf {
+    if let Some(dir) = std::env::var_os(SCRATCH_ROOT_ENV) {
+        let path = PathBuf::from(dir);
+        // Absolute or nothing: a relative root would be resolved against the
+        // daemon's working directory, which is not the user's and which the
+        // sandbox then binds by that name.
+        if path.is_absolute() {
+            return path;
+        }
+    }
+    PathBuf::from(SCRATCH_ROOT)
 }
 
 /// Create `dir` and every missing parent with `0700`.
@@ -286,6 +317,21 @@ mod tests {
             Some(v) if !v.is_empty() => assert_eq!(data_home(), PathBuf::from(v)),
             _ => assert_eq!(data_home(), home().join(".local/share")),
         }
+    }
+
+    #[test]
+    fn the_scratch_root_reads_its_own_variable_and_falls_back_to_the_default() {
+        // Written against whatever the environment actually is, for the same
+        // reason `data_home_reads_its_own_variable_and_falls_back_to_the_spec`
+        // is: `set_var` is process-global and races the other tests here.
+        match std::env::var_os(SCRATCH_ROOT_ENV) {
+            Some(v) if !v.is_empty() && Path::new(&v).is_absolute() => {
+                assert_eq!(scratch_root(), PathBuf::from(v));
+            }
+            _ => assert_eq!(scratch_root(), PathBuf::from(SCRATCH_ROOT)),
+        }
+        assert!(scratch_dir(7).ends_with("7"));
+        assert!(scratch_dir(7).starts_with(scratch_root()));
     }
 
     #[test]
