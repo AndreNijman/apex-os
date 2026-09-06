@@ -1175,6 +1175,67 @@ jobs:
         run: |
           cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
 
+      # ── SBOM, and why only on this image ────────────────────────────────────
+      # A signature says the bytes came from this pipeline. It says nothing
+      # about what is inside them, which is the question anyone asks after a CVE
+      # lands: is this machine affected. Until now there was no answer that did
+      # not involve booting the image and running rpm.
+      #
+      # Attached to `apex` alone rather than to core and base as well. This is
+      # the digest every machine actually pulls; core and base are build tiers
+      # nobody boots, and their contents are a strict subset of this one, so two
+      # more SBOMs would be two more things to keep honest for no extra answer.
+      #
+      # `cosign attest` rather than `cosign attach sbom`: attach is deprecated
+      # upstream and produces an unsigned blob, which is the wrong shape for a
+      # provenance claim. An attestation is signed by the same keyless identity
+      # as the image, so one `cosign verify-attestation` answers both "who built
+      # it" and "what is in it".
+      - name: Generate and attest the SBOM
+        if: ${{ steps.push.outputs.digest != '' }}
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+          syft --version
+
+          REF="$IMAGE@${{ steps.push.outputs.digest }}"
+          # Read the image out of the registry rather than local storage: the
+          # push above is the artefact users get, and a local-storage read could
+          # describe something the registry does not have.
+          syft "registry:$REF" -o spdx-json > /tmp/sbom.spdx.json
+
+          # An SBOM that describes nothing is worse than none: it answers the
+          # CVE question with silence and looks authoritative doing it. The
+          # image carries thousands of packages, so a hundred is a floor no
+          # healthy build can fall below and any broken one will.
+          COUNT="$(jq '.packages | length' /tmp/sbom.spdx.json)"
+          echo "SBOM packages: $COUNT"
+          test "$COUNT" -gt 100
+
+          cosign attest --yes --predicate /tmp/sbom.spdx.json \
+            --type spdxjson "$REF"
+
+      - name: Verify the image and its SBOM are both retrievable
+        if: ${{ steps.push.outputs.digest != '' }}
+        run: |
+          set -euo pipefail
+          REF="$IMAGE@${{ steps.push.outputs.digest }}"
+          IDENTITY="https://github.com/${{ github.repository }}/.github/workflows/build-image.yml@${{ github.ref }}"
+          # Verifying here, in the job that produced them, is what makes the
+          # claim testable at all. A signature nobody checks is a signature that
+          # can quietly stop being produced, and the failure would surface for
+          # the first time on a user's machine.
+          cosign verify "$REF" \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            > /dev/null
+          cosign verify-attestation "$REF" --type spdxjson \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            > /dev/null
+          echo "signature and SBOM attestation both verify against $IDENTITY"
+
       # EVERY published name, all pointing at the one digest.
       #
       #   apex / apex-<sha>              the canonical name going forward
