@@ -111,6 +111,16 @@ ACCEL_PROFILES = ("adaptive", "flat")
 CLICK_METHODS = ("none", "buttonAreas", "clickfinger")
 SCROLL_METHODS = ("none", "twofinger", "edge")
 
+# The model's vocabulary is labwc's, because labwc's is the one with a spelling
+# for every value. Each compositor gets its own translation, and a value with no
+# translation is a capability gap rather than a silent substitution.
+#
+# Hyprland's `drag_3fg` is an enum: 0 off, 1 three fingers, 2 four.
+HYPR_DRAG_3FG = {False: 0, True: 1}
+NIRI_SCROLL_METHODS = {"twofinger": "two-finger", "edge": "edge", "none": "no-scroll"}
+NIRI_CLICK_METHODS = {"clickfinger": "clickfinger", "buttonAreas": "button-areas"}
+NIRI_TAP_BUTTON_MAPS = {"lrm": "left-right-middle", "lmr": "left-middle-right"}
+
 
 # ── model ───────────────────────────────────────────────────────────────────
 def load_model(path):
@@ -272,6 +282,10 @@ def gen_hyprland(model):
         f"            clickfinger_behavior    = {lua_value(t['click_method'] == 'clickfinger')},",
         f"            tap_button_map          = {lua_value(t['tap_button_map'])},",
         f"            scroll_factor           = {lua_value(t['scroll_factor'])},",
+        # drag_3fg is an ENUM, not a boolean: 0 off, 1 three fingers, 2 four.
+        # It was missing entirely, so the Three-finger drag switch wrote the
+        # model, regenerated every config and changed nothing on Hyprland.
+        f"            drag_3fg                = {HYPR_DRAG_3FG[bool(t['three_finger_drag'])]},",
         "        },",
         "    },",
         "})",
@@ -325,18 +339,41 @@ def gen_niri(model):
         lines.append("        dwt")
     if t["middle_emulation"]:
         lines.append("        middle-emulation")
+    if t["left_handed"]:
+        lines.append("        left-handed")
+    # `drag-lock` is a bare flag in niri 26.04 — it takes NO argument, so
+    # `drag-lock false` is a parse error rather than a way to turn it off.
+    # Absence is off.
+    if t["drag_lock"]:
+        lines.append("        drag-lock")
     lines += [
+        # `drag` is niri's tap-and-drag, and it is the one touchpad option here
+        # that takes an explicit boolean. Written both ways on purpose: niri
+        # enables tap-and-drag by default, so omitting it when the user turned
+        # it off would leave it on.
+        f"        drag {'true' if t['tap_and_drag'] else 'false'}",
         f"        accel-speed {t['speed']}",
         f'        accel-profile "{t["accel_profile"]}"',
-        f'        click-method "{"clickfinger" if t["click_method"] == "clickfinger" else "button-areas"}"',
-        f'        tap-button-map "{"left-right-middle" if t["tap_button_map"] == "lrm" else "left-middle-right"}"',
+        f'        scroll-method "{NIRI_SCROLL_METHODS[t["scroll_method"]]}"',
+        f'        tap-button-map "{NIRI_TAP_BUTTON_MAPS[t["tap_button_map"]]}"',
         f"        scroll-factor {t['scroll_factor']}",
+    ]
+    # niri's click-method has two values and no "off". Emitting button-areas
+    # for a user who asked for neither is a wrong answer dressed as a right
+    # one, so the option is omitted and the gap is declared in CAPABILITIES.
+    if t["click_method"] in NIRI_CLICK_METHODS:
+        lines.append(f'        click-method "{NIRI_CLICK_METHODS[t["click_method"]]}"')
+    lines += [
         "    }",
         "",
         "    mouse {",
     ]
     if p["natural_scroll"]:
         lines.append("        natural-scroll")
+    if p["middle_emulation"]:
+        lines.append("        middle-emulation")
+    if p["left_handed"]:
+        lines.append("        left-handed")
     lines += [
         f"        accel-speed {p['speed']}",
         f'        accel-profile "{p["accel_profile"]}"',
@@ -382,6 +419,43 @@ def libinput_element(model):
     device("touchpad", t, True)
     device("default", p, False)
     return root
+
+
+def set_keyboard_repeat(text, model):
+    """Put repeat rate and delay into <keyboard>, returning (text, notes).
+
+    Keyboard repeat is NOT a libinput setting in labwc: it lives in
+    <keyboard><repeatRate> and <repeatDelay>, which is why the Repeat rate and
+    Repeat delay sliders reached Hyprland and niri and did nothing at all in a
+    labwc session.
+
+    A span edit like the <libinput> one, and for the same reason — the shipped
+    <keyboard> block is ninety lines of keybinds with a comment on most of them,
+    and it carries the APEX-KEYBINDS markers another generator writes between.
+    """
+    k = model["keyboard"]
+    notes = []
+    open_m = re.search(r"<keyboard(?:\s[^>]*)?>", text)
+    if open_m is None:
+        return text, [f"{LABWC_RC} has no <keyboard> block; repeat rate not applied"]
+    close_at = text.find("</keyboard>", open_m.end())
+    if close_at == -1:
+        return text, [f"{LABWC_RC} has an unterminated <keyboard>; repeat rate not applied"]
+
+    for tag, value in (("repeatRate", k["repeat_rate"]), ("repeatDelay", k["repeat_delay"])):
+        # Scoped to the block, re-derived each pass because an insertion moves
+        # the closing tag. A repeatRate outside <keyboard> is not labwc's.
+        block = text[open_m.end():close_at]
+        found = re.search(rf"<{tag}>[^<]*</{tag}>", block)
+        if found:
+            start = open_m.end() + found.start()
+            text = text[:start] + f"<{tag}>{value}</{tag}>" + text[start + len(found.group(0)):]
+        else:
+            text = (text[:open_m.end()] + f"\n    <{tag}>{value}</{tag}>"
+                    + text[open_m.end():])
+        open_m = re.search(r"<keyboard(?:\s[^>]*)?>", text)
+        close_at = text.find("</keyboard>", open_m.end())
+    return text, notes
 
 
 def write_labwc(rc_path, model, dry_run):
@@ -440,13 +514,15 @@ def write_labwc(rc_path, model, dry_run):
             return [f"{rc_path} has no </labwc_config>; refusing to touch it"]
         updated = text[:root_close] + block + "\n\n" + text[root_close:]
 
+    updated, notes = set_keyboard_repeat(updated, model)
+
     try:
         ET.fromstring(updated)
     except ET.ParseError as e:
-        return [f"the generated rc.xml would not parse ({e}); the original is untouched"]
+        return notes + [f"the generated rc.xml would not parse ({e}); the original is untouched"]
 
     if dry_run:
-        return []
+        return notes
 
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(rc_path), prefix=".rc.xml.apex.")
     try:
@@ -457,8 +533,8 @@ def write_labwc(rc_path, model, dry_run):
     except OSError as e:
         if os.path.exists(tmp):
             os.unlink(tmp)
-        return [f"could not replace {rc_path}: {e}"]
-    return []
+        return notes + [f"could not replace {rc_path}: {e}"]
+    return notes
 
 
 # ── validation and reload ───────────────────────────────────────────────────
