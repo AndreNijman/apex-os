@@ -361,7 +361,11 @@ fn serve(daemon: &Arc<Daemon>, stream: UnixStream) -> Result<()> {
     // request is parsed. The kernel filled them in at connect(2) and they
     // cannot change for the life of the connection — whereas anything read out
     // of a request line is whatever the client chose to send.
-    let creds = peer::credentials(&stream);
+    // The peer credentials, plus whatever narrowing this connection latches
+    // onto itself. The latch lives here, on the stack of the thread serving
+    // one connection, so it dies with the socket: nothing persists it, and no
+    // other connection can see it.
+    let mut caller = privilege::Caller::new(peer::credentials(&stream));
 
     let mut reader = BufReader::new(stream.try_clone().context("cloning the connection")?);
     let mut writer = stream;
@@ -401,7 +405,7 @@ fn serve(daemon: &Arc<Daemon>, stream: UnixStream) -> Result<()> {
             return session::handle_attach(daemon, writer, reader, id, cols, rows, replay);
         }
 
-        let response = dispatch(daemon, request, creds);
+        let response = dispatch(daemon, request, &mut caller);
         respond(&mut writer, &response)?;
     }
 }
@@ -416,10 +420,12 @@ fn respond(writer: &mut UnixStream, response: &Response) -> Result<()> {
 
 /// Handle every verb except `Attach`.
 ///
-/// `creds` is the connection's peer credentials, or `None` when the kernel
-/// would not report them. It is passed rather than looked up so that no handler
-/// can accidentally consult the request for identity instead.
-fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -> Response {
+/// `caller` is the connection: the peer credentials the kernel reported at
+/// `connect(2)`, and any origin the connection has narrowed itself to. It is
+/// passed rather than looked up so that no handler can accidentally consult
+/// the request for identity instead, and it is `&mut` for exactly one verb —
+/// `DeclareOrigin`, which is the only thing that may change it.
+fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Caller) -> Response {
     match request {
         Request::Hello => {
             let cfg = daemon.config.lock().expect("config lock");
@@ -430,7 +436,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             }
         }
 
-        Request::Run(req) => match session::start(daemon, req, creds) {
+        Request::Run(req) => match session::start(daemon, req, caller) {
             Ok(info) => Response::Session(Box::new(info)),
             Err(e) => session::run_error(e),
         },
@@ -665,7 +671,9 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             Response::Ok
         }
 
-        Request::DeclareOrigin { origin } => privilege::declare(daemon, creds, &origin),
+        Request::DeclareOrigin { origin, actor } => {
+            privilege::declare(daemon, caller, &origin, actor)
+        }
 
         Request::Prune => {
             let handles = daemon.registry.lock().expect("registry lock").list();
@@ -694,16 +702,16 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
         }
 
         // ── privilege requests ──────────────────────────────────────────────
-        // Every one of these takes `creds` and none of them takes a session id
+        // Every one of these takes `caller` and none of them takes a session id
         // from the wire.
         Request::PrivilegeRequest { verb, args, reason } => {
-            privilege::file(daemon, creds, &verb, &args, &reason)
+            privilege::file(daemon, caller, &verb, &args, &reason)
         }
 
         Request::Requests => privilege::list(),
 
         Request::Decide { id, decision } => match request::Decision::parse(&decision) {
-            Some(d) => privilege::decide(daemon, creds, id, d),
+            Some(d) => privilege::decide(daemon, caller, id, d),
             None => Response::error(
                 ErrorKind::BadRequest,
                 format!("'{decision}' is not a decision; use once, project or deny"),
@@ -715,16 +723,16 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
         Request::Grants => privilege::grants(),
 
         Request::Revoke { project, key } => {
-            privilege::revoke(daemon, creds, &project, key.as_deref())
+            privilege::revoke(daemon, caller, &project, key.as_deref())
         }
 
         // ── system-access grants ────────────────────────────────────────────
         Request::SystemGrants => privilege::system_grants(daemon),
 
-        Request::RevokeSystemGrant { id } => privilege::revoke_system_grant(daemon, creds, id),
+        Request::RevokeSystemGrant { id } => privilege::revoke_system_grant(daemon, caller, id),
 
         Request::RenewSystemGrant { id, ttl_ms } => {
-            privilege::renew_system_grant(daemon, creds, id, ttl_ms)
+            privilege::renew_system_grant(daemon, caller, id, ttl_ms)
         }
 
         // ── the secret broker ───────────────────────────────────────────────
@@ -737,7 +745,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             project,
         } => broker::use_capability(
             daemon,
-            creds,
+            caller,
             &service,
             &operation,
             &resource,

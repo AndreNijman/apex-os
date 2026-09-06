@@ -795,6 +795,7 @@ mod tests {
             policy: apex_agent_core::AgentPolicy::default(),
             request_origin: Some(apex_agent_core::policy::RequestOrigin::LocalTerminal),
             origin_source: Some(apex_agent_core::origin::OriginSource::Observed),
+            actor: None,
             grant: None,
             grant_expires_ms: None,
             native_observed: None,
