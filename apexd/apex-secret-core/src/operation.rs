@@ -424,6 +424,21 @@ impl OperationSpec {
         self.id == name || self.aliases.contains(&name)
     }
 
+    /// Whether the caller names nothing at all: no resource, no parameters.
+    ///
+    /// The one property that makes a grant safe to hold in every project. An
+    /// operation like this can only reach the endpoint pinned when its
+    /// credential was stored, so where it is asked for changes nothing about
+    /// what it reaches. `git.push` fails this — it acts on a remote resolved
+    /// out of whatever repository the caller is standing in, so the same grant
+    /// would be a different permission in every directory.
+    ///
+    /// Every parameter counts, not only the required ones: an optional
+    /// `branch` is still something the caller names.
+    pub fn names_nothing(&self) -> bool {
+        matches!(self.resource, ResourceKind::None) && self.params.is_empty()
+    }
+
     fn param(&self, name: &str) -> Option<&'static ParamSpec> {
         self.params.iter().find(|p| p.name == name)
     }
