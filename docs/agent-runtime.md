@@ -336,7 +336,7 @@ holding the terminal open for seconds guessing at startup times.
 ### It runs stored command lines
 
 Worth being plain about: the layout file is a list of argv vectors that
-`apex project restore` executes. It lives under `$XDG_STATE_HOME` at `0700` and
+`apex project layout restore` executes. It lives under `$XDG_STATE_HOME` at `0700` and
 is written only by your own runtime. It is executed as an argv **vector**, never
 through a shell, so nothing in a stored entry can be interpreted as a shell
 metacharacter — there is no shell to interpret it.
@@ -349,7 +349,7 @@ An agent has no sudo, no root shell, and a sandbox that cannot reach the system
 bus. When it genuinely needs a system change, it asks:
 
 ```
-apex request install clang --reason "Required to compile the project"
+apex request ask install clang --reason "Required to compile the project"
 ```
 
 and blocks. You see it, and decide:
