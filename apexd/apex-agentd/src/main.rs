@@ -454,6 +454,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             state,
             event,
             detail,
+            native,
         } => {
             // An event that names neither is not a smaller event, it is a
             // request that says nothing. Refused rather than recorded, because
@@ -502,6 +503,20 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
                 return no_such_session(id);
             };
             let mut s = handle.lock().expect("session lock");
+            // §4.1's third criterion: the agent's own permission mode is what
+            // dimension 1 actually is, and `policy.native` says only what APEX
+            // did about it — which for the default is nothing. Recorded on
+            // every event that carries one, because Claude's mode can change
+            // mid-session (a `/permissions` switch, a plan-mode exit) and a
+            // value captured once at start would go stale silently.
+            //
+            // Nothing branches on it. It is the agent describing itself, in
+            // exactly the class `detail` is in.
+            if let Some(mode) = native {
+                if s.info.native_observed.as_deref() != Some(mode.as_str()) {
+                    s.info.native_observed = Some(mode);
+                }
+            }
             // The tool flag first: a `stop` publishes `waiting_for_user` and
             // also ends any tool call the last `pre_tool_use` claimed, and the
             // order matters only in that both must happen.

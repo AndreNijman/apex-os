@@ -722,3 +722,503 @@ fn sample_request() -> PrivilegeRequest {
         exit_code: None,
     }
 }
+
+// ── P0-005: the agent's own permission mode is inherited, not overridden ────
+//
+// §4.1 is three sentences and each is a separate claim:
+//
+//   1. a Claude profile that defaults to `bypassPermissions` keeps it under
+//      `a` — APEX must pass nothing and must not shadow the setting;
+//   2. APEX does not duplicate the dangerous-mode warning Claude already
+//      prints;
+//   3. the agent-native mode is visible in the Agent Center.
+//
+// Criterion 3 has a trap in it, and it is the one this task actually turned
+// on: `policy.native` reads `inherit` for the normal case, which describes
+// what APEX *did* — pass no flag — and not what the agent is doing. A shell
+// rendering "inherit" beside a session running `bypassPermissions` would have
+// satisfied the words and answered nothing. `native_observed` is the field
+// that answers it.
+
+#[test]
+fn a_claude_profile_that_defaults_to_bypass_keeps_it_under_the_shortcut() {
+    // Criterion 1. `a` and an unqualified `apex agent run` both resolve to
+    // the default policy, whose dimension 1 is `inherit`, and `inherit` is
+    // the ABSENCE of a flag rather than a flag meaning "default" — so
+    // `~/.claude/settings.json` is the only thing deciding, which is what
+    // §4.1 asks for.
+    let p = AgentPolicy::default();
+    assert_eq!(p.native, NativeMode::Inherit);
+
+    let claude = adapter::by_id("claude").expect("the claude adapter");
+    let args = claude.build_args(NativeMode::Inherit, Some("go"), &[]);
+    assert!(
+        !args.iter().any(|a| a == "--permission-mode"),
+        "APEX passed a permission mode under the default policy: {args:?}"
+    );
+    assert_eq!(args, vec!["go".to_string()], "{args:?}");
+
+    // And it is true of every adapter, not only the one the criterion names:
+    // an adapter that expressed `inherit` as a flag would be overriding a
+    // profile in exactly the way §4.1 forbids, and it would do it silently.
+    for a in adapter::ADAPTERS {
+        assert_eq!(
+            a.native_mode_args(NativeMode::Inherit),
+            Some(Vec::new()),
+            "{} spells inherit as a flag",
+            a.id
+        );
+    }
+}
+
+#[test]
+fn the_settings_file_apex_injects_cannot_move_the_agents_permission_mode() {
+    // The other half of criterion 1, and the one that could have broken it
+    // without anybody typing a flag. P0-011 starts a managed Claude with
+    // `--settings <scratch>/claude-hooks.json`, which is a higher-precedence
+    // settings source than `~/.claude/settings.json`. A `permissions` key in
+    // that document — even an innocuous-looking `defaultMode` — would
+    // override the user's own default on every managed launch, and the only
+    // symptom would be Claude asking for confirmations it had been told not
+    // to ask for.
+    //
+    // So: the document APEX writes contains hooks and nothing else.
+    let doc = apex_agent_core::hook::settings_json(std::path::Path::new("/usr/bin/apex"));
+    let obj = doc.as_object().expect("an object");
+    assert_eq!(
+        obj.keys().collect::<Vec<_>>(),
+        vec!["hooks"],
+        "APEX's settings document carries more than hooks: {doc}"
+    );
+    for forbidden in ["permissions", "defaultMode", "permissionMode", "allowedTools"] {
+        assert!(
+            !doc.to_string().contains(forbidden),
+            "{forbidden} appears in the settings APEX injects: {doc}"
+        );
+    }
+}
+
+#[test]
+fn apex_states_its_own_layers_and_does_not_restate_the_agents_warning() {
+    // Criterion 2. Claude prints its own banner in `bypassPermissions`, every
+    // launch. A user who set that as their profile default has already agreed
+    // to see it, and a second APEX warning saying the same thing would be
+    // noise on every run — which is how a warning stops being read, including
+    // the one warning here that is worth reading.
+    //
+    // Stated as a property of the vocabulary: nothing APEX prints about
+    // dimension 1 is a caution. The words below are the ones a duplicated
+    // warning would use.
+    const CAUTION: [&str; 6] = [
+        "dangerous",
+        "danger",
+        "be careful",
+        "at your own risk",
+        "are you sure",
+        "warning",
+    ];
+    for native in NativeMode::ALL {
+        let p = AgentPolicy {
+            native: *native,
+            ..AgentPolicy::default()
+        };
+        // Everything APEX says about the six dimensions, in every renderer
+        // that shows them: the six labels and values, which is what the
+        // launch line and `apex agent status` are both built from.
+        let said = p
+            .dimensions()
+            .iter()
+            .map(|(n, v)| format!("{n} {v}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+            .to_lowercase();
+        for word in CAUTION {
+            assert!(!said.contains(word), "{native}: APEX warned about the agent's own mode: {said}");
+        }
+        // And APEX's layers ARE stated, which is the other half: not warning
+        // must not become not saying anything.
+        assert!(said.contains("sandbox project"), "{said}");
+        assert!(said.contains("secrets brokered"), "{said}");
+        assert!(said.contains("system none"), "{said}");
+    }
+
+    // The one mode that DOES get a caution is break-glass, and it is APEX's
+    // own boundary being removed rather than the agent's. §3.4 asks for it in
+    // as many words.
+    assert_eq!(
+        PolicyPreset::UnsafeEverything.policy().system,
+        SystemAccess::Unsafe
+    );
+}
+
+#[test]
+fn the_agent_center_is_shown_the_mode_the_agent_is_actually_in() {
+    // Criterion 3, and the trap in it. `policy.native` is `inherit` for the
+    // case that matters, which says what APEX did and not what the agent is
+    // doing; a shell rendering "inherit" beside a session running
+    // `bypassPermissions` would have satisfied the words and answered
+    // nothing.
+    //
+    // Claude puts `permission_mode` on every hook payload, and the bridge
+    // carries it to `SessionInfo.native_observed`. That is the field the
+    // Agent Center reads.
+    use apex_agent_core::hook::{observe, HookEvent, Payload};
+
+    for mode in ["bypassPermissions", "acceptEdits", "plan", "default"] {
+        let payload = Payload {
+            permission_mode: Some(mode.to_string()),
+            tool_name: Some("Bash".into()),
+            ..Payload::default()
+        };
+        let o = observe(HookEvent::PreToolUse, &payload);
+        assert_eq!(o.native.as_deref(), Some(mode), "{mode} was not carried");
+    }
+
+    // Passed through, not mapped onto `NativeMode`. Three of those four have
+    // no APEX vocabulary at all, and folding them into "not ask" would answer
+    // "what mode is this agent in" with a summary of what APEX did about it —
+    // which is the thing the user can already see.
+    assert_eq!(NativeMode::parse("acceptEdits"), None);
+    assert_eq!(NativeMode::parse("plan"), None);
+
+    // An agent that says nothing leaves it absent, which reads as "not
+    // reported" rather than as a mode.
+    assert_eq!(observe(HookEvent::Stop, &Payload::default()).native, None);
+
+    // And it is bounded and stripped, because it is read off a document the
+    // agent writes into a record a client renders in a table.
+    for hostile in [
+        "bypass\nPRIORITY=7",
+        "\x1b[31mroot\x1b[0m",
+        &"x".repeat(64),
+        "  ",
+    ] {
+        let payload = Payload {
+            permission_mode: Some(hostile.to_string()),
+            ..Payload::default()
+        };
+        assert_eq!(
+            observe(HookEvent::Stop, &payload).native,
+            None,
+            "{hostile:?} was carried through"
+        );
+    }
+}
+
+// ── P0-006 and P0-007: the two system-access grants ─────────────────────────
+//
+// Six criteria and five, and they overlap: both grants are time-limited, both
+// are audited, both take a local password. What separates them is what the
+// session gets — a bounded window in which named privilege verbs need no
+// second decision, versus `no_new_privs` off and real root — and the tests
+// below are written to fail if that ever collapses into one thing.
+//
+// Two criteria are NOT here, because they are not properties of these types:
+// "the authentication prompt occurs outside the agent PTY" is a property of
+// which process polkit is asked about, which lives in `apex-agentd`'s
+// `privilege::authorise_grant` and is tested there and in
+// `tests/test-agent-grants.sh`; and "the agent cannot renew its own grant" is
+// the same function's first refusal. Both are about a connection, and a
+// connection is not something this file has.
+
+#[test]
+fn a_grant_is_bound_to_one_session_and_a_bounded_window() {
+    // P0-007 criteria 1 and 2, and P0-006 criteria 2 and 4, which are the
+    // same two properties of the same type.
+    use apex_agent_core::grant::{ttl_for, GrantKind, MAX_BREAK_GLASS_MS, MAX_SESSION_ACCESS_MS};
+
+    // Every window is bounded, in both modes, and zero is refused as a grant
+    // that has already expired.
+    for kind in GrantKind::ALL {
+        assert!(ttl_for(*kind, Some(0)).is_err(), "{kind} issued a zero window");
+        let cap = match kind {
+            GrantKind::BreakGlass => MAX_BREAK_GLASS_MS,
+            GrantKind::SystemAccess => MAX_SESSION_ACCESS_MS,
+        };
+        assert!(ttl_for(*kind, Some(cap)).is_ok(), "{kind}");
+        assert!(
+            ttl_for(*kind, Some(cap + 1)).is_err(),
+            "{kind} issued an unbounded window"
+        );
+    }
+
+    // §3.4's "explicit short TTL", read as written: break-glass will not
+    // default its own window, and its cap is the shorter of the two.
+    assert!(ttl_for(GrantKind::BreakGlass, None).is_err());
+    assert!(ttl_for(GrantKind::SystemAccess, None).is_ok());
+    assert!(MAX_BREAK_GLASS_MS < MAX_SESSION_ACCESS_MS);
+}
+
+#[test]
+fn a_grant_that_outlived_a_reboot_is_reported_rather_than_forgotten() {
+    // P0-006 criterion 5, and the whole of what it means. "Does not silently
+    // persist across reboot" is not "is forgotten on reboot": an owner who
+    // authorised fifteen minutes of break-glass and then rebooted has no way
+    // to tell whether the window is still open, and a machine that simply
+    // loses the grant has answered them with silence.
+    //
+    // So: the grant is stamped with the boot it was issued under, it is not
+    // in force on any other boot, and the machine says which of the two
+    // things happened — the window ran out on its own, or the reboot ended it.
+    use apex_agent_core::grant::{BootStamp, ClosureReason, GrantKind, SystemGrant};
+
+    let issued = 1_000_000_000_000u64;
+    let g = SystemGrant {
+        id: 1,
+        kind: GrantKind::BreakGlass,
+        session: 4,
+        agent: "claude".into(),
+        project: None,
+        capabilities: Vec::new(),
+        issued_ms: issued,
+        expires_ms: issued + 900_000,
+        boot_id: "the-boot-it-was-issued-on".into(),
+        request_origin: RequestOrigin::LocalTerminal,
+        authenticated_by: "org.apexos.agent.break-glass".into(),
+        closed: None,
+    };
+
+    // Same boot, inside the window: in force.
+    let same = BootStamp {
+        id: "the-boot-it-was-issued-on".into(),
+        booted_ms: issued - 60_000,
+    };
+    assert!(g.state_at(issued + 1, &same).is_active());
+
+    // A different boot: not in force, whatever the clock says — including a
+    // clock that has not yet reached the expiry.
+    let next = BootStamp {
+        id: "a-different-boot".into(),
+        booted_ms: issued + 300_000,
+    };
+    assert!(!g.state_at(issued + 1, &next).is_active());
+    assert!(!g.state_at(issued + 899_999, &next).is_active());
+
+    // And it is SAID, with the reason, which is the part that makes this
+    // criterion different from "it is gone".
+    assert_eq!(
+        g.state_at(issued + 400_000, &next).reason(),
+        Some(ClosureReason::Reboot)
+    );
+    let said = g.describe(issued + 400_000, &next);
+    assert!(said.contains("rebooted"), "{said}");
+    assert!(said.contains("nothing has been re-authorised"), "{said}");
+
+    // The distinction is kept rather than collapsed: a window that ran out
+    // before the machine went down expired on its own, and calling that
+    // "ended at the reboot" would misdescribe it.
+    let much_later = BootStamp {
+        id: "a-different-boot".into(),
+        booted_ms: issued + 900_000,
+    };
+    assert_eq!(
+        g.state_at(issued + 9_000_000, &much_later).reason(),
+        Some(ClosureReason::Expired)
+    );
+}
+
+#[test]
+fn every_elevation_takes_a_local_password_and_giving_it_up_takes_none() {
+    // P0-006 criterion 1 and P0-007's half of the same thing, as the pure
+    // decision they are. The prompt itself cannot be unit-tested; this is the
+    // rule that decides whether there is one, and it is asserted over the
+    // whole 3×3 product rather than over the interesting pairs.
+    use apex_agent_core::auth::{required_for, ACTION_BREAK_GLASS, ACTION_SYSTEM_ACCESS};
+
+    for from in SystemAccess::ALL {
+        for to in SystemAccess::ALL {
+            let r = required_for(*from, *to);
+            assert_eq!(
+                r.needs_a_human(),
+                *to != SystemAccess::None,
+                "{from} -> {to}"
+            );
+        }
+    }
+    // Two actions, not one: allowing the smaller thing must not allow
+    // break-glass.
+    assert_eq!(
+        required_for(SystemAccess::None, SystemAccess::Session).action(),
+        Some(ACTION_SYSTEM_ACCESS)
+    );
+    assert_eq!(
+        required_for(SystemAccess::None, SystemAccess::Unsafe).action(),
+        Some(ACTION_BREAK_GLASS)
+    );
+    // A renewal is a step toward privilege and is not free. That is the
+    // policy half of "the agent cannot renew its own grant": even for a
+    // caller who is allowed to ask, there is no standing yes to inherit.
+    assert!(required_for(SystemAccess::Unsafe, SystemAccess::Unsafe).needs_a_human());
+}
+
+#[test]
+fn a_grant_covers_named_verbs_and_break_glass_covers_none_of_them() {
+    // P0-007 criterion 3. Capability-scoped means a whitelist by name: a verb
+    // added to the vocabulary tomorrow is not covered by a grant issued
+    // today, which is what stops the scope from widening under a grant that
+    // is already in force.
+    use apex_agent_core::grant::{normalise_capabilities, GrantKind, SystemGrant};
+
+    let g = SystemGrant {
+        id: 1,
+        kind: GrantKind::SystemAccess,
+        session: 4,
+        agent: "claude".into(),
+        project: Some("/p".into()),
+        capabilities: normalise_capabilities(["install", "update"]),
+        issued_ms: 0,
+        expires_ms: 1,
+        boot_id: "b".into(),
+        request_origin: RequestOrigin::LocalTerminal,
+        authenticated_by: "org.apexos.agent.system-access".into(),
+        closed: None,
+    };
+    assert!(g.covers("install"));
+    assert!(g.covers("update"));
+    for name in Verb::names() {
+        if *name != "install" && *name != "update" {
+            assert!(!g.covers(name), "{name} was covered by a grant that did not name it");
+        }
+    }
+
+    // Break-glass carries no capabilities at all, and that is the difference
+    // between the two modes rather than an omission: break-glass is sudo
+    // inside the session, not a pre-approval of the request vocabulary. So an
+    // expired break-glass grant cannot leave behind a session whose
+    // `apex request install` goes through unasked.
+    let bg = SystemGrant {
+        kind: GrantKind::BreakGlass,
+        capabilities: Vec::new(),
+        ..g.clone()
+    };
+    for name in Verb::names() {
+        assert!(!bg.covers(name), "break-glass covered {name}");
+    }
+}
+
+#[test]
+fn the_two_grants_lift_different_boundaries_and_only_one_lifts_the_kernels() {
+    // §4.5: "deliberately different from system-access mode". The difference
+    // is a kernel fact, which is also why only one of them can be expired by
+    // anything short of ending the session.
+    use apex_agent_core::grant::GrantKind;
+
+    let session = AgentPolicy {
+        system: SystemAccess::Session,
+        sandbox: SandboxPolicy::Unrestricted,
+        ..AgentPolicy::default()
+    };
+    let breakglass = AgentPolicy {
+        system: SystemAccess::Unsafe,
+        sandbox: SandboxPolicy::Unrestricted,
+        ..AgentPolicy::default()
+    };
+    assert!(session.no_new_privs(), "§4.4 does not hand back setuid");
+    assert!(!breakglass.no_new_privs(), "§4.5 is the mode that does");
+    assert!(!GrantKind::SystemAccess.expiry_ends_the_session());
+    assert!(GrantKind::BreakGlass.expiry_ends_the_session());
+
+    // Neither moves the secret dimension. §3.4 keeps the broker even through
+    // break-glass, in as many words.
+    assert_eq!(session.secrets, SecretPolicy::Brokered);
+    assert_eq!(breakglass.secrets, SecretPolicy::Brokered);
+
+    // And each names its own grant, so nothing arrives at one by omission.
+    assert_eq!(AgentPolicy::default().needs_grant(), None);
+    assert_eq!(session.needs_grant(), Some(GrantKind::SystemAccess));
+    assert_eq!(breakglass.needs_grant(), Some(GrantKind::BreakGlass));
+}
+
+#[test]
+fn a_grant_that_lifts_no_new_privs_cannot_be_asked_for_inside_a_sandbox() {
+    // The finding this task turned up, as a boundary. `bwrap` sets
+    // PR_SET_NO_NEW_PRIVS for everything it wraps and no process can clear
+    // it, so `--unsafe-everything --sandbox project` would run with the flag
+    // ON while every reader of `no_new_privs()` — the sandbox builder, the
+    // hook policy point, the Agent Center — reported it off.
+    for sandbox in [SandboxPolicy::Project, SandboxPolicy::Strict] {
+        let p = AgentPolicy {
+            system: SystemAccess::Unsafe,
+            sandbox,
+            ..AgentPolicy::default()
+        };
+        assert!(p.validate().is_err(), "{sandbox}");
+    }
+    // The session grant keeps no_new_privs, so it is at home in any sandbox —
+    // which is the point of it being the smaller mode.
+    for sandbox in SandboxPolicy::ALL {
+        let p = AgentPolicy {
+            system: SystemAccess::Session,
+            sandbox: *sandbox,
+            ..AgentPolicy::default()
+        };
+        assert_eq!(p.validate(), Ok(()), "{sandbox}");
+    }
+}
+
+#[test]
+fn no_elevation_is_reachable_from_a_stored_default() {
+    // §3.4: "no remember forever". Dimension 3 is a grant, not a setting, and
+    // a configuration file naming an elevated default would make every later
+    // `apex agent run` arrive asking for one. Asserted through the loader
+    // every caller actually goes through.
+    for stored in ["session", "unsafe"] {
+        let cfg = apex_agent_core::config::from_str(&format!(
+            r#"{{"system":"{stored}","sandbox":"unrestricted"}}"#
+        ))
+        .expect("a file naming an elevated default must still load");
+        assert_eq!(cfg.policy().system, SystemAccess::None, "{stored}");
+        assert_eq!(cfg.policy().needs_grant(), None, "{stored}");
+    }
+}
+
+#[test]
+fn a_grant_event_carries_everything_an_audit_is_read_for() {
+    // P0-006 criterion 6. The record has to answer who was granted what, when,
+    // for how long, on whose authority, from which origin, and how it ended —
+    // and it has to be a value, not a sentence, so the two trails cannot
+    // disagree about it.
+    use apex_agent_core::grant::{GrantKind, SystemGrant};
+
+    let g = SystemGrant {
+        id: 3,
+        kind: GrantKind::BreakGlass,
+        session: 9,
+        agent: "claude".into(),
+        project: Some("/home/t/p".into()),
+        capabilities: Vec::new(),
+        issued_ms: 1_757_000_000_000,
+        expires_ms: 1_757_000_900_000,
+        boot_id: "abc".into(),
+        request_origin: RequestOrigin::LocalTerminal,
+        authenticated_by: "org.apexos.agent.break-glass".into(),
+        closed: None,
+    };
+    let json = serde_json::to_value(&g).expect("serialise");
+    for key in [
+        "id",
+        "kind",
+        "session",
+        "agent",
+        "project",
+        "capabilities",
+        "issued_ms",
+        "expires_ms",
+        "boot_id",
+        "request_origin",
+        "authenticated_by",
+    ] {
+        assert!(json.get(key).is_some(), "{key} missing from the record: {json}");
+    }
+    // The authority is named, not merely implied: "a human authenticated"
+    // without saying against which action leaves an auditor unable to tell a
+    // session grant from break-glass.
+    assert_eq!(
+        json["authenticated_by"],
+        apex_agent_core::auth::action_for(GrantKind::BreakGlass)
+    );
+    // And the record survives the wire intact, because the shell and the CLI
+    // both read it.
+    let back: SystemGrant = serde_json::from_value(json).expect("parse");
+    assert_eq!(back, g);
+}
