@@ -240,7 +240,14 @@ fn serve(service: &Service, stream: UnixStream) {
             continue;
         }
         let response = match serde_json::from_str::<Request>(line.trim_end()) {
-            Ok(request) => dispatch(service, peer, handle.as_ref(), request, &mut reader),
+            Ok(request) => dispatch(
+                service,
+                peer,
+                handle.as_ref(),
+                request,
+                &mut reader,
+                &writer,
+            ),
             Err(e) => Response::error(
                 ErrorKind::BadRequest,
                 format!("cannot parse that request: {e}"),
@@ -267,6 +274,7 @@ fn dispatch(
     handle: Option<&ProcHandle>,
     request: Request,
     reader: &mut BufReader<UnixStream>,
+    stream: &UnixStream,
 ) -> Response {
     match request {
         Request::Hello => service.hello(),
@@ -284,7 +292,7 @@ fn dispatch(
         } => {
             // The bytes are read whatever the decision, or the next request
             // line would be parsed out of the middle of a credential.
-            let value = match read_value(reader, value_len) {
+            let value = match read_value(reader, value_len, stream, VALUE_TIMEOUT) {
                 Ok(v) => v,
                 Err(message) => return Response::error(ErrorKind::BadRequest, message),
             };
@@ -349,8 +357,27 @@ fn refuse_a_session(handle: Option<&ProcHandle>, what: &str) -> Option<Response>
     None
 }
 
+/// How long the daemon will wait for the bytes an `add` promised.
+///
+/// The one place a caller names a length the daemon then blocks on, so it is
+/// the one place a local process can pin a connection thread by promising bytes
+/// it never sends. Long enough for a credential arriving over a pipe from a
+/// password manager, short enough that holding threads open costs something.
+const VALUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Read exactly `len` bytes of credential from the socket.
-fn read_value(reader: &mut BufReader<UnixStream>, len: usize) -> Result<SecretValue, String> {
+///
+/// `stream` is the same connection the reader wraps, borrowed to set a timeout
+/// for this read alone. It is cleared afterwards, because the connection stays
+/// open for further requests and a caller may sit idle between them. The
+/// timeout is a parameter rather than the constant so the test can prove the
+/// wait actually ends without waiting [`VALUE_TIMEOUT`] to find out.
+fn read_value(
+    reader: &mut BufReader<UnixStream>,
+    len: usize,
+    stream: &UnixStream,
+    timeout: std::time::Duration,
+) -> Result<SecretValue, String> {
     if len == 0 {
         return Err("that credential is empty; nothing was stored".to_string());
     }
@@ -361,9 +388,10 @@ fn read_value(reader: &mut BufReader<UnixStream>, len: usize) -> Result<SecretVa
         ));
     }
     let mut buf = vec![0u8; len];
-    reader
-        .read_exact(&mut buf)
-        .map_err(|e| format!("the credential did not arrive: {e}"))?;
+    stream.set_read_timeout(Some(timeout)).ok();
+    let read = reader.read_exact(&mut buf);
+    stream.set_read_timeout(None).ok();
+    read.map_err(|e| format!("the credential did not arrive: {e}"))?;
     Ok(SecretValue::new(buf))
 }
 
@@ -427,11 +455,31 @@ mod tests {
     #[test]
     fn a_value_longer_than_the_limit_is_refused_before_it_is_read() {
         let (a, _b) = UnixStream::pair().unwrap();
-        let mut reader = BufReader::new(a);
-        let err = read_value(&mut reader, SecretValue::MAX_BYTES + 1).unwrap_err();
+        let mut reader = BufReader::new(a.try_clone().unwrap());
+        let err = read_value(&mut reader, SecretValue::MAX_BYTES + 1, &a, VALUE_TIMEOUT).unwrap_err();
         assert!(err.contains("limit is"), "{err}");
         // And an empty one is an error rather than a stored blank.
-        assert!(read_value(&mut reader, 0).unwrap_err().contains("empty"));
+        assert!(read_value(&mut reader, 0, &a, VALUE_TIMEOUT)
+            .unwrap_err()
+            .contains("empty"));
+        // Neither refusal touched the connection's timeout, so a caller that
+        // asked for something silly has not changed how the next request is
+        // read.
+        assert_eq!(a.read_timeout().unwrap(), None);
+    }
+
+    #[test]
+    fn a_promised_credential_that_never_arrives_times_out() {
+        // The one place a caller names a length the daemon then blocks on. A
+        // socketpair whose other end sends nothing is exactly that case.
+        let (a, _b) = UnixStream::pair().unwrap();
+        let mut reader = BufReader::new(a.try_clone().unwrap());
+        let short = std::time::Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let err = read_value(&mut reader, 32, &a, short).unwrap_err();
+        assert!(err.contains("did not arrive"), "{err}");
+        assert!(started.elapsed() < VALUE_TIMEOUT, "the caller's timeout was ignored");
+        assert_eq!(a.read_timeout().unwrap(), None, "the timeout was left set");
     }
 
     #[test]

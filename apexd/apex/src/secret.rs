@@ -173,10 +173,15 @@ fn add(service: &str, host: &str, username: &str, scheme: &str) -> Result<i32> {
 }
 
 fn list(json: bool) -> Result<i32> {
-    let services = match Client::connect()?.call(&Request::List)? {
+    let mut client = Client::connect()?;
+    let services = match client.call(&Request::List)? {
         Response::Services { services } => services,
         other => bail!("unexpected reply: {}", other.variant()),
     };
+    if !json {
+        warn_if_unprotected(&mut client);
+        warn_about_the_old_store();
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&services)?);
         return Ok(0);
@@ -195,6 +200,60 @@ fn list(json: bool) -> Result<i32> {
         );
     }
     Ok(0)
+}
+
+/// Where the agent runtime's broker used to keep credentials.
+///
+/// Plain JSON, `0600`, inside `$HOME`. Readable by anything running as the
+/// user, which is the whole reason the store moved to `apex-secretd`.
+fn old_store() -> std::path::PathBuf {
+    apex_agent_core::paths::state_dir().join("secrets")
+}
+
+/// Say so when credentials from the old broker are still lying in the home.
+///
+/// Nothing reads them any more. They are not deleted for you either: a file
+/// that may hold the only copy of a token is not something a `list` command
+/// should remove on its own initiative. So it is named, on stderr, where the
+/// person who can decide will see it — an upgraded machine keeps its old
+/// credential files until somebody looks.
+fn warn_about_the_old_store() {
+    let dir = old_store();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let count = entries
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+        .count();
+    if count == 0 {
+        return;
+    }
+    let (plural, verb) = if count == 1 { ("", "is") } else { ("s", "are") };
+    eprintln!(
+        "apex secret: {count} credential file{plural} from the old broker {verb} still in\n  \
+         {}\n  \
+         Nothing reads them now, and anything running as you can. Re-add what you\n  \
+         still need with `apex secret add`, then delete that directory.",
+        dir.display()
+    );
+}
+
+/// Say so when the service is holding the store where the caller could read it.
+///
+/// True of a daemon started by hand for a test, false of the one the image
+/// ships. Reporting it costs one round trip and stops a test instance from
+/// looking like a boundary it is not.
+fn warn_if_unprotected(client: &mut Client) {
+    if let Ok(Response::Hello {
+        protected: false, ..
+    }) = client.call(&Request::Hello)
+    {
+        eprintln!(
+            "apex secret: this secret service is not running as root, so its store is\n  \
+             readable by your own account. That is a test instance, not a boundary."
+        );
+    }
 }
 
 fn remove(service: &str) -> Result<i32> {
@@ -374,6 +433,44 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for c in codes {
             assert!(seen.insert(c), "{c} is used twice");
+        }
+    }
+
+    #[test]
+    fn no_verb_offers_to_hand_a_credential_back() {
+        // The CLI is the surface people read, and a `apex secret show github`
+        // would be an obvious thing for somebody to add — obvious, and the one
+        // thing this whole task exists to make impossible. The daemon could not
+        // answer it, so it would ship as a verb that always fails; asserting
+        // the vocabulary here means it never gets written in the first place.
+        //
+        // The image asserts the same thing against the built binary's help, in
+        // Containerfile.base. This is where it fails first.
+        let cmd = SecretCmd::augment_subcommands(clap::Command::new("secret"));
+        let names: Vec<String> = cmd
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect();
+        for forbidden in ["show", "reveal", "export", "cat", "print", "read", "dump", "get"] {
+            assert!(
+                !names.iter().any(|n| n == forbidden),
+                "`apex secret {forbidden}` exists; no verb may return a credential"
+            );
+        }
+        // ...and the ones that must exist, by name, because a rename is a
+        // silent no-op in every skill and shell function that calls them.
+        for expected in [
+            "add",
+            "list",
+            "remove",
+            "capabilities",
+            "grant",
+            "revoke",
+            "grants",
+            "use",
+            "audit",
+        ] {
+            assert!(names.iter().any(|n| n == expected), "`{expected}` is gone");
         }
     }
 

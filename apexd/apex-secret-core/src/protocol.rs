@@ -125,8 +125,9 @@ pub enum Response {
         /// hardcode them to print a help text.
         capabilities: Vec<String>,
         /// Whether the daemon holds the store behind a uid boundary, or is
-        /// running as an ordinary user for a test. Reported so `apex secret`
-        /// can say which, rather than implying a protection that is not there.
+        /// running as an ordinary user for a test. `apex secret list` says so
+        /// when it is false, rather than letting a test instance look like a
+        /// boundary it is not.
         protected: bool,
     },
 

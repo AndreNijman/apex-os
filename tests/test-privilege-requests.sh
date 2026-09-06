@@ -75,7 +75,10 @@ if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
 fi
 ok "apex-agentd and apex build"
 
-BIN="${ROOT}/apexd/target/debug"
+# Honours CARGO_TARGET_DIR, because cargo does: a checkout on a small tmpfs is
+# built with the target directory pointed elsewhere, and hardcoding the path
+# makes the suite look broken when the build was fine.
+BIN="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug"
 AGENTD="${BIN}/apex-agentd"
 APEX="${BIN}/apex"
 
