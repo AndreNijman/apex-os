@@ -13,6 +13,7 @@ name = "apex"
 path = "src/main.rs"
 
 [dependencies]
+apex-secret-core = { path = "../apex-secret-core" }
 apexd-core = { path = "../apexd-core" }
 apex-agent-core = { path = "../apex-agent-core" }
 anyhow.workspace = true

@@ -23,6 +23,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::capability::CapabilityRecord;
 
+/// The default for a field an older line did not carry.
+fn unknown() -> String {
+    "unknown".to_string()
+}
+
 /// What happened.
 ///
 /// A closed set, so `apex secret audit` can colour it and a reader can grep it.
@@ -98,7 +103,13 @@ pub struct AuditLine {
     /// Forwarded by `apex-agentd` and not verified — see [`CapabilityRecord`].
     #[serde(default)]
     pub agent_session: Option<u32>,
+    /// §7's origin, as `apex-agentd` established it from the connection.
     pub request_origin: String,
+    /// Whether that origin was `observed`, `inherited`, `declared` — or
+    /// `unknown`, which is what the daemon writes when it could not read the
+    /// peer's placement rather than defaulting to a local origin.
+    #[serde(default = "unknown")]
+    pub origin_source: String,
     pub approval_policy: String,
     #[serde(default)]
     pub constraints: Vec<String>,
@@ -133,6 +144,7 @@ impl AuditLine {
             project: record.project.clone(),
             agent_session: record.agent_session,
             request_origin: record.request_origin.clone(),
+            origin_source: record.origin_source.clone(),
             approval_policy: record.approval_policy.clone(),
             constraints: record.constraints.clone(),
             reason: None,
@@ -162,7 +174,10 @@ impl AuditLine {
             endpoint: None,
             project: None,
             agent_session: None,
-            request_origin: "local".to_string(),
+            // The owner typed this at a shell the daemon can see, which is
+            // the one case where the origin needs no forwarding to be true.
+            request_origin: "local-terminal".to_string(),
+            origin_source: "observed".to_string(),
             approval_policy: "owner".to_string(),
             constraints: Vec::new(),
             reason: None,
@@ -264,6 +279,7 @@ mod tests {
             "project",
             "agent_session",
             "request_origin",
+            "origin_source",
             "approval_policy",
             "constraints",
             "reason",
@@ -272,6 +288,7 @@ mod tests {
             assert!(json.get(field).is_some(), "no {field} in {json}");
         }
         assert_eq!(json["event"], "used");
+        assert_eq!(json["origin_source"], "unknown");
         assert_eq!(json["operation"], "git-fetch");
         assert_eq!(json["detail"], "git fetch origin");
         assert_eq!(json["agent_session"], 7);
@@ -338,6 +355,34 @@ mod tests {
         assert!(!line.provider.contains(SENTINEL));
         assert!(!line.detail.contains(SENTINEL));
         assert_eq!(line.endpoint, None);
+    }
+
+    #[test]
+    fn an_origin_without_its_source_is_not_a_line_this_writes() {
+        // §7's field answers "where did this come from"; the source answers
+        // "and does the daemon know that, or was it asked for". A trail with
+        // the first and not the second cannot tell an observation from a
+        // declaration, which is the only thing it is for.
+        let mut rec = record();
+        rec.request_origin = "claude-remote-control".into();
+        rec.origin_source = "declared".into();
+        let line = AuditLine::from_record("a1", AuditEvent::Used, 1000, 42, &rec);
+        assert_eq!(line.request_origin, "claude-remote-control");
+        assert_eq!(line.origin_source, "declared");
+
+        // A line written before the field existed still reads, as `unknown`
+        // rather than as a guess: the trail is append-only across an update.
+        let old: AuditLine = serde_json::from_str(
+            &serde_json::to_string(&serde_json::json!({
+                "audit_id": "a0", "ms": 1, "event": "used", "uid": 1000,
+                "peer_pid": 1, "provider": "demo", "operation": "git-fetch",
+                "detail": "git fetch origin", "resource": "origin",
+                "request_origin": "local-terminal", "approval_policy": "grant"
+            }))
+            .unwrap(),
+        )
+        .expect("an older line still parses");
+        assert_eq!(old.origin_source, "unknown");
     }
 
     #[test]

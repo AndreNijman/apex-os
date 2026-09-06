@@ -275,6 +275,26 @@ impl Service {
                 ErrorKind::BadRequest,
             );
         }
+        // The two §7 fields are claims forwarded by `apex-agentd`, and this
+        // daemon cannot re-derive either: the connection it sees is the agent
+        // runtime's, not the session's. So it checks the shape — the trail is
+        // line-delimited JSON somebody greps, and a caller that could write a
+        // newline or a paragraph into it could shape what the audit looks like
+        // — and records the claim as a claim.
+        for (field, value) in [
+            ("request_origin", &record.request_origin),
+            ("origin_source", &record.origin_source),
+        ] {
+            if !capability::valid_origin_label(value) {
+                return refuse(
+                    format!(
+                        "'{}' is not a {field} label",
+                        value.escape_debug()
+                    ),
+                    ErrorKind::BadRequest,
+                );
+            }
+        }
         if !capability::valid_remote_name(record.operation.remote()) {
             return refuse(
                 CapabilityError::BadRemoteName(record.operation.remote().to_string()).to_string(),
@@ -591,6 +611,70 @@ mod tests {
         let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
         rec.project = Some("relative/p".into());
         assert!(svc.use_capability(peer, rec).as_error().is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_origin_label_that_could_reshape_the_trail_is_refused() {
+        // The audit trail is one JSON object per line and an administrator
+        // greps it. This daemon cannot verify WHERE a request came from — the
+        // connection it sees belongs to apex-agentd — but it can refuse a
+        // value that is not a label at all.
+        let (svc, dir) = temp_service("originshape");
+        let peer = me();
+        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+        svc.grant(peer, "/tmp/p", "demo", "git-fetch", false);
+
+        for bad in ["local terminal", "Local-Terminal", "local\nterminal", ""] {
+            let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
+            rec.request_origin = bad.to_string();
+            let resp = svc.use_capability(peer, rec);
+            assert!(
+                resp.as_error()
+                    .is_some_and(|(k, m)| k == ErrorKind::BadRequest
+                        && m.contains("request_origin")),
+                "'{}' was accepted: {resp:?}",
+                bad.escape_debug()
+            );
+        }
+        // The same rule for how the origin was reached.
+        let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
+        rec.origin_source = "observed by me".into();
+        assert!(svc
+            .use_capability(peer, rec)
+            .as_error()
+            .is_some_and(|(_, m)| m.contains("origin_source")));
+
+        // ...and a well-formed pair gets past this check to the next one.
+        let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
+        rec.request_origin = "claude-remote-control".into();
+        rec.origin_source = "declared".into();
+        assert!(svc
+            .use_capability(peer, rec)
+            .as_error()
+            .is_some_and(|(_, m)| !m.contains("origin")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_origin_a_caller_forwarded_reaches_the_trail_unchanged() {
+        // §7's field is only useful if it survives to the record an owner
+        // reads. Nothing here verifies it — that is written down — but a value
+        // the daemon silently dropped would be worse than one it never had.
+        let (svc, dir) = temp_service("origintrail");
+        let peer = me();
+        svc.add(peer, "demo", "github.com", "https", None, SecretValue::new(b"x".to_vec()));
+        let mut rec = record("demo", "git-fetch", "origin", "/tmp/p");
+        rec.request_origin = "claude-remote-control".into();
+        rec.origin_source = "inherited".into();
+        svc.use_capability(peer, rec);
+
+        let refused = audit::tail(&Store::new(dir.clone()).audit_path(), 10)
+            .into_iter()
+            .find(|l| l.event == AuditEvent::Refused)
+            .expect("the refusal is in the trail");
+        assert_eq!(refused.request_origin, "claude-remote-control");
+        assert_eq!(refused.origin_source, "inherited");
         std::fs::remove_dir_all(&dir).ok();
     }
 

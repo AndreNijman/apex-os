@@ -1,68 +1,99 @@
-//! The secret broker, daemon side (roadmap §4).
+//! The secret broker, agent-runtime side (roadmap §3.2, §7, §11).
 //!
-//! The agent asks for an operation; this performs it and returns the result.
-//! The token is only ever in the environment of a `git` process the agent
-//! cannot see — the sandbox uses `--unshare-pid`, so the daemon's children are
-//! not in the agent's `/proc` at all.
+//! This used to be the broker. It is now a *client* of one.
 //!
-//! That is a NAMESPACE boundary, not a privilege one. `apex-agentd` runs as the
-//! same unprivileged user; what it has that the session does not is a view of
-//! the filesystem and process table. For "the agent must not learn the token"
-//! that is exactly the boundary required, and it is why a git credential helper
-//! cannot work: `git` runs inside the sandbox, so the helper's reply lands in
-//! the agent's own namespace.
+//! The reason is P0-002's first acceptance criterion: credentials must not live
+//! in agent-readable home paths. `apex-agentd` runs as the user, because it
+//! launches the user's own programs — so a credential it can read is a
+//! credential an unrestricted session can read, and `0600` in
+//! `$XDG_STATE_HOME` only ever kept out another *account*. The store moved to
+//! `apex-secretd`, which runs as root, and this daemon lost the ability to read
+//! a credential at all: there is no verb in `apex_secret_core::protocol` that
+//! returns one, and nothing here holds a `SecretValue`.
+//!
+//! What stays here is what only this daemon knows:
+//!
+//! * **which session is asking**, resolved from the connection's peer
+//!   credentials against the pids the daemon recorded when it forked each
+//!   session — never from the request;
+//! * **that session's secret policy** (dimension 4), so `--secrets none` is
+//!   enforced before the request goes anywhere;
+//! * **that session's project**, recorded at fork time, so a confined agent
+//!   cannot claim a project whose capabilities it was never granted;
+//! * **where the connection came from** (§7's `request_origin`), observed by
+//!   `crate::origin` or inherited from the session, never read off the request.
+//!
+//! Those become a `CapabilityRecord` and go to `apex-secretd`, which re-checks
+//! everything it can check for itself — the account, the grant, the remote, the
+//! host pin — and performs the operation. Session identity and origin are the
+//! two things it cannot re-derive, so the record marks them as attribution
+//! rather than authorisation, and the crate note in `apex_secret_core` says
+//! what that does and does not buy.
 //!
 //! ## The network dimension and where a cloud provider plugs in
 //!
 //! `--network brokered` is a session with `--unshare-net`: no IP egress at all,
 //! and this module is the way out. That works because the control socket is an
 //! `AF_UNIX` path, which a network namespace does not touch, and because the
-//! daemon that runs the operation is outside the namespace and therefore still
-//! has the network. The same property is why `git push` already works from a
+//! daemons that run the operation are outside the namespace and therefore still
+//! have the network. The same property is why `git push` already works from a
 //! `strict` session today.
 //!
-//! Nothing in the network dimension is checked here, deliberately. [`Capability`]
-//! is the seam a cloud provider attaches to: adding a variant, a name in
-//! `Capability::names`, and an arm in the runner is the whole of what P1-002's
-//! Cloudflare provider needs in order to be usable from a session with no
-//! network — the confinement, the grant check, the audit record and the
-//! namespace argument above all apply to a new capability unchanged. The one
-//! dimension that can shut this door is the secret one, checked below, and
-//! `--network brokered --secrets none` is refused by `AgentPolicy::validate`
-//! before a session with both is ever started.
+//! Nothing in the network dimension is checked here, deliberately.
+//! [`Capability`] is the seam a cloud provider attaches to: adding a variant, a
+//! name in `Capability::names`, and an arm in `apex-secretd`'s runner is the
+//! whole of what P1-002's Cloudflare provider needs in order to be usable from
+//! a session with no network — the confinement, the grant check, the audit
+//! record and the namespace argument above all apply to a new capability
+//! unchanged. The one dimension that can shut this door is the secret one,
+//! checked below, and `--network brokered --secrets none` is refused by
+//! `AgentPolicy::validate` before a session with both is ever started.
 //!
-//! What is deliberately *not* here is a provider trait: P1-001 models
-//! provider, operation, resource, expiry and constraints as a framework, and
-//! inventing half of one now would be a shape that task has to undo.
+//! ## §7 and this module
+//!
+//! §7's table answers `allow` for "github push" from every origin, local and
+//! remote alike — "Remote Control is a normal workflow, not an edge case" — so
+//! origin is *recorded* here and does not gate anything.
+//! [`apex_agent_core::policy::SecretPolicy::may_use_broker`] takes no origin
+//! for that reason, and giving it one would quietly tighten a row §7 says is
+//! open. The row §7 does deny from every origin is "read raw brokered secret",
+//! and this build denies it by having nowhere to implement it: no verb in the
+//! secret service returns a value.
+//!
+//! Granting is no longer here at all. A grant is a change to what is allowed,
+//! and `apex-secretd` refuses one from any caller inside a session — which
+//! covers a session that skips this daemon and connects to the socket itself,
+//! something the old check could not see.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use apex_agent_core::protocol::{ErrorKind, Response};
-use apex_agent_core::secret::{self, AuditEntry, Capability, SecretError, SecretGrants};
+use apex_secret_core::capability::{Capability, CapabilityRecord};
+use apex_secret_core::client::Client;
+use apex_secret_core::protocol as secret_protocol;
 
 use crate::peer::Peer;
 use crate::privilege;
 use crate::Daemon;
 
-/// How long a brokered git operation may run.
+/// What the record carries when the daemon could not establish the origin.
 ///
-/// A push to an unreachable host otherwise blocks the connection thread
-/// indefinitely, and the agent waiting on it never gets an answer.
-const GIT_TIMEOUT_SECS: u64 = 120;
+/// Deliberately not [`apex_agent_core::policy::RequestOrigin::default`], which
+/// is `local-terminal` — the origin §7 reserves root and break-glass for. "I
+/// could not tell" and "a human is at the keyboard" are different answers, and
+/// an audit trail that conflates them is worse than one with a gap in it.
+const UNKNOWN_ORIGIN: &str = "unknown";
 
 /// Perform one capability.
 ///
 /// Order matters and is the security argument:
 ///   1. resolve the session from the PEER CREDENTIALS — never the request;
-///   2. resolve the project from what the daemon recorded for that session;
-///   3. check the grant for (project, service, capability);
-///   4. resolve the remote NAME against the repository's own configuration;
-///   5. check the remote's host against the credential's host;
-///   6. only then read the token, and only into a child's environment.
-///
-/// Every step before 6 can refuse, and the token is not read until they all
-/// pass — so a refusal cannot leak it through an error path.
+///   2. check dimension 4 for that session, before anything else about it;
+///   3. resolve the project from what the daemon recorded for that session;
+///   4. stamp §7's origin from the connection, not from the request;
+///   5. hand the record to `apex-secretd`, which owns every remaining check and
+///      the credential itself.
 pub fn use_capability(
     daemon: &Arc<Daemon>,
     peer: Option<Peer>,
@@ -74,11 +105,8 @@ pub fn use_capability(
 ) -> Response {
     let cap = match Capability::parse(capability, remote, branch) {
         Ok(c) => c,
-        Err(e) => return refuse(e),
+        Err(e) => return Response::error(ErrorKind::BadRequest, e.to_string()),
     };
-    if !secret::valid_service_name(service) {
-        return refuse(SecretError::NoSuchService(service.to_string()));
-    }
 
     let who = privilege::origin(daemon, peer);
 
@@ -88,8 +116,11 @@ pub fn use_capability(
     // it forked the session — a session that could name its own policy could
     // name a looser one. This is the enforcement point that makes
     // `--secrets none` mean something: a task with no business touching a
-    // credential cannot reach the broker at all, and the refusal happens
-    // before the project, the grant or the remote is even resolved.
+    // credential cannot reach the broker at all, and the refusal happens before
+    // the project or the grant is even resolved.
+    //
+    // No origin is passed, and that is §7's position rather than an oversight:
+    // "github push" is `allow` from every origin.
     if !who.policy.secrets.may_use_broker() {
         return Response::error(
             ErrorKind::PermissionDenied,
@@ -125,321 +156,233 @@ pub fn use_capability(
         );
     };
 
-    let info = match secret::info(service) {
-        Some(i) => i,
-        None => return refuse(SecretError::NoSuchService(service.to_string())),
-    };
+    let mut record = CapabilityRecord::new(service, cap);
+    record.project = Some(project);
+    // Attribution, not authentication. `apex-secretd` cannot re-derive either
+    // of these — it would have to trust a list of session pids published by a
+    // process running as the user — so it records the claim and authorises on
+    // the things it can establish itself.
+    record.agent_session = who.session;
+    record.agent_session_agent(who.agent.as_deref());
+    stamp_origin(&mut record, &who);
 
-    let grants = SecretGrants::load(&secret::grants_file());
-    if !grants.allows(Some(&project), service, cap.name()) {
-        let _ = secret::audit(
-            &secret::audit_log(),
-            &AuditEntry {
-                event: "refused",
-                service,
-                capability: &cap,
-                session: who.session,
-                agent: who.agent.as_deref(),
-                project: Some(&project),
-                origin: who.request_origin.map(|o| o.origin),
-                origin_source: who.request_origin.map(|o| o.source),
-                exit_code: None,
-            },
-        );
-        return refuse(SecretError::NotGranted {
-            service: service.to_string(),
-            capability: cap.name().to_string(),
-        });
+    perform(record)
+}
+
+/// Copy §7's origin onto the record, with how it was arrived at.
+///
+/// Both fields or neither. `origin_source` is what separates "the daemon
+/// worked this out from the connection" from "something asked for this and was
+/// allowed", and a trail carrying the origin without it cannot answer the only
+/// question worth asking of it.
+fn stamp_origin(record: &mut CapabilityRecord, who: &privilege::Origin) {
+    match who.request_origin {
+        Some(o) => {
+            record.request_origin = o.origin.as_str().to_string();
+            record.origin_source = o.source.as_str().to_string();
+        }
+        None => {
+            record.request_origin = UNKNOWN_ORIGIN.to_string();
+            record.origin_source = UNKNOWN_ORIGIN.to_string();
+        }
     }
+}
 
-    // The repository's own remotes. Read by the daemon from the repo, so a
-    // session cannot substitute a URL — which would make the broker push the
-    // branch anywhere it was told, with the user's token attached.
-    let remotes = match git_remotes(Path::new(&project)) {
-        Ok(r) => r,
-        Err(e) => return Response::error(ErrorKind::Internal, e),
-    };
-    if let Err(e) = secret::check_remote(cap.remote(), &remotes, &info.host) {
-        let _ = secret::audit(
-            &secret::audit_log(),
-            &AuditEntry {
-                event: "refused",
-                service,
-                capability: &cap,
-                session: who.session,
-                agent: who.agent.as_deref(),
-                project: Some(&project),
-                origin: who.request_origin.map(|o| o.origin),
-                origin_source: who.request_origin.map(|o| o.source),
-                exit_code: None,
-            },
-        );
-        return refuse(e);
-    }
-
-    // Every check has passed. Only now is the token read.
-    let token = match secret::token(service) {
-        Ok(t) => t,
-        Err(e) => return refuse(e),
-    };
-
-    let (code, output) = match run_git(&project, &cap, &info.username, &token) {
-        Ok(v) => v,
+/// Send the record to `apex-secretd` and translate its answer.
+fn perform(record: CapabilityRecord) -> Response {
+    let mut client = match Client::connect() {
+        Ok(c) => c,
         Err(e) => {
-            return Response::error(ErrorKind::Internal, e);
-        }
-    };
-
-    let _ = secret::audit(
-        &secret::audit_log(),
-        &AuditEntry {
-            event: "used",
-            service,
-            capability: &cap,
-            session: who.session,
-            agent: who.agent.as_deref(),
-            project: Some(&project),
-            origin: who.request_origin.map(|o| o.origin),
-            origin_source: who.request_origin.map(|o| o.source),
-            exit_code: Some(code),
-        },
-    );
-
-    Response::Brokered {
-        service: service.to_string(),
-        capability: cap.name().to_string(),
-        detail: cap.summary(),
-        exit_code: code,
-        output: scrub(&output, &token),
-    }
-}
-
-/// Remove the token from anything on its way back to the caller.
-///
-/// Defence in depth. git does not print credentials, but it does print URLs,
-/// and a URL of the form `https://user:token@host/…` appears in some error
-/// messages. Since the entire promise of this module is that the agent never
-/// receives the secret, the output it gets is scrubbed before it is returned
-/// rather than trusted not to contain it.
-fn scrub(text: &str, token: &str) -> String {
-    if token.is_empty() {
-        return text.to_string();
-    }
-    text.replace(token, "«redacted»")
-}
-
-/// `git remote -v`, as (name, url) pairs for the fetch URL.
-fn git_remotes(root: &Path) -> Result<Vec<(String, String)>, String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["remote", "-v"])
-        .output()
-        .map_err(|e| format!("running git remote: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    let mut seen = Vec::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let mut parts = line.split_whitespace();
-        let Some(name) = parts.next() else { continue };
-        let Some(url) = parts.next() else { continue };
-        if !seen.iter().any(|(n, _): &(String, String)| n == name) {
-            seen.push((name.to_string(), url.to_string()));
-        }
-    }
-    Ok(seen)
-}
-
-/// Run the git operation with the credential in the child's environment.
-///
-/// The credential reaches git through an inline `credential.helper` that echoes
-/// two environment variables. The token is therefore:
-///   * never on a command line — `/proc/<pid>/cmdline` is world-readable;
-///   * never in a file — nothing to leave behind on a crash;
-///   * never interpolated into the helper string — the helper names the
-///     variables, so a token containing quotes or `$` cannot break out.
-///
-/// `GIT_TERMINAL_PROMPT=0` and an empty `GIT_ASKPASS` are set because the
-/// alternative to a working credential is git *blocking on a prompt* that
-/// nobody will ever see — the same failure the keyring has, and the reason a
-/// timeout wraps this too.
-fn run_git(
-    project: &str,
-    cap: &Capability,
-    username: &str,
-    token: &str,
-) -> Result<(i32, String), String> {
-    let helper = "!f() { echo \"username=$APEX_GIT_USER\"; \
-                  echo \"password=$APEX_GIT_TOKEN\"; }; f";
-
-    let mut args: Vec<String> = vec![
-        "-C".into(),
-        project.to_string(),
-        "-c".into(),
-        format!("credential.helper={helper}"),
-    ];
-    match cap {
-        Capability::GitPush { remote, branch } => {
-            args.push("push".into());
-            args.push(remote.clone());
-            if let Some(b) = branch {
-                args.push(b.clone());
-            } else {
-                args.push("HEAD".into());
-            }
-        }
-        Capability::GitFetch { remote } => {
-            args.push("fetch".into());
-            args.push(remote.clone());
-        }
-    }
-
-    // `timeout` rather than a watchdog thread: the child has to actually die,
-    // or a push to an unreachable host leaves git running after the caller has
-    // given up.
-    let out = std::process::Command::new("timeout")
-        .arg(GIT_TIMEOUT_SECS.to_string())
-        .arg("git")
-        .args(&args)
-        .env("APEX_GIT_USER", username)
-        .env("APEX_GIT_TOKEN", token)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "")
-        .env("SSH_ASKPASS", "")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("running git: {e}"))?;
-
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let err = String::from_utf8_lossy(&out.stderr);
-    if !err.trim().is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(err.trim_end());
-    }
-    let code = out.status.code().unwrap_or(-1);
-    if code == 124 {
-        text.push_str(&format!(
-            "\napex: git did not finish within {GIT_TIMEOUT_SECS}s and was stopped"
-        ));
-    }
-    Ok((code, text))
-}
-
-/// Grant a capability. Refused for a sessioned peer, like a privilege decision:
-/// a session that can widen its own permissions has no permissions.
-pub fn grant(
-    daemon: &Arc<Daemon>,
-    peer: Option<Peer>,
-    project: &str,
-    service: &str,
-    capability: &str,
-    revoke: bool,
-) -> Response {
-    if let Some(session) = privilege::origin(daemon, peer).session {
-        return Response::error(
-            ErrorKind::PermissionDenied,
-            format!("session {session} cannot change its own capabilities"),
-        );
-    }
-    if !Capability::names().contains(&capability) {
-        return refuse(SecretError::UnknownCapability(capability.to_string()));
-    }
-    if !secret::valid_service_name(service) {
-        return refuse(SecretError::NoSuchService(service.to_string()));
-    }
-
-    let path = secret::grants_file();
-    let mut grants = SecretGrants::load(&path);
-    if revoke {
-        if !grants.revoke(project, service, capability) {
             return Response::error(
-                ErrorKind::NoSuchRequest,
-                format!("{service}:{capability} was not granted for {project}"),
-            );
+                ErrorKind::Internal,
+                format!(
+                    "{e}\nthe secret service holds every credential; \
+                     without it no capability can be performed"
+                ),
+            )
         }
-    } else {
-        // A capability cannot be granted for a service that does not exist:
-        // otherwise a typo produces a grant that silently never matches.
-        if secret::info(service).is_none() {
-            return refuse(SecretError::NoSuchService(service.to_string()));
-        }
-        grants.allow(project, service, capability);
-    }
-    if let Err(e) = grants.save(&path) {
-        return Response::error(ErrorKind::Internal, e.to_string());
-    }
-    Response::SecretGrants {
-        projects: grants.projects,
-    }
-}
-
-pub fn grants() -> Response {
-    Response::SecretGrants {
-        projects: SecretGrants::load(&secret::grants_file()).projects,
-    }
-}
-
-fn refuse(e: SecretError) -> Response {
-    let kind = match e {
-        SecretError::NotGranted { .. } => ErrorKind::PermissionDenied,
-        SecretError::NoSuchService(_) => ErrorKind::NoSuchRequest,
-        SecretError::Io(_) | SecretError::KeyringTimeout => ErrorKind::Internal,
-        _ => ErrorKind::BadRequest,
     };
-    Response::error(kind, e.to_string())
+    let request = secret_protocol::Request::Use {
+        record: Box::new(record),
+    };
+    match client.request(&request) {
+        Ok(secret_protocol::Response::Performed {
+            record,
+            endpoint,
+            exit_code,
+            output,
+        }) => Response::Brokered {
+            service: record.provider.clone(),
+            capability: record.operation.name().to_string(),
+            detail: record.operation.summary(),
+            audit_id: record.audit_id.clone(),
+            endpoint,
+            exit_code,
+            output,
+        },
+        Ok(secret_protocol::Response::Error { kind, message }) => {
+            Response::error(translate(kind), message)
+        }
+        Ok(other) => Response::error(
+            ErrorKind::Internal,
+            format!("the secret service replied with a {} to a use", other.variant()),
+        ),
+        Err(e) => Response::error(ErrorKind::Internal, format!("{e:#}")),
+    }
+}
+
+/// Map the secret service's error kinds onto the agent runtime's.
+///
+/// Two protocols, deliberately: the agent runtime's is a compatibility surface
+/// that APEX Shell parses, and the secret service's is its own. Translating in
+/// one place keeps a change to either from silently changing the other.
+fn translate(kind: secret_protocol::ErrorKind) -> ErrorKind {
+    match kind {
+        secret_protocol::ErrorKind::BadRequest => ErrorKind::BadRequest,
+        secret_protocol::ErrorKind::NoSuchService => ErrorKind::NoSuchRequest,
+        secret_protocol::ErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
+        secret_protocol::ErrorKind::Internal => ErrorKind::Internal,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apex_agent_core::origin::{OriginSource, SessionOrigin};
+    use apex_agent_core::policy::RequestOrigin;
+
+    fn record() -> CapabilityRecord {
+        CapabilityRecord::new(
+            "demo",
+            Capability::parse("git-fetch", "origin", None).unwrap(),
+        )
+    }
 
     #[test]
-    fn the_token_is_scrubbed_from_anything_returned() {
-        // The whole promise of this module. git does not normally print
-        // credentials, but it does print URLs, and some error paths include a
-        // `https://user:token@host/…` form.
-        let out = scrub(
-            "fatal: could not read from https://x:ghp_SEKRIT@github.com/a/b\n",
-            "ghp_SEKRIT",
+    fn every_secret_error_kind_has_an_agent_runtime_equivalent() {
+        // An exhaustive match already forces this at compile time; the test is
+        // about the *choices*. `NoSuchService` becoming `NoSuchRequest` is the
+        // one that is not obvious: the agent protocol has no service kind, and
+        // mapping it to `Internal` would tell a caller to file a bug when the
+        // answer is "you have not added that credential".
+        use secret_protocol::ErrorKind as S;
+        assert_eq!(translate(S::BadRequest), ErrorKind::BadRequest);
+        assert_eq!(translate(S::NoSuchService), ErrorKind::NoSuchRequest);
+        assert_eq!(translate(S::PermissionDenied), ErrorKind::PermissionDenied);
+        assert_eq!(translate(S::Internal), ErrorKind::Internal);
+    }
+
+    #[test]
+    fn a_capability_is_parsed_before_anything_is_sent() {
+        // The daemon refuses a malformed capability itself, so a typo does not
+        // become a connection to the secret service and a round trip.
+        for (cap, remote) in [("exec", "origin"), ("git-fetch", "https://x/y")] {
+            assert!(Capability::parse(cap, remote, None).is_err(), "{cap} {remote}");
+        }
+    }
+
+    #[test]
+    fn a_record_built_here_carries_the_session_as_attribution() {
+        let mut record = record();
+        record.project = Some("/home/t/p".into());
+        record.agent_session = Some(7);
+        record.agent_session_agent(Some("claude"));
+        // The agent name rides in `constraints` rather than in a field of its
+        // own: §11 fixes the record's fields, and the trail is more useful with
+        // the agent named than with the list left empty.
+        assert!(record.constraints.iter().any(|c| c == "agent=claude"));
+        assert_eq!(record.agent_session, Some(7));
+    }
+
+    #[test]
+    fn an_unnamed_agent_adds_no_constraint() {
+        let mut record = record();
+        record.agent_session_agent(None);
+        assert!(record.constraints.is_empty());
+    }
+
+    #[test]
+    fn the_origin_and_how_it_was_reached_both_land_on_the_record() {
+        // §7's field is only worth having if a reader can tell an observation
+        // from a declaration, so the record carries both or neither.
+        for (session_origin, origin, source) in [
+            (
+                SessionOrigin::observed(RequestOrigin::LocalTerminal),
+                "local-terminal",
+                "observed",
+            ),
+            (
+                SessionOrigin::inherited(RequestOrigin::RemoteControl),
+                "claude-remote-control",
+                "inherited",
+            ),
+            (
+                SessionOrigin::observed(RequestOrigin::LocalTerminal)
+                    .declare(RequestOrigin::Mcp)
+                    .expect("mcp is declarable over a local origin"),
+                "mcp",
+                "declared",
+            ),
+        ] {
+            let mut record = record();
+            stamp_origin(
+                &mut record,
+                &privilege::Origin {
+                    request_origin: Some(session_origin),
+                    ..privilege::Origin::default()
+                },
+            );
+            assert_eq!(record.request_origin, origin);
+            assert_eq!(record.origin_source, source);
+        }
+        // And every source the runtime can produce is spelled the same way on
+        // the record as it is in the type, so a reader of the trail and a
+        // reader of the code agree.
+        for source in OriginSource::ALL {
+            assert!(!source.as_str().is_empty());
+        }
+    }
+
+    #[test]
+    fn an_unreadable_origin_is_recorded_as_unknown_and_never_as_local() {
+        // The defect this exists to avoid: falling back to the default, which
+        // is `local-terminal` — the origin §7 reserves root and break-glass
+        // for. "Could not tell" is not "a human is at the keyboard".
+        let mut record = record();
+        stamp_origin(
+            &mut record,
+            &privilege::Origin {
+                request_origin: None,
+                origin_unreadable: Some("cannot read /proc/1234/cgroup".into()),
+                ..privilege::Origin::default()
+            },
         );
-        assert!(!out.contains("ghp_SEKRIT"), "{out}");
-        assert!(out.contains("«redacted»"), "{out}");
+        assert_eq!(record.request_origin, UNKNOWN_ORIGIN);
+        assert_eq!(record.origin_source, UNKNOWN_ORIGIN);
+        assert_ne!(record.request_origin, RequestOrigin::default().as_str());
     }
 
     #[test]
-    fn scrubbing_an_empty_token_does_not_mangle_the_output() {
-        // An empty needle would otherwise match everywhere.
-        assert_eq!(scrub("hello", ""), "hello");
-    }
-
-    #[test]
-    fn the_credential_helper_names_variables_and_never_interpolates_them() {
-        // A token containing a quote or a `$` must not be able to break out of
-        // the helper string, which it could if the value were substituted in.
-        let helper = "!f() { echo \"username=$APEX_GIT_USER\"; \
-                      echo \"password=$APEX_GIT_TOKEN\"; }; f";
-        assert!(helper.contains("$APEX_GIT_TOKEN"));
-        // No format placeholder, so there is nothing to interpolate INTO.
-        assert!(!helper.contains("{}"));
-    }
-
-    #[test]
-    fn git_remotes_parses_the_fetch_url_once_per_remote() {
-        // `git remote -v` prints two lines per remote (fetch and push). A
-        // parser that kept both would report duplicate names, and `find` would
-        // then silently pick whichever came first.
-        let this = std::env::current_dir().expect("cwd");
-        let Ok(remotes) = git_remotes(&this) else {
-            eprintln!("SKIP: not a git repository");
-            return;
-        };
-        let mut names: Vec<&str> = remotes.iter().map(|(n, _)| n.as_str()).collect();
-        let before = names.len();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), before, "duplicate remote names: {remotes:?}");
+    fn the_secret_dimension_is_read_without_an_origin() {
+        // §7's table answers `allow` for "github push" from every origin, so
+        // the broker gate is the secret dimension alone. A signature taking an
+        // origin would be an invitation to tighten a row §7 says is open, and
+        // the four `allow` rows are the half most easily lost by being careful.
+        use apex_agent_core::origin::Capability as PolicyCapability;
+        for origin in RequestOrigin::ALL {
+            assert_eq!(
+                PolicyCapability::GitHubPush.ruling(*origin),
+                apex_agent_core::origin::Ruling::Allow,
+                "{origin} lost the github-push row"
+            );
+        }
+        // And the row §7 denies everywhere is the one this build implements by
+        // having nowhere to put it.
+        for origin in RequestOrigin::ALL {
+            assert_eq!(
+                PolicyCapability::ReadRawSecret.ruling(*origin),
+                apex_agent_core::origin::Ruling::Deny
+            );
+        }
     }
 }

@@ -1,31 +1,43 @@
-//! `apex secret` — the user-facing half of the secret broker (§4).
+//! `apex secret` — the user-facing half of the protected secret service (§11).
 //!
 //! ```text
-//! apex secret add github --host github.com     # token on stdin
+//! apex secret add github --host github.com     # credential on stdin
 //! apex secret list
 //! apex secret grant github git-push
 //! apex secret use github git-push origin       # run by an agent
 //! apex secret audit
 //! ```
 //!
-//! `use` is the interesting one: an agent runs it, the DAEMON performs the git
-//! operation, and what comes back is git's output with the token scrubbed. The
-//! agent never holds the credential. See `apex-agentd`'s broker module for why
-//! a git credential helper cannot achieve that.
+//! Two daemons answer these, and which one is not arbitrary.
+//!
+//! * `add`, `remove`, `list`, `grant`, `revoke`, `grants` and `audit` go
+//!   straight to `apex-secretd`, which owns the store and refuses any of the
+//!   mutating ones from a caller inside an agent session.
+//! * `use` goes through `apex-agentd` first, because only that daemon can say
+//!   which session is asking, what its secret policy is, and which project it
+//!   was started in. It forwards a capability record; `apex-secretd` performs
+//!   the operation.
+//!
+//! Nothing on either path can return the credential. `apex-secretd` has no verb
+//! that does.
 
 use std::io::Read;
 
 use anyhow::{bail, Result};
-use apex_agent_core::client;
-use apex_agent_core::protocol::{Request, Response};
-use apex_agent_core::secret::{self, Backend, Capability, ServiceInfo};
+use apex_agent_core::client as agent_client;
+use apex_agent_core::protocol::{Request as AgentRequest, Response as AgentResponse};
+use apex_secret_core::capability::Capability;
+use apex_secret_core::client::Client;
+use apex_secret_core::protocol::{Request, Response};
+use apex_secret_core::store::valid_service_name;
+use apex_secret_core::SecretValue;
 use clap::Subcommand;
 
 /// `apex secret <verb>`.
 #[derive(Subcommand)]
 pub enum SecretCmd {
-    /// Store a credential. The token is read from stdin, never from the
-    /// command line — argv is world-readable through /proc.
+    /// Store a credential. It is read from stdin, never from the command line —
+    /// argv is world-readable through /proc.
     Add {
         /// Name you will refer to it by, e.g. `github`.
         service: String,
@@ -36,21 +48,17 @@ pub enum SecretCmd {
         /// Username to send. Most token schemes ignore it.
         #[arg(long, default_value = "x-access-token")]
         username: String,
-        /// Store the token in the login keyring instead of a 0600 file.
-        ///
-        /// Not the default, and deliberately so: on APEX `secret-tool` blocks
-        /// on an "Unlock Keyring" dialog, and gnome-keyring-daemon ships
-        /// disabled. A broker an agent calls must not hang or raise a prompt
-        /// nobody is watching for. Every keyring call is bounded by a timeout.
-        #[arg(long)]
-        keyring: bool,
+        /// Scheme the host is reached over. `http` is accepted only for a
+        /// loopback host, where the credential does not cross a network.
+        #[arg(long, default_value = "https")]
+        scheme: String,
     },
-    /// Stored services. Never prints a token.
+    /// Stored credentials. Never prints one.
     List {
         #[arg(long)]
         json: bool,
     },
-    /// Delete a stored credential.
+    /// Delete a stored credential and every grant that named it.
     Remove { service: String },
     /// The operations an agent can be granted.
     Capabilities,
@@ -63,14 +71,14 @@ pub enum SecretCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Use a capability. The broker performs it; you get the result.
+    /// Use a capability. The service performs it; you get the result.
     Use {
         service: String,
         /// One of `apex secret capabilities`.
         capability: String,
-        /// A git remote NAME, never a URL. The daemon resolves it against this
-        /// repository's own configuration — accepting a URL would let a
-        /// session choose where the token gets sent.
+        /// A git remote NAME, never a URL. The service resolves it against this
+        /// repository's own configuration — accepting a URL would let a session
+        /// choose where the credential gets sent.
         ///
         /// `allow_hyphen_values` so that `-f` reaches the validator and is
         /// refused as "not a git remote name", rather than being rejected by
@@ -95,16 +103,22 @@ pub fn main(cmd: SecretCmd) -> i32 {
             service,
             host,
             username,
-            keyring,
-        } => add(&service, &host, &username, keyring),
+            scheme,
+        } => add(&service, &host, &username, &scheme),
         SecretCmd::List { json } => list(json),
         SecretCmd::Remove { service } => remove(&service),
         SecretCmd::Capabilities => {
             capabilities();
             Ok(0)
         }
-        SecretCmd::Grant { service, capability } => grant(&service, &capability, false),
-        SecretCmd::Revoke { service, capability } => grant(&service, &capability, true),
+        SecretCmd::Grant {
+            service,
+            capability,
+        } => grant(&service, &capability, false),
+        SecretCmd::Revoke {
+            service,
+            capability,
+        } => grant(&service, &capability, true),
         SecretCmd::Grants { json } => grants(json),
         SecretCmd::Use {
             service,
@@ -123,63 +137,60 @@ pub fn main(cmd: SecretCmd) -> i32 {
     }
 }
 
-fn add(service: &str, host: &str, username: &str, keyring: bool) -> Result<i32> {
-    if !secret::valid_service_name(service) {
+fn add(service: &str, host: &str, username: &str, scheme: &str) -> Result<i32> {
+    if !valid_service_name(service) {
         bail!("'{service}' is not a usable service name (letters, digits, _ - .)");
     }
     if host.trim().is_empty() {
         bail!("--host is required: it is what a remote's URL is checked against");
     }
 
-    // stdin, never argv. A token on a command line is visible in
+    // stdin, never argv. A credential on a command line is visible in
     // /proc/<pid>/cmdline to every process on the machine for as long as this
     // runs, and in the shell history forever.
-    let mut token = String::new();
-    std::io::stdin().read_to_string(&mut token)?;
-    let token = token.trim();
-    if token.is_empty() {
+    let mut value = String::new();
+    std::io::stdin().read_to_string(&mut value)?;
+    let value = value.trim();
+    if value.is_empty() {
         bail!(
-            "no token on stdin. Pipe it in:\n  \
+            "nothing on stdin. Pipe the credential in:\n  \
              printf %s \"$TOKEN\" | apex secret add {service} --host {host}"
         );
     }
 
-    let info = ServiceInfo {
-        service: service.to_string(),
-        host: host.trim().to_ascii_lowercase(),
-        username: username.to_string(),
-        backend: if keyring { Backend::Keyring } else { Backend::File },
-        added: apex_agent_core::request::now_ms() / 1000,
-    };
-    secret::store(&info, token)?;
-    println!(
-        "stored a credential for {} ({}), backend {}",
-        info.service,
-        info.host,
-        info.backend.as_str()
-    );
+    let host = host.trim().to_ascii_lowercase();
+    Client::connect()?.add(
+        service,
+        &host,
+        scheme,
+        Some(username),
+        &SecretValue::new(value.as_bytes().to_vec()),
+    )?;
+    println!("stored a credential for {service} ({scheme}://{host})");
     println!("nothing is allowed yet — grant a capability with:");
-    println!("  apex secret grant {} git-push", info.service);
+    println!("  apex secret grant {service} git-push");
     Ok(0)
 }
 
 fn list(json: bool) -> Result<i32> {
-    let all = secret::list();
+    let services = match Client::connect()?.call(&Request::List)? {
+        Response::Services { services } => services,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
     if json {
-        println!("{}", serde_json::to_string_pretty(&all)?);
+        println!("{}", serde_json::to_string_pretty(&services)?);
         return Ok(0);
     }
-    if all.is_empty() {
+    if services.is_empty() {
         println!("no credentials stored");
         return Ok(0);
     }
-    println!("{:<16} {:<22} {:<10} USERNAME", "SERVICE", "HOST", "BACKEND");
-    for i in &all {
+    println!("{:<16} {:<28} USERNAME", "SERVICE", "ENDPOINT");
+    for i in &services {
         println!(
-            "{:<16} {:<22} {:<10} {}",
+            "{:<16} {:<28} {}",
             i.service,
-            i.host,
-            i.backend.as_str(),
+            format!("{}://{}", i.scheme, i.host),
             i.username
         );
     }
@@ -187,22 +198,25 @@ fn list(json: bool) -> Result<i32> {
 }
 
 fn remove(service: &str) -> Result<i32> {
-    secret::remove(service)?;
-    println!("removed {service}");
+    Client::connect()?.call(&Request::Remove {
+        service: service.to_string(),
+    })?;
+    println!("removed {service}, and every grant that named it");
     Ok(0)
 }
 
 fn capabilities() {
     println!("Capabilities an agent can be granted:\n");
     for name in Capability::names() {
-        println!("  {:<12} {}", name, Capability::describe(name));
+        println!("  {:<14} {}", name, Capability::describe(name));
     }
     println!(
-        "\nThe broker PERFORMS these; it never hands over the credential. A git\n\
-         credential helper cannot do that, because git runs inside the sandbox and\n\
-         whatever the helper prints is readable by the agent.\n\
+        "\napex-secretd PERFORMS these; it never hands over the credential, and\n\
+         has no verb that could. A git credential helper cannot achieve that,\n\
+         because git runs inside the sandbox and whatever the helper prints is\n\
+         readable by the agent.\n\
          \n\
-         A remote is named, never given as a URL: the daemon resolves the name\n\
+         A remote is named, never given as a URL: the service resolves the name\n\
          against the repository's own remotes and checks the host against the\n\
          credential, so a grant cannot be turned into a push to anywhere else."
     );
@@ -210,33 +224,24 @@ fn capabilities() {
 
 fn grant(service: &str, capability: &str, revoke: bool) -> Result<i32> {
     let project = current_project_root()?;
-    match client::call(&Request::SecretGrant {
+    Client::connect()?.call(&Request::Grant {
         project: project.clone(),
         service: service.to_string(),
         capability: capability.to_string(),
         revoke,
-    })? {
-        Response::SecretGrants { .. } => {
-            if revoke {
-                println!("withdrew {service}:{capability} for {project}");
-            } else {
-                println!("allowed {service}:{capability} for {project}");
-            }
-            Ok(0)
-        }
-        Response::Error { message, .. } => {
-            eprintln!("apex secret: {message}");
-            Ok(1)
-        }
-        other => bail!("unexpected reply: {other:?}"),
+    })?;
+    if revoke {
+        println!("withdrew {service}:{capability} for {project}");
+    } else {
+        println!("allowed {service}:{capability} for {project}");
     }
+    Ok(0)
 }
 
 fn grants(json: bool) -> Result<i32> {
-    let projects = match client::call(&Request::SecretGrants)? {
-        Response::SecretGrants { projects } => projects,
-        Response::Error { message, .. } => bail!("{message}"),
-        other => bail!("unexpected reply: {other:?}"),
+    let projects = match Client::connect()?.call(&Request::Grants)? {
+        Response::Grants { projects } => projects,
+        other => bail!("unexpected reply: {}", other.variant()),
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&projects)?);
@@ -257,29 +262,31 @@ fn grants(json: bool) -> Result<i32> {
 
 /// Exit codes are the message, because an agent reads `$?`:
 ///   0  the operation ran and succeeded
-///   1  the broker refused, or the operation failed
+///   1  the service refused, or the operation failed
 ///   2  the request was malformed
 fn use_it(service: &str, capability: &str, remote: &str, branch: Option<&str>) -> Result<i32> {
-    // Validated locally first so a typo is immediate. The daemon validates
-    // again and trusts none of this.
+    // Validated locally first so a typo is immediate. Both daemons validate
+    // again and trust none of this.
     if let Err(e) = Capability::parse(capability, remote, branch) {
         eprintln!("apex secret: {e}");
         return Ok(2);
     }
 
-    // Sent because the daemon cannot see this process's working directory. It
-    // is ignored for a managed session, whose project the daemon already knows.
+    // Sent because `apex-agentd` cannot see this process's working directory.
+    // It is ignored for a managed session, whose project the daemon already
+    // knows.
     let project = current_project_root().ok();
 
-    match client::call(&Request::SecretUse {
+    match agent_client::call(&AgentRequest::SecretUse {
         service: service.to_string(),
         capability: capability.to_string(),
         remote: remote.to_string(),
         branch: branch.map(str::to_string),
         project,
     })? {
-        Response::Brokered {
+        AgentResponse::Brokered {
             detail,
+            endpoint,
             exit_code,
             output,
             ..
@@ -288,14 +295,14 @@ fn use_it(service: &str, capability: &str, remote: &str, branch: Option<&str>) -
                 println!("{}", output.trim_end());
             }
             if exit_code == 0 {
-                eprintln!("apex secret: {detail} — done");
+                eprintln!("apex secret: {detail} against {endpoint} — done");
                 Ok(0)
             } else {
-                eprintln!("apex secret: {detail} — exited {exit_code}");
+                eprintln!("apex secret: {detail} against {endpoint} — exited {exit_code}");
                 Ok(1)
             }
         }
-        Response::Error { message, .. } => {
+        AgentResponse::Error { message, .. } => {
             eprintln!("apex secret: {message}");
             Ok(1)
         }
@@ -304,26 +311,28 @@ fn use_it(service: &str, capability: &str, remote: &str, branch: Option<&str>) -
 }
 
 fn audit(lines: usize) -> Result<i32> {
-    let path = secret::audit_log();
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("no capability has been used on this machine yet");
-            return Ok(0);
-        }
-        Err(e) => return Err(e.into()),
+    let entries = match Client::connect()?.call(&Request::Audit { lines })? {
+        Response::Audit { entries } => entries,
+        other => bail!("unexpected reply: {}", other.variant()),
     };
-    let all: Vec<&str> = text.lines().collect();
-    for line in all.iter().rev().take(lines).rev() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
+    if entries.is_empty() {
+        println!("no capability has been used by this account yet");
+        return Ok(0);
+    }
+    for e in &entries {
+        let outcome = match (e.exit_code, e.reason.as_deref()) {
+            (Some(0), _) => String::new(),
+            (Some(code), _) => format!("  exit {code}"),
+            (None, Some(reason)) => format!("  {reason}"),
+            (None, None) => String::new(),
         };
         println!(
-            "{:<10} {:<12} {:<10} {}",
-            v["event"].as_str().unwrap_or("?"),
-            v["service"].as_str().unwrap_or("-"),
-            v["agent"].as_str().unwrap_or("-"),
-            v["detail"].as_str().unwrap_or("")
+            "{:<9} {:<14} {:<24} {}{}",
+            e.event.as_str(),
+            e.provider,
+            e.detail,
+            e.endpoint.as_deref().unwrap_or("-"),
+            outcome
         );
     }
     Ok(0)
@@ -366,5 +375,17 @@ mod tests {
         for c in codes {
             assert!(seen.insert(c), "{c} is used twice");
         }
+    }
+
+    #[test]
+    fn the_capability_text_says_the_credential_is_never_handed_over() {
+        // `apex secret capabilities` is where somebody decides whether to trust
+        // this with a credential. If it stops saying what the service refuses
+        // to do, the one thing they needed is gone.
+        let mut text = String::new();
+        for name in Capability::names() {
+            text.push_str(Capability::describe(name));
+        }
+        assert!(text.contains("remote"), "{text}");
     }
 }
