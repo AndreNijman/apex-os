@@ -5,11 +5,9 @@ worktree: /var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell
 branch: roadmap/v2.2
 
 ## NEXT
-apex-os p0-005 LANDED AND PUSHED: roadmap/v2.2 = 5ae4350. Next job: apex-shell
-task/p0-005-agent-center-modes (1 commit d9cdb37) in /var/tmp/apex-work/int-shell,
-then apex-os task/p1-030-shell-integrations, then ONE clippy container run on the
-final os tip. Recovery tags: int-os-prelanding-2 (9a24d2b),
-int-shell-prelanding-2 (d2d1f33), local branch int2-p0005-landed.
+apex-shell DONE AND PUSHED: roadmap/v2.2 = 0fd12ee. apex-os p0-005 DONE AND
+PUSHED: 5ae4350. REMAINING: cherry-pick task/p1-030-shell-integrations
+(6 commits, 63493c7) onto apex-os roadmap/v2.2, then ONE clippy container run.
 
 ## PLAN
 1. apex-os: cherry-pick d31257a..task/p0-005-permission-modes onto roadmap/v2.2 (9a24d2b)
@@ -114,3 +112,36 @@ apex-secretd bin tests 69 -> 70. Full suite 1512 passed + the known flake.
   * decided_by line 509: (false, Some(id)) => (Decision::AllowOnce, Some(id),
     "requested-and-covered") -- allow_once carrying system_grant, NOT
     allow_for_project.
+
+## APEX-SHELL RESULT (tip 0fd12ee, was d2d1f33)
+ZERO file overlap between task/p0-005-agent-center-modes and roadmap/v2.2 since
+their common base 321e3a5, so the cherry-pick of d9cdb37 was clean. The branch
+touches five files, not the two the brief named: AgentService.qml,
+agentpolicy.js, SessionRow.qml, tests/agent-policy-test.js and
+tests/check-agent-settings.sh.
+Counts (every suite run from the REPOSITORY ROOT, XDG_* at /var/tmp/apex-shell-int2-xdg):
+  check-no-conflict-markers   PASS      PASS
+  settings-semantics          33/0  ->  33/0
+  settings-pages              15/0  ->  15/0
+  check-agent-settings        65/0  ->  81/0   (self-test 14/0 -> 17/0)
+  check-color-tokens          22/0  ->  21/1 -> 22/0 after my fix below
+  agent-policy-test.js        pass  ->  pass
+EXPECT_WHITE_FG stayed 211. The red break-glass chip uses Theme.danger, a token,
+so it added no translucent-white foreground. NOT lowered, NOT raised.
+
+ONE COMMIT OF MY OWN (0fd12ee), flagged: check-color-tokens self-test (g)
+mutated the exact line `border.color: badge.toneColor` in SessionRow.qml.
+P0-005 put `(row.breakGlass && row.live) ? Theme.danger : ` in front of it, so
+the literal search stopped matching, the mutant did not apply, and the harness
+reported 21 passed / 1 failed -- correctly, since a mutation that does not apply
+proves nothing. Every real check was green throughout. Changed the search to
+`badge.toneColor` alone (first occurrence in that file IS the row border) so it
+survives further edits to the front of the line. 9 mutants apply again.
+
+Degradation against an older daemon verified by driving agentpolicy.js in node
+with a session object carrying none of the new fields:
+  sessionNativeLabel -> ""   isBreakGlass -> false
+  sessionGrant -> null       sessionSystem -> "none"
+Also "" for {} and for null. The chip is omitted, nothing throws.
+Andre's own quickshell (pid 2338) untouched; ~/.config/apex-shell mtime still
+6 Sep 09:01; no window opened.
