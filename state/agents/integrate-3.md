@@ -96,15 +96,64 @@ CAVEATS TO REPORT (none blocking):
  3. Never exercised end-to-end. It cannot be, headless, without locking
     Andre's session — which I will not do.
 
-## REMAINING ORDER (do not let added scope orphan the shell work)
-1. p1-018: `git cherry-pick 526e16c..16fc8ae` (9 commits; 526e16c is ALREADY
-   upstream as my 7f14a00 — `git cherry` confirms it as `-`). It carries the
-   run-clippy.sh fix as 16fc8ae.
-2. per-commit build over the 9, then push.
-3. katana + L16 clippy runs (independent machines).
-4. api.rs-on-run_curl decision (feature vs resolution).
-5. apex-shell fix/locked-hint.
-6. report.
+## NEXT
+ALL FOUR BRANCHES + p1-018 LANDED AND PUSHED. Nothing in progress.
+  apex-os    roadmap/v2.2 = b2d7905   (was e4e221f)  1801 passed / 0 failed
+  apex-shell roadmap/v2.2 = 8d081ff   (was 0fd12ee)  33/0, 15/0, 22/0
+Only remaining work would be the deferred api.rs item below (feature, not
+integration) and the OperationSpec `same_everywhere` design question.
+
+## CLIPPY — BOTH MACHINES, ON THE FINAL TIP
+  L16    tests/run-clippy.sh          -> PASS clippy is clean (rc=0)
+  katana clone of roadmap/v2.2 b2d7905 -> "info: downloading component clippy"
+         then "PASS clippy is clean" (rc=0). The download line IS the proof the
+         --network=host fix works; before it, katana had no DNS in the
+         container and the discarded stderr reported it as a missing component.
+  katana scratch cleaned (484M), /var there is 96% full — leave it clean.
+It caught TWO REAL LINTS on first run, both in P1-002 code whose author had
+recorded "clippy CANNOT BE RUN" (b2d7905):
+  - clippy::type_complexity on providers/cloudflare/tests.rs every_operation()
+    -> named the tuple `type OperationCase` rather than #[allow]ing it.
+  - clippy::useless_format in apex/src/cloudflare/tests.rs device-flow double
+    -> dropped format!, unescaped the {{ }} so the served bytes are identical.
+      `cargo test -p apex --bin apex cloudflare::` 13/0 before and after.
+
+## api.rs ON TOP OF broker::run_curl — DEFERRED DELIBERATELY, NOT FORGOTTEN
+The brief said to do this "not a conflict but do it anyway". Measured, it is a
+FEATURE CHANGE and not a resolution, so I did not do it blind:
+  - api.rs asks curl to print the HTTP status on its own line after the body
+    and parses it (`Reply { status: u16, body }`, api.rs:396). `run_curl`
+    returns `Output { code, text }` where `code` is CURL'S EXIT CODE, not the
+    HTTP status — the Cloudflare provider's entire success/refusal model
+    (`is_ok()` = 200..300, "status 0 means curl never answered") has nothing to
+    read.
+  - `run_curl` APPENDS STDERR ONTO THE BODY. That alone breaks api.rs's
+    "status is the last line" parse.
+  - api.rs runs `/usr/bin/curl -q -K -` (absolute path; `-q` first so the
+    owner's ~/.curlrc is not read). `run_curl` runs bare `curl` off PATH with
+    NO `-q`, while setting HOME to the owner's. Moving Cloudflare onto it would
+    be a downgrade in both respects.
+  FINDING TO ROUTE ON: those last two are arguably defects in `run_curl`
+  itself, on the MCP path — a root daemon spawning a curl that reads the
+  owner's ~/.curlrc off a bare-PATH binary. I did NOT touch broker.rs for it:
+  p1-018-mcp-auth was live in that file the whole time and the brief's rule was
+  minimal edits there. It belongs to whoever owns the MCP provider.
+
+## READING PASS (asked for explicitly; read, not run)
+- tests/test-secret-migrate.sh: p1-018 DOES touch apex/src/migrate.rs, adding
+  two new skip branches. Neither can fire on this fixture: the new
+  `authorization.contains('$')` branch needs a literal `$` in the file, and the
+  fixture's heredoc at line 149 is UNQUOTED (`<<JSON`), so `${FAKE_BEARER}` is
+  expanded by the shell before the file is written — .claude.json holds the
+  literal token. Lines 258/300 grep for the expanded value, confirming it.
+  No image-test landmine.
+- p1-045 removes NO identifier at all (`git diff | grep '^-'` over fn/struct/
+  enum/const across apexd/ is empty), so nothing to re-spell.
+- p1-002's only removal across the landing is the `fn drop_to` line itself,
+  changed to `pub(crate) fn drop_to`. `drop_privileges` has ZERO references
+  left anywhere in the tree.
+- The message I changed ("acts on something you name") had exactly ONE
+  assertion on it, in end_to_end.rs. Swept *.rs *.sh *.md *.yml *.qml.
 GUARD ADDED to runtests.sh + percommit.sh: refuse to run on a dirty tree
 (exit 3). Mutation-proved: dirtied cloudflare.rs -> rc=3, restored -> runs.
 
