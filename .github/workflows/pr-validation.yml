@@ -942,6 +942,15 @@ jobs:
           APEX_REQUIRE_SANDBOX: "1"
         run: ./tests/test-secret-broker.sh
 
+      # P0-003's migration, against a fixture home under /var/tmp with two
+      # obvious fakes in it and a loopback MCP server that refuses without the
+      # bearer token. It proves the order the whole thing rests on — store,
+      # verify, and only then remove — including that an unverifiable
+      # credential is stored and LEFT, which is the outcome an interrupted or
+      # ungranted run has to have.
+      - name: Run credential-migration assertions
+        run: ./tests/test-secret-migrate.sh
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail

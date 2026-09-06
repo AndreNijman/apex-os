@@ -118,6 +118,18 @@ pub enum SecretCmd {
         #[arg(long = "option", short = 'o', value_name = "NAME=VALUE")]
         options: Vec<String>,
     },
+    /// Move credentials this machine already has in plaintext into the store.
+    ///
+    /// Reads each one, stores it, proves the stored copy works, and only then
+    /// removes the original — in that order, so an interrupted run leaves a
+    /// machine that still works. Run it from your own shell, with no agent
+    /// running.
+    Migrate {
+        /// Say what would move and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// The audit trail: which capability was used, by what, and when.
     Audit {
         #[arg(long, short, default_value_t = 20)]
@@ -148,6 +160,7 @@ pub fn main(cmd: SecretCmd) -> i32 {
             resource,
             options,
         } => use_it(&service, &operation, &resource, &options),
+        SecretCmd::Migrate { dry_run } => crate::migrate::main(dry_run),
         SecretCmd::Audit { lines } => audit(lines),
     };
     match result {
@@ -651,6 +664,7 @@ mod tests {
             "revoke",
             "grants",
             "use",
+            "migrate",
             "audit",
         ] {
             assert!(names.iter().any(|n| n == expected), "`{expected}` is gone");
