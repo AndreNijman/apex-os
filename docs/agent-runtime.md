@@ -1245,16 +1245,16 @@ symmetrical and is not:
   every agent running — and reopening the template finds them again.
 - Running a multiplexer *inside* an agent session would put the multiplexer
   server inside that session's bwrap confinement: its socket, its other panes
-  and every program in them held to one agent's policy, and one session able to
-  hold only one agent.
+  and every program in them held to one agent's policy. One session could then
+  hold one agent.
 - It would also put the durable thing inside the ephemeral one, making the
   multiplexer a single point of failure for agent state.
 
-Two consequences follow, and both are why this composes without special cases.
+Two consequences follow, and both are why this composes with no special cases.
 Resize already works: `apex agent attach` turns SIGWINCH into a `Resize`
 control frame, so reattaching a tmux client at a different size reaches the
-daemon's PTY through `TIOCSWINSZ`. And the detach key, `ctrl-]`, collides with
-neither tmux's `C-b` nor zellij's `Ctrl-p`, so you can leave an agent pane
+daemon's PTY through `TIOCSWINSZ`. The detach key is `ctrl-]`, which collides
+with neither tmux's `C-b` nor zellij's `Ctrl-p`. You can leave an agent pane
 without leaving the multiplexer.
 
 Detaching does end that pane's `apex agent attach`, and the pane is built with
@@ -1274,10 +1274,11 @@ halves of "attach and restore cleanly": after a reboot there are no sessions
 and the template starts fresh ones, and while agents are working it puts you
 back with those agents rather than starting duplicates beside them.
 
-The session is named `apex-<project>-<digest>` — the project's directory name,
-which is what a status bar shows, plus six hex of its path, because `~/work/api`
-and `~/oss/api` are two projects and sharing a session would silently attach one
-to the other's panes.
+The session is named `apex-<project>-<digest>`. The first half is the
+project's directory name, which is what a status bar shows. The second is six
+hex of its path, because `~/work/api` and `~/oss/api` are two projects, and
+sharing a session name would attach one to the other's panes without saying
+so.
 
 ### One layout record, not two
 
@@ -1288,11 +1289,11 @@ the one record, so `apex project layout show` reports both halves and `forget`
 discards both.
 
 tmux and zellij are driven through `/usr/libexec/apex-mux`, the same adapter
-shape as `apex-project-windows` for compositors: the multiplexer is the only
+shape as `apex-project-windows` for compositors. The multiplexer is the only
 per-backend part, so the CLI carries no tmux or zellij knowledge and the tests
 have one program to fake. `apex-mux kdl <arrangement> <plan>` prints the zellij
-layout that would be sent, which is also how the image build hands it back to
-zellij's own parser.
+layout that would be sent; the image build hands that straight back to zellij's
+own parser.
 
 Pane commands are passed as argv and never through a shell, for the reason
 window layouts store argv vectors: nothing in a pane command can be read as a
@@ -1317,10 +1318,10 @@ degraded experience.
 
 Every one of those directories is the shell's own, asked of the shell rather
 than assumed: `fish -c 'echo $__fish_vendor_confdirs'` and
-`nu -c '$nu.vendor-autoload-dirs'` both name them. So no dotfile is edited and
-nothing has to run at first login. The image build asserts both that each file
-parses and that the shell really reads the directory it went into — a file one
-level off is never read, and nothing tells you.
+`nu -c '$nu.vendor-autoload-dirs'` both name them. Nothing edits a dotfile and
+nothing runs at first login. The image build asserts two things: that each file
+parses, and that the shell reads the directory it went into. A file one level
+off is never read, and nothing tells you.
 
 `tests/test-shell-agent.sh` runs a real `fish` and a real `nu` for every
 assertion, and compares the prompt output byte-for-byte with what `agent.sh`
@@ -1331,8 +1332,8 @@ installed, and refuses to report success if every section skipped.
 
 - **The opt-out.** `APEX_NO_AGENT_ALIASES` works in bash, zsh and fish. It
   cannot in nushell: `def`, `alias` and `extern` are parse-time declarations,
-  and putting one inside an `if` does not define it conditionally — it defines
-  nothing. nushell's own opt-out is `hide`, in `~/.config/nushell/config.nu`:
+  and putting one inside an `if` defines nothing at all rather than defining
+  it under a condition. nushell's own opt-out is `hide`, in `~/.config/nushell/config.nu`:
 
   ```nu
   hide a; hide aa; hide al; hide ad; hide aw; hide ap
@@ -1361,8 +1362,8 @@ installed, and refuses to report success if every section skipped.
   external command rather than wrappers. An unknown flag or an extra argument
   goes straight through to `apex`, so a signature that falls behind the CLI
   costs a completion and never refuses a command that works. That property is
-  asserted, because an `extern` that rejected valid arguments would make a
-  working command look unsupported — strictly worse than no completion.
+  asserted: an `extern` that rejected valid arguments would make a working
+  command look unsupported, which is worse than shipping no completion.
 
 - **nushell reads its autoload directory in the REPL only.** `nu -c '…'` and
   `nu script.nu` do not see it, so a script that wants `a` has to
