@@ -5,9 +5,10 @@ worktree: /var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell
 branch: roadmap/v2.2
 
 ## NEXT
-apex-os p0-005: ALL 10 COMMITS CHERRY-PICKED (tip a37dc71). Cherry-pick finished,
-no rebase in progress. Running verification (cargo test / shell suites).
-Recovery tags: int-os-prelanding-2 (9a24d2b), int-shell-prelanding-2 (d2d1f33).
+apex-os: PUSHED bb5b355 = 9a24d2b + the p1-002 scrub fix (coordinator's queue jump).
+Now re-applying the 10 already-resolved p0-005 commits, saved on local branch
+`int2-p0005-landed` (a37dc71). Recovery tags: int-os-prelanding-2 (9a24d2b),
+int-shell-prelanding-2 (d2d1f33).
 
 ## PLAN
 1. apex-os: cherry-pick d31257a..task/p0-005-permission-modes onto roadmap/v2.2 (9a24d2b)
@@ -63,3 +64,26 @@ failed on the first (fail-fast) run and passed on the --no-fail-fast rerun.
   (integrate-1's deliberate keep) and `an_option_must_be_written_as_a_pair`.
 - Everything else auto-merged: Containerfile.base, apexd/apex-agentd/src/main.rs,
   apexd/apex-agentd/src/session.rs, docs/agent-runtime.md.
+
+## OUT-OF-ORDER LANDING (coordinator instruction mid-task)
+8110944 `fix(secret): the one path out of a use that never scrubbed anything`
+from origin/task/p1-002-cloudflare landed and pushed ALONE, ahead of the three
+branches. Textually clean, but it does NOT compile against 9a24d2b: its new
+test `a_provider_that_puts_the_credential_in_an_error_does_not_get_to_hand_it_over`
+calls `use_capability(me(), record(..))` with two arguments, and P0-003's
+landing gave that method a third, `body: Vec<u8>`. Every one of the other 27
+call sites on the tip already passes `Vec::new()`. Added the same `Vec::new()`
+and amended the cherry-pick so the branch builds at every commit. Pushed as
+bb5b355. NOT a textual conflict; a one-token mechanical adaptation.
+apex-secretd bin tests 69 -> 70. Full suite 1512 passed + the known flake.
+
+## KNOWN PRE-EXISTING FLAKES (neither caused by this landing)
+- apex-secretd `tests::a_stale_socket_from_a_dead_daemon_is_replaced` — fails
+  intermittently under the full parallel run, passes 6/6 in isolation, and
+  ALSO failed once on the untouched 9a24d2b baseline.
+- apex-agentd `pty::tests::spawning_runs_the_real_program_on_a_real_terminal`
+  and `egress::tests::a_head_that_never_ends_is_abandoned_rather_than_held_open`
+  HUNG for 30+ min in one full run while two other agents' cargo runs were
+  live; the same two were hung for 1h and 5h in /var/tmp/apex-work/wt-p0-005's
+  own runs. Run alone: 86 passed / 0 failed in 2.01s. pty.rs and egress.rs are
+  not touched by any branch here. Cross-run contention, not a regression.
