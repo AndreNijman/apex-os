@@ -86,6 +86,41 @@ for f in "$MODULES"/*.lua; do
     render "$f" > "$H/.config/hypr/apex/$(basename "$f")"
 done
 
+# ── the autostart is commented out in the fixture, on purpose ────────────────
+# apex/session.lua's hyprland.start handler starts the real session: the shell
+# autostart, the polkit agent, two `wl-paste --watch` clipboard watchers and
+# `fcitx5 -d -r`, where -r means REPLACE a running instance. Those are absolute
+# paths and system binaries, so the fixture's restricted PATH does not stop
+# them, and a nested compositor is not a sandbox — they would reach the same
+# D-Bus and the same processes as the desktop session running this test. The
+# input method takeover is the sharp one: fcitx5 -r would evict the developer's
+# own IME while they are typing.
+#
+# Nothing this file tests needs them to actually run. That the REAL session.lua
+# parses, and that its exec targets exist, is proved in the image build by
+# `Hyprland --verify-config` over the unmodified tree.
+#
+# The hl.on registration is left intact: the "does not re-fire" assertion below
+# needs the event still wired up.
+sed -i 's|^\([[:space:]]*\)hl\.exec_cmd(|\1-- neutered by the harness: hl.exec_cmd(|' \
+    "$H/.config/hypr/apex/session.lua"
+if grep -qE '^[[:space:]]*hl\.exec_cmd\(' "$H/.config/hypr/apex/session.lua"; then
+    bad "the fixture starts nothing outside itself (session.lua execs are commented out)"
+else
+    ok "the fixture starts nothing outside itself (session.lua execs are commented out)"
+fi
+
+# The probe behind the "fires once" assertion. user-overrides.lua is loaded last
+# by hyprland.lua and is not shipped in the image, so the fixture owns the name.
+# It counts through Lua io rather than exec_cmd, so measuring the event does not
+# itself spawn anything.
+cat > "$H/.config/hypr/apex/user-overrides.lua" <<'PROBE'
+hl.on("hyprland.start", function()
+    local f = io.open(os.getenv("HOME") .. "/start-fired", "a")
+    if f then f:write("fired\n"); f:close() end
+end)
+PROBE
+
 # ── the headless host ────────────────────────────────────────────────────────
 env -i HOME="$H" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$RT" \
     WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 \
