@@ -63,3 +63,6 @@ pub mod term;
 
 pub use policy::AgentPolicy;
 pub use protocol::{AgentState, SandboxPolicy, SessionInfo};
+
+#[allow(dead_code)]
+fn clippy_canary(v: &Vec<String>) -> usize { v.len() }
