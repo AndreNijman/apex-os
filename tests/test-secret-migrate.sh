@@ -83,7 +83,30 @@ chmod 0700 "$XDG_RUNTIME_DIR"
 cat > "${WORK}/server.py" <<'PY'
 import http.server, json, sys, threading
 seen = []
+def pkt(payload):
+    return ("%04x" % (len(payload) + 4)).encode() + payload
+
 class H(http.server.BaseHTTPRequestHandler):
+    # git's smart-HTTP ref advertisement, so a *git* credential can be verified
+    # against this same fixture. Without an Authorization header it 401s with a
+    # Basic challenge, which is what makes git ask its credential helper.
+    def do_GET(self):
+        auth = self.headers.get("Authorization")
+        with open(sys.argv[2], "a") as f:
+            f.write((auth or "<none>") + "\n")
+        if not auth:
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="apex-test"')
+            self.send_header("Content-Length", "0")
+            self.end_headers(); return
+        body = (pkt(b"# service=git-upload-pack\n") + b"0000"
+                + pkt(b"0" * 40 + b" capabilities^{}\x00agent=apex-test\n") + b"0000")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-git-upload-pack-advertisement")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         auth = self.headers.get("Authorization")
         n = int(self.headers.get("Content-Length", 0))
@@ -156,6 +179,34 @@ git -C "$PROJ" init -q
 git -C "$PROJ" config user.email t@t
 git -C "$PROJ" config user.name t
 git -C "$PROJ" commit -q --allow-empty -m init
+git -C "$PROJ" remote add origin "http://127.0.0.1:${PORT}/demo.git"
+
+# ── the old broker's leftovers ───────────────────────────────────────────────
+# P0-002 named this directory and deliberately left it alone: a file that may
+# hold the only copy of a token is not something a `list` command deletes on its
+# own. It said a real migration belongs with P0-003. This is that, and the
+# fixture is the shape the old broker actually wrote — metadata and the token in
+# one 0600 JSON file, with the grants in a second one beside it.
+FAKE_LEGACY="apex-migrate-fixture-legacy-do-not-use"
+OLD="${XDG_STATE_HOME}/apex/agent/secrets"
+mkdir -p "$OLD"
+cat > "${OLD}/legacy-git.json" <<JSON
+{"service": "legacy-git", "host": "127.0.0.1", "scheme": "http",
+ "username": "x-access-token", "backend": "file", "added": 1,
+ "token": "${FAKE_LEGACY}"}
+JSON
+chmod 0600 "${OLD}/legacy-git.json"
+# A keyring-backed record: the metadata is here and the value is not, so there
+# is nothing to carry. It must be NAMED rather than silently dropped.
+cat > "${OLD}/legacy-keyring.json" <<'JSON'
+{"service": "legacy-keyring", "host": "gitlab.com",
+ "username": "x-access-token", "backend": "keyring", "added": 1}
+JSON
+chmod 0600 "${OLD}/legacy-keyring.json"
+cat > "${XDG_STATE_HOME}/apex/agent/secret-grants.json" <<JSON
+{"projects": {"${PROJ}": ["legacy-git:git-ls-remote", "legacy-git:git-fetch"]}}
+JSON
+ok "the old broker's store has one file credential, one keyring record and two grants"
 
 # ── dry run ──────────────────────────────────────────────────────────────────
 section "a dry run says what it would do and writes nothing"
@@ -170,6 +221,12 @@ printf '%s' "$out" | grep -q "would  store fixture-memory" \
 printf '%s' "$out" | grep -q "hands a credential to a program it spawns" \
     && ok "the dry run named the stdio server it cannot help with" \
     || bad "the dry run named the stdio server it cannot help with"
+printf '%s' "$out" | grep -q "would  store legacy-git" \
+    && ok "the dry run found the old broker's file credential" \
+    || bad "the dry run found the old broker's file credential"
+printf '%s' "$out" | grep -q "legacy-keyring.json holds no value" \
+    && ok "the dry run named the keyring record it cannot read" \
+    || bad "the dry run named the keyring record it cannot read"
 printf '%s' "$out" | grep -q "ACME_API_KEY .*nothing here knows which host" \
     && ok "a credential whose host nobody can work out is named, not guessed at" \
     || bad "a credential whose host nobody can work out is named, not guessed at"
@@ -201,6 +258,33 @@ printf '%s' "$list" | grep -q "$FAKE_BEARER\|$FAKE_PAT" \
 grep -q "$FAKE_BEARER" "${HOME}/.claude.json" \
     && ok "an unverifiable credential was left in place, as it must be" \
     || bad "an unverifiable credential was removed anyway"
+
+# ── the old broker's store, closed out ───────────────────────────────────────
+# This one IS verifiable on the first run: its grants came across from the old
+# store, and the fixture project's origin is the fixture server. So it is the
+# one credential here that goes all the way through store, verify and remove in
+# a single pass — which is what an upgraded machine's leftovers should do.
+printf '%s' "$out" | grep -q "grant(s) from the old broker" \
+    && ok "the old broker's grants were carried across" \
+    || bad "the old broker's grants were carried across"
+"$APEX" secret grants 2>/dev/null | grep -q "legacy-git:git-ls-remote" \
+    && ok "and the secret service now holds them" \
+    || { bad "and the secret service now holds them"; "$APEX" secret grants; }
+grep -q "Basic" "${WORK}/seen" \
+    && ok "the legacy credential was verified against the fixture server" \
+    || { bad "the legacy credential was verified against the fixture server"; cat "${WORK}/seen" 2>/dev/null; }
+[ ! -e "${OLD}/legacy-git.json" ] \
+    && ok "the old broker's plaintext file is gone" \
+    || bad "the old broker's plaintext file is gone"
+[ -e "${OLD}/legacy-keyring.json" ] \
+    && ok "the keyring record, which holds no value, was not deleted" \
+    || bad "the keyring record, which holds no value, was not deleted"
+if grep -rq "$FAKE_LEGACY" "$XDG_STATE_HOME" 2>/dev/null; then
+    printf '      still in: %s\n' "$(grep -rl "$FAKE_LEGACY" "$XDG_STATE_HOME" 2>/dev/null | tr '\n' ' ')"
+    bad "no copy of the legacy credential is left in the home"
+else
+    ok "no copy of the legacy credential is left in the home"
+fi
 
 # ── grant, then migrate again ────────────────────────────────────────────────
 section "with a grant, the second run verifies and removes"
@@ -271,12 +355,12 @@ grep -qx ok "${WORK}/set.out" \
 
 # ── nothing leaked ───────────────────────────────────────────────────────────
 section "no credential is anywhere it should not be"
-if grep -rq "$FAKE_BEARER" "${WORK}/secretd.log" 2>/dev/null; then
+if grep -rqE "$FAKE_BEARER|$FAKE_LEGACY" "${WORK}/secretd.log" 2>/dev/null; then
     bad "the daemon logged the credential"
 else
     ok "the daemon logged no credential"
 fi
-if grep -q "$FAKE_BEARER" "${APEX_SECRETD_STORE}/audit.jsonl" 2>/dev/null; then
+if grep -qE "$FAKE_BEARER|$FAKE_LEGACY" "${APEX_SECRETD_STORE}/audit.jsonl" 2>/dev/null; then
     bad "the audit trail carries the credential"
 else
     ok "the audit trail carries no credential"
