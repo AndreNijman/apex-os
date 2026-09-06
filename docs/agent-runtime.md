@@ -233,6 +233,15 @@ grant issued today. The grant pre-decides; it does not pre-execute. An
 approved request still runs through `apex request approve`, under the approving
 human's own root, and nothing in this module runs anything.
 
+The two authorities are recorded apart. A request a per-project grant allowed
+is filed `allow_for_project`, which is what the next identical request in that
+project will find. A request a session grant covered is filed `allow_once` and
+carries the grant's id, because the window it came from can be revoked or run
+out before the next request — filing it as a standing project grant would put
+a permission in the audit trail that no human ever gave and that nothing on
+disk backs. The id is also what joins this trail to the `APEX_GRANT_ID` line
+journald holds for the same window.
+
 ### Where the authority lives, and why not on disk
 
 `apex-agentd` runs as the user. A `--sandbox unrestricted` session runs as the
