@@ -192,7 +192,7 @@ fn devices(json: bool) -> Result<i32> {
         println!("no devices paired. `apex remote pair` shows a code.");
         return Ok(0);
     }
-    println!("{:<18} {:<20} {:<9} {:<8} {}", "ID", "NAME", "STATE", "PATH", "LAST SEEN");
+    println!("{:<18} {:<20} {:<9} {:<8} LAST SEEN", "ID", "NAME", "STATE", "PATH");
     for d in &devices {
         println!(
             "{:<18} {:<20} {:<9} {:<8} {}",
