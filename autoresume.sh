@@ -54,6 +54,30 @@ if [ "${remaining:-1}" = 0 ]; then
     exit 0
 fi
 
+# ── Is someone already working? ─────────────────────────────────────────────
+# The first time this timer fired it launched a second orchestrator alongside a
+# live one, and two orchestrators dispatching from the same queue would fight
+# over the same branches. The signal that settles it is the same one resume.sh
+# uses to judge an agent alive: when did anything last get written.
+#
+# A subagent output file touched in the last 20 minutes means work is in flight.
+# A heartbeat file touched in the last 45 minutes means an orchestrator is alive
+# even with no agents running. Either one means stay out of the way.
+busy=""
+if [ -n "$(find /tmp/claude-*/-var-home-andre-Projects-apex/*/tasks -name '*.output' -mmin -20 2>/dev/null | head -1)" ]; then
+    busy="agents are still writing output"
+elif [ -r "$STATE/orchestrator.pid" ] \
+     && kill -0 "$(cat "$STATE/orchestrator.pid")" 2>/dev/null \
+     && tr '\0' ' ' < "/proc/$(cat "$STATE/orchestrator.pid")/cmdline" 2>/dev/null | grep -q claude; then
+    busy="the orchestrator process $(cat "$STATE/orchestrator.pid") is still alive"
+elif [ -n "$(find "$STATE" -maxdepth 1 -name orchestrator.heartbeat -mmin -45 2>/dev/null)" ]; then
+    busy="an orchestrator heartbeat is less than 45 minutes old"
+fi
+if [ -n "$busy" ]; then
+    say "skipped: $busy"
+    exit 0
+fi
+
 # One at a time. flock rather than a pid file: a killed session releases it.
 exec 9>"$LOCK"
 if ! flock -n 9; then
