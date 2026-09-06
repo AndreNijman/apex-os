@@ -222,6 +222,7 @@ fn block_termination_signals() {
 /// is to end the session, and that is what this does.
 fn spawn_expiry_thread(daemon: Arc<Daemon>) {
     use apex_agent_core::grant::SystemGrant;
+    use apex_agent_core::lock::{LockWatch, Loginctl};
 
     std::thread::Builder::new()
         .name("apex-agentd-grants".into())
@@ -231,6 +232,15 @@ fn spawn_expiry_thread(daemon: Arc<Daemon>) {
             // session, because what is being tracked is a promise the audit
             // trail made and not a property of the process.
             let mut ending: Vec<SystemGrant> = Vec::new();
+            // §7's lock rules. This thread rather than a second one because
+            // the two jobs are the same job: both end with a grant closing
+            // and a session that cannot outlive it, and sharing `ending`
+            // means a break-glass session revoked by a screen lock gets the
+            // same SIGTERM-then-SIGKILL escalation as one whose window ran
+            // out. A separate thread would have needed its own copy of that,
+            // which is exactly how the two paths would drift apart.
+            let mut watch = LockWatch::new();
+            let mut observer = Loginctl::new();
             loop {
                 std::thread::sleep(EXPIRY_TICK);
                 let now = request::now_ms();
@@ -240,61 +250,230 @@ fn spawn_expiry_thread(daemon: Arc<Daemon>) {
                     if !ends_session {
                         continue;
                     }
-                    let Some(handle) = lookup(&daemon, grant.session) else {
-                        continue;
-                    };
-                    let mut s = handle.lock().expect("session lock");
-                    if !s.info.is_live() {
-                        continue;
+                    if end_session_for_grant(
+                        &daemon,
+                        &grant,
+                        "its break-glass window is over and no_new_privs cannot be put back on \
+                         a running process",
+                        now,
+                    ) {
+                        ending.push(grant);
                     }
-                    eprintln!(
-                        "apex-agentd: ending session {} — its break-glass window is over and \
-                         no_new_privs cannot be put back on a running process",
-                        grant.session
-                    );
-                    registry::terminate(&mut s);
-                    registry::write_record(&s.info);
-                    drop(s);
-                    // A separate line from the grant's own `expired`, and it
-                    // deliberately does not claim the session is gone. The
-                    // grant expiring and the process ending are two facts, and
-                    // an `expired` line that implied the second would be a log
-                    // that lies in exactly the case that matters: a session
-                    // that declined SIGTERM and still has root.
-                    grant_note(&grant, "session-ending", now);
-                    ending.push(grant);
                 }
 
-                // The escalation, and then the confirmation. `SIGTERM` is a
-                // request; §3.4's expiry is not.
-                ending.retain(|grant| {
-                    let Some(handle) = lookup(&daemon, grant.session) else {
-                        grant_note(grant, "session-ended", now);
-                        return false;
-                    };
-                    let mut s = handle.lock().expect("session lock");
-                    if !s.info.is_live() {
-                        grant_note(grant, "session-ended", now);
-                        return false;
-                    }
-                    let asked = s.closing_since_ms.unwrap_or(now);
-                    if now.saturating_sub(asked) >= registry::TERMINATE_GRACE_MS
-                        && registry::force_kill(&mut s)
-                    {
-                        eprintln!(
-                            "apex-agentd: session {} did not exit within {}ms of its break-glass \
-                             window ending; killed",
-                            grant.session,
-                            registry::TERMINATE_GRACE_MS
-                        );
-                        drop(s);
-                        grant_note(grant, "session-killed", now);
-                    }
-                    true
-                });
+                lock_tick(&daemon, &mut watch, &mut observer, &mut ending, now);
+
+                escalate_ending(&daemon, &mut ending, now);
             }
         })
         .ok();
+}
+
+/// Ask a session to end because the grant it was running under has closed.
+///
+/// Shared by expiry and by revoke-on-lock, and that sharing is the point:
+/// closing a break-glass grant is not the same thing as ending its session,
+/// because `PR_SET_NO_NEW_PRIVS` was cleared between `fork` and `exec` and no
+/// process can put it back. A revocation that only dropped the grant from the
+/// authority's map would leave a session that still has root and a record
+/// saying it does not.
+///
+/// Returns whether the session is still live and therefore has to be watched
+/// through [`escalate_ending`].
+fn end_session_for_grant(
+    daemon: &Arc<Daemon>,
+    grant: &apex_agent_core::grant::SystemGrant,
+    why: &str,
+    now: u64,
+) -> bool {
+    let Some(handle) = lookup(daemon, grant.session) else {
+        return false;
+    };
+    let mut s = handle.lock().expect("session lock");
+    if !s.info.is_live() {
+        return false;
+    }
+    eprintln!("apex-agentd: ending session {} — {why}", grant.session);
+    registry::terminate(&mut s);
+    registry::write_record(&s.info);
+    drop(s);
+    // A separate line from the grant's own closure, and it deliberately does
+    // not claim the session is gone. The grant ending and the process ending
+    // are two facts, and a line that implied the second would be a log that
+    // lies in exactly the case that matters: a session that declined SIGTERM
+    // and still has root.
+    grant_note(grant, "session-ending", now);
+    true
+}
+
+/// The escalation, and then the confirmation. `SIGTERM` is a request; §3.4's
+/// expiry is not, and neither is §7's revoke-on-lock.
+fn escalate_ending(
+    daemon: &Arc<Daemon>,
+    ending: &mut Vec<apex_agent_core::grant::SystemGrant>,
+    now: u64,
+) {
+    ending.retain(|grant| {
+        let Some(handle) = lookup(daemon, grant.session) else {
+            grant_note(grant, "session-ended", now);
+            return false;
+        };
+        let mut s = handle.lock().expect("session lock");
+        if !s.info.is_live() {
+            grant_note(grant, "session-ended", now);
+            return false;
+        }
+        let asked = s.closing_since_ms.unwrap_or(now);
+        if now.saturating_sub(asked) >= registry::TERMINATE_GRACE_MS && registry::force_kill(&mut s)
+        {
+            eprintln!(
+                "apex-agentd: session {} did not exit within {}ms of its grant ending; killed",
+                grant.session,
+                registry::TERMINATE_GRACE_MS
+            );
+            drop(s);
+            grant_note(grant, "session-killed", now);
+        }
+        true
+    });
+}
+
+/// One observation of the screen, and whatever §7 says follows from it.
+///
+/// The policy is re-read from the configuration file on every tick rather
+/// than taken from `daemon.config`, which is loaded once at startup. A lock
+/// rule that needed the runtime restarted before it applied would be a
+/// setting that lies about when it takes effect, and `apex agent lock` is
+/// meant to be something the owner changes and then walks away from the
+/// machine.
+fn lock_tick(
+    daemon: &Arc<Daemon>,
+    watch: &mut apex_agent_core::lock::LockWatch,
+    observer: &mut dyn apex_agent_core::lock::LockObserver,
+    ending: &mut Vec<apex_agent_core::grant::SystemGrant>,
+    now: u64,
+) {
+    use apex_agent_core::lock::{GrantView, SessionView};
+
+    let state = observer.observe();
+    let policy = Config::load().lock;
+
+    let sessions: Vec<SessionView> = daemon
+        .registry
+        .lock()
+        .expect("registry lock")
+        .list()
+        .into_iter()
+        .filter_map(|h| {
+            let s = h.lock().expect("session lock");
+            s.info.is_live().then(|| SessionView {
+                id: s.info.id,
+                origin: s.info.request_origin,
+                paused: s.info.paused,
+            })
+        })
+        .collect();
+    let grants: Vec<GrantView> = daemon
+        .grants
+        .active(now)
+        .into_iter()
+        .map(|g| GrantView { id: g.id })
+        .collect();
+
+    let actions = watch.step(&policy, &state, &sessions, &grants);
+    if actions.is_empty() {
+        return;
+    }
+    if let Some(why) = state.reason() {
+        eprintln!(
+            "apex-agentd: the screen state could not be read ({why}), which §7's rules treat \
+             as locked"
+        );
+    }
+
+    for (id, why) in actions.hold {
+        hold_session(daemon, id, &why);
+    }
+    for id in actions.resume {
+        resume_session(daemon, id);
+    }
+    for id in actions.revoke {
+        match daemon.grants.revoke(id, now) {
+            Ok(grant) => {
+                eprintln!(
+                    "apex-agentd: {} — the screen locked, and §7 revokes short-lived root \
+                     grants by default (`apex agent lock --root-grants keep` to stop this)",
+                    grant.describe(now, daemon.grants.boot())
+                );
+                if grant.kind.expiry_ends_the_session()
+                    && end_session_for_grant(
+                        daemon,
+                        &grant,
+                        "the screen locked, its break-glass grant was revoked, and \
+                         no_new_privs cannot be put back on a running process",
+                        now,
+                    )
+                {
+                    ending.push(grant);
+                }
+            }
+            // Not an error worth failing over: a grant can expire between the
+            // list and the revoke, and the outcome is the one that was
+            // wanted either way.
+            Err(e) => eprintln!("apex-agentd: grant {id} was not revoked on lock: {e}"),
+        }
+    }
+}
+
+/// Stop a session because the screen is locked.
+///
+/// The same `SIGSTOP` and the same `paused` flag `apex agent pause` sets, so
+/// there is one notion of a stopped session rather than two. The flag is set
+/// only after the signal succeeded, for the reason `Request::Signal` gives:
+/// a flag set first would claim a session was paused when the signal failed.
+fn hold_session(daemon: &Arc<Daemon>, id: u32, why: &str) {
+    let Some(handle) = lookup(daemon, id) else {
+        return;
+    };
+    let mut s = handle.lock().expect("session lock");
+    if !s.info.is_live() {
+        return;
+    }
+    match pty::signal_group(s.pgid, libc::SIGSTOP) {
+        Ok(()) => {
+            s.info.paused = true;
+            s.info.detail = Some("held — the screen is locked".to_string());
+            registry::write_record(&s.info);
+            eprintln!("apex-agentd: session {id} held — {why}");
+        }
+        // The watch has already recorded the hold, so the unlock will send a
+        // SIGCONT to a session that was never stopped, which is harmless. The
+        // line is here so the log does not claim a hold that did not happen.
+        Err(e) => eprintln!("apex-agentd: session {id} could not be held ({e})"),
+    }
+}
+
+/// Start a session again because the screen was unlocked.
+///
+/// Only ever called for a session this daemon's own lock watch stopped —
+/// a session the user paused by hand is never held, so it is never resumed.
+fn resume_session(daemon: &Arc<Daemon>, id: u32) {
+    let Some(handle) = lookup(daemon, id) else {
+        return;
+    };
+    let mut s = handle.lock().expect("session lock");
+    if !s.info.is_live() {
+        return;
+    }
+    match pty::signal_group(s.pgid, libc::SIGCONT) {
+        Ok(()) => {
+            s.info.paused = false;
+            s.info.detail = None;
+            registry::write_record(&s.info);
+            eprintln!("apex-agentd: session {id} resumed — the screen was unlocked");
+        }
+        Err(e) => eprintln!("apex-agentd: session {id} could not be resumed ({e})"),
+    }
 }
 
 /// One more line about a grant that has already ended, in both trails.
