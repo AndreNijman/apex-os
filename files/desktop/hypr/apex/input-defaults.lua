@@ -63,10 +63,10 @@ hl.config({
             natural_scroll          = true,
             tap_to_click            = true,
             tap_and_drag            = true,
-            drag_lock               = true,
+            drag_lock               = false,
             disable_while_typing    = true,
             middle_button_emulation = false,
-            clickfinger_behavior    = true,
+            clickfinger_behavior    = false,
             tap_button_map          = "lrm",
             scroll_factor           = 1.0,
             -- 0 off, 1 three fingers, 2 four.
