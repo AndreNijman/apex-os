@@ -230,12 +230,24 @@ pub enum AgentCmd {
     /// that is from the connection, so there is no id to pass and no way to
     /// speak about another session.
     ///
-    /// The declaration can only ever cost the session something. A local
+    /// Run from anywhere else it narrows the *connection* instead, for as long
+    /// as that connection is open. That is only useful to a program holding
+    /// the socket open across several requests, which is what `apex-remoted`
+    /// does; one `apex agent origin` from a shell narrows a connection that
+    /// closes immediately afterwards, and the command says so.
+    ///
+    /// The declaration can only ever cost the caller something. A local
     /// session may hand itself to Remote Control; nothing may declare itself
     /// local, and a Remote Control session may not declare its way back out.
     Origin {
         /// claude-remote-control | scheduled-job | mcp | subagent | cloud-job
         origin: String,
+        /// Which remote actor this is being declared for: a paired device id,
+        /// a host name, a job name. Recorded beside the origin on sessions and
+        /// privilege requests. Never a key or a token — it is printed on the
+        /// prompt a human reads before approving root.
+        #[arg(long)]
+        actor: Option<String>,
     },
     /// Forget a finished session and delete its transcript.
     Rm { id: u32 },
@@ -694,7 +706,7 @@ pub fn agent(cmd: AgentCmd) -> i32 {
         } => event(state, session, detail),
         AgentCmd::Hook { event } => return hook(&event),
         AgentCmd::Statusline => return statusline(),
-        AgentCmd::Origin { origin } => declare_origin(&origin),
+        AgentCmd::Origin { origin, actor } => declare_origin(&origin, actor),
         AgentCmd::Rm { id } => remove(id),
         AgentCmd::Prune => prune(),
         AgentCmd::Enable => enable(),
@@ -2018,10 +2030,11 @@ fn policy_decision(payload: &hook_core::Payload) -> Option<String> {
 /// be pointed at another session and does not read `$APEX_AGENT_SESSION`.
 /// Handing a session id to a verb that changes a permission-relevant property
 /// is exactly what the privilege verbs avoid, and for the same reason.
-fn declare_origin(origin: &str) -> Result<i32> {
+fn declare_origin(origin: &str, actor: Option<String>) -> Result<i32> {
     let wanted = parse_request_origin(origin).map_err(|e| anyhow::anyhow!("{e}"))?;
     match client::call(&Request::DeclareOrigin {
         origin: wanted.as_str().to_string(),
+        actor,
     })? {
         Response::Session(info) => {
             eprintln!(
@@ -2030,6 +2043,19 @@ fn declare_origin(origin: &str) -> Result<i32> {
                 info.request_origin
                     .map(|o| o.to_string())
                     .unwrap_or_else(|| "unrecorded".into())
+            );
+            Ok(0)
+        }
+        // The connection case. Said plainly rather than reported as a success,
+        // because from a shell it IS a no-op: `client::call` opens a
+        // connection, sends one request and closes it, so the latch it just
+        // set is gone before the next command runs. A program that holds the
+        // socket is the only caller this helps, and a user typing it deserves
+        // to be told that rather than left believing something was recorded.
+        Response::Ok => {
+            eprintln!(
+                "apex: this connection is now {wanted}, and it closes when this command exits — \
+                 a declaration on a connection lasts only as long as the connection"
             );
             Ok(0)
         }

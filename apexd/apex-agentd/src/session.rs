@@ -21,7 +21,7 @@ use apex_agent_core::session as logic;
 use apex_agent_core::term::WinSize;
 
 use crate::egress;
-use crate::peer::Peer;
+use crate::privilege::Caller;
 use crate::pty;
 use crate::registry::{self, now_secs, Handle};
 use crate::Daemon;
@@ -39,7 +39,7 @@ const POLL_INTERVAL_MS: i32 = 1000;
 /// reason the privilege verbs take it: the origin has to come from the
 /// kernel's view of who connected, and a handler that could reach for the
 /// request instead would eventually do so.
-pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Result<SessionInfo> {
+pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<SessionInfo> {
     let cwd = PathBuf::from(&req.cwd);
     if !cwd.is_absolute() {
         bail!("working directory {} must be absolute", cwd.display());
@@ -112,7 +112,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     //
     // Refused rather than defaulted when it cannot be established: the default
     // is `local-terminal`, which is what §7 reserves root for.
-    let who = crate::privilege::origin(daemon, peer);
+    let who = crate::privilege::origin(daemon, caller);
     let session_origin = crate::privilege::for_new_session(&who, req.request_origin)
         .map_err(OriginRefused)?;
 
@@ -145,7 +145,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
             let (grant_origin, proof) = crate::privilege::authorise_grant(
                 daemon,
                 &who,
-                peer,
+                caller,
                 kind,
                 "ask for a system-access grant",
             )
@@ -466,6 +466,11 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         policy,
         request_origin: Some(session_origin.origin),
         origin_source: Some(session_origin.source),
+        // Which remote device asked for this session, when the connection
+        // that asked named one. Carried from the connection rather than from
+        // the `Run` request: a session that could name its own actor could
+        // name somebody else's phone.
+        actor: who.actor.clone(),
         grant: issued.as_ref().map(|g| g.id),
         grant_expires_ms: issued.as_ref().map(|g| g.expires_ms),
         // Nothing has been heard from the agent yet. Claude fills this in on
