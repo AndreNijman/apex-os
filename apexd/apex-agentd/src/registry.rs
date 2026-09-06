@@ -543,7 +543,6 @@ pub fn terminate(session: &mut Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_agent_core::protocol::SandboxPolicy;
 
     /// A store of this test's own.
     ///
@@ -594,7 +593,7 @@ mod tests {
             state: AgentState::Starting,
             detail: None,
             paused: false,
-            sandbox: SandboxPolicy::Project,
+            policy: apex_agent_core::AgentPolicy::default(),
             pid: 0,
             started: 0,
             last_activity: 0,
