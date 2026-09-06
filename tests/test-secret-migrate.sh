@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  `apex secret migrate` against a fixture home (P0-003).
+#
+#  The migration reads a value, stores it somewhere else, and deletes the
+#  original. That order is the whole safety argument, and it is what this
+#  asserts:
+#
+#      store, verify, and only then remove — so an interrupted run leaves a
+#      machine that still has its credentials;
+#
+#      and the value that arrives at the far end is the value that left, which
+#      is checked by a loopback MCP server recording the header it was sent.
+#
+#  NOTHING HERE TOUCHES YOUR OWN CREDENTIALS. HOME, XDG_STATE_HOME and
+#  XDG_CONFIG_HOME all point inside a fixture under /var/tmp, the secret service
+#  runs on a private socket with a private store, and every credential in it is
+#  an obvious fake. The one thing asserted about the real machine is that
+#  nothing under the real $HOME was read or written, which the fixture's own
+#  isolation gives for free.
+#
+#      ./tests/test-secret-migrate.sh
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+set +e
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK="$(mktemp -d -p /var/tmp apex-migrate-XXXXXX)"
+
+pass=0; fail=0
+ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
+bad() { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
+section() { printf '\n── %s ──\n' "$1"; }
+
+SECRETD_PID=""; SERVER_PID=""
+cleanup() {
+    for p in "$SECRETD_PID" "$SERVER_PID"; do
+        [ -n "$p" ] || continue
+        kill "$p" 2>/dev/null
+        for _ in 1 2 3 4 5; do kill -0 "$p" 2>/dev/null || break; sleep 0.2; done
+        kill -9 "$p" 2>/dev/null
+    done
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+for tool in cargo python3 curl; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "FATAL: $tool is required; this suite cannot test anything without it" >&2
+        exit 2
+    }
+done
+
+section "the binaries"
+if ! cargo build --manifest-path "${ROOT}/apexd/Cargo.toml" \
+        --bin apex --bin apex-secretd >/dev/null 2>&1; then
+    bad "apex and apex-secretd build"
+    printf '\nmigrate: %d passed, %d failed\n' "$pass" "$fail"
+    exit 1
+fi
+ok "apex and apex-secretd build"
+BIN="${CARGO_TARGET_DIR:-${ROOT}/apexd/target}/debug"
+APEX="${BIN}/apex"
+SECRETD="${BIN}/apex-secretd"
+
+# Two obvious fakes. Every assertion below is that one of these is somewhere or
+# — much more often — that it is not.
+FAKE_PAT="ghp-apex-migrate-fixture-pat-do-not-use"
+FAKE_BEARER="apex-migrate-fixture-bearer-do-not-use"
+
+# ── the fixture ──────────────────────────────────────────────────────────────
+section "a fixture home with plaintext credentials in it"
+export HOME="${WORK}/home"
+export XDG_STATE_HOME="${WORK}/state"
+export XDG_CONFIG_HOME="${WORK}/config"
+export XDG_RUNTIME_DIR="${WORK}/run"
+mkdir -p "${HOME}/.claude" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
+chmod 0700 "$XDG_RUNTIME_DIR"
+
+# A loopback MCP server that demands the bearer token and records what it got.
+# `http` on a loopback host is the one scheme the store allows besides https,
+# precisely so this path can be exercised without a certificate authority.
+cat > "${WORK}/server.py" <<'PY'
+import http.server, json, sys, threading
+seen = []
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        auth = self.headers.get("Authorization")
+        n = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(n)
+        with open(sys.argv[2], "a") as f:
+            f.write((auth or "<none>") + "\n")
+        if not auth:
+            self.send_response(401); self.send_header("Content-Length", "0")
+            self.end_headers(); return
+        body = json.dumps({"jsonrpc": "2.0", "id": 1,
+                           "result": {"protocolVersion": "2025-06-18",
+                                      "serverInfo": {"name": "fixture"}}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+with open(sys.argv[1], "w") as f:
+    f.write(str(srv.server_address[1]))
+srv.serve_forever()
+PY
+python3 "${WORK}/server.py" "${WORK}/port" "${WORK}/seen" &
+SERVER_PID=$!
+for _ in $(seq 1 60); do [ -s "${WORK}/port" ] && break; sleep 0.1; done
+PORT="$(cat "${WORK}/port" 2>/dev/null)"
+[ -n "$PORT" ] && ok "the fixture MCP server is listening on 127.0.0.1:${PORT}" \
+               || { bad "the fixture MCP server is listening"; exit 1; }
+
+cat > "${HOME}/.claude/settings.json" <<JSON
+{
+  "model": "opus",
+  "theme": "dark",
+  "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${FAKE_PAT}",
+          "ACME_API_KEY": "an-unknown-provider",
+          "CLAUDE_CODE_ENABLE_TELEMETRY": "1"}
+}
+JSON
+cat > "${HOME}/.claude.json" <<JSON
+{
+  "machineID": "fixture",
+  "mcpServers": {
+    "fixture-memory": {"type": "http", "url": "http://127.0.0.1:${PORT}/mcp",
+                       "headers": {"Authorization": "Bearer ${FAKE_BEARER}"}},
+    "local-tool": {"command": "npx", "args": ["-y", "x"],
+                   "env": {"SOME_API_TOKEN": "handed-to-a-local-process"}}
+  }
+}
+JSON
+chmod 0600 "${HOME}/.claude.json"
+ok "the fixture home has a PAT in settings.json and a bearer token in .claude.json"
+
+# ── the secret service, on a private socket and store ────────────────────────
+section "a private secret service"
+export APEX_SECRETD_SOCKET="${WORK}/secretd.sock"
+export APEX_SECRETD_STORE="${WORK}/store"
+"$SECRETD" --socket "$APEX_SECRETD_SOCKET" --store "$APEX_SECRETD_STORE" \
+    > "${WORK}/secretd.log" 2>&1 &
+SECRETD_PID=$!
+for _ in $(seq 1 100); do [ -S "$APEX_SECRETD_SOCKET" ] && break; sleep 0.1; done
+[ -S "$APEX_SECRETD_SOCKET" ] && ok "the secret service came up on a private socket" \
+    || { bad "the secret service came up"; cat "${WORK}/secretd.log"; exit 1; }
+
+# A project, because a capability is granted per project and verification is a
+# use. Migration runs from inside it.
+PROJ="${WORK}/proj"
+mkdir -p "$PROJ"
+git -C "$PROJ" init -q
+git -C "$PROJ" config user.email t@t
+git -C "$PROJ" config user.name t
+git -C "$PROJ" commit -q --allow-empty -m init
+
+# ── dry run ──────────────────────────────────────────────────────────────────
+section "a dry run says what it would do and writes nothing"
+out="$(cd "$PROJ" && "$APEX" secret migrate --dry-run 2>&1)"
+printf '%s\n' "$out" | sed 's/^/      | /'
+printf '%s' "$out" | grep -q "would  store github" \
+    && ok "the dry run found the PAT in settings.json" \
+    || bad "the dry run found the PAT in settings.json"
+printf '%s' "$out" | grep -q "would  store fixture-memory" \
+    && ok "the dry run found the MCP bearer token" \
+    || bad "the dry run found the MCP bearer token"
+printf '%s' "$out" | grep -q "hands a credential to a program it spawns" \
+    && ok "the dry run named the stdio server it cannot help with" \
+    || bad "the dry run named the stdio server it cannot help with"
+printf '%s' "$out" | grep -q "ACME_API_KEY .*nothing here knows which host" \
+    && ok "a credential whose host nobody can work out is named, not guessed at" \
+    || bad "a credential whose host nobody can work out is named, not guessed at"
+grep -q "$FAKE_PAT" "${HOME}/.claude/settings.json" \
+    && ok "the dry run wrote nothing to settings.json" \
+    || bad "the dry run changed settings.json"
+"$APEX" secret list --json 2>/dev/null | grep -q "fixture-memory" \
+    && bad "the dry run stored something" \
+    || ok "the dry run stored nothing"
+
+# ── the real run ─────────────────────────────────────────────────────────────
+section "the migration"
+out="$(cd "$PROJ" && "$APEX" secret migrate 2>&1)"
+printf '%s\n' "$out" | sed 's/^/      | /'
+
+# Both credentials are stored, whatever happened to the originals: store comes
+# first, and it is the step that must never be skipped.
+list="$("$APEX" secret list --json 2>/dev/null)"
+printf '%s' "$list" | grep -q '"fixture-memory"' \
+    && ok "the MCP credential is in the store" || bad "the MCP credential is in the store"
+printf '%s' "$list" | grep -q '"github"' \
+    && ok "the GitHub credential is in the store" || bad "the GitHub credential is in the store"
+printf '%s' "$list" | grep -q "$FAKE_BEARER\|$FAKE_PAT" \
+    && bad "apex secret list printed a credential" \
+    || ok "apex secret list printed neither credential"
+
+# The MCP one had no grant on this first run, so it was stored and KEPT. That
+# is the discipline working, not a failure.
+grep -q "$FAKE_BEARER" "${HOME}/.claude.json" \
+    && ok "an unverifiable credential was left in place, as it must be" \
+    || bad "an unverifiable credential was removed anyway"
+
+# ── grant, then migrate again ────────────────────────────────────────────────
+section "with a grant, the second run verifies and removes"
+(cd "$PROJ" && "$APEX" secret grant fixture-memory mcp-request >/dev/null 2>&1)
+out="$(cd "$PROJ" && "$APEX" secret migrate 2>&1)"
+printf '%s\n' "$out" | sed 's/^/      | /'
+
+grep -q "Bearer ${FAKE_BEARER}" "${WORK}/seen" \
+    && ok "the credential reached the MCP server, sent by the daemon" \
+    || { bad "the credential never reached the MCP server"; cat "${WORK}/seen" 2>/dev/null; }
+grep -q "$FAKE_BEARER" "${HOME}/.claude.json" \
+    && bad "the bearer token is still in ~/.claude.json" \
+    || ok "the bearer token is gone from ~/.claude.json"
+python3 - "${HOME}/.claude.json" <<'PY' > "${WORK}/mcp.out" 2>&1
+import json, sys
+d = json.load(open(sys.argv[1]))
+s = d["mcpServers"]["fixture-memory"]
+assert s["type"] == "stdio", s
+assert s["command"] == "apex", s
+assert s["args"] == ["mcp", "bridge", "fixture-memory"], s
+assert d["machineID"] == "fixture", "the rest of the document was damaged"
+assert d["mcpServers"]["local-tool"]["command"] == "npx", "an untouched server was changed"
+print("ok")
+PY
+grep -qx ok "${WORK}/mcp.out" \
+    && ok "the server definition now names the bridge, and nothing else moved" \
+    || { bad "the server definition now names the bridge"; cat "${WORK}/mcp.out"; }
+[ "$(stat -c %a "${HOME}/.claude.json")" = "600" ] \
+    && ok "the rewritten file kept its 0600 mode" \
+    || bad "the rewritten file kept its 0600 mode"
+
+# The GitHub one still cannot be verified — this fixture repository has no
+# github.com remote and no network — so it is still stored and still in place.
+grep -q "$FAKE_PAT" "${HOME}/.claude/settings.json" \
+    && ok "the PAT, which nothing here can verify, is still in settings.json" \
+    || bad "the PAT was removed without being verified"
+
+# ── idempotence ──────────────────────────────────────────────────────────────
+section "running it again changes nothing"
+out="$(cd "$PROJ" && "$APEX" secret migrate 2>&1)"
+printf '%s' "$out" | grep -q "fixture-memory" \
+    && bad "a migrated credential was found again" \
+    || ok "a migrated credential is not found a second time"
+python3 - "${HOME}/.claude.json" <<'PY' > "${WORK}/mcp2.out" 2>&1
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["mcpServers"]["fixture-memory"]["args"] == ["mcp", "bridge", "fixture-memory"]
+print("ok")
+PY
+grep -qx ok "${WORK}/mcp2.out" \
+    && ok "the bridged definition survived a second run" \
+    || { bad "the bridged definition survived a second run"; cat "${WORK}/mcp2.out"; }
+
+# ── what settings.json kept ──────────────────────────────────────────────────
+section "nothing else was touched"
+python3 - "${HOME}/.claude/settings.json" <<'PY' > "${WORK}/set.out" 2>&1
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["model"] == "opus", d
+assert d["theme"] == "dark", d
+assert d["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1", d
+assert d["env"]["ACME_API_KEY"] == "an-unknown-provider", "a guess was made after all"
+print("ok")
+PY
+grep -qx ok "${WORK}/set.out" \
+    && ok "the model, the theme, the plain variable and the unguessable one are intact" \
+    || { bad "settings.json lost something"; cat "${WORK}/set.out"; }
+
+# ── nothing leaked ───────────────────────────────────────────────────────────
+section "no credential is anywhere it should not be"
+if grep -rq "$FAKE_BEARER" "${WORK}/secretd.log" 2>/dev/null; then
+    bad "the daemon logged the credential"
+else
+    ok "the daemon logged no credential"
+fi
+if grep -q "$FAKE_BEARER" "${APEX_SECRETD_STORE}/audit.jsonl" 2>/dev/null; then
+    bad "the audit trail carries the credential"
+else
+    ok "the audit trail carries no credential"
+fi
+grep -q "mcp-request" "${APEX_SECRETD_STORE}/audit.jsonl" 2>/dev/null \
+    && ok "the audit trail records the brokered request" \
+    || bad "the audit trail records the brokered request"
+
+printf '\nmigrate: %d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]
