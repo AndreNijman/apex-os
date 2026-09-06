@@ -899,6 +899,31 @@ jobs:
       - name: Run project-layout assertions
         run: ./tests/test-project-layout.sh
 
+      # fish and nushell cannot source the POSIX agent.sh, so each has its own
+      # integration file — and the only way to know the three agree is to run
+      # all three. fish is in Ubuntu's archive; nushell is not, so it comes from
+      # the pinned upstream release the image also ships. A failed download
+      # degrades that section to a LOUD SKIP rather than a red build, and the
+      # suite refuses to report success if every section skipped.
+      - name: Install fish and nushell
+        run: |
+          set -uo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fish
+          fish --version
+          nu_ver=0.99.1
+          url="https://github.com/nushell/nushell/releases/download/${nu_ver}/nu-${nu_ver}-x86_64-unknown-linux-musl.tar.gz"
+          if curl -fsSL --retry 2 "$url" -o /tmp/nu.tgz; then
+            tar xzf /tmp/nu.tgz -C /tmp
+            sudo install -m0755 "/tmp/nu-${nu_ver}-x86_64-unknown-linux-musl/nu" /usr/local/bin/nu
+            nu --version
+          else
+            echo "note: nushell ${nu_ver} did not download; its section will skip out loud"
+          fi
+
+      - name: Run fish and nushell agent-integration assertions
+        run: ./tests/test-shell-agent.sh
+
       # §4's whole claim is "agents use credentials without receiving the raw
       # secret". This stores a sentinel token, uses a capability from inside a
       # real CONFINED session, and asserts the sentinel appears in neither
