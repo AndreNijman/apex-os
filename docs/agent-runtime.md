@@ -98,6 +98,78 @@ was, then live output. Several terminals can attach to one session at once.
 
 ---
 
+## Six permission dimensions
+
+§3.1 names six controls that must never become one switch, and each is a
+separate flag with a separate default:
+
+| # | dimension | flag | values | default |
+|---|---|---|---|---|
+| 1 | the agent's own permission mode | `--native` | `inherit` `ask` `bypass` | `inherit` |
+| 2 | APEX filesystem/process sandbox | `--sandbox` | `unrestricted` `project` `strict` | `project` |
+| 3 | APEX system/root capability | `--system-access` | `none` `session` `unsafe` | `none` |
+| 4 | APEX secret capability | `--secrets` | `brokered` `none` `export` | `brokered` |
+| 5 | network policy | `--network` | `open` `allowlist` `brokered` `offline` | `open` |
+| 6 | remote-origin policy | `--origin-policy` | `local` `remote` | `local` |
+
+`apex agent status <id>` prints all six for a session, and `apex agent status`
+with no id prints the configured defaults — six sibling keys in `agent.json`.
+
+### The named modes are presets over the six
+
+§4's modes are points in that space, not a seventh setting. `apex agent run`
+takes the preset first and your own flags on top, so a combination none of the
+five names stays reachable — break-glass with the broker switched off, say.
+
+| mode | native | sandbox | system | secrets | network | origin |
+|---|---|---|---|---|---|---|
+| default (§4.1) | inherit | project | none | brokered | open | local |
+| `--agent-bypass` (§4.2) | **bypass** | project | none | brokered | open | local |
+| `--sandbox unrestricted` (§4.3) | inherit | **unrestricted** | none | brokered | open | local |
+| `--system-access` (§4.4) | **bypass** | **unrestricted** | **session** | brokered | open | local |
+| `--unsafe-everything` (§4.5) | **bypass** | **unrestricted** | **unsafe** | brokered | open | local |
+
+The secret column does not move, even for break-glass. §3.4: *"broker secrets
+are still not conveniently dumped into the agent environment."*
+
+### The three invariants
+
+`apex-agent-core/tests/policy_invariants.rs` is these sentences as tests, each
+asserted over the whole value set of the dimension that drives it:
+
+- **`bypassPermissions` does not disable the APEX sandbox.** Dimension 1 is a
+  flag handed to `claude`. It cannot reach the mount namespace the sandbox is
+  built out of, and the test asserts that twice: once on the policy, once on the
+  `bwrap` argv the policy produces.
+- **Unrestricted user does not imply root.** No sandbox value moves dimension 3.
+  On top of that, a managed session runs with `PR_SET_NO_NEW_PRIVS`, so `sudo`,
+  `su` and `pkexec` come up unprivileged inside it and fail. `bwrap` set that
+  for confined sessions already; the runtime now sets it for the unconfined
+  ones, which is §4.3's request.
+- **A root grant does not imply secret export.** No system-access value moves
+  dimension 4.
+
+### Two dimensions do talk, and only downward
+
+`strict` forces the network dimension to `offline`, because that is what
+`strict` has always meant — so `--sandbox strict --network offline` and
+`--sandbox project --network offline` build the same argv, and
+`--sandbox strict --network open` is refused rather than quietly tightened.
+Nothing loosens: `unrestricted` does not imply an open network.
+
+`--sandbox unrestricted --network offline` is refused too. Nothing is there to
+unshare, so the session would run with a network while reporting none.
+
+### What is refused until it is built
+
+Six values parse and are then refused, each naming the task that will implement
+it: `--network allowlist`, `--network brokered`, `--system-access session`,
+`--system-access unsafe`, `--secrets export`, `--origin-policy remote`. A flag
+that parsed and then did nothing would read as a protection in `apex agent
+info` and in a script, with nothing behind it.
+
+---
+
 ## The sandbox
 
 Three policies. `project` is the default.
@@ -517,7 +589,7 @@ was given.
 | `$XDG_STATE_HOME/apex/agent/secret-grants.json` | per-project capability grants |
 | `$XDG_STATE_HOME/apex/agent/secret-audit.jsonl` | append-only capability audit |
 | `$XDG_STATE_HOME/apex/agent/privilege-audit.jsonl` | append-only privilege audit |
-| `$XDG_CONFIG_HOME/apex/agent.json` | default agent, sandbox, detach key |
+| `$XDG_CONFIG_HOME/apex/agent.json` | default agent, the six permission dimensions, detach key |
 | `/tmp/apex-agent/<id>/` | per-session scratch, removed with the session |
 
 Transcripts are a record of your work and are readable only by you.
@@ -600,3 +672,8 @@ Named because the roadmap asks for them and this does not do them:
 - **Test status and merge conflicts per worktree** in the Agent Center (§7).
   The worktree a session is on is shown; whether its tests pass is not.
 - **Disposable environments** and capsules.
+- **Enforcement for six permission values.** `--network allowlist`,
+  `--network brokered`, both `--system-access` grants, `--secrets export` and
+  `--origin-policy remote` parse and then refuse. The vocabulary is here so the
+  enforcement slots in without moving anything else; see *Six permission
+  dimensions*.

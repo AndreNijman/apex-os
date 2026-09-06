@@ -18,6 +18,7 @@
 //!         ▼
 //! apex-agentd  — unprivileged, per-user, systemd --user
 //!         ├─ PTY + session lifecycle       session.rs
+//!         ├─ the six permission dimensions policy.rs
 //!         ├─ sandbox policy                sandbox.rs
 //!         ├─ adapters                      adapter.rs
 //!         ├─ projects + worktrees          project.rs
@@ -43,6 +44,7 @@ pub mod config;
 pub mod git;
 pub mod layout;
 pub mod paths;
+pub mod policy;
 pub mod project;
 pub mod protocol;
 pub mod request;
@@ -51,4 +53,5 @@ pub mod secret;
 pub mod session;
 pub mod term;
 
+pub use policy::AgentPolicy;
 pub use protocol::{AgentState, SandboxPolicy, SessionInfo};
