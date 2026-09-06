@@ -2231,7 +2231,17 @@ pub struct ModelInfo {
     /// Whether the blob named by the manifest is actually present. A manifest
     /// with no blob is what a half-finished `apex ai rm` leaves, and reporting
     /// it beats printing a model that cannot load.
+    ///
+    /// `false` when confirmed absent, and also when the stat could not be
+    /// completed — the two are told apart by `present_unavailable`. Never
+    /// `true` off a read that never happened.
     pub present: bool,
+    /// Set when `present` could not be determined: the blob's own stat was
+    /// refused rather than answered. `apex ai models` shows this instead of
+    /// "WEIGHTS MISSING", because a permission refusal is not the same
+    /// finding and re-pulling will not fix it.
+    #[serde(default)]
+    pub present_unavailable: Option<String>,
     /// Whether the digest came from the person typing rather than the image.
     pub user_supplied_digest: bool,
     /// Whether this is the selected model.
