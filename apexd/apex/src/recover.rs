@@ -1679,9 +1679,10 @@ fn cmd_reset(args: ResetArgs) -> i32 {
         let r = match (p.target.how, p.target.kind) {
             (Disposition::Delete, Kind::Dir) => std::fs::remove_dir_all(&p.path),
             (Disposition::Delete, Kind::File) => std::fs::remove_file(&p.path),
-            // Emptied in place: hyprland.conf `source=`s these and Hyprland
-            // treats a source with no match as a fatal config error, so a
-            // delete here takes the whole session's configuration with it.
+            // Emptied in place. Nothing under ~/.config/hypr is ever deleted:
+            // empty is the "no overrides" state the compositor understands, and
+            // it is reachable without this code deciding which of the user's
+            // files it may remove.
             (Disposition::Truncate, _) => std::fs::write(&p.path, b""),
         };
         match r {
@@ -1745,11 +1746,22 @@ fn cmd_reset(args: ResetArgs) -> i32 {
     // Postcondition on the reseed, not just its exit status: the provisioner
     // is `set -e` but writes several files best-effort, so "exited 0" and
     // "the files are back" are two different claims.
+    //
+    // The two generated fragments are NOT checked here any more. They used to
+    // be, because the provisioner pre-created them and a `source =` with no
+    // match was fatal — so "still absent" really did mean a broken session.
+    // Under the Lua layout the provisioner deliberately creates neither:
+    // hyprland.lua skips a module that is not there, and an empty
+    // apex/monitors.lua would suppress nothing while looking like a generator
+    // that ran. Asserting their presence would now fail every correct reset.
+    //
+    // What is worth asserting is what the provisioner really does seed: the
+    // entry point and the module directory it requires from.
     let mut absent: Vec<String> = Vec::new();
     for rel in [
         ".config/apex-shell",
-        ".config/hypr/apex-input.conf",
-        ".config/hypr/apex-display.conf",
+        ".config/hypr/hyprland.lua",
+        ".config/hypr/apex",
     ] {
         if !home.join(rel).exists() {
             absent.push(rel.to_string());
