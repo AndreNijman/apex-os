@@ -37,7 +37,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::destination::{Allowlist, Destination};
+use crate::policy::{AgentPolicy, NetworkPolicy};
 use crate::protocol::AgentState;
+use crate::sandbox::SandboxSpec;
 
 /// How long a hook command may take before Claude ignores it.
 ///
@@ -364,7 +367,11 @@ fn detail_for(event: HookEvent, payload: &Payload) -> Option<String> {
 fn tool_summary(tool: &str, input: &serde_json::Value) -> Option<String> {
     let key = match tool {
         "Bash" | "BashOutput" => "command",
-        "Read" | "Write" | "Edit" | "NotebookEdit" => "file_path",
+        // `NotebookEdit` spells it differently, which is the whole reason this
+        // table is hand-written: a generic "first string in the object" showed
+        // `new_source` for it and `new_string` for `Edit`.
+        "NotebookEdit" => "notebook_path",
+        "Read" | "Write" | "Edit" => "file_path",
         "Glob" | "Grep" => "pattern",
         "WebFetch" => "url",
         "WebSearch" => "query",
@@ -450,6 +457,312 @@ fn shell_quote(path: &Path) -> String {
 /// Where the settings file for a session's scratch directory goes.
 pub fn settings_path(scratch: &Path) -> PathBuf {
     scratch.join(SETTINGS_FILE)
+}
+
+// ---------------------------------------------------------------------------
+// §6.2 — the policy point
+// ---------------------------------------------------------------------------
+
+/// Which kernel restriction refuses the operation a [`Decision::Deny`] names.
+///
+/// Every deny carries one. That is the rule §6.2 turns on: a hook runs inside
+/// the agent's own process tree, from a settings file the agent's home mount
+/// lets it rewrite, so a denial the sandbox would not also have refused is
+/// advice the agent can switch off — theatre with a policy engine behind it.
+/// Naming the refusal makes the claim checkable, and
+/// `every_denial_names_a_restriction_the_argv_actually_carries` checks it
+/// against the argv `build_argv` really produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelRefusal {
+    /// `--ro-bind / /` with no writable bind over this path: the write returns
+    /// `EROFS`.
+    ReadOnlyRoot,
+    /// `--ro-bind-try /dev/null <path>`: the write returns `EROFS` and the read
+    /// returns an empty file, so the credential does not reach the agent
+    /// either way.
+    MaskedFile,
+    /// `--unshare-net` with nothing in the namespace: `connect` returns
+    /// `ENETUNREACH`.
+    EmptyNetNamespace,
+    /// The namespace's only route out is the egress proxy, and the broker on
+    /// the far end of its socket refuses this destination.
+    Allowlist,
+    /// `PR_SET_NO_NEW_PRIVS`, which `bwrap` sets for every confined session and
+    /// which the runtime sets itself for an unconfined one: the setuid bit on
+    /// `sudo` is inert, so it cannot become root however it is invoked.
+    NoNewPrivs,
+}
+
+impl KernelRefusal {
+    /// The clause that goes in the reason Claude shows the agent.
+    fn as_clause(&self) -> &'static str {
+        match self {
+            KernelRefusal::ReadOnlyRoot => "the sandbox mounts it read-only",
+            KernelRefusal::MaskedFile => "the sandbox replaces it with /dev/null",
+            KernelRefusal::EmptyNetNamespace => "this session has no network namespace",
+            KernelRefusal::Allowlist => "this destination is not on the session's allowlist",
+            KernelRefusal::NoNewPrivs => "no_new_privs makes the setuid bit inert",
+        }
+    }
+}
+
+/// What the `PreToolUse` policy point says about one tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    /// Say nothing. Claude proceeds under whatever its own permission mode
+    /// decided, which in Andre's normal `bypassPermissions` is "yes".
+    Allow,
+    /// Refuse, with a reason and the restriction that would have refused it
+    /// anyway.
+    Deny {
+        reason: String,
+        refusal: KernelRefusal,
+    },
+}
+
+impl Decision {
+    pub fn is_deny(&self) -> bool {
+        matches!(self, Decision::Deny { .. })
+    }
+
+    /// The document Claude reads from a `PreToolUse` hook's stdout.
+    ///
+    /// `None` for an allow: a hook that says nothing leaves the decision where
+    /// it was, and printing `"allow"` would do something quite different —
+    /// it would *skip* the permission system for that call. APEX has no
+    /// business granting a permission; it is here to withhold one.
+    pub fn to_hook_output(&self) -> Option<serde_json::Value> {
+        let Decision::Deny { reason, .. } = self else {
+            return None;
+        };
+        Some(deny_document(reason))
+    }
+}
+
+/// The `PreToolUse` refusal document, for a caller that has the reason and not
+/// the [`Decision`] it came from.
+///
+/// The CLI is that caller: the decision is made in the daemon, where the
+/// mounts are, and what crosses the socket is the sentence a person reads.
+pub fn deny_document(reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    })
+}
+
+/// Decide one `PreToolUse`, as a pure function of the tool call and the
+/// confinement the session was actually started with.
+///
+/// ## The rule, and why it is the only defensible one
+///
+/// A deny is returned only where `spec` already refuses the operation. The
+/// hook therefore buys three things and never a fourth:
+///
+/// * the agent is told *why*, in words, instead of getting `EROFS` in the
+///   middle of a tool call and inventing a workaround;
+/// * the call does not run at all, so a `Write` that would have half-succeeded
+///   does not;
+/// * the daemon records the attempt.
+///
+/// The fourth thing — stopping something the sandbox permits — is exactly what
+/// this must not do, because the agent can rewrite the settings file this hook
+/// is configured from and there would be nothing underneath.
+///
+/// ## What it therefore cannot see
+///
+/// Anything past the first word of a `Bash` command. Parsing a shell well
+/// enough to find the writes inside it is a losing game, and a rule that
+/// caught `rm -rf /usr` but not `sh -c 'rm -rf /usr'` would read as protection
+/// while providing none. The sandbox catches both, which is why this one does
+/// not try.
+///
+/// An `mcp__*` tool, whose input shape belongs to the server rather than to
+/// Claude. And every tool call in a session started with the sandbox off,
+/// where there is no restriction to mirror — see the first branch.
+pub fn decide(payload: &Payload, spec: &SandboxSpec, allowlist: &Allowlist) -> Decision {
+    // A session the user deliberately started unconfined has nothing behind
+    // this hook, so a denial here would be the pure theatre §6.2 is trying to
+    // avoid: the one layer that could enforce it is the one the agent can
+    // switch off. The exception is no_new_privs, which the runtime sets on the
+    // process itself and which therefore holds without any mount at all.
+    let confined = spec.policy.sandbox.is_confined();
+
+    let Some(tool) = payload.tool_name.as_deref() else {
+        return Decision::Allow;
+    };
+    let input = &payload.tool_input;
+
+    if tool == "Bash" {
+        if let Some(refusal) = bash_refusal(&spec.policy, input) {
+            return deny(
+                format!(
+                    "APEX policy: this session may not run a privileged command — {}",
+                    refusal.as_clause()
+                ),
+                refusal,
+            );
+        }
+        // Everything else a shell can do is the sandbox's problem, on purpose.
+        return Decision::Allow;
+    }
+
+    if matches!(tool, "WebFetch" | "WebSearch") {
+        if let Some((refusal, detail)) = network_refusal(tool, &spec.policy, allowlist, input) {
+            return deny(
+                format!("APEX policy: {detail} — {}", refusal.as_clause()),
+                refusal,
+            );
+        }
+        return Decision::Allow;
+    }
+
+    if !confined {
+        return Decision::Allow;
+    }
+
+    let Some((path, writes)) = file_operation(tool, input) else {
+        return Decision::Allow;
+    };
+    if let Some(refusal) = path_refusal(spec, &path, writes) {
+        let verb = if writes { "write to" } else { "read" };
+        return deny(
+            format!(
+                "APEX policy: this session may not {verb} {} — {}",
+                path.display(),
+                refusal.as_clause()
+            ),
+            refusal,
+        );
+    }
+    Decision::Allow
+}
+
+fn deny(reason: String, refusal: KernelRefusal) -> Decision {
+    Decision::Deny { reason, refusal }
+}
+
+/// The programs whose whole purpose is to acquire privilege.
+///
+/// Matched on the first word only, and deliberately not on anything deeper.
+/// See [`decide`] for why a longer list here would be a worse module rather
+/// than a safer one.
+const PRIVILEGE_PROGRAMS: &[&str] = &["sudo", "pkexec", "doas", "su", "run0"];
+
+fn bash_refusal(policy: &AgentPolicy, input: &serde_json::Value) -> Option<KernelRefusal> {
+    if !policy.no_new_privs() {
+        // Break-glass. §3.4 says "unsafe everything" must exist and must mean
+        // it; a hook that kept saying no there would be a mode that lies.
+        return None;
+    }
+    let command = input.get("command")?.as_str()?;
+    let first = command.split_whitespace().next()?;
+    let base = first.rsplit('/').next().unwrap_or(first);
+    PRIVILEGE_PROGRAMS
+        .contains(&base)
+        .then_some(KernelRefusal::NoNewPrivs)
+}
+
+fn network_refusal(
+    tool: &str,
+    policy: &AgentPolicy,
+    allowlist: &Allowlist,
+    input: &serde_json::Value,
+) -> Option<(KernelRefusal, String)> {
+    let network = policy.effective_network();
+    if !network.removes_direct_egress() {
+        return None;
+    }
+    if network != NetworkPolicy::Allowlist {
+        return Some((
+            KernelRefusal::EmptyNetNamespace,
+            format!("this session has no network, so {tool} cannot reach anything"),
+        ));
+    }
+    // The allowlist mode has a proxy, so the question is where to, and the
+    // answer comes from the same function the broker on the far end of the
+    // socket uses. A second rule set here would drift from the enforcement it
+    // is supposed to be predicting.
+    let url = input.get("url")?.as_str()?;
+    let dest = Destination::from_url(url).ok()?;
+    if allowlist.decide(&dest).is_allowed() {
+        return None;
+    }
+    Some((
+        KernelRefusal::Allowlist,
+        format!("{} is not on this session's allowlist", dest.host()),
+    ))
+}
+
+/// The path a tool touches, and whether it writes to it.
+fn file_operation(tool: &str, input: &serde_json::Value) -> Option<(PathBuf, bool)> {
+    let (key, writes) = match tool {
+        "Write" | "Edit" => ("file_path", true),
+        "NotebookEdit" => ("notebook_path", true),
+        "Read" => ("file_path", false),
+        _ => return None,
+    };
+    let raw = input.get(key)?.as_str()?;
+    let path = PathBuf::from(raw);
+    // A relative path is resolved by the agent against a working directory
+    // this function does not have, and guessing at one would produce a denial
+    // about a path nobody named. The sandbox judges the real one.
+    path.is_absolute().then_some((path, writes))
+}
+
+fn path_refusal(spec: &SandboxSpec, path: &Path, writes: bool) -> Option<KernelRefusal> {
+    if spec.mask.iter().any(|m| m == path) {
+        return Some(KernelRefusal::MaskedFile);
+    }
+    if !writes {
+        // `--ro-bind / /` is exactly that: the whole filesystem is readable
+        // inside a confined session. Refusing a read the kernel allows would
+        // be the theatre this module is built to avoid, so the only read this
+        // denies is one of a masked file.
+        return None;
+    }
+    if writable(spec, path) {
+        return None;
+    }
+    Some(KernelRefusal::ReadOnlyRoot)
+}
+
+/// Whether a confined session can write to `path` and have the write land
+/// anywhere at all.
+///
+/// The tmpfs mounts count. A write into the masked `$HOME` succeeds and is
+/// discarded when the session ends, which is not a refusal and must not be
+/// reported as one — the sandbox has already made it harmless.
+fn writable(spec: &SandboxSpec, path: &Path) -> bool {
+    let tmpfs = [
+        spec.home.as_path(),
+        spec.runtime_dir.as_path(),
+        Path::new("/tmp"),
+        Path::new("/run"),
+        Path::new("/proc"),
+        Path::new("/dev"),
+    ];
+    if tmpfs
+        .iter()
+        .chain(std::iter::once(&spec.scratch.as_path()))
+        .any(|base| !base.as_os_str().is_empty() && under(path, base))
+    {
+        return true;
+    }
+    spec.rw.iter().any(|base| under(path, base))
+}
+
+/// Whether `path` is `base` or sits under it.
+///
+/// Lexical, because both sides have already been through
+/// [`crate::sandbox::real_target`] by the time a spec is stored, and because a
+/// hook must not stat a path an agent chose: `decide` is called once per tool
+/// call and has three seconds to answer.
+fn under(path: &Path, base: &Path) -> bool {
+    !base.as_os_str().is_empty() && (path == base || path.starts_with(base))
 }
 
 #[cfg(test)]
@@ -693,4 +1006,337 @@ mod tests {
             PathBuf::from("/run/user/1000/apex/s7/claude-hooks.json")
         );
     }
+    // -----------------------------------------------------------------------
+    // §6.2 — the policy point
+    // -----------------------------------------------------------------------
+
+    use crate::destination::Allowlist;
+    use crate::policy::{AgentPolicy, NetworkPolicy, SandboxPolicy, SystemAccess};
+    use crate::sandbox::{build_argv, SandboxSpec};
+
+    /// A spec shaped like the one `apex-agentd` builds for a project session:
+    /// confined, the project writable, the credential files masked.
+    fn confined_spec() -> SandboxSpec {
+        let mut spec = SandboxSpec::new(
+            AgentPolicy::default(),
+            PathBuf::from("/home/tester"),
+            PathBuf::from("/run/user/1000"),
+        );
+        spec.cwd = PathBuf::from("/home/tester/p");
+        spec.scratch = PathBuf::from("/tmp/apex-agent/7");
+        spec.rw.push(PathBuf::from("/home/tester/p"));
+        crate::adapter::by_id("claude")
+            .expect("the claude adapter")
+            .apply_sandbox(&mut spec);
+        spec
+    }
+
+    fn call(tool: &str, input: serde_json::Value) -> Payload {
+        payload(serde_json::json!({"tool_name": tool, "tool_input": input}))
+    }
+
+    fn verdict(spec: &SandboxSpec, tool: &str, input: serde_json::Value) -> Decision {
+        decide(&call(tool, input), spec, &Allowlist::default())
+    }
+
+    #[test]
+    fn a_write_outside_every_writable_bind_is_denied() {
+        let spec = confined_spec();
+        let d = verdict(
+            &spec,
+            "Write",
+            serde_json::json!({"file_path": "/usr/bin/apex", "content": "x"}),
+        );
+        assert!(d.is_deny(), "{d:?}");
+        assert!(matches!(
+            d,
+            Decision::Deny {
+                refusal: KernelRefusal::ReadOnlyRoot,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_write_the_sandbox_permits_is_not_denied() {
+        // The project is bound writable, /tmp and the scratch directory are
+        // tmpfs, and the masked home is a tmpfs too — a write there succeeds
+        // and is discarded, which is not a refusal and must not be reported as
+        // one. Denying any of these would be advice with nothing behind it.
+        let spec = confined_spec();
+        for path in [
+            "/home/tester/p/src/main.rs",
+            "/tmp/scratch.txt",
+            "/tmp/apex-agent/7/notes",
+            "/home/tester/anywhere",
+        ] {
+            let d = verdict(&spec, "Write", serde_json::json!({"file_path": path}));
+            assert_eq!(d, Decision::Allow, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_masked_credential_is_denied_in_both_directions() {
+        let spec = confined_spec();
+        for tool in ["Read", "Write"] {
+            let d = verdict(
+                &spec,
+                tool,
+                serde_json::json!({"file_path": "/home/tester/.npmrc"}),
+            );
+            assert!(matches!(
+                d,
+                Decision::Deny {
+                    refusal: KernelRefusal::MaskedFile,
+                    ..
+                }
+            ), "{tool}: {d:?}");
+        }
+    }
+
+    #[test]
+    fn a_read_the_kernel_allows_is_not_denied() {
+        // `--ro-bind / /` means a confined session can read the whole
+        // filesystem. That is the sandbox's decision, and a hook that pretended
+        // otherwise would be denying something it cannot enforce.
+        let spec = confined_spec();
+        for path in ["/etc/passwd", "/var/log/messages", "/usr/lib/os-release"] {
+            assert_eq!(
+                verdict(&spec, "Read", serde_json::json!({"file_path": path})),
+                Decision::Allow,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_relative_path_is_left_to_the_sandbox() {
+        // It is resolved against a working directory this function does not
+        // have, and a guess would produce a refusal naming a path nobody wrote.
+        let spec = confined_spec();
+        assert_eq!(
+            verdict(&spec, "Write", serde_json::json!({"file_path": "../../etc/hosts"})),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn an_offline_session_is_denied_the_network() {
+        let mut spec = confined_spec();
+        spec.policy.network = NetworkPolicy::Offline;
+        for tool in ["WebFetch", "WebSearch"] {
+            let d = verdict(&spec, tool, serde_json::json!({"url": "https://example.com/x"}));
+            assert!(matches!(
+                d,
+                Decision::Deny {
+                    refusal: KernelRefusal::EmptyNetNamespace,
+                    ..
+                }
+            ), "{tool}: {d:?}");
+        }
+    }
+
+    #[test]
+    fn an_open_session_is_denied_nothing_about_the_network() {
+        let mut spec = confined_spec();
+        spec.policy.network = NetworkPolicy::Open;
+        assert_eq!(
+            verdict(&spec, "WebFetch", serde_json::json!({"url": "https://example.com"})),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn an_allowlisted_session_is_judged_by_the_brokers_own_function() {
+        // Not a second rule set: `Allowlist::decide` is what the egress broker
+        // on the far end of the session's only socket uses, so the hook's
+        // answer and the enforcement cannot drift apart.
+        let mut spec = confined_spec();
+        spec.policy.network = NetworkPolicy::Allowlist;
+        let allowlist = Allowlist::parse(&["github.com:443"]).expect("allowlist");
+
+        let allowed = decide(
+            &call("WebFetch", serde_json::json!({"url": "https://github.com/a/b"})),
+            &spec,
+            &allowlist,
+        );
+        assert_eq!(allowed, Decision::Allow);
+
+        let refused = decide(
+            &call("WebFetch", serde_json::json!({"url": "https://evil.example/x"})),
+            &spec,
+            &allowlist,
+        );
+        assert!(matches!(
+            refused,
+            Decision::Deny {
+                refusal: KernelRefusal::Allowlist,
+                ..
+            }
+        ), "{refused:?}");
+        // And the broker agrees, which is the point of reusing its function.
+        let dest = Destination::from_url("https://evil.example/x").expect("destination");
+        assert!(!allowlist.decide(&dest).is_allowed());
+    }
+
+    #[test]
+    fn sudo_is_denied_because_no_new_privs_makes_it_pointless() {
+        let spec = confined_spec();
+        for command in ["sudo dnf install x", "/usr/bin/pkexec id", "su -", "doas ls"] {
+            let d = verdict(&spec, "Bash", serde_json::json!({"command": command}));
+            assert!(matches!(
+                d,
+                Decision::Deny {
+                    refusal: KernelRefusal::NoNewPrivs,
+                    ..
+                }
+            ), "{command}: {d:?}");
+        }
+    }
+
+    #[test]
+    fn break_glass_is_allowed_to_mean_it() {
+        // §3.4: "unsafe everything" must exist. A mode that still said no to
+        // sudo would be a mode that lies, and `no_new_privs` is genuinely off
+        // there, so the refusal this mirrors does not exist either.
+        let mut spec = confined_spec();
+        spec.policy.system = SystemAccess::Unsafe;
+        assert_eq!(
+            verdict(&spec, "Bash", serde_json::json!({"command": "sudo id"})),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn a_bash_command_is_not_read_past_its_first_word() {
+        // Parsing a shell well enough to find the writes inside it is a losing
+        // game, and a rule that caught `rm -rf /usr` but not `sh -c 'rm -rf
+        // /usr'` would read as protection while providing none.
+        let spec = confined_spec();
+        for command in [
+            "rm -rf /usr",
+            "sh -c 'sudo id'",
+            "echo x > /etc/passwd",
+            "env sudo id",
+        ] {
+            assert_eq!(
+                verdict(&spec, "Bash", serde_json::json!({"command": command})),
+                Decision::Allow,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_tool_is_not_judged() {
+        // An `mcp__*` tool's input shape belongs to its server. Inventing a
+        // rule for it would deny on a key that means something else.
+        let spec = confined_spec();
+        assert_eq!(
+            verdict(
+                &spec,
+                "mcp__memory__write",
+                serde_json::json!({"file_path": "/usr/x"})
+            ),
+            Decision::Allow
+        );
+        assert_eq!(
+            decide(&Payload::default(), &spec, &Allowlist::default()),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn a_session_the_user_unconfined_is_denied_nothing_the_mounts_would_have_stopped() {
+        // The honest half of §6.2. With `--sandbox unrestricted` there is no
+        // mount to mirror, so a path denial here would be advice the agent can
+        // switch off with nothing underneath. no_new_privs still holds,
+        // because the runtime sets it on the process rather than by a mount.
+        let mut spec = confined_spec();
+        spec.policy.sandbox = SandboxPolicy::Unrestricted;
+        spec.policy.network = NetworkPolicy::Open;
+        assert_eq!(
+            verdict(&spec, "Write", serde_json::json!({"file_path": "/usr/bin/apex"})),
+            Decision::Allow
+        );
+        assert!(verdict(&spec, "Bash", serde_json::json!({"command": "sudo id"})).is_deny());
+    }
+
+    #[test]
+    fn an_allow_prints_nothing_at_all() {
+        // A hook that printed `"allow"` would not be agreeing, it would be
+        // SKIPPING the permission system for that call. APEX is here to
+        // withhold a permission, never to grant one.
+        assert_eq!(Decision::Allow.to_hook_output(), None);
+        let doc = Decision::Deny {
+            reason: "because".into(),
+            refusal: KernelRefusal::ReadOnlyRoot,
+        }
+        .to_hook_output()
+        .expect("a deny document");
+        assert_eq!(doc["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(doc["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(
+            doc["hookSpecificOutput"]["permissionDecisionReason"],
+            "because"
+        );
+    }
+
+    #[test]
+    fn every_denial_names_a_restriction_the_argv_actually_carries() {
+        // The no-theatre gate. Each deny below is re-checked against the argv
+        // `build_argv` really produces for the same spec, so a rule added later
+        // that refuses something the kernel would have allowed fails here
+        // rather than shipping as security.
+        let spec = confined_spec();
+        let argv = build_argv(&spec, "claude", &[]).expect("argv");
+        let has = |w: &[&str]| argv.windows(w.len()).any(|win| win == w);
+
+        // ReadOnlyRoot: the whole filesystem is mounted read-only and nothing
+        // binds a writable copy over the path.
+        assert!(verdict(&spec, "Write", serde_json::json!({"file_path": "/usr/bin/apex"})).is_deny());
+        assert!(has(&["--ro-bind", "/", "/"]));
+        assert!(
+            !argv.iter().any(|a| a == "/usr" || a == "/usr/bin"),
+            "a writable bind over /usr would make that denial theatre"
+        );
+
+        // MaskedFile: the path is /dev/null, read-only.
+        assert!(verdict(&spec, "Read", serde_json::json!({"file_path": "/home/tester/.npmrc"})).is_deny());
+        assert!(has(&["--ro-bind-try", "/dev/null", "/home/tester/.npmrc"]));
+
+        // EmptyNetNamespace: the namespace is unshared and nothing is put in it.
+        let mut offline = confined_spec();
+        offline.policy.network = NetworkPolicy::Offline;
+        assert!(verdict(&offline, "WebFetch", serde_json::json!({"url": "https://x.example"})).is_deny());
+        let offline_argv = build_argv(&offline, "claude", &[]).expect("argv");
+        assert!(offline_argv.iter().any(|a| a == "--unshare-net"));
+        assert!(offline.policy.effective_network().removes_direct_egress());
+
+        // NoNewPrivs: bwrap sets it for every confined session, so the setuid
+        // bit on sudo is inert. `no_new_privs` is the runtime's own record of
+        // that, and it is what the unconfined path passes to `pty::spawn`.
+        assert!(verdict(&spec, "Bash", serde_json::json!({"command": "sudo id"})).is_deny());
+        assert!(spec.policy.no_new_privs());
+    }
+
+    #[test]
+    fn a_url_becomes_the_destination_the_broker_would_have_been_handed() {
+        assert_eq!(
+            Destination::from_url("https://api.github.com/repos").expect("d"),
+            Destination::new("api.github.com", 443).expect("d")
+        );
+        assert_eq!(
+            Destination::from_url("http://Example.COM./x?y#z").expect("d"),
+            Destination::new("example.com", 80).expect("d")
+        );
+        assert_eq!(
+            Destination::from_url("https://user:pw@host.example:8443/p").expect("d"),
+            Destination::new("host.example", 8443).expect("d")
+        );
+        // A scheme with no proxy port is not a destination this can judge.
+        assert!(Destination::from_url("file:///etc/passwd").is_err());
+        assert!(Destination::from_url("not a url").is_err());
+    }
+
 }
