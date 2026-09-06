@@ -101,9 +101,21 @@ DEFAULTS = {
         "tap": True,                  # labwc <tap>yes; hypr tap-to-click true
         "tap_and_drag": True,         # labwc tapAndDrag yes
         "tap_button_map": "lrm",      # one/two/three finger = left/right/middle
-        "drag_lock": True,
+        # Both of these were chosen, and both disagreed with every compositor
+        # that has to carry them. Hyprland 0.56.2 with no config at all reports
+        # drag_lock 0 and clickfinger_behavior false; the shipped rc.xml sets
+        # neither, so labwc leaves them to libinput, whose drag lock is off and
+        # whose click method on an ordinary clickpad is button areas.
+        #
+        # A default that disagrees with the shipped state is not a preference,
+        # it is a change nobody asked for: the page writes the WHOLE model on
+        # any edit, so moving the scroll-speed slider also turned drag lock and
+        # clickfinger clicking on. Making them agree is what lets
+        # apex/input-defaults.lua state them explicitly without that being a
+        # behaviour change on the next `apex update`.
+        "drag_lock": False,
         "disable_while_typing": True,
-        "click_method": "clickfinger",
+        "click_method": "buttonAreas",
         "scroll_method": "twofinger",
         "middle_emulation": False,
         "accel_profile": "adaptive",  # labwc accelProfile adaptive
