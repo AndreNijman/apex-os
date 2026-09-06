@@ -1289,6 +1289,15 @@ RUN set -eux; \
 # uwsm the PACKAGE stays installed, so restoring the entry is a one-line experiment for
 # whoever chases the real cause. Do not re-add it as the sort-first default without
 # first reproducing a clean login on hardware.
+#
+# BASE-013 criterion 3 ("compositor names remain implementation details for normal
+# users") FAILED here: GreetContext.qml prints this file's Name= verbatim in the
+# greeter's session picker, so "Hyprland" was the first word a brand-new user had to
+# parse a choice between, before they had ever logged in. Name= is now the product
+# term the roadmap already uses for this session (§1: "a dynamic tiling
+# workstation"); Comment= keeps the raw project name for whoever opens the file.
+# DesktopNames/Exec stay Hyprland — portals.conf(5), XDG_CURRENT_DESKTOP and every
+# tool that shells out to `hyprctl` key off those, not Name=.
 COPY files/desktop/wayland-sessions/niri.desktop \
      /usr/share/wayland-sessions/niri.desktop
 RUN set -eux; \
@@ -1296,7 +1305,7 @@ RUN set -eux; \
           /usr/share/wayland-sessions/labwc.desktop \
           /usr/share/wayland-sessions/hyprland-uwsm.desktop; \
     [ -f /usr/share/wayland-sessions/hyprland.desktop ] || \
-      printf '[Desktop Entry]\nName=Hyprland\nComment=Dynamic tiling Wayland compositor\nExec=Hyprland\nType=Application\nDesktopNames=Hyprland\n' \
+      printf '[Desktop Entry]\nName=APEX Dynamic\nComment=Hyprland, dynamic tiling Wayland compositor\nExec=Hyprland\nType=Application\nDesktopNames=Hyprland\n' \
         > /usr/share/wayland-sessions/hyprland.desktop
 
 # labwc as a THIRD user session, offered alongside Hyprland and niri.

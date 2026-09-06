@@ -1,6 +1,12 @@
 [Desktop Entry]
-Name=niri
-Comment=A scrollable-tiling Wayland compositor
+# Name is the product term (roadmap §1: "a niri scrolling workstation"), not the
+# compositor name — the greeter's session picker prints this Name= verbatim to
+# every user before their first login (BASE-013 criterion 3), so it must read as
+# a mode, not a project. Comment keeps the raw name for whoever opens this file;
+# Exec/DesktopNames stay `niri` — that's what niri --session and the portal
+# lookup key off, not Name=.
+Name=APEX Scrolling
+Comment=niri, a scrollable-tiling Wayland compositor
 # `niri --session` also imports the environment into the systemd user manager
 # and D-Bus (the supported way to start a niri session), matching how the
 # greeter execs it: apex-greet runs the Exec line via `sh -lc "<Exec>"`.
