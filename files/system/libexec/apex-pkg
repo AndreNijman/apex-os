@@ -1345,7 +1345,8 @@ cmd_rebuild() {
 }
 
 cmd_list() {
-    if [ -f "$STATE" ]; then
+    local kind; kind="$(state_kind)"
+    if [ "$kind" = ok ]; then
         echo "packages (system extension):"
         # Provenance is shown, not hidden: a package that came from a file the
         # user vouched for personally must not read like one Fedora signed.
@@ -1359,14 +1360,9 @@ cmd_list() {
               end' "$STATE"
         printf '  (+%s pulled in as dependencies)\n' \
             "$(( $(jq -r '.resolved | length' "$STATE") - $(jq -r '.requested | length' "$STATE") ))"
-    elif [ -e "$STATE" ] || ! [ -r "${PKG_ROOT}" ]; then
-        # `$PKG_ROOT` is 0700 root:root, and `apex pkg list` is something a
-        # desktop session runs as itself. `[ -f ]` is false both when the file
-        # is missing and when the directory above it refuses the stat, so
-        # reporting "none" here told every non-root user with packages
-        # installed that they had none. Say which it is instead.
-        echo "packages (system extension): cannot read ${STATE}"
-        echo "  reading it needs root; try: sudo apex pkg list"
+    elif [ "$kind" = unreadable ]; then
+        printf 'packages (system extension): '
+        state_unreadable_notice list
     else
         echo "packages (system extension): none"
     fi
@@ -1381,15 +1377,82 @@ cmd_list() {
     fi
 }
 
+# Whether `$STATE` can be read, and if not, whether we are entitled to say so.
+#
+# Prints `ok`, `absent` or `unreadable`.
+#
+# `[ -f "$STATE" ]` answers false for a missing file, a directory we may not
+# search, a symlink cycle and a non-directory parent alike. `$PKG_ROOT` is 0700
+# root:root while `list`, `info`, `status` and `verify` all run unprivileged, so
+# every one of them certified "no packages installed" on machines that had them.
+# In `verify` that also returned 0, which reads as "checked, and fine".
+#
+# So: read it. Absence is only a safe conclusion when the read failed AND every
+# directory on the way to the file was one we could actually look inside.
+# Takes the path as an argument, defaulting to $STATE, so the suite can drive
+# it over a fixture tree. $PKG_ROOT is a hardcoded readonly and giving it an
+# environment override would put a redirectable path into a script that runs as
+# root, which is a worse trade than one parameter.
+state_kind() {
+    # Not named STATE: that is a readonly global, and `local STATE=` is an error
+    # in bash rather than a shadow. The suite found this the first time it ran.
+    local target="${1:-$STATE}"
+    if cat -- "$target" >/dev/null 2>&1; then
+        printf 'ok\n'
+        return
+    fi
+    # A symlink whose target is missing or loops still exists as a name.
+    if [ -L "$target" ]; then
+        printf 'unreadable\n'
+        return
+    fi
+    # Walk up to the first ancestor that exists. If it is not a searchable,
+    # readable directory then the read failed because we could not look, not
+    # because there was nothing there.
+    local d="$target" prev=
+    while :; do
+        d="$(dirname -- "$d")"
+        [ "$d" = "$prev" ] && break
+        prev="$d"
+        if [ -e "$d" ]; then
+            if [ -d "$d" ] && [ -r "$d" ] && [ -x "$d" ]; then
+                break
+            fi
+            printf 'unreadable\n'
+            return
+        fi
+        [ "$d" = "/" ] && break
+    done
+    if [ -e "$target" ]; then
+        printf 'unreadable\n'
+    else
+        printf 'absent\n'
+    fi
+}
+
+# What every caller prints when it could not look. Kept in one place so the
+# four commands cannot drift into disagreeing about the same machine.
+state_unreadable_notice() {
+    echo "cannot read ${STATE}"
+    echo "  reading it needs root; try: sudo apex pkg ${1}"
+}
+
 cmd_info() {
-    [ -f "$STATE" ] || { echo "no packages installed"; return 0; }
+    case "$(state_kind)" in
+        absent) echo "no packages installed"; return 0 ;;
+        unreadable) state_unreadable_notice info; return 1 ;;
+    esac
     jq . "$STATE"
 }
 
 cmd_status() {
     local payload; payload="$(current_payload)"
     printf 'extension       : %s\n' "${payload:-(none)}"
-    if [ -f "$STATE" ]; then
+    local kind; kind="$(state_kind)"
+    if [ "$kind" = unreadable ]; then
+        printf 'packages        : cannot read %s (needs root)\n' "$STATE"
+    fi
+    if [ "$kind" = ok ]; then
         printf 'built for       : %s %s\n' "$(jq -r .os_id "$STATE")" "$(jq -r .os_version_id "$STATE")"
         printf 'running         : %s %s\n' "$(os_id)" "$(os_version)"
         printf 'packages        : %s requested, %s total\n' \
@@ -1401,7 +1464,13 @@ cmd_status() {
 }
 
 cmd_verify() {
-    [ -f "$STATE" ] || { echo "no packages installed"; return 0; }
+    # A refused read must not exit 0 here. `verify` answers "is this what APEX
+    # built", and exiting 0 without looking answers "yes" to a question nobody
+    # checked.
+    case "$(state_kind)" in
+        absent) echo "no packages installed"; return 0 ;;
+        unreadable) state_unreadable_notice verify; return 1 ;;
+    esac
     local payload want have
     payload="$(current_payload)"
     [ -n "$payload" ] || die "the extension recorded in state.json is missing"

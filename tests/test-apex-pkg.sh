@@ -253,6 +253,60 @@ for want in 'file.rpm' '--allow-unsigned' '/var/lib/apex/pkg/local'; do
     else bad "--help mentions: $want" "absent"; fi
 done
 
+echo "── state we may not read is not state that is absent ──────────────────"
+# `[ -f "$STATE" ]` is false for a missing file, a directory we may not search,
+# a symlink cycle and a non-directory parent alike. /var/lib/apex/pkg is 0700
+# root:root and `list`, `info`, `status` and `verify` all run unprivileged, so
+# every one of them told users with packages installed that they had none — and
+# `verify` exited 0 while doing it, which reads as "checked, and fine".
+#
+# The matrix below is the reason the fix reads the file rather than testing the
+# permissions that might have let it: three of these cases have a readable
+# parent and still cannot be read.
+SK=$WORK/statekind
+mkdir -p "$SK"
+
+mkdir -p "$SK/present" && echo '{}' > "$SK/present/state.json"
+is "a readable state file is ok" ok "$(call state_kind "$SK/present/state.json")"
+
+mkdir -p "$SK/empty"
+is "a missing file under a readable dir is absent" absent "$(call state_kind "$SK/empty/state.json")"
+
+is "a missing parent is absent" absent "$(call state_kind "$SK/nothing/here/state.json")"
+
+# ENOTDIR: the parent is a regular file, so the read fails with a readable path.
+echo not-a-dir > "$SK/afile"
+is "a non-directory parent is unreadable" unreadable "$(call state_kind "$SK/afile/state.json")"
+
+# ELOOP: the name exists, the read cannot complete.
+ln -s "$SK/loop" "$SK/loop" 2>/dev/null
+is "a symlink cycle is unreadable" unreadable "$(call state_kind "$SK/loop")"
+
+# A dangling symlink is a damaged pointer, not an empty machine.
+ln -s "$SK/nowhere" "$SK/dangling"
+is "a dangling symlink is unreadable" unreadable "$(call state_kind "$SK/dangling")"
+
+# EACCES, the case that shipped. Root walks through 0000, so the assertion is
+# skipped rather than silently passing where the mode bit proves nothing.
+mkdir -p "$SK/sealed" && echo '{}' > "$SK/sealed/state.json"
+chmod 000 "$SK/sealed"
+if cat "$SK/sealed/state.json" >/dev/null 2>&1; then
+    skipped "an unsearchable parent is unreadable" "this user overrides the mode bit"
+else
+    is "an unsearchable parent is unreadable" unreadable "$(call state_kind "$SK/sealed/state.json")"
+fi
+chmod 755 "$SK/sealed"
+
+# EACCES on the file itself, with a searchable parent.
+mkdir -p "$SK/filesealed" && echo '{}' > "$SK/filesealed/state.json"
+chmod 000 "$SK/filesealed/state.json"
+if cat "$SK/filesealed/state.json" >/dev/null 2>&1; then
+    skipped "an unreadable file is unreadable" "this user overrides the mode bit"
+else
+    is "an unreadable file is unreadable" unreadable "$(call state_kind "$SK/filesealed/state.json")"
+fi
+chmod 644 "$SK/filesealed/state.json"
+
 echo
 printf 'apex-pkg: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" = 0 ]
