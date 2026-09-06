@@ -221,36 +221,101 @@ fn block_termination_signals() {
 /// its `sudo` whatever any record said. The only honest expiry for that mode
 /// is to end the session, and that is what this does.
 fn spawn_expiry_thread(daemon: Arc<Daemon>) {
+    use apex_agent_core::grant::SystemGrant;
+
     std::thread::Builder::new()
         .name("apex-agentd-grants".into())
-        .spawn(move || loop {
-            std::thread::sleep(EXPIRY_TICK);
-            let now = request::now_ms();
-            for (grant, ends_session) in daemon.grants.expire(now) {
-                eprintln!(
-                    "apex-agentd: {}",
-                    grant.describe(now, daemon.grants.boot())
-                );
-                if !ends_session {
-                    continue;
+        .spawn(move || {
+            // Break-glass grants whose sessions have been asked to end and
+            // have not yet been observed gone. Held here rather than on the
+            // session, because what is being tracked is a promise the audit
+            // trail made and not a property of the process.
+            let mut ending: Vec<SystemGrant> = Vec::new();
+            loop {
+                std::thread::sleep(EXPIRY_TICK);
+                let now = request::now_ms();
+
+                for (grant, ends_session) in daemon.grants.expire(now) {
+                    eprintln!("apex-agentd: {}", grant.describe(now, daemon.grants.boot()));
+                    if !ends_session {
+                        continue;
+                    }
+                    let Some(handle) = lookup(&daemon, grant.session) else {
+                        continue;
+                    };
+                    let mut s = handle.lock().expect("session lock");
+                    if !s.info.is_live() {
+                        continue;
+                    }
+                    eprintln!(
+                        "apex-agentd: ending session {} — its break-glass window is over and \
+                         no_new_privs cannot be put back on a running process",
+                        grant.session
+                    );
+                    registry::terminate(&mut s);
+                    registry::write_record(&s.info);
+                    drop(s);
+                    // A separate line from the grant's own `expired`, and it
+                    // deliberately does not claim the session is gone. The
+                    // grant expiring and the process ending are two facts, and
+                    // an `expired` line that implied the second would be a log
+                    // that lies in exactly the case that matters: a session
+                    // that declined SIGTERM and still has root.
+                    grant_note(&grant, "session-ending", now);
+                    ending.push(grant);
                 }
-                let Some(handle) = lookup(&daemon, grant.session) else {
-                    continue;
-                };
-                let mut s = handle.lock().expect("session lock");
-                if !s.info.is_live() {
-                    continue;
-                }
-                eprintln!(
-                    "apex-agentd: ending session {} — its break-glass window is over and \
-                     no_new_privs cannot be put back on a running process",
-                    grant.session
-                );
-                registry::terminate(&mut s);
-                registry::write_record(&s.info);
+
+                // The escalation, and then the confirmation. `SIGTERM` is a
+                // request; §3.4's expiry is not.
+                ending.retain(|grant| {
+                    let Some(handle) = lookup(&daemon, grant.session) else {
+                        grant_note(grant, "session-ended", now);
+                        return false;
+                    };
+                    let mut s = handle.lock().expect("session lock");
+                    if !s.info.is_live() {
+                        grant_note(grant, "session-ended", now);
+                        return false;
+                    }
+                    let asked = s.closing_since_ms.unwrap_or(now);
+                    if now.saturating_sub(asked) >= registry::TERMINATE_GRACE_MS
+                        && registry::force_kill(&mut s)
+                    {
+                        eprintln!(
+                            "apex-agentd: session {} did not exit within {}ms of its break-glass \
+                             window ending; killed",
+                            grant.session,
+                            registry::TERMINATE_GRACE_MS
+                        );
+                        drop(s);
+                        grant_note(grant, "session-killed", now);
+                    }
+                    true
+                });
             }
         })
         .ok();
+}
+
+/// One more line about a grant that has already ended, in both trails.
+///
+/// The state is `Ended` with the grant's own recorded reason, because the
+/// grant is over — these events are about what happened to the SESSION
+/// afterwards, and pretending the grant was still active while they were
+/// written would put a second, wrong answer in the record.
+fn grant_note(grant: &apex_agent_core::grant::SystemGrant, event: &str, now: u64) {
+    use apex_agent_core::grant::GrantState;
+    let state = grant
+        .closed
+        .map(|c| GrantState::Ended {
+            why: c.why,
+            at_ms: c.ms,
+        })
+        .unwrap_or(GrantState::Ended {
+            why: apex_agent_core::grant::ClosureReason::Expired,
+            at_ms: now,
+        });
+    apex_agent_core::grant::audit(&request::audit_log(), event, grant, &state);
 }
 
 fn spawn_signal_thread(daemon: Arc<Daemon>, socket: PathBuf) {
