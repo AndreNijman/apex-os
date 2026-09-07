@@ -25,3 +25,5 @@ Roadmap counts moved 45/25/55/2 → **46 done / 30 partial / 49 todo / 2 blocked
 
 I'll process each agent's report as it arrives: record with real reported counts, update the dispatch table, and dispatch the next READY unit — `p1-035` first, then `p1-050` once `p0-014` clears, then `trust-enforcement`.
 2026-09-07 10:28:52 resume session ended (exit 0)
+2026-09-07 11:17:10 report refreshed (203 lines)
+2026-09-07 11:17:10 starting a resume session (81 items outstanding)
