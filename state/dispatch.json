@@ -1,140 +1,110 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T10:05+08:00",
-  "_round": "Round 4. The six agents dispatched 05:05-06:00 on 2026-09-07 were all dead by 09:57 (session ended, not failure). FOUR of the six units below are FRESH agents carrying those dead agents' cards: p0-014, p1-023, p2-010, p1-039. The other two are new units -- integrate-4 (landing round) and followups-int3 (the hardening follow-ups queued as followups-integrate-3). None of the dead agents was revived by SendMessage.",
+  "updated": "2026-09-07T11:55+08:00",
+  "_round": "Round 5. All six round-4 agents were dead on arrival this session (their session ended ~10:30; ListAgents confirmed nothing alive, cards 48-62m stale). None was revived by SendMessage. integrate-4 had finished its landing list before dying, so its slot was freed. FIVE of the six below are FRESH agents carrying round-4 cards -- p0-014, p1-023, p2-010, p1-039, followups-int3 -- and the sixth is p1-035, which round 4 held for the ceiling and recorded as first in line. Landing this round: task/p1-050-remote-protocol onto apex-os roadmap/v2.2 (4ab5f75 -> 1d4095c -> 1ab542c). No apex-shell landing: all three unlanded shell branches are mid-work and their fresh agents own them.",
+  "_landed_this_round": {
+    "apex-os": "roadmap/v2.2 4ab5f75 -> 1ab542c. task/p1-050-remote-protocol, 7 commits, rebase --onto from fork bc4f06e. Two keep-both conflicts (apex/src/agent.rs: p1-020's AgentCmd::Statusline beside this branch's actor-carrying AgentCmd::Origin; apex/src/main.rs: Cmd::Devices beside Cmd::Remote). 09c977d's two COURTESY clippy fixes in the Cloudflare tests were DROPPED as its own commit message invited -- the tip had already fixed both independently (OperationCase vs OperationRow for the same type_complexity lint; a byte-identical raw-string replacement for the empty format!). cargo test 1854/1 -> 1964/1 (+110 tests, 0 removed, 0 new failures, 29 -> 33 binaries); the 1 is the pre-existing cgroup/origin artifact, renewing_a_grant_that_does_not_exist_is_refused_without_asking_anybody, identical by name in integrate-4's baseline and both its landings. run-clippy.sh PASS rc=0. check-no-conflict-markers PASS. Then 1ab542c: a cross-branch fix the landing exposed -- the firewall service catalogue is shipped TWICE (files/system/firewall/services and a built-in fallback heredoc in files/system/libexec/apex-firewall) and tests/test-apex-firewall.sh asserts they agree; p1-050 forked before p1-044 landed the second copy, so the suite went 31/0/1 -> 30/1/1. Entry added to the helper, restored to 31/0/1.",
+    "apex-shell": "unchanged at 690014a."
+  },
+  "_status_recorded_this_round": "P1-050 done, P1-051 partial, P1-052 partial (this round's landing). Plus integrate-4's seven landings, which it deliberately left to the orchestrator: P1-020 done, P1-021 done, P1-022 done, P1-048 done, P1-044 partial -> DONE (both halves landed), P1-038 partial (18 matrix rows need real applications), P2-005/P2-006/P2-007 partial (every remainder is hardware nobody here has). Counts moved 46 done / 30 partial -> 47 done / 29 partial of 127.",
   "_deliberately_held": {
-    "p1-050": "P1-050 and P1-051 are DONE and pushed (7 commits, tip 322fa45). NOT in integrate-4's landing list and no fresh agent was dispatched for it -- both on purpose. P1-052's remainder is a Cloudflare Worker + Durable Object relay, reconnect logic, mDNS discovery and connection quality, plus QR rendering and a paired-device page that belong in apex-shell. That is a unit of its own and it did not fit under the ceiling of six. Do not read its absence as an oversight.",
-    "p1-035": "P1-035 is implemented and green (test-agent-inject.sh 40/0), committed and pushed (tip 83ef1e0), with 1 dirty file and five owed mutations listed on its card. P1-036 and P1-037 are untouched. Held only for the ceiling; first in line next round.",
-    "p1-038-hardware": "The 18 labwc matrix rows need real applications on a real session. Cannot be done headless and cannot be done on the L16 while Andre is using it. A katana job or a job for Andre with a checklist -- not dispatchable tonight."
+    "p1-038-hardware": "The 18 labwc matrix rows need real applications on a real session. Cannot be done headless and cannot be done on the L16 while Andre is using it. A katana job or a job for Andre with a checklist -- not dispatchable unattended.",
+    "trust-enforcement": "READY and unblocked (new, from P1-047: make an APEX machine actually verify the signature it already has). Not dispatched only because the ceiling is six. First in line next round.",
+    "p1-005 / p1-008 / p1-011 / p1-014": "The Cloudflare capability suite, 13 tasks. Mutually conflicting -- p1-005 conflicts with p1-002, p1-008 with p1-002 and p1-005, p1-011 with p1-005 and p1-008, p1-014 with p1-011 -- so at most ONE of them can hold a slot at a time. None dispatched this round; the ceiling went to the five card-carrying units plus p1-035.",
+    "p1-025": "READY (skill inventory/audit, plugin provenance, memory provider interface, connector trust planes) but after p1-018, which is COMPLETE-but-unlanded. Land p1-018's work before dispatching this.",
+    "integrate-5": "No integration agent this round. Nothing was finished-and-unlanded except p1-050, which the orchestrator landed itself. integrate-4 left three housekeeping items on its card -- the per-commit build check for the four p1-020os commits, the four now-guarded nested shell suites on the final shell tip (run-nested-labwc.sh, run-labwc-matrix-test.sh, run-nexus-smoke.sh, run-agent-center-smoke.sh from the repo ROOT with XDG_* at /var/tmp/apex-shell-xdg), and squash-merged branch cleanup by git merge-tree --write-tree comparison. Fold those into the next integrate round's brief."
   },
   "agents": [
     {
-      "slug": "integrate-4",
-      "items": [
-        "(integration only)"
-      ],
-      "repo": "both",
-      "worktree": "/var/tmp/apex-work/int-os",
-      "branch": "roadmap/v2.2",
-      "agent_id": "a4d2d3505491923dd",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T10:05+08:00",
-      "title": "land p1-044 (both), p2-005, p1-020 (both), p1-038-labwc-parity, p1-048-guided-settings onto roadmap/v2.2",
-      "landing": [
-        "apex-os: task/p1-044-firewall-live 4cc3f4b",
-        "apex-os: task/p2-005-device-maturity 1adbdb2",
-        "apex-os: task/p1-020-agent-graph-daemon 85e3e2a",
-        "apex-shell: task/p1-020-agent-graph bb69775",
-        "apex-shell: task/p1-044-firewall-settings e51412b",
-        "apex-shell: task/p1-038-labwc-parity d2523e2",
-        "apex-shell: task/p1-048-guided-settings 0b36897"
-      ],
-      "must_not_touch": [
-        "apex-os: task/p0-014-remote-lock",
-        "apex-os: task/p1-035-agent-tooling",
-        "apex-os: task/p1-043-gpu-parity",
-        "apex-os: task/p1-050-remote-protocol",
-        "apex-os: task/p2-010-hardware-storage",
-        "apex-shell: task/p0-015-lock-tests",
-        "apex-shell: task/p1-039-display-colour",
-        "apex-shell: task/p1-023-handoff-lifecycle"
-      ],
-      "second_worktree": "/var/tmp/apex-work/int-shell",
-      "second_branch": "roadmap/v2.2"
-    },
-    {
       "slug": "p0-014",
-      "items": [
-        "P0-014",
-        "P0-015"
-      ],
+      "items": ["P0-014", "P0-015"],
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p0-014",
       "branch": "task/p0-014-remote-lock",
-      "agent_id": "af470f7add6e91d6c",
+      "agent_id": "ada1246b8b40f2c4c",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T10:05+08:00",
+      "dispatched": "2026-09-07T11:52+08:00",
       "fresh_agent_for_card": "p0-014",
-      "title": "CTAP2 assertion verifier behind --origin-policy remote -- the last P0 work in the roadmap",
+      "title": "CTAP2 assertion verifier behind --origin-policy remote, in three independently mergeable commits -- the last P0 work in the roadmap",
       "second_worktree": "/var/tmp/apex-work/wt-p0-015-shell",
       "second_branch": "task/p0-015-lock-tests",
-      "queue_id": "p0-014"
+      "queue_id": "p0-014",
+      "at_dispatch": "3 dirty paths in wt-p0-014: lib.rs + webauthn.rs are the in-progress commit 1 of 3 (commit them), webauthn.rs.orig is a patch leftover (delete it, do not commit). Told never to checkout/reset/stash first. Handed the note that p1-050's landing changed the origin plumbing under it -- DeclareOrigin now carries an actor and there is a per-connection origin latch -- so read privilege.rs and origin.rs on the new tip before designing the gate. Vectors already in /var/tmp/apex-work/fido-vectors/, on the card, not to be re-derived."
     },
     {
       "slug": "p1-023",
-      "items": [
-        "(red suites)",
-        "(pipefail sweep)",
-        "P1-023",
-        "P1-024",
-        "P1-029"
-      ],
+      "items": ["(red suites)", "(pipefail sweep)", "P1-023", "P1-024", "P1-029"],
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p1-023",
       "branch": "task/p1-023-handoff-lifecycle",
-      "agent_id": "ace9f96b23a98cc3f",
+      "agent_id": "aa81dbb74df468e1c",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T10:05+08:00",
+      "dispatched": "2026-09-07T11:52+08:00",
       "fresh_agent_for_card": "p1-023",
-      "title": "gate repair (Agent Center invariants, pipefail sweep: 26 files / 87 sites), then PTT, handoff packet, lifecycle types",
-      "at_dispatch": "BRANCH WAS NOT ON ORIGIN -- 2 local commits (1788443, da50162) covered only by refs/wip/wt-p1-023- at 901009a, plus 24 uncommitted files. Agent's first two instructions are push -u, then commit the 24.",
-      "queue_id": "p1-023"
+      "title": "voice-ptt wiring through all three keybind generators, then handoff packet and lifecycle types",
+      "second_worktree": "/var/tmp/apex-work/wt-p1-023-os",
+      "second_branch": "task/p1-023-push-to-talk-daemon",
+      "queue_id": "p1-023",
+      "at_dispatch": "Round 4's 'branch not on origin' note is RESOLVED for the shell half -- origin/task/p1-023-handoff-lifecycle is at acd985d. But the apex-os half is the mirror image: task/p1-023-push-to-talk-daemon is NOT on origin, HEAD is an old integration tip (95d068c), and it carries 2 uncommitted files (apex/src/main.rs, files/system/libexec/apex-labwc-keybinds) surviving only as refs/wip/wt-p1-023-os-. First instructions: commit those two, then push -u. Told not to re-fix integrate-4's frozen-clock check repair."
     },
     {
       "slug": "p2-010",
-      "items": [
-        "P2-010",
-        "P2-011",
-        "P2-014",
-        "P2-015"
-      ],
+      "items": ["P2-010", "P2-011", "P2-014", "P2-015"],
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p2-010",
       "branch": "task/p2-010-hardware-storage",
-      "agent_id": "a1e51b387d31a9bab",
+      "agent_id": "a2c4029deed1b521f",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T10:05+08:00",
+      "dispatched": "2026-09-07T11:52+08:00",
       "fresh_agent_for_card": "p2-010",
       "title": "hardware qualification database, agent cgroup budgets, Storage Manager, firmware lifecycle",
-      "at_dispatch": "10 uncommitted files from the predecessor. Agent told to commit them before anything else -- never checkout/reset/stash first.",
-      "queue_id": "p2-e"
+      "queue_id": "p2-e",
+      "at_dispatch": "FIVE commits existed only on this disk (1dd0b13 cef3979 caf756a 604e885 df4139d), covered by refs/wip/wt-p2-010- and nothing else. The card's order (mutation battery, then push) was DELIBERATELY REVERSED in the brief: push -u first, then measure. A green measurement of unpushed work is worth nothing if the machine goes down. Also warned about the duplicated firewall service catalogue, and told the destructive P2-014 half is loop devices only, never a real block device on either machine."
     },
     {
       "slug": "p1-039",
-      "items": [
-        "P1-039",
-        "P1-040",
-        "P1-041",
-        "P1-042",
-        "P1-043"
-      ],
+      "items": ["P1-039", "P1-040", "P1-041", "P1-042", "P1-043"],
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p1-039",
       "branch": "task/p1-039-display-colour",
-      "agent_id": "a8666e8dce5bef33d",
+      "agent_id": "ac9fe8d21fc560ab3",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T10:05+08:00",
+      "dispatched": "2026-09-07T11:52+08:00",
       "fresh_agent_for_card": "p1-039",
-      "title": "P1-041 creator colour management then P1-042 creator input/audio; P1-039/040 already committed",
-      "at_dispatch": "Both worktrees clean and pushed. katana read-only until pgrep steam|proton is empty -- restated in the brief because the GPU leg goes there.",
+      "title": "P1-041 colour engine half (a color verb on apex-display-apply, ICC tag table parsed directly, fake colormgr on a replaced PATH), then P1-042 creator input/audio",
       "second_worktree": "/var/tmp/apex-work/wt-p1-043",
       "second_branch": "task/p1-043-gpu-parity",
-      "queue_id": "p1-039"
+      "queue_id": "p1-039",
+      "at_dispatch": "wt-p1-043 has 2 uncommitted files (apex-display-apply, test-apex-display.sh) -- the in-progress P1-041 engine half; commit before anything else, never checkout/reset/stash. The colour facts measured on the L16 are on the card and must not be re-derived, including that NO vcgt loader exists on the image, so 'load the curve' is not honestly deliverable unattended and the deliverable is assignment stored and reported. katana read-only until pgrep steam|proton is empty -- restated, because the P1-043 GPU leg wants the RTX 3070 -- with instructions to do the AMD/Intel half on the L16 and record what still needs the NVIDIA machine."
     },
     {
       "slug": "followups-int3",
-      "items": [
-        "(hardening)"
-      ],
+      "items": ["(hardening)"],
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-followups-int3",
       "branch": "task/followups-int3",
-      "agent_id": "a51d3199218d2c8ce",
+      "agent_id": "affcea8fb9df6852c",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T10:05+08:00",
+      "dispatched": "2026-09-07T11:52+08:00",
+      "fresh_agent_for_card": "followups-int3",
+      "title": "item 4 of 4, the last one: document apex mcp connect/list/run/confine/policy and apex secret grant --everywhere in docs/agent-runtime.md, and why cloudflare.account.read does not qualify",
       "queue_id": "followups-integrate-3",
-      "title": "two security fixes (same_everywhere on OperationSpec; run_curl's bare curl reading the owner's ~/.curlrc), api.rs onto run_curl, p1-018 docs",
-      "at_dispatch": "New unit, new branch forked from origin/roadmap/v2.2 at dispatch time. Told the integration tip will move under it and NOT to rebase mid-work."
+      "at_dispatch": "Items 1-3 done and pushed; only item 4 remains, so this is the smallest unit in flight and may finish early. Told to point APEX at its own build for tests/check-doc-verbs.sh because the INSTALLED apex predates these verbs, to keep its base at b2d7905 and not rebase, that apex remote is a new verb family from p1-050's landing which is NOT its job to document from a stale tree, and to stop rather than invent work when item 4 is green."
+    },
+    {
+      "slug": "p1-035",
+      "items": ["P1-035", "P1-036", "P1-037"],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p1-035",
+      "branch": "task/p1-035-agent-tooling",
+      "agent_id": "a7ac60f2113e323e1",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T11:52+08:00",
+      "fresh_agent_for_card": "p1-035",
+      "title": "clear the five owed mutations on the pushed P1-035 commits, then P1-036 worktree status, then P1-037 disposable capsules",
+      "queue_id": "p1-035",
+      "at_dispatch": "Held one round for the ceiling; round 4 recorded it as first in line. Its card's NEXT is STALE -- it says 'waiting on a full cargo test before the first commit', but 1bb5db4 and 83ef1e0 are pushed and test-agent-inject.sh is 40/0; the brief overrides it and the agent was told to fix that line as its first card edit. Only dirt is an untracked .mutate.sh scratch runner, not to be committed. Pointed at P1-020's landed graph.rs to reuse for P1-036 rather than modelling agent hierarchy twice, and at the unowned task/p1-030-shell-integrations (tip 63493c7) to read before writing P1-037 capsules.",
+      "conflicts_note": "queue.json lists p1-035 as conflicting with p1-030. That conflict is moot this round: p1-030 is not dispatched and is not in the unlanded set."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine."

@@ -1,6 +1,6 @@
 {
   "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap \u2014 do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
-  "updated": "2026-09-06T23:50+08:00",
+  "updated": "2026-09-07T11:55+08:00",
   "concurrency_ceiling": 6,
   "units": [
     {
@@ -153,7 +153,8 @@
         "p0-018b",
         "p1-023"
       ],
-      "note": "P0-022 already rewrote the Agent Center to say what each agent is; the graph builds on that, it does not replace it."
+      "note": "P0-022 already rewrote the Agent Center to say what each agent is; the graph builds on that, it does not replace it.",
+      "landed": "both halves landed by integrate-4; P1-020/021/022 all done 2026-09-07."
     },
     {
       "id": "p1-023",
@@ -184,7 +185,8 @@
       "after": [
         "p1-018"
       ],
-      "conflicts": []
+      "conflicts": [],
+      "note": "Blocked in practice, not by the queue: `after: p1-018` and p1-018's work is COMPLETE but UNLANDED. Land it before dispatching this."
     },
     {
       "id": "p1-035",
@@ -200,7 +202,8 @@
       ],
       "conflicts": [
         "p1-030"
-      ]
+      ],
+      "note": "Dispatched round 5. Its queue conflict with p1-030 is moot while p1-030 is neither dispatched nor unlanded."
     },
     {
       "id": "p1-039",
@@ -232,7 +235,8 @@
       "title": "Integrate the firewall branches (work is finished, not merged)",
       "after": [],
       "conflicts": [],
-      "note": "DONE and pushed: task/p1-044-firewall-live 4cc3f4b (apex-os) and task/p1-044-firewall-settings e51412b (apex-shell). Optional follow-up its author names: apex firewall status --json so the shell page stops parsing prose. Two policy scope questions stay open on purpose -- LLMNR accepted on every interface, and mDNS accepting unicast from any source. Also open: katana's installed apex predates the firewall subcommand, and whether the page should stop offering commands that image cannot run is a judgement nobody has made. ALSO, from the P2-005 agent, measured with positive controls: a hotspot cannot work under the shipped policy, three independent ways -- forward is policy drop, the DHCP rule matches replies rather than a client's DISCOVER, and port 53 is shut. The exception mechanism itself is sound (631/445/2049 reopen immediately). And two lines in `apex devices network` state the current policy as fact and go stale the day it changes; ping task/p2-005-device-maturity when the policy moves."
+      "note": "DONE and pushed: task/p1-044-firewall-live 4cc3f4b (apex-os) and task/p1-044-firewall-settings e51412b (apex-shell). Optional follow-up its author names: apex firewall status --json so the shell page stops parsing prose. Two policy scope questions stay open on purpose -- LLMNR accepted on every interface, and mDNS accepting unicast from any source. Also open: katana's installed apex predates the firewall subcommand, and whether the page should stop offering commands that image cannot run is a judgement nobody has made. ALSO, from the P2-005 agent, measured with positive controls: a hotspot cannot work under the shipped policy, three independent ways -- forward is policy drop, the DHCP rule matches replies rather than a client's DISCOVER, and port 53 is shut. The exception mechanism itself is sound (631/445/2049 reopen immediately). And two lines in `apex devices network` state the current policy as fact and go stale the day it changes; ping task/p2-005-device-maturity when the policy moves.",
+      "landed": "both halves landed by integrate-4; P1-044 marked done 2026-09-07."
     },
     {
       "id": "p1-050",
@@ -247,7 +251,8 @@
         "p0-014"
       ],
       "conflicts": [],
-      "note": "Gates the entire eight-task Android chain. The protocol decision here is the single highest-leverage design left in the roadmap."
+      "note": "Gates the entire eight-task Android chain. The protocol decision here is the single highest-leverage design left in the roadmap.",
+      "landed": "apex-os roadmap/v2.2 1ab542c on 2026-09-07. P1-050 done. P1-051 and P1-052 stay partial and their remainders do NOT belong to this unit: P1-051 needs the key in Android Keystore with setUserAuthenticationRequired plus a per-approval challenge and attestation (that is p1-053a), and apex-shell owes it a QR page and a paired-device page. P1-052 needs a deployed Cloudflare Worker + Durable Object relay, reconnect across network changes, mDNS discovery and rendered connection quality -- a unit of its own. Do NOT re-dispatch p1-050; carve those two out instead."
     },
     {
       "id": "p1-053a",
