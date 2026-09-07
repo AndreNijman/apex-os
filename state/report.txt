@@ -50,3 +50,174 @@ APEX ROADMAP — resume report — 2026-09-07 09:57 AWST
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
+  int-os:  tip b2d7905 style(cloudflare): the two lints the new clippy wrappe
+    task/p0-014-remote-lock
+      cbe09d8 feat(lock): §7's lock rules were a switch with no wire running   [2/10 added lines on tip]
+      3c3abd3 test(request): the root approval path needed a real uid 0, not   [2/10 added lines on tip]
+    task/p1-020-agent-graph-daemon
+      2050767 feat(agent): the daemon was told about every subagent and reco   [0/10 added lines on tip]
+      51529a1 feat(agent): MCP servers and tool processes are the half nobod   [2/10 added lines on tip]
+      877999a fix(agent): a subagent can outlive the turn, and the sweep sai   [0/10 added lines on tip]
+      85e3e2a feat(agent): the model, the context and the rate limits reach    [1/10 added lines on tip]
+    task/p1-035-agent-tooling
+      1bb5db4 fix(agent): a test daemon and the real one shared every sessio   [0/10 added lines on tip]
+      83ef1e0 feat(agent): a screenshot in front of you could not be handed    [1/10 added lines on tip]
+    task/p1-043-gpu-parity
+      166f089 feat(gpu): AMD and Intel had no GPU handling at all, and a hyb   [2/10 added lines on tip]
+    task/p1-044-firewall-live
+      fd4c6e1 test(firewall): the policy had never been loaded into a kernel   [1/10 added lines on tip]
+      34e66e9 fix(firewall): the forward chain overrode every container's ow   [0/10 added lines on tip]
+      7410a68 test(firewall): a namespace cannot prove ssh survives the poli   [2/10 added lines on tip]
+      b9986aa fix(firewall): the live driver could not reach the one machine   [0/10 added lines on tip]
+      c031829 fix(firewall): fifteen ssh calls got the driver banned by the    [0/10 added lines on tip]
+      c20dc8b fix(firewall): the nft that loads the policy cannot read it ou   [0/10 added lines on tip]
+      4cc3f4b docs(firewall): slop pass over the ssh driver's comments   [0/8 added lines on tip]
+    task/p1-050-remote-protocol
+      7041b74 fix(agent): a proxy's origin was whatever its cgroup said, and   [1/10 added lines on tip]
+      05c73da feat(remote): a phone has one channel, and the daemon's protoc   [2/10 added lines on tip]
+      6f6246e feat(remote): the desktop half, and it is a client of the runt   [2/10 added lines on tip]
+      71f8a90 test(remote): the pairing gate passed with the check replaced    [2/10 added lines on tip]
+      09c977d fix(clippy): the integration tip was not clean, and two of the   [1/10 added lines on tip]
+      17b18c4 test(remote): a phone approving root, demonstrated rather than   [1/10 added lines on tip]
+      322fa45 fix(remote): the handshake deadline was cleared before it coul   [0/10 added lines on tip]
+    task/p2-005-device-maturity
+      c823974 test(firewall): the rules were read, never sent a packet throu   [1/10 added lines on tip]
+      f9ab0e7 test(devices): a shared printer is unreachable and nothing sai   [1/10 added lines on tip]
+      36232f5 fix(image): the share stack had no floor, and hplip hung every   [1/10 added lines on tip]
+      3142bbd fix(image): the scan enumeration hung on avahi's absence, not    [1/10 added lines on tip]
+      5a7d0c6 feat(devices): "there is none" and "I could not look" stop arr   [1/10 added lines on tip]
+      fce0a99 feat(devices): `apex devices` is a verb, and it covers cards,    [1/10 added lines on tip]
+      5d5441b style(devices): the messages a user reads, in the voice the re   [0/10 added lines on tip]
+      1adbdb2 fix(devices): NetworkManager answers `full` for a link nobody    [0/10 added lines on tip]
+    task/p2-010-hardware-storage
+      ee30c3b feat(qualify): a machine's compatibility record existed once,    [2/10 added lines on tip]
+
+  int-shell:  tip 8d081ff fix(lock): logind was told nothing, so a session locke
+    fix/labwc-desktop-parity  — squash-merged, safe to delete
+      landed whole as f609a6c fix(labwc): complete desktop parity (#6)
+    fix/popup-first-open-and-media-keys  — squash-merged, safe to delete
+      landed whole as b8a63a8 fix(popups): first-open rendering, dead toasts, and medi
+    fix/screenshot-off-hyprland  — squash-merged, safe to delete
+      landed whole as 4e267eb fix: screenshots and popup input regions off Hyprland (#
+    task/p0-015-lock-tests
+      bbec072 test(lock): the fix that told logind about the lock had never    [3/10 added lines on tip]
+    task/p0-016-agent-settings  — squash-merged, safe to delete
+      landed whole as 4335e42 fix(agents): the sudo caveat was written before no_new_p
+    task/p1-020-agent-graph
+      62fb5d9 fix(agents): six agents needing attention produced one notific   [0/10 added lines on tip]
+      6046b71 test(ci): the notification suites existed but nothing ran them   [0/10 added lines on tip]
+      c1a9896 feat(agents): a row that says "working" cannot tell you six ag   [0/10 added lines on tip]
+      85d9658 feat(agents): the model, the context and the branch, said once   [1/10 added lines on tip]
+      bb69775 fix(agents): the rate-limit countdown was computed once and ne   [1/10 added lines on tip]
+    task/p1-038-labwc-parity
+      d2523e2 test(screenshot): nothing ran the capture script, on any compo   [0/10 added lines on tip]
+      cfad23f test(labwc): the Floating session's defects all look like noth   [1/10 added lines on tip]
+      2ea0790 test(labwc): one output cannot tell a per-output bug from a wo   [0/10 added lines on tip]
+    task/p1-039-display-colour
+      9da1822 feat(night light): one control, four compositors, and a mechan   [2/10 added lines on tip]
+      2cf7a8e fix(scaling): a mixed-DPI desk got one size, and the test that   [1/10 added lines on tip]
+    task/p1-044-firewall-settings
+      f045d2f feat(firewall): a default-drop policy the user could not see a   [1/10 added lines on tip]
+      e51412b fix(firewall): an empty list of open ports was read as a machi   [0/10 added lines on tip]
+    task/p1-048-guided-settings
+      0b36897 test(headless): twelve runners opened their windows on whoever   [3/10 added lines on tip]
+      56240d8 fix(headless): the teardown aborted on its own kill and took t   [0/10 added lines on tip]
+      abb248f test(headless): a runner that can reach the desk fails the bui   [1/10 added lines on tip]
+      5d4acc9 fix(headless): the guard let `command -p` through, and CI neve   [0/10 added lines on tip]
+      6213f05 feat(blueprint): the plan could not tell taking something away   [0/10 added lines on tip]
+      fd154bc feat(blueprint): the page was correct, and nobody could read i   [0/10 added lines on tip]
+      d54e6d1 fix(blueprint): the removal count pointed at a section that ma   [0/9 added lines on tip]
+      4cd2890 feat(gaming): the logic behind a Gaming page, and what it refu   [0/10 added lines on tip]
+      7266f50 feat(gaming): a Gaming page, built for the machine that has no   [1/10 added lines on tip]
+
+  The per-commit lines above are a HEURISTIC: a low count can also mean
+  landed-then-rewritten. Settle any one of them with
+  `git diff <integration> <branch> -- $(git show --name-only --format= <commit>)`
+  before spending an agent on it.
+
+────────────────────────────────────────────────────────────────────────────
+  durability
+────────────────────────────────────────────────────────────────────────────
+  snapshot timer: active   last 2min 39s Mon
+  wip refs:
+    apex-os    dd3496b  apex-os-
+    apex-os    73dd699  int-os-
+    apex-os    f9740f9  roadmap-state
+    apex-os    6c9c17f  wt-clippy-
+    apex-os    1951fdc  wt-disposable-
+    apex-os    0683355  wt-greeter-os-
+    apex-os    c74f38d  wt-multilib2-
+    apex-os    0fd2d78  wt-p0-002-
+    apex-os    e63b0e3  wt-p0-003-
+    apex-os    cb17b4e  wt-p0-004-
+    apex-os    1a4b5f2  wt-p0-005-
+    apex-os    162d6fa  wt-p0-009-
+    apex-os    d4787a4  wt-p0-009b-
+    apex-os    f30f7ca  wt-p0-011-
+    apex-os    9b605a1  wt-p0-011b-
+    apex-os    f36005e  wt-p0-014-
+    apex-os    580c657  wt-p0-019-os-
+    apex-os    00c1973  wt-p0-025-os-
+    apex-os    eda5ef8  wt-p1-001-
+    apex-os    a23175f  wt-p1-002-
+    apex-os    c260504  wt-p1-018-
+    apex-os    7685dc3  wt-p1-020-os-
+    apex-os    df682db  wt-p1-030-
+    apex-os    b69fb95  wt-p1-035-
+    apex-os    592f49a  wt-p1-043-
+    apex-shell b54d6a5  apex-shell-
+    apex-shell a692c30  int-shell-
+    apex-shell 75049cf  wt-greeter-shell-
+    apex-shell ed92eaa  wt-lockhint-
+    apex-shell ad2d89d  wt-p0-005-shell-
+    apex-shell 6282c29  wt-p0-015-shell-
+    apex-shell 2afecfc  wt-p0-016-
+    apex-shell 5cf1789  wt-p0-017-
+    apex-shell e1d8a82  wt-p0-017b-
+    apex-shell 763c26e  wt-p0-018-prefix-
+    apex-shell 5b2a749  wt-p0-018b-
+    apex-shell 4eb5711  wt-p0-019-shell-
+    apex-shell a006b8c  wt-p0-023-
+    apex-shell b1621de  wt-p1-020-
+    apex-shell ce13965  wt-p1-023-
+    apex-shell 3db5952  wt-p1-038-
+    apex-shell de4ed18  wt-p1-039-
+    apex-shell 086727e  wt-p1-044-shell-
+    apex-shell fb019fa  wt-p1-048-
+
+────────────────────────────────────────────────────────────────────────────
+  next
+────────────────────────────────────────────────────────────────────────────
+  6 agent(s) dispatched, ceiling 6
+
+  READY (dependencies believed satisfied — confirm against the agent table above):
+    followups-integrate-3 (hardening)                      Four follow-ups the third integration round routed onward
+    trust-enforcement (new, from P1-047)               Make an APEX machine actually verify the signature it alread
+    p1-038-hardware P1-038                           The 18 labwc matrix rows that need real applications
+    p0-014         P0-014,P0-015                    Remote Control privilege policy and lock-state policy, wired
+    p1-018         P1-018,P1-019                    MCP auth helper integration and per-MCP sidecar sandboxing
+                   conflicts with p0-003
+    p1-005         P1-005,P1-006,P1-007             Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets
+                   conflicts with p1-002
+    p1-008         P1-008,P1-009,P1-010             Cloudflare One, Workers AI and AI Gateway, Secrets Store
+                   conflicts with p1-002, p1-005
+    p1-011         P1-011,P1-012,P1-013             Temporary task credentials, transparent brokered wrangler/cl
+                   conflicts with p1-005, p1-008
+
+  HELD:
+    p1-050         after p0-014
+    p1-053a        after p1-050
+    base-partials  after p1-039
+    final          after *
+
+────────────────────────────────────────────────────────────────────────────
+  how to resume
+────────────────────────────────────────────────────────────────────────────
+  1. This page IS the resume. Do not re-derive it with git commands.
+  2. A dead agent is NOT resumed with SendMessage — that replays its whole
+     transcript through the model and cost 10% of a usage window on 2026-09-06.
+     Dispatch a FRESH agent and paste it ROADMAP/state/agents/<slug>.md.
+     Its worktree is intact; its branch is pushed; its card says what is next.
+  3. Land finished branches onto roadmap/v2.2, record them with set-status.py,
+     then dispatch from READY up to the ceiling.
+  4. Full context, if you need more than this page: ROADMAP/PROGRESS.md.
