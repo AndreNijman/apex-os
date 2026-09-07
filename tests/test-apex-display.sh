@@ -345,6 +345,301 @@ PATH="$NPBIN" HOME="$NP" "$PY" "$GEN" --help 2>&1 | grep -q -- '--no-persist' \
     && ok "--no-persist is discoverable in --help (the shell probes for it)" \
     || bad "--no-persist is discoverable in --help (the shell probes for it)"
 
+section "colour management"
+# colord is the store; this program is the adapter. The suite never talks to the
+# real colord and never creates a real device — `colormgr create-device` at
+# `normal` scope writes /var/lib/colord/mapping.db, and MEASURED on 2026-09-07:
+# `colormgr delete-device` does NOT remove the device-to-profile rows it leaves
+# behind, so a suite that used the real daemon would silently accumulate
+# assignments in the developer's own colour database.
+#
+# /sys is the other thing that cannot be isolated by HOME or PATH, so the
+# program names its DRM root and this hands it a fixture tree. Without that,
+# every EDID assertion would be an assertion about whatever panel the developer
+# happens to have.
+CROOT="${WORK}/colour"
+mkdir -p "$CROOT/bin" "$CROOT/drm" "$CROOT/icc" "$CROOT/home/.config/apex-shell"
+
+"$PY" - "$CROOT" <<'FIXTURES'
+import os, struct, sys
+root = sys.argv[1]
+
+def icc(path, tags):
+    """A minimal but structurally real ICC profile: 128-byte header with 'acsp'
+    at offset 36, a uint32 tag count, then 12-byte (sig, offset, size) entries."""
+    header = bytearray(128)
+    header[36:40] = b"acsp"
+    body = struct.pack(">I", len(tags))
+    off = 132 + 12 * len(tags)
+    for sig in tags:
+        body += sig + struct.pack(">II", off, 8)
+        off += 8
+    blob = bytes(header) + body + b"\x00" * (8 * len(tags))
+    blob = struct.pack(">I", len(blob)) + blob[4:]
+    open(path, "wb").write(blob)
+
+icc(os.path.join(root, "icc/with-curve.icc"),  [b"desc", b"vcgt", b"wtpt"])
+icc(os.path.join(root, "icc/no-curve.icc"),    [b"desc", b"wtpt"])
+open(os.path.join(root, "icc/not-an-icc.icc"), "wb").write(b"this is not a profile" * 16)
+
+def edid(path, mfg, name, serial, hdr):
+    b = bytearray(128)
+    b[0:8] = b"\x00\xff\xff\xff\xff\xff\xff\x00"
+    packed = 0
+    for ch in mfg:
+        packed = (packed << 5) | (ord(ch) - 64)
+    b[8], b[9] = packed >> 8, packed & 0xFF
+    def descriptor(at, tag, text):
+        b[at:at+5] = bytes([0, 0, 0, tag, 0])
+        t = (text + "\n").ljust(13)[:13].encode("ascii")
+        b[at+5:at+18] = t
+    descriptor(54, 0xFC, name)
+    descriptor(72, 0xFF, serial)
+    b[126] = 1
+    ext = bytearray(128)
+    ext[0] = 0x02          # CTA-861
+    ext[1] = 3             # revision
+    blocks = b""
+    if hdr:
+        blocks += bytes([(7 << 5) | 3, 6, 0x0F, 0x00])   # HDR static metadata
+        blocks += bytes([(7 << 5) | 3, 5, 0x00, 0x00])   # colorimetry
+    else:
+        blocks += bytes([(1 << 5) | 3, 0x01, 0x02, 0x03])  # an audio block
+    ext[4:4+len(blocks)] = blocks
+    ext[2] = 4 + len(blocks)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "wb").write(bytes(b) + bytes(ext))
+
+edid(os.path.join(root, "drm/card0-eDP-1/edid"),   "APX", "PANEL-SDR", "SN0001", False)
+edid(os.path.join(root, "drm/card0-DP-2/edid"),    "APX", "PANEL-HDR", "SN0002", True)
+os.makedirs(os.path.join(root, "drm/card0-HDMI-A-1"), exist_ok=True)
+open(os.path.join(root, "drm/card0-HDMI-A-1/edid"), "wb").write(b"")   # unplugged
+FIXTURES
+
+cat > "$CROOT/home/.config/apex-shell/display.json" <<'MODEL'
+{"outputs":[
+  {"name":"eDP-1","enabled":true,"x":0,"y":0,"scale":1.0,"transform":"normal",
+   "adaptive_sync":false,"mode":{"width":1920,"height":1200,"refresh":60}},
+  {"name":"DP-2","enabled":true,"x":1920,"y":0,"scale":1.0,"transform":"normal",
+   "adaptive_sync":false,"mode":{"width":3840,"height":2160,"refresh":60}},
+  {"name":"HDMI-A-1","enabled":true,"x":0,"y":1200,"scale":1.0,"transform":"normal",
+   "adaptive_sync":false,"mode":{"width":1280,"height":720,"refresh":60}}
+]}
+MODEL
+
+# A fake colormgr with a state file, so "the device already exists" is a state
+# the suite can reach rather than a branch it has to trust.
+cat > "$CROOT/bin/colormgr" <<'CMGR'
+#!/bin/sh
+S="$CM_STATE"
+echo "$*" >> "$S.calls"
+# Shell builtins ONLY below — no grep, no tail, no cat. The engine is invoked
+# with PATH set to exactly this one directory, which is what guarantees it can
+# never reach the real colormgr; the same setting means nothing external is on
+# PATH for the fake either. An earlier version of this fake used `grep -qx` to
+# ask whether a device already existed, and because grep was not reachable the
+# lookup exited 127, which reads as "no such device" — so `find-device` and
+# `device-get-default-profile` always failed, `colour_assign` always took the
+# create branch, and two assertions here were red against correct engine code.
+# A fake that depends on the PATH it is being isolated from is not isolated.
+have_device() {
+    _hd=1
+    [ -f "$S.devices" ] || return 1
+    while read -r _d; do [ "$_d" = "$1" ] && _hd=0; done < "$S.devices"
+    return $_hd
+}
+case "$1" in
+get-devices)
+    [ -s "$S.devices" ] || exit 0
+    while read -r d; do printf 'Device ID:   %s\n\n' "$d"; done < "$S.devices"
+    ;;
+find-device)
+    have_device "$2" || { echo "device not found" >&2; exit 1; }
+    printf 'Device ID:   %s\n\n' "$2"
+    ;;
+create-device)
+    have_device "$2" && { echo "exists" >&2; exit 1; }
+    echo "$2" >> "$S.devices"
+    printf 'Device ID:   %s\n\n' "$2"
+    ;;
+device-make-profile-default)
+    printf '%s %s\n' "$2" "$3" >> "$S.defaults"
+    ;;
+device-get-default-profile)
+    # Last writer wins, the way colord's own default does. Device ids are
+    # sanitised to alnum and dash by the engine, so splitting on IFS is safe.
+    pid=""
+    if [ -f "$S.defaults" ]; then
+        while read -r _dev _pid; do
+            [ "$_dev" = "$2" ] && pid="$_pid"
+        done < "$S.defaults"
+    fi
+    [ -n "$pid" ] || { echo "no profile" >&2; exit 1; }
+    case "$pid" in
+      icc-with) printf 'Title:   Fixture With Curve\nFilename:   %s\nProfile ID:   icc-with\n\n' "$CM_ICC/with-curve.icc" ;;
+      icc-none) printf 'Title:   Fixture No Curve\nFilename:   %s\nProfile ID:   icc-none\n\n' "$CM_ICC/no-curve.icc" ;;
+      *) exit 1 ;;
+    esac
+    ;;
+get-profiles)
+    printf 'Title:   Fixture With Curve\nType:   display-device\nFilename:   %s\nProfile ID:   icc-with\n\n' "$CM_ICC/with-curve.icc"
+    printf 'Title:   Fixture No Curve\nType:   display-device\nFilename:   %s\nProfile ID:   icc-none\n\n' "$CM_ICC/no-curve.icc"
+    ;;
+esac
+exit 0
+CMGR
+chmod +x "$CROOT/bin/colormgr"
+for tool in hyprctl wlr-randr pkill; do
+    printf '#!/bin/sh\n[ "$1" = "--json" ] && echo "[]"\n[ "$1" = "-j" ] && echo "[]"\nexit 0\n' \
+        > "$CROOT/bin/$tool"
+    chmod +x "$CROOT/bin/$tool"
+done
+
+CM_STATE="${WORK}/cm"
+: > "${CM_STATE}.devices"; : > "${CM_STATE}.defaults"; : > "${CM_STATE}.calls"
+colour() {
+    PATH="$CROOT/bin" HOME="$CROOT/home" \
+        APEX_DISPLAY_DRM_ROOT="$CROOT/drm" APEX_DISPLAY_NO_LIVE=1 \
+        CM_STATE="$CM_STATE" CM_ICC="$CROOT/icc" \
+        XDG_CURRENT_DESKTOP="${1:-Hyprland}" "$PY" "$GEN" "${@:2}"
+}
+# The same, with nothing named colormgr anywhere on PATH.
+colour_nocolord() {
+    PATH="${WORK}/emptybin" HOME="$CROOT/home" \
+        APEX_DISPLAY_DRM_ROOT="$CROOT/drm" APEX_DISPLAY_NO_LIVE=1 \
+        XDG_CURRENT_DESKTOP="${1:-Hyprland}" "$PY" "$GEN" "${@:2}"
+}
+mkdir -p "${WORK}/emptybin"
+
+jqp() { "$PY" -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+
+state="$(colour Hyprland color 2>/dev/null)"
+printf '%s' "$state" | "$PY" -c 'import json,sys; json.load(sys.stdin)' \
+    && ok "color emits valid JSON" || bad "color emits valid JSON"
+
+# ── the vcgt question, answered out of the file ──────────────────────────────
+# colord reports a "Gamma Table" line, but the page has to be right on a profile
+# colord has never seen, and "could not read it" is a third answer that must not
+# collapse into "no curve".
+v_with="$(printf '%s' "$state" | jqp '[p["vcgt"] for p in d["profiles"] if p["id"]=="icc-with"]')"
+v_none="$(printf '%s' "$state" | jqp '[p["vcgt"] for p in d["profiles"] if p["id"]=="icc-none"]')"
+[ "$v_with" = "[True]" ]  && ok "a profile carrying a vcgt tag is reported as having one" \
+                          || bad "a profile carrying a vcgt tag is reported as having one (got $v_with)"
+[ "$v_none" = "[False]" ] && ok "a profile with no vcgt tag is reported as having none" \
+                          || bad "a profile with no vcgt tag is reported as having none (got $v_none)"
+noticc="$(PATH="$CROOT/bin" "$PY" -c "
+import importlib.util as u, importlib.machinery as mach, sys
+s = u.spec_from_loader('e', mach.SourceFileLoader('e', '$GEN')); m = u.module_from_spec(s); s.loader.exec_module(m)
+print(m.icc_has_vcgt('$CROOT/icc/not-an-icc.icc'), m.icc_has_vcgt('$CROOT/icc/absent.icc'))")"
+[ "$noticc" = "None None" ] \
+    && ok "a file that is not an ICC profile answers 'unknown', not 'no curve'" \
+    || bad "a file that is not an ICC profile answers 'unknown', not 'no curve' (got $noticc)"
+
+# ── HDR is read off the panel, not guessed ──────────────────────────────────
+hdr_sdr="$(printf '%s' "$state" | jqp '[o["hdr"] for o in d["outputs"] if o["name"]=="eDP-1"][0]["static_metadata"]')"
+hdr_hdr="$(printf '%s' "$state" | jqp '[o["hdr"] for o in d["outputs"] if o["name"]=="DP-2"][0]["static_metadata"]')"
+col_hdr="$(printf '%s' "$state" | jqp '[o["hdr"] for o in d["outputs"] if o["name"]=="DP-2"][0]["colorimetry"]')"
+no_edid="$(printf '%s' "$state" | jqp '[o["hdr"] for o in d["outputs"] if o["name"]=="HDMI-A-1"][0]["edid"]')"
+[ "$hdr_sdr" = "False" ] && ok "a panel with no HDR block is not reported as HDR" \
+                         || bad "a panel with no HDR block is not reported as HDR"
+[ "$hdr_hdr" = "True" ]  && ok "a panel with a CTA HDR static metadata block IS reported as HDR" \
+                         || bad "a panel with a CTA HDR static metadata block IS reported as HDR"
+[ "$col_hdr" = "True" ]  && ok "the colorimetry block is reported separately from the HDR one" \
+                         || bad "the colorimetry block is reported separately from the HDR one"
+[ "$no_edid" = "False" ] && ok "an unplugged connector reports no EDID rather than 'not HDR'" \
+                         || bad "an unplugged connector reports no EDID rather than 'not HDR'"
+
+# ── the device id travels with the panel, not the socket ────────────────────
+# Unplug a calibrated monitor from DP-1 and put a different one there: an id
+# keyed on the connector hands the second monitor the first one's profile.
+id_edp="$(printf '%s' "$state" | jqp '[o["device"] for o in d["outputs"] if o["name"]=="eDP-1"][0]')"
+id_hdmi="$(printf '%s' "$state" | jqp '[o["device"] for o in d["outputs"] if o["name"]=="HDMI-A-1"][0]')"
+[ "$id_edp" = "apex-display-APX-PANEL-SDR-SN0001" ] \
+    && ok "the colord device id is built from the EDID" \
+    || bad "the colord device id is built from the EDID (got $id_edp)"
+[ "$id_hdmi" = "apex-display-HDMI-A-1" ] \
+    && ok "with no EDID the id falls back to the connector" \
+    || bad "with no EDID the id falls back to the connector (got $id_hdmi)"
+
+# ── the curve verdict is per compositor ─────────────────────────────────────
+# On the wlroots compositors the gamma LUT is one slot and the night light is
+# already in it, so a calibration curve and a night light are the same control.
+# Hyprland's night light is a colour matrix, a different slot.
+lut_h="$(printf '%s' "$state" | jqp 'd["curve"]["lut_shared_with_night_light"]')"
+lut_l="$(colour labwc color 2>/dev/null | jqp 'd["curve"]["lut_shared_with_night_light"]')"
+[ "$lut_h" = "False" ] && ok "on Hyprland the night light does not occupy the gamma LUT" \
+                       || bad "on Hyprland the night light does not occupy the gamma LUT"
+[ "$lut_l" = "True" ]  && ok "on a wlroots compositor a curve and a night light are the same slot" \
+                       || bad "on a wlroots compositor a curve and a night light are the same slot"
+loader="$(printf '%s' "$state" | jqp 'd["curve"]["loader"]')"
+[ "$loader" = "None" ] && ok "with no ICC loader installed the page is told so by name" \
+                       || bad "with no ICC loader installed the page is told so by name (got $loader)"
+printf '#!/bin/sh\nexit 0\n' > "$CROOT/bin/xcalib"; chmod +x "$CROOT/bin/xcalib"
+loader2="$(colour Hyprland color 2>/dev/null | jqp 'd["curve"]["loader"]')"
+rm -f "$CROOT/bin/xcalib"
+[ "$loader2" = "xcalib" ] \
+    && ok "a loader that IS installed is found (so 'none' is a measurement)" \
+    || bad "a loader that IS installed is found (so 'none' is a measurement, got $loader2)"
+
+# ── colord absent is a state, not a crash ───────────────────────────────────
+nc="$(colour_nocolord Hyprland color 2>/dev/null)"
+printf '%s' "$nc" | jqp 'd["colord"]["available"]' | grep -qx False \
+    && ok "with no colormgr on PATH, colord is reported unavailable" \
+    || bad "with no colormgr on PATH, colord is reported unavailable"
+printf '%s' "$nc" | jqp 'len(d["outputs"])' | grep -qx 3 \
+    && ok "the outputs and their EDID verdicts survive colord being absent" \
+    || bad "the outputs and their EDID verdicts survive colord being absent"
+
+# ── assignment ──────────────────────────────────────────────────────────────
+colour Hyprland --dry-run color-assign eDP-1 icc-with >/dev/null 2>&1
+grep -qE 'create-device|make-profile-default' "${CM_STATE}.calls" \
+    && bad "--dry-run color-assign changes nothing in colord" \
+    || ok "--dry-run color-assign changes nothing in colord"
+
+out="$(colour Hyprland color-assign eDP-1 icc-with 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && ok "color-assign succeeds" || bad "color-assign succeeds (rc=$rc)"
+grep -qx "apex-display-APX-PANEL-SDR-SN0001" "${CM_STATE}.devices" \
+    && ok "the output was registered with colord under its EDID id" \
+    || bad "the output was registered with colord under its EDID id"
+grep -q "device-make-profile-default apex-display-APX-PANEL-SDR-SN0001 icc-with" "${CM_STATE}.calls" \
+    && ok "the profile was made the device default" \
+    || bad "the profile was made the device default"
+
+after="$(colour Hyprland color 2>/dev/null)"
+printf '%s' "$after" | jqp '[o["profile"]["title"] for o in d["outputs"] if o["name"]=="eDP-1"][0]' \
+    | grep -qx "Fixture With Curve" \
+    && ok "the assignment is read back by the same verb the page uses" \
+    || bad "the assignment is read back by the same verb the page uses"
+printf '%s' "$after" | jqp '[o["profile"] for o in d["outputs"] if o["name"]=="DP-2"][0]' \
+    | grep -qx "None" \
+    && ok "an output with no assignment says so rather than inheriting one" \
+    || bad "an output with no assignment says so rather than inheriting one"
+
+# Twice. create-device fails on an existing id, so an assign that always creates
+# would work exactly once — which is the shape of bug a single-run test misses.
+: > "${CM_STATE}.calls"
+out2="$(colour Hyprland color-assign eDP-1 icc-none 2>&1)"; rc2=$?
+[ "$rc2" -eq 0 ] && ok "assigning again to an already-registered output succeeds" \
+                 || bad "assigning again to an already-registered output succeeds (rc=$rc2)"
+grep -q "create-device" "${CM_STATE}.calls" \
+    && bad "the second assign does not try to create the device again" \
+    || ok "the second assign does not try to create the device again"
+printf '%s' "$out2" | grep -q "carries no vcgt" \
+    && ok "assigning a profile with no curve says there is no curve to load" \
+    || bad "assigning a profile with no curve says there is no curve to load"
+
+out3="$(colour Hyprland color-assign eDP-1 nonsuch 2>&1)"; rc3=$?
+{ [ "$rc3" -eq 1 ] && printf '%s' "$out3" | grep -q "no colord profile matches"; } \
+    && ok "an unknown profile is refused and named" \
+    || bad "an unknown profile is refused and named (rc=$rc3)"
+out4="$(colour_nocolord Hyprland color-assign eDP-1 icc-with 2>&1)"; rc4=$?
+{ [ "$rc4" -eq 1 ] && printf '%s' "$out4" | grep -q "colord is not answering"; } \
+    && ok "assignment without colord fails loudly" \
+    || bad "assignment without colord fails loudly (rc=$rc4)"
+out5="$(colour Hyprland color-assign eDP-1 2>&1)"; rc5=$?
+[ "$rc5" -eq 2 ] && ok "color-assign with one argument is a usage error" \
+                 || bad "color-assign with one argument is a usage error (rc=$rc5)"
+
 section "live enumeration"
 # Needs a real session. Reported honestly rather than stubbed: the whole point
 # of enumeration is that it reflects hardware.
