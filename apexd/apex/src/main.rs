@@ -1054,6 +1054,14 @@ enum ShellCmd {
     Focus,
     /// Start the screen-recorder setup strip.
     Record,
+    /// Start or stop push-to-talk.
+    ///
+    /// A toggle rather than hold-to-talk because niri has no bind that fires
+    /// on key release, so press-and-hold would work on Hyprland and labwc and
+    /// do nothing useful on niri. The shell shows a microphone indicator
+    /// naming the session the words are going to, and stops on its own after
+    /// ninety seconds.
+    Voice,
     /// List every target this wrapper knows, with the IPC call behind it.
     List,
     /// Call an arbitrary target/function, for anything not covered above.
@@ -2095,6 +2103,7 @@ fn shell_targets() -> Vec<(&'static str, &'static str, &'static str)> {
         ("network hotspot", "hotspot-toggle", "toggle"),
         ("focus", "focus-toggle", "toggle"),
         ("record", "screenrec-on", "toggle"),
+        ("voice", "voice-ptt", "toggle"),
     ]
 }
 
@@ -2304,6 +2313,7 @@ fn cmd_shell(cmd: ShellCmd) -> i32 {
         ShellCmd::Power => shell_ipc("PowerMenu-toggle", "toggle", &[]),
         ShellCmd::Focus => shell_ipc("focus-toggle", "toggle", &[]),
         ShellCmd::Record => shell_ipc("screenrec-on", "toggle", &[]),
+        ShellCmd::Voice => shell_ipc("voice-ptt", "toggle", &[]),
 
         ShellCmd::Audio { which } => {
             let target = match which.as_str() {
