@@ -529,6 +529,406 @@ pub fn encryption_health(e: &Encryption) -> (Health, String) {
     }
 }
 
+// ── refusing a destructive operation ─────────────────────────────────────────
+//
+// Everything above this line reads. Everything below it decides whether
+// something is allowed to write, and THE POLARITY OF THE UNKNOWN CASE INVERTS
+// AT THIS LINE.
+//
+// For the report, a check that could not be performed is a grey row: say so,
+// carry the remedy, do not alarm anybody. For a destructive operation, a check
+// that could not be performed is a REFUSAL. An unreadable `holders` directory
+// is not an absence of holders, and an unreadable `mountinfo` is not an absence
+// of mounts. Getting that backwards in the read half mislabels a row; getting
+// it backwards here destroys a filesystem.
+//
+// The two are not the same kind of "unknown", though, and the distinction is
+// what [`PartitionEntry`] is shaped around. "udev has no record for this
+// device" is a check that did not happen. "udev's record exists and has no
+// ID_PART_ENTRY_NAME in it" is a fact — measured on the L16, four of five
+// partitions have no name — and treating that as unverifiable would refuse
+// every ordinary partition on the developer's own machine for a reason that is
+// not true. So the [`Reading`] wraps the RECORD, and plain `Option`s inside it
+// carry fields udev genuinely did not write.
+
+/// The GPT partition type GUID of an EFI System Partition.
+///
+/// Measured on the L16: `nvme0n1p1` has
+/// `ID_PART_ENTRY_TYPE=c12a7328-f81f-11d2-ba4b-00a0c93ec93b`, and it is the
+/// only partition on the disk that carries an `ID_PART_ENTRY_NAME` at all. The
+/// type is therefore the discriminator and the name is the fallback, not the
+/// other way round: an installer that leaves the ESP unnamed, or names it
+/// `EFI`, still gets caught by the GUID.
+pub const ESP_TYPE_GUID: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
+
+/// The MBR partition type byte for an EFI System Partition, as udev writes it.
+pub const ESP_TYPE_MBR: &str = "0xef";
+
+/// The partition fields of a udev record.
+///
+/// Each is an `Option` because udev writes what the partition table actually
+/// says and no more. The *record* being absent is the unverifiable case and is
+/// modelled one level up, by the [`Reading`] this sits inside.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PartitionEntry {
+    /// `ID_PART_ENTRY_SCHEME` — `gpt` or `dos`.
+    pub scheme: Option<String>,
+    /// `ID_PART_ENTRY_TYPE` — a GUID under GPT, a `0x..` byte under MBR.
+    pub type_id: Option<String>,
+    /// `ID_PART_ENTRY_NAME`, still in udev's octal-ish escaping.
+    pub name: Option<String>,
+    /// `ID_FS_TYPE`.
+    pub fs_type: Option<String>,
+}
+
+/// Whether a partition is the EFI System Partition, or whether nobody can say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EspVerdict {
+    /// It is, and here is what said so.
+    Yes(String),
+    /// It is not, and the partition table was legible enough to prove it.
+    No,
+    /// The question was not answerable. For a destructive operation this is a
+    /// refusal, never a `No`.
+    Unsure(String),
+}
+
+/// udev escapes a space in `ID_PART_ENTRY_NAME` as the four characters `\x20`.
+fn unescape_udev(s: &str) -> String {
+    s.replace("\\x20", " ")
+}
+
+/// Is this partition the ESP?
+///
+/// Ordered so the strongest evidence answers first. The `No` arm requires a
+/// partition type to have been read: without one there is no basis for saying
+/// what the partition is, and a `vfat` filesystem with no type entry is
+/// exactly the shape an ESP has under a table this code failed to parse.
+pub fn is_esp(e: &PartitionEntry) -> EspVerdict {
+    if let Some(t) = &e.type_id {
+        let t = t.trim().to_ascii_lowercase();
+        if t == ESP_TYPE_GUID {
+            return EspVerdict::Yes(format!("GPT partition type {t}"));
+        }
+        if t == ESP_TYPE_MBR {
+            return EspVerdict::Yes(format!("MBR partition type {t}"));
+        }
+    }
+    if let Some(n) = &e.name {
+        let n = unescape_udev(n);
+        if n.trim().eq_ignore_ascii_case("EFI System Partition") {
+            return EspVerdict::Yes(format!("partition name {n:?}"));
+        }
+    }
+    match &e.type_id {
+        // A type was read and it is neither ESP GUID nor 0xEF. That is a
+        // positive answer, and it is what keeps this guard from refusing the
+        // four unnamed partitions on the developer's own disk.
+        Some(t) => {
+            let _ = t;
+            EspVerdict::No
+        }
+        None => EspVerdict::Unsure(
+            "udev's record has no ID_PART_ENTRY_TYPE, so the partition table \
+             did not say what this partition is"
+                .into(),
+        ),
+    }
+}
+
+/// One block device, as `/sys/block` and its udev record describe it.
+///
+/// The guard is pure and takes this by value so the suite can present layouts
+/// the developer's machine does not have — a LUKS holder, a mounted ESP, an
+/// unreadable sysfs — without arranging any of them on real hardware.
+/// Measured: every `holders` directory on the L16 is empty, so the holder rule
+/// could not be exercised live even once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockDevice {
+    /// Kernel name, e.g. `nvme0n1p5` or `loop3`.
+    pub kernel_name: String,
+    /// The whole disk this is a partition of, or `None` when it *is* a whole
+    /// disk. Taken from `/sys/block/<disk>/<part>` rather than by chopping
+    /// digits off a name: `nvme0n1` is a whole disk whose name ends in a digit,
+    /// and every name-parsing version of this relation gets that wrong.
+    pub parent: Option<String>,
+    /// What is stacked on top — dm-crypt, an md array, an LVM PV.
+    ///
+    /// A [`Reading`] and not a `Vec`, and that is the whole point of the type:
+    /// `Vec::default()` is the empty list, which reads as "nothing depends on
+    /// this device, go ahead".
+    pub holders: Reading<Vec<String>>,
+    /// The device's udev record, or the reason there is none. A freshly
+    /// created loop device has no record at all.
+    pub partition: Reading<PartitionEntry>,
+}
+
+/// The machine a destructive request is judged against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Machine {
+    pub devices: Vec<BlockDevice>,
+    /// Every mount, or the reason there is no list. Unavailable refuses.
+    pub mounts: Reading<Vec<Mount>>,
+}
+
+/// Mount points whose loss stops this machine booting or running.
+///
+/// **`/` is in this list and will never match on an APEX machine.** It is kept
+/// here, with this comment, because leaving it out looks like an oversight and
+/// putting it in *alone* is the defect: measured on the L16, `/`'s mount source
+/// is `overlay` with fstype `composefs`, so it is not a block device and no
+/// device is ever "the device `/` is on". The device that actually carries this
+/// operating system, `/dev/nvme0n1p5`, is the source of `/etc`, `/sysroot`,
+/// `/boot` and `/var` — and of `/` never. A guard that protects only `/`
+/// protects nothing at all here and will happily wipe the running system.
+const SYSTEM_TARGETS: [&str; 6] = ["/", "/etc", "/sysroot", "/boot", "/boot/efi", "/var"];
+
+/// Why a destructive request was refused. One request can collect several.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// Not running with privileges. Nothing else was even looked at.
+    NeedsRoot,
+    /// The named path is not a block device this machine knows about.
+    NotAKnownBlockDevice { path: String },
+    /// A filesystem on it, or on one of its partitions, is mounted now.
+    Mounted { device: String, targets: Vec<String> },
+    /// It carries the running operating system.
+    CarriesTheRunningSystem { device: String, evidence: String },
+    /// Something is stacked on top of it.
+    HasHolders { device: String, holders: Vec<String> },
+    /// It is the EFI System Partition — which on this machine is mounted
+    /// nowhere, so no mount rule catches it.
+    IsTheEsp { device: String, evidence: String },
+    /// The typed confirmation does not name the device.
+    Unconfirmed { typed: String, expected: String },
+    /// A check could not be performed, so the answer is no.
+    CouldNotVerify { what: String, why: String },
+}
+
+impl Refusal {
+    /// One line, and where there is something to do about it, what.
+    pub fn say(&self) -> String {
+        match self {
+            Refusal::NeedsRoot => "this erases a disk and must run as root — try it with sudo"
+                .into(),
+            Refusal::NotAKnownBlockDevice { path } => {
+                format!("{path} is not a block device on this machine")
+            }
+            Refusal::Mounted { device, targets } => format!(
+                "{device} is mounted at {} — unmount it first",
+                targets.join(", ")
+            ),
+            Refusal::CarriesTheRunningSystem { device, evidence } => format!(
+                "{device} carries the running operating system ({evidence}) — \
+                 APEX will not erase the disk it booted from"
+            ),
+            Refusal::HasHolders { device, holders } => format!(
+                "{device} has {} stacked on it — close {} first",
+                holders.join(", "),
+                if holders.len() == 1 { "it" } else { "them" }
+            ),
+            Refusal::IsTheEsp { device, evidence } => format!(
+                "{device} is the EFI System Partition ({evidence}) — erasing it \
+                 leaves a machine that cannot boot, and it is mounted nowhere, \
+                 so nothing else would have stopped you"
+            ),
+            Refusal::Unconfirmed { typed, expected } => format!(
+                "to erase {expected} you have to type it exactly; got {typed:?}"
+            ),
+            Refusal::CouldNotVerify { what, why } => format!(
+                "refusing because {what} could not be checked: {why}. \
+                 A check that did not happen is not a check that passed"
+            ),
+        }
+    }
+}
+
+/// Permission to erase one device. **The only constructor is [`guard`].**
+///
+/// The field is private and there is no `new`, so a caller cannot fabricate
+/// one, and the destructive step takes a `&Permit` rather than a device name.
+/// That makes "erase without asking the guard" not a mistake somebody has to
+/// remember to avoid, but a program that does not compile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Permit {
+    device: String,
+}
+
+impl Permit {
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+}
+
+/// Everything erasing `name` would destroy: the device, and — when it is a
+/// whole disk — every partition on it.
+///
+/// The relation runs **downward only**, and both halves of that are load
+/// bearing. Downward, because the argument that matters is the whole disk:
+/// measured on the L16, `/dev/nvme0n1` is a mount source **zero** times — only
+/// `p5` is — so `wipefs /dev/nvme0n1`, which takes the partition table and the
+/// running system with it, passes an equality test against every mount source
+/// on the machine. Only downward, because erasing one partition does not touch
+/// its siblings, and sweeping the parent in would refuse `p1` for what is
+/// mounted on `p5` — a refusal that is safe, arrives for a reason that is not
+/// true, and teaches the user that the guard is noise.
+fn would_destroy<'a>(devices: &'a [BlockDevice], name: &str) -> Vec<&'a BlockDevice> {
+    devices
+        .iter()
+        .filter(|d| d.kernel_name == name || d.parent.as_deref() == Some(name))
+        .collect()
+}
+
+/// The kernel name in a `/dev/...` path, or `None` if it is not one.
+fn kernel_name_of(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/dev/")?;
+    // No nested paths: /dev/mapper/x and /dev/disk/by-uuid/y are symlinks the
+    // caller is expected to have resolved, and guessing here would mean
+    // judging one device and erasing another.
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(rest)
+}
+
+/// Judge one request to erase one device.
+///
+/// Collects **every** reason rather than returning the first, because a user
+/// who unmounts the filesystem and runs it again should not then discover the
+/// LUKS holder, and then the confirmation. One refusal per round trip is how a
+/// person ends up hammering `--force`.
+///
+/// `euid` is a [`Reading`] because it is read from `/proc/self/status` and that
+/// read can fail. `apex`'s own `ops::require_root` folds an unreadable status
+/// file into "must run as root", which is safe but tells the user to do
+/// something that will not help; here it is reported as the unanswered check it
+/// is.
+pub fn guard(
+    device_path: &str,
+    typed_confirmation: &str,
+    machine: &Machine,
+    euid: &Reading<u32>,
+) -> Result<Permit, Vec<Refusal>> {
+    // Privilege first and alone: without it nothing below can be trusted to
+    // have been readable in the first place, and a list of six refusals when
+    // the answer is "use sudo" buries the one line that helps.
+    match euid {
+        Reading::Unavailable(why) => {
+            return Err(vec![Refusal::CouldNotVerify {
+                what: "which user is running this".into(),
+                why: why.clone(),
+            }]);
+        }
+        Reading::Known(0) => {}
+        Reading::Known(_) => return Err(vec![Refusal::NeedsRoot]),
+    }
+
+    let Some(name) = kernel_name_of(device_path) else {
+        return Err(vec![Refusal::NotAKnownBlockDevice { path: device_path.into() }]);
+    };
+    if !machine.devices.iter().any(|d| d.kernel_name == name) {
+        return Err(vec![Refusal::NotAKnownBlockDevice { path: device_path.into() }]);
+    }
+
+    let mut refusals = Vec::new();
+
+    if typed_confirmation != device_path {
+        refusals.push(Refusal::Unconfirmed {
+            typed: typed_confirmation.into(),
+            expected: device_path.into(),
+        });
+    }
+
+    // Every device this request would destroy: the target, and — when the
+    // target is a whole disk — each of its partitions.
+    let affected = would_destroy(&machine.devices, name);
+
+    match &machine.mounts {
+        Reading::Unavailable(why) => refusals.push(Refusal::CouldNotVerify {
+            what: "which filesystems are mounted".into(),
+            why: why.clone(),
+        }),
+        Reading::Known(mounts) => {
+            let mut system = Vec::new();
+            let mut plain = Vec::new();
+            for m in mounts {
+                let Some(src) = kernel_name_of(&m.source) else { continue };
+                if !affected.iter().any(|d| d.kernel_name == src) {
+                    continue;
+                }
+                if SYSTEM_TARGETS.contains(&m.target.as_str()) {
+                    system.push(format!("/dev/{src} is mounted at {}", m.target));
+                } else {
+                    plain.push(m.target.clone());
+                }
+            }
+            if !system.is_empty() {
+                refusals.push(Refusal::CarriesTheRunningSystem {
+                    device: device_path.into(),
+                    evidence: system.join("; "),
+                });
+            }
+            if !plain.is_empty() {
+                plain.sort();
+                plain.dedup();
+                refusals.push(Refusal::Mounted { device: device_path.into(), targets: plain });
+            }
+        }
+    }
+
+    for d in &affected {
+        match &d.holders {
+            Reading::Unavailable(why) => refusals.push(Refusal::CouldNotVerify {
+                what: format!("what is stacked on /dev/{}", d.kernel_name),
+                why: why.clone(),
+            }),
+            Reading::Known(h) if !h.is_empty() => refusals.push(Refusal::HasHolders {
+                device: format!("/dev/{}", d.kernel_name),
+                holders: h.clone(),
+            }),
+            Reading::Known(_) => {}
+        }
+
+        // The ESP question is only asked of partitions, because a whole disk
+        // cannot be one. That is not a convenience: a loop device straight out
+        // of `losetup --find --show` is a whole disk with no udev record at
+        // all, and treating a missing record as unverifiable there would make
+        // the feature refuse the only thing it is ever tested on.
+        if d.parent.is_none() {
+            continue;
+        }
+        let verdict = match &d.partition {
+            Reading::Unavailable(why) => EspVerdict::Unsure(why.clone()),
+            Reading::Known(e) => is_esp(e),
+        };
+        match verdict {
+            EspVerdict::Yes(evidence) => refusals.push(Refusal::IsTheEsp {
+                device: format!("/dev/{}", d.kernel_name),
+                evidence,
+            }),
+            EspVerdict::Unsure(why) => refusals.push(Refusal::CouldNotVerify {
+                what: format!("whether /dev/{} is the EFI System Partition", d.kernel_name),
+                why,
+            }),
+            EspVerdict::No => {}
+        }
+    }
+
+    if refusals.is_empty() {
+        Ok(Permit { device: device_path.to_string() })
+    } else {
+        Err(refusals)
+    }
+}
+
+/// Where a signature backup goes, and it is said once.
+///
+/// Measured: `wipefs --backup` with no directory writes into `$HOME`, and under
+/// `sudo` `$HOME` is `/root`. So the file a user is told to keep in case they
+/// need it back lands in root's home, which they will not think to look in and
+/// may not be able to read. The path is passed explicitly for that reason.
+pub const SIGNATURE_BACKUP_DIR: &str = "/var/lib/apex/storage/signature-backups";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,5 +1315,318 @@ mod tests {
         let r: Reading<u64> = Reading::Unavailable("nope".into());
         assert!(r.known().is_none());
         assert!(!r.is_known());
+    }
+
+    // ── the destructive guard ────────────────────────────────────────────────
+
+    /// A whole disk or a partition with a legible, ordinary partition type.
+    ///
+    /// The type is the Linux filesystem-data GUID, which is what four of the
+    /// five real partitions on the L16 carry, and none of them has a name.
+    const LINUX_DATA: &str = "0fc63daf-8483-4772-8e79-3d69d8477de4";
+
+    fn dev(name: &str, parent: Option<&str>) -> BlockDevice {
+        BlockDevice {
+            kernel_name: name.into(),
+            parent: parent.map(str::to_string),
+            holders: Reading::Known(Vec::new()),
+            partition: Reading::Known(PartitionEntry {
+                scheme: parent.map(|_| "gpt".into()),
+                type_id: parent.map(|_| LINUX_DATA.into()),
+                name: None,
+                fs_type: Some("btrfs".into()),
+            }),
+        }
+    }
+
+    fn mount(target: &str, source: &str) -> Mount {
+        Mount {
+            target: target.into(),
+            source: source.into(),
+            fstype: "btrfs".into(),
+            read_only: false,
+            super_options: "rw".into(),
+            fs_root: "/".into(),
+        }
+    }
+
+    const ROOT: Reading<u32> = Reading::Known(0);
+
+    /// The L16 exactly: `/` is composefs on `overlay`, the operating system
+    /// lives on `nvme0n1p5`, `p1` is an unmounted ESP carrying the type GUID
+    /// and the only `ID_PART_ENTRY_NAME` on the disk, and the whole disk is a
+    /// mount source nowhere.
+    fn l16() -> Machine {
+        let mut esp = dev("nvme0n1p1", Some("nvme0n1"));
+        esp.partition = Reading::Known(PartitionEntry {
+            scheme: Some("gpt".into()),
+            type_id: Some(ESP_TYPE_GUID.into()),
+            name: Some("EFI\\x20System\\x20Partition".into()),
+            fs_type: Some("vfat".into()),
+        });
+        Machine {
+            devices: vec![
+                dev("nvme0n1", None),
+                esp,
+                dev("nvme0n1p5", Some("nvme0n1")),
+                dev("loop3", None),
+            ],
+            mounts: Reading::Known(vec![
+                mount("/", "overlay"),
+                mount("/etc", "/dev/nvme0n1p5"),
+                mount("/sysroot", "/dev/nvme0n1p5"),
+                mount("/boot", "/dev/nvme0n1p5"),
+                mount("/var", "/dev/nvme0n1p5"),
+            ]),
+        }
+    }
+
+    /// Index of `loop3` in [`l16`]'s device list — the only device the suite is
+    /// ever allowed to pretend to erase.
+    const LOOP: usize = 3;
+
+    fn refuse(path: &str, machine: &Machine) -> Vec<Refusal> {
+        guard(path, path, machine, &ROOT).expect_err("should have been refused")
+    }
+
+    #[test]
+    fn the_disk_carrying_the_running_system_is_refused_although_slash_is_not_on_it() {
+        // The measurement this test exists for: `/`'s source is `overlay`, so
+        // the device is never "the device / is on". Protecting only `/` would
+        // let both of these through.
+        for path in ["/dev/nvme0n1p5", "/dev/nvme0n1"] {
+            let why = refuse(path, &l16());
+            assert!(
+                why.iter().any(|r| matches!(r, Refusal::CarriesTheRunningSystem { .. })),
+                "{path} was not recognised as carrying the running system: {why:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn erasing_a_whole_disk_is_judged_against_its_partitions_too() {
+        // `/dev/nvme0n1` is a mount source zero times on the real machine.
+        // Equality against mount sources therefore permits it, and it is the
+        // single most destructive argument the command can be given.
+        let m = l16();
+        let sources: Vec<&str> =
+            m.mounts.known().unwrap().iter().map(|x| x.source.as_str()).collect();
+        assert!(
+            !sources.contains(&"/dev/nvme0n1"),
+            "fixture no longer reproduces the measurement: the whole disk must not be a source"
+        );
+        let why = refuse("/dev/nvme0n1", &m);
+        assert!(why.iter().any(|r| matches!(r, Refusal::CarriesTheRunningSystem { .. })), "{why:?}");
+    }
+
+    #[test]
+    fn erasing_one_partition_is_not_refused_for_what_a_sibling_carries() {
+        // The other direction of `would_destroy`, and the reason it is not
+        // symmetric. `p9` is a spare partition on the same disk as the running
+        // system; sweeping the parent in would refuse it, safely, for a reason
+        // that is not true.
+        let mut m = l16();
+        m.devices.push(dev("nvme0n1p9", Some("nvme0n1")));
+        guard("/dev/nvme0n1p9", "/dev/nvme0n1p9", &m, &ROOT)
+            .expect("a sibling's mounts are not this partition's problem");
+    }
+
+    #[test]
+    fn the_efi_system_partition_is_refused_even_though_it_is_mounted_nowhere() {
+        let m = l16();
+        assert!(
+            !m.mounts.known().unwrap().iter().any(|x| x.source == "/dev/nvme0n1p1"),
+            "fixture no longer reproduces the measurement: the ESP must be unmounted"
+        );
+        let why = refuse("/dev/nvme0n1p1", &m);
+        assert!(
+            why.iter().any(|r| matches!(r, Refusal::IsTheEsp { .. })),
+            "an unmounted ESP was not refused: {why:?}"
+        );
+    }
+
+    #[test]
+    fn an_esp_is_caught_by_its_type_guid_when_it_has_no_name_at_all() {
+        // Measured on the L16: four of five partitions carry no
+        // ID_PART_ENTRY_NAME. An installer that leaves the ESP unnamed is
+        // therefore ordinary, and a name-only rule wipes the boot partition.
+        let mut m = l16();
+        m.devices[1].partition = Reading::Known(PartitionEntry {
+            scheme: Some("gpt".into()),
+            type_id: Some(ESP_TYPE_GUID.to_ascii_uppercase()),
+            name: None,
+            fs_type: Some("vfat".into()),
+        });
+        let why = refuse("/dev/nvme0n1p1", &m);
+        let said = why.iter().map(Refusal::say).collect::<Vec<_>>().join("\n");
+        assert!(
+            why.iter().any(|r| matches!(r, Refusal::IsTheEsp { .. })),
+            "an unnamed ESP was not caught by its type GUID: {said}"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_unnamed_partition_is_not_refused_as_unverifiable() {
+        // The complement, and the reason the udev RECORD is the Reading while
+        // the fields inside it are Options. udev writing no name is a fact,
+        // not a check that failed; treating it as unverifiable would refuse
+        // four of the five partitions on the developer's own disk.
+        let mut m = l16();
+        let spare = dev("nvme0n1p9", Some("nvme0n1"));
+        assert!(
+            matches!(&spare.partition, Reading::Known(e) if e.name.is_none()),
+            "the fixture must reproduce an unnamed partition"
+        );
+        m.devices.push(spare);
+        guard("/dev/nvme0n1p9", "/dev/nvme0n1p9", &m, &ROOT)
+            .expect("a legible non-ESP partition type is a positive answer");
+    }
+
+    #[test]
+    fn an_unreadable_check_refuses_and_is_not_treated_as_a_check_that_passed() {
+        // Every arm of the inversion this section is built around.
+        let mut m = l16();
+        m.mounts = Reading::Unavailable("/proc/self/mountinfo: permission denied".into());
+        let why = guard("/dev/loop3", "/dev/loop3", &m, &ROOT).expect_err("unreadable mounts");
+        assert!(why.iter().any(|r| matches!(r, Refusal::CouldNotVerify { .. })), "{why:?}");
+
+        let mut m = l16();
+        m.devices[LOOP].holders = Reading::Unavailable("holders: permission denied".into());
+        let why = guard("/dev/loop3", "/dev/loop3", &m, &ROOT).expect_err("unreadable holders");
+        assert!(why.iter().any(|r| matches!(r, Refusal::CouldNotVerify { .. })), "{why:?}");
+
+        let unknown = Reading::Unavailable("/proc/self/status: no Uid line".into());
+        let why =
+            guard("/dev/loop3", "/dev/loop3", &l16(), &unknown).expect_err("unreadable euid");
+        assert!(
+            why.iter().any(|r| matches!(r, Refusal::CouldNotVerify { .. })),
+            "an unreadable euid became a plain sudo hint: {why:?}"
+        );
+    }
+
+    #[test]
+    fn a_stacked_device_is_refused_naming_what_is_on_top() {
+        let mut m = l16();
+        m.devices[LOOP].holders = Reading::Known(vec!["dm-0".into()]);
+        let why = guard("/dev/loop3", "/dev/loop3", &m, &ROOT).expect_err("a holder refuses");
+        let said = why.iter().map(Refusal::say).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("dm-0"), "the refusal did not name the holder: {said}");
+    }
+
+    #[test]
+    fn a_confirmation_that_does_not_name_the_device_is_refused() {
+        let m = l16();
+        let why =
+            guard("/dev/loop3", "yes", &m, &ROOT).expect_err("a bare yes is not a confirmation");
+        assert!(why.iter().any(|r| matches!(r, Refusal::Unconfirmed { .. })), "{why:?}");
+        // A near miss is still a miss, and an empty string most of all.
+        for typed in ["", "loop3", "/dev/loop", "/dev/loop30", " /dev/loop3"] {
+            let why = guard("/dev/loop3", typed, &m, &ROOT)
+                .expect_err("only the exact device name confirms");
+            assert!(
+                why.iter().any(|r| matches!(r, Refusal::Unconfirmed { .. })),
+                "{typed:?} was accepted as a confirmation: {why:?}"
+            );
+        }
+        // And typing it exactly is what gets through.
+        guard("/dev/loop3", "/dev/loop3", &m, &ROOT).expect("the device name confirms");
+    }
+
+    #[test]
+    fn without_root_nothing_else_is_even_reported() {
+        let why = guard("/dev/loop3", "/dev/loop3", &l16(), &Reading::Known(1000))
+            .expect_err("refused");
+        assert_eq!(why, vec![Refusal::NeedsRoot], "the sudo line must not be buried");
+        assert!(Refusal::NeedsRoot.say().contains("sudo"), "and it says how");
+    }
+
+    #[test]
+    fn every_reason_is_collected_so_a_user_does_not_learn_them_one_at_a_time() {
+        let mut m = l16();
+        m.devices[LOOP].holders = Reading::Known(vec!["dm-0".into()]);
+        let why = guard("/dev/loop3", "nope", &m, &ROOT).expect_err("refused");
+        assert!(why.len() >= 2, "only one reason came back: {why:?}");
+    }
+
+    #[test]
+    fn a_device_this_machine_does_not_have_is_not_erased_by_default() {
+        for path in ["/dev/sdz", "/dev/mapper/secret", "nvme0n1p5", "/dev/", ""] {
+            let why = guard(path, path, &l16(), &ROOT).expect_err("unknown device refused");
+            assert!(
+                why.iter().any(|r| matches!(r, Refusal::NotAKnownBlockDevice { .. })),
+                "{path:?} was not refused as unknown: {why:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_permit_can_only_come_from_the_guard() {
+        // Structural, and the reason `Permit`'s field is private: the only way
+        // to hold one is to have been granted it. If this stops compiling
+        // because somebody added a constructor or made the field public, the
+        // type-level guarantee is gone and this test is the notice.
+        let m = l16();
+        let p = guard("/dev/loop3", "/dev/loop3", &m, &ROOT).expect("permitted");
+        assert_eq!(p.device(), "/dev/loop3");
+        let src = include_str!("storage.rs");
+        let decl = src.split("pub struct Permit").nth(1).expect("Permit is declared");
+        let body = decl.split('}').next().expect("a body");
+        assert!(
+            !body.contains("pub device"),
+            "Permit's field became public, so anyone can forge permission"
+        );
+    }
+
+    #[test]
+    fn a_loop_device_with_no_udev_record_is_still_erasable() {
+        // The device the suite is allowed to touch. A fresh loop device has no
+        // udev record, and if a missing record refused, the destructive path
+        // would be untestable and would grow a --force nobody could review.
+        let mut m = l16();
+        m.devices[LOOP].partition = Reading::Unavailable("no udev record".into());
+        guard("/dev/loop3", "/dev/loop3", &m, &ROOT)
+            .expect("a whole loop device cannot be an ESP");
+    }
+
+    #[test]
+    fn a_partition_whose_type_cannot_be_read_is_refused() {
+        // The other side of the same rule: a real partition with no readable
+        // record could be the ESP, and nobody can say it is not. Both the
+        // missing-record and the record-without-a-type shapes.
+        for entry in [
+            Reading::Unavailable("no udev record".into()),
+            Reading::Known(PartitionEntry {
+                scheme: None,
+                type_id: None,
+                name: None,
+                fs_type: Some("vfat".into()),
+            }),
+        ] {
+            let mut m = l16();
+            let mut p = dev("nvme0n1p9", Some("nvme0n1"));
+            p.partition = entry;
+            m.devices.push(p);
+            let why = guard("/dev/nvme0n1p9", "/dev/nvme0n1p9", &m, &ROOT).expect_err("refused");
+            assert!(why.iter().any(|r| matches!(r, Refusal::CouldNotVerify { .. })), "{why:?}");
+        }
+    }
+
+    #[test]
+    fn an_mbr_esp_is_caught_by_its_type_byte() {
+        let e = PartitionEntry {
+            scheme: Some("dos".into()),
+            type_id: Some(ESP_TYPE_MBR.into()),
+            name: None,
+            fs_type: Some("vfat".into()),
+        };
+        assert!(matches!(is_esp(&e), EspVerdict::Yes(_)), "{:?}", is_esp(&e));
+    }
+
+    #[test]
+    fn a_signature_backup_does_not_land_in_roots_home() {
+        // Measured: `wipefs --backup` with no directory writes into $HOME, and
+        // $HOME under sudo is /root.
+        assert!(SIGNATURE_BACKUP_DIR.starts_with("/var/lib/apex/"), "{SIGNATURE_BACKUP_DIR}");
+        assert!(!SIGNATURE_BACKUP_DIR.starts_with("/root"), "{SIGNATURE_BACKUP_DIR}");
     }
 }
