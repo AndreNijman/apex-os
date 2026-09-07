@@ -8,13 +8,14 @@ env: CARGO_TARGET_DIR=/var/tmp/apex-build-cache/followups-int3
      XDG_STATE_HOME=/var/tmp/apex-fi3-state XDG_CONFIG_HOME=/var/tmp/apex-fi3-config
 
 ## NEXT
-Item 3: change `broker::run_curl` (apexd/apex-secretd/src/broker.rs:536) to
-return stdout and stderr APART instead of appending stderr onto the body, make
-it `pub(crate)`, add USER/LOGNAME to its env for parity with api.rs; keep
-`perform_http` merging them exactly as it does today so MCP behaviour is
-byte-identical. THEN move `providers/cloudflare/api.rs::call` (line ~305, the
-`Command::new(CURL)` block) onto it. If that turns out to be more than ~100
-lines, stop, write down what is left, and leave #3 for the next owner.
+Item 4 (last): document `apex mcp connect` / `list` / `run` / `confine` /
+`policy` and `apex secret grant --everywhere` in `docs/agent-runtime.md`,
+in the "MCP servers, and the one line of JSON that undid the store" subsection
+(around line 975) and the `apex secret` block at line ~874. Say why
+`cloudflare.account.read` does NOT qualify for `--everywhere`. Then run
+`APEX=/var/tmp/apex-build-cache/followups-int3/debug/apex tests/check-doc-verbs.sh docs/agent-runtime.md`
+(the INSTALLED apex predates these verbs; the script's own header says to point
+APEX at the build). Then tests/run-clippy.sh once, then push.
 
 ## DONE
 - **#1 SECURITY — 400af1c** `same_everywhere` is now a mandatory field on
@@ -48,9 +49,30 @@ lines, stop, write down what is left, and leave #3 for the next owner.
   recorder, real `perform_http`. MUTATION M1 red/green: drop `-q` -> the
   recorded headers contain `X-Curlrc` -> restored, apex-secretd bin 112/0.
 
+- **#3 FEATURE — 3a50741** DONE, not deferred. `run_curl` now returns
+  `CurlOutput { code, stdout, stderr }` with the streams APART; the merge moved
+  into `merged()`, called only by `perform_http`, so the MCP path is
+  byte-identical. api.rs's 25-line child is one call to `broker::run_curl`;
+  its `const CURL` and `std::process::{Command, Stdio}` are gone.
+  THREE DELIBERATE BEHAVIOUR CHANGES, all in the commit message: Cloudflare
+  gains `NO_PROXY=*`, Cloudflare gains the 3 MiB reply cap, MCP gains
+  USER/LOGNAME. `TransportError::NoCurl`'s message changed from "could not be
+  started" to "could not complete the request" because it now also carries the
+  cap.
+  New test `a_connection_that_never_happens_is_a_status_of_zero_and_curls_own_
+  message` (port 9, discard) covers the `status == 0` path, which NOTHING
+  covered before.
+  MUTATION M5 red/green: put the stderr merge back inside `run_curl` -> that
+  test fails "stderr was dropped" (curl's "Failed to connect" lands in stdout,
+  fails the status parse, body comes back empty). Restored: secretd 114/0,
+  e2e 15/0, `apex --bin apex cloudflare::` 13/0.
+- **test hardening — 55832ce** the bind-invariance test's `(Err, Err)` arm used
+  to PASS. A provider whose `bind` fails in both dirs for a fixture reason would
+  have bound nothing and been reported proven. Now panics.
+
 ## IN PROGRESS
-- nothing. Branch PUSHED at 400af1c. Workspace 1803 passed / 1 failed
-  (the 1 is the environmental scheduled-job one, present at the fork point).
+- Item 4 (docs) only. Branch PUSHED at 3a50741. Workspace 1804 passed /
+  1 failed (the environmental scheduled-job one, present at the fork point).
 
 ## FOUND
 - **BASELINE IS NOT 1801/0 IN THIS ENVIRONMENT.** At the untouched fork point
@@ -73,6 +95,16 @@ lines, stop, write down what is left, and leave #3 for the next owner.
   `tests::a_stale_socket_from_a_dead_daemon_is_replaced` as the known one.
 - `run_git` already sets `GIT_CONFIG_GLOBAL=/dev/null` for exactly the reason
   `run_curl` was missing `-q`. The precedent was in the same file.
+- **A THIRD hardening drift between the two curls, not in the brief:** the
+  broker's `run_curl` set `NO_PROXY=*` and `providers/cloudflare/api.rs` did
+  not. So until 3a50741 a Cloudflare call would honour `http_proxy` if one were
+  ever in the daemon's environment. Closed by the move.
+- **The `status == 0` path in the Cloudflare provider had NO test.**
+  `mod.rs:605` branches on it to say "the api could not be reached", and
+  nothing exercised it. Added with the move.
+- Vault notes written (the vault is UP):
+  `decisions/2026-09-07-same-everywhere-declared-fact.md` and
+  `errors-and-fixes/autoresume-service-cgroup-reads-as-scheduled-job.md`.
 
 ## BLOCKED ON
 - nothing

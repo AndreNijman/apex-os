@@ -9,22 +9,61 @@ worktree: /var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell
 branch: roadmap/v2.2
 
 ## NEXT
-apex-os landing 3 (LAST apex-os one): task/p1-020-agent-graph-daemon,
-fork 5ae4350cd09badffaf38f43cc8128e463441eaa4, 4 commits, tip 85e3e2a.
-  cd /var/tmp/apex-work/int-os
-  git checkout -b land/p1-020os origin/task/p1-020-agent-graph-daemon
-  git rebase --onto roadmap/v2.2 5ae4350cd09badffaf38f43cc8128e463441eaa4
-  git checkout roadmap/v2.2 && git merge --ff-only land/p1-020os
-  /var/tmp/apex-int4-logs/runtests.sh p1-020os   (background; ~7 min)
-  tests/run-clippy.sh roadmap/v2.2               (1700 new lines of Rust — expect lints)
-  then git push --force-with-lease
-Then apex-shell landing 4 (last of all): task/p1-048-guided-settings,
-tip 7266f50, 9 commits, fork d2d1f33. Conflicts expected in ci.yml,
-PageRegistry.qml, src/services/qmldir and several tests/run-*.sh.
-AFTER p1-048 is on the tip: run tests/check-headless-runners.sh, and only then
-the nested-compositor suites.
+**ALL SEVEN BRANCHES ARE LANDED AND PUSHED.**
+  apex-os    roadmap/v2.2 = 4ab5f75   (was b2d7905)   1854 passed / 1 failed*
+  apex-shell roadmap/v2.2 = 690014a   (was 8d081ff)   33/17/22/5/27, markers PASS
+  *the 1 is the cgroup/origin artifact described under FOUND, not a regression.
+Remaining, in order:
+ 1. per-commit build check for the 4 apex-os p1-020os commits:
+    /var/tmp/apex-int4-logs/percommit.sh p1-020os bf9a5fb e77695a 5685418 4ab5f75
+    (p2-005's 8-commit run is going; watch /var/tmp/apex-int4-logs/percommit-p2-005.txt)
+ 2. run the now-guarded nested suites once on the final shell tip:
+    tests/run-nested-labwc.sh, run-labwc-matrix-test.sh, run-nexus-smoke.sh,
+    run-agent-center-smoke.sh — all from the repo ROOT with XDG_* pointed at
+    /var/tmp/apex-shell-xdg.
+ 3. branch cleanup: for each of fix/labwc-desktop-parity,
+    fix/popup-first-open-and-media-keys, fix/screenshot-off-hyprland,
+    task/p0-016-agent-settings compare
+    `git merge-tree --write-tree roadmap/v2.2 origin/<b>` to
+    `git rev-parse roadmap/v2.2^{tree}`; delete the remote ref ONLY if equal.
+    (The brief's `git diff roadmap/v2.2 <branch>` CANNOT be empty — the tip is
+    dozens of commits ahead, so that diff is the tip's later work, not theirs.)
 
 ## DONE
+- **apex-os task/p1-020-agent-graph-daemon LANDED AND PUSHED: roadmap/v2.2 =
+  4ab5f75** (was 95d068c). 4 commits: bf9a5fb e77695a 5685418 4ab5f75.
+  **ZERO CONFLICTS**, and no hidden compile break either — I checked for
+  integrate-3's "breaks the cherry-pick cannot see" case explicitly, because
+  the tip had moved 260 lines under this branch since its fork 5ae4350
+  (agent.rs +235, task.rs +17, paths.rs +12, lib.rs +1).
+  `cargo build --locked --workspace --all-targets` rc=0 on the tip.
+  cargo test 1804/1 -> **1854 passed / 1 failed**: **+50 tests, zero removed,
+  zero new failures** (same single cgroup artifact).
+  tests/run-clippy.sh on the landed tip: **PASS clippy is clean (rc=0)** —
+  1,700 lines of brand-new Rust (graph.rs 1031, statusline.rs 698) and clippy
+  found nothing. Unlike integrate-3's p1-002 case, this author had run it.
+- **apex-shell task/p1-048-guided-settings LANDED AND PUSHED: roadmap/v2.2 =
+  690014a** (was 4037a1b). 9 commits: 945446f 86fcc9e e448d94 5a6eacd 7c5b6bc
+  f0beee9 8cbdafd 9669ea0 690014a. **ZERO CONFLICTS** despite 29 files and a
+  391-line BlueprintPage.qml rewrite: the tip had moved only ci.yml (+127),
+  PageRegistry.qml (+13) and src/services/qmldir (+10) since d2d1f33, and none
+  of the three collided.
+  Counts before -> after:
+     check-no-conflict-markers  PASS -> PASS
+     settings-semantics         33/0 -> 33/0
+     settings-pages             16/0 -> **17/0** (+1: the new GamingPage)
+     check-color-tokens         22/0 -> 22/0   EXPECT_WHITE_FG 211, UNCHANGED
+     check-scale-tokens          5/0 ->  5/0
+     agent-state                27/0 -> 27/0
+  Pre-checked rather than discovered late: the branch touches
+  check-color-tokens.sh not at all, and adds ZERO
+  `color: Qt.rgba(1, 1, 1, ...)` sites, so the 211 ratchet could not be
+  tripped and did not have to be raised.
+  Branch suites: blueprint-editor 87/0, check-blueprint-editor all-pass,
+  gaming-settings 43/0, check-gaming-settings all-pass,
+  **check-headless-runners 25 passed / 0 failed**.
+  ci.yml re-validated: parses, 3 jobs, no duplicate step names.
+  Neither src/qmldir nor src/services/qmldir has a duplicate registration.
 - **apex-os task/p2-005-device-maturity LANDED AND PUSHED: roadmap/v2.2 =
   95d068c** (was 9fafab4). 8 commits: b3e1c83 fb0c11e e773856 dc8d45c 50c0107
   e5f9f06 f013697 95d068c. **ZERO CONFLICTS.**

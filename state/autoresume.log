@@ -6,3 +6,22 @@
 2026-09-07 04:45:09 skipped: agents are still writing output
 2026-09-07 09:57:32 report refreshed (223 lines)
 2026-09-07 09:57:32 starting a resume session (82 items outstanding)
+Background tasks still running after 600s; terminating. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.
+Six agents are running; nothing has landed yet this round — the landing is delegated and in flight.
+
+**Dispatched (6, at the ceiling).** All six agents from the 05:05–06:00 round were dead. Four fresh agents carry their cards (`p0-014`, `p1-023`, `p2-010`, `p1-039`); none was revived by message. Two are new units: `integrate-4` (landing seven finished branches across both repos) and `followups-int3` (the two security holes integration round 3 routed onward — the `names_nothing()` gate that will pass silently for the next context-resolving operation, and `run_curl`'s bare `curl` reading the owner's `~/.curlrc` under root).
+
+`p1-050` and `p1-035` are held under the ceiling with their finished work pushed. `dispatch.json` records why, so the next resume doesn't read the hold as an oversight.
+
+**One branch was one disk failure from gone.** `task/p1-023-handoff-lifecycle` was never on origin — two commits and 24 uncommitted files, covered only by a wip snapshot ref. Its agent's first instruction is to push, then commit, before touching anything else.
+
+**A third of the roadmap's evidence had been silently erased.** `set-status.py` takes evidence positionally, so `--evidence "text"` stored the string `--evidence` and dropped the text — and reported success every time. 33 of 127 tasks were in that state. Repaired: 8 recovered byte-exact by walking `refs/wip/roadmap-state`, which turns out to be a 62-commit history rather than a latest-state mirror; 24 reconstructed from the agent cards, each line naming its source. **P0-024 is unrecoverable** — no snapshot ever held it and no card covers it, so its entry says so plainly rather than pretending. The script now refuses flag-shaped evidence in either spelling.
+
+Worth noting: the prompt I was given specifies the `--evidence` form, which is exactly the invocation that caused this. It works now.
+
+**Two more trip-wires removed.** `resume.sh` was offering `p1-018` and `p1-020` as READY although both are done, and offering every unit already in a dispatched agent's hands — the double-dispatch the README warns about. Completion is now derived from `roadmap.yaml` and ownership from `dispatch.json`. And `resume.sh` does `isdir(worktree)`, so the two-repo agents needed one path per field; written the obvious way, the next report would have said "no worktree" for worktrees that are fine.
+
+Roadmap counts moved 45/25/55/2 → **46 done / 30 partial / 49 todo / 2 blocked**, entirely from recording work already pushed, not from new work.
+
+I'll process each agent's report as it arrives: record with real reported counts, update the dispatch table, and dispatch the next READY unit — `p1-035` first, then `p1-050` once `p0-014` clears, then `trust-enforcement`.
+2026-09-07 10:28:52 resume session ended (exit 0)
