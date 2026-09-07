@@ -9,18 +9,60 @@ worktree: /var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell
 branch: roadmap/v2.2
 
 ## NEXT
-apex-shell landing 3: task/p1-038-labwc-parity (tip 2ea0790, 3 commits).
-  cd /var/tmp/apex-work/int-shell
-  git checkout -b land/p1-038 origin/task/p1-038-labwc-parity
-  git rebase --onto roadmap/v2.2 d2d1f33cebd4bece0da32e5f0c676ecea4b1fe3f
-  (expect a conflict in .github/workflows/ci.yml only — additive, keep both)
-  git checkout roadmap/v2.2 && git merge --ff-only land/p1-038
-  /var/tmp/apex-int4-logs/shelltests.sh p1-038 ; then push --force-with-lease
-  DO NOT run tests/run-labwc-matrix-test.sh — it is a nested-compositor runner
-  written before p1-048's headless guard. Hold it until p1-048 is on the tip.
-Then apex-os landing 2: task/p2-005-device-maturity, fork 9a24d2b.
+apex-os landing 3 (LAST apex-os one): task/p1-020-agent-graph-daemon,
+fork 5ae4350cd09badffaf38f43cc8128e463441eaa4, 4 commits, tip 85e3e2a.
+  cd /var/tmp/apex-work/int-os
+  git checkout -b land/p1-020os origin/task/p1-020-agent-graph-daemon
+  git rebase --onto roadmap/v2.2 5ae4350cd09badffaf38f43cc8128e463441eaa4
+  git checkout roadmap/v2.2 && git merge --ff-only land/p1-020os
+  /var/tmp/apex-int4-logs/runtests.sh p1-020os   (background; ~7 min)
+  tests/run-clippy.sh roadmap/v2.2               (1700 new lines of Rust — expect lints)
+  then git push --force-with-lease
+Then apex-shell landing 4 (last of all): task/p1-048-guided-settings,
+tip 7266f50, 9 commits, fork d2d1f33. Conflicts expected in ci.yml,
+PageRegistry.qml, src/services/qmldir and several tests/run-*.sh.
+AFTER p1-048 is on the tip: run tests/check-headless-runners.sh, and only then
+the nested-compositor suites.
 
 ## DONE
+- **apex-os task/p2-005-device-maturity LANDED AND PUSHED: roadmap/v2.2 =
+  95d068c** (was 9fafab4). 8 commits: b3e1c83 fb0c11e e773856 dc8d45c 50c0107
+  e5f9f06 f013697 95d068c. **ZERO CONFLICTS.**
+  cargo test before -> after: 1799 passed/2 failed -> **1804 passed/1 failed**.
+  Read that correctly: the baseline's 2 failures were (a) the pty deadlock I
+  had to kill and (b) the cgroup/origin artifact. Only (b) recurred. So
+  **+5 tests, zero removed, zero new failures**, and 1804+1 = 1805 vs the
+  baseline's 1801 total.
+  tests/run-clippy.sh on the landed tip: **PASS clippy is clean (rc=0)** — and
+  this one MATTERED, it is the first landing with new Rust
+  (apexd/apex/src/main.rs +133, ops.rs +30).
+  Branch suites, all run here and all green:
+     test-apex-devices             55 passed / 0 failed / 0 skipped
+     test-device-image             39 passed / 0 failed
+     test-device-services-netns    12 passed / 0 failed / 0 skipped
+  The netns suite is safe on this machine and I checked why rather than
+  assuming: it uses `unshare -rmn` (unprivileged user+mount+net namespace),
+  no sudo at all, and nftables tables are network-namespace scoped, so
+  `nft -f apex.nft` inside it cannot reach the L16's ruleset.
+  test-apex-firewall.sh still 31/0/1 after the landing.
+  NOTE: c823974 added `tests/test-device-firewall-netns.sh`; a later commit on
+  the same branch renamed it to `test-device-services-netns.sh`. The report
+  lists the original name; the file is not missing.
+- **apex-shell task/p1-038-labwc-parity LANDED AND PUSHED: roadmap/v2.2 =
+  4037a1b** (was b2bc964). 3 commits. **ZERO CONFLICTS** — the anticipated
+  .github/workflows/ci.yml clash did not happen (p1-020 and p1-038 append in
+  different regions). ci.yml re-validated as YAML after the landing: parses,
+  3 jobs, no duplicate step names in any job.
+  Counts before -> after: markers PASS->PASS, settings-semantics 33/0->33/0,
+  settings-pages 16/0->16/0, colour 22/0->22/0 (WHITE_FG 211), scale 5/0->5/0,
+  agent-state 27/0->27/0.
+  Branch suite: check-screenshot-dispatch **42 passed / 0 failed**, 4 mutants.
+  tests/run-labwc-matrix-test.sh NOT run yet — see the headless note below. I
+  did READ it, and contrary to what I expected it IS correctly guarded
+  (private XDG_RUNTIME_DIR and HOME, `unset WAYLAND_DISPLAY`/`DISPLAY`/
+  `HYPRLAND_INSTANCE_SIGNATURE`/`NIRI_SOCKET`, WLR_BACKENDS=headless, and a
+  hard FAIL if WAYLAND_DISPLAY does not name a socket in the private dir).
+  It is safe; it is being held only so it runs once on the final tip.
 - **apex-os task/p1-044-firewall-live LANDED AND PUSHED: roadmap/v2.2 = 9fafab4**
   (was b2d7905). 7 commits: b599ca6 f2d5289 a811277 c3d2657 df28052 c1f450b
   9fafab4. **ZERO CONFLICTS.**
