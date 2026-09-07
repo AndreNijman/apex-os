@@ -91,6 +91,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::grant::GrantKind;
 use crate::paths;
+use crate::policy::{OriginPolicy, RequestOrigin};
 
 // ---------------------------------------------------------------------------
 // SHA-256
@@ -531,8 +532,25 @@ pub const CHALLENGE_CONTEXT: &str = "apex-agent/remote-elevation/v1";
 /// an eight-hour break-glass one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Challenge {
-    /// The session the elevation is for.
-    pub session: u32,
+    /// The session the elevation is for, or `None` for one that does not
+    /// exist yet.
+    ///
+    /// `None` is not a missing value. It is the *primary* case, and it is
+    /// forced by where the gate sits: `apex-agentd`'s `session::start` calls
+    /// `privilege::authorise_grant` before it reserves a session id, on
+    /// purpose — "before the worktree, the checkpoint, the reserved id and
+    /// the PTY, so a refused password leaves nothing behind". A session
+    /// started with `--origin-policy remote --system-access session` is
+    /// therefore asking to be elevated while it is still nameless.
+    ///
+    /// `Some(n)` is the other caller: renewing a grant that already exists
+    /// and already names its session.
+    ///
+    /// The distinction is load-bearing rather than cosmetic, and
+    /// [`SecondFactor::may_answer_for`] enforces it in both directions: a
+    /// touch collected for a pending start cannot renew session 7's grant,
+    /// and a touch collected for session 7 cannot start a new session.
+    pub session: Option<u32>,
     /// Which of the two grants §4.4 and §4.5 name.
     pub kind: GrantKind,
     /// The ttl being asked for, in milliseconds.
@@ -548,7 +566,7 @@ impl Challenge {
     /// A challenge with a caller-supplied nonce. Tests use it; the daemon uses
     /// [`ChallengeStore::issue`], which draws the nonce from the kernel.
     pub fn with_nonce(
-        session: u32,
+        session: Option<u32>,
         kind: GrantKind,
         grant_ttl_ms: u64,
         now_ms: u64,
@@ -571,10 +589,19 @@ impl Challenge {
     /// renders without one: three integers, one word from a closed set, and
     /// base64. Nothing in it can contain a newline, so no two different
     /// challenges can produce the same bytes.
+    ///
+    /// `session` renders as the literal `none` when there is no id yet, which
+    /// is why it stayed an integer-or-word rather than becoming the agent and
+    /// project names: those are free strings, a newline in either would let
+    /// two different challenges render identically, and the paragraph above
+    /// would stop being true.
     pub fn binding(&self) -> Vec<u8> {
         format!(
             "{CHALLENGE_CONTEXT}\nsession={}\nkind={}\nttl_ms={}\nissued_ms={}\nnonce={}\n",
-            self.session,
+            match self.session {
+                Some(id) => id.to_string(),
+                None => "none".to_string(),
+            },
             self.kind.as_str(),
             self.grant_ttl_ms,
             self.issued_ms,
@@ -626,14 +653,20 @@ impl ChallengeStore {
     }
 
     /// Issue one, with a nonce from the kernel.
-    pub fn issue(&mut self, session: u32, kind: GrantKind, grant_ttl_ms: u64, now_ms: u64) -> Challenge {
+    pub fn issue(
+        &mut self,
+        session: Option<u32>,
+        kind: GrantKind,
+        grant_ttl_ms: u64,
+        now_ms: u64,
+    ) -> Challenge {
         self.issue_with_nonce(session, kind, grant_ttl_ms, now_ms, &random_nonce())
     }
 
     /// [`ChallengeStore::issue`] with the nonce supplied, so a test can name it.
     pub fn issue_with_nonce(
         &mut self,
-        session: u32,
+        session: Option<u32>,
         kind: GrantKind,
         grant_ttl_ms: u64,
         now_ms: u64,
@@ -1123,14 +1156,280 @@ pub fn verify_for_challenge(
     assertion: &Assertion,
     uv: UserVerification,
     now_ms: u64,
-) -> Result<u32, AssertionError> {
+) -> Result<SecondFactor, AssertionError> {
     if challenge.expired_at(now_ms) {
         return Err(AssertionError::ChallengeExpired {
             issued_ms: challenge.issued_ms,
             now_ms,
         });
     }
-    verify_assertion(credential, &challenge.binding(), assertion, uv)
+    let counter = verify_assertion(credential, &challenge.binding(), assertion, uv)?;
+    // Re-parsed rather than threaded out of `verify_assertion`, whose
+    // signature and whose thirty-odd tests are left alone deliberately: this
+    // is a second pass over 37 bytes that are already in memory and have
+    // already been proved well-formed, and it buys the receipt below the one
+    // fact it cannot otherwise carry.
+    let auth = AuthData::parse(&assertion.auth_data)?;
+    Ok(SecondFactor {
+        session: challenge.session,
+        kind: challenge.kind,
+        grant_ttl_ms: challenge.grant_ttl_ms,
+        nonce: challenge.nonce.clone(),
+        credential: credential.label.clone(),
+        counter,
+        user_verified: auth.user_verified(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The receipt, and the gate that reads it
+// ---------------------------------------------------------------------------
+
+/// Proof that a security key was touched for one particular elevation.
+///
+/// **There is no public constructor and every field is private.** The only
+/// way to obtain one is [`verify_for_challenge`] returning `Ok`, which means
+/// a caller cannot assemble something that merely looks verified — the type
+/// *is* the evidence. That is the whole reason it exists rather than
+/// `may_elevate` taking a `bool`: a `bool` can be written by the code that
+/// wants the answer to be yes, and four separate gates in this repository
+/// have already been found whose only caller could not fail them.
+///
+/// It deliberately carries the challenge's *scope* rather than just "a key
+/// was touched". A touch is consent to one elevation, not to elevation in
+/// general, and [`SecondFactor::may_answer_for`] is where that is checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecondFactor {
+    session: Option<u32>,
+    kind: GrantKind,
+    grant_ttl_ms: u64,
+    nonce: String,
+    credential: String,
+    counter: u32,
+    user_verified: bool,
+}
+
+impl SecondFactor {
+    /// The session this touch was collected for — `None` for a session that
+    /// did not exist yet when the challenge was issued.
+    pub fn session(&self) -> Option<u32> {
+        self.session
+    }
+
+    pub fn kind(&self) -> GrantKind {
+        self.kind
+    }
+
+    /// The authenticator's signature counter, for the credential store to
+    /// record so the same assertion cannot be spent twice.
+    pub fn counter(&self) -> u32 {
+        self.counter
+    }
+
+    /// Whether the authenticator reported a PIN or biometric, not just a
+    /// touch. Read off the signed bytes, so it is the authenticator's claim
+    /// and not the client's.
+    pub fn user_verified(&self) -> bool {
+        self.user_verified
+    }
+
+    /// Which enrolled credential answered, for the audit line.
+    pub fn credential(&self) -> &str {
+        &self.credential
+    }
+
+    /// The nonce this receipt answers, so a caller can prove it redeemed the
+    /// challenge it is about to spend.
+    pub fn nonce(&self) -> &str {
+        &self.nonce
+    }
+
+    /// Does this touch authorise *that* elevation?
+    ///
+    /// Every field must agree, and the session field must agree in **both**
+    /// directions — `None` cannot answer for `Some(7)` and `Some(7)` cannot
+    /// answer for `None`. One direction would be a half-check: a touch
+    /// collected while starting a session is a touch for a session nobody has
+    /// named yet, and letting it renew an existing grant would spend consent
+    /// on a thing the human never saw.
+    fn may_answer_for(&self, what: &Elevation) -> Result<(), RemoteElevationRefused> {
+        if self.session != what.scope {
+            return Err(RemoteElevationRefused::WrongSession {
+                touched_for: self.session,
+                asked_for: what.scope,
+            });
+        }
+        if self.kind != what.kind {
+            return Err(RemoteElevationRefused::WrongKind {
+                touched_for: self.kind,
+                asked_for: what.kind,
+            });
+        }
+        if self.grant_ttl_ms != what.ttl_ms {
+            return Err(RemoteElevationRefused::WrongTtl {
+                touched_for: self.grant_ttl_ms,
+                asked_for: what.ttl_ms,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The elevation being asked for, as the gate needs to see it.
+///
+/// A struct rather than four parameters so that a caller cannot transpose the
+/// two `u64`s — `grant_ttl_ms` and a session id are both integers, and
+/// `may_elevate(policy, ttl, session, ..)` would compile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Elevation {
+    /// The session being elevated, or `None` for one being started. See
+    /// [`Challenge::session`] for why `None` is the primary case.
+    pub scope: Option<u32>,
+    pub kind: GrantKind,
+    pub ttl_ms: u64,
+    /// Where the request to elevate came from. From the connection's own
+    /// provenance via `origin::classify`, never from the request.
+    pub origin: RequestOrigin,
+}
+
+/// Why a remote elevation was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteElevationRefused {
+    /// The owner has not turned the setting on for this session.
+    PolicyForbids { origin: RequestOrigin },
+    /// The setting is on, but no security key answered.
+    NoSecondFactor { origin: RequestOrigin },
+    /// A key was touched, for something else.
+    WrongSession {
+        touched_for: Option<u32>,
+        asked_for: Option<u32>,
+    },
+    WrongKind {
+        touched_for: GrantKind,
+        asked_for: GrantKind,
+    },
+    WrongTtl {
+        touched_for: u64,
+        asked_for: u64,
+    },
+    /// A key was touched but reported no PIN or biometric, and what is being
+    /// asked for is root.
+    NotUserVerified { credential: String },
+}
+
+impl std::fmt::Display for RemoteElevationRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemoteElevationRefused::PolicyForbids { origin } => write!(
+                f,
+                "§7 requires local approval for root, and this request came from {}; \
+                 the owner can allow it with `--origin-policy remote`, which needs an \
+                 enrolled security key",
+                origin.as_str()
+            ),
+            RemoteElevationRefused::NoSecondFactor { origin } => write!(
+                f,
+                "elevation from {} is allowed for this session, but only with a security key, \
+                 and none was touched for this request",
+                origin.as_str()
+            ),
+            RemoteElevationRefused::WrongSession {
+                touched_for,
+                asked_for,
+            } => {
+                fn name(s: &Option<u32>) -> String {
+                    match s {
+                        Some(id) => format!("session {id}"),
+                        None => "a session being started".to_string(),
+                    }
+                }
+                write!(
+                    f,
+                    "that security key was touched for {}, not for {}",
+                    name(touched_for),
+                    name(asked_for)
+                )
+            }
+            RemoteElevationRefused::WrongKind {
+                touched_for,
+                asked_for,
+            } => write!(
+                f,
+                "that security key was touched for a {} grant, not a {} one",
+                touched_for.as_str(),
+                asked_for.as_str()
+            ),
+            RemoteElevationRefused::WrongTtl {
+                touched_for,
+                asked_for,
+            } => write!(
+                f,
+                "that security key was touched for a grant lasting {touched_for}ms, and this one \
+                 would last {asked_for}ms"
+            ),
+            RemoteElevationRefused::NotUserVerified { credential } => write!(
+                f,
+                "{credential} reported a touch but no PIN or biometric, and root needs both; \
+                 set a PIN on the key with `fido2-token -S`"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RemoteElevationRefused {}
+
+/// May this elevation proceed, given where it came from and what answered?
+///
+/// This is the gate P0-014 is about, and the first non-test caller
+/// [`OriginPolicy::allows_elevation_from`] has ever had — it shipped with
+/// three callers, all of them assertions in its own test module.
+///
+/// The order is the security property:
+///
+///   1. **A local origin needs nothing from here.** §7 already gives root
+///      "local auth" locally, and that path is `may_be_granted` plus polkit.
+///      Returning `Ok` for it is not a hole; it is this function declining to
+///      be a second, weaker copy of a check that already exists.
+///   2. **The policy, before the factor.** A refusal the owner has not opted
+///      out of should not depend on whether a key happened to be touched, and
+///      checking it first means the error the user reads names the setting
+///      they need to change rather than the key they do not have.
+///   3. **A factor at all**, and then **that factor for this elevation** —
+///      session, kind and ttl, all three, in both directions.
+///   4. **User verification for root.** Both `GrantKind`s are root: §4.4 is
+///      capability-scoped root and §4.5 is break-glass root. So `Required` is
+///      the level, and a bare touch is not enough. The consequence is stated
+///      rather than hidden: of the three real-device vectors this module is
+///      tested against, the `0x19` spec vector (user present, not verified)
+///      becomes a *negative* here alongside the `0x00` silent one, and the
+///      macOS TouchID `0x45` vector is the only positive. A key with no PIN
+///      cannot approve root from a phone, which is the intended answer — the
+///      remote path is the one where nobody can see who is holding the key.
+pub fn may_elevate(
+    policy: OriginPolicy,
+    what: &Elevation,
+    factor: Option<&SecondFactor>,
+) -> Result<(), RemoteElevationRefused> {
+    if what.origin.is_local() {
+        return Ok(());
+    }
+    if !policy.allows_elevation_from(what.origin) {
+        return Err(RemoteElevationRefused::PolicyForbids {
+            origin: what.origin,
+        });
+    }
+    let Some(factor) = factor else {
+        return Err(RemoteElevationRefused::NoSecondFactor {
+            origin: what.origin,
+        });
+    };
+    factor.may_answer_for(what)?;
+    if !factor.user_verified {
+        return Err(RemoteElevationRefused::NotUserVerified {
+            credential: factor.credential.clone(),
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1633,8 +1932,14 @@ mod tests {
     // The challenge
     // -----------------------------------------------------------------
 
+    /// A challenge for an existing session.
     fn challenge_at(session: u32, kind: GrantKind, ttl: u64, now: u64, nonce: u8) -> Challenge {
-        Challenge::with_nonce(session, kind, ttl, now, &[nonce; 32])
+        Challenge::with_nonce(Some(session), kind, ttl, now, &[nonce; 32])
+    }
+
+    /// A challenge for a session that does not exist yet — the primary case.
+    fn challenge_starting(kind: GrantKind, ttl: u64, now: u64, nonce: u8) -> Challenge {
+        Challenge::with_nonce(None, kind, ttl, now, &[nonce; 32])
     }
 
     #[test]
@@ -1680,7 +1985,7 @@ mod tests {
     #[test]
     fn a_challenge_is_answerable_once_and_then_never_again() {
         let mut store = ChallengeStore::new();
-        let c = store.issue_with_nonce(3, GrantKind::BreakGlass, 60_000, 100, &[9u8; 32]);
+        let c = store.issue_with_nonce(Some(3), GrantKind::BreakGlass, 60_000, 100, &[9u8; 32]);
         assert_eq!(store.outstanding(), 1);
         assert_eq!(store.redeem(&c.nonce, 100).as_ref(), Some(&c));
         assert_eq!(store.redeem(&c.nonce, 100), None, "a nonce is spent by use");
@@ -1690,7 +1995,7 @@ mod tests {
     #[test]
     fn an_unanswered_challenge_is_forgotten_when_its_window_closes() {
         let mut store = ChallengeStore::new();
-        let c = store.issue_with_nonce(3, GrantKind::SystemAccess, 60_000, 100, &[9u8; 32]);
+        let c = store.issue_with_nonce(Some(3), GrantKind::SystemAccess, 60_000, 100, &[9u8; 32]);
         assert_eq!(store.redeem(&c.nonce, 100 + CHALLENGE_TTL_MS), None);
         assert_eq!(store.outstanding(), 0);
     }
@@ -1702,7 +2007,7 @@ mod tests {
         for i in 0..(MAX_OUTSTANDING_CHALLENGES as u8 + 4) {
             nonces.push(
                 store
-                    .issue_with_nonce(1, GrantKind::SystemAccess, 60_000, 100, &[i; 32])
+                    .issue_with_nonce(Some(1), GrantKind::SystemAccess, 60_000, 100, &[i; 32])
                     .nonce,
             );
         }
@@ -1716,8 +2021,8 @@ mod tests {
     #[test]
     fn a_nonce_comes_from_the_kernel_and_is_not_the_same_twice() {
         let mut store = ChallengeStore::new();
-        let a = store.issue(1, GrantKind::SystemAccess, 60_000, 1);
-        let b = store.issue(1, GrantKind::SystemAccess, 60_000, 1);
+        let a = store.issue(Some(1), GrantKind::SystemAccess, 60_000, 1);
+        let b = store.issue(Some(1), GrantKind::SystemAccess, 60_000, 1);
         assert_ne!(a.nonce, b.nonce);
         assert_eq!(b64_decode(&a.nonce).map(|n| n.len()), Some(32));
     }
@@ -2130,6 +2435,699 @@ mod tests {
             ),
             Err(AssertionError::WrongChallenge)
         );
+    }
+
+    // -----------------------------------------------------------------
+    // A key made here, for the one thing the vectors cannot do
+    // -----------------------------------------------------------------
+
+    /// A P-256 key pair `openssl` generated, and a signer for it.
+    ///
+    /// The vectors above are real and therefore **fixed**: each one's client
+    /// data was chosen by whatever program collected it, and no [`Challenge`]
+    /// this daemon can issue will hash to it. So no vector can ever drive
+    /// [`verify_for_challenge`] to `Ok` — every test in the section above
+    /// asserts a refusal, and the three that carry a signature past `openssl`
+    /// go through [`verify_assertion`] with the vector's own client data.
+    ///
+    /// That is exactly right for the verifier and useless for the receipt.
+    /// [`SecondFactor`] exists *because* it cannot be assembled by a caller
+    /// who merely wants to look verified, so a test that builds one by hand
+    /// and hands it to [`may_elevate`] has asserted nothing about the only
+    /// property the type has. This signer closes that gap: every receipt the
+    /// gate is fed below was minted by the shipped code path, over bytes a
+    /// private key that exists actually signed.
+    ///
+    /// It is **not** a substitute for the vectors, and it verifies nothing
+    /// about the verifier: a signature this module both makes and checks only
+    /// proves the module agrees with itself. The vectors still own every test
+    /// above, and this key owns no test of the cryptography.
+    struct Signer {
+        dir: TempDir,
+        key_pem_path: String,
+        credential: Credential,
+    }
+
+    impl Signer {
+        /// Arbitrary, and never sent anywhere: the relying party of an
+        /// enrolment is whatever the owner registered the key against, and
+        /// the only thing this module does with it is hash it.
+        const RP_ID: &'static str = "apex-agent.localhost";
+
+        fn new(label: &str) -> Signer {
+            let dir = TempDir::new("apex-webauthn-signer").expect("temp dir");
+            let key_pem_path = dir.path().join("key.pem").to_string_lossy().into_owned();
+            openssl(&[
+                "ecparam",
+                "-name",
+                "prime256v1",
+                "-genkey",
+                "-noout",
+                "-out",
+                &key_pem_path,
+            ]);
+            let pem = String::from_utf8(openssl(&["pkey", "-in", &key_pem_path, "-pubout"]))
+                .expect("openssl writes pem as text");
+            // Asserted before any test leans on the key: what `openssl`
+            // wrote is a SubjectPublicKeyInfo the *shipped* parser reads. A
+            // signer whose public half this module could not load would fail
+            // every test below for a reason that is not the test's.
+            PublicKey::from_spki_pem(&pem).expect("openssl wrote an spki this module reads");
+            Signer {
+                dir,
+                key_pem_path,
+                credential: Credential {
+                    label: label.into(),
+                    id: b64_encode(b"a-credential-id-made-for-this-test"),
+                    public_key_pem: pem,
+                    rp_id: Signer::RP_ID.into(),
+                    counter: 0,
+                    enrolled_ms: 1,
+                },
+            }
+        }
+
+        /// An assertion over `challenge`, with those flags and that counter.
+        ///
+        /// `flags` is the knob the gate cares about: `UP | UV` is a key with
+        /// a PIN set, bare `UP` is a key without one, and the difference is
+        /// the whole of [`RemoteElevationRefused::NotUserVerified`].
+        fn assert_for(&self, challenge: &Challenge, flags: u8, counter: u32) -> Assertion {
+            let mut auth_data = sha256(Signer::RP_ID.as_bytes()).to_vec();
+            auth_data.push(flags);
+            auth_data.extend_from_slice(&counter.to_be_bytes());
+            self.sign_over(challenge, auth_data)
+        }
+
+        /// [`Signer::assert_for`] with the authenticator data supplied whole,
+        /// so a test can sign one block and present a different one.
+        fn sign_over(&self, challenge: &Challenge, auth_data: Vec<u8>) -> Assertion {
+            let cdh = challenge.client_data_hash();
+            let mut message = auth_data.clone();
+            message.extend_from_slice(&cdh);
+            let msg = self.dir.path().join("message");
+            let sig = self.dir.path().join("signature");
+            std::fs::write(&msg, &message).expect("write the message");
+            openssl(&[
+                "pkeyutl",
+                "-sign",
+                "-inkey",
+                &self.key_pem_path,
+                "-rawin",
+                "-digest",
+                "sha256",
+                "-in",
+                &msg.to_string_lossy(),
+                "-out",
+                &sig.to_string_lossy(),
+            ]);
+            Assertion {
+                credential_id: self.credential.id_bytes().expect("the id is base64"),
+                client_data_hash: cdh.to_vec(),
+                rp_id: Signer::RP_ID.into(),
+                auth_data,
+                signature: std::fs::read(&sig).expect("read the signature back"),
+            }
+        }
+
+        /// A receipt, minted the way the daemon will mint one.
+        ///
+        /// `UserVerification::Discouraged` on purpose, and it is a design
+        /// decision rather than a test convenience — see
+        /// `the_gate_and_not_the_verifier_is_what_demands_a_pin`.
+        fn receipt(&self, challenge: &Challenge, flags: u8, counter: u32) -> SecondFactor {
+            let assertion = self.assert_for(challenge, flags, counter);
+            verify_for_challenge(
+                &self.credential,
+                challenge,
+                &assertion,
+                UserVerification::Discouraged,
+                challenge.issued_ms,
+            )
+            .expect("a signature this key made over this very challenge")
+        }
+    }
+
+    /// Run `openssl`, and fail the test with its own words if it will not.
+    fn openssl(args: &[&str]) -> Vec<u8> {
+        let out = Command::new("openssl")
+            .args(args)
+            .output()
+            .expect("openssl is in the image");
+        assert!(
+            out.status.success(),
+            "openssl {args:?} exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    /// The elevation a receipt from `challenge` should answer for, from
+    /// `origin`.
+    fn asking(challenge: &Challenge, origin: RequestOrigin) -> Elevation {
+        Elevation {
+            scope: challenge.session,
+            kind: challenge.kind,
+            ttl_ms: challenge.grant_ttl_ms,
+            origin,
+        }
+    }
+
+    /// §7's five origins with nobody at this machine.
+    fn remote_origins() -> Vec<RequestOrigin> {
+        RequestOrigin::ALL
+            .iter()
+            .copied()
+            .filter(|o| !o.is_local())
+            .collect()
+    }
+
+    const UP: u8 = flags::UP;
+    const UP_UV: u8 = flags::UP | flags::UV;
+
+    // -----------------------------------------------------------------
+    // The receipt
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_receipt_is_what_a_verified_assertion_leaves_behind() {
+        let signer = Signer::new("a key with a pin");
+        let c = challenge_starting(GrantKind::BreakGlass, 8 * 3_600_000, 1_000, 0x11);
+        let factor = signer.receipt(&c, UP_UV, 7);
+        // Every field of the receipt comes from the challenge that was
+        // answered or the bytes that were signed. None of it comes from the
+        // request, which is the point: a receipt describes what a human
+        // consented to, not what a caller asked for.
+        assert_eq!(factor.session(), None);
+        assert_eq!(factor.kind(), GrantKind::BreakGlass);
+        assert_eq!(factor.nonce(), c.nonce);
+        assert_eq!(factor.credential(), "a key with a pin");
+        assert_eq!(factor.counter(), 7);
+        assert!(factor.user_verified());
+    }
+
+    #[test]
+    fn a_receipt_for_an_existing_session_names_it() {
+        let signer = Signer::new("k");
+        let c = challenge_at(31, GrantKind::SystemAccess, 60_000, 1_000, 0x12);
+        let factor = signer.receipt(&c, UP_UV, 1);
+        assert_eq!(factor.session(), Some(31));
+        assert_eq!(factor.kind(), GrantKind::SystemAccess);
+    }
+
+    #[test]
+    fn no_receipt_comes_out_of_a_signature_that_did_not_check_out() {
+        // The property the whole type rests on. A receipt is unforgeable only
+        // if `verify_for_challenge` is the sole way to obtain one *and* that
+        // function does not hand one out for a bad signature.
+        let signer = Signer::new("k");
+        let c = challenge_at(1, GrantKind::SystemAccess, 60_000, 1_000, 0x13);
+        let mut bad = signer.assert_for(&c, UP_UV, 1);
+        let last = bad.signature.len() - 1;
+        bad.signature[last] ^= 0x01;
+        assert_eq!(
+            verify_for_challenge(
+                &signer.credential,
+                &c,
+                &bad,
+                UserVerification::Discouraged,
+                1_000
+            ),
+            Err(AssertionError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn a_receipt_cannot_be_had_for_a_challenge_that_was_not_the_one_signed() {
+        let signer = Signer::new("k");
+        let signed = challenge_at(1, GrantKind::SystemAccess, 60_000, 1_000, 0x14);
+        let asked = challenge_at(1, GrantKind::SystemAccess, 60_000, 1_000, 0x15);
+        let assertion = signer.assert_for(&signed, UP_UV, 1);
+        // One byte of nonce apart, and that is enough: the client data hash
+        // the key signed is over the whole binding.
+        assert_eq!(
+            verify_for_challenge(
+                &signer.credential,
+                &asked,
+                &assertion,
+                UserVerification::Discouraged,
+                1_000
+            ),
+            Err(AssertionError::WrongChallenge)
+        );
+    }
+
+    #[test]
+    fn the_pin_bit_on_a_receipt_is_inside_the_signature_and_cannot_be_moved() {
+        // `user_verified` is the fact the gate refuses root over, so it has to
+        // be the authenticator's claim rather than the client's. Asserted the
+        // only way that means anything: sign a bare touch, then set the UV bit
+        // in the block that is presented. If the bit were read from anywhere
+        // outside the signed bytes this would mint a verified receipt.
+        let signer = Signer::new("a key with no pin");
+        let c = challenge_at(1, GrantKind::BreakGlass, 60_000, 1_000, 0x16);
+        let honest = signer.assert_for(&c, UP, 1);
+        assert!(!signer.receipt(&c, UP, 1).user_verified());
+
+        let mut tampered = honest.clone();
+        tampered.auth_data[32] |= flags::UV;
+        assert_eq!(
+            verify_for_challenge(
+                &signer.credential,
+                &c,
+                &tampered,
+                UserVerification::Discouraged,
+                1_000
+            ),
+            Err(AssertionError::BadSignature),
+            "the flags byte is covered by the signature"
+        );
+    }
+
+    #[test]
+    fn a_receipt_has_no_constructor_and_no_field_anybody_can_write() {
+        // The type's entire security value is that `verify_for_challenge`
+        // returning `Ok` is the only way to get one. Inside this crate the
+        // child test module can still reach the private fields — which is why
+        // this is asserted over the source text rather than by trying and
+        // failing to compile something. What a later edit must not add is a
+        // `pub` field or a public constructor; either would turn the receipt
+        // back into the `bool` it exists instead of.
+        let source = include_str!("webauthn.rs");
+        let shipped = source.split("#[cfg(test)]").next().expect("source");
+        let body = shipped
+            .split("pub struct SecondFactor {")
+            .nth(1)
+            .expect("the struct is declared")
+            .split('}')
+            .next()
+            .expect("the struct body ends");
+        assert!(
+            !body.contains("pub "),
+            "a field of SecondFactor was made public: {body}"
+        );
+        let methods = shipped
+            .split("impl SecondFactor {")
+            .nth(1)
+            .expect("the impl block is there")
+            .split("\n}")
+            .next()
+            .expect("the impl block ends");
+        assert!(
+            !methods.contains("-> SecondFactor"),
+            "SecondFactor grew a constructor: {methods}"
+        );
+        // And the one function that does return one is the verifier.
+        assert!(shipped.contains("-> Result<SecondFactor, AssertionError>"));
+    }
+
+    // -----------------------------------------------------------------
+    // The gate
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_touch_from_a_remote_origin_opens_the_gate_the_owner_opened() {
+        // The whole of P0-014 in one assertion, and the first time
+        // `OriginPolicy::RemoteElevationAllowed` has ever led anywhere: the
+        // owner turned the setting on, a key with a PIN was touched for this
+        // exact elevation, and root from a phone is allowed.
+        let signer = Signer::new("a key with a pin");
+        let c = challenge_starting(GrantKind::BreakGlass, 60_000, 1_000, 0x21);
+        let factor = signer.receipt(&c, UP_UV, 1);
+        assert_eq!(
+            may_elevate(
+                OriginPolicy::RemoteElevationAllowed,
+                &asking(&c, RequestOrigin::RemoteControl),
+                Some(&factor)
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_local_origin_is_not_asked_for_a_key_by_this_gate() {
+        // Not a hole. §7 gives root "local auth" locally and that path is
+        // `may_be_granted` plus polkit; this function declining to be a
+        // second, weaker copy of it is the design. Asserted for both local
+        // origins, both policies, with no factor and with a factor that is
+        // wrong in every field — because if any of those changed the answer,
+        // the local path would have acquired a requirement §7 does not give
+        // it.
+        let signer = Signer::new("k");
+        let other = challenge_at(9, GrantKind::SystemAccess, 1_000, 1_000, 0x22);
+        let wrong = signer.receipt(&other, UP, 1);
+        for origin in RequestOrigin::ALL.iter().copied().filter(|o| o.is_local()) {
+            for policy in OriginPolicy::ALL.iter().copied() {
+                let what = Elevation {
+                    scope: Some(4),
+                    kind: GrantKind::BreakGlass,
+                    ttl_ms: 8 * 3_600_000,
+                    origin,
+                };
+                assert_eq!(may_elevate(policy, &what, None), Ok(()), "{origin} {policy}");
+                assert_eq!(
+                    may_elevate(policy, &what, Some(&wrong)),
+                    Ok(()),
+                    "{origin} {policy}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_policy_refuses_every_remote_origin_however_good_the_key_is() {
+        let signer = Signer::new("a key with a pin");
+        let c = challenge_starting(GrantKind::BreakGlass, 60_000, 1_000, 0x23);
+        let factor = signer.receipt(&c, UP_UV, 1);
+        for origin in remote_origins() {
+            assert_eq!(
+                may_elevate(
+                    OriginPolicy::LocalElevationOnly,
+                    &asking(&c, origin),
+                    Some(&factor)
+                ),
+                Err(RemoteElevationRefused::PolicyForbids { origin }),
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_setting_on_its_own_is_not_the_second_factor() {
+        for origin in remote_origins() {
+            let what = Elevation {
+                scope: None,
+                kind: GrantKind::SystemAccess,
+                ttl_ms: 60_000,
+                origin,
+            };
+            assert_eq!(
+                may_elevate(OriginPolicy::RemoteElevationAllowed, &what, None),
+                Err(RemoteElevationRefused::NoSecondFactor { origin }),
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gate_reads_the_setting_before_it_looks_for_a_key() {
+        // Order is a property here, not an implementation detail. A refusal
+        // the owner never opted out of must not depend on whether a key
+        // happened to be plugged in, and the error a user reads should name
+        // the setting they can change rather than the key they do not have.
+        assert_eq!(
+            may_elevate(
+                OriginPolicy::LocalElevationOnly,
+                &Elevation {
+                    scope: None,
+                    kind: GrantKind::BreakGlass,
+                    ttl_ms: 60_000,
+                    origin: RequestOrigin::RemoteControl,
+                },
+                None
+            ),
+            Err(RemoteElevationRefused::PolicyForbids {
+                origin: RequestOrigin::RemoteControl
+            }),
+            "the policy is the first answer, not NoSecondFactor"
+        );
+    }
+
+    #[test]
+    fn a_touch_collected_for_one_elevation_does_not_authorise_another() {
+        // A touch is consent to one thing. Every field of the challenge is
+        // checked, and the session field in **both** directions: a receipt
+        // for a session being started must not renew session 7's grant, and
+        // one collected for session 7 must not start a session. One direction
+        // would be a half-check that passes a naive test.
+        let signer = Signer::new("a key with a pin");
+        let starting = challenge_starting(GrantKind::SystemAccess, 60_000, 1_000, 0x24);
+        let existing = challenge_at(7, GrantKind::SystemAccess, 60_000, 1_000, 0x25);
+        let for_starting = signer.receipt(&starting, UP_UV, 1);
+        let for_existing = signer.receipt(&existing, UP_UV, 2);
+        let policy = OriginPolicy::RemoteElevationAllowed;
+
+        assert_eq!(
+            may_elevate(
+                policy,
+                &asking(&existing, RequestOrigin::RemoteControl),
+                Some(&for_starting)
+            ),
+            Err(RemoteElevationRefused::WrongSession {
+                touched_for: None,
+                asked_for: Some(7)
+            })
+        );
+        assert_eq!(
+            may_elevate(
+                policy,
+                &asking(&starting, RequestOrigin::RemoteControl),
+                Some(&for_existing)
+            ),
+            Err(RemoteElevationRefused::WrongSession {
+                touched_for: Some(7),
+                asked_for: None
+            })
+        );
+        // And the receipts each answer their own elevation, so the two
+        // refusals above are about scope and not about the receipts.
+        assert_eq!(
+            may_elevate(
+                policy,
+                &asking(&starting, RequestOrigin::RemoteControl),
+                Some(&for_starting)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            may_elevate(
+                policy,
+                &asking(&existing, RequestOrigin::RemoteControl),
+                Some(&for_existing)
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_touch_for_a_capability_grant_does_not_buy_break_glass() {
+        // The two `GrantKind`s are different things — §4.4 leaves
+        // `no_new_privs` on and §4.5 turns it off — so consent to one is not
+        // consent to the other, in either direction.
+        let signer = Signer::new("a key with a pin");
+        let policy = OriginPolicy::RemoteElevationAllowed;
+        for (touched, asked) in [
+            (GrantKind::SystemAccess, GrantKind::BreakGlass),
+            (GrantKind::BreakGlass, GrantKind::SystemAccess),
+        ] {
+            let c = challenge_starting(touched, 60_000, 1_000, 0x26);
+            let factor = signer.receipt(&c, UP_UV, 1);
+            let what = Elevation {
+                scope: None,
+                kind: asked,
+                ttl_ms: 60_000,
+                origin: RequestOrigin::RemoteControl,
+            };
+            assert_eq!(
+                may_elevate(policy, &what, Some(&factor)),
+                Err(RemoteElevationRefused::WrongKind {
+                    touched_for: touched,
+                    asked_for: asked
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a_touch_for_a_minute_does_not_authorise_eight_hours() {
+        // The ttl is in the signed binding for exactly this reason: without
+        // it, a human who approved a one-minute capability grant would have
+        // approved an eight-hour one, and the audit line would say they did.
+        let signer = Signer::new("a key with a pin");
+        let c = challenge_starting(GrantKind::BreakGlass, 60_000, 1_000, 0x27);
+        let factor = signer.receipt(&c, UP_UV, 1);
+        let what = Elevation {
+            scope: None,
+            kind: GrantKind::BreakGlass,
+            ttl_ms: 8 * 3_600_000,
+            origin: RequestOrigin::RemoteControl,
+        };
+        assert_eq!(
+            may_elevate(OriginPolicy::RemoteElevationAllowed, &what, Some(&factor)),
+            Err(RemoteElevationRefused::WrongTtl {
+                touched_for: 60_000,
+                asked_for: 8 * 3_600_000
+            })
+        );
+    }
+
+    #[test]
+    fn the_gate_and_not_the_verifier_is_what_demands_a_pin() {
+        // A decision worth stating, because getting it wrong makes
+        // `NotUserVerified` unreachable — the dead-gate pattern this task
+        // exists to stop repeating.
+        //
+        // `verify_for_challenge` takes a `UserVerification`, so the daemon
+        // could ask *it* to insist on a PIN. It must not: the verifier does
+        // not know where the request came from, and UV is required **because
+        // the origin is remote**. A local origin never reaches this check at
+        // all. So the daemon passes `Discouraged`, a bare touch mints a
+        // perfectly real receipt, and `may_elevate` is what refuses it — with
+        // an error that names the key and says how to set a PIN on it.
+        let signer = Signer::new("a key with no pin");
+        let c = challenge_starting(GrantKind::BreakGlass, 60_000, 1_000, 0x28);
+        let factor = signer.receipt(&c, UP, 1);
+        assert!(!factor.user_verified(), "a real receipt, from a bare touch");
+        assert_eq!(
+            may_elevate(
+                OriginPolicy::RemoteElevationAllowed,
+                &asking(&c, RequestOrigin::RemoteControl),
+                Some(&factor)
+            ),
+            Err(RemoteElevationRefused::NotUserVerified {
+                credential: "a key with no pin".into()
+            })
+        );
+        // Both `GrantKind`s are root — §4.4 is capability-scoped root and
+        // §4.5 is break-glass root — so neither is exempt.
+        let c = challenge_starting(GrantKind::SystemAccess, 60_000, 1_000, 0x29);
+        let factor = signer.receipt(&c, UP, 1);
+        assert!(matches!(
+            may_elevate(
+                OriginPolicy::RemoteElevationAllowed,
+                &asking(&c, RequestOrigin::RemoteControl),
+                Some(&factor)
+            ),
+            Err(RemoteElevationRefused::NotUserVerified { .. })
+        ));
+        // The alternative path, recorded so the choice above is visible: ask
+        // the verifier for UV and there is no receipt at all, and therefore
+        // no way to say which key needs a PIN.
+        let assertion = signer.assert_for(&c, UP, 1);
+        assert_eq!(
+            verify_for_challenge(
+                &signer.credential,
+                &c,
+                &assertion,
+                UserVerification::Required,
+                1_000
+            ),
+            Err(AssertionError::NoUserVerification)
+        );
+    }
+
+    #[test]
+    fn the_scope_of_a_touch_is_checked_before_its_pin() {
+        // A receipt that is both out of scope and unverified is refused for
+        // being out of scope. The other order would tell a user to set a PIN
+        // on a key that was never the problem.
+        let signer = Signer::new("a key with no pin");
+        let c = challenge_at(7, GrantKind::SystemAccess, 60_000, 1_000, 0x2a);
+        let factor = signer.receipt(&c, UP, 1);
+        let what = Elevation {
+            scope: None,
+            kind: GrantKind::SystemAccess,
+            ttl_ms: 60_000,
+            origin: RequestOrigin::RemoteControl,
+        };
+        assert!(matches!(
+            may_elevate(OriginPolicy::RemoteElevationAllowed, &what, Some(&factor)),
+            Err(RemoteElevationRefused::WrongSession { .. })
+        ));
+    }
+
+    #[test]
+    fn the_gate_agrees_with_the_dimension_it_reads_over_all_fourteen_pairs() {
+        // `may_elevate` is the first non-test caller
+        // `OriginPolicy::allows_elevation_from` has ever had — it shipped
+        // with three, all of them assertions in its own test module. This
+        // asserts the wiring over the whole 2x7 product rather than over the
+        // pairs someone thought of: wherever the dimension says elevation is
+        // allowed from an origin, a good receipt gets through, and wherever
+        // it says no, nothing does.
+        let signer = Signer::new("a key with a pin");
+        let c = challenge_starting(GrantKind::BreakGlass, 60_000, 1_000, 0x2b);
+        let factor = signer.receipt(&c, UP_UV, 1);
+        let mut allowed = 0;
+        for policy in OriginPolicy::ALL.iter().copied() {
+            for origin in RequestOrigin::ALL.iter().copied() {
+                let what = asking(&c, origin);
+                let verdict = may_elevate(policy, &what, Some(&factor));
+                assert_eq!(
+                    verdict.is_ok(),
+                    policy.allows_elevation_from(origin),
+                    "{policy} / {origin}"
+                );
+                if verdict.is_ok() {
+                    allowed += 1;
+                }
+            }
+        }
+        // 2 local origins x 2 policies, plus 5 remote origins under the
+        // permissive one. If the gate ever opened for a remote origin under
+        // the default policy this count would move.
+        assert_eq!(allowed, 9);
+    }
+
+    #[test]
+    fn every_refusal_says_what_would_change_the_answer() {
+        // These strings are what a user sees instead of the thing they asked
+        // for, so each has to name either the setting or the key.
+        let cases = [
+            (
+                RemoteElevationRefused::PolicyForbids {
+                    origin: RequestOrigin::RemoteControl,
+                },
+                "--origin-policy remote",
+            ),
+            (
+                RemoteElevationRefused::NoSecondFactor {
+                    origin: RequestOrigin::Mcp,
+                },
+                "security key",
+            ),
+            (
+                RemoteElevationRefused::WrongSession {
+                    touched_for: None,
+                    asked_for: Some(7),
+                },
+                "a session being started",
+            ),
+            (
+                RemoteElevationRefused::WrongKind {
+                    touched_for: GrantKind::SystemAccess,
+                    asked_for: GrantKind::BreakGlass,
+                },
+                "grant",
+            ),
+            (
+                RemoteElevationRefused::WrongTtl {
+                    touched_for: 60_000,
+                    asked_for: 100,
+                },
+                "60000ms",
+            ),
+            (
+                RemoteElevationRefused::NotUserVerified {
+                    credential: "yubikey".into(),
+                },
+                "fido2-token -S",
+            ),
+        ];
+        for (refusal, must_say) in cases {
+            let said = refusal.to_string();
+            assert!(said.contains(must_say), "{said:?} does not say {must_say:?}");
+            // The origin a refusal carries is rendered by §7's own name, not
+            // by the debug spelling of the variant.
+            assert!(!said.contains("RemoteControl"), "{said:?}");
+        }
+        assert!(RemoteElevationRefused::WrongSession {
+            touched_for: Some(7),
+            asked_for: None,
+        }
+        .to_string()
+        .contains("session 7"));
     }
 
     // -----------------------------------------------------------------
