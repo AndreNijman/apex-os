@@ -203,6 +203,23 @@ pub struct Output {
     pub text: String,
 }
 
+/// What a curl run produced, with the two streams still apart.
+///
+/// [`Output`] merges them, which is right for git — git says everything worth
+/// reading on stderr, and the caller wants one transcript. It is wrong for an
+/// HTTP client whose caller parses stdout: the Cloudflare provider asks curl to
+/// print the status on the last line of stdout, and a warning appended to that
+/// line makes the status unreadable. So [`run_curl`] hands both back and each
+/// caller decides. `perform_http` merges them exactly as it always did.
+pub(crate) struct CurlOutput {
+    /// curl's **exit code**, which is not an HTTP status. 0 means the transfer
+    /// happened; 22 with `fail-with-body` means the server answered an error
+    /// status and the body is still in `stdout`.
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// Perform the capability with the credential attached.
 ///
 /// Returns the child's combined output with the credential scrubbed out of it.
@@ -457,7 +474,7 @@ pub fn perform_http(
     config.push_str(&format!("max-filesize = {HTTP_MAX_BYTES}\n"));
     config.push_str(&format!("max-time = {GIT_TIMEOUT_SECS}\n"));
 
-    let mut out = run_curl(&config, owner)?;
+    let mut out = merged(run_curl(&config, owner)?);
     let (headers, rest) = strip_http_headers(&out.text);
     out.text = scrub(&scrub(&rest, token), &info.header_value(token));
     Ok(HttpOutput {
@@ -533,12 +550,14 @@ pub fn mcp_session_id(headers: &str) -> Option<String> {
 /// spelled out anyway because the pin and the lookup are two facts that have to
 /// stay in step, and [`crate::providers::cloudflare::api`] — the other curl in
 /// this build — already spells it out.
-fn run_curl(config: &str, owner: &Owner) -> Result<Output, String> {
+pub(crate) fn run_curl(config: &str, owner: &Owner) -> Result<CurlOutput, String> {
     let mut cmd = Command::new(CURL);
     cmd.arg("-q").arg("--config").arg("-");
     cmd.env_clear()
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("HOME", &owner.home)
+        .env("USER", &owner.name)
+        .env("LOGNAME", &owner.name)
         .env("LC_ALL", "C")
         // A proxy the environment could name is a destination the caller did
         // not choose and this daemon did not check.
@@ -559,23 +578,37 @@ fn run_curl(config: &str, owner: &Owner) -> Result<Output, String> {
         .wait_with_output()
         .map_err(|e| format!("waiting for curl: {e}"))?;
 
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    if text.len() > HTTP_MAX_BYTES {
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if stdout.len() > HTTP_MAX_BYTES {
         return Err(format!(
             "that reply is larger than the {HTTP_MAX_BYTES} bytes this service will carry"
         ));
     }
-    let err = String::from_utf8_lossy(&out.stderr);
-    if !err.trim().is_empty() {
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str(err.trim_end());
-    }
-    Ok(Output {
+    Ok(CurlOutput {
         code: out.status.code().unwrap_or(-1),
-        text,
+        stdout,
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     })
+}
+
+/// Append what curl said on stderr to what it printed, the way [`Output`] has
+/// always carried a brokered reply.
+///
+/// Its own function so that "the MCP path merges the streams" is one line a
+/// reader can find, rather than a thing `run_curl` did to every caller.
+fn merged(out: CurlOutput) -> Output {
+    let CurlOutput {
+        code,
+        mut stdout,
+        stderr,
+    } = out;
+    if !stderr.trim().is_empty() {
+        if !stdout.is_empty() && !stdout.ends_with('\n') {
+            stdout.push('\n');
+        }
+        stdout.push_str(stderr.trim_end());
+    }
+    Output { code, text: stdout }
 }
 
 /// A curl config value, quoted so nothing in it can be read as syntax.
