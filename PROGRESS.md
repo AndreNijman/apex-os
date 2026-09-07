@@ -520,6 +520,59 @@ Two details worth keeping:
   which is exactly the property the "write it as you go, never at the end" rule
   exists to produce. A card written at the end would not have existed.
 
+### A flag the script never had erased a third of the roadmap's evidence
+
+`set-status.py` takes evidence **positionally**. Some orchestrator ran it as
+`set-status.py <id> <status> --evidence "<text>"`, and `sys.argv[3]` is then the
+string `--evidence`; the real text sat in `argv[4]` and was never read. The
+script did what it promised — it wrote the evidence it was given, re-parsed the
+file, and reported success — so nothing looked wrong at any point.
+
+Found on 2026-09-07: **33 of 127 tasks held the literal string `--evidence`**
+where their acceptance record belonged. Every one of them had reported cleanly.
+
+It is the same shape as the other findings on this page. A check that cannot
+fail is not a check, and a tool that cannot tell a flag from a value will
+cheerfully record the flag. Three things came out of it:
+
+1. `set-status.py` accepts `--evidence TEXT` and `--evidence=TEXT` now, and
+   **refuses** to store anything that starts with `--`, or an empty string. Both
+   spellings work, so an orchestrator reading either the docstring or a stale
+   prompt gets the same result.
+2. Eight were recovered exactly, from `refs/wip/roadmap-state` — the snapshot
+   timer's 62 commits are a real history, not just a backup of the latest state.
+   That is worth knowing the next time something is lost.
+3. Twenty-four were reconstructed from `state/agents/*.md`, which is what the
+   cards are for: they are written by the agent doing the work, contemporaneously,
+   and they held the test counts and mutation pairs the evidence field had lost.
+   Each reconstructed line says so and names the card it came from.
+
+**`P0-024` is the one that could not be recovered.** No snapshot ever held its
+evidence and no card covers it, so its line records what is verifiable today and
+says plainly that the acceptance record is gone. Anyone re-qualifying P0-024
+should re-derive its criteria rather than trust that line.
+
+### A stale queue offers finished work, and `resume.sh` was offering it
+
+The READY list was computed only from each unit's `after` field, so a unit stayed
+on offer no matter what had happened to it. On 2026-09-07 it was still offering
+`p1-018` and `p1-020` — both landed and `done` — and it listed every unit already
+in a dispatched agent's hands. Fixed in `resume.sh`, both derived rather than
+maintained by hand:
+
+- **IN HAND** — a unit an agent owns is not offered. The agent's slug and the
+  queue id may differ (`followups-integrate-3` was dispatched as
+  `followups-int3`), so an agent may name its unit with a `queue_id` field.
+- **COMPLETE** — a unit whose every roadmap item is `done` is not offered. Read
+  from `roadmap.yaml`, so it cannot go stale.
+
+One more trap, in `dispatch.json` rather than the queue: `resume.sh` does
+`os.path.isdir(worktree)` and `git rev-list origin/<branch>..HEAD`, so both
+fields must hold **one** value. An agent working two repos writes the second in
+`second_worktree`/`second_branch`. Writing "a and b" there makes the next report
+say "no worktree" for a worktree that is perfectly fine — an absence that is
+really a parse failure, which is the fourth time this program has hit that shape.
+
 ### The landed-check was wrong, and it cost an agent run
 
 `ROADMAP/state/unlanded.py` sampled the lines a commit added and asked whether
@@ -791,3 +844,17 @@ eight tasks and the largest single piece of work in the roadmap).
   task its own companion document called a release blocker.
 - **2026-09-06 10:10** — Wave 0 dispatched: 5 BASE verification agents, 5 P0 UI
   implementation agents.
+- **2026-09-07 10:05** — Round 4 dispatched. All six of the 05:05–06:00 agents
+  were dead (session ended, not failure); none was revived by message. Fresh
+  agents carry the cards for `p0-014`, `p1-023`, `p2-010` and `p1-039`;
+  `integrate-4` lands seven finished branches; `followups-int3` takes the two
+  security holes integration round three routed onward. `p1-050` and `p1-035`
+  are held under the ceiling with their finished work pushed — see
+  `state/dispatch.json:_deliberately_held`, which exists so the next resume does
+  not read the hold as an oversight.
+- **2026-09-07 10:20** — Roadmap evidence repaired: 33 tasks whose evidence was
+  the literal string `--evidence`, 8 recovered from the snapshot ref and 24
+  reconstructed from the cards. `set-status.py` now refuses flag-shaped
+  evidence. `resume.sh` stopped offering work that is finished or already in an
+  agent's hands. Counts moved 45/25/55/2 → 46/30/49/2 done/partial/todo/blocked,
+  entirely from recording work that was already pushed.

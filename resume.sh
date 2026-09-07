@@ -137,7 +137,7 @@ git -C "$INT_SHELL" ls-remote origin 'refs/wip/*' 2>/dev/null | sed 's|^\(......
 
 # ── 5. What to dispatch next ────────────────────────────────────────────────
 sec "next"
-python3 - "$STATE/queue.json" "$STATE/dispatch.json" <<'PY'
+python3 - "$STATE/queue.json" "$STATE/dispatch.json" "$HERE/roadmap.yaml" <<'PY'
 import sys, json
 q = json.load(open(sys.argv[1]))
 try: agents = json.load(open(sys.argv[2]))['agents']
@@ -149,10 +149,26 @@ live = {a['slug'] for a in agents}
 taken = set(live) | {a['queue_id'] for a in agents if a.get('queue_id')}
 print(f"  {len(live)} agent(s) dispatched, ceiling {q['concurrency_ceiling']}")
 print()
-ready, held, running = [], [], []
+# A unit every one of whose roadmap items is `done` has nothing left to
+# dispatch. Derived from roadmap.yaml rather than maintained by hand, because a
+# queue that still offers finished work is how the same task gets done twice.
+status = {}
+try:
+    import yaml
+    status = {t['id']: t.get('status') for t in yaml.safe_load(open(sys.argv[3]))['tasks']}
+except Exception:
+    pass
+
+def finished(u):
+    ids = [i for i in u['items'] if i in status]
+    return bool(ids) and len(ids) == len(u['items']) and all(status[i] == 'done' for i in ids)
+
+ready, held, running, done_units = [], [], [], []
 for u in q['units']:
     if u['id'] in taken:
         running.append(u); continue
+    if finished(u):
+        done_units.append(u); continue
     blockers = [a for a in u['after'] if a in live or a == '*']
     (held if blockers else ready).append((u, blockers))
 if running:
@@ -168,6 +184,10 @@ print()
 print("  HELD:")
 for u, b in held[:10]:
     print(f"    {u['id']:14} after {', '.join(b)[:44]}")
+if done_units:
+    print()
+    print("  COMPLETE (every roadmap item done — not offered again):")
+    print("   ", ", ".join(u['id'] for u in done_units))
 PY
 
 sec "how to resume"
