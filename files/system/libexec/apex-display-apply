@@ -44,6 +44,8 @@ usage:
   apex-display-apply apply [--model PATH]      apply the model, live AND persist
   apex-display-apply apply --no-persist        apply live ONLY; nothing on disk
   apex-display-apply save                      persist ONLY; never touches hardware
+  apex-display-apply color                     colour management state, as JSON
+  apex-display-apply color-assign OUT PROFILE  give an output an ICC profile
   apex-display-apply --dry-run apply           validate without applying
   apex-display-apply --self-test               check the generators
 
@@ -59,6 +61,7 @@ the temporary apply genuinely temporary; Keep then runs `save`, which is
 persistence with no hardware write. See ROADMAP/design/P0-018-display-recovery.md.
 """
 import argparse
+import glob
 import json
 import os
 import shutil
@@ -520,6 +523,355 @@ def persist(model, live, dry_run):
     return notes
 
 
+# ── colour management ───────────────────────────────────────────────────────
+# colord is the store, not this program. It ships with the image, it runs as a
+# system service, and it already owns a device/profile database with a D-Bus API
+# and a polkit policy that lets an active session write to it without a prompt.
+# What it does NOT have on APEX is anything that registers a display with it:
+# `colormgr get-devices` on a running APEX session is EMPTY, because the thing
+# that normally creates those devices is a desktop's own colour daemon
+# (gnome-settings-daemon, plasma's kded) and APEX has neither.
+#
+# So the shape here is the same adapter boundary as the layout half: the shell
+# talks to one binary, and the binary talks to colord.
+#
+# Scope `normal`, not `temp`. Measured: a temp-scope device lives exactly as long
+# as the D-Bus connection that made it, and `colormgr` is one-shot — a device
+# created by one invocation is already gone by the next. A settings engine that
+# runs, exits and is expected to have changed something durable has no choice.
+
+# Overridable so the suite can hand it a fixture tree. Everything else in this
+# program can be isolated with HOME or PATH; /sys can only be isolated by being
+# named. Without it the EDID assertions would be assertions about the developer's
+# own panel, which is the class of test that passes on one machine.
+DRM_ROOT = os.environ.get("APEX_DISPLAY_DRM_ROOT", "/sys/class/drm")
+
+
+def icc_has_vcgt(path):
+    """Does this ICC profile carry a video card gamma table?
+
+    Read out of the file rather than taken from colord, because it is the whole
+    question for a Wayland session: everything else in a display profile is for
+    applications that ask for it, and the vcgt is the only part that would have
+    to be pushed into the hardware. An ICC v2/v4 file is a 128-byte header, a
+    big-endian uint32 tag count at offset 128, then 12-byte (signature, offset,
+    size) entries.
+
+    None when the file cannot be read or is not an ICC profile at all — which is
+    a different answer from "no curve", and the caller says so.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(132)
+            if len(head) < 132:
+                return None
+            # 'acsp' at offset 36 is the profile file signature.
+            if head[36:40] != b"acsp":
+                return None
+            count = int.from_bytes(head[128:132], "big")
+            if count > 4096:            # a corrupt or hostile tag table
+                return None
+            table = fh.read(12 * count)
+    except OSError:
+        return None
+    if len(table) < 12 * count:
+        return None
+    for i in range(count):
+        if table[12 * i:12 * i + 4] == b"vcgt":
+            return True
+    return False
+
+
+def edid_for(name):
+    """The raw EDID for a connector, straight from DRM.
+
+    wlr-randr and hyprctl both report make/model, but neither reports what a
+    panel says about HDR, and a headless output has no EDID at all. The kernel
+    exposes the bytes at /sys/class/drm/card*-<connector>/edid, empty when
+    nothing is plugged in.
+    """
+    for path in sorted(glob.glob(os.path.join(DRM_ROOT, "card*-%s" % name, "edid"))):
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        if len(raw) >= 128:
+            return raw
+    return None
+
+
+def edid_identity(raw):
+    """(manufacturer, model name, serial) out of the 128-byte base block."""
+    if not raw or len(raw) < 128:
+        return (None, None, None)
+    packed = raw[8] << 8 | raw[9]
+    mfg = "".join(chr(((packed >> s) & 0x1F) + 64) for s in (10, 5, 0))
+    if not mfg.isalpha():
+        mfg = None
+    name = serial = None
+    for off in range(54, 126, 18):
+        d = raw[off:off + 18]
+        if d[0:2] != b"\x00\x00":
+            continue
+        text = d[5:18].decode("cp437", "replace").split("\n")[0].strip()
+        if d[3] == 0xFC:
+            name = text or None
+        elif d[3] == 0xFF:
+            serial = text or None
+    return (mfg, name, serial)
+
+
+def edid_hdr(raw):
+    """What the panel claims about HDR, from the CTA-861 extension blocks.
+
+    HDR on Wayland needs three things to line up: a panel that advertises it, a
+    compositor protocol to describe it, and a client that uses it. This answers
+    only the first, and it answers it from the panel rather than from a guess —
+    CTA-861 data block tag 7 is "use extended tag", and extended tag 6 is the
+    HDR Static Metadata Data Block. Extended tag 5 is Colorimetry, which is what
+    carries BT.2020.
+    """
+    out = {"edid": bool(raw), "static_metadata": False, "colorimetry": False,
+           "eotf": None}
+    if not raw:
+        return out
+    for base in range(128, len(raw), 128):
+        block = raw[base:base + 128]
+        if len(block) < 128 or block[0] != 0x02:
+            continue
+        end = block[2]
+        if end <= 4 or end > 128:
+            continue
+        body = block[4:end]
+        i = 0
+        while i < len(body):
+            header = body[i]
+            tag, length = header >> 5, header & 0x1F
+            payload = body[i + 1:i + 1 + length]
+            if tag == 7 and payload:
+                if payload[0] == 6:
+                    out["static_metadata"] = True
+                    if len(payload) > 1:
+                        out["eotf"] = payload[1]
+                elif payload[0] == 5:
+                    out["colorimetry"] = True
+            i += 1 + length
+    return out
+
+
+def colord_available():
+    return shutil.which("colormgr") is not None and \
+        run(["colormgr", "get-devices"]).returncode == 0
+
+
+def _colormgr_records(args):
+    """colormgr prints `Key:   value` blocks separated by blank lines."""
+    res = run(["colormgr"] + args)
+    if res.returncode != 0:
+        return []
+    records, cur = [], {}
+    for line in res.stdout.splitlines():
+        if not line.strip():
+            if cur:
+                records.append(cur)
+                cur = {}
+            continue
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if key == "Metadata":
+            cur.setdefault("Metadata", []).append(value)
+        else:
+            cur[key] = value
+    if cur:
+        records.append(cur)
+    return records
+
+
+def colour_profiles():
+    """Every display profile colord knows, with the one fact that matters here."""
+    out = []
+    for rec in _colormgr_records(["get-profiles"]):
+        filename = rec.get("Filename", "")
+        if not filename:
+            continue
+        out.append({
+            "id": rec.get("Profile ID", ""),
+            "title": rec.get("Title", os.path.basename(filename)),
+            "filename": filename,
+            "kind": rec.get("Type", ""),
+            # None means "could not be read", which is not the same as "no curve".
+            "vcgt": icc_has_vcgt(filename),
+        })
+    out.sort(key=lambda p: p["title"].lower())
+    return out
+
+
+def device_id(name, raw):
+    """A colord device id for an output.
+
+    EDID first, connector second. A connector name is a slot on the graphics
+    card: unplug a calibrated monitor from DP-1 and plug a different one in, and
+    an id keyed on the connector hands the second monitor the first one's
+    profile. The EDID travels with the panel. `apex-display-` prefixed because
+    nothing else on this image creates colord devices, so there is nothing to
+    collide with and everything to explain.
+    """
+    mfg, model, serial = edid_identity(raw)
+    parts = [p for p in (mfg, model, serial) if p]
+    if not parts:
+        return "apex-display-" + name
+    ident = "-".join(parts)
+    ident = "".join(c if c.isalnum() or c == "-" else "-" for c in ident)
+    while "--" in ident:
+        ident = ident.replace("--", "-")
+    return "apex-display-" + ident.strip("-")
+
+
+def curve_verdict(which):
+    """Can a calibration curve actually be loaded on this session?
+
+    The honest answer on this image is no, and for two independent reasons that
+    are worth keeping apart, because one of them is fixable by installing a
+    package and the other is a protocol fact.
+
+    1. Nothing on the image loads a vcgt. Not xcalib, not argyllcms, not
+       wl-gammactl. gammastep is here, but it only computes a colour temperature
+       ramp; it has no ICC input.
+    2. On the wlroots compositors the gamma LUT is a single slot, and APEX's
+       night light is already in it — `zwlr_gamma_control_manager_v1` replaces
+       the whole ramp, it does not compose with one. So even with a loader, a
+       calibration curve and a night light are the same control there and the
+       second one to write wins. Hyprland is the exception: its night light is
+       hyprland-ctm-control-v1, a colour matrix, which is a different slot from
+       the gamma LUT, so both could be live at once.
+    """
+    loader = next((t for t in ("xcalib", "dispwin", "wl-gammactl")
+                   if shutil.which(t)), None)
+    shared = which in ("labwc", "niri", "sway", "unknown")
+    return {
+        "loader": loader,
+        "lut_shared_with_night_light": shared,
+        "reason": (
+            "no ICC curve loader is installed (xcalib, argyll's dispwin and "
+            "wl-gammactl are all absent), so an assigned profile's vcgt is "
+            "stored and reported but not pushed into the hardware"
+            if loader is None else
+            "%s can load the curve" % loader
+        ) + ("; and on this compositor the gamma LUT is the same slot the night "
+             "light writes, so a curve and a night light cannot both be active"
+             if shared else
+             "; Hyprland's night light is a colour matrix (hyprland-ctm-control-v1), "
+             "a different slot from the gamma LUT, so a curve could coexist with it"),
+    }
+
+
+def colour_state(live=None):
+    """Everything the settings page needs, in one call."""
+    which = compositor()
+    have = colord_available()
+    profiles = colour_profiles() if have else []
+    by_id = {p["id"]: p for p in profiles}
+    by_file = {p["filename"]: p for p in profiles}
+
+    outs = []
+    for o in (live if live is not None else outputs()):
+        name = o.get("name", "")
+        raw = edid_for(name)
+        dev = device_id(name, raw)
+        assigned = None
+        if have:
+            recs = _colormgr_records(["device-get-default-profile", dev])
+            if recs:
+                rec = recs[0]
+                assigned = by_id.get(rec.get("Profile ID", "")) \
+                    or by_file.get(rec.get("Filename", ""))
+                if assigned is None and rec.get("Filename"):
+                    assigned = {"id": rec.get("Profile ID", ""),
+                                "title": rec.get("Title", ""),
+                                "filename": rec["Filename"],
+                                "kind": rec.get("Type", ""),
+                                "vcgt": icc_has_vcgt(rec["Filename"])}
+        mfg, model, serial = edid_identity(raw)
+        outs.append({
+            "name": name,
+            "device": dev,
+            "make": mfg,
+            "model": model,
+            "serial": serial,
+            "hdr": edid_hdr(raw),
+            "profile": assigned,
+        })
+    return {
+        "compositor": which,
+        "colord": {
+            "available": have,
+            # A colord with no devices is the normal state on APEX and the
+            # reason this verb exists; say it rather than leaving the page to
+            # infer it from an empty list.
+            "registered": len(_colormgr_records(["get-devices"])) if have else 0,
+        },
+        "profiles": profiles,
+        "outputs": outs,
+        "curve": curve_verdict(which),
+    }
+
+
+def colour_assign(name, profile, dry_run=False):
+    """Give an output a profile, creating its colord device if need be.
+
+    Returns (rc, notes). Every failure is named: a settings page that says
+    "could not assign" and nothing else is a page the user cannot act on.
+    """
+    notes = []
+    if not colord_available():
+        return 1, ["colord is not answering; colour profiles cannot be assigned"]
+
+    raw = edid_for(name)
+    dev = device_id(name, raw)
+
+    wanted = None
+    for p in colour_profiles():
+        if profile in (p["id"], p["filename"], p["title"]):
+            wanted = p
+            break
+    if wanted is None:
+        return 1, ["no colord profile matches %r; ask `color` for the list" % profile]
+
+    if dry_run:
+        return 0, ["would assign %s to %s (device %s)" % (wanted["title"], name, dev)]
+
+    if not _colormgr_records(["find-device", dev]):
+        res = run(["colormgr", "create-device", dev, "normal", "display"])
+        if res.returncode != 0:
+            return 1, ["colord refused to create a device for %s: %s"
+                       % (name, res.stderr.strip() or res.stdout.strip())]
+        mfg, model, serial = edid_identity(raw)
+        for verb, value in (("device-set-vendor", mfg),
+                            ("device-set-model", model),
+                            ("device-set-serial", serial)):
+            if value:
+                run(["colormgr", verb, dev, value])
+        notes.append("registered %s with colord as %s" % (name, dev))
+
+    # add-profile is not idempotent in colord: adding one that is already on the
+    # device answers "profile object path already exists". Not an error here.
+    run(["colormgr", "device-add-profile", dev, wanted["id"]])
+    res = run(["colormgr", "device-make-profile-default", dev, wanted["id"]])
+    if res.returncode != 0:
+        return 1, ["colord refused to make %s the default for %s: %s"
+                   % (wanted["title"], name, res.stderr.strip() or res.stdout.strip())]
+
+    notes.append("%s is now the profile for %s" % (wanted["title"], name))
+    if wanted["vcgt"] is False:
+        notes.append("this profile carries no vcgt, so there is no curve to load "
+                     "even where one could be")
+    return 0, notes
+
+
 # ── self-test ───────────────────────────────────────────────────────────────
 SAMPLE = {
     "outputs": [
@@ -608,7 +960,9 @@ def self_test():
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Apply and persist APEX display settings.")
     ap.add_argument("action", nargs="?", default="list",
-                    choices=("list", "apply", "save", "compositor"))
+                    choices=("list", "apply", "save", "compositor",
+                             "color", "color-assign"))
+    ap.add_argument("rest", nargs="*", help="OUTPUT PROFILE, for color-assign")
     ap.add_argument("--model", default=MODEL_PATH)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-persist", action="store_true",
@@ -635,6 +989,31 @@ def main(argv=None):
     if args.action == "list":
         print(json.dumps(outputs(), indent=2))
         return 0
+
+    # Colour is read and written through colord, which is a different store from
+    # the layout model, so it is a different verb rather than a field the layout
+    # apply would have to carry. A calibration outlives a layout.
+    if args.action == "color":
+        # Enumeration first, the saved model second. A session that cannot be
+        # enumerated — Hyprland before P0-025, a compositor that is not up yet —
+        # still has a colour page worth showing, and the names in the model are
+        # the names colord devices are keyed on.
+        live = outputs()
+        if not live:
+            saved, _ = load_model(args.model)
+            live = [{"name": o["name"]} for o in saved["outputs"]]
+        print(json.dumps(colour_state(live), indent=2))
+        return 0
+
+    if args.action == "color-assign":
+        if len(args.rest) != 2:
+            print("apex-display: color-assign takes OUTPUT and PROFILE",
+                  file=sys.stderr)
+            return 2
+        rc, notes = colour_assign(args.rest[0], args.rest[1], args.dry_run)
+        for n in notes:
+            print(f"apex-display: {n}", file=sys.stderr)
+        return rc
 
     model, notes = load_model(args.model)
     for n in notes:
