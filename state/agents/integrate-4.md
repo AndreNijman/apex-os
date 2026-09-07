@@ -9,16 +9,47 @@ worktree: /var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell
 branch: roadmap/v2.2
 
 ## NEXT
-apex-shell landing 2: task/p1-044-firewall-settings.
+apex-shell landing 3: task/p1-038-labwc-parity (tip 2ea0790, 3 commits).
   cd /var/tmp/apex-work/int-shell
-  git checkout -b land/p1-044s origin/task/p1-044-firewall-settings
+  git checkout -b land/p1-038 origin/task/p1-038-labwc-parity
   git rebase --onto roadmap/v2.2 d2d1f33cebd4bece0da32e5f0c676ecea4b1fe3f
-  (expect conflicts in src/services/qmldir and src/nexus/PageRegistry.qml — additive, keep both)
-  git checkout roadmap/v2.2 && git merge --ff-only land/p1-044s
-  /var/tmp/apex-int4-logs/shelltests.sh p1-044s ; then push --force-with-lease
-apex-os is NOT started yet; baseline is measured (below), clippy PASSES.
+  (expect a conflict in .github/workflows/ci.yml only — additive, keep both)
+  git checkout roadmap/v2.2 && git merge --ff-only land/p1-038
+  /var/tmp/apex-int4-logs/shelltests.sh p1-038 ; then push --force-with-lease
+  DO NOT run tests/run-labwc-matrix-test.sh — it is a nested-compositor runner
+  written before p1-048's headless guard. Hold it until p1-048 is on the tip.
+Then apex-os landing 2: task/p2-005-device-maturity, fork 9a24d2b.
 
 ## DONE
+- **apex-os task/p1-044-firewall-live LANDED AND PUSHED: roadmap/v2.2 = 9fafab4**
+  (was b2d7905). 7 commits: b599ca6 f2d5289 a811277 c3d2657 df28052 c1f450b
+  9fafab4. **ZERO CONFLICTS.**
+  It changes NO Rust: `git diff --name-only b2d7905 9fafab4 -- apexd/` is EMPTY
+  (only files/ and tests/), so cargo test and clippy are unchanged by
+  construction rather than by assertion.
+  tests/test-apex-firewall.sh, before -> after: **25 passed/0 failed/1 skipped
+  -> 31/0/1**. (The 1 skip is "the ruleset parses", which needs root; the suite
+  deliberately never LOADS the policy.)
+  NOT RUN, deliberately: tests/test-apex-firewall-live.sh and
+  test-apex-firewall-ssh.sh. Both ssh to katana and load a default-drop policy
+  on it. The p1-044 card records that its own live run completed and left
+  katana with an empty ruleset; re-running them here would risk exactly the
+  lockout the suite exists to detect, on a machine I was told to keep
+  read-only.
+- **apex-shell task/p1-044-firewall-settings LANDED AND PUSHED:
+  roadmap/v2.2 = b2bc964** (was ed1c466). 2 commits: 4397145 b2bc964.
+  **ZERO CONFLICTS** — the anticipated qmldir/PageRegistry clashes did not
+  happen; p1-020 and p1-044 add in different regions of both files.
+  Counts before -> after:
+     check-no-conflict-markers  PASS -> PASS
+     settings-semantics         33/0 -> 33/0
+     settings-pages             15/0 -> **16/0** (+1: the new FirewallPage is
+                                       picked up by the page enumeration)
+     check-color-tokens         22/0 -> 22/0    EXPECT_WHITE_FG 211, unchanged
+     check-scale-tokens          5/0 ->  5/0
+     agent-state                27/0 -> 27/0
+  Branch's own suites: check-firewall-ui 29/0, firewall-test.js all-pass.
+  qmldir has no duplicate type registration after the two landings.
 - **apex-shell task/p1-020-agent-graph LANDED AND PUSHED: roadmap/v2.2 = ed1c466**
   (was 8d081ff). 5 commits: ce9eb79 6cbd472 56b7e2f 3af5e24 ed1c466.
   ONE conflict, in src/services/agents/SessionRow.qml, two hunks, both

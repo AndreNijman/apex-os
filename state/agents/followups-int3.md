@@ -8,15 +8,39 @@ env: CARGO_TARGET_DIR=/var/tmp/apex-build-cache/followups-int3
      XDG_STATE_HOME=/var/tmp/apex-fi3-state XDG_CONFIG_HOME=/var/tmp/apex-fi3-config
 
 ## NEXT
-Item 1: add `pub same_everywhere: bool` to `OperationSpec`
-(apexd/apex-secret-core/src/operation.rs:404), state it at every construction
-site (git.rs, mcp.rs, cloudflare/mod.rs, bearer.rs, operation.rs + provider.rs
-test fixtures), make `ProviderSpec::validate` refuse `same_everywhere &&
-!names_nothing()`, and reduce `service::may_be_granted_everywhere`
-(service.rs:666) to `op.same_everywhere` — deleting the `id == "mcp.request"`
-allow-list.
+Item 3: change `broker::run_curl` (apexd/apex-secretd/src/broker.rs:536) to
+return stdout and stderr APART instead of appending stderr onto the body, make
+it `pub(crate)`, add USER/LOGNAME to its env for parity with api.rs; keep
+`perform_http` merging them exactly as it does today so MCP behaviour is
+byte-identical. THEN move `providers/cloudflare/api.rs::call` (line ~305, the
+`Command::new(CURL)` block) onto it. If that turns out to be more than ~100
+lines, stop, write down what is left, and leave #3 for the next owner.
 
 ## DONE
+- **#1 SECURITY — 400af1c** `same_everywhere` is now a mandatory field on
+  `OperationSpec` (apex-secret-core/src/operation.rs). No `Default`, no `..`
+  anywhere in the tree, so a new operation does not COMPILE until its author
+  states it. `ProviderSpec::validate` refuses `same_everywhere && !names_nothing()`.
+  `service::may_be_granted_everywhere` is now just `op.same_everywhere` — the
+  `id == "mcp.request"` allow-list is deleted.
+  The load-bearing test is `providers::tests::an_operation_that_claims_to_reach_
+  the_same_thing_everywhere_binds_the_same_in_two_projects`: it binds every
+  claiming operation in a project with an `apex.toml` account binding AND in a
+  bare one, and requires identical `Bound`. Two EMPTY dirs would not catch it.
+  MUTATIONS red/green:
+    M2 cloudflare.account.read declares true -> 110/3, bind test prints
+       "read account example-account [0123...]" vs "list the accounts this
+       credential can see". ENDPOINT ALONE WOULD NOT CATCH IT — both are
+       https://api.cloudflare.com. `detail` is what does it.
+    M3 gate computes names_nothing() again -> 111/2
+    M4 validate coherence rule removed -> apex-secret-core 74/1
+  Behaviour unchanged: mcp.request only; cloudflare.account.read still
+  per-project, so `apex cf status` still needs a per-project grant.
+  RENAMED, flag for the integrator: end_to_end.rs
+  `a_grant_held_in_every_project_is_only_for_an_operation_that_names_nothing`
+  -> `..._that_reaches_the_same_thing`. Same test the journal calls flaky.
+  Also corrected: `apex secret grant --everywhere` clap help said "Only for an
+  operation that names nothing", which is the rule that was wrong.
 - **#2 SECURITY — 0fc6a4d** `run_curl` now runs `/usr/bin/curl -q` (const
   `broker::CURL`), `-q` FIRST so `.curlrc` is disabled before it is read.
   New live test `a_curlrc_in_the_owners_home_cannot_configure_the_brokered_request`
@@ -25,7 +49,8 @@ allow-list.
   recorded headers contain `X-Curlrc` -> restored, apex-secretd bin 112/0.
 
 ## IN PROGRESS
-- nothing
+- nothing. Branch PUSHED at 400af1c. Workspace 1803 passed / 1 failed
+  (the 1 is the environmental scheduled-job one, present at the fork point).
 
 ## FOUND
 - **BASELINE IS NOT 1801/0 IN THIS ENVIRONMENT.** At the untouched fork point
