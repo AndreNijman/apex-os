@@ -170,6 +170,11 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: REMOTE,
             params: &[BRANCH],
             aliases: &["git-push"],
+            // A remote is resolved out of whatever repository the caller is
+            // standing in, so the same grant is a different permission in
+            // every directory. True of all three, and the reason
+            // `--everywhere` was gated in the first place.
+            same_everywhere: false,
         },
         OperationSpec {
             id: "git.fetch",
@@ -178,6 +183,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: REMOTE,
             params: &[],
             aliases: &["git-fetch"],
+            same_everywhere: false,
         },
         OperationSpec {
             id: "git.ls-remote",
@@ -186,6 +192,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: REMOTE,
             params: &[],
             aliases: &["git-ls-remote"],
+            same_everywhere: false,
         },
     ],
 };
