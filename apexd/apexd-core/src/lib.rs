@@ -68,6 +68,11 @@ pub mod profile;
 pub mod qualify;
 pub mod recover;
 pub mod select;
+// §48's Storage Manager. Pure: the CLI runs smartctl and reads sysfs, and
+// hands the text in — so every threshold, every bitmask and every "this could
+// not be read" is driven from fixtures rather than from whatever disk the
+// runner happens to have.
+pub mod storage;
 pub mod syswriter;
 // §21's Task. Deliberately NOT re-exported at the crate root: its `Observed`
 // would collide with `blueprint::Observed`, which is re-exported below, and

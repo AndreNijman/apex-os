@@ -776,6 +776,35 @@ RUN set -eux; \
         /usr/lib/systemd/system/apex-boot-health.service \
         /usr/lib/systemd/system/apex-boot-notice.service
 
+# ── §48: the disk-health warning ────────────────────────────────────────────
+# A USER timer, because notify-send needs a session bus and root has none. It
+# is ENABLED by default, unlike apex-agentd and apex-aid: those start a daemon
+# that holds resources, this runs one read-only pass a day and says nothing
+# unless a disk has something to report. A warning mechanism nobody switched on
+# is a warning mechanism that does not exist.
+COPY files/system/libexec/apex-storage-notice /usr/libexec/apex-storage-notice
+COPY files/system/units/apex-storage-notice.service \
+     /usr/lib/systemd/user/apex-storage-notice.service
+COPY files/system/units/apex-storage-notice.timer \
+     /usr/lib/systemd/user/apex-storage-notice.timer
+RUN set -eux; \
+    chmod 0755 /usr/libexec/apex-storage-notice; \
+    bash -n /usr/libexec/apex-storage-notice; \
+    : '── the tool it depends on has to be in this image ──'; \
+    : 'apex storage reads sysfs for everything but the SMART log, and'; \
+    : 'smartctl is what reads that. Without it every wear row is'; \
+    : 'unavailable, which is honest and useless.'; \
+    test -x /usr/sbin/smartctl; \
+    : 'The notice is a desktop notification and nothing else can send one.'; \
+    command -v notify-send; \
+    systemctl --global enable apex-storage-notice.timer; \
+    test -L /etc/systemd/user/timers.target.wants/apex-storage-notice.timer; \
+    : '── and it must NOT be a system unit ──'; \
+    : 'A system unit reaching for a session bus either fails or finds the'; \
+    : 'wrong user, and the warning goes to somebody who cannot act on it.'; \
+    test ! -e /usr/lib/systemd/system/apex-storage-notice.service; \
+    echo "apex-storage-notice enabled as a user timer"
+
 COPY files/system/libexec/apex-boot-windows /usr/libexec/apex-boot-windows
 COPY files/system/sudoers/apex-boot-windows /etc/sudoers.d/020-apex-boot-windows
 RUN set -eux; \

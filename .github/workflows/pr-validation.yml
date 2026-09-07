@@ -447,6 +447,14 @@ jobs:
       - name: §25 schema — every store declares its rollback answer, and no version key defaults to current
         run: ./tests/test-apex-schema.sh
 
+      # §48's Storage Manager, structural half. Three one-line changes away
+      # from being actively harmful: a comparison against smartctl's exit
+      # status turns a failing disk grey, a free-space check pointed at / fires
+      # forever on every bootc machine, and a trust in blkid reports an
+      # encrypted disk as unencrypted.
+      - name: §48 storage — a failing disk is red not grey, and the composefs root is not a full disk
+        run: ./tests/test-apex-storage.sh
+
       # §33's qualification database, structural half. The two properties it
       # guards are both one-line changes away: a consent gate that reads
       # "not declined" instead of "granted" starts recording on a machine
@@ -664,6 +672,22 @@ jobs:
           cargo build -p apex --locked --manifest-path apexd/Cargo.toml
           test -x "$APEX"
           ./tests/test-apex-schema.sh --with-binary
+
+      # §48's binary half: `apex storage` and the notifier against a whole
+      # fixture machine — sysfs, mountinfo, udev records and captured smartctl
+      # output for a healthy disk, a failing one and a refused read. Nothing
+      # touches a real block device: under $APEX_STORAGE_ROOT no subprocess is
+      # spawned at all, and the notifier's notify-send is a shim that writes to
+      # a file.
+      - name: §48 storage — apex storage against a healthy disk, a failing one and a refused read
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-storage.sh --with-binary
 
       # §33's binary half: `apex qualify` against a whole fixture machine —
       # DMI, PCI, cpuinfo, cmdline and an EFI variable — including a serial
