@@ -245,6 +245,12 @@ sec "a healthy machine reads as a healthy machine"
 "$APEX" storage status > "$TMP/out" 2>&1
 has 'SPCC M.2 PCIe SSD' "$TMP/out" "the disk is named by model"
 has 'solid state' "$TMP/out" "and by kind"
+# 4000797360 sectors. /sys/block/<d>/size is ALWAYS in 512-byte units whatever
+# the disk's own block size is, so this is 2048.4 GB. Multiplying by the
+# logical block size instead is a factor-of-eight error on a 4K-sector disk, in
+# the direction that makes a full disk look empty. Asserted here because a
+# mutation to 4096 left the whole shell suite green.
+has '2048.4 GB' "$TMP/out" "the size is sectors x 512, not sectors x the block size"
 has '1% of the rated endurance is used' "$TMP/out" "wear comes from the SMART log"
 has '9222 hours powered on' "$TMP/out" "with the hours beside it"
 has '38 °C' "$TMP/out" "and the temperature"
@@ -390,6 +396,26 @@ before="$(wc -l < "$TMP/notified")"
 after="$(wc -l < "$TMP/notified")"
 [[ "$before" == "$after" ]] && ok "and does not say it again tomorrow" \
                             || bad "the same warning notified twice"
+
+# The digest must be built from the ATTENTION rows alone. `apex storage
+# warnings` prints the unavailable ones too, and their reasons move for
+# reasons that are nothing to do with a disk — a run without privilege, a
+# fixture path, a systemctl that answered differently. If those reach the
+# digest, the same failing disk announces itself again every time one of them
+# shifts, and the notifier becomes the thing users mute.
+#
+# So: hold the failing disk exactly where it is, and change only an
+# unavailable row's reason. Nothing may be said.
+rm -f "$FIX/.fixture/space/sysroot"          # unavailable: "no space fixture"
+"$NOTICE_BIN" > "$TMP/out" 2>&1              # re-announce, digest now current
+before="$(wc -l < "$TMP/notified")"
+printf 'not-a-number\n' > "$FIX/.fixture/space/sysroot"   # unavailable: "malformed"
+"$NOTICE_BIN" > "$TMP/out" 2>&1
+after="$(wc -l < "$TMP/notified")"
+[[ "$before" == "$after" ]] \
+    && ok "an unavailable row changing its reason does not re-announce a standing warning" \
+    || bad "the digest included an unavailable row, so a reason string re-notified"
+printf '1618000000000 1180000000000\n' > "$FIX/.fixture/space/sysroot"
 
 smart_healthy
 "$NOTICE_BIN" > "$TMP/out" 2>&1
