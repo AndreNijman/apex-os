@@ -380,6 +380,9 @@ fn run_git(
 /// memory one connection at a time.
 pub const HTTP_MAX_BYTES: usize = 3 * 1024 * 1024;
 
+/// The curl this build runs, by absolute path.
+pub const CURL: &str = "/usr/bin/curl";
+
 /// The `Mcp-Session-Id` a server issued, if it issued one.
 pub struct HttpOutput {
     pub out: Output,
@@ -511,9 +514,28 @@ pub fn mcp_session_id(headers: &str) -> Option<String> {
 }
 
 /// Run curl as the owner, with its whole configuration on stdin.
+///
+/// ## `-q`, and why it is the first argument
+///
+/// This process is root and sets `HOME` to the **owner's**. Without `-q`, curl
+/// reads `$HOME/.curlrc` before anything else and takes every option in it —
+/// `proxy`, `header`, `insecure`, `write-out`, `output` — from a file the
+/// owner's own account can write. That is the same hole [`run_git`] closes with
+/// `GIT_CONFIG_GLOBAL=/dev/null`: the account this runs *for* must not get to
+/// configure the child this daemon spawns on its behalf. `-q` has to be the
+/// first argument on the line — curl reads the default config at the point it
+/// sees the flag, so `--config - -q` would read `.curlrc` first and only then
+/// disable it.
+///
+/// ## The absolute path
+///
+/// `PATH` is pinned below, so a bare `curl` would resolve the same today. It is
+/// spelled out anyway because the pin and the lookup are two facts that have to
+/// stay in step, and [`crate::providers::cloudflare::api`] — the other curl in
+/// this build — already spells it out.
 fn run_curl(config: &str, owner: &Owner) -> Result<Output, String> {
-    let mut cmd = Command::new("curl");
-    cmd.arg("--config").arg("-");
+    let mut cmd = Command::new(CURL);
+    cmd.arg("-q").arg("--config").arg("-");
     cmd.env_clear()
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("HOME", &owner.home)
@@ -766,5 +788,134 @@ mod tests {
         .expect("spawn");
         assert_ne!(out.code, 0);
         assert!(!out.text.trim().is_empty(), "stderr was dropped");
+    }
+
+    /// A server that records every header it was sent and answers 200.
+    ///
+    /// Small on purpose: the only question it is asked is *which headers
+    /// arrived*, and a request the child never made cannot be recorded.
+    struct HeaderRecorder {
+        port: u16,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl HeaderRecorder {
+        fn start() -> HeaderRecorder {
+            use std::io::{BufRead, BufReader};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+            let port = listener.local_addr().expect("addr").port();
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorder = std::sync::Arc::clone(&seen);
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let recorder = std::sync::Arc::clone(&recorder);
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        let mut reader =
+                            BufReader::new(stream.try_clone().expect("clone"));
+                        let mut headers = Vec::new();
+                        loop {
+                            let mut line = String::new();
+                            match reader.read_line(&mut line) {
+                                Ok(0) => break,
+                                Ok(_) => {}
+                                Err(_) => return,
+                            }
+                            if line.trim_end().is_empty() {
+                                break;
+                            }
+                            headers.push(line.trim_end().to_string());
+                        }
+                        recorder.lock().expect("lock").extend(headers);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                              Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        );
+                    });
+                }
+            });
+            HeaderRecorder { port, seen }
+        }
+
+        fn headers(&self) -> Vec<String> {
+            self.seen.lock().expect("lock").clone()
+        }
+    }
+
+    /// The owner's `~/.curlrc` must not configure a child this daemon spawns.
+    ///
+    /// This process is root and hands curl the owner's `HOME`, so without `-q`
+    /// curl reads that account's own `.curlrc` before the configuration on its
+    /// stdin — and every option in it applies. `header` is the mildest thing
+    /// that file could say; `proxy` is the one that matters, because it names a
+    /// destination the caller did not choose and this daemon did not check.
+    ///
+    /// The mutation that proves it bites: drop the `-q` from `run_curl` and the
+    /// header arrives, because the request is real and the server is real.
+    /// (The absolute path in `CURL` is *not* mutation-testable here: `PATH` is
+    /// pinned to system directories, so a bare `curl` resolves to the same
+    /// binary. It is spelled out for the reason the doc comment gives, not
+    /// because a test can tell the difference.)
+    #[test]
+    fn a_curlrc_in_the_owners_home_cannot_configure_the_brokered_request() {
+        // Safe: getuid cannot fail.
+        let me = unsafe { libc::getuid() };
+        let mut owner = owner(me).expect("own uid");
+
+        let dir = std::env::temp_dir().join(format!("apex-curlrc-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("fake home");
+        std::fs::write(
+            dir.join(".curlrc"),
+            "header = \"X-Curlrc: the owner configured this\"\n",
+        )
+        .expect("write .curlrc");
+        // The child's HOME comes from the account record, not from `$HOME`, so
+        // this is the only way to point it anywhere.
+        owner.home = dir.to_string_lossy().into_owned();
+
+        let server = HeaderRecorder::start();
+        let info = ServiceInfo {
+            service: "memory".into(),
+            host: "127.0.0.1".into(),
+            scheme: "http".into(),
+            username: "x-access-token".into(),
+            path: "/mcp".into(),
+            auth: "bearer".into(),
+            port: Some(server.port),
+            added: 0,
+        };
+        let out = perform_http(
+            &info,
+            &SecretValue::new(b"apex-curlrc-test-token".to_vec()),
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            None,
+            &owner,
+            &dir.join("messages"),
+        )
+        .expect("the request runs");
+        assert_eq!(out.out.code, 0, "{}", out.out.text);
+
+        let headers = server.headers();
+        // The request really happened — otherwise "no X-Curlrc" would be true
+        // of a curl that never ran, which is the failure this must not have.
+        assert!(
+            headers.iter().any(|h| h.starts_with("POST /mcp")),
+            "the child never reached the server: {headers:?}"
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|h| h.to_ascii_lowercase().starts_with("authorization:")),
+            "the credential never went: {headers:?}"
+        );
+        assert!(
+            !headers
+                .iter()
+                .any(|h| h.to_ascii_lowercase().starts_with("x-curlrc:")),
+            "the owner's ~/.curlrc was read: {headers:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
