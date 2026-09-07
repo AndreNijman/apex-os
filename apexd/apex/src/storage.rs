@@ -482,9 +482,7 @@ fn trim_timer(roots: &Roots) -> (Reading<bool>, Option<String>) {
         Ok(o) => match String::from_utf8_lossy(&o.stdout).trim() {
             "enabled" | "enabled-runtime" | "static" | "indirect" => Reading::Known(true),
             "disabled" | "masked" | "masked-runtime" => Reading::Known(false),
-            other if other.is_empty() => {
-                Reading::Unavailable("systemctl said nothing about fstrim.timer".into())
-            }
+            "" => Reading::Unavailable("systemctl said nothing about fstrim.timer".into()),
             other => Reading::Unavailable(format!("systemctl said {other:?}")),
         },
         Err(e) => Reading::Unavailable(format!("systemctl: {e}")),
