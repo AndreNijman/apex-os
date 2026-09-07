@@ -874,12 +874,18 @@ a dedicated service. That service is `apex-secretd`.
 printf %s "$TOKEN" | apex secret add github --host github.com
 apex secret capabilities                 # what the service offers
 apex secret grant github git.push        # per project
+apex secret grant claude-memory mcp.request --everywhere
 apex secret use github git.push origin   # run by the agent
 apex secret migrate                      # move what is already in plaintext
 apex secret audit
 ```
 
-You rarely type the third line. A managed session finds a `git` on its PATH
+`--everywhere` is the only line there that widens a grant past the project it
+was made in, and exactly one shipped operation qualifies for it. *A grant held
+in every project* below says which, and why the operation that looks like the
+obvious second candidate is refused.
+
+You rarely type `apex secret use`. A managed session finds a `git` on its PATH
 that sends `push`, `fetch` and `ls-remote` here and execs `/usr/bin/git` for
 everything else, so a skill keeps running `git push` and nothing was rewritten
 — §12's requirement. That shim holds no credential and enforces nothing:
@@ -979,6 +985,170 @@ Not carried: a server-initiated notification down a stream the server holds
 open. Each message is one request and one reply. And an `Mcp-Session-Id` is
 remembered per account and service, so two sessions talking to one server share
 that server's idea of the conversation.
+
+Nothing above says which servers a machine actually has, and there are four
+places a definition can live — your own `~/.claude.json`, its per-directory
+block, a repository's `.mcp.json`, and every enabled plugin's. `apex mcp list`
+reads all four and answers, per server, the two questions that matter here:
+where the definition is, and whether the agent can read the credential.
+
+```
+claude-memory
+  transport   http, https://mem.example/mcp
+  credential  a value in the definition's Authorization header, which the agent reads
+  defined in  ~/.claude.json (every directory)
+  fix         apex mcp connect claude-memory
+
+1 MCP credential is readable by any agent that runs as you
+```
+
+`apex mcp connect` is that fix, one server at a time and by hand: the credential
+is read from **stdin**, stored, proved against the server itself, and only then
+removed from the file the agent reads. What is left behind is the `stdio`
+definition above. The order is the one *Moving what a machine already has*
+argues for below, for the same reason — an interrupted run leaves a machine that
+still has its credential. `--dry-run` prints the plan and writes nothing.
+
+Listing is read-only and always allowed. Connecting is not: it refuses from
+inside a session, and unless it is a dry run it refuses while a `claude` with
+the same `HOME` is running, because that process holds `~/.claude.json` in
+memory and writes it back on exit.
+
+### A grant held in every project
+
+A grant is per project, which is the right default — the same operation in a
+different directory is usually a different permission. `mcp.request` is the
+exception, and `apex secret grant --everywhere` is the exception's key: a `*`
+where the project path would go.
+
+It is safe there for one reason. The request goes to the endpoint pinned when
+the credential was stored, whatever directory it is asked in, so `*` widens
+*where the operation may be asked for* and not *what it reaches*. It is worth
+having because an MCP server is defined once and is therefore present in every
+directory: without it, every new worktree is one where the agent's memory server
+is unauthorised until somebody notices.
+
+**`cloudflare.account.read` does not qualify — and it is the reason this is a
+declared field rather than a computed one.** The first version of the gate
+computed the answer: no resource argument and no parameters, therefore nothing
+project-shaped to resolve, therefore the same thing everywhere.
+`cloudflare.account.read` declares no resource and no parameters, so it passes
+that test exactly, and its `bind` still reads the project's own `apex.toml`.
+Bound, the request is `GET /accounts/{id}` for that project's account; in a
+directory that binds none it is `GET /accounts`, every account the token can
+see. Two projects, two different requests, one stored token — so a `*` grant
+would let an agent in a project the owner never approved read that project's
+account. It is refused, and `apex cf status` needs a grant in the project it is
+run in.
+
+The correction is about where the fact lives. Naming nothing is a fact about the
+**declaration**; where a request ends up is a fact about the provider's
+**`bind`**, which is the same split *Where a provider plugs in* describes above,
+and no amount of reading the declaration recovers it. An allow-list inside the
+service would be fail-closed and silent — the next provider to add an operation
+of this shape gets the safe answer, and nobody is ever asked the question.
+
+So the question is asked, of the only party who can answer it. Every operation
+declares `same_everywhere`. There is no `Default` for that struct and nothing in
+the tree constructs one with `..`, so **a new operation does not compile until
+its author has written down which of the two it is**, and the gate reads that
+field and computes nothing of its own.
+
+Two things then hold the answer to account. Registration refuses the outright
+contradiction: an operation that takes a resource or a parameter is a different
+permission per directory by construction, so claiming otherwise is not a
+judgement call. Naming nothing is *necessary and not sufficient*, and that
+asymmetry is the whole point. Then a test binds every operation carrying the
+claim in two projects — one with an `apex.toml` that binds an account, one bare
+— and requires the two results to be identical. It compares the audited
+`detail` sentence and not just the endpoint, because both of
+`cloudflare.account.read`'s answers are on `api.cloudflare.com`: the endpoint
+alone would have passed it, and two empty directories would have passed it too.
+`mcp.request` is the only shipped operation that carries the claim, and that
+test spells the set out, so adding one is a line somebody writes on purpose.
+
+### One sandbox per MCP server
+
+§10.2. Everything above is about the credential. An MCP server is also *a
+program the agent starts*, and by default it starts inside the agent's own
+sandbox with everything that sandbox has: the project writable, the network, the
+caches, the profile. `npx -y @modelcontextprotocol/server-memory` is third-party
+code fetched from a registry at first run, given the agent's whole reach, to
+store notes in one file.
+
+`apex mcp confine` rewrites the definition so the server starts inside a sandbox
+of its own:
+
+```json
+"memory": {"command": "apex",
+           "args": ["mcp", "run", "memory", "--",
+                    "npx", "-y", "@modelcontextprotocol/server-memory"]}
+```
+
+The server's own command stays in the definition rather than moving into a
+policy file, so what a server runs is still visible where somebody would look
+for it. `apex mcp run` is the wrapper the agent then spawns, and it builds its
+argv with the same function that confines a session — a second bubblewrap
+profile in this codebase would be a second thing to get wrong, and would drift
+from the one that is tested.
+
+Three dimensions, each default-deny, and the honest worth of each:
+
+**Filesystem.** Masking `$HOME`, `/run` and `$XDG_RUNTIME_DIR` costs nothing
+extra, because session confinement already does it. What this adds is a
+*different* home — one private directory per server — so a server that writes
+beside itself writes where neither the agent nor the next server can see. The
+project root is not bound unless the policy asks.
+
+**Network.** `--unshare-net`, which is the whole of the kernel enforcement.
+`network = true` hands the server the *parent's* namespace, and that is a
+ceiling rather than a grant: a namespace cannot be un-shared upward, so a server
+declared `network = true` inside an offline session still has none. An MCP
+server is not a way out of a session that was confined without one.
+
+**Secrets**, where the honest answer is narrower than the word suggests. The
+wrapper runs as the agent's own account, so neither daemon can tell it apart
+from the agent — **per-MCP identity at the broker does not exist**, and a
+credential this server could fetch is one the agent could fetch. What *is*
+enforceable is reachability: both daemons' sockets live under the masked
+directories, so by default the server can open neither. `broker = true` binds
+back the one socket a confined process is ever given, `apex-agentd`'s, and the
+grant table decides from there. `apex-secretd`'s socket is not bound and must
+not be — a session does not get it either, and an MCP server holding a door into
+the secret daemon that the agent starting it lacks is a sandbox inverted.
+
+A policy is `<name>.toml` under `$XDG_CONFIG_HOME/apex/mcp`, and then
+`/etc/apex/mcp` for a default an image or an administrator ships. The user's own
+wins, because the person running a server is the one who decides what it may
+reach. Every
+field defaults closed, so a file only ever widens. An unknown key is refused
+rather than ignored — a policy carrying `netwrok = true` that started the server
+with no network would read as a setting which had been applied — and a file that
+does not parse is an error, never a quiet fall back to the default: the default
+is *tighter*, so falling back would break the server and blame the server. The
+directory is bound read-only into a session, for the same reason it is worth
+having.
+
+`apex mcp policy` prints what each server will actually get, and where that was
+decided:
+
+```
+memory
+  network     none — its own empty namespace
+  filesystem  a private home, 0 read-only and 1 writable path(s) it names
+  secrets     cannot reach apex-agentd or apex-secretd at all
+  decided by  ~/.config/apex/mcp/memory.toml
+  started     with everything the agent session has — apex mcp confine memory
+```
+
+The last line is the one to read: a policy exists and the definition still does
+not use it. An endpoint server has neither policy nor wrapper — there is no
+process here to confine, because the request is made by `apex-secretd` — and
+confining one is refused with that explanation rather than writing a definition
+which cannot work.
+
+What this confines is the MCP server's own code. It is **not** a boundary
+against a hostile agent, and the limit is stated below.
 
 ### Moving what a machine already has
 
@@ -1116,6 +1286,14 @@ uid, and no reply the service can send contains one.
 Two providers: `git`, with `git.push`, `git.fetch` and `git.ls-remote`, and
 `mcp`, with `mcp.request`. git is the framework's reference implementation and
 the one that can be exercised without an account. Cloudflare is P1-002.
+
+A session cannot be stopped from *un*-confining one of its own MCP servers,
+because `~/.claude.json` is writable inside a session — so it can rewrite a
+definition to drop the `apex mcp run` wrapper, and could have run the same
+program directly in any case. Closing that means starting the agent with
+`--strict-mcp-config` and a configuration file the daemon wrote, which is a
+change to how sessions are launched; it is named here rather than half-built.
+The per-server sandbox confines the server's code, which is a different job.
 
 `gh`-style API capabilities (read issues, open a PR) are a second vocabulary
 with a second validation surface, and `gh` inside a managed session is
