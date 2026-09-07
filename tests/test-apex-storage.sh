@@ -73,6 +73,12 @@ fi
 has 'a_failing_disk_is_a_read_that_happened_and_not_an_unavailable_row' "$CORE" \
     "and a test names the case"
 
+sec "a refused read carries the remedy, wherever the refusal came from"
+has 'pub const REMEDY' "$CORE" "one wording, so the three surfaces cannot drift"
+has 'fn remedy_for' "$CORE" "and smartctl's message gets it too, having no errno to give"
+has 'a_refused_open_names_the_remedy_in_the_row_and_not_only_in_a_footer' "$CORE" \
+    "with a test that names the case"
+
 sec "free space is a property of a filesystem, not of a mount point"
 has 'starts_with("/dev/")' "$CORE" "only block-device sources are considered"
 has 'composefs' "$CORE" "the composefs root is named as the reason"
@@ -288,6 +294,17 @@ has '38 °C' "$TMP/out" "and hwmon still gives a temperature with no privilege a
 [[ "$rc" -eq 0 ]] && ok "warnings exits 0 for a row nobody could measure" \
                   || bad "warnings exited $rc for an unmeasured row"
 has 'unavailable' "$TMP/warn" "and still prints it"
+
+# The remedy has to be on the ROW. `status` prints a footer telling the user to
+# try sudo, and that footer reaches exactly one of the four surfaces: not
+# --json, not `warnings`, not `apex doctor`. A caller parsing the JSON, or a
+# notifier reading a doctor line, sees "Permission denied" and no next step.
+"$APEX" storage warnings --json > "$TMP/warn.json" 2>&1
+has 'run it with sudo' "$TMP/warn.json" "the JSON row carries the remedy, not only the footer"
+"$APEX" storage status --json > "$TMP/status.json" 2>&1
+has 'run it with sudo' "$TMP/status.json" "and so does status --json"
+has 'Permission denied' "$TMP/status.json" "beside what smartctl actually said"
+hasnt 'no SMART data' "$TMP/status.json" "and the reason is never 'no SMART data'"
 
 sec "a filesystem with nothing left is an alert; a big one at the same percentage is not"
 smart_healthy
