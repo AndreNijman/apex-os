@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-07 04:44 AWST
+APEX ROADMAP — resume report — 2026-09-07 09:57 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -7,188 +7,46 @@ APEX ROADMAP — resume report — 2026-09-07 04:44 AWST
   BASE          10         8         -         -
   L              -         1         -         2
   P0            19         6         -         -
-  P1             4         9        49         -
-  P2             -         -        19         -
-  ALL           33        24        68         2   of 127
+  P1            16         7        39         -
+  P2             -         3        16         -
+  ALL           45        25        55         2   of 127
 
   P0 not done: P0-001(part), P0-002(part), P0-007(part), P0-014(part), P0-015(part), P0-021(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p1-044     ALIVE      P1-044                             task/p1-044-firewall-live
-             head 7410a68 test(firewall): a namespace cannot prove ssh survives 
-             dirty 1 file(s), 0 unpushed, card 6m
-             NEXT Run the driver from the worktree, then mutation-prove it:
+  p1-050     unknown    P1-050,P1-051,P1-052               task/p1-050-remote-protocol
+             head 322fa45 fix(remote): the handshake deadline was cleared before
+             dirty 0 file(s), 0 unpushed, card 229m
+             NEXT Everything owned by P1-050 and P1-051 is done and pushed. What is 
 
-  p2-005     ALIVE      P2-005,P2-006,P2-007               task/p2-005-device-maturity
-             head 5a7d0c6 feat(devices): "there is none" and "I could not look" 
-             dirty 1 file(s), 0 unpushed, card 7m
-             NEXT Wire `apex devices` in `apexd/apex/src/main.rs` — mirror `Cmd::Fir
+  p1-039     unknown    P1-039,P1-040,P1-041,P1-042,P1-043 task/p1-039-display-colour
+             head 2cf7a8e fix(scaling): a mixed-DPI desk got one size, and the t
+             dirty 0 file(s), 0 unpushed, card 229m
+             NEXT P1-041 (creator colour management) then P1-042 (creator input/audi
 
-  p1-018     ALIVE      P1-018,P1-019                      task/p1-018-mcp-auth
-             head 28e4c86 feat(mcp): a listing that showed the wrapper stopped s
-             dirty 2 file(s), 1 unpushed, card 7m
-             NEXT 1. Commit the two files already in the tree (`mcp.rs`, `mcp/server
+  p1-035     unknown    P1-035,P1-036,P1-037               task/p1-035-agent-tooling
+             head 83ef1e0 feat(agent): a screenshot in front of you could not be
+             dirty 1 file(s), 0 unpushed, card 240m
+             NEXT P1-035 implemented and green (tests/test-agent-inject.sh 40/0). Wa
 
-  p1-020     ALIVE      P1-020,P1-021,P1-022               task/p1-020-agent-graph
-             head 6046b71 test(ci): the notification suites existed but nothing 
-             dirty 0 file(s), 0 unpushed, card 8m
-             NEXT Step 1 of the plan below: the daemon side of the graph, in wt-p1-0
+  p2-010     unknown    P2-010,P2-011,P2-014,P2-015        task/p2-010-hardware-storage
+             head ee30c3b feat(qualify): a machine's compatibility record existe
+             dirty 10 file(s), 0 unpushed, card 252m
+             NEXT P2-014, first commit: the read-only storage reader at
 
-  p1-048     ALIVE      (test hygiene),P1-048,P1-049       task/p1-048-guided-settings
-             head 56240d8 fix(headless): the teardown aborted on its own kill an
-             dirty 1 file(s), ? unpushed, card 12m
-             NEXT Write `tests/check-headless-runners.sh`. Check the invariant (no r
+  p0-014     unknown    P0-014,P0-015                      task/p0-014-remote-lock
+             head 3c3abd3 test(request): the root approval path needed a real ui
+             dirty 0 file(s), 0 unpushed, card 230m
+             NEXT P0-014 remainder 1, the last one: a CTAP2-level assertion verifier
+
+  p1-023     unknown    (red suites),(pipefail sweep),P1-023,P1-024,P1-029 task/p1-023-handoff-lifecycle
+             head da50162 test(smoke): the second shell's error count read the l
+             dirty 24 file(s), ? unpushed, card 245m
+             NEXT Job 1 in progress. Next action: extract the ci.yml "Agent Center i
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 5ae4350 docs: say how a covered request is recorded, and again
-    task/p1-002-cloudflare
-      9af2b08 feat(secret): a provider that binds a project has to read it a   [2/10 added lines on tip]
-      ddc80fa feat(cloudflare): a project's worker names meant nothing until   [0/10 added lines on tip]
-      74f1055 fix(cloudflare): a route read answered about the zone, not the   [1/10 added lines on tip]
-      3d2dc43 feat(cloudflare): there was no way to hand this machine a Clou   [1/10 added lines on tip]
-      2514e09 fix(cloudflare): the count in the module note was one out, and   [0/10 added lines on tip]
-    task/p1-018-mcp-auth
-      526e16c test: three reports said clippy was clean on a machine that ha   [1/10 added lines on tip]
-      e605e6a feat(mcp): a token could only leave the config for a server th   [4/10 added lines on tip]
-      bf083e7 test(mcp): a refused credential is a successful operation, so    [0/10 added lines on tip]
-      34016f8 feat(mcp): an MCP server inherited the agent's whole sandbox,    [0/10 added lines on tip]
-    task/p1-030-shell-integrations
-      a70393c feat(shell): the agent shortcuts, completion and prompt, in fi   [0/10 added lines on tip]
-      96e959c feat(shell): the agent shortcuts, completion and prompt, in nu   [0/10 added lines on tip]
-      b5764d1 feat(project): editor/agent/terminal layouts, in tmux and zell   [2/10 added lines on tip]
-      00d0bd1 test(layout): count what the dry run started, not every sleep    [0/10 added lines on tip]
-      1dd4b41 docs(agent): slop pass over the shells and terminal-layouts se   [0/10 added lines on tip]
-      63493c7 fix(image): the zellij layout check must not leave a session i   [0/9 added lines on tip]
-    task/p1-044-firewall-live
-      fd4c6e1 test(firewall): the policy had never been loaded into a kernel   [1/10 added lines on tip]
-      34e66e9 fix(firewall): the forward chain overrode every container's ow   [0/10 added lines on tip]
-      7410a68 test(firewall): a namespace cannot prove ssh survives the poli   [2/10 added lines on tip]
-    task/p1-045-updates-trust
-      512bd91 feat(trust): every image is signed, and no machine has ever ch   [2/10 added lines on tip]
-      24a800c feat(schema): the image rolls back and the state it migrated d   [1/10 added lines on tip]
-      e52d08e feat(channel): every APEX machine is on edge and has never bee   [0/10 added lines on tip]
-      7710e33 feat(channel): four channels, and a stop for the machine the l   [1/10 added lines on tip]
-      e424d80 fix(trust): one of two unverified schemes was printed as the n   [1/8 added lines on tip]
-      5eb7f1a test(channel): the one thing a rollout stop has to do had neve   [2/10 added lines on tip]
-    task/p2-005-device-maturity
-      c823974 test(firewall): the rules were read, never sent a packet throu   [1/10 added lines on tip]
-      f9ab0e7 test(devices): a shared printer is unreachable and nothing sai   [1/10 added lines on tip]
-      36232f5 fix(image): the share stack had no floor, and hplip hung every   [1/10 added lines on tip]
-      3142bbd fix(image): the scan enumeration hung on avahi's absence, not    [1/10 added lines on tip]
-      5a7d0c6 feat(devices): "there is none" and "I could not look" stop arr   [1/10 added lines on tip]
-
-  int-shell:  tip 0fd12ee test(theme): the workspace-token mutation stopped appl
-    fix/labwc-desktop-parity  — squash-merged, safe to delete
-      landed whole as f609a6c fix(labwc): complete desktop parity (#6)
-    fix/locked-hint
-      87c84f3 wip snapshot of fix/locked-hint in wt-lockhint-   [0/10 added lines on tip]
-    fix/popup-first-open-and-media-keys  — squash-merged, safe to delete
-      landed whole as b8a63a8 fix(popups): first-open rendering, dead toasts, and medi
-    fix/screenshot-off-hyprland  — squash-merged, safe to delete
-      landed whole as 4e267eb fix: screenshots and popup input regions off Hyprland (#
-    task/p0-016-agent-settings  — squash-merged, safe to delete
-      landed whole as 4335e42 fix(agents): the sudo caveat was written before no_new_p
-    task/p1-020-agent-graph
-      62fb5d9 fix(agents): six agents needing attention produced one notific   [0/10 added lines on tip]
-      6046b71 test(ci): the notification suites existed but nothing ran them   [0/10 added lines on tip]
-    task/p1-038-labwc-parity
-      d2523e2 test(screenshot): nothing ran the capture script, on any compo   [0/10 added lines on tip]
-      cfad23f test(labwc): the Floating session's defects all look like noth   [1/10 added lines on tip]
-      2ea0790 test(labwc): one output cannot tell a per-output bug from a wo   [0/10 added lines on tip]
-    task/p1-044-firewall-settings
-      f045d2f feat(firewall): a default-drop policy the user could not see a   [1/10 added lines on tip]
-
-  The per-commit lines above are a HEURISTIC: a low count can also mean
-  landed-then-rewritten. Settle any one of them with
-  `git diff <integration> <branch> -- $(git show --name-only --format= <commit>)`
-  before spending an agent on it.
-
-────────────────────────────────────────────────────────────────────────────
-  durability
-────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 47s Mon 2026-09-07
-  wip refs:
-    apex-os    dd3496b  apex-os-
-    apex-os    79eb62b  int-os-
-    apex-os    0c244fe  roadmap-state
-    apex-os    6c9c17f  wt-clippy-
-    apex-os    c2610ac  wt-disposable-
-    apex-os    717cdb6  wt-greeter-os-
-    apex-os    c74f38d  wt-multilib2-
-    apex-os    4fb807f  wt-p0-002-
-    apex-os    e63b0e3  wt-p0-003-
-    apex-os    2cb722d  wt-p0-004-
-    apex-os    1a4b5f2  wt-p0-005-
-    apex-os    93d760a  wt-p0-009-
-    apex-os    d4787a4  wt-p0-009b-
-    apex-os    a8822fd  wt-p0-011-
-    apex-os    9b605a1  wt-p0-011b-
-    apex-os    580c657  wt-p0-019-os-
-    apex-os    ead8cca  wt-p0-025-os-
-    apex-os    eda5ef8  wt-p1-001-
-    apex-os    a23175f  wt-p1-002-
-    apex-os    2ef51e1  wt-p1-018-
-    apex-os    a9232a9  wt-p1-020-os-
-    apex-os    df682db  wt-p1-030-
-    apex-os    719240e  wt-p1-044-
-    apex-os    2a2b1cc  wt-p1-045-
-    apex-os    d354a6c  wt-p2-005-
-    apex-shell 93bbc9f  apex-shell-
-    apex-shell a692c30  int-shell-
-    apex-shell 965abe3  wt-greeter-shell-
-    apex-shell 5a172c0  wt-lockhint-
-    apex-shell ad2d89d  wt-p0-005-shell-
-    apex-shell 2afecfc  wt-p0-016-
-    apex-shell a5409f6  wt-p0-017-
-    apex-shell e1d8a82  wt-p0-017b-
-    apex-shell dd6cf81  wt-p0-018-prefix-
-    apex-shell 5b2a749  wt-p0-018b-
-    apex-shell 4eb5711  wt-p0-019-shell-
-    apex-shell a006b8c  wt-p0-023-
-    apex-shell 2abbe07  wt-p1-020-
-    apex-shell 3db5952  wt-p1-038-
-    apex-shell b7c2e1c  wt-p1-044-shell-
-    apex-shell 9ca29b0  wt-p1-048-
-
-────────────────────────────────────────────────────────────────────────────
-  next
-────────────────────────────────────────────────────────────────────────────
-  5 agent(s) dispatched, ceiling 6
-
-  READY (dependencies believed satisfied — confirm against the agent table above):
-    integrate-clippy (tooling)                        Land chore/run-clippy — the only working way to run clippy h
-    trust-enforcement (new, from P1-047)               Make an APEX machine actually verify the signature it alread
-    p1-038-hardware P1-038                           The 18 labwc matrix rows that need real applications
-    integrate-cloudflare (integration only)               Land task/p1-002-cloudflare (2514e09, 6 commits) onto roadma
-                   conflicts with integrate-2
-    p0-014         P0-014,P0-015                    Remote Control privilege policy and lock-state policy, wired
-    p1-018         P1-018,P1-019                    MCP auth helper integration and per-MCP sidecar sandboxing
-                   conflicts with p0-003
-    p1-005         P1-005,P1-006,P1-007             Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets
-                   conflicts with p1-002
-    p1-008         P1-008,P1-009,P1-010             Cloudflare One, Workers AI and AI Gateway, Secrets Store
-                   conflicts with p1-002, p1-005
-
-  HELD:
-    p1-014         after p1-018
-    p1-023         after p1-020
-    p1-025         after p1-018
-    p2-b           after p1-048
-    final          after *
-
-────────────────────────────────────────────────────────────────────────────
-  how to resume
-────────────────────────────────────────────────────────────────────────────
-  1. This page IS the resume. Do not re-derive it with git commands.
-  2. A dead agent is NOT resumed with SendMessage — that replays its whole
-     transcript through the model and cost 10% of a usage window on 2026-09-06.
-     Dispatch a FRESH agent and paste it ROADMAP/state/agents/<slug>.md.
-     Its worktree is intact; its branch is pushed; its card says what is next.
-  3. Land finished branches onto roadmap/v2.2, record them with set-status.py,
-     then dispatch from READY up to the ceiling.
-  4. Full context, if you need more than this page: ROADMAP/PROGRESS.md.
