@@ -1,19 +1,8 @@
 {
-  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap \u2014 do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
-  "updated": "2026-09-07T11:35+08:00",
+  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
+  "updated": "2026-09-07T15:08+08:00",
   "concurrency_ceiling": 6,
   "units": [
-    {
-      "id": "followups-integrate-3",
-      "repo": "apex-os",
-      "items": [
-        "(hardening)"
-      ],
-      "title": "Four follow-ups the third integration round routed onward",
-      "after": [],
-      "conflicts": [],
-      "note": "1. SECURITY, and the real fix for a hole caught during integration: p1-018's --everywhere grant is gated on OperationSpec::names_nothing(), reasoning that an operation naming nothing can only reach the endpoint pinned when its credential was stored. P1-002 landed the first counterexample -- cloudflare.account.read declares no resource AND no params, yet resolves its account from the project's own apex.toml (bound: GET /accounts/{id}; unbound: GET /accounts), so `*` would let an agent in a project the owner never approved read that project's account. p1-018's own test caught it and the integrator fixed it with an explicit allow-list shared by the gate and the CLI hint. That is fail-closed but the registry test will pass SILENTLY for the next such operation. The real fix is `same_everywhere` as a declared fact on OperationSpec. Consequence of the interim fix: cloudflare.account.read is per-project only. 2. SECURITY: broker.rs's run_curl invokes a bare `curl` off PATH with no -q, while setting HOME to the owner's -- so a root daemon's curl reads the owner's ~/.curlrc. api.rs already uses /usr/bin/curl -q. 3. cloudflare/api.rs should move onto broker::run_curl, but this is a FEATURE not a resolution: run_curl returns curl's exit code rather than the HTTP status the Cloudflare Reply model needs, and appends stderr onto the body, which breaks its status parse. Fix run_curl first. 4. p1-018 shipped no docs: neither `apex mcp connect` nor --everywhere appears under docs/, though the refusal message and the CLI hint point users at both."
-    },
     {
       "id": "trust-enforcement",
       "repo": "apex-os",
@@ -36,7 +25,7 @@
       "title": "The 18 labwc matrix rows that need real applications",
       "after": [],
       "conflicts": [],
-      "note": "Automated already: screenshots, multi-monitor, lock and idle, scaling. The remainder needs real programs on a real session and is written out step by step in state/agents/p1-038.md: portals, Firefox and Chromium screen sharing, OBS, Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling, rotation, refresh rate, VRR, suspend and resume, dock hotplug. This one cannot be done headless and cannot be done on the L16 while Andre is using it \u2014 it is a katana job, or a job for Andre with a checklist. Do not pretend otherwise."
+      "note": "Automated already: screenshots, multi-monitor, lock and idle, scaling. The remainder needs real programs on a real session and is written out step by step in state/agents/p1-038.md: portals, Firefox and Chromium screen sharing, OBS, Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling, rotation, refresh rate, VRR, suspend and resume, dock hotplug. This one cannot be done headless and cannot be done on the L16 while Andre is using it — it is a katana job, or a job for Andre with a checklist. Do not pretend otherwise."
     },
     {
       "id": "p0-014",
@@ -50,7 +39,7 @@
         "integrate-3"
       ],
       "conflicts": [],
-      "note": "Both are already implemented on task/p0-013-request-origin and land as `partial`. P0-014's remainder is a real FIDO/WebAuthn path behind --origin-policy remote. P0-015's remainder is that nothing reports lock state: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind reports LockedHint=no on a session locked for an hour. The shell half was recovered from a WIP snapshot and pushed as fix/locked-hint at 87c84f3 (LockedHintService.qml, qmldir, Lockscreen.qml wiring) \u2014 integrate that first. P0-015 criterion 2 also needs P0-007's session grants to exist. P0-005's agent also produced an apex-shell branch, task/p0-005-agent-center-modes (the row shows the mode an agent is in) \u2014 integrate it alongside the apex-os side."
+      "note": "Both are already implemented on task/p0-013-request-origin and land as `partial`. P0-014's remainder is a real FIDO/WebAuthn path behind --origin-policy remote. P0-015's remainder is that nothing reports lock state: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind reports LockedHint=no on a session locked for an hour. The shell half was recovered from a WIP snapshot and pushed as fix/locked-hint at 87c84f3 (LockedHintService.qml, qmldir, Lockscreen.qml wiring) — integrate that first. P0-015 criterion 2 also needs P0-007's session grants to exist. P0-005's agent also produced an apex-shell branch, task/p0-005-agent-center-modes (the row shows the mode an agent is in) — integrate it alongside the apex-os side."
     },
     {
       "id": "p1-018",
@@ -83,7 +72,7 @@
       "conflicts": [
         "p1-002"
       ],
-      "note": "26 of section 13.2's 32 operations remain after P1-002 took seven. Two framework gaps the Cloudflare author hit and worked around locally, which P1-005 should fix generally rather than repeat: Bound carries no provider payload, so bind cannot hand what it resolved to perform \u2014 Cloudflare re-resolves and refuses on mismatch, but git does NOT, which makes git's host pin a TOCTOU rather than a guarantee; and mint cannot reach a companion service, which is why OAuth refresh could not be expressed as mint and why P1-011 will hit the same wall."
+      "note": "26 of section 13.2's 32 operations remain after P1-002 took seven. Two framework gaps the Cloudflare author hit and worked around locally, which P1-005 should fix generally rather than repeat: Bound carries no provider payload, so bind cannot hand what it resolved to perform — Cloudflare re-resolves and refuses on mismatch, but git does NOT, which makes git's host pin a TOCTOU rather than a guarantee; and mint cannot reach a companion service, which is why OAuth refresh could not be expressed as mint and why P1-011 will hit the same wall."
     },
     {
       "id": "p1-008",
@@ -439,5 +428,12 @@
       "conflicts": [],
       "note": "The last unit. Build the integrated image, boot the L16 onto it, qualify, then apex-shell roadmap/v2.2 -> main FIRST (Containerfile.base carries ARG APEX_SHELL_REF=main), then apex-os roadmap/v2.2 -> main. This is the only point at which GitHub CI is allowed to run."
     }
-  ]
+  ],
+  "_completed_units": {
+    "followups-integrate-3": "COMPLETE AND LANDED 2026-09-07, round 6. All four hardening items the third integration round routed onward are on apex-os roadmap/v2.2 as ef87088..678bb5d (the broker's bare curl reading the owner's ~/.curlrc under root, 'reaches the same thing everywhere' made a declared fact, a bind test that bound nothing and passed, one curl in this build with a readable contract, and the MCP verbs documented in docs/agent-runtime.md). REMOVED from units rather than left with a marker, because resume.sh derives 'finished' from roadmap.yaml item status and this unit's items are '(hardening)' - no roadmap ids - so it can never satisfy that test and would have been offered as READY forever, which is exactly the double-dispatch the queue exists to prevent. One follow-up did NOT belong to it and is still owed: apex remote pair|devices|revoke|status|enable is documented nowhere, and it is recorded in dispatch.json _deliberately_held for the next integrate round."
+  },
+  "_notes": {
+    "trust-enforcement": "DISPATCHED 2026-09-07 15:02 (round 6), the slot freed by followups-integrate-3 finishing. Its `after: [integrate-3]` is long satisfied. No card existed; the agent creates ROADMAP/state/agents/trust-enforcement.md and its own worktree /var/tmp/apex-work/wt-trust on branch task/trust-enforcement.",
+    "p1-025": "UNBLOCKED as of round 6. `after: [p1-018]` is satisfied: p1-018's work is landed by content on roadmap/v2.2 (the diff of every file origin/task/p1-018-mcp-auth touches against the tip is empty, even though the branch is 10 commits 'ahead' by graph). Not dispatched only because the ceiling is six; first in line next round alongside one of the Cloudflare units."
+  }
 }

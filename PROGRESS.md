@@ -932,3 +932,102 @@ after landing, not just the workspace ones.
   quality unrendered, and apex-shell owes a QR page and a paired-device page —
   and records that P1-051's real second factor is p1-053a's work, not its own,
   so nobody closes P1-051 from there alone.
+
+- **2026-09-07 15:05** — Round 6 dispatched, and the interruption that caused it
+  is now the ordinary case rather than an incident. The round-5 orchestrator hit
+  the session limit at **11:42** (`autoresume.log`: "You've hit your session
+  limit · resets 2:50pm") and all six of its agents died with it. `ListAgents`
+  showed nothing alive and `ps` showed exactly one `claude` process, this one.
+  None was revived by message. The changeover cost one `resume.sh` and six
+  briefs, for the second round running.
+
+  **Nothing existed only on disk this time.** Every one of the eight agent
+  worktrees was pushed with `ahead=0` — round 5's push-before-measure
+  instruction did precisely what it was written for, including on
+  `task/p1-023-push-to-talk-daemon`, which round 4 had left as a wip snapshot
+  ref and nothing else. The five dirty paths that remain are all
+  work-in-progress the cards describe, and each brief tells its agent to read
+  `git diff` and commit rather than reach for `checkout`/`reset`/`stash`.
+
+  Five fresh agents carry round-5 cards (`p0-014`, `p1-023`, `p2-010`,
+  `p1-039`, `p1-035`); the sixth slot went to **`trust-enforcement`**, which
+  `dispatch.json` had recorded as first in line. `followups-int3`'s slot freed
+  because its unit finished — all four hardening items done and pushed — and
+  this round landed them.
+
+### Registering as the orchestrator, before dispatching anything
+
+`state/orchestrator.pid` was stale from 05:49 and the heartbeat was three hours
+old. `autoresume.sh`'s "is someone already working" guard reads exactly those
+two things (plus agent `.output` files under 20 minutes old), and the limit had
+just reset at 14:50 — so its next firing would have launched a **second
+orchestrator dispatching from the same queue**, which is the one failure the
+queue's own comment warns about. Fixed in the first minute: this session's pid
+written, and a background loop touching the heartbeat every 10 minutes for five
+hours. It fired six times during the limit (11:17, 12:27, 12:56, 13:39, 14:39,
+14:49) and each attempt died on the limit, while the free half kept
+`report.txt` fresh throughout — the design working as intended.
+
+### Landed: task/followups-int3, 1ab542c → 678bb5d
+
+Five commits, `rebase --onto` from fork `b2d7905`, **zero conflicts**: the
+broker's bare `curl` reading the owner's `~/.curlrc` under root, "reaches the
+same thing everywhere" made a declared fact, a bind test that bound nothing and
+passed, one `curl` in this build with a contract the Cloudflare model can read,
+and the MCP verbs documented in `docs/agent-runtime.md`. 14 files, +850/−106.
+
+Verified on the landed tip, on a quiet machine before the six agents were
+dispatched: no conflict markers; `cargo test --locked --workspace` through to
+the doc-tests with **zero failures** (cargo is fail-fast, so reaching
+`Doc-tests` proves no target failed); `run-clippy.sh` rc=0 in-container;
+`check-doc-verbs.sh` against a **freshly built** `apex` — the installed one
+predates these verbs — 49 valid, 0 deliberate, 0 not-a-command.
+
+Two caveats recorded rather than smoothed over:
+
+1. **The exact pass-count is not recorded.** The harness piped `cargo test`
+   through `tail -60`, so the totals scrolled off. "Zero failures" is sound;
+   the familiar `1964` is not, and is deliberately not written down. The re-run
+   started to recover the number hung for twelve minutes in `apex-agentd`'s
+   `pty::tests` and `egress::tests` while six agents were building and testing
+   the same crates — contention, not a regression — and was stopped rather than
+   left to compete with them. Re-measure on an idle machine.
+2. **The "cgroup/origin artifact" did not reproduce.** The single failure three
+   integration rounds have written off,
+   `renewing_a_grant_that_does_not_exist_is_refused_without_asking_anybody`,
+   **passed** here. That is evidence *for* FINDINGS-round5 item 3, not against
+   it: the failure is a property of the runner's cgroup rather than of the code,
+   which is exactly how nine assertions across two harnesses can silently never
+   execute. `p0-014` owns it and its brief says so.
+
+### Two queue trip-wires removed, and one handoff closed by checking it
+
+`followups-integrate-3` was **removed** from `queue.json` rather than marked
+done. `resume.sh` derives "finished" from roadmap item status, and this unit's
+items are `(hardening)` — no roadmap ids — so it could never satisfy that test
+and would have been offered as READY forever the moment its agent left the
+dispatch table. The same shape is worth watching for in any future non-roadmap
+unit.
+
+`p1-025` is **unblocked**. It waited on `p1-018`, which round 5 reported as
+COMPLETE-but-unlanded. Content-checked this round: `origin/task/p1-018-mcp-auth`
+is ten commits "ahead" of the tip by graph, but the diff of every file it
+touches against `roadmap/v2.2` is **empty** — the work is in, and the branch is
+deletable. The graph said unlanded; the content said landed. Content wins.
+
+CLAUDE.md's katana handoff — `fix/pkg-multilib` "needs two additions" — is
+**closed, and closed by checking rather than by working**. Both additions are
+already on the tip: `origin/fix/pkg-multilib-2` carries `aa7bf62` for the
+`install_etc` removal pass that ate 26 image-owned `/etc` files and the
+`host_evr` app-twin rule, and the diff of all three files those branches touch
+against `roadmap/v2.2` is empty. `roadmap/v2.2`'s `apex-pkg` has the `rpm -qf`
+image-owner guard at line 852. So no roadmap item is outstanding (BASE-006 is
+done and its evidence already covers the six multilib defects), and katana's
+post-reboot `apex install` failure ends when this tip reaches an image build.
+Both branches are safe to delete.
+
+`apex remote pair|devices|revoke|status|enable` is documented **nowhere**, and
+`check-doc-verbs.sh` structurally cannot catch it: it validates documented-verb
+→ real-command, never the reverse. It was the one round-5 finding with no owner;
+it is now written into `dispatch.json` `_deliberately_held` for the next
+integrate round, against the tip, so it is not lost a second time.
