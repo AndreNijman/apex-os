@@ -330,9 +330,15 @@ impl Fixture {
     }
 }
 
+/// One operation, the resource it names, and the options its own declaration
+/// accepts. Named because the bare tuple is what clippy::type_complexity
+/// objects to, and it is right — three levels of nesting in a return type is
+/// something a reader has to parse rather than read.
+type OperationCase = (&'static str, &'static str, Vec<(&'static str, &'static str)>);
+
 /// Every operation the provider declares, with a resource and options that its
 /// own declaration accepts.
-fn every_operation() -> Vec<(&'static str, &'static str, Vec<(&'static str, &'static str)>)> {
+fn every_operation() -> Vec<OperationCase> {
     vec![
         ("cloudflare.account.read", "", vec![]),
         ("cloudflare.worker.read", "project", vec![]),
