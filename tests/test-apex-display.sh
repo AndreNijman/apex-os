@@ -497,6 +497,10 @@ device-get-default-profile)
 get-profiles)
     printf 'Title:   Fixture With Curve\nType:   display-device\nFilename:   %s\nProfile ID:   icc-with\n\n' "$CM_ICC/with-curve.icc"
     printf 'Title:   Fixture No Curve\nType:   display-device\nFilename:   %s\nProfile ID:   icc-none\n\n' "$CM_ICC/no-curve.icc"
+    # colord really does hand out non-display profiles from the same call: the
+    # image ships x11-colors.icc, kind named-color, alongside the six display
+    # ones. Measured live on the L16.
+    printf 'Title:   Fixture Spot Colours\nType:   named-color\nFilename:   %s\nProfile ID:   icc-spot\n\n' "$CM_ICC/with-curve.icc"
     ;;
 esac
 exit 0
@@ -648,6 +652,21 @@ grep -q "create-device" "${CM_STATE}.calls" \
 printf '%s' "$out2" | grep -q "carries no vcgt" \
     && ok "assigning a profile with no curve says there is no curve to load" \
     || bad "assigning a profile with no curve says there is no curve to load"
+
+# ── a named-colour profile is not a monitor profile ─────────────────────────
+# The image ships x11-colors.icc, kind named-color, from the same get-profiles
+# call as the six display profiles. It is a table of spot colours; there is
+# nothing sensible to do with it on a display. Deliberately given the SAME
+# filename as the with-curve fixture, so a filter keying on the file rather than
+# on the kind cannot pass this.
+kinds="$(printf '%s' "$state" | jqp 'sorted(p["id"] for p in d["profiles"])')"
+[ "$kinds" = "['icc-none', 'icc-with']" ] \
+    && ok "a named-colour profile is not offered as a monitor profile" \
+    || bad "a named-colour profile is not offered as a monitor profile (got $kinds)"
+out6="$(colour Hyprland color-assign DP-2 icc-spot 2>&1)"; rc6=$?
+{ [ "$rc6" -eq 1 ] && printf '%s' "$out6" | grep -q "no colord profile matches"; } \
+    && ok "assigning a named-colour profile to a display is refused" \
+    || bad "assigning a named-colour profile to a display is refused (rc=$rc6)"
 
 out3="$(colour Hyprland color-assign eDP-1 nonsuch 2>&1)"; rc3=$?
 { [ "$rc3" -eq 1 ] && printf '%s' "$out3" | grep -q "no colord profile matches"; } \
