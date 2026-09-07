@@ -1503,7 +1503,17 @@ tasks:
     (ChildInfo/ChildKind/ChildEnd), SessionInfo.children, the /proc half (ProcEntry, read_processes, process_tree,
     fill_rss) with descendants added at READ time and never persisted. apex-agent-core 435/0 then 442/0,
     hook_bridge 8/0 then 9/0, seven mutants killed. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-020.md;
-    the original text was destroyed by the set-status.py --evidence defect (script fixed the same day).
+    the original text was destroyed by the set-status.py --evidence defect (script fixed the same day). LANDED by
+    integrate-4: apex-shell roadmap/v2.2 = ed1c466 (5 commits from task/p1-020-agent-graph) and apex-os
+    roadmap/v2.2 = 4ab5f75 (4 commits from task/p1-020-agent-graph-daemon). The daemon half landed with ZERO
+    conflicts even though the tip had moved 260 lines under it since fork 5ae4350; cargo test 1804/1 to 1854/1
+    (plus 50 tests, no new failures) and run-clippy.sh clean over 1,700 lines of new Rust (graph.rs 1031,
+    statusline.rs 698). The shell half had ONE conflict, both hunks in src/services/agents/SessionRow.qml,
+    resolved keep-both -- with the trap that a naive keep-both leaves two row-level height properties, a QML
+    duplicate-property error; the stale Theme.px(52) was moved into the new header Item and only one row-level
+    height remains. Post-landing shell suites: agentgraph 67/0, notifybus 41/0, agenttelemetry 59/0, check-agent-
+    settings 17/0, check-remote-agents 13/0, agent-policy all-pass; settings-semantics 33/0, settings-pages 15/0,
+    colour 22/0 (EXPECT_WHITE_FG 211 unchanged), scale 5/0, agent-state 27/0, markers PASS.
 - id: P1-021
   title: Integrate Claude statusline telemetry
   priority: P1
@@ -1528,7 +1538,17 @@ tasks:
     chain), Request::Telemetry as its own request so last_activity does NOT move, and `apex agent statusline` runs
     the user's command FIRST. apex-agent-core 462/0, hook_bridge 12/0, policy_invariants 33/0, six mutants killed.
     reconstructed 2026-09-07 from ROADMAP/state/agents/p1-020.md; the original text was destroyed by the set-
-    status.py --evidence defect (script fixed the same day).
+    status.py --evidence defect (script fixed the same day). LANDED by integrate-4 with the rest of
+    task/p1-020-agent-graph, apex-shell roadmap/v2.2 = ed1c466. One rebase-introduced failure was found and fixed
+    IN the landing commit rather than on top of it: agenttelemetry 'SessionRow does not freeze the clock in a
+    property' went 59/0 to 58/1 because the check was a bare regex on property NAME: Date.now(), and the merged
+    SessionRow.qml carries HEAD's nowMs -- which a 1s Timer rewrites, so it is the opposite of the frozen-clock
+    defect the check exists for. Each side is green alone; only the merged file trips it. The check now collects
+    the names bound to Date.now() and flags only those never assigned again, so a readonly frozen property is
+    still caught by construction. Mutation-proved both directions (Timer changed to not re-read the clock -> 58/1
+    naming nowMs; a readonly frozen property added to TelemetryStrip -> 58/1 naming nowFrozen; restored -> 59/0).
+    The rejected alternative is recorded on integrate-4's card: rewriting already-landed break-glass code to
+    satisfy a heuristic, at the cost of a countdown sitting at epoch 0 on first paint.
 - id: P1-022
   title: Notification bridge and deduplication
   priority: P1
@@ -1548,7 +1568,9 @@ tasks:
     extraHints plus byKey/idForKey/retract. tests/notifybus-test.js 41/0 with 9 mutants plus an inverse mutant;
     tests/run-notify-spawn-test.sh 10/0 under headless labwc. run-agent-center-smoke.sh wired into CI as 6046b71.
     reconstructed 2026-09-07 from ROADMAP/state/agents/p1-020.md; the original text was destroyed by the set-
-    status.py --evidence defect (script fixed the same day).
+    status.py --evidence defect (script fixed the same day). LANDED by integrate-4 with task/p1-020-agent-graph,
+    apex-shell roadmap/v2.2 = ed1c466. notifybus 41/0 after the landing; qmldir and .github/workflows/ci.yml auto-
+    merged clean and ci.yml re-validated as YAML (parses, 3 jobs, no duplicate step names).
 - id: P1-023
   title: Global push-to-talk routing
   priority: P1
@@ -1810,7 +1832,17 @@ tasks:
     Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling,
     rotation, refresh rate, VRR, suspend/resume, dock hotplug). Cannot be done headless and cannot be done on the
     L16 while Andre is using it. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-038.md; the original text
-    was destroyed by the set-status.py --evidence defect (script fixed the same day).
+    was destroyed by the set-status.py --evidence defect (script fixed the same day). labwc parity LANDED by
+    integrate-4: apex-shell roadmap/v2.2 = 4037a1b, 3 commits, ZERO conflicts -- the anticipated
+    .github/workflows/ci.yml clash did not happen (p1-020 and p1-038 append in different regions), and ci.yml was
+    re-validated as YAML after the landing. check-screenshot-dispatch 42/0 with 4 mutants. Still partial, and for
+    one reason only: rows 1-18 of the validation matrix need real applications in a real labwc session on the L16.
+    Nothing further is automatable without those applications present, so this is a checklist for a human at the
+    machine, not an agent task. tests/run-labwc-matrix-test.sh was NOT run at integration but WAS read, and
+    contrary to expectation it is correctly guarded (private XDG_RUNTIME_DIR and HOME,
+    WAYLAND_DISPLAY/DISPLAY/HYPRLAND_INSTANCE_SIGNATURE/NIRI_SOCKET unset, WLR_BACKENDS=headless, and a hard FAIL
+    if WAYLAND_DISPLAY does not name a socket in the private dir) -- it is safe headless and was held only to run
+    once on a final tip.
 - id: P1-039
   title: Compositor-neutral Night Light
   priority: P1
@@ -1891,7 +1923,7 @@ tasks:
 - id: P1-044
   title: Default incoming firewall
   priority: P1
-  status: partial
+  status: done
   area: security
   depends_on: []
   acceptance:
@@ -1909,7 +1941,22 @@ tasks:
     nftables sets, never into the ruleset, and apex firewall manages them by service name from a shipped
     catalogue. The unit loads before network-pre.target and conflicts with nftables.service, and the image enables
     it and asserts the policy parses under nft -c. tests/test-apex-firewall.sh 25/0. Criterion 1 is met; criterion
-    2 asks for the exceptions in the APEX UI, and only the CLI exists so far.
+    2 asks for the exceptions in the APEX UI, and only the CLI exists so far. BOTH HALVES NOW LANDED by
+    integrate-4, so this moves partial -> done. apex-os roadmap/v2.2 = 9fafab4 (7 commits, ZERO conflicts) and
+    apex-shell roadmap/v2.2 = b2bc964 (2 commits, ZERO conflicts -- the anticipated qmldir/PageRegistry clashes
+    did not happen, p1-020 and p1-044 add in different regions of both files). The OS half changes NO Rust and
+    that is proven by construction rather than asserted: git diff --name-only b2d7905 9fafab4 -- apexd/ is EMPTY.
+    test-apex-firewall.sh 25/0/1 -> 31/0/1 (the 1 skip is 'the ruleset parses', which needs root; the suite
+    deliberately never LOADS the policy). Shell side: settings-pages 15/0 -> 16/0 (the new FirewallPage is
+    enumerated), check-firewall-ui 29/0, firewall-test.js all-pass, no duplicate qmldir registration after both
+    landings. test-apex-firewall-live.sh and test-apex-firewall-ssh.sh were deliberately NOT re-run at
+    integration: both ssh to katana and load a default-drop policy there, and katana was to stay read-only; the
+    branch's own card records that its live run completed and left katana with an empty ruleset. Three things are
+    open and none is an acceptance gap: apex firewall status has no --json so the page parses prose (the parsing
+    is proven against real output; FirewallCmd in apexd/apex/src/main.rs is where the flag would go, and it is a
+    Rust change so it needs run-clippy.sh); LLMNR 5355 tcp+udp is accepted on every interface and mDNS accepts a
+    unicast query from any source rather than only link-local; and apex firewall allow on an image predating the
+    subcommand fails the same way status does.
 - id: P1-045
   title: Persistent-state migration framework
   priority: P1
@@ -2011,7 +2058,14 @@ tasks:
     AND NOT FAKED: raw TOML editing (the only write verb takes JSON), Import, Export, 'use this device as
     Blueprint' -- no CLI verbs exist -- and transactional apply with rollback. reconstructed 2026-09-07 from
     ROADMAP/state/agents/p1-048.md; the original text was destroyed by the set-status.py --evidence defect (script
-    fixed the same day).
+    fixed the same day). LANDED by integrate-4: apex-shell roadmap/v2.2 = 690014a, 9 commits, ZERO conflicts
+    despite 29 files and a 391-line BlueprintPage.qml rewrite -- the tip had moved only ci.yml, PageRegistry.qml
+    and src/services/qmldir since d2d1f33 and none of the three collided. settings-pages 16/0 to 17/0 (the new
+    GamingPage is picked up by the page enumeration); check-color-tokens 22/0 with EXPECT_WHITE_FG 211 UNCHANGED,
+    pre-checked rather than discovered late (the branch adds zero Qt.rgba(1,1,1,...) sites, so the ratchet could
+    not be tripped and did not have to be raised). Branch suites after landing: blueprint-editor 87/0, check-
+    blueprint-editor all-pass, gaming-settings 43/0, check-gaming-settings all-pass, check-headless-runners 25/0.
+    Neither src/qmldir nor src/services/qmldir has a duplicate registration.
 - id: P1-049
   title: Redesign Gaming settings around simple understandable toggles
   priority: P1
@@ -2407,7 +2461,22 @@ tasks:
     to a printer, a share mounted from a server, a card in a slot. The L16's avahi is still masked and unmasking
     it is Andre's call, so that machine cannot discover a printer or scanner at all. reconstructed 2026-09-07 from
     ROADMAP/state/agents/p2-005.md; the original text was destroyed by the set-status.py --evidence defect (script
-    fixed the same day).
+    fixed the same day). LANDED by integrate-4: apex-os roadmap/v2.2 = 95d068c, 8 commits from task/p2-005-device-
+    maturity, ZERO conflicts. cargo test 1799/2 -> 1804/1, which reads as plus 5 tests and zero new failures once
+    the baseline's two are named (a pty deadlock that had to be killed, and the cgroup/origin artifact); only the
+    second recurred. run-clippy.sh PASS on the landed tip, and this was the first landing carrying new Rust.
+    Suites after landing: test-apex-devices 55/0/0, test-device-image 39/0, test-device-services-netns 12/0/0, and
+    test-apex-firewall still 31/0/1. The netns suite is safe on this machine for a checked reason rather than an
+    assumed one: it uses unshare -rmn with no sudo, and nftables tables are network-namespace scoped, so nft -f
+    apex.nft inside it cannot reach the L16's ruleset. Note for anyone reading the old report: c823974 added
+    tests/test-device-firewall-netns.sh and a later commit on the same branch renamed it test-device-services-
+    netns.sh -- the file is not missing. STILL PARTIAL, and every remainder is hardware nobody here has: a print
+    job to a printer, a share mounted from a server, a card in a slot, an EAP handshake with a real access point,
+    a tunnel to a VPN endpoint, a paired headset, an attached dock. Three cheap things are left: an apex devices
+    entry in files/system/libexec/apex-desktop-menu; a rebuilt image plus a re-run of apex devices on both
+    machines, because several readers change answer once 36232f5's packages land (gvfs-fuse, boltd, wg, the NM VPN
+    plugins, dnsmasq as a real package, aptX, the connectivity check); and the L16's masked avahi, whose unmasking
+    is Andre's call, not an agent's -- until then that machine cannot discover a printer or a scanner.
 - id: P2-006
   title: Networking maturity
   priority: P2
@@ -2430,7 +2499,23 @@ tasks:
     open: two lines in `apex devices network` state the current policy as fact and go stale the day it changes.
     REMAINDER: an EAP handshake with a real access point and a tunnel to a real VPN endpoint. reconstructed
     2026-09-07 from ROADMAP/state/agents/p2-005.md; the original text was destroyed by the set-status.py
-    --evidence defect (script fixed the same day).
+    --evidence defect (script fixed the same day). LANDED by integrate-4: apex-os roadmap/v2.2 = 95d068c, 8
+    commits from task/p2-005-device-maturity, ZERO conflicts. cargo test 1799/2 -> 1804/1, which reads as plus 5
+    tests and zero new failures once the baseline's two are named (a pty deadlock that had to be killed, and the
+    cgroup/origin artifact); only the second recurred. run-clippy.sh PASS on the landed tip, and this was the
+    first landing carrying new Rust. Suites after landing: test-apex-devices 55/0/0, test-device-image 39/0, test-
+    device-services-netns 12/0/0, and test-apex-firewall still 31/0/1. The netns suite is safe on this machine for
+    a checked reason rather than an assumed one: it uses unshare -rmn with no sudo, and nftables tables are
+    network-namespace scoped, so nft -f apex.nft inside it cannot reach the L16's ruleset. Note for anyone reading
+    the old report: c823974 added tests/test-device-firewall-netns.sh and a later commit on the same branch
+    renamed it test-device-services-netns.sh -- the file is not missing. STILL PARTIAL, and every remainder is
+    hardware nobody here has: a print job to a printer, a share mounted from a server, a card in a slot, an EAP
+    handshake with a real access point, a tunnel to a VPN endpoint, a paired headset, an attached dock. Three
+    cheap things are left: an apex devices entry in files/system/libexec/apex-desktop-menu; a rebuilt image plus a
+    re-run of apex devices on both machines, because several readers change answer once 36232f5's packages land
+    (gvfs-fuse, boltd, wg, the NM VPN plugins, dnsmasq as a real package, aptX, the connectivity check); and the
+    L16's masked avahi, whose unmasking is Andre's call, not an agent's -- until then that machine cannot discover
+    a printer or a scanner.
 - id: P2-007
   title: Bluetooth/dock/peripheral maturity
   priority: P2
@@ -2450,7 +2535,23 @@ tasks:
     packages land in a built image: gvfs-fuse, boltd, wg, the VPN plugins, dnsmasq as a real package, aptX and the
     connectivity check, so the readings must be retaken after the next image build. REMAINDER is hardware nobody
     here has: a paired headset and an attached dock. reconstructed 2026-09-07 from ROADMAP/state/agents/p2-005.md;
-    the original text was destroyed by the set-status.py --evidence defect (script fixed the same day).
+    the original text was destroyed by the set-status.py --evidence defect (script fixed the same day). LANDED by
+    integrate-4: apex-os roadmap/v2.2 = 95d068c, 8 commits from task/p2-005-device-maturity, ZERO conflicts. cargo
+    test 1799/2 -> 1804/1, which reads as plus 5 tests and zero new failures once the baseline's two are named (a
+    pty deadlock that had to be killed, and the cgroup/origin artifact); only the second recurred. run-clippy.sh
+    PASS on the landed tip, and this was the first landing carrying new Rust. Suites after landing: test-apex-
+    devices 55/0/0, test-device-image 39/0, test-device-services-netns 12/0/0, and test-apex-firewall still
+    31/0/1. The netns suite is safe on this machine for a checked reason rather than an assumed one: it uses
+    unshare -rmn with no sudo, and nftables tables are network-namespace scoped, so nft -f apex.nft inside it
+    cannot reach the L16's ruleset. Note for anyone reading the old report: c823974 added tests/test-device-
+    firewall-netns.sh and a later commit on the same branch renamed it test-device-services-netns.sh -- the file
+    is not missing. STILL PARTIAL, and every remainder is hardware nobody here has: a print job to a printer, a
+    share mounted from a server, a card in a slot, an EAP handshake with a real access point, a tunnel to a VPN
+    endpoint, a paired headset, an attached dock. Three cheap things are left: an apex devices entry in
+    files/system/libexec/apex-desktop-menu; a rebuilt image plus a re-run of apex devices on both machines,
+    because several readers change answer once 36232f5's packages land (gvfs-fuse, boltd, wg, the NM VPN plugins,
+    dnsmasq as a real package, aptX, the connectivity check); and the L16's masked avahi, whose unmasking is
+    Andre's call, not an agent's -- until then that machine cannot discover a printer or a scanner.
 - id: P2-008
   title: First-party virtualization UX
   priority: P2
