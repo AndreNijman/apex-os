@@ -56,14 +56,10 @@
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use apex_secret_core::SecretValue;
 
 use crate::broker::Owner;
-
-/// The program. Absolute, so `PATH` cannot choose a different one.
-const CURL: &str = "/usr/bin/curl";
 
 /// How long one API call may take, end to end.
 pub const TIMEOUT_SECS: u64 = 120;
@@ -165,14 +161,19 @@ impl Reply {
 
 /// Why a call could not be made at all.
 ///
-/// Every variant is a sentence composed in this file. None of them can contain
-/// a credential, a response body or a child's output, which is what makes them
-/// safe to return through the framework's unscrubbed refusal path.
+/// Every variant is a sentence composed in this file or in `crate::broker`.
+/// None of them can contain a credential, a response body or a child's output,
+/// which is what makes them safe to return through the framework's unscrubbed
+/// refusal path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
     /// The stored credential is not a token this will send.
     BadCredential,
-    /// curl could not be started.
+    /// The child could not be run to completion — it could not be started, its
+    /// configuration could not be written, or the reply it began to read was
+    /// larger than [`crate::broker::HTTP_MAX_BYTES`]. All three are
+    /// `broker::run_curl`'s sentences, and none of them can carry a credential
+    /// or a response body.
     NoCurl(String),
     /// A temporary file for the request body could not be made.
     NoScratch(String),
@@ -189,7 +190,11 @@ impl std::fmt::Display for TransportError {
                  `/` `=`; store it again with `apex cf connect`",
             ),
             TransportError::NoCurl(reason) => {
-                write!(f, "the api client could not be started: {reason}")
+                // Not "could not be started": since this moved onto
+                // `broker::run_curl`, the same variant also carries the reply
+                // size cap, and a request that was refused mid-read is not one
+                // that failed to start.
+                write!(f, "the api client could not complete the request: {reason}")
             }
             TransportError::NoScratch(reason) => {
                 write!(f, "a working file for the request could not be made: {reason}")
@@ -365,40 +370,27 @@ pub fn call(
     // happens to end in digits cannot be mistaken for one.
     config.push_str("write-out = \"\\n%{http_code}\"\n");
 
-    let mut cmd = Command::new(CURL);
-    cmd.arg("-q").arg("-K").arg("-");
-    cmd.env_clear()
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-        .env("HOME", &owner.home)
-        .env("USER", &owner.name)
-        .env("LOGNAME", &owner.name)
-        .env("LC_ALL", "C")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::broker::drop_to(&mut cmd, owner);
+    // One curl in this build, not two. `broker::run_curl` owns the child: the
+    // absolute program, `-q` first so the owner's `~/.curlrc` cannot configure
+    // it, `env_clear` with `NO_PROXY=*`, the drop to the owner's uid, the
+    // configuration on stdin where `/proc` cannot read it, and the cap on how
+    // large a reply this daemon will carry. Everything below is this provider's
+    // own: `run_curl` hands back curl's exit code with the two streams apart,
+    // because the status this model needs is on the last line of stdout and
+    // stderr appended to it would make that line unparseable.
+    let out = crate::broker::run_curl(&config, owner).map_err(TransportError::NoCurl)?;
 
-    let mut child = cmd.spawn().map_err(|e| TransportError::NoCurl(e.to_string()))?;
-    // The write happens before the wait, and a failure here is still a
-    // transport error rather than a leak: nothing has been sent.
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(config.as_bytes())
-            .map_err(|e| TransportError::NoCurl(e.to_string()))?;
-    }
-    drop(child.stdin.take());
-    let out = child
-        .wait_with_output()
-        .map_err(|e| TransportError::NoCurl(e.to_string()))?;
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = out.stdout.as_str();
+    let stderr = out.stderr.as_str();
     let (body, status) = match stdout.rsplit_once('\n') {
         Some((body, tail)) => (body.to_string(), tail.trim().parse::<u16>().ok()),
         None => (String::new(), stdout.trim().parse::<u16>().ok()),
     };
     let Some(status) = status else {
-        if out.status.success() {
+        // `code` is CURL'S EXIT CODE, not an HTTP status. Zero means the
+        // transfer happened, so there should have been a status line, and its
+        // absence is output this build cannot read.
+        if out.code == 0 {
             return Err(TransportError::Unreadable);
         }
         // curl failed before it had a status: a refused connection, a name that
@@ -534,6 +526,43 @@ mod tests {
         assert!(text.contains("export default {};"));
         // Two parts and one closing delimiter.
         assert_eq!(text.matches(&format!("--{boundary}")).count(), 3);
+    }
+
+    /// The path nothing covered before this call moved onto `broker::run_curl`.
+    ///
+    /// When curl never gets a status — a refused connection, a name that does
+    /// not resolve, a TLS handshake that fails — `Reply.status` is 0 and the
+    /// body is curl's own message. `mod.rs` keys on `status == 0` to say "the
+    /// api could not be reached" rather than "cloudflare answered HTTP 0", and
+    /// the whole distinction rests on telling curl's EXIT CODE apart from an
+    /// HTTP status. `run_curl` returns the former, which is exactly the mixup
+    /// this move had to avoid, so it is measured rather than asserted.
+    ///
+    /// Port 9 is `discard`, reserved and not listening: no server to stand up
+    /// and nothing to leak.
+    #[test]
+    fn a_connection_that_never_happens_is_a_status_of_zero_and_curls_own_message() {
+        // Safe: getuid cannot fail.
+        let owner = crate::broker::owner(unsafe { libc::getuid() }).expect("own uid");
+        let reply = call(
+            &Api::loopback(9),
+            &Call {
+                method: "GET",
+                path: "/accounts".to_string(),
+                body: Body::None,
+            },
+            &SecretValue::new(b"apex-cf-unreachable-token".to_vec()),
+            &owner,
+        )
+        .expect("a refused connection is a Reply, not an Err");
+        assert_eq!(reply.status, 0, "{}", reply.body);
+        assert!(!reply.ok());
+        // curl's message, not an empty body — an empty one would make
+        // `mod.rs`'s "the api could not be reached\n{body}" a bare heading.
+        assert!(!reply.body.trim().is_empty(), "stderr was dropped");
+        // And the credential is not in it, which is the reason this comes back
+        // as a Reply the framework scrubs rather than as an Err it does not.
+        assert!(!reply.body.contains("apex-cf-unreachable-token"), "{}", reply.body);
     }
 
     #[test]
