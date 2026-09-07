@@ -2078,7 +2078,20 @@ tasks:
     arguing it -- with the declaration removed the run reads `a phone approved root: allow_once`. Fixed by a per-
     connection monotonic origin latch; apexd 1760/0 against a 1750/0 baseline measured on a clean worktree.
     Recorded by the orchestrator from the agent card, not from a landing: this is pushed branch work that
-    roadmap/v2.2 does NOT yet carry. A fresh agent is working the item now and will supersede this line.
+    roadmap/v2.2 does NOT yet carry. A fresh agent is working the item now and will supersede this line. LANDED on
+    roadmap/v2.2 as 1d4095c (apex-os), 7 commits rebased --onto 4ab5f75 from fork bc4f06e. Two keep-both
+    conflicts, both single match arms: apex/src/agent.rs kept p1-020's AgentCmd::Statusline alongside this
+    branch's actor-carrying AgentCmd::Origin, and apex/src/main.rs kept Cmd::Devices (p2-005) alongside
+    Cmd::Remote. 09c977d's two courtesy clippy fixes in the Cloudflare tests were DROPPED at integration exactly
+    as its own message invited: the tip had already fixed both independently (OperationCase vs this branch's
+    OperationRow for the same type_complexity lint, and a byte-identical raw-string replacement for the empty
+    format!), so the branch's own two clippy fixes are all that commit still carries. cargo test --locked
+    --workspace 1854 passed / 1 failed at 4ab5f75 to 1964 passed / 1 failed at the landing: plus 110 tests, zero
+    removed, zero new failures, 29 to 33 binaries. The one failure is
+    renewing_a_grant_that_does_not_exist_is_refused_without_asking_anybody, the pre-existing cgroup/origin
+    artifact -- cargo test runs under a systemd cgroup that reads as scheduled-job, so the origin gate refuses
+    before the existence check -- identical by name in integrate-4's b2d7905 baseline and both its landings.
+    tests/run-clippy.sh PASS rc=0 including the two new crates. check-no-conflict-markers PASS.
 - id: P1-051
   title: Implement secure device pairing for APEX Remote
   priority: P1
@@ -2106,7 +2119,11 @@ tasks:
     channel even when the daemon had not attached. REMAINDER: criteria 1 and 3 are apex-shell work that does not
     exist yet -- the QR renderer and the paired-device page. Recorded by the orchestrator from the agent card, not
     from a landing: this is pushed branch work that roadmap/v2.2 does NOT yet carry. A fresh agent is working the
-    item now and will supersede this line.
+    item now and will supersede this line. Landed with P1-050 on roadmap/v2.2 as 1d4095c. Still partial for the
+    reason its own agent recorded rather than a missing test: --origin-policy remote stays refused, because the
+    device key is the device's own claim until it lives in Android Keystore with setUserAuthenticationRequired,
+    there is no per-approval challenge and there is no attestation. apex-shell also owes it a QR page and a
+    paired-device page.
 - id: P1-052
   title: Support direct LAN and encrypted internet relay for remote agents
   priority: P1
@@ -2137,7 +2154,11 @@ tasks:
     which would advertise the machine whether or not the service is running; (4) Frame::Ping/Pong carry a token
     and nothing measures or renders the round trip. Recorded by the orchestrator from the agent card, not from a
     landing: this is pushed branch work that roadmap/v2.2 does NOT yet carry. A fresh agent is working the item
-    now and will supersede this line.
+    now and will supersede this line. Landed with P1-050 on roadmap/v2.2 as 1d4095c: LAN direct connection, Noise
+    NK/IK and the rendezvous client are in apex-remote-core, and files/system/firewall/services gains an apex-
+    remote tcp 7717 entry that is offerable to apex firewall allow and is NOT opened by any default policy. Four
+    named remainders: no Cloudflare Worker or Durable Object relay is deployed, no reconnect across network
+    changes, no mDNS discovery, and connection quality is not rendered.
 - id: P1-053
   title: Create polished first-party APEX Remote Android app foundation
   priority: P1
