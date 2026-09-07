@@ -692,11 +692,26 @@ def _colormgr_records(args):
 
 
 def colour_profiles():
-    """Every display profile colord knows, with the one fact that matters here."""
+    """Every DISPLAY profile colord knows, with the one fact that matters here.
+
+    Kind matters, and not academically. Measured on the L16: of the seven
+    profiles shipped in /usr/share/color/icc/colord/, one — `x11-colors.icc` —
+    is kind `named-color`, a lookup table of spot colours. It is not a monitor
+    profile, there is nothing sensible to do with it on a display, and before
+    this filter existed `color-assign eDP-1 "X11 Colors"` went through and the
+    page would have offered it.
+
+    Only what is OFFERED is filtered. `colour_state` reads a device's assigned
+    profile back from colord directly and falls back to the record colord hands
+    it, so a profile put there by something else still shows up on the page
+    rather than vanishing from a list it is not in.
+    """
     out = []
     for rec in _colormgr_records(["get-profiles"]):
         filename = rec.get("Filename", "")
         if not filename:
+            continue
+        if rec.get("Type", "") != "display-device":
             continue
         out.append({
             "id": rec.get("Profile ID", ""),
