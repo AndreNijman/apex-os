@@ -8,6 +8,12 @@ bad edit fails here instead of in the next session.
 
     ./set-status.py P0-001 partial "probed both machines, see evidence/..."
     ./set-status.py BASE-007 done "cargo test 1075 passed; blueprint harness 140/0"
+
+Evidence may also be passed as --evidence TEXT. It once could not: the flag was
+read as the evidence itself, and on 2026-09-07 thirty-three tasks were found
+holding the literal string "--evidence" where their evidence belonged. The text
+after it had been silently dropped. Both spellings work now, and a lone flag
+name is refused rather than stored.
 """
 import re
 import sys
@@ -26,12 +32,37 @@ def block(text, indent="    "):
 
 
 def main():
-    if len(sys.argv) < 3:
+    args = sys.argv[1:]
+    evidence = None
+    # --evidence TEXT and --evidence=TEXT, so the flag spelling cannot be
+    # stored as the evidence. See the module docstring for why this is here.
+    rest = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--evidence":
+            if i + 1 >= len(args):
+                sys.exit("--evidence needs a value")
+            evidence = args[i + 1]
+            i += 2
+            continue
+        if a.startswith("--evidence="):
+            evidence = a.split("=", 1)[1]
+            i += 1
+            continue
+        rest.append(a)
+        i += 1
+    if len(rest) < 2:
         sys.exit(__doc__)
-    tid, status = sys.argv[1], sys.argv[2]
-    evidence = sys.argv[3] if len(sys.argv) > 3 else None
+    tid, status = rest[0], rest[1]
+    if evidence is None and len(rest) > 2:
+        evidence = rest[2]
     if status not in VALID:
         sys.exit(f"status must be one of {sorted(VALID)}")
+    if evidence is not None and evidence.strip().startswith("--"):
+        sys.exit(f"refusing to store {evidence.strip()!r} as evidence")
+    if evidence is not None and not evidence.strip():
+        sys.exit("refusing to store empty evidence")
 
     src = open(PATH).read()
     m = re.search(rf"^- id: {re.escape(tid)}\n((?:(?!^- id: ).*\n)*)", src, re.M)

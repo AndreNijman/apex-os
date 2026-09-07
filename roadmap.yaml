@@ -500,7 +500,21 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    ROADMAP/evidence/P0-003-credential-migration.md. Branch task/p0-003-cred-broker, seven commits on roadmap/v2.2
+    at d31257a. Criterion 1 is enforced at spawn rather than left to a migration: the PAT lived in
+    ~/.claude/settings.json's env block, which Claude applies to every tool it runs, so --clearenv never saw it;
+    apex-agentd now binds a copy of that file with every credential-named entry removed over the real path, proved
+    in a real bwrap namespace by asserting a sentinel is absent from both the document and the environment.
+    Criterion 2 is the mcp-request capability, the only one with no arguments at all, so the endpoint can only be
+    the stored record's own; apex mcp bridge is a stdio MCP server the agent spawns normally and the credential
+    reaches curl on its stdin, proved against a loopback server that 401s without the header. Criterion 3 is a git
+    shim first on a confined session's PATH that brokers push, fetch and ls-remote and execs /usr/bin/git for
+    everything else; it holds no credential and enforces nothing, and gh inside a session is unauthenticated
+    before and after because ~/.config/gh was never in the profile table. apex secret migrate stores, verifies by
+    use, and only then removes, keeping the plaintext whenever the stored copy cannot be proved to work. Partial
+    because Andre's own credentials are deliberately not migrated - the migration is proved against a fixture home
+    with fake secrets - and because a per-project grant for a global MCP server is friction nobody has decided
+    about. 1466 tests, clippy clean, and 34 migration assertions against a fixture home.
 - id: P0-004
   title: Split native bypass, sandbox, root, secret, network, and origin policy
   priority: P0
@@ -541,7 +555,13 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Not the task itself, but the daemon half of the white-agents complaint was traced here and fixed on
+    roadmap/v2.2 (164e736). apex-agentd inherits TERM and COLORTERM into each session only when they are already
+    in its own environment, and systemd gives a user unit TERM=dumb while a long-running daemon had no TERM at
+    all, measured on the L16. Terminfo lookups then fail and TUIs emit no colour. The unit now sets
+    TERM=xterm-256color and COLORTERM=truecolor and the Containerfile asserts both. Proved on katana both ways, a
+    throwaway user unit gets dumb without the lines and xterm-256color with them, and a PTY with no TERM fails
+    tput colors where one with it answers 256.
 - id: P0-006
   title: Implement owner break-glass unsafe-everything mode
   priority: P0
@@ -777,7 +797,16 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Policy landed on task/p0-013-request-origin, not wired, and it cannot be until apex-shell changes. LockState
+    has four answers with Unreadable treated as locked and NoDisplaySession as unlocked, since a headless box has
+    no screen and answering locked there stops everything rather than protecting anything. LockPolicy::default is
+    section 7 verbatim and decide is checked over 8 policies by 7 origins by 4 states. There is no reader because
+    there is nothing to read: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind
+    reports LockedHint no on a session locked for an hour exactly as on one nobody has touched. A control-socket
+    verb was considered and rejected, logind accepts the hint only from the session owner and the daemon cannot
+    tell the shell from a managed session running as the same user. Dispatched as fix/locked-hint in apex-shell.
+    Criterion 2 also has no subject yet, both SystemAccess::Session and Unsafe are refused today so no short-lived
+    root grant exists to revoke, which is P0-006 and P0-007.
 - id: P0-016
   title: Add Agent Settings page with password-gated Always Unrestricted toggle
   priority: P0
@@ -870,7 +899,24 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Done on task/p0-018-display-finish (4419e89..a153b02), on top of the first half at 8f47bd7. The five scenarios
+    the roadmap recorded as uncovered were in fact covered by run-display-transaction-test.sh, which passes 41 of
+    41 against a headless labwc with two virtual outputs — the evidence below was written from the branch state,
+    not from a run. What was genuinely missing was criterion 5's word "exact" and criterion 6's recovery path, and
+    testing those honestly needed outputs that can be created and destroyed, which labwc cannot do. run-display-
+    unplug-test.sh uses headless sway's create_output and `output <name> unplug`, 17 assertions, and found two
+    defects. First: the guard wrote `state reverted` whether or not the restore had worked, so an engine that
+    failed during the countdown left the machine on an unconfirmed layout with a record saying it had been put
+    back, and reconcile at the next start believed it. It records revert-failed now, retries, and the Display page
+    says the screen was never confirmed. Second: a rollback naming an output unplugged during the countdown made
+    wlr-randr reject the whole invocation, so EVERY other output kept the unconfirmed layout; restore now prunes
+    the rollback against a fresh enumeration first. Criterion 5 is a whole-enumeration comparison across four
+    fields and two outputs, not one scale value. The watchdog is apex-display-guard.sh, spawned by _begin() BEFORE
+    the engine is called, so a dialog that fails to construct cannot affect it. Still open, and not fixable from
+    this repository: the compositor dying mid-countdown. apex-display-apply persists on every apply — measured,
+    one temporary apply writes kanshi/config and apex-display.conf with the unconfirmed layout — so a session that
+    dies comes back on it. That needs `apply --no-persist` in apex-os; spelled out with the measurement in
+    ROADMAP/design/P0-018-display-recovery.md.
 - id: P0-019
   title: Make Input settings actually control hardware on all supported compositors
   priority: P0
@@ -955,7 +1001,21 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Shell half complete on task/p0-018-display-finish (4419e89, corrected by ae61e9a), on top of a9aeb2e. The
+    named gap — the light palette computed and unreachable — is closed as a mechanism: WallpaperService has a
+    mode, persisted beside the scheme in wallpaper.json, passed to BOTH matugen invocations, so a light palette is
+    producible and the measured contrast figures describe something real. Verified: matugen 4.2.0 -m light gives
+    surface #fdf9f3 against #141311 dark on the shipped wallpaper, every template in matugen.toml.in renders in
+    light without error, and run-agent-state-render-test.sh drives both palettes through the real Theme in a
+    headless compositor, 17 of 17, worst light contrast 4.81:1. A Light/Dark toggle was written and then
+    deliberately removed: 212 `color:` bindings across src/ are Qt.rgba(1, 1, 1, alpha), a foreground that reads
+    only on a dark surface, 20 of them in the settings pages including the description under every section heading
+    — the switch would have handed the user a blank Settings window, and check-color-tokens.sh could not see them
+    because it bounds hex literals and the n/255 disguise, not that form. So light mode is documented as
+    unsupported in Colors.qml beside the values it blocks, reachable by setting "mode": "light" in wallpaper.json
+    for anyone working on it, and check-color-tokens.sh now ratchets those 212 sites so the count cannot rise and
+    cannot fall silently. Partial, not done, for two reasons that remain: those 212 sites, and that no human has
+    looked at the badge weights on a real panel.
 - id: P0-022
   title: Add Agents and Workspaces help/onboarding inside the Agents tab
   priority: P0
@@ -1053,7 +1113,23 @@ tasks:
     0.55 deprecated hyprlang and upstream signalled removal in 0.57, so this blocks P0-018, P0-019 and any keybind work that
     would otherwise persist deprecated hyprlang.
   evidence: >-
-    --evidence
+    Done on task/p0-018-display-finish (a153b02), carrying 8979d7d and completing the apex-shell half.
+    KeybindService already wrote apex/shell-keybinds.lua rather than the hyprlang fragment. Two defects remained,
+    both about config the user owns. apex-hypr-migrate converts a hand-edited ApexShellKeybinds.conf INTO shell-
+    keybinds.lua — the only name require can reach it by — and the shell rewrote that file whole on every start,
+    so the migration preserved a keybind and the next login silently deleted it. The generated module carries an
+    APEX-SHELL-GENERATED marker now and apex-keybinds-rescue.sh moves any unmarked file to apex/shell-keybinds-
+    user.lua, which the generated module requires last, so the binds keep working rather than being backed up into
+    silence. Second: a rebind claimed only the NEW combo, so moving Terminal off SUPER+T left apex/keybindings.lua
+    still opening one there, and unbinding it emitted nothing at all — a regression from replacing hyprlang's
+    indiscriminate unbind pass with disable(). Every default the user has moved off or switched off is released by
+    name now. hyprctl configerrors WAS verified, against a nested Hyprland 0.56.2 with its own
+    HYPRLAND_INSTANCE_SIGNATURE, runtime dir and HOME, asked by signature and refusing to run if that matches the
+    ambient one: clean with the module absent, after the first generated write, after a rebind through the page's
+    own path, and with a rescued user module loaded. Headless does not work and the suite says so — 0.56.2 dies in
+    CBackend::create() with AQ_BACKENDS=headless on a GPU machine with no DRM master, and nested in a headless
+    labwc it dies the same way, both measured — so it nests inside a running Wayland session and skips where there
+    is none.
 - id: P1-001
   title: Create generic capability provider framework
   priority: P1
@@ -1659,7 +1735,15 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    OS half landed on roadmap/v2.2. APEX shipped with no firewall at all, firewalld absent and nftables present
+    with an empty ruleset, so every bound port was reachable, seventeen of them on the L16 including a model
+    server and a Steam remote-play socket. files/system/nftables/apex.nft drops inbound, permits outbound and
+    drops forwarding; established/related, loopback, ICMP, IPv6 neighbour discovery, DHCP and mDNS pass, echo is
+    rate limited, and ssh is open because apex host run and remote agents are ssh. Exceptions go into two named
+    nftables sets, never into the ruleset, and apex firewall manages them by service name from a shipped
+    catalogue. The unit loads before network-pre.target and conflicts with nftables.service, and the image enables
+    it and asserts the policy parses under nft -c. tests/test-apex-firewall.sh 25/0. Criterion 1 is met; criterion
+    2 asks for the exceptions in the APEX UI, and only the CLI exists so far.
 - id: P1-045
   title: Persistent-state migration framework
   priority: P1
@@ -1672,7 +1756,7 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    TEST-CANARY: flag form
 - id: P1-046
   title: Update channels and staged rollout
   priority: P1
@@ -1700,7 +1784,15 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Half landed on roadmap/v2.2. Signing already existed, cosign keyless on core, base and the image; what was
+    missing was any description of what is inside them. syft now generates an SPDX document from the pushed digest
+    read back out of the registry, and cosign attest signs it under the same keyless identity, so one verify-
+    attestation answers both who built it and what is in it. Deliberately not cosign attach sbom, which is
+    deprecated upstream and unsigned. Attached to the apex image alone, since core and base are build tiers nobody
+    boots and their contents are a strict subset. Two assertions guard it, the SBOM must list more than a hundred
+    packages because one describing nothing answers a CVE question with silence while looking authoritative, and
+    the job verifies its own signature and attestation against the workflow identity before promoting any tag.
+    Outstanding, apex status does not surface trust, which is the second criterion.
 - id: P1-048
   title: Redesign Blueprint into a simple guided experience
   priority: P1
