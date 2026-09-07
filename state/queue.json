@@ -1,6 +1,6 @@
 {
   "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap \u2014 do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
-  "updated": "2026-09-07T11:55+08:00",
+  "updated": "2026-09-07T11:35+08:00",
   "concurrency_ceiling": 6,
   "units": [
     {
@@ -25,7 +25,7 @@
         "integrate-3"
       ],
       "conflicts": [],
-      "note": "P1-047 measured this rather than suspecting it. /etc/containers/policy.json on both machines is byte-identical to the image's /usr/etc copy and holds one insecureAcceptAnything, and the booted deployment records the consequence in its own origin: container-image-reference=ostree-unverified-registry:. Every image is cosign-signed and self-verified in CI and none of that reaches a machine. The .sig tag is present for the digest both machines run and names build-image.yml@refs/heads/main; the .att tag is not, because the SBOM work has only ever been built on roadmap/v2.2. DANGEROUS TO GET WRONG: a policy that refuses the wrong thing leaves a machine unable to update, and on an atomic OS that is not a small mistake. Whoever takes this must prove the rollback path on katana BEFORE the L16 ever sees it, must keep a documented escape hatch, and must not enable enforcement in the same change that introduces the policy. cosign is not in the image; skopeo and openssl are."
+      "note": "First in line next round: READY, unblocked, no conflicts, and the only READY unit that is neither hardware-bound nor part of the mutually-conflicting Cloudflare suite."
     },
     {
       "id": "p1-038-hardware",
@@ -239,20 +239,17 @@
       "landed": "both halves landed by integrate-4; P1-044 marked done 2026-09-07."
     },
     {
-      "id": "p1-050",
-      "repo": "apex-os",
+      "id": "p1-052-relay",
       "items": [
-        "P1-050",
         "P1-051",
         "P1-052"
       ],
-      "title": "Provider-neutral APEX Remote agent protocol, secure device pairing, LAN and encrypted relay",
-      "after": [
-        "p0-014"
-      ],
+      "repo": "both",
+      "after": [],
       "conflicts": [],
-      "note": "Gates the entire eight-task Android chain. The protocol decision here is the single highest-leverage design left in the roadmap.",
-      "landed": "apex-os roadmap/v2.2 1ab542c on 2026-09-07. P1-050 done. P1-051 and P1-052 stay partial and their remainders do NOT belong to this unit: P1-051 needs the key in Android Keystore with setUserAuthenticationRequired plus a per-approval challenge and attestation (that is p1-053a), and apex-shell owes it a QR page and a paired-device page. P1-052 needs a deployed Cloudflare Worker + Durable Object relay, reconnect across network changes, mDNS discovery and rendered connection quality -- a unit of its own. Do NOT re-dispatch p1-050; carve those two out instead."
+      "title": "The APEX Remote remainder: relay, reconnect, mDNS, connection quality, and the two shell pages",
+      "note": "REPLACES the old p1-050 unit, which was landed on apex-os roadmap/v2.2 as 1ab542c on 2026-09-07 (P1-050 done). Keeping p1-050 in the queue would have offered finished work again -- it read as HELD 'after p0-014' in the report, one dependency away from being dispatched twice. What is actually left, and it is a unit of its own: (1) no Cloudflare Worker or Durable Object relay is deployed -- the client exists in apex-remote-core, the server side does not; (2) no reconnect across network changes; (3) no mDNS discovery; (4) connection quality is not rendered; (5) apex-shell owes a QR pairing page and a paired-device page. P1-051 also stays partial for a reason NOT in this unit: --origin-policy remote stays refused until the device key lives in Android Keystore with setUserAuthenticationRequired, with a per-approval challenge and attestation -- that is p1-053a's work, and p0-014's CTAP2 verifier is the desktop half of it. Do not close P1-051 from here alone.",
+      "landed_predecessor": "apex-os roadmap/v2.2 1ab542c on 2026-09-07. P1-050 done. P1-051 and P1-052 stay partial and their remainders do NOT belong to this unit: P1-051 needs the key in Android Keystore with setUserAuthenticationRequired plus a per-approval challenge and attestation (that is p1-053a), and apex-shell owes it a QR page and a paired-device page. P1-052 needs a deployed Cloudflare Worker + Durable Object relay, reconnect across network changes, mDNS discovery and rendered connection quality -- a unit of its own. Do NOT re-dispatch p1-050; carve those two out instead."
     },
     {
       "id": "p1-053a",
@@ -263,11 +260,9 @@
         "P1-055"
       ],
       "title": "Android app foundation, Agent Center parity, full PTY/TUI remote terminal",
-      "after": [
-        "p1-050"
-      ],
+      "after": [],
       "conflicts": [],
-      "note": "No Android repo exists yet \u2014 creating it is part of P1-053. Decide the toolchain and whether it builds on katana before writing any UI."
+      "note": "Its `after: p1-050` was dropped when p1-050 landed. Also owns the real second factor for P1-051 (Android Keystore with setUserAuthenticationRequired, per-approval challenge, attestation); p0-014 is building the desktop CTAP2 verifier it pairs with."
     },
     {
       "id": "p1-053b",

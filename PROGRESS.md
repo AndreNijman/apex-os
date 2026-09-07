@@ -858,3 +858,77 @@ eight tasks and the largest single piece of work in the roadmap).
   evidence. `resume.sh` stopped offering work that is finished or already in an
   agent's hands. Counts moved 45/25/55/2 → 46/30/49/2 done/partial/todo/blocked,
   entirely from recording work that was already pushed.
+- **2026-09-07 11:20** — `task/p1-050-remote-protocol` landed: apex-os
+  `roadmap/v2.2` `4ab5f75` → `1ab542c`. Seven commits, `rebase --onto` from fork
+  `bc4f06e`. Two conflicts, both a single `match` arm, both keep-both:
+  `apex/src/agent.rs` (p1-020's `AgentCmd::Statusline` beside this branch's
+  actor-carrying `AgentCmd::Origin`) and `apex/src/main.rs` (`Cmd::Devices`
+  beside `Cmd::Remote`). `09c977d`'s two *courtesy* clippy fixes in the
+  Cloudflare tests were **dropped**, exactly as its own commit message invited:
+  the tip had already fixed both independently — `OperationCase` where this
+  branch wrote `OperationRow` for the same `type_complexity` lint, and a
+  byte-identical raw-string replacement for the empty `format!`. `cargo test
+  --locked --workspace` 1854/1 → **1964 passed / 1 failed**: +110 tests, zero
+  removed, zero new failures, 29 → 33 binaries. `run-clippy.sh` PASS rc=0 with
+  the two new crates. The single failure is
+  `renewing_a_grant_that_does_not_exist_is_refused_without_asking_anybody` —
+  the pre-existing cgroup/origin artifact, identical by name in integrate-4's
+  `b2d7905` baseline and in both of its landings, because `cargo test` runs
+  under a systemd cgroup that reads as `scheduled-job` and the origin gate
+  refuses before the existence check.
+
+### The service catalogue is shipped twice, and a landing only fed one
+
+`test-apex-firewall.sh` went 31/0/1 → **30/1/1** on the landing, on "the
+helper's built-in catalogue matches the shipped one". Neither branch is at
+fault and each is green alone. p1-050 forked at `bc4f06e`, before
+`task/p1-044-firewall-live` landed; at that fork point the service catalogue
+existed once, in `files/system/firewall/services`, so p1-050's `apex-remote tcp
+7717` entry went there and nowhere else. p1-044 then landed a *second* copy —
+a built-in fallback heredoc inside `files/system/libexec/apex-firewall`, for an
+image whose catalogue file is missing — and the suite asserts the two agree.
+The two copies only meet at integration.
+
+Fixed as `1ab542c`, restored to 31/0/1. The failure that preceded the commit is
+its own mutation proof: it named that exact line as the only difference. Every
+agent dispatched in round 5 whose work could touch a service entry was told
+about the duplication.
+
+**Generalisation worth keeping:** this is the third cross-branch interaction
+that only exists in the merged tree (integrate-3's compile break the
+cherry-pick could not see, integrate-4's frozen-clock false positive, this).
+A per-branch green is not evidence about the tip. Run the *branch's own* suites
+after landing, not just the workspace ones.
+
+- **2026-09-07 11:35** — Round 5 dispatched. All six round-4 agents were dead on
+  arrival (session ended ~10:30; `ListAgents` confirmed nothing alive and the
+  cards were 48–62 minutes stale). None was revived by message; the whole cost
+  of the changeover was one `resume.sh` and six briefs. `integrate-4` had
+  finished its landing list before it died, so its slot was freed. Five fresh
+  agents carry round-4 cards — `p0-014`, `p1-023`, `p2-010`, `p1-039`,
+  `followups-int3` — and the sixth is `p1-035`, which round 4 held under the
+  ceiling and recorded as first in line.
+
+  Statuses recorded for integrate-4's seven landings, which it deliberately left
+  to the orchestrator: P1-020, P1-021, P1-022, P1-048 done; **P1-044 partial →
+  done**, both halves landed; P1-038 stays partial (18 matrix rows need real
+  applications on a real session); P2-005/006/007 stay partial (every remainder
+  is hardware nobody here has). Plus this round's landing: P1-050 done,
+  P1-051/P1-052 partial. Counts 46/30/49/2 → **47/29/49/2**.
+
+  Two durability holes were closed at dispatch rather than reported. `p2-010`
+  had five commits that existed only on its own disk, covered by
+  `refs/wip/wt-p2-010-` and nothing else; its card's order (mutation battery,
+  then push) was deliberately reversed in the brief — a green measurement of
+  unpushed work is worth nothing if the machine goes down. `task/p1-023-push-to-talk-daemon`
+  was not on origin at all and carried two uncommitted files, so that agent's
+  first two instructions are commit, then `push -u`.
+
+  `queue.json`'s `p1-050` unit was **replaced** by `p1-052-relay`. Left alone it
+  would have gone on offering finished work: the report showed it as HELD "after
+  p0-014", one dependency away from being dispatched a second time. The new unit
+  names only what is actually left — no relay Worker or Durable Object is
+  deployed, no reconnect across network changes, no mDNS discovery, connection
+  quality unrendered, and apex-shell owes a QR page and a paired-device page —
+  and records that P1-051's real second factor is p1-053a's work, not its own,
+  so nobody closes P1-051 from there alone.

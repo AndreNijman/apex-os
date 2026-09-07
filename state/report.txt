@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-07 11:16 AWST
+APEX ROADMAP — resume report — 2026-09-07 11:32 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -7,50 +7,50 @@ APEX ROADMAP — resume report — 2026-09-07 11:16 AWST
   BASE          10         8         -         -
   L              -         1         -         2
   P0            19         6         -         -
-  P1            17        11        34         -
+  P1            18        10        34         -
   P2             -         4        15         -
-  ALL           46        30        49         2   of 127
+  ALL           47        29        49         2   of 127
 
   P0 not done: P0-001(part), P0-002(part), P0-007(part), P0-014(part), P0-015(part), P0-021(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  integrate-4 unknown    (integration only)                 roadmap/v2.2
-             head 4ab5f75 feat(agent): the model, the context and the rate limit
-             dirty 0 file(s), 0 unpushed, card 48m
-             NEXT **ALL SEVEN BRANCHES ARE LANDED AND PUSHED.**
+  p0-014     ALIVE      P0-014,P0-015                      task/p0-014-remote-lock
+             head a3bf2a8 feat(webauthn): a security key's assertion, checked ag
+             dirty 0 file(s), 0 unpushed, card 1m
+             NEXT **Commit 2 of 3**: the `validate`/`validate_for` gate in
 
-  p0-014     unknown    P0-014,P0-015                      task/p0-014-remote-lock
-             head 3c3abd3 test(request): the root approval path needed a real ui
-             dirty 3 file(s), 0 unpushed, card 62m
-             NEXT P0-014 remainder 1, split into three independently mergeable commi
-
-  p1-023     unknown    (red suites),(pipefail sweep),P1-023,P1-024,P1-029 task/p1-023-handoff-lifecycle
+  p1-023     ALIVE      (red suites),(pipefail sweep),P1-023,P1-024,P1-029 task/p1-023-handoff-lifecycle
              head acd985d ci(voice): the push-to-talk suite was written but noth
-             dirty 0 file(s), 0 unpushed, card 49m
+             dirty 0 file(s), 0 unpushed, card 65m
              NEXT Add the `voice-ptt` entry to KeybindService.qml `_defaults` so the
 
-  p2-010     unknown    P2-010,P2-011,P2-014,P2-015        task/p2-010-hardware-storage
+  p2-010     ALIVE      P2-010,P2-011,P2-014,P2-015        task/p2-010-hardware-storage
              head 1dd0b13 style(storage): two lints that only became visible onc
-             dirty 0 file(s), 5 unpushed, card 53m
-             NEXT Run the mutation battery over the storage commits (script at
+             dirty 0 file(s), 0 unpushed, card 2m
+             NEXT Re-run of the mutation battery at HEAD `1dd0b13` is IN FLIGHT — ba
 
-  p1-039     unknown    P1-039,P1-040,P1-041,P1-042,P1-043 task/p1-039-display-colour
+  p1-039     ALIVE      P1-039,P1-040,P1-041,P1-042,P1-043 task/p1-039-display-colour
              head 07c2620 fix(display): the temporary apply asks the engine to s
-             dirty 0 file(s), 0 unpushed, card 53m
+             dirty 0 file(s), 0 unpushed, card 68m
              NEXT P1-041 colour, engine half: add a `color` verb to
 
-  followups-int3 unknown    (hardening)                        task/followups-int3
+  followups-int3 ALIVE      (hardening)                        task/followups-int3
              head 3a50741 refactor(secret): one curl in this build, and a contra
-             dirty 0 file(s), 0 unpushed, card 48m
+             dirty 0 file(s), 0 unpushed, card 64m
              NEXT Item 4 (last): document `apex mcp connect` / `list` / `run` / `con
+
+  p1-035     ALIVE      P1-035,P1-036,P1-037               task/p1-035-agent-tooling
+             head 83ef1e0 feat(agent): a screenshot in front of you could not be
+             dirty 1 file(s), 0 unpushed, card 2m
+             NEXT Run `/var/tmp/apex-work/wt-p1-035/.mutate.sh 1` … `5` (the five ow
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 4ab5f75 feat(agent): the model, the context and the rate limit
+  int-os:  tip 1ab542c fix(firewall): the catalogue is shipped twice, and the
     task/followups-int3
       0fc6a4d fix(secret): the broker's curl read the owner's ~/.curlrc   [4/10 added lines on tip]
       400af1c fix(secret): make "reaches the same thing everywhere" a declar   [2/10 added lines on tip]
@@ -59,6 +59,7 @@ APEX ROADMAP — resume report — 2026-09-07 11:16 AWST
     task/p0-014-remote-lock
       cbe09d8 feat(lock): §7's lock rules were a switch with no wire running   [2/10 added lines on tip]
       3c3abd3 test(request): the root approval path needed a real uid 0, not   [2/10 added lines on tip]
+      a3bf2a8 feat(webauthn): a security key's assertion, checked against ve   [0/10 added lines on tip]
     task/p1-035-agent-tooling
       1bb5db4 fix(agent): a test daemon and the real one shared every sessio   [1/10 added lines on tip]
       83ef1e0 feat(agent): a screenshot in front of you could not be handed    [1/10 added lines on tip]
@@ -66,15 +67,13 @@ APEX ROADMAP — resume report — 2026-09-07 11:16 AWST
       166f089 feat(gpu): AMD and Intel had no GPU handling at all, and a hyb   [2/10 added lines on tip]
       0b0cced fix(display): every apply persisted, so a session that died mi   [0/10 added lines on tip]
     task/p1-050-remote-protocol
-      7041b74 fix(agent): a proxy's origin was whatever its cgroup said, and   [1/10 added lines on tip]
-      05c73da feat(remote): a phone has one channel, and the daemon's protoc   [2/10 added lines on tip]
-      6f6246e feat(remote): the desktop half, and it is a client of the runt   [2/10 added lines on tip]
-      71f8a90 test(remote): the pairing gate passed with the check replaced    [2/10 added lines on tip]
-      09c977d fix(clippy): the integration tip was not clean, and two of the   [1/10 added lines on tip]
-      17b18c4 test(remote): a phone approving root, demonstrated rather than   [1/10 added lines on tip]
-      322fa45 fix(remote): the handshake deadline was cleared before it coul   [0/10 added lines on tip]
+      09c977d fix(clippy): the integration tip was not clean, and two of the   [2/10 added lines on tip]
     task/p2-010-hardware-storage
       ee30c3b feat(qualify): a machine's compatibility record existed once,    [2/10 added lines on tip]
+      df4139d feat(storage): a failing disk read as a disk nobody could meas   [2/10 added lines on tip]
+      604e885 fix(storage): a refused SMART read named the refusal and not t   [0/10 added lines on tip]
+      caf756a test(storage): two claims the suite made and never checked   [0/10 added lines on tip]
+      cef3979 style(secret): a three-deep tuple in a return type is parsed,    [1/6 added lines on tip]
 
   int-shell:  tip 690014a feat(gaming): a Gaming page, built for the machine tha
     fix/labwc-desktop-parity  — squash-merged, safe to delete
@@ -106,11 +105,11 @@ APEX ROADMAP — resume report — 2026-09-07 11:16 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 2min 45s Mon
+  snapshot timer: active   last 1min 52s Mon
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    a9a6d54  roadmap-state
+    apex-os    10410ff  roadmap-state
     apex-os    6c9c17f  wt-clippy-
     apex-os    1951fdc  wt-disposable-
     apex-os    0db0412  wt-followups-int3-
@@ -124,16 +123,16 @@ APEX ROADMAP — resume report — 2026-09-07 11:16 AWST
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
     apex-os    9b605a1  wt-p0-011b-
-    apex-os    e90d2a3  wt-p0-014-
+    apex-os    ce7c6f7  wt-p0-014-
     apex-os    580c657  wt-p0-019-os-
     apex-os    00c1973  wt-p0-025-os-
     apex-os    eda5ef8  wt-p1-001-
     apex-os    a23175f  wt-p1-002-
     apex-os    c260504  wt-p1-018-
     apex-os    7685dc3  wt-p1-020-os-
-    apex-os    33c308c  wt-p1-023-os-
+    apex-os    a5eaa43  wt-p1-023-os-
     apex-os    df682db  wt-p1-030-
-    apex-shell dc7b43c  apex-shell-
+    apex-shell 9b0c76f  apex-shell-
     apex-shell df979e1  int-shell-
     apex-shell 75049cf  wt-greeter-shell-
     apex-shell ed92eaa  wt-lockhint-
@@ -162,6 +161,7 @@ APEX ROADMAP — resume report — 2026-09-07 11:16 AWST
     followups-integrate-3 (hardening)                      Four follow-ups the third integration round routed onward
     p0-014         P0-014,P0-015                    Remote Control privilege policy and lock-state policy, wired
     p1-023         P1-023,P1-024,P1-029             Global push-to-talk routing, cross-agent handoff packet, loc
+    p1-035         P1-035,P1-036,P1-037             Screenshot/file injection into TUI agents, worktree test/con
     p1-039         P1-039,P1-040,P1-041,P1-042,P1   Night Light, mixed-DPI scaling, creator colour management, c
     p2-e           P2-010,P2-011,P2-014,P2-015      Hardware qualification database, agent cgroup budgets, Stora
 
@@ -177,18 +177,16 @@ APEX ROADMAP — resume report — 2026-09-07 11:16 AWST
     p1-014         P1-014,P1-015,P1-016,P1-017      Cloudflare environment protection, worktree preview environm
                    conflicts with p1-011
     p1-025         P1-025,P1-026,P1-027,P1-028      Skill inventory and audit, plugin provenance and isolation, 
-    p1-035         P1-035,P1-036,P1-037             Screenshot/file injection into TUI agents, worktree test/con
-                   conflicts with p1-030
+    p1-052-relay   P1-051,P1-052                    The APEX Remote remainder: relay, reconnect, mDNS, connectio
 
   HELD:
-    p1-050         after p0-014
     base-partials  after p1-039
     final          after *
 
   COMPLETE (every roadmap item done — not offered again).
   This says the WORK is done, not that it is landed — check the
   unlanded section above before assuming roadmap/v2.2 carries it:
-    p1-018, p1-020
+    p1-018, p1-020, p1-044
 
 ────────────────────────────────────────────────────────────────────────────
   how to resume
