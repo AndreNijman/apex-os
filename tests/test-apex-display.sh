@@ -382,6 +382,19 @@ icc(os.path.join(root, "icc/with-curve.icc"),  [b"desc", b"vcgt", b"wtpt"])
 icc(os.path.join(root, "icc/no-curve.icc"),    [b"desc", b"wtpt"])
 open(os.path.join(root, "icc/not-an-icc.icc"), "wb").write(b"this is not a profile" * 16)
 
+# A second not-an-ICC file, and the reason it exists: the one above is caught by
+# the tag-count sanity check on its own, because its bytes at offset 128 read as
+# 1.77 billion tags. So it does NOT exercise the 'acsp' file-signature check —
+# MEASURED, by deleting that check and watching the suite stay green at 67/0.
+# This one is a PNG whose bytes at 128..132 happen to say "two tags", which is
+# entirely plausible. Without the signature check it parses as a real tag table,
+# finds no vcgt among the zeroed entries, and answers "no curve" — silently
+# turning "I cannot read this file" into "this file has no calibration in it",
+# which are opposite things to tell someone about their monitor profile.
+plausible = bytearray(b"\x89PNG\r\n\x1a\n" + b"\x00" * 192)
+plausible[128:132] = struct.pack(">I", 2)
+open(os.path.join(root, "icc/png-with-plausible-tagcount.icc"), "wb").write(bytes(plausible))
+
 def edid(path, mfg, name, serial, hdr):
     b = bytearray(128)
     b[0:8] = b"\x00\xff\xff\xff\xff\xff\xff\x00"
@@ -534,6 +547,14 @@ print(m.icc_has_vcgt('$CROOT/icc/not-an-icc.icc'), m.icc_has_vcgt('$CROOT/icc/ab
 [ "$noticc" = "None None" ] \
     && ok "a file that is not an ICC profile answers 'unknown', not 'no curve'" \
     || bad "a file that is not an ICC profile answers 'unknown', not 'no curve' (got $noticc)"
+# Specifically the file-signature check, which the fixture above does not reach.
+sigcheck="$(PATH="$CROOT/bin" "$PY" -c "
+import importlib.util as u, importlib.machinery as mach, sys
+s = u.spec_from_loader('e', mach.SourceFileLoader('e', '$GEN')); m = u.module_from_spec(s); s.loader.exec_module(m)
+print(m.icc_has_vcgt('$CROOT/icc/png-with-plausible-tagcount.icc'))")"
+[ "$sigcheck" = "None" ] \
+    && ok "a non-ICC file with a plausible tag count is still 'unknown', not 'no curve'" \
+    || bad "a non-ICC file with a plausible tag count is still 'unknown', not 'no curve' (got $sigcheck)"
 
 # ── HDR is read off the panel, not guessed ──────────────────────────────────
 hdr_sdr="$(printf '%s' "$state" | jqp '[o["hdr"] for o in d["outputs"] if o["name"]=="eDP-1"][0]["static_metadata"]')"
