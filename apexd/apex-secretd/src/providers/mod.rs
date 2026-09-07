@@ -176,6 +176,10 @@ worker = "project"
         let registry = default_registry(run_dir).expect("registry");
         // Safe: getuid cannot fail.
         let owner = crate::broker::owner(unsafe { libc::getuid() }).expect("own uid");
+        // MCP-shaped, because `mcp.request` is the only operation that carries
+        // the claim today. A provider whose `bind` needs a different record
+        // will hit the "binds in NEITHER project" panic below, which is the
+        // signal to add its own fixture here rather than to loosen the check.
         let service = ServiceInfo {
             service: "memory".into(),
             host: "127.0.0.1".into(),
@@ -224,10 +228,16 @@ worker = "project"
                          difference is harmless and this test needs to say why."
                     );
                 }
-                (Err(a), Err(b)) => assert_eq!(
-                    a.to_string(),
-                    b.to_string(),
-                    "'{id}' refuses differently depending on the project"
+                // Not "the same refusal in both, so it is consistent". A
+                // provider whose `bind` fails in BOTH directories for a reason
+                // that belongs to this fixture — a `ServiceInfo` of the wrong
+                // shape, a missing path — would make this loop bind nothing and
+                // call the claim proven. That is the same silent pass, in a new
+                // coat. Refuse it and make somebody extend the fixture.
+                (Err(a), Err(b)) => panic!(
+                    "'{id}' binds in NEITHER project with this fixture ({a} / {b}), so \
+                     nothing about its claim was checked. Extend the fixture below \
+                     until it binds; a test that binds nothing proves nothing."
                 ),
                 _ => panic!(
                     "'{id}' binds in one project and not the other: {in_bound:?} vs {in_bare:?}"
