@@ -25,6 +25,7 @@ mod qualify;
 mod schema;
 mod request;
 mod secret;
+mod storage;
 mod task;
 mod touchpad;
 mod trust;
@@ -133,6 +134,17 @@ enum Cmd {
     Qualify {
         #[command(subcommand)]
         cmd: qualify::QualifyCmd,
+    },
+    /// The disks in this machine, their health, and what nobody could ask
+    /// them (§48).
+    ///
+    /// Wear, temperature, TRIM, encryption, mount state and free space, with
+    /// every row carrying either a measurement or the reason there is none.
+    /// Reading needs no root except for the SMART log, which reports as
+    /// unavailable with the remedy rather than disappearing.
+    Storage {
+        #[command(subcommand)]
+        cmd: storage::StorageCmd,
     },
     /// Persistent state: which schema each store is on, and what a rollback
     /// would do to it (§25).
@@ -1218,6 +1230,7 @@ async fn main() {
         // Rollback and Pin.
         Cmd::Channel { cmd } => channel::main(cmd),
         Cmd::Qualify { cmd } => qualify::main(cmd),
+        Cmd::Storage { cmd } => storage::main(cmd),
         Cmd::Schema { cmd } => schema::main(cmd),
         Cmd::Trust(args) => trust::main(args),
         // Read-only except for `add`/`remove`/`probe`, which write only the
@@ -2494,6 +2507,14 @@ async fn cmd_doctor(json: bool) -> i32 {
         ok: metrics_up,
         what: "metrics endpoint reachable on 127.0.0.1:9723".to_string(),
     });
+
+    // §48: disk-health warnings reach the doctor. Only the rows with something
+    // to do become a WARN — a row nobody could measure is printed with its
+    // reason and passes, because `apex doctor` runs unprivileged and a SMART
+    // log nobody could open must not turn every run red.
+    for (ok, what) in storage::doctor_lines(&storage::Roots::from_env()) {
+        checks.push(recover::Check { ok, what });
+    }
 
     print!("{}", recover::render_doctor(&checks, json));
     0
