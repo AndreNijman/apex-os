@@ -106,9 +106,33 @@ pub fn from_read(what: &str, r: Result<String, std::io::Error>) -> Reading<Strin
     match r {
         Ok(s) => Reading::Known(s.trim().to_string()),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            Reading::Unavailable(format!("{what}: permission denied — run it with sudo"))
+            Reading::Unavailable(format!("{what}: permission denied{REMEDY}"))
         }
         Err(e) => Reading::Unavailable(format!("{what}: {e}")),
+    }
+}
+
+/// The next step a refused read gets, wherever the refusal came from.
+///
+/// One constant because the remedy has to be identical in all three surfaces
+/// — the report, `--json` and `apex doctor` — and because the human-mode
+/// footer is not a substitute. A caller reading the JSON, or a notifier
+/// reading the doctor line, sees only the row.
+pub const REMEDY: &str = " — run it with sudo";
+
+/// Apply the EACCES rule to a sentence rather than to an `io::Error`.
+///
+/// [`from_read`] has a kind to match on. smartctl has none to give: it prints
+/// the refusal into its `messages` array and exits 2, so the text is the only
+/// thing there is. Both paths end at the same remedy, because "Permission
+/// denied" on its own tells a user the read failed and not what to do about
+/// it — which is the defect this whole module was written around.
+fn remedy_for(said: &str) -> &'static str {
+    let lower = said.to_ascii_lowercase();
+    if lower.contains("permission denied") || lower.contains("operation not permitted") {
+        REMEDY
+    } else {
+        ""
     }
 }
 
@@ -209,7 +233,7 @@ pub fn parse_smart(text: &str, exit_code: i32) -> Result<Smart, String> {
             .and_then(|m| m["string"].as_str())
             .map(str::to_string);
         return Err(match said {
-            Some(s) => format!("{s} ({why})"),
+            Some(s) => format!("{s} ({why}){}", remedy_for(&s)),
             None => why.to_string(),
         });
     }
@@ -585,6 +609,19 @@ mod tests {
     fn a_refused_open_is_an_error_carrying_what_smartctl_said() {
         let e = parse_smart(REFUSED, 2).expect_err("a refused open parsed as health data");
         assert!(e.contains("Permission denied"), "{e}");
+    }
+
+    #[test]
+    fn a_refused_open_names_the_remedy_in_the_row_and_not_only_in_a_footer() {
+        // The row is what reaches `--json`, `apex storage warnings` and the
+        // doctor line. A remedy printed only in the human-mode footer is a
+        // remedy three of the four surfaces do not have.
+        let e = parse_smart(REFUSED, 2).expect_err("a refused open parsed as health data");
+        assert!(e.ends_with(REMEDY), "{e}");
+        // And a read that failed for some other reason is not told to use
+        // sudo, which would send a user to a password prompt that fixes
+        // nothing.
+        assert_eq!(remedy_for("a mandatory SMART command failed"), "");
     }
 
     #[test]
