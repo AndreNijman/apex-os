@@ -41,10 +41,22 @@ which validates a layout without applying it.
 
 usage:
   apex-display-apply list                      outputs as JSON
-  apex-display-apply apply [--model PATH]      apply the model, live
+  apex-display-apply apply [--model PATH]      apply the model, live AND persist
+  apex-display-apply apply --no-persist        apply live ONLY; nothing on disk
   apex-display-apply save                      persist ONLY; never touches hardware
   apex-display-apply --dry-run apply           validate without applying
   apex-display-apply --self-test               check the generators
+
+## Why `apply --no-persist` exists
+
+A layout the user has not confirmed yet must not outlive the session that is
+asking about it. APEX Settings applies a candidate layout, starts a countdown
+and reverts if nobody says Keep — but `apply` persisted unconditionally, so a
+session that died during those fifteen seconds came back at the next login on
+the layout nobody confirmed, with kanshi reapplying it on every hotplug and no
+transaction left anywhere to say it was never confirmed. `--no-persist` makes
+the temporary apply genuinely temporary; Keep then runs `save`, which is
+persistence with no hardware write. See ROADMAP/design/P0-018-display-recovery.md.
 """
 import argparse
 import json
@@ -599,11 +611,22 @@ def main(argv=None):
                     choices=("list", "apply", "save", "compositor"))
     ap.add_argument("--model", default=MODEL_PATH)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-persist", action="store_true",
+                    help="apply live without writing kanshi/Hyprland persistence; "
+                         "for a layout the user has not confirmed yet")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args(argv)
 
     if args.self_test:
         return self_test()
+
+    # `save` IS the persistence verb, so `save --no-persist` asks for nothing at
+    # all. Silently doing nothing would look exactly like a successful save to
+    # the caller that just promoted a model, so it is refused by name.
+    if args.no_persist and args.action != "apply":
+        print(f"apex-display: --no-persist applies to `apply`, not `{args.action}`",
+              file=sys.stderr)
+        return 2
 
     if args.action == "compositor":
         print(compositor())
@@ -644,7 +667,12 @@ def main(argv=None):
             return 1
 
     # Persist on both apply and save: a layout that is applied but not persisted
-    # is a layout the user has to set again after every logout.
+    # is a layout the user has to set again after every logout. The one exception
+    # is an apply the user has not confirmed yet — see --no-persist above.
+    if args.no_persist:
+        print("apex-display: --no-persist; the live layout changed and nothing "
+              "was written", file=sys.stderr)
+        return 0
     for n in persist(model, live, args.dry_run):
         print(f"apex-display: {n}", file=sys.stderr)
     return 0
