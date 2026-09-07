@@ -186,7 +186,9 @@ for u, b in held[:10]:
     print(f"    {u['id']:14} after {', '.join(b)[:44]}")
 if done_units:
     print()
-    print("  COMPLETE (every roadmap item done — not offered again):")
+    print("  COMPLETE (every roadmap item done — not offered again).")
+    print("  This says the WORK is done, not that it is landed — check the")
+    print("  unlanded section above before assuming roadmap/v2.2 carries it:")
     print("   ", ", ".join(u['id'] for u in done_units))
 PY
 
