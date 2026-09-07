@@ -1,69 +1,44 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T05:44+08:00",
+  "updated": "2026-09-07T10:05+08:00",
+  "_round": "Round 4. The six agents dispatched 05:05-06:00 on 2026-09-07 were all dead by 09:57 (session ended, not failure). Their branches and worktrees are intact and their cards are current. Five of the six units below are FRESH agents carrying those cards; none was revived by SendMessage.",
+  "_deliberately_held": {
+    "p1-050": "P1-050 and P1-051 are DONE and pushed (7 commits, tip 322fa45). NOT in integrate-4's landing list and no fresh agent was dispatched for it -- both on purpose. P1-052's remainder is a Cloudflare Worker + Durable Object relay, reconnect logic, mDNS discovery and connection quality, plus QR rendering and a paired-device page that belong in apex-shell. That is a unit of its own and it did not fit under the ceiling of six. Do not read its absence as an oversight.",
+    "p1-035": "P1-035 is implemented and green (test-agent-inject.sh 40/0), committed and pushed (tip 83ef1e0), with 1 dirty file and five owed mutations listed on its card. P1-036 and P1-037 are untouched. Held only for the ceiling; first in line next round.",
+    "p1-038-hardware": "The 18 labwc matrix rows need real applications on a real session. Cannot be done headless and cannot be done on the L16 while Andre is using it. A katana job or a job for Andre with a checklist -- not dispatchable tonight."
+  },
   "agents": [
     {
-      "slug": "p1-050",
+      "slug": "integrate-4",
       "items": [
-        "P1-050",
-        "P1-051",
-        "P1-052"
+        "(integration only)"
       ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-050",
-      "branch": "task/p1-050-remote-protocol",
-      "agent_id": "a296418c4cf5d4b69",
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell",
+      "branch": "roadmap/v2.2",
+      "agent_id": "a4d2d3505491923dd",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T05:05+08:00",
-      "title": "provider-neutral remote agent protocol, device pairing, LAN and relay transport"
-    },
-    {
-      "slug": "p1-039",
-      "items": [
-        "P1-039",
-        "P1-040",
-        "P1-041",
-        "P1-042",
-        "P1-043"
+      "dispatched": "2026-09-07T10:05+08:00",
+      "title": "land p1-044 (both), p2-005, p1-020 (both), p1-038-labwc-parity, p1-048-guided-settings onto roadmap/v2.2",
+      "landing": [
+        "apex-os: task/p1-044-firewall-live 4cc3f4b",
+        "apex-os: task/p2-005-device-maturity 1adbdb2",
+        "apex-os: task/p1-020-agent-graph-daemon 85e3e2a",
+        "apex-shell: task/p1-020-agent-graph bb69775",
+        "apex-shell: task/p1-044-firewall-settings e51412b",
+        "apex-shell: task/p1-038-labwc-parity d2523e2",
+        "apex-shell: task/p1-048-guided-settings 0b36897"
       ],
-      "repo": "apex-shell",
-      "worktree": "/var/tmp/apex-work/wt-p1-039",
-      "branch": "task/p1-039-display-colour",
-      "agent_id": "abf5f52382e24938e",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T05:15+08:00",
-      "title": "Night Light, mixed-DPI scaling, creator colour management, creator input/audio, GPU parity"
-    },
-    {
-      "slug": "p1-035",
-      "items": [
-        "P1-035",
-        "P1-036",
-        "P1-037"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-035",
-      "branch": "task/p1-035-agent-tooling",
-      "agent_id": "a982ab6a7fa671176",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T05:25+08:00",
-      "title": "screenshot/file injection into TUI agents, worktree status, disposable capsules"
-    },
-    {
-      "slug": "p2-010",
-      "items": [
-        "P2-010",
-        "P2-011",
-        "P2-014",
-        "P2-015"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p2-010",
-      "branch": "task/p2-010-hardware-storage",
-      "agent_id": "afe0623c24f524eaa",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T05:35+08:00",
-      "title": "hardware qualification database, agent cgroup budgets, Storage Manager, firmware lifecycle"
+      "must_not_touch": [
+        "apex-os: task/p0-014-remote-lock",
+        "apex-os: task/p1-035-agent-tooling",
+        "apex-os: task/p1-043-gpu-parity",
+        "apex-os: task/p1-050-remote-protocol",
+        "apex-os: task/p2-010-hardware-storage",
+        "apex-shell: task/p0-015-lock-tests",
+        "apex-shell: task/p1-039-display-colour",
+        "apex-shell: task/p1-023-handoff-lifecycle"
+      ]
     },
     {
       "slug": "p0-014",
@@ -72,12 +47,13 @@
         "P0-015"
       ],
       "repo": "both",
-      "worktree": "/var/tmp/apex-work/wt-p0-014",
-      "branch": "task/p0-014-remote-lock",
-      "agent_id": "aea4c89ecac1a21da",
+      "worktree": "/var/tmp/apex-work/wt-p0-014 and /var/tmp/apex-work/wt-p0-015-shell",
+      "branch": "task/p0-014-remote-lock (os) + task/p0-015-lock-tests (shell)",
+      "agent_id": "af470f7add6e91d6c",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T05:45+08:00",
-      "title": "finish the Remote Control privilege policy and the lock-state policy \u2014 closes P0"
+      "dispatched": "2026-09-07T10:05+08:00",
+      "fresh_agent_for_card": "p0-014",
+      "title": "CTAP2 assertion verifier behind --origin-policy remote -- the last P0 work in the roadmap"
     },
     {
       "slug": "p1-023",
@@ -91,10 +67,64 @@
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p1-023",
       "branch": "task/p1-023-handoff-lifecycle",
-      "agent_id": "a546a74ab53f5684a",
+      "agent_id": "ace9f96b23a98cc3f",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-07T06:00+08:00",
-      "title": "fix two red suites and the grep -q pipefail flake in eleven more, then PTT, handoff packet, lifecycle types"
+      "dispatched": "2026-09-07T10:05+08:00",
+      "fresh_agent_for_card": "p1-023",
+      "title": "gate repair (Agent Center invariants, pipefail sweep: 26 files / 87 sites), then PTT, handoff packet, lifecycle types",
+      "at_dispatch": "BRANCH WAS NOT ON ORIGIN -- 2 local commits (1788443, da50162) covered only by refs/wip/wt-p1-023- at 901009a, plus 24 uncommitted files. Agent's first two instructions are push -u, then commit the 24."
+    },
+    {
+      "slug": "p2-010",
+      "items": [
+        "P2-010",
+        "P2-011",
+        "P2-014",
+        "P2-015"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p2-010",
+      "branch": "task/p2-010-hardware-storage",
+      "agent_id": "a1e51b387d31a9bab",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T10:05+08:00",
+      "fresh_agent_for_card": "p2-010",
+      "title": "hardware qualification database, agent cgroup budgets, Storage Manager, firmware lifecycle",
+      "at_dispatch": "10 uncommitted files from the predecessor. Agent told to commit them before anything else -- never checkout/reset/stash first."
+    },
+    {
+      "slug": "p1-039",
+      "items": [
+        "P1-039",
+        "P1-040",
+        "P1-041",
+        "P1-042",
+        "P1-043"
+      ],
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/wt-p1-039 and /var/tmp/apex-work/wt-p1-043",
+      "branch": "task/p1-039-display-colour (shell) + task/p1-043-gpu-parity (os)",
+      "agent_id": "a8666e8dce5bef33d",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T10:05+08:00",
+      "fresh_agent_for_card": "p1-039",
+      "title": "P1-041 creator colour management then P1-042 creator input/audio; P1-039/040 already committed",
+      "at_dispatch": "Both worktrees clean and pushed. katana read-only until pgrep steam|proton is empty -- restated in the brief because the GPU leg goes there."
+    },
+    {
+      "slug": "followups-int3",
+      "items": [
+        "(hardening)"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-followups-int3",
+      "branch": "task/followups-int3",
+      "agent_id": "a51d3199218d2c8ce",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-07T10:05+08:00",
+      "queue_id": "followups-integrate-3",
+      "title": "two security fixes (same_everywhere on OperationSpec; run_curl's bare curl reading the owner's ~/.curlrc), api.rs onto run_curl, p1-018 docs",
+      "at_dispatch": "New unit, new branch forked from origin/roadmap/v2.2 at dispatch time. Told the integration tip will move under it and NOT to rebase mid-work."
     }
   ]
 }
