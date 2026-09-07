@@ -113,6 +113,17 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: ResourceKind::None,
             params: &[],
             aliases: &[],
+            // **The declaration that forced `same_everywhere` to be a field.**
+            //
+            // This operation names nothing — no resource, no parameters — and
+            // it still resolves against the directory the caller is standing
+            // in: `resolve` reads the project's own `apex.toml`, and answers
+            // `GET /accounts/{id}` for the account that file binds, or
+            // `GET /accounts` for every account the token can see when it
+            // binds none. Two projects, two different requests, one stored
+            // token. So `*` is refused, and `apex cf status` needs a grant in
+            // the project it is run in.
+            same_everywhere: false,
         },
         OperationSpec {
             id: "cloudflare.worker.read",
@@ -121,6 +132,10 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: NAMED,
             params: &[],
             aliases: &[],
+            // Every other Cloudflare operation names a worker, which the
+            // project's own `apex.toml` maps to an account and an
+            // environment. Per project by construction.
+            same_everywhere: false,
         },
         OperationSpec {
             id: "cloudflare.worker.upload-version",
@@ -144,6 +159,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
                 MESSAGE,
             ],
             aliases: &[],
+            same_everywhere: false,
         },
         OperationSpec {
             id: "cloudflare.worker.deploy",
@@ -153,6 +169,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: NAMED,
             params: &[VERSION, MESSAGE],
             aliases: &[],
+            same_everywhere: false,
         },
         OperationSpec {
             id: "cloudflare.worker.rollback",
@@ -162,6 +179,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: NAMED,
             params: &[VERSION, MESSAGE],
             aliases: &[],
+            same_everywhere: false,
         },
         OperationSpec {
             id: "cloudflare.worker.tail",
@@ -170,6 +188,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: NAMED,
             params: &[],
             aliases: &[],
+            same_everywhere: false,
         },
         OperationSpec {
             id: "cloudflare.worker.route.read",
@@ -178,6 +197,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: NAMED,
             params: &[],
             aliases: &[],
+            same_everywhere: false,
         },
     ],
 };
