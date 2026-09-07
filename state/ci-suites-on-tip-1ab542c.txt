@@ -1,0 +1,31 @@
+rc=0       tests/test-agent-profile.sh      profile: 48 passed, 0 failed
+rc=1       tests/test-apex-ai.sh            apex ai: 43 passed, 1 failed
+rc=0       tests/test-apex-blueprint.sh     apex-blueprint: 140 passed, 0 failed
+rc=0       tests/test-apex-channel.sh       22 passed, 0 failed
+rc=0       tests/test-apex-dispatch.sh      apex dispatch: 55 passed, 0 failed
+rc=0       tests/test-apex-display.sh       apex-display: 29 passed, 0 failed
+rc=0       tests/test-apex-env.sh           apex-env: 265 passed, 0 failed, 0 skipped
+rc=0       tests/test-apex-firstrun.sh      apex-shell-firstrun: 59 passed, 0 failed, 0 skipped
+rc=0       tests/test-apex-gaming.sh        apex-gaming: 114 passed, 0 failed
+rc=0       tests/test-apex-host.sh          apex host: 52 passed, 0 failed
+rc=0       tests/test-apex-hypr-lua.sh      apex hypr-lua: 22 passed, 0 failed, 0 skipped
+SKIP-LIVE  tests/test-apex-input-live.sh  (never a window on Andre's desktop)
+rc=0       tests/test-apex-input.sh         apex-input: 109 passed, 0 failed, 0 skipped
+rc=0       tests/test-apex-modes.sh         apex-modes: 67 passed, 0 failed
+rc=0       tests/test-apex-pkg.sh           apex-pkg: 78 passed, 0 failed, 0 skipped
+rc=0       tests/test-apex-plugin.sh        apex-plugin: 117 passed, 0 failed
+rc=0       tests/test-apex-recover.sh       apex recover / disposable: 79 passed, 0 failed (structural only)
+rc=0       tests/test-apex-resolve.sh       apex-resolve: 88 passed, 0 failed
+rc=0       tests/test-apex-schema.sh        15 passed, 0 failed
+rc=0       tests/test-apex-task.sh          apex task: 71 passed, 0 failed
+rc=0       tests/test-apex-trust.sh         6 passed, 0 failed
+rc=0       tests/test-apex-verbs.sh         apex verbs: 44 passed, 0 failed
+rc=0       tests/test-boot-v2.sh            == test-boot-v2: 60 passed, 0 failed ==
+rc=0       tests/test-labwc-keybinds.sh     
+rc=0       tests/test-mux-layouts.sh        mux-layouts: 46 passed, 0 failed, 0 skipped
+rc=1       tests/test-privilege-requests.sh privilege: 30 passed, 8 failed
+rc=0       tests/test-project-layout.sh     project-layout: 23 passed, 0 failed
+rc=0       tests/test-secret-broker.sh      secret-broker: 65 passed, 0 failed
+rc=0       tests/test-secret-migrate.sh     migrate: 34 passed, 0 failed
+rc=0       tests/test-shell-agent.sh        shell-agent: 58 passed, 0 failed, 0 skipped
+DONE
