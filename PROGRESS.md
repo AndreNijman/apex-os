@@ -1031,3 +1031,46 @@ Both branches are safe to delete.
 → real-command, never the reverse. It was the one round-5 finding with no owner;
 it is now written into `dispatch.json` `_deliberately_held` for the next
 integrate round, against the tip, so it is not lost a second time.
+
+- **2026-09-07 15:32** — **PAUSED at Andre's request** ("pause work, im shutting
+  off my laptop"). Not a limit, not a crash — a deliberate stop, and the first
+  one this program has had.
+
+  All six round-6 agents were stopped with `TaskStop` rather than left to be
+  killed by the shutdown, then `apex-wip-snapshot.service` was run by hand
+  twice. Saved: `wt-p1-035` (10 files, +1713), `wt-p1-039` (5 files, +1537),
+  `wt-p2-010` (2 files, +512/−17), `wt-trust` (2 files, +1450/−187), and
+  apex-shell's `p3/recovery-ui` (1 file). Every other worktree came back clean
+  with `ahead=0`. `refs/wip/roadmap-state` was already current — the 3-minute
+  timer had taken this directory's edits before the pause, which is why it
+  printed no line.
+
+  **`p1-023` is the one unit that got work onto origin this round:** `6b469ec`
+  (the whole push-to-talk wiring — keybind, IPC handler, qmldir singleton,
+  `PushToTalkService.qml`, `AgentService.lastFocusedId`, the CI step, a 324-line
+  static suite) and `f5b494b` (the notch microphone indicator plus a `dismiss`
+  event, so a refusal stops being permanent furniture). Its reported counts:
+  `check-push-to-talk.sh` 42/0, and 16/18 against the pre-wiring tree — it
+  fails on absence, which is the only way a static suite is worth anything;
+  node suite 57 assertions; 14/14 mutants caught; all 17 static suites 462/0.
+  `check-color-tokens.sh` caught a hardcoded hex (22/0 → 19/3) and it moved to
+  `Theme.danger`/`Theme.subtext` without touching the allowlist.
+
+  **`autoresume` is disarmed** — `state/AUTORESUME` removed. The timer will keep
+  refreshing `report.txt` every five hours, including the once-on-next-boot
+  firing `Persistent=true` guarantees, but will start no Claude session.
+  Re-arm with `touch ROADMAP/state/AUTORESUME`; `dispatch.json` `_paused` holds
+  every agent's last known state and the per-worktree dirty counts.
+
+### Found at the pause, and deliberately left alone
+
+The **apex-os main clone** (`/var/home/andre/Projects/apex/apex-os`, not a
+worktree) is on a **detached HEAD in the middle of an interrupted rebase** —
+`.git/rebase-merge` exists — with **64 untracked files**. No round-6 work went
+near it; every agent works in `/var/tmp/apex-work/wt-*`. It is the "1 skipped
+mid-operation" line in the snapshot log, and that matters: those 64 untracked
+files are **not** covered by `refs/wip`. They look like leftovers of the
+interrupted rebase rather than unique work — `apexd/apex-aid/`,
+`apexd/apex/src/*.rs`, all present in branch tips — but nobody has verified
+that, so it was recorded rather than tidied. **Do not blind-`rebase --abort`
+it.** Inspect first, then decide.
