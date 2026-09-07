@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-07T11:35+08:00",
+  "updated": "2026-09-07T11:50+08:00",
   "_round": "Round 5. All six round-4 agents were dead on arrival this session (their session ended ~10:30; ListAgents confirmed nothing alive, cards 48-62m stale). None was revived by SendMessage. integrate-4 had finished its landing list before dying, so its slot was freed. FIVE of the six below are FRESH agents carrying round-4 cards -- p0-014, p1-023, p2-010, p1-039, followups-int3 -- and the sixth is p1-035, which round 4 held for the ceiling and recorded as first in line. Landing this round: task/p1-050-remote-protocol onto apex-os roadmap/v2.2 (4ab5f75 -> 1d4095c -> 1ab542c). No apex-shell landing: all three unlanded shell branches are mid-work and their fresh agents own them.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 4ab5f75 -> 1ab542c. task/p1-050-remote-protocol, 7 commits, rebase --onto from fork bc4f06e. Two keep-both conflicts (apex/src/agent.rs: p1-020's AgentCmd::Statusline beside this branch's actor-carrying AgentCmd::Origin; apex/src/main.rs: Cmd::Devices beside Cmd::Remote). 09c977d's two COURTESY clippy fixes in the Cloudflare tests were DROPPED as its own commit message invited -- the tip had already fixed both independently (OperationCase vs OperationRow for the same type_complexity lint; a byte-identical raw-string replacement for the empty format!). cargo test 1854/1 -> 1964/1 (+110 tests, 0 removed, 0 new failures, 29 -> 33 binaries); the 1 is the pre-existing cgroup/origin artifact, renewing_a_grant_that_does_not_exist_is_refused_without_asking_anybody, identical by name in integrate-4's baseline and both its landings. run-clippy.sh PASS rc=0. check-no-conflict-markers PASS. Then 1ab542c: a cross-branch fix the landing exposed -- the firewall service catalogue is shipped TWICE (files/system/firewall/services and a built-in fallback heredoc in files/system/libexec/apex-firewall) and tests/test-apex-firewall.sh asserts they agree; p1-050 forked before p1-044 landed the second copy, so the suite went 31/0/1 -> 30/1/1. Entry added to the helper, restored to 31/0/1.",
@@ -17,7 +17,10 @@
   "agents": [
     {
       "slug": "p0-014",
-      "items": ["P0-014", "P0-015"],
+      "items": [
+        "P0-014",
+        "P0-015"
+      ],
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p0-014",
       "branch": "task/p0-014-remote-lock",
@@ -33,7 +36,13 @@
     },
     {
       "slug": "p1-023",
-      "items": ["(red suites)", "(pipefail sweep)", "P1-023", "P1-024", "P1-029"],
+      "items": [
+        "(red suites)",
+        "(pipefail sweep)",
+        "P1-023",
+        "P1-024",
+        "P1-029"
+      ],
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p1-023",
       "branch": "task/p1-023-handoff-lifecycle",
@@ -49,7 +58,12 @@
     },
     {
       "slug": "p2-010",
-      "items": ["P2-010", "P2-011", "P2-014", "P2-015"],
+      "items": [
+        "P2-010",
+        "P2-011",
+        "P2-014",
+        "P2-015"
+      ],
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p2-010",
       "branch": "task/p2-010-hardware-storage",
@@ -63,7 +77,13 @@
     },
     {
       "slug": "p1-039",
-      "items": ["P1-039", "P1-040", "P1-041", "P1-042", "P1-043"],
+      "items": [
+        "P1-039",
+        "P1-040",
+        "P1-041",
+        "P1-042",
+        "P1-043"
+      ],
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p1-039",
       "branch": "task/p1-039-display-colour",
@@ -79,7 +99,9 @@
     },
     {
       "slug": "followups-int3",
-      "items": ["(hardening)"],
+      "items": [
+        "(hardening)"
+      ],
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-followups-int3",
       "branch": "task/followups-int3",
@@ -93,7 +115,11 @@
     },
     {
       "slug": "p1-035",
-      "items": ["P1-035", "P1-036", "P1-037"],
+      "items": [
+        "P1-035",
+        "P1-036",
+        "P1-037"
+      ],
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p1-035",
       "branch": "task/p1-035-agent-tooling",
@@ -107,5 +133,9 @@
       "conflicts_note": "queue.json lists p1-035 as conflicting with p1-030. That conflict is moot this round: p1-030 is not dispatched and is not in the unlanded set."
     }
   ],
-  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine."
+  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
+  "_findings": [
+    "ROADMAP/state/FINDINGS-round5.md \u2014 three defects found by running the TIP rather than a branch, all three checked to be pre-existing rather than assumed. (1) `apex ai status --json` returns prose, not JSON, on any machine with nvidia-smi installed but no loaded driver: gpu.rs detects 'no NVIDIA' by the binary being ABSENT, but the L16 has /usr/bin/nvidia-smi and it exits 9. Same 'permission denied is not absence' class as the ~14 already found, wearing 'driver not loaded'. Owner: P1-043, i.e. the live p1-039 agent. (2) `apex remote pair|devices|revoke|status|enable` is documented NOWHERE in docs/, and check-doc-verbs.sh structurally cannot catch it -- it validates documented-verb -> real-command, not the reverse. Owner: the next integrate or followups round, against the tip; followups-int3 was deliberately told not to do it from a stale base. (3) THE IMPORTANT ONE: tests/test-privilege-requests.sh is 30/8 on the tip AND 30/8 with the identical eight names in the identical order at the pre-landing tip 4ab5f75, and all eight fail for the same reason as the single cargo test failure that three integration rounds have written off as 'the cgroup/origin artifact' -- a test runner's cgroup reads as scheduled-job, so \u00a77's gate refuses a root approval before the behaviour under test is reached. That is nine unverified assertions across two harnesses, covering the approval path, including 'a denied request cannot be flipped to approved'. Not an artifact; a hole in the harness. p0-014's 3c3abd3 suggests it has already started on this class."
+  ],
+  "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt \u2014 the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk."
 }
