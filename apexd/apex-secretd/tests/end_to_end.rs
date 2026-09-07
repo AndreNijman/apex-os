@@ -1076,13 +1076,17 @@ fn a_credential_the_server_refuses_still_comes_back_as_a_successful_operation() 
 }
 
 #[test]
-fn a_grant_held_in_every_project_is_only_for_an_operation_that_names_nothing() {
+fn a_grant_held_in_every_project_is_only_for_an_operation_that_reaches_the_same_thing() {
     // MCP servers are global and grants are per project, so a memory server
     // defined once in `~/.claude.json` is present in every directory and
     // unauthorised in every new worktree until somebody grants it again. The
-    // `*` key closes that — and is refused for anything that acts on something
-    // the caller names, because the same grant there would be a different
-    // permission in every directory.
+    // `*` key closes that — and is refused for anything whose provider has not
+    // declared that it reaches the same thing in every project, because the
+    // same grant there would be a different permission in every directory.
+    //
+    // RENAMED from `..._that_names_nothing`: naming nothing was the rule this
+    // gate used to compute, and P1-002 landed the operation that satisfies it
+    // and is still refused.
     let provider = FakeMcp::start(false);
     let daemon = Daemon::start("everywhere");
     let granted = daemon.dir.join("granted");

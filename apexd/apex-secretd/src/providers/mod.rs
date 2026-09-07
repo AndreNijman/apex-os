@@ -83,26 +83,162 @@ mod tests {
     }
 
     #[test]
-    fn only_an_operation_that_names_nothing_can_be_granted_in_every_project() {
+    fn the_everywhere_gate_reads_the_operations_own_declaration() {
         // The gate on `apex secret grant --everywhere`, checked against the
-        // whole shipped vocabulary rather than against the one operation it
-        // was written for — so a provider added later that takes a resource
-        // cannot quietly become grantable everywhere by inheriting a default.
-        // Asserted on the GATE, not on `names_nothing`. P1-002 landed
-        // `cloudflare.account.read`, which declares no resource and no
-        // parameters — `names_nothing()` is true — but resolves the account out
-        // of the project's own `apex.toml`, so it reaches a different thing in a
-        // different directory. Conflating the declaration with the permission is
-        // exactly the "inheriting a default" this test exists to catch.
+        // whole shipped vocabulary rather than against the one operation it was
+        // written for.
+        //
+        // Two assertions, and the second is the one that stopped this being
+        // silent. The gate agrees with the declaration — it computes nothing of
+        // its own — and the set of operations that carry the claim is spelled
+        // out, so adding one is a line in this test somebody has to write on
+        // purpose. It is a review gate, not a safety property: the safety comes
+        // from the field being mandatory (there is no `Default` for
+        // `OperationSpec`) and from
+        // `an_operation_that_claims_to_reach_the_same_thing_everywhere_binds_
+        // the_same_in_two_projects` below, which asks the provider's `bind`
+        // rather than its declaration.
         let registry = default_registry(std::env::temp_dir()).expect("registry");
+        let mut everywhere = Vec::new();
         for id in registry.operation_ids() {
             let (_, op) = registry.lookup(&id).expect("declared");
             assert_eq!(
                 crate::service::may_be_granted_everywhere(op),
-                id == "mcp.request",
-                "'{id}' may be granted in every project: {}",
-                crate::service::may_be_granted_everywhere(op)
+                op.same_everywhere,
+                "the gate on '{id}' disagrees with its own declaration"
             );
+            if op.same_everywhere {
+                everywhere.push(id);
+            }
         }
+        assert_eq!(
+            everywhere,
+            vec!["mcp.request"],
+            "the set of operations grantable in every project changed; each one \
+             has to be true of the provider's `bind`, not just of its declaration"
+        );
+    }
+
+    /// The claim, asked of the provider instead of the declaration.
+    ///
+    /// `same_everywhere` says the operation reaches the same thing whichever
+    /// directory it is asked in. `bind` is where that is decided — it is handed
+    /// `req.project`, and what it does with it is the entire question — so this
+    /// binds every operation that carries the claim in **two different
+    /// projects** and requires the two `Bound`s to be identical. The endpoint
+    /// is not enough on its own: `cloudflare.account.read` resolves to the same
+    /// host either way and to a different *path*, which is why `detail` — the
+    /// sentence the framework pins and audits, and which the provider is
+    /// required to make name every value that decides where the request goes —
+    /// is compared too.
+    ///
+    /// **The two projects have to differ in a way a provider would read.** One
+    /// gets §13.1's `apex.toml` binding an account; the other is bare. Two
+    /// empty directories would make this pass for `cloudflare.account.read`,
+    /// which is the mutation it exists to fail on.
+    ///
+    /// What it does not prove: that a provider reads nothing else. A `bind`
+    /// keying on some third thing in the project — a lockfile, an env file —
+    /// would go unnoticed until that thing is planted here too. It catches the
+    /// mechanism every provider in this build actually uses.
+    #[test]
+    fn an_operation_that_claims_to_reach_the_same_thing_everywhere_binds_the_same_in_two_projects()
+    {
+        use crate::provider::Bind;
+        use apex_secret_core::operation::Params;
+        use apex_secret_core::store::ServiceInfo;
+
+        // §13.1's file, the same shape `providers::cloudflare::tests` uses.
+        const BOUND_PROJECT: &str = r#"
+[identity.cloudflare]
+account = "example-account"
+account_id = "0123456789abcdef0123456789abcdef"
+
+[cloudflare]
+zone = "example.com"
+zone_id = "fedcba9876543210fedcba9876543210"
+
+[cloudflare.production]
+worker = "project"
+"#;
+
+        let tag = format!("apex-everywhere-{}", std::process::id());
+        let root = std::env::temp_dir().join(&tag);
+        let bound_dir = root.join("bound");
+        let bare_dir = root.join("bare");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&bound_dir).expect("bound project");
+        std::fs::create_dir_all(&bare_dir).expect("bare project");
+        std::fs::write(bound_dir.join("apex.toml"), BOUND_PROJECT).expect("apex.toml");
+
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        let registry = default_registry(run_dir).expect("registry");
+        // Safe: getuid cannot fail.
+        let owner = crate::broker::owner(unsafe { libc::getuid() }).expect("own uid");
+        let service = ServiceInfo {
+            service: "memory".into(),
+            host: "127.0.0.1".into(),
+            scheme: "http".into(),
+            username: "x-access-token".into(),
+            path: "/mcp".into(),
+            auth: "bearer".into(),
+            port: Some(9000),
+            added: 0,
+        };
+        let params = Params::new();
+
+        let mut checked = 0;
+        for id in registry.operation_ids() {
+            let (provider, op) = registry.lookup(&id).expect("declared");
+            if !op.same_everywhere {
+                continue;
+            }
+            // Guaranteed by `ProviderSpec::validate`, restated here because the
+            // `Bind` below gives no resource and no parameters and would
+            // otherwise be testing a request the operation never takes.
+            assert!(op.names_nothing(), "'{id}' claims `*` and names something");
+
+            let bind = |project: &std::path::Path| {
+                provider.bind(&Bind {
+                    operation: op,
+                    resource: "",
+                    params: &params,
+                    body: br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                    project: project.to_str().expect("utf8"),
+                    service: &service,
+                    owner: &owner,
+                })
+            };
+            let in_bound = bind(&bound_dir);
+            let in_bare = bind(&bare_dir);
+            match (&in_bound, &in_bare) {
+                (Ok(a), Ok(b)) => {
+                    assert_eq!(
+                        (a.endpoint.to_string(), a.detail.as_str()),
+                        (b.endpoint.to_string(), b.detail.as_str()),
+                        "'{id}' claims to reach the same thing in every project, but \
+                         binding it in a project that binds an account and in one that \
+                         does not gives two different requests. Either its `bind` reads \
+                         the project — in which case `same_everywhere: false` — or the \
+                         difference is harmless and this test needs to say why."
+                    );
+                }
+                (Err(a), Err(b)) => assert_eq!(
+                    a.to_string(),
+                    b.to_string(),
+                    "'{id}' refuses differently depending on the project"
+                ),
+                _ => panic!(
+                    "'{id}' binds in one project and not the other: {in_bound:?} vs {in_bare:?}"
+                ),
+            }
+            checked += 1;
+        }
+        // A loop over an empty set proves nothing, and the whole point of the
+        // gate is that its set is small.
+        assert!(checked > 0, "no operation carries the claim; this test ran on nothing");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

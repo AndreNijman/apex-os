@@ -416,6 +416,49 @@ pub struct OperationSpec {
     /// canonical id is what gets stored and logged; an alias is only ever an
     /// input.
     pub aliases: &'static [&'static str],
+    /// **The provider's claim that this operation reaches the same thing no
+    /// matter which project it is asked in.**
+    ///
+    /// The one property that makes a grant safe to hold in every project — the
+    /// `*` key behind `apex secret grant --everywhere`. True means: whatever
+    /// directory the caller is standing in, the request goes to the endpoint
+    /// pinned when the credential was stored and asks it for the same thing, so
+    /// granting it everywhere widens *where it may be asked for* and not *what
+    /// it reaches*.
+    ///
+    /// ## Why this is a field and not a rule
+    ///
+    /// P1-018 computed it, as [`OperationSpec::names_nothing`]: no resource
+    /// argument, no parameters, therefore nothing project-shaped to resolve.
+    /// P1-002 landed the counterexample within one integration round.
+    /// `cloudflare.account.read` declares no resource and no parameters — it
+    /// passes `names_nothing` — and still resolves its account out of the
+    /// project's own `apex.toml`: bound, `GET /accounts/{id}` for THAT
+    /// project's account; unbound, `GET /accounts` for every account the token
+    /// can see. Granting it `*` would let an agent in a project the owner never
+    /// approved read that project's account with the one stored token.
+    ///
+    /// `names_nothing` is a fact about the **declaration**. Where a request
+    /// ends up is a fact about the **provider's `bind`**, and no amount of
+    /// reading the declaration recovers it. The integration fix was an explicit
+    /// allow-list in `apex-secretd`, which is fail-closed but silent: the next
+    /// provider to add an operation like this gets the safe answer and nobody
+    /// is ever asked the question. A field is asked. There is no `Default` for
+    /// this struct and nothing constructs one with `..`, so adding an operation
+    /// does not compile until its author has written down which of the two it
+    /// is.
+    ///
+    /// ## The invariant, and where it is checked
+    ///
+    /// `same_everywhere` implies [`OperationSpec::names_nothing`] — an
+    /// operation that takes a resource or a parameter is by construction a
+    /// different permission per directory. [`ProviderSpec::validate`] refuses
+    /// the contradiction at registration, so the gate can read this field
+    /// alone.
+    ///
+    /// The reverse does not hold, and that asymmetry is the whole point:
+    /// `names_nothing` is necessary and not sufficient.
+    pub same_everywhere: bool,
 }
 
 impl OperationSpec {
@@ -426,12 +469,12 @@ impl OperationSpec {
 
     /// Whether the caller names nothing at all: no resource, no parameters.
     ///
-    /// The one property that makes a grant safe to hold in every project. An
-    /// operation like this can only reach the endpoint pinned when its
-    /// credential was stored, so where it is asked for changes nothing about
-    /// what it reaches. `git.push` fails this — it acts on a remote resolved
-    /// out of whatever repository the caller is standing in, so the same grant
-    /// would be a different permission in every directory.
+    /// **Necessary for [`OperationSpec::same_everywhere`] and not sufficient**,
+    /// which is the correction P1-002 forced: `git.push` fails this because it
+    /// acts on a remote resolved out of whatever repository the caller is
+    /// standing in, but `cloudflare.account.read` *passes* it and still
+    /// resolves against the project's own `apex.toml`. Use it to check a
+    /// declaration is coherent; never as the gate on a `*` grant.
     ///
     /// Every parameter counts, not only the required ones: an optional
     /// `branch` is still something the caller names.
@@ -541,6 +584,25 @@ impl ProviderSpec {
                 if alias.is_empty() || alias.contains(char::is_whitespace) {
                     return Err(format!("'{}' has a malformed alias", op.id));
                 }
+            }
+            // The one coherence rule on [`OperationSpec::same_everywhere`] a
+            // declaration can be held to. An operation that takes a resource or
+            // a parameter acts on something the caller names, and the same
+            // grant is then a different permission in every directory — so
+            // claiming it reaches the same thing everywhere is a contradiction,
+            // not a judgement call, and it is refused here rather than trusted.
+            //
+            // The converse is NOT checked and cannot be: whether an operation
+            // that names nothing still resolves against the project is a fact
+            // about the provider's `bind`, and the declaration cannot see it.
+            // That half is the provider author's claim, and the registry's own
+            // tests are where it is held to it.
+            if op.same_everywhere && !op.names_nothing() {
+                return Err(format!(
+                    "'{}' claims to reach the same thing in every project, but it acts \
+                     on something the caller names",
+                    op.id
+                ));
             }
         }
         Ok(())
@@ -843,6 +905,10 @@ mod tests {
                 resource: ResourceKind::None,
                 params: &[],
                 aliases: &[],
+                // Names nothing AND declared per-project, which is the pair
+                // `names_nothing` alone cannot express and the one
+                // `cloudflare.account.read` is really in.
+                same_everywhere: false,
             },
             OperationSpec {
                 id: "demo.thing.write",
@@ -864,6 +930,7 @@ mod tests {
                     },
                 ],
                 aliases: &["demo-write"],
+                same_everywhere: false,
             },
             OperationSpec {
                 id: "demo.blob.object.read",
@@ -872,6 +939,7 @@ mod tests {
                 resource: ResourceKind::Path,
                 params: &[],
                 aliases: &[],
+                same_everywhere: false,
             },
         ],
     };
@@ -904,6 +972,7 @@ mod tests {
                 summary: "an annotation",
             }],
             aliases: &[],
+            same_everywhere: false,
         };
         assert!(!NAMES_ONLY_A_PARAMETER.names_nothing());
     }
@@ -922,6 +991,7 @@ mod tests {
                 resource: ResourceKind::Name,
                 params: &[],
                 aliases: &[],
+                same_everywhere: false,
             }],
         };
         let err = IMPOSTOR.validate().unwrap_err();
@@ -937,9 +1007,80 @@ mod tests {
                 resource: ResourceKind::None,
                 params: &[],
                 aliases: &[],
+                same_everywhere: false,
             }],
         };
         assert!(UNPARSEABLE.validate().is_err());
+    }
+
+    #[test]
+    fn an_operation_cannot_claim_to_reach_the_same_thing_everywhere_and_also_name_one() {
+        // The half of `same_everywhere` a declaration can be held to. Claiming
+        // it while taking a resource or a parameter is a contradiction: the
+        // caller names the thing, and the name is resolved wherever the caller
+        // is standing. Refused at registration rather than at the gate, so
+        // `may_be_granted_everywhere` can read the field alone.
+        const NAMES_A_RESOURCE: ProviderSpec = ProviderSpec {
+            id: "demo",
+            summary: "s",
+            operations: &[OperationSpec {
+                id: "demo.thing.read",
+                summary: "read a thing",
+                effect: Effect::Read,
+                resource: ResourceKind::Name,
+                params: &[],
+                aliases: &[],
+                same_everywhere: true,
+            }],
+        };
+        let err = NAMES_A_RESOURCE.validate().unwrap_err();
+        assert!(err.contains("acts on something the caller names"), "{err}");
+
+        // A parameter is enough on its own, and an optional one counts — the
+        // case no shipped provider has, which is why it is written here.
+        const NAMES_A_PARAMETER: ProviderSpec = ProviderSpec {
+            id: "demo",
+            summary: "s",
+            operations: &[OperationSpec {
+                id: "demo.account.read",
+                summary: "read the account",
+                effect: Effect::Read,
+                resource: ResourceKind::None,
+                params: &[ParamSpec {
+                    name: "note",
+                    syntax: Syntax::Text,
+                    required: false,
+                    summary: "an annotation",
+                }],
+                aliases: &[],
+                same_everywhere: true,
+            }],
+        };
+        assert!(NAMES_A_PARAMETER.validate().is_err());
+
+        // And the coherent version of the same claim is accepted, so this is a
+        // rule about the contradiction and not a ban on the field.
+        const COHERENT: ProviderSpec = ProviderSpec {
+            id: "demo",
+            summary: "s",
+            operations: &[OperationSpec {
+                id: "demo.account.read",
+                summary: "read the account",
+                effect: Effect::Read,
+                resource: ResourceKind::None,
+                params: &[],
+                aliases: &[],
+                same_everywhere: true,
+            }],
+        };
+        assert_eq!(COHERENT.validate(), Ok(()));
+
+        // The converse is NOT a rule: naming nothing does not make the claim
+        // true, and `DEMO`'s own `demo.account.read` is exactly that pair —
+        // the shape `cloudflare.account.read` is really in.
+        assert!(DEMO.operations[0].names_nothing());
+        assert!(!DEMO.operations[0].same_everywhere);
+        assert_eq!(DEMO.validate(), Ok(()));
     }
 
     #[test]
