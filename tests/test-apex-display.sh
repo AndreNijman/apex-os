@@ -238,6 +238,113 @@ mutating \
     && ok "without the guard, apply does mutate (so the guard is load-bearing)" \
     || bad "without the guard, apply does mutate (so the guard is load-bearing)"
 
+section "a layout nobody has confirmed yet leaves nothing behind"
+# P0-018: `apply` persisted unconditionally, so a session that died during the
+# fifteen-second countdown came back at the next login on the layout nobody
+# confirmed — kanshi reapplying it on every hotplug, and no transaction left to
+# say it was never confirmed. `apply --no-persist` is the fix.
+#
+# Every assertion here runs with the guard deliberately OFF (`env -u`), because
+# the property under test is that a REAL apply — one that does reach the fake
+# compositor — writes nothing. With the guard on the run returns before it could
+# persist anyway, and the whole section would pass vacuously.
+#
+# Its own fakes, and its own XDG_CURRENT_DESKTOP. The section above only needs
+# to see that a mutating call happened, so a silent hyprctl is enough for it; a
+# silent hyprctl is a REJECTION to apply_hypr, which returns 1 before persisting
+# and would make "nothing was written" true for the wrong reason. And
+# compositor() reads XDG_CURRENT_DESKTOP, so without pinning it this section
+# would take the Hyprland path on the developer's machine and the wlr-randr path
+# on CI.
+NPBIN="${WORK}/np-bin"; mkdir -p "$NPBIN"
+cat > "${NPBIN}/hyprctl" <<'SH'
+#!/bin/sh
+echo "$0 $*" >> "$NP_CALLED"
+case "$1" in
+    -j) echo "[]" ;;
+    *)  echo "ok" ;;
+esac
+SH
+cat > "${NPBIN}/wlr-randr" <<'SH'
+#!/bin/sh
+echo "$0 $*" >> "$NP_CALLED"
+[ "$1" = "--json" ] && echo "[]"
+exit 0
+SH
+printf '#!/bin/sh\necho "$0 $*" >> "$NP_CALLED"\nexit 0\n' > "${NPBIN}/pkill"
+chmod +x "${NPBIN}"/hyprctl "${NPBIN}"/wlr-randr "${NPBIN}"/pkill
+export NP_CALLED="${WORK}/np-called"
+
+np_home() {
+    local h="${WORK}/$1"; mkdir -p "$h/.config/apex-shell"
+    cp "$H5/.config/apex-shell/display.json" "$h/.config/apex-shell/display.json"
+    printf '%s' "$h"
+}
+np_run() {
+    local h="$1"; shift
+    rm -f "$NP_CALLED"
+    env -u APEX_DISPLAY_NO_LIVE PATH="$NPBIN" HOME="$h" \
+        XDG_CURRENT_DESKTOP=Hyprland "$PY" "$GEN" "$@" 2>&1
+}
+np_applied() { grep -q 'hyprctl eval' "$NP_CALLED" 2>/dev/null; }
+np_hupped()  { grep -q 'pkill -HUP -x kanshi' "$NP_CALLED" 2>/dev/null; }
+
+# Positive control first. If a plain apply did not persist, "--no-persist wrote
+# nothing" would be true for the wrong reason and prove nothing at all.
+P1="$(np_home np-plain)"
+np_run "$P1" apply >/dev/null
+if [ -f "$P1/.config/kanshi/config" ] && [ -f "$P1/.config/hypr/apex/monitors.lua" ]; then
+    ok "a plain apply DOES persist (so the control is load-bearing)"
+else
+    bad "a plain apply DOES persist (so the control is load-bearing)"
+fi
+np_hupped \
+    && ok "a plain apply signals kanshi" \
+    || bad "a plain apply signals kanshi"
+
+NP="$(np_home np)"
+np_run "$NP" apply --no-persist >/dev/null
+np_applied \
+    && ok "apply --no-persist still reaches the compositor" \
+    || bad "apply --no-persist still reaches the compositor"
+[ -e "$NP/.config/kanshi/config" ] \
+    && bad "apply --no-persist writes no kanshi profile" \
+    || ok "apply --no-persist writes no kanshi profile"
+[ -e "$NP/.config/hypr/apex/monitors.lua" ] \
+    && bad "apply --no-persist writes no Hyprland monitor module" \
+    || ok "apply --no-persist writes no Hyprland monitor module"
+np_hupped \
+    && bad "apply --no-persist sends kanshi no SIGHUP" \
+    || ok "apply --no-persist sends kanshi no SIGHUP"
+
+# Keep still has to work: `save` after an unpersisted apply is what promotes the
+# layout, and it is the only thing that can.
+np_run "$NP" save >/dev/null
+if [ -f "$NP/.config/kanshi/config" ] && [ -f "$NP/.config/hypr/apex/monitors.lua" ]; then
+    ok "save after --no-persist still persists (Keep is not broken)"
+else
+    bad "save after --no-persist still persists (Keep is not broken)"
+fi
+
+# `save --no-persist` asks for nothing at all. Doing nothing quietly is
+# indistinguishable from a successful save to the caller that just promoted a
+# model, so it is refused by name.
+S1="$(np_home np-save)"
+out="$(np_run "$S1" save --no-persist)"; rc=$?
+{ [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q -- '--no-persist applies to `apply`'; } \
+    && ok "save --no-persist is refused, not silently ignored" \
+    || bad "save --no-persist is refused, not silently ignored (rc=${rc})"
+[ -e "$S1/.config/kanshi/config" ] \
+    && bad "the refused save wrote nothing" \
+    || ok "the refused save wrote nothing"
+
+# APEX Shell and the OS image land independently, so the shell must be able to
+# ask whether the engine it found understands the flag before passing it. --help
+# is that answer; an engine without the flag exits 2 on the flag itself.
+PATH="$NPBIN" HOME="$NP" "$PY" "$GEN" --help 2>&1 | grep -q -- '--no-persist' \
+    && ok "--no-persist is discoverable in --help (the shell probes for it)" \
+    || bad "--no-persist is discoverable in --help (the shell probes for it)"
+
 section "live enumeration"
 # Needs a real session. Reported honestly rather than stubbed: the whole point
 # of enumeration is that it reflects hardware.
