@@ -140,14 +140,26 @@ sec "next"
 python3 - "$STATE/queue.json" "$STATE/dispatch.json" <<'PY'
 import sys, json
 q = json.load(open(sys.argv[1]))
-try: live = {a['slug'] for a in json.load(open(sys.argv[2]))['agents']}
-except Exception: live = set()
+try: agents = json.load(open(sys.argv[2]))['agents']
+except Exception: agents = []
+live = {a['slug'] for a in agents}
+# A unit whose work is already in someone's hands must not be offered again.
+# The agent slug and the queue id are allowed to differ (followups-integrate-3
+# was dispatched as followups-int3), so an agent may name its unit explicitly.
+taken = set(live) | {a['queue_id'] for a in agents if a.get('queue_id')}
 print(f"  {len(live)} agent(s) dispatched, ceiling {q['concurrency_ceiling']}")
 print()
-ready, held = [], []
+ready, held, running = [], [], []
 for u in q['units']:
+    if u['id'] in taken:
+        running.append(u); continue
     blockers = [a for a in u['after'] if a in live or a == '*']
     (held if blockers else ready).append((u, blockers))
+if running:
+    print("  IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):")
+    for u in running:
+        print(f"    {u['id']:14} {','.join(u['items'])[:30]:32} {u['title'][:60]}")
+    print()
 print("  READY (dependencies believed satisfied — confirm against the agent table above):")
 for u, _ in ready[:8]:
     print(f"    {u['id']:14} {','.join(u['items'])[:30]:32} {u['title'][:60]}")

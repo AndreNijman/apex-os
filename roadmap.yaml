@@ -580,7 +580,13 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Owner break-glass unsafe-everything mode. Pushed on task/p0-005-permission-modes (apex-os 85df34f..ee51ef4,
+    apex-shell d9cdb37). cargo test --locked with APEX_REQUIRE_APEX_CLI=1: 1511 passed / 0 failed, exit 0
+    (baseline 1436). clippy -D warnings --all-targets clean on katana from a wiped target, re-run at d580779,
+    CLIPPY_EXIT=0. Shell: 81 checks / 0 failed (baseline 65), self-test 17/17, 16 mutants. Escalation mutation
+    proof: intact 20/0; SIGKILL->SIGTERM 19/1; escalation removed 19/1. reconstructed 2026-09-07 from
+    ROADMAP/state/agents/p0-005.md; the original text was destroyed by the set-status.py --evidence defect (script
+    fixed the same day).
 - id: P0-007
   title: Implement session-scoped system-access grants
   priority: P0
@@ -598,7 +604,13 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Session-scoped system-access grants, same branch and same test run as P0-006 (1511/0, privilege script 38/38,
+    conflict gate PASS). Audit attribution defect found and fixed as d580779: a request covered by a section 4.4
+    session grant was recorded as allow_for_project, a standing grant no human ever made; decided_by() now
+    separates requested-and-covered from requested-and-granted. REMAINDER: criterion 3 is done in the type but
+    partial in the CLI. issue() fills capabilities from Verb::names(), so every session grant covers all eight
+    verbs; closing it is one --capabilities flag. reconstructed 2026-09-07 from ROADMAP/state/agents/p0-005.md;
+    the original text was destroyed by the set-status.py --evidence defect (script fixed the same day).
 - id: P0-008
   title: Add agent network modes
   priority: P0
@@ -1063,7 +1075,14 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Unified settings staging/apply/save/revert semantics; landed on roadmap/v2.2. Verified surviving P0-018's
+    359-line KeybindService.qml rewrite underneath it, which git auto-merged with no conflict so nothing else
+    exercised the seam: run-settings-staged-test.sh 21/0 and run-settings-controls-test.sh 16/0, plus settings-
+    semantics 33/0 and settings-pages 15/0 at d2d1f33. The CfgCommit staging bar is what replaced P0-018's three
+    CfgRow/CfgButton rows and was deliberately kept over them at integration. Its CfgRow.qml and KeybindsPage.qml
+    work removed three white-foreground literals, which is why check-color-tokens EXPECT_WHITE_FG moved 212 -> 211
+    in d2d1f33. reconstructed 2026-09-07 from ROADMAP/state/agents/integrate-1.md; the original text was destroyed
+    by the set-status.py --evidence defect (script fixed the same day).
 - id: P0-024
   title: Create settings UI regression test harness
   priority: P0
@@ -1083,7 +1102,13 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Settings UI regression test harness. NOTE: this item's original acceptance record is UNRECOVERABLE -- it was
+    destroyed by the --evidence defect and no snapshot in refs/wip/roadmap-state (62 snapshots, oldest 2026-09-06)
+    ever held it. What IS verifiable: the harness suites are run from the repository root at every integration
+    round and were all green on roadmap/v2.2 at d2d1f33 -- settings-semantics 33/0, settings-pages 15/0, run-
+    settings-staged-test 21/0, run-settings-controls-test 16/0, display-transaction statics 42/0, check-color-
+    tokens 22/0, agent-state 27/0, scale-tokens 5/0, plus nested headless labwc and sway runs. Anyone re-
+    qualifying P0-024 should re-derive its acceptance criteria rather than trust this line.
 - id: P0-025
   title: Migrate Hyprland compositor configuration from legacy hyprlang to Lua
   priority: P0
@@ -1177,7 +1202,16 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    First-party Cloudflare provider, pushed on task/p1-002-cloudflare and landed by integrate-3 at bc4f06e.
+    providers/cloudflare/{mod,binding,api,tests}.rs, 7 operations (six of section 13.2's 32; 26 remain). Final
+    1543 passed / 0 failed at tip 2514e09 from a 1477/0 baseline; -D warnings --all-targets clean; check-no-
+    conflict-markers PASS. Fifteen mutation pairs, every one bites (M1 100/0->97/3, M2 ->91/9, M7 O_NOFOLLOW
+    dropped 71/0->68/3, M15 curl-config escaper disabled 103/0->100/3, others ->99/1). Carries two independent
+    P1-001 fixes: 8110944, service.rs refuse() ran no scrub, so a provider that put the credential in an Err after
+    the value was read leaked it to the caller AND the trail; and 74f1055, worker.route.read returned the whole
+    zone's routing while the audit line claimed it was one worker's. reconstructed 2026-09-07 from
+    ROADMAP/state/agents/p1-002.md; the original text was destroyed by the set-status.py --evidence defect (script
+    fixed the same day).
 - id: P1-003
   title: Cloudflare connection and identity UX
   priority: P1
@@ -1193,7 +1227,14 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Cloudflare connection and identity UX. Pushed as 3d2dc43 on task/p1-002-cloudflare: apex/src/cloudflare.rs
+    plus tests, `apex cf connect|status`, RFC 8628 device flow with no browser, and the refresh token filed under
+    a different host so the pin stops it being spent as an API token. Mutations M11-M14 all bite (12/0 -> 11/1):
+    slow_down treated as failure, denial/expiry collapsed, proxy 200 polled past, broad scopes requested.
+    REMAINDER: token refresh, and tests for status/pasted-token/store. Refresh cannot be expressed as `mint` in
+    the current shape -- mint gets one credential and cannot read a companion service -- so it belongs to
+    P1-011/P1-013. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-002.md; the original text was destroyed
+    by the set-status.py --evidence defect (script fixed the same day).
 - id: P1-004
   title: Cloudflare Workers capability set
   priority: P1
@@ -1208,7 +1249,12 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Cloudflare Workers capability set, mostly delivered by ddc80fa alongside P1-002 and landed at bc4f06e.
+    REMAINDER: the tail stream and static assets. cloudflare.worker.tail cannot be brokered in the same shape as
+    the others because its result IS a credential -- a wss:// URL that authorises the log stream. As shipped the
+    session is created, the URL is withheld and the stream is not relayed; M6 (tail wss url passed on) is
+    mutation-pinned at 100/0 -> 99/1. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-002.md; the original
+    text was destroyed by the set-status.py --evidence defect (script fixed the same day).
 - id: P1-005
   title: Cloudflare R2 capability set
   priority: P1
@@ -1402,7 +1448,15 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    MCP auth helper integration, landed from task/p1-018-mcp-auth (tip 16fc8ae). `apex mcp list` and `apex mcp
+    connect`, two migration defects fixed, a refused credential is exit 22 with the body attached, and 853475a's
+    `--everywhere` project grant. Workspace 1562 passed / 0 failed at 853475a from a 1512/0 baseline. Clippy
+    clean, exit 0, via tests/run-clippy.sh at 16fc8ae with target-clippy deleted first so the whole workspace was
+    checked. Mutations red/green throughout (M7 352/3, M8 353/2, M9 352/3 -> 355/0; M10-M14 -> 1562/0). Found
+    live: GITHUB_PERSONAL_ACCESS_TOKEN in ~/.claude/settings.json is 23 bytes of REPLACE_WITH_ACTUAL_PAT, so
+    plugin:github has never authenticated once, and migrate.rs would have stored it for a host the pin can never
+    carry it to. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-018.md; the original text was destroyed by
+    the set-status.py --evidence defect (script fixed the same day).
 - id: P1-019
   title: Per-MCP sidecar sandboxing
   priority: P1
@@ -1417,7 +1471,16 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Per-MCP sidecar sandboxing, landed from task/p1-018-mcp-auth. 34016f8 carries `apex mcp run|confine|policy`,
+    sidecar.rs, confine.rs and four live bwrap tests; c38075f fixes the broker socket and adds control_socket_in
+    plus two live tests that run the shipped binary and complete a real MCP initialize handshake inside bwrap. THE
+    DEFECT THAT MATTERED: `broker = true` bound the WRONG socket -- sidecar.rs used
+    apex_secret_core::paths::socket() instead of the agent runtime's control.sock, so a server with broker = true
+    reached apex-secretd directly, a socket a confined agent session never gets, while `apex secret use` and `apex
+    mcp bridge` still failed inside it. REMAINDER, named not started: sidecar.rs's module doc notes a session can
+    rewrite ~/.claude.json to drop the wrapper; closing that means launching agents with --strict-mcp-config,
+    which is a change to how sessions start. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-018.md; the
+    original text was destroyed by the set-status.py --evidence defect (script fixed the same day).
 - id: P1-020
   title: Agent/subagent graph in Agent Center
   priority: P1
@@ -1432,7 +1495,15 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Agent/subagent graph in Agent Center. Shell c1a9896 on task/p1-020-agent-graph: src/services/agentgraph.js
+    (pure, three-valued `supported`, derived liveness, three end words, accounting mirroring graph::account, the
+    agent-lifting process rollup), SubagentRow.qml, SessionRow gains a meta-line summary plus an expander and
+    child list. agentgraph-test.js 67/0 with 8 mutants including an inverse; run-agent-graph-render-test.sh 13/0
+    with 3 mutants. Daemon 2050767 and 51529a1 on task/p1-020-agent-graph-daemon: graph.rs
+    (ChildInfo/ChildKind/ChildEnd), SessionInfo.children, the /proc half (ProcEntry, read_processes, process_tree,
+    fill_rss) with descendants added at READ time and never persisted. apex-agent-core 435/0 then 442/0,
+    hook_bridge 8/0 then 9/0, seven mutants killed. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-020.md;
+    the original text was destroyed by the set-status.py --evidence defect (script fixed the same day).
 - id: P1-021
   title: Integrate Claude statusline telemetry
   priority: P1
@@ -1446,7 +1517,18 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Claude statusline telemetry. Shell 85d9658 plus follow-up bb69775 on task/p1-020-agent-graph:
+    agenttelemetry.js (three-valued absence, freshness, fleet() taking account windows from the FRESHEST session),
+    TelemetryStrip.qml pinned in AgentCenter, SessionRow gains model/context/branch and no account-wide number.
+    agenttelemetry-test.js 57/0 with 8 mutants including an inverse; run-agent-graph-render-test.sh 20/0 with 5.
+    THE FOLLOW-UP IS THE INTERESTING PART: TelemetryStrip held `readonly property real now: Date.now() / 1000`, a
+    binding with no dependencies, so every countdown was computed against the moment the dashboard opened and
+    never moved; the clock is read inside the bindings now, 59/0 and 58/1 with the property put back. Daemon
+    85e3e2a: statusline.rs (Telemetry, parse, git_branch from .git/HEAD including worktree pointer files, overlay,
+    chain), Request::Telemetry as its own request so last_activity does NOT move, and `apex agent statusline` runs
+    the user's command FIRST. apex-agent-core 462/0, hook_bridge 12/0, policy_invariants 33/0, six mutants killed.
+    reconstructed 2026-09-07 from ROADMAP/state/agents/p1-020.md; the original text was destroyed by the set-
+    status.py --evidence defect (script fixed the same day).
 - id: P1-022
   title: Notification bridge and deduplication
   priority: P1
@@ -1461,7 +1543,12 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Notification bridge and deduplication, pushed as 46c6ef2. src/services/notifybus.js (pure: dedup, refractory,
+    retraction), AgentService spawns detached instead of through one shared Process, NotificationService gains
+    extraHints plus byKey/idForKey/retract. tests/notifybus-test.js 41/0 with 9 mutants plus an inverse mutant;
+    tests/run-notify-spawn-test.sh 10/0 under headless labwc. run-agent-center-smoke.sh wired into CI as 6046b71.
+    reconstructed 2026-09-07 from ROADMAP/state/agents/p1-020.md; the original text was destroyed by the set-
+    status.py --evidence defect (script fixed the same day).
 - id: P1-023
   title: Global push-to-talk routing
   priority: P1
@@ -1565,7 +1652,15 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Fish agent integration, a70393c on task/p1-030-shell-integrations (tip 63493c7).
+    /usr/share/fish/vendor_conf.d/apex-agent.fish with six shortcuts, APEX_NO_AGENT_ALIASES, a fork-free
+    apex_agent_prompt, plus vendor_completions.d/{apex,a,aa,ad,ap}.fish and Containerfile.base COPY and
+    assertions. Branch totals verified locally, not on CI, per Andre's standing rule: 1461 rust tests / 0 failed
+    (+25 over a 1436 baseline), test-shell-agent.sh 58/0, test-mux-layouts.sh 46/0, test-project-layout.sh 23/0,
+    clippy -D warnings clean in rust:1-slim, check-no-conflict-markers / check-doc-verbs (36 valid) / check-
+    containerfile-order all pass. Thirteen mutations, every one caught. reconstructed 2026-09-07 from
+    ROADMAP/state/agents/p1-030.md; the original text was destroyed by the set-status.py --evidence defect (script
+    fixed the same day).
 - id: P1-031
   title: Finish Nushell agent integration
   priority: P1
@@ -1578,7 +1673,16 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Nushell agent integration, 96e959c on task/p1-030-shell-integrations.
+    /usr/share/nushell/vendor/autoload/apex.nu (aliases, `extern` completions, apex-agent-prompt),
+    Containerfile.base COPY and assertions, and docs/agent-runtime.md gained a Shells section while the stale 'Not
+    implemented' bullets for fish/nushell/tmux/zellij/layouts were removed. Two measured facts recorded rather
+    than assumed: nushell 0.99.1 reads vendor autoload files in the REPL ONLY -- `nu -c` and `nu script.nu` do
+    not, proven both ways including a pty-driven REPL assertion -- and nushell cannot express the
+    APEX_NO_AGENT_ALIASES opt-out at all, because def/alias/extern are parse-time so one inside an `if` defines
+    nothing; `hide` is documented instead of faking it. Same branch test totals as P1-030. reconstructed
+    2026-09-07 from ROADMAP/state/agents/p1-030.md; the original text was destroyed by the set-status.py
+    --evidence defect (script fixed the same day).
 - id: P1-032
   title: Finish tmux integration
   priority: P1
@@ -1591,7 +1695,15 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    tmux integration, b5764d1 on task/p1-030-shell-integrations: `apex project layout templates|open`, apex-agent-
+    core/src/mux.rs and files/system/libexec/apex-mux as the tmux and zellij adapter. ProjectLayout gained
+    template/mux so there is one layout record rather than two. Same branch test totals as P1-030 (test-mux-
+    layouts.sh 46/0, test-project-layout.sh 23/0). SAFETY FINDING, written up at errors-and-fixes/test-pane-
+    started-a-real-agent-session-on-the-live-daemon.md: a tmux pane in an early manual test genuinely started a
+    claude session on Andre's live daemon (removed with `apex agent rm 5`, daemon untouched). Isolating
+    TMUX_TMPDIR does nothing about what the panes execute; the suite now fixtures XDG_RUNTIME_DIR and puts a stub
+    apex first on PATH. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-030.md; the original text was
+    destroyed by the set-status.py --evidence defect (script fixed the same day).
 - id: P1-033
   title: Finish Zellij integration
   priority: P1
@@ -1604,7 +1716,13 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Zellij integration, b5764d1 plus 63493c7 on task/p1-030-shell-integrations. Measured constraint: zellij has no
+    way to start a session with a layout without attaching, so apex-mux does it in two steps (attach --create-
+    background, then add the layout as a tab), at the cost of one leftover default tab. 63493c7 also redirects
+    every directory zellij writes to under /tmp during the Containerfile's layout-parse check; the image would
+    otherwise ship two dead zellij session records in the build user's cache. Same branch test totals as P1-030.
+    reconstructed 2026-09-07 from ROADMAP/state/agents/p1-030.md; the original text was destroyed by the set-
+    status.py --evidence defect (script fixed the same day).
 - id: P1-034
   title: Add editor/agent layout templates
   priority: P1
@@ -1617,11 +1735,17 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Editor/agent layout templates, b5764d1 on task/p1-030-shell-integrations, with docs/agent-runtime.md gaining a
+    'Terminal layouts' section and 1dd4b41 a slop pass (0.18 slopcheck hits/line against 0.26 for the rest of the
+    file). 00d0bd1 de-flaked test-project-layout.sh's 'a dry run starts nothing', which had been counting every
+    `sleep` on the machine, and taught the CI selector to pick the rust job for
+    files/desktop/{fish,nushell,shell}/ and files/system/libexec/apex-mux. test-project-layout.sh 23/0.
+    reconstructed 2026-09-07 from ROADMAP/state/agents/p1-030.md; the original text was destroyed by the set-
+    status.py --evidence defect (script fixed the same day).
 - id: P1-035
   title: Screenshot and file injection into TUI agents
   priority: P1
-  status: todo
+  status: partial
   area: agent-ui
   depends_on: []
   acceptance:
@@ -1630,6 +1754,16 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Screenshot and file injection into TUI agents, implemented and green on task/p1-035-agent-tooling (1bb5db4,
+    83ef1e0): apex-agent-core/src/inject.rs, an OutputScanner that learned CSI so it tracks DECSET 2004 bracketed
+    paste from the session's own output, Request::Inject and Response::Injected (NOT a protocol bump), the apex-
+    agentd handler which refuses any caller resolving to a managed session, refuses relative paths and non-regular
+    files, caps at 32 MiB and copies into the session scratch inbox, plus `apex agent send`. tests/test-agent-
+    inject.sh 40/0 with a real daemon and real PTYs. MEASURED: File::open on a FIFO BLOCKS until a writer arrives,
+    which the first version got wrong. REMAINDER: five named mutations are owed and unrun. Recorded by the
+    orchestrator from the agent card, not from a landing: this is pushed branch work that roadmap/v2.2 does NOT
+    yet carry. A fresh agent is working the item now and will supersede this line.
 - id: P1-036
   title: Worktree test/conflict/PR status
   priority: P1
@@ -1665,11 +1799,22 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Floating/labwc validation matrix. THE REFRAME, and the most valuable thing on this item: the three supposedly
+    unmerged August branches are not unmerged -- all 17 commits landed byte-for-byte as squash-merges, proven by
+    `git diff origin/fix/<branch> <squash>` being empty for all three (fix/screenshot-off-hyprland -> 4e267eb,
+    fix/labwc-desktop-parity -> f609a6c, fix/popup-first-open-and-media-keys -> b8a63a8). They appear in `git log
+    roadmap/v2.2..origin/<branch>` only because the branch pointers were never deleted. A survival audit confirms
+    all 17 survive on d2d1f33, with two August CI guards deliberately superseded and documented in place.
+    Automated on task/p1-038-labwc-parity: screenshots, multi-monitor, lock and idle, scaling. REMAINDER: 18
+    matrix rows needing real applications on a real session (portals, Firefox and Chromium screen sharing, OBS,
+    Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling,
+    rotation, refresh rate, VRR, suspend/resume, dock hotplug). Cannot be done headless and cannot be done on the
+    L16 while Andre is using it. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-038.md; the original text
+    was destroyed by the set-status.py --evidence defect (script fixed the same day).
 - id: P1-039
   title: Compositor-neutral Night Light
   priority: P1
-  status: todo
+  status: partial
   area: desktop
   depends_on: []
   acceptance:
@@ -1677,6 +1822,14 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Compositor-neutral Night Light implemented and pushed as 9da1822 on task/p1-039-display-colour -- one control
+    across four compositors plus a mechanism note. Measured protocol fact that shapes the item:
+    wp_color_manager_v1 v3 is advertised by Hyprland 0.56.2 and by NOTHING else (labwc 0.9.6, sway 1.11, niri
+    26.04 all lack it), so on the wlroots compositors night light and a calibration curve are the same gamma LUT
+    and cannot both be active. Recorded by the orchestrator from the agent card, not from a landing: this is
+    pushed branch work that roadmap/v2.2 does NOT yet carry. A fresh agent is working the item now and will
+    supersede this line.
 - id: P1-040
   title: Fix mixed-DPI shell scaling
   priority: P1
@@ -1688,6 +1841,11 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Mixed-DPI shell scaling fixed and pushed as 2cf7a8e on task/p1-039-display-colour: a mixed-DPI desk was
+    getting one size, and the test that should have caught it did not. Recorded by the orchestrator from the agent
+    card, not from a landing: this is pushed branch work that roadmap/v2.2 does NOT yet carry. A fresh agent is
+    working the item now and will supersede this line.
 - id: P1-041
   title: Creator color-management stack
   priority: P1
@@ -1722,6 +1880,14 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    GPU parity, pushed as 166f089 on task/p1-043-gpu-parity: AMD and Intel had no GPU handling at all, and a
+    hybrid machine was unhandled. CORRECTS THE ROADMAP: docs/p3-progress.md says closing the GPU row 'needs
+    hardware nobody here has' and that is wrong. All three vendors are reachable and were measured on 2026-09-07
+    -- the L16 is AMD only (card1, 0x1002, Radeon 780M, gpu_busy_percent present) and katana carries both an Intel
+    Alder Lake-P Iris Xe as boot_vga=1 and an NVIDIA RTX 3070 Mobile that nvidia-smi answers for. Recorded by the
+    orchestrator from the agent card, not from a landing: this is pushed branch work that roadmap/v2.2 does NOT
+    yet carry. A fresh agent is working the item now and will supersede this line.
 - id: P1-044
   title: Default incoming firewall
   priority: P1
@@ -1756,7 +1922,17 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    TEST-CANARY: flag form
+    Persistent-state migration framework, pushed as 24a800c on task/p1-045-updates-trust and landed by integrate-3
+    at 7f14a00. apexd-core/src/migrate.rs (framework plus a 4-store registry, 18 tests), apex/src/schema.rs (`apex
+    schema status|migrate`), docs/state-migration.md, tests/test-apex-schema.sh: 1521 rust tests, 44 shell
+    assertions, wired into pr-validation static and rust. THREE MUTATIONS, AND TWO OF THEM DID NOT GO RED AT FIRST
+    -- that is the finding. #1 version_of's None arm 373/0 -> 365/7. #2 renaming last_opened to lastOpened passed
+    at first because the additive property test fed every store an EMPTY document; fixed by adding a `sample`
+    field to Store, then 373/0 -> 372/1. #3 migrate_file's Plan::TooNew arm passed at first because `apex schema
+    migrate` pre-decided TooNew before calling migrate_file, so the CLI shielded the framework; the duplicate
+    guard was removed, then 373/0 and 44/0 -> 372/1 and 43/1. reconstructed 2026-09-07 from
+    ROADMAP/state/agents/p1-045.md; the original text was destroyed by the set-status.py --evidence defect (script
+    fixed the same day).
 - id: P1-046
   title: Update channels and staged rollout
   priority: P1
@@ -1770,7 +1946,17 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Update channels and staged rollout. Criterion 1 DONE, pushed as e52d08e (the pure channel model) and 7710e33
+    (`apex channel status|list|set|report`, promote-channel.yml, the rollout stop wired into ops::update,
+    docs/update-channels.md, tests/test-apex-channel.sh): 1547 rust tests, 49 shell assertions. Five mutations all
+    bite (#4 from_tag 391/0 -> 390/1 and 49/0 -> 46/3; #5 verdict's Unavailable arm; #6 promote edge deleted from
+    build-image.yml 22/0 -> 21/1; #7 halt_reason; #8 rebooted_into_new). REMAINDER on criterion 2: the transmitter
+    -- no endpoint exists and nothing is sent -- and a mutable rollout percentage, which has nowhere to live
+    because an OCI label is baked once per build. MEASURED AND UNCOMFORTABLE: apex, daily, gaming-mesa and gaming-
+    nvidia are four aliases for ONE digest, moved on every successful main build, so every APEX machine today is
+    effectively on EDGE and has never been told so; the L16's origin says :daily. reconstructed 2026-09-07 from
+    ROADMAP/state/agents/p1-045.md; the original text was destroyed by the set-status.py --evidence defect (script
+    fixed the same day).
 - id: P1-047
   title: SBOM/provenance/trust status
   priority: P1
@@ -1813,7 +1999,19 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Blueprint redesigned into a guided experience, pushed as 6213f05, fd154bc and d54e6d1 on task/p1-048-guided-
+    settings. changeKind/ofKind/removals in blueprint.js, the service splits the user-domain plan, and the page
+    reordered: what this is, nothing here yet, editor, not saved, what Apply would do, added/changed/REMOVED,
+    needs root, apply, advanced. EXPECT_WHITE_FG unchanged at 211 -- the page had no colour literals. Also on this
+    branch, job 1: tests/lib/headless.sh plus twelve runners converted, tests/check-headless-runners.sh (four
+    rules, 25 assertions, four inline mutants and a control), wired into a ci.yml that lists every check by name
+    and would never have run it. TWO BUGS FOUND BY RUNNING RATHER THAN PARSING: headless_cleanup aborted on its
+    own `kill -9` under set -e (set -e exempts only the LEFT operand of &&), so a green suite exited 1 and leaked
+    its sandbox, five of them into /tmp; and the guard read `command -p X` as a lookup when -p RUNS X. NOT DONE
+    AND NOT FAKED: raw TOML editing (the only write verb takes JSON), Import, Export, 'use this device as
+    Blueprint' -- no CLI verbs exist -- and transactional apply with rollback. reconstructed 2026-09-07 from
+    ROADMAP/state/agents/p1-048.md; the original text was destroyed by the set-status.py --evidence defect (script
+    fixed the same day).
 - id: P1-049
   title: Redesign Gaming settings around simple understandable toggles
   priority: P1
@@ -1835,11 +2033,21 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Gaming settings redesigned around understandable toggles, pushed as 4cd2890 and 7266f50 on task/p1-048-guided-
+    settings. New gaming.js, GamingService.qml and GamingPage.qml, registered in src/qmldir, src/services/qmldir
+    and PageRegistry.qml; the smoke suites derive their page list from the registry, so no test-list edits were
+    needed. Reads `apex gaming --json` (readiness, per-tool presence, blockers, warnings, install_hint) and `apex
+    mode status` (text -- there is no --json on that subcommand), and writes only `apex mode set` followed by a
+    re-read. THE DESIGN TRAP, worth keeping: `apex mode set --auto` is documented one-shot -- APEX ships nothing
+    that re-evaluates it on a timer -- so the master 'optimise games automatically' control CANNOT be a switch; it
+    is the choice plus a read-back, and check-gaming-settings.sh enforces no Timer anywhere. Not built because no
+    verb exists: VRR, background-update suppression. Not reached: per-game profiles, though `apex game profile`
+    does exist and is the obvious next increment. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-048.md;
+    the original text was destroyed by the set-status.py --evidence defect (script fixed the same day).
 - id: P1-050
   title: Build provider-neutral APEX Remote agent protocol and desktop service
   priority: P1
-  status: todo
+  status: done
   area: remote-agents
   depends_on:
   - P1-020
@@ -1856,10 +2064,25 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Provider-neutral APEX Remote agent protocol and desktop service, complete and pushed on task/p1-050-remote-
+    protocol (tip 322fa45). Decisions: reuse RequestOrigin::RemoteControl rather than an 8th section 7 origin (an
+    8th is a PROTOCOL_VERSION bump plus a change to Capability::ruling and the 7x7 declaration test), with device
+    identity in a separate `actor` field; and the remote protocol IS the existing agentd control protocol carried
+    inside an encrypted channel, not a second protocol. 05c73da apex-remote-core (wire framing, device store,
+    identity, Noise NK for pairing and IK for sessions, rendezvous), 53 tests, four mutations all red. 6f6246e
+    apex-remoted plus `apex remote`, the unit, the firewall catalogue entry and Containerfile wiring, 26 daemon
+    tests. THE HOLE IT CLOSED FIRST, 7041b74: apex-agentd establishes request origin from the connection's cgroup,
+    so a proxy started from a login session is recorded as local-terminal, which privilege::decide accepts as a
+    human at the keyboard and will let approve a root operation. 17b18c4 demonstrates it end to end rather than
+    arguing it -- with the declaration removed the run reads `a phone approved root: allow_once`. Fixed by a per-
+    connection monotonic origin latch; apexd 1760/0 against a 1750/0 baseline measured on a clean worktree.
+    Recorded by the orchestrator from the agent card, not from a landing: this is pushed branch work that
+    roadmap/v2.2 does NOT yet carry. A fresh agent is working the item now and will supersede this line.
 - id: P1-051
   title: Implement secure device pairing for APEX Remote
   priority: P1
-  status: todo
+  status: partial
   area: remote-agents
   depends_on:
   - P1-050
@@ -1873,10 +2096,21 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Secure device pairing, apex-os half complete and pushed on task/p1-050-remote-protocol. 71f8a90 records a
+    mutation that SURVIVED and was fixed: 'any origin may pair' passed every test, because cargo test runs in a
+    login session so the refusal branch was unreachable; the rule moved into may_pair and is tested over all seven
+    section 7 origins, and the same mutant is now 25/1. 322fa45 fixes three defects found by reading the code
+    against its own comments, none of which any test could see: the handshake deadline was cleared before it
+    applied so a silent LAN peer held a thread forever, unregister removed nothing, and PtyChannel::open opened a
+    channel even when the daemon had not attached. REMAINDER: criteria 1 and 3 are apex-shell work that does not
+    exist yet -- the QR renderer and the paired-device page. Recorded by the orchestrator from the agent card, not
+    from a landing: this is pushed branch work that roadmap/v2.2 does NOT yet carry. A fresh agent is working the
+    item now and will supersede this line.
 - id: P1-052
   title: Support direct LAN and encrypted internet relay for remote agents
   priority: P1
-  status: todo
+  status: partial
   area: remote-agents
   depends_on:
   - P1-051
@@ -1891,6 +2125,19 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    LAN and encrypted internet relay. Pushed groundwork on task/p1-050-remote-protocol:
+    apex_remote_core::rendezvous holds the id derivation and the disclosure text, the framing is transport-
+    agnostic by design so the Noise channel runs through any relay unchanged, and the firewall catalogue entry
+    plus 5353 are in place. FOUR NAMED REMAINDERS, none started: (1) nothing dials a relay -- it needs a
+    Cloudflare Worker plus Durable Object pairing two outbound WebSockets on a rendezvous id, a client in apex-
+    remoted holding one outbound connection open, and the same in the device; (2) reconnect across network changes
+    -- the daemon holds the PTY so a reconnect is a fresh Noise_IK handshake plus re-Open, and nothing writes that
+    resume logic; (3) LAN discovery over _apex-remote._tcp mDNS, deliberately NOT a static Avahi service file,
+    which would advertise the machine whether or not the service is running; (4) Frame::Ping/Pong carry a token
+    and nothing measures or renders the round trip. Recorded by the orchestrator from the agent card, not from a
+    landing: this is pushed branch work that roadmap/v2.2 does NOT yet carry. A fresh agent is working the item
+    now and will supersede this line.
 - id: P1-053
   title: Create polished first-party APEX Remote Android app foundation
   priority: P1
@@ -2127,7 +2374,19 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Printing/scanning/network-share maturity, on task/p2-005-device-maturity. 36232f5 tests/test-device-image.sh
+    41 passed, mutation-proved seven ways (40/1 x5, 39/2, 40/1; restored 41/0), adding gvfs-fuse/gphoto2/nfs and
+    giving the share stack a floor after hplip hung every enumeration. 3142bbd fixed scan enumeration hanging on
+    avahi's ABSENCE rather than its answer. fce0a99 `apex devices` as a verb covering cards, printers, scanners
+    and shares, 53 passed, cargo test -p apex 315 passed, mutation-proved seven ways (49/4, 52/1 x5, 51/2;
+    restored 53/0). 5a7d0c6 makes 'there is none' and 'I could not look' stop arriving as the same answer. All
+    suites re-run rather than quoted: test-device-image.sh 39/0, test-device-services-netns.sh 12/0, test-apex-
+    devices.sh 55/0, cargo test -p apex 315/0, tests/run-clippy.sh clean. Full write-up with both machines'
+    readings: ROADMAP/evidence/P2-005-007-device-maturity.md. REMAINDER is hardware nobody here has: a print job
+    to a printer, a share mounted from a server, a card in a slot. The L16's avahi is still masked and unmasking
+    it is Andre's call, so that machine cannot discover a printer or scanner at all. reconstructed 2026-09-07 from
+    ROADMAP/state/agents/p2-005.md; the original text was destroyed by the set-status.py --evidence defect (script
+    fixed the same day).
 - id: P2-006
   title: Networking maturity
   priority: P2
@@ -2140,7 +2399,17 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Networking maturity, on task/p2-005-device-maturity. c823974 and f9ab0e7 add tests/test-device-services-
+    netns.sh, 12 passed, mutation-proved four ways (11/1, 9/3, 9/3, 11/1; restored 12/0) -- the firewall rules had
+    been read but never sent a packet through, and a shared printer was unreachable with nothing saying so.
+    1adbdb2 fixes NetworkManager answering `full` for a link nobody can route over. THE FINDING THAT MATTERS,
+    measured with positive controls and owed to P1-044: a hotspot CANNOT work under the shipped firewall policy,
+    three independent ways -- forward is policy drop, the DHCP rule matches replies rather than a client's
+    DISCOVER, and port 53 is shut. The exception mechanism itself is sound (631/445/2049 reopen immediately). Also
+    open: two lines in `apex devices network` state the current policy as fact and go stale the day it changes.
+    REMAINDER: an EAP handshake with a real access point and a tunnel to a real VPN endpoint. reconstructed
+    2026-09-07 from ROADMAP/state/agents/p2-005.md; the original text was destroyed by the set-status.py
+    --evidence defect (script fixed the same day).
 - id: P2-007
   title: Bluetooth/dock/peripheral maturity
   priority: P2
@@ -2153,7 +2422,14 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    --evidence
+    Bluetooth/dock/peripheral maturity, on task/p2-005-device-maturity, delivered through the same `apex devices`
+    verb and suites as P2-005/P2-006 (test-apex-devices.sh 55/0 covering six areas, cargo test -p apex 315/0, run-
+    clippy.sh clean, evidence at ROADMAP/evidence/P2-005-007-device-maturity.md). 5d5441b is the message pass --
+    what a user reads, in the voice the rest of the CLI uses. Several readers change their answer once 36232f5's
+    packages land in a built image: gvfs-fuse, boltd, wg, the VPN plugins, dnsmasq as a real package, aptX and the
+    connectivity check, so the readings must be retaken after the next image build. REMAINDER is hardware nobody
+    here has: a paired headset and an attached dock. reconstructed 2026-09-07 from ROADMAP/state/agents/p2-005.md;
+    the original text was destroyed by the set-status.py --evidence defect (script fixed the same day).
 - id: P2-008
   title: First-party virtualization UX
   priority: P2
@@ -2180,7 +2456,7 @@ tasks:
 - id: P2-010
   title: Hardware qualification database
   priority: P2
-  status: todo
+  status: partial
   area: qualification
   depends_on:
   - P0-001
@@ -2189,6 +2465,16 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Hardware qualification database, first commit pushed as ee30c3b on task/p2-010-hardware-storage -- a machine's
+    compatibility record existed once and did not survive. The card carries the measurement that shapes the rest
+    of the unit, and it is a permission-denial-as-absence trap in two layers: `smartctl -j /dev/nvme0n1`
+    unprivileged exits 2 and returns a document with no health log, so a reader keying on the absence of
+    nvme_smart_health_information_log reports 'no SMART data' for a disk that has plenty; and `sudo smartctl -j
+    /dev/nvme0n1` exits 0 and ALSO returns no health log, because smartctl with no action option does nothing and
+    -a is what asks. Exit 0 plus an empty document is the same trap wearing root. Recorded by the orchestrator
+    from the agent card, not from a landing: this is pushed branch work that roadmap/v2.2 does NOT yet carry. A
+    fresh agent is working the item now and will supersede this line.
 - id: P2-011
   title: Agent cgroup resource budgets
   priority: P2

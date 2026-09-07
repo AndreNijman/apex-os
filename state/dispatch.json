@@ -14,7 +14,7 @@
         "(integration only)"
       ],
       "repo": "both",
-      "worktree": "/var/tmp/apex-work/int-os and /var/tmp/apex-work/int-shell",
+      "worktree": "/var/tmp/apex-work/int-os",
       "branch": "roadmap/v2.2",
       "agent_id": "a4d2d3505491923dd",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
@@ -38,7 +38,9 @@
         "apex-shell: task/p0-015-lock-tests",
         "apex-shell: task/p1-039-display-colour",
         "apex-shell: task/p1-023-handoff-lifecycle"
-      ]
+      ],
+      "second_worktree": "/var/tmp/apex-work/int-shell",
+      "second_branch": "roadmap/v2.2"
     },
     {
       "slug": "p0-014",
@@ -47,13 +49,16 @@
         "P0-015"
       ],
       "repo": "both",
-      "worktree": "/var/tmp/apex-work/wt-p0-014 and /var/tmp/apex-work/wt-p0-015-shell",
-      "branch": "task/p0-014-remote-lock (os) + task/p0-015-lock-tests (shell)",
+      "worktree": "/var/tmp/apex-work/wt-p0-014",
+      "branch": "task/p0-014-remote-lock",
       "agent_id": "af470f7add6e91d6c",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T10:05+08:00",
       "fresh_agent_for_card": "p0-014",
-      "title": "CTAP2 assertion verifier behind --origin-policy remote -- the last P0 work in the roadmap"
+      "title": "CTAP2 assertion verifier behind --origin-policy remote -- the last P0 work in the roadmap",
+      "second_worktree": "/var/tmp/apex-work/wt-p0-015-shell",
+      "second_branch": "task/p0-015-lock-tests",
+      "queue_id": "p0-014"
     },
     {
       "slug": "p1-023",
@@ -72,7 +77,8 @@
       "dispatched": "2026-09-07T10:05+08:00",
       "fresh_agent_for_card": "p1-023",
       "title": "gate repair (Agent Center invariants, pipefail sweep: 26 files / 87 sites), then PTT, handoff packet, lifecycle types",
-      "at_dispatch": "BRANCH WAS NOT ON ORIGIN -- 2 local commits (1788443, da50162) covered only by refs/wip/wt-p1-023- at 901009a, plus 24 uncommitted files. Agent's first two instructions are push -u, then commit the 24."
+      "at_dispatch": "BRANCH WAS NOT ON ORIGIN -- 2 local commits (1788443, da50162) covered only by refs/wip/wt-p1-023- at 901009a, plus 24 uncommitted files. Agent's first two instructions are push -u, then commit the 24.",
+      "queue_id": "p1-023"
     },
     {
       "slug": "p2-010",
@@ -90,7 +96,8 @@
       "dispatched": "2026-09-07T10:05+08:00",
       "fresh_agent_for_card": "p2-010",
       "title": "hardware qualification database, agent cgroup budgets, Storage Manager, firmware lifecycle",
-      "at_dispatch": "10 uncommitted files from the predecessor. Agent told to commit them before anything else -- never checkout/reset/stash first."
+      "at_dispatch": "10 uncommitted files from the predecessor. Agent told to commit them before anything else -- never checkout/reset/stash first.",
+      "queue_id": "p2-e"
     },
     {
       "slug": "p1-039",
@@ -102,14 +109,17 @@
         "P1-043"
       ],
       "repo": "both",
-      "worktree": "/var/tmp/apex-work/wt-p1-039 and /var/tmp/apex-work/wt-p1-043",
-      "branch": "task/p1-039-display-colour (shell) + task/p1-043-gpu-parity (os)",
+      "worktree": "/var/tmp/apex-work/wt-p1-039",
+      "branch": "task/p1-039-display-colour",
       "agent_id": "a8666e8dce5bef33d",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
       "dispatched": "2026-09-07T10:05+08:00",
       "fresh_agent_for_card": "p1-039",
       "title": "P1-041 creator colour management then P1-042 creator input/audio; P1-039/040 already committed",
-      "at_dispatch": "Both worktrees clean and pushed. katana read-only until pgrep steam|proton is empty -- restated in the brief because the GPU leg goes there."
+      "at_dispatch": "Both worktrees clean and pushed. katana read-only until pgrep steam|proton is empty -- restated in the brief because the GPU leg goes there.",
+      "second_worktree": "/var/tmp/apex-work/wt-p1-043",
+      "second_branch": "task/p1-043-gpu-parity",
+      "queue_id": "p1-039"
     },
     {
       "slug": "followups-int3",
@@ -126,5 +136,6 @@
       "title": "two security fixes (same_everywhere on OperationSpec; run_curl's bare curl reading the owner's ~/.curlrc), api.rs onto run_curl, p1-018 docs",
       "at_dispatch": "New unit, new branch forked from origin/roadmap/v2.2 at dispatch time. Told the integration tip will move under it and NOT to rebase mid-work."
     }
-  ]
+  ],
+  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine."
 }
