@@ -200,6 +200,54 @@ pub fn origin(daemon: &Arc<Daemon>, peer: Option<Peer>) -> Origin {
 
 /// Record a session's own, narrower, origin (§7).
 ///
+/// Whether a connection may write text into session `target`'s terminal.
+///
+/// `None` means it may. A [`Response`] means it may not, and says why.
+///
+/// A function over an established [`Origin`] and nothing else, so the decision
+/// is testable without a daemon, a socket or a session — which is the pattern
+/// the rest of this file follows, and the reason `tests/request_origin.rs`
+/// exists only for the two claims that genuinely need a spawned process.
+///
+/// `Request::Input` is the one verb on this socket that acts on a session
+/// other than the caller's own AND is invisible to the target as anything but
+/// a person at the keyboard. `Signal` reaches another session too, but an
+/// agent sees a signal as a signal; bytes on a PTY are typing. So a session
+/// that could send them could instruct a sibling agent and borrow whatever
+/// that sibling was granted, which is dimension 3 leaking sideways.
+///
+/// Two refusals, not one, and the second is the one worth writing down:
+///
+///  * the caller IS a session. Refused.
+///  * the caller could not be classified at all. Also refused. A connection
+///    whose credentials the kernel would not report is not evidence of a
+///    human; treating "could not read" as "not a session" is exactly the
+///    defect [`Origin::unreadable`] exists to prevent, one verb further on.
+///    Fail closed: the cost is a `apex agent input` that reports it could not
+///    establish the caller, against an agent quietly driving another agent.
+pub fn refuse_input(who: &Origin, target: u32) -> Option<Response> {
+    if let Some(caller) = who.session {
+        return Some(Response::error(
+            ErrorKind::PermissionDenied,
+            format!(
+                "session {caller} may not write into session {target}'s terminal; text on a \
+                 terminal cannot be told apart from a person typing"
+            ),
+        ));
+    }
+    if let Some(why) = who.origin_unreadable.as_deref() {
+        return Some(Response::error(
+            ErrorKind::PermissionDenied,
+            format!(
+                "refusing to write into session {target}: this connection could not be \
+                 classified, so there is no way to tell it is not a session driving another \
+                 session ({why})"
+            ),
+        ));
+    }
+    None
+}
+
 /// Only a session may call this, and only about itself — the session comes
 /// from the peer credentials, so there is no id to get wrong or to forge. The
 /// declaration is checked by [`apex_agent_core::origin::may_declare`], which
@@ -811,6 +859,64 @@ mod tests {
             request_origin: Some(SessionOrigin::observed(origin)),
             ..Origin::default()
         }
+    }
+
+    #[test]
+    fn a_person_at_a_terminal_may_write_into_a_session() {
+        // The whole point of the verb. A connection this daemon classified and
+        // found outside every session is the shell's push-to-talk route or a
+        // person running `apex agent input`, and it is allowed.
+        let who = unsessioned(RequestOrigin::LocalTerminal);
+        assert!(refuse_input(&who, 4).is_none());
+    }
+
+    #[test]
+    fn a_session_may_not_write_into_another_session() {
+        // Dimension 3 leaking sideways: an agent that could type into a
+        // sibling could ask it to run what the sibling was granted and the
+        // caller was not. The refusal names both ids, because the interesting
+        // half of the log line is WHICH session tried.
+        let who = Origin {
+            session: Some(7),
+            ..Origin::default()
+        };
+        let refusal = refuse_input(&who, 4).expect("a session must be refused");
+        let (kind, message) = refusal.as_error().expect("an error");
+        assert_eq!(kind, ErrorKind::PermissionDenied);
+        assert!(message.contains("session 7"), "{message}");
+        assert!(message.contains("session 4"), "{message}");
+    }
+
+    #[test]
+    fn a_session_may_not_write_into_itself_either() {
+        // Not a special case worth allowing. An agent typing into its own
+        // terminal is an agent writing its own next prompt, which is the same
+        // borrowed-authority problem with one hop taken out, and there is no
+        // caller that wants it: an agent already owns its stdout.
+        let who = Origin {
+            session: Some(4),
+            ..Origin::default()
+        };
+        assert!(refuse_input(&who, 4).is_some());
+    }
+
+    #[test]
+    fn a_connection_that_could_not_be_classified_is_refused_and_not_assumed_human() {
+        // The important one. `session: None` on an unreadable origin means
+        // "the walk never happened", not "the walk happened and found
+        // nothing" — the two are indistinguishable in that field, which is why
+        // the reason field is consulted instead of the absence. Reading a
+        // failed classification as a human is the defect this repository has
+        // already shipped once, in the other direction.
+        let who = Origin::unreadable("the kernel would not report the peer credentials");
+        assert!(who.session.is_none(), "the fixture must exercise the gap");
+        let refusal = refuse_input(&who, 4).expect("an unclassified caller must be refused");
+        let (kind, message) = refusal.as_error().expect("an error");
+        assert_eq!(kind, ErrorKind::PermissionDenied);
+        assert!(
+            message.contains("could not be classified"),
+            "the refusal must say why it could not decide: {message}"
+        );
     }
 
     #[test]

@@ -82,6 +82,8 @@ apex agent run "upgrade to Qt 7" --checkpoint --worktree qt7
 apex agent list --all
 apex agent attach 4
 apex agent pause 4 / resume 4 / kill 4
+apex agent input 4 "run the tests"            # types it, leaves it unsent
+apex agent input 4 "run the tests" --submit   # and presses Enter
 apex agent logs 4
 apex agent diff 4
 apex agent undo 4

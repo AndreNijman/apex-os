@@ -63,6 +63,26 @@ pub enum AgentCmd {
         #[arg(long, value_name = "HOST")]
         host: Option<String>,
     },
+    /// Type text into a session's terminal.
+    ///
+    /// The text lands in the agent's prompt exactly as if it had been typed,
+    /// and stays there. Add --submit to send it. That is deliberate: the words
+    /// may have come from somewhere less certain than a keyboard, and reading
+    /// them before they become an instruction is the difference between a
+    /// typo and a command.
+    ///
+    /// APEX Shell's push-to-talk route is the other caller. A session cannot
+    /// call this on another session.
+    Input {
+        id: u32,
+        /// The text to type. Several words are joined with single spaces, so
+        /// quoting is optional.
+        #[arg(required = true, num_args = 1.., value_name = "TEXT")]
+        text: Vec<String>,
+        /// Press Enter after it, so the agent acts on the line.
+        #[arg(long)]
+        submit: bool,
+    },
     /// Suspend a session and everything it started.
     Pause { id: u32 },
     /// Resume a paused session.
@@ -646,6 +666,7 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             }
             None => attach(id, !no_replay),
         },
+        AgentCmd::Input { id, text, submit } => input(id, &text.join(" "), submit),
         AgentCmd::Pause { id } => signal(id, "stop", "paused"),
         AgentCmd::Resume { id } => signal(id, "cont", "resumed"),
         AgentCmd::Kill { id, signal: sig } => signal(id, &sig, "signalled"),
@@ -1149,6 +1170,45 @@ fn install_winch_forwarder(id: u32, initial: WinSize) {
             }
         })
         .ok();
+}
+
+/// Build the bytes `apex agent input` puts on the wire.
+///
+/// Carriage return and not newline for --submit. CR is the byte a terminal
+/// actually sends when Enter is pressed, so it is what a program reading that
+/// terminal is written against: the line discipline's ICRNL turns it into a
+/// newline for anything reading lines, and a TUI reading its input raw — which
+/// is what the agents in this runtime do — treats CR as Enter.
+///
+/// The reason this comment is careful is that the obvious test does not support
+/// it. Measured on a real PTY against `sh -c 'read line'`: CR and LF BOTH end
+/// the line, because ICRNL is on by default. So apex-agentd's cooked-mode test
+/// proves the bytes arrive and that the terminator ends the line, and it does
+/// NOT discriminate between the two candidates. CR is chosen for the raw-mode
+/// case, where they differ and where no test in either crate reaches.
+///
+/// Split out from [`input`] so it can be tested without a running daemon: the
+/// whole behaviour of the flag is in this function.
+fn input_bytes(text: &str, submit: bool) -> String {
+    let mut data = text.to_string();
+    if submit {
+        data.push('\r');
+    }
+    data
+}
+
+fn input(id: u32, text: &str, submit: bool) -> Result<i32> {
+    let data = input_bytes(text, submit);
+    client::call(&Request::Input { id, data })?;
+    // On stderr, so a script's stdout stays empty. Says whether Enter was
+    // pressed, because "nothing happened" and "it is sitting in the prompt"
+    // look the same from outside the session and want different next steps.
+    if submit {
+        eprintln!("apex: sent to session {id}");
+    } else {
+        eprintln!("apex: typed into session {id}, not sent; add --submit to send it");
+    }
+    Ok(0)
 }
 
 fn signal(id: u32, name: &str, past_tense: &str) -> Result<i32> {
@@ -2838,6 +2898,32 @@ mod tests {
             remote_path: None,
             allow_dirty: false,
         }
+    }
+
+    #[test]
+    fn input_without_submit_adds_nothing_at_all() {
+        // The default has to be inert. A newline appended "helpfully" here is
+        // the whole difference between text waiting in a prompt and an agent
+        // acting on words that may have come from a speech-to-text hook.
+        assert_eq!(input_bytes("run the tests", false), "run the tests");
+        assert_eq!(input_bytes("", false), "");
+        // Text that already ends in a newline is passed through untouched:
+        // trimming it would be this function deciding, which is the caller's
+        // job in both directions.
+        assert_eq!(input_bytes("two lines\n", false), "two lines\n");
+    }
+
+    #[test]
+    fn input_with_submit_appends_exactly_one_carriage_return() {
+        assert_eq!(input_bytes("run the tests", true), "run the tests\r");
+        // Exactly one, and at the end. A doubled terminator would submit an
+        // empty line after the text, which in an agent's prompt is a second
+        // turn with nothing in it.
+        assert_eq!(input_bytes("x", true).matches('\r').count(), 1);
+        assert!(input_bytes("x", true).ends_with('\r'));
+        // CR and not LF. See `input_bytes` for why, including what the PTY
+        // test in apex-agentd does and does not prove about the choice.
+        assert!(!input_bytes("x", true).contains('\n'));
     }
 
     #[test]
