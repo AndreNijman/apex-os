@@ -10,6 +10,7 @@ mod blueprint;
 mod channel;
 mod boot;
 mod cloudflare;
+mod connector;
 mod digest;
 mod dispatch;
 mod disposable;
