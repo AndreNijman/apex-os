@@ -359,6 +359,12 @@ rc="$(gate "$R")"
 both
 has 'could not be verified' "$TMP/all" "under enforce it is refused, and worded as unverifiABLE"
 hasnt 'does not verify.' "$TMP/all" "still not worded as a failure"
+# Not only the headline. The paragraph underneath used to say, in every
+# refusal, that "the image the registry is serving is not the one this machine
+# was told to expect" — contradicting its own headline three lines above and
+# telling a user with a broken network that they had been attacked.
+hasnt 'is not the one this machine' "$TMP/all" "and no part of the refusal accuses the publisher"
+has 'could not establish' "$TMP/all" "the explanation is true of a check that did not run"
 [[ "$rc" == 1 ]] && ok "and exits 1" || bad "apex update exited $rc under enforce"
 
 sec "a registry that answers and holds nothing IS unsigned"
@@ -479,6 +485,41 @@ if printf '%s' "$fx" | grep -qE '^\s+return Some\('; then
 else
     bad "the fixture branch can fall through — a verifying fixture would reach bootc upgrade"
 fi
+
+sec "an origin file nobody could read is never deployed ungated"
+# The EACCES rule, at the gate. This repository swept fourteen readers in
+# September for collapsing "permission denied" into "absent" and reporting the
+# guess as a checked fact. Skipping the gate on an unreadable origin was the
+# same defect one layer up, and worse: it DEPLOYED, under signature=enforce,
+# having printed one line about it.
+R="$(crypto_fixture unreadable 'signature=enforce')"
+chmod 0000 "$R/proc/cmdline"
+if [[ -r "$R/proc/cmdline" ]]; then
+    printf '  skip  this user reads a 0000 file (root or CAP_DAC_OVERRIDE)\n'
+else
+    rc="$(gate "$R")"
+    both
+    has 'Permission denied' "$TMP/all" "the reason the origin could not be read is carried"
+    has 'could not be read' "$TMP/all" "and named as a read that failed"
+    hasnt 'has no signature' "$TMP/all" "an unreadable origin is NOT an unsigned image"
+    [[ "$rc" == 1 ]] && ok "under enforce it is refused rather than deployed" \
+        || bad "an unreadable origin deployed ungated (exit $rc)"
+    # A gap is a gap: under warn the same machine still updates.
+    chmod 0644 "$R/proc/cmdline"
+    printf 'signature=warn\nprovenance=warn\n' > "$R/etc/apex/trust.conf"
+    chmod 0000 "$R/proc/cmdline"
+    rc="$(gate "$R")"
+    [[ "$rc" == 0 ]] && ok "and under warn it still updates" \
+        || bad "warn refused an unreadable origin (exit $rc)"
+    chmod 0644 "$R/proc/cmdline"
+fi
+# A deployment that genuinely has no image reference is the one state that
+# legitimately has nothing to check, and it must not print the same sentence.
+R="$(crypto_fixture noimage 'signature=enforce')"
+printf '[origin]\n' > "$R/ostree/deploy/default/deploy/f3f505fc39fb268c59f4458365c96b764a7bd7d30f2f51e98bb6a009666b7852.0.origin"
+gate "$R" >/dev/null; both
+has 'no container image reference' "$TMP/all" "a deployment with no image says exactly that"
+hasnt 'could not be read' "$TMP/all" "and is not confused with an origin nobody could read"
 
 sec "when the tag has moved, the gate judges the new image and --verify the old"
 # The normal state of every APEX machine, not an edge case. The four tags moved

@@ -558,17 +558,19 @@ fn packages_pass() -> i32 {
 fn trust_gate(allow_unverified: bool) -> Option<i32> {
     let roots = crate::trust::Roots::from_env();
     let report = crate::trust::offline_report(&roots);
-    let Some(reference) = report.image.clone() else {
-        // Not a container deployment, so there is no image to verify. A gate
-        // that refused here would refuse on the grounds that it could not
-        // verify something which does not exist.
-        if let Some(e) = &report.image_error {
-            eprintln!("apex: the signature of the next image was not checked: {e}");
-        }
-        return None;
-    };
-
-    let g = crate::verify::gate(&roots, &reference);
+    // The origin read is handed to the gate rather than unwrapped here. An
+    // early return on `image_error` is what made an unreadable /proc/cmdline
+    // deploy an image nobody checked, under `signature=enforce`, while
+    // printing a single line about it — the EACCES class this repository
+    // swept fourteen readers for, one layer up.
+    let g = crate::verify::gate(
+        &roots,
+        match (&report.image, &report.image_error) {
+            (Some(r), _) => Ok(Some(r.as_str())),
+            (None, Some(e)) => Err(e.as_str()),
+            (None, None) => Ok(None),
+        },
+    );
     let refusal = crate::verify::refusal(
         &g.verification,
         &g.enforcement,
