@@ -112,6 +112,33 @@ pub fn common_dir(dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Whether `dir` is a LINKED worktree rather than a repository's main one.
+///
+/// `--git-dir` and `--git-common-dir` name the same directory in a main
+/// worktree and different ones in a linked worktree
+/// (`.git/worktrees/<name>` against `.git`). MEASURED on git 2.55.0 rather
+/// than assumed, from both sides.
+///
+/// Asked because a linked worktree is not a project: every worktree of the
+/// repository is visible from inside it, so anything that enumerates
+/// "this project's worktrees" from a linked one produces a second copy of
+/// every row, with the linked worktree's own name on all of them.
+pub fn is_linked_worktree(dir: &Path) -> bool {
+    let Some(out) = git_opt(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+    ) else {
+        // Not a repository at all. Not a linked worktree either, and saying
+        // "yes" here would hide an ordinary directory from a listing.
+        return false;
+    };
+    let mut lines = out.lines();
+    match (lines.next(), lines.next()) {
+        (Some(git_dir), Some(common)) => git_dir != common,
+        _ => false,
+    }
+}
+
 /// One registered worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
@@ -631,7 +658,18 @@ detached
         // Real captured output (git 2.55.0): OID, the conflicted path, an
         // empty field, then the message section — which must NOT be mistaken
         // for more paths.
-        let text = "6513cc3bd3dcd48685fdde56dc293742f6f2f367\0f.txt\0\01\0f.txt\0Auto-merging\0Auto-merging f.txt\n\0";
+        //
+        // `\x00` and not `\0`: the message section's first field is the digit
+        // `1`, so `\01` reads as an octal escape that Rust does not have (it
+        // is a NUL followed by a one) and clippy::octal_escapes refuses it.
+        // Written unambiguously, because getting this literal wrong would
+        // silently change which fields the parser is being shown.
+        let text = concat!(
+            "6513cc3bd3dcd48685fdde56dc293742f6f2f367\x00",
+            "f.txt\x00",
+            "\x00", // the empty field that ends the path list
+            "1\x00f.txt\x00Auto-merging\x00Auto-merging f.txt\n\x00",
+        );
         assert_eq!(parse_merge_tree_z(text), vec!["f.txt".to_string()]);
     }
 

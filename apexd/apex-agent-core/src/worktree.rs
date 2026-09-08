@@ -57,7 +57,8 @@
 //! So the wording everywhere is "the last test run APEX observed". A field
 //! called `tests_pass` would be a claim this evidence cannot support.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -414,29 +415,68 @@ pub fn status(
     }
 }
 
+/// Which of `worktrees` a directory belongs to: the DEEPEST one containing it.
+///
+/// Not simply "the first one that contains it". Every agent worktree lives
+/// UNDER the main working tree — `<root>/.apex/worktrees/<name>` — so a plain
+/// containment test credits a session working in an agent worktree to the main
+/// tree as well, and the main tree then lists every agent in the repository
+/// and reads as the busiest checkout on the machine. The deepest match is the
+/// worktree the session is actually in, and there is exactly one.
+///
+/// Compared by PATH COMPONENT, not by string prefix: `/w/tree-2` starts with
+/// the text `/w/tree`, and a string test would put that session in a tree it
+/// has never been in.
+pub fn owning_worktree<'a>(
+    worktrees: &'a [AgentWorktree],
+    dir: &Path,
+) -> Option<&'a AgentWorktree> {
+    worktrees
+        .iter()
+        .filter(|wt| dir == wt.path || dir.starts_with(&wt.path))
+        .max_by_key(|wt| wt.path.components().count())
+}
+
 /// Status for every worktree of `project`, main tree first.
 ///
-/// `tests_for` and `sessions_for` are supplied by the caller — the daemon,
-/// which is the only thing that holds those records — keyed by worktree path.
-/// Passed in rather than read here so this function needs no daemon state and
-/// can be tested against a bare repository.
-pub fn statuses<F, G>(
+/// `tests_for` is supplied by the caller — the daemon, which is the only thing
+/// that holds that record — keyed by worktree path. Passed in rather than read
+/// here so this function needs no daemon state and can be tested against a
+/// bare repository.
+///
+/// `sessions` is `(id, cwd)` as the daemon recorded them, and the attribution
+/// to a worktree happens HERE rather than in the caller because only this
+/// function has the whole worktree list, which is what [`owning_worktree`]
+/// needs to pick the deepest.
+pub fn statuses<F>(
     project: &Project,
     mut tests_for: F,
-    mut sessions_for: G,
+    sessions: &[(u32, PathBuf)],
 ) -> anyhow::Result<Vec<WorktreeStatus>>
 where
     F: FnMut(&Path) -> TestState,
-    G: FnMut(&Path) -> Vec<u32>,
 {
     let repo = Path::new(&project.root);
     let base = git::current_branch(repo);
     let worktrees = project::worktrees(project)?;
+
+    // Every session is attributed to exactly one worktree before any row is
+    // built, so that no two rows can claim the same session.
+    let mut ids: HashMap<&Path, Vec<u32>> = HashMap::new();
+    for (id, cwd) in sessions {
+        if let Some(wt) = owning_worktree(&worktrees, cwd) {
+            ids.entry(wt.path.as_path()).or_default().push(*id);
+        }
+    }
+    for list in ids.values_mut() {
+        list.sort_unstable();
+    }
+
     Ok(worktrees
         .iter()
         .map(|wt| {
             let tests = tests_for(&wt.path);
-            let sessions = sessions_for(&wt.path);
+            let sessions = ids.get(wt.path.as_path()).cloned().unwrap_or_default();
             status(repo, wt, base.as_deref(), tests, sessions)
         })
         .collect())
@@ -871,6 +911,43 @@ mod tests {
         assert_eq!(TestPhase::Failed.as_str(), "failed");
         assert_eq!(TestPhase::parse("passed"), Some(TestPhase::Passed));
         assert_eq!(TestPhase::parse("nonsense"), None);
+    }
+
+    fn wt(path: &str, is_agent: bool) -> AgentWorktree {
+        AgentWorktree {
+            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            path: PathBuf::from(path),
+            branch: Some("b".to_string()),
+            is_agent,
+        }
+    }
+
+    #[test]
+    fn a_session_in_an_agent_worktree_is_not_also_the_main_trees() {
+        // The defect this function exists for. An agent worktree lives UNDER
+        // the main tree, so plain containment credited every agent session to
+        // the main tree too — and the main tree then listed every agent in
+        // the repository.
+        let trees = vec![
+            wt("/w/proj", false),
+            wt("/w/proj/.apex/worktrees/clash", true),
+            wt("/w/proj/.apex/worktrees/tidy", true),
+        ];
+        let owner = owning_worktree(&trees, Path::new("/w/proj/.apex/worktrees/clash"));
+        assert_eq!(owner.map(|w| w.name.as_str()), Some("clash"));
+
+        // ...and a session genuinely in the main tree still belongs to it.
+        let owner = owning_worktree(&trees, Path::new("/w/proj/apexd/src"));
+        assert_eq!(owner.map(|w| w.name.as_str()), Some("proj"));
+    }
+
+    #[test]
+    fn a_sibling_with_a_shared_text_prefix_is_not_inside() {
+        // `/w/proj-2` starts with the TEXT `/w/proj`. Path comparison is by
+        // component, which is why this is `None` and not the main tree.
+        let trees = vec![wt("/w/proj", false)];
+        assert!(owning_worktree(&trees, Path::new("/w/proj-2/src")).is_none());
+        assert!(owning_worktree(&trees, Path::new("/elsewhere")).is_none());
     }
 
     #[test]

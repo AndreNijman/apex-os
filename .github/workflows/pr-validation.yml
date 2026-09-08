@@ -996,6 +996,16 @@ jobs:
       - name: Run file-injection assertions
         run: ./tests/test-agent-inject.sh
 
+      # P1-036's named guarantee, which is the whole reason the conflict answer
+      # comes from `merge-tree` and not from a real merge: after a status call
+      # on a GENUINELY CONFLICTED worktree, MERGE_HEAD is absent, the staged
+      # entries are unchanged, `git status --porcelain` is byte-identical and
+      # no ref has moved. A unit test cannot reach any of it — it needs a real
+      # repository with a real conflict, and the suite builds one, along with
+      # its own daemon on its own socket and its own project store.
+      - name: Run worktree-status assertions
+        run: ./tests/test-agent-worktrees.sh
+
       # §5's two claims, neither of which the unit tests can reach: a portable
       # bundle carries no credential and no conversation, from a profile on a
       # real filesystem; and a confined session cannot rewrite the instructions

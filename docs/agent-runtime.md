@@ -637,6 +637,84 @@ runtime state, not something to commit and push to your colleagues.
 
 Re-running with the same name reattaches to the same worktree.
 
+### What each worktree is up to
+
+```
+apex agent worktrees
+apex agent worktrees --project my-repo --json
+```
+
+```
+WORKTREE               BRANCH                          DIFF  CONFLICTS   TESTS       READY
+my-repo                main                           dirty  -           unobserved  uncommitted changes in the worktree
+issue-217              agent/issue-217             4f +81/-12  clean       passed      yes
+issue-221              agent/issue-221             2f +19/-3   1 file(s)   failed      would conflict in 1 file
+```
+
+Four questions per worktree — has it got a diff, would it merge back, what
+happened to the tests, is it ready to hand over — and `--json` carries the same
+answers with the conflicted paths and the full blocker list.
+
+**Nothing this command does touches a worktree you are working in.** That
+constraint shapes two of the four answers, and both are worth understanding
+before you trust the column.
+
+**Conflicts** come from `git merge-tree --write-tree`, run from the project
+root against branch names. The obvious implementation — `git merge --no-commit`
+in the worktree — would leave a `MERGE_HEAD` and a half-merged index in a
+checkout an agent is typing into. `merge-tree` computes the same merge entirely
+in the object database.
+
+One caveat stated exactly, because "reads only" would be false: `--write-tree`
+*does* write the merged tree and its blobs into the repository's shared object
+store, as unreferenced objects that `git gc` later removes. No working tree, no
+index, no stash and no ref is touched. The integration suite asserts that
+literally — after a status call on a genuinely conflicted worktree,
+`MERGE_HEAD` is absent, `git ls-files --stage` is unchanged entry for entry,
+`git status --porcelain` is byte-identical, and no ref has moved.
+
+Base is the **main working tree's current branch, read when you ask**. Nothing
+records the branch a worktree was created from, so this is an observation now
+and not a memory of the branch point. Move the main tree to another branch and
+every answer here is against that one instead.
+
+**Tests are observed, never run.** The runtime does not run your suite to
+answer a status query: that has a build directory, a CPU cost, and for a suite
+that touches a daemon or a port a real chance of breaking the session that is
+mid-task. So the column is the last test run APEX *saw go past* in that tree,
+through the hook stream it already receives, and its default is `unobserved` —
+which is not a failure, just an absence.
+
+What each word means, precisely:
+
+- `unobserved` — no test run has been seen in this tree. Most worktrees.
+- `running` — a run started and nothing has reported its end. A run whose
+  completion never arrives stays here for as long as the daemon lives, because
+  "nobody told us how it ended" is not a pass.
+- `passed` — a completion event arrived for that run and it was not a failure
+  event. Whether the agent upstream distinguishes those for a non-zero exit is
+  upstream's behaviour, not something APEX can compel; if it ever reports a
+  failed suite as an ordinary completion, this says `passed`.
+- `failed` — a failure event arrived. This blocks readiness.
+
+A test run is matched to the tree the **session** lives in, taken from the
+session's own recorded working directory — not from wherever the hook process
+happened to run. A session cannot report a suite result against a tree it does
+not live in. And the observations are process memory: restart the daemon and
+everything is `unobserved` again, which is the honest answer, because nobody
+here saw a test run. A `passed` written to disk would outlive the commit it
+referred to and be read as a fresh verdict.
+
+**READY is local.** The field is `ready_to_propose`, and it asks nothing of
+GitHub: has an upstream, in sync with it, ahead of base, clean tree, no
+conflicts, no observed test failure. It is the answer to "is this worth a
+human's attention yet", not to "what does the pull request say".
+
+`--project` takes a project **slug**, the kind `apex project list` prints, and
+never a path. Answering this request makes the daemon run git in the project's
+root, so the set of directories it can reach is exactly the set you have
+already chosen to remember.
+
 ### Undo
 
 ```

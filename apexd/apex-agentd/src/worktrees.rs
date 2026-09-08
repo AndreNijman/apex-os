@@ -31,6 +31,7 @@ use std::sync::Mutex;
 
 use apex_agent_core::git;
 use apex_agent_core::project;
+
 use apex_agent_core::protocol::{ErrorKind, Response};
 use apex_agent_core::worktree::{self, TestNote, TestState};
 
@@ -154,16 +155,53 @@ pub fn handle(
         None => project::list(),
     };
 
+    // `(id, cwd)` once, for every project. Which worktree each session
+    // belongs to is decided inside `worktree::statuses`, which is the only
+    // place that has the whole worktree list to compare against.
+    let where_they_are: Vec<(u32, PathBuf)> = sessions
+        .iter()
+        .map(|s| (s.id, PathBuf::from(&s.cwd)))
+        .collect();
+
     let mut out = Vec::new();
     for proj in &projects {
+        // A LINKED WORKTREE REMEMBERED AS A PROJECT IS NOT A PROJECT.
+        //
+        // `project::detect` resolves a project from `git rev-parse
+        // --show-toplevel`, and inside a linked worktree that is the worktree
+        // itself — so `apex agent run --cwd <a worktree>` records the worktree
+        // as a project of its own. Every worktree of the repository is visible
+        // from in there, so listing it produces a SECOND copy of every row,
+        // all carrying the linked worktree's directory name and all with
+        // `is_agent` false because none of them sit under ITS
+        // `.apex/worktrees`. Measured, not theorised: the fixture suite
+        // produced six rows for a three-worktree repository, three of them
+        // named after one worktree.
+        //
+        // Skipped here rather than fixed in `detect`, which is not this
+        // unit's: the record is also what checkpoints and layouts key on, and
+        // a status listing has no business changing what a project is. The
+        // rows are not lost — they are the real project's, if it is
+        // remembered.
+        if git::is_linked_worktree(Path::new(&proj.root)) {
+            if slug.is_some() {
+                return Response::error(
+                    ErrorKind::BadRequest,
+                    format!(
+                        "{:?} is a linked git worktree, not a project — its \
+                         worktrees are the repository's, and belong to the \
+                         project whose root is the main working tree",
+                        clip(&proj.slug)
+                    ),
+                );
+            }
+            continue;
+        }
+
         // One unreadable project must not fail the whole listing — a checkout
         // on an unmounted disk is the ordinary case, not an error worth
         // refusing every other project's status over.
-        let statuses = worktree::statuses(
-            proj,
-            |path| observations.get(path),
-            |path| sessions_in(sessions, path),
-        );
+        let statuses = worktree::statuses(proj, |path| observations.get(path), &where_they_are);
         match statuses {
             Ok(mut s) => out.append(&mut s),
             Err(_) => continue,
@@ -182,26 +220,6 @@ fn clip(text: &str) -> String {
     }
     let keep: String = text.chars().take(64).collect();
     format!("{keep}…")
-}
-
-/// The ids of sessions working in `path`.
-///
-/// Matched on the session's recorded `cwd`, so a session started in a
-/// subdirectory of the worktree still counts — which is the common case, since
-/// `apex agent run --worktree` puts the agent at the tree root but a person
-/// attaching later may be anywhere under it.
-///
-/// Exited sessions are included when they are still in the registry: "session
-/// 12 worked here" is the fact somebody reading a conflict wants, and hiding
-/// it would make the busiest worktree on the machine look untouched.
-fn sessions_in(sessions: &[SessionWhere], path: &Path) -> Vec<u32> {
-    let mut ids: Vec<u32> = sessions
-        .iter()
-        .filter(|s| Path::new(&s.cwd) == path || Path::new(&s.cwd).starts_with(path))
-        .map(|s| s.id)
-        .collect();
-    ids.sort_unstable();
-    ids
 }
 
 #[cfg(test)]
@@ -233,36 +251,13 @@ mod tests {
         assert!(seen.is_empty(), "recorded {:?}", *seen);
     }
 
-    fn info(id: u32, cwd: &str) -> SessionWhere {
-        SessionWhere {
-            id,
-            cwd: cwd.to_string(),
-        }
-    }
-
     #[test]
-    fn a_session_below_the_worktree_still_counts_as_in_it() {
-        let sessions = vec![
-            info(1, "/w/tree"),
-            info(2, "/w/tree/apexd/apex-agent-core"),
-            info(3, "/w/other"),
-        ];
-        assert_eq!(sessions_in(&sessions, Path::new("/w/tree")), vec![1, 2]);
-    }
-
-    #[test]
-    fn a_sibling_with_a_shared_prefix_is_not_inside() {
-        // The bug a string `starts_with` would have: `/w/tree-2` starts with
-        // the TEXT `/w/tree`, and reporting its sessions against the wrong
-        // worktree would put an agent in a tree it has never been in. Path
-        // comparison is by component, which is why this passes.
-        let sessions = vec![info(1, "/w/tree-2/src"), info(2, "/w/tree")];
-        assert_eq!(sessions_in(&sessions, Path::new("/w/tree")), vec![2]);
-    }
-
-    #[test]
-    fn ids_come_back_sorted() {
-        let sessions = vec![info(9, "/w/t"), info(2, "/w/t"), info(5, "/w/t")];
-        assert_eq!(sessions_in(&sessions, Path::new("/w/t")), vec![2, 5, 9]);
+    fn a_long_slug_is_clipped_before_it_reaches_an_error() {
+        // The slug is echoed back so a typo is obvious, and a caller can send
+        // a megabyte of it. An error is a log line, not a mirror.
+        let out = clip(&"a".repeat(500));
+        assert_eq!(out.chars().count(), 65, "64 plus the ellipsis");
+        assert!(out.ends_with('…'));
+        assert_eq!(clip("short"), "short");
     }
 }
