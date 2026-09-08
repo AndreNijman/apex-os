@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::grant::GrantKind;
 use crate::origin::OriginSource;
 use crate::policy::{AgentPolicy, RequestOrigin};
 
@@ -641,6 +642,44 @@ pub enum Request {
         #[serde(default)]
         project: Option<String>,
     },
+
+    // ── §7's remote elevation (P0-014) ──────────────────────────────────────
+    /// Ask for a challenge a security key can answer.
+    ///
+    /// §7 gives root capability and unsafe-everything "local auth" locally and
+    /// "local approval required" from everywhere else, and `OriginPolicy`'s
+    /// `remote_elevation_allowed` is the owner's opt-out. What the opt-out
+    /// costs is a touch on a security key, and this is how the daemon says
+    /// what to touch it over: it issues a nonce, keeps it in memory, and hands
+    /// back the exact bytes the key must sign.
+    ///
+    /// **Not a protocol bump**, for the reason [`Request::Event`] and
+    /// [`Request::ToolCheck`] both record: a daemon that has never heard of
+    /// this `cmd` fails to deserialise it and answers
+    /// [`ErrorKind::BadRequest`], which is refusing to elevate. The failure
+    /// mode of an unknown verb here is losing an elevation, never gaining one,
+    /// and that is the test those two set. Bumping would also claim revision 6
+    /// while three branches are open on this file.
+    ElevationChallenge {
+        /// The session to be elevated, or `None` for one that does not exist
+        /// yet — which is the *primary* case, because
+        /// `privilege::authorise_grant` runs before a session id is reserved.
+        /// See `webauthn::Challenge::session`.
+        #[serde(default)]
+        session: Option<u32>,
+        /// Which of §4's two elevated modes the touch will be consent to. Part
+        /// of what the key signs: a touch for a capability grant must not buy
+        /// break-glass.
+        kind: GrantKind,
+        /// The window being asked for. Also signed over, so a touch for a
+        /// minute cannot authorise eight hours.
+        ttl_ms: u64,
+        /// Which enrolled key, by label. Omitted when only one is enrolled;
+        /// with several enrolled and none named the daemon refuses and lists
+        /// them rather than picking.
+        #[serde(default)]
+        credential: Option<String>,
+    },
 }
 
 impl Request {
@@ -812,6 +851,36 @@ pub enum Response {
     ToolDecision {
         #[serde(default)]
         deny: Option<String>,
+    },
+    /// A challenge to be signed by a security key, and how to sign it.
+    ///
+    /// Everything a human at another machine needs, because that is where the
+    /// key is: the remote-elevation path exists precisely for the case where
+    /// nobody is at this one.
+    ElevationChallenge {
+        /// The nonce that names this challenge, base64. Sent back with the
+        /// assertion so the daemon knows which challenge was answered.
+        nonce: String,
+        /// The exact bytes the key must sign over, base64.
+        ///
+        /// The client data itself and not its hash: `fido2-assert -w` takes
+        /// client data and hashes it, and a caller handed only a digest could
+        /// not use that mode. `webauthn::Challenge::binding` is what produced
+        /// them, and no two challenges can produce the same bytes.
+        binding: String,
+        /// The label of the key that has to answer.
+        credential: String,
+        /// That key's credential id, base64. `fido2-assert` is asked for an
+        /// assertion by id, and does not print it.
+        credential_id: String,
+        /// The relying party the credential was enrolled against.
+        rp_id: String,
+        /// When the challenge stops being good for anything.
+        expires_ms: u64,
+        /// The commands to run where the key is, for a human to read. Printed
+        /// rather than executed: by construction the key is not plugged into
+        /// this machine.
+        instructions: String,
     },
     /// Verb succeeded and has nothing to say.
     Ok,
@@ -1070,6 +1139,15 @@ mod tests {
                 exit_code: 0,
                 output: "Everything up-to-date".into(),
             },
+            Response::ElevationChallenge {
+                nonce: "bm9uY2U=".into(),
+                binding: "YmluZGluZw==".into(),
+                credential: "yubikey".into(),
+                credential_id: "aWQ=".into(),
+                rp_id: "apex-agent.localhost".into(),
+                expires_ms: 1_700_000_000_000,
+                instructions: "fido2-assert -G -w -p -i /dev/stdin /dev/hidraw0".into(),
+            },
             Response::ToolDecision { deny: None },
             Response::ToolDecision {
                 deny: Some("no".into()),
@@ -1213,6 +1291,12 @@ mod tests {
             Request::SystemGrants,
             Request::RevokeSystemGrant { id: 3 },
             Request::RenewSystemGrant { id: 3, ttl_ms: 900_000 },
+            Request::ElevationChallenge {
+                session: None,
+                kind: GrantKind::BreakGlass,
+                ttl_ms: 900_000,
+                credential: Some("yubikey".into()),
+            },
             Request::Revoke {
                 project: "/home/t/p".into(),
                 key: Some("install:clang".into()),

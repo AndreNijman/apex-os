@@ -1181,6 +1181,81 @@ pub fn verify_for_challenge(
     })
 }
 
+/// The whole sequence a daemon runs when an assertion comes back: redeem the
+/// challenge, then check the assertion against it, then record the counter.
+///
+/// It lives here rather than in the daemon for one reason that is not tidiness:
+/// the only thing in this repository that can produce a *valid* assertion is
+/// the test signer in this module's own test child, so a version of this
+/// sequence written in `apex-agentd` could be tested against refusals and
+/// never once against a receipt it actually minted. The daemon's handler is
+/// then a mutex lock and a call, which is all a handler should be.
+///
+/// ## The order is the security property
+///
+/// The challenge is redeemed **first**, before the credential is looked up and
+/// before a single byte of the assertion is parsed. Every early return past
+/// that point has therefore already spent the nonce. That is deliberate and it
+/// is the point of a nonce: one issue, one attempt. Redeeming last — or only
+/// on success — would leave a challenge alive across a failed attempt, and an
+/// attacker who can retry against a fixed challenge has a challenge that is no
+/// longer a nonce. The cost is that a mistyped `--credential` burns one
+/// challenge and the operator asks for another, which is the right side of that
+/// trade.
+///
+/// ## Why `Discouraged` here
+///
+/// The verifier is asked for the *weakest* level on purpose, and the strength
+/// is demanded by [`may_elevate`] instead. Asking the verifier for `Required`
+/// would make it refuse a key with no PIN as a malformed assertion, and
+/// [`RemoteElevationRefused::NotUserVerified`] — the error that tells the owner
+/// their key needs a PIN before it can approve root from somewhere else —
+/// would become unreachable. See `the_gate_and_not_the_verifier_is_what_demands_a_pin`.
+///
+/// `credentials` is taken by `&mut` for the counter alone. The store is NOT
+/// saved here: when to write a file is the daemon's decision, not this
+/// function's.
+pub fn redeem_and_verify(
+    challenges: &mut ChallengeStore,
+    credentials: &mut CredentialStore,
+    nonce: &str,
+    label: &str,
+    assertion_text: &str,
+    now_ms: u64,
+) -> Result<SecondFactor, AssertionError> {
+    let challenge = challenges
+        .redeem(nonce, now_ms)
+        .ok_or(AssertionError::NoSuchChallenge)?;
+    // Cloned rather than borrowed: `record_counter` below needs the store
+    // mutably, and a `Credential` is six small fields.
+    let credential = credentials
+        .by_label(label)
+        .ok_or(AssertionError::UnknownCredential)?
+        .clone();
+    let id = credential
+        .id_bytes()
+        .ok_or(AssertionError::Malformed("the enrolled credential id is not base64"))?;
+    let assertion = Assertion::parse_fido2_assert(&id, assertion_text)?;
+    let factor = verify_for_challenge(
+        &credential,
+        &challenge,
+        &assertion,
+        UserVerification::Discouraged,
+        now_ms,
+    )?;
+    // Not a check on anything a client sent — `verify_for_challenge` builds
+    // the receipt out of the challenge this function redeemed, so the two
+    // nonces agree by construction today. It is here so that they still have
+    // to agree tomorrow: the one edit this sequence cannot survive is a
+    // receipt that describes a different challenge from the one that was spent,
+    // and that edit would otherwise be silent.
+    if factor.nonce() != challenge.nonce {
+        return Err(AssertionError::WrongChallenge);
+    }
+    credentials.record_counter(&id, factor.counter());
+    Ok(factor)
+}
+
 // ---------------------------------------------------------------------------
 // The receipt, and the gate that reads it
 // ---------------------------------------------------------------------------
@@ -3165,5 +3240,239 @@ mod tests {
             path
         };
         assert!(!path.exists(), "the directory is removed when it goes away");
+    }
+    // ── the sequence a daemon runs (P0-014, commit 3) ────────────────────────
+
+    /// An [`Assertion`] rendered back into the four lines `fido2-assert -G`
+    /// prints, so [`redeem_and_verify`] can be driven the way the daemon will
+    /// drive it — through the parser, from text — rather than around it.
+    ///
+    /// It also round-trips the parser against the only assertions in this
+    /// repository whose signature is known to be good.
+    fn as_fido2_assert_lines(a: &Assertion) -> String {
+        format!(
+            "{}\n{}\n{}\n{}\n",
+            b64_encode(&a.client_data_hash),
+            a.rp_id,
+            b64_encode(&a.auth_data),
+            b64_encode(&a.signature),
+        )
+    }
+
+    /// A store holding one signer's credential, and the signer.
+    fn enrolled(label: &str) -> (Signer, CredentialStore) {
+        let signer = Signer::new(label);
+        let store = CredentialStore {
+            credentials: vec![signer.credential.clone()],
+        };
+        (signer, store)
+    }
+
+    #[test]
+    fn a_redeemed_challenge_mints_a_receipt_and_moves_the_counter_on() {
+        let (signer, mut keys) = enrolled("yubikey");
+        let mut challenges = ChallengeStore::new();
+        let now = 1_000_000;
+        let c = challenges.issue(None, GrantKind::SystemAccess, 900_000, now);
+        assert_eq!(challenges.outstanding(), 1);
+
+        let text = as_fido2_assert_lines(&signer.assert_for(&c, flags::UP | flags::UV, 7));
+        let factor = redeem_and_verify(
+            &mut challenges,
+            &mut keys,
+            &c.nonce,
+            "yubikey",
+            &text,
+            now + 1,
+        )
+        .expect("a signature this key made over this very challenge");
+
+        assert_eq!(factor.nonce(), c.nonce, "the receipt names another challenge");
+        assert_eq!(factor.session(), None);
+        assert_eq!(factor.kind(), GrantKind::SystemAccess);
+        assert_eq!(factor.counter(), 7);
+        assert!(factor.user_verified(), "UV was set in the flags");
+        // Spent, and the counter is on the store for the next assertion to
+        // have to beat. Without this a replayed assertion would be refused
+        // only by the nonce, and the counter check would be decoration.
+        assert_eq!(challenges.outstanding(), 0, "the challenge was not spent");
+        assert_eq!(keys.by_label("yubikey").expect("still enrolled").counter, 7);
+    }
+
+    #[test]
+    fn one_challenge_cannot_mint_two_receipts() {
+        // The property the whole redeem-first ordering exists for. The second
+        // attempt presents an assertion that is cryptographically perfect and
+        // is refused anyway, because the thing it answers is gone.
+        let (signer, mut keys) = enrolled("k");
+        let mut challenges = ChallengeStore::new();
+        let now = 5_000;
+        let c = challenges.issue(Some(3), GrantKind::BreakGlass, 60_000, now);
+        let text = as_fido2_assert_lines(&signer.assert_for(&c, flags::UP | flags::UV, 1));
+
+        redeem_and_verify(&mut challenges, &mut keys, &c.nonce, "k", &text, now).expect("first");
+        let again = redeem_and_verify(&mut challenges, &mut keys, &c.nonce, "k", &text, now)
+            .expect_err("a challenge answered once must not answer again");
+        assert_eq!(again, AssertionError::NoSuchChallenge);
+    }
+
+    #[test]
+    fn a_failed_attempt_spends_the_challenge_too() {
+        // The other half of "one issue, one attempt", and the one that is easy
+        // to get wrong: if a refusal left the challenge outstanding, an
+        // attacker could grind assertions against a fixed nonce until one
+        // verified. So a rubbish submission burns it, and the good assertion
+        // that follows — over that same challenge — is refused.
+        let (signer, mut keys) = enrolled("k");
+        let mut challenges = ChallengeStore::new();
+        let now = 9;
+        let c = challenges.issue(None, GrantKind::SystemAccess, 1_000, now);
+        let good = as_fido2_assert_lines(&signer.assert_for(&c, flags::UP | flags::UV, 1));
+
+        let first = redeem_and_verify(&mut challenges, &mut keys, &c.nonce, "k", "rubbish", now)
+            .expect_err("three lines short of an assertion");
+        assert!(matches!(first, AssertionError::Malformed(_)), "{first}");
+        assert_eq!(challenges.outstanding(), 0, "a failed attempt left it alive");
+
+        let second = redeem_and_verify(&mut challenges, &mut keys, &c.nonce, "k", &good, now)
+            .expect_err("the challenge was spent by the failed attempt");
+        assert_eq!(second, AssertionError::NoSuchChallenge);
+    }
+
+    #[test]
+    fn a_nonce_nobody_issued_answers_nothing() {
+        let (signer, mut keys) = enrolled("k");
+        let mut challenges = ChallengeStore::new();
+        let c = challenges.issue(None, GrantKind::SystemAccess, 1_000, 1);
+        let text = as_fido2_assert_lines(&signer.assert_for(&c, flags::UP | flags::UV, 1));
+        // The assertion is genuine; the nonce it is offered against is not one
+        // this store ever handed out.
+        let e = redeem_and_verify(
+            &mut challenges,
+            &mut keys,
+            &b64_encode(b"a nonce from somewhere else"),
+            "k",
+            &text,
+            1,
+        )
+        .expect_err("must refuse");
+        assert_eq!(e, AssertionError::NoSuchChallenge);
+        assert_eq!(challenges.outstanding(), 1, "the real challenge was spent");
+    }
+
+    #[test]
+    fn a_challenge_that_ran_out_reads_as_one_that_was_never_issued() {
+        // Worth pinning because it is not the error a reader would predict:
+        // `ChallengeStore::redeem` expires the store before it looks, so a
+        // challenge past its window is gone rather than found-and-refused, and
+        // the error is `NoSuchChallenge` and not `ChallengeExpired`. Both
+        // messages tell the operator to ask for another one, which is why
+        // either is acceptable — but only one of them is what happens.
+        let (signer, mut keys) = enrolled("k");
+        let mut challenges = ChallengeStore::new();
+        let now = 100;
+        let c = challenges.issue(None, GrantKind::SystemAccess, 1_000, now);
+        let text = as_fido2_assert_lines(&signer.assert_for(&c, flags::UP | flags::UV, 1));
+        let late = c.expires_ms + 1;
+        assert!(c.expired_at(late));
+        let e = redeem_and_verify(&mut challenges, &mut keys, &c.nonce, "k", &text, late)
+            .expect_err("must refuse");
+        assert_eq!(e, AssertionError::NoSuchChallenge);
+    }
+
+    #[test]
+    fn a_label_that_is_not_enrolled_is_refused_by_name() {
+        let (signer, mut keys) = enrolled("desk");
+        let mut challenges = ChallengeStore::new();
+        let c = challenges.issue(None, GrantKind::SystemAccess, 1_000, 1);
+        let text = as_fido2_assert_lines(&signer.assert_for(&c, flags::UP | flags::UV, 1));
+        let e = redeem_and_verify(&mut challenges, &mut keys, &c.nonce, "travel", &text, 1)
+            .expect_err("no key called travel");
+        assert_eq!(e, AssertionError::UnknownCredential);
+        // And the challenge is gone, per the ordering: the operator asks for
+        // another rather than retrying against this one.
+        assert_eq!(challenges.outstanding(), 0);
+    }
+
+    #[test]
+    fn the_receipt_this_sequence_mints_is_the_one_the_gate_reads() {
+        // The join, end to end, and the reason `Discouraged` is passed to the
+        // verifier: a key with no PIN gets all the way to a receipt — the
+        // assertion is valid and it is not the verifier's business to have an
+        // opinion about PINs — and `may_elevate` is what refuses it. If this
+        // sequence asked for `Required` instead, the error the owner reads
+        // would be about a malformed assertion and `NotUserVerified` would be
+        // dead code.
+        let (signer, mut keys) = enrolled("no-pin");
+        let mut challenges = ChallengeStore::new();
+        let now = 42;
+        let what = Elevation {
+            scope: None,
+            kind: GrantKind::SystemAccess,
+            ttl_ms: 900_000,
+            origin: RequestOrigin::RemoteControl,
+        };
+
+        let c = challenges.issue(what.scope, what.kind, what.ttl_ms, now);
+        let bare = as_fido2_assert_lines(&signer.assert_for(&c, flags::UP, 1));
+        let factor = redeem_and_verify(&mut challenges, &mut keys, &c.nonce, "no-pin", &bare, now)
+            .expect("a touch with no PIN is still a valid assertion");
+        assert!(!factor.user_verified());
+        assert_eq!(
+            may_elevate(
+                OriginPolicy::RemoteElevationAllowed,
+                &what,
+                Some(&factor)
+            ),
+            Err(RemoteElevationRefused::NotUserVerified {
+                credential: "no-pin".into()
+            })
+        );
+
+        // The same sequence with a PIN behind it opens the gate.
+        let c2 = challenges.issue(what.scope, what.kind, what.ttl_ms, now);
+        let verified =
+            as_fido2_assert_lines(&signer.assert_for(&c2, flags::UP | flags::UV, 2));
+        let factor2 =
+            redeem_and_verify(&mut challenges, &mut keys, &c2.nonce, "no-pin", &verified, now)
+                .expect("a verified touch");
+        assert_eq!(
+            may_elevate(OriginPolicy::RemoteElevationAllowed, &what, Some(&factor2)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_receipt_for_one_scope_does_not_answer_for_another_after_a_round_trip() {
+        // `may_answer_for` is tested exhaustively over values above. This is
+        // the same claim once the receipt has been through the whole redeem,
+        // parse and verify path, because that is the path production uses and
+        // a scope lost in it would not show up in any of those tests.
+        let (signer, mut keys) = enrolled("k");
+        let mut challenges = ChallengeStore::new();
+        let now = 7;
+        let c = challenges.issue(Some(11), GrantKind::SystemAccess, 60_000, now);
+        let text = as_fido2_assert_lines(&signer.assert_for(&c, flags::UP | flags::UV, 3));
+        let factor =
+            redeem_and_verify(&mut challenges, &mut keys, &c.nonce, "k", &text, now).expect("ok");
+        assert_eq!(factor.session(), Some(11));
+
+        let elsewhere = Elevation {
+            scope: Some(12),
+            kind: GrantKind::SystemAccess,
+            ttl_ms: 60_000,
+            origin: RequestOrigin::RemoteControl,
+        };
+        assert_eq!(
+            may_elevate(
+                OriginPolicy::RemoteElevationAllowed,
+                &elsewhere,
+                Some(&factor)
+            ),
+            Err(RemoteElevationRefused::WrongSession {
+                touched_for: Some(11),
+                asked_for: Some(12),
+            })
+        );
     }
 }
