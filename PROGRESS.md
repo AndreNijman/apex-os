@@ -1074,3 +1074,71 @@ interrupted rebase rather than unique work — `apexd/apex-aid/`,
 `apexd/apex/src/*.rs`, all present in branch tips — but nobody has verified
 that, so it was recorded rather than tidied. **Do not blind-`rebase --abort`
 it.** Inspect first, then decide.
+
+- **2026-09-07 15:32 → 2026-09-08 08:56** — **Paused at Andre's request**
+  ("pause work, im shutting off my laptop"), then resumed on his word. The
+  first interruption this program has had that was neither a usage limit nor a
+  crash, and the cheapest: nothing was lost and nothing had to be
+  reconstructed.
+
+  At the pause, all six round-6 agents were stopped with `TaskStop` rather than
+  left to be killed by the shutdown, and `apex-wip-snapshot.service` was run by
+  hand twice. Saved: `wt-p1-035` (10 files, +1713), `wt-p1-039` (5 files,
+  +1537), `wt-p2-010` (2 files, +512/−17), `wt-trust` (2 files, +1450/−187),
+  apex-shell's `p3/recovery-ui` (1 file). `refs/wip/roadmap-state` was already
+  current — the 3-minute timer had taken this directory's edits before the
+  pause. `AUTORESUME` was removed, and the design then behaved exactly as
+  written: the once-on-next-boot firing at **08:53** logged "report refreshed
+  (205 lines)" followed by "not armed; nothing started". The free half ran; no
+  usage was spent while Andre was away from the machine.
+
+  **Every card was current at the pause.** They were 1050–1277 minutes stale on
+  resume and each still named its exact next action — the whole point of the
+  contract. Round 7 is six fresh agents on the same six cards.
+
+### What survived, and what it says about the discipline
+
+`p1-023` was the only round-6 unit to get work onto origin: `6b469ec` (the
+whole push-to-talk wiring — keybind, IPC handler, qmldir singleton,
+`PushToTalkService.qml`, `AgentService.lastFocusedId`, the CI step, a 324-line
+static suite) and `f5b494b` (the notch microphone indicator plus a `dismiss`
+event, so a refusal stops being permanent furniture). Its reported counts:
+`check-push-to-talk.sh` 42/0, and **16/18 against the pre-wiring tree** — it
+fails on absence, which is the only way a static suite is worth anything; node
+suite 57 assertions; 14/14 mutants caught; all 17 static suites 462/0.
+`check-color-tokens.sh` caught a hardcoded hex (22/0 → 19/3) and it moved to
+`Theme.danger`/`Theme.subtext` without touching the allowlist.
+
+The other five had committed work pushed (`2b463d1` on p0-014, `46d4ac7` on
+p2-010) or uncommitted work that only the snapshot ref covered. That asymmetry
+is the argument for the push-before-measure rule, restated in every round-7
+brief: **commit and push what is on disk before starting anything new.**
+
+`p1-023`'s card also carried the trap this program keeps meeting: its `NEXT`
+still said "THE VISIBLE INDICATOR" although `f5b494b` had already built it. The
+brief tells that agent to read `git show f5b494b`, decide, and fix the line as
+its first card edit. A `NEXT` written before the commit that answers it is
+worse than no `NEXT`, because it is confidently wrong.
+
+### Found at the pause, and deliberately left alone
+
+The **apex-os main clone** (`/var/home/andre/Projects/apex/apex-os`, not a
+worktree) is on a **detached HEAD in the middle of an interrupted rebase** —
+`.git/rebase-merge` exists — with **64 untracked files**. No round-6 or round-7
+work went near it; every agent works in `/var/tmp/apex-work/wt-*`. It is the
+"1 skipped mid-operation" line in the snapshot log, and that is the part that
+matters: those 64 untracked files are **not** covered by `refs/wip`. They look
+like rebase leftovers rather than unique work — `apexd/apex-aid/`,
+`apexd/apex/src/*.rs`, all present in branch tips — but nobody has verified
+that, so it was recorded rather than tidied. **Do not blind-`rebase --abort`
+it.** Inspect, then decide.
+
+### The heartbeat had to be guarded on the pid
+
+Round 6 started an unguarded five-hour loop touching
+`state/orchestrator.heartbeat`. If that session had died on a limit, the bash
+child would have outlived it and `autoresume`'s guard would have read a fresh
+heartbeat and stayed out — defeating the recovery path the heartbeat exists to
+protect. Round 7's loop is `while kill -0 <pid>`, so the heartbeat goes stale
+within ten minutes of the session ending, and live agents' `.output` mtimes
+cover the gap while they are working.
