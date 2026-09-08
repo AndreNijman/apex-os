@@ -998,6 +998,17 @@ struct UpdateArgs {
     /// the fix is in the release being held.
     #[arg(long)]
     force: bool,
+    /// Deploy the next image even though its signature does not verify.
+    ///
+    /// §27's gate refuses an update whose image the machine cannot verify —
+    /// see `docs/trust-enforcement.md` for what "cannot" covers and how to
+    /// change it permanently. This is the one-off way past it.
+    ///
+    /// Deliberately not `--force`: that is §26's rollout stop, for a machine
+    /// that came back from its last update broken. Working around a health
+    /// stop must not silently stop checking signatures.
+    #[arg(long)]
+    allow_unverified: bool,
     /// Keep ostree's per-object fsync on during the pull. Roughly halves update
     /// speed (measured: ~8 MiB/s with it, ~14.6 without, because 179k objects at
     /// 2.98 ms of fsync each outweighs the download itself) in exchange for
@@ -1298,6 +1309,7 @@ async fn main() {
             skip_packages: args.skip_packages,
             skip_flatpak: args.skip_flatpak,
             force: args.force,
+            allow_unverified: args.allow_unverified,
         }),
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Metrics(args) => cmd_metrics(args).await,
