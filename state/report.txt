@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-08 19:36 AWST
+APEX ROADMAP — resume report — 2026-09-09 00:37 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -18,32 +18,32 @@ APEX ROADMAP — resume report — 2026-09-08 19:36 AWST
 ────────────────────────────────────────────────────────────────────────────
   p0-014     unknown    P0-014,P0-015                      task/p0-014-remote-lock
              head 41d7c53 feat(webauthn): a challenge the daemon issues, and the
-             dirty 7 file(s), 0 unpushed, card 412m
+             dirty 7 file(s), 0 unpushed, card 713m
              NEXT **The plan is five commits plus the harness fix.** Commits 1, 2 an
 
   p1-023     unknown    (red suites),(pipefail sweep),P1-023,P1-024,P1-029 task/p1-023-handoff-lifecycle
              head 7544834 docs(voice): the guide says where push-to-talk stops
-             dirty 0 file(s), 0 unpushed, card 593m
+             dirty 0 file(s), 0 unpushed, card 894m
              NEXT The wiring is DONE and pushed (6b469ec) — do not redo it, and do n
 
   p2-010     unknown    P2-010,P2-011,P2-014,P2-015        task/p2-010-hardware-storage
              head 4c0c1f7 test(firmware): the doctor-line guard found the first 
-             dirty 0 file(s), 0 unpushed, card 284m
+             dirty 0 file(s), 0 unpushed, card 585m
              NEXT **P2-010, P2-014 and P2-015 are DONE and pushed through `20f3ef2`.
 
   p1-035     unknown    P1-035,P1-036,P1-037               task/p1-035-agent-tooling
              head d701f37 test(agent): three assertions in this suite could not 
-             dirty 4 file(s), 0 unpushed, card 410m
+             dirty 4 file(s), 0 unpushed, card 711m
              NEXT P1-035 is DONE (committed, pushed, 7/7 mutations killed). Mutation
 
   base-partials unknown    BASE-002,BASE-005,BASE-009,BASE-010,BASE-013,BASE-014,BASE-016,BASE-018 task/base-partials
              head 8a74816 test(env): the teardown assertion was filtering for a 
-             dirty 0 file(s), 0 unpushed, card 285m
+             dirty 0 file(s), 0 unpushed, card 586m
              NEXT BASE-018, BASE-002, BASE-016, BASE-005 are CLOSED (see RESULTS).
 
   p1-025     unknown    P1-025,P1-026,P1-027,P1-028        task/p1-025-skills-plugins
              head 5917833 feat(connector): P1-027 memory providers and P1-028 co
-             dirty 3 file(s), 0 unpushed, card 413m
+             dirty 3 file(s), 0 unpushed, card 714m
              NEXT P1-025, P1-027, P1-028 are landed on the branch (31e5860, 5917833)
 
 
@@ -130,11 +130,11 @@ APEX ROADMAP — resume report — 2026-09-08 19:36 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 2min 19s Tue
+  snapshot timer: active   last 52s Wed 2026-09-09
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    d64bef1  roadmap-state
+    apex-os    2a87bc0  roadmap-state
     apex-os    d6add7a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
     apex-os    1951fdc  wt-disposable-
@@ -149,15 +149,15 @@ APEX ROADMAP — resume report — 2026-09-08 19:36 AWST
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
     apex-os    9b605a1  wt-p0-011b-
-    apex-os    11a2c73  wt-p0-014-
+    apex-os    760013e  wt-p0-014-
     apex-os    580c657  wt-p0-019-os-
     apex-os    00c1973  wt-p0-025-os-
     apex-os    eda5ef8  wt-p1-001-
     apex-os    a23175f  wt-p1-002-
     apex-os    c260504  wt-p1-018-
     apex-os    7685dc3  wt-p1-020-os-
-    apex-os    ded07d1  wt-p1-023-os-
-    apex-shell 6450110  apex-shell-
+    apex-os    9058d32  wt-p1-023-os-
+    apex-shell dc6a71a  apex-shell-
     apex-shell df979e1  int-shell-
     apex-shell 75049cf  wt-greeter-shell-
     apex-shell ed92eaa  wt-lockhint-
