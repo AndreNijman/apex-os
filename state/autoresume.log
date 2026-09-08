@@ -53,3 +53,5 @@ You've hit your session limit · resets 2:50pm (Australia/Perth)
 2026-09-08 08:53:24 not armed; nothing started
 2026-09-08 12:18:00 report refreshed (210 lines)
 2026-09-08 12:18:00 skipped: agents are still writing output
+2026-09-08 14:41:37 report refreshed (224 lines)
+2026-09-08 14:41:37 skipped: the orchestrator process 4283 is still alive
