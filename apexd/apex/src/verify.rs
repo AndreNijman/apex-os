@@ -407,7 +407,7 @@ pub fn unix_from_iso(text: &str) -> Result<i64, String> {
     let s = text.trim().trim_start_matches("notBefore=").trim_start_matches("notAfter=").trim();
     let s = s.trim_end_matches('Z').trim();
     let (date, time) = s
-        .split_once(|c: char| c == ' ' || c == 'T')
+        .split_once([' ', 'T'])
         .ok_or_else(|| format!("not an ISO-8601 instant: {text:?}"))?;
     let d: Vec<&str> = date.split('-').collect();
     let t: Vec<&str> = time.split(':').collect();
@@ -719,10 +719,8 @@ pub fn fetch(roots: &Roots, repo: &str, tag: &str) -> Result<Fetched, Artifact> 
 /// aliases for one digest that moves on every successful main build.
 pub fn resolve(roots: &Roots, reference: &str) -> Result<String, String> {
     if roots.fixture.is_some() {
-        if let Ok(why) = roots.read_optional("/registry/resolve.error") {
-            if let Some(why) = why {
-                return Err(why.trim().to_string());
-            }
+        if let Ok(Some(why)) = roots.read_optional("/registry/resolve.error") {
+            return Err(why.trim().to_string());
         }
         return roots
             .read_optional("/registry/resolve")
@@ -778,22 +776,69 @@ fn openssl(args: &[&str], paths: &[&Path]) -> Openssl {
     }
 }
 
+/// The reason out of `openssl verify`'s output.
+///
+/// Measured, because the obvious reading is wrong. `openssl verify` prints the
+/// SUBJECT of the offending certificate on its first line and the reason on
+/// the second:
+///
+/// ```text
+/// O=sigstore.dev, CN=sigstore
+/// error 9 at 2 depth lookup: certificate is not yet valid
+/// error leaf.pem: verification failed
+/// ```
+///
+/// Taking `lines().next()` — which this function replaced — put a
+/// distinguished name where a refusal's reason should be, so the one line a
+/// user reads when their machine will not update said `O=sigstore.dev,
+/// CN=sigstore` instead of telling them what was wrong with it.
+fn openssl_verify_reason(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains("depth lookup:"))
+        .and_then(|l| l.split_once("depth lookup:").map(|(_, why)| why.trim().to_string()))
+        // No `depth lookup:` line at all: report every non-empty line rather
+        // than guessing which one mattered. An empty reason is worse than a
+        // verbose one here.
+        .unwrap_or_else(|| {
+            let all: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+            if all.is_empty() { "verification failed".to_string() } else { all.join("; ") }
+        })
+}
+
 /// The verification of one certificate-and-signature pair, shared by the
 /// signature and provenance paths.
 ///
 /// `signed` is the exact byte string the signature is over: the payload blob
 /// for a cosign signature, the DSSE pre-authentication encoding for an
 /// attestation.
-fn verify_signed_bytes(
-    roots: &Roots,
-    work: &Path,
-    leaf_pem: &str,
-    chain_pem: Option<&str>,
-    signature_b64: &str,
-    signed: &[u8],
-    expect_signer: &str,
-    expect_issuer: &str,
-) -> Verdict {
+/// One certificate-and-signature pair, and the exact bytes it covers.
+///
+/// Grouped rather than passed as eight arguments because the four travel
+/// together and are meaningless apart: a certificate without the signature it
+/// made, or a signature without the byte string it is over, cannot be checked
+/// at all.
+struct Candidate<'a> {
+    leaf_pem: &'a str,
+    /// Untrusted intermediates, never a root. See [`FULCIO_ROOT`].
+    chain_pem: Option<&'a str>,
+    signature_b64: &'a str,
+    /// The payload blob for a cosign signature; the DSSE pre-authentication
+    /// encoding for an attestation.
+    signed: &'a [u8],
+}
+
+/// Who this machine will accept a signature from.
+struct Expect {
+    signer: String,
+    issuer: String,
+}
+
+fn verify_signed_bytes(roots: &Roots, work: &Path, c: &Candidate<'_>, want: &Expect) -> Verdict {
+    let (leaf_pem, chain_pem, signature_b64, signed) =
+        (c.leaf_pem, c.chain_pem, c.signature_b64, c.signed);
+    let (expect_signer, expect_issuer) = (want.signer.as_str(), want.issuer.as_str());
     let leaf = work.join("leaf.pem");
     if let Err(e) = std::fs::write(&leaf, leaf_pem) {
         return Verdict::CouldNotRun(format!("{}: {e}", leaf.display()));
@@ -886,7 +931,7 @@ fn verify_signed_bytes(
     if !chained.ok {
         return Verdict::Failed(format!(
             "the signing certificate does not chain to the pinned Fulcio root: {}",
-            chained.stderr.lines().next().unwrap_or("verification failed")
+            openssl_verify_reason(&chained.stderr)
         ));
     }
 
@@ -937,13 +982,13 @@ fn verify_signed_bytes(
 // ── the two artifacts ────────────────────────────────────────────────────────
 
 /// The identity and issuer this machine expects, and nothing inferred.
-fn expectations(roots: &Roots) -> (String, String) {
+fn expectations(roots: &Roots) -> Expect {
     let signer = crate::trust::expected_signer(roots);
     let issuer = match roots.read_optional(ISSUER_OVERRIDE) {
         Ok(Some(s)) if !s.trim().is_empty() => s.trim().to_string(),
         _ => crate::trust::EXPECTED_ISSUER.to_string(),
     };
-    (signer, issuer)
+    Expect { signer, issuer }
 }
 
 /// One layer's cosign annotations.
@@ -1049,7 +1094,7 @@ pub fn verify_signature(roots: &Roots, repo: &str, digest: &str) -> Verdict {
             "{repo}:{tag} carries no {MEDIA_SIMPLE_SIGNING} layer"
         ));
     }
-    let (expect_signer, expect_issuer) = expectations(roots);
+    let want = expectations(roots);
     let mut last = Verdict::CouldNotRun("no layer was examined".to_string());
     // Every layer, and any one verifying is enough: a re-signed image carries
     // more than one signature, and taking only the first would refuse it.
@@ -1079,12 +1124,13 @@ pub fn verify_signature(roots: &Roots, repo: &str, digest: &str) -> Verdict {
         let v = verify_signed_bytes(
             roots,
             work.path(),
-            &ann.certificate,
-            ann.chain.as_deref(),
-            &ann.signature,
-            &bytes,
-            &expect_signer,
-            &expect_issuer,
+            &Candidate {
+                leaf_pem: &ann.certificate,
+                chain_pem: ann.chain.as_deref(),
+                signature_b64: &ann.signature,
+                signed: &bytes,
+            },
+            &want,
         );
         if matches!(v, Verdict::Verified { .. }) {
             return v;
@@ -1110,7 +1156,7 @@ pub fn verify_provenance(roots: &Roots, repo: &str, digest: &str) -> Verdict {
     if layers.is_empty() {
         return Verdict::CouldNotRun(format!("{repo}:{tag} carries no {MEDIA_DSSE} layer"));
     }
-    let (expect_signer, expect_issuer) = expectations(roots);
+    let want = expectations(roots);
     let mut last = Verdict::CouldNotRun("no envelope was examined".to_string());
     for layer in &layers {
         let bytes = match blob(&fetched, layer) {
@@ -1183,12 +1229,13 @@ pub fn verify_provenance(roots: &Roots, repo: &str, digest: &str) -> Verdict {
         let v = verify_signed_bytes(
             roots,
             work.path(),
-            &cert,
-            chain.as_deref(),
-            &sig_b64,
-            &signed,
-            &expect_signer,
-            &expect_issuer,
+            &Candidate {
+                leaf_pem: &cert,
+                chain_pem: chain.as_deref(),
+                signature_b64: &sig_b64,
+                signed: &signed,
+            },
+            &want,
         );
         if matches!(v, Verdict::Verified { .. }) {
             return v;
@@ -1206,6 +1253,56 @@ pub fn verify_image(roots: &Roots, repo: &str, digest: &str) -> Verification {
         provenance: verify_provenance(roots, &repo, digest),
         digest: digest.to_string(),
         repo,
+    }
+}
+
+// ── the gate ─────────────────────────────────────────────────────────────────
+
+/// Everything the update path needs to decide, in one value.
+pub struct Gate {
+    pub verification: Verification,
+    pub enforcement: Enforcement,
+    pub decision: Decision,
+}
+
+/// The gate for the image a reference would deploy RIGHT NOW.
+///
+/// The load-bearing difference between this and [`verify_image`] as `apex
+/// trust --verify` calls it: this resolves the reference against the registry
+/// first, so it verifies the digest the machine is about to run rather than
+/// the one it is already running. On APEX those differ for the same tag as a
+/// matter of routine — `apex`, `daily`, `gaming-mesa` and `gaming-nvidia` are
+/// four aliases for ONE digest that moves on every successful main build, so
+/// every machine is effectively on edge and has never been told so. A gate
+/// that verified the booted digest would wave through an update to an
+/// unsigned image every single time, while printing "verified".
+///
+/// A reference that cannot be resolved is not an error the caller has to
+/// handle: it is both checks answering [`Verdict::CouldNotRun`], with the
+/// reason, and [`decide`] deciding what that is worth. Returning `Err` here
+/// would put a second policy decision in every caller.
+pub fn gate(roots: &Roots, reference: &str) -> Gate {
+    let enforcement = enforcement(roots);
+    match resolve(roots, reference) {
+        Ok(digest) => {
+            let verification = verify_image(roots, reference, &digest);
+            let decision = decide(&verification, &enforcement);
+            Gate { verification, enforcement, decision }
+        }
+        Err(why) => {
+            let why = format!("the registry would not say which digest {reference} is: {why}");
+            let verification = Verification {
+                // The reference, because there is no digest — and saying so
+                // in the field a reader looks at beats inventing a digest or
+                // printing an empty one.
+                digest: reference.to_string(),
+                repo: repo_of(reference).to_string(),
+                signature: Verdict::CouldNotRun(why.clone()),
+                provenance: Verdict::CouldNotRun(why),
+            };
+            let decision = decide(&verification, &enforcement);
+            Gate { verification, enforcement, decision }
+        }
     }
 }
 
@@ -1904,6 +2001,28 @@ mod tests {
         let got = issuer_from_openssl_text(&hostile).expect("something was read");
         assert_ne!(got, ISSUER);
         assert!(got.starts_with("https://evil.example/"), "{got}");
+    }
+
+    #[test]
+    fn a_chain_failure_reports_the_reason_and_not_a_distinguished_name() {
+        // Captured from `openssl verify` rather than typed. It prints the
+        // SUBJECT of the offending certificate first and the reason second,
+        // so the obvious `lines().next()` — which this replaced — put
+        // `O=sigstore.dev, CN=sigstore` where a user needed to read "the
+        // certificate is not yet valid".
+        let real = "O=sigstore.dev, CN=sigstore\n\
+                    error 9 at 2 depth lookup: certificate is not yet valid\n\
+                    error leaf.pem: verification failed\n";
+        assert_eq!(openssl_verify_reason(real), "certificate is not yet valid");
+        let expired = "O=sigstore.dev, CN=sigstore-intermediate\n\
+                       error 10 at 0 depth lookup: certificate has expired\n";
+        assert_eq!(openssl_verify_reason(expired), "certificate has expired");
+        // No `depth lookup:` line: say everything rather than guess, because
+        // an empty reason on the screen that stops somebody updating is worse
+        // than a verbose one.
+        assert_eq!(openssl_verify_reason("something else entirely"), "something else entirely");
+        assert_eq!(openssl_verify_reason("   \n\n"), "verification failed");
+        assert_eq!(openssl_verify_reason(""), "verification failed");
     }
 
     #[test]

@@ -91,6 +91,22 @@ pub struct TrustArgs {
     /// and a status command must not reach the network unless it was asked to.
     #[arg(long)]
     pub verify: bool,
+    /// Answer the question `apex update` asks: would the image this machine
+    /// would deploy NEXT be accepted?
+    ///
+    /// Not the same question as `--verify`, which is about the image already
+    /// booted. This one resolves the origin's tag against the registry first,
+    /// because the four APEX tags are aliases for one digest that moves on
+    /// every successful main build — so what a machine is running and what it
+    /// is about to run are routinely different, and only the second one can
+    /// be refused.
+    ///
+    /// Exits 1 if the update would be refused, and prints the same refusal
+    /// `apex update` would print, from the same function. It needs no root
+    /// and stages nothing, so it is the way to find out what the gate will do
+    /// before asking it to do it.
+    #[arg(long, conflicts_with = "verify")]
+    pub gate: bool,
     /// Emit machine-readable JSON instead of a report.
     #[arg(long)]
     pub json: bool,
@@ -710,13 +726,24 @@ pub fn to_json(r: &Report) -> Value {
             }
             match (&reg.verification, &reg.decision) {
                 (Some(v), Some(d)) => {
-                    m.insert("signature".into(), v.signature.to_json());
-                    m.insert("sbomAttestation".into(), v.provenance.to_json());
-                    m.insert("repository".into(), Value::from(v.repo.clone()));
-                    let (decision, refused_by, reasons) = crate::verify::decision_json(d);
-                    m.insert("decision".into(), Value::from(decision));
-                    m.insert("refusedBy".into(), Value::from(refused_by));
-                    m.insert("reasons".into(), Value::from(reasons));
+                    // Produced by `crate::verify`, not rebuilt here. `apex
+                    // trust --json` and the gate `apex update` consults have
+                    // to agree about which word means which state, and two
+                    // functions writing the same object is how they stop.
+                    let ver = crate::verify::to_json(v, &r.enforcement, d);
+                    let Value::Object(mut ver) = ver else { unreachable!("to_json is an object") };
+                    // This report has always called the attestation
+                    // `sbomAttestation`; the gate calls the same thing
+                    // provenance, because that is the name of what it
+                    // enforces. Renamed rather than duplicated: two keys for
+                    // one fact is two things for a consumer to disagree about.
+                    if let Some(p) = ver.remove("provenance") {
+                        ver.insert("sbomAttestation".into(), p);
+                    }
+                    // Already at the top level of this report, where `apex
+                    // status` reads it without a network round trip.
+                    ver.remove("enforcement");
+                    m.extend(ver);
                 }
                 _ => {
                     // Every state that is not a verification carries its
@@ -861,8 +888,51 @@ pub fn render(r: &Report) -> String {
     s
 }
 
+/// `apex trust --gate` — what `apex update` would decide, without updating.
+///
+/// It calls exactly the functions the update path calls, in the same order,
+/// and prints the refusal from the same producer. A second implementation of
+/// "would this be accepted" is a second thing to drift, and the whole reason
+/// this unit exists is that a machine's report and its behaviour had drifted
+/// as far as they can: it said nothing was checked, and nothing was.
+fn gate_main(roots: &Roots, json: bool) -> i32 {
+    let report = offline_report(roots);
+    let Some(reference) = report.image.clone() else {
+        // Nothing to deploy from, so nothing to accept or refuse.
+        let why = report
+            .image_error
+            .clone()
+            .unwrap_or_else(|| "this deployment has no container image reference".to_string());
+        if json {
+            println!("{}", json!({ "decision": "not-decided", "reason": why }));
+        } else {
+            println!("apex: no image to check — {why}");
+        }
+        return 0;
+    };
+    let g = crate::verify::gate(roots, &reference);
+    if json {
+        let mut j = crate::verify::to_json(&g.verification, &g.enforcement, &g.decision);
+        if let Value::Object(m) = &mut j {
+            m.insert("reference".into(), Value::from(reference));
+        }
+        println!("{}", serde_json::to_string_pretty(&j).unwrap_or_default());
+    } else {
+        print!("{}", crate::verify::render(&g.verification, &g.enforcement, &g.decision));
+        if let Some(why) =
+            crate::verify::refusal(&g.verification, &g.enforcement, &g.decision, "--allow-unverified")
+        {
+            eprint!("{why}");
+        }
+    }
+    i32::from(g.decision.refuses())
+}
+
 pub fn main(args: TrustArgs) -> i32 {
     let roots = Roots::from_env();
+    if args.gate {
+        return gate_main(&roots, args.json);
+    }
     let report = build(&roots, args.verify);
     if args.json {
         println!("{}", serde_json::to_string_pretty(&to_json(&report)).unwrap_or_default());
