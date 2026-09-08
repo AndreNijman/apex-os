@@ -855,6 +855,29 @@ jobs:
       - name: Run capsule assertions
         run: ./tests/test-apex-env.sh
 
+      # The half the suite above deliberately cannot answer. Its device-profile
+      # coverage is argv-PINNED — it proves the engine emits the flags its
+      # author intended, with a stubbed container manager. It cannot prove
+      # those flags reach a device, which is the entire purpose of the `amd`
+      # and `hw` profiles, and §BASE-005 carried that as its outstanding
+      # qualification.
+      #
+      # This suite asks the shipped engine what a profile adds (it sources
+      # apex-env and calls gpu_flags, so a change to a profile changes the
+      # test) and hands exactly those flags to real rootless podman on an
+      # image that is ALREADY local, then reads back what is reachable inside.
+      # It never calls `apex env create`, never pulls, and every container is
+      # --rm.
+      #
+      # On this runner there is no AMD device and probably no podman, so the
+      # hardware half skips with status 0 — the same trade test-apex-hypr-lua
+      # and test-apex-input-live already make. The profile-SHAPE assertions run
+      # everywhere and fail rather than skip if gpu_flags stops emitting
+      # `--additional-flags` plus one argument, which is the way this file
+      # could otherwise have gone quietly vacuous.
+      - name: Run capsule device-profile assertions (live where the hardware is)
+        run: ./tests/test-apex-env-devices-live.sh
+
       # §9's resolver, which is the same engine as the package suite above and
       # a separate file because it is a separate claim: that engine INSTALLS,
       # this one CHOOSES. A choice is a policy, and the policy is invisible
@@ -1108,7 +1131,7 @@ jobs:
             tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
             tests/test-apex-modes.sh tests/test-apex-plugin.sh \
             tests/test-apex-host.sh tests/test-apex-dispatch.sh \
-            tests/test-apex-ai.sh
+            tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
       # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
