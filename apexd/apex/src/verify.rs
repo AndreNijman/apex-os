@@ -1,0 +1,1327 @@
+//! Sigstore verification, and the gate that refuses an image which fails it.
+//!
+//! `trust.rs` answers "has anybody checked this image?". Until this module
+//! existed the answer on every APEX machine was no, and the reason was not
+//! philosophical: the cryptographic arm of `apex trust --verify` keyed off
+//! `/usr/bin/cosign` existing, and **cosign is not packaged for Fedora**.
+//! `dnf5 repoquery cosign 'cosign*' 'sigstore*'` is empty across fedora,
+//! updates, updates-archive and both RPM Fusion repositories, so that branch
+//! was dead code on every machine this project can ship to, and the report
+//! always ended "…were not checked".
+//!
+//! It turns out cosign is not needed. A cosign keyless signature is an OCI
+//! artifact whose parts are all standard, and the two tools that read them —
+//! `skopeo` and `openssl` — are already in the image. So this module verifies
+//! the signature itself.
+//!
+//! ## What a signature verification consists of here
+//!
+//! For the `.sig` artifact of a digest, every one of these must hold:
+//!
+//! 1. the payload blob's sha256 equals the layer digest that named it;
+//! 2. the ECDSA signature in `dev.cosignproject.cosign/signature` verifies
+//!    over that blob under the public key of the leaf certificate in
+//!    `dev.sigstore.cosign/certificate`;
+//! 3. the leaf chains to a **pinned** Fulcio root — [`FULCIO_ROOT`], shipped by
+//!    the image — with the `dev.sigstore.cosign/chain` annotation supplied only
+//!    as untrusted intermediates;
+//! 4. the leaf's subject alternative name is the identity this machine expects,
+//!    and its Sigstore OIDC-issuer extension is the issuer it expects;
+//! 5. the payload binds the digest being verified and the repository it came
+//!    from — `critical.image.docker-manifest-digest` and
+//!    `critical.identity.docker-reference`.
+//!
+//! Any of those answering "no" is a failure. Any of them failing to *run* —
+//! openssl missing, the pinned root unreadable, the registry unreachable — is
+//! not a failure, and is not a pass either. See [`Verdict`].
+//!
+//! ### The `-attime` trap
+//!
+//! A Fulcio leaf lives for **ten minutes**. The one on the image the author's
+//! L16 is running was valid from 13:43:25 to 13:53:25 on 2026-09-05 and has
+//! been expired ever since, so `openssl verify` at the current time reports
+//! "certificate has expired" for a perfectly good signature. Verification must
+//! therefore be done at a past instant, and *which* instant is a security
+//! decision:
+//!
+//! * The `dev.sigstore.cosign/bundle` annotation carries Rekor's
+//!   `integratedTime`, which is the honest answer — but that annotation is not
+//!   covered by anything this module verifies, so an attacker who can serve a
+//!   manifest can put any number in it. Using it would let a signature made
+//!   with a leaked ephemeral key long after its window verify anyway.
+//! * The leaf's own `notBefore` is inside the certificate, and the certificate
+//!   is authenticated by the chain in step 3. That is what this module uses.
+//!
+//! What is given up by not verifying the Rekor entry is transparency-log
+//! inclusion: this module cannot tell that the signature was ever published to
+//! a log, only that a certificate issued to the expected identity signed this
+//! exact digest. That is the same posture as `cosign verify
+//! --insecure-ignore-tlog`, and the report says so in those words rather than
+//! printing an unqualified "verified".
+//!
+//! ## Provenance
+//!
+//! The `.att` artifact is a DSSE envelope wrapping an in-toto statement whose
+//! predicate is the syft SPDX SBOM. It is verified the same way, over the DSSE
+//! pre-authentication encoding, and the statement's subject must be the digest.
+//!
+//! **No published APEX image has one yet.** The `cosign attest` step exists
+//! only on `roadmap/v2.2`; `origin/main`'s `build-image.yml` has no `syft` and
+//! no `attest`, and `skopeo inspect` on the booted digest's `.att` tag returns
+//! `manifest unknown`. So provenance is `Absent` on every machine today, which
+//! is why the shipped default treats it as advisory — see [`Enforcement`].
+//!
+//! Because that also means the attestation path could not be exercised against
+//! a real artifact, an envelope this module cannot parse is reported as
+//! [`Verdict::CouldNotRun`] and never as a failure. A format that turns out to
+//! differ from the one assumed here must not refuse the first genuinely signed
+//! image that carries it.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use serde_json::{json, Map, Value};
+
+use crate::trust::{classify_skopeo_failure, cosign_tag, san_uri, Artifact, Roots};
+
+/// The pinned Fulcio root, shipped by the image.
+///
+/// Pinning is the whole point: the `chain` annotation in a cosign signature
+/// carries Fulcio's intermediate **and root**, and verifying a signature
+/// against a root the signature itself supplied proves nothing. The shipped
+/// file was taken from `sigstore/root-signing` and matches, fingerprint for
+/// fingerprint, the root the real ghcr.io signature carries — which is the
+/// check that makes pinning it safe rather than merely different.
+pub const FULCIO_ROOT: &str = "/usr/share/apex-os/trust/fulcio-root.pem";
+
+/// An image-owned file that replaces [`crate::trust::EXPECTED_ISSUER`].
+///
+/// The twin of `trust.rs`'s signer override, and it exists for the same reason
+/// plus one more: the test suite mints its own certificate authority and its
+/// own identity, and a suite that could not say which issuer to expect would
+/// have to skip the identity check — which is one of the two arms that make
+/// this verification mean anything.
+const ISSUER_OVERRIDE: &str = "/usr/share/apex-os/trust/expected-issuer";
+
+/// Where the image ships its enforcement defaults.
+const DEFAULTS_PATH: &str = "/usr/share/apex-os/trust/enforcement.conf";
+
+/// Where an administrator overrides them, per key.
+const OVERRIDE_PATH: &str = "/etc/apex/trust.conf";
+
+/// The Sigstore certificate extension holding the OIDC issuer.
+///
+/// `1.3.6.1.4.1.57264.1.1` is the original form and holds the raw string.
+/// `.1.8` is the same value re-encoded as a DER UTF8String, which openssl
+/// renders with two bytes of tag and length in front of it. Either is accepted;
+/// see [`issuer_from_openssl_text`].
+const OID_ISSUER_V1: &str = "1.3.6.1.4.1.57264.1.1";
+const OID_ISSUER_V2: &str = "1.3.6.1.4.1.57264.1.8";
+
+const MEDIA_SIMPLE_SIGNING: &str = "application/vnd.dev.cosign.simplesigning.v1+json";
+const MEDIA_DSSE: &str = "application/vnd.dsse.envelope.v1+json";
+
+// ── verdicts ─────────────────────────────────────────────────────────────────
+
+/// What verification concluded about one artifact.
+///
+/// Four values, not two, and not three. The distinction this program keeps
+/// re-learning is that "no" and "I could not tell" are different answers; this
+/// module needs one more, because "the registry answered and holds nothing" is
+/// a measurement about the publisher, while "the registry did not answer" is a
+/// measurement about the network. Collapsing those two would either refuse
+/// every update whenever a machine is offline, or accept an image nobody ever
+/// signed — depending which way round the collapse went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// Every check in the module documentation passed.
+    Verified {
+        /// The identity in the certificate, now actually verified.
+        signer: String,
+        /// The instant the chain was verified at, and where it came from.
+        at: String,
+    },
+    /// The registry answered, and holds no such artifact for this digest.
+    /// Nobody signed it. That is not the same as a signature that is wrong.
+    Absent(String),
+    /// Verification ran to a conclusion and the conclusion is no.
+    Failed(String),
+    /// Verification did not run to a conclusion. Never a pass, never a failure.
+    CouldNotRun(String),
+}
+
+impl Verdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Verdict::Verified { .. } => "verified",
+            Verdict::Absent(_) => "absent",
+            Verdict::Failed(_) => "failed",
+            Verdict::CouldNotRun(_) => "could-not-run",
+        }
+    }
+
+    /// The reason, for every state that has one.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Verdict::Verified { .. } => None,
+            Verdict::Absent(w) | Verdict::Failed(w) | Verdict::CouldNotRun(w) => Some(w),
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        let mut m = Map::new();
+        m.insert("state".into(), Value::from(self.as_str()));
+        if let Some(w) = self.reason() {
+            m.insert("reason".into(), Value::from(w));
+        }
+        if let Verdict::Verified { signer, at } = self {
+            m.insert("signer".into(), Value::from(signer.clone()));
+            m.insert("verifiedAt".into(), Value::from(at.clone()));
+        }
+        Value::Object(m)
+    }
+}
+
+/// Both verdicts for one digest.
+#[derive(Debug, Clone)]
+pub struct Verification {
+    /// The digest that was verified — not necessarily the booted one.
+    pub digest: String,
+    /// The repository the artifacts were looked for in.
+    pub repo: String,
+    pub signature: Verdict,
+    pub provenance: Verdict,
+}
+
+// ── enforcement ──────────────────────────────────────────────────────────────
+
+/// How hard one check refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strictness {
+    /// Anything short of `Verified` stops the update.
+    Enforce,
+    /// A `Failed` check stops the update; `Absent` and `CouldNotRun` warn.
+    ///
+    /// The asymmetry is deliberate. A signature that verifies *wrongly* is the
+    /// signature of an attack, and no amount of "the network was flaky" makes
+    /// it not one; a signature that is missing, or that could not be fetched,
+    /// is a gap and warning about a gap is proportionate.
+    Warn,
+    /// Report, never refuse.
+    Off,
+}
+
+impl Strictness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Strictness::Enforce => "enforce",
+            Strictness::Warn => "warn",
+            Strictness::Off => "off",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "enforce" => Some(Strictness::Enforce),
+            "warn" => Some(Strictness::Warn),
+            "off" => Some(Strictness::Off),
+            _ => None,
+        }
+    }
+}
+
+/// The configured strictness of each check, and where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Enforcement {
+    pub signature: Strictness,
+    pub provenance: Strictness,
+    /// Every line that could not be understood, and every file that could not
+    /// be read, so a typo in the config never silently relaxes a check.
+    pub notes: Vec<String>,
+}
+
+impl Default for Enforcement {
+    /// What a machine with no configuration at all does.
+    ///
+    /// `signature=enforce` because every published APEX image is signed and
+    /// always has been: refusing an unsigned one costs nothing and is the
+    /// entire point of this module.
+    ///
+    /// `provenance=warn` because **no published APEX image has an SBOM
+    /// attestation**. The `cosign attest` step lives on `roadmap/v2.2` and has
+    /// never run on `main`, so `.att` is `manifest unknown` for every digest in
+    /// the registry today. Shipping `enforce` would refuse every update on
+    /// every machine on the grounds that the publisher has not caught up yet,
+    /// which is an outage dressed as a security control.
+    fn default() -> Self {
+        Self { signature: Strictness::Enforce, provenance: Strictness::Warn, notes: Vec::new() }
+    }
+}
+
+/// Parse `signature=` / `provenance=` out of one config file's text.
+///
+/// Anything else is a note rather than an error: this file is edited by hand on
+/// a machine whose updates depend on it, and a stray line must not be the
+/// difference between updating and not.
+pub fn parse_enforcement(text: &str, into: &mut Enforcement, source: &str) {
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            into.notes.push(format!("{source}:{}: not a key=value line: {line}", n + 1));
+            continue;
+        };
+        let Some(level) = Strictness::parse(value) else {
+            into.notes.push(format!(
+                "{source}:{}: {} is not one of enforce, warn, off — leaving {} as it was",
+                n + 1,
+                value.trim(),
+                key.trim()
+            ));
+            continue;
+        };
+        match key.trim() {
+            "signature" => into.signature = level,
+            "provenance" => into.provenance = level,
+            other => into
+                .notes
+                .push(format!("{source}:{}: no such setting: {other}", n + 1)),
+        }
+    }
+}
+
+/// The enforcement this machine is configured for.
+///
+/// The image's defaults first, then the administrator's overrides on top, per
+/// key. A file that is simply not there is normal and silent; a file that
+/// exists and cannot be read is a note, because an unreadable policy file must
+/// never quietly become a permissive one.
+pub fn enforcement(roots: &Roots) -> Enforcement {
+    let mut e = Enforcement::default();
+    for path in [DEFAULTS_PATH, OVERRIDE_PATH] {
+        match roots.read_optional(path) {
+            Ok(Some(text)) => parse_enforcement(&text, &mut e, path),
+            Ok(None) => {}
+            Err(why) => e.notes.push(format!("{why} — using the built-in default")),
+        }
+    }
+    e
+}
+
+/// What the update path should do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    /// Nothing to say. Deploy.
+    Proceed,
+    /// Deploy, but tell the user what was not established.
+    ProceedWithWarnings(Vec<String>),
+    /// Do not deploy. `failed` names which checks refused, in the words the
+    /// user needs — "signature", "provenance", or both.
+    Refuse { refused_by: Vec<String>, lines: Vec<String> },
+}
+
+impl Decision {
+    pub fn refuses(&self) -> bool {
+        matches!(self, Decision::Refuse { .. })
+    }
+}
+
+/// One check's contribution to the decision.
+///
+/// Pure, exhaustive over the 4 × 3 table, and the only place the policy lives.
+/// `ops::update`, `apex trust` and the JSON all read their answer from here, so
+/// there is no second implementation to drift.
+fn arm(what: &str, v: &Verdict, how: Strictness) -> Result<Option<String>, String> {
+    let detail = |head: &str| match v.reason() {
+        Some(w) => format!("{head}: {w}"),
+        None => head.to_string(),
+    };
+    match (v, how) {
+        (Verdict::Verified { .. }, _) => Ok(None),
+        (_, Strictness::Off) => Ok(Some(detail(&format!(
+            "the {what} was not established, and {what} checking is switched off"
+        )))),
+        (Verdict::Failed(_), _) => Err(detail(&format!("the {what} does not verify"))),
+        (Verdict::Absent(_), Strictness::Enforce) => {
+            Err(detail(&format!("this image has no {what}")))
+        }
+        (Verdict::CouldNotRun(_), Strictness::Enforce) => {
+            Err(detail(&format!("the {what} could not be checked")))
+        }
+        (Verdict::Absent(_), Strictness::Warn) => {
+            Ok(Some(detail(&format!("this image has no {what}"))))
+        }
+        (Verdict::CouldNotRun(_), Strictness::Warn) => {
+            Ok(Some(detail(&format!("the {what} could not be checked"))))
+        }
+    }
+}
+
+/// Turn two verdicts and a configuration into a decision.
+pub fn decide(v: &Verification, e: &Enforcement) -> Decision {
+    let mut refused_by = Vec::new();
+    let mut lines = Vec::new();
+    let mut warnings = Vec::new();
+
+    for (what, verdict, how) in [
+        ("signature", &v.signature, e.signature),
+        ("provenance", &v.provenance, e.provenance),
+    ] {
+        match arm(what, verdict, how) {
+            Ok(None) => {}
+            Ok(Some(w)) => warnings.push(w),
+            Err(line) => {
+                refused_by.push(what.to_string());
+                lines.push(line);
+            }
+        }
+    }
+
+    if !refused_by.is_empty() {
+        // The warnings ride along: a refusal that mentions only the check that
+        // failed, on a machine where the other one was also never established,
+        // sends the reader to fix half the problem.
+        lines.extend(warnings);
+        return Decision::Refuse { refused_by, lines };
+    }
+    if warnings.is_empty() {
+        Decision::Proceed
+    } else {
+        Decision::ProceedWithWarnings(warnings)
+    }
+}
+
+// ── time ─────────────────────────────────────────────────────────────────────
+
+/// Seconds since the epoch from openssl's `-dateopt iso_8601` rendering.
+///
+/// `openssl x509 -noout -startdate -dateopt iso_8601` prints
+/// `notBefore=2026-09-05 13:43:25Z`. This crate has no date library and one
+/// would be a dependency for a single conversion, so the civil-to-days
+/// algorithm is here, with the epoch check as a test. Shelling out to `date -d`
+/// was the alternative and would put locale parsing in the middle of a
+/// signature check.
+pub fn unix_from_iso(text: &str) -> Result<i64, String> {
+    let s = text.trim().trim_start_matches("notBefore=").trim_start_matches("notAfter=").trim();
+    let s = s.trim_end_matches('Z').trim();
+    let (date, time) = s
+        .split_once(|c: char| c == ' ' || c == 'T')
+        .ok_or_else(|| format!("not an ISO-8601 instant: {text:?}"))?;
+    let d: Vec<&str> = date.split('-').collect();
+    let t: Vec<&str> = time.split(':').collect();
+    if d.len() != 3 || t.len() != 3 {
+        return Err(format!("not an ISO-8601 instant: {text:?}"));
+    }
+    let num = |v: &str| -> Result<i64, String> {
+        v.parse::<i64>().map_err(|e| format!("{v:?} in {text:?}: {e}"))
+    };
+    let (y, mo, da) = (num(d[0])?, num(d[1])?, num(d[2])?);
+    let (h, mi, se) = (num(t[0])?, num(t[1])?, num(t[2])?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&da) {
+        return Err(format!("not a real date: {text:?}"));
+    }
+    Ok(days_from_civil(y, mo, da) * 86_400 + h * 3600 + mi * 60 + se)
+}
+
+/// Days from 1970-01-01 to a proleptic-Gregorian date. Hinnant's algorithm.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+// ── certificate reading ──────────────────────────────────────────────────────
+
+/// The OIDC issuer out of a certificate's Sigstore extension.
+///
+/// openssl renders an unknown extension by printing the OID, a colon, and the
+/// value on the following line. For `1.3.6.1.4.1.57264.1.1` that value is the
+/// issuer string; for `.1.8` it is the same string wrapped in a DER
+/// UTF8String, so openssl prints two bytes of tag and length in front of it and
+/// the line reads `.+https://token.actions.githubusercontent.com`. Both forms
+/// are accepted, and the wrapper is peeled by taking the tail — never by
+/// searching for the expected value inside the line, which would let
+/// `https://evil.example/?x=https://token.actions.githubusercontent.com`
+/// match.
+pub fn issuer_from_openssl_text(text: &str) -> Option<String> {
+    let mut best: Option<String> = None;
+    let mut lines = text.lines().peekable();
+    while let Some(l) = lines.next() {
+        let t = l.trim();
+        let is_v1 = t == format!("{OID_ISSUER_V1}:");
+        let is_v2 = t == format!("{OID_ISSUER_V2}:");
+        if !is_v1 && !is_v2 {
+            continue;
+        }
+        let Some(raw) = lines.peek() else { continue };
+        let value = raw.trim();
+        // Peel at most a two-byte DER header. Anything longer is not a
+        // UTF8String wrapper and is left alone so it fails the comparison.
+        let peeled = match value.char_indices().find(|(_, c)| *c == 'h') {
+            Some((i, _)) if i <= 2 => &value[i..],
+            _ => value,
+        };
+        if peeled.is_empty() {
+            continue;
+        }
+        // v1 wins when both are present: it is the unwrapped form.
+        if is_v1 || best.is_none() {
+            best = Some(peeled.to_string());
+        }
+        if is_v1 {
+            return best;
+        }
+    }
+    best
+}
+
+/// What the payload of a cosign simple-signing blob must say.
+///
+/// The signature proves that *something* was signed by the expected identity.
+/// Without this check, a valid signature over a different image from the same
+/// publisher would verify — which is precisely the substitution a moved tag
+/// makes easy.
+pub fn simple_signing_binds(payload: &str, repo: &str, digest: &str) -> Result<(), String> {
+    let doc: Value = serde_json::from_str(payload)
+        .map_err(|e| format!("the signed payload is not JSON: {e}"))?;
+    let critical = doc
+        .get("critical")
+        .ok_or_else(|| "the signed payload has no `critical` section".to_string())?;
+    let signed_digest = critical
+        .get("image")
+        .and_then(|i| i.get("docker-manifest-digest"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "the signed payload names no manifest digest".to_string())?;
+    if signed_digest != digest {
+        return Err(format!(
+            "the signature covers {signed_digest}, not the {digest} being deployed"
+        ));
+    }
+    let signed_repo = critical
+        .get("identity")
+        .and_then(|i| i.get("docker-reference"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "the signed payload names no repository".to_string())?;
+    // Compared without a tag on either side: cosign records the repository, and
+    // the four APEX tags are aliases for one digest, so a tag comparison would
+    // fail on an image that is genuinely the right one.
+    if repo_of(signed_repo) != repo_of(repo) {
+        return Err(format!(
+            "the signature covers an image in {signed_repo}, not in {repo}"
+        ));
+    }
+    Ok(())
+}
+
+/// What the in-toto statement inside a DSSE envelope must say.
+pub fn intoto_binds(statement: &str, digest: &str) -> Result<(), String> {
+    let doc: Value = serde_json::from_str(statement)
+        .map_err(|e| format!("the attested statement is not JSON: {e}"))?;
+    let hex = digest.split_once(':').map(|(_, h)| h).unwrap_or(digest);
+    let subjects = doc
+        .get("subject")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "the attested statement has no subject".to_string())?;
+    let covered = subjects.iter().any(|s| {
+        s.get("digest")
+            .and_then(|d| d.get("sha256"))
+            .and_then(Value::as_str)
+            .is_some_and(|h| h.eq_ignore_ascii_case(hex))
+    });
+    if !covered {
+        return Err(format!("the attestation's subject is not {digest}"));
+    }
+    let kind = doc.get("predicateType").and_then(Value::as_str).unwrap_or("");
+    if !kind.contains("spdx") {
+        return Err(format!(
+            "the attestation is a {kind} predicate, not the SPDX SBOM this image publishes"
+        ));
+    }
+    Ok(())
+}
+
+/// The DSSE pre-authentication encoding: what a DSSE signature is actually over.
+///
+/// `DSSEv1 SP len(payloadType) SP payloadType SP len(payload) SP payload`, with
+/// the payload as raw bytes after base64 decoding — not the base64 text.
+pub fn pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + payload_type.len() + 32);
+    out.extend_from_slice(b"DSSEv1 ");
+    out.extend_from_slice(payload_type.len().to_string().as_bytes());
+    out.push(b' ');
+    out.extend_from_slice(payload_type.as_bytes());
+    out.push(b' ');
+    out.extend_from_slice(payload.len().to_string().as_bytes());
+    out.push(b' ');
+    out.extend_from_slice(payload);
+    out
+}
+
+/// A repository reference with any tag or digest removed.
+fn repo_of(reference: &str) -> &str {
+    let head = reference.split_once('@').map(|(r, _)| r).unwrap_or(reference);
+    match head.rsplit_once(':') {
+        // A colon after the last slash is a tag. A colon before it is a port.
+        Some((r, _)) if head.rfind(':') > head.rfind('/') => r,
+        _ => head,
+    }
+}
+
+// ── base64, without a dependency ─────────────────────────────────────────────
+
+/// Decode standard base64, ignoring whitespace. Returns None on anything else.
+///
+/// The alternative was a new dependency in the crate that verifies signatures,
+/// which is the crate where a new dependency is least welcome.
+pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut pad = 0;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            continue;
+        }
+        if c == '=' {
+            pad += 1;
+            continue;
+        }
+        if pad > 0 {
+            return None;
+        }
+        let v = match c {
+            'A'..='Z' => c as u32 - 'A' as u32,
+            'a'..='z' => c as u32 - 'a' as u32 + 26,
+            '0'..='9' => c as u32 - '0' as u32 + 52,
+            '+' => 62,
+            '/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    if pad > 2 || (acc & ((1 << bits) - 1)) != 0 {
+        return None;
+    }
+    Some(out)
+}
+
+// ── fetching ─────────────────────────────────────────────────────────────────
+
+/// One fetched cosign artifact: its manifest, and the directory its blobs are in.
+pub struct Fetched {
+    pub manifest: String,
+    pub blobs: PathBuf,
+    /// Kept so the temporary directory outlives the verification.
+    _keep: Option<TempDir>,
+}
+
+/// A private temporary directory that removes itself.
+pub struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> Result<Self, String> {
+        // Nanosecond-and-pid naming rather than a counter: two `apex trust`
+        // runs at once must not share a directory that one of them deletes.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let safe: String = tag.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let p = std::env::temp_dir().join(format!("apex-verify-{}-{stamp}-{safe}", std::process::id()));
+        std::fs::create_dir_all(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        Ok(TempDir(p))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Ask the registry for one cosign artifact and put its parts on disk.
+///
+/// `skopeo copy … dir:` rather than `skopeo inspect` plus a blob fetch: it is
+/// one network round trip, it writes the raw manifest beside the blobs, and it
+/// validates every blob's digest against the manifest on the way in.
+///
+/// Under a fixture root nothing is spawned. The fixture supplies
+/// `registry/<tag>/manifest.json` plus the blobs, or `registry/<tag>.error`
+/// with the text of a registry failure, or neither — which is the registry
+/// answering that it holds nothing.
+/// Whether a fixture root exists but supplies no `registry/` tree.
+///
+/// The distinction the shell suite depends on. Most fixture roots in
+/// `tests/test-apex-trust.sh` exist to exercise the OFFLINE report — an origin
+/// file, a `policy.json` — and `--verify` against one of those must stay the
+/// no-op it has always been, because reporting "the registry holds no
+/// signature" there would be a fixture's shape printed as a fact about an
+/// image. A fixture that DOES carry `registry/` is asking for the verification
+/// path, and gets it, without a byte of network.
+pub fn fixture_without_registry(roots: &Roots) -> bool {
+    roots.fixture.is_some() && !roots.path("/registry").is_dir()
+}
+
+pub fn fetch(roots: &Roots, repo: &str, tag: &str) -> Result<Fetched, Artifact> {
+    if roots.fixture.is_some() {
+        let dir = roots.path(&format!("/registry/{tag}"));
+        let err = roots.path(&format!("/registry/{tag}.error"));
+        if let Ok(text) = std::fs::read_to_string(&err) {
+            return Err(classify_skopeo_failure(&text));
+        }
+        let manifest = dir.join("manifest.json");
+        return match std::fs::read_to_string(&manifest) {
+            Ok(m) => Ok(Fetched { manifest: m, blobs: dir, _keep: None }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(Artifact::Absent)
+            }
+            Err(e) => Err(Artifact::Unavailable(format!("{}: {e}", manifest.display()))),
+        };
+    }
+
+    let tmp = TempDir::new(tag).map_err(Artifact::Unavailable)?;
+    let out = Command::new("/usr/bin/skopeo")
+        .args(["copy", "--quiet", &format!("docker://{repo}:{tag}")])
+        .arg(format!("dir:{}", tmp.path().display()))
+        .output()
+        .map_err(|e| Artifact::Unavailable(format!("could not run skopeo: {e}")))?;
+    if !out.status.success() {
+        return Err(classify_skopeo_failure(&String::from_utf8_lossy(&out.stderr)));
+    }
+    let manifest = tmp.path().join("manifest.json");
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|e| Artifact::Unavailable(format!("{}: {e}", manifest.display())))?;
+    let blobs = tmp.path().to_path_buf();
+    Ok(Fetched { manifest: text, blobs, _keep: Some(tmp) })
+}
+
+/// The digest the registry currently serves for a tag.
+///
+/// This is the load-bearing difference between a readout and a gate: `apex
+/// trust` verifies what the machine is *running*, and an update has to verify
+/// what it is *about to run*. On APEX those are routinely different for the
+/// same tag — `apex`, `daily`, `gaming-mesa` and `gaming-nvidia` are four
+/// aliases for one digest that moves on every successful main build.
+pub fn resolve(roots: &Roots, reference: &str) -> Result<String, String> {
+    if roots.fixture.is_some() {
+        if let Ok(why) = roots.read_optional("/registry/resolve.error") {
+            if let Some(why) = why {
+                return Err(why.trim().to_string());
+            }
+        }
+        return roots
+            .read_optional("/registry/resolve")
+            .map_err(|e| e.to_string())?
+            .map(|s| s.trim().to_string())
+            .ok_or_else(|| "this fixture root resolves no tag".to_string());
+    }
+    let out = Command::new("/usr/bin/skopeo")
+        .args(["inspect", "--format", "{{.Digest}}", &format!("docker://{reference}")])
+        .output()
+        .map_err(|e| format!("could not run skopeo: {e}"))?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        let line = why.lines().last().map(str::trim).unwrap_or("skopeo failed without a message");
+        return Err(line.to_string());
+    }
+    let d = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !d.starts_with("sha256:") {
+        return Err(format!("the registry answered {d:?}, which is not a digest"));
+    }
+    Ok(d)
+}
+
+// ── the cryptography ─────────────────────────────────────────────────────────
+
+/// An openssl invocation that did not run, as distinct from one that said no.
+struct Openssl {
+    ran: bool,
+    ok: bool,
+    stdout: String,
+    stderr: String,
+}
+
+fn openssl(args: &[&str], paths: &[&Path]) -> Openssl {
+    let mut cmd = Command::new("/usr/bin/openssl");
+    cmd.args(args);
+    for p in paths {
+        cmd.arg(p);
+    }
+    match cmd.output() {
+        Ok(o) => Openssl {
+            ran: true,
+            ok: o.status.success(),
+            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        },
+        Err(e) => Openssl {
+            ran: false,
+            ok: false,
+            stdout: String::new(),
+            stderr: format!("could not run openssl: {e}"),
+        },
+    }
+}
+
+/// The verification of one certificate-and-signature pair, shared by the
+/// signature and provenance paths.
+///
+/// `signed` is the exact byte string the signature is over: the payload blob
+/// for a cosign signature, the DSSE pre-authentication encoding for an
+/// attestation.
+fn verify_signed_bytes(
+    roots: &Roots,
+    work: &Path,
+    leaf_pem: &str,
+    chain_pem: Option<&str>,
+    signature_b64: &str,
+    signed: &[u8],
+    expect_signer: &str,
+    expect_issuer: &str,
+) -> Verdict {
+    let leaf = work.join("leaf.pem");
+    if let Err(e) = std::fs::write(&leaf, leaf_pem) {
+        return Verdict::CouldNotRun(format!("{}: {e}", leaf.display()));
+    }
+    let payload = work.join("signed.bin");
+    if let Err(e) = std::fs::write(&payload, signed) {
+        return Verdict::CouldNotRun(format!("{}: {e}", payload.display()));
+    }
+    let Some(sig) = b64_decode(signature_b64) else {
+        return Verdict::Failed("the signature is not valid base64".to_string());
+    };
+    let sigfile = work.join("sig.der");
+    if let Err(e) = std::fs::write(&sigfile, &sig) {
+        return Verdict::CouldNotRun(format!("{}: {e}", sigfile.display()));
+    }
+
+    // 1. the public key out of the leaf.
+    let pub_out = openssl(&["x509", "-pubkey", "-noout", "-in"], &[&leaf]);
+    if !pub_out.ran {
+        return Verdict::CouldNotRun(pub_out.stderr);
+    }
+    if !pub_out.ok {
+        return Verdict::Failed(format!("the certificate does not parse: {}", pub_out.stderr));
+    }
+    let pubkey = work.join("pub.pem");
+    if let Err(e) = std::fs::write(&pubkey, &pub_out.stdout) {
+        return Verdict::CouldNotRun(format!("{}: {e}", pubkey.display()));
+    }
+
+    // 2. the signature over the signed bytes.
+    let dgst = openssl(
+        &["dgst", "-sha256", "-verify", &pubkey.display().to_string(), "-signature", &sigfile.display().to_string()],
+        &[&payload],
+    );
+    if !dgst.ran {
+        return Verdict::CouldNotRun(dgst.stderr);
+    }
+    if !dgst.ok {
+        return Verdict::Failed(
+            "the signature does not verify against the certificate's public key".to_string(),
+        );
+    }
+
+    // 3. the chain, at the leaf's own notBefore. See the module note on why
+    //    not the bundle's integratedTime.
+    let start = openssl(&["x509", "-noout", "-startdate", "-dateopt", "iso_8601", "-in"], &[&leaf]);
+    if !start.ran {
+        return Verdict::CouldNotRun(start.stderr);
+    }
+    if !start.ok {
+        return Verdict::Failed(format!("the certificate has no start date: {}", start.stderr));
+    }
+    let at = match unix_from_iso(&start.stdout) {
+        Ok(t) => t,
+        Err(e) => return Verdict::Failed(format!("the certificate's start date is unreadable: {e}")),
+    };
+    let root_pem = match roots.read(FULCIO_ROOT) {
+        Ok(s) => s,
+        Err(e) => {
+            return Verdict::CouldNotRun(format!(
+                "the pinned Fulcio root could not be read, so nothing could be checked \
+                 against it: {e}"
+            ))
+        }
+    };
+    let rootfile = work.join("root.pem");
+    if let Err(e) = std::fs::write(&rootfile, &root_pem) {
+        return Verdict::CouldNotRun(format!("{}: {e}", rootfile.display()));
+    }
+    let mut verify_args: Vec<String> = vec![
+        "verify".into(),
+        "-CAfile".into(),
+        rootfile.display().to_string(),
+        "-attime".into(),
+        at.to_string(),
+    ];
+    if let Some(chain) = chain_pem {
+        let chainfile = work.join("chain.pem");
+        if let Err(e) = std::fs::write(&chainfile, chain) {
+            return Verdict::CouldNotRun(format!("{}: {e}", chainfile.display()));
+        }
+        verify_args.push("-untrusted".into());
+        verify_args.push(chainfile.display().to_string());
+    }
+    let borrowed: Vec<&str> = verify_args.iter().map(String::as_str).collect();
+    let chained = openssl(&borrowed, &[&leaf]);
+    if !chained.ran {
+        return Verdict::CouldNotRun(chained.stderr);
+    }
+    if !chained.ok {
+        return Verdict::Failed(format!(
+            "the signing certificate does not chain to the pinned Fulcio root: {}",
+            chained.stderr.lines().next().unwrap_or("verification failed")
+        ));
+    }
+
+    // 4. who signed, and who said so.
+    let text = openssl(&["x509", "-noout", "-text", "-in"], &[&leaf]);
+    if !text.ran {
+        return Verdict::CouldNotRun(text.stderr);
+    }
+    if !text.ok {
+        return Verdict::Failed(format!("the certificate does not print: {}", text.stderr));
+    }
+    let signer = match san_uri(&text.stdout) {
+        Some(s) => s,
+        None => {
+            return Verdict::Failed(
+                "the signing certificate names no identity in its subject alternative name"
+                    .to_string(),
+            )
+        }
+    };
+    if signer != expect_signer {
+        return Verdict::Failed(format!(
+            "signed by {signer}, and this machine expects {expect_signer}"
+        ));
+    }
+    let issuer = match issuer_from_openssl_text(&text.stdout) {
+        Some(s) => s,
+        None => {
+            return Verdict::Failed(
+                "the signing certificate carries no Sigstore OIDC issuer extension".to_string(),
+            )
+        }
+    };
+    if issuer != expect_issuer {
+        return Verdict::Failed(format!(
+            "the identity was issued by {issuer}, and this machine expects {expect_issuer}"
+        ));
+    }
+
+    Verdict::Verified {
+        signer,
+        at: format!(
+            "the certificate's own notBefore, unix {at}; the transparency log was not checked"
+        ),
+    }
+}
+
+// ── the two artifacts ────────────────────────────────────────────────────────
+
+/// The identity and issuer this machine expects, and nothing inferred.
+fn expectations(roots: &Roots) -> (String, String) {
+    let signer = crate::trust::expected_signer(roots);
+    let issuer = match roots.read_optional(ISSUER_OVERRIDE) {
+        Ok(Some(s)) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => crate::trust::EXPECTED_ISSUER.to_string(),
+    };
+    (signer, issuer)
+}
+
+/// One layer's cosign annotations.
+struct Annotations {
+    signature: String,
+    certificate: String,
+    chain: Option<String>,
+}
+
+fn annotations(layer: &Value) -> Option<Annotations> {
+    let a = layer.get("annotations")?;
+    let get = |k: &str| a.get(k).and_then(Value::as_str).map(str::to_string);
+    Some(Annotations {
+        // `dev.cosignproject.cosign/signature` is what cosign actually writes —
+        // measured on the real ghcr.io artifact, not assumed. The
+        // `dev.sigstore.cosign/` spelling is accepted because older and
+        // third-party signers use it, and reading only one of the two is how a
+        // valid signature reports as "no signature annotation".
+        signature: get("dev.cosignproject.cosign/signature")
+            .or_else(|| get("dev.sigstore.cosign/signature"))?,
+        certificate: get("dev.sigstore.cosign/certificate")?,
+        chain: get("dev.sigstore.cosign/chain"),
+    })
+}
+
+/// The blob a layer names, checked against the digest that named it.
+fn blob(fetched: &Fetched, layer: &Value) -> Result<Vec<u8>, String> {
+    let digest = layer
+        .get("digest")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "a layer has no digest".to_string())?;
+    let hex = digest.split_once(':').map(|(_, h)| h).unwrap_or(digest);
+    let path = fetched.blobs.join(hex);
+    let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // `skopeo copy` already validates this on the way in, but the fixture path
+    // does not go through skopeo, and a check that only runs in production is a
+    // check nobody has ever seen run.
+    let out = Command::new("/usr/bin/openssl")
+        .args(["dgst", "-sha256", "-r"])
+        .arg(&path)
+        .output()
+        .map_err(|e| format!("could not run openssl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "could not hash {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let got = text.split_whitespace().next().unwrap_or("");
+    if !got.eq_ignore_ascii_case(hex) {
+        return Err(format!("the blob is {got}, and its manifest says {hex}"));
+    }
+    Ok(bytes)
+}
+
+/// Layers of one media type, in manifest order.
+fn layers_of(manifest: &str, media: &str) -> Result<Vec<Value>, String> {
+    let doc: Value = serde_json::from_str(manifest)
+        .map_err(|e| format!("the artifact manifest is not JSON: {e}"))?;
+    let all = doc
+        .get("layers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "the artifact manifest has no layers".to_string())?;
+    Ok(all
+        .iter()
+        .filter(|l| l.get("mediaType").and_then(Value::as_str) == Some(media))
+        .cloned()
+        .collect())
+}
+
+/// Turn a fetch failure into a verdict.
+fn from_artifact(a: Artifact, what: &str) -> Verdict {
+    match a {
+        // The registry answered. Nobody signed this digest.
+        Artifact::Absent => Verdict::Absent(format!("the registry holds no {what} for this digest")),
+        // Distance, not absence — and the reason is carried so no caller can
+        // read a network failure as an unsigned image. This is the mapping the
+        // gate's `an_unreachable_registry_is_never_refused_as_unsigned` test
+        // exists to hold down.
+        Artifact::Unavailable(why) => Verdict::CouldNotRun(why),
+    }
+}
+
+/// Verify the `.sig` artifact for a digest.
+pub fn verify_signature(roots: &Roots, repo: &str, digest: &str) -> Verdict {
+    let Some(tag) = cosign_tag(digest, ".sig") else {
+        return Verdict::CouldNotRun(format!("unusable digest: {digest}"));
+    };
+    let fetched = match fetch(roots, repo, &tag) {
+        Ok(f) => f,
+        Err(a) => return from_artifact(a, "signature"),
+    };
+    let layers = match layers_of(&fetched.manifest, MEDIA_SIMPLE_SIGNING) {
+        Ok(l) => l,
+        Err(e) => return Verdict::CouldNotRun(e),
+    };
+    if layers.is_empty() {
+        // The tag exists but carries nothing this module recognises. Not a
+        // failed signature — an artifact of a shape it cannot judge.
+        return Verdict::CouldNotRun(format!(
+            "{repo}:{tag} carries no {MEDIA_SIMPLE_SIGNING} layer"
+        ));
+    }
+    let (expect_signer, expect_issuer) = expectations(roots);
+    let mut last = Verdict::CouldNotRun("no layer was examined".to_string());
+    // Every layer, and any one verifying is enough: a re-signed image carries
+    // more than one signature, and taking only the first would refuse it.
+    for layer in &layers {
+        let Some(ann) = annotations(layer) else {
+            last = Verdict::Failed(
+                "a signature layer carries no certificate and signature pair".to_string(),
+            );
+            continue;
+        };
+        let bytes = match blob(&fetched, layer) {
+            Ok(b) => b,
+            Err(e) => {
+                last = Verdict::CouldNotRun(e);
+                continue;
+            }
+        };
+        let payload = String::from_utf8_lossy(&bytes).into_owned();
+        if let Err(e) = simple_signing_binds(&payload, repo, digest) {
+            last = Verdict::Failed(e);
+            continue;
+        }
+        let work = match TempDir::new("sig") {
+            Ok(w) => w,
+            Err(e) => return Verdict::CouldNotRun(e),
+        };
+        let v = verify_signed_bytes(
+            roots,
+            work.path(),
+            &ann.certificate,
+            ann.chain.as_deref(),
+            &ann.signature,
+            &bytes,
+            &expect_signer,
+            &expect_issuer,
+        );
+        if matches!(v, Verdict::Verified { .. }) {
+            return v;
+        }
+        last = v;
+    }
+    last
+}
+
+/// Verify the `.att` artifact — the signed SPDX SBOM — for a digest.
+pub fn verify_provenance(roots: &Roots, repo: &str, digest: &str) -> Verdict {
+    let Some(tag) = cosign_tag(digest, ".att") else {
+        return Verdict::CouldNotRun(format!("unusable digest: {digest}"));
+    };
+    let fetched = match fetch(roots, repo, &tag) {
+        Ok(f) => f,
+        Err(a) => return from_artifact(a, "SBOM attestation"),
+    };
+    let layers = match layers_of(&fetched.manifest, MEDIA_DSSE) {
+        Ok(l) => l,
+        Err(e) => return Verdict::CouldNotRun(e),
+    };
+    if layers.is_empty() {
+        return Verdict::CouldNotRun(format!("{repo}:{tag} carries no {MEDIA_DSSE} layer"));
+    }
+    let (expect_signer, expect_issuer) = expectations(roots);
+    let mut last = Verdict::CouldNotRun("no envelope was examined".to_string());
+    for layer in &layers {
+        let bytes = match blob(&fetched, layer) {
+            Ok(b) => b,
+            Err(e) => {
+                last = Verdict::CouldNotRun(e);
+                continue;
+            }
+        };
+        // Everything about the envelope's *shape* is CouldNotRun rather than
+        // Failed. This path has never met a real attestation — the publisher
+        // has not produced one yet — so a shape this code does not know is far
+        // more likely to be this code's gap than an attack, and refusing an
+        // update on the strength of a guess is the failure mode the whole
+        // module is built to avoid.
+        let envelope: Value = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                last = Verdict::CouldNotRun(format!("the attestation is not a DSSE envelope: {e}"));
+                continue;
+            }
+        };
+        let (Some(payload_type), Some(payload_b64)) = (
+            envelope.get("payloadType").and_then(Value::as_str),
+            envelope.get("payload").and_then(Value::as_str),
+        ) else {
+            last = Verdict::CouldNotRun(
+                "the DSSE envelope has no payloadType and payload pair".to_string(),
+            );
+            continue;
+        };
+        let Some(payload) = b64_decode(payload_b64) else {
+            last = Verdict::CouldNotRun("the DSSE payload is not valid base64".to_string());
+            continue;
+        };
+        let statement = String::from_utf8_lossy(&payload).into_owned();
+        // The binding, by contrast, IS a real failure: the envelope parsed, it
+        // says what it covers, and what it covers is not this image.
+        if let Err(e) = intoto_binds(&statement, digest) {
+            last = Verdict::Failed(e);
+            continue;
+        }
+        let signed = pae(payload_type, &payload);
+        // cosign puts the certificate in the layer annotations, the same place
+        // as for a signature; some producers put it in the envelope's own
+        // signature entry instead, so both are read.
+        let (cert, chain, sig_b64) = match annotations(layer) {
+            Some(a) => (a.certificate, a.chain, a.signature),
+            None => {
+                let entry = envelope.get("signatures").and_then(Value::as_array).and_then(|a| a.first());
+                let sig = entry.and_then(|e| e.get("sig")).and_then(Value::as_str);
+                let cert = entry.and_then(|e| e.get("cert")).and_then(Value::as_str);
+                match (sig, cert) {
+                    (Some(s), Some(c)) => (c.to_string(), None, s.to_string()),
+                    _ => {
+                        last = Verdict::CouldNotRun(
+                            "the attestation carries no certificate and signature pair, in the \
+                             layer annotations or in the envelope"
+                                .to_string(),
+                        );
+                        continue;
+                    }
+                }
+            }
+        };
+        let work = match TempDir::new("att") {
+            Ok(w) => w,
+            Err(e) => return Verdict::CouldNotRun(e),
+        };
+        let v = verify_signed_bytes(
+            roots,
+            work.path(),
+            &cert,
+            chain.as_deref(),
+            &sig_b64,
+            &signed,
+            &expect_signer,
+            &expect_issuer,
+        );
+        if matches!(v, Verdict::Verified { .. }) {
+            return v;
+        }
+        last = v;
+    }
+    last
+}
+
+/// Both checks for one digest.
+pub fn verify_image(roots: &Roots, repo: &str, digest: &str) -> Verification {
+    let repo = repo_of(repo).to_string();
+    Verification {
+        signature: verify_signature(roots, &repo, digest),
+        provenance: verify_provenance(roots, &repo, digest),
+        digest: digest.to_string(),
+        repo,
+    }
+}
+
+// ── reporting ────────────────────────────────────────────────────────────────
+
+/// A decision as the three things every consumer of it needs: the word, which
+/// checks refused, and the lines to print.
+///
+/// One function because `apex trust --json`, `verify::to_json` and the update
+/// path all have to agree on which word means which state, and three
+/// `match`es on the same enum is three chances for one of them to call a
+/// refusal a warning.
+pub fn decision_json(d: &Decision) -> (&'static str, Vec<String>, Vec<String>) {
+    match d {
+        Decision::Proceed => ("proceed", Vec::new(), Vec::new()),
+        Decision::ProceedWithWarnings(w) => ("proceed-with-warnings", Vec::new(), w.clone()),
+        Decision::Refuse { refused_by, lines } => ("refuse", refused_by.clone(), lines.clone()),
+    }
+}
+
+pub fn to_json(v: &Verification, e: &Enforcement, d: &Decision) -> Value {
+    let (decision, refused_by, lines) = decision_json(d);
+    json!({
+        "digest": v.digest,
+        "repository": v.repo,
+        "signature": v.signature.to_json(),
+        "provenance": v.provenance.to_json(),
+        "enforcement": {
+            "signature": e.signature.as_str(),
+            "provenance": e.provenance.as_str(),
+            "notes": e.notes,
+        },
+        "decision": decision,
+        "refusedBy": refused_by,
+        "reasons": lines,
+    })
+}
+
+/// One line for `apex status`, and the same words the gate would use.
+pub fn render_mode(e: &Enforcement) -> String {
+    format!(
+        "  Enforcement       signature {}, provenance {}\n",
+        e.signature.as_str(),
+        e.provenance.as_str()
+    )
+}
+
+fn verdict_sentence(what: &str, v: &Verdict) -> String {
+    match v {
+        Verdict::Verified { signer, .. } => format!(
+            "  {what:<18}verified — signed by {signer}\n                    \
+             (the transparency log was not checked)\n"
+        ),
+        Verdict::Absent(w) => format!("  {what:<18}none published — {w}\n"),
+        Verdict::Failed(w) => format!("  {what:<18}DOES NOT VERIFY — {w}\n"),
+        Verdict::CouldNotRun(w) => format!("  {what:<18}not checked — {w}\n"),
+    }
+}
+
+/// The verification block of `apex trust --verify`.
+pub fn render(v: &Verification, e: &Enforcement, d: &Decision) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("  Digest            {}\n", v.digest));
+    s.push_str(&verdict_sentence("Signature", &v.signature));
+    s.push_str(&verdict_sentence("Provenance", &v.provenance));
+    s.push_str(&render_mode(e));
+    for note in &e.notes {
+        s.push_str(&format!("  note              {note}\n"));
+    }
+    match d {
+        Decision::Proceed => {
+            s.push_str("  Deploying this    yes — both checks pass\n");
+        }
+        Decision::ProceedWithWarnings(w) => {
+            s.push_str("  Deploying this    yes, with what follows unestablished\n");
+            for line in w {
+                s.push_str(&format!("                    {line}\n"));
+            }
+        }
+        Decision::Refuse { refused_by, lines } => {
+            s.push_str(&format!(
+                "  Deploying this    REFUSED — {}\n",
+                refused_by.join(" and ")
+            ));
+            for line in lines {
+                s.push_str(&format!("                    {line}\n"));
+            }
+        }
+    }
+    s
+}
+
+/// The refusal an update prints, in full, or nothing.
+///
+/// Shaped like `channel::halt_reason` on purpose: `ops::update` already knows
+/// how to consult one of these, and a second shape would be a second thing to
+/// get wrong.
+pub fn refusal(v: &Verification, e: &Enforcement, d: &Decision, escape: &str) -> Option<String> {
+    let Decision::Refuse { refused_by, lines } = d else { return None };
+    let mut s = format!(
+        "apex: this update is being held because the image it would deploy does not \
+         verify.\n  the {} could not be established for {}\n",
+        refused_by.join(" and the "),
+        v.digest
+    );
+    for line in lines {
+        s.push_str(&format!("  {line}\n"));
+    }
+    s.push_str(&format!(
+        "\nAPEX publishes a cosign signature for every image, and this machine checks it \
+         before deploying.\nA refusal here means the image the registry is serving is not \
+         the one this machine\nwas told to expect, so the update stops before anything is \
+         downloaded.\n\n\
+         If you know why and want it anyway: `sudo apex update {escape}`.\n\
+         To change what is enforced permanently, edit {OVERRIDE_PATH} — see \
+         `man apex-trust`\nor docs/trust-enforcement.md.\n"
+    ));
+    Some(s)
+}

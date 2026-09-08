@@ -28,6 +28,7 @@ mod secret;
 mod task;
 mod touchpad;
 mod trust;
+mod verify;
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
