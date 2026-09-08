@@ -45,6 +45,10 @@ ENGINE="$ROOT/files/system/libexec/apex-env"
 [ -f "$ENGINE" ] || { echo "FATAL: cannot find $ENGINE" >&2; exit 2; }
 
 pass=0; fail=0; skip=0
+# How many containers this suite actually started. `inside` and the hw runs
+# bump it in the CURRENT shell (never inside a command substitution), so the
+# teardown section below can tell "nothing leaked" from "nothing ran".
+started_containers=0
 ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
 bad() { printf 'FAIL  %s%s\n' "$1" "${2:+  — $2}"; fail=$((fail + 1)); }
 skp() { printf 'SKIP  %s%s\n' "$1" "${2:+  — $2}"; skip=$((skip + 1)); }
@@ -145,11 +149,19 @@ for d in "$@"; do
 done
 PROBE_EOF
 
+# Every container this suite starts is NAMED, and the name carries this run's
+# pid. That is the only thing that makes the teardown assertion at the bottom
+# capable of failing: podman's default names are random, so a filter that does
+# not know what to look for finds nothing whether or not `--rm` did its job.
+PROBE_NAME="apexdev-probe-$$"
+
 inside() {
     local -a extra=()
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do extra+=("$1"); shift; done
     shift
-    podman run --rm "${extra[@]}" "$IMAGE" bash -c "$PROBE" -- "$@" 2>&1
+    started_containers=$((started_containers + 1))
+    podman run --rm --name "$PROBE_NAME-$RANDOM" "${extra[@]}" \
+        "$IMAGE" bash -c "$PROBE" -- "$@" 2>&1
 }
 
 # ── the amd profile, against the GPU in this machine ────────────────────────
@@ -222,14 +234,19 @@ if [ -d /dev/bus/usb ]; then
     else
         # A directory, not a character device, so the question is whether the
         # tree arrives — a programmer or JTAG probe is a node underneath it.
-        out="$(podman run --rm "${HW_FLAGS[@]}" "$IMAGE" \
+        #
+        # Counted HERE and not inside the substitutions below: `$(…)` is a
+        # subshell, so an increment written in there is discarded and the
+        # teardown section would read zero and skip.
+        started_containers=$((started_containers + 2))
+        out="$(podman run --rm --name "$PROBE_NAME-$RANDOM" "${HW_FLAGS[@]}" "$IMAGE" \
                  bash -c 'if [ -d /dev/bus/usb ] && [ -n "$(ls -A /dev/bus/usb 2>/dev/null)" ]; then echo HAVE; else echo NOPE; fi' 2>&1)"
         if grep -qx HAVE <<<"$out"; then
             ok "inside a real rootless container, /dev/bus/usb arrives with buses under it"
         else
             bad "inside a real rootless container, /dev/bus/usb arrives" "$out"
         fi
-        outn="$(podman run --rm "$IMAGE" \
+        outn="$(podman run --rm --name "$PROBE_NAME-$RANDOM" "$IMAGE" \
                  bash -c 'if [ -d /dev/bus/usb ]; then echo HAVE; else echo NOPE; fi' 2>&1)"
         if grep -qx NOPE <<<"$outn"; then
             ok "…and without the profile's flags there is no /dev/bus/usb"
@@ -252,10 +269,23 @@ fi
 
 # ── the machine running the tests ───────────────────────────────────────────
 section "no side effects"
-if [ -z "$(podman ps -a --filter 'name=^disp-' --format '{{.Names}}' 2>/dev/null)" ]; then
-    ok "no container was left behind by this suite"
+# Filtered on this run's own name prefix, not a guess. An earlier version of
+# this file filtered `^disp-` — the DISPOSABLE engine's prefix, which nothing
+# here is ever called — so the assertion passed whether or not a container was
+# leaked, and removing every `--rm` would not have reddened it.
+#
+# And the assertion refuses to speak when nothing ran: on a machine where the
+# hardware sections all skipped, "no container was left behind" is true for the
+# uninteresting reason, so it is reported as a skip rather than banked as a
+# pass.
+left="$(podman ps -a --filter "name=^$PROBE_NAME-" --format '{{.Names}}' 2>/dev/null)"
+if [ "$started_containers" -eq 0 ]; then
+    skp "no container was left behind by this suite" \
+        "this suite started no container here, so there was nothing to leak"
+elif [ -z "$left" ]; then
+    ok "no container was left behind by this suite ($started_containers started, all --rm)"
 else
-    bad "no container was left behind" "$(podman ps -a --format '{{.Names}}' | tr '\n' ' ')"
+    bad "no container was left behind by this suite" "still present: $(tr '\n' ' ' <<<"$left")"
 fi
 
 finish
