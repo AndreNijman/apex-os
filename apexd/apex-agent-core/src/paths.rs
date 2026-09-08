@@ -218,6 +218,33 @@ pub const SCRATCH_ROOT: &str = "/tmp/apex-agent";
 /// daemon's environment is fixed before any session exists.
 pub const SCRATCH_ROOT_ENV: &str = "APEX_AGENT_SCRATCH_ROOT";
 
+/// The shipped disposable-capsule engine (§19).
+pub const DISPOSABLE_ENGINE: &str = "/usr/libexec/apex-disposable";
+
+/// Overrides [`DISPOSABLE_ENGINE`], for a suite that must not create capsules.
+///
+/// The engine itself already takes `APEX_DISPOSABLE_ENV_ENGINE` and
+/// `APEX_DISPOSABLE_ROOT`, so a test can run the REAL engine against a fake
+/// capsule engine in a scratch root. This variable is the last link in that
+/// chain: without it a suite cannot reach the engine in the repository at all,
+/// because the daemon would look under `/usr/libexec` on the running system.
+pub const DISPOSABLE_ENGINE_ENV: &str = "APEX_DISPOSABLE_ENGINE";
+
+/// Where the daemon looks for the disposable engine.
+///
+/// Absolute or nothing, for the reason [`scratch_root`] insists on it: a
+/// relative path would resolve against the daemon's working directory, which
+/// is not the caller's.
+pub fn disposable_engine() -> PathBuf {
+    if let Some(p) = std::env::var_os(DISPOSABLE_ENGINE_ENV) {
+        let path = PathBuf::from(p);
+        if path.is_absolute() {
+            return path;
+        }
+    }
+    PathBuf::from(DISPOSABLE_ENGINE)
+}
+
 /// The scratch directory a sandboxed session may write to.
 pub fn scratch_dir(id: u32) -> PathBuf {
     scratch_root().join(id.to_string())

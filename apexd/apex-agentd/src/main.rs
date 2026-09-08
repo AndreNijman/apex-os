@@ -18,6 +18,7 @@
 
 mod broker;
 mod egress;
+mod disposable;
 mod grants;
 mod inject;
 mod origin;

@@ -387,6 +387,17 @@ pub struct SessionInfo {
     /// it was.
     #[serde(default)]
     pub injected: u32,
+    /// The disposable capsule this session runs inside, if any (§P1-037).
+    ///
+    /// `None` for an ordinary session, which is nearly all of them. Carried so
+    /// that `apex agent status` can say the thing a user MUST be able to see
+    /// about such a session: its working tree is a copy, and everything in it
+    /// is deleted when the session ends unless a `--copy-out` was given.
+    ///
+    /// `#[serde(default)]`, so a record written before this reads as an
+    /// ordinary session — which is what it was.
+    #[serde(default)]
+    pub capsule: Option<String>,
 }
 
 impl SessionInfo {
@@ -787,6 +798,42 @@ pub struct RunRequest {
     /// Environment additions, applied after the sandbox is built.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// Run this session inside a DISPOSABLE CAPSULE and delete the whole
+    /// environment when it closes (§19, §P1-037).
+    ///
+    /// The working directory is COPIED into the capsule's throwaway home, not
+    /// bound, so whatever the agent does to it goes with the environment —
+    /// which is what "discard state" means here. Nothing leaves unless
+    /// [`RunRequest::copy_out`] names somewhere for it to go.
+    ///
+    /// ## A throwaway environment, NOT a security boundary
+    ///
+    /// distrobox mounts the host's root filesystem at `/run/host` inside every
+    /// capsule — that is how `distrobox-export` reaches back out, and there is
+    /// no flag that removes it — and the process runs as the user's own uid.
+    /// So code in there can read and write the real HOME. What is disposable
+    /// is the ENVIRONMENT: its packages, its home, its state.
+    ///
+    /// For confinement — `$HOME` masked, `~/.ssh` unreachable, the environment
+    /// rebuilt from an allowlist — the mechanism is `policy.sandbox`. The two
+    /// are REFUSED together rather than combined: bwrap wrapping the capsule
+    /// engine would confine the container client and not the agent, so the
+    /// pair reads as "confined and disposable" and delivers neither.
+    ///
+    /// Optional and `#[serde(default)]`, the ToolCheck precedent: a daemon
+    /// that predates it ignores the field and starts an ordinary session. That
+    /// loses the environment, never a restriction — the failure is a session
+    /// on the host, which is what the caller would have got anyway.
+    #[serde(default)]
+    pub disposable: bool,
+    /// Where `~/out` inside a disposable capsule is copied when it closes.
+    ///
+    /// `None` — the default — means NOTHING leaves. Meaningless without
+    /// [`RunRequest::disposable`], and the daemon refuses the pair rather than
+    /// ignoring it, for the reason `ttl_ms` is refused on an ordinary session:
+    /// a caller who named a destination believes they asked for something.
+    #[serde(default)]
+    pub copy_out: Option<String>,
 }
 
 /// A control response.
@@ -1100,6 +1147,7 @@ mod tests {
             cols: 80,
             rows: 24,
             injected: 0,
+            capsule: None,
         }
     }
 
@@ -1247,6 +1295,8 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: vec![],
+                disposable: false,
+                copy_out: None,
             })
         };
         assert!(run(SystemAccess::Session).waits_on_a_human());
@@ -1283,6 +1333,29 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: vec![("K".into(), "V".into())],
+                disposable: false,
+                copy_out: None,
+            }),
+            Request::Run(RunRequest {
+                // A disposable run, so the two new keys cross the wire in the
+                // round-trip too rather than only in their default form.
+                agent: Some("claude".into()),
+                prompt: Some("review this".into()),
+                args: vec![],
+                cwd: "/home/t/p".into(),
+                policy: AgentPolicy {
+                    sandbox: SandboxPolicy::Unrestricted,
+                    ..AgentPolicy::default()
+                },
+                request_origin: None,
+                worktree: None,
+                checkpoint: false,
+                ttl_ms: None,
+                cols: 80,
+                rows: 24,
+                env: vec![],
+                disposable: true,
+                copy_out: Some("/home/t/results".into()),
             }),
             Request::List,
             Request::PrivilegeRequest {
@@ -1552,6 +1625,7 @@ mod tests {
             cols: 80,
             rows: 24,
             injected: 0,
+            capsule: None,
         };
         assert!(info.is_live());
         assert_eq!(info.exit_summary(), None);
