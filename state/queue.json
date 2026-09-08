@@ -1,21 +1,8 @@
 {
   "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
-  "updated": "2026-09-08T10:00+08:00",
+  "updated": "2026-09-08T12:20+08:00",
   "concurrency_ceiling": 6,
   "units": [
-    {
-      "id": "trust-enforcement",
-      "repo": "apex-os",
-      "items": [
-        "(new, from P1-047)"
-      ],
-      "title": "Make an APEX machine actually verify the signature it already has",
-      "after": [
-        "integrate-3"
-      ],
-      "conflicts": [],
-      "note": "First in line next round: READY, unblocked, no conflicts, and the only READY unit that is neither hardware-bound nor part of the mutually-conflicting Cloudflare suite."
-    },
     {
       "id": "p1-038-hardware",
       "repo": "apex-shell",
@@ -420,7 +407,8 @@
     }
   ],
   "_completed_units": {
-    "followups-integrate-3": "COMPLETE AND LANDED 2026-09-07, round 6. All four hardening items the third integration round routed onward are on apex-os roadmap/v2.2 as ef87088..678bb5d (the broker's bare curl reading the owner's ~/.curlrc under root, 'reaches the same thing everywhere' made a declared fact, a bind test that bound nothing and passed, one curl in this build with a readable contract, and the MCP verbs documented in docs/agent-runtime.md). REMOVED from units rather than left with a marker, because resume.sh derives 'finished' from roadmap.yaml item status and this unit's items are '(hardening)' - no roadmap ids - so it can never satisfy that test and would have been offered as READY forever, which is exactly the double-dispatch the queue exists to prevent. One follow-up did NOT belong to it and is still owed: apex remote pair|devices|revoke|status|enable is documented nowhere, and it is recorded in dispatch.json _deliberately_held for the next integrate round."
+    "followups-integrate-3": "COMPLETE AND LANDED 2026-09-07, round 6. All four hardening items the third integration round routed onward are on apex-os roadmap/v2.2 as ef87088..678bb5d (the broker's bare curl reading the owner's ~/.curlrc under root, 'reaches the same thing everywhere' made a declared fact, a bind test that bound nothing and passed, one curl in this build with a readable contract, and the MCP verbs documented in docs/agent-runtime.md). REMOVED from units rather than left with a marker, because resume.sh derives 'finished' from roadmap.yaml item status and this unit's items are '(hardening)' - no roadmap ids - so it can never satisfy that test and would have been offered as READY forever, which is exactly the double-dispatch the queue exists to prevent. One follow-up did NOT belong to it and is still owed: apex remote pair|devices|revoke|status|enable is documented nowhere, and it is recorded in dispatch.json _deliberately_held for the next integrate round.",
+    "trust-enforcement": "COMPLETE AND LANDED 2026-09-08 on apex-os roadmap/v2.2 as e67fab9 -> 583355e. APEX now refuses an update whose image signature does not verify: cosign-free sigstore verification (skopeo + openssl) against a PINNED Sigstore root shipped by Containerfile.base, wired into ops::update BEFORE channel::record_update and BEFORE FsyncGuard::disable, escaping only via --allow-unverified. 455 Rust tests in the crate (+51) and a new tests/test-apex-trust-enforcement.sh at 77/0 with real minted-CA cryptography. REMOVED from units rather than marked done, because its items are '(new, from P1-047)' - not roadmap ids - so resume.sh's finished() test can never be satisfied and the unit would have been offered forever. Still open and recorded on P1-047's evidence: provenance=warn until a build publishes a .att; /etc/containers/policy.json is still one insecureAcceptAnything; transparency-log inclusion is not verified and every report says so; and `bootc upgrade` run directly bypasses the gate (ops::update is its only caller in the repo, grepped)."
   },
   "_notes": {
     "trust-enforcement": "DISPATCHED 2026-09-07 15:02 (round 6), the slot freed by followups-integrate-3 finishing. Its `after: [integrate-3]` is long satisfied. No card existed; the agent creates ROADMAP/state/agents/trust-enforcement.md and its own worktree /var/tmp/apex-work/wt-trust on branch task/trust-enforcement.",
