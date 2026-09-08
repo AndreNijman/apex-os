@@ -211,6 +211,20 @@ env_out()   { printf '%s/%s/home/out' "$DISP_ROOT" "$1"; }
 #      equality, not a prefix test. A prefix test passes for
 #      "<root>-elsewhere/x"; equality cannot.
 #
+# Two more checks sit between them and were not in the list above:
+#
+#   5. what is there must be a DIRECTORY. A regular file or a socket at
+#      <root>/disp-x is not an environment, and `rm -rf` on one would still
+#      delete it;
+#   6. the resolved ROOT must not be /, /home, /var/home, /usr, /etc or /var.
+#      Note what it takes to reach this one: the early return above means the
+#      whole function stops before it unless <root>/disp-<name> already
+#      EXISTS, so it can only fire on a machine that has a `disp-` entry
+#      directly inside one of those directories. That is why the suite reaches
+#      it through a fixtured `realpath` rather than by creating one — see
+#      tests/test-apex-recover.sh. It is defence in depth, not a check the
+#      other fences lean on.
+#
 # Any failure is a hard exit with nothing removed.
 remove_env_dir() {
     local name="$1" dir root_real real
@@ -630,9 +644,23 @@ cmd_rm() {
     case "$name" in disp-*) ;; *) name="disp-${name}" ;; esac
     valid_disposable_name "$name" || die "'${1}' is not a disposable environment name"
     require_engine
+    # Read before, reported after. `remove_env_dir` treats an absent directory
+    # as a successful no-op — correct, because `rm` on an already-torn-down
+    # environment is not an error — but this then printed "removed 'disp-x'"
+    # about a name that had never existed, which is a claim rather than a
+    # report. A verb whose whole job is deletion must not say it deleted
+    # something it did not find.
+    local existed=0
+    if [ -e "$(env_dir "$name")" ] || [ -L "$(env_dir "$name")" ]; then
+        existed=1
+    fi
     remove_env_container "$name"
     remove_env_dir "$name"
-    msg "removed '${name}'"
+    if [ "$existed" = 1 ]; then
+        msg "removed '${name}'"
+    else
+        msg "there was no '${name}' to remove; the capsule engine was still asked to remove a container by that name"
+    fi
 }
 
 cmd_purge() {
