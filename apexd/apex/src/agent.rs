@@ -1621,8 +1621,9 @@ fn worktrees(project: Option<String>, json: bool) -> Result<i32> {
 
     if rows.is_empty() {
         println!(
-            "no worktrees. `apex project add` remembers a project, and \
-             `apex agent run --worktree <name>` gives an agent one of its own"
+            "no worktrees. A project is remembered when an agent runs in it, \
+             and `apex agent run --worktree <name>` gives that agent a \
+             worktree of its own"
         );
         return Ok(0);
     }
