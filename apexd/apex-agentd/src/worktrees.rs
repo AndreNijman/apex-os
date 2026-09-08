@@ -158,9 +158,34 @@ pub fn handle(
     // `(id, cwd)` once, for every project. Which worktree each session
     // belongs to is decided inside `worktree::statuses`, which is the only
     // place that has the whole worktree list to compare against.
+    //
+    // RESOLVED HERE, and the honest account of why. A session records its
+    // working directory as the caller gave it — `session.rs` keeps it
+    // unresolved on purpose: it becomes a `--chdir`, and bwrap refuses to
+    // mount on a path that traverses a symlink. `git worktree list` reports
+    // the real path. On an atomic OS every home is reached through a symlink
+    // (`/home` -> `var/home`, `/root` -> `var/roothome`), so a cwd of
+    // `/home/andre/proj` against a worktree at `/var/home/andre/proj` matches
+    // NOTHING under a comparison by path component — silently, and the row
+    // then says no session works here while an agent sits in it.
+    //
+    // The SHIPPED CLI already canonicalizes `--cwd` before it sends the run
+    // request (`apex/src/agent.rs`, `run`), so this line changes nothing for
+    // it, and a mutation removing only this one survives the suite —
+    // measured. It is here for the socket's other clients: apex-shell speaks
+    // this protocol too, and one layer has to resolve. Removing BOTH does
+    // fail the suite's symlink assertion, which is what says the property is
+    // tested rather than assumed.
+    //
+    // A path that no longer exists keeps its given form: a missing directory
+    // is not a reason to drop the session from the listing.
     let where_they_are: Vec<(u32, PathBuf)> = sessions
         .iter()
-        .map(|s| (s.id, PathBuf::from(&s.cwd)))
+        .map(|s| {
+            let cwd = PathBuf::from(&s.cwd);
+            let real = cwd.canonicalize().unwrap_or(cwd);
+            (s.id, real)
+        })
         .collect();
 
     let mut out = Vec::new();
@@ -198,9 +223,15 @@ pub fn handle(
             continue;
         }
 
-        // One unreadable project must not fail the whole listing — a checkout
-        // on an unmounted disk is the ordinary case, not an error worth
-        // refusing every other project's status over.
+        // One project whose git commands fail must not fail the whole
+        // listing — a repository mid-`gc`, a permission the daemon does not
+        // have — so the rows for every other project still come back.
+        //
+        // Not the unmounted-disk case, which cannot reach here: `project::
+        // list()` already dropped that project AND deleted its record before
+        // this loop saw it. See the FOUND note on the card — that deletion is
+        // pre-existing behaviour of the store, and it means any caller of
+        // this request forgets a project whose disk is unplugged.
         let statuses = worktree::statuses(proj, |path| observations.get(path), &where_they_are);
         match statuses {
             Ok(mut s) => out.append(&mut s),
