@@ -426,6 +426,31 @@ pub enum Request {
     },
     /// Tell the PTY its window changed. Sent on its own connection.
     Resize { id: u32, cols: u16, rows: u16 },
+    /// Write text into a live session's terminal.
+    ///
+    /// The same write [`Request::Attach`] already performs, without the read
+    /// half. `handle_attach` turns its connection into the session's terminal
+    /// and pumps the client's stdin into the PTY master; a client that has one
+    /// thing to say and nothing to display needs only that half. APEX Shell's
+    /// push-to-talk route is the first: it holds a transcript and owns no
+    /// terminal.
+    ///
+    /// `data` is written verbatim and no byte is added. Whether the line is
+    /// SENT is the caller's decision, because it is the difference between
+    /// putting words in a prompt and making an agent act on them: `apex agent
+    /// input --submit` appends the carriage return that means Enter, and
+    /// without it the text waits in the prompt for a person.
+    ///
+    /// Refused when the caller is itself a managed session. Every other verb
+    /// on this socket is either a question or an action on the caller's own
+    /// session; this one puts words in another agent's mouth, and hooks run
+    /// inside the sandbox with reach to this socket.
+    ///
+    /// Not a protocol bump, by the criterion on [`Request::Event`] below: a
+    /// daemon that predates this answers "unparseable request", the client
+    /// reports that it could not deliver, and nothing has been typed. The
+    /// failure loses a message, never a restriction.
+    Input { id: u32, data: String },
     /// Deliver a signal by name (`int`, `term`, `kill`, `stop`, `cont`).
     Signal { id: u32, signal: String },
     /// Publish a state transition. This is the open event protocol: any client
@@ -953,6 +978,55 @@ mod tests {
     }
 
     #[test]
+    fn input_carries_its_text_through_the_wire_byte_for_byte() {
+        // The payload is a person's words, so it can hold anything a keyboard
+        // or a speech-to-text hook produces: a newline, a carriage return, a
+        // quote, a backslash, a tab. The framing is NDJSON, so a raw newline
+        // in the serialised line would desynchronise the stream for every
+        // request after it, and the bytes typed into the agent's terminal have
+        // to be the bytes the caller asked for and no others.
+        let text = "say \"hi\"\tthen\\stop\nrun it\r";
+        let req = Request::Input {
+            id: 4,
+            data: text.to_string(),
+        };
+        let line = serde_json::to_string(&req).expect("serialise");
+        assert!(!line.contains('\n'), "{line} would break NDJSON framing");
+        assert!(!line.contains('\r'), "{line} would break NDJSON framing");
+        match serde_json::from_str::<Request>(&line).expect("round-trip") {
+            Request::Input { id, data } => {
+                assert_eq!(id, 4);
+                assert_eq!(data, text, "the payload changed on the wire");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_is_tagged_input_and_takes_no_default() {
+        // The shell calls `apex agent input <id> <text>` and the CLI builds
+        // this; a rename of either the tag or a field is a silent break, since
+        // an unknown `cmd` is answered as "unparseable request" and looks to
+        // the shell exactly like an old daemon.
+        let line = serde_json::to_string(&Request::Input {
+            id: 9,
+            data: "x".into(),
+        })
+        .unwrap();
+        assert!(line.contains(r#""cmd":"input""#), "{line}");
+        assert!(line.contains(r#""id":9"#), "{line}");
+        assert!(line.contains(r#""data":"x""#), "{line}");
+
+        // No `#[serde(default)]` on `data`: an Input with no text is a caller
+        // bug, and defaulting it to the empty string would turn that into a
+        // successful write of nothing.
+        assert!(
+            serde_json::from_str::<Request>(r#"{"cmd":"input","id":9}"#).is_err(),
+            "an Input without text must not parse"
+        );
+    }
+
+    #[test]
     fn run_request_sandbox_defaults_to_project_when_omitted() {
         let req: RunRequest =
             serde_json::from_str(r#"{"cwd":"/tmp","cols":80,"rows":24}"#).expect("parse");
@@ -1240,6 +1314,13 @@ mod tests {
             Request::Signal {
                 id: 1,
                 signal: "term".into(),
+            },
+            Request::Input {
+                id: 1,
+                // A transcript with a carriage return in it, because that is
+                // what `--submit` appends and it is the byte most likely to be
+                // mangled on the way through JSON.
+                data: "run the tests\r".into(),
             },
             Request::Event {
                 id: 1,
