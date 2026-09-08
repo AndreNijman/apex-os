@@ -744,6 +744,60 @@ Two deliberate boundaries:
   system-wide removal because you undid a working tree is not a call this makes
   for you.
 
+### A session you throw away
+
+```
+apex agent run "see if this PR is worth reviewing" --disposable
+apex agent run "build it and keep the artefacts" --disposable --copy-out ~/out
+```
+
+The session runs inside a disposable capsule, and the engine deletes that
+capsule at the end of the session. APEX **copies** your working directory in
+rather than sharing it, so what the agent does to that copy goes with the
+environment. Your own tree stays byte-identical afterwards, index included.
+
+Nothing comes back unless you say where. `--copy-out DIR` copies the capsule's
+`~/out` to `DIR` as the environment closes, and copies nothing else, and it
+runs before the teardown. Leave it out and the agent's work goes with the
+capsule, which is the point.
+
+`apex agent status` names the capsule and says both of those things. A session
+whose edits are about to vanish should not read like an ordinary one.
+
+The capsule engine performs the teardown and the daemon holds no teardown code
+of its own. The engine is the session's own process, and its `trap` fires when
+the agent finishes, when `apex agent kill` arrives, and when the daemon goes
+away. If the machine loses power mid-session, `apex disposable list` and
+`apex disposable purge` clear up what is left. Each environment carries the id
+of the session that owned it, so a leftover says where it came from.
+
+**It is a throwaway environment and not a security boundary.** distrobox
+mounts the host's root filesystem at `/run/host` inside each capsule, no flag
+removes it, and the process runs as your own uid. A program in there can read
+and write your files. `apex disposable plan` prints the whole boundary, and
+[recovery.md](recovery.md) states it in full. `--sandbox` is the mechanism for
+confinement: it masks `$HOME`, puts `~/.ssh` out of reach, and rebuilds the
+environment from an allowlist.
+
+APEX **refuses these pairs rather than combining them**:
+
+- `--sandbox` with a confining policy. bwrap would wrap the container client
+  and not the agent inside the capsule, so the pair would read as "confined
+  and disposable" while delivering neither.
+- `--worktree`. APEX would create the branch on your machine and leave it
+  empty, because the agent commits to the copy and the capsule takes those
+  commits with it. A linked worktree is worse: its `.git` is a file pointing
+  at an absolute host path the capsule cannot reach, so the copy is not a
+  working checkout at all.
+- `--checkpoint`. It would snapshot a tree this session cannot change, and
+  `apex agent undo` would then offer to roll back work this agent did not do.
+
+Each refusal lands before the daemon creates anything: no environment, no
+worktree, no branch.
+
+One interaction worth knowing: `apex agent worktrees` lists a disposable
+session under the tree you started it in, which is the tree the capsule
+copied. That session cannot change it.
 ---
 
 ## Status, and the open event protocol

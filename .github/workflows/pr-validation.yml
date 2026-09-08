@@ -1006,6 +1006,17 @@ jobs:
       - name: Run worktree-status assertions
         run: ./tests/test-agent-worktrees.sh
 
+      # P1-037's acceptance line — an agent session that runs in a disposable
+      # capsule and discards its state — against the REAL disposable engine
+      # from this checkout, a real daemon and a real PTY. Only the capsule
+      # engine is faked, through the override the engine already documents, and
+      # the fake logs every call: a fake that merely exited 0 would let every
+      # assertion pass with the agent running on the host. So this needs no
+      # podman, no distrobox and no image pull, and it cannot fail here for a
+      # reason unrelated to this code.
+      - name: Run disposable-capsule assertions
+        run: ./tests/test-agent-disposable.sh
+
       # §5's two claims, neither of which the unit tests can reach: a portable
       # bundle carries no credential and no conversation, from a profile on a
       # real filesystem; and a confined session cannot rewrite the instructions
