@@ -216,7 +216,8 @@ observe="$1"; shift
     # not a single file had been copied.
     printf 'copied=%s\n' "$(cat ./tracked.txt 2>&1)"
     printf 'gitdir=%s\n' "$(test -d ./.git && echo directory || echo "$(cat ./.git 2>/dev/null)")"
-    printf 'argv=%s\n' "$*"
+    printf 'argc=%s\n' "$#"
+    printf 'argv=%s\n' "$(printf '[%s]' "$@")"
 } > "$observe"
 # Write into the tree the agent was given. If that tree is the host's, the
 # host will see this file and the suite will say so.
@@ -241,7 +242,8 @@ run_disposable() {   # run_disposable <observe file> [extra args...]
     local observe="$1"; shift
     "$APEX" agent run --agent generic --sandbox unrestricted \
         --disposable --cwd "$PROJ" -d "$@" \
-        -- /bin/bash "$AGENT_SH" "$observe" hello 'a b' 2>"${WORK}/run.err" \
+        -- /bin/bash "$AGENT_SH" "$observe" hello 'a b' '$(id -un)' ';touch pwned' \
+        2>"${WORK}/run.err" \
         | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1
 }
 
@@ -343,13 +345,36 @@ else
     bad "and NOT the user's real home"
 fi
 
-# 6. the hostile-looking argument arrived as an ARGUMENT, verbatim
+# 6. the hostile arguments arrived as ARGUMENTS, verbatim and uninterpreted
+#
+# The count matters as much as the text. `$*` joins with spaces, so an argv
+# folded into a shell command string would report the same `argv=` line for
+# `hello 'a b'` as a correct one does — the assertion would be blind to the
+# exact defect it exists to catch. Four arguments in, four out, each bracketed.
+observed_argc="$(sed -n 's/^argc=//p' "$OBS1")"
 observed_argv="$(sed -n 's/^argv=//p' "$OBS1")"
-if [ "$observed_argv" = "hello a b" ]; then
-    ok "the agent's arguments arrived verbatim, as arguments (${observed_argv})"
+want_argv='[hello][a b][$(id -un)][;touch pwned]'
+if [ "$observed_argc" = 4 ]; then
+    ok "the agent got exactly the 4 arguments it was given, unsplit"
 else
-    bad "the agent's arguments arrived verbatim, as arguments"
+    bad "the agent got exactly the 4 arguments it was given, unsplit"
+    echo "      argc was '${observed_argc}', wanted 4" >&2
+fi
+if [ "$observed_argv" = "$want_argv" ]; then
+    ok "the agent's arguments arrived verbatim, uninterpreted by any shell"
+else
+    bad "the agent's arguments arrived verbatim, uninterpreted by any shell"
     echo "      argv was '${observed_argv}'" >&2
+    echo "      wanted   '${want_argv}'" >&2
+fi
+# `;touch pwned` as a command would have created a file. The copy is gone by
+# now, so this looks where such a file would SURVIVE: the host tree the agent
+# was copied from, and the daemon's working directory.
+if [ ! -e "${PROJ}/pwned" ] && [ ! -e "${WORK}/pwned" ] && [ ! -e ./pwned ]; then
+    ok "no argument ran as a command anywhere it could have left a trace"
+else
+    bad "no argument ran as a command anywhere it could have left a trace"
+    ls -la "${PROJ}/pwned" "${WORK}/pwned" ./pwned 2>/dev/null | sed 's/^/      /' >&2
 fi
 
 # ── teardown ─────────────────────────────────────────────────────────────────
