@@ -10,6 +10,7 @@ mod blueprint;
 mod channel;
 mod boot;
 mod cloudflare;
+mod digest;
 mod dispatch;
 mod disposable;
 mod gaming;
@@ -25,6 +26,7 @@ mod remote;
 mod schema;
 mod request;
 mod secret;
+mod skill;
 mod task;
 mod touchpad;
 mod trust;
@@ -367,6 +369,19 @@ enum Cmd {
     Plugin {
         #[command(subcommand)]
         cmd: PluginCmd,
+    },
+    /// Agent skills: where each came from, what it hashes to, and whether it
+    /// ships a program.
+    ///
+    /// `apex agent profile doctor` already counts skills and names the ones
+    /// with no `SKILL.md`. This is the inventory rather than the health check:
+    /// per skill, its origin, a digest of the files on disk, and whether it is
+    /// executable or reference-only — none of which anything recorded before.
+    ///
+    /// Unprivileged, and read-only: it never writes to a skill.
+    Skill {
+        #[command(subcommand)]
+        cmd: SkillCmd,
     },
     /// The incoming firewall: what is dropped, and the exceptions you opened.
     ///
@@ -881,6 +896,32 @@ enum DeviceArea {
     All,
 }
 
+/// `apex skill <verb>` — P1-025's inventory.
+///
+/// Two verbs, and the split is the one `apex mcp` uses: `list` is the readout,
+/// `audit` is the same measurement reduced to what is wrong with it and an
+/// exit status a script can branch on.
+#[derive(Subcommand)]
+enum SkillCmd {
+    /// Every skill, with its origin, digest and type.
+    ///
+    /// Exits non-zero if a skills directory could not be read — an incomplete
+    /// inventory is not a successful one, because the count it prints is the
+    /// number somebody would rely on to say nothing unexpected is installed.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// What is wrong: unreadable directories, missing manifests, links out of
+    /// a skill, and every skill that ships a program.
+    ///
+    /// Exits non-zero when there is a problem.
+    Audit {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum PluginCmd {
     /// Installed plugins, whether each one is valid, and why not.
@@ -1370,6 +1411,10 @@ async fn main() {
         Cmd::Devices { area } => ops::devices(&devices_argv(area)),
         Cmd::Remote { cmd } => remote::remote(cmd),
         Cmd::Plugin { cmd } => ops::plugin(&plugin_argv(cmd)),
+        Cmd::Skill { cmd } => match cmd {
+            SkillCmd::List { json } => skill::list(json),
+            SkillCmd::Audit { json } => skill::audit(json),
+        },
     };
     std::process::exit(code);
 }
