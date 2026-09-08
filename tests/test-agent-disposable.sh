@@ -229,6 +229,21 @@ printf 'the result\n' > "${HOME}/out/result.txt"
 AGENT_EOF
 chmod +x "$AGENT_SH"
 
+no_create_appears() {   # no_create_appears <count before>
+    # Waits for a `create` to show up and reports FAILURE if one does. A
+    # refusal that really happened first has nothing to wait for; without the
+    # wait, `-d` returning early made "nothing was created" true whoever won.
+    local base="$1" _
+    for _ in $(seq 1 30); do
+        [ "$(grep -c '^create ' "$CAPLOG")" != "$base" ] && return 1
+        sleep 0.1
+    done
+    return 0
+}
+session_count() {
+    "$APEX" agent list --all 2>/dev/null | grep -cE '^[[:space:]]*[0-9]+[[:space:]]'
+}
+
 wait_gone() {   # wait_gone <path>
     for _ in $(seq 1 200); do [ -e "$1" ] || return 0; sleep 0.1; done
     return 1
@@ -467,6 +482,17 @@ section "two mechanisms that are refused together, not combined"
 
 before_entries="$(ls "$APEX_DISPOSABLE_ROOT" 2>/dev/null | wc -l)"
 before_creates="$(grep -c '^create ' "$CAPLOG")"
+before_sessions="$(session_count)"
+# Guard against the way this assertion was vacuous once already: if the count
+# is 0 here, three sessions into the suite, then it is counting nothing and
+# comparing it to itself proves nothing.
+if [ "$before_sessions" -ge 2 ]; then
+    ok "the session count reads the daemon's list (${before_sessions} so far)"
+else
+    bad "the session count reads the daemon's list"
+    echo "      counted ${before_sessions}; the suite has started 2 sessions by now" >&2
+    "$APEX" agent list --all 2>&1 | sed 's/^/      | /' >&2
+fi
 out="$("$APEX" agent run --agent generic --sandbox strict --disposable \
         --cwd "$PROJ" -d -- /bin/true 2>&1)"
 rc=$?
@@ -482,13 +508,26 @@ if printf '%s' "$out" | grep -q "not the agent"; then
 else
     bad "and the refusal says WHY the pair would deliver neither"
 fi
-after_creates="$(grep -c '^create ' "$CAPLOG")"
-after_entries="$(ls "$APEX_DISPOSABLE_ROOT" 2>/dev/null | wc -l)"
-if [ "$before_creates" = "$after_creates" ] && [ "$before_entries" = "$after_entries" ]; then
+if no_create_appears "$before_creates"; then
     ok "the refusal happened BEFORE any environment was created"
 else
     bad "the refusal happened BEFORE any environment was created"
-    echo "      creates ${before_creates} -> ${after_creates}, dirs ${before_entries} -> ${after_entries}" >&2
+    grep '^create' "$CAPLOG" | sed 's/^/      | /' >&2
+fi
+after_entries="$(ls "$APEX_DISPOSABLE_ROOT" 2>/dev/null | wc -l)"
+if [ "$before_entries" = "$after_entries" ]; then
+    ok "and no environment directory was left behind by the refusal"
+else
+    bad "and no environment directory was left behind by the refusal"
+    echo "      dirs ${before_entries} -> ${after_entries}" >&2
+fi
+# A refused run must not leave a session either. Deterministic: the CLI has
+# already returned, so the count cannot still be catching up.
+if [ "$(session_count)" = "$before_sessions" ]; then
+    ok "and the refused run started no session at all"
+else
+    bad "and the refused run started no session at all"
+    "$APEX" agent list 2>&1 | sed 's/^/      | /' >&2
 fi
 
 # This one is refused by CLAP, not by the daemon: `--copy-out` is declared
@@ -531,10 +570,11 @@ else
     bad "and no host worktree was created before refusing"
     echo "      before: '${WT_BEFORE}' after: '${WT_AFTER}'" >&2
 fi
-if ! git_q -C "$PROJ" rev-parse --verify -q throwaway >/dev/null 2>&1; then
-    ok "and no branch called throwaway exists"
+if ! git_q -C "$PROJ" rev-parse --verify -q refs/heads/agent/throwaway >/dev/null 2>&1; then
+    ok "and no branch agent/throwaway exists (the name ensure_worktree would use)"
 else
-    bad "and no branch called throwaway exists"
+    bad "and no branch agent/throwaway exists (the name ensure_worktree would use)"
+    git_q -C "$PROJ" branch -a | sed 's/^/      | /' >&2
 fi
 
 out="$("$APEX" agent run --agent generic --sandbox unrestricted --disposable \
@@ -547,12 +587,11 @@ else
     echo "      exit ${rc}" >&2
     printf '%s\n' "$out" | sed 's/^/      | /' >&2
 fi
-after_creates="$(grep -c '^create ' "$CAPLOG")"
-if [ "$before_creates" = "$after_creates" ]; then
+if no_create_appears "$before_creates"; then
     ok "neither refusal created an environment first"
 else
     bad "neither refusal created an environment first"
-    echo "      creates ${before_creates} -> ${after_creates}" >&2
+    grep '^create' "$CAPLOG" | sed 's/^/      | /' >&2
 fi
 
 # ── what a person sees ───────────────────────────────────────────────────────
