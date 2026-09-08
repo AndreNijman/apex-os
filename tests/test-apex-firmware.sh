@@ -169,10 +169,19 @@ sec "apex doctor reports one condition once"
 # waiting" and so passed its filter — `apex doctor` printed one unreadable
 # fwupd as a PASS and a WARN together. Fixed by returning, not by widening the
 # filter, so the check is that the branch cannot fall through.
+# Scoped to the pending match, and that scope is the point: `doctor_lines`
+# has TWO `return vec![(true …)]` — one for a fwupd that could not be read at
+# all, one for a pending list that could not be. A check against the whole
+# function finds the first and passes while the second is gone, which is
+# exactly what the battery caught it doing (F11: core 9/2, structural 24/0).
 DOCTOR="$(awk '/^pub fn doctor_lines/,/^}/' "$CLI")"
 [[ -n "$DOCTOR" ]] || bad "doctor_lines was not found in $CLI"
-present "$DOCTOR" 'return vec!\[\(true' \
-    "an unconsultable fwupd returns immediately instead of falling through"
+PENDING_ARM="$(awk '/let pending = match &r\.pending \{/,/^    \};/' "$CLI")"
+[[ -n "$PENDING_ARM" ]] || bad "doctor_lines does not match on r.pending at all"
+present "$PENDING_ARM" 'Reading::Unavailable' \
+    "the unavailable pending list is its own arm"
+present "$PENDING_ARM" 'return' \
+    "and that arm RETURNS instead of falling through into the attention loop"
 has 'an_unconsultable_fwupd_is_exactly_one_doctor_line_and_it_passes' "$CLI" \
     "and a test asserts it is exactly one line, and that it passes"
 has 'a_healthy_machine_on_battery_is_one_passing_doctor_line' "$CLI" \
