@@ -247,6 +247,10 @@ fi
 case "\$1" in
     create) exit "\${STUB_CREATE_EXIT:-0}" ;;
     exec|enter) exit "\${STUB_EXIT:-0}" ;;
+    # A third knob, for the one ordering in the teardown that is deliberately
+    # NOT fatal: a container the engine cannot remove must still not stop the
+    # state directory from going.
+    rm) exit "\${STUB_RM_EXIT:-0}" ;;
 esac
 exit 0
 EOF
@@ -477,6 +481,81 @@ done
 
 # A symlinked ANCESTOR: the final component is a real directory, so the -L
 # check does not fire and the realpath equality is what has to catch it.
+# A regular file where an environment directory should be. `rm -rf` would
+# delete it perfectly well, which is exactly why the check is there.
+printf 'not a directory\n' > "$DISP_ROOT/disp-file"
+out=$(disp rm disp-file); rc=$?
+is "something that is not a directory exits 2, not 1" "2" "$rc"
+has "…and refuses for the not-a-directory reason specifically" \
+    "exists but is not a directory" "$out"
+if [ -f "$DISP_ROOT/disp-file" ]; then
+    ok "…and the thing it would have deleted is still there"
+else
+    bad "…and the thing it would have deleted is still there" "IT IS GONE"
+fi
+rm -f "$DISP_ROOT/disp-file"
+
+# The root blocklist (the engine's sixth check). It cannot be reached with real
+# paths: the early return means the function stops unless <root>/disp-<name>
+# already exists, so exercising it for real would mean creating a `disp-` entry
+# inside the machine's own /etc, /usr, /var or /home. So `realpath` is fixtured
+# for this one invocation — which is honest about what is being simulated,
+# a machine whose disposable root RESOLVES to a blocklisted directory — and the
+# mutation is safe either way, because the path the removal would then reach is
+# /etc/disp-blocklistprobe, which does not exist.
+if [ -e /etc/disp-blocklistprobe ]; then
+    bad "the blocklist probe path is free" "/etc/disp-blocklistprobe exists on this machine"
+else
+    ok "the blocklist probe path is free, so a mutation could delete nothing"
+    RPBIN="$WORK/rp-bin"; mkdir -p "$RPBIN"
+    mkdir -p "$DISP_ROOT/disp-blocklistprobe"
+    cat > "$RPBIN/realpath" <<RP
+#!/usr/bin/env bash
+# Answers /etc for the disposable root and /etc/<name> for a child of it;
+# everything else is delegated, so the engine's other resolutions stay real.
+last=\${*: -1}
+case "\$last" in
+    "$DISP_ROOT") printf '/etc\n'; exit 0 ;;
+    "$DISP_ROOT"/*) printf '/etc/%s\n' "\${last##*/}"; exit 0 ;;
+esac
+exec /usr/bin/realpath "\$@"
+RP
+    chmod +x "$RPBIN/realpath"
+    out=$(PATH="$RPBIN:$PATH" "$ENGINE" rm disp-blocklistprobe 2>&1); rc=$?
+    is "a root that resolves to a blocklisted directory exits 2" "2" "$rc"
+    has "…and names the directory it refused to treat as a root" \
+        "which is never a disposable root" "$out"
+    if [ -d "$DISP_ROOT/disp-blocklistprobe" ]; then
+        ok "…and removed nothing, not even the environment that really was there"
+    else
+        bad "…and removed nothing" "the real directory was deleted anyway"
+    fi
+    rm -rf "$DISP_ROOT/disp-blocklistprobe"
+fi
+
+# The one teardown ordering that is deliberately not fatal: the container half
+# WARNS where the directory half refuses. A container the engine cannot remove
+# must not leave the state directory behind as well — that would turn one
+# leaked container into a leaked container plus whatever the run wrote.
+resetcalls
+mkdir -p "$DISP_ROOT/disp-warn/home"
+printf 'left behind\n' > "$DISP_ROOT/disp-warn/home/data"
+out=$(STUB_RM_EXIT=9 disp rm disp-warn); rc=$?
+is "a capsule engine that cannot remove the container still exits 0" "0" "$rc"
+has "…and says the container may survive" "the container may survive" "$out"
+if [ ! -e "$DISP_ROOT/disp-warn" ]; then
+    ok "…and the state directory is removed regardless"
+else
+    bad "…and the state directory is removed regardless" "the directory survived too"
+fi
+has "…having asked the engine to remove the container first" "<rm> <disp-warn>" "$(cat "$CALLS")"
+
+# And the report must not claim a removal it did not make.
+out=$(disp rm disp-neverexisted); rc=$?
+is "rm on an environment that was never there still exits 0" "0" "$rc"
+has "…and says there was nothing to remove" "there was no 'disp-neverexisted' to remove" "$out"
+hasnt "…and does not claim it removed one" "removed 'disp-neverexisted'" "$out"
+
 mkdir -p "$WORK/elsewhere/disp-ancestor"
 printf 'keep\n' > "$WORK/elsewhere/disp-ancestor/data"
 ALT_ROOT="$WORK/alt-root"
@@ -534,6 +613,31 @@ has "create gives it its OWN home, which is what makes it disposable" \
     "<--home=$DISP_ROOT/disp-argv/home>" "$argv"
 has "create gives it no device access" "<--gpu=none>" "$argv"
 hasnt "a disposable capsule is never given a GPU" "--gpu=nvidia" "$argv"
+
+# The image nobody asked for. `apex disposable run` with no --image must still
+# name one, and it names the ALIAS: resolution to a registry reference is the
+# capsule engine's table (apex-env's alias_image), not this engine's, so what
+# crosses the boundary is the word `fedora` and not a pinned registry path.
+resetcalls
+disp run --name deflt -- true >/dev/null
+has "run with no --image still names an image" "<--image=fedora>" "$(grep '<create>' "$CALLS")"
+
+# …and an image reference that would split into two arguments, or be read as an
+# option, is refused rather than sanitised — before anything is created.
+for bad_ref in "a b" "-evil"; do
+    resetcalls
+    out=$(disp run --name imgref --image "$bad_ref" -- true); rc=$?
+    if [ "$rc" -ne 0 ] && grep -qF "is not a usable image reference" <<<"$out"; then
+        ok "an image reference like '$bad_ref' is refused with the reason"
+    else
+        bad "an image reference like '$bad_ref' is refused" "rc=$rc out=$(head -1 <<<"$out")"
+    fi
+    if [ ! -s "$CALLS" ] && [ ! -e "$DISP_ROOT/disp-imgref" ]; then
+        ok "…before the capsule engine was called or a directory made"
+    else
+        bad "…before anything was created" "calls=$(cat "$CALLS") dir=$(ls -d "$DISP_ROOT/disp-imgref" 2>&1)"
+    fi
+done
 
 resetcalls
 disp run --name gitrun --git https://example.com/o/r.git -- true >/dev/null
