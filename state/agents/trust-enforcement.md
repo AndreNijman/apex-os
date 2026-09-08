@@ -5,8 +5,33 @@ worktree: /var/tmp/apex-work/wt-trust
 branch: task/trust-enforcement
 
 ## NEXT
-Wire the gate into `ops::update` (commit 3), then ship `fulcio-root.pem` +
-`enforcement.conf` and write `docs/trust-enforcement.md` (commit 4).
+Commit 4, and it has two code fixes in it before the files:
+1. **`image_error: Some(_)` proceeds UNGATED.** Both `ops::trust_gate` and
+   `trust::gate_main` do `let Some(reference) = report.image else { print;
+   return }` — so an unreadable `/proc/cmdline` or origin file (EACCES, the
+   exact class this repo swept in September) prints one line and DEPLOYS, even
+   under `signature=enforce`. Inconsistent with `resolve` failing, which
+   becomes `CouldNotRun` and is refused. Fix: `verify::gate` takes
+   `(Option<reference>, Option<image_error>)` and turns `image_error: Some`
+   into `CouldNotRun` on BOTH arms before `decide`. Only `image: None,
+   image_error: None` — genuinely not a container deployment — may skip.
+2. **`refusal()`'s body paragraph is still unconditional.** The headline is
+   fixed, but two lines down every refusal says "A refusal here means the
+   image the registry is serving is not the one this machine was told to
+   expect", which is FALSE for `CouldNotRun` — the headline three lines above
+   just said it is not the same as failing to verify. Reword so it is true in
+   all three states, and add `hasnt 'is not the one this machine'` to the
+   `offlinestrict` section, which does not currently catch it.
+Then ship `/usr/share/apex-os/trust/fulcio-root.pem` + `enforcement.conf` and
+write `docs/trust-enforcement.md`. **The shipping path is the most dangerous
+piece of this unit**: under the shipped default a missing or unreadable
+`fulcio-root.pem` is `CouldNotRun`, which `signature=enforce` REFUSES — so a
+file that does not land refuses every update on every machine. Do not assume
+`files/…` maps to `/usr/share/…`; grep the `COPY` in `Containerfile.core`
+(`/usr/share/apex-os/secureboot` is created INLINE there with mkdir/printf, so
+the trust dir may need the same). Then assert in the suite: the file exists,
+its `openssl x509 -noout -fingerprint -sha256` equals the full pinned value
+below, and that path is what `FULCIO_ROOT` names.
 Placement is measured, not a preference: the gate must fire BEFORE
 `channel::record_update` and BEFORE `FsyncGuard::disable()` — both mutate
 machine state, and a refusal after them has written a health record for an
@@ -42,16 +67,47 @@ testable through the real binary, headless.
   rewritten onto it: `Artifact::Present`, `claimed_signer` and `checked` are
   gone — one field for the answer, none for the claim — and `render` prints a
   signer name ONLY where one was verified.
+- **180c01c — the gate, wired into `ops::update`.** Before `record_update` and
+  before `FsyncGuard::disable` (both write machine state; a refusal after them
+  would have recorded a health record for an update that never happened, which
+  is what §26's rollout stop then reasons about, and left ostree's fsync off on
+  a machine that is not updating) — asserted structurally, comment-stripped, at
+  lines 12 vs 19 vs 26 vs 28. Verifies the digest `verify::resolve` gets for the
+  ORIGIN REFERENCE, not `booted_digest`. Escape `--allow-unverified`, separate
+  from `--force`, and it still prints the refusal it overrode. New read-only
+  surface `apex trust --gate [--json]`: the same gate as a readout, calling the
+  same functions in the same order, no root, stages nothing. Under
+  `APEX_TRUST_ROOT` the gate returns before acting on any decision — stated as
+  a program invariant, one condition checked first, which is what makes the new
+  suite safe on a daily-driver laptop.
+- **`tests/test-apex-trust-enforcement.sh` — 59 assertions, real cryptography.**
+  Each fixture mints a P-256 root + intermediate + leaf, gives the leaf a
+  Sigstore SAN and OIDC-issuer extension, and signs a genuine cosign
+  simple-signing payload; the binary does the whole verification. No network,
+  no bootc, no root.
 - **c14da15 — 41 verify tests + the 12-cell decision table, and two mutations.**
   Full suite **451 green** (445 unit + 6 mcp_sidecar_live), up from 404.
-  25/25 shell assertions in `tests/test-apex-trust.sh --with-binary` still
-  pass unchanged.
 
-## MUTATIONS PROVEN (round 6)
-| mutation | file:arm | tests that went red | restored |
-|---|---|---|---|
-| `(Verdict::Failed(_), _) => Err(...)` → `Ok(Some(...))` — a signature that verifies WRONGLY stops refusing | verify.rs `arm()` | 6: `a_failed_signature_refuses_even_under_warn`, `a_failed_signature_under_enforce_refuses`, `a_refusal_carries_the_other_check_s_warning_too`, `a_refusal_names_which_of_the_two_checks_refused`, `a_refusal_that_could_not_run_is_never_worded_as_a_failure`, `the_json_gate_answer_matches_the_rendered_one` (439 passed / 6 failed) | yes, 445 green |
-| `Artifact::Unavailable(why) => Verdict::CouldNotRun(why)` → `Verdict::Absent(why)` — an unreachable registry reads as unsigned | verify.rs `from_artifact()` | 1: `an_unreachable_registry_is_never_refused_as_unsigned` (444 passed / 1 failed) | yes, 445 green |
+## COUNTS (real runs, at 180c01c)
+- `cargo test`: **452** — 446 unit + 6 `mcp_sidecar_live`. Was 404 at the
+  branch point, so +48.
+- `tests/test-apex-trust-enforcement.sh`: **59 passed, 0 failed**, and run five
+  times in a row to confirm it is deterministic across freshly minted keys.
+- `tests/test-apex-trust.sh --with-binary`: **25 passed, 0 failed** — unchanged
+  by the rewrite, which is the point.
+- `tests/test-apex-verbs.sh`: 44 passed, 0 failed.
+- `tests/run-clippy.sh`: **PASS**, in the container. Three real lints were
+  fixed to get there (`manual_pattern_char_comparison`, `collapsible_match`,
+  and `too_many_arguments` on `verify_signed_bytes`, which became the
+  `Candidate` + `Expect` structs).
+
+## MUTATIONS PROVEN (round 6) — four, each restored and re-verified green
+| # | mutation | where | what went red | restored |
+|---|---|---|---|---|
+| 1 | `(Verdict::Failed(_), _) => Err(...)` → `Ok(Some(...))` — a signature that verifies WRONGLY stops refusing | verify.rs `arm()` | **6 Rust tests**: `a_failed_signature_refuses_even_under_warn`, `a_failed_signature_under_enforce_refuses`, `a_refusal_carries_the_other_check_s_warning_too`, `a_refusal_names_which_of_the_two_checks_refused`, `a_refusal_that_could_not_run_is_never_worded_as_a_failure`, `the_json_gate_answer_matches_the_rendered_one` (439 pass / 6 fail) | yes |
+| 2 | `Artifact::Unavailable(why) => CouldNotRun(why)` → `Absent(why)` — an unreachable registry reads as unsigned | verify.rs `from_artifact()` | **1 Rust test**: `an_unreachable_registry_is_never_refused_as_unsigned` (444 pass / 1 fail) | yes |
+| 3 | `match resolve(roots, reference)` → `match crate::trust::booted_digest(roots)` — the gate judges what is RUNNING instead of what would be DEPLOYED | verify.rs `gate()` | **5 shell assertions** (54 pass / 5 fail): the two in the unresolvable-tag section and the three in the moved-tag section. Caught only 2 before the `moved` fixture was added, which is why that fixture exists — booted and resolved were equal in every other fixture, so the mutation was invisible. | yes |
+| 4 | `openssl_verify_reason` back to `lines().next()` | verify.rs | **1 Rust test**: `a_chain_failure_reports_the_reason_and_not_a_distinguished_name` (445 pass / 1 fail) | yes |
 
 ## FOUND
 - **cosign is not packaged for Fedora 43.** `dnf5 repoquery cosign` / `cosign*` /
