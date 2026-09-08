@@ -40,10 +40,19 @@
 //! 1. This is the last run APEX observed, not a fresh verdict. The tree may
 //!    have changed since. `TestState` carries `head`, the commit the run was
 //!    observed at, so a client can say "and the tree has moved since".
-//! 2. Whether the agent upstream really emits a failure event for a non-zero
-//!    exit is an upstream behaviour this crate cannot compel. If it never
-//!    arrives, the state stays `Running` and then ages out — which reads as
-//!    "nobody told us how it ended", not as a pass.
+//! 2. [`TestState::Passed`] means one exact thing: APEX saw a COMPLETION
+//!    event for that run and it was not a failure event. Whether the agent
+//!    upstream emits `post_tool_use_failure` rather than `post_tool_use` for a
+//!    non-zero exit is upstream behaviour this crate can neither compel nor
+//!    check headlessly — so if upstream ever reports a failed suite as an
+//!    ordinary completion, this reports `passed`. That is a limit of the only
+//!    channel there is, and it is written down here rather than hidden behind
+//!    a field called `tests_pass`.
+//!
+//!    The other direction IS guaranteed, and it is the one that matters for a
+//!    handover: a run whose completion event never arrives at all stays
+//!    [`TestState::Running`] for as long as the daemon lives, because "nobody
+//!    told us how it ended" is not a pass. Nothing in this module promotes it.
 //!
 //! So the wording everywhere is "the last test run APEX observed". A field
 //! called `tests_pass` would be a claim this evidence cannot support.
@@ -101,7 +110,8 @@ pub enum ConflictState {
     /// one wrong answer that costs somebody a broken merge.
     Unknown { reason: String },
     /// Not a question for this tree: the project's own main working tree has
-    /// nothing to merge into itself.
+    /// nothing to merge into itself, and neither has an agent worktree sitting
+    /// on the base branch itself.
     NotApplicable,
 }
 
@@ -317,16 +327,31 @@ pub fn status(
 
     // Dirt is the one question that HAS to be asked in the worktree itself:
     // it is about that checkout's own uncommitted state, which no ref knows.
-    // Read-only — `git status --porcelain` writes nothing.
+    //
+    // `git status --porcelain` CHANGES NO ENTRY — no file in the tree, no
+    // staged content, no ref. Said that way rather than "writes nothing",
+    // because it may rewrite the index file to refresh the stat cache of an
+    // entry whose mtime it had to look past. That is a cache update and the
+    // staged content is identical after it; the suite asserts on
+    // `git ls-files --stage`, which is the content, for exactly this reason.
     let dirty = git::is_dirty(&wt.path);
 
     let (mut diff, mut ahead, mut behind) = (DiffSummary::default(), None, None);
-    let mut conflicts = if wt.is_agent {
+
+    // Every path out of the block below either answers the conflict question
+    // or says WHICH ref it was missing. The starting value is the refusal, so
+    // that a case nobody thought of cannot fall through to `Clean` — which is
+    // the one wrong answer here that costs somebody a broken merge.
+    let mut conflicts = if !wt.is_agent {
+        ConflictState::NotApplicable
+    } else if branch.is_none() {
         ConflictState::Unknown {
-            reason: "no base branch to compare against".to_string(),
+            reason: "this worktree is not on a branch".to_string(),
         }
     } else {
-        ConflictState::NotApplicable
+        ConflictState::Unknown {
+            reason: "the main worktree is not on a branch to merge back into".to_string(),
+        }
     };
 
     if let (Some(base), Some(branch)) = (base, branch.as_deref()) {
@@ -337,17 +362,20 @@ pub fn status(
             ahead = Some(a);
             behind = Some(b);
         }
-        // The main tree has nothing to merge into itself, and a branch
-        // compared against itself is trivially clean — reporting that as a
-        // real answer would be noise.
-        if wt.is_agent && base != branch {
-            conflicts = match git::merge_tree_probe(repo, base, branch) {
-                git::MergeProbe::Clean => ConflictState::Clean,
-                git::MergeProbe::Conflicted(paths) => ConflictState::Conflicted { paths },
-                git::MergeProbe::Unknown(reason) => ConflictState::Unknown { reason },
+        if wt.is_agent {
+            conflicts = if base == branch {
+                // A worktree sitting on the base branch itself. There is no
+                // merge to ask about, and probing a branch against itself
+                // would answer `Clean` — true, and read as "this is ready".
+                // Its `ahead` is 0, which is what actually blocks it.
+                ConflictState::NotApplicable
+            } else {
+                match git::merge_tree_probe(repo, base, branch) {
+                    git::MergeProbe::Clean => ConflictState::Clean,
+                    git::MergeProbe::Conflicted(paths) => ConflictState::Conflicted { paths },
+                    git::MergeProbe::Unknown(reason) => ConflictState::Unknown { reason },
+                }
             };
-        } else if !wt.is_agent {
-            conflicts = ConflictState::NotApplicable;
         }
     }
 

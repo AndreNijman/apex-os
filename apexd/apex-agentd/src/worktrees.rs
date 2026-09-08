@@ -124,14 +124,29 @@ pub fn handle(
     sessions: &[SessionWhere],
 ) -> Response {
     let projects = match slug.as_deref() {
-        Some(slug) => match project::load(slug) {
+        // Resolved by SEARCHING the remembered set, not by joining the slug
+        // onto the store path. The difference is the whole security argument
+        // of this request: answering it makes the daemon run git — including
+        // `merge-tree --write-tree`, which writes objects — in the project's
+        // `root`, and every confined session has the control socket bound in
+        // so that it can publish events. Built by joining, a slug of
+        // `../../../var/tmp/mine` would name a record of the caller's own
+        // writing and the daemon would run there. Searched, the set of
+        // directories this request can reach is exactly the set the user
+        // already chose to remember, whatever the caller sends.
+        //
+        // `project::load` refuses a path-shaped slug too, as of the same
+        // change. Two barriers on purpose: that one protects every other
+        // caller of the store, this one does not depend on it.
+        Some(slug) => match project::list().into_iter().find(|p| p.slug == slug) {
             Some(p) => vec![p],
             None => {
                 return Response::error(
                     ErrorKind::BadRequest,
                     format!(
-                        "no remembered project with slug {slug:?}; \
-                         `apex project list` shows the ones there are"
+                        "no remembered project with slug {:?}; \
+                         `apex project list` shows the ones there are",
+                        clip(slug)
                     ),
                 )
             }
@@ -155,6 +170,18 @@ pub fn handle(
         }
     }
     Response::Worktrees { worktrees: out }
+}
+
+/// Trim a caller's string before it goes into an error message.
+///
+/// The slug is echoed back so that a typo is obvious, and a caller can send a
+/// megabyte of it. An error is a log line and a terminal row, not a mirror.
+fn clip(text: &str) -> String {
+    if text.chars().count() <= 64 {
+        return text.to_string();
+    }
+    let keep: String = text.chars().take(64).collect();
+    format!("{keep}…")
 }
 
 /// The ids of sessions working in `path`.

@@ -124,7 +124,7 @@ pub fn detect(dir: &Path) -> Option<Project> {
 
 /// The stored record for `slug`, if there is one.
 pub fn load(slug: &str) -> Option<Project> {
-    let text = std::fs::read_to_string(record_path(slug)).ok()?;
+    let text = std::fs::read_to_string(record_path(slug)?).ok()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -162,8 +162,34 @@ pub fn languages_from_names(names: &[String]) -> Vec<String> {
     out
 }
 
-fn record_path(slug: &str) -> PathBuf {
-    paths::projects_dir().join(format!("{slug}.json"))
+/// Whether `slug` may name a record file in the project store.
+///
+/// A real slug comes from [`git::path_slug`], which turns every `/` and every
+/// other non-alphanumeric into `-`, so it is `[a-z0-9._-]` and nothing else.
+/// This exists because [`record_path`] JOINS the slug onto the store
+/// directory, and two of its callers take the slug from outside this process:
+/// `apex agent worktrees --project <slug>` reaches [`load`] through the
+/// daemon's control socket (§P1-036), which every confined session can speak,
+/// and [`forget`] DELETES the file the slug names. A `..` or a `/` walks out
+/// of the store, so neither is a place to trust a caller's spelling.
+///
+/// A dot is allowed — a repository directory may be called `apex.rs` — but a
+/// leading one is not, which rules out `.`, `..` and a dotfile in one rule.
+pub fn is_record_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 128
+        && !slug.starts_with('.')
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Where `slug`'s record lives, or `None` when `slug` is not a slug.
+fn record_path(slug: &str) -> Option<PathBuf> {
+    if !is_record_slug(slug) {
+        return None;
+    }
+    Some(paths::projects_dir().join(format!("{slug}.json")))
 }
 
 /// Record that a project was used, so `apex project list` can order by recency.
@@ -183,7 +209,8 @@ pub fn remember(project: &Project) -> Result<()> {
     if p.capsule.is_none() {
         p.capsule = load(&p.slug).and_then(|old| old.capsule);
     }
-    let path = record_path(&p.slug);
+    let path = record_path(&p.slug)
+        .with_context(|| format!("{:?} is not a usable project slug", p.slug))?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&p)?)
         .with_context(|| format!("writing {}", tmp.display()))?;
@@ -265,7 +292,8 @@ pub fn bind_capsule(project: &Project, capsule: Option<&str>) -> Result<()> {
     let dir = paths::projects_dir();
     paths::ensure_private_dir(&dir)?;
     p.last_opened = now_secs();
-    let path = record_path(&p.slug);
+    let path = record_path(&p.slug)
+        .with_context(|| format!("{:?} is not a usable project slug", p.slug))?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&p)?)
         .with_context(|| format!("writing {}", tmp.display()))?;
@@ -307,7 +335,8 @@ pub fn suggested_capsule(languages: &[String]) -> Option<&'static str> {
 
 /// Forget a remembered project. The checkout itself is never touched.
 pub fn forget(slug: &str) -> Result<()> {
-    let path = record_path(slug);
+    let path = record_path(slug)
+        .with_context(|| format!("{slug:?} is not a project slug"))?;
     if path.exists() {
         std::fs::remove_file(&path)?;
     }
@@ -570,5 +599,65 @@ mod tests {
         let p = project();
         assert!(p.worktree_root().starts_with(&p.root));
         assert!(p.worktree_root().ends_with("worktrees"));
+    }
+
+    #[test]
+    fn a_real_slug_is_accepted() {
+        // What `git::path_slug` actually produces, for the paths on this
+        // machine. A guard that rejected one of these would break `apex
+        // project add` rather than protect anything.
+        for slug in [
+            "var-home-andre-projects-apex",
+            "var-tmp-apex-work-wt-p1-035",
+            "home-a-apex.rs",
+            "x",
+            "a_b-c.d",
+        ] {
+            assert!(is_record_slug(slug), "{slug}");
+        }
+        assert!(is_record_slug(&git::path_slug("/var/home/a/apex")));
+    }
+
+    #[test]
+    fn a_path_shaped_slug_cannot_name_a_record() {
+        // `record_path` JOINS the slug onto the store directory, `load` is
+        // reachable through the daemon's control socket, which every confined
+        // session can speak, and `forget` DELETES what it names. Each of
+        // these walks out of the store.
+        for slug in [
+            "../../../var/tmp/mine",
+            "..",
+            ".",
+            "/etc/passwd",
+            "a/b",
+            "sub/../../escape",
+            ".hidden",
+            "",
+        ] {
+            assert!(!is_record_slug(slug), "{slug:?} must not name a record");
+            assert!(record_path(slug).is_none(), "{slug:?}");
+        }
+        // And nothing exotic gets through either: a NUL or a newline in a
+        // filename is a different class of problem to hand to the filesystem.
+        assert!(!is_record_slug("a\0b"));
+        assert!(!is_record_slug("a\nb"));
+        assert!(!is_record_slug(&"a".repeat(129)), "bounded");
+    }
+
+    #[test]
+    fn loading_a_path_shaped_slug_reads_nothing() {
+        // The refusal has to be in `load`, not only in the daemon: this is the
+        // function every other caller of the store goes through.
+        assert!(load("../../../etc/hostname").is_none());
+        assert!(load("..").is_none());
+    }
+
+    #[test]
+    fn forgetting_a_path_shaped_slug_is_an_error_not_a_deletion() {
+        let err = forget("../../../tmp/anything").expect_err("must refuse");
+        assert!(
+            format!("{err:#}").contains("not a project slug"),
+            "{err:#}"
+        );
     }
 }
