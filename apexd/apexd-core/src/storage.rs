@@ -661,6 +661,22 @@ pub struct BlockDevice {
     /// The device's udev record, or the reason there is none. A freshly
     /// created loop device has no record at all.
     pub partition: Reading<PartitionEntry>,
+    /// The file this loop device is attached to; `None` when it is not an
+    /// attached loop device at all.
+    ///
+    /// **This is the check nothing else makes.** Measured on the L16:
+    /// `/dev/loop0` is attached to `/lib/extensions/apex-user.raw`, a merged
+    /// system extension carrying 219 packages — and it appears in
+    /// `/proc/self/mountinfo` zero times, in `/proc/1/mountinfo` zero times,
+    /// and its `holders` directory is empty. Every other rule in this guard
+    /// passed it. `wipefs` on a loop device writes straight through to the
+    /// backing file, so granting that permit destroys the extension.
+    ///
+    /// `Known(None)` is a definite answer and comes only from the `loop/`
+    /// directory being genuinely absent — `NotFound` and nothing else, because
+    /// `Path::exists()` is false on EACCES too and this module has now found
+    /// that same mistake fifteen times.
+    pub loop_backing: Reading<Option<String>>,
 }
 
 /// The machine a destructive request is judged against.
@@ -696,6 +712,14 @@ pub enum Refusal {
     CarriesTheRunningSystem { device: String, evidence: String },
     /// Something is stacked on top of it.
     HasHolders { device: String, holders: Vec<String> },
+    /// It is a loop device attached to a file, so it is in use by whoever
+    /// attached it — and an attached loop device is in no mount table at all.
+    LoopDeviceInUse { device: String, backing_file: String },
+    /// The caller said which file a loop device backs, and was wrong. Refusing
+    /// on a mismatch rather than falling back to the other rules: someone who
+    /// names the wrong file has the wrong device, and the other rules are
+    /// exactly the ones that do not see a loop device.
+    BackingFileMismatch { device: String, expected: String, actual: Option<String> },
     /// It is the EFI System Partition — which on this machine is mounted
     /// nowhere, so no mount rule catches it.
     IsTheEsp { device: String, evidence: String },
@@ -727,6 +751,23 @@ impl Refusal {
                 holders.join(", "),
                 if holders.len() == 1 { "it" } else { "them" }
             ),
+            Refusal::LoopDeviceInUse { device, backing_file } => format!(
+                "{device} is a loop device attached to {backing_file}, so something \
+                 is using it — and an attached loop device appears in no mount \
+                 table, so no other check here would have stopped you. Detach it \
+                 first (losetup -d {device}), or if you do mean the file it backs, \
+                 say which: --expect-backing-file {backing_file}"
+            ),
+            Refusal::BackingFileMismatch { device, expected, actual } => match actual {
+                Some(a) => format!(
+                    "{device} is attached to {a}, not to {expected} — check which \
+                     loop device you meant before erasing either"
+                ),
+                None => format!(
+                    "{device} is not an attached loop device, so it backs no file, \
+                     and {expected} is not what you are about to erase"
+                ),
+            },
             Refusal::IsTheEsp { device, evidence } => format!(
                 "{device} is the EFI System Partition ({evidence}) — erasing it \
                  leaves a machine that cannot boot, and it is mounted nowhere, \
@@ -798,6 +839,14 @@ fn kernel_name_of(path: &str) -> Option<&str> {
 /// LUKS holder, and then the confirmation. One refusal per round trip is how a
 /// person ends up hammering `--force`.
 ///
+/// `expect_backing` is how a caller gets past [`Refusal::LoopDeviceInUse`]: an
+/// attached loop device is erasable only by someone who can say which file it
+/// backs. That is deliberately the same assertion the destructive test is
+/// required to make before it touches anything — promoted out of the suite and
+/// into the product, where it protects everyone rather than only the tests.
+/// Compared as a plain string; canonicalising paths is the caller's job, at
+/// the edge where a real filesystem exists.
+///
 /// `euid` is a [`Reading`] because it is read from `/proc/self/status` and that
 /// read can fail. `apex`'s own `ops::require_root` folds an unreadable status
 /// file into "must run as root", which is safe but tells the user to do
@@ -808,6 +857,7 @@ pub fn guard(
     typed_confirmation: &str,
     machine: &Machine,
     euid: &Reading<u32>,
+    expect_backing: Option<&str>,
 ) -> Result<Permit, Vec<Refusal>> {
     // Privilege first and alone: without it nothing below can be trusted to
     // have been readable in the first place, and a list of six refusals when
@@ -887,6 +937,39 @@ pub fn guard(
                 holders: h.clone(),
             }),
             Reading::Known(_) => {}
+        }
+
+        // An attached loop device is in use and no mount check sees it. This
+        // sits above the ESP question rather than below it because it is the
+        // rule that applies to the only device class this feature is ever
+        // tested against, and getting it wrong is silent.
+        let is_target = d.kernel_name == name;
+        match &d.loop_backing {
+            Reading::Unavailable(why) => refusals.push(Refusal::CouldNotVerify {
+                what: format!("whether /dev/{} is an attached loop device", d.kernel_name),
+                why: why.clone(),
+            }),
+            Reading::Known(Some(backing)) => match (is_target, expect_backing) {
+                (true, Some(e)) if e == backing => {}
+                (true, Some(e)) => refusals.push(Refusal::BackingFileMismatch {
+                    device: format!("/dev/{}", d.kernel_name),
+                    expected: e.to_string(),
+                    actual: Some(backing.clone()),
+                }),
+                _ => refusals.push(Refusal::LoopDeviceInUse {
+                    device: format!("/dev/{}", d.kernel_name),
+                    backing_file: backing.clone(),
+                }),
+            },
+            Reading::Known(None) => {
+                if let (true, Some(e)) = (is_target, expect_backing) {
+                    refusals.push(Refusal::BackingFileMismatch {
+                        device: format!("/dev/{}", d.kernel_name),
+                        expected: e.to_string(),
+                        actual: None,
+                    });
+                }
+            }
         }
 
         // The ESP question is only asked of partitions, because a whole disk
@@ -1336,6 +1419,7 @@ mod tests {
                 name: None,
                 fs_type: Some("btrfs".into()),
             }),
+            loop_backing: Reading::Known(None),
         }
     }
 
@@ -1351,6 +1435,9 @@ mod tests {
     }
 
     const ROOT: Reading<u32> = Reading::Known(0);
+
+    /// What `/dev/loop0` is really attached to on the development machine.
+    const SYSEXT: &str = "/lib/extensions/apex-user.raw";
 
     /// The L16 exactly: `/` is composefs on `overlay`, the operating system
     /// lives on `nvme0n1p5`, `p1` is an unmounted ESP carrying the type GUID
@@ -1370,6 +1457,15 @@ mod tests {
                 esp,
                 dev("nvme0n1p5", Some("nvme0n1")),
                 dev("loop3", None),
+                // The real loop0 on this machine: a merged system extension,
+                // attached, in no mount table, no holders.
+                BlockDevice {
+                    kernel_name: "loop0".into(),
+                    parent: None,
+                    holders: Reading::Known(Vec::new()),
+                    partition: Reading::Unavailable("no udev record".into()),
+                    loop_backing: Reading::Known(Some(SYSEXT.into())),
+                },
             ],
             mounts: Reading::Known(vec![
                 mount("/", "overlay"),
@@ -1386,7 +1482,7 @@ mod tests {
     const LOOP: usize = 3;
 
     fn refuse(path: &str, machine: &Machine) -> Vec<Refusal> {
-        guard(path, path, machine, &ROOT).expect_err("should have been refused")
+        guard(path, path, machine, &ROOT, None).expect_err("should have been refused")
     }
 
     #[test]
@@ -1427,7 +1523,7 @@ mod tests {
         // that is not true.
         let mut m = l16();
         m.devices.push(dev("nvme0n1p9", Some("nvme0n1")));
-        guard("/dev/nvme0n1p9", "/dev/nvme0n1p9", &m, &ROOT)
+        guard("/dev/nvme0n1p9", "/dev/nvme0n1p9", &m, &ROOT, None)
             .expect("a sibling's mounts are not this partition's problem");
     }
 
@@ -1478,7 +1574,7 @@ mod tests {
             "the fixture must reproduce an unnamed partition"
         );
         m.devices.push(spare);
-        guard("/dev/nvme0n1p9", "/dev/nvme0n1p9", &m, &ROOT)
+        guard("/dev/nvme0n1p9", "/dev/nvme0n1p9", &m, &ROOT, None)
             .expect("a legible non-ESP partition type is a positive answer");
     }
 
@@ -1487,17 +1583,24 @@ mod tests {
         // Every arm of the inversion this section is built around.
         let mut m = l16();
         m.mounts = Reading::Unavailable("/proc/self/mountinfo: permission denied".into());
-        let why = guard("/dev/loop3", "/dev/loop3", &m, &ROOT).expect_err("unreadable mounts");
+        let why = guard("/dev/loop3", "/dev/loop3", &m, &ROOT, None).expect_err("unreadable mounts");
         assert!(why.iter().any(|r| matches!(r, Refusal::CouldNotVerify { .. })), "{why:?}");
 
         let mut m = l16();
         m.devices[LOOP].holders = Reading::Unavailable("holders: permission denied".into());
-        let why = guard("/dev/loop3", "/dev/loop3", &m, &ROOT).expect_err("unreadable holders");
+        let why = guard("/dev/loop3", "/dev/loop3", &m, &ROOT, None).expect_err("unreadable holders");
+        assert!(why.iter().any(|r| matches!(r, Refusal::CouldNotVerify { .. })), "{why:?}");
+
+        let mut m = l16();
+        m.devices[LOOP].loop_backing =
+            Reading::Unavailable("/sys/block/loop3/loop: permission denied".into());
+        let why = guard("/dev/loop3", "/dev/loop3", &m, &ROOT, None)
+            .expect_err("an unreadable loop directory refuses");
         assert!(why.iter().any(|r| matches!(r, Refusal::CouldNotVerify { .. })), "{why:?}");
 
         let unknown = Reading::Unavailable("/proc/self/status: no Uid line".into());
         let why =
-            guard("/dev/loop3", "/dev/loop3", &l16(), &unknown).expect_err("unreadable euid");
+            guard("/dev/loop3", "/dev/loop3", &l16(), &unknown, None).expect_err("unreadable euid");
         assert!(
             why.iter().any(|r| matches!(r, Refusal::CouldNotVerify { .. })),
             "an unreadable euid became a plain sudo hint: {why:?}"
@@ -1508,7 +1611,7 @@ mod tests {
     fn a_stacked_device_is_refused_naming_what_is_on_top() {
         let mut m = l16();
         m.devices[LOOP].holders = Reading::Known(vec!["dm-0".into()]);
-        let why = guard("/dev/loop3", "/dev/loop3", &m, &ROOT).expect_err("a holder refuses");
+        let why = guard("/dev/loop3", "/dev/loop3", &m, &ROOT, None).expect_err("a holder refuses");
         let said = why.iter().map(Refusal::say).collect::<Vec<_>>().join("\n");
         assert!(said.contains("dm-0"), "the refusal did not name the holder: {said}");
     }
@@ -1517,11 +1620,11 @@ mod tests {
     fn a_confirmation_that_does_not_name_the_device_is_refused() {
         let m = l16();
         let why =
-            guard("/dev/loop3", "yes", &m, &ROOT).expect_err("a bare yes is not a confirmation");
+            guard("/dev/loop3", "yes", &m, &ROOT, None).expect_err("a bare yes is not a confirmation");
         assert!(why.iter().any(|r| matches!(r, Refusal::Unconfirmed { .. })), "{why:?}");
         // A near miss is still a miss, and an empty string most of all.
         for typed in ["", "loop3", "/dev/loop", "/dev/loop30", " /dev/loop3"] {
-            let why = guard("/dev/loop3", typed, &m, &ROOT)
+            let why = guard("/dev/loop3", typed, &m, &ROOT, None)
                 .expect_err("only the exact device name confirms");
             assert!(
                 why.iter().any(|r| matches!(r, Refusal::Unconfirmed { .. })),
@@ -1529,12 +1632,12 @@ mod tests {
             );
         }
         // And typing it exactly is what gets through.
-        guard("/dev/loop3", "/dev/loop3", &m, &ROOT).expect("the device name confirms");
+        guard("/dev/loop3", "/dev/loop3", &m, &ROOT, None).expect("the device name confirms");
     }
 
     #[test]
     fn without_root_nothing_else_is_even_reported() {
-        let why = guard("/dev/loop3", "/dev/loop3", &l16(), &Reading::Known(1000))
+        let why = guard("/dev/loop3", "/dev/loop3", &l16(), &Reading::Known(1000), None)
             .expect_err("refused");
         assert_eq!(why, vec![Refusal::NeedsRoot], "the sudo line must not be buried");
         assert!(Refusal::NeedsRoot.say().contains("sudo"), "and it says how");
@@ -1544,14 +1647,14 @@ mod tests {
     fn every_reason_is_collected_so_a_user_does_not_learn_them_one_at_a_time() {
         let mut m = l16();
         m.devices[LOOP].holders = Reading::Known(vec!["dm-0".into()]);
-        let why = guard("/dev/loop3", "nope", &m, &ROOT).expect_err("refused");
+        let why = guard("/dev/loop3", "nope", &m, &ROOT, None).expect_err("refused");
         assert!(why.len() >= 2, "only one reason came back: {why:?}");
     }
 
     #[test]
     fn a_device_this_machine_does_not_have_is_not_erased_by_default() {
         for path in ["/dev/sdz", "/dev/mapper/secret", "nvme0n1p5", "/dev/", ""] {
-            let why = guard(path, path, &l16(), &ROOT).expect_err("unknown device refused");
+            let why = guard(path, path, &l16(), &ROOT, None).expect_err("unknown device refused");
             assert!(
                 why.iter().any(|r| matches!(r, Refusal::NotAKnownBlockDevice { .. })),
                 "{path:?} was not refused as unknown: {why:?}"
@@ -1566,7 +1669,7 @@ mod tests {
         // because somebody added a constructor or made the field public, the
         // type-level guarantee is gone and this test is the notice.
         let m = l16();
-        let p = guard("/dev/loop3", "/dev/loop3", &m, &ROOT).expect("permitted");
+        let p = guard("/dev/loop3", "/dev/loop3", &m, &ROOT, None).expect("permitted");
         assert_eq!(p.device(), "/dev/loop3");
         let src = include_str!("storage.rs");
         let decl = src.split("pub struct Permit").nth(1).expect("Permit is declared");
@@ -1584,7 +1687,7 @@ mod tests {
         // would be untestable and would grow a --force nobody could review.
         let mut m = l16();
         m.devices[LOOP].partition = Reading::Unavailable("no udev record".into());
-        guard("/dev/loop3", "/dev/loop3", &m, &ROOT)
+        guard("/dev/loop3", "/dev/loop3", &m, &ROOT, None)
             .expect("a whole loop device cannot be an ESP");
     }
 
@@ -1606,7 +1709,7 @@ mod tests {
             let mut p = dev("nvme0n1p9", Some("nvme0n1"));
             p.partition = entry;
             m.devices.push(p);
-            let why = guard("/dev/nvme0n1p9", "/dev/nvme0n1p9", &m, &ROOT).expect_err("refused");
+            let why = guard("/dev/nvme0n1p9", "/dev/nvme0n1p9", &m, &ROOT, None).expect_err("refused");
             assert!(why.iter().any(|r| matches!(r, Refusal::CouldNotVerify { .. })), "{why:?}");
         }
     }
@@ -1620,6 +1723,101 @@ mod tests {
             fs_type: Some("vfat".into()),
         };
         assert!(matches!(is_esp(&e), EspVerdict::Yes(_)), "{:?}", is_esp(&e));
+    }
+
+    #[test]
+    fn an_attached_loop_device_is_refused_although_nothing_at_all_sees_it_in_use() {
+        // THE REGRESSION TEST FOR THIS FEATURE'S WORST NEAR MISS. Measured on
+        // the development machine: /dev/loop0 is attached to a merged system
+        // extension carrying 219 packages, and
+        //   grep loop /proc/self/mountinfo -> 0
+        //   grep loop /proc/1/mountinfo    -> 0
+        //   /sys/block/loop0/holders       -> empty
+        // Every other rule in this guard passed it, and wipefs on a loop
+        // device writes straight through to the backing file. The first
+        // version of this guard granted the permit.
+        let m = l16();
+        let loop0 = m.devices.iter().find(|d| d.kernel_name == "loop0").expect("loop0");
+        assert_eq!(
+            loop0.holders,
+            Reading::Known(Vec::new()),
+            "the fixture must reproduce the measurement: no holders"
+        );
+        assert!(
+            !m.mounts.known().unwrap().iter().any(|x| x.source.contains("loop")),
+            "the fixture must reproduce the measurement: in no mount table"
+        );
+        let why = refuse("/dev/loop0", &m);
+        assert!(
+            why.iter().any(|r| matches!(r, Refusal::LoopDeviceInUse { .. })),
+            "an attached loop device was permitted: {why:?}"
+        );
+    }
+
+    #[test]
+    fn the_refusal_says_both_ways_out_and_names_the_file() {
+        // A user who legitimately wants to wipe their own loop-backed image
+        // needs a next step; without one the only path forward is reading the
+        // source, and the path after that is a --force flag.
+        let said = refuse("/dev/loop0", &l16())
+            .iter()
+            .map(Refusal::say)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(said.contains(SYSEXT), "the refusal did not name the file: {said}");
+        assert!(said.contains("losetup -d"), "no detach instruction: {said}");
+        assert!(said.contains("--expect-backing-file"), "no way through: {said}");
+    }
+
+    #[test]
+    fn an_attached_loop_device_is_erasable_by_someone_who_says_which_file_it_backs() {
+        // The way through, and the only way: this is the assertion the
+        // destructive test is required to make, enforced by the product.
+        let m = l16();
+        let p = guard("/dev/loop0", "/dev/loop0", &m, &ROOT, Some(SYSEXT))
+            .expect("naming the backing file correctly is permission");
+        assert_eq!(p.device(), "/dev/loop0");
+    }
+
+    #[test]
+    fn naming_the_wrong_backing_file_is_its_own_refusal_and_not_a_fallback() {
+        // Someone who names the wrong file has the wrong device, and the other
+        // rules are precisely the ones that cannot see a loop device.
+        let m = l16();
+        let why = guard("/dev/loop0", "/dev/loop0", &m, &ROOT, Some("/var/tmp/mine.img"))
+            .expect_err("a mismatch refuses");
+        assert!(
+            why.iter().any(|r| matches!(r, Refusal::BackingFileMismatch { actual: Some(_), .. })),
+            "{why:?}"
+        );
+        let said = why.iter().map(Refusal::say).collect::<Vec<_>>().join("\n");
+        assert!(said.contains(SYSEXT) && said.contains("/var/tmp/mine.img"), "{said}");
+    }
+
+    #[test]
+    fn asserting_a_backing_file_for_a_device_that_backs_nothing_is_refused() {
+        // The typo that would otherwise be silent: --expect-backing-file
+        // pointed at a real image, and the device argument pointed at a disk.
+        let m = l16();
+        let why = guard("/dev/loop3", "/dev/loop3", &m, &ROOT, Some(SYSEXT))
+            .expect_err("loop3 backs nothing in this fixture");
+        assert!(
+            why.iter().any(|r| matches!(r, Refusal::BackingFileMismatch { actual: None, .. })),
+            "{why:?}"
+        );
+    }
+
+    #[test]
+    fn a_backing_file_assertion_does_not_excuse_a_second_loop_device() {
+        // `expect_backing` speaks only for the device that was named. If the
+        // request would take another attached loop device with it, that one is
+        // still in use and nobody vouched for it.
+        let mut m = l16();
+        m.devices[LOOP].parent = Some("loop0".into());
+        m.devices[LOOP].loop_backing = Reading::Known(Some("/var/tmp/other.img".into()));
+        let why = guard("/dev/loop0", "/dev/loop0", &m, &ROOT, Some(SYSEXT))
+            .expect_err("the other attached device is still in use");
+        assert!(why.iter().any(|r| matches!(r, Refusal::LoopDeviceInUse { .. })), "{why:?}");
     }
 
     #[test]
