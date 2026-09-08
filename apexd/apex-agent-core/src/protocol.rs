@@ -496,6 +496,14 @@ pub enum Request {
         /// in exactly the way an agent reporting its own `detail` is.
         #[serde(default)]
         native: Option<String>,
+        /// A test run the bridge saw start or finish (§P1-036).
+        ///
+        /// Another optional key on this request, and not a protocol bump for
+        /// the reason the others are not: a daemon that predates it ignores
+        /// the field and records the event exactly as it always did. The
+        /// failure loses a status line, never a restriction.
+        #[serde(default)]
+        test: Option<crate::worktree::TestNote>,
     },
     /// Ask whether a tool call this session is about to make is one its own
     /// confinement would refuse (§6.2).
@@ -519,6 +527,30 @@ pub enum Request {
         /// the next tool added upstream.
         #[serde(default)]
         tool_input: serde_json::Value,
+    },
+    /// Per-worktree status for a remembered project: tests, conflicts, diff
+    /// and local readiness (§P1-036).
+    ///
+    /// ## Why this takes a SLUG and not a path
+    ///
+    /// The obvious signature is `{ path: String }`, and it would be a hole.
+    /// Answering this request makes the daemon run git in the named directory,
+    /// including `merge-tree --write-tree`, which WRITES objects. A confined
+    /// session has the control socket bound in so that it can publish events,
+    /// so a path-keyed version would let any session point the daemon at a
+    /// repository of its choosing and have it write there. Keyed on a
+    /// remembered project's slug instead, the set of directories reachable
+    /// through this request is exactly the set the user already chose to
+    /// remember, and the daemon resolves the path itself.
+    ///
+    /// Not a protocol bump: an older daemon answers `BadRequest` for an
+    /// unknown `cmd` and the connection survives, so a new client against an
+    /// old daemon loses this listing and nothing else.
+    Worktrees {
+        /// A project slug (`project::Project::slug`), or `None` for every
+        /// project the user has remembered.
+        #[serde(default)]
+        project: Option<String>,
     },
     /// Read the tail of a session's transcript.
     Logs {
@@ -792,6 +824,10 @@ pub enum Response {
         /// so `apex agent send` can say whether the agent will see it as a
         /// paste or as typing.
         bracketed: bool,
+    },
+    /// Per-worktree status, main tree first, projects in listing order.
+    Worktrees {
+        worktrees: Vec<crate::worktree::WorktreeStatus>,
     },
     Logs {
         id: u32,
@@ -1298,6 +1334,10 @@ mod tests {
                 event: Some("pre_tool_use".into()),
                 detail: Some("d".into()),
                 native: Some("bypassPermissions".into()),
+                test: Some(crate::worktree::TestNote {
+                    phase: crate::worktree::TestPhase::Started,
+                    command: "cargo test".into(),
+                }),
             },
             Request::Event {
                 id: 1,
@@ -1305,6 +1345,7 @@ mod tests {
                 event: Some("task_created".into()),
                 detail: None,
                 native: None,
+                test: None,
             },
             Request::ToolCheck {
                 id: 1,
@@ -1316,6 +1357,10 @@ mod tests {
             Request::Prune,
             Request::DeclareOrigin {
                 origin: "claude-remote-control".into(),
+            },
+            Request::Worktrees { project: None },
+            Request::Worktrees {
+                project: Some("apex-os".into()),
             },
         ];
 
@@ -1339,6 +1384,7 @@ mod tests {
             event: None,
             detail: Some("line one\nline two".into()),
             native: None,
+            test: None,
         };
         let text = serde_json::to_string(&req).unwrap();
         assert!(!text.contains('\n'), "{text}");

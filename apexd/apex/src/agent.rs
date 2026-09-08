@@ -23,6 +23,7 @@ use apex_agent_core::protocol::{
 };
 use apex_agent_core::hook::{self as hook_core, HookEvent};
 use apex_agent_core::term::{self, RawMode, WinSize};
+use apex_agent_core::worktree::{ConflictState, TestState};
 use apex_agent_core::{adapter, checkpoint, config, git, layout, mux, profile, project};
 use clap::{Args, Subcommand};
 
@@ -107,6 +108,20 @@ pub enum AgentCmd {
         /// How many bytes of the tail to show.
         #[arg(long, default_value_t = 64 * 1024)]
         bytes: usize,
+    },
+    /// Per-worktree status: tests, conflicts, diff and local readiness.
+    ///
+    /// Answers the four questions worth asking about an agent worktree before
+    /// touching it — has it got a diff, would it merge back, what happened to
+    /// the tests, is it ready to hand over — without running anything in a
+    /// worktree somebody else is working in.
+    Worktrees {
+        /// One project by slug, instead of every remembered project.
+        #[arg(long, value_name = "SLUG")]
+        project: Option<String>,
+        /// Machine-readable output, one object per worktree.
+        #[arg(long)]
+        json: bool,
     },
     /// Show one session in detail, or the runtime's own status.
     Status { id: Option<u32> },
@@ -683,6 +698,7 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             json,
         } => send(id, files, last_screenshot, json),
         AgentCmd::Logs { id, bytes } => logs(id, bytes),
+        AgentCmd::Worktrees { project, json } => worktrees(project, json),
         AgentCmd::Status { id } => status(id),
         AgentCmd::Default { agent } => default_agent(agent),
         AgentCmd::Allow {
@@ -1589,6 +1605,99 @@ fn fetch_grants() -> Result<GrantListing> {
     }
 }
 
+/// `apex agent worktrees` — the four questions, per worktree (§P1-036).
+///
+/// The daemon answers, not this process, and that is deliberate: it holds the
+/// record of which sessions are where and of the test runs it watched go past,
+/// and it resolves the project slug to a path itself so that no caller names a
+/// directory for it to run git in.
+fn worktrees(project: Option<String>, json: bool) -> Result<i32> {
+    let rows = client::worktrees(project)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(0);
+    }
+
+    if rows.is_empty() {
+        println!(
+            "no worktrees. `apex project add` remembers a project, and \
+             `apex agent run --worktree <name>` gives an agent one of its own"
+        );
+        return Ok(0);
+    }
+
+    println!(
+        "{:<22} {:<26} {:>9}  {:<11} {:<11} READY",
+        "WORKTREE", "BRANCH", "DIFF", "CONFLICTS", "TESTS"
+    );
+    for w in &rows {
+        let branch = w.branch.as_deref().unwrap_or("(detached)");
+        let diff = if w.diff.files == 0 {
+            // A worktree with no committed delta and a dirty tree has
+            // something in it; "-" would read as "nothing here".
+            if w.dirty {
+                "dirty".to_string()
+            } else {
+                "-".to_string()
+            }
+        } else {
+            format!("{}f +{}/-{}", w.diff.files, w.diff.insertions, w.diff.deletions)
+        };
+        let conflicts = match &w.conflicts {
+            ConflictState::Clean => "clean".to_string(),
+            ConflictState::Conflicted { paths } => format!("{} file(s)", paths.len()),
+            ConflictState::Unknown { .. } => "unknown".to_string(),
+            ConflictState::NotApplicable => "-".to_string(),
+        };
+        let ready = if w.ready.ready_to_propose {
+            "yes".to_string()
+        } else {
+            // The first blocker, because it is the one to fix first and the
+            // whole list is in `--json`.
+            w.ready
+                .blockers
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "no".to_string())
+        };
+        println!(
+            "{:<22} {:<26} {:>9}  {:<11} {:<11} {}",
+            clip(&w.name, 22),
+            clip(branch, 26),
+            diff,
+            conflicts,
+            w.tests.as_str(),
+            ready
+        );
+    }
+
+    // Said once, at the bottom, rather than implied by a column heading that
+    // cannot carry it: this is the last test run the runtime SAW, and the
+    // runtime does not run anybody's suite to answer a status query.
+    if rows.iter().any(|w| w.tests != TestState::Unobserved) {
+        println!(
+            "\nTESTS is the last run APEX observed going past, not a fresh result — \
+             the tree may have moved since."
+        );
+    } else {
+        println!(
+            "\nTESTS is 'unobserved' until a test run happens inside a managed session. \
+             APEX never runs a suite itself to answer this."
+        );
+    }
+    Ok(0)
+}
+
+/// Trim a cell to fit, with an ellipsis rather than a hard cut.
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let keep: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{keep}…")
+}
+
 fn grants(active_only: bool, json: bool) -> Result<i32> {
     let (grants, states) = fetch_grants()?;
     let rows: Vec<_> = grants
@@ -2033,6 +2142,7 @@ fn hook(event: &str) -> i32 {
         observation.state,
         observation.detail,
         observation.native,
+        observation.test,
     ) {
         eprintln!("apex agent hook: {parsed} not published: {e:#}");
     }
