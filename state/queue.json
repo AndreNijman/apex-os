@@ -1,6 +1,6 @@
 {
   "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
-  "updated": "2026-09-07T15:08+08:00",
+  "updated": "2026-09-08T10:00+08:00",
   "concurrency_ceiling": 6,
   "units": [
     {
@@ -195,25 +195,15 @@
       "note": "Dispatched round 5. Its queue conflict with p1-030 is moot while p1-030 is neither dispatched nor unlanded."
     },
     {
-      "id": "p1-039",
-      "repo": "both",
+      "id": "p1-040-per-output-scaling",
+      "repo": "apex-shell",
       "items": [
-        "P1-039",
-        "P1-040",
-        "P1-041",
-        "P1-042",
-        "P1-043"
+        "P1-040"
       ],
-      "title": "Night Light, mixed-DPI scaling, creator colour management, creator input/audio, GPU parity",
-      "after": [
-        "p0-018b",
-        "shell-orphans"
-      ],
-      "conflicts": [
-        "p0-018b",
-        "shell-orphans"
-      ],
-      "note": "All five touch AppearancePage and the display pages. Held until the P0-018 shell agent lands."
+      "after": [],
+      "conflicts": [],
+      "title": "Per-output scaling: two densities, two sizes, one shell",
+      "note": "REPLACES the old p1-039 unit, which landed on 2026-09-08 (apex-shell 690014a -> a90cef6, apex-os 678bb5d -> e67fab9). Left in place it would have offered finished work again: P1-039 and P1-041 are DONE, and resume.sh only calls a unit finished when EVERY item is done, so a unit carrying three hardware-blocked partials reads as READY forever. What is actually left here, and it is real dispatchable work: the shell resolves ONE scale factor through two singletons with 831 call sites across 82 files, so 'two outputs at compositor scale 1 with different densities each get their own size' was never attempted. The landed page states when the desk cannot share one size rather than claiming a per-output result it does not compute. Start at src/theme/scaling.js (the breakpoint table both the shell and node read) and src/theme/Metrics.qml, and treat the call-site count as the actual cost. The harness is already there: tests/run-scaling-test.sh brings up two headless outputs at different densities through tests/lib/headless.sh and is 30/0, so the assertion has somewhere to live on day one."
     },
     {
       "id": "p1-044",
@@ -435,5 +425,10 @@
   "_notes": {
     "trust-enforcement": "DISPATCHED 2026-09-07 15:02 (round 6), the slot freed by followups-integrate-3 finishing. Its `after: [integrate-3]` is long satisfied. No card existed; the agent creates ROADMAP/state/agents/trust-enforcement.md and its own worktree /var/tmp/apex-work/wt-trust on branch task/trust-enforcement.",
     "p1-025": "UNBLOCKED as of round 6. `after: [p1-018]` is satisfied: p1-018's work is landed by content on roadmap/v2.2 (the diff of every file origin/task/p1-018-mcp-auth touches against the tip is empty, even though the branch is 10 commits 'ahead' by graph). Not dispatched only because the ceiling is six; first in line next round alongside one of the Cloudflare units."
+  },
+  "_hardware_blocked": {
+    "P1-042 tablet leg": "Four of five creator input/audio legs are landed. The fifth owes one assertion - 'a stylus enumerates, is classified tablet, and its settings reach the compositor' - and NO TABLET EXISTS on either machine: libwacom finds none on the L16 or on katana. This is NOT a katana-while-gaming wait, so no amount of patience clears it; somebody has to plug a tablet in. Not dispatchable unattended, and deliberately not left inside a queue unit where it would keep a finished unit READY.",
+    "P1-043 NVIDIA verification": "GPU parity is landed for AMD, Intel and the hybrid case, and the nvidia-smi three-state fix closed test-apex-ai (43/1 -> 44/0). One verification assertion remains - 'SmiOutcome::Ready is what a real loaded NVIDIA driver produces' - and it needs katana while katana is NOT gaming. Functionally covered already: 9b68be3 measured nvidia-smi answering there, and 454ae3a does not touch that path's parsing. A katana job for an idle window, not a dispatchable unit.",
+    "P1-038 labwc matrix": "Unchanged and still held: the 18 matrix rows need real applications on a real session. Cannot be done headless and cannot be done on the L16 while Andre is using it. Still listed as its own unit (p1-038-hardware) because it is a whole item rather than a remainder."
   }
 }

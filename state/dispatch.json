@@ -1,12 +1,12 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-08T09:05+08:00",
+  "updated": "2026-09-08T09:55+08:00",
   "_round": "Round 7. The first interruption this program has had that was neither a limit nor a crash: Andre said 'pause work, im shutting off my laptop' at 15:32 on 2026-09-07. All six round-6 agents were stopped with TaskStop rather than left to be killed, apex-wip-snapshot.service was run by hand twice, and AUTORESUME was removed so the timer would refresh the report but start no session. That worked exactly as designed: the boot firing at 08:53 on 2026-09-08 logged 'report refreshed (205 lines)' then 'not armed; nothing started'. Andre said continue at 08:56, so AUTORESUME is armed again and six FRESH agents carry the same six cards. Every card was current at the pause because each agent had written it before stopping - the cards were 1050-1277 minutes stale on resume and still named the exact next action.",
   "_landed_this_round": {
-    "apex-os": "nothing landed yet at 678bb5d. No unit is finished-and-unlanded: every one of the six is mid-work, and mid-work branches are not landed here.",
-    "apex-shell": "unchanged at 690014a, same reason."
+    "apex-shell": "roadmap/v2.2 690014a -> a90cef6, PUSHED --force-with-lease. task/p1-039-display-colour, 5 commits, rebase --onto from fork 0fd12ee. ONE REAL CONFLICT, in tests/run-scaling-test.sh, and it is the fourth cross-branch interaction that existed only in the merged tree: the integration tip had moved all nine graphical runners onto the shared tests/lib/headless.sh harness (private HOME and XDG_RUNTIME_DIR, aborts if the socket is not inside it) while this branch had rewritten the same runner to bring up TWO outputs at different densities for P1-040. Resolved keep-both: the harness provides the compositor and the sandbox, the runner overrides WLR_HEADLESS_OUTPUTS (headless_begin asks for one), names wlr-randr as an explicit headless_unstub exception because it is the tool that sets the modes, and links gammastep/hyprsunset to the harness stub LOCALLY rather than adding them to headless.sh - a stub that exits 0 would tell the night-light mechanism table that a mechanism exists, and that table is another suite's subject. VERIFIED ON THE LANDED TIP: check-no-conflict-markers PASS, check-headless-runners 25/0 (so the merge did not punch a hole in the harness rules), check-scale-tokens 8/0, check-colour-page 32/0, check-display-transaction 48/0, check-color-tokens 22/0, run-colour-page-test 47/0, run-display-transaction-test 42/0 against the real shipped engine, and run-scaling-test 30/0 on two headless outputs with HEADLESS-1 resolving 1.5 and HEADLESS-2 resolving 1 - the mixed-DPI capability survived the merge, which is the only thing that proves the resolution was right rather than merely conflict-free.",
+    "apex-os": "roadmap/v2.2 678bb5d -> e67fab9, PUSHED --force-with-lease. task/p1-043-gpu-parity, 8 commits, rebase --onto from fork b2d7905, zero conflicts. VERIFIED ON THE LANDED TIP: check-no-conflict-markers PASS; cargo test --locked --workspace --no-fail-fast 1993 passed / 0 failed across 30 binaries (--no-fail-fast deliberately, to get a complete tally rather than a stop at the first red binary); test-apex-ai 44 passed / 0 failed, which was 43/1 on 1ab542c, so round 5's nvidia-smi finding is closed and only one of its two red suites remains (test-privilege-requests, which p0-014 owns); test-apex-display 70/0; test-apex-gaming 114/0; test-apex-audio-live 21/0 with 4 skipped; run-clippy.sh PASS in the container. The cgroup/origin artifact did not reproduce here either - 0 failures in this session's cgroup, consistent with yesterday's measurement and with p0-014's harness diagnosis."
   },
-  "_status_recorded_this_round": "Nothing yet. Counts unchanged at 47 done / 29 partial / 49 todo / 2 blocked of 127.",
+  "_status_recorded_this_round": "P1-039 partial -> DONE, P1-041 todo -> DONE, P1-042 todo -> partial, P1-040 stays partial, P1-043 stays partial. Counts 47 done / 29 partial / 49 todo / 2 blocked -> 49 done / 29 partial / 47 todo / 2 blocked of 127. Every remainder is named as an assertion rather than as a topic: P1-040 owes 'two outputs at compositor scale 1 with different densities each get their own size' (not attempted - one factor through two singletons with 831 call sites in 82 files); P1-042 owes 'a stylus enumerates, is classified tablet, and its settings reach the compositor' (NO TABLET EXISTS on either machine - libwacom finds none - so this is not a katana-while-gaming wait, somebody has to plug one in); P1-043 owes 'SmiOutcome::Ready is what a real loaded NVIDIA driver produces' (needs katana idle; it ran steam/proton all session).",
   "_deliberately_held": {
     "p1-038-hardware": "Still not dispatchable unattended. The 18 labwc matrix rows need real applications on a real session: cannot be done headless and cannot be done on the L16 while Andre is using it. A katana job once gaming is over, or a job for Andre with a checklist.",
     "p1-005 / p1-008 / p1-011 / p1-014": "The Cloudflare capability suite, 13 tasks, mutually conflicting (p1-005 with p1-002, p1-008 with p1-002 and p1-005, p1-011 with p1-005 and p1-008, p1-014 with p1-011), so at most ONE can hold a slot at a time. None dispatched: the ceiling went to the five card-carriers plus trust-enforcement. First in line next round together with p1-025.",
@@ -81,29 +81,6 @@
       "session": "round 7 orchestrator, pid 22565"
     },
     {
-      "slug": "p1-039",
-      "items": [
-        "P1-039",
-        "P1-040",
-        "P1-041",
-        "P1-042",
-        "P1-043"
-      ],
-      "repo": "both",
-      "worktree": "/var/tmp/apex-work/wt-p1-039",
-      "branch": "task/p1-039-display-colour",
-      "agent_id": "a168c3858a9025301",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T09:02+08:00",
-      "fresh_agent_for_card": "p1-039",
-      "title": "P1-041 colour engine half (a color verb on apex-display-apply, ICC tag table parsed directly, fake colormgr on a replaced PATH), then P1-042 creator input/audio",
-      "second_worktree": "/var/tmp/apex-work/wt-p1-043",
-      "second_branch": "task/p1-043-gpu-parity",
-      "queue_id": "p1-039",
-      "at_dispatch": "FIVE dirty paths - DisplayService.qml, DisplayPage.qml and three new test files (check-colour-page.sh, colour-page-test.qml, run-colour-page-test.sh) - the P1-041 shell half plus its tests, and NOTHING from yesterday's session is on origin, so the brief says commit and push before starting anything new. L16 colour measurements are on the card and not to be re-derived, including that no vcgt loader exists on the image so the honest deliverable is assignment stored and reported. Still owns FINDINGS-round5 item 1 (apex ai status --json emits prose where nvidia-smi exists but exits 9). katana read-only while gaming; do the AMD/Intel half on the L16 and record what needs the RTX 3070.",
-      "session": "round 7 orchestrator, pid 22565"
-    },
-    {
       "slug": "p1-035",
       "items": [
         "P1-035",
@@ -139,6 +116,32 @@
       "title": "Make an APEX machine actually verify the signature it already has",
       "card": "ROADMAP/state/agents/trust-enforcement.md - written by the round-6 agent before the pause; no longer a card-less unit.",
       "at_dispatch": "TWO dirty paths - trust.rs modified and a NEW untracked apexd/apex/src/verify.rs - the sigstore verifier mid-build, nothing on origin beyond the branch point 1ab542c. Its predecessor got as far as writing its own card and a design: Verdict (Verified/Failed/CouldNotRun) x {signature, provenance}, a pure decision fn, a real verifier on skopeo+openssl, wired into ops::update before bootc upgrade. Re-handed the three measured constraints (one digest behind four tags; an unreachable registry is never 'unsigned' and CouldNotRun is neither pass nor fail; mutation pairs recorded) and the hard prohibition: never stage an image, reboot or roll back - fixtures and fakes, never Andre's real update."
+    },
+    {
+      "slug": "base-partials",
+      "items": [
+        "BASE-002",
+        "BASE-005",
+        "BASE-009",
+        "BASE-010",
+        "BASE-013",
+        "BASE-014",
+        "BASE-016",
+        "BASE-018"
+      ],
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/wt-base-os",
+      "branch": "task/base-partials",
+      "second_worktree": "/var/tmp/apex-work/wt-base-shell",
+      "second_branch": "task/base-partials-shell",
+      "agent_id": "abe9bf40239aedb97",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-08T09:52+08:00",
+      "session": "round 7 orchestrator, pid 22565",
+      "queue_id": "base-partials",
+      "title": "Close the eight BASE preservation items still marked partial",
+      "card": "NONE AT DISPATCH - told to create ROADMAP/state/agents/base-partials.md as its second action, before any code.",
+      "at_dispatch": "The slot came free when p1-039 finished, which is also the dependency this unit was held on. Told to create both worktrees off the NEW tips (apex-os e67fab9, apex-shell a90cef6) and push -u before any work. The standard was restated as the queue states it: each item needs an ACTUAL check that the preserved thing still works, not a reading of the code - a code-reading verdict is what left all eight partial. Told to read the existing roadmap.yaml evidence for its eight items FIRST and record per item what that evidence already settles, so it works the gap rather than re-measuring ground already covered. Constraints were given as part of the task rather than as boilerplate, because these eight items run straight into them: BASE-002 is the live agent runtime other agents are using right now (never pkill or restart apex-agentd, never point a test at the real control socket - the harness's private XDG_RUNTIME_DIR exists so a suite cannot find it); BASE-013/BASE-014 are graphical (tests/lib/headless.sh only, never a window on Andre's desktop, never qs -p, and check-headless-runners.sh will catch a runner that reaches for the ambient display); BASE-009 is Gaming Mode and katana is the gaming box (read-only while pgrep steam|proton finds anything); BASE-018 is Boot v2 (never stage, reboot or roll back - fixtures and shipped units only); BASE-016 is loop devices and throwaway dirs only. Also handed the by-content-lookup trap the p1-039 agent found: an assertion guarded by a lookup that locates its subject by content vanishes when the content changes instead of failing."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -154,5 +157,6 @@
     "when": "2026-09-07T15:32+08:00 to 2026-09-08T08:56+08:00",
     "what": "Andre paused the run to shut the laptop down. Six agents stopped with TaskStop, two hand-run snapshots (wt-p1-035 10 files +1713, wt-p1-039 5 files +1537, wt-p2-010 2 files +512/-17, wt-trust 2 files +1450/-187, apex-shell p3/recovery-ui 1 file), AUTORESUME removed, and the boot firing correctly refreshed the report without starting a session. Nothing was lost and no work had to be reconstructed.",
     "found": "The apex-os MAIN clone (/var/home/andre/Projects/apex/apex-os, not a worktree) is on a DETACHED HEAD in the middle of an interrupted rebase - .git/rebase-merge exists - with 64 untracked files. It is nobody's round-6 or round-7 work; every agent works in /var/tmp/apex-work/wt-*. It is the 'skipped mid-operation' line in the snapshot log, which means those 64 untracked files are NOT covered by refs/wip. They look like rebase leftovers rather than unique work (apexd/apex-aid/, apexd/apex/src/*.rs, all present in branch tips) but nobody has verified that. Do NOT blind-abort it: inspect, then decide. Deliberately left alone rather than tidied."
-  }
+  },
+  "_findings_amended": "ROADMAP/state/FINDINGS-round5.md item 1 now carries an AMENDED section. Its headline - 'apex ai status --json returns prose, not JSON' - was WRONG, and the p1-039 agent proved it by measuring the streams into separate files: stdout 803 bytes of valid JSON, stderr 50 bytes of prose, exit 0, and jq worked all along. What fails is a caller that merges them with 2>&1, which is what the suite line did. The CAUSE the finding named was right and is fixed (454ae3a): PATH presence stood in for hardware. Kept rather than rewritten, because the wrong headline is itself the lesson - a finding written from a suite's failure line inherits that line's assumptions."
 }

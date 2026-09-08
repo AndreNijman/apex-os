@@ -1142,3 +1142,105 @@ heartbeat and stayed out — defeating the recovery path the heartbeat exists to
 protect. Round 7's loop is `while kill -0 <pid>`, so the heartbeat goes stale
 within ten minutes of the session ending, and live agents' `.output` mtimes
 cover the gap while they are working.
+
+- **2026-09-08 09:55** — **`p1-039` complete; both halves landed.** apex-shell
+  `690014a → a90cef6` (5 commits from fork `0fd12ee`), apex-os
+  `678bb5d → e67fab9` (8 commits from fork `b2d7905`). **P1-039 done, P1-041
+  done, P1-042 todo → partial**, P1-040 and P1-043 stay partial with named
+  remainders. Counts **47/29/49/2 → 49 done / 29 partial / 47 todo / 2
+  blocked** of 127.
+
+### The fourth cross-branch interaction, and the first that needed a real merge
+
+`tests/run-scaling-test.sh` conflicted, and both sides were right. The
+integration tip had moved all nine graphical runners onto a shared
+`tests/lib/headless.sh` — private `HOME`, private `XDG_RUNTIME_DIR`, and an
+abort if the socket it ends up talking to is not inside it — while this branch
+had rewritten the same runner to bring up **two headless outputs at different
+densities**, because P1-040 is about a mixed-DPI desk and there is no mixed-DPI
+desk here.
+
+Resolved keep-both rather than by picking a side: the harness supplies the
+compositor and the sandbox; the runner overrides `WLR_HEADLESS_OUTPUTS` (the
+harness asks for one), names `wlr-randr` as an explicit `headless_unstub`
+exception because it is the tool that sets the modes, and links
+`gammastep`/`hyprsunset` to the harness stub **locally** instead of adding them
+to `headless.sh` — a stub that exits 0 would tell the night-light mechanism
+table that a mechanism exists, and that table is another suite's subject.
+
+What proves the resolution rather than the absence of markers:
+`check-headless-runners.sh` 25/0 — the harness rules the tip added still hold —
+and `run-scaling-test.sh` 30/0 **on two outputs**, HEADLESS-1 resolving 1.5 and
+HEADLESS-2 resolving 1, with naming either one moving the reference. A
+conflict-free merge is a statement about text; a suite that still exercises
+both intentions is a statement about behaviour.
+
+Landed-tip counts, shell: check-scale-tokens 8/0, check-colour-page 32/0,
+check-display-transaction 48/0, check-color-tokens 22/0, run-colour-page-test
+47/0, run-display-transaction-test 42/0 against the real shipped engine. And
+apex-os: `cargo test --locked --workspace --no-fail-fast` **1993/0 across 30
+binaries** (`--no-fail-fast` deliberately, for a complete tally rather than a
+stop at the first red binary), test-apex-display 70/0, test-apex-gaming 114/0,
+test-apex-audio-live 21/0 + 4 skipped, clippy clean in the container.
+
+### A finding of this program's own was wrong, and the amendment is the lesson
+
+`FINDINGS-round5` item 1 said `apex ai status --json` "returns prose, not
+JSON". The agent measured the streams into separate files while fixing it:
+**stdout is 803 bytes of valid JSON, stderr is 50 bytes of prose, exit 0** —
+`| jq` worked all along. What fails is a caller that *merges* them with `2>&1`,
+which is exactly what the suite line in the finding did.
+
+The cause the finding named was right, and is fixed in `454ae3a`: PATH presence
+stood in for hardware, so an `nvidia-smi` that exists and exits 9 read as a
+working NVIDIA GPU instead of "no NVIDIA GPU here". Three states now, not two.
+`test-apex-ai` went **43/1 → 44/0**, so one of round 5's two red suites is
+closed; `test-privilege-requests` is the other, and `p0-014` owns it.
+
+`FINDINGS-round5.md` carries an `AMENDED` section rather than a rewrite,
+because the wrong headline is itself worth keeping: **a finding written from a
+suite's failure line inherits that line's assumptions.** A red assertion tells
+you something is wrong, never what.
+
+### Two defects that outlive their item
+
+**PipeWire never had the realtime priority this repo claimed.**
+`30-apex-gaming-rtprio.conf` said gaming sits at 20 "rather than PipeWire's 70
+… well below the audio stack". Measured on **both** machines: PipeWire's data
+loops are `FF 20` — the same number as the ceiling. The `@pipewire` group that
+would grant 70 ships **empty** (stock Fedora relies on rtkit) and rtkit's own
+ceiling is also 20, so no configuration of this image reaches 70. The number
+was deliberately **left at 20** — raising it is a security-posture decision,
+not a test fix — with the `pam_limits` precedence trap recorded for whoever
+does raise it.
+
+**No latency diagnostics ship at all.** `pw-top`, `pw-metadata`, `pw-cli`,
+`pw-dump` are all absent, so quantum and sample rate are not readable on APEX
+and "my audio crackles" has no investigable answer.
+
+### Remainders, stated as assertions rather than topics
+
+- **P1-040** owes *"two outputs at compositor scale 1 with different densities
+  each get their own size."* Not attempted: the shell resolves one factor
+  through two singletons with **831 call sites across 82 files**. The page says
+  when the desk cannot share one size instead of claiming a per-output result
+  it does not compute.
+- **P1-042** owes *"a stylus enumerates, is classified `tablet`, and its
+  settings reach the compositor."* **No tablet exists on either machine** —
+  `libwacom` finds none. This is not a katana-while-gaming wait; somebody has
+  to plug one in.
+- **P1-043** owes *"`SmiOutcome::Ready` is what a real loaded NVIDIA driver
+  produces."* Needs katana idle; it ran steam/proton all session, so it stayed
+  read-only throughout.
+
+### Dispatched into the freed slot: `base-partials`
+
+Eight BASE preservation items, and the unit was held on `p1-039` — the
+dependency that just cleared. The queue's standard went into the brief as the
+task rather than as advice: *each needs an actual check that the preserved
+thing still works, not a reading of the code*, because a code-reading verdict
+is what left all eight partial. It was also told to read the existing evidence
+for its eight items first and record what that evidence already settles, so it
+works the gap instead of re-measuring covered ground — and the constraints were
+written as part of the work, since these items run straight into them: BASE-002
+**is** the live agent runtime the other five agents are talking to right now.
