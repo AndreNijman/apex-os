@@ -622,6 +622,43 @@ else
     printf '%s\n' "$out" | sed 's/^/      | /' >&2
 fi
 
+# ── a session reached through a symlink is still in its worktree ─────────────
+#
+# A session records its cwd as the caller gave it (`session.rs` keeps it
+# unresolved on purpose: it becomes a --chdir, and bwrap must not mount on a
+# symlinked path), while `git worktree list` reports the real path. On an
+# atomic OS every home is reached through a symlink — /home -> var/home — so
+# without resolving one side the join matches nothing and the row silently
+# claims no session works there.
+section "a session whose cwd goes through a symlink"
+
+ln -s "$PROJ" "${WORK}/link"
+LINK_SESSION="$("$APEX" agent run --agent generic --sandbox unrestricted \
+    --cwd "${WORK}/link/.apex/worktrees/tidy" -d -- /bin/sh -c 'sleep 600' \
+    2>"${WORK}/link-run.err" | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1)"
+if [ -n "$LINK_SESSION" ]; then
+    ok "a session started through the symlink (id ${LINK_SESSION})"
+else
+    bad "a session started through the symlink"
+    sed 's/^/      /' "${WORK}/link-run.err" >&2
+fi
+"$APEX" agent worktrees --project "$SLUG" --json > "${WORK}/linked.json" 2>/dev/null
+linked="$(jq_get "${WORK}/linked.json" tidy '",".join(str(i) for i in w["sessions"])')"
+if [ "$linked" = "$LINK_SESSION" ]; then
+    ok "the worktree claims the session even though its cwd went through a symlink"
+else
+    bad "the worktree claims the session even though its cwd went through a symlink"
+    echo "      tidy sessions='${linked}', wanted '${LINK_SESSION}'" >&2
+    echo "      the session recorded $("$APEX" agent status "$LINK_SESSION" 2>/dev/null | grep -i cwd)" >&2
+fi
+rows="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "${WORK}/linked.json")"
+if [ "$rows" -eq 4 ]; then
+    ok "and it added no row of its own (${rows})"
+else
+    bad "and it added no row of its own"
+    echo "      ${rows} rows, wanted 4" >&2
+fi
+
 # ── the slug is not a path ───────────────────────────────────────────────────
 #
 # `Request::Worktrees` takes a slug precisely so that no caller names a
