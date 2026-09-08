@@ -44,7 +44,7 @@ use std::process::Command;
 
 use apexd_core::recover::Health;
 use apexd_core::storage::{
-    self, Encryption, Mount, Reading, Smart, Space, Trim,
+    self, BlockDevice, Encryption, Machine, Mount, PartitionEntry, Reading, Smart, Space, Trim,
 };
 use clap::Subcommand;
 use serde_json::{json, Value};
@@ -130,6 +130,32 @@ pub enum StorageCmd {
         /// Emit machine-readable JSON instead of a report.
         #[arg(long)]
         json: bool,
+    },
+    /// Erase the filesystem signatures on one device. **Destroys data.**
+    ///
+    /// Refuses by default and needs root. Refuses if the device is mounted
+    /// anywhere, if it carries the running system, if it is the parent disk of
+    /// something that does, if anything is stacked on it, if it is the EFI
+    /// System Partition, or if any of those checks could not be performed —
+    /// a check that did not happen is not a check that passed.
+    ///
+    /// `--confirm` takes the device path itself, typed out. Nothing shorter
+    /// works: `yes` is a reflex, `/dev/nvme0n1` is a decision.
+    Erase {
+        /// The device to erase, as a `/dev/<name>` path.
+        device: String,
+        /// The device path again, typed exactly.
+        #[arg(long)]
+        confirm: String,
+        /// For a loop device: the file it is attached to.
+        ///
+        /// An attached loop device is refused without this, because it is in
+        /// use by whoever attached it and appears in no mount table — the
+        /// development machine's `/dev/loop0` backs a merged system extension
+        /// and is invisible to every other check here. Naming the file is how
+        /// you show you know which device you have.
+        #[arg(long, value_name = "PATH")]
+        expect_backing_file: Option<String>,
     },
 }
 
@@ -717,10 +743,386 @@ fn warnings(as_json: bool) -> i32 {
     i32::from(!attention.is_empty())
 }
 
+// ── erasing a device ─────────────────────────────────────────────────────────
+
+/// wipefs, by absolute path, for the same reason as [`SMARTCTL`]: this runs
+/// under sudo, and a `PATH` entry the invoking user controls would be a root
+/// shell — here one that erases disks.
+const WIPEFS: &str = "/usr/sbin/wipefs";
+
+/// Exit status for a refused erase, distinct from a failed one.
+///
+/// A caller — a settings page, a script, the suite — has to be able to tell
+/// "the guard said no" from "the guard said yes and wipefs then failed". Both
+/// as `1` means a script cannot retry the second and must not retry the first.
+pub const EXIT_REFUSED: i32 = 3;
+
+/// Who the kernel thinks is running this, or the reason nobody knows.
+///
+/// A [`Reading`] rather than `ops::effective_uid`'s `Option` because the two
+/// unknowns want different sentences: `ops::require_root` folds an unreadable
+/// `/proc/self/status` into "must run as root", which is safe but advises a
+/// `sudo` that will not help.
+fn effective_uid(roots: &Roots) -> Reading<u32> {
+    if roots.is_fixture() {
+        return match roots.fixture_file("euid") {
+            Some(t) => match t.trim().parse::<u32>() {
+                Ok(v) => Reading::Known(v),
+                Err(e) => {
+                    Reading::Unavailable(format!("fixture euid {t:?} is not a number ({e})"))
+                }
+            },
+            None => Reading::Unavailable(
+                "the fixture did not say which user is running this".into(),
+            ),
+        };
+    }
+    match crate::ops::effective_uid() {
+        Some(v) => Reading::Known(v),
+        None => Reading::Unavailable(
+            "/proc/self/status did not say what the effective uid is".into(),
+        ),
+    }
+}
+
+/// What is stacked on a device, or the reason nobody knows.
+///
+/// The `Err` arm is the whole reason this is not a `Vec`. `read_dir` failing
+/// and `read_dir` returning nothing are one line apart in the code and
+/// opposite in meaning: the first is "nobody could check whether a dm-crypt
+/// mapping depends on this disk" and the second is "nothing does". Measured:
+/// every `holders` directory on this machine is empty, so the arm that matters
+/// is the one that never fires here.
+fn holders(roots: &Roots, sys_path: &str) -> Reading<Vec<String>> {
+    let p = roots.path(&format!("{sys_path}/holders"));
+    match std::fs::read_dir(&p) {
+        Err(e) => Reading::Unavailable(format!("{}: {e}", p.display())),
+        Ok(entries) => {
+            let mut v: Vec<String> = entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect();
+            v.sort();
+            Reading::Known(v)
+        }
+    }
+}
+
+/// The path as the filesystem agrees it is, or as given when it cannot say.
+///
+/// Both sides of the backing-file comparison go through this so that a caller
+/// naming `/tmp/x.img` and a kernel that recorded the path through a symlinked
+/// `/tmp` still meet. Two deliberate non-behaviours: the kernel appends
+/// ` (deleted)` to the backing file of an unlinked image and `canonicalize`
+/// fails on that, so the raw string survives — a deleted backing file must not
+/// accidentally equal anything. And under a fixture root nothing is
+/// canonicalised at all: the fixture's paths name files that do not exist, and
+/// resolving them against the real filesystem would turn `/lib/...` into
+/// `/usr/lib/...` and make the suite assert something it did not write.
+fn canonical(roots: &Roots, p: &str) -> String {
+    if roots.is_fixture() {
+        return p.to_string();
+    }
+    std::fs::canonicalize(p).map(|q| q.display().to_string()).unwrap_or_else(|_| p.to_string())
+}
+
+/// The file a loop device is attached to, or `None` when it is not one.
+///
+/// **`NotFound` and nothing else is the definite answer.** `Path::exists()`
+/// returns false on `EACCES` as readily as on a missing file, and a guard that
+/// read "permission denied" as "not an attached loop device" would erase
+/// exactly the device this rule exists to protect. Every other error is
+/// `Unavailable`, which refuses.
+fn loop_backing(roots: &Roots, sys_path: &str) -> Reading<Option<String>> {
+    let dir = roots.path(&format!("{sys_path}/loop"));
+    match std::fs::metadata(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Reading::Known(None),
+        Err(e) => return Reading::Unavailable(format!("{}: {e}", dir.display())),
+        Ok(_) => {}
+    }
+    let f = roots.path(&format!("{sys_path}/loop/backing_file"));
+    match std::fs::read_to_string(&f) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Reading::Known(None),
+        Err(e) => Reading::Unavailable(format!("{}: {e}", f.display())),
+        Ok(t) => match t.trim() {
+            "" => Reading::Known(None),
+            path => Reading::Known(Some(canonical(roots, path))),
+        },
+    }
+}
+
+/// The partition fields of a device's udev record.
+fn partition_entry(roots: &Roots, sys_path: &str) -> Reading<PartitionEntry> {
+    match udev_record(roots, sys_path) {
+        Err(why) => Reading::Unavailable(why),
+        Ok(props) => Reading::Known(PartitionEntry {
+            scheme: props.get("ID_PART_ENTRY_SCHEME").cloned(),
+            type_id: props.get("ID_PART_ENTRY_TYPE").cloned(),
+            name: props.get("ID_PART_ENTRY_NAME").cloned(),
+            fs_type: props.get("ID_FS_TYPE").cloned(),
+        }),
+    }
+}
+
+/// Every block device, whole disks and partitions alike.
+///
+/// **Deliberately not [`disks`].** That function skips everything under
+/// `devices/virtual/block`, which is correct for a health report — a loop
+/// device has no SMART log and no wear — and wrong here twice over: it would
+/// make every loop device `NotAKnownBlockDevice`, so the one kind of device
+/// this command is ever tested against could not be named; and it would make
+/// `/dev/dm-0` unnameable too, while leaving whatever it maps perfectly
+/// erasable. A guard that cannot see a device cannot protect anything stacked
+/// on it.
+///
+/// Partitions are found by the `partition` file existing, not by their name
+/// starting with the disk's. Both hold on the standard drivers, but only the
+/// first is what sysfs actually promises.
+///
+/// **`Result`, and every enumeration error is the `Err` arm, because a
+/// partially-enumerated machine is not a machine to judge against.** Every
+/// other reading here is a [`Reading`] that the guard weighs; this one cannot
+/// be, because the guard reasons about a device by looking at its *neighbours*
+/// — `would_destroy` walks downward from a disk to its partitions, the
+/// critical-system rule matches a mount source against them, and the ESP rule
+/// is asked only of partitions. A device that was never enumerated is not an
+/// unknown the guard can refuse on; it is a fact the guard never learns.
+///
+/// Measured, in the fixture, before this was a `Result`: `chmod 100` on one
+/// disk's sysfs directory — readable to no one, still traversable, so
+/// `holders/` and `dev` still answer — dropped all five partitions of
+/// `nvme0n1`. The whole-disk erase then went from **six refusals to a granted
+/// permit**: no mount source is `/dev/nvme0n1` (measured on the L16: zero
+/// times), nothing was left with `parent == nvme0n1`, and the ESP rule never
+/// runs on a whole disk. Only the fixture gate stopped `wipefs --all` on the
+/// disk carrying the running system.
+///
+/// So this is the fifth way "is the device mounted?" green-lights destroying
+/// this machine, and the first that needs no unusual hardware — just one
+/// unreadable directory.
+pub fn machine(roots: &Roots) -> Result<Machine, String> {
+    let mut names = dir_names(&roots.path("/sys/block"))?;
+    names.sort();
+
+    let mut devices = Vec::new();
+    for disk in &names {
+        let sys = format!("/sys/block/{disk}");
+        devices.push(BlockDevice {
+            kernel_name: disk.clone(),
+            parent: None,
+            holders: holders(roots, &sys),
+            partition: partition_entry(roots, &sys),
+            loop_backing: loop_backing(roots, &sys),
+        });
+
+        let base = roots.path(&sys);
+        let mut parts = Vec::new();
+        for name in dir_names(&base)? {
+            if &name == disk {
+                continue;
+            }
+            // Two questions, and only two answers are definite enough to skip
+            // on: this entry is not a directory (so it is one of the dozen
+            // attribute FILES beside the partitions — `dev`, `size`, `ro`),
+            // or it is a directory with no `partition` in it (`queue`,
+            // `holders`, `power`).
+            //
+            // `Path::exists()` would have collapsed both of those together
+            // with EACCES, which is the mistake this module keeps finding: it
+            // is false on a permission denial exactly as readily as on a
+            // missing file, so a partition inside an unreadable directory
+            // would quietly stop being a partition. Only `NotFound` and
+            // `NotADirectory` say "not a partition"; everything else is an
+            // enumeration that came up short.
+            let entry = base.join(&name);
+            match std::fs::metadata(&entry) {
+                // Gone between `read_dir` and here. sysfs is live and a device
+                // can be unplugged mid-scan; nothing to protect any more.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("{}: {e}", entry.display())),
+                Ok(md) if !md.is_dir() => continue,
+                Ok(_) => {}
+            }
+            let marker = entry.join("partition");
+            match std::fs::metadata(&marker) {
+                Ok(_) => parts.push(name),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) => {}
+                Err(e) => return Err(format!("{}: {e}", marker.display())),
+            }
+        }
+        parts.sort();
+        // A partition of an attached loop device is attached to the same file
+        // its parent is, and sysfs does not say so. Measured, with
+        // `losetup --find --show --partscan` on a GPT image:
+        // `/sys/block/loop1/loop1p1` has a `partition` file and **no `loop/`
+        // directory at all** — so read on its own the partition answers
+        // `Known(None)`, "not an attached loop device", and the guard would
+        // permit erasing it. `wipefs` on it writes through the parent into the
+        // backing file just the same.
+        //
+        // `would_destroy` walks downward only, so nothing else relates a
+        // partition back up to its disk. Without this the loop rule is
+        // one-directional where the mount rule is explicitly both.
+        let inherited = devices
+            .last()
+            .filter(|d| d.kernel_name == *disk)
+            .map(|d| d.loop_backing.clone())
+            .unwrap_or(Reading::Known(None));
+        for part in parts {
+            let psys = format!("{sys}/{part}");
+            let own = loop_backing(roots, &psys);
+            devices.push(BlockDevice {
+                kernel_name: part,
+                parent: Some(disk.clone()),
+                holders: holders(roots, &psys),
+                partition: partition_entry(roots, &psys),
+                // Its own answer wins if it has one — a partition with a
+                // `loop/` directory is a shape sysfs does not currently
+                // produce, and inventing a rule that overrides a real reading
+                // is how the next surprise becomes a defect. Otherwise the
+                // parent's answer, including the parent's `Unavailable`: if
+                // nobody could tell whether the disk is an attached loop
+                // device, nobody can tell whether this partition is on one.
+                loop_backing: match own {
+                    Reading::Known(None) => inherited.clone(),
+                    other => other,
+                },
+            });
+        }
+    }
+
+    Ok(Machine {
+        devices,
+        // mountinfo failing is not an empty mount table. It is the single
+        // check whose collapse to "nothing is mounted" would erase the
+        // running system. Unlike the enumeration above this one CAN be a
+        // `Reading`: the guard has a rule for not knowing what is mounted, and
+        // that rule refuses.
+        mounts: match mounts(roots) {
+            Ok(m) => Reading::Known(m),
+            Err(e) => Reading::Unavailable(e),
+        },
+    })
+}
+
+/// The names in a directory, or the reason the list is not the whole list.
+///
+/// No `.flatten()`. `read_dir`'s per-entry `Err` is a name that exists and was
+/// not returned, and `flatten` spells "silently shorten the list of devices we
+/// are about to protect" in eight characters.
+fn dir_names(dir: &std::path::Path) -> Result<Vec<String>, String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut out = Vec::new();
+    for e in entries {
+        let e = e.map_err(|e| format!("{}: {e}", dir.display()))?;
+        out.push(e.file_name().to_string_lossy().to_string());
+    }
+    Ok(out)
+}
+
+/// `apex storage erase` — refuse, or wipe the signatures off one device.
+///
+/// Note the order: the guard runs before anything is opened, and the fixture
+/// gate sits between the permit and the subprocess. A `Permit` is necessary to
+/// reach the erase and is not sufficient, because a fixture that answered
+/// `euid` 0 has a permit for a device that does not exist and must still spawn
+/// nothing.
+fn erase(device: &str, confirm: &str, expect_backing: Option<&str>) -> i32 {
+    let roots = Roots::from_env();
+    // An enumeration that came up short is a refusal and not a smaller
+    // machine — see `machine`. It reports as a refusal rather than an error
+    // because that is what it is: nothing was wrong with the request.
+    let m = match machine(&roots) {
+        Ok(m) => m,
+        Err(why) => {
+            eprintln!("apex: refusing to erase {device}");
+            eprintln!(
+                "  - refusing because the block devices on this machine could not all be \
+                 listed: {why}. Judging a request against a partial list of devices is how \
+                 a whole disk gets erased for having no partitions"
+            );
+            return EXIT_REFUSED;
+        }
+    };
+    let euid = effective_uid(&roots);
+    // Canonicalised on this side too, or the comparison is between a path the
+    // user typed and a path the kernel resolved.
+    let expect = expect_backing.map(|e| canonical(&roots, e));
+
+    let permit = match storage::guard(device, confirm, &m, &euid, expect.as_deref()) {
+        Ok(p) => p,
+        Err(why) => {
+            eprintln!("apex: refusing to erase {device}");
+            for r in &why {
+                eprintln!("  - {}", r.say());
+            }
+            return EXIT_REFUSED;
+        }
+    };
+
+    // Unconditional, and above the subprocess rather than inside a branch of
+    // it: under a fixture root every path in `machine()` came from files this
+    // process could have written, so a fixture that says euid 0 can obtain a
+    // real permit. It must not be able to obtain a real erase.
+    if roots.is_fixture() {
+        println!("would erase {} — fixture root, nothing was touched", permit.device());
+        return 0;
+    }
+
+    let backups = std::path::Path::new(storage::SIGNATURE_BACKUP_DIR);
+    if let Err(e) = std::fs::create_dir_all(backups) {
+        eprintln!("apex: cannot create {}: {e}", backups.display());
+        return 1;
+    }
+
+    // `--backup=<dir>` and never a bare `--backup`: measured, wipefs with no
+    // directory writes into `$HOME`, and `$HOME` under sudo is `/root`. The
+    // file a user is told to keep would land somewhere they will not look and
+    // may not be able to read.
+    let out = Command::new(WIPEFS)
+        .arg("--all")
+        .arg(format!("--backup={}", backups.display()))
+        .arg(permit.device())
+        .output();
+    match out {
+        Err(e) => {
+            eprintln!("apex: cannot run {WIPEFS}: {e}");
+            1
+        }
+        Ok(o) if !o.status.success() => {
+            eprint!("{}", String::from_utf8_lossy(&o.stderr));
+            eprintln!(
+                "apex: wipefs refused {} (exit {})",
+                permit.device(),
+                o.status.code().unwrap_or(-1)
+            );
+            1
+        }
+        Ok(o) => {
+            print!("{}", String::from_utf8_lossy(&o.stdout));
+            println!("erased the filesystem signatures on {}", permit.device());
+            // The path, not the word "backup": guidance a user cannot follow
+            // is the same as no guidance.
+            println!(
+                "signature backups are in {} — keep them until you are sure",
+                backups.display()
+            );
+            0
+        }
+    }
+}
+
 pub fn main(cmd: StorageCmd) -> i32 {
     match cmd {
         StorageCmd::Status { json } => status(json),
         StorageCmd::Warnings { json } => warnings(json),
+        StorageCmd::Erase { device, confirm, expect_backing_file } => {
+            erase(&device, &confirm, expect_backing_file.as_deref())
+        }
     }
 }
 

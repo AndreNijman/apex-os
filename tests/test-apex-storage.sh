@@ -19,23 +19,49 @@
 #     device it never opened — the one sentence here a user would act on by
 #     putting data at risk.
 #
-#  Two modes, the split test-apex-schema.sh uses:
+#  4. AN ERASE THE GUARD WAVED THROUGH. `apex storage erase` is the only thing
+#     in this feature that destroys data, and "is the device mounted?" — the
+#     check everybody writes — green-lights destroying THIS machine five
+#     independent ways: / is composefs and not a block device at all; the whole
+#     disk carrying the OS is a mount source zero times; the ESP is mounted
+#     nowhere; an attached loop device is in no mount table anywhere; and one
+#     sysfs directory with the wrong mode makes a disk's partitions vanish so
+#     that nothing relates the disk to the OS on it. Every one of those was
+#     measured on the development machine, and the last two were found by this
+#     suite's own fixtures granting a permit.
+#
+#  Three modes:
 #
 #    (no argument)     Structural checks with no toolchain.
 #    --with-binary     Drives `apex storage` and the notifier against a whole
 #                      fixture machine: sysfs, mountinfo, udev records and
 #                      captured smartctl output. It DIES if the binary is
 #                      absent; a skipped assertion reports as a pass.
+#    --destructive     Really erases a device. Opt-in, NOT in pr-validation.yml,
+#                      needs `sudo -n`. See the banner on destructive_half.
 #
-#  NOTHING HERE TOUCHES A REAL DISK. Under $APEX_STORAGE_ROOT no subprocess is
-#  spawned at all — smartctl's answer, the fstrim timer's state and every
-#  filesystem's size come from files this script writes.
+#  NEITHER OF THE FIRST TWO TOUCHES A REAL DISK. Under $APEX_STORAGE_ROOT no
+#  subprocess is spawned at all — smartctl's answer, the fstrim timer's state
+#  and every filesystem's size come from files this script writes, and the
+#  erase path returns before `wipefs` on a fixture root unconditionally.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WITH_BINARY=0
-[[ "${1:-}" == "--with-binary" ]] && WITH_BINARY=1
+DESTRUCTIVE=0
+case "${1:-}" in
+    "")            ;;
+    --with-binary) WITH_BINARY=1 ;;
+    # A THIRD branch and never a flag folded into --with-binary: the two want
+    # opposite environments. The binary half exports APEX_STORAGE_ROOT, and the
+    # destructive half has one step that does NOT go through `sudo -n`'s
+    # env_reset — the unprivileged one — so a leaked fixture root would make it
+    # judge the fixture machine and report CouldNotVerify where the whole point
+    # is NeedsRoot against the real one.
+    --destructive) DESTRUCTIVE=1 ;;
+    *) echo "usage: ${0##*/} [--with-binary|--destructive]" >&2; exit 2 ;;
+esac
 
 PASS=0 FAIL=0
 ok()  { PASS=$((PASS + 1)); printf '  ok   %s\n' "$*"; }
@@ -117,6 +143,299 @@ has 'systemd/user' "$REPO/Containerfile.base" "the unit ships as a user unit"
 hasnt '[Install]' "$SVC" "the service itself is not enabled; the timer is"
 has 'Persistent=true' "$TIMER" "a machine that was off checks when it returns"
 
+# ── the erase path, read as source ──────────────────────────────────────────
+#
+# Structural because these are claims about which code CANNOT run, and a test
+# that drives the binary can only show that it did not run this time.
+
+sec "a fixture can never erase anything"
+# The gate is what makes the other half of this file safe to run at all. It has
+# to be unconditional and above the subprocess: under a fixture root every path
+# machine() reads came from files the suite wrote, so a fixture answering
+# euid 0 holds a real Permit for a device that does not exist.
+has 'if roots.is_fixture() {' "$CLI" "the fixture gate exists"
+if awk '/^fn erase\(/,/^}/' "$CLI" | grep -q 'is_fixture'; then
+    ok "and it is inside erase() itself"
+else
+    bad "erase() does not consult is_fixture"
+fi
+# Order matters more than presence: a gate below the spawn is not a gate.
+gate="$(awk '/^fn erase\(/,/^}/' "$CLI" | grep -n 'is_fixture' | head -1 | cut -d: -f1)"
+spawn="$(awk '/^fn erase\(/,/^}/' "$CLI" | grep -n 'Command::new(WIPEFS)' | head -1 | cut -d: -f1)"
+if [[ -n "$gate" && -n "$spawn" && "$gate" -lt "$spawn" ]]; then
+    ok "the gate is above the spawn, not inside a branch of it"
+else
+    bad "the fixture gate is at line $gate and wipefs is spawned at $spawn"
+fi
+
+sec "wipefs is spawned by absolute path and with an explicit backup directory"
+has 'const WIPEFS: &str = "/usr/sbin/wipefs"' "$CLI" \
+    "a PATH entry the caller controls would be a root shell that erases disks"
+# Measured: `wipefs --backup` with no directory writes into $HOME, and $HOME
+# under sudo is /root. The file a user is told to keep would land somewhere
+# they will not look and may not be able to read.
+has '--backup={}' "$CLI" "the backup directory is passed explicitly"
+if sed -E 's://.*$::' "$CLI" | grep -qE '"--backup"'; then
+    bad "a bare --backup has appeared, which writes into root's home"
+else
+    ok "and never as a bare --backup"
+fi
+
+sec "a refused erase is a different exit status from a failed one"
+# A caller — a settings page, a script, this suite — has to tell "the guard
+# said no" from "the guard said yes and wipefs then failed". Both as 1 means a
+# script cannot retry the second and must not retry the first.
+has 'pub const EXIT_REFUSED' "$CLI" "the refused status has a name"
+has 'Refusal::' "$CORE" "and the refusals are an enumeration, not strings"
+
+sec "the enumerator sees every block device, and says so when it cannot"
+# disks() skips devices/virtual/block, which is right for a health report and
+# wrong here: it would make every loop device NotAKnownBlockDevice — the one
+# class this command is ever tested against — and /dev/dm-0 unnameable while
+# leaving whatever it maps perfectly erasable.
+if awk '/^pub fn machine\(/,/^}/' "$CLI" | grep -q 'disks('; then
+    bad "machine() is built from disks(), which cannot see a loop device"
+else
+    ok "machine() is its own enumerator and not disks()"
+fi
+has 'pub fn machine(roots: &Roots) -> Result<Machine, String>' "$CLI" \
+    "a partially-enumerated machine is not a machine to judge against"
+# The defect this replaced: `let Ok(entries) = read_dir(&base) else { continue }`
+# plus `.join("partition").exists()`. chmod 100 on one disk's sysfs directory
+# dropped all five of its partitions and turned six refusals into a permit.
+if awk '/^pub fn machine\(/,/^}/' "$CLI" | grep -qE '\.exists\(\)'; then
+    bad "machine() uses Path::exists(), which is false on EACCES as well"
+else
+    ok "and never asks Path::exists(), which cannot tell EACCES from absent"
+fi
+if awk '/^pub fn machine\(/,/^}/' "$CLI" | grep -qE 'flatten\(\)'; then
+    bad "machine() flattens away read_dir's per-entry errors"
+else
+    ok "nor flattens away a device that exists and could not be named"
+fi
+
+sec "an absence is only ever read from the one error that means absence"
+# Two functions have an "absent" answer to give, and both must reach it from
+# ErrorKind and never from a boolean.
+for fn in 'fn loop_backing' 'pub fn machine'; do
+    if awk "/^${fn}/,/^}/" "$CLI" | grep -q 'ErrorKind::NotFound'; then
+        ok "${fn#*fn } reads absence from NotFound and not from a failed stat"
+    else
+        bad "${fn#*fn } does not distinguish NotFound from any other error"
+    fi
+done
+# dir_names has NO absent answer to give: a /sys/block that cannot be listed is
+# not an absence of block devices, so every error is the Err arm and singling
+# out NotFound would be the defect rather than the guard against it.
+if awk '/^fn dir_names/,/^}/' "$CLI" | grep -q 'ErrorKind'; then
+    bad "dir_names special-cases an error kind; a directory that will not list is not empty"
+else
+    ok "and a directory that will not list is never an empty directory"
+fi
+has 'fn holders' "$CLI" "holders is read with read_dir"
+if awk '/^fn holders/,/^}/' "$CLI" | grep -q 'Reading::Unavailable'; then
+    ok "and an unreadable holders directory is not an absence of holders"
+else
+    bad "an unreadable holders directory collapses to an empty Vec"
+fi
+
+# ── the destructive half ─────────────────────────────────────────────────────
+#
+#  THIS ONE REALLY ERASES A DEVICE. It is opt-in, it is not in
+#  pr-validation.yml, and it needs `sudo -n`.
+#
+#  Every device it touches comes from `losetup --find --show` on a sparse file
+#  it created seconds earlier, and it asserts
+#  `/sys/block/<dev>/loop/backing_file` is that file before it does anything
+#  else at all. That assertion is not belt-and-braces on the development
+#  machine: /dev/loop0 there is attached to /lib/extensions/apex-user.raw, a
+#  merged system extension carrying 219 packages, so a test that hardcoded a
+#  loop device number or took one from argv would erase live machine state.
+#
+#  `backing_file` is a FILE CONTAINING A PATH, not a symlink. `realpath` on the
+#  sysfs node compares a sysfs path against a tmp path and can therefore never
+#  match — which fails safe, and means the test silently never runs. Hence the
+#  `cat`.
+SIG_BACKUPS="/var/lib/apex/storage/signature-backups"
+
+# Every name the cleanup touches is a GLOBAL with a default, and that is not
+# style. An EXIT trap runs after the function that installed it has returned,
+# so a trap referring to one of its `local`s dies on `set -u` at the first
+# line — and this file's first line is the umount, so NOTHING gets detached.
+# Found by doing it: two loop devices left attached to deleted images, and the
+# suite reported 59 passed. `${x:-}` everywhere below for the same reason: a
+# cleanup that can abort is a cleanup that will.
+DEVS=()
+TMPD=""
+MNT=""
+
+cleanup_destructive() {
+    local d
+    [[ -n "${MNT:-}" ]] && sudo -n umount "${MNT}" 2>/dev/null
+    for d in "${DEVS[@]:-}"; do
+        [[ -n "$d" ]] || continue
+        sudo -n losetup -d "$d" 2>/dev/null
+        sudo -n rm -f "$SIG_BACKUPS/wipefs-${d#/dev/}"-*.bak 2>/dev/null
+    done
+    [[ -n "${TMPD:-}" ]] && rm -rf "${TMPD}"
+    return 0
+}
+
+destructive_half() {
+    sec "the destructive half — a real erase, on a loop device and nothing else"
+
+    # This half must judge the REAL machine. A fixture root leaking in from the
+    # environment would make every assertion below a statement about files this
+    # script wrote, and the NeedsRoot step does not go through sudo's env_reset.
+    unset APEX_STORAGE_ROOT
+
+    local APEX="${APEX:-$REPO/apexd/target/debug/apex}"
+    [[ -x "$APEX" ]] || { echo "FATAL: no apex binary at $APEX" >&2; exit 1; }
+    sudo -n true 2>/dev/null \
+        || { echo "FATAL: --destructive needs non-interactive sudo" >&2; exit 1; }
+
+    # ONE trap doing everything, armed BEFORE anything exists to clean up. A
+    # second `trap … EXIT` REPLACES the first rather than adding to it, so the
+    # binary half's own trap and this one can never both be installed — which
+    # is the other half of why --destructive is a separate branch.
+    trap cleanup_destructive EXIT
+
+    TMPD="$(mktemp -d)"
+    MNT="$TMPD/mnt"
+    local img="$TMPD/erase-me.img" out="$TMPD/out"
+    local dev pimg pdev rc backing
+    mkdir -p "$MNT"
+
+    # ── the device, and the assertion that earns the right to touch it ──
+    truncate -s 64M "$img" || { bad "could not create $img"; return; }
+    dev="$(sudo -n losetup --find --show "$img")"
+    [[ -n "$dev" ]] || { bad "losetup --find --show produced no device"; return; }
+    DEVS+=("$dev")
+    backing="$(cat "/sys/block/${dev#/dev/}/loop/backing_file" 2>/dev/null)"
+    if [[ -z "$backing" || "$(realpath "$backing")" != "$(realpath "$img")" ]]; then
+        bad "REFUSING TO CONTINUE: $dev backs '${backing:-nothing}', not $img"
+        return
+    fi
+    ok "$dev is attached to the file this test made, asserted before anything else"
+
+    # ── mounted: the one refusal everybody does write ──
+    sudo -n /usr/sbin/mkfs.ext4 -q -F "$dev" 2>/dev/null || { bad "mkfs failed"; return; }
+    sudo -n mount "$dev" "$MNT" || { bad "mount failed"; return; }
+    sudo -n "$APEX" storage erase "$dev" --confirm "$dev" \
+        --expect-backing-file "$img" > "$out" 2>&1; rc=$?
+    [[ "$rc" -eq 3 ]] && ok "a mounted device is refused with exit 3" \
+                      || bad "a mounted device exited $rc: $(cat "$out")"
+    has 'is mounted at' "$out" "and the refusal names where"
+    # The signature has to still be there. An erase that refused and wiped is
+    # the failure this whole file exists to make impossible.
+    if sudo -n /usr/sbin/wipefs -n "$dev" 2>/dev/null | grep -q ext4; then
+        ok "and the ext4 signature is still on the device"
+    else
+        bad "THE SIGNATURE IS GONE — a refused erase erased"
+    fi
+    sudo -n umount "$MNT"
+
+    # ── privilege, first and alone ──
+    "$APEX" storage erase "$dev" --confirm "$dev" \
+        --expect-backing-file "$img" > "$out" 2>&1; rc=$?
+    [[ "$rc" -eq 3 ]] && ok "an unprivileged erase is refused with exit 3" \
+                      || bad "unprivileged erase exited $rc: $(cat "$out")"
+    has 'root' "$out" "and says so"
+    # Privilege is reported alone: a list of six refusals when the first is
+    # "you are not root" is how somebody ends up reaching for --force.
+    n="$(grep -c '^  - ' "$out")"
+    [[ "$n" == "1" ]] && ok "and is the only thing it says" \
+                      || bad "an unprivileged erase reported $n refusals"
+
+    # ── the confirmation ──
+    sudo -n "$APEX" storage erase "$dev" --confirm yes \
+        --expect-backing-file "$img" > "$out" 2>&1; rc=$?
+    [[ "$rc" -eq 3 ]] && ok "the wrong confirmation token is refused with exit 3" \
+                      || bad "a wrong token exited $rc: $(cat "$out")"
+
+    # ── the loop rule: this device is in no mount table at all ──
+    sudo -n "$APEX" storage erase "$dev" --confirm "$dev" > "$out" 2>&1; rc=$?
+    [[ "$rc" -eq 3 ]] && ok "an attached loop device with no asserted backing file is refused" \
+                      || bad "an attached loop device exited $rc: $(cat "$out")"
+    has 'loop device attached to' "$out" "naming the file it writes through to"
+    has '--expect-backing-file' "$out" "and the way through"
+
+    sudo -n "$APEX" storage erase "$dev" --confirm "$dev" \
+        --expect-backing-file "$TMPD/not-this-one.img" > "$out" 2>&1; rc=$?
+    [[ "$rc" -eq 3 ]] && ok "asserting the wrong backing file is refused with exit 3" \
+                      || bad "a wrong backing file exited $rc: $(cat "$out")"
+    has 'not-this-one.img' "$out" "and both paths are named"
+
+    # ── a partition of an attached loop device is on that same file ──
+    # Measured: /sys/block/loopN/loopNp1 has a `partition` file and no `loop/`
+    # directory at all, so read on its own it answers "not a loop device" —
+    # while wipefs on it writes through the parent into the backing file
+    # exactly as it would on the whole device.
+    pimg="$TMPD/parted.img"
+    truncate -s 64M "$pimg"
+    pdev="$(sudo -n losetup --find --show --partscan "$pimg")"
+    if [[ -n "$pdev" ]]; then
+        DEVS+=("$pdev")
+        backing="$(cat "/sys/block/${pdev#/dev/}/loop/backing_file" 2>/dev/null)"
+        if [[ "$(realpath "${backing:-/nonexistent}")" != "$(realpath "$pimg")" ]]; then
+            bad "REFUSING TO CONTINUE: $pdev backs '${backing:-nothing}', not $pimg"
+        else
+            printf 'label: gpt\nsize=32MiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4\n' \
+                | sudo -n /usr/sbin/sfdisk -q "$pdev" >/dev/null 2>&1
+            sudo -n partprobe "$pdev" 2>/dev/null
+            # Wait on the SYSFS directory, not on the /dev node. machine()
+            # enumerates /sys/block and never looks at /dev, and the two
+            # appear at slightly different moments — a wait on /dev/loopNp1
+            # can be satisfied while /sys/block/loopN/loopNp1 is not there
+            # yet, and the partition then reads as NotAKnownBlockDevice. That
+            # is still exit 3, so the assertion on the refusal's WORDING is
+            # the only thing that catches it. Seen once as a flake before
+            # this loop watched the right path.
+            local part="${pdev}p1" pn="${pdev#/dev/}" waited=0
+            while [[ ! -d "/sys/block/$pn/${pn}p1" && "$waited" -lt 50 ]]; do
+                sleep 0.1; waited=$((waited + 1))
+            done
+            if [[ -d "/sys/block/$pn/${pn}p1" ]]; then
+                sudo -n "$APEX" storage erase "$part" --confirm "$part" > "$out" 2>&1; rc=$?
+                [[ "$rc" -eq 3 ]] \
+                    && ok "a partition of an attached loop device is refused too" \
+                    || bad "$part exited $rc — the loop rule is downward only: $(cat "$out")"
+                has 'loop device attached to' "$out" "inheriting its parent's backing file"
+            else
+                bad "/sys/block/$pn/${pn}p1 never appeared after sfdisk + partprobe"
+            fi
+        fi
+    else
+        bad "could not attach a second loop device for the partition case"
+    fi
+
+    # ── and finally the thing itself ──
+    local before after
+    before="$(sudo -n ls "$SIG_BACKUPS" 2>/dev/null | wc -l)"
+    sudo -n "$APEX" storage erase "$dev" --confirm "$dev" \
+        --expect-backing-file "$img" > "$out" 2>&1; rc=$?
+    [[ "$rc" -eq 0 ]] && ok "an unmounted loop device with the file named erases, exit 0" \
+                      || bad "the erase exited $rc: $(cat "$out")"
+    if sudo -n /usr/sbin/wipefs -n "$dev" 2>/dev/null | grep -q ext4; then
+        bad "the erase reported success and the ext4 signature is still there"
+    else
+        ok "and the signature is really gone"
+    fi
+    after="$(sudo -n ls "$SIG_BACKUPS" 2>/dev/null | wc -l)"
+    [[ "$after" -gt "$before" ]] && ok "a signature backup was written" \
+                                 || bad "no backup appeared in $SIG_BACKUPS"
+    # The path, not the word: guidance a user cannot follow is no guidance, and
+    # the measured default for `wipefs --backup` is /root under sudo.
+    has "$SIG_BACKUPS" "$out" "and the output names the directory it is in"
+}
+
+if [[ "$DESTRUCTIVE" -eq 1 ]]; then
+    destructive_half
+    printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+    [[ "$FAIL" -eq 0 ]] || exit 1
+    exit 0
+fi
+
 if [[ "$WITH_BINARY" -eq 0 ]]; then
     printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
     [[ "$FAIL" -eq 0 ]] || exit 1
@@ -151,7 +470,7 @@ build_machine() {
     ln -sfn ../devices/virtual/block/loop0 "$FIX/sys/block/loop0"
 
     local d="$FIX/sys/devices/pci0000:00/nvme/nvme0/nvme0n1"
-    mkdir -p "$d/queue" "$d/device/hwmon4"
+    mkdir -p "$d/queue" "$d/device/hwmon4" "$d/holders"
     printf '4000797360\n' > "$d/size"
     printf '0\n'          > "$d/queue/rotational"
     printf '512\n'        > "$d/queue/discard_granularity"
@@ -160,12 +479,23 @@ build_machine() {
     printf 'SPCC M.2 PCIe SSD\n' > "$d/device/model"
     printf '37850\n'      > "$d/device/hwmon4/temp1_input"
 
+    # The partition types are the real disk's, measured from
+    # /run/udev/data/b259:*. p1 carries the ESP type GUID and is the ONLY
+    # partition on that disk with an ID_PART_ENTRY_NAME at all; p2-p5 carry a
+    # Linux-filesystem type GUID and no name. Keying the ESP rule on the name
+    # would therefore miss the ESP of any installer that left it unnamed, and
+    # treating a missing name as unverifiable refuses four of five ordinary
+    # partitions for a reason that is not true.
+    local ESP_GUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+    local LINUX_GUID="0fc63daf-8483-4772-8e79-3d69d8477de4"
     local i=1
-    for spec in "p1:1228800:vfat" "p2:4194304:ext4" "p3:831107072:btrfs" \
-                "p4:4194304:ext4" "p5:3160272896:btrfs"; do
+    for spec in "p1:1228800:vfat:$ESP_GUID" "p2:4194304:ext4:$LINUX_GUID" \
+                "p3:831107072:btrfs:$LINUX_GUID" "p4:4194304:ext4:$LINUX_GUID" \
+                "p5:3160272896:btrfs:$LINUX_GUID"; do
         local part="${spec%%:*}" rest="${spec#*:}"
-        local sectors="${rest%%:*}" fs="${rest##*:}"
-        mkdir -p "$d/nvme0n1$part"
+        local sectors="${rest%%:*}"; rest="${rest#*:}"
+        local fs="${rest%%:*}" ptype="${rest#*:}"
+        mkdir -p "$d/nvme0n1$part/holders"
         printf '%s\n' "$sectors" > "$d/nvme0n1$part/size"
         printf '1\n'             > "$d/nvme0n1$part/partition"
         printf '259:%s\n' "$i"   > "$d/nvme0n1$part/dev"
@@ -175,9 +505,38 @@ build_machine() {
             printf 'E:ID_SERIAL_SHORT=NF12312150500322\n'
             printf 'E:ID_MODEL=SPCC M.2 PCIe SSD\n'
             printf 'E:ID_FS_TYPE=%s\n' "$fs"
+            printf 'E:ID_PART_ENTRY_SCHEME=gpt\n'
+            printf 'E:ID_PART_ENTRY_TYPE=%s\n' "$ptype"
+            [[ "$part" == "p1" ]] && printf 'E:ID_PART_ENTRY_NAME=EFI System Partition\n'
         } > "$FIX/run/udev/data/b259:$i"
         i=$((i + 1))
     done
+
+    # Two more loop devices, for the erase guard. **Neither is loop0.** The
+    # development machine's real /dev/loop0 is attached to
+    # /lib/extensions/apex-user.raw — a merged system extension — so a fixture
+    # device sharing that name would, if a mutation ever dropped the fixture
+    # gate in erase(), aim wipefs at live machine state. loop7 and loop8 exist
+    # on no machine this suite runs on.
+    #
+    # loop7 has no `loop/` directory: not an attached loop device, and the one
+    # device in this fixture a correct guard is supposed to permit.
+    # loop8 has one, so it is in use by whoever attached it — and it appears in
+    # the mount table zero times, which is the whole point.
+    local l
+    for l in loop7 loop8; do
+        mkdir -p "$FIX/sys/devices/virtual/block/$l/holders" \
+                 "$FIX/sys/devices/virtual/block/$l/queue"
+        ln -sfn "../devices/virtual/block/$l" "$FIX/sys/block/$l"
+        printf '131072\n' > "$FIX/sys/devices/virtual/block/$l/size"
+        printf '0\n'      > "$FIX/sys/devices/virtual/block/$l/removable"
+        printf '0\n'      > "$FIX/sys/devices/virtual/block/$l/ro"
+        printf '0\n'      > "$FIX/sys/devices/virtual/block/$l/queue/rotational"
+    done
+    mkdir -p "$FIX/sys/devices/virtual/block/loop8/loop"
+    printf '/var/tmp/some-image.raw\n' \
+        > "$FIX/sys/devices/virtual/block/loop8/loop/backing_file"
+    mkdir -p "$FIX/sys/devices/virtual/block/loop0/holders"
 
     # Measured on the L16: / is composefs, and one btrfs volume is mounted at
     # five paths of which only /sysroot exposes the whole filesystem.
@@ -358,6 +717,185 @@ printf '0\n' > "$FIX/sys/devices/pci0000:00/nvme/nvme0/nvme0n1/queue/discard_gra
 "$APEX" storage status > "$TMP/out" 2>&1
 has 'nothing to trim' "$TMP/out" "a device with no discard has nothing to trim"
 hasnt '[attention] /dev/nvme0n1 trim' "$TMP/out" "and is not an alert"
+build_machine; smart_healthy
+
+# ── the erase guard, driven through the shipped binary ───────────────────────
+#
+# Seven of the ten refusals are only reachable from a shell with the fixture
+# euid override. Without it every erase here would stop at NeedsRoot — the
+# suite would report a pass for a guard whose other nine rules had never run
+# once. Nothing below spawns wipefs: erase() returns on `roots.is_fixture()`
+# above the subprocess, unconditionally.
+ERC=0
+erase_try() {   # <device> <token> [extra args…]
+    local d="$1" t="$2"; shift 2
+    "$APEX" storage erase "$d" --confirm "$t" "$@" > "$TMP/erase" 2>&1
+    ERC=$?
+}
+refused_with() {   # <substring> <description>
+    if [[ "$ERC" -ne 3 ]]; then
+        bad "$2 — exit was $ERC, not 3:"; sed 's/^/       /' "$TMP/erase" >&2
+    else
+        has "$1" "$TMP/erase" "$2"
+    fi
+}
+
+sec "an erase is refused by default, and every refusal is reachable"
+printf '0\n' > "$FIX/.fixture/euid"
+
+erase_try /dev/nvme0n1p5 /dev/nvme0n1p5
+refused_with 'is mounted at' "a mounted partition is refused"
+
+# The disk that carries this OS is a mount source ZERO times — measured. Only
+# p5 appears in mountinfo, so `wipefs /dev/nvme0n1`, which takes the partition
+# table and everything on it, passes an "is it mounted?" test cleanly.
+erase_try /dev/nvme0n1 /dev/nvme0n1
+refused_with 'carries the running operating system' \
+    "the whole disk is refused although it is mounted nowhere itself"
+has 'nvme0n1p5' "$TMP/erase" "and the evidence names the partition that is"
+
+# / is composefs on overlay: not a block device, and never will be on a bootc
+# machine. A critical-target list containing / protects nothing at all here.
+hasnt 'mounted at /,' "$TMP/erase" "the composefs root is not offered as evidence"
+
+erase_try /dev/nvme0n1p1 /dev/nvme0n1p1
+refused_with 'is the EFI System Partition' "the ESP is refused"
+has 'c12a7328' "$TMP/erase" "on its type GUID, not on its name"
+has 'mounted nowhere' "$TMP/erase" "and the refusal says why nothing else caught it"
+
+# p2-p5 have a type GUID and no ID_PART_ENTRY_NAME, exactly like the real disk.
+# Refusing them for having no name would be four false refusals out of five,
+# which is how a guard teaches a user that it is noise.
+erase_try /dev/nvme0n1p3 /dev/nvme0n1p3
+if [[ "$ERC" -eq 0 ]]; then
+    ok "an unmounted, unnamed, non-ESP partition is permitted"
+else
+    bad "a legible non-ESP partition was refused: $(cat "$TMP/erase")"
+fi
+
+erase_try /dev/sdz /dev/sdz
+refused_with 'is not a block device on this machine' "a device that does not exist is refused"
+
+erase_try /dev/loop7 yes
+refused_with 'you have to type it exactly' "the wrong confirmation token is refused"
+
+sec "a check that could not be performed refuses, and says which check"
+printf '1000\n' > "$FIX/.fixture/euid"
+erase_try /dev/loop7 /dev/loop7
+refused_with 'must run as root' "an unprivileged erase is refused"
+n="$(grep -c '^  - ' "$TMP/erase")"
+[[ "$n" == "1" ]] && ok "and privilege is reported alone, so nobody reaches for --force" \
+                  || bad "an unprivileged erase reported $n refusals at once"
+
+rm -f "$FIX/.fixture/euid"
+erase_try /dev/loop7 /dev/loop7
+refused_with 'could not be checked' "an unreadable effective uid refuses"
+has 'which user is running this' "$TMP/erase" "naming the check that did not happen"
+hasnt 'must run as root' "$TMP/erase" \
+    "and does not advise a sudo that would not have helped"
+printf '0\n' > "$FIX/.fixture/euid"
+
+mv "$FIX/proc/self/mountinfo" "$TMP/mountinfo.saved"
+erase_try /dev/loop7 /dev/loop7
+refused_with 'could not be checked' "an unreadable mount table refuses"
+has 'which filesystems are mounted' "$TMP/erase" \
+    "because an unreadable mountinfo is not an empty mount table"
+mv "$TMP/mountinfo.saved" "$FIX/proc/self/mountinfo"
+
+# Every holders directory on the development machine is empty — there is no
+# LUKS anywhere on it — so this rule cannot be exercised live even once. That
+# is the argument for the guard being pure and fixture-driven.
+mkdir -p "$FIX/sys/devices/virtual/block/loop7/holders/dm-0"
+erase_try /dev/loop7 /dev/loop7
+refused_with 'stacked on it' "a device with a holder is refused"
+rmdir "$FIX/sys/devices/virtual/block/loop7/holders/dm-0"
+
+# Mode 100: traversable, unlistable — which is precisely what "the holders of
+# this device cannot be listed" means, and the mode that reaches the holders
+# reading itself.
+chmod 100 "$FIX/sys/devices/virtual/block/loop7/holders"
+erase_try /dev/loop7 /dev/loop7
+refused_with 'could not be checked' "an unlistable holders directory refuses"
+has 'stacked on /dev/loop7' "$TMP/erase" "naming the check that did not happen"
+hasnt 'has  stacked on it' "$TMP/erase" "and is not reported as an absence of holders"
+chmod 755 "$FIX/sys/devices/virtual/block/loop7/holders"
+
+# Mode 000 is not traversable, so the enumerator's own probe for a `partition`
+# file inside that directory fails first and the request is refused as an
+# incomplete enumeration rather than as unlistable holders. Both refuse, which
+# is the only thing that matters; asserted here so that the interaction is a
+# recorded fact rather than a surprise for whoever changes either one.
+chmod 000 "$FIX/sys/devices/virtual/block/loop7/holders"
+erase_try /dev/loop7 /dev/loop7
+[[ "$ERC" -eq 3 ]] && ok "an untraversable subdirectory of a device refuses as well" \
+                   || bad "an untraversable subdirectory exited $ERC: $(cat "$TMP/erase")"
+hasnt 'would erase' "$TMP/erase" "and is never permitted"
+chmod 755 "$FIX/sys/devices/virtual/block/loop7/holders"
+
+# The defect: chmod 100 is readable to nobody and still traversable, so
+# holders/ and dev keep answering and only the LISTING fails. Every partition
+# of the disk then vanishes from the Machine, and the whole-disk erase went
+# from six refusals to a granted permit. Nothing but the fixture gate stood
+# between that and wipefs on the disk carrying the running system.
+chmod 100 "$FIX/sys/devices/pci0000:00/nvme/nvme0/nvme0n1"
+erase_try /dev/nvme0n1 /dev/nvme0n1
+refused_with 'could not all be listed' \
+    "a disk whose partitions could not be listed is refused, not judged without them"
+hasnt 'would erase' "$TMP/erase" "and certainly not permitted"
+chmod 755 "$FIX/sys/devices/pci0000:00/nvme/nvme0/nvme0n1"
+
+sec "an attached loop device is in no mount table at all"
+# The finding this rule exists for: /dev/loop0 on the development machine is
+# attached to /lib/extensions/apex-user.raw, a merged system extension carrying
+# 219 packages, and it appears in /proc/self/mountinfo zero times, in
+# /proc/1/mountinfo zero times, and its holders directory is empty. Every other
+# rule in the guard passed it, and wipefs on a loop device writes straight
+# through to the backing file.
+erase_try /dev/loop8 /dev/loop8
+refused_with 'is a loop device attached to' "an attached loop device is refused"
+has '/var/tmp/some-image.raw' "$TMP/erase" "naming the file it would write through to"
+has 'losetup -d' "$TMP/erase" "with a way to detach it"
+has '--expect-backing-file' "$TMP/erase" "and a way through for somebody who means it"
+
+erase_try /dev/loop8 /dev/loop8 --expect-backing-file /var/tmp/other.raw
+refused_with 'not to /var/tmp/other.raw' "asserting the wrong backing file is refused"
+has 'some-image.raw' "$TMP/erase" "and both paths are named"
+
+erase_try /dev/loop7 /dev/loop7 --expect-backing-file /var/tmp/some-image.raw
+refused_with 'backs no file' "asserting a backing file for a device that has none is refused"
+
+erase_try /dev/loop8 /dev/loop8 --expect-backing-file /var/tmp/some-image.raw
+if [[ "$ERC" -eq 0 ]]; then
+    ok "and naming the backing file correctly is permission"
+else
+    bad "the correct backing file was still refused: $(cat "$TMP/erase")"
+fi
+
+# Measured: /sys/block/loopN/loopNp1 has a `partition` file and NO loop/
+# directory, so read on its own a loop partition answers "not an attached loop
+# device" — while wipefs on it writes through the parent into the backing file
+# just the same. would_destroy walks downward only, so nothing else relates a
+# partition back up to its disk.
+mkdir -p "$FIX/sys/devices/virtual/block/loop8/loop8p1/holders"
+printf '1\n' > "$FIX/sys/devices/virtual/block/loop8/loop8p1/partition"
+erase_try /dev/loop8p1 /dev/loop8p1
+refused_with 'is a loop device attached to' \
+    "a partition of an attached loop device inherits its parent's backing file"
+rm -rf "$FIX/sys/devices/virtual/block/loop8/loop8p1"
+
+sec "and a device with nothing wrong with it is erasable"
+erase_try /dev/loop7 /dev/loop7
+if [[ "$ERC" -eq 0 ]]; then
+    ok "an unmounted device with no holders and no backing file is permitted"
+    has 'would erase' "$TMP/erase" "and the fixture gate reports what it did not do"
+else
+    bad "the permittable device was refused: $(cat "$TMP/erase")"
+fi
+# The gate, again, from the outside: a fixture holds a real Permit and must
+# still spawn nothing. There is no /dev/loop7 on this machine to erase, so the
+# proof is that the run said "fixture root" rather than failing to find it.
+has 'fixture root, nothing was touched' "$TMP/erase" "and says nothing was touched"
+
 build_machine; smart_healthy
 
 sec "the notifier"
