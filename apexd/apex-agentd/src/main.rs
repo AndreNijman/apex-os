@@ -18,6 +18,7 @@
 
 mod broker;
 mod egress;
+mod elevation;
 mod grants;
 mod origin;
 mod peer;
@@ -60,6 +61,19 @@ pub struct Daemon {
     /// polkit. Nothing in this repository's test suite raises a prompt, and
     /// this field is why that is enforceable.
     pub auth: Box<dyn Authenticator>,
+    /// The elevation challenges this process has issued and not yet seen
+    /// answered (§7, P0-014).
+    ///
+    /// In memory, and deliberately: a challenge that survived a restart would
+    /// be a request to touch a key outliving the process that asked for it,
+    /// and a daemon restarting is exactly when a stale one should stop being
+    /// good. `ChallengeStore` expires its own contents on every `issue` and
+    /// every `redeem`, so it needs no place in the expiry tick — which is
+    /// also why this is a plain `Mutex` like `registry` and `config` rather
+    /// than an authority owning its own lock: nothing here has an ordering
+    /// relationship with the grant lock, because issuing a challenge grants
+    /// nothing.
+    pub challenges: Mutex<apex_agent_core::webauthn::ChallengeStore>,
 }
 
 impl Daemon {
@@ -69,6 +83,7 @@ impl Daemon {
             config: Mutex::new(Config::load()),
             grants: grants::GrantAuthority::new(),
             auth: Box::new(PolkitAuthenticator),
+            challenges: Mutex::new(apex_agent_core::webauthn::ChallengeStore::new()),
         }
     }
 }
@@ -924,6 +939,16 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             body.as_deref(),
             project.as_deref(),
         ),
+
+        // §7's remote elevation. Issuing a challenge grants nothing and gates
+        // on nothing — see `elevation`'s module comment for why the gate is
+        // not consulted here.
+        Request::ElevationChallenge {
+            session,
+            kind,
+            ttl_ms,
+            credential,
+        } => elevation::challenge(daemon, session, kind, ttl_ms, credential.as_deref()),
 
         // Granting is NOT here. A grant changes what is allowed, and
         // `apex-secretd` refuses one from any caller inside a session —

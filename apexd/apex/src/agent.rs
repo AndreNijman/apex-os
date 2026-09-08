@@ -23,6 +23,7 @@ use apex_agent_core::protocol::{
 };
 use apex_agent_core::hook::{self as hook_core, HookEvent};
 use apex_agent_core::term::{self, RawMode, WinSize};
+use apex_agent_core::webauthn;
 use apex_agent_core::{adapter, checkpoint, config, git, layout, mux, profile, project};
 use clap::{Args, Subcommand};
 
@@ -250,6 +251,48 @@ pub enum AgentCmd {
     /// lingering systemd user instance (root has none by default) and then
     /// prints what running agents as root costs.
     Enable,
+    /// The security keys that can answer a remote elevation (§7).
+    ///
+    /// §7 reserves root for a human at this machine. `--origin-policy remote`
+    /// is the owner's opt-out, and what it costs is a touch on one of these
+    /// keys. An empty store is what makes that policy refuse to start, so
+    /// enrolling one is the first step of turning it on.
+    Key {
+        #[command(subcommand)]
+        cmd: KeyCmd,
+    },
+}
+
+/// `apex agent key <verb>`.
+#[derive(Subcommand)]
+pub enum KeyCmd {
+    /// Enrol a security key from what `fido2-cred -V` printed.
+    ///
+    /// The key is plugged into whatever machine the owner is at, which by
+    /// construction is not necessarily this one, so this takes the *output*
+    /// rather than talking to the device:
+    ///
+    ///   fido2-cred -M -rk -i params /dev/hidraw0 | fido2-cred -V -o cred.txt
+    ///   apex agent key add --label yubikey --rp-id apex.local --from cred.txt
+    ///
+    /// `fido2-cred -V` prints the credential id and then a PEM public key.
+    /// Both are stored as printed, so an operator can compare the file with
+    /// the paste.
+    Add {
+        /// What to call it. Named in a refusal, and in `--credential`.
+        #[arg(long, value_name = "NAME")]
+        label: String,
+        /// The relying party id the credential was created for. It is not this
+        /// machine's hostname unless that is what was passed to `fido2-cred`;
+        /// an assertion for a different one is refused.
+        #[arg(long, value_name = "ID")]
+        rp_id: String,
+        /// The file `fido2-cred -V` wrote. Omitted reads standard input.
+        #[arg(long, value_name = "PATH")]
+        from: Option<PathBuf>,
+    },
+    /// Every enrolled key.
+    List,
 }
 
 /// `apex agent profile <verb>`.
@@ -703,6 +746,14 @@ pub fn agent(cmd: AgentCmd) -> i32 {
         AgentCmd::Rm { id } => remove(id),
         AgentCmd::Prune => prune(),
         AgentCmd::Enable => enable(),
+        AgentCmd::Key { cmd } => match cmd {
+            KeyCmd::Add {
+                label,
+                rp_id,
+                from,
+            } => key_add(&label, &rp_id, from.as_deref()),
+            KeyCmd::List => key_list(),
+        },
     };
     report(result)
 }
@@ -2938,6 +2989,72 @@ fn format_age(unix_secs: u64) -> String {
         3600..=86_399 => format!("{}h ago", delta / 3600),
         _ => format!("{}d ago", delta / 86_400),
     }
+}
+
+// ── security keys (§7's remote elevation, P0-014) ───────────────────────────
+
+/// Enrol a security key.
+///
+/// Writes the store directly rather than going through the daemon, and that is
+/// a decision rather than a shortcut: the file is under the owner's own
+/// `XDG_STATE_HOME`, the owner is the only party whose enrolment means
+/// anything, and a protocol verb for it would be a way for a *session* to ask
+/// the daemon to trust a new key. There is deliberately no such way.
+///
+/// The one thing lost by not going through the daemon: a running daemon that
+/// verifies an assertion writes the same file back to record a signature
+/// counter, so an enrolment racing that write can lose one of the two. The
+/// consequence is a counter that reads low or a key that has to be enrolled
+/// again — never a key trusted that the owner did not enrol, because both
+/// writers only ever write what they were given. Not solved here; a lock
+/// belongs beside the store, and it is not what P0-014 is about.
+fn key_add(label: &str, rp_id: &str, from: Option<&Path>) -> Result<i32> {
+    let printed = match from {
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?,
+        None => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                .context("reading the credential from standard input")?;
+            text
+        }
+    };
+
+    let credential = webauthn::Credential::parse_fido2_cred(label, rp_id, &printed, apex_agent_core::request::now_ms())
+        .map_err(|e| anyhow!("{e}"))?;
+    let mut store = webauthn::CredentialStore::load();
+    store.add(credential).map_err(|e| anyhow!("{e}"))?;
+    store.save().map_err(|e| anyhow!("{e}"))?;
+
+    println!("apex: enrolled {label:?} for relying party {rp_id:?}.");
+    println!("      {}", webauthn::store_path().display());
+    if store.len() == 1 {
+        println!();
+        println!("      A remote elevation now has a key to ask. It still needs the owner to");
+        println!("      allow one: `apex agent run --origin-policy remote ...`.");
+    }
+    Ok(0)
+}
+
+/// Every enrolled key.
+///
+/// The listing `AssertionError::UnknownCredential` tells the operator to run,
+/// which is why it exists: an error naming a command that does not exist is
+/// worse than one that names nothing.
+fn key_list() -> Result<i32> {
+    let store = webauthn::CredentialStore::load();
+    if store.is_empty() {
+        println!("apex: no security key is enrolled.");
+        println!("      `apex agent key add --label <name> --rp-id <id> --from <file>`");
+        return Ok(0);
+    }
+    for c in &store.credentials {
+        println!(
+            "{:<20} rp={:<28} counter={}",
+            c.label, c.rp_id, c.counter
+        );
+    }
+    Ok(0)
 }
 
 #[cfg(test)]
