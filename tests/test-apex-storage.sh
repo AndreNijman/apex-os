@@ -538,6 +538,24 @@ build_machine() {
         > "$FIX/sys/devices/virtual/block/loop8/loop/backing_file"
     mkdir -p "$FIX/sys/devices/virtual/block/loop0/holders"
 
+    # A partition with a legible, non-ESP type — the case that must come back
+    # PERMITTED. It hangs off loop7 rather than off nvme0n1 for one reason:
+    # nvme0n1p1..p5 are the real names of real partitions on the machine that
+    # runs this suite, one of which holds another operating system. A test
+    # asserting "this device is erasable" must never name a device that
+    # exists, because the only thing standing between that assertion and
+    # `wipefs` is the fixture gate — and the whole point of a mutation battery
+    # is to find out what happens when one `if` goes missing.
+    mkdir -p "$FIX/sys/devices/virtual/block/loop7/loop7p1/holders"
+    printf '65536\n' > "$FIX/sys/devices/virtual/block/loop7/loop7p1/size"
+    printf '1\n'     > "$FIX/sys/devices/virtual/block/loop7/loop7p1/partition"
+    printf '7:71\n'  > "$FIX/sys/devices/virtual/block/loop7/loop7p1/dev"
+    {
+        printf 'E:ID_FS_TYPE=ext4\n'
+        printf 'E:ID_PART_ENTRY_SCHEME=gpt\n'
+        printf 'E:ID_PART_ENTRY_TYPE=%s\n' "$LINUX_GUID"
+    } > "$FIX/run/udev/data/b7:71"
+
     # Measured on the L16: / is composefs, and one btrfs volume is mounted at
     # five paths of which only /sysroot exposes the whole filesystem.
     cat > "$FIX/proc/self/mountinfo" <<'EOF'
@@ -740,6 +758,22 @@ refused_with() {   # <substring> <description>
     fi
 }
 
+sec "nothing this suite expects a permit for exists on the machine running it"
+# The fixture gate is one `if`. Everything below asks the shipped binary to
+# erase things, and four of those requests are supposed to come back PERMITTED
+# — so if the gate ever goes missing, those four are what wipefs gets pointed
+# at. They are therefore named after devices that exist nowhere. This is the
+# assertion that keeps that true as the fixture grows, and it is not
+# theoretical: the development machine's /dev/loop0 is a live system extension
+# and its nvme0n1p1..p5 include another installed operating system.
+for d in loop7 loop7p1 loop8 loop8p1; do
+    if [[ -e "/dev/$d" ]]; then
+        bad "/dev/$d EXISTS here and this suite expects a permit for it"
+    else
+        ok "/dev/$d is on no machine, so a lost fixture gate still erases nothing"
+    fi
+done
+
 sec "an erase is refused by default, and every refusal is reachable"
 printf '0\n' > "$FIX/.fixture/euid"
 
@@ -763,15 +797,23 @@ refused_with 'is the EFI System Partition' "the ESP is refused"
 has 'c12a7328' "$TMP/erase" "on its type GUID, not on its name"
 has 'mounted nowhere' "$TMP/erase" "and the refusal says why nothing else caught it"
 
-# p2-p5 have a type GUID and no ID_PART_ENTRY_NAME, exactly like the real disk.
-# Refusing them for having no name would be four false refusals out of five,
-# which is how a guard teaches a user that it is noise.
-erase_try /dev/nvme0n1p3 /dev/nvme0n1p3
+# nvme0n1p2..p5 have a type GUID and no ID_PART_ENTRY_NAME, exactly like the
+# real disk. Refusing a partition for having no NAME would be four false
+# refusals out of five, which is how a guard teaches a user it is noise — so
+# the positive case has to be asserted, on a partition that exists nowhere.
+erase_try /dev/loop7p1 /dev/loop7p1
 if [[ "$ERC" -eq 0 ]]; then
     ok "an unmounted, unnamed, non-ESP partition is permitted"
 else
     bad "a legible non-ESP partition was refused: $(cat "$TMP/erase")"
 fi
+# And the real disk's own unnamed partitions are refused for REASONS, never
+# for having no name. Asserted without asking for a permit, because
+# /dev/nvme0n1p3 exists on this machine and holds another operating system.
+erase_try /dev/nvme0n1p3 /dev/nvme0n1p3
+hasnt 'could not be checked' "$TMP/erase" \
+    "an unnamed partition with a legible type is not treated as unverifiable"
+hasnt 'EFI System Partition' "$TMP/erase" "nor mistaken for the ESP"
 
 erase_try /dev/sdz /dev/sdz
 refused_with 'is not a block device on this machine' "a device that does not exist is refused"
