@@ -49,14 +49,33 @@ already-local image and reads back whether each node is present and OPENABLE.
   assertion with nothing to pass); dropping `--device /dev/bus/usb` from `hw`
   reddens two; making `none` emit a device reddens the default-holds-nothing
   assertion.
+- **A DEFECT IN MY OWN FIRST COMMIT, found and fixed at `8a74816`.** The
+  suite's last assertion ("no container was left behind by this suite")
+  filtered `podman ps -a` on `name=^disp-` — the DISPOSABLE engine's prefix,
+  lifted from the wrong neighbour — while every container this file starts took
+  podman's own random name. It could not fail. PROVEN vacuous rather than
+  argued: with the old filter and `--rm` removed from all three `podman run`
+  calls, FIVE exited containers sat in `podman ps -a` and the suite still
+  printed `PASS  no container was left behind` and a clean 14/0/2. Now every
+  probe is `--name "apexdev-probe-$$-$RANDOM"`, the filter looks for that, and
+  a `started_containers` counter (incremented in the current shell, never in a
+  `$(…)` subshell where it would be discarded) makes the assertion SKIP rather
+  than bank a pass on a machine where every hardware section skipped. Two more
+  mutations: dropping `--rm` reddens it and names the five leaks (13/1/2);
+  restoring the `^disp-` filter goes green again at 14/0/2 with five containers
+  demonstrably present. Leftovers removed and `podman ps -a` re-checked empty
+  after each.
 - Wired into `pr-validation.yml`'s capsule job AND its ShellCheck gate (:1134).
   `shellcheck -S warning` clean (needed an explicit `SC1090` directive with a
   reason, matching `apex-env:170`'s convention). `bash -n` clean.
   `git check-ignore -v` on the new file: not ignored (exit 1).
 
 ### BASE-016 — DONE. apex-os cf7df30 on task/base-partials.
-Committed by the predecessor; counts re-verified this round (see NEXT for why
-this card previously listed it as outstanding).
+Committed by the predecessor; counts RE-RUN and confirmed this round, both
+halves matching the commit message exactly:
+- `tests/test-apex-recover.sh` **98 passed, 0 failed** (structural only).
+- `tests/test-apex-recover.sh --with-binary` **220 passed, 0 failed**.
+See NEXT for why this card previously listed the item as outstanding.
 
 ## RESULTS (round 9) — per item
 
