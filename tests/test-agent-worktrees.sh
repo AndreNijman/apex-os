@@ -138,13 +138,36 @@ git_q -C "$PROJ" worktree add -q -b agent/tidy "$WT_TIDY" >/dev/null 2>&1
 printf 'base\nworktree change\n' > "${WT_CLASH}/f.txt"
 git_q -C "$WT_CLASH" commit -qam "the worktree's take on f.txt"
 
+# TWO commits here, against main's one. The counts must be ASYMMETRIC: with
+# `ahead` and `behind` both 1, swapping the two columns of
+# `git rev-list --left-right --count` is invisible, and a mutation that
+# reversed them survived this suite until the fixture was changed. 2 ahead and
+# 1 behind cannot be swapped without the assertion noticing.
 printf 'new file\n' > "${WT_TIDY}/new.txt"
 git_q -C "$WT_TIDY" add new.txt
 git_q -C "$WT_TIDY" commit -qm "add new.txt"
+printf 'second new file\n' > "${WT_TIDY}/new2.txt"
+git_q -C "$WT_TIDY" add new2.txt
+git_q -C "$WT_TIDY" commit -qm "add new2.txt"
 git_q -C "$WT_TIDY" push -q -u origin agent/tidy >/dev/null 2>&1
 
 printf 'base\nmain change\n' > "${PROJ}/f.txt"
 git_q -C "$PROJ" commit -qam "main's take on f.txt"
+
+# A third agent worktree on an ORPHAN branch, so its history is unrelated to
+# main's. `merge-tree` exits 128 on that ("refusing to merge unrelated
+# histories") and the design says an exit git declines to answer degrades to
+# `unknown` — carrying the reason — rather than collapsing to `clean` or
+# failing the whole listing. Neither half of that had any coverage against
+# real git until this fixture existed: a mutation that let `unknown` count as
+# ready survived the suite.
+WT_ALIEN="${PROJ}/.apex/worktrees/alien"
+git_q -C "$PROJ" worktree add -q --detach "$WT_ALIEN" >/dev/null 2>&1
+git_q -C "$WT_ALIEN" checkout -q --orphan agent/alien >/dev/null 2>&1
+git_q -C "$WT_ALIEN" rm -q -rf . >/dev/null 2>&1
+printf 'alien\n' > "${WT_ALIEN}/a.txt"
+git_q -C "$WT_ALIEN" add a.txt
+git_q -C "$WT_ALIEN" commit -qm "an unrelated history"
 
 # Proof the fixture is what the rest of this file assumes. Without this, every
 # "nothing changed" assertion below could be passing over a clean merge.
@@ -163,6 +186,15 @@ if git_q -C "$PROJ" merge-tree --write-tree --name-only main agent/tidy >/dev/nu
     ok "git itself says main and agent/tidy merge cleanly"
 else
     bad "git itself says main and agent/tidy merge cleanly"
+    give_up
+fi
+git_q -C "$PROJ" merge-tree --write-tree --name-only main agent/alien >/dev/null 2>&1
+alien_rc=$?
+if [ "$alien_rc" -ne 0 ] && [ "$alien_rc" -ne 1 ]; then
+    ok "git itself declines to merge main and agent/alien (exit ${alien_rc}, not 0 or 1)"
+else
+    bad "git itself declines to merge main and agent/alien"
+    echo "      exit ${alien_rc}; the orphan branch is not unrelated after all" >&2
     give_up
 fi
 
@@ -292,11 +324,11 @@ else
 fi
 
 names="$(python3 -c 'import json,sys; print(" ".join(sorted(w["name"] for w in json.load(open(sys.argv[1])))))' "${WORK}/status.json")"
-if [ "$names" = "clash proj tidy" ]; then
-    ok "all three worktrees are listed (${names})"
+if [ "$names" = "alien clash proj tidy" ]; then
+    ok "all four worktrees are listed (${names})"
 else
-    bad "all three worktrees are listed"
-    echo "      got '${names}', wanted 'clash proj tidy'" >&2
+    bad "all four worktrees are listed"
+    echo "      got '${names}', wanted 'alien clash proj tidy'" >&2
 fi
 
 # ── THE NAMED GUARANTEE ──────────────────────────────────────────────────────
@@ -372,6 +404,32 @@ else
     echo "      state='${state}'" >&2
 fi
 
+# An answer git declined to give. The one wrong answer here is `clean`, which
+# reads as "ready" and costs somebody a broken merge.
+state="$(jq_get "${WORK}/status.json" alien 'w["conflicts"]["state"]')"
+reason="$(jq_get "${WORK}/status.json" alien 'w["conflicts"].get("reason","")')"
+if [ "$state" = "unknown" ] && printf '%s' "$reason" | grep -qi "unrelated histories"; then
+    ok "an unmergeable history is 'unknown' and carries git's reason (${reason})"
+else
+    bad "an unmergeable history is 'unknown' and carries git's reason"
+    echo "      state='${state}' reason='${reason}'" >&2
+fi
+ready="$(jq_get "${WORK}/status.json" alien 'w["ready"]["ready_to_propose"]')"
+blockers="$(jq_get "${WORK}/status.json" alien '" | ".join(w["ready"]["blockers"])')"
+if [ "$ready" = "False" ] && printf '%s' "$blockers" | grep -q "conflict state unknown"; then
+    ok "an unknown conflict state is never treated as ready"
+else
+    bad "an unknown conflict state is never treated as ready"
+    echo "      ready='${ready}' blockers='${blockers}'" >&2
+fi
+# ...and the odd worktree did not take the rest of the listing down with it,
+# which is the reason the probe degrades instead of failing.
+if [ "$names" = "alien clash proj tidy" ]; then
+    ok "one worktree git cannot answer for does not fail the whole listing"
+else
+    bad "one worktree git cannot answer for does not fail the whole listing"
+fi
+
 # The diff, checked against git's own numbers rather than against a constant
 # somebody typed: a hard-coded 1/1/1 would keep passing if the range were
 # wrong in the same direction as the fixture.
@@ -387,11 +445,12 @@ fi
 
 ahead="$(jq_get "${WORK}/status.json" tidy 'w["ahead"]')"
 behind="$(jq_get "${WORK}/status.json" tidy 'w["behind"]')"
-if [ "$ahead" = "1" ] && [ "$behind" = "1" ]; then
-    ok "ahead/behind are the right way round (1 ahead of main, 1 behind it)"
+if [ "$ahead" = "2" ] && [ "$behind" = "1" ]; then
+    ok "ahead/behind are the right way round (2 ahead of main, 1 behind it)"
 else
     bad "ahead/behind are the right way round"
-    echo "      ahead='${ahead}' behind='${behind}', wanted 1 and 1" >&2
+    echo "      ahead='${ahead}' behind='${behind}', wanted 2 and 1" >&2
+    echo "      git says: $(git_q -C "$PROJ" rev-list --left-right --count main...agent/tidy)" >&2
 fi
 
 up="$(jq_get "${WORK}/status.json" tidy 'w["upstream"]')"
@@ -538,15 +597,15 @@ fi
 # them named after one worktree.
 stored="$(ls "$PROJECTS" | wc -l)"
 rows="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "${WORK}/failed.json")"
-if [ "$stored" -eq 2 ] && [ "$rows" -eq 3 ]; then
+if [ "$stored" -eq 2 ] && [ "$rows" -eq 4 ]; then
     ok "a linked worktree remembered as a project adds no duplicate rows (${stored} records, ${rows} rows)"
 else
     bad "a linked worktree remembered as a project adds no duplicate rows"
-    echo "      ${stored} project records, ${rows} rows; wanted 2 and 3" >&2
+    echo "      ${stored} project records, ${rows} rows; wanted 2 and 4" >&2
     ls "$PROJECTS" | sed 's/^/      /' >&2
 fi
 names="$(python3 -c 'import json,sys; print(" ".join(sorted(w["name"] for w in json.load(open(sys.argv[1])))))' "${WORK}/failed.json")"
-if [ "$names" = "clash proj tidy" ]; then
+if [ "$names" = "alien clash proj tidy" ]; then
     ok "and each worktree still appears exactly once (${names})"
 else
     bad "and each worktree still appears exactly once"
@@ -572,6 +631,13 @@ fi
 # moved is proof the daemon ran there.
 section "a path-shaped slug reaches nothing"
 
+# The decoy is built the same shape as the fixture project — a main tree AND
+# an agent worktree whose branch CONFLICTS with it — for a specific reason: a
+# repository with no agent worktree has nothing for `merge-tree` to probe, so
+# reaching it writes no objects and an object count would prove nothing.
+# Measured: with a bare decoy, a mutation that resolved the slug by joining it
+# onto the store path reached this repository and the object count did not
+# move. Now it would.
 DECOY="${WORK}/decoy"
 mkdir -p "$DECOY"
 git_q init -q "$DECOY" >/dev/null 2>&1
@@ -580,6 +646,23 @@ git_q -C "$DECOY" config user.name t
 printf 'decoy\n' > "${DECOY}/d.txt"
 git_q -C "$DECOY" add d.txt
 git_q -C "$DECOY" commit -qm "decoy"
+mkdir -p "${DECOY}/.apex/worktrees"
+git_q -C "$DECOY" worktree add -q -b agent/x "${DECOY}/.apex/worktrees/x" >/dev/null 2>&1
+printf 'decoy\nfrom the worktree\n' > "${DECOY}/.apex/worktrees/x/d.txt"
+git_q -C "${DECOY}/.apex/worktrees/x" commit -qam "the decoy worktree's take"
+printf 'decoy\nfrom main\n' > "${DECOY}/d.txt"
+git_q -C "$DECOY" commit -qam "the decoy main tree's take"
+# Proof the decoy is a repository where a reached probe WOULD write: git
+# itself says the two sides conflict, so `merge-tree --write-tree` has a
+# merged tree and blobs to write.
+if ! git_q -C "$DECOY" merge-tree --write-tree --name-only main agent/x >/dev/null 2>&1; then
+    ok "the decoy is a repository a reached probe would write objects into"
+else
+    bad "the decoy is a repository a reached probe would write objects into"
+    echo "      its two branches do not conflict, so the object count below proves nothing" >&2
+fi
+# ...and that probe just wrote some, which is why the count is taken AFTER it.
+git_q -C "$DECOY" gc --quiet --prune=now >/dev/null 2>&1
 mkdir -p "${PROJECTS}/../planted"
 python3 - "$DECOY" "${PROJECTS}/../planted/decoy.json" <<'PY'
 import json, sys, time
@@ -674,13 +757,21 @@ else
     echo "      expected ${APEX_AGENT_SCRATCH_ROOT}/${PROJ_SESSION}" >&2
     ls -la "$APEX_AGENT_SCRATCH_ROOT" 2>&1 | sed 's/^/      /' >&2
 fi
-POST_SCRATCH="$(ls /tmp/apex-agent 2>/dev/null | sort | tr '\n' ' ')"
-if [ "$PRE_SCRATCH" = "$POST_SCRATCH" ]; then
-    ok "the shared /tmp/apex-agent the real daemon uses is exactly as it was"
+# The hazard is DELETION: a session reap runs `remove_dir_all` on its own id,
+# a fixture daemon numbers its sessions from 1, and before `1bb5db4` that
+# reaped the real daemon's session 1. An entry the real daemon ADDS while this
+# suite runs is not this suite's doing, and comparing the whole listing made
+# an unrelated session start fail this line.
+gone=""
+for entry in $PRE_SCRATCH; do
+    [ -e "/tmp/apex-agent/${entry}" ] || gone="${gone}${entry} "
+done
+if [ -z "$gone" ]; then
+    ok "nothing was deleted from the shared /tmp/apex-agent the real daemon uses"
 else
-    bad "the shared /tmp/apex-agent the real daemon uses is exactly as it was"
+    bad "nothing was deleted from the shared /tmp/apex-agent the real daemon uses"
+    echo "      gone: ${gone}" >&2
     echo "      before: ${PRE_SCRATCH}" >&2
-    echo "      after:  ${POST_SCRATCH}" >&2
 fi
 
 printf '\nworktrees: %d passed, %d failed\n' "$pass" "$fail"
