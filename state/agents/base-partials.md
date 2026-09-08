@@ -6,10 +6,12 @@ branch: task/base-partials (apex-os), task/base-partials-shell (apex-shell)
 base: apex-os e67fab9, apex-shell a90cef6 (both origin/roadmap/v2.2)
 
 ## NEXT
-Recon both trees for the exact defect sites the eight items' evidence names
-(adapter.rs TOOLCHAIN_RO, registry.rs next_id, Surface.bootloader caveat,
-GreetContext.qml:332-335 raw compositor names, disposable coverage in
-test-apex-recover.sh), then pick the closeable subset and write assertions.
+Await the two recon sweeps, then write the per-criterion suite map (for each
+acceptance criterion: which NAMED suite asserts it today, or `no suite`) into
+this card and push. Then work in this order: BASE-018 (Surface.bootloader
+caveat, fixture only), BASE-016 (new tests/test-apex-disposable-live.sh wired
+into pr-validation.yml), BASE-002, BASE-005, BASE-013, BASE-014, BASE-010,
+BASE-009.
 
 ## DONE
 - Worktrees created and both branches pushed with -u before any work.

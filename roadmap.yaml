@@ -2092,15 +2092,44 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Half landed on roadmap/v2.2. Signing already existed, cosign keyless on core, base and the image; what was
-    missing was any description of what is inside them. syft now generates an SPDX document from the pushed digest
-    read back out of the registry, and cosign attest signs it under the same keyless identity, so one verify-
-    attestation answers both who built it and what is in it. Deliberately not cosign attach sbom, which is
-    deprecated upstream and unsigned. Attached to the apex image alone, since core and base are build tiers nobody
-    boots and their contents are a strict subset. Two assertions guard it, the SBOM must list more than a hundred
-    packages because one describing nothing answers a CVE question with silence while looking authoritative, and
-    the job verifies its own signature and attestation against the workflow identity before promoting any tag.
-    Outstanding, apex status does not surface trust, which is the second criterion.
+    SBOM, provenance and trust status — and, as of 2026-09-08, actual ENFORCEMENT. Criterion 1 (image SBOM and
+    signed provenance published) was closed earlier: signing already existed as cosign keyless on core, base and
+    the image; what was missing was any description of what is inside them, so syft generates an SPDX document
+    from the pushed digest read back out of the registry and cosign attest signs it under the same keyless
+    identity, one verify-attestation answering both who built it and what is in it. Deliberately not cosign attach
+    sbom, which is deprecated upstream and unsigned. Attached to the apex image alone, since core and base are
+    build tiers nobody boots and their contents are a strict subset. Two guards: the SBOM must list more than a
+    hundred packages, because one describing nothing answers a CVE question with silence while looking
+    authoritative, and the job verifies its own signature and attestation against the workflow identity before
+    promoting any tag. Criterion 2 (apex status surfaces trust) landed as 512bd91: a Trust block on apex status
+    plus apex trust [--verify] [--json], 17 rust unit tests and 25 shell assertions. THE GAP THAT REMAINED WAS
+    ENFORCEMENT — a machine that could verify and did not — and it is now closed, landed on roadmap/v2.2 as
+    e67fab9 -> 583355e (task/trust-enforcement, 5 commits from base 1ab542c plus one landing fix).
+    apex/src/verify.rs does real sigstore verification on skopeo + openssl with NO cosign on the machine, against
+    a PINNED Sigstore root shipped by Containerfile.base rather than taken from the signature (a cosign
+    signature's chain annotation carries Fulcio's own intermediate and root, so verifying a certificate against a
+    root the certificate handed you proves nothing). verify::gate is wired into ops::update BEFORE
+    channel::record_update and BEFORE FsyncGuard::disable — both write machine state, and a refusal after them
+    would have recorded a health record for an update that never happened, which is what the rollout stop then
+    reasons about, and left ostree's fsync off on a machine that is not updating; the ordering is asserted
+    structurally, comment-stripped, line 12 vs 19 vs 26 vs 28. It verifies the digest resolved for the ORIGIN
+    REFERENCE, not booted_digest. The escape hatch is --allow-unverified, deliberately not --force. New read-only
+    surface: apex trust --gate [--json]. A refusal names which of failed/absent/could-not-run and which check
+    refused. Counts from real runs on the landed tip: cargo test --locked --workspace --no-fail-fast 2040 passed /
+    0 failed across 30 binaries (404 -> 455 in the crate, +51); tests/test-apex-trust-enforcement.sh 77 passed / 0
+    failed, new, real minted-CA cryptography, run five times for determinism; test-apex-trust 6/0 structural
+    (25/25 with --with-binary); test-apex-verbs 44/0; test-apex-channel 22/0; test-apex-host 52/0; check-doc-verbs
+    on docs/trust-enforcement.md 2 valid; run-clippy clean in the container; no conflict markers. Five mutation
+    pairs recorded on the agent card. TWO DEFECTS OF THE FORBIDDEN CLASS WERE FOUND AND FIXED IN THE PREDECESSOR'S
+    OWN DESIGN (0591e63): an unreadable origin file (EACCES) DEPLOYED UNGATED under signature=enforce, and
+    refusal() accused the publisher even for a check that never ran. STILL OPEN, precisely: (a) provenance=warn
+    until an image build publishes a .att — one line in enforcement.conf, but it must not precede the artifact;
+    (b) /etc/containers/policy.json is still a single insecureAcceptAnything, a separate mechanism whose
+    tightening interacts with skopeo copy; (c) transparency-log inclusion is NOT verified and every report says so
+    in those words; (d) bootc upgrade run directly bypasses the gate — ops::update is its only caller in the repo,
+    grepped. NOT PROVEN, stated plainly: the ops::update path was exercised through apex trust --gate (same
+    functions, same order, same refusal producer) plus source-level ordering assertions, NOT by running apex
+    update under sudo, which the brief forbade.
 - id: P1-048
   title: Redesign Blueprint into a simple guided experience
   priority: P1
