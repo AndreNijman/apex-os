@@ -455,6 +455,15 @@ jobs:
       - name: §48 storage — a failing disk is red not grey, and the composefs root is not a full disk
         run: ./tests/test-apex-storage.sh
 
+      # §P2-015's firmware readout, structural half. fwupdmgr's exit status
+      # means "nothing to do" when non-zero and accompanies an explicit error
+      # document when zero, so a caller that trusts it reads a current machine
+      # as a broken one. And `updatable` is a momentary condition: on battery
+      # this machine drops the flag from seven devices including the System
+      # Firmware, so printing it as a capability is a lie about the hardware.
+      - name: §P2-015 firmware — the document is the only truth, and updatable is not a property
+        run: ./tests/test-apex-firmware.sh
+
       # §33's qualification database, structural half. The two properties it
       # guards are both one-line changes away: a consent gate that reads
       # "not declined" instead of "granted" starts recording on a machine
@@ -688,6 +697,21 @@ jobs:
           cargo build -p apex --locked --manifest-path apexd/Cargo.toml
           test -x "$APEX"
           ./tests/test-apex-storage.sh --with-binary
+
+      # §P2-015's binary half: `apex firmware` against captured fwupd
+      # documents — the on-battery one, an Error object that arrived with exit
+      # zero, a document with no Devices list at all, and prose where JSON was
+      # asked for. No fwupdmgr is spawned; every answer is a file the script
+      # writes, so this runs on a machine with no fwupd and no system bus.
+      - name: §P2-015 firmware — apex firmware against fwupd's own oddest answers
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-firmware.sh --with-binary
 
       # §33's binary half: `apex qualify` against a whole fixture machine —
       # DMI, PCI, cpuinfo, cmdline and an EFI variable — including a serial

@@ -1015,9 +1015,12 @@ RUN set -eux; \
         alacritty fastfetch \
         pavucontrol \
         gparted parted gdisk udisks2 smartmontools \
+        fwupd \
         bluez bluez-tools blueman \
         scrcpy android-tools; \
     rpm -q scrcpy android-tools; \
+    rpm -q fwupd; \
+    command -v fwupdmgr; \
     command -v scrcpy; \
     command -v adb; \
     dnf5 -y copr disable zeno/scrcpy; \
