@@ -6,12 +6,10 @@ branch: task/base-partials (apex-os), task/base-partials-shell (apex-shell)
 base: apex-os e67fab9, apex-shell a90cef6 (both origin/roadmap/v2.2)
 
 ## NEXT
-Await the two recon sweeps, then write the per-criterion suite map (for each
-acceptance criterion: which NAMED suite asserts it today, or `no suite`) into
-this card and push. Then work in this order: BASE-018 (Surface.bootloader
-caveat, fixture only), BASE-016 (new tests/test-apex-disposable-live.sh wired
-into pr-validation.yml), BASE-002, BASE-005, BASE-013, BASE-014, BASE-010,
-BASE-009.
+Recon is DONE and folded into this card (see RECON below) — nothing is awaited.
+Work order: BASE-018 (Surface.bootloader caveat, fixture only), BASE-016 (new
+tests/test-apex-disposable.sh wired into pr-validation.yml), BASE-002,
+BASE-005, BASE-013, BASE-014, BASE-010, BASE-009.
 
 ## DONE
 - Worktrees created and both branches pushed with -u before any work.
@@ -197,3 +195,12 @@ new machinery rather than a new assertion in an existing suite.
   `labwc-session: %d passed, %d failed, %d skipped`. Both labwc OS suites run
   under `set +e` deliberately, because CI invokes `bash -e {0}` and under that
   an assignment from a failing command kills the run mid-way.
+
+## FOUND (round 9, fresh agent)
+- **`wtype` IS installed at `/usr/bin/wtype`** on the L16. virtual-keyboard-unstable-v1
+  is exactly what labwc feeds into its own seat, so BASE-014's "the rebound key
+  fires after --reconfigure" assertion IS deliverable headless. `ydotool`,
+  `dotool`, `wlrctl` are all absent; `swtpm`, `gamescope`, `steam`, `mangohud`,
+  `llama-server` absent on the L16 too (ollama exists at ~/.local/bin/ollama).
+  No `/usr/share/wayland-protocols` or `wlr-protocols` tree, so a hand-compiled
+  virtual-keyboard client is NOT the route — `wtype` is.

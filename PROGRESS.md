@@ -1244,3 +1244,107 @@ for its eight items first and record what that evidence already settles, so it
 works the gap instead of re-measuring covered ground — and the constraints were
 written as part of the work, since these items run straight into them: BASE-002
 **is** the live agent runtime the other five agents are talking to right now.
+
+- **2026-09-08 12:25** — **`trust-enforcement` landed; round 8 dispatched.**
+  apex-os `e67fab9 → 583355e`. Andre paused again mid-round and then said
+  "continue all work now": six agents stopped with `TaskStop`, one hand-run
+  snapshot, every branch back with `ahead=0`, and the run picked up where it
+  stopped.
+
+### APEX now refuses an update it cannot verify
+
+`apexd/apex/src/verify.rs` does real sigstore verification with `skopeo` and
+`openssl` and **no cosign on the machine**, against a **pinned** Sigstore root
+shipped by `Containerfile.base` rather than taken from the signature — because
+a cosign signature's `chain` annotation carries Fulcio's own intermediate and
+root, and verifying a certificate against a root the certificate handed you
+proves nothing.
+
+`verify::gate` is wired into `ops::update` **before** `channel::record_update`
+and **before** `FsyncGuard::disable`, and the ordering is asserted structurally
+rather than trusted: both of those write machine state, so a refusal after them
+would have recorded a health record for an update that never happened — which
+is what the rollout stop then reasons about — and left ostree's fsync off on a
+machine that is not updating. The escape hatch is `--allow-unverified`,
+deliberately not `--force`. 455 Rust tests in the crate (+51), a new
+`tests/test-apex-trust-enforcement.sh` at 77/0 built on real minted-CA
+cryptography, five mutation pairs, clippy clean.
+
+Two defects of the forbidden class were found and fixed inside the unit's own
+first design: an unreadable origin file (EACCES) **deployed ungated** under
+`signature=enforce`, and `refusal()` accused the publisher even for a check
+that never ran.
+
+### The landing caught what the branch could not see
+
+`tests/test-apex-trust-enforcement.sh` was **77/77 in the agent's worktree and
+73/1 on the first clean checkout**, failing its own first assertion: *"no pinned
+Fulcio root at `files/system/trust/fulcio-root.pem` — every update would be
+refused."*
+
+`.gitignore` line 13 carries `*.pem` under "Signing material — PRIVATE KEYS
+NEVER IN REPO", and it silently matched the **public** Sigstore root the
+verifier needs. `git add` said nothing. `git status` showed a clean tree. The
+suite passed because the file existed **untracked** in the worktree that wrote
+it.
+
+The severity is the whole point: under the shipped default
+(`signature=enforce`) a missing root is `CouldNotRun`, and `CouldNotRun`
+refuses. So this was not a missing feature — it was **a fleet that would have
+stopped updating, shipped by a rule written to prevent leaking a private key.**
+
+Fixed as `583355e`, with the bytes checked rather than assumed: self-signed,
+subject and issuer both `O=sigstore.dev, CN=sigstore`, valid 2021-10-07 to
+2031-10-05, SHA-256 `3B:A7:B6:…:80:C1` — byte-identical to the value
+`Containerfile.base` pins and fails the build over. The ignore is negated **by
+exact path**, not by directory, so the next `.pem` that wants to live there is a
+decision somebody makes rather than an accident that inherits an exemption.
+
+**The general lesson, worth more than the fix:** a green suite in a worktree is
+not evidence about the committed tree. `git status` cannot tell you about a file
+`.gitignore` is hiding. Every round-8 brief now says: run `git check-ignore -v`
+on any new file whose extension might be ignored.
+
+### A near miss worth writing down
+
+While creating `enforcement.conf`, the agent used an **unquoted** heredoc
+(`cat > f <<CONF`), and bash command-substituted the backticks inside its own
+explanatory comments — one of which was `` `apex update` ``. It executed on the
+L16. Nothing was staged: the root check exited it, and `rpm-ostree status`
+afterwards read `State: idle` with no staged deployment and the booted digest
+unchanged. **One permission check stood between a documentation comment and a
+deployment.** Quote the delimiter (`<<'CONF'`) whenever the body is prose that
+may contain backticks — which is most prose in this repository.
+
+### Round 8: the same six units, all with work in flight
+
+`p0-014` (commits 1–3 and the harness fix pushed; mutation proofs, then
+enforcement, then the relaxation), `p1-023` (wiring, indicator and help prose
+all pushed; P1-024's handoff packet mid-build in the apex-os half), `p2-010`
+(P2-010 and P2-014 done; P2-015 firmware mid-build across seven paths),
+`p1-035` (P1-035 and P1-036 done; P1-037 capsules mid-build across eleven),
+`base-partials` and `p1-025`.
+
+Two cards were stale by exactly one step — `p0-014` still called commit 3
+uncommitted, and `base-partials` still said "await the two recon sweeps" — so
+both briefs make correcting that line the first card edit. That is now the
+third time a `NEXT` written just before the commit that answered it has cost
+this program something.
+
+**And the recon that would have died with its parent is on the card instead.**
+`base-partials`' recon subagent finished, reported, and then its parent was
+stopped — so the orchestrator wrote the whole report into
+`state/agents/base-partials.md` as a `## RECON (DO NOT RE-DERIVE)` section:
+`headless.sh`'s API, how `check-headless-runners.sh`'s four rules work and how a
+new runner satisfies them, which labwc suites live in which repo, the greeter's
+raw-`Name=` chain, and the per-repo counting conventions. A subagent's report
+reaches the parent's context, not the disk; if the parent dies, it is gone. The
+card is the only place that survives, and it now holds it.
+
+Two structural findings came out of that recon and go to `base-partials`:
+**there is no name-translation map anywhere in either repo** — the greeter
+prints raw `Name=` values, `MiscPage` omits labwc from its compositor control
+entirely, and "Floating" exists only in comments and docs — and **BASE-014's
+last assertion needs new machinery**, because no "the rebound key fires after
+`labwc --reconfigure`" test exists anywhere, `test-labwc-keybinds.sh` never
+starts labwc, and there is no `wtype`/`ydotool` in either repo.
