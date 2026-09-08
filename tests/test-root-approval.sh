@@ -12,8 +12,23 @@
 #  and testing it "needs a real sudo prompt". It does not. `unshare -r` gives a
 #  process a real effective uid of 0 — the kernel's own answer, the one
 #  `ops::effective_uid` reads out of /proc/self/status — and asks nobody for a
-#  password. Nothing here raises a polkit or sudo prompt, and nothing here can:
-#  no `sudo`, no `pkexec`, no `pkcheck`.
+#  password. Nothing here raises a polkit or sudo prompt: no `pkexec`, no
+#  `pkcheck`, and the one `sudo` is `sudo -n`, which by definition cannot ask.
+#
+#  ── AND IT NEEDS A LOGIN SESSION, WHICH IS NOT THE SAME AS A ROOT UID ───────
+#
+#  `unshare -r` answers "am I root". It does not answer "is a human at this
+#  machine", and §7 asks both: `privilege::decide` refuses a non-local origin
+#  before the euid is looked at. A user namespace does not change the cgroup,
+#  so a runner that systemd started is still a `scheduled-job` inside it and
+#  every assertion past the first approval is refused for a reason that has
+#  nothing to do with the execution path being tested. Measured on 2026-09-08
+#  in `…/user@1000.service/app.slice/x.scope`: **12 passed, 8 failed**, against
+#  20/0 from a login session. So this suite re-enters itself through
+#  tests/in-login-session.sh first, exactly as test-privilege-requests.sh
+#  does. That costs one `sudo -n` and no prompt; see that file for what it
+#  does when it cannot get a session, and for why it is not allowed to fake
+#  one.
 #
 #  ── WHAT A USER NAMESPACE IS, AND WHAT IT IS NOT ────────────────────────────
 #
@@ -39,6 +54,17 @@ set -uo pipefail
 set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# A local origin, before anything else — see the header. The inner half below
+# is this same file re-executed inside the namespace and inherits both the
+# session and the guard, so it must not try to re-enter: `sudo -n` from a uid 0
+# that only exists inside a user namespace would fail anyway, and the wrapper
+# would then print its degradation notice in the middle of the run.
+if [ "${APEX_ROOT_APPROVAL_INNER:-}" != "1" ] \
+   && [ -z "${APEX_LOGIN_SESSION_WRAPPED:-}" ] \
+   && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
+    exec "${ROOT}/tests/in-login-session.sh" "${BASH_SOURCE[0]}" "$@"
+fi
 
 pass=0; fail=0
 ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
