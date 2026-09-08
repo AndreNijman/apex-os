@@ -272,6 +272,68 @@ both() { cat "$TMP/out" "$TMP/err" > "$TMP/all"; }
 gate() { run "$1" trust --gate "${@:2}"; }
 
 # ═════════════════════════════════════════════════════════════════════════════
+sec "the pinned Fulcio root the image ships, and the path the verifier reads"
+# The most dangerous file in this unit. Under the shipped default
+# (`signature=enforce`) a root that is missing or unreadable is `CouldNotRun`,
+# which REFUSES — so a root that does not land, or lands with the wrong bytes,
+# refuses every update on every machine. These assertions are on the SOURCE
+# tree, so they fail here rather than in the fleet.
+ROOTPEM="$REPO/files/system/trust/fulcio-root.pem"
+CONF="$REPO/files/system/trust/enforcement.conf"
+VERIFYRS="$REPO/apexd/apex/src/verify.rs"
+# The full fingerprint, written out: an elided one is not a check anybody can
+# repeat. It matches the root the live ghcr.io signature carries, and the value
+# independently fetched from sigstore/root-signing when this was first
+# measured — which is what makes pinning it safe rather than merely different.
+WANT_FP='3B:A7:B6:CC:4E:95:46:9D:4D:33:4B:49:CB:25:7A:D8:53:70:76:FA:84:B0:CA:87:FF:4E:CF:E6:A5:46:80:C1'
+if [[ -f "$ROOTPEM" ]]; then
+    ok "the image ships a pinned Fulcio root"
+    got="$(openssl x509 -noout -fingerprint -sha256 -in "$ROOTPEM" 2>/dev/null | sed 's/.*=//')"
+    [[ "$got" == "$WANT_FP" ]] && ok "and it is the Sigstore root, by SHA-256 fingerprint" \
+        || bad "the pinned root is $got, expected $WANT_FP"
+    # A root, not an intermediate that would itself need one.
+    sub="$(openssl x509 -noout -subject -in "$ROOTPEM" 2>/dev/null)"
+    iss="$(openssl x509 -noout -issuer -in "$ROOTPEM" 2>/dev/null | sed 's/^issuer=/subject=/')"
+    [[ -n "$sub" && "$sub" == "$iss" ]] && ok "and it is self-signed, so it is a root" \
+        || bad "the pinned root is not self-signed (subject $sub, issuer $iss)"
+    # Not expired, and not about to be: the verifier checks the chain at the
+    # LEAF's notBefore, which is in the past, but a root that has expired
+    # before the leaf was issued would still refuse everything.
+    openssl x509 -noout -checkend 0 -in "$ROOTPEM" >/dev/null 2>&1 \
+        && ok "and it has not expired" || bad "the pinned Fulcio root has expired"
+else
+    bad "no pinned Fulcio root at files/system/trust/fulcio-root.pem — every update would be refused"
+fi
+# The path in the source and the path in the image have to be the same string.
+# They are in two files, and nothing but this connects them.
+if grep -q 'FULCIO_ROOT: &str = "/usr/share/apex-os/trust/fulcio-root.pem"' "$VERIFYRS"; then
+    ok "verify.rs reads /usr/share/apex-os/trust/fulcio-root.pem"
+else
+    bad "verify.rs's FULCIO_ROOT is not the path the image installs"
+fi
+for cf in Containerfile.base; do
+    if grep -q 'files/system/trust/fulcio-root.pem  */usr/share/apex-os/trust/fulcio-root.pem' "$REPO/$cf"; then
+        ok "$cf installs it there"
+    else
+        bad "$cf does not COPY the pinned root to that path"
+    fi
+    if grep -q "$WANT_FP" "$REPO/$cf"; then
+        ok "$cf fails the build if the fingerprint changes"
+    else
+        bad "$cf does not assert the pinned root's fingerprint at build time"
+    fi
+done
+# The shipped enforcement defaults, as the runtime parses them.
+if [[ -f "$CONF" ]]; then
+    grep -qx 'signature=enforce' "$CONF" && ok "the image default enforces the signature" \
+        || bad "the shipped enforcement.conf does not set signature=enforce"
+    grep -qx 'provenance=warn' "$CONF" && ok "and only warns on provenance, which nothing publishes yet" \
+        || bad "the shipped enforcement.conf does not set provenance=warn"
+else
+    bad "no shipped enforcement.conf"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
 sec "a real signature, verified by the binary with skopeo and openssl only"
 # The claim the whole unit rests on. cosign is not packaged for Fedora — `dnf5
 # repoquery cosign 'cosign*' 'sigstore*'` is empty across every configured
@@ -528,7 +590,7 @@ sec "when the tag has moved, the gate judges the new image and --verify the old"
 # of them can be enforced. Measured live while writing this: `:daily` served
 # sha256:daf8c8eb… while the author's L16 was booted on sha256:308127d9….
 R="$(crypto_fixture moved 'signature=enforce')"
-BOOTED='sha256:308127d9cefeada90b1cb47b8f9c1cf6e8bd8f13ae5f3b0e2d7f4a6c8e1b3d5f'
+BOOTED='sha256:308127d9cefeada90414ae37bdc8175d011c1f851ea9dde1661279a5da5bd89b'
 printf '{"deployments":[{"booted":true,"base-commit-meta":{"ostree.manifest-digest":"%s"}}]}\n' \
     "$BOOTED" > "$R/rpm-ostree-status.json"
 gate "$R" >/dev/null; both

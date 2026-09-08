@@ -1118,6 +1118,48 @@ RUN systemctl --global enable apex-shell-firstrun.service
 # The extension records the OS version it was built for and systemd refuses to
 # merge a mismatched one; apex-sysext-rebuild.service turns that refusal into an
 # automatic rebuild after an OS upgrade instead of vanished packages.
+# ── roadmap §27: what the machine needs to verify an image itself ───────────
+#
+# `apex update` refuses an image whose cosign signature does not verify, and it
+# does the verification with skopeo and openssl — cosign is not packaged for
+# Fedora at all, so a gate built on it would be dead code on every machine this
+# project ships to.
+#
+# `fulcio-root.pem` is the Sigstore root the signing certificate must chain to.
+# It is PINNED, and shipped rather than taken from the signature, because a
+# cosign signature's `chain` annotation carries Fulcio's intermediate AND root:
+# verifying a certificate against a root the certificate handed you proves
+# nothing at all.
+#
+# This file is load-bearing in the dangerous direction. Under the shipped
+# default (`signature=enforce`) a root that is missing or unreadable is
+# `CouldNotRun`, which REFUSES — so a build that shipped the wrong bytes here
+# would refuse every update on every machine. Hence the assertions below: the
+# build fails rather than the fleet.
+COPY files/system/trust/fulcio-root.pem  /usr/share/apex-os/trust/fulcio-root.pem
+COPY files/system/trust/enforcement.conf /usr/share/apex-os/trust/enforcement.conf
+RUN set -eux; \
+    # It has to be a certificate at all, and openssl has to be here to say so —
+    # the same openssl the verifier will use at runtime.
+    command -v openssl >/dev/null || { echo "FATAL: the trust gate needs openssl"; exit 1; }; \
+    command -v skopeo  >/dev/null || { echo "FATAL: the trust gate needs skopeo"; exit 1; }; \
+    openssl x509 -noout -in /usr/share/apex-os/trust/fulcio-root.pem; \
+    # And it has to be THE Sigstore root, by fingerprint. Checked here because
+    # the failure mode of the wrong root is not a broken feature, it is a fleet
+    # that will not update: every good signature would stop chaining.
+    want=3B:A7:B6:CC:4E:95:46:9D:4D:33:4B:49:CB:25:7A:D8:53:70:76:FA:84:B0:CA:87:FF:4E:CF:E6:A5:46:80:C1; \
+    got="$(openssl x509 -noout -fingerprint -sha256 \
+             -in /usr/share/apex-os/trust/fulcio-root.pem | sed 's/.*=//')"; \
+    test "$got" = "$want" || { echo "FATAL: pinned Fulcio root is $got, expected $want"; exit 1; }; \
+    # A self-signed root, i.e. actually a root and not an intermediate that
+    # would need one.
+    test "$(openssl x509 -noout -subject -in /usr/share/apex-os/trust/fulcio-root.pem)" \
+       = "$(openssl x509 -noout -issuer  -in /usr/share/apex-os/trust/fulcio-root.pem | sed 's/^issuer=/subject=/')"; \
+    # The defaults have to parse as the runtime parses them, or a typo here
+    # ships a machine whose enforcement is not what this file says.
+    grep -qx 'signature=enforce'  /usr/share/apex-os/trust/enforcement.conf; \
+    grep -qx 'provenance=warn'    /usr/share/apex-os/trust/enforcement.conf
+
 COPY --chmod=0755 files/system/libexec/apex-pkg /usr/libexec/apex-pkg
 COPY files/system/units/apex-sysext-rebuild.service \
      /usr/lib/systemd/system/apex-sysext-rebuild.service
