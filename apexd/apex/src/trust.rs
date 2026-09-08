@@ -897,20 +897,16 @@ pub fn render(r: &Report) -> String {
 /// as far as they can: it said nothing was checked, and nothing was.
 fn gate_main(roots: &Roots, json: bool) -> i32 {
     let report = offline_report(roots);
-    let Some(reference) = report.image.clone() else {
-        // Nothing to deploy from, so nothing to accept or refuse.
-        let why = report
-            .image_error
-            .clone()
-            .unwrap_or_else(|| "this deployment has no container image reference".to_string());
-        if json {
-            println!("{}", json!({ "decision": "not-decided", "reason": why }));
-        } else {
-            println!("apex: no image to check — {why}");
-        }
-        return 0;
+    // Handed to the gate rather than unwrapped here, for the same reason
+    // `ops::update` does: an origin file nobody could read is not a reason to
+    // skip the check, it is a reason nothing could be checked.
+    let found = match (&report.image, &report.image_error) {
+        (Some(r), _) => Ok(Some(r.as_str())),
+        (None, Some(e)) => Err(e.as_str()),
+        (None, None) => Ok(None),
     };
-    let g = crate::verify::gate(roots, &reference);
+    let reference = report.image.clone().unwrap_or_else(|| "(none)".to_string());
+    let g = crate::verify::gate(roots, found);
     if json {
         let mut j = crate::verify::to_json(&g.verification, &g.enforcement, &g.decision);
         if let Value::Object(m) = &mut j {

@@ -1281,8 +1281,39 @@ pub struct Gate {
 /// handle: it is both checks answering [`Verdict::CouldNotRun`], with the
 /// reason, and [`decide`] deciding what that is worth. Returning `Err` here
 /// would put a second policy decision in every caller.
-pub fn gate(roots: &Roots, reference: &str) -> Gate {
+///
+/// `found` is what [`crate::trust::offline_report`] made of the deployment's
+/// origin: the reference, or the reason it could not be read. A reference
+/// nobody could READ is `CouldNotRun` on both arms, exactly like a reference
+/// nobody could resolve — this is the EACCES rule this repository swept
+/// fourteen readers for in September, and skipping the gate on it was the
+/// same defect one layer up. `Ok(None)` — a deployment that genuinely has no
+/// container image reference — is the only state that skips: there is no
+/// image, so refusing on the grounds that one could not be verified would
+/// refuse on the grounds that something which does not exist was not checked.
+pub fn gate(roots: &Roots, found: Result<Option<&str>, &str>) -> Gate {
     let enforcement = enforcement(roots);
+    let reference = match found {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            // Nothing to deploy from. Both arms could not run, and `decide`
+            // is still the one that says what that is worth — but the reason
+            // says which kind of nothing it is, because "this is not a
+            // container deployment" and "I could not tell" must not print the
+            // same sentence.
+            let why = "this deployment has no container image reference, so there is no \
+                       image to verify"
+                .to_string();
+            return not_run("(no image)", "(no repository)", &why, &enforcement);
+        }
+        Err(e) => {
+            let why = format!(
+                "the deployment's own record of which image it runs could not be read, so \
+                 there is nothing to look up: {e}"
+            );
+            return not_run("(unknown)", "(unknown)", &why, &enforcement);
+        }
+    };
     match resolve(roots, reference) {
         Ok(digest) => {
             let verification = verify_image(roots, reference, &digest);
@@ -1291,19 +1322,28 @@ pub fn gate(roots: &Roots, reference: &str) -> Gate {
         }
         Err(why) => {
             let why = format!("the registry would not say which digest {reference} is: {why}");
-            let verification = Verification {
-                // The reference, because there is no digest — and saying so
-                // in the field a reader looks at beats inventing a digest or
-                // printing an empty one.
-                digest: reference.to_string(),
-                repo: repo_of(reference).to_string(),
-                signature: Verdict::CouldNotRun(why.clone()),
-                provenance: Verdict::CouldNotRun(why),
-            };
-            let decision = decide(&verification, &enforcement);
-            Gate { verification, enforcement, decision }
+            // The reference stands in for the digest, because there is no
+            // digest — and saying so in the field a reader looks at beats
+            // inventing one or printing an empty one.
+            not_run(reference, repo_of(reference), &why, &enforcement)
         }
     }
+}
+
+/// A gate whose two checks could not run, for the same reason.
+///
+/// One helper so that every "nothing could be checked" path reaches [`decide`]
+/// rather than returning early past it. An early return is how the reference
+/// this gate could not read came to be deployed without being checked.
+fn not_run(digest: &str, repo: &str, why: &str, e: &Enforcement) -> Gate {
+    let verification = Verification {
+        digest: digest.to_string(),
+        repo: repo.to_string(),
+        signature: Verdict::CouldNotRun(why.to_string()),
+        provenance: Verdict::CouldNotRun(why.to_string()),
+    };
+    let decision = decide(&verification, e);
+    Gate { verification, enforcement: e.clone(), decision }
 }
 
 // ── reporting ────────────────────────────────────────────────────────────────
@@ -1447,9 +1487,10 @@ pub fn refusal(v: &Verification, e: &Enforcement, d: &Decision, escape: &str) ->
     }
     s.push_str(&format!(
         "\nAPEX publishes a cosign signature for every image, and this machine checks it \
-         before deploying.\nA refusal here means the image the registry is serving is not \
-         the one this machine\nwas told to expect, so the update stops before anything is \
-         downloaded.\n\n\
+         before deploying.\nA refusal means this machine could not establish that the image \
+         the registry is serving\nis the one it was told to expect — see the line above for \
+         whether that is because the\nsignature was wrong or because the check could not be \
+         made. Either way the update\nstops before anything is downloaded.\n\n\
          If you know why and want it anyway: `sudo apex update {escape}`.\n\
          To change what is enforced permanently, edit {OVERRIDE_PATH} — see \
          docs/trust-enforcement.md.\n"
@@ -1657,6 +1698,28 @@ mod tests {
     }
 
     #[test]
+    fn no_part_of_a_refusal_accuses_the_publisher_when_the_check_did_not_run() {
+        // The headline was the obvious half. The paragraph underneath used to
+        // say, unconditionally, that "the image the registry is serving is not
+        // the one this machine was told to expect" — which contradicts the
+        // headline three lines above it whenever the verdict is CouldNotRun,
+        // and tells a user with a broken network that they have been attacked.
+        let e = sig_only(Strictness::Enforce);
+        let ver = v(Verdict::CouldNotRun("dial tcp: lookup ghcr.io: no such host".into()), verified());
+        let d = decide(&ver, &e);
+        let out = refusal(&ver, &e, &d, "--allow-unverified").expect("a refusal");
+        assert!(!out.contains("is not the one this machine"), "{out}");
+        assert!(out.contains("could not establish"), "{out}");
+        // The sentence still has to hold for a real failure, which is the
+        // reason it was phrased as an accusation in the first place.
+        let ver = v(Verdict::Failed("the digest is not the one signed".into()), verified());
+        let d = decide(&ver, &e);
+        let out = refusal(&ver, &e, &d, "--allow-unverified").expect("a refusal");
+        assert!(out.contains("could not establish"), "{out}");
+        assert!(out.contains("does not verify"), "{out}");
+    }
+
+    #[test]
     fn nothing_that_proceeds_produces_a_refusal() {
         let e = sig_only(Strictness::Warn);
         for verdict in [verified(), Verdict::Absent("x".into()), Verdict::CouldNotRun("y".into())] {
@@ -1848,6 +1911,55 @@ mod tests {
         assert!(!fixture_without_registry(&Roots { fixture: None }));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&with);
+    }
+
+    #[test]
+    fn an_origin_file_nobody_could_read_is_never_deployed_ungated() {
+        // The EACCES rule, at the gate. This repository swept fourteen readers
+        // in September for collapsing "permission denied" into "absent" and
+        // then reporting the guess as a checked fact; skipping the gate on an
+        // unreadable origin was the same defect one layer up, and it deployed
+        // rather than merely mis-reported.
+        let dir = fixture("unreadable-origin");
+        let roots = Roots { fixture: Some(dir.clone()) };
+        let g = gate(&roots, Err("/proc/cmdline: Permission denied"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(matches!(g.verification.signature, Verdict::CouldNotRun(_)), "{:?}", g.verification);
+        assert!(matches!(g.verification.provenance, Verdict::CouldNotRun(_)), "{:?}", g.verification);
+        assert!(g.decision.refuses(), "the shipped default must refuse this: {:?}", g.decision);
+        let Decision::Refuse { lines, .. } = &g.decision else { unreachable!() };
+        assert!(lines[0].contains("Permission denied"), "{lines:?}");
+        // Not an unsigned image. Nobody knows whether it is signed.
+        assert!(!lines[0].contains("has no signature"), "{lines:?}");
+
+        // Under `warn` the same machine still updates, because a gap is a gap.
+        let dir = fixture("unreadable-origin-warn");
+        let roots = Roots { fixture: Some(dir.clone()) };
+        std::fs::create_dir_all(dir.join("etc/apex")).unwrap();
+        std::fs::write(dir.join("etc/apex/trust.conf"), "signature=warn\nprovenance=warn\n").unwrap();
+        let g = gate(&roots, Err("/proc/cmdline: Permission denied"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!g.decision.refuses(), "{:?}", g.decision);
+    }
+
+    #[test]
+    fn a_deployment_with_no_image_at_all_is_told_apart_from_one_nobody_could_read() {
+        // Both reach `decide` — neither returns early past it — but they must
+        // not print the same sentence. "This is not a container deployment"
+        // and "I could not tell what it runs" are different facts, and only
+        // one of them is anybody's fault.
+        let dir = fixture("no-image");
+        let roots = Roots { fixture: Some(dir.clone()) };
+        let none = gate(&roots, Ok(None));
+        let unread = gate(&roots, Err("/proc/cmdline: Permission denied"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let a = none.verification.signature.reason().unwrap_or_default().to_string();
+        let b = unread.verification.signature.reason().unwrap_or_default().to_string();
+        assert!(a.contains("no container image reference"), "{a}");
+        assert!(b.contains("could not be read"), "{b}");
+        assert_ne!(a, b);
     }
 
     #[test]
