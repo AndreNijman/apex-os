@@ -528,7 +528,7 @@ sec "when the tag has moved, the gate judges the new image and --verify the old"
 # of them can be enforced. Measured live while writing this: `:daily` served
 # sha256:daf8c8eb… while the author's L16 was booted on sha256:308127d9….
 R="$(crypto_fixture moved 'signature=enforce')"
-BOOTED='sha256:308127d9cefeada90b1cb47b8f9c1cf6e8bd8f13ae5f3b0e2d7f4a6c8e1b3d5f'
+BOOTED='sha256:308127d9cefeada90414ae37bdc8175d011c1f851ea9dde1661279a5da5bd89b'
 printf '{"deployments":[{"booted":true,"base-commit-meta":{"ostree.manifest-digest":"%s"}}]}\n' \
     "$BOOTED" > "$R/rpm-ostree-status.json"
 gate "$R" >/dev/null; both
