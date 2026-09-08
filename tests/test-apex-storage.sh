@@ -3,7 +3,7 @@
 #  test-apex-storage.sh — executable assertions for roadmap §48's Storage
 #  Manager: the read-and-report half.
 #
-#  ── The three failures this exists to catch ─────────────────────────────────
+#  ── The four failures this exists to catch ──────────────────────────────────
 #
 #  1. A DYING DISK REPORTED AS A DISK NOBODY COULD MEASURE. smartctl's exit
 #     status is a bitmask. Bits 0-2 mean the read did not happen; bits 3-7 mean
@@ -807,10 +807,16 @@ if [[ "$ERC" -eq 0 ]]; then
 else
     bad "a legible non-ESP partition was refused: $(cat "$TMP/erase")"
 fi
-# And the real disk's own unnamed partitions are refused for REASONS, never
-# for having no name. Asserted without asking for a permit, because
-# /dev/nvme0n1p3 exists on this machine and holds another operating system.
-erase_try /dev/nvme0n1p3 /dev/nvme0n1p3
+# And the real disk's own unnamed partitions are judged on REASONS, never on
+# having no name. **Deliberately with the WRONG token**, which is the technique
+# the live sudo run against real machine state used: `Unconfirmed` guarantees
+# no permit can be issued while every other rule still reports. /dev/nvme0n1p3
+# exists on this machine and holds another installed operating system, so a
+# correct token here would be a permit for it — safe only while the fixture
+# gate holds, and a mutation battery exists to remove exactly that kind of
+# only-thing-holding.
+erase_try /dev/nvme0n1p3 not-the-token
+has 'type it exactly' "$TMP/erase" "the wrong token alone stops it, so the rest can report freely"
 hasnt 'could not be checked' "$TMP/erase" \
     "an unnamed partition with a legible type is not treated as unverifiable"
 hasnt 'EFI System Partition' "$TMP/erase" "nor mistaken for the ESP"
@@ -886,6 +892,19 @@ refused_with 'could not all be listed' \
 hasnt 'would erase' "$TMP/erase" "and certainly not permitted"
 chmod 755 "$FIX/sys/devices/pci0000:00/nvme/nvme0/nvme0n1"
 
+# The other half of the same rule, and the one the battery proved was
+# untested: the disk's directory LISTS perfectly, and one partition's own
+# directory cannot be traversed, so the `partition` marker inside it cannot be
+# stat'ed. Folding that into "not a partition" is one ErrorKind away and the
+# whole-disk refusal keeps working — it just stops mentioning the ESP.
+# Mutation M10 was completely green until this existed.
+chmod 000 "$FIX/sys/devices/pci0000:00/nvme/nvme0/nvme0n1/nvme0n1p1"
+erase_try /dev/nvme0n1 /dev/nvme0n1
+refused_with 'could not all be listed' \
+    "a partition whose own directory cannot be traversed refuses the whole request"
+hasnt 'would erase' "$TMP/erase" "rather than quietly not being a partition"
+chmod 755 "$FIX/sys/devices/pci0000:00/nvme/nvme0/nvme0n1/nvme0n1p1"
+
 sec "an attached loop device is in no mount table at all"
 # The finding this rule exists for: /dev/loop0 on the development machine is
 # attached to /lib/extensions/apex-user.raw, a merged system extension carrying
@@ -912,6 +931,17 @@ if [[ "$ERC" -eq 0 ]]; then
 else
     bad "the correct backing file was still refused: $(cat "$TMP/erase")"
 fi
+
+# `backing_file` exists and cannot be read. Reading that as "not an attached
+# loop device" is one `Err` arm away, and it is the arm that erases the live
+# system extension: /dev/loop0's node is there, and only its CONTENT says what
+# it would destroy. Mutation M11 was completely green until this existed.
+chmod 000 "$FIX/sys/devices/virtual/block/loop8/loop/backing_file"
+erase_try /dev/loop8 /dev/loop8
+refused_with 'could not be checked' "an unreadable backing_file refuses"
+has 'attached loop device' "$TMP/erase" "naming the check that did not happen"
+hasnt 'would erase' "$TMP/erase" "and is never read as 'not a loop device'"
+chmod 644 "$FIX/sys/devices/virtual/block/loop8/loop/backing_file"
 
 # Measured: /sys/block/loopN/loopNp1 has a `partition` file and NO loop/
 # directory, so read on its own a loop partition answers "not an attached loop
