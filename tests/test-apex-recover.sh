@@ -720,6 +720,70 @@ else
     bad "on a signed UKI the rescue route is absent" "$out"
 fi
 
+# ── the label, when the identity itself could not be read ────────────────────
+# A whole-DIRECTORY efivarfs refusal — efivarfs masked in a container, an LSM
+# policy — takes LoaderInfo down together with StubInfo. `detect_bootloader`
+# then has no marker to look at and answers off the kernel command line, which
+# carries `ostree=` on every APEX image and so always says grub. The rescue
+# ROUTE was already gated on that (the assertion two blocks up). The LABEL was
+# not: it printed the bare word, so `apex recover status` and `apex boot
+# status` gave contradictory accounts of one machine, and the contradicting one
+# was the recovery surface.
+sec "apex recover status — a bootloader identity that could not be read"
+SEALED="$WORK/fx-sealed"; mkfixture "$SEALED" healthy
+printf '\x06\x00\x00\x00s\x00y\x00s\x00t\x00e\x00m\x00d\x00-\x00b\x00o\x00o\x00t\x00' \
+    > "$SEALED/sys/firmware/efi/efivars/LoaderInfo-$G"
+chmod 000 "$SEALED/sys/firmware/efi/efivars"
+# Root and CAP_DAC_OVERRIDE walk straight through mode 000, so the refusal is
+# CHECKED rather than assumed. Unchecked, every assertion below would run
+# against a perfectly readable directory and pass for the wrong reason — which
+# is the failure mode this suite's own header calls out.
+if cat "$SEALED/sys/firmware/efi/efivars/LoaderInfo-$G" >/dev/null 2>&1; then
+    chmod 755 "$SEALED/sys/firmware/efi/efivars"
+    bad "the efivarfs seal takes, so the refusal under test is real" \
+        "mode 000 was walked through — running as root or with CAP_DAC_OVERRIDE"
+else
+    ok "the efivarfs seal takes, so the refusal under test is real"
+    out=$(APEX_RECOVER_ROOT="$SEALED" apex recover status)
+    saysit "the label still prints the cmdline fallback" "bootloader : grub" "$out"
+    saysit "…and says on the same surface that it was not confirmed" \
+        "not confirmed: LoaderInfo could not be read" "$out"
+    saysit "…and names where the reason can be read in full" \
+        "apex boot status" "$out"
+    jout=$(APEX_RECOVER_ROOT="$SEALED" apex recover status --json)
+    if python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+# The VALUE is a compatibility surface — apex-shell's RecoveryService.qml reads
+# it — so the caveat arrives as a sibling key and never as a changed label.
+assert d['bootloader'] == 'grub', d['bootloader']
+why = d['bootloaderUnavailable']
+assert why, 'the JSON must carry the reason, got %r' % (why,)
+assert 'LoaderInfo' in why, why
+assert 'Permission denied' in why, why
+" "$jout" 2>&1; then
+        ok "status --json carries bootloaderUnavailable beside an unchanged label"
+    else
+        bad "status --json carries bootloaderUnavailable" "$(head -c 200 <<<"$jout")"
+    fi
+    chmod 755 "$SEALED/sys/firmware/efi/efivars"
+fi
+# The other half, and the one that stops the caveat from being prose that
+# always prints and therefore tells nobody anything: a machine whose efivarfs
+# reads fine must carry no caveat, in either format. An absent LoaderInfo is a
+# reading — every GRUB machine has one — not a refusal.
+out=$(APEX_RECOVER_ROOT="$HEALTHY" apex recover status)
+hasnt "a readable efivarfs prints no caveat at all" "not confirmed" "$out"
+if python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+assert d['bootloaderUnavailable'] is None, d['bootloaderUnavailable']
+" "$(APEX_RECOVER_ROOT="$HEALTHY" apex recover status --json)" 2>/dev/null; then
+    ok "…and the JSON key is present-and-null rather than missing"
+else
+    bad "the JSON key is null on a machine that could be read" ""
+fi
+
 sec "apex doctor --json"
 out=$(apex doctor --json)
 if python3 -c "
