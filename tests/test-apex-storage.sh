@@ -72,6 +72,37 @@ has() {
         bad "$3 — no '$1' in:"; sed 's/^/       /' "$2" >&2
     fi
 }
+
+# ── why no check below is `producer | grep -q` ───────────────────────────────
+#
+#  Under `set -o pipefail` that shape is a COIN FLIP, and in the direction
+#  these checks are written it is a SILENT one. `grep -q` exits at its first
+#  match and SIGPIPEs whatever feeds it, so the PIPELINE reports 141 rather
+#  than grep's 0, and an `if` reads a match as "no match" — which for a check
+#  whose match means `bad` turns a real regression into a pass.
+#
+#  Measured, and it is not a corner case. A mutation was spliced into
+#  `apex/src/storage.rs` that made the CLI look up `ID_SERIAL_SHORT` — the
+#  exact privacy regression the first check below exists to catch — 35 lines
+#  into a 1,331-line file. The raw pipeline returned **141 in 40 of 40** bash
+#  trials, and this suite **failed to report it in 24 of 25 runs**. The check
+#  guarding the disk serial was 96% blind to the one change it is for.
+#
+#  A small producer hides it: `awk '/^fn x/,/^}/'` emits one function, finishes
+#  writing before grep can exit, and caught the same class of mutation 20/20.
+#  That is luck about a pipe buffer, not a property anyone maintains — a
+#  function that grows, or a match near its start, flips it. So every check
+#  captures the text first; command substitution reads its producer to EOF, so
+#  there is nobody left to signal.
+absent() {   # absent <text> <extended-regex> <message>
+    if grep -qE -- "$2" <<<"$1"; then
+        bad "$3 — matched /$2/ in:"; sed 's/^/       /' <<<"$1" >&2
+    else ok "$3"; fi
+}
+present() {  # present <text> <extended-regex> <message>
+    if grep -qE -- "$2" <<<"$1"; then ok "$3"
+    else bad "$3 — no /$2/ in:"; sed 's/^/       /' <<<"$1" >&2; fi
+}
 hasnt() {
     if grep -qF -- "$1" "$2"; then
         bad "$3 — found '$1' in:"; sed 's/^/       /' "$2" >&2
@@ -124,16 +155,10 @@ sec "no report can print a disk serial"
 # clean; this is the structural half, and it looks for a LOOKUP rather than for
 # the string, because the fixtures in the test module contain the string on
 # purpose.
-if sed -E 's://.*$::' "$CLI" | grep -qE 'get\("ID_SERIAL|ID_SERIAL[A-Z_]*"\]'; then
-    bad "the CLI looks up ID_SERIAL"
-else
-    ok "the CLI never looks up ID_SERIAL"
-fi
-if sed -E 's://.*$::' "$CLI" | grep -qE 'Command::new.*nvme|"/usr/sbin/nvme"'; then
-    bad "nvme list, which prints the serial to any user, is spawned"
-else
-    ok "nvme-cli is never spawned"
-fi
+CLI_CODE="$(sed -E 's://.*$::' "$CLI")"
+[[ -n "$CLI_CODE" ]] || bad "$CLI could not be read at all"
+absent "$CLI_CODE" 'get\("ID_SERIAL|ID_SERIAL[A-Z_]*"\]' "the CLI never looks up ID_SERIAL"
+absent "$CLI_CODE" 'Command::new.*nvme|"/usr/sbin/nvme"' "nvme-cli is never spawned"
 
 sec "the notifier will not wake somebody over a read it could not perform"
 has 'rc=$?' "$NOTICE" "the exit status is captured before anything else runs"
@@ -154,11 +179,9 @@ sec "a fixture can never erase anything"
 # machine() reads came from files the suite wrote, so a fixture answering
 # euid 0 holds a real Permit for a device that does not exist.
 has 'if roots.is_fixture() {' "$CLI" "the fixture gate exists"
-if awk '/^fn erase\(/,/^}/' "$CLI" | grep -q 'is_fixture'; then
-    ok "and it is inside erase() itself"
-else
-    bad "erase() does not consult is_fixture"
-fi
+ERASE="$(awk '/^fn erase\(/,/^}/' "$CLI")"
+[[ -n "$ERASE" ]] || bad "fn erase() was not found in $CLI"
+present "$ERASE" 'is_fixture' "and it is inside erase() itself"
 # Order matters more than presence: a gate below the spawn is not a gate.
 gate="$(awk '/^fn erase\(/,/^}/' "$CLI" | grep -n 'is_fixture' | head -1 | cut -d: -f1)"
 spawn="$(awk '/^fn erase\(/,/^}/' "$CLI" | grep -n 'Command::new(WIPEFS)' | head -1 | cut -d: -f1)"
@@ -175,11 +198,8 @@ has 'const WIPEFS: &str = "/usr/sbin/wipefs"' "$CLI" \
 # under sudo is /root. The file a user is told to keep would land somewhere
 # they will not look and may not be able to read.
 has '--backup={}' "$CLI" "the backup directory is passed explicitly"
-if sed -E 's://.*$::' "$CLI" | grep -qE '"--backup"'; then
-    bad "a bare --backup has appeared, which writes into root's home"
-else
-    ok "and never as a bare --backup"
-fi
+absent "$CLI_CODE" '"--backup"' \
+    "and never as a bare --backup, which would write into root's home"
 
 sec "a refused erase is a different exit status from a failed one"
 # A caller — a settings page, a script, this suite — has to tell "the guard
@@ -193,51 +213,40 @@ sec "the enumerator sees every block device, and says so when it cannot"
 # wrong here: it would make every loop device NotAKnownBlockDevice — the one
 # class this command is ever tested against — and /dev/dm-0 unnameable while
 # leaving whatever it maps perfectly erasable.
-if awk '/^pub fn machine\(/,/^}/' "$CLI" | grep -q 'disks('; then
-    bad "machine() is built from disks(), which cannot see a loop device"
-else
-    ok "machine() is its own enumerator and not disks()"
-fi
+MACHINE="$(awk '/^pub fn machine\(/,/^}/' "$CLI")"
+[[ -n "$MACHINE" ]] || bad "pub fn machine() was not found in $CLI"
+absent "$MACHINE" 'disks\(' "machine() is its own enumerator and not disks()"
 has 'pub fn machine(roots: &Roots) -> Result<Machine, String>' "$CLI" \
     "a partially-enumerated machine is not a machine to judge against"
 # The defect this replaced: `let Ok(entries) = read_dir(&base) else { continue }`
 # plus `.join("partition").exists()`. chmod 100 on one disk's sysfs directory
 # dropped all five of its partitions and turned six refusals into a permit.
-if awk '/^pub fn machine\(/,/^}/' "$CLI" | grep -qE '\.exists\(\)'; then
-    bad "machine() uses Path::exists(), which is false on EACCES as well"
-else
-    ok "and never asks Path::exists(), which cannot tell EACCES from absent"
-fi
-if awk '/^pub fn machine\(/,/^}/' "$CLI" | grep -qE 'flatten\(\)'; then
-    bad "machine() flattens away read_dir's per-entry errors"
-else
-    ok "nor flattens away a device that exists and could not be named"
-fi
+absent "$MACHINE" '\.exists\(\)' \
+    "and never asks Path::exists(), which cannot tell EACCES from absent"
+absent "$MACHINE" 'flatten\(\)' \
+    "nor flattens away a device that exists and could not be named"
 
 sec "an absence is only ever read from the one error that means absence"
 # Two functions have an "absent" answer to give, and both must reach it from
 # ErrorKind and never from a boolean.
 for fn in 'fn loop_backing' 'pub fn machine'; do
-    if awk "/^${fn}/,/^}/" "$CLI" | grep -q 'ErrorKind::NotFound'; then
-        ok "${fn#*fn } reads absence from NotFound and not from a failed stat"
-    else
-        bad "${fn#*fn } does not distinguish NotFound from any other error"
-    fi
+    body="$(awk "/^${fn}/,/^}/" "$CLI")"
+    [[ -n "$body" ]] || bad "${fn} was not found in $CLI"
+    present "$body" 'ErrorKind::NotFound' \
+        "${fn#*fn } reads absence from NotFound and not from a failed stat"
 done
 # dir_names has NO absent answer to give: a /sys/block that cannot be listed is
 # not an absence of block devices, so every error is the Err arm and singling
 # out NotFound would be the defect rather than the guard against it.
-if awk '/^fn dir_names/,/^}/' "$CLI" | grep -q 'ErrorKind'; then
-    bad "dir_names special-cases an error kind; a directory that will not list is not empty"
-else
-    ok "and a directory that will not list is never an empty directory"
-fi
+DIR_NAMES="$(awk '/^fn dir_names/,/^}/' "$CLI")"
+[[ -n "$DIR_NAMES" ]] || bad "fn dir_names was not found in $CLI"
+absent "$DIR_NAMES" 'ErrorKind' \
+    "and a directory that will not list is never an empty directory"
 has 'fn holders' "$CLI" "holders is read with read_dir"
-if awk '/^fn holders/,/^}/' "$CLI" | grep -q 'Reading::Unavailable'; then
-    ok "and an unreadable holders directory is not an absence of holders"
-else
-    bad "an unreadable holders directory collapses to an empty Vec"
-fi
+HOLDERS="$(awk '/^fn holders/,/^}/' "$CLI")"
+[[ -n "$HOLDERS" ]] || bad "fn holders was not found in $CLI"
+present "$HOLDERS" 'Reading::Unavailable' \
+    "and an unreadable holders directory is not an absence of holders"
 
 # ── the destructive half ─────────────────────────────────────────────────────
 #
@@ -328,7 +337,7 @@ destructive_half() {
     has 'is mounted at' "$out" "and the refusal names where"
     # The signature has to still be there. An erase that refused and wiped is
     # the failure this whole file exists to make impossible.
-    if sudo -n /usr/sbin/wipefs -n "$dev" 2>/dev/null | grep -q ext4; then
+    if grep -qF ext4 <<<"$(sudo -n /usr/sbin/wipefs -n "$dev" 2>/dev/null)"; then
         ok "and the ext4 signature is still on the device"
     else
         bad "THE SIGNATURE IS GONE — a refused erase erased"
@@ -416,7 +425,7 @@ destructive_half() {
         --expect-backing-file "$img" > "$out" 2>&1; rc=$?
     [[ "$rc" -eq 0 ]] && ok "an unmounted loop device with the file named erases, exit 0" \
                       || bad "the erase exited $rc: $(cat "$out")"
-    if sudo -n /usr/sbin/wipefs -n "$dev" 2>/dev/null | grep -q ext4; then
+    if grep -qF ext4 <<<"$(sudo -n /usr/sbin/wipefs -n "$dev" 2>/dev/null)"; then
         bad "the erase reported success and the ext4 signature is still there"
     else
         ok "and the signature is really gone"
