@@ -36,6 +36,27 @@ handling at all". Three states, not two: no binary / binary present but no
 usable driver / working. The middle one must read as "no NVIDIA GPU here" for
 planning, and `--json` must stay JSON whatever the answer.
 
+### AMENDED 2026-09-08 — the headline above is wrong, the cause was right
+
+The `p1-039` agent measured it into separate files while fixing it, and the
+claim "returns prose, not JSON" does not survive that measurement. On the L16:
+**stdout is 803 bytes of valid JSON, stderr is 50 bytes of prose, exit 0.** The
+streams were never crossed, and `apex ai status --json | jq` worked all along.
+What fails is a caller that *merges* them — `2>&1` — which is what the suite
+line above does, so the suite was right to be red and wrong about why.
+
+The diagnosis underneath was correct and is what got fixed: PATH presence stood
+in for hardware, so an `nvidia-smi` that exists and exits 9 read as a working
+NVIDIA GPU rather than as "no NVIDIA GPU here". That is the
+"permission-denied-is-not-absence" class, and the three-state model is now in
+`454ae3a fix(gpu): an installed nvidia-smi is not an NVIDIA GPU, and exit 9 is
+an answer`.
+
+Kept rather than rewritten, because the wrong headline is itself the lesson: a
+finding written from a suite's failure line inherits that line's assumptions. A
+red assertion tells you something is wrong, never what. Measure the streams
+before naming the defect.
+
 ## 2. `apex remote` is documented nowhere — OWNER: next integrate or followups round
 
 `p1-050`'s landing added the verb family `apex remote pair | devices | revoke |
