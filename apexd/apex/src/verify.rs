@@ -1303,16 +1303,50 @@ pub fn render(v: &Verification, e: &Enforcement, d: &Decision) -> String {
 /// Shaped like `channel::halt_reason` on purpose: `ops::update` already knows
 /// how to consult one of these, and a second shape would be a second thing to
 /// get wrong.
+///
+/// The headline is chosen from the verdicts of the checks that actually
+/// refused, not from the fact of a refusal. "This image does not verify" and
+/// "this image could not be verified" are different accusations — the first
+/// says somebody tampered with it, the second says the machine could not
+/// reach a registry — and a gate that prints the first when it means the
+/// second teaches its users to ignore it.
 pub fn refusal(v: &Verification, e: &Enforcement, d: &Decision, escape: &str) -> Option<String> {
     let Decision::Refuse { refused_by, lines } = d else { return None };
+    let verdict_of = |what: &str| -> &Verdict {
+        if what == "signature" {
+            &v.signature
+        } else {
+            &v.provenance
+        }
+    };
+    let any = |f: &dyn Fn(&Verdict) -> bool| refused_by.iter().any(|w| f(verdict_of(w)));
+    // Worst first: a tampering signal outranks a missing one, which outranks a
+    // check that never ran.
+    let headline = if any(&|x| matches!(x, Verdict::Failed(_))) {
+        "does not verify"
+    } else if any(&|x| matches!(x, Verdict::Absent(_))) {
+        "carries no signature from anybody"
+    } else {
+        "could not be verified — which is not the same as failing to verify"
+    };
     let mut s = format!(
-        "apex: this update is being held because the image it would deploy does not \
-         verify.\n  the {} could not be established for {}\n",
+        "apex: this update is being held. The image it would deploy {headline}.\n  \
+         the {} for {}\n",
         refused_by.join(" and the "),
         v.digest
     );
     for line in lines {
         s.push_str(&format!("  {line}\n"));
+    }
+    // What is enforced, named, because the user's next question is "why is
+    // this stopping me" and the answer is a setting they can see.
+    s.push_str(&format!(
+        "\nThis machine enforces: signature {}, provenance {}.\n",
+        e.signature.as_str(),
+        e.provenance.as_str()
+    ));
+    for note in &e.notes {
+        s.push_str(&format!("  {note}\n"));
     }
     s.push_str(&format!(
         "\nAPEX publishes a cosign signature for every image, and this machine checks it \
@@ -1321,7 +1355,613 @@ pub fn refusal(v: &Verification, e: &Enforcement, d: &Decision, escape: &str) ->
          downloaded.\n\n\
          If you know why and want it anyway: `sudo apex update {escape}`.\n\
          To change what is enforced permanently, edit {OVERRIDE_PATH} — see \
-         `man apex-trust`\nor docs/trust-enforcement.md.\n"
+         docs/trust-enforcement.md.\n"
     ));
     Some(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SIGNER: &str =
+        "https://github.com/AndreNijman/apex-os/.github/workflows/build-image.yml@refs/heads/main";
+    const ISSUER: &str = "https://token.actions.githubusercontent.com";
+    const DIGEST: &str = "sha256:308127d9cefeada90b1cb47b8f9c1cf6e8bd8f13ae5f3b0e2d7f4a6c8e1b3d5f";
+    const REPO: &str = "ghcr.io/andrenijman/apex-os";
+
+    fn verified() -> Verdict {
+        Verdict::Verified { signer: SIGNER.into(), at: "unix 1757079805".into() }
+    }
+
+    /// A verification whose signature is `sig` and whose provenance is `prov`.
+    fn v(sig: Verdict, prov: Verdict) -> Verification {
+        Verification { digest: DIGEST.into(), repo: REPO.into(), signature: sig, provenance: prov }
+    }
+
+    /// Strictness for the signature only; provenance is pinned `Off` so a test
+    /// of one arm cannot be answered by the other.
+    fn sig_only(level: Strictness) -> Enforcement {
+        Enforcement { signature: level, provenance: Strictness::Off, notes: Vec::new() }
+    }
+
+    // ── the decision table, one named test per cell ──────────────────────────
+    //
+    // Written out rather than looped. A loop over a table is a test that fails
+    // once with a subscript in the message; twelve names mean the failure tells
+    // you which rule broke, and this is the table that decides whether a
+    // machine takes an update.
+
+    #[test]
+    fn a_verified_signature_under_enforce_proceeds() {
+        assert_eq!(
+            decide(&v(verified(), verified()), &Enforcement {
+                signature: Strictness::Enforce,
+                provenance: Strictness::Enforce,
+                notes: Vec::new()
+            }),
+            Decision::Proceed
+        );
+    }
+
+    #[test]
+    fn a_verified_signature_under_warn_proceeds() {
+        assert_eq!(decide(&v(verified(), verified()), &sig_only(Strictness::Warn)), Decision::Proceed);
+    }
+
+    #[test]
+    fn a_verified_signature_under_off_proceeds() {
+        assert_eq!(decide(&v(verified(), verified()), &sig_only(Strictness::Off)), Decision::Proceed);
+    }
+
+    #[test]
+    fn a_failed_signature_under_enforce_refuses() {
+        let d = decide(&v(Verdict::Failed("signed by nobody".into()), verified()), &sig_only(Strictness::Enforce));
+        let Decision::Refuse { refused_by, lines } = &d else { panic!("{d:?}") };
+        assert_eq!(refused_by, &["signature".to_string()]);
+        assert!(lines[0].contains("does not verify"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_failed_signature_refuses_even_under_warn() {
+        // The asymmetry that makes `warn` usable. A signature that verifies
+        // WRONGLY is the signature of an attack, and no amount of "the network
+        // was flaky" makes it not one. `warn` forgives a gap, never a lie.
+        let d = decide(&v(Verdict::Failed("the digest is not the one signed".into()), verified()), &sig_only(Strictness::Warn));
+        assert!(d.refuses(), "{d:?}");
+    }
+
+    #[test]
+    fn a_failed_signature_under_off_only_warns() {
+        // `off` means off. A user who switched signature checking off gets a
+        // warning and their update; the alternative is a setting that does not
+        // do what it says, which is worse than not having it.
+        let d = decide(&v(Verdict::Failed("bad".into()), verified()), &sig_only(Strictness::Off));
+        let Decision::ProceedWithWarnings(w) = &d else { panic!("{d:?}") };
+        assert!(w[0].contains("switched off"), "{w:?}");
+    }
+
+    #[test]
+    fn an_absent_signature_under_enforce_refuses() {
+        let d = decide(&v(Verdict::Absent("the registry holds no signature".into()), verified()), &sig_only(Strictness::Enforce));
+        let Decision::Refuse { refused_by, lines } = &d else { panic!("{d:?}") };
+        assert_eq!(refused_by, &["signature".to_string()]);
+        assert!(lines[0].contains("has no signature"), "{lines:?}");
+        // Absence is not failure, and the refusal must not say it is.
+        assert!(!lines[0].contains("does not verify"), "{lines:?}");
+    }
+
+    #[test]
+    fn an_absent_signature_under_warn_only_warns() {
+        let d = decide(&v(Verdict::Absent("nobody signed it".into()), verified()), &sig_only(Strictness::Warn));
+        let Decision::ProceedWithWarnings(w) = &d else { panic!("{d:?}") };
+        assert!(w[0].contains("has no signature"), "{w:?}");
+    }
+
+    #[test]
+    fn an_absent_signature_under_off_only_warns() {
+        assert!(matches!(
+            decide(&v(Verdict::Absent("nobody signed it".into()), verified()), &sig_only(Strictness::Off)),
+            Decision::ProceedWithWarnings(_)
+        ));
+    }
+
+    #[test]
+    fn a_signature_that_could_not_be_checked_under_enforce_refuses() {
+        let d = decide(&v(Verdict::CouldNotRun("no route to host".into()), verified()), &sig_only(Strictness::Enforce));
+        let Decision::Refuse { refused_by, lines } = &d else { panic!("{d:?}") };
+        assert_eq!(refused_by, &["signature".to_string()]);
+        assert!(lines[0].contains("could not be checked"), "{lines:?}");
+        // The two claims this must never make about an unreachable registry.
+        assert!(!lines[0].contains("has no signature"), "{lines:?}");
+        assert!(!lines[0].contains("does not verify"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_signature_that_could_not_be_checked_under_warn_only_warns() {
+        let d = decide(&v(Verdict::CouldNotRun("no route to host".into()), verified()), &sig_only(Strictness::Warn));
+        let Decision::ProceedWithWarnings(w) = &d else { panic!("{d:?}") };
+        assert!(w[0].contains("could not be checked"), "{w:?}");
+        assert!(w[0].contains("no route to host"), "{w:?}");
+    }
+
+    #[test]
+    fn a_signature_that_could_not_be_checked_under_off_only_warns() {
+        assert!(matches!(
+            decide(&v(Verdict::CouldNotRun("no openssl".into()), verified()), &sig_only(Strictness::Off)),
+            Decision::ProceedWithWarnings(_)
+        ));
+    }
+
+    // ── what a refusal says ─────────────────────────────────────────────────
+
+    #[test]
+    fn a_refusal_names_which_of_the_two_checks_refused() {
+        let both = Enforcement {
+            signature: Strictness::Enforce,
+            provenance: Strictness::Enforce,
+            notes: Vec::new(),
+        };
+        let d = decide(&v(Verdict::Failed("bad".into()), Verdict::Absent("none".into())), &both);
+        let Decision::Refuse { refused_by, .. } = &d else { panic!("{d:?}") };
+        assert_eq!(refused_by, &["signature".to_string(), "provenance".to_string()]);
+
+        let d = decide(&v(verified(), Verdict::Absent("none".into())), &both);
+        let Decision::Refuse { refused_by, .. } = &d else { panic!("{d:?}") };
+        assert_eq!(refused_by, &["provenance".to_string()]);
+    }
+
+    #[test]
+    fn a_refusal_carries_the_other_check_s_warning_too() {
+        // Refusing on the signature and staying silent about a provenance
+        // nobody could establish sends the reader to fix half the problem.
+        let e = Enforcement {
+            signature: Strictness::Enforce,
+            provenance: Strictness::Warn,
+            notes: Vec::new(),
+        };
+        let d = decide(
+            &v(Verdict::Failed("bad".into()), Verdict::CouldNotRun("no route to host".into())),
+            &e,
+        );
+        let Decision::Refuse { lines, .. } = &d else { panic!("{d:?}") };
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("provenance could not be checked")), "{lines:?}");
+    }
+
+    #[test]
+    fn a_refusal_that_could_not_run_is_never_worded_as_a_failure() {
+        // The whole point of the four-valued verdict, at the one place a user
+        // reads it. "Does not verify" accuses the publisher; "could not be
+        // verified" describes the machine, and a gate that confuses them
+        // teaches people to ignore it.
+        let e = sig_only(Strictness::Enforce);
+        let ver = v(Verdict::CouldNotRun("dial tcp: lookup ghcr.io: no such host".into()), verified());
+        let d = decide(&ver, &e);
+        let out = refusal(&ver, &e, &d, "--allow-unverified").expect("a refusal");
+        assert!(out.contains("could not be verified"), "{out}");
+        assert!(!out.contains("does not verify."), "{out}");
+        assert!(out.contains("no such host"), "{out}");
+        // And the enforcement that caused it, so the reader knows what to change.
+        assert!(out.contains("signature enforce"), "{out}");
+        assert!(out.contains("--allow-unverified"), "{out}");
+
+        // A genuine failure DOES get the accusation.
+        let ver = v(Verdict::Failed("the digest is not the one signed".into()), verified());
+        let d = decide(&ver, &e);
+        let out = refusal(&ver, &e, &d, "--allow-unverified").expect("a refusal");
+        assert!(out.contains("does not verify"), "{out}");
+
+        // An absent one is neither.
+        let ver = v(Verdict::Absent("the registry holds no signature".into()), verified());
+        let d = decide(&ver, &e);
+        let out = refusal(&ver, &e, &d, "--allow-unverified").expect("a refusal");
+        assert!(out.contains("carries no signature from anybody"), "{out}");
+    }
+
+    #[test]
+    fn nothing_that_proceeds_produces_a_refusal() {
+        let e = sig_only(Strictness::Warn);
+        for verdict in [verified(), Verdict::Absent("x".into()), Verdict::CouldNotRun("y".into())] {
+            let ver = v(verdict.clone(), verified());
+            let d = decide(&ver, &e);
+            assert!(refusal(&ver, &e, &d, "--allow-unverified").is_none(), "{verdict:?} -> {d:?}");
+        }
+    }
+
+    #[test]
+    fn the_decision_word_is_defined_in_exactly_one_place() {
+        assert_eq!(decision_json(&Decision::Proceed).0, "proceed");
+        assert_eq!(decision_json(&Decision::ProceedWithWarnings(vec!["w".into()])).0, "proceed-with-warnings");
+        assert_eq!(
+            decision_json(&Decision::Refuse { refused_by: vec!["signature".into()], lines: vec!["l".into()] }).0,
+            "refuse"
+        );
+        // A warning is not a refusal, and the JSON must not let a consumer
+        // read it as one: `refusedBy` is empty for everything that proceeds.
+        assert!(decision_json(&Decision::ProceedWithWarnings(vec!["w".into()])).1.is_empty());
+    }
+
+    // ── enforcement configuration ───────────────────────────────────────────
+
+    #[test]
+    fn the_shipped_default_enforces_the_signature_and_only_warns_on_provenance() {
+        let e = Enforcement::default();
+        assert_eq!(e.signature, Strictness::Enforce);
+        // No published APEX image has an SBOM attestation: the `cosign attest`
+        // step lives on roadmap/v2.2 and has never run on main, so `.att` is
+        // `manifest unknown` for every digest in the registry today. Shipping
+        // `enforce` would refuse every update on every machine because the
+        // publisher has not caught up, which is an outage dressed as a
+        // security control.
+        assert_eq!(e.provenance, Strictness::Warn);
+        assert!(e.notes.is_empty());
+    }
+
+    #[test]
+    fn the_administrator_overrides_the_image_per_key() {
+        let mut e = Enforcement::default();
+        parse_enforcement("signature=enforce\nprovenance=warn\n", &mut e, "image");
+        parse_enforcement("provenance=enforce\n", &mut e, "admin");
+        assert_eq!(e.signature, Strictness::Enforce, "the key nobody overrode must survive");
+        assert_eq!(e.provenance, Strictness::Enforce);
+        assert!(e.notes.is_empty(), "{:?}", e.notes);
+    }
+
+    #[test]
+    fn a_typo_in_the_config_never_silently_relaxes_a_check() {
+        let mut e = Enforcement::default();
+        parse_enforcement(
+            "signature = enfore\nprovenanace=off\nsignature\n# a comment\n\nprovenance=off # trailing\n",
+            &mut e,
+            "/etc/apex/trust.conf",
+        );
+        // The misspelled VALUE left the setting where it was — enforce — and
+        // said so. Falling back to a default here would mean a slip of the
+        // finger switches signature checking off on a machine that takes
+        // updates unattended.
+        assert_eq!(e.signature, Strictness::Enforce);
+        // The misspelled KEY set nothing.
+        assert_eq!(e.notes.iter().filter(|n| n.contains("no such setting: provenanace")).count(), 1, "{:?}", e.notes);
+        assert_eq!(e.notes.iter().filter(|n| n.contains("not a key=value line")).count(), 1, "{:?}", e.notes);
+        assert!(e.notes.iter().any(|n| n.contains("is not one of enforce, warn, off")), "{:?}", e.notes);
+        // A comment after a good value is still a good value.
+        assert_eq!(e.provenance, Strictness::Off);
+        // Every complaint names its file and line.
+        for n in &e.notes {
+            assert!(n.starts_with("/etc/apex/trust.conf:"), "{n}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_policy_file_is_a_note_and_not_a_permissive_default() {
+        let dir = std::env::temp_dir().join(format!("apex-verify-conf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc/apex")).unwrap();
+        let f = dir.join("etc/apex/trust.conf");
+        std::fs::write(&f, "signature=off\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let e = enforcement(&Roots { fixture: Some(dir.clone()) });
+        let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&dir);
+        if e.notes.is_empty() {
+            // Running as root, which can read a 000 file. The property is
+            // untestable here rather than false, and a test that quietly
+            // passes in that case is the "skipped counts as success" failure
+            // this repository has recorded three times.
+            assert_eq!(e.signature, Strictness::Off, "root read the file, so it must have applied");
+            return;
+        }
+        assert_eq!(e.signature, Strictness::Enforce, "an unreadable file must not relax anything");
+        assert!(e.notes.iter().any(|n| n.contains("using the built-in default")), "{:?}", e.notes);
+    }
+
+    #[test]
+    fn a_config_file_that_is_simply_absent_is_normal_and_silent() {
+        let dir = std::env::temp_dir().join(format!("apex-verify-noconf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = enforcement(&Roots { fixture: Some(dir.clone()) });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(e, Enforcement::default());
+    }
+
+    // ── the fixture path, and the rule it exists to hold down ───────────────
+
+    /// A fixture root with a `registry/` tree, so `--verify` runs against it.
+    fn fixture(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("apex-verify-fx-{}-{name}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("registry")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_unreachable_registry_is_never_refused_as_unsigned() {
+        // The enforcement-path twin of trust.rs's
+        // `an_unreachable_registry_is_never_reported_as_unsigned`. That one
+        // guards the readout; this one guards the gate, which is where getting
+        // it wrong stops somebody's machine from updating.
+        for stderr in [
+            "dial tcp: lookup ghcr.io: no such host",
+            "x509: certificate signed by unknown authority",
+            "unauthorized: authentication required",
+            "toomanyrequests: retry later",
+        ] {
+            let dir = fixture("unreachable");
+            let tag = cosign_tag(DIGEST, ".sig").unwrap();
+            std::fs::write(dir.join("registry").join(format!("{tag}.error")), stderr).unwrap();
+            let roots = Roots { fixture: Some(dir.clone()) };
+            let got = verify_signature(&roots, REPO, DIGEST);
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert!(matches!(got, Verdict::CouldNotRun(_)), "{stderr:?} -> {got:?}");
+            assert_ne!(got.as_str(), "absent", "{stderr:?}");
+
+            // And the two decisions that follow from it.
+            let ver = v(got.clone(), verified());
+            let warn = decide(&ver, &sig_only(Strictness::Warn));
+            assert!(!warn.refuses(), "an offline machine must still update: {warn:?}");
+
+            let strict = decide(&ver, &sig_only(Strictness::Enforce));
+            let Decision::Refuse { lines, .. } = &strict else { panic!("{strict:?}") };
+            assert!(lines[0].contains("could not be checked"), "{lines:?}");
+            assert!(!lines[0].contains("has no signature"), "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn a_registry_that_answers_and_holds_nothing_is_absent_not_unreachable() {
+        // The other half of the same distinction: no `.error` file and no
+        // manifest is the fixture's way of saying the registry answered
+        // `manifest unknown`. THAT is the substituted-image signal.
+        let dir = fixture("absent");
+        let roots = Roots { fixture: Some(dir.clone()) };
+        let got = verify_signature(&roots, REPO, DIGEST);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(got, Verdict::Absent(_)), "{got:?}");
+    }
+
+    #[test]
+    fn a_manifest_unknown_error_is_absence_because_the_registry_said_so() {
+        let dir = fixture("unknown");
+        let tag = cosign_tag(DIGEST, ".sig").unwrap();
+        std::fs::write(
+            dir.join("registry").join(format!("{tag}.error")),
+            "level=fatal msg=\"reading manifest sha256-x.sig in ghcr.io/a/b: manifest unknown\"",
+        )
+        .unwrap();
+        let roots = Roots { fixture: Some(dir.clone()) };
+        let got = verify_signature(&roots, REPO, DIGEST);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(got, Verdict::Absent(_)), "{got:?}");
+    }
+
+    #[test]
+    fn a_fixture_root_with_no_registry_tree_keeps_verify_a_no_op() {
+        let dir = std::env::temp_dir().join(format!("apex-verify-bare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(fixture_without_registry(&Roots { fixture: Some(dir.clone()) }));
+        let with = fixture("has-registry");
+        assert!(!fixture_without_registry(&Roots { fixture: Some(with.clone()) }));
+        // And a real machine is never "a fixture without a registry".
+        assert!(!fixture_without_registry(&Roots { fixture: None }));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&with);
+    }
+
+    #[test]
+    fn a_digest_that_is_not_a_digest_could_not_run_rather_than_failing() {
+        let dir = fixture("baddigest");
+        let roots = Roots { fixture: Some(dir.clone()) };
+        let got = verify_signature(&roots, REPO, "not-a-digest");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(got, Verdict::CouldNotRun(_)), "{got:?}");
+    }
+
+    // ── the payload bindings ────────────────────────────────────────────────
+
+    #[test]
+    fn a_signature_over_a_different_image_does_not_count_as_one_over_this_one() {
+        // The substitution a moved tag makes easy, and the reason the payload
+        // bindings are checked at all: the ECDSA verification alone proves
+        // only that the expected identity signed SOMETHING.
+        let payload = format!(
+            r#"{{"critical":{{"identity":{{"docker-reference":"{REPO}"}},"image":{{"docker-manifest-digest":"sha256:deadbeef"}},"type":"cosign container image signature"}}}}"#
+        );
+        let e = simple_signing_binds(&payload, REPO, DIGEST).expect_err("must not bind");
+        assert!(e.contains("sha256:deadbeef"), "{e}");
+        assert!(e.contains(DIGEST), "{e}");
+    }
+
+    #[test]
+    fn a_signature_from_a_different_repository_does_not_count() {
+        let payload = format!(
+            r#"{{"critical":{{"identity":{{"docker-reference":"ghcr.io/someoneelse/apex-os"}},"image":{{"docker-manifest-digest":"{DIGEST}"}}}}}}"#
+        );
+        let e = simple_signing_binds(&payload, REPO, DIGEST).expect_err("must not bind");
+        assert!(e.contains("someoneelse"), "{e}");
+    }
+
+    #[test]
+    fn the_four_apex_tags_all_bind_because_the_tag_is_not_compared() {
+        // `apex`, `daily`, `gaming-mesa` and `gaming-nvidia` are four aliases
+        // for ONE digest that moves on every successful main build, so a tag
+        // comparison would refuse an image that is genuinely the right one.
+        // cosign records the repository; that is what is compared.
+        let payload = format!(
+            r#"{{"critical":{{"identity":{{"docker-reference":"{REPO}"}},"image":{{"docker-manifest-digest":"{DIGEST}"}}}}}}"#
+        );
+        for tag in ["apex", "daily", "gaming-mesa", "gaming-nvidia"] {
+            simple_signing_binds(&payload, &format!("{REPO}:{tag}"), DIGEST)
+                .unwrap_or_else(|e| panic!("{tag}: {e}"));
+        }
+        simple_signing_binds(&payload, &format!("{REPO}@{DIGEST}"), DIGEST).unwrap();
+    }
+
+    #[test]
+    fn a_payload_missing_its_bindings_is_an_error_rather_than_a_pass() {
+        for payload in [
+            "{}",
+            r#"{"critical":{}}"#,
+            r#"{"critical":{"image":{}}}"#,
+            r#"{"critical":{"image":{"docker-manifest-digest":"sha256:x"}}}"#,
+            "not json at all",
+        ] {
+            assert!(simple_signing_binds(payload, REPO, DIGEST).is_err(), "{payload}");
+        }
+    }
+
+    #[test]
+    fn an_attestation_must_cover_this_digest_and_be_the_sbom_this_image_publishes() {
+        let hex = DIGEST.split_once(':').unwrap().1;
+        let good = format!(
+            r#"{{"_type":"https://in-toto.io/Statement/v0.1","predicateType":"https://spdx.dev/Document","subject":[{{"name":"{REPO}","digest":{{"sha256":"{hex}"}}}}]}}"#
+        );
+        intoto_binds(&good, DIGEST).unwrap();
+        // Uppercase hex is the same digest.
+        intoto_binds(&good.replace(hex, &hex.to_uppercase()), DIGEST).unwrap();
+
+        let other = good.replace(hex, &"a".repeat(hex.len()));
+        assert!(intoto_binds(&other, DIGEST).unwrap_err().contains("subject is not"));
+
+        let wrong_kind = good.replace("https://spdx.dev/Document", "https://slsa.dev/provenance/v1");
+        assert!(intoto_binds(&wrong_kind, DIGEST).unwrap_err().contains("slsa.dev"));
+    }
+
+    // ── the encodings ───────────────────────────────────────────────────────
+
+    #[test]
+    fn the_dsse_preauthentication_encoding_is_over_raw_bytes_and_their_lengths() {
+        assert_eq!(pae("t", b"hello"), b"DSSEv1 1 t 5 hello".to_vec());
+        // The length is of the DECODED payload. Computing it over the base64
+        // text is the mistake that makes every attestation fail to verify.
+        let payload = b"\x00\x01\x02\xff";
+        let got = pae("application/vnd.in-toto+json", payload);
+        assert!(got.starts_with(b"DSSEv1 28 application/vnd.in-toto+json 4 "));
+        assert!(got.ends_with(payload));
+    }
+
+    #[test]
+    fn base64_decodes_what_openssl_produced_and_rejects_what_it_did_not() {
+        assert_eq!(b64_decode("aGVsbG8=").unwrap(), b"hello".to_vec());
+        assert_eq!(b64_decode("aGVsbG8h").unwrap(), b"hello!".to_vec());
+        assert_eq!(b64_decode("").unwrap(), Vec::<u8>::new());
+        // Registry annotations arrive wrapped; whitespace is not corruption.
+        assert_eq!(b64_decode("aGVs\nbG8=\n").unwrap(), b"hello".to_vec());
+        for bad in ["aGVsbG8*", "aGVsbG8=x", "a", "aGVsbG8==="] {
+            assert!(b64_decode(bad).is_none(), "{bad} decoded");
+        }
+    }
+
+    #[test]
+    fn a_certificate_start_date_becomes_the_instant_the_chain_is_checked_at() {
+        // The trap this exists for: a Fulcio leaf lives ten MINUTES, so it is
+        // expired for every machine that ever boots the image, and `openssl
+        // verify` at `now` reports "certificate has expired" for a perfectly
+        // good signature. Measured on the real signature of the digest the
+        // L16 is running: notBefore 2026-09-05 13:43:25, notAfter 13:53:25.
+        assert_eq!(unix_from_iso("notBefore=1970-01-01 00:00:00Z").unwrap(), 0);
+        assert_eq!(unix_from_iso("1970-01-02 00:00:01Z").unwrap(), 86_401);
+        let t = unix_from_iso("notBefore=2026-09-05 13:43:25Z").unwrap();
+        assert_eq!(t, 1_788_615_805, "the L16's leaf notBefore");
+        // Ten minutes later is the notAfter, which is what makes it a trap.
+        assert_eq!(unix_from_iso("notAfter=2026-09-05 13:53:25Z").unwrap(), t + 600);
+        // The ISO-8601 `T` separator, and a leap day.
+        assert_eq!(
+            unix_from_iso("2024-02-29T00:00:00Z").unwrap(),
+            unix_from_iso("2024-02-28 00:00:00Z").unwrap() + 86_400
+        );
+        for bad in ["", "notBefore=", "2026-09-05", "2026-09 13:43:25Z", "2026-13-05 00:00:00Z", "2026-09-32 00:00:00Z", "not a date at all"] {
+            assert!(unix_from_iso(bad).is_err(), "{bad:?} parsed");
+        }
+    }
+
+    #[test]
+    fn the_oidc_issuer_is_read_out_of_either_sigstore_extension() {
+        // Both renderings captured from `openssl x509 -noout -text` over
+        // certificates minted for the purpose, not hand-typed: openssl leaves
+        // a trailing space after the OID and indents the value on the next
+        // line, and `.1.8` wraps the string in a DER UTF8String which openssl
+        // prints as two bytes in front of it.
+        let v1 = "            1.3.6.1.4.1.57264.1.1: \n                https://token.actions.githubusercontent.com\n    Signature Algorithm: ecdsa-with-SHA256\n";
+        assert_eq!(issuer_from_openssl_text(v1).as_deref(), Some(ISSUER));
+        let v2 = "            1.3.6.1.4.1.57264.1.8: \n                .+https://token.actions.githubusercontent.com\n    Signature Algorithm: ecdsa-with-SHA256\n";
+        assert_eq!(issuer_from_openssl_text(v2).as_deref(), Some(ISSUER));
+        assert_eq!(issuer_from_openssl_text("no extension here"), None);
+    }
+
+    #[test]
+    fn an_issuer_that_merely_contains_the_expected_one_is_not_the_expected_one() {
+        // The reason the wrapper is peeled by taking the tail rather than by
+        // searching the line for the value we hoped to find.
+        let hostile = format!(
+            "            1.3.6.1.4.1.57264.1.8: \n                .Xhttps://evil.example/?x={ISSUER}\n"
+        );
+        let got = issuer_from_openssl_text(&hostile).expect("something was read");
+        assert_ne!(got, ISSUER);
+        assert!(got.starts_with("https://evil.example/"), "{got}");
+    }
+
+    #[test]
+    fn a_reference_loses_its_tag_and_keeps_its_port() {
+        assert_eq!(repo_of("ghcr.io/andrenijman/apex-os:daily"), REPO);
+        assert_eq!(repo_of(&format!("{REPO}@{DIGEST}")), REPO);
+        assert_eq!(repo_of(REPO), REPO);
+        // A colon before the last slash is a port, not a tag.
+        assert_eq!(repo_of("registry.local:5000/apex/os"), "registry.local:5000/apex/os");
+        assert_eq!(repo_of("registry.local:5000/apex/os:daily"), "registry.local:5000/apex/os");
+    }
+
+    // ── what a reader is told ───────────────────────────────────────────────
+
+    #[test]
+    fn the_report_never_prints_verified_without_saying_what_was_not_checked() {
+        let ver = v(verified(), Verdict::Absent("none published".into()));
+        let e = Enforcement::default();
+        let out = render(&ver, &e, &decide(&ver, &e));
+        assert!(out.contains("verified — signed by"), "{out}");
+        assert!(out.contains("transparency log was not checked"), "{out}");
+        assert!(out.contains("Enforcement       signature enforce, provenance warn"), "{out}");
+        // Provenance is absent and only warned about, so the machine deploys —
+        // and says what it did not establish.
+        assert!(out.contains("yes, with what follows unestablished"), "{out}");
+    }
+
+    #[test]
+    fn every_verdict_carries_its_reason_into_the_json() {
+        for verdict in [
+            Verdict::Absent("nobody signed it".into()),
+            Verdict::Failed("the digest is not the one signed".into()),
+            Verdict::CouldNotRun("no route to host".into()),
+        ] {
+            let j = verdict.to_json();
+            assert_eq!(j["state"], verdict.as_str());
+            assert!(j["reason"].as_str().is_some_and(|r| !r.is_empty()), "{j}");
+            assert!(j["signer"].is_null(), "only a verified signature names a signer: {j}");
+        }
+        let j = verified().to_json();
+        assert_eq!(j["state"], "verified");
+        assert_eq!(j["signer"], SIGNER);
+        assert!(j["reason"].is_null());
+        assert!(j["verifiedAt"].as_str().is_some());
+    }
+
+    #[test]
+    fn the_json_gate_answer_matches_the_rendered_one() {
+        let ver = v(Verdict::Failed("bad".into()), Verdict::Absent("none".into()));
+        let e = Enforcement::default();
+        let d = decide(&ver, &e);
+        let j = to_json(&ver, &e, &d);
+        assert_eq!(j["decision"], "refuse");
+        assert_eq!(j["refusedBy"], serde_json::json!(["signature"]));
+        assert_eq!(j["signature"]["state"], "failed");
+        assert_eq!(j["provenance"]["state"], "absent");
+        assert_eq!(j["enforcement"]["signature"], "enforce");
+        assert_eq!(j["digest"], DIGEST);
+        assert!(render(&ver, &e, &d).contains("REFUSED — signature"));
+    }
 }
