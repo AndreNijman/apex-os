@@ -491,3 +491,111 @@ fn the_action_says_which_file_it_writes() {
     assert!(d.contains("power_dpm_force_performance_level"), "{d}");
     assert!(d.contains("high"), "{d}");
 }
+
+// ── an installed nvidia-smi is not an NVIDIA GPU ───────────────────────────
+//
+// Measured on the L16, 2026-09-08: /usr/bin/nvidia-smi is installed and exits
+// 9 ("couldn't communicate with the NVIDIA driver"). There is no NVIDIA card
+// in that machine at all. So "the tool is on PATH" and "there is a usable GPU"
+// are different facts, and the code used to conflate them in two places — a
+// stderr line on every `apex ai status`, and `apex game` reporting
+// `nvidia-smi: present` to somebody asking why clock locks do nothing.
+//
+// classify_smi is pure and takes `installed` as an argument, so these cases can
+// be checked exhaustively without a real nvidia-smi and without mutating PATH
+// inside a test process, which would race every other test in the binary.
+
+#[test]
+fn an_uninstalled_tool_is_absent_whatever_its_exit_code() {
+    // Including the codes that would mean something if it HAD run: a caller
+    // that has already established the tool is missing must not have its
+    // answer changed by a stale status.
+    for code in [None, Some(0), Some(9), Some(1)] {
+        assert_eq!(gpu::classify_smi(false, code), gpu::SmiOutcome::Absent);
+    }
+}
+
+#[test]
+fn exit_9_means_no_driver_rather_than_a_failure() {
+    // THE assertion. 9 is nvidia-smi's documented "couldn't communicate with
+    // the NVIDIA driver", which is the ordinary state of a machine that ships
+    // the tool without a card — not a fault to report.
+    let o = gpu::classify_smi(true, Some(9));
+    assert_eq!(o, gpu::SmiOutcome::NoDriver);
+    assert!(
+        !o.is_worth_reporting(),
+        "a machine with no driver must not print a diagnostic on every invocation"
+    );
+}
+
+#[test]
+fn a_driver_that_answers_is_ready() {
+    let o = gpu::classify_smi(true, Some(0));
+    assert_eq!(o, gpu::SmiOutcome::Ready);
+    assert!(!o.is_worth_reporting());
+}
+
+#[test]
+fn any_other_failure_is_still_reported() {
+    // The point of narrowing the silence to exit 9: an unexplained failure is
+    // NOT quietly swallowed. Nobody has established that these are expected,
+    // so they keep their line on stderr.
+    for code in [Some(1), Some(2), Some(255)] {
+        let o = gpu::classify_smi(true, code);
+        assert_eq!(o, gpu::SmiOutcome::Failed, "code {code:?}");
+        assert!(o.is_worth_reporting(), "code {code:?}");
+    }
+}
+
+#[test]
+fn a_tool_killed_by_a_signal_is_not_mistaken_for_a_missing_driver() {
+    // A signalled process has no exit code. Reading that as "no driver" would
+    // silence a real fault, which is the failure this whole change is about —
+    // in the opposite direction.
+    let o = gpu::classify_smi(true, None);
+    assert_eq!(o, gpu::SmiOutcome::Failed);
+    assert!(o.is_worth_reporting());
+}
+
+#[test]
+fn each_outcome_tells_the_user_something_different() {
+    // The four descriptions must be distinct, because the whole defect was one
+    // word ("present") standing for two different machines.
+    let all = [
+        gpu::SmiOutcome::Absent,
+        gpu::SmiOutcome::NoDriver,
+        gpu::SmiOutcome::Ready,
+        gpu::SmiOutcome::Failed,
+    ];
+    let mut seen: Vec<&str> = all.iter().map(|o| o.as_str()).collect();
+    seen.sort_unstable();
+    let n = seen.len();
+    seen.dedup();
+    assert_eq!(seen.len(), n, "two outcomes render the same text: {seen:?}");
+
+    // And the one that caused the confusion must not simply say "present".
+    assert_ne!(gpu::SmiOutcome::NoDriver.as_str(), "present");
+    assert!(
+        gpu::SmiOutcome::NoDriver.as_str().contains("driver"),
+        "the no-driver case has to name the driver: {}",
+        gpu::SmiOutcome::NoDriver.as_str()
+    );
+}
+
+#[test]
+fn the_state_probe_agrees_with_the_pure_classifier_on_this_machine() {
+    // Not a claim about which GPU is in the machine running the suite — that
+    // would be a test of the developer's hardware. It is a consistency claim:
+    // whatever nvidia_smi_state() decides, it must be one of the outcomes
+    // classify_smi can produce for the installed-ness this machine reports.
+    let state = gpu::nvidia_smi_state();
+    if gpu::nvidia_smi_available() {
+        assert_ne!(
+            state,
+            gpu::SmiOutcome::Absent,
+            "the tool is on PATH, so the state must not be Absent"
+        );
+    } else {
+        assert_eq!(state, gpu::SmiOutcome::Absent);
+    }
+}
