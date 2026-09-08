@@ -1348,3 +1348,50 @@ entirely, and "Floating" exists only in comments and docs — and **BASE-014's
 last assertion needs new machinery**, because no "the rebound key fires after
 `labwc --reconfigure`" test exists anywhere, `test-labwc-keybinds.sh` never
 starts labwc, and there is no `wtype`/`ydotool` in either repo.
+
+- **2026-09-08 14:48** — **Round 9 dispatched. Round 8 hit the session limit at
+  ~12:55 and produced more finished work than any round before it — and none of
+  it was landed, because no unit finished.**
+
+  All six agents died together on HTTP 429. Nothing was lost: each had pushed as
+  it went, and one hand-run snapshot at 14:41 covered every dirty worktree plus
+  this state directory. The `autoresume` firing at 12:18 logged **"skipped:
+  agents are still writing output"** — the `.output`-mtime guard doing exactly
+  its job while round 8 was alive.
+
+  What round 8 finished, all pushed and unlanded:
+
+  | unit | done |
+  |---|---|
+  | `p2-010` | **P2-010, P2-014, P2-015** through `20f3ef2` — only cgroup budgets left |
+  | `p1-025` | **P1-025, P1-027, P1-028** on the branch (`31e5860`, `5917833`) |
+  | `p1-035` | **P1-036** (`473b7f6` + `f4ec0ee`), P1-037 through `d701f37` |
+  | `base-partials` | **BASE-018 and BASE-002 closed** |
+  | `p0-014` | commit 3 plus **nine mutation pairs**, harness fix pushed |
+  | `p1-023` | handoff packet at 16/16 mutants, one run short of committing |
+
+  Five of the six had uncommitted work in front of them at the cut, and every
+  round-9 brief opens with "read the diff, finish it, commit and push" before
+  anything new.
+
+### Three things carried forward that would otherwise have been lost
+
+**`p1-035`'s unmeasured claim.** Its advisor caught it asserting, in three
+separate places, that the engine's trap runs when the daemon dies — never
+measured. It had just started measuring instead of asserting when the limit
+hit. The round-9 brief makes finishing that measurement the condition for the
+three places to keep saying anything, because "a cleanup runs on daemon death"
+is precisely the assertion that passes by never being exercised.
+
+**`base-partials` proved `wtype` works.** That is what BASE-014's last
+assertion needed — the rebound key firing after `labwc --reconfigure`, which no
+test in either repo has ever pressed. The gap the recon identified as needing
+new machinery now has its machinery.
+
+**`p2-010`'s P2-011 shape.** Measured and handed forward rather than
+rediscovered: a *new* `budget.rs` with a one-line hook, because P1-020 put
+~1,700 lines into `apex-agentd` on a tip this branch does not carry, so a new
+file merges where a refactor would conflict; `cpu`/`memory`/`pids` delegate to
+`app.slice`; and **`io` is absent at every level, so it must be a `Reading`
+carrying that reason and never a budget of zero** — the same
+permission-denied-is-not-absence discipline, in its fifteenth location.

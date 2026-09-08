@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-08 14:41 AWST
+APEX ROADMAP — resume report — 2026-09-08 14:45 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,34 +16,34 @@ APEX ROADMAP — resume report — 2026-09-08 14:41 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p0-014     unknown    P0-014,P0-015                      task/p0-014-remote-lock
+  p0-014     ALIVE      P0-014,P0-015                      task/p0-014-remote-lock
              head 41d7c53 feat(webauthn): a challenge the daemon issues, and the
-             dirty 4 file(s), 0 unpushed, card 116m
+             dirty 4 file(s), 0 unpushed, card 120m
              NEXT **The plan is five commits plus the harness fix.** Commits 1, 2 an
 
-  p1-023     unknown    (red suites),(pipefail sweep),P1-023,P1-024,P1-029 task/p1-023-handoff-lifecycle
+  p1-023     ALIVE      (red suites),(pipefail sweep),P1-023,P1-024,P1-029 task/p1-023-handoff-lifecycle
              head 7544834 docs(voice): the guide says where push-to-talk stops
-             dirty 0 file(s), 0 unpushed, card 298m
+             dirty 0 file(s), 0 unpushed, card 302m
              NEXT The wiring is DONE and pushed (6b469ec) — do not redo it, and do n
 
-  p2-010     unknown    P2-010,P2-011,P2-014,P2-015        task/p2-010-hardware-storage
-             head 20f3ef2 test(storage): the check guarding the disk serial was 
-             dirty 1 file(s), 0 unpushed, card 125m
+  p2-010     ALIVE      P2-010,P2-011,P2-014,P2-015        task/p2-010-hardware-storage
+             head 4c0c1f7 test(firmware): the doctor-line guard found the first 
+             dirty 0 file(s), 0 unpushed, card 129m
              NEXT **P2-010, P2-014 and P2-015 are DONE and pushed through `20f3ef2`.
 
-  p1-035     unknown    P1-035,P1-036,P1-037               task/p1-035-agent-tooling
+  p1-035     ALIVE      P1-035,P1-036,P1-037               task/p1-035-agent-tooling
              head d701f37 test(agent): three assertions in this suite could not 
-             dirty 3 file(s), 0 unpushed, card 115m
+             dirty 3 file(s), 0 unpushed, card 119m
              NEXT P1-035 is DONE (committed, pushed, 7/7 mutations killed). Mutation
 
-  base-partials unknown    BASE-002,BASE-005,BASE-009,BASE-010,BASE-013,BASE-014,BASE-016,BASE-018 task/base-partials
+  base-partials ALIVE      BASE-002,BASE-005,BASE-009,BASE-010,BASE-013,BASE-014,BASE-016,BASE-018 task/base-partials
              head cf7df30 test(disposable): the two fences that were greps, and 
-             dirty 2 file(s), 0 unpushed, card 124m
+             dirty 2 file(s), 0 unpushed, card 127m
              NEXT BASE-018 and BASE-002 are CLOSED (see RESULTS). Remaining work ord
 
-  p1-025     unknown    P1-025,P1-026,P1-027,P1-028        task/p1-025-skills-plugins
+  p1-025     ALIVE      P1-025,P1-026,P1-027,P1-028        task/p1-025-skills-plugins
              head 5917833 feat(connector): P1-027 memory providers and P1-028 co
-             dirty 2 file(s), 0 unpushed, card 117m
+             dirty 2 file(s), 0 unpushed, card 121m
              NEXT P1-025, P1-027, P1-028 are landed on the branch (31e5860, 5917833)
 
 
@@ -95,6 +95,7 @@ APEX ROADMAP — resume report — 2026-09-08 14:41 AWST
       0d752fc test(storage): two mutations the battery proved were completel   [0/10 added lines on tip]
       7cd113c feat(firmware): §P2-015 readout, and a structural check that w   [0/10 added lines on tip]
       20f3ef2 test(storage): the check guarding the disk serial was 96% blin   [0/10 added lines on tip]
+      4c0c1f7 test(firmware): the doctor-line guard found the first of two r   [0/10 added lines on tip]
 
   int-shell:  tip a90cef6 test(colour): four assertions about the page's honesty
     fix/labwc-desktop-parity  — squash-merged, safe to delete
@@ -127,12 +128,12 @@ APEX ROADMAP — resume report — 2026-09-08 14:41 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 2min 37s Tue
+  snapshot timer: active   last 1min 48s Tue
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    79822fc  roadmap-state
-    apex-os    046fb79  wt-base-os-
+    apex-os    d45d0b0  roadmap-state
+    apex-os    3db73d4  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
     apex-os    1951fdc  wt-disposable-
     apex-os    59b7328  wt-followups-int3-
@@ -146,15 +147,15 @@ APEX ROADMAP — resume report — 2026-09-08 14:41 AWST
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
     apex-os    9b605a1  wt-p0-011b-
-    apex-os    3e0d2da  wt-p0-014-
+    apex-os    7f1397a  wt-p0-014-
     apex-os    580c657  wt-p0-019-os-
     apex-os    00c1973  wt-p0-025-os-
     apex-os    eda5ef8  wt-p1-001-
     apex-os    a23175f  wt-p1-002-
     apex-os    c260504  wt-p1-018-
     apex-os    7685dc3  wt-p1-020-os-
-    apex-os    7372ead  wt-p1-023-os-
-    apex-shell a147d19  apex-shell-
+    apex-os    21ac455  wt-p1-023-os-
+    apex-shell 056c0a3  apex-shell-
     apex-shell df979e1  int-shell-
     apex-shell 75049cf  wt-greeter-shell-
     apex-shell ed92eaa  wt-lockhint-

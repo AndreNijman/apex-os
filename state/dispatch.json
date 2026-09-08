@@ -1,12 +1,12 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-08T12:20+08:00",
-  "_round": "Round 8. Andre paused again mid-round ('payse') and then said 'continue all work now'. All six round-7 agents were stopped with TaskStop rather than left to die, the snapshot service was run by hand, and every branch came back with ahead=0. Two units finished during round 7 and both are landed: p1-039 (both repos) and trust-enforcement (apex-os). Round 8 re-dispatches the four card-carrying units plus the two started late in round 7 (base-partials, p1-025), all six with work already pushed or with a card that names the next action.",
+  "updated": "2026-09-08T14:50+08:00",
+  "_round": "Round 9. All six round-8 agents died together on a session usage limit at ~12:55 (resets 13:50; HTTP 429 on every one). Nothing was lost: each had pushed as it went, and one hand-run snapshot at 14:41 covered every dirty worktree plus this state directory. The round produced more finished work than any before it - P2-010/P2-014/P2-015 done, P1-025/P1-027/P1-028 on the branch, P1-036 done, BASE-018 and BASE-002 closed, p0-014's commit 3 plus its nine mutation proofs - and NOTHING was landed, because no unit finished. Round 9 is six fresh agents on the same six units, each with a card that names the exact next action and, in five cases, uncommitted work to commit first.",
   "_landed_this_round": {
-    "apex-os": "roadmap/v2.2 e67fab9 -> 583355e, PUSHED --force-with-lease. task/trust-enforcement, 5 commits rebased from base 1ab542c with zero conflicts, PLUS one landing fix of the orchestrator's own (583355e). THE LANDING CAUGHT A DEFECT THE BRANCH COULD NOT SEE: tests/test-apex-trust-enforcement.sh was 77/77 in the agent's worktree and went 73/1 on the first clean checkout, failing its own first assertion - 'no pinned Fulcio root at files/system/trust/fulcio-root.pem, every update would be refused'. Cause: .gitignore line 13 carries *.pem under 'Signing material - PRIVATE KEYS NEVER IN REPO', and it silently matched the PUBLIC Sigstore root the verifier needs. git add said nothing, git status showed a clean tree, and the suite passed because the file existed UNTRACKED in the worktree that wrote it. Severity is the point: under the shipped default (signature=enforce) a missing root is CouldNotRun, and CouldNotRun REFUSES - so the omission would not have broken a feature, it would have stopped every machine in the fleet from updating, shipped by a rule written to prevent leaking a private key. Fixed by negating the ignore BY EXACT PATH (not by directory, so the next .pem there is a decision) and committing the anchor after checking the bytes rather than assuming them: self-signed, subject and issuer both O=sigstore.dev CN=sigstore, valid 2021-10-07 to 2031-10-05, SHA-256 fingerprint 3B:A7:B6:CC:4E:95:46:9D:4D:33:4B:49:CB:25:7A:D8:53:70:76:FA:84:B0:CA:87:FF:4E:CF:E6:A5:46:80:C1, byte-identical to the value Containerfile.base pins and fails the build over. VERIFIED ON THE LANDED TIP: test-apex-trust-enforcement 77/0 (from 73/1), cargo test --locked --workspace --no-fail-fast 2040 passed / 0 failed across 30 binaries, test-apex-trust 6/0 structural, test-apex-verbs 44/0, test-apex-channel 22/0, test-apex-host 52/0, check-doc-verbs on docs/trust-enforcement.md 2 valid, run-clippy PASS in the container, no conflict markers.",
-    "apex-shell": "unchanged at a90cef6 (p1-039's shell half landed earlier the same day: 690014a -> a90cef6)."
+    "apex-os": "nothing yet at 583355e - no unit finished in round 8.",
+    "apex-shell": "unchanged at a90cef6."
   },
-  "_status_recorded_this_round": "P1-047 re-recorded as done with the enforcement evidence folded in - its criterion 2 was the gap trust-enforcement closed, and the item was already 'done', so the evidence string was rewritten rather than the status. Counts unchanged by that: 49 done / 29 partial / 47 todo / 2 blocked of 127.",
+  "_status_recorded_this_round": "Nothing yet. Counts hold at 49 done / 29 partial / 47 todo / 2 blocked of 127. NOTE for the next landing: base-partials reports BASE-018 and BASE-002 CLOSED on its branch, and p2-010 reports P2-010/P2-014/P2-015 done - those are recordable the moment their units land, and both are close.",
   "_deliberately_held": {
     "p1-038-hardware": "Still not dispatchable unattended. The 18 labwc matrix rows need real applications on a real session: cannot be done headless and cannot be done on the L16 while Andre is using it. A katana job once gaming is over, or a job for Andre with a checklist.",
     "p1-005 / p1-008 / p1-011 / p1-014": "The Cloudflare capability suite, 13 tasks, mutually conflicting (p1-005 with p1-002, p1-008 with p1-002 and p1-005, p1-011 with p1-005 and p1-008, p1-014 with p1-011), so at most ONE can hold a slot at a time. None dispatched: the ceiling went to the five card-carriers plus trust-enforcement. First in line next round together with p1-025.",
@@ -26,16 +26,16 @@
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p0-014",
       "branch": "task/p0-014-remote-lock",
-      "agent_id": "a12f3ea8e8f212f70",
+      "agent_id": "a9ec671c551237591",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T12:25+08:00",
+      "dispatched": "2026-09-08T14:48+08:00",
       "fresh_agent_for_card": "p0-014",
       "title": "CTAP2 assertion verifier behind --origin-policy remote, in three independently mergeable commits -- the last P0 work in the roadmap",
       "second_worktree": "/var/tmp/apex-work/wt-p0-015-shell",
       "second_branch": "task/p0-015-lock-tests",
       "queue_id": "p0-014",
-      "at_dispatch": "Clean and pushed through 41d7c53 - commits 1, 2, 3 and the harness fix (cca4442) are all on origin. Its card's NEXT was ONE STEP STALE (it still called commit 3 'written and green locally, awaiting its commit') and the brief makes correcting that line the first card edit, with git show 41d7c53 named as the way to settle it. Then: mutation proofs on commit 3, commit 4 (authorise_grant consults may_elevate - the enforcement), commit 5 (the validate_for relaxation) last. Asked explicitly to report test-privilege-requests.sh and system_grants.rs counts before and after, because that is the last of round 5's two red suites - test-apex-ai closed today at 44/0. Handed the orchestrator's own measurement as corroboration: 2040/0 on the tip in this session's cgroup, so the lone cargo failure really is a property of the systemd runner.",
-      "session": "round 8 orchestrator, pid 3898"
+      "at_dispatch": "Commits 1, 2, 3 and the harness fix are pushed (a3bf2a8, 2b463d1, 41d7c53, cca4442) and commit 3's NINE mutation pairs are measured and recorded. FOUR dirty paths - protocol.rs plus elevation.rs/grants.rs/privilege.rs - are commit 4, the enforcement, mid-write; the predecessor's last words were 'now Elevating, decide_origin and the rewritten authorise_grant'. Brief: read the diff, finish, commit, push, then commit 5 (the validate_for relaxation) last. Asked again to report test-privilege-requests.sh and system_grants.rs before/after, because those nine assertions are the last of round 5's two red suites and the harness fix was meant to make them execute for the first time.",
+      "session": "round 9 orchestrator, pid 4283"
     },
     {
       "slug": "p1-023",
@@ -49,16 +49,16 @@
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p1-023",
       "branch": "task/p1-023-handoff-lifecycle",
-      "agent_id": "aad5d21336a808b62",
+      "agent_id": "a08ecf4d2d79733bc",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T12:25+08:00",
+      "dispatched": "2026-09-08T14:48+08:00",
       "fresh_agent_for_card": "p1-023",
       "title": "voice-ptt wiring through all three keybind generators, then handoff packet and lifecycle types",
       "second_worktree": "/var/tmp/apex-work/wt-p1-023-os",
       "second_branch": "task/p1-023-push-to-talk-daemon",
       "queue_id": "p1-023",
-      "at_dispatch": "Shell half clean at 7544834 with THREE things done and pushed (6b469ec wiring, f5b494b indicator, 7544834 help prose), and the card now says so emphatically because a stale NEXT on this very unit already cost one wasted start. The apex-os half is where the work is: 8c3958d is pushed but FOUR paths are dirty, including a new apex-agent-core/src/handoff.rs - P1-024's handoff packet mid-build, none of it on origin. Brief: read the diff and handoff.rs, finish, commit, push. Reminded that check-agent-help.sh is 24/0 with slopcheck TOTAL:0 and any new prose must keep both.",
-      "session": "round 8 orchestrator, pid 3898"
+      "at_dispatch": "Shell half clean at 7544834 with wiring, indicator and help prose all pushed and mutation-proven. The apex-os half is where the work is: EIGHT dirty paths and ~1,800 added lines - a new apex-agent-core/src/handoff.rs and apex/tests/handoff_packet.rs plus doc, fish-completion and agent.sh edits - and the predecessor's last report was '16/16 mutants caught, 0 survived, control green either side; final full run before committing'. Brief: do that run, COMMIT AND PUSH before extending anything, then P1-029. Reminded that check-agent-help.sh is 24/0 with slopcheck TOTAL:0 and that a new verb needs a fresh apex build for the doc-verb checker, since the installed one is older.",
+      "session": "round 9 orchestrator, pid 4283"
     },
     {
       "slug": "p2-010",
@@ -71,14 +71,14 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p2-010",
       "branch": "task/p2-010-hardware-storage",
-      "agent_id": "a89b2dfbdaed4df1f",
+      "agent_id": "afd439e13ee23878c",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T12:25+08:00",
+      "dispatched": "2026-09-08T14:48+08:00",
       "fresh_agent_for_card": "p2-010",
       "title": "hardware qualification database, agent cgroup budgets, Storage Manager, firmware lifecycle",
       "queue_id": "p2-e",
-      "at_dispatch": "P2-010 and P2-014 are DONE and pushed through 0d752fc, battery included. SEVEN dirty paths are P2-015 firmware mid-build - two new firmware.rs, a new tests/test-apex-firmware.sh, plus pr-validation.yml and Containerfile.core edits - and none of it is on origin. The card's fwupd measurements are handed forward as settled: 4 of 28 rows have NO Version key, Name repeats five times for UEFI Device Firmware so DeviceId is the identity, and get-updates' exit status must never be read (--json exits 0 with an empty Devices array where the bare form does not). Told the tip moved to 583355e and that Containerfile.base now carries hard trust assertions, so a Containerfile.core edit should match the block it lands in. P2-011 cgroup budgets must be proven against a test daemon, never by reconfiguring the live apex-agentd.",
-      "session": "round 8 orchestrator, pid 3898"
+      "at_dispatch": "THREE of four items are DONE and pushed through 20f3ef2: P2-010, P2-014, P2-015. Only P2-011 cgroup budgets remains and then the unit is complete. One dirty path (tests/test-apex-firmware.sh) is the predecessor checking whether a firmware guard was itself a by-content lookup that vanishes instead of failing - finish, commit, push. P2-011's measured shape was handed forward: a NEW apexd/apex-agentd/src/budget.rs with a one-line hook (P1-020 put ~1,700 lines into apex-agentd on a tip this branch does not carry, so a new file merges where a refactor would not); cpu/memory/pids delegate to app.slice; io is ABSENT at every level and must be a Reading carrying that reason, never a budget of zero; systemd-run --user --scope needs no polkit and was measured killed at exactly 5s with exit 143; the live RuntimeMaxSec check needs a user bus so it stays opt-in and out of pr-validation.yml. Told to prove budgets against a test daemon, never the live apex-agentd.",
+      "session": "round 9 orchestrator, pid 4283"
     },
     {
       "slug": "p1-035",
@@ -90,15 +90,15 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p1-035",
       "branch": "task/p1-035-agent-tooling",
-      "agent_id": "afc50abceb434a71d",
+      "agent_id": "a102e014609a092da",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T12:25+08:00",
+      "dispatched": "2026-09-08T14:48+08:00",
       "fresh_agent_for_card": "p1-035",
       "title": "clear the five owed mutations on the pushed P1-035 commits, then P1-036 worktree status, then P1-037 disposable capsules",
       "queue_id": "p1-035",
-      "at_dispatch": "P1-035 and P1-036 are both DONE and pushed (473b7f6 the engine, f4ec0ee the hardening plus a slug-keying traversal hole it found and closed, 296b0ee the symlink fix). ELEVEN dirty paths are P1-037 disposable capsules mid-build - a new apex-agentd/src/disposable.rs and tests/test-agent-disposable.sh - none of it on origin; .mutate.sh and .mutate-036.sh stay uncommitted. Continue the predecessor's shape: a fake capsule engine that logs every call and swaps HOME the way a real one does, so the whole chain runs for real. Told to keep the isolation claim honest (shared HOME, /run/host read-write, read-only OS layer only - already measured for BASE-005) and to read the unowned task/p1-030-shell-integrations at 63493c7 before finalising the capsule surface.",
+      "at_dispatch": "P1-035 and P1-036 both DONE and pushed (473b7f6, f4ec0ee, plus 296b0ee and d701f37). Only three scratch mutate runners are dirty and they stay uncommitted, so P1-037 is committed up to d701f37. THE ONE THING CARRIED FORWARD DELIBERATELY: the advisor caught the predecessor asserting, in three places, that the engine's trap runs when the daemon dies - unmeasured. It had started measuring it instead. The brief says finish that measurement and make all three places say what was measured, because 'a cleanup runs on daemon death' is exactly the assertion that passes by never being exercised.",
       "conflicts_note": "queue.json lists p1-035 as conflicting with p1-030. That conflict is moot this round: p1-030 is not dispatched and is not in the unlanded set.",
-      "session": "round 8 orchestrator, pid 3898"
+      "session": "round 9 orchestrator, pid 4283"
     },
     {
       "slug": "base-partials",
@@ -117,14 +117,14 @@
       "branch": "task/base-partials",
       "second_worktree": "/var/tmp/apex-work/wt-base-shell",
       "second_branch": "task/base-partials-shell",
-      "agent_id": "ac5c600c1cbbd2e34",
+      "agent_id": "add8ce2853ad24ffa",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T12:25+08:00",
-      "session": "round 8 orchestrator, pid 3898",
+      "dispatched": "2026-09-08T14:48+08:00",
+      "session": "round 9 orchestrator, pid 4283",
       "queue_id": "base-partials",
       "title": "Close the eight BASE preservation items still marked partial",
       "card": "NONE AT DISPATCH - told to create ROADMAP/state/agents/base-partials.md as its second action, before any code.",
-      "at_dispatch": "Both worktrees clean and pushed, no commits yet. THE ORCHESTRATOR WROTE THE DEAD RECON ONTO THE CARD: the recon subagent finished and reported, then its parent was stopped, so a 100-plus-line report on headless.sh's API, check-headless-runners.sh's four rules and how a new runner satisfies them, which suites live in which repo, the greeter's raw-Name chain and the per-repo counting conventions would have died with that context. It is now a ## RECON (DO NOT RE-DERIVE) section. The card's NEXT said 'await the two recon sweeps', so correcting that line is the first card edit. Handed the two structural findings the recon settled: there is NO name-translation map in either repo (the greeter prints raw Name= values, MiscPage omits labwc entirely, 'Floating' is comments and docs only) and changing displayName's meaning is a deliberate tested edit because two suites assert it; and BASE-014's last assertion - the rebound key firing after labwc --reconfigure - needs NEW machinery, since test-labwc-keybinds.sh never starts labwc and there is no wtype/ydotool anywhere. Also that katana now HAS steam/gamescope, so BASE-009's 'not installed' note is stale, while katana stays read-only during gaming."
+      "at_dispatch": "BASE-018 and BASE-002 are CLOSED on the branch (head cf7df30). Two dirty paths - pr-validation.yml and a new tests/test-apex-env-devices-live.sh - are the predecessor's 'all three mutations caught, including the shape change failing rather than skipping; wiring into CI'. Finish, commit, push. Remaining order from the card: BASE-016 (five named holes in test-apex-recover.sh, the suite the old evidence claimed did not exist), BASE-005 (AMD verifiable on this machine), BASE-013, BASE-014, BASE-010, BASE-009. BASE-014's last assertion is now reachable: the predecessor PROVED wtype works, and no test in either repo has ever pressed a key after labwc --reconfigure. Re-handed the no-name-translation-map finding and the warning that changing displayName's meaning is a deliberate tested edit (two suites assert it)."
     },
     {
       "slug": "p1-025",
@@ -137,14 +137,14 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p1-025",
       "branch": "task/p1-025-skills-plugins",
-      "agent_id": "a3f75a97c0ad8178e",
+      "agent_id": "a1c8f6ecbed4822da",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T12:25+08:00",
-      "session": "round 8 orchestrator, pid 3898",
+      "dispatched": "2026-09-08T14:48+08:00",
+      "session": "round 9 orchestrator, pid 4283",
       "queue_id": "p1-025",
       "title": "Skill inventory and audit, plugin provenance and isolation, memory provider interface, connector trust planes",
       "card": "ROADMAP/state/agents/p1-025.md - written by the round-7 agent before it was stopped; its NEXT is the read-first step.",
-      "at_dispatch": "Dispatched in round 7 and stopped early: worktree made, branch pushed, card written, ground-truth measurement started - but it was stopped BEFORE reporting, so anything it learned that is not on the card is gone and the brief says re-measure rather than guess. Clean at e67fab9; the tip has since moved to 583355e, which matters for two of its items: verify.rs is now the in-repo example of provenance done properly (pinned root, skopeo+openssl, and a verification that could not run being neither a pass nor a failure), and the brief points at it. Four constraints handed forward as measured: P1-027's 'remote MCP memory stays authoritative' is a CONSTRAINT (Andre's vault on the NAS via the Orange Pi), so an interface that needs a migration to be useful fails the item; sandbox honesty (shared HOME, /run/host read-write) must not be papered over by the word 'sandbox' in P1-026's criterion; provenance means the hash of what RUNS, not a recorded URL nobody re-checks; and permission-denied-is-not-absence, because an inventory is exactly where the fifteenth defect of that shape would live. Forbidden from installing from a real marketplace or writing to Andre's real vault."
+      "at_dispatch": "P1-025, P1-027 and P1-028 are on the branch (31e5860, 5917833). Remaining: P1-026 provenance, then tests/test-apex-skill.sh and the shell suite for the new verbs, then mutations, then clippy and a full run. Two dirty paths - digest.rs modified, a new provenance.rs - are P1-026 mid-build. Pointed at apexd/apex/src/verify.rs ON THE NEW TIP as the in-repo example of provenance done properly: a pinned root rather than one the signature handed you, and a verdict distinguishing failed from absent from could-not-run, where could-not-run is neither a pass nor a failure. Re-stated that provenance means the hash of what RUNS and that the sandbox word must not carry more than the mechanism does."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -153,8 +153,8 @@
   ],
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt — the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {
-    "pid": 3898,
-    "note": "Re-registered after the pause: state/orchestrator.pid is 3898 with a heartbeat loop guarded on that pid (`while kill -0 3898`), so the heartbeat goes stale within ten minutes of this session ending instead of locking autoresume out. AUTORESUME survived the pause armed, because this pause was a stop-and-continue rather than a shutdown."
+    "pid": 4283,
+    "note": "Re-registered after the limit: state/orchestrator.pid is 4283 with a heartbeat loop guarded on that pid, so the heartbeat goes stale within ten minutes of this session ending. The 12:18 autoresume firing correctly logged 'skipped: agents are still writing output' - the .output-mtime guard did its job while round 8 was alive."
   },
   "_previous_pause": {
     "when": "2026-09-07T15:32+08:00 to 2026-09-08T08:56+08:00",

@@ -6,10 +6,57 @@ branch: task/base-partials (apex-os), task/base-partials-shell (apex-shell)
 base: apex-os e67fab9, apex-shell a90cef6 (both origin/roadmap/v2.2)
 
 ## NEXT
-BASE-018 and BASE-002 are CLOSED (see RESULTS). Remaining work order:
-BASE-016 (fill five named holes in tests/test-apex-recover.sh — the suite the
-old evidence said did not exist), BASE-005 (AMD is verifiable ON THIS MACHINE),
-BASE-013, BASE-014 (wtype works — proved), BASE-010, BASE-009.
+BASE-018, BASE-002, BASE-016, BASE-005 are CLOSED (see RESULTS).
+Remaining work order: BASE-013, BASE-014 (wtype works — proved), BASE-010,
+BASE-009.
+
+### Round-10 correction to this card's own work order
+The previous NEXT said BASE-016 was still to do. It was already DONE at
+`cf7df30`, committed by the predecessor minutes before it died — the five
+named holes were filled in `tests/test-apex-recover.sh` (which is the right
+file: BASE-016's evidence claims "there is no tests/test-apex-disposable.sh"
+and concludes wrongly from it — `test-apex-recover.sh` already drives the
+shipped `apex-disposable` through a stub capsule engine, and `pr-validation.yml`
+runs it in the `static` job, the one with no path filter). Counts re-verified
+this round, see RESULTS.
+
+## RESULTS (round 10) — per item
+
+### BASE-005 — DONE. apex-os 2c77182 on task/base-partials.
+The one outstanding qualification was "the AMD and hw device profiles are
+argv-pinned but not hardware-verified". Closed on the L16, which HAS the
+hardware (Radeon 780M, `/dev/kfd` present, engine reads the machine as `amd`).
+New suite `tests/test-apex-env-devices-live.sh` (265 lines) sources the SHIPPED
+`files/system/libexec/apex-env` and calls `gpu_flags`, so a profile change
+changes the test, then hands exactly those flags to real rootless podman on an
+already-local image and reads back whether each node is present and OPENABLE.
+- `tests/test-apex-env-devices-live.sh` **14 passed, 0 failed, 2 skipped**.
+  /dev/kfd and /dev/dri/renderD128 both OPEN inside a real rootless container
+  with the amd profile's six arguments, and both ABSENT without them (negative
+  control on every device assertion). /dev/bus/usb arrives for `hw`, absent
+  without it. `none` adds nothing. No container left behind.
+- The two SKIPs are honest and named: `--group-add keep-groups` is
+  unverifiable here (amdgpu leaves /dev/kfd mode 0666, so no supplementary
+  group is what grants access — host mode printed in the skip line), and
+  nvidia has no device on this machine so `--nvidia` stays argv-pinned only.
+- Never calls `apex env create`, never pulls, every container `--rm`, one
+  read-only probe (`dd … count=0`). No window, no password.
+- MUTATION-PROVED four ways, engine restored clean after each: dropping
+  `--device /dev/kfd` from `amd` reddens the live /dev/kfd assertion;
+  collapsing `gpu_flags`' two `printf` lines into one **FAILS the shape
+  assertion rather than skipping past it** (that is the trap this suite was
+  built to avoid — a shape change would otherwise leave every device
+  assertion with nothing to pass); dropping `--device /dev/bus/usb` from `hw`
+  reddens two; making `none` emit a device reddens the default-holds-nothing
+  assertion.
+- Wired into `pr-validation.yml`'s capsule job AND its ShellCheck gate (:1134).
+  `shellcheck -S warning` clean (needed an explicit `SC1090` directive with a
+  reason, matching `apex-env:170`'s convention). `bash -n` clean.
+  `git check-ignore -v` on the new file: not ignored (exit 1).
+
+### BASE-016 — DONE. apex-os cf7df30 on task/base-partials.
+Committed by the predecessor; counts re-verified this round (see NEXT for why
+this card previously listed it as outstanding).
 
 ## RESULTS (round 9) — per item
 
