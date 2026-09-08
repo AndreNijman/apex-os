@@ -102,10 +102,127 @@ pub trait NvidiaSmi: Send + Sync {
 }
 
 /// True when `nvidia-smi` resolves on `PATH`.
+///
+/// This answers "is the tool installed", and that is ALL it answers. It is not
+/// the same question as "is there a usable NVIDIA GPU here" — see
+/// [`SmiOutcome`] and [`classify_smi`] for why the two came apart on real
+/// hardware, and prefer them for anything the user reads.
 pub fn nvidia_smi_available() -> bool {
     std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).any(|dir| dir.join("nvidia-smi").is_file()))
         .unwrap_or(false)
+}
+
+/// `nvidia-smi`'s own exit code for "there is no driver to talk to".
+///
+/// Documented by the tool as *"NVIDIA_SMI has failed because it couldn't
+/// communicate with the NVIDIA driver"*.
+const SMI_NO_DRIVER: i32 = 9;
+
+/// What running `nvidia-smi` actually told us.
+///
+/// ## Why this type exists
+///
+/// `nvidia_smi_available()` asks whether the binary is on `PATH`, and for a
+/// while that stood in for "this machine has an NVIDIA GPU". Measured on the
+/// ThinkPad L16 on 2026-09-08, those are different facts: `/usr/bin/nvidia-smi`
+/// is installed and **exits 9** because no driver is loaded. There is no NVIDIA
+/// card in the machine at all.
+///
+/// That is not an unusual configuration and it is not a broken one. The same
+/// state occurs on any machine where the tool ships and the module does not
+/// load: a laptop with its discrete card disabled in firmware, a machine whose
+/// kernel was updated before the module was rebuilt, and — as here — a single
+/// image that carries the tool for the machines that do have a card.
+///
+/// Treating it as an error had two visible costs, both fixed with this type:
+///
+///  * every `apex ai status`, on every such machine, printed
+///    `apexd: nvidia-smi query failed (exit status: 9):` to stderr. The JSON on
+///    stdout was correct and parseable — that part was never broken — but a
+///    caller that merges the streams, which is the common shape for `2>&1` in a
+///    script, got prose in front of its JSON.
+///  * `apex game` reported `nvidia-smi: present`, which is true and useless to
+///    somebody working out why their clock locks do nothing.
+///
+/// This is the same class of defect this codebase has found repeatedly, wearing
+/// a different hat: an absent capability inferred from the wrong signal. The
+/// earlier instances read a failed `stat` as "the file is not there"; this one
+/// reads an installed binary as "the hardware is there".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmiOutcome {
+    /// The tool is not installed. Nothing to say about NVIDIA.
+    Absent,
+    /// The tool ran and said it cannot reach a driver. No usable NVIDIA GPU
+    /// right now — an ordinary state, and NOT worth a diagnostic.
+    NoDriver,
+    /// The tool ran and answered.
+    Ready,
+    /// The tool ran and failed for some other reason. Worth reporting, because
+    /// unlike the case above nobody has established that this is expected.
+    Failed,
+}
+
+impl SmiOutcome {
+    /// What to show a user who is asking why NVIDIA features are inactive.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SmiOutcome::Absent => "absent",
+            SmiOutcome::NoDriver => "present, but no driver is loaded",
+            SmiOutcome::Ready => "present",
+            SmiOutcome::Failed => "present, but the query failed",
+        }
+    }
+
+    /// Whether this outcome deserves a line on stderr.
+    ///
+    /// [`SmiOutcome::NoDriver`] deliberately does not: it is the steady state
+    /// of every machine in this fleet that has the tool and no card, and a
+    /// diagnostic printed on every invocation is noise that trains people to
+    /// ignore diagnostics.
+    pub fn is_worth_reporting(self) -> bool {
+        matches!(self, SmiOutcome::Failed)
+    }
+}
+
+/// Classify a finished `nvidia-smi` run from its exit code.
+///
+/// Pure on purpose, and `pub` for the same reason [`parse_query`] is: the
+/// spawning wrapper below cannot be unit-tested without a real `nvidia-smi` on
+/// `PATH`, and mutating `PATH` inside a test process races every other test in
+/// the binary. So the decision lives here where it can be checked exhaustively,
+/// and the wrapper stays a thin shell over it.
+///
+/// `installed` is passed rather than probed so that a caller which has already
+/// answered that question does not answer it twice — and so that this function
+/// has no way to read the machine it is running on.
+pub fn classify_smi(installed: bool, code: Option<i32>) -> SmiOutcome {
+    if !installed {
+        return SmiOutcome::Absent;
+    }
+    match code {
+        Some(0) => SmiOutcome::Ready,
+        Some(SMI_NO_DRIVER) => SmiOutcome::NoDriver,
+        // A signal gives no code. Unknown rather than expected, so it is
+        // reportable — a killed nvidia-smi is not the same claim as a machine
+        // without a driver.
+        _ => SmiOutcome::Failed,
+    }
+}
+
+/// Run `nvidia-smi` cheaply and say what this machine can do with it.
+///
+/// `-L` lists the cards and nothing else, so this is the least work that still
+/// distinguishes "the driver answers" from "the driver is not there".
+pub fn nvidia_smi_state() -> SmiOutcome {
+    if !nvidia_smi_available() {
+        return SmiOutcome::Absent;
+    }
+    match std::process::Command::new("nvidia-smi").arg("-L").output() {
+        Ok(o) => classify_smi(true, o.status.code()),
+        // Installed but unable to execute at all. Not "no driver".
+        Err(_) => SmiOutcome::Failed,
+    }
 }
 
 /// The real `nvidia-smi` querier.
@@ -129,6 +246,13 @@ impl NvidiaSmi for RealNvidiaSmi {
             .output();
         match out {
             Ok(o) if o.status.success() => parse_query(&String::from_utf8_lossy(&o.stdout)),
+            // A driver that is not there is an ANSWER, not a fault, and the two
+            // sibling methods below already treated it that way. This arm makes
+            // query() agree with them: no NVIDIA GPU is usable, so report no
+            // GPUs, quietly. Printing here put a line on stderr for every
+            // `apex ai status` on every machine that ships the tool without a
+            // card — see SmiOutcome for the measurement.
+            Ok(o) if !classify_smi(true, o.status.code()).is_worth_reporting() => Vec::new(),
             Ok(o) => {
                 eprintln!(
                     "apexd: nvidia-smi query failed ({}): {}",
