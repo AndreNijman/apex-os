@@ -40,6 +40,8 @@ If anything else is picked up here, the two things deliberately NOT done:
   rewritten onto it: `Artifact::Present`, `claimed_signer` and `checked` are
   gone — one field for the answer, none for the claim — and `render` prints a
   signer name ONLY where one was verified.
+- **c14da15 — 41 verify tests + the 12-cell decision table, and two mutations.**
+  Suite 404 -> 451 at that commit (445 unit + 6 mcp_sidecar_live).
 - **180c01c — the gate, wired into `ops::update`.** Before `record_update` and
   before `FsyncGuard::disable` (both write machine state; a refusal after them
   would have recorded a health record for an update that never happened, which
@@ -87,9 +89,6 @@ If anything else is picked up here, the two things deliberately NOT done:
   clean under `check-doc-verbs.sh` (2 valid, 0 not-a-command; the 4 BAD in the
   whole-docs run are pre-existing, in `p1-/p3-progress.md`, which that
   checker's own header excludes as historical records).
-- **c14da15 — 41 verify tests + the 12-cell decision table, and two mutations.**
-  Full suite **451 green** (445 unit + 6 mcp_sidecar_live), up from 404.
-
 ## COUNTS (real runs, at the final tip)
 - `cargo test`: **455** — 449 unit + 6 `mcp_sidecar_live`. Was 404 at the
   branch point, so **+51**.
@@ -107,7 +106,7 @@ If anything else is picked up here, the two things deliberately NOT done:
   and `too_many_arguments` on `verify_signed_bytes`, which became the
   `Candidate` + `Expect` structs).
 
-## MUTATIONS PROVEN (round 6) — four, each restored and re-verified green
+## MUTATIONS PROVEN (round 6) — five, each restored and re-verified green
 | # | mutation | where | what went red | restored |
 |---|---|---|---|---|
 | 1 | `(Verdict::Failed(_), _) => Err(...)` → `Ok(Some(...))` — a signature that verifies WRONGLY stops refusing | verify.rs `arm()` | **6 Rust tests**: `a_failed_signature_refuses_even_under_warn`, `a_failed_signature_under_enforce_refuses`, `a_refusal_carries_the_other_check_s_warning_too`, `a_refusal_names_which_of_the_two_checks_refused`, `a_refusal_that_could_not_run_is_never_worded_as_a_failure`, `the_json_gate_answer_matches_the_rendered_one` (439 pass / 6 fail) | yes |
@@ -192,6 +191,55 @@ If anything else is picked up here, the two things deliberately NOT done:
 - No consumer outside Rust reads the renamed JSON keys: `claimedSigner`,
   `signatureChecked`, `signatureCheckedNote`, `sbomAttestation` appear in no `.sh`,
   `.qml`, `.md`, `.py` or `.js` in the repo, so the rename breaks nothing.
+
+- **`ops::update` is the ONLY caller of `bootc upgrade` in this repository.**
+  Grepped `*.sh`, `*.service`, `*.timer`, `*.rs`, `*.py`, `*.qml`: every other
+  hit is a comment, a doc, or `tests/test-apex-channel.sh` asserting on the
+  source. So the gate covers every update path this project provides — and a
+  user running `bootc upgrade` by hand still bypasses it. That is a real
+  coverage boundary, stated in `docs/trust-enforcement.md` rather than papered
+  over: the gate is a policy APEX applies to its own verb, not a kernel-level
+  restraint.
+- **`Containerfile.base`, not `.core`, is where `COPY files/… /usr/…` lives.**
+  Measured because the brief's instinct was `.core`: `.core` has only 3
+  COPY/ADD lines and creates `/usr/share/apex-os/secureboot` INLINE with
+  mkdir/printf; `.apex` copies a handful of session files; `.base` carries the
+  ~40 explicit per-file COPY lines including `files/system/libexec/apex-pkg ->
+  /usr/libexec/apex-pkg`. There is no generic `files/system/share` mapping
+  anywhere, so a new `/usr/share` file needs its own COPY line.
+- **`openssl verify` prints the offending certificate's DN on line 1 and the
+  reason on line 2.** `stderr.lines().next()` — the obvious reading — put
+  `O=sigstore.dev, CN=sigstore` where a refusal's reason belongs, so the one
+  line a user reads when their machine will not update was a distinguished
+  name. Fixed by finding the `depth lookup:` line. Note written to
+  `errors-and-fixes/openssl-verify-prints-the-dn-before-the-reason.md`.
+- **A test CA must have a notBefore in the PAST.** With a root minted "now" and
+  a deliberately expired leaf, `openssl verify -attime <leaf notBefore>` fails
+  `certificate is not yet valid` at **depth 2** — the authority is not yet
+  valid at the instant it signed its own leaf. It reads exactly like a verifier
+  bug and cost real time. Real Fulcio roots predate their leaves by years (the
+  pinned one: notBefore 2021-10-07). `errors-and-fixes/a-test-ca-must-predate-the-leaf-it-signs.md`.
+- **Appending a byte to a DER signature is an unreliable tamper.** An ECDSA
+  P-256 DER signature is 70-72 bytes depending on whether r and s need a
+  leading zero, so appending changes length as well as content and what
+  openssl rejects it for varies per fixture. Two of thirteen fixtures ended up
+  carrying a WORKING signature while claiming to be tampered, and the
+  surrounding assertions passed for the wrong reason. Fixed by flipping a byte
+  inside the DER **and** by making every fixture verify its own tamper with
+  openssl before the binary is asked anything — FATAL if a fixture that claims
+  to be broken still verifies.
+  `errors-and-fixes/appending-a-byte-to-a-der-signature-is-an-unreliable-tamper.md`.
+- **NEAR MISS, worth reading: an unquoted heredoc ran `apex update` on the
+  L16.** Writing `enforcement.conf` with `cat > f <<CONF` (delimiter NOT
+  quoted) command-substituted the backticks in its own comments — one of which
+  said `` `apex update` `` — and bash executed it. **Nothing was staged**:
+  `apex update` requires root and exited with its own message, and
+  `rpm-ostree status` afterwards read `State: idle` with no staged deployment
+  (booted 308127d9…, previous 5e206de5…). The corrupt output in the file is how
+  it was caught. Only the root check stood between a documentation comment and
+  a deployment on Andre's daily driver. Use `<<'EOF'` by default; prose about
+  dangerous commands is dangerous prose.
+  `errors-and-fixes/unquoted-heredoc-ran-apex-update-on-the-live-machine.md`.
 
 ## BLOCKED ON
 - nothing
