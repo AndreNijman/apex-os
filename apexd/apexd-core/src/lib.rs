@@ -48,6 +48,11 @@ pub mod channel;
 pub mod dispatch;
 pub mod fan;
 pub mod fingerprint;
+// §P2-015's firmware readout. Pure: the CLI runs fwupdmgr and hands the JSON
+// in. fwupd's exit status is never consulted anywhere, because it was measured
+// to mean "nothing to do" when non-zero and to accompany an explicit `Error`
+// document when zero — so the document is the only truth.
+pub mod firmware;
 pub mod game;
 pub mod gameprofile;
 pub mod gaming;
