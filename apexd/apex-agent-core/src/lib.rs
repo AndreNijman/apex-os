@@ -30,6 +30,7 @@
 //!         ├─ claude's own hook lifecycle   hook.rs
 //!         ├─ handing a file to a session   inject.rs
 //!         ├─ projects + worktrees          project.rs
+//!         ├─ per-worktree status            worktree.rs
 //!         ├─ project window layouts        layout.rs
 //!         ├─ checkpoints                   checkpoint.rs
 //!         ├─ privilege requests            request.rs
@@ -69,6 +70,7 @@ pub mod request;
 pub mod sandbox;
 pub mod session;
 pub mod term;
+pub mod worktree;
 
 pub use policy::AgentPolicy;
 pub use protocol::{AgentState, SandboxPolicy, SessionInfo};

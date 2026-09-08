@@ -205,6 +205,10 @@ pub fn publish_event(id: u32, state: &str, detail: Option<String>) -> Result<()>
         // own permission mode, so this stays absent rather than being made a
         // flag anybody could set.
         native: None,
+        // Same reasoning: a test observation is something the hook bridge
+        // DERIVES from a tool payload it was handed, not something a caller
+        // asserts about itself. `apex agent event` cannot set it.
+        test: None,
     })?;
     Ok(())
 }
@@ -222,6 +226,7 @@ pub fn publish_hook(
     state: Option<AgentState>,
     detail: Option<String>,
     native: Option<String>,
+    test: Option<crate::worktree::TestNote>,
 ) -> Result<()> {
     call(&Request::Event {
         id,
@@ -229,8 +234,17 @@ pub fn publish_hook(
         event: Some(event.as_str().to_string()),
         detail,
         native,
+        test,
     })?;
     Ok(())
+}
+
+/// Per-worktree status for one remembered project, or all of them (§P1-036).
+pub fn worktrees(project: Option<String>) -> Result<Vec<crate::worktree::WorktreeStatus>> {
+    match call(&Request::Worktrees { project })? {
+        Response::Worktrees { worktrees } => Ok(worktrees),
+        other => bail!("unexpected reply to worktrees: {other:?}"),
+    }
 }
 
 /// Read the session id from the environment, for a process running *inside* a
