@@ -1911,10 +1911,11 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
                         if topo.ecore_list().is_empty() { "(none)".into() } else { topo.ecore_list() },
                         topo.source.as_str()
                     );
-                    println!(
-                        "nvidia-smi: {}",
-                        if apexd_core::gpu::nvidia_smi_available() { "present" } else { "absent" }
-                    );
+                    // The STATE, not merely whether the file exists. On a
+                    // machine that ships nvidia-smi with no driver loaded —
+                    // the L16, measured — "present" is true and tells somebody
+                    // debugging absent clock locks nothing at all.
+                    println!("nvidia-smi: {}", apexd_core::gpu::nvidia_smi_state().as_str());
                 }
             }
             0
