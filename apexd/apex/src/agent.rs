@@ -416,6 +416,29 @@ pub struct RunArgs {
     /// Where to run. Defaults to the current directory.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+    /// Run inside a disposable capsule and delete the whole environment when
+    /// the session ends (§19).
+    ///
+    /// The working directory is COPIED in, not shared, so whatever the agent
+    /// does to it goes with the environment. That is what makes the state
+    /// disposable — and it means nothing comes back unless `--copy-out` says
+    /// where to put it.
+    ///
+    /// A throwaway ENVIRONMENT, not a security boundary. distrobox mounts the
+    /// host filesystem at /run/host in every capsule and the process runs as
+    /// your own uid, so code in there can still reach your real home. For
+    /// confinement — $HOME masked, ~/.ssh unreachable — use `--sandbox`
+    /// instead; the two are refused together rather than pretending to
+    /// combine. `apex disposable plan` prints the whole boundary.
+    #[arg(long)]
+    pub disposable: bool,
+    /// Where the capsule's ~/out is copied when it closes. Needs
+    /// `--disposable`.
+    ///
+    /// Without it NOTHING leaves the environment. An agent that should hand
+    /// work back writes it to ~/out inside.
+    #[arg(long, value_name = "DIR", requires = "disposable")]
+    pub copy_out: Option<String>,
     /// Start it and return, instead of attaching.
     #[arg(long, short)]
     pub detach: bool,
@@ -903,6 +926,8 @@ fn run(args: RunArgs) -> Result<i32> {
         cols: size.cols,
         rows: size.rows,
         env: Vec::new(),
+        disposable: args.disposable,
+        copy_out: args.copy_out.clone(),
     };
 
     let mut c = Client::connect()?;
@@ -1473,6 +1498,16 @@ fn print_session(s: &SessionInfo) {
     }
     if let Some(c) = &s.checkpoint {
         println!("checkpoint   {c}");
+    }
+    // Said in full, not as a one-word flag. A user looking at this session
+    // needs to know two things a capsule name does not convey on its own:
+    // the working tree is a COPY, and it is deleted when the session ends.
+    if let Some(capsule) = &s.capsule {
+        println!("capsule      {capsule} (disposable)");
+        println!(
+            "             the working tree here is a COPY, and this environment is \
+             deleted when the session ends"
+        );
     }
     println!("pid          {}", s.pid);
     println!("terminal     {}x{}", s.cols, s.rows);
@@ -3097,6 +3132,8 @@ mod tests {
             worktree: None,
             checkpoint: false,
             cwd: None,
+            disposable: false,
+            copy_out: None,
             detach: false,
             args: Vec::new(),
             host: None,

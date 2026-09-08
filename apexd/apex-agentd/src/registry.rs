@@ -808,6 +808,7 @@ mod tests {
             cols: 80,
             rows: 24,
             injected: 0,
+            capsule: None,
         }
     }
 
