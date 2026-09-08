@@ -69,7 +69,7 @@ const EXPECTED_SIGNER: &str =
     "https://github.com/AndreNijman/apex-os/.github/workflows/build-image.yml@refs/heads/main";
 
 /// The OIDC issuer behind that identity. GitHub Actions' token endpoint.
-const EXPECTED_ISSUER: &str = "https://token.actions.githubusercontent.com";
+pub const EXPECTED_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 /// An image-owned file that replaces [`EXPECTED_SIGNER`] when present.
 ///
@@ -128,10 +128,26 @@ impl Roots {
     /// feeds a claim about whether the operating system is trustworthy, and
     /// there is no such claim that is safe to make out of a read nobody
     /// completed.
-    fn read(&self, absolute: &str) -> Result<String, String> {
+    pub(crate) fn read(&self, absolute: &str) -> Result<String, String> {
         let p = self.path(absolute);
         match std::fs::read_to_string(&p) {
             Ok(s) => Ok(s),
+            Err(e) => Err(format!("{}: {e}", p.display())),
+        }
+    }
+
+    /// A file's text, `None` if it does not exist, or the reason it could not
+    /// be read.
+    ///
+    /// The difference from [`Self::read`] matters for configuration: an absent
+    /// policy file means "no policy was written", which is a real and normal
+    /// state, while an unreadable one means nobody knows what the policy is.
+    /// One may fall back to a default; the other may not.
+    pub(crate) fn read_optional(&self, absolute: &str) -> Result<Option<String>, String> {
+        let p = self.path(absolute);
+        match std::fs::read_to_string(&p) {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("{}: {e}", p.display())),
         }
     }
@@ -369,25 +385,20 @@ fn classify(reqs: &Value) -> Policy {
 // ── does the registry hold a signature for what we are running ───────────────
 
 /// One registry-side artifact for the booted digest.
+/// There is no `Present` variant any more, and its absence is the unit's whole
+/// point. `Present` meant "the tag exists", which is what this module used to
+/// report because it could not do better; a tag existing is not a signature
+/// verifying, and printing the first as if it were the second is the lie
+/// `crate::verify` was written to stop telling. A fetch now either hands back
+/// the artifact's bytes — which `crate::verify` judges — or one of these two
+/// reasons it could not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Artifact {
-    /// The registry answered and holds it.
-    Present,
     /// The registry answered and does not hold it.
     Absent,
     /// The registry was not reached, or answered something else. The reason is
     /// carried so this can never be read as `Absent`.
     Unavailable(String),
-}
-
-impl Artifact {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Artifact::Present => "present",
-            Artifact::Absent => "absent",
-            Artifact::Unavailable(_) => "unavailable",
-        }
-    }
 }
 
 /// Whether an error from `skopeo inspect` means the tag is not there, or that
@@ -446,17 +457,23 @@ pub fn san_uri(openssl_text: &str) -> Option<String> {
 }
 
 /// The registry half of the report, filled in only under `--verify`.
+///
+/// It used to hold a `claimed_signer` and a `checked: Option<bool>`, because
+/// the cryptography was `cosign verify` and cosign is not installed on any APEX
+/// machine — so `checked` was `None` every time and the report could only
+/// repeat what the certificate said about itself. `crate::verify` replaced that
+/// with a verification this machine can actually perform, so there is one field
+/// for the answer and no field for the claim.
 #[derive(Debug, Clone)]
 pub struct Registry {
     pub digest: Option<String>,
     pub digest_error: Option<String>,
-    pub signature: Artifact,
-    pub attestation: Artifact,
-    /// What the signature certificate says about its own signer. Unverified.
-    pub claimed_signer: Option<String>,
-    /// Whether that claim was checked cryptographically, and if not, why not.
-    pub checked: Option<bool>,
-    pub checked_note: Option<String>,
+    /// The verification of that digest, when there was a digest to verify.
+    pub verification: Option<crate::verify::Verification>,
+    /// What the update path would do about it.
+    pub decision: Option<crate::verify::Decision>,
+    /// Set when `--verify` deliberately did nothing, and why.
+    pub note: Option<String>,
 }
 
 /// The digest of the booted image, from `rpm-ostree status --json`.
@@ -503,51 +520,8 @@ pub fn booted_digest(roots: &Roots) -> Result<String, String> {
         .ok_or_else(|| "the booted deployment records no manifest digest".to_string())
 }
 
-/// Ask the registry for one cosign artifact tag.
-fn probe_artifact(repo: &str, tag: &str) -> (Artifact, Option<String>) {
-    let out = match Command::new("/usr/bin/skopeo")
-        .args(["inspect", "--raw", &format!("docker://{repo}:{tag}")])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => return (Artifact::Unavailable(format!("could not run skopeo: {e}")), None),
-    };
-    if out.status.success() {
-        return (Artifact::Present, Some(String::from_utf8_lossy(&out.stdout).into_owned()));
-    }
-    (classify_skopeo_failure(&String::from_utf8_lossy(&out.stderr)), None)
-}
-
-/// The signer identity a cosign signature manifest claims, read out of the
-/// certificate it carries.
-fn claimed_signer_from_manifest(manifest: &str) -> Option<String> {
-    let doc: Value = serde_json::from_str(manifest).ok()?;
-    let pem = doc
-        .get("layers")?
-        .as_array()?
-        .first()?
-        .get("annotations")?
-        .get("dev.sigstore.cosign/certificate")?
-        .as_str()?;
-    let dir = std::env::temp_dir().join(format!("apex-trust-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join("sig.pem");
-    std::fs::write(&path, pem).ok()?;
-    let out = Command::new("/usr/bin/openssl")
-        .args(["x509", "-noout", "-text", "-in"])
-        .arg(&path)
-        .output()
-        .ok();
-    let _ = std::fs::remove_dir_all(&dir);
-    let out = out?;
-    if !out.status.success() {
-        return None;
-    }
-    san_uri(&String::from_utf8_lossy(&out.stdout))
-}
-
 /// The identity this machine expects, and where that expectation came from.
-fn expected_signer(roots: &Roots) -> String {
+pub(crate) fn expected_signer(roots: &Roots) -> String {
     match roots.read(SIGNER_OVERRIDE) {
         Ok(s) => {
             let t = s.trim().to_string();
@@ -561,93 +535,51 @@ fn expected_signer(roots: &Roots) -> String {
     }
 }
 
+/// The registry half, under `--verify`.
+///
+/// Every cryptographic decision is `crate::verify`'s; this function's only job
+/// is to find the digest to ask about and to keep "there was no digest" from
+/// looking like "the registry holds no signature".
 fn verify_registry(roots: &Roots, image_reference: &str) -> Registry {
-    let repo = image_reference
-        .split_once('@')
-        .map(|(r, _)| r.to_string())
-        .unwrap_or_else(|| match image_reference.rsplit_once(':') {
-            Some((head, _)) if image_reference.rfind(':') > image_reference.rfind('/') => {
-                head.to_string()
-            }
-            _ => image_reference.to_string(),
-        });
-
+    if crate::verify::fixture_without_registry(roots) {
+        // Historic and deliberate: most fixture roots exist to exercise the
+        // offline report, and `--verify` against one of those must stay a
+        // no-op. Reporting an absent signature instead would be a fixture's
+        // shape reported as a fact about an image.
+        return Registry {
+            digest: None,
+            digest_error: None,
+            verification: None,
+            decision: None,
+            note: Some(
+                "--verify does not run under a fixture root that supplies no registry/ fixture"
+                    .to_string(),
+            ),
+        };
+    }
     let (digest, digest_error) = match booted_digest(roots) {
         Ok(d) => (Some(d), None),
         Err(e) => (None, Some(e)),
     };
     let Some(digest) = digest else {
+        // Without a digest there is nothing to ask the registry ABOUT. That is
+        // not the registry being silent, so it is not an absent signature.
         return Registry {
             digest: None,
             digest_error,
-            // Without a digest there is nothing to ask the registry ABOUT. That
-            // is not the registry being silent, so it is not `Absent`.
-            signature: Artifact::Unavailable("the booted digest is unknown".into()),
-            attestation: Artifact::Unavailable("the booted digest is unknown".into()),
-            claimed_signer: None,
-            checked: None,
-            checked_note: None,
+            verification: None,
+            decision: None,
+            note: Some("the booted digest is unknown, so nothing could be verified".to_string()),
         };
     };
-
-    let sig_tag = cosign_tag(&digest, ".sig");
-    let att_tag = cosign_tag(&digest, ".att");
-    let (signature, manifest) = match &sig_tag {
-        Some(t) => probe_artifact(&repo, t),
-        None => (Artifact::Unavailable(format!("unusable digest: {digest}")), None),
-    };
-    let (attestation, _) = match &att_tag {
-        Some(t) => probe_artifact(&repo, t),
-        None => (Artifact::Unavailable(format!("unusable digest: {digest}")), None),
-    };
-
-    let claimed_signer = manifest.as_deref().and_then(claimed_signer_from_manifest);
-
-    // The cryptography. `cosign` is not in the APEX image — it is a CI tool —
-    // so on a normal machine this stays `None` and the report says the identity
-    // above was read, not checked. Where cosign IS installed the answer becomes
-    // a real verdict.
-    let (checked, checked_note) = if signature != Artifact::Present {
-        (None, None)
-    } else if !Path::new("/usr/bin/cosign").exists() {
-        (
-            None,
-            Some(
-                "cosign is not installed on this machine, so the signature's \
-                 cryptography and its transparency-log entry were not checked"
-                    .to_string(),
-            ),
-        )
-    } else {
-        let want = expected_signer(roots);
-        let out = Command::new("/usr/bin/cosign")
-            .args([
-                "verify",
-                "--certificate-identity",
-                &want,
-                "--certificate-oidc-issuer",
-                EXPECTED_ISSUER,
-                &format!("{repo}@{digest}"),
-            ])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => (Some(true), None),
-            Ok(o) => (
-                Some(false),
-                Some(String::from_utf8_lossy(&o.stderr).trim().to_string()),
-            ),
-            Err(e) => (None, Some(format!("could not run cosign: {e}"))),
-        }
-    };
-
+    let verification = crate::verify::verify_image(roots, image_reference, &digest);
+    let decision = crate::verify::decide(&verification, &crate::verify::enforcement(roots));
     Registry {
         digest: Some(digest),
         digest_error,
-        signature,
-        attestation,
-        claimed_signer,
-        checked,
-        checked_note,
+        verification: Some(verification),
+        decision: Some(decision),
+        note: None,
     }
 }
 
@@ -661,6 +593,11 @@ pub struct Report {
     pub pull: Pull,
     pub policy: Policy,
     pub expected_signer: String,
+    /// What this machine refuses to deploy. A file read, so `apex status` can
+    /// print it without touching the network — and it must, because a machine
+    /// that enforces nothing and a machine that enforces everything look
+    /// identical in every other line of this report.
+    pub enforcement: crate::verify::Enforcement,
     pub registry: Option<Registry>,
 }
 
@@ -694,6 +631,7 @@ pub fn offline_report(roots: &Roots) -> Report {
         pull,
         policy,
         expected_signer: expected_signer(roots),
+        enforcement: crate::verify::enforcement(roots),
         registry: None,
     }
 }
@@ -702,33 +640,11 @@ pub fn offline_report(roots: &Roots) -> Report {
 pub fn build(roots: &Roots, verify: bool) -> Report {
     let mut report = offline_report(roots);
     if verify {
-        // Under a fixture root nothing is executed: a suite that reached the
-        // network would be measuring GitHub's availability, and would pass or
-        // fail for reasons that have nothing to do with this code.
-        if roots.fixture.is_some() {
-            report.registry = Some(Registry {
-                digest: None,
-                digest_error: Some("--verify does not run under a fixture root".into()),
-                signature: Artifact::Unavailable("--verify does not run under a fixture root".into()),
-                attestation: Artifact::Unavailable(
-                    "--verify does not run under a fixture root".into(),
-                ),
-                claimed_signer: None,
-                checked: None,
-                checked_note: None,
-            });
-        } else if let Some(reference) = report.image.clone() {
+        if let Some(reference) = report.image.clone() {
             report.registry = Some(verify_registry(roots, &reference));
         }
     }
     report
-}
-
-fn artifact_json(a: &Artifact) -> Value {
-    match a {
-        Artifact::Unavailable(why) => json!({ "state": a.as_str(), "reason": why }),
-        _ => json!({ "state": a.as_str() }),
-    }
 }
 
 pub fn to_json(r: &Report) -> Value {
@@ -767,6 +683,15 @@ pub fn to_json(r: &Report) -> Value {
     root.insert("nextPullPolicy".into(), Value::Object(pol));
     root.insert("expectedSigner".into(), Value::from(r.expected_signer.clone()));
 
+    root.insert(
+        "enforcement".into(),
+        json!({
+            "signature": r.enforcement.signature.as_str(),
+            "provenance": r.enforcement.provenance.as_str(),
+            "notes": r.enforcement.notes,
+        }),
+    );
+
     match &r.registry {
         None => {
             root.insert("registry".into(), Value::Null);
@@ -783,18 +708,30 @@ pub fn to_json(r: &Report) -> Value {
             if let Some(e) = &reg.digest_error {
                 m.insert("digestError".into(), Value::from(e.clone()));
             }
-            m.insert("signature".into(), artifact_json(&reg.signature));
-            m.insert("sbomAttestation".into(), artifact_json(&reg.attestation));
-            m.insert(
-                "claimedSigner".into(),
-                reg.claimed_signer.clone().map(Value::from).unwrap_or(Value::Null),
-            );
-            m.insert(
-                "signatureChecked".into(),
-                reg.checked.map(Value::Bool).unwrap_or(Value::Null),
-            );
-            if let Some(n) = &reg.checked_note {
-                m.insert("signatureCheckedNote".into(), Value::from(n.clone()));
+            match (&reg.verification, &reg.decision) {
+                (Some(v), Some(d)) => {
+                    m.insert("signature".into(), v.signature.to_json());
+                    m.insert("sbomAttestation".into(), v.provenance.to_json());
+                    m.insert("repository".into(), Value::from(v.repo.clone()));
+                    let (decision, refused_by, reasons) = crate::verify::decision_json(d);
+                    m.insert("decision".into(), Value::from(decision));
+                    m.insert("refusedBy".into(), Value::from(refused_by));
+                    m.insert("reasons".into(), Value::from(reasons));
+                }
+                _ => {
+                    // Every state that is not a verification carries its
+                    // reason, so no consumer can read a missing field as a
+                    // signature that was checked and found wanting.
+                    let why = reg
+                        .note
+                        .clone()
+                        .or_else(|| reg.digest_error.clone())
+                        .unwrap_or_else(|| "nothing was verified".to_string());
+                    let unrun = json!({ "state": "could-not-run", "reason": why });
+                    m.insert("signature".into(), unrun.clone());
+                    m.insert("sbomAttestation".into(), unrun);
+                    m.insert("decision".into(), Value::from("not-decided"));
+                }
             }
             root.insert("registry".into(), Value::Object(m));
         }
@@ -822,8 +759,34 @@ fn render_offline(r: &Report) -> String {
 /// registry agreed with them.
 pub fn render_block(r: &Report) -> String {
     let mut s = render_offline(r);
+    s.push_str(&format!("  enforced      : {}\n", enforcement_sentence(&r.enforcement)));
     s.push_str("  registry      : not contacted — `apex trust --verify` asks it\n");
     s
+}
+
+/// What this machine will refuse, in one line.
+///
+/// Worded as an action rather than a setting name. "signature enforce" is a
+/// configuration dump; "refuses an image whose signature does not verify" is
+/// the sentence a reader can check against what happened to them.
+pub fn enforcement_sentence(e: &crate::verify::Enforcement) -> String {
+    use crate::verify::Strictness::*;
+    match (e.signature, e.provenance) {
+        (Off, Off) => "nothing — this machine will deploy an image nobody signed".to_string(),
+        (Enforce, Enforce) => {
+            "an image whose signature or SBOM attestation does not verify is refused".to_string()
+        }
+        (Enforce, _) => {
+            "an image whose signature does not verify is refused; provenance is advisory"
+                .to_string()
+        }
+        (_, Enforce) => {
+            "an image whose SBOM attestation does not verify is refused; the signature is advisory"
+                .to_string()
+        }
+        _ => "a signature or attestation that fails is refused; a missing one only warns"
+            .to_string(),
+    }
 }
 
 fn pull_sentence(p: &Pull) -> String {
@@ -868,61 +831,34 @@ pub fn render(r: &Report) -> String {
         return s;
     };
     let mut s = render_offline(r);
-    {
-        match (&reg.digest, &reg.digest_error) {
-            (Some(d), _) => s.push_str(&format!("  digest        : {d}\n")),
-            (None, Some(e)) => s.push_str(&format!("  digest        : unavailable — {e}\n")),
-            (None, None) => s.push_str("  digest        : unavailable\n"),
+    s.push_str(&format!("  enforced      : {}\n", enforcement_sentence(&r.enforcement)));
+    match (&reg.digest, &reg.digest_error) {
+        (Some(d), _) => s.push_str(&format!("  digest        : {d}\n")),
+        (None, Some(e)) => s.push_str(&format!("  digest        : unavailable — {e}\n")),
+        (None, None) => s.push_str("  digest        : unavailable\n"),
+    }
+    if let Some(note) = &reg.note {
+        s.push_str(&format!("  note          : {note}\n"));
+    }
+    match (&reg.verification, &reg.decision) {
+        (Some(v), Some(d)) => {
+            s.push('\n');
+            s.push_str("Verification\n");
+            s.push_str(&crate::verify::render(v, &r.enforcement, d));
         }
-        s.push_str(&format!(
-            "  signature     : {}\n",
-            artifact_sentence(&reg.signature, "cosign signature")
-        ));
-        s.push_str(&format!(
-            "  sbom          : {}\n",
-            artifact_sentence(&reg.attestation, "SBOM attestation")
-        ));
-        if let Some(who) = &reg.claimed_signer {
-            match reg.checked {
-                Some(true) => s.push_str(&format!("  signed by     : {who} (verified)\n")),
-                Some(false) => s.push_str(&format!(
-                    "  signed by     : {who} — CLAIMED, and verification FAILED\n"
-                )),
-                None => s.push_str(&format!(
-                    "  signed by     : {who} — claimed by the certificate, not checked here\n"
-                )),
-            }
-            if *who != r.expected_signer {
-                s.push_str(&format!("  expected      : {}\n", r.expected_signer));
-            }
-        }
-        if let Some(n) = &reg.checked_note {
-            s.push_str(&format!("  note          : {n}\n"));
+        _ => {
+            s.push_str("  signature     : not checked — nothing was verified\n");
         }
     }
-    // Printed only when nothing above already showed it. Repeating the same
-    // URL two lines apart makes the reader look for the difference between
-    // them, and there is none.
-    let already_shown = reg.claimed_signer.as_deref() == Some(r.expected_signer.as_str());
-    if !already_shown {
+    if r.expected_signer != EXPECTED_SIGNER
+        || !matches!(
+            reg.verification.as_ref().map(|v| &v.signature),
+            Some(crate::verify::Verdict::Verified { .. })
+        )
+    {
         s.push_str(&format!("\nExpected signer\n  {}\n", r.expected_signer));
     }
     s
-}
-
-fn artifact_sentence(a: &Artifact, what: &str) -> String {
-    match a {
-        Artifact::Present => format!("present — the registry holds a {what} for this digest"),
-        Artifact::Absent => {
-            format!("absent — the registry answered, and holds no {what} for this digest")
-        }
-        // The wording carries the distinction because the state name alone
-        // does not survive being skimmed: a reader who sees "unavailable" in a
-        // list next to "absent" will read them as the same bad news.
-        Artifact::Unavailable(why) => {
-            format!("unavailable — {why}. This is NOT the same as unsigned.")
-        }
-    }
 }
 
 pub fn main(args: TrustArgs) -> i32 {
@@ -937,10 +873,18 @@ pub fn main(args: TrustArgs) -> i32 {
     // not make a status command exit non-zero — that would put every APEX
     // machine's `apex trust` in a failing state in every script that runs it.
     // Only a verification that ran and FAILED is an error.
-    match report.registry.as_ref().and_then(|r| r.checked) {
-        Some(false) => 1,
-        _ => 0,
-    }
+    //
+    // Deliberately NOT the gate's decision. `Absent` plus `signature=enforce`
+    // refuses an update, and rightly, but it is not this command reporting a
+    // failure — it is this command reporting that nobody signed the image, and
+    // an offline machine or a fork with no signatures would then have every
+    // script that calls `apex trust` start failing. `apex update` is where a
+    // refusal belongs, and it has its own exit code.
+    let failed = report.registry.as_ref().and_then(|r| r.verification.as_ref()).is_some_and(|v| {
+        matches!(v.signature, crate::verify::Verdict::Failed(_))
+            || matches!(v.provenance, crate::verify::Verdict::Failed(_))
+    });
+    i32::from(failed)
 }
 
 #[cfg(test)]
@@ -1094,7 +1038,7 @@ mod tests {
             "",
         ] {
             let a = classify_skopeo_failure(stderr);
-            assert_eq!(a.as_str(), "unavailable", "stderr: {stderr:?}");
+            assert!(matches!(a, Artifact::Unavailable(_)), "stderr: {stderr:?} gave {a:?}");
             assert_ne!(a, Artifact::Absent);
         }
         // And the one answer that IS absence: the registry said so.
@@ -1108,8 +1052,45 @@ mod tests {
 
     #[test]
     fn an_unavailable_artifact_says_it_is_not_the_same_as_unsigned() {
-        let s = artifact_sentence(&Artifact::Unavailable("no route to host".into()), "a signature");
-        assert!(s.contains("NOT the same as unsigned"), "{s}");
+        // The sentence moved from `artifact_sentence` to the verification
+        // block, and the property did not move with it by accident: a report
+        // that says "not checked" where it means "not signed" is the same lie
+        // in a new module. So a `CouldNotRun` must print its reason and must
+        // never print the words this report reserves for absence.
+        let out = render(&report_with(
+            crate::verify::Verdict::CouldNotRun("no route to host".into()),
+            crate::verify::Verdict::CouldNotRun("no route to host".into()),
+        ));
+        assert!(out.contains("not checked — no route to host"), "{out}");
+        assert!(!out.contains("none published"), "{out}");
+        assert!(!out.contains("DOES NOT VERIFY"), "{out}");
+    }
+
+    /// A report whose registry half carries exactly these two verdicts.
+    fn report_with(signature: crate::verify::Verdict, provenance: crate::verify::Verdict) -> Report {
+        let v = crate::verify::Verification {
+            digest: "sha256:abc".into(),
+            repo: "ghcr.io/andrenijman/apex-os".into(),
+            signature,
+            provenance,
+        };
+        let e = crate::verify::Enforcement::default();
+        let d = crate::verify::decide(&v, &e);
+        Report {
+            image: Some("ghcr.io/andrenijman/apex-os:daily".into()),
+            image_error: None,
+            pull: Pull::Unverified,
+            policy: Policy::AcceptsAnything,
+            expected_signer: EXPECTED_SIGNER.to_string(),
+            enforcement: e,
+            registry: Some(Registry {
+                digest: Some("sha256:abc".into()),
+                digest_error: None,
+                verification: Some(v),
+                decision: Some(d),
+                note: None,
+            }),
+        }
     }
 
     #[test]
@@ -1138,25 +1119,55 @@ mod tests {
 
     #[test]
     fn a_claimed_signer_is_never_printed_as_verified() {
-        let r = Report {
-            image: Some("ghcr.io/andrenijman/apex-os:daily".into()),
-            image_error: None,
-            pull: Pull::Unverified,
-            policy: Policy::AcceptsAnything,
-            expected_signer: EXPECTED_SIGNER.to_string(),
-            registry: Some(Registry {
-                digest: Some("sha256:abc".into()),
-                digest_error: None,
-                signature: Artifact::Present,
-                attestation: Artifact::Absent,
-                claimed_signer: Some(EXPECTED_SIGNER.to_string()),
-                checked: None,
-                checked_note: Some("cosign is not installed".into()),
-            }),
+        // This test used to assert that an unverified certificate's own claim
+        // about its signer was labelled "claimed … not checked here", because
+        // that claim was all the report had. It now asserts something
+        // stronger, and the reason the wording changed is the unit: the
+        // certificate's self-description is not printed AT ALL unless it was
+        // verified. A signer name on the screen is now a verified signer name.
+        let out = render(&report_with(
+            crate::verify::Verdict::CouldNotRun(
+                "the pinned Fulcio root could not be read".into(),
+            ),
+            crate::verify::Verdict::Absent("the registry holds no SBOM attestation".into()),
+        ));
+        assert!(out.contains("not checked"), "{out}");
+        assert!(!out.contains("verified — signed by"), "{out}");
+        // And the identity is still on the screen, as the expectation it is,
+        // never as an assertion about who signed.
+        assert!(out.contains("Expected signer"), "{out}");
+    }
+
+    #[test]
+    fn a_verified_signature_is_the_only_state_that_prints_a_signer() {
+        let out = render(&report_with(
+            crate::verify::Verdict::Verified {
+                signer: EXPECTED_SIGNER.to_string(),
+                at: "the certificate's own notBefore, unix 1757079805".into(),
+            },
+            crate::verify::Verdict::Absent("the registry holds no SBOM attestation".into()),
+        ));
+        assert!(out.contains(&format!("verified — signed by {EXPECTED_SIGNER}")), "{out}");
+        // The transparency log is NOT checked, and a report that says
+        // "verified" without saying so is overclaiming.
+        assert!(out.contains("transparency log was not checked"), "{out}");
+    }
+
+    #[test]
+    fn the_status_block_says_what_this_machine_refuses() {
+        // A machine that enforces nothing and a machine that enforces
+        // everything are identical in every other line of this report, so the
+        // line that tells them apart is not optional.
+        let mut r = offline_report(&Roots { fixture: Some(std::env::temp_dir().join("nope")) });
+        r.enforcement = crate::verify::Enforcement::default();
+        assert!(render_block(&r).contains("signature does not verify is refused"), "{}", render_block(&r));
+        r.enforcement = crate::verify::Enforcement {
+            signature: crate::verify::Strictness::Off,
+            provenance: crate::verify::Strictness::Off,
+            notes: Vec::new(),
         };
-        let out = render(&r);
-        assert!(out.contains("claimed by the certificate, not checked here"), "{out}");
-        assert!(!out.contains("(verified)"), "{out}");
+        let out = render_block(&r);
+        assert!(out.contains("deploy an image nobody signed"), "{out}");
     }
 
     #[test]
@@ -1167,6 +1178,7 @@ mod tests {
             pull: Pull::Unverified,
             policy: Policy::AcceptsAnything,
             expected_signer: EXPECTED_SIGNER.to_string(),
+            enforcement: crate::verify::Enforcement::default(),
             registry: None,
         };
         let j = to_json(&r);
@@ -1182,6 +1194,7 @@ mod tests {
             pull: Pull::Unavailable("/proc/cmdline: Permission denied".into()),
             policy: Policy::Unavailable("/etc/containers/policy.json: Permission denied".into()),
             expected_signer: EXPECTED_SIGNER.to_string(),
+            enforcement: crate::verify::Enforcement::default(),
             registry: None,
         };
         let j = to_json(&r);
@@ -1223,6 +1236,7 @@ mod tests {
             pull: Pull::Unverified,
             policy: Policy::AcceptsAnything,
             expected_signer: EXPECTED_SIGNER.to_string(),
+            enforcement: crate::verify::Enforcement::default(),
             registry: None,
         };
         let b = render_block(&r);
