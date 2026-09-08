@@ -6,10 +6,63 @@ branch: task/base-partials (apex-os), task/base-partials-shell (apex-shell)
 base: apex-os e67fab9, apex-shell a90cef6 (both origin/roadmap/v2.2)
 
 ## NEXT
-Recon is DONE and folded into this card (see RECON below) — nothing is awaited.
-Work order: BASE-018 (Surface.bootloader caveat, fixture only), BASE-016 (new
-tests/test-apex-disposable.sh wired into pr-validation.yml), BASE-002,
-BASE-005, BASE-013, BASE-014, BASE-010, BASE-009.
+BASE-018 and BASE-002 are CLOSED (see RESULTS). Remaining work order:
+BASE-016 (fill five named holes in tests/test-apex-recover.sh — the suite the
+old evidence said did not exist), BASE-005 (AMD is verifiable ON THIS MACHINE),
+BASE-013, BASE-014 (wtype works — proved), BASE-010, BASE-009.
+
+## RESULTS (round 9) — per item
+
+### BASE-018 — DONE. apex-os d385c96 on task/base-partials.
+Surface.bootloader now carries the caveat. `probe()` consulted
+`chain.bootloader_unavailable` for the ROUTE and then dropped it, so `Surface`
+could not carry it: both renderings of `apex recover status` printed a bare
+"grub" while `apex boot status` printed the caveat for the same machine.
+Fixed by carrying the field onto `Surface`, a caveat line under the human
+label, and a `bootloaderUnavailable` sibling key in the JSON (the VALUE is
+untouched — apex-shell's RecoveryService.qml reads it and two shell suites pin
+the bare strings). The reason string stays out of the human line: it is an
+efivarfs path plus an OS error, one token longer than the whole 96-column
+budget the rendered report is measured against at test-apex-recover.sh:638.
+- `cargo test -p apex` **412 passed, 0 failed** — 4 new:
+  `recover::tests::the_bootloader_label_says_so_when_the_identity_could_not_be_read`,
+  `recover::tests::a_readable_efivarfs_leaves_the_bootloader_label_uncaveated`,
+  `boot::tests::an_unreadable_loaderinfo_is_not_a_measurement_of_grub`,
+  `boot::tests::a_genuinely_absent_loaderinfo_is_a_reading_rather_than_a_refusal`.
+- `tests/test-apex-recover.sh --with-binary` **201 passed, 0 failed** (194
+  before; 7 new, in a new section "a bootloader identity that could not be
+  read"). Includes a CHECKED seal — root/CAP_DAC_OVERRIDE walk through mode
+  000, so the suite proves the refusal is real before asserting through it.
+- `tests/test-boot-v2.sh --with-binary` **85 passed, 0 failed**, unchanged.
+- MUTATION-PROVED both ways. Dropping the field back on the floor in `probe()`
+  reddens the Rust label test. Printing the caveat unconditionally is INVISIBLE
+  to the Rust tests and reddens the new shell assertion — and that is how it
+  was actually caught here: the shell suite ran against a stale mutant binary
+  left in target/debug and went red on exactly that assertion.
+- shellcheck -S warning on the modified suite: clean (CI gates it at :1107).
+
+### BASE-002 — DONE, no code needed. The evidence was stale.
+Both named defects are ALREADY FIXED on this lineage; the roadmap's line
+numbers (`adapter.rs:50-56`, `registry.rs:173-178`) are `origin/main`'s, not
+roadmap/v2.2's. `4b85f24` "let opencode and codex start in a confined sandbox"
+and `48a3872` "stop a daemon restart from overwriting the last sessions" are
+both contained in `task/base-partials`, and both carry named regression tests.
+- `cargo test -p apex-agent-core -p apex-agentd` **671 passed, 0 failed**,
+  0 skipped, including
+  `adapter::tests::a_symlinked_agent_reaches_the_package_its_bin_entry_points_at`
+  (defect A) and
+  `registry::tests::a_restart_neither_reuses_an_id_nor_overwrites_the_record_at_it`
+  (defect B).
+- MUTATION-PROVED both. Removing `.local/lib/node_modules` from `TOOLCHAIN_RO`
+  reddens A's test. Restoring main's allocator (no `highest_used_id` disk scan,
+  no `create_new` guard, no transcript check) reddens FIVE registry tests
+  including B's. Worktree restored clean after each.
+- NOTE for the orchestrator: the fix is `.local/lib/node_modules`, NOT
+  `.local/lib` — `adapter.rs:639` asserts the wider path is absent by design.
+  Do not "complete" this by widening it.
+- The live daemon was never touched: these are unit tests over temp stores, and
+  the three integration suites that do spawn a daemon kill by pid, never by
+  name, each with its own XDG_RUNTIME_DIR.
 
 ## DONE
 - Worktrees created and both branches pushed with -u before any work.
