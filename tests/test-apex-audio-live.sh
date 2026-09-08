@@ -23,7 +23,7 @@
 #      WirePlumber's own state directory, so "put it back afterwards" is not
 #      reliably possible. Reading is.
 #
-#  The one thing it generates is a four-note MIDI file in its own scratch
+#  The one thing it generates is a one-note MIDI file in its own scratch
 #  directory, played into the kernel's `Midi Through` loopback — a port that
 #  exists to be written to and is connected to nothing that makes sound.
 #
@@ -116,9 +116,9 @@ else
     elif ! command -v aplaymidi >/dev/null 2>&1 || ! command -v aseqdump >/dev/null 2>&1; then
         skp "aplaymidi or aseqdump is missing; a note cannot be round-tripped"
     else
-        # A four-event standard MIDI file, format 0: note on, note off, end of
-        # track. Written here rather than committed, so the test carries no
-        # binary and nothing has to explain what is in it.
+        # A three-event standard MIDI file, format 0, carrying ONE note: note
+        # on, note off, end of track. Written here rather than committed, so
+        # the test carries no binary and nothing has to explain what is in it.
         python3 - "$W/note.mid" <<'MIDI'
 import struct, sys
 # delta-time, event  — C4 (0x3C) on at velocity 64, off after one beat
