@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-10 08:56 AWST
+APEX ROADMAP — resume report — 2026-09-10 11:17 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -18,210 +18,35 @@ APEX ROADMAP — resume report — 2026-09-10 08:56 AWST
 ────────────────────────────────────────────────────────────────────────────
   p0-014     unknown    P0-014,P0-015                      task/p0-014-remote-lock
              head 41d7c53 feat(webauthn): a challenge the daemon issues, and the
-             dirty 7 file(s), 0 unpushed, card 2651m
+             dirty 7 file(s), 0 unpushed, card 2793m
              NEXT **The plan is five commits plus the harness fix.** Commits 1, 2 an
 
   p1-023     unknown    (red suites),(pipefail sweep),P1-023,P1-024,P1-029 task/p1-023-handoff-lifecycle
              head 7544834 docs(voice): the guide says where push-to-talk stops
-             dirty 0 file(s), 0 unpushed, card 2833m
+             dirty 0 file(s), 0 unpushed, card 2974m
              NEXT The wiring is DONE and pushed (6b469ec) — do not redo it, and do n
 
   p2-010     unknown    P2-010,P2-011,P2-014,P2-015        task/p2-010-hardware-storage
              head 4c0c1f7 test(firmware): the doctor-line guard found the first 
-             dirty 0 file(s), 0 unpushed, card 2523m
+             dirty 0 file(s), 0 unpushed, card 2665m
              NEXT **P2-010, P2-014 and P2-015 are DONE and pushed through `20f3ef2`.
 
   p1-035     unknown    P1-035,P1-036,P1-037               task/p1-035-agent-tooling
              head d701f37 test(agent): three assertions in this suite could not 
-             dirty 4 file(s), 0 unpushed, card 2650m
+             dirty 4 file(s), 0 unpushed, card 2791m
              NEXT P1-035 is DONE (committed, pushed, 7/7 mutations killed). Mutation
 
   base-partials unknown    BASE-002,BASE-005,BASE-009,BASE-010,BASE-013,BASE-014,BASE-016,BASE-018 task/base-partials
              head 8a74816 test(env): the teardown assertion was filtering for a 
-             dirty 0 file(s), 0 unpushed, card 2524m
+             dirty 0 file(s), 0 unpushed, card 2666m
              NEXT BASE-018, BASE-002, BASE-016, BASE-005 are CLOSED (see RESULTS).
 
   p1-025     unknown    P1-025,P1-026,P1-027,P1-028        task/p1-025-skills-plugins
              head 5917833 feat(connector): P1-027 memory providers and P1-028 co
-             dirty 3 file(s), 0 unpushed, card 2652m
+             dirty 3 file(s), 0 unpushed, card 2794m
              NEXT P1-025, P1-027, P1-028 are landed on the branch (31e5860, 5917833)
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 583355e fix(trust): the pinned Fulcio root never reached the r
-    task/base-partials
-      d385c96 fix(recover): the bootloader label says when the identity coul   [1/10 added lines on tip]
-      cf7df30 test(disposable): the two fences that were greps, and a remova   [0/10 added lines on tip]
-      2c77182 test(env): the amd and hw device profiles, against the devices   [0/10 added lines on tip]
-      8a74816 test(env): the teardown assertion was filtering for a prefix n   [0/10 added lines on tip]
-    task/p0-014-remote-lock
-      cbe09d8 feat(lock): §7's lock rules were a switch with no wire running   [2/10 added lines on tip]
-      3c3abd3 test(request): the root approval path needed a real uid 0, not   [2/10 added lines on tip]
-      a3bf2a8 feat(webauthn): a security key's assertion, checked against ve   [0/10 added lines on tip]
-      2b463d1 feat(webauthn): a touch is consent to one elevation, and the t   [0/10 added lines on tip]
-      cca4442 test(harness): seventeen assertions were being refused by the    [0/10 added lines on tip]
-      41d7c53 feat(webauthn): a challenge the daemon issues, and the one seq   [1/10 added lines on tip]
-    task/p1-023-push-to-talk-daemon
-      9c38a2e feat(voice): labwc can reach push-to-talk, which needs a verb    [0/8 added lines on tip]
-      8c3958d feat(voice): a session can be spoken to, and not by another ag   [1/10 added lines on tip]
-    task/p1-025-skills-plugins
-      31e5860 feat(skill): P1-025 — an inventory that carries origin, digest   [0/10 added lines on tip]
-      5917833 feat(connector): P1-027 memory providers and P1-028 connector    [0/10 added lines on tip]
-    task/p1-035-agent-tooling
-      1bb5db4 fix(agent): a test daemon and the real one shared every sessio   [1/10 added lines on tip]
-      83ef1e0 feat(agent): a screenshot in front of you could not be handed    [1/10 added lines on tip]
-      473b7f6 feat(agent): a worktree could be listed but nothing could be s   [0/10 added lines on tip]
-      f4ec0ee fix(agent): a project slug from the socket was joined straight   [1/10 added lines on tip]
-      3ec4467 test(agent): the promise that a status query touches nobody's    [0/10 added lines on tip]
-      290002e test(agent): three of the suite's own assertions proved nothin   [0/10 added lines on tip]
-      296b0ee fix(agent): a session reached through a symlink was in no work   [0/10 added lines on tip]
-      26ae934 feat(agent): an agent session could not be thrown away with it   [1/10 added lines on tip]
-      9870bd7 test(agent): nothing proved the capsule was more than a word i   [3/10 added lines on tip]
-      d0c612d docs(agent): the disposable session was undocumented and untes   [0/10 added lines on tip]
-      f5879df test(agent): the injection assertion could not see the injecti   [0/10 added lines on tip]
-      d701f37 test(agent): three assertions in this suite could not fail, an   [0/10 added lines on tip]
-    task/p1-050-remote-protocol
-      09c977d fix(clippy): the integration tip was not clean, and two of the   [2/10 added lines on tip]
-    task/p2-010-hardware-storage
-      ee30c3b feat(qualify): a machine's compatibility record existed once,    [2/10 added lines on tip]
-      df4139d feat(storage): a failing disk read as a disk nobody could meas   [2/10 added lines on tip]
-      604e885 fix(storage): a refused SMART read named the refusal and not t   [0/10 added lines on tip]
-      caf756a test(storage): two claims the suite made and never checked   [0/10 added lines on tip]
-      cef3979 style(secret): a three-deep tuple in a return type is parsed,    [1/6 added lines on tip]
-      46d4ac7 feat(storage): a check that could not be performed is a refusa   [0/10 added lines on tip]
-      973455f fix(storage): an attached loop device is in no mount table at    [0/10 added lines on tip]
-      d376193 feat(storage): apex storage erase, and one unreadable director   [1/10 added lines on tip]
-      9c31464 test(storage): no device the suite wants erased may exist on t   [0/10 added lines on tip]
-      0d752fc test(storage): two mutations the battery proved were completel   [0/10 added lines on tip]
-      7cd113c feat(firmware): §P2-015 readout, and a structural check that w   [0/10 added lines on tip]
-      20f3ef2 test(storage): the check guarding the disk serial was 96% blin   [0/10 added lines on tip]
-      4c0c1f7 test(firmware): the doctor-line guard found the first of two r   [0/10 added lines on tip]
-
-  int-shell:  tip a90cef6 test(colour): four assertions about the page's honesty
-    fix/labwc-desktop-parity  — squash-merged, safe to delete
-      landed whole as f609a6c fix(labwc): complete desktop parity (#6)
-    fix/popup-first-open-and-media-keys  — squash-merged, safe to delete
-      landed whole as b8a63a8 fix(popups): first-open rendering, dead toasts, and medi
-    fix/screenshot-off-hyprland  — squash-merged, safe to delete
-      landed whole as 4e267eb fix: screenshots and popup input regions off Hyprland (#
-    task/p0-015-lock-tests
-      bbec072 test(lock): the fix that told logind about the lock had never    [4/10 added lines on tip]
-    task/p0-016-agent-settings  — squash-merged, safe to delete
-      landed whole as 4335e42 fix(agents): the sudo caveat was written before no_new_p
-    task/p1-023-handoff-lifecycle
-      1788443 test(agents): the invariant could not tell a help page from a    [1/10 added lines on tip]
-      da50162 test(smoke): the second shell's error count read the log the f   [0/10 added lines on tip]
-      89cb520 test: 85 grep -q sites read a pipe that pipefail turns into a    [1/10 added lines on tip]
-      af33aba feat(voice): push-to-talk is a toggle, because niri cannot fir   [1/10 added lines on tip]
-      acd985d ci(voice): the push-to-talk suite was written but nothing ran    [0/10 added lines on tip]
-      6b469ec feat(voice): a reducer nothing calls is a file, not a feature   [0/10 added lines on tip]
-      f5b494b feat(voice): the microphone indicator, and a refusal that goes   [2/10 added lines on tip]
-      7544834 docs(voice): the guide says where push-to-talk stops   [0/10 added lines on tip]
-    task/p1-029-lifecycle-types
-      ef3724a feat(agents): the Agent Center says which KIND of agent a row    [0/10 added lines on tip]
-
-  The per-commit lines above are a HEURISTIC: a low count can also mean
-  landed-then-rewritten. Settle any one of them with
-  `git diff <integration> <branch> -- $(git show --name-only --format= <commit>)`
-  before spending an agent on it.
-
-────────────────────────────────────────────────────────────────────────────
-  durability
-────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 2min 38s Thu
-  wip refs:
-    apex-os    dd3496b  apex-os-
-    apex-os    73dd699  int-os-
-    apex-os    96a5659  roadmap-state
-    apex-os    d6add7a  wt-base-os-
-    apex-os    6c9c17f  wt-clippy-
-    apex-os    1951fdc  wt-disposable-
-    apex-os    59b7328  wt-followups-int3-
-    apex-os    0683355  wt-greeter-os-
-    apex-os    c74f38d  wt-multilib2-
-    apex-os    0fd2d78  wt-p0-002-
-    apex-os    e63b0e3  wt-p0-003-
-    apex-os    cb17b4e  wt-p0-004-
-    apex-os    1a4b5f2  wt-p0-005-
-    apex-os    162d6fa  wt-p0-009-
-    apex-os    d4787a4  wt-p0-009b-
-    apex-os    f30f7ca  wt-p0-011-
-    apex-os    9b605a1  wt-p0-011b-
-    apex-os    0fbe1f0  wt-p0-014-
-    apex-os    580c657  wt-p0-019-os-
-    apex-os    00c1973  wt-p0-025-os-
-    apex-os    eda5ef8  wt-p1-001-
-    apex-os    a23175f  wt-p1-002-
-    apex-os    c260504  wt-p1-018-
-    apex-os    7685dc3  wt-p1-020-os-
-    apex-os    fca3b12  wt-p1-023-os-
-    apex-shell 57172e1  apex-shell-
-    apex-shell df979e1  int-shell-
-    apex-shell 75049cf  wt-greeter-shell-
-    apex-shell ed92eaa  wt-lockhint-
-    apex-shell ad2d89d  wt-p0-005-shell-
-    apex-shell 6282c29  wt-p0-015-shell-
-    apex-shell 2afecfc  wt-p0-016-
-    apex-shell 5cf1789  wt-p0-017-
-    apex-shell e1d8a82  wt-p0-017b-
-    apex-shell 763c26e  wt-p0-018-prefix-
-    apex-shell 5b2a749  wt-p0-018b-
-    apex-shell 4eb5711  wt-p0-019-shell-
-    apex-shell a006b8c  wt-p0-023-
-    apex-shell b1621de  wt-p1-020-
-    apex-shell 3c297fc  wt-p1-023-
-    apex-shell ad337cd  wt-p1-029-
-    apex-shell 3db5952  wt-p1-038-
-    apex-shell f10daa7  wt-p1-039-
-    apex-shell 086727e  wt-p1-044-shell-
-    apex-shell fb019fa  wt-p1-048-
-
-────────────────────────────────────────────────────────────────────────────
-  next
-────────────────────────────────────────────────────────────────────────────
-  6 agent(s) dispatched, ceiling 6
-
-  IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
-    p0-014         P0-014,P0-015                    Remote Control privilege policy and lock-state policy, wired
-    p1-023         P1-023,P1-024,P1-029             Global push-to-talk routing, cross-agent handoff packet, loc
-    p1-025         P1-025,P1-026,P1-027,P1-028      Skill inventory and audit, plugin provenance and isolation, 
-    p1-035         P1-035,P1-036,P1-037             Screenshot/file injection into TUI agents, worktree test/con
-    base-partials  BASE-002,BASE-005,BASE-009,BAS   Close the eight BASE preservation items still marked partial
-    p2-e           P2-010,P2-011,P2-014,P2-015      Hardware qualification database, agent cgroup budgets, Stora
-
-  READY (dependencies believed satisfied — confirm against the agent table above):
-    p1-038-hardware P1-038                           The 18 labwc matrix rows that need real applications
-    p1-005         P1-005,P1-006,P1-007             Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets
-                   conflicts with p1-002
-    p1-008         P1-008,P1-009,P1-010             Cloudflare One, Workers AI and AI Gateway, Secrets Store
-                   conflicts with p1-002, p1-005
-    p1-011         P1-011,P1-012,P1-013             Temporary task credentials, transparent brokered wrangler/cl
-                   conflicts with p1-005, p1-008
-    p1-014         P1-014,P1-015,P1-016,P1-017      Cloudflare environment protection, worktree preview environm
-                   conflicts with p1-011
-    p1-040-per-output-scaling P1-040                           Per-output scaling: two densities, two sizes, one shell
-    p1-052-relay   P1-051,P1-052                    The APEX Remote remainder: relay, reconnect, mDNS, connectio
-    p1-053a        P1-053,P1-054,P1-055             Android app foundation, Agent Center parity, full PTY/TUI re
-
-  HELD:
-    p1-061         after p1-025
-    final          after *
-
-  COMPLETE (every roadmap item done — not offered again).
-  This says the WORK is done, not that it is landed — check the
-  unlanded section above before assuming roadmap/v2.2 carries it:
-    p1-018, p1-020, p1-044
-
-────────────────────────────────────────────────────────────────────────────
-  how to resume
-────────────────────────────────────────────────────────────────────────────
-  1. This page IS the resume. Do not re-derive it with git commands.
-  2. A dead agent is NOT resumed with SendMessage — that replays its whole
-     transcript through the model and cost 10% of a usage window on 2026-09-06.
-     Dispatch a FRESH agent and paste it ROADMAP/state/agents/<slug>.md.
-     Its worktree is intact; its branch is pushed; its card says what is next.
-  3. Land finished branches onto roadmap/v2.2, record them with set-status.py,
-     then dispatch from READY up to the ceiling.
-  4. Full context, if you need more than this page: ROADMAP/PROGRESS.md.
