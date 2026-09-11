@@ -37,11 +37,44 @@ jobs:
       - name: Classify changed paths
         id: paths
         env:
+          EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          # The range depends on the event, and until now only one event could
+          # produce one. `github.event.pull_request.*` is EMPTY on a push, so
+          # the first push-triggered run of this workflow died here with
+          # `git diff --name-only "" ""` and exit 128 before a single test ran.
+          #
+          # Whatever cannot be determined selects EVERYTHING. This file already
+          # records three separate bugs where a selector picked nothing, the
+          # job was skipped, and a skipped job counted as success — so the
+          # unknown case fails towards running too much, never too little.
+          case "$EVENT" in
+            pull_request)
+              base="$BASE_SHA"; head="$HEAD_SHA" ;;
+            push)
+              head="$SHA"; base="$PUSH_BEFORE"
+              # All-zeros on a branch's first push, and unreachable after a
+              # force-push; both mean "no usable predecessor".
+              if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+                 || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+                base="$(git merge-base origin/main "$head" 2>/dev/null || true)"
+              fi ;;
+            *)
+              head="$SHA"; base="$(git merge-base origin/main "$head" 2>/dev/null || true)" ;;
+          esac
+
+          if [ -n "${base:-}" ] && [ -n "${head:-}" ]; then
+            files="$(git diff --name-only "$base" "$head")"
+            echo "::notice::classified $EVENT over ${base}..${head}"
+          else
+            files=""
+            echo "::notice::$EVENT gave no usable diff range; selecting every suite"
+          fi
           printf '%s\n' "$files"
 
           rust=false
@@ -75,6 +108,11 @@ jobs:
           # engine, session launchers, guards. A PR touching only that used to
           # run nothing but a syntax check that did not even reach it.
           grep -Eq '^(files/|tests/)' <<<"$files" && engine=true
+
+          # The fail-towards-running rule, applied.
+          if [ -z "${base:-}" ] || [ -z "${head:-}" ]; then
+            rust=true; installer=true; engine=true
+          fi
 
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
           echo "installer=$installer" >> "$GITHUB_OUTPUT"
