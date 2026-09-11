@@ -73,12 +73,55 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/apex-greet-layout.XXXXXX")" || exit 2
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT INT TERM
 
+# ── The greeter still parses ─────────────────────────────────────────────────
+# This is the cheapest assertion in the file and the one with the worst failure
+# mode behind it. GreetSurface.qml is built by tests/test-apex-greet-a11y.sh, so
+# a syntax error there is caught. GreetContext.qml imports Quickshell, which no
+# test can load, so NOTHING parsed this file until this section existed — and it
+# is the greeter: a stray brace in it means the next image boots to a login
+# screen that never paints, on every machine, with no way in.
+#
+# qmllint is a parser, not a linter, for this purpose: warnings are ignored (the
+# shipped file already emits some, e.g. Process.onExited's QProcess::ExitStatus
+# parameter type) and only the exit status is read.
+section "the greeter parses"
+linter=""
+for c in qmllint-qt6 qmllint /usr/lib64/qt6/bin/qmllint /usr/lib/qt6/bin/qmllint; do
+    if command -v "$c" >/dev/null 2>&1; then linter="$c"; break; fi
+done
+if [ -z "$linter" ]; then
+    skp "GreetContext.qml and GreetSurface.qml parse" "qmllint not installed"
+else
+    # Asked, not hardcoded: Fedora puts the QML modules under
+    # /usr/lib64/qt6/qml and Debian under
+    # /usr/lib/x86_64-linux-gnu/qt6/qml, and a wrong -I turns the Quickshell
+    # imports into "not found" noise on one of the two distributions.
+    qmldir_inc=""
+    for q in qtpaths6 qtpaths /usr/lib64/qt6/bin/qtpaths6 /usr/lib/qt6/bin/qtpaths6; do
+        if command -v "$q" >/dev/null 2>&1; then
+            d="$("$q" --query QT_INSTALL_QML 2>/dev/null)"
+            [ -n "$d" ] && [ -d "$d" ] && qmldir_inc="-I $d"
+            break
+        fi
+    done
+    for f in "$CTX" "$SURFACE"; do
+        # shellcheck disable=SC2086  # qmldir_inc is a flag pair or empty
+        if "$linter" $qmldir_inc "$f" >/dev/null 2>&1; then
+            ok "$(basename "$f") parses"
+        else
+            bad "$(basename "$f") parses" "qmllint rejected it — the greeter would not start"
+            # shellcheck disable=SC2086
+            "$linter" $qmldir_inc "$f" 2>&1 | grep -i "error" | head -5
+        fi
+    done
+fi
+
 # ── Extraction ───────────────────────────────────────────────────────────────
 # The `readonly property string layoutScript:` value is a QML string built by
 # concatenating double-quoted segments. QML's escapes are JSON's, so each
 # segment is decoded as a JSON string and the pieces joined.
-extract_script() {
-    python3 - "$CTX" <<'PY'
+extract_script() {   # extract_script <GreetContext.qml>
+    python3 - "$1" <<'PY'
 import json, re, sys
 src = open(sys.argv[1]).read()
 m = re.search(r'readonly property string layoutScript:\s*(.*?)\n\s*\n', src, re.S)
@@ -93,7 +136,7 @@ PY
 }
 
 SCRIPT="$WORK/layout.sh"
-extract_script > "$SCRIPT" 2>/dev/null
+extract_script "$CTX" > "$SCRIPT" 2>/dev/null
 xstatus=$?
 
 section "the extraction is real"
@@ -253,12 +296,10 @@ section "the surface's switch is gated on there being something to switch to"
 # the file that knows what the model looks like: a `switchable` that read
 # `layouts.length > 0` would satisfy the QML suite's two-layout case and still
 # offer a dead control on every single-layout machine.
-if grep -q 'layouts.length > 1' "$SURFACE"; then
-    ok "GreetSurface gates the switch on more than one layout"
-else
-    bad "GreetSurface gates the switch on more than one layout" \
-        "the switchable predicate is not layouts.length > 1"
-fi
+# NOTE: the surface's own gate is NOT asserted here by grepping for
+# `layouts.length > 1`. greet-a11y-test.qml's test_034 presses Space on the
+# focused indicator with one layout configured and requires that nothing
+# happens, which is the same claim measured instead of matched.
 # NOT a grep. Replacing cycleLayout's guard with `if (false) return` was a
 # mutation this suite SURVIVED while this was two `grep -q` calls: the stanza
 # still CONTAINED both `canSwitchLayout` and `ctx.layouts.length > 1` — the
@@ -313,6 +354,83 @@ PY
         c4="$(node "$CYC_JS" '[]' 1 2>/dev/null)"
         is "no layouts known yet: cycleLayout runs nothing" '[false,""]' "$c4"
     fi
+fi
+
+# ── Self-test ────────────────────────────────────────────────────────────────
+# Two mutants, each changing ONE arm, each of which must be caught. The repo
+# idiom (check-scale-tokens.sh, check-agent-help.sh): apply the mutation, VERIFY
+# THE FILE ACTUALLY CHANGED before believing the verdict — a mutant that failed
+# to apply must be reported as such, never as caught, because this tree has
+# produced exactly that false verdict before — then re-run the rule.
+#
+# Both of these SURVIVED when they were first written, and both survivals were
+# real defects in the assertions rather than bad mutants. SM2 in particular is
+# why the cycleLayout check above runs the function instead of grepping for it.
+section "self-test"
+
+mutate_ctx() {   # mutate_ctx <out.qml> <python-expr-over-s>
+    python3 - "$CTX" "$1" "$2" <<'PY'
+import sys
+src, out, expr = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(src).read()
+before = s
+s = eval(expr, {"s": s, "chr": chr})
+if s == before:
+    sys.exit(3)
+open(out, "w").write(s)
+PY
+}
+
+# SM1 — the extraction splits sway's JSON array on commas, keeping only the
+# first layout. A two-layout machine then reads as single-layout and the switch
+# is hidden on exactly the machines that need it.
+if mutate_ctx "$WORK/m1.qml" 's.replace(chr(92)+chr(92)+"[[^]]*"+chr(92)+chr(92)+"]", chr(92)+chr(92)+"[[^],]*", 1)'; then
+    extract_script "$WORK/m1.qml" > "$WORK/m1.sh" 2>/dev/null
+    m1_out="$(SWAY_FIXTURE="$WORK/two.json" PATH="$WORK/bin:$PATH" sh "$WORK/m1.sh" 2>/dev/null)"
+    if [ "$m1_out" != "$(printf 'French\tEnglish (US),French')" ]; then
+        ok "self-test SM1 (comma-split extraction): caught"
+    else
+        bad "self-test SM1 (comma-split extraction): SURVIVED" \
+            "a mutated extraction still produced both layouts"
+    fi
+else
+    bad "self-test SM1 (comma-split extraction): MUTANT DID NOT APPLY" \
+        "the extraction no longer contains the bracket pattern this mutant edits"
+fi
+
+# SM2 — cycleLayout loses its single-layout guard, so Space on a one-layout
+# machine asks sway to switch to a layout that does not exist.
+if ! command -v node >/dev/null 2>&1; then
+    skp "self-test SM2 (cycleLayout guard removed)" "node is not installed"
+elif mutate_ctx "$WORK/m2.qml" 's.replace("if (!ctx.canSwitchLayout) return", "if (false) return", 1)'; then
+    M2_JS="$WORK/m2.js"
+    python3 - "$WORK/m2.qml" "$M2_JS" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+fn = re.search(r'function cycleLayout\(dir\) \{(.*?)\n    \}', src, re.S)
+pred = re.search(r'readonly property bool canSwitchLayout:\s*(.+)', src)
+if not fn or not pred:
+    sys.exit(1)
+open(sys.argv[2], "w").write("""
+var layoutSwitchProc = { command: null, running: false };
+var ctx = { layouts: JSON.parse(process.argv[2]),
+            get canSwitchLayout() { return %s; } };
+function cycleLayout(dir) {%s
+}
+cycleLayout(1);
+console.log(JSON.stringify(layoutSwitchProc.running));
+""" % (pred.group(1).strip(), fn.group(1)))
+PY
+    m2_out="$(node "$M2_JS" '["English (US)"]' 2>/dev/null)"
+    if [ "$m2_out" = "true" ]; then
+        ok "self-test SM2 (cycleLayout guard removed): caught"
+    else
+        bad "self-test SM2 (cycleLayout guard removed): SURVIVED" \
+            "a guardless cycleLayout still refused to run; got [$m2_out]"
+    fi
+else
+    bad "self-test SM2 (cycleLayout guard removed): MUTANT DID NOT APPLY" \
+        "cycleLayout no longer contains the guard this mutant edits"
 fi
 
 finish

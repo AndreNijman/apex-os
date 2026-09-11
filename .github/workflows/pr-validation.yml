@@ -1185,6 +1185,27 @@ jobs:
       # It opens no window and starts no compositor; WAYLAND_DISPLAY is removed
       # from the environment before the runner is invoked. It skips with
       # status 0 where qmltestrunner is not installed.
+      # Both greeter suites skip with status 0 where their tools are absent,
+      # and a skip that is never noticed is the way a suite goes quietly
+      # vacuous — so the tools are installed rather than hoped for.
+      #
+      # qmltestrunner builds the real GreetSurface.qml, which imports
+      # QtQuick.Effects for its wallpaper blur, so qml6-module-qtquick-effects
+      # is as load-bearing as the runner itself: without it the surface fails
+      # to load and the suite reports a load failure rather than a skip.
+      #
+      # Tolerant in the same way the labwc step above is: a failed install is
+      # reported and the suites are left to skip, because reddening the whole
+      # job over a missing test dependency is worse than not running the test.
+      - name: Install the Qt QML test runner
+        run: |
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq \
+            qt6-declarative-dev-tools \
+            qml6-module-qttest qml6-module-qtquick \
+            qml6-module-qtquick-effects qml6-module-qtquick-window \
+            || echo "qmltestrunner unavailable on this runner; the greeter QML suites will skip"
+
       - name: Run greeter accessibility assertions
         run: ./tests/test-apex-greet-a11y.sh
 
