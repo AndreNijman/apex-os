@@ -128,6 +128,15 @@ pub struct Walk {
     pub links: BTreeMap<String, String>,
     /// Whether the root existed at all.
     pub present: bool,
+    /// Root-relative paths never descended into, as asked for by
+    /// [`walk_excluding`]. Reported so a digest is never quietly partial.
+    pub exclude: Vec<String>,
+    /// Relative paths actually skipped because of [`Walk::exclude`].
+    ///
+    /// The difference between "we would skip this name" and "we did skip
+    /// something": a reader of a digest is entitled to know which bytes it does
+    /// not cover, and an exclusion that matched nothing is worth seeing too.
+    pub excluded: Vec<String>,
 }
 
 impl Walk {
@@ -155,14 +164,52 @@ impl Walk {
 /// component's digest cover bytes outside its own directory, and a link into
 /// `$HOME` would make the digest change whenever unrelated files did.
 pub fn walk(root: &Path) -> Walk {
-    let mut w = Walk::default();
+    walk_excluding(root, &[])
+}
+
+/// [`walk`], skipping the named **root-relative paths**.
+///
+/// ## Why an exclusion list exists at all, and why it is not a convenience
+///
+/// A digest is only useful for re-checking if an untouched component hashes the
+/// same tomorrow. Claude Code writes runtime state *inside* an installed
+/// plugin's own tree — `.in_use/<pid>`, one file per live process — so a digest
+/// that covered it would change every time the plugin was used, and a
+/// provenance check built on it would report "changed" constantly. A check that
+/// cries wolf on every run is worse than no check: it trains whoever reads it
+/// to ignore the one time it means something.
+///
+/// ## Why the match is root-relative and not by name at any depth
+///
+/// The first version of this matched a bare component wherever it appeared,
+/// which is the wrong shape for a digest: it meant that anything placed under a
+/// directory called `.in_use` **anywhere** in the tree was invisible to both
+/// the hash and [`Walk::executables`], so a script hidden at
+/// `tools/.in_use/go.sh` would never be measured at all. Provenance is the hash
+/// of what runs; an exclusion broad enough to hide a program from it is a hole,
+/// not a convenience.
+///
+/// So each entry is matched against the whole root-relative path. `.in_use`
+/// skips exactly the one entry at the root — which is where Claude Code
+/// actually writes it, measured on this machine: every `installPath` in
+/// `installed_plugins.json` carries `.in_use` as a direct child — while
+/// `tools/.in_use` is hashed like any other directory. A whole path component
+/// still has to match, so `.in_use` never matches a file called `not.in_used`,
+/// and every path actually skipped is *reported* alongside the digest — see
+/// [`Walk::excluded`]. A digest that quietly skipped part of a tree would be
+/// the same lie as one taken over a partially-readable one.
+pub fn walk_excluding(root: &Path, exclude: &[&str]) -> Walk {
+    let mut w = Walk {
+        exclude: exclude.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    };
     match std::fs::symlink_metadata(root) {
         Ok(m) if m.is_dir() => w.present = true,
         Ok(_) => {
             // A path that is there but is not a directory. Present, and the
             // walk finds no files — said this way rather than as an absence.
             w.present = true;
-            w.denied.push(format!(". is not a directory"));
+            w.denied.push(". is not a directory".to_string());
             return w;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return w,
@@ -174,11 +221,12 @@ pub fn walk(root: &Path) -> Walk {
             return w;
         }
     }
-    descend(root, Path::new(""), &mut w);
+    let exclude: Vec<String> = w.exclude.clone();
+    descend(root, Path::new(""), &exclude, &mut w);
     w
 }
 
-fn descend(abs: &Path, rel: &Path, w: &mut Walk) {
+fn descend(abs: &Path, rel: &Path, exclude: &[String], w: &mut Walk) {
     let entries = match std::fs::read_dir(abs) {
         Ok(e) => e,
         Err(e) => {
@@ -221,6 +269,14 @@ fn descend(abs: &Path, rel: &Path, w: &mut Walk) {
             rel.join(name)
         };
         let key = child_rel.display().to_string();
+        // Matched against the whole root-relative path, so `.in_use` skips the
+        // root entry and not a `tools/.in_use` deeper in the tree, and
+        // `.in_use` still cannot match `not.in_used`. Recorded rather than
+        // silently dropped.
+        if exclude.iter().any(|e| e == &key) {
+            w.excluded.push(key);
+            continue;
+        }
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(e) => {
@@ -236,7 +292,7 @@ fn descend(abs: &Path, rel: &Path, w: &mut Walk) {
             continue;
         }
         if meta.is_dir() {
-            descend(&path, &child_rel, w);
+            descend(&path, &child_rel, exclude, w);
             continue;
         }
         #[cfg(unix)]
@@ -307,7 +363,7 @@ pub fn digest_with(root: &Path, w: &Walk, prog: &str) -> Digest {
         let out = match cmd.output() {
             Ok(o) => o,
             Err(e) => {
-                return Digest::Unmeasured(format!("{} could not be run: {e}", prog))
+                return Digest::Unmeasured(format!("{prog} could not be run: {e}"))
             }
         };
         if !out.status.success() {
@@ -333,7 +389,7 @@ pub fn digest_with(root: &Path, w: &Walk, prog: &str) -> Digest {
         }
         for (name, line) in chunk.iter().zip(lines) {
             let Some(h) = line.split_whitespace().next() else {
-                return Digest::Unmeasured(format!("{} printed a line with no hash", prog));
+                return Digest::Unmeasured(format!("{prog} printed a line with no hash"));
             };
             per_file.insert(name.as_str(), h.to_string());
         }
@@ -362,7 +418,7 @@ fn hash_text_with(prog: &str, text: &str) -> Digest {
         .spawn()
     {
         Ok(c) => c,
-        Err(e) => return Digest::Unmeasured(format!("{} could not be run: {e}", prog)),
+        Err(e) => return Digest::Unmeasured(format!("{prog} could not be run: {e}")),
     };
     if let Some(mut stdin) = child.stdin.take() {
         // A hasher that closed its input early must not become a hash.
@@ -500,6 +556,64 @@ mod tests {
             assert_eq!(w.file_count(), 1, "the link is not a file of this tree");
             assert_eq!(w.links.get("sneaky").map(String::as_str), Some("/etc/passwd"));
         }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_exclusion_skips_the_root_entry_only_and_never_hides_a_program() {
+        // Two claims in the doc comment, both of which have been wrong in a
+        // draft of this file:
+        //   * the exclusion must not hide anything below a same-named
+        //     directory deeper in the tree, or a script at
+        //     `tools/.in_use/go.sh` would never be measured — and provenance
+        //     is the hash of what runs;
+        //   * a whole path component must match, so `.in_use` is not a prefix
+        //     test that also eats `not.in_used`.
+        let root = fixture("exclude");
+        std::fs::write(root.join("plugin.json"), "{}\n").expect("write");
+        std::fs::write(root.join("not.in_used"), "kept\n").expect("write");
+        std::fs::create_dir_all(root.join(".in_use")).expect("mkdir");
+        std::fs::write(root.join(".in_use/4242"), "").expect("write");
+        std::fs::create_dir_all(root.join("tools/.in_use")).expect("mkdir");
+        let hidden = root.join("tools/.in_use/go.sh");
+        std::fs::write(&hidden, "#!/bin/sh\necho hi\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
+        let w = walk_excluding(&root, &[".in_use"]);
+        let files: Vec<&str> = w.files.keys().map(String::as_str).collect();
+
+        // The root marker is skipped, and reported as skipped.
+        assert!(
+            !files.iter().any(|f| f.starts_with(".in_use/")),
+            "the root runtime marker must be outside the digest: {files:?}"
+        );
+        assert_eq!(w.excluded, vec![".in_use".to_string()], "{:?}", w.excluded);
+
+        // A whole component has to match.
+        assert!(
+            files.contains(&"not.in_used"),
+            "the exclusion must match a whole path component: {files:?}"
+        );
+
+        // And nothing deeper is hidden — the hole this asserts is closed.
+        assert!(
+            files.contains(&"tools/.in_use/go.sh"),
+            "an exclusion at the root must not hide a file deeper in the tree: {files:?}"
+        );
+        #[cfg(unix)]
+        assert!(
+            w.executables().contains(&"tools/.in_use/go.sh"),
+            "and an executable hidden that way would never be reported: {:?}",
+            w.executables()
+        );
+
+        // The digest still covers the rest, and it is a real measurement.
+        assert!(digest(&root, &w).is_measured());
         std::fs::remove_dir_all(&root).ok();
     }
 
