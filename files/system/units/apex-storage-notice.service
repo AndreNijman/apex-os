@@ -1,0 +1,36 @@
+# APEX-OS — disk-health warning (systemd USER service).
+#
+# WHY A USER SERVICE
+# The whole point is a desktop notification, and notify-send needs a session
+# bus. Root has no session. A system unit would either fail silently or, on a
+# machine with several logged-in users, reach whichever one systemd found —
+# which is worse than not notifying, because the warning would go to somebody
+# who cannot act on it.
+#
+# WHAT IT COSTS TO RUN
+# One `apex storage warnings`, which is a directory walk of /sys/block, one
+# read of /proc/self/mountinfo, one statvfs per filesystem, and one smartctl
+# per disk. Unprivileged the smartctl is refused in about a millisecond and the
+# row reads unavailable — which is why this unit does not run as root and does
+# not ask for a privilege: a daily toast is not worth a polkit prompt, and a
+# prompt is what the constraint here forbids outright.
+#
+# So on an ordinary machine this notifies about free space, TRIM, a read-only
+# device and encryption state, and stays quiet about SMART. Somebody who wants
+# the SMART row watched runs `sudo apex storage status`, or gives smartctl the
+# capability. That is stated plainly rather than papered over: a warning
+# mechanism that claims to watch a disk's health and cannot is worse than one
+# that says which half it watches.
+
+[Unit]
+Description=APEX-OS disk-health warning
+Documentation=man:apex(1)
+# A machine with no disks is a machine with nothing to say. The condition also
+# keeps this inert in a container, where /sys/block is empty or absent.
+ConditionPathExists=/sys/block
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/apex-storage-notice
+# It writes one digest file under $XDG_STATE_HOME and nothing else.
+NoNewPrivileges=yes

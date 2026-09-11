@@ -306,6 +306,12 @@ pub struct UpdateOptions {
     pub skip_flatpak: bool,
     /// Ignore §26's rollout stop and update anyway.
     pub force: bool,
+    /// Deploy an image whose signature §27's gate refused.
+    ///
+    /// Separate from `force` because the two gates answer different
+    /// questions, and a machine whose last update left it broken is not a
+    /// machine that should also stop checking who signed the next one.
+    pub allow_unverified: bool,
 }
 
 /// The system-extension package engine behind `apex install`/`remove`/`pkg`.
@@ -518,6 +524,107 @@ fn packages_pass() -> i32 {
 ///
 /// Now: refresh honours fwupd's own cache window, and the update pass runs only
 /// after `get-updates` says there is something to install.
+/// §27's enforcement pass: does the image this update would deploy actually
+/// verify, and is this machine configured to care?
+///
+/// `Some(code)` means `update` stops here with that code.
+///
+/// Roadmap §27's producer half has worked for months — every published digest
+/// is cosign-signed under a keyless GitHub identity and CI verifies its own
+/// work before moving a tag — and none of it reached the machine. P1-047
+/// landed the readout, so an APEX machine could finally say that nobody had
+/// checked. This is the half that checks.
+///
+/// Three placement decisions, each of which the obvious alternative gets
+/// wrong:
+///
+/// * **Before `record_update` and before `FsyncGuard::disable`.** Both of
+///   those write machine state. A refusal that fired after them would have
+///   recorded a health record for an update that never happened — which is
+///   exactly what §26's rollout stop then reasons about — and left ostree's
+///   per-object fsync switched off on a machine that is not updating.
+/// * **On the digest the registry would SERVE, not the booted one.** `apex
+///   trust --verify` answers "is what I am running signed"; a gate has to
+///   answer "is what I am about to run signed". Those differ for the same tag
+///   as a matter of routine here, because the four APEX tags are aliases for
+///   one digest that moves on every successful main build. Verifying the
+///   booted digest would wave an unsigned image through every time, while
+///   printing "verified".
+/// * **Not behind `--force`.** That flag is §26's escape, for a machine that
+///   came back from its last update broken. Sharing it would mean anybody
+///   working around a health stop silently stopped checking signatures too,
+///   and the two have nothing to do with each other. `--allow-unverified` is
+///   long on purpose.
+fn trust_gate(allow_unverified: bool) -> Option<i32> {
+    let roots = crate::trust::Roots::from_env();
+    let report = crate::trust::offline_report(&roots);
+    // The origin read is handed to the gate rather than unwrapped here. An
+    // early return on `image_error` is what made an unreadable /proc/cmdline
+    // deploy an image nobody checked, under `signature=enforce`, while
+    // printing a single line about it — the EACCES class this repository
+    // swept fourteen readers for, one layer up.
+    let g = crate::verify::gate(
+        &roots,
+        match (&report.image, &report.image_error) {
+            (Some(r), _) => Ok(Some(r.as_str())),
+            (None, Some(e)) => Err(e.as_str()),
+            (None, None) => Ok(None),
+        },
+    );
+    let refusal = crate::verify::refusal(
+        &g.verification,
+        &g.enforcement,
+        &g.decision,
+        "--allow-unverified",
+    );
+
+    // A fixture root means every trust fact in play is a file somebody wrote
+    // for a test. `bootc upgrade` is not run on the strength of those, in
+    // either direction — which is also what makes all three decisions
+    // exercisable through the real binary, headless, without a machine ever
+    // staging an image.
+    if roots.fixture.is_some() {
+        print!(
+            "{}",
+            crate::verify::render(&g.verification, &g.enforcement, &g.decision)
+        );
+        if let Some(why) = &refusal {
+            eprint!("{why}");
+        }
+        println!("apex: this program will not deploy on fixture facts");
+        return Some(i32::from(g.decision.refuses() && !allow_unverified));
+    }
+
+    match refusal {
+        None => {
+            // Warnings are printed even when nothing is refused: "provenance
+            // could not be established" is the normal state on every APEX
+            // machine today, and a gate that stays silent about it is a gate
+            // nobody knows is there.
+            if let crate::verify::Decision::ProceedWithWarnings(w) = &g.decision {
+                for line in w {
+                    eprintln!("apex: {line}");
+                }
+            }
+            None
+        }
+        Some(why) if allow_unverified => {
+            // Asked for, so granted — and still printed in full. Skipping the
+            // explanation would make `--allow-unverified` a way to not find
+            // out what was wrong with the image you just deployed.
+            eprint!("{why}");
+            eprintln!(
+                "apex: proceeding anyway because --allow-unverified was given."
+            );
+            None
+        }
+        Some(why) => {
+            eprint!("{why}");
+            Some(1)
+        }
+    }
+}
+
 pub fn update(opts: UpdateOptions) -> i32 {
     let started = Instant::now();
     let mut worst = 0;
@@ -556,6 +663,15 @@ pub fn update(opts: UpdateOptions) -> i32 {
         if let Some(why) = crate::channel::halt_reason() {
             eprint!("{why}");
             return 1;
+        }
+    }
+
+    // §27's signature gate. Deliberately after §26's stop, which is a local
+    // file read and costs nothing, and deliberately before `record_update`
+    // and `FsyncGuard::disable` below, which both write. See `trust_gate`.
+    if !opts.firmware_only {
+        if let Some(code) = trust_gate(opts.allow_unverified) {
+            return code;
         }
     }
 

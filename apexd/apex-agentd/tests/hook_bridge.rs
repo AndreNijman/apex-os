@@ -62,7 +62,10 @@ impl Harness {
         let child = Command::new(env!("CARGO_BIN_EXE_apex-agentd"))
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
-            .env("APEX_AGENT_SCRATCH", root.join("scratch"))
+            .env(
+                apex_agent_core::paths::SCRATCH_ROOT_ENV,
+                root.join("scratch"),
+            )
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
