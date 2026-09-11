@@ -2017,12 +2017,23 @@ mod tests {
         // The newest guard is the current revision: adding a wire field
         // without bumping the version is the fail-open these exist to catch.
         assert_eq!(SCOPED_GRANT_VERSION, PROTOCOL_VERSION);
-        // And the three that shipped as revision 5 stay behind it. Written as
-        // one revision below rather than as a literal 5, so that the next bump
-        // moves them together instead of leaving an equality nobody reads.
-        assert_eq!(GENERIC_CAPABILITY_VERSION, PROTOCOL_VERSION - 1);
-        assert_eq!(MCP_BRIDGE_VERSION, PROTOCOL_VERSION - 1);
-        assert_eq!(SYSTEM_GRANT_VERSION, PROTOCOL_VERSION - 1);
+        // And every older guard stays strictly behind it. `<`, not
+        // `== PROTOCOL_VERSION - 1`: these three shipped as revision 5 and are
+        // not going to move again, so pinning them one below the current
+        // version would break all three on the next bump to 7 for no reason
+        // anybody could act on.
+        for (name, since) in [
+            ("generic capabilities", GENERIC_CAPABILITY_VERSION),
+            ("the mcp bridge", MCP_BRIDGE_VERSION),
+            ("system-access grants", SYSTEM_GRANT_VERSION),
+        ] {
+            assert!(
+                since < PROTOCOL_VERSION,
+                "the guard for {name} is pinned at {since} and PROTOCOL_VERSION is \
+                 {PROTOCOL_VERSION}: a guard for an older revision must stay strictly \
+                 behind the current one, or a peer that predates it is told it is current"
+            );
+        }
     }
 
     #[test]
