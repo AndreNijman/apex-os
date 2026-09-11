@@ -3,6 +3,19 @@ name: PR validation
 on:
   pull_request:
     branches: [main]
+  # The roadmap v2.2 program integrates onto `roadmap/v2.2` and is forbidden
+  # from opening a PR until the final integration, so for the whole of that
+  # program NOTHING here ever ran: `pull_request` was the only trigger, and
+  # sixty landed roadmap items were verified entirely on one laptop. That is
+  # one machine's kernel, one cgroup layout, one set of installed packages.
+  #
+  # `push` on the integration branch gives every landing a second environment
+  # for free, and `workflow_dispatch` lets a task branch be checked BEFORE it
+  # lands rather than after — `gh workflow run pr-validation.yml --ref <branch>`.
+  # Neither changes what a pull request does.
+  push:
+    branches: [roadmap/v2.2]
+  workflow_dispatch:
 
 permissions:
   contents: read
