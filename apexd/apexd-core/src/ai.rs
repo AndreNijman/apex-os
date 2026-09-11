@@ -1324,7 +1324,33 @@ pub fn plan_fit(
     budget_mib: u64,
 ) -> Fit {
     let mut notes = Vec::new();
-    let layers = layers.max(1);
+
+    // `layers == 0` means the manifest declares NO layer count, which is what
+    // `apex ai pull --url` writes for every model outside the catalogue. It
+    // does not mean the model has one layer.
+    //
+    // This line used to be `let layers = layers.max(1)`, which was added to
+    // stop the split path dividing by zero and did — but it also made every
+    // uncatalogued model plan as a one-layer model. A 4 GiB model that fitted
+    // entirely in VRAM was reported as "all 1 layers fit" and launched with
+    // `--n-gpu-layers 1`, so one layer went to the GPU and the rest ran on the
+    // CPU, at CPU speed, while `apex ai pull` had just printed "cannot plan a
+    // partial offload for it" about that same model. The two halves of the
+    // product disagreed and the slower one was the one that ran.
+    //
+    // Unknown layers therefore means: offload EVERYTHING or nothing. A split
+    // needs a per-layer cost, and `weights_mib / layers` is not a per-layer
+    // cost when the denominator is a guess.
+    let unknown_layers = layers == 0;
+    let layers = if unknown_layers { ALL_LAYERS_UNKNOWN } else { layers };
+
+    // How the notes name the layer count, since "all 999 layers" would be a
+    // worse lie than the one being fixed.
+    let all_layers = if unknown_layers {
+        "every layer (this model declares no layer count)".to_string()
+    } else {
+        format!("all {layers} layers")
+    };
 
     let kv_for = |ctx: u32| -> u64 {
         kv_mib_per_1k.saturating_mul(u64::from(ctx).div_ceil(1024))
@@ -1338,7 +1364,7 @@ pub fn plan_fit(
     // Full offload at the requested context.
     if need_for(want_context) <= budget_mib {
         notes.push(format!(
-            "all {layers} layers fit: {} MiB needed of {budget_mib} MiB available \
+            "{all_layers} fit: {} MiB needed of {budget_mib} MiB available \
              ({VRAM_OVERHEAD_MIB} MiB runtime + {weights_mib} MiB weights + {} MiB KV for \
              {want_context} tokens)",
             need_for(want_context),
@@ -1359,8 +1385,8 @@ pub fn plan_fit(
         ctx /= 2;
         if need_for(ctx) <= budget_mib {
             notes.push(format!(
-                "context reduced from {want_context} to {ctx} tokens so that all {layers} \
-                 layers still fit — a smaller context on the GPU beats a full context split \
+                "context reduced from {want_context} to {ctx} tokens so that {all_layers} \
+                 still fit — a smaller context on the GPU beats a full context split \
                  with system RAM"
             ));
             return Fit {
@@ -1371,6 +1397,31 @@ pub fn plan_fit(
                 notes,
             };
         }
+    }
+
+    // A split needs to know what one layer costs. With no declared layer count
+    // there is no honest way to compute that, so the answer is the CPU — and
+    // saying why, because "nothing is offloaded" on a machine with a capable
+    // GPU is otherwise indistinguishable from a detection failure.
+    //
+    // This is also exactly what `apex ai pull` promises the user when it writes
+    // such a manifest: "it will load, but `apex ai status` cannot plan a
+    // partial offload for it".
+    if unknown_layers {
+        notes.push(format!(
+            "nothing is offloaded: this model declares no layer count, so the cost of one \
+             layer is unknown and a partial offload cannot be planned. It needs {} MiB for a \
+             full offload and {budget_mib} MiB is available — `apex ai pull` from the \
+             catalogue, or a manifest with a layer count, would allow a split",
+            need_for(MIN_USEFUL_CONTEXT.min(want_context))
+        ));
+        return Fit {
+            placement: Placement::Cpu,
+            context: want_context,
+            vram_mib: 0,
+            budget_mib,
+            notes,
+        };
     }
 
     // Split. At the smallest useful context, so the layers get what is left.
@@ -1426,6 +1477,15 @@ pub const MIN_USEFUL_CONTEXT: u32 = 2048;
 
 /// Layers left unspent on the split path. See [`plan_fit`].
 pub const SPLIT_MARGIN_LAYERS: u32 = 1;
+
+/// The `-ngl` value that means "all of them" when the real count is unknown.
+///
+/// `llama-server` clamps `--n-gpu-layers` to the model's actual layer count, so
+/// any value above every plausible count offloads the whole model and nothing
+/// more. This is what [`plan_fit`] uses for a model whose manifest declares no
+/// layer count — `apex ai pull --url` writes `layers: 0` for everything outside
+/// the catalogue, and 0 there means UNKNOWN, not "one layer".
+pub const ALL_LAYERS_UNKNOWN: u32 = 999;
 
 // ── idle unloading ───────────────────────────────────────────────────────────
 
@@ -2961,7 +3021,10 @@ mod tests {
         // sampled, because an off-by-one here is an allocation failure at
         // startup on somebody's machine.
         for weights in [512u64, 4096, 8192, 40_000] {
-            for layers in [1u32, 8, 32, 80] {
+            // 0 is in the sweep because it is a real manifest value —
+            // `apex ai pull --url` writes it — and the budget invariant has to
+            // hold on the unknown-layers path too.
+            for layers in [0u32, 1, 8, 32, 80] {
                 for kv in [0u64, 8, 32, 512] {
                     for ctx in [2048u32, 8192, 32768, 131_072] {
                         for budget in [0u64, 300, 1024, 4096, 8192, 24_576] {
@@ -2987,10 +3050,80 @@ mod tests {
 
     #[test]
     fn a_zero_layer_model_does_not_divide_by_zero() {
-        // Validation refuses this in a catalogue, but a rolled-back manifest
-        // defaults `layers` to 0 and the daemon must not panic on it.
+        // Validation refuses this in a catalogue, but `apex ai pull --url`
+        // writes `layers: 0` for everything outside it, and the daemon must not
+        // panic on one.
+        //
+        // This used to assert `gpu_layers() <= 1`, which pinned the defect
+        // rather than the requirement: the requirement is that it does not
+        // divide by zero, and answering "1" satisfied that while being wrong.
         let f = plan_fit(4096, 0, 32, 8192, 6000);
-        assert!(f.placement.gpu_layers() <= 1, "{:?}", f.placement);
+        assert_ne!(f.placement, Placement::Gpu { layers: 1 }, "{:?}", f.notes);
+    }
+
+    #[test]
+    fn a_model_with_no_declared_layer_count_is_offloaded_whole_or_not_at_all() {
+        // `layers: 0` means UNKNOWN. Clamping it to 1 made a model that fits
+        // entirely in VRAM launch with `--n-gpu-layers 1` — one layer on the
+        // GPU, the rest on the CPU — under a note reading "all 1 layers fit".
+        let f = plan_fit(4096, 0, 32, 8192, 6000);
+        assert_eq!(
+            f.placement,
+            Placement::Gpu { layers: ALL_LAYERS_UNKNOWN },
+            "{:?}",
+            f.notes
+        );
+        assert!(
+            f.placement.gpu_layers() > 1,
+            "one layer is not a full offload: {:?}",
+            f.placement
+        );
+        // And the note must not claim a count it does not have.
+        assert!(
+            f.notes.iter().any(|n| n.contains("declares no layer count")),
+            "{:?}",
+            f.notes
+        );
+        assert!(
+            !f.notes.iter().any(|n| n.contains("all 1 layers")
+                || n.contains(&format!("all {ALL_LAYERS_UNKNOWN} layers"))),
+            "{:?}",
+            f.notes
+        );
+    }
+
+    #[test]
+    fn a_model_with_no_declared_layer_count_is_never_split() {
+        // A split needs a per-layer cost and `weights_mib / layers` is not one
+        // when the denominator is a guess. The old code computed
+        // `weights_mib / 1` and offered to offload a "layer" that was the
+        // entire model. The CPU is the honest answer, and it is also what
+        // `apex ai pull` already promises for such a manifest.
+        let f = plan_fit(40_000, 0, 32, 8192, 6000);
+        assert_eq!(f.placement, Placement::Cpu, "{:?}", f.notes);
+        assert_eq!(f.placement.gpu_layers(), 0);
+        assert_eq!(f.vram_mib, 0);
+        assert!(
+            f.notes
+                .iter()
+                .any(|n| n.contains("a partial offload cannot be planned")),
+            "the refusal must say why: {:?}",
+            f.notes
+        );
+    }
+
+    #[test]
+    fn a_declared_layer_count_still_splits_exactly_as_before() {
+        // The negative control for the two above: the unknown-layers branch
+        // must not have changed what a catalogued model does.
+        let f = plan_fit(8192, 32, 32, 32768, 4096);
+        match f.placement {
+            Placement::Split { layers, total } => {
+                assert_eq!(total, 32);
+                assert!(layers > 0 && layers < total, "{layers} of {total}");
+            }
+            other => panic!("a catalogued model must still split: {other:?}"),
+        }
     }
 
     #[test]

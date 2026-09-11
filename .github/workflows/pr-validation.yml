@@ -1150,6 +1150,24 @@ jobs:
       - name: Run capsule device-profile assertions (live where the hardware is)
         run: ./tests/test-apex-env-devices-live.sh
 
+      # What the login session picker calls the three desktops. BASE-013's
+      # third criterion — compositor names stay implementation details for
+      # normal users — failed on the one surface every user sees at every
+      # login: the greeter rendered `Name=` verbatim, so the carousel read
+      # "labwc (APEX) / niri / Hyprland".
+      #
+      # This runs here rather than only in an image build because two of the
+      # three things it checks are build rules: Containerfile.base's rename of
+      # the Hyprland package's own entry, and Containerfile.apex's sweep over
+      # the finished directory. Both are LIFTED OUT of the Containerfiles and
+      # run against a staging tree, so the gate that normally costs a
+      # multi-hour image build is exercised on every PR in under a second, and
+      # the greeter's enumeration is lifted out of GreetContext.qml and run
+      # rather than re-implemented — this tree already carries three copies of
+      # that loop. It starts no compositor and opens no window.
+      - name: Run session-picker wording assertions
+        run: ./tests/test-apex-greet-sessions.sh
+
       # §9's resolver, which is the same engine as the package suite above and
       # a separate file because it is a separate claim: that engine INSTALLS,
       # this one CHOOSES. A choice is a policy, and the policy is invisible
@@ -1236,6 +1254,43 @@ jobs:
           # run, having asserted precisely nothing.
           APEX_REQUIRE_SHELL_TREE: "1"
         run: ./tests/test-labwc-keybinds.sh
+
+      # The half of the reported bug the suite above cannot reach. It passes
+      # --no-reload to every `apply` on purpose, so it never starts labwc and
+      # never presses a key; test-labwc-session.sh starts labwc and reloads it
+      # but never presses a key either. So "the XML is correct" and "the
+      # compositor survived" were both proven and "the key the user just bound
+      # now does something" was proven by neither — which is the entire
+      # complaint: rebind the launcher, watch the UI confirm it, press the key,
+      # nothing happens.
+      #
+      # This starts labwc under WLR_BACKENDS=headless in a private
+      # XDG_RUNTIME_DIR with WAYLAND_DISPLAY unset, so it draws nothing and has
+      # no parent session to leak a keystroke into, and synthesises the
+      # keypresses with wtype over virtual-keyboard-unstable-v1. It asserts
+      # that isolation as three hard failures before the first key, and unsets
+      # the inherited LABWC_PID — `labwc --reconfigure` SIGHUPs whatever that
+      # names, and inheriting it would reload a developer's own session.
+      #
+      # It reuses the apex-shell tree vendored above, and skips with status 0
+      # where labwc or wtype will not run, so a runner that cannot host a
+      # compositor reports a skip rather than a false green or a false red.
+      - name: Install a compositor and a synthetic keyboard
+        run: |
+          # Tolerant on purpose. The suite below skips with status 0 where labwc
+          # or wtype will not run, so a runner that cannot host a compositor
+          # reports a skip — but that safety net protects the SUITE, not this
+          # step. `apt-get install` of a package the image's enabled components
+          # do not carry exits non-zero and would redden the whole job over a
+          # missing test dependency, which is a worse outcome than not running
+          # the test. So a failed install is reported and the suite is left to
+          # skip.
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq labwc wtype \
+            || echo "labwc/wtype unavailable on this runner; the reload suite will skip"
+
+      - name: Run the keybind reload assertions
+        run: ./tests/test-labwc-keybind-reload.sh
 
       # End-to-end, against a real daemon on an isolated socket: that the
       # daemon resolves the asking session from the connection's PEER
@@ -1459,7 +1514,9 @@ jobs:
             tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
             tests/test-apex-modes.sh tests/test-apex-plugin.sh \
             tests/test-apex-host.sh tests/test-apex-dispatch.sh \
-            tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh
+            tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh \
+            tests/test-apex-greet-sessions.sh \
+            tests/test-labwc-keybind-reload.sh
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
       # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
