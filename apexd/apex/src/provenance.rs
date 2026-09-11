@@ -132,7 +132,12 @@ impl Revision {
                 let state = match dirty {
                     Some(true) => "and its working tree has been MODIFIED since",
                     Some(false) => "and its working tree still matches it",
-                    None => "and whether the tree still matches could not be checked",
+                    // Deliberately does NOT contain the clean arm's phrase.
+                    // It used to read "whether the tree still matches could not
+                    // be checked", which any grep for "still matches" also hit
+                    // — so a check for the clean answer matched the arm that
+                    // means nobody looked.
+                    None => "and whether its working tree matches could not be checked",
                 };
                 match remote {
                     Some(r) => format!("git {sha} from {r}, {state}"),
@@ -173,8 +178,8 @@ impl Revision {
 /// checkout it is pointed at, and `apex provenance show` runs against real
 /// marketplace checkouts on somebody's machine. A measurement that modifies
 /// what it measures is not one.
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
+fn git(prog: &str, dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new(prog)
         .arg("--no-optional-locks")
         .arg("-C")
         .arg(dir)
@@ -194,6 +199,18 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// reason — and "the directory is not there" and "git refused" are different
 /// reasons that both end up here saying which they were.
 pub fn revision_of(dir: &Path) -> Revision {
+    revision_of_with(dir, "git")
+}
+
+/// [`revision_of`], with the git program named.
+///
+/// A parameter and not a constant for one reason: the arm where `rev-parse`
+/// answers and `status` does **not** decides whether a checkout nobody could
+/// check reads as clean, and there is no way to make the real git fail that way
+/// on demand. `digest_with` exists for the same reason. Taken as an argument
+/// rather than an environment variable so one test cannot move another's git
+/// mid-run — the defect that broke two unrelated tests in this branch already.
+pub fn revision_of_with(dir: &Path, prog: &str) -> Revision {
     // NOT `dir.exists()`. That returns false for a directory that is there and
     // refused — a marketplace checkout under a mode-000 parent would have been
     // reported as "not on this machine", which reads as nothing-to-check. This
@@ -212,14 +229,16 @@ pub fn revision_of(dir: &Path) -> Revision {
             ));
         }
     }
-    match git(dir, &["rev-parse", "HEAD"]) {
+    match git(prog, dir, &["rev-parse", "HEAD"]) {
         Ok(sha) if !sha.is_empty() => {
-            let dirty = match git(dir, &["status", "--porcelain"]) {
+            let dirty = match git(prog, dir, &["status", "--porcelain"]) {
                 Ok(text) => Some(!text.trim().is_empty()),
-                // Could not ask. NOT clean.
+                // Could not ask. NOT clean — `Some(false)` here would report a
+                // checkout nobody could check as one whose tree still matches
+                // its commit, which is the module's whole thesis inverted.
                 Err(_) => None,
             };
-            let remote = git(dir, &["remote", "get-url", "origin"])
+            let remote = git(prog, dir, &["remote", "get-url", "origin"])
                 .ok()
                 .filter(|s| !s.is_empty());
             return Revision::Commit { sha, dirty, remote };
@@ -1542,6 +1561,92 @@ mod tests {
             "{:?}",
             r.findings()
         );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_git_status_that_could_not_run_is_not_a_clean_working_tree() {
+        // The arm no test reached before. `rev-parse` answers, `status` does
+        // not — a repository under a lock, a git killed by a resource limit, a
+        // filesystem that went away mid-command. `dirty` must stay `None`:
+        // `Some(false)` would print "its working tree still matches it" about a
+        // tree nobody looked at, which is the one sentence a reader would act
+        // on.
+        let root = fixture("gitfail");
+        let fake = root.join("fakegit");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nfor a in \"$@\"; do\n  [ \"$a\" = rev-parse ] && { \
+             echo 01a9cec39b961236e2d99fa2db9b22b534fa27a9; exit 0; }\n  \
+             [ \"$a\" = status ] && exit 128\ndone\nexit 128\n",
+        )
+        .expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        let rev = revision_of_with(&root, fake.to_str().expect("utf8"));
+        match &rev {
+            Revision::Commit { dirty, .. } => assert_eq!(
+                *dirty, None,
+                "a status that could not run must not read as a clean tree"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            rev.describe().contains("could not be checked"),
+            "and the report must say so: {}",
+            rev.describe()
+        );
+        assert!(
+            !rev.describe().contains("still matches it"),
+            "it must never claim the tree matches: {}",
+            rev.describe()
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_registry_that_is_there_and_refused_is_not_a_registry_that_is_absent() {
+        // `read_registry`'s permission arm. A registry file that cannot be read
+        // makes the report INCOMPLETE; dropped to `None` it would instead be a
+        // machine with no plugins installed, which is the reassuring answer and
+        // the wrong one.
+        let home = fixture("refused");
+        std::fs::create_dir_all(home.join(".claude/plugins")).expect("mkdir");
+        let reg = home.join(".claude/plugins/installed_plugins.json");
+        std::fs::write(&reg, "{\"version\": 2, \"plugins\": {}}").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&reg, std::fs::Permissions::from_mode(0o000))
+                .expect("chmod");
+        }
+        if std::fs::read_to_string(&reg).is_ok() {
+            // root, or CAP_DAC_OVERRIDE. Say so rather than passing quietly.
+            eprintln!("skipped: this user reads a 0000 file");
+        } else {
+            let r = build_at(&home, &store_in(&home));
+            assert_eq!(r.unreadable.len(), 1, "{:?}", r.unreadable);
+            assert!(
+                r.unreadable[0].contains("could not be read"),
+                "{:?}",
+                r.unreadable
+            );
+            assert!(!r.complete(), "a refused registry is not a complete report");
+            assert!(
+                r.findings().iter().any(|f| f.contains("INCOMPLETE")),
+                "{:?}",
+                r.findings()
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&reg, std::fs::Permissions::from_mode(0o644)).ok();
+        }
         std::fs::remove_dir_all(&home).ok();
     }
 
