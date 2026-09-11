@@ -130,7 +130,7 @@ fn version_or_reason(d: &Device) -> String {
         Reading::Known(v) => match d.version_format.as_deref() {
             // `0x0006` is a real version and looks like a mistake, so the
             // format fwupd declared travels with it.
-            Some(f) if f == "hex" => format!("{v} (hex)"),
+            Some("hex") => format!("{v} (hex)"),
             _ => v,
         },
         Reading::Unavailable(_) => "no version reported".into(),
