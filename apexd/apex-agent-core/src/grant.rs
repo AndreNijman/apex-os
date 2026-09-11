@@ -250,6 +250,90 @@ pub fn ttl_for(kind: GrantKind, asked_ms: Option<u64>) -> Result<u64, TtlError> 
     Ok(ms)
 }
 
+/// A capability list this build will not issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityError {
+    /// A name that is not one of [`crate::request::Verb::names`].
+    NotAVerb(String),
+    /// `--capabilities` with nothing in it.
+    Empty,
+    /// `--capabilities` on a break-glass grant, which does not go through
+    /// `apex request` at all.
+    NotScopable,
+}
+
+impl std::fmt::Display for CapabilityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CapabilityError::NotAVerb(name) => write!(
+                f,
+                "'{name}' is not a privilege verb, so a grant naming it would cover nothing; \
+                 the verbs are {}",
+                crate::request::Verb::names().join(", ")
+            ),
+            CapabilityError::Empty => write!(
+                f,
+                "a grant covering no verb authorises nothing; name the verbs the session needs, \
+                 or drop `--capabilities` to cover all of them"
+            ),
+            CapabilityError::NotScopable => write!(
+                f,
+                "`--unsafe-everything` does not go through `apex request`, so there are no verbs \
+                 for `--capabilities` to narrow; it clears no_new_privs and the session uses \
+                 sudo directly"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CapabilityError {}
+
+/// Which privilege verbs a grant about to be issued covers.
+///
+/// The companion of [`ttl_for`], and here for the same reason: the CLI is not
+/// the only thing that can send a [`crate::protocol::RunRequest`], so the rule
+/// that decides what a grant covers has to live where the daemon applies it to
+/// a client that never saw a flag.
+///
+/// `None` — no `--capabilities` — is the whole privilege vocabulary, which is
+/// what every session grant covered before the flag existed. The names are
+/// resolved *here*, at issue time, rather than stored as "all": a verb added
+/// tomorrow is not covered by a grant issued today, and that property is the
+/// reason this returns a list and never a wildcard.
+///
+/// A break-glass grant is refused a list rather than given an empty one. Its
+/// `capabilities` is empty because break-glass does not go through
+/// `apex request` — accepting `--capabilities` there would be a flag that
+/// narrows nothing while reading as though it did.
+pub fn capabilities_for(
+    kind: GrantKind,
+    asked: Option<&[String]>,
+) -> Result<Vec<String>, CapabilityError> {
+    match (kind, asked) {
+        (GrantKind::BreakGlass, Some(_)) => Err(CapabilityError::NotScopable),
+        (GrantKind::BreakGlass, None) => Ok(Vec::new()),
+        (GrantKind::SystemAccess, None) => Ok(normalise_capabilities(
+            crate::request::Verb::names().iter().copied(),
+        )),
+        (GrantKind::SystemAccess, Some(names)) => {
+            let caps = normalise_capabilities(names.iter().map(|s| s.as_str()));
+            if caps.is_empty() {
+                return Err(CapabilityError::Empty);
+            }
+            // Checked against the vocabulary rather than normalised away. A
+            // misspelled verb silently dropped would hand back a grant that
+            // covers less than the caller asked for, and the first thing they
+            // would learn about it is a refusal in the middle of a session.
+            for c in &caps {
+                if !crate::request::Verb::names().contains(&c.as_str()) {
+                    return Err(CapabilityError::NotAVerb(c.clone()));
+                }
+            }
+            Ok(caps)
+        }
+    }
+}
+
 /// A duration as a human writes it back: `15m`, `1h 30m`, `45s`.
 pub fn format_ms(ms: u64) -> String {
     let secs = ms / 1000;
@@ -700,6 +784,87 @@ pub fn audit(path: &Path, event: &str, grant: &SystemGrant, state: &GrantState) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_narrowing_is_the_whole_vocabulary_and_it_is_named_not_wildcarded() {
+        // P0-007 criterion 3, the default half. The flag's absence has to mean
+        // exactly what it meant before the flag existed, or every session
+        // already running loses privilege on upgrade.
+        let all = capabilities_for(GrantKind::SystemAccess, None).expect("the default is issuable");
+        assert_eq!(all.len(), crate::request::Verb::names().len());
+        for v in crate::request::Verb::names() {
+            assert!(all.contains(&v.to_string()), "the default dropped {v}");
+        }
+        // Named, never "all": the list is resolved at issue time, so a verb
+        // added tomorrow is not covered by a grant issued today. A wildcard
+        // would be, silently, and nobody would ever see the widening.
+        assert!(!all.iter().any(|c| c == "*" || c == "all"));
+    }
+
+    #[test]
+    fn a_narrowed_grant_carries_only_the_verbs_that_were_named() {
+        let caps = capabilities_for(
+            GrantKind::SystemAccess,
+            Some(&["update".to_string(), "install".to_string()]),
+        )
+        .expect("two real verbs are issuable");
+        assert_eq!(caps, vec!["install".to_string(), "update".to_string()]);
+        // And the grant built from it answers `covers` the same way, which is
+        // the enforcement point rather than the record.
+        let mut g = grant(GrantKind::SystemAccess, 1_000, 900_000, "b");
+        g.capabilities = caps;
+        assert!(g.covers("install"));
+        assert!(g.covers("update"));
+        assert!(!g.covers("rollback"), "a verb nobody named is not covered");
+        assert!(!g.covers("pkg-rollback"));
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_verb_is_refused_rather_than_dropped() {
+        // The failure this prevents: `--capabilities instal` normalised away
+        // leaves a grant covering nothing, or — worse, if the caller also
+        // named a real verb — a grant that silently covers less than was
+        // asked for, discovered mid-session.
+        assert_eq!(
+            capabilities_for(GrantKind::SystemAccess, Some(&["instal".to_string()])),
+            Err(CapabilityError::NotAVerb("instal".to_string()))
+        );
+        assert_eq!(
+            capabilities_for(
+                GrantKind::SystemAccess,
+                Some(&["install".to_string(), "sudo".to_string()])
+            ),
+            Err(CapabilityError::NotAVerb("sudo".to_string())),
+            "one bad name refuses the whole list rather than issuing the good half"
+        );
+        // The sentence has to name the vocabulary, or the remedy is a guess.
+        let said = CapabilityError::NotAVerb("instal".to_string()).to_string();
+        for v in crate::request::Verb::names() {
+            assert!(said.contains(v), "the refusal does not say {v} is available");
+        }
+    }
+
+    #[test]
+    fn an_empty_narrowing_is_refused_and_break_glass_cannot_be_narrowed_at_all() {
+        assert_eq!(
+            capabilities_for(GrantKind::SystemAccess, Some(&[])),
+            Err(CapabilityError::Empty)
+        );
+        // Whitespace is the same thing arriving by a different route:
+        // `--capabilities " "` must not be an all-covering grant.
+        assert_eq!(
+            capabilities_for(GrantKind::SystemAccess, Some(&["  ".to_string()])),
+            Err(CapabilityError::Empty)
+        );
+        // Break-glass has no verbs to narrow — it clears no_new_privs and the
+        // session uses sudo — so the flag is refused rather than accepted and
+        // ignored, which would read as a narrowing that is not one.
+        assert_eq!(
+            capabilities_for(GrantKind::BreakGlass, Some(&["install".to_string()])),
+            Err(CapabilityError::NotScopable)
+        );
+        assert_eq!(capabilities_for(GrantKind::BreakGlass, None), Ok(Vec::new()));
+    }
 
     fn boot(id: &str, booted_ms: u64) -> BootStamp {
         BootStamp {

@@ -19,7 +19,7 @@ use apex_agent_core::policy::{
 };
 use apex_agent_core::protocol::{
     AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo,
-    POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION, SYSTEM_GRANT_VERSION,
+    POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION, SCOPED_GRANT_VERSION, SYSTEM_GRANT_VERSION,
 };
 use apex_agent_core::hook::{self as hook_core, HookEvent};
 use apex_agent_core::paths;
@@ -553,6 +553,24 @@ pub struct RunArgs {
     /// depending on who is reading, and the value is a security window.
     #[arg(long, value_name = "DURATION", value_parser = parse_ttl)]
     pub ttl: Option<u64>,
+    /// Which privilege verbs the grant covers: `install,update`.
+    ///
+    /// §3.3 asks for a grant that is "capability scoped", and without this
+    /// every session grant covered all eight verbs — a session that needed to
+    /// install one package could also roll the system back. Omitted, that is
+    /// still what you get, because it is what the flag's absence has always
+    /// meant.
+    ///
+    /// A name that is not a verb is refused rather than dropped: a grant
+    /// quietly covering less than was asked for fails in the middle of a
+    /// session instead of here. Refused with `--unsafe-everything`, which
+    /// does not go through `apex request` and has no verbs to narrow.
+    // No `num_args = 1..`: `prompt` is POSITIONAL, so a greedy multi-value flag
+    // would swallow it — `--capabilities install "fix the bug"` would read the
+    // prompt as a second verb and the daemon would refuse it as not a verb.
+    // The comma delimiter is how more than one is given.
+    #[arg(long, value_name = "VERBS", value_delimiter = ',')]
+    pub capabilities: Option<Vec<String>>,
     /// Run in a dedicated git worktree, creating it if needed.
     #[arg(long, short)]
     pub worktree: Option<String>,
@@ -670,6 +688,15 @@ impl RunArgs {
         if let Some(ms) = self.ttl {
             out.push("--ttl".to_string());
             out.push(format!("{}s", ms / 1000));
+        }
+        // Forwarded for a stronger reason than the TTL is. Losing a `--ttl` on
+        // the way to another machine leaves a longer window than was typed;
+        // losing this leaves a grant over every verb on a machine the user is
+        // not sitting at. A narrowing that only applies locally is not a
+        // narrowing.
+        if let Some(caps) = &self.capabilities {
+            out.push("--capabilities".to_string());
+            out.push(caps.join(","));
         }
         if self.checkpoint {
             out.push("--checkpoint".to_string());
@@ -1108,6 +1135,7 @@ fn run(args: RunArgs) -> Result<i32> {
         worktree: args.worktree.clone(),
         checkpoint: args.checkpoint,
         ttl_ms: args.ttl,
+        capabilities: args.capabilities.clone(),
         // Nothing to send yet: collecting an assertion needs a challenge to
         // have been asked for, and the command that asks for one is the next
         // commit. The daemon's reader landed with this one so that the gate
@@ -1121,7 +1149,7 @@ fn run(args: RunArgs) -> Result<i32> {
     };
 
     let mut c = Client::connect()?;
-    check_daemon_understands(&mut c, &policy, args.origin)?;
+    check_daemon_understands(&mut c, &policy, args.origin, args.capabilities.is_some())?;
     let info = match c.call(&Request::Run(request))? {
         Response::Session(info) => *info,
         other => bail!("unexpected reply: {other:?}"),
@@ -1213,6 +1241,7 @@ fn check_daemon_understands(
     c: &mut Client,
     policy: &AgentPolicy,
     origin: Option<RequestOrigin>,
+    scoped: bool,
 ) -> Result<()> {
     let moved = non_default_dimensions(policy);
     let mut needs: Vec<(&str, u32)> = moved
@@ -1236,6 +1265,14 @@ fn check_daemon_understands(
     if policy.needs_grant().is_some() {
         needs.push(("--system-access", SYSTEM_GRANT_VERSION));
         needs.push(("--ttl", SYSTEM_GRANT_VERSION));
+    }
+    // The only entry on this list whose dropped key makes the session MORE
+    // privileged than was asked for: a daemon below this ignores the narrowing
+    // and issues a grant over every verb. Checked separately from the two
+    // above because it arrived a revision later, so a daemon can understand
+    // `--system-access` and still not understand this.
+    if scoped {
+        needs.push(("--capabilities", SCOPED_GRANT_VERSION));
     }
     if needs.is_empty() {
         return Ok(());
@@ -1779,6 +1816,11 @@ fn handoff(id: Option<u32>, to: &str, no_start: bool, transcript_bytes: usize) -
         worktree: None,
         checkpoint: false,
         ttl_ms: None,
+        // A handoff carries the outgoing session's POLICY, not its grant: the
+        // new session asks for whatever dimension 3 the policy names and gets
+        // its own human decision. There is nothing to narrow here, and
+        // inheriting the old grant's verbs would be inheriting the grant.
+        capabilities: None,
         cols: 80,
         rows: 24,
         env: vec![],
@@ -4110,6 +4152,7 @@ mod tests {
             origin: None,
             unsafe_everything: false,
             ttl: None,
+            capabilities: None,
             worktree: None,
             checkpoint: false,
             cwd: None,
@@ -4396,6 +4439,95 @@ mod tests {
         }
         // The local-only flags still stay behind.
         assert!(!forwarded.contains("--host"), "{forwarded}");
+    }
+
+    #[test]
+    fn a_narrowed_grant_stays_narrowed_on_the_machine_it_is_forwarded_to() {
+        // P0-007 criterion 3, across §20's hop. This is the one flag whose
+        // loss in transit makes the REMOTE session more privileged than the
+        // person asked for: the far end's `apex agent run` sees no
+        // `--capabilities`, and no narrowing means the whole vocabulary. A
+        // narrowing that only applies on the machine you are sitting at is not
+        // a narrowing.
+        let args = RunArgs {
+            system_access: Some(SystemAccess::Session),
+            ttl: Some(900_000),
+            capabilities: Some(vec!["install".into(), "update".into()]),
+            host: Some("katana".into()),
+            ..run_args()
+        };
+        let forwarded = args.forward_argv().join(" ");
+        assert!(
+            forwarded.contains("--capabilities install,update"),
+            "the narrowing did not survive the hop: {forwarded}"
+        );
+        // And nothing invents one when it was not asked for, which would make
+        // every forwarded grant look narrowed in the far end's audit.
+        let wide = RunArgs {
+            system_access: Some(SystemAccess::Session),
+            ttl: Some(900_000),
+            host: Some("katana".into()),
+            ..run_args()
+        };
+        assert!(
+            !wide.forward_argv().join(" ").contains("--capabilities"),
+            "a narrowing was invented"
+        );
+    }
+
+    #[test]
+    fn narrowing_a_grant_does_not_swallow_the_prompt_that_follows_it() {
+        // `--capabilities` is the only list-valued flag on `apex agent run`,
+        // and `prompt` is POSITIONAL. Declared greedy — `num_args = 1..`, which
+        // is how this flag was first written — clap gives the flag everything
+        // up to the next `-`, so
+        //
+        //     apex agent run --capabilities install "fix the bug"
+        //
+        // parses as TWO verbs and NO prompt. The session then dies at the
+        // daemon with "fix the bug is not a verb", and the user is told their
+        // prompt is not a capability. Nothing else in this file would notice:
+        // `forward_argv` above is given a `RunArgs` built by hand, so it
+        // asserts what the struct carries and never how it was filled.
+        //
+        // Parsed through the real `Cli`, because the interaction being
+        // asserted is between a flag and a positional and only the whole
+        // parser has both.
+        use clap::Parser;
+        fn parse(argv: &[&str]) -> RunArgs {
+            match crate::Cli::try_parse_from(argv).expect("parses").command {
+                crate::Cmd::Agent { cmd: AgentCmd::Run(a) } => a,
+                _ => panic!("not `agent run`"),
+            }
+        }
+
+        let one = parse(&["apex", "agent", "run", "--capabilities", "install", "fix the bug"]);
+        assert_eq!(one.capabilities.as_deref(), Some(&["install".to_string()][..]));
+        assert_eq!(
+            one.prompt.as_deref(),
+            Some("fix the bug"),
+            "the capability list ate the prompt"
+        );
+
+        // More than one verb is the comma — the spelling `forward_argv` emits,
+        // so what this parses is what the far end of §20's hop is sent.
+        let two = parse(&[
+            "apex",
+            "agent",
+            "run",
+            "--capabilities",
+            "install,update",
+            "fix the bug",
+        ]);
+        assert_eq!(
+            two.capabilities.as_deref(),
+            Some(&["install".to_string(), "update".to_string()][..])
+        );
+        assert_eq!(two.prompt.as_deref(), Some("fix the bug"));
+
+        // And absent stays absent: no narrowing is the whole vocabulary, which
+        // is what every session before this flag existed was given.
+        assert!(parse(&["apex", "agent", "run", "fix the bug"]).capabilities.is_none());
     }
 
     #[test]

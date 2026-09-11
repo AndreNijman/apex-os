@@ -148,11 +148,27 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
              `--system-access session` or `--unsafe-everything`, or drop the --ttl"
         );
     }
+    if wanted_grant.is_none() && req.capabilities.is_some() {
+        // The same refusal as a `--ttl` with nothing to bound, and for the
+        // same reason: a caller who narrowed a grant they did not ask for
+        // believes they asked for something they did not.
+        bail!(
+            "--capabilities narrows a system-access grant, and this session is not asking for \
+             one; add `--system-access session`, or drop the --capabilities"
+        );
+    }
     let authorised = match wanted_grant {
         None => None,
         Some(kind) => {
             let ttl_ms = apex_agent_core::grant::ttl_for(kind, req.ttl_ms)
                 .map_err(|e| TtlRefused(e.to_string()))?;
+            // Ahead of `authorise_grant` for the reason the TTL is: a typo in
+            // `--capabilities` should fail in front of the person who typed
+            // it, not after a password dialog they then find out was
+            // pointless.
+            let capabilities =
+                apex_agent_core::grant::capabilities_for(kind, req.capabilities.as_deref())
+                    .map_err(|e| CapabilitiesRefused(e.to_string()))?;
             let (grant_origin, proof) = crate::privilege::authorise_grant(
                 daemon,
                 &who,
@@ -182,7 +198,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
                 },
             )
             .map_err(|e| GrantRefused(e.to_string()))?;
-            Some((kind, ttl_ms, grant_origin, proof))
+            Some((kind, ttl_ms, capabilities, grant_origin, proof))
         }
     };
 
@@ -462,7 +478,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     // before the process starts: §3.3 wants the grant "bound to a concrete
     // agent session", and a grant issued after the agent was already running
     // would have a window in which the session existed and the record did not.
-    let issued = authorised.map(|(kind, ttl_ms, grant_origin, proof)| {
+    let issued = authorised.map(|(kind, ttl_ms, capabilities, grant_origin, proof)| {
         daemon.grants.issue(
             proof,
             kind,
@@ -470,6 +486,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
             adapter.id,
             detected.as_ref().map(|p| p.root.as_str()),
             ttl_ms,
+            capabilities,
             grant_origin,
             apex_agent_core::request::now_ms(),
         )
@@ -904,6 +921,24 @@ impl std::fmt::Display for TtlRefused {
 
 impl std::error::Error for TtlRefused {}
 
+/// A `--capabilities` list this build will not issue a grant for (P0-007).
+///
+/// Its own type rather than folded into [`TtlRefused`], following the same
+/// rule the four above follow: the remedies are different and specific. A
+/// refused TTL is answered by asking for a shorter window; a refused
+/// capability list is answered by spelling the verb correctly, or by not
+/// narrowing a break-glass grant that has no verbs to narrow.
+#[derive(Debug)]
+pub struct CapabilitiesRefused(pub String);
+
+impl std::fmt::Display for CapabilitiesRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for CapabilitiesRefused {}
+
 /// A resource budget that cannot be delivered (§P2-011).
 ///
 /// Its own type rather than a bare `anyhow!` because the kind is the point: a
@@ -945,6 +980,9 @@ pub fn run_error(e: anyhow::Error) -> Response {
         return Response::error(ErrorKind::PermissionDenied, format!("{e:#}"));
     }
     if e.downcast_ref::<TtlRefused>().is_some() {
+        return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
+    }
+    if e.downcast_ref::<CapabilitiesRefused>().is_some() {
         return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
     }
     if e.downcast_ref::<BudgetRefused>().is_some() {

@@ -335,7 +335,20 @@ RUN set -eux; \
     # because everything that brokers a credential depends on it answering.
     test -s /usr/lib/systemd/system/apex-secretd.service; \
     grep -q '^ExecStart=/usr/bin/apex-secretd$' /usr/lib/systemd/system/apex-secretd.service; \
-    test -L /usr/lib/systemd/system/multi-user.target.wants/apex-secretd.service; \
+    # /etc, not /usr/lib: `systemctl enable` puts the wants symlink under
+    # /etc/systemd/system, which on a bootc image is the shipped default that
+    # ostree three-way merges on upgrade. It has never put one in /usr/lib, so
+    # this assertion used to be one that could only ever fail — the same defect
+    # 706489ec fixed one RUN block away, and the reason `podman build -f
+    # Containerfile.base` still could not succeed after that commit. The four
+    # sibling checks in this file (apex-boot-notice, apex-storage-notice,
+    # apex-sysext-rebuild, apex-firewall) all name /etc; this one did not.
+    # Verified against the real thing rather than reasoned about: `systemctl
+    # enable apex-secretd.service` inside ghcr.io/andrenijman/apex-os:core says
+    # "Created symlink '/etc/systemd/system/multi-user.target.wants/
+    # apex-secretd.service'" and leaves /usr/lib untouched.
+    test -L /etc/systemd/system/multi-user.target.wants/apex-secretd.service; \
+    test ! -e /usr/lib/systemd/system/multi-user.target.wants/apex-secretd.service; \
     # The two lines that make the store a boundary rather than a directory. A
     # StateDirectoryMode that drifted to 0755 would leave every credential
     # readable by the account it belongs to, which is the whole of P0-002's

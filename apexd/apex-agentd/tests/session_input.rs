@@ -122,6 +122,7 @@ impl Harness {
             worktree: None,
             checkpoint: false,
             ttl_ms: None,
+            capabilities: None,
             second_factor: None,
             cols: 80,
             rows: 24,
