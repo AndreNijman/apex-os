@@ -41,6 +41,22 @@ shell-wide *light-mode* remainder and belong to whatever item owns light mode.
 They are a real reason light mode is not shippable; they are not a reason
 P0-021 is unfinished.
 
+Two holes that a directory-name search would have left, closed explicitly
+rather than assumed shut:
+
+- **Consumers outside `src/services/agents/`.** The criterion names badges,
+  and the roadmap's standing remainder is about badge weights *on a panel* —
+  a surface that would not be matched by path. Every file referencing
+  `AgentState.`, `StateBadge` or `AgentService.` from elsewhere
+  (`RecoveryService.qml`, `search/AgentsProvider.qml`, `search.js`,
+  `config_tab/pages/AgentsPage.qml`) was run through the same widened colour
+  grep: **0 non-token hits.**
+- **Icons.** The 15 agent files reference no `source:` image asset at all —
+  their icons are glyphs, not files — and no SVG under `src/assets/` carries
+  a hard-coded `fill="#fff"` / `fill="white"`.
+
+So criterion 1 closes with no qualifier.
+
 ## 2. "Working/waiting/blocked/failed/completed visually distinct in both palettes" — CLOSED
 
 `run-agent-state-render-test.sh` drives `agent-state-render-test.qml` through

@@ -19,6 +19,11 @@ Environment notes:
 - This session's cgroup is `session-4.scope` → `origin::classify` answers
   local-terminal, so `apex-agentd/tests/system_grants.rs` can run directly.
 - `sudo -n` works. `podman 5.8.4`, 16 cores, 992 G free on `/var`.
+- Side effect of this round's CI reproduction, left alone on purpose: logind
+  session `c8` (root, `State=closing`) is `sudo`'s own pam session from the
+  `sudo -n systemd-run` probes. It closes itself; it is NOT one of
+  `in-login-session.sh`'s (that helper uses `--pty` precisely to avoid leaving
+  `closing` records). Not terminated — read-only means read-only.
 - **clippy is now installed locally** (0.1.98 / rustc 1.98.0, from Fedora,
   installed by the orchestrator). `cargo clippy --locked --workspace
   --all-targets -- -D warnings` runs in ~13 s. `tests/run-clippy.sh` remains
@@ -75,6 +80,18 @@ the next one in line.
 `needs: [changes, rust, core]`. A failing `rust` job SKIPS `base`, and
 `image` needs `base`. So one missing wrapper is why the branch can build no
 image at all — which is P0-001's first acceptance criterion.
+
+The mechanism was read rather than assumed, because `always()` in a job's
+`if:` can override the implicit success gate and would have made this claim
+false. It does not here — `base`'s gate is explicit:
+
+    always() && !cancelled()
+    && needs.rust.result == 'success'
+    && needs.core.result != 'failure'
+    && !(…build_iso…)
+
+and `image`'s is `needs.base.result == 'success'`. So a failed `rust` leaves
+`base` unrun by an explicit test of its result, not merely by default.
 
 Proved twice, in both directions:
 
@@ -170,7 +187,7 @@ existing evidence at `ROADMAP/evidence/P0-001-hardware-qualification.md`
 | Multi-monitor | UNVERIFIED | Needs physical displays. Ties to P0-018. |
 | Steam | N/A by design | Installed on demand. |
 | Recovery | PARTIAL | `apex doctor` present, rollback deployment present, flow not exercised. |
-| Failed units | **clean, with a caveat worth stating** | System bus: **zero** failed units. User bus: 10 failures, every one a `libpod-*` / `libpod-conmon-*` / `podman-*` transient scope left by this session's own container runs (`tests/run-clippy.sh` among them). **No image unit is failing.** Deliberately not `reset-failed`'d — reporting state, not tidying it. |
+| Failed units | **clean, with a caveat worth stating** | System bus: **zero** failed units. User bus: 10 failures, every one a `libpod-*` / `libpod-conmon-*` / `podman-*` transient scope left by container runs on this machine. (They were observed BEFORE `tests/run-clippy.sh` ran in this session, so they are from earlier container work, not from it — stated that way because the sequence rules out the tempting inference.) **No image unit is failing.** Deliberately not `reset-failed`'d — reporting state, not tidying it. |
 
 Secure Boot on the L16: **enabled (deployed)**, confirmed today. Katana's
 disabled state from 2026-09-06 is unchanged and unverifiable from here.

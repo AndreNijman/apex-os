@@ -100,6 +100,16 @@ runner sits in a system-slice service. `pr-validation.yml` learned this on
 job SKIPS them both. One missing wrapper is therefore the whole reason no
 image can be built from the branch.
 
+Read rather than assumed, since an `always()` in a job's `if:` can override
+the implicit success gate and would have made that claim false. It does not
+here. `base`'s gate is explicit —
+`always() && !cancelled() && needs.rust.result == 'success' && needs.core.result != 'failure' && …`
+— and `image`'s is `needs.base.result == 'success'`. A failed `rust` leaves
+`base` unrun by an explicit test of its result.
+
+Consequence for the prediction below: run 34656544347 never reaches
+`Containerfile.base`, so it can neither confirm nor refute it.
+
 Fixed on `task/p0-finish` as `392108e5`, proved in both directions:
 
 | Placement | Result |
@@ -163,7 +173,7 @@ upgrade that was performed and booted.
 |---|---|
 | Secure Boot (L16) | **enabled (deployed)** |
 | Failed units, system bus | **zero** |
-| Failed units, user bus | 10, and every one a `libpod-*` / `libpod-conmon-*` / `podman-*` transient scope left by this session's own container runs, `tests/run-clippy.sh` among them. **No image unit is failing.** Deliberately not `reset-failed`'d: this is a report of state, not a tidy-up. |
+| Failed units, user bus | 10, and every one a `libpod-*` / `libpod-conmon-*` / `podman-*` transient scope left by container runs on this machine. They were observed *before* `tests/run-clippy.sh` ran in this session, so they predate it rather than coming from it. **No image unit is failing.** Deliberately not `reset-failed`'d: this is a report of state, not a tidy-up. |
 | Suspend/resume (L16) | **39** resumes in 30 days, all `systemd-suspend.service` finishing cleanly |
 | Wayland sessions registered | `apex-gaming`, `apex-labwc`, `hyprland`, `niri` |
 | Compositors on PATH | `Hyprland`, `niri`, `labwc` present; `gamescope` absent, which is correct — it is installed on demand |
