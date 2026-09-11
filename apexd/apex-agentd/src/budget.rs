@@ -363,11 +363,36 @@ impl ScopeName {
 /// Derived from the daemon's own `/proc/self/cgroup` rather than hardcoded,
 /// but **not** by taking the daemon's parent: `systemd-run --user --scope`
 /// puts the scope under `…/user@<uid>.service/app.slice/` regardless of where
-/// the caller sits, which was measured from a login session at
-/// `/user.slice/user-1000.slice/session-4.scope`. So the boundary is found by
-/// walking to the `user@<uid>.service` component and appending `app.slice` —
-/// and a cgroup line with no such component is [`Reading::Unavailable`], not a
-/// guess, because a guess here is a budget that silently is not enforced.
+/// the caller sits. Measured twice, from both placements a daemon can have:
+///
+/// ```text
+/// caller in …/user@1000.service/app.slice/apex-agentd.service  (the shipped unit)
+/// caller in /user.slice/user-1000.slice/session-4.scope        (a login session)
+///   both ->  …/user-1000.slice/user@1000.service/app.slice/<name>.scope
+/// ```
+///
+/// So there are **two** ways to name that boundary and the daemon needs both,
+/// because it has both placements in practice — the shipped user unit sits
+/// under `user@<uid>.service`, and a daemon started from a terminal or an ssh
+/// session sits in a `session-<n>.scope` that has no such component at all:
+///
+/// 1. a `user@<uid>.service` component in the path — the boundary is that
+///    component plus `app.slice`. This is the observed path, so it is
+///    preferred whenever it is there.
+/// 2. otherwise a `user-<uid>.slice` component — the user manager for that uid
+///    is its `user@<uid>.service` child, whether or not this process happens
+///    to be inside it. That is the login-session case, and reading its absence
+///    as "there is no user manager" is [`FOUND (seventh)`] — see the card.
+///
+/// A path with neither is [`Reading::Unavailable`] and not a guess: a system
+/// service has no user manager to ask, and a guess here is a budget that
+/// silently is not enforced. A `user-<uid>.slice` whose uid is not a number is
+/// also unavailable — it is a component that cannot be made sense of, which is
+/// not the same as one that is not there.
+///
+/// If the constructed path does not exist, [`delegated_controllers`] fails to
+/// read its `cgroup.controllers` and the session is refused — the unknown
+/// branch, which is the correct polarity for a boundary that was inferred.
 pub fn scope_parent(proc_cgroup: &str) -> Reading<String> {
     let Some(path) = proc_cgroup
         .lines()
@@ -379,16 +404,36 @@ pub fn scope_parent(proc_cgroup: &str) -> Reading<String> {
         ));
     };
     let mut kept: Vec<&str> = Vec::new();
+    // The deepest `user-<uid>.slice` seen so far, and the uid it names. Only
+    // consulted after the whole path has been walked, so a `user@` component
+    // further down still wins: the measured path beats the constructed one.
+    let mut user_slice: Option<(String, &str)> = None;
     for part in path.split('/') {
         kept.push(part);
         if part.starts_with("user@") && part.ends_with(".service") {
             return Reading::Known(format!("{}/app.slice", kept.join("/")));
         }
+        if let Some(uid) = part
+            .strip_prefix("user-")
+            .and_then(|rest| rest.strip_suffix(".slice"))
+        {
+            if uid.is_empty() || !uid.chars().all(|c| c.is_ascii_digit()) {
+                return Reading::Unavailable(format!(
+                    "the cgroup path {path:?} has a user slice component \
+                     {part:?} whose uid is not a number, so the user manager \
+                     it belongs to cannot be named"
+                ));
+            }
+            user_slice = Some((kept.join("/"), uid));
+        }
+    }
+    if let Some((slice, uid)) = user_slice {
+        return Reading::Known(format!("{slice}/user@{uid}.service/app.slice"));
     }
     Reading::Unavailable(format!(
-        "no user@<uid>.service component in the cgroup path {path:?}, so this \
-         process is not under a systemd user manager and a transient user \
-         scope has no knowable parent"
+        "no user@<uid>.service and no user-<uid>.slice component in the cgroup \
+         path {path:?}, so this process is under no systemd user manager at \
+         all and a transient user scope has no knowable parent"
     ))
 }
 
@@ -795,17 +840,56 @@ mod tests {
         // Measured: a scope asked for from a LOGIN SESSION still lands under
         // user@1000.service/app.slice, so the boundary is not the caller's
         // parent. Both of these cgroups must produce the same answer.
+        //
+        // They did not, and that was FOUND (seventh): this assertion used to
+        // say the login-session path was `Unavailable`, three lines under a
+        // comment stating the measurement that says otherwise. The daemon was
+        // reading the absence of `user@` from ITS OWN path as the absence of a
+        // user manager, and refusing every budgeted session on a machine where
+        // `systemd-run --user --scope` works — which is every daemon started
+        // from a terminal, from ssh, and from `tests/in-login-session.sh`,
+        // the harness this repository's own CI runs `cargo test` under.
         let from_service = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/apex-agentd.service\n";
         let from_login = "0::/user.slice/user-1000.slice/session-4.scope\n";
+        let want =
+            Reading::Known("/user.slice/user-1000.slice/user@1000.service/app.slice".to_string());
+        assert_eq!(scope_parent(from_service), want);
+        assert_eq!(scope_parent(from_login), want, "whoever asks");
+    }
+
+    #[test]
+    fn a_root_daemon_in_a_login_session_finds_root_s_user_manager() {
+        // The uid comes from the slice component rather than from a constant,
+        // so the root daemon — which this machine also runs — gets user@0 and
+        // not user@1000.
         assert_eq!(
-            scope_parent(from_service),
-            Reading::Known(
-                "/user.slice/user-1000.slice/user@1000.service/app.slice".to_string()
-            )
+            scope_parent("0::/user.slice/user-0.slice/session-9.scope\n"),
+            Reading::Known("/user.slice/user-0.slice/user@0.service/app.slice".to_string())
         );
-        // A login session has no user@ component at all, so it is an unknown
-        // and not a guess.
-        assert!(matches!(scope_parent(from_login), Reading::Unavailable(_)));
+    }
+
+    #[test]
+    fn a_deeper_user_manager_component_still_wins_over_the_constructed_one() {
+        // The measured path beats the inferred one: the walk must not stop at
+        // `user-1000.slice` and construct a boundary when the real component
+        // is one level further down.
+        assert_eq!(
+            scope_parent("0::/user.slice/user-1000.slice/user@1000.service/app.slice/x.service\n"),
+            Reading::Known("/user.slice/user-1000.slice/user@1000.service/app.slice".to_string())
+        );
+    }
+
+    #[test]
+    fn a_user_slice_whose_uid_is_not_a_number_is_unavailable_and_not_ignored() {
+        // A component that cannot be made sense of is not a component that is
+        // not there. Guessing a manager name off it would build a path that
+        // either does not exist or belongs to somebody else.
+        let got = scope_parent("0::/user.slice/user-foo.slice/session-4.scope\n");
+        assert!(matches!(got, Reading::Unavailable(_)), "{got:?}");
+        assert!(
+            got.why().unwrap().contains("user-foo.slice"),
+            "the refusal must name the component it could not read: {got:?}"
+        );
     }
 
     #[test]
