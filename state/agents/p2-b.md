@@ -54,14 +54,16 @@ suite and a mutation pair.
 | screen reader | **partial** | Markup measured at runtime (see login row). The end-to-end AT-SPI walk is NOT done — see "What could not be measured". |
 | magnifier | not present | no magnifier in either repo; wlroots has no standard one |
 | high contrast | present, untested as a11y | six shaders in apex-shell `src/config/shaders/` incl. `HighContrast.glsl`, applied via Hyprland `decoration:screen_shader` only — niri and labwc get nothing, and it is shipped as a visual effect, not an a11y feature |
-| reduced motion | **present, 11% effective, 0 tests** | `SettingsService.reduceMotion` → `effectiveAnim`; reaches 48 of 451 `duration:` sites. 402 are int literals. `grep reduceMotion tests/` = 0 |
+| reduced motion | **present, 11% effective, 0 tests** (unchanged) | `SettingsService.reduceMotion` → `effectiveAnim`; reaches 48 of 451 `duration:` sites. 402 are int literals. `grep reduceMotion tests/` = 0 |
 | large text | partial by other means | no text-specific setting; only the global `Metrics.scale` (0.5–3.0). One real a11y constant: the 7px floor in `fs()`, enforced by `check-scale-tokens.sh` |
 | colour filters | **present** | shipped shaders + hyprshade's protanopia/deuteranopia/tritanopia, Hyprland only |
 | sticky keys | not present | 0 mentions in either repo |
 | slow keys | not present | 0 mentions in either repo |
 | mouse keys | not present | 0 mentions in either repo |
 | on-screen keyboard | not present | no wvkbd/squeekboard/maliit anywhere; none in the image |
-| keyboard-only installer | **not present** | installer is GUI-only (GTK4/Adw); the whiptail text UI was deleted deliberately. Not yet measured. |
+| keyboard-only installer | **not present** | installer is GUI-only (GTK4/Adw); the whiptail text UI was deleted deliberately. Not measured — see NEXT. |
+| keyboard-only DESKTOP | **DONE for the shared controls** | `tests/run-a11y-controls-test.sh` — 21 runtime assertions. Every shared `Cfg*` control is now a tab stop and operates on Space/Enter, proved by posting real `QKeyEvent`s and counting the signal the pages listen to. Pages that use only these controls are covered; bespoke widgets in `popups/` are NOT. |
+| screen-reader markup, desktop | **DONE for the shared controls** | same suite: `CfgRow` hands its label, description, disabled-reason and live readback to whatever control it holds; names and roles read back off the live attached objects. |
 | accessible login/lock/recovery | **login DONE** | `tests/test-apex-greet-a11y.sh` — 22 runtime assertions on the shipped `GreetSurface.qml` under qmltestrunner: accessible name/role read off live objects, tab ring walked with real `Qt.Key_Tab`. Lock and recovery NOT done. |
 
 ### P2-004 — internationalisation
@@ -117,12 +119,27 @@ Full script: `scratchpad/mutate-greet.sh`.
 | M5 | `Accessible.passwordEdit: true` → `false` | `test_013_password_is_marked_a_password` |
 | M6 | layout extraction splits the JSON on commas | `both configured layouts survive extraction` |
 | M7 | `if (!ctx.canSwitchLayout) return` → `if (false) return` | `one configured layout: cycleLayout runs nothing at all` |
+| N1 | `CfgRow._adoptControls` stops calling `_pushA11y()` | `test_010_row_names_its_control` |
+| N2 | `CfgRow` adopts controls that name themselves | `test_012_a_control_that_names_itself_is_left_alone` |
+| N3 | `Accessible.checked: root.checked` → `false` | `test_021_checkable_controls_report_their_state` |
+| N4 | `CfgTextField` input `activeFocusOnTab` → false | `test_030_every_control_is_a_tab_stop` |
+| N5 | `CfgSwitch` drops `Qt.Key_Space` | `test_040_space_toggles_the_switch` |
+| N6 | `CfgRow` stops announcing the readback | `test_013_description_carries_the_rows_prose_and_readback` |
+| N7 | a segmented pill's `Accessible.name` → `""` | `test_022_each_pill_names_its_option` |
+| N8 | `CfgRow` slot `enabled: !unavailable` → `true` | `test_045_a_disabled_control_ignores_the_keyboard` |
 
 **Two survived a first pass, and both were real weaknesses, not bad mutants:**
 
 - **M2b** survived the tab-ring walk. Qt honours an explicit `KeyNavigation`
   link regardless of `activeFocusOnTab`, so the walk could not see the flag
   change. `test_023` was added to read the flag off the live object.
+- **N8** survived, and the survival was the SUITE's fault. The fixture's
+  disabled switch had no `onToggled` handler at all, so its counter could not
+  move whatever happened: the assertion was that a number did not change, and
+  the number had never been shown capable of changing. It now drives the row
+  live and requires the same counter to move once the reason is cleared. This
+  is the plainest false-green in the unit and it was invisible without the
+  mutant.
 - **M7** survived while its assertion was two `grep -q` calls. The stanza still
   CONTAINED both strings they looked for — `canSwitchLayout` in the readonly
   property that defines the guard, and `ctx.layouts.length > 1` in that
@@ -132,9 +149,30 @@ Full script: `scratchpad/mutate-greet.sh`.
 
 ## Landed
 
-`apex-os` `42f23e62` on `task/p2-b-accessibility-i18n` (pushed).
-`tests/test-apex-greet-a11y.sh` 22 assertions + `tests/test-apex-greet-layout.sh`
-22 assertions, both wired into `pr-validation.yml` and its shellcheck list.
+Both repos on `task/p2-b-accessibility-i18n`, both pushed, neither rebased.
+
+**apex-os** — `a0dd1999`, `e5d049ad`, `69f59cb0`
+- `tests/test-apex-greet-a11y.sh` + `greet-a11y-test.qml` — **22 assertions**.
+- `tests/test-apex-greet-layout.sh` — **25 assertions**, including a two-mutant
+  inline self-test.
+- Baseline before the fix: **15 of 17** accessibility/keyboard assertions failed
+  on the shipped greeter.
+- CI: the layout suite passes on the runner. The a11y suite runs in a
+  **Fedora container** — ubuntu-24.04 ships Qt 6.4 and the greeter imports
+  `QtQuick.Effects` (MultiEffect, Qt 6.5+), so on the runner itself it skipped
+  on every run. Verified by running it: 22 assertions, same result.
+
+**apex-shell** — `83775dc`
+- `tests/run-a11y-controls-test.sh` + `a11y-controls-test.qml` — **21
+  assertions** over the shipped `src/components/config`.
+- `CfgRow` now hands its words to the control it holds; `CfgSwitch`,
+  `CfgButton`, `CfgTile`, `CfgSegmented`, `CfgTextField`, `CfgSlider`,
+  `CfgSwatch` gained roles, state, tab stops, Space/Enter and focus rings.
+- Wired into `ci.yml` and `structure-check`'s manifest.
+- Regression found and fixed: `check-wheel-value.sh`'s third self-test mutant
+  anchored on the exact `CfgSwitch` line this change rewrites. It reported *"the
+  mutation did not apply, so its verdict is meaningless"* rather than passing —
+  the anchor was updated, 6 applied / 0 failed-to-apply.
 
 Qt finding worth keeping: `Accessible.name` and `Accessible.passwordEdit` are
 **mutually exclusive**. `qquickaccessibleattached_p.h:91-93` returns an empty
@@ -144,7 +182,49 @@ reader can name — not both. The greeter keeps the flag and carries the label i
 the description; `test_002_qt_suppresses_name_for_password_edits` pins the Qt
 behaviour with its own probe items.
 
+## Installer facts established (for whoever writes the page)
+
+- Page order is NOT derived from one list. It lives in hardcoded `self.go("…")`
+  targets on every page, plus FOUR duplicated places: the `for name, build in`
+  tuple AND `self.builders` dict (`apex-installer-gui:444-456`), the
+  `STEP N OF 6` literals (12 call sites), the welcome-page bullet list, and
+  `test-installer.sh:224-225`.
+- `test-installer.sh:224-225` extracts page names with `grep -oE '"[a-z]+"'`. A
+  page named `keyboard-locale` or `kb_tz` is **silently dropped** from the render
+  suite with no failure. Name it `[a-z]+`.
+- `measure.py` builds EVERY page; a `self.answers['newkey']` with brackets raises
+  `KeyError` and every page then fails as "never measured". Use `.get()`.
+- The engine has ONE flag (`--headless ANSWERS`). Values travel as `key=value`
+  lines in a 0600 file; unknown key → `die`. A new key must be added in FOUR
+  places: the GUI's key tuple (`:1423`), the engine's `case` block (`:698-708`),
+  the globals-clear line (`:689`), and validation.
+- `spawn_engine()` writes `if a.get(k):` — an empty value never reaches the
+  engine, so `set_locale_keymap_in()`'s live-env fallback stays load-bearing.
+- Layout enumeration already has an in-repo idiom:
+  `apex-shell-firstrun:175-183` parses `/usr/share/X11/xkb/rules/base.lst`, and
+  `xkeyboard-config` is explicitly installed in the live ISO
+  (`Containerfile.installer:147`).
+- **Locale caveat:** the image installs `glibc-langpack-en` ONLY. A free locale
+  picker would let a user choose one that silently degrades to `C.UTF-8` on the
+  installed system. Either restrict the list to what the target ships or add
+  langpacks to `Containerfile.core`.
+
 ## NEXT
+
+0. **DESIGN FORK to settle before writing the installer page** (from a full
+   read of `installer/`): the criterion is "keyboard layout before password
+   CREATION", and the point is that the user can *type* their password on their
+   own layout. Recording the choice in the answers file does not achieve that —
+   the layout must be applied to the RUNNING cage session. Nothing in
+   `apex-installer-launch` touches XKB today (it exports `LIBSEAT_BACKEND`,
+   `WLR_RENDERER`, `GDK_BACKEND`, … but no `XKB_DEFAULT_LAYOUT`), and GTK4 on
+   Wayland takes its keymap from the compositor. Three options: (a)
+   `localectl set-x11-keymap` in the live session — zero engine changes, since
+   `set_locale_keymap_in()` already reads `localectl status` first, but depends
+   on `systemd-localed` answering over dbus, which the engine's own comment
+   doubts; (b) re-exec cage with `XKB_DEFAULT_LAYOUT` after the pick — reliable
+   for the running session, fights the launcher's retry logic; (c) answers-file
+   only — records the choice correctly and does NOT deliver the criterion.
 
 1. **The installer's missing keyboard/locale/timezone step.** This is P2-004's
    acceptance criterion read literally — "keyboard layout before password
@@ -158,11 +238,10 @@ behaviour with its own probe items.
    plumbing exists and the UI to collect a choice does not. Measurable: page
    order (keyboard before account), the engine honouring explicit overrides, and
    a non-US layout reaching the deploy root.
-2. **apex-shell accessibility baseline.** 0 `Accessible.*` across 209 QML files,
-   0 `FocusScope`, 0 `KeyNavigation`, one real `activeFocusOnTab` (CfgSlider).
-   The shared `src/components/config/Cfg*` controls are the leverage point — a
-   name and role there fixes every Settings page at once. Same runtime shape as
-   the greeter suite; `run-settings-controls-test.sh` already stages that tree.
+2. **DONE** — see Landed. Remaining in apex-shell: the bespoke widgets in
+   `src/popups/` (WifiTab, BluetoothTab, VPNTab) and `src/nexus/NavPane.qml`,
+   which use their own Rectangle+MouseArea rather than the shared controls and
+   are therefore still mouse-only and unnamed.
 3. **Reduce-motion has no test at all** and reaches 11% of animations. Cheapest
    honest measurement in the unit: instantiate a real component, toggle the
    setting, read `duration` back at runtime, and report the covered/total count.

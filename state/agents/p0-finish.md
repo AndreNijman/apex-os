@@ -23,7 +23,13 @@ Environment notes:
 
 ## NEXT
 
-Card written. Next: local image build in the background, then P0-007.
+P0-007, P0-015 and P0-002 are done and pushed. Outstanding: the local
+`core -> base -> apex` build for P0-001 (running), the P0-001 remainder
+checklist, and P0-021 (a probe agent is reporting on the shell branch).
+
+Branch tip: see `git -C /var/tmp/apex-work/wt-p0-finish log --oneline -1`.
+Baseline on this worktree at `f39fd664`: **2517 passed / 0 failed**
+(`cargo test --locked --no-fail-fast`, XDG_CONFIG_HOME redirected).
 
 ## What is already proven, per item (read before adding anything)
 
@@ -111,6 +117,36 @@ not addressed by the existing evidence at all.
 
 - Worktree created, `task/p0-finish` pushed, this card.
 
+- **`f372c089` fix(build)** — the SECOND assertion in `Containerfile.base`
+  that can only ever fail, one RUN block after the one `706489ec` fixed
+  today. `test -L /usr/lib/systemd/system/multi-user.target.wants/
+  apex-secretd.service`, and `systemctl enable` has never written a symlink
+  there. Measured inside `ghcr.io/andrenijman/apex-os:core`: it creates
+  `/etc/systemd/system/multi-user.target.wants/apex-secretd.service` and
+  leaves `/usr/lib` untouched. The four sibling checks in the same file all
+  name `/etc`. So `roadmap/v2.2` still could not build an image after
+  `706489ec`.
+
+- **`f31f4020` feat(grant)** — P0-007 criterion 3. `--capabilities` narrows
+  a session grant to named verbs, enforced at `GrantAuthority::covers`.
+  `capabilities_for` beside `ttl_for`; unknown verb refused not dropped;
+  break-glass refused outright; PROTOCOL_VERSION 5 -> 6 with
+  `SCOPED_GRANT_VERSION`, because a dropped key here WIDENS the grant;
+  forwarded over §20's hop. Four mutation pairs.
+
+- **`7eaa0cdb` test(lock)** — P0-015. Four tests through `lock_tick`
+  against a real `GrantAuthority`, only the screen faked. Three mutation
+  pairs. See the P0-015 section above for why the old evidence was stale.
+
+- **`71c7b5af` test(secret)** — P0-002 criterion 1's at-rest half.
+  `tests/test-secret-at-rest.sh`, 18/0, apex-secretd as REAL root via
+  `sudo -n`. Mutation: same daemon without sudo -> 8/10, including "the
+  credential is readable at .../store/users/1000/demo.secret".
+
 ## IN PROGRESS
 
-- Local `podman build` of `Containerfile.base` + `Containerfile.apex`.
+- Local `podman build`, all three stages from this branch:
+  `core -> base -> apex`. The published `:core` is built from `main` and
+  predates `Containerfile.core` installing `xdg-terminal-exec`, so building
+  `base` against it fails on a correct assertion — that was my shortcut,
+  not a branch defect, and it is why core is being built too.
