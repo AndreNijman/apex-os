@@ -323,16 +323,23 @@ impl ScopeName {
     /// The validation, separated so a test can aim it at a name `new` cannot
     /// currently produce. A refactor that changes `new` keeps this.
     fn checked(name: String) -> Result<ScopeName, String> {
-        if !name.starts_with(SCOPE_PREFIX) {
-            return Err(format!(
-                "a scope name must begin {SCOPE_PREFIX:?}, and {name:?} does not"
-            ));
-        }
+        // The privilege rule goes FIRST, and the order is load-bearing rather
+        // than cosmetic. Behind the prefix rule this arm is unreachable — no
+        // string can begin both "apex-agent-" and "session-" — so a name that
+        // would forge a login session was refused by the PREFIX rule, with the
+        // prefix rule's message, and nothing could tell the two apart. The
+        // battery's B5 row (drop this arm entirely) was completely green
+        // because of it. First means the arm answers for itself.
         if name.starts_with("session-") {
             return Err(format!(
                 "a scope named {name:?} would put \"/session-\" into every \
                  process's cgroup path, which origin::classify reads as a \
                  local login session"
+            ));
+        }
+        if !name.starts_with(SCOPE_PREFIX) {
+            return Err(format!(
+                "a scope name must begin {SCOPE_PREFIX:?}, and {name:?} does not"
             ));
         }
         if !name
@@ -1132,7 +1139,41 @@ mod tests {
         // ...and it is refused for the right reason: it is caught before the
         // charset rule, which would also have let it through.
         let why = ScopeName::checked("session-99-agent".to_string()).unwrap_err();
-        assert!(why.contains("session-") || why.contains("begin"), "{why}");
+        assert!(
+            why.contains("origin::classify") && why.contains("login session"),
+            "refused, but by the wrong rule — this assertion used to accept \
+             `why.contains(\"begin\")`, which is the PREFIX rule's word, so \
+             deleting the session rule left it green: {why}"
+        );
+    }
+
+    #[test]
+    fn the_scope_prefix_itself_cannot_forge_a_login_session() {
+        // What the `session-` arm really guards is a change to SCOPE_PREFIX:
+        // the arm is unreachable while the prefix is "apex-agent-", so the
+        // constant is the thing a test has to pin. A prefix beginning
+        // "session-" would promote every budgeted agent to the origin §7
+        // reserves for a human at this machine, and every name `new` produces
+        // would pass the charset rule on the way there.
+        use apex_agent_core::origin::classify;
+        use apex_agent_core::policy::RequestOrigin;
+
+        assert!(
+            !SCOPE_PREFIX.starts_with("session-"),
+            "SCOPE_PREFIX is {SCOPE_PREFIX:?}"
+        );
+        for (pid, id) in [(1u32, 1u32), (4242, 7), (u32::MAX, u32::MAX)] {
+            let leaf = ScopeName::new(pid, id).expect("valid").cgroup_leaf();
+            let path =
+                format!("/user.slice/user-1000.slice/user@1000.service/app.slice/{leaf}");
+            for tty in [true, false] {
+                assert_eq!(
+                    classify(&path, tty),
+                    Some(RequestOrigin::ScheduledJob),
+                    "{path}"
+                );
+            }
+        }
     }
 
     #[test]
