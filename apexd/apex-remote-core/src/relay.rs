@@ -272,6 +272,51 @@ pub fn accept_for(key: &str) -> String {
     BASE64.encode(&h.finalize())
 }
 
+/// What a relay says about itself, in a text frame.
+///
+/// Deliberately tiny and deliberately not about the session. Anything a relay
+/// could say about the traffic it is copying is something it should not know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Notice {
+    /// This connection holds the rendezvous; no device has arrived yet.
+    Waiting,
+    /// A device has arrived and the two connections are now joined.
+    Paired,
+    /// The other end has gone. The session is over; the relay is still up.
+    PeerGone,
+}
+
+impl Notice {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Notice::Waiting => "waiting",
+            Notice::Paired => "paired",
+            Notice::PeerGone => "peer-gone",
+        }
+    }
+
+    /// Parse one text frame.
+    ///
+    /// Unknown words are `None` rather than an error: a later relay may grow
+    /// a notice this build does not have, and a client that killed the
+    /// connection over one would make every relay upgrade a flag day.
+    pub fn parse(text: &[u8]) -> Option<Notice> {
+        let value: serde_json::Value = serde_json::from_slice(text).ok()?;
+        match value.get("relay")?.as_str()? {
+            "waiting" => Some(Notice::Waiting),
+            "paired" => Some(Notice::Paired),
+            "peer-gone" => Some(Notice::PeerGone),
+            _ => None,
+        }
+    }
+
+    /// The frame a relay sends. Here so the double and the Worker agree with
+    /// the parser rather than with each other.
+    pub fn text(&self) -> String {
+        format!("{{\"relay\":\"{}\"}}", self.as_str())
+    }
+}
+
 /// The client half of the opening handshake.
 pub struct Opening {
     key: String,
@@ -644,6 +689,28 @@ impl<R: Read> Receiver<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── the relay's own vocabulary ───────────────────────────────────────
+
+    #[test]
+    fn the_relay_vocabulary_round_trips_and_has_no_room_for_session_data() {
+        for notice in [Notice::Waiting, Notice::Paired, Notice::PeerGone] {
+            assert_eq!(Notice::parse(notice.text().as_bytes()), Some(notice));
+        }
+        // Three words and nothing else. A relay that could attach a payload
+        // to a notice would have a channel for saying something about the
+        // session it is copying.
+        assert_eq!(Notice::Paired.text(), r#"{"relay":"paired"}"#);
+    }
+
+    #[test]
+    fn a_notice_this_build_does_not_know_is_ignored_rather_than_fatal() {
+        // A later relay growing a word must not make every older desktop drop
+        // its connection, so an unknown notice is not an error.
+        assert_eq!(Notice::parse(br#"{"relay":"rebalancing"}"#), None);
+        assert_eq!(Notice::parse(b"not json at all"), None);
+        assert_eq!(Notice::parse(br#"{"something":"else"}"#), None);
+    }
 
     // ── the handshake ────────────────────────────────────────────────────
 

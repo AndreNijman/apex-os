@@ -30,6 +30,7 @@ mod control;
 mod net;
 mod peer;
 mod proxy;
+mod relay;
 mod serve;
 mod state;
 
@@ -146,6 +147,26 @@ fn run(args: &[String]) -> Result<(), String> {
     );
 
     let agentd = apex_agent_core::paths::control_socket();
+
+    // The relay, when one is configured. Parsed here rather than at every
+    // dial so a typo is one line in the journal at startup instead of a
+    // failed connection every two seconds for the life of the machine — and
+    // NOT a refusal to start, because a bad relay address must not cost the
+    // owner the LAN path that does work.
+    if let Some(url) = state.relay.clone() {
+        match apex_remote_core::relay::Endpoint::parse(&url) {
+            Ok(endpoint) => {
+                let state = Arc::clone(&state);
+                let agentd = agentd.clone();
+                std::thread::spawn(move || relay::supervise(state, endpoint, agentd));
+            }
+            Err(e) => eprintln!(
+                "apex-remoted: the configured relay is not usable, so this machine is \
+                 reachable on this network only: {e}"
+            ),
+        }
+    }
+
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         // A dead connection must not hold a thread forever, and a live PTY
