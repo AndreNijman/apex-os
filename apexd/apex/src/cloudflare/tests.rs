@@ -52,12 +52,14 @@ impl Auth {
                 let (status, reply) = if device {
                     (
                         200,
-                        format!(
-                            r#"{{"device_code":"dev-abc123","user_code":"WDJB-MJHT",
+                        // Not `format!`: there is nothing to substitute, and the
+                        // doubled braces were only escaping for a template this
+                        // never was. The bytes are identical.
+                        r#"{"device_code":"dev-abc123","user_code":"WDJB-MJHT",
                                 "verification_uri":"https://dash.cloudflare.com/oauth2/device",
                                 "verification_uri_complete":"https://dash.cloudflare.com/oauth2/device?code=WDJB-MJHT",
-                                "expires_in":300}}"#
-                        ),
+                                "expires_in":300}"#
+                            .to_string(),
                     )
                 } else {
                     let step = steps.get(polls).cloned().unwrap_or(Step::Pending);

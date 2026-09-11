@@ -410,8 +410,15 @@ pipeline unattended, against no specification, is not something to do at 2am.
 **GPU controls are NVIDIA-only, and clock locks exist for one machine.**
 `gpu.rs` is NVIDIA-only and only `msi-katana-gf76.toml` — the developer's own
 laptop — carries a `[gamemode]` section. `generic-desktop`, `generic-laptop`
-and `amd-zen` have none. That is a real limit on the Gamer and Creator rows,
-and closing it needs hardware nobody here has.
+and `amd-zen` have none. That is a real limit on the Gamer and Creator rows.
+
+> **Corrected 2026-09-07 (P1-043).** The sentence that stood here said closing
+> it "needs hardware nobody here has". That was wrong, and it was wrong when it
+> was written: the ThinkPad L16 is a Radeon 780M (`0x1002`, amdgpu) and the MSI
+> Katana is an Alder Lake-P Iris Xe (`0x8086`, i915) beside an RTX 3070 Mobile
+> (`0x10de`). All three vendors were on the two machines the whole time, and
+> nothing had asked either of them. `apexd-core/tests/gpu_parity.rs` is built
+> from what they actually publish.
 
 Both are recorded as gaps rather than quietly counted as met.
 

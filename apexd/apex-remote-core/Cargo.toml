@@ -1,0 +1,19 @@
+[package]
+name = "apex-remote-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+apex-agent-core = { path = "../apex-agent-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+snow = "0.9.6"
+data-encoding = "2.11.1"
+rand = "0.9.5"
+sha2 = "0.10.9"

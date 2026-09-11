@@ -217,7 +217,8 @@ impl Service {
         capability: &str,
         revoke: bool,
     ) -> Response {
-        if !broker::valid_project(project) {
+        let everywhere = project == store::ANY_PROJECT;
+        if !everywhere && !broker::valid_project(project) {
             return Response::error(
                 ErrorKind::BadRequest,
                 "a grant is keyed on an absolute project path".to_string(),
@@ -230,6 +231,20 @@ impl Service {
             Ok((_, op)) => op,
             Err(e) => return Response::error(ErrorKind::BadRequest, e.to_string()),
         };
+        // The gate on `*`, here rather than in the CLI, because the CLI is not
+        // the trust boundary: this socket takes a request from anything running
+        // as the account. See [`may_be_granted_everywhere`] for what earns it.
+        if everywhere && !may_be_granted_everywhere(op) {
+            return Response::error(
+                ErrorKind::BadRequest,
+                format!(
+                    "'{}' resolves against the project it is asked in, so it is granted \
+                     where you name it and not everywhere. Run `apex secret grant` in \
+                     the project.",
+                    op.id
+                ),
+            );
+        }
         let capability = op.id;
         if !store::valid_service_name(service) {
             return refuse_store(StoreError::BadServiceName(service.to_string()));
@@ -304,9 +319,22 @@ impl Service {
         {
             return Decision::Allowed("grant");
         }
+        // The one message somebody reads in a worktree where a global MCP
+        // server has stopped working, relayed to them by the agent as a
+        // JSON-RPC error. It has to carry the way out, and for an operation
+        // that names nothing the way out is usually `--everywhere` rather than
+        // running the same grant again in each new directory.
+        let everywhere = if may_be_granted_everywhere(op) {
+            format!(
+                ", or in every project with `apex secret grant {provider} {} --everywhere`",
+                op.id
+            )
+        } else {
+            String::new()
+        };
         Decision::Refused(format!(
             "'{}' on '{provider}' is not granted for this project; allow it with \
-             `apex secret grant {provider} {}`",
+             `apex secret grant {provider} {}`{everywhere}",
             op.id, op.id
         ))
     }
@@ -613,6 +641,35 @@ pub struct NewService<'a> {
 
 fn valid_host_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_')
+}
+
+/// Whether `*` (every project) is a safe key for this operation.
+///
+/// **The operation's own declaration answers this**, and nothing here computes
+/// it. That is the whole of the fix, and it took two wrong shapes to get here:
+///
+/// 1. P1-018 gated `--everywhere` on [`OperationSpec::names_nothing`],
+///    reasoning that an operation naming nothing "can only ever reach the
+///    endpoint pinned when its credential was stored". P1-002 landed the
+///    counterexample in the same integration round: `cloudflare.account.read`
+///    declares no resource and no parameters and still resolves its account out
+///    of the project's own `apex.toml`. A rule over the declaration cannot see
+///    what a provider's `bind` reads.
+/// 2. The integration fix was `names_nothing() && id == "mcp.request"` — an
+///    allow-list. Fail-closed, and **silent**: the next provider to declare an
+///    operation like this gets the safe answer, the registry test keeps
+///    passing, and nobody is ever asked the question. Safe by accident is not
+///    safe by design.
+///
+/// [`OperationSpec::same_everywhere`] is the question, asked of the one party
+/// that can answer it. There is no `Default` for `OperationSpec` and nothing
+/// constructs one with `..`, so an operation added later does not compile until
+/// its author has stated which of the two it is; and
+/// [`apex_secret_core::operation::ProviderSpec::validate`] refuses the
+/// incoherent half of the claim at registration, so this can read the field
+/// alone.
+pub(crate) fn may_be_granted_everywhere(op: &'static OperationSpec) -> bool {
+    op.same_everywhere
 }
 
 fn refuse_store(e: StoreError) -> Response {

@@ -22,7 +22,10 @@ use apex_agent_core::protocol::{
     POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION, SYSTEM_GRANT_VERSION,
 };
 use apex_agent_core::hook::{self as hook_core, HookEvent};
+use apex_agent_core::paths;
+use apex_agent_core::statusline as statusline_core;
 use apex_agent_core::term::{self, RawMode, WinSize};
+use apex_agent_core::webauthn;
 use apex_agent_core::worktree::{ConflictState, TestState};
 use apex_agent_core::{adapter, checkpoint, config, git, layout, mux, profile, project};
 use clap::{Args, Subcommand};
@@ -63,6 +66,26 @@ pub enum AgentCmd {
         /// is the remote's, which is why `apex agent list --host` exists.
         #[arg(long, value_name = "HOST")]
         host: Option<String>,
+    },
+    /// Type text into a session's terminal.
+    ///
+    /// The text lands in the agent's prompt exactly as if it had been typed,
+    /// and stays there. Add --submit to send it. That is deliberate: the words
+    /// may have come from somewhere less certain than a keyboard, and reading
+    /// them before they become an instruction is the difference between a
+    /// typo and a command.
+    ///
+    /// APEX Shell's push-to-talk route is the other caller. A session cannot
+    /// call this on another session.
+    Input {
+        id: u32,
+        /// The text to type. Several words are joined with single spaces, so
+        /// quoting is optional.
+        #[arg(required = true, num_args = 1.., value_name = "TEXT")]
+        text: Vec<String>,
+        /// Press Enter after it, so the agent acts on the line.
+        #[arg(long)]
+        submit: bool,
     },
     /// Suspend a session and everything it started.
     Pause { id: u32 },
@@ -143,6 +166,26 @@ pub enum AgentCmd {
         /// Remove it instead of adding it.
         #[arg(long)]
         remove: bool,
+    },
+    /// Show or change what a screen lock does to running work (§7).
+    ///
+    /// §7: "ordinary agents may continue; Remote Control may continue if
+    /// configured; short-lived root grants should default to revocation; user
+    /// policy may override." This is the override, and with no flags it
+    /// prints what the machine will do — and what the screen is doing now.
+    ///
+    /// The runtime picks a change up on its next few-second tick; nothing has
+    /// to be restarted.
+    Lock {
+        /// Ordinary agent sessions on a locked screen: continue | hold.
+        #[arg(long, value_name = "WHAT", value_parser = parse_continues)]
+        agents: Option<bool>,
+        /// Remote Control sessions on a locked screen: continue | hold.
+        #[arg(long, value_name = "WHAT", value_parser = parse_continues)]
+        remote: Option<bool>,
+        /// Short-lived root grants when the screen locks: revoke | keep.
+        #[arg(long, value_name = "WHAT", value_parser = parse_revokes)]
+        root_grants: Option<bool>,
     },
     /// System-access grants: what has been granted, and to what (§4.4, §4.5).
     ///
@@ -247,18 +290,47 @@ pub enum AgentCmd {
         /// session_start | pre_tool_use | post_tool_use | stop | …
         event: String,
     },
+    /// Claude's status line, wrapped (§P1-021).
+    ///
+    /// Not meant to be typed either. `apex-agentd` points a managed session's
+    /// `statusLine` here, the payload arrives on stdin as the JSON document
+    /// Claude produces, and what this prints is what appears under the prompt.
+    ///
+    /// It does two things and the ORDER is the point. First it runs the user's
+    /// own status-line command with the same payload and copies its output —
+    /// so the terminal status line is byte-for-byte what it was, which is the
+    /// criterion. Second it publishes the model, context and rate-limit
+    /// numbers to the daemon, which is the only way any of them reach the
+    /// Agent Center.
+    ///
+    /// Always exits 0. A status line that failed would be a broken daemon
+    /// putting an error where the user's prompt used to be.
+    #[command(hide = true)]
+    Statusline,
     /// Narrow where this session says it is driven from (§7).
     ///
     /// Run from inside a managed session — the runtime works out which session
     /// that is from the connection, so there is no id to pass and no way to
     /// speak about another session.
     ///
-    /// The declaration can only ever cost the session something. A local
+    /// Run from anywhere else it narrows the *connection* instead, for as long
+    /// as that connection is open. That is only useful to a program holding
+    /// the socket open across several requests, which is what `apex-remoted`
+    /// does; one `apex agent origin` from a shell narrows a connection that
+    /// closes immediately afterwards, and the command says so.
+    ///
+    /// The declaration can only ever cost the caller something. A local
     /// session may hand itself to Remote Control; nothing may declare itself
     /// local, and a Remote Control session may not declare its way back out.
     Origin {
         /// claude-remote-control | scheduled-job | mcp | subagent | cloud-job
         origin: String,
+        /// Which remote actor this is being declared for: a paired device id,
+        /// a host name, a job name. Recorded beside the origin on sessions and
+        /// privilege requests. Never a key or a token — it is printed on the
+        /// prompt a human reads before approving root.
+        #[arg(long)]
+        actor: Option<String>,
     },
     /// Forget a finished session and delete its transcript.
     Rm { id: u32 },
@@ -272,6 +344,48 @@ pub enum AgentCmd {
     /// lingering systemd user instance (root has none by default) and then
     /// prints what running agents as root costs.
     Enable,
+    /// The security keys that can answer a remote elevation (§7).
+    ///
+    /// §7 reserves root for a human at this machine. `--origin-policy remote`
+    /// is the owner's opt-out, and what it costs is a touch on one of these
+    /// keys. An empty store is what makes that policy refuse to start, so
+    /// enrolling one is the first step of turning it on.
+    Key {
+        #[command(subcommand)]
+        cmd: KeyCmd,
+    },
+}
+
+/// `apex agent key <verb>`.
+#[derive(Subcommand)]
+pub enum KeyCmd {
+    /// Enrol a security key from what `fido2-cred -V` printed.
+    ///
+    /// The key is plugged into whatever machine the owner is at, which by
+    /// construction is not necessarily this one, so this takes the *output*
+    /// rather than talking to the device:
+    ///
+    ///   fido2-cred -M -rk -i params /dev/hidraw0 | fido2-cred -V -o cred.txt
+    ///   apex agent key add --label yubikey --rp-id apex.local --from cred.txt
+    ///
+    /// `fido2-cred -V` prints the credential id and then a PEM public key.
+    /// Both are stored as printed, so an operator can compare the file with
+    /// the paste.
+    Add {
+        /// What to call it. Named in a refusal, and in `--credential`.
+        #[arg(long, value_name = "NAME")]
+        label: String,
+        /// The relying party id the credential was created for. It is not this
+        /// machine's hostname unless that is what was passed to `fido2-cred`;
+        /// an assertion for a different one is refused.
+        #[arg(long, value_name = "ID")]
+        rp_id: String,
+        /// The file `fido2-cred -V` wrote. Omitted reads standard input.
+        #[arg(long, value_name = "PATH")]
+        from: Option<PathBuf>,
+    },
+    /// Every enrolled key.
+    List,
 }
 
 /// `apex agent profile <verb>`.
@@ -711,6 +825,7 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             }
             None => attach(id, !no_replay),
         },
+        AgentCmd::Input { id, text, submit } => input(id, &text.join(" "), submit),
         AgentCmd::Pause { id } => signal(id, "stop", "paused"),
         AgentCmd::Resume { id } => signal(id, "cont", "resumed"),
         AgentCmd::Kill { id, signal: sig } => signal(id, &sig, "signalled"),
@@ -728,6 +843,11 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             destination,
             remove,
         } => allow(destination, remove),
+        AgentCmd::Lock {
+            agents,
+            remote,
+            root_grants,
+        } => lock_policy(agents, remote, root_grants),
         AgentCmd::Grants { active, json } => grants(active, json),
         AgentCmd::RevokeGrant { id } => revoke_grant(id),
         AgentCmd::RenewGrant { id, ttl } => renew_grant(id, ttl),
@@ -746,10 +866,19 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             detail,
         } => event(state, session, detail),
         AgentCmd::Hook { event } => return hook(&event),
-        AgentCmd::Origin { origin } => declare_origin(&origin),
+        AgentCmd::Statusline => return statusline(),
+        AgentCmd::Origin { origin, actor } => declare_origin(&origin, actor),
         AgentCmd::Rm { id } => remove(id),
         AgentCmd::Prune => prune(),
         AgentCmd::Enable => enable(),
+        AgentCmd::Key { cmd } => match cmd {
+            KeyCmd::Add {
+                label,
+                rp_id,
+                from,
+            } => key_add(&label, &rp_id, from.as_deref()),
+            KeyCmd::List => key_list(),
+        },
     };
     report(result)
 }
@@ -783,6 +912,28 @@ dimension_parser!(parse_system_access, SystemAccess, "none, session or unsafe");
 dimension_parser!(parse_secrets, SecretPolicy, "brokered, none or export");
 dimension_parser!(parse_network, NetworkPolicy, "open, allowlist, brokered or offline");
 dimension_parser!(parse_origin_policy, OriginPolicy, "local or remote");
+
+/// `--agents` and `--remote` on `apex agent lock`.
+///
+/// §7 words both rules as "may continue", so the value is the sentence rather
+/// than a bare true/false: `--agents hold` says what will happen, where
+/// `--agents false` would leave the reader working out which way round it is.
+fn parse_continues(s: &str) -> std::result::Result<bool, String> {
+    match s {
+        "continue" | "continues" | "run" | "keep-running" => Ok(true),
+        "hold" | "held" | "pause" | "stop" => Ok(false),
+        _ => Err("use continue or hold".to_string()),
+    }
+}
+
+/// `--root-grants` on `apex agent lock`.
+fn parse_revokes(s: &str) -> std::result::Result<bool, String> {
+    match s {
+        "revoke" | "revoked" => Ok(true),
+        "keep" | "kept" | "hold" => Ok(false),
+        _ => Err("use revoke or keep".to_string()),
+    }
+}
 
 /// `--ttl`, in milliseconds.
 ///
@@ -1225,6 +1376,45 @@ fn install_winch_forwarder(id: u32, initial: WinSize) {
         .ok();
 }
 
+/// Build the bytes `apex agent input` puts on the wire.
+///
+/// Carriage return and not newline for --submit. CR is the byte a terminal
+/// actually sends when Enter is pressed, so it is what a program reading that
+/// terminal is written against: the line discipline's ICRNL turns it into a
+/// newline for anything reading lines, and a TUI reading its input raw — which
+/// is what the agents in this runtime do — treats CR as Enter.
+///
+/// The reason this comment is careful is that the obvious test does not support
+/// it. Measured on a real PTY against `sh -c 'read line'`: CR and LF BOTH end
+/// the line, because ICRNL is on by default. So apex-agentd's cooked-mode test
+/// proves the bytes arrive and that the terminator ends the line, and it does
+/// NOT discriminate between the two candidates. CR is chosen for the raw-mode
+/// case, where they differ and where no test in either crate reaches.
+///
+/// Split out from [`input`] so it can be tested without a running daemon: the
+/// whole behaviour of the flag is in this function.
+fn input_bytes(text: &str, submit: bool) -> String {
+    let mut data = text.to_string();
+    if submit {
+        data.push('\r');
+    }
+    data
+}
+
+fn input(id: u32, text: &str, submit: bool) -> Result<i32> {
+    let data = input_bytes(text, submit);
+    client::call(&Request::Input { id, data })?;
+    // On stderr, so a script's stdout stays empty. Says whether Enter was
+    // pressed, because "nothing happened" and "it is sitting in the prompt"
+    // look the same from outside the session and want different next steps.
+    if submit {
+        eprintln!("apex: sent to session {id}");
+    } else {
+        eprintln!("apex: typed into session {id}, not sent; add --submit to send it");
+    }
+    Ok(0)
+}
+
 fn signal(id: u32, name: &str, past_tense: &str) -> Result<i32> {
     client::call(&Request::Signal {
         id,
@@ -1541,6 +1731,90 @@ fn default_agent(agent: Option<String>) -> Result<i32> {
     cfg.default_agent = agent.clone();
     cfg.save()?;
     println!("default agent is now {agent}");
+    Ok(0)
+}
+
+/// `apex agent lock [--agents …] [--remote …] [--root-grants …]`.
+///
+/// With no flags it reports, and the report leads with what the screen is
+/// actually doing — read from logind, which is the half of this that did not
+/// exist until apex-shell started calling `SetLockedHint`. A settings page
+/// that could not say whether the mechanism was working would be the same
+/// switch-with-no-wire this policy used to be.
+fn lock_policy(
+    agents: Option<bool>,
+    remote: Option<bool>,
+    root_grants: Option<bool>,
+) -> Result<i32> {
+    use apex_agent_core::lock::{LockObserver, Loginctl};
+
+    let (mut cfg, notes) = config::load_reporting();
+    for note in &notes {
+        eprintln!("apex: {note}");
+    }
+
+    if agents.is_none() && remote.is_none() && root_grants.is_none() {
+        let state = Loginctl::new().observe();
+        println!("screen                   {state}");
+        println!(
+            "ordinary agents          {}",
+            if cfg.lock.agents_continue {
+                "continue"
+            } else {
+                "hold"
+            }
+        );
+        println!(
+            "Remote Control           {}",
+            if cfg.lock.remote_control_continues {
+                "continue"
+            } else {
+                "hold"
+            }
+        );
+        println!(
+            "short-lived root grants  {}",
+            if cfg.lock.revoke_root_grants {
+                "revoke"
+            } else {
+                "keep"
+            }
+        );
+        if !cfg.lock.remote_control_continues {
+            println!(
+                "\n§7 lets Remote Control past a lock only when it is configured to:\n  \
+                 apex agent lock --remote continue"
+            );
+        }
+        return Ok(0);
+    }
+
+    if let Some(v) = agents {
+        cfg.lock.agents_continue = v;
+    }
+    if let Some(v) = remote {
+        cfg.lock.remote_control_continues = v;
+    }
+    if let Some(v) = root_grants {
+        cfg.lock.revoke_root_grants = v;
+    }
+    cfg.save()?;
+
+    let p = cfg.lock;
+    println!(
+        "on a locked screen: ordinary agents {}, Remote Control {}, short-lived root grants {}",
+        if p.agents_continue { "continue" } else { "are held" },
+        if p.remote_control_continues {
+            "continues"
+        } else {
+            "is held"
+        },
+        if p.revoke_root_grants {
+            "are revoked"
+        } else {
+            "are kept"
+        }
+    );
     Ok(0)
 }
 
@@ -2172,17 +2446,83 @@ fn hook(event: &str) -> i32 {
         return 0;
     };
     let observation = hook_core::observe(parsed, &payload);
-    if let Err(e) = client::publish_hook(
-        id,
-        parsed,
-        observation.state,
-        observation.detail,
-        observation.native,
-        observation.test,
-    ) {
+    if let Err(e) = client::publish_hook(id, &observation) {
         eprintln!("apex agent hook: {parsed} not published: {e:#}");
     }
     0
+}
+
+/// `apex agent statusline` — the wrapper around the user's own status line.
+///
+/// Returns an exit code directly rather than a `Result`, for the same reason
+/// [`hook`] does: there is only one, and it is 0. Claude treats a non-zero
+/// exit from a status line as an error, and every failure here — no daemon, a
+/// payload that will not parse, a user command that is not installed — must
+/// leave the prompt looking exactly as it did.
+///
+/// ## Why the user's own command runs FIRST
+///
+/// It is what the person sees. The publish is a round trip to a Unix socket
+/// and the daemon may be busy or gone; doing it first would put its latency in
+/// front of every status-line refresh, and a daemon that hangs would blank the
+/// line rather than merely lose a measurement.
+fn statusline() -> i32 {
+    use std::io::{Read, Write};
+
+    // Bounded for the reason `read_payload` is: it is a document the agent's
+    // own state ends up inside, and this process has no reason to hold a large
+    // one. Generous, because the status-line payload carries the whole
+    // workspace description and a `pr` block.
+    const MAX_PAYLOAD: u64 = 1024 * 1024;
+    let mut raw = Vec::new();
+    let _ = std::io::stdin()
+        .take(MAX_PAYLOAD)
+        .read_to_end(&mut raw);
+
+    // 1. The user's line, unchanged. `project_dir` rather than `current_dir`,
+    //    because that is the root a project's own `.claude/settings.json` sits
+    //    at and the daemon read the same three sources in the same order when
+    //    it wrote the overlay.
+    let doc: serde_json::Value = serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
+    let project = doc
+        .get("workspace")
+        .and_then(|w| w.get("project_dir"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+    let user = statusline_core::user_status_line(&paths::home(), project.as_deref());
+    if let Some(command) = user.as_ref().and_then(|u| u.command.as_deref()) {
+        if let Some(out) = statusline_core::chain(command, &raw) {
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(&out);
+            let _ = stdout.flush();
+        }
+    }
+
+    // 2. The measurement. Nothing below this line can change what was printed.
+    let Some(id) = client::current_session() else {
+        return 0;
+    };
+    let telemetry = statusline_core::parse(&doc, now_secs());
+    if telemetry.is_empty() {
+        // Nothing worth a round trip. A status line runs once a minute per
+        // session, and publishing an empty record would rewrite every
+        // session's file on a timer to say nothing.
+        return 0;
+    }
+    if let Err(e) = client::publish_telemetry(id, &telemetry) {
+        // Including a daemon that predates this request and answered with a
+        // parse error. The status line has already printed; this is a
+        // measurement that did not arrive.
+        eprintln!("apex agent statusline: not published: {e:#}");
+    }
+    0
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Read the payload Claude writes to a hook's stdin.
@@ -2231,10 +2571,11 @@ fn policy_decision(payload: &hook_core::Payload) -> Option<String> {
 /// be pointed at another session and does not read `$APEX_AGENT_SESSION`.
 /// Handing a session id to a verb that changes a permission-relevant property
 /// is exactly what the privilege verbs avoid, and for the same reason.
-fn declare_origin(origin: &str) -> Result<i32> {
+fn declare_origin(origin: &str, actor: Option<String>) -> Result<i32> {
     let wanted = parse_request_origin(origin).map_err(|e| anyhow::anyhow!("{e}"))?;
     match client::call(&Request::DeclareOrigin {
         origin: wanted.as_str().to_string(),
+        actor,
     })? {
         Response::Session(info) => {
             eprintln!(
@@ -2243,6 +2584,19 @@ fn declare_origin(origin: &str) -> Result<i32> {
                 info.request_origin
                     .map(|o| o.to_string())
                     .unwrap_or_else(|| "unrecorded".into())
+            );
+            Ok(0)
+        }
+        // The connection case. Said plainly rather than reported as a success,
+        // because from a shell it IS a no-op: `client::call` opens a
+        // connection, sends one request and closes it, so the latch it just
+        // set is gone before the next command runs. A program that holds the
+        // socket is the only caller this helps, and a user typing it deserves
+        // to be told that rather than left believing something was recorded.
+        Response::Ok => {
+            eprintln!(
+                "apex: this connection is now {wanted}, and it closes when this command exits — \
+                 a declaration on a connection lasts only as long as the connection"
             );
             Ok(0)
         }
@@ -3109,6 +3463,72 @@ fn format_age(unix_secs: u64) -> String {
     }
 }
 
+// ── security keys (§7's remote elevation, P0-014) ───────────────────────────
+
+/// Enrol a security key.
+///
+/// Writes the store directly rather than going through the daemon, and that is
+/// a decision rather than a shortcut: the file is under the owner's own
+/// `XDG_STATE_HOME`, the owner is the only party whose enrolment means
+/// anything, and a protocol verb for it would be a way for a *session* to ask
+/// the daemon to trust a new key. There is deliberately no such way.
+///
+/// The one thing lost by not going through the daemon: a running daemon that
+/// verifies an assertion writes the same file back to record a signature
+/// counter, so an enrolment racing that write can lose one of the two. The
+/// consequence is a counter that reads low or a key that has to be enrolled
+/// again — never a key trusted that the owner did not enrol, because both
+/// writers only ever write what they were given. Not solved here; a lock
+/// belongs beside the store, and it is not what P0-014 is about.
+fn key_add(label: &str, rp_id: &str, from: Option<&Path>) -> Result<i32> {
+    let printed = match from {
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?,
+        None => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                .context("reading the credential from standard input")?;
+            text
+        }
+    };
+
+    let credential = webauthn::Credential::parse_fido2_cred(label, rp_id, &printed, apex_agent_core::request::now_ms())
+        .map_err(|e| anyhow!("{e}"))?;
+    let mut store = webauthn::CredentialStore::load();
+    store.add(credential).map_err(|e| anyhow!("{e}"))?;
+    store.save().map_err(|e| anyhow!("{e}"))?;
+
+    println!("apex: enrolled {label:?} for relying party {rp_id:?}.");
+    println!("      {}", webauthn::store_path().display());
+    if store.len() == 1 {
+        println!();
+        println!("      A remote elevation now has a key to ask. It still needs the owner to");
+        println!("      allow one: `apex agent run --origin-policy remote ...`.");
+    }
+    Ok(0)
+}
+
+/// Every enrolled key.
+///
+/// The listing `AssertionError::UnknownCredential` tells the operator to run,
+/// which is why it exists: an error naming a command that does not exist is
+/// worse than one that names nothing.
+fn key_list() -> Result<i32> {
+    let store = webauthn::CredentialStore::load();
+    if store.is_empty() {
+        println!("apex: no security key is enrolled.");
+        println!("      `apex agent key add --label <name> --rp-id <id> --from <file>`");
+        return Ok(0);
+    }
+    for c in &store.credentials {
+        println!(
+            "{:<20} rp={:<28} counter={}",
+            c.label, c.rp_id, c.counter
+        );
+    }
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3140,6 +3560,32 @@ mod tests {
             remote_path: None,
             allow_dirty: false,
         }
+    }
+
+    #[test]
+    fn input_without_submit_adds_nothing_at_all() {
+        // The default has to be inert. A newline appended "helpfully" here is
+        // the whole difference between text waiting in a prompt and an agent
+        // acting on words that may have come from a speech-to-text hook.
+        assert_eq!(input_bytes("run the tests", false), "run the tests");
+        assert_eq!(input_bytes("", false), "");
+        // Text that already ends in a newline is passed through untouched:
+        // trimming it would be this function deciding, which is the caller's
+        // job in both directions.
+        assert_eq!(input_bytes("two lines\n", false), "two lines\n");
+    }
+
+    #[test]
+    fn input_with_submit_appends_exactly_one_carriage_return() {
+        assert_eq!(input_bytes("run the tests", true), "run the tests\r");
+        // Exactly one, and at the end. A doubled terminator would submit an
+        // empty line after the text, which in an agent's prompt is a second
+        // turn with nothing in it.
+        assert_eq!(input_bytes("x", true).matches('\r').count(), 1);
+        assert!(input_bytes("x", true).ends_with('\r'));
+        // CR and not LF. See `input_bytes` for why, including what the PTY
+        // test in apex-agentd does and does not prove about the choice.
+        assert!(!input_bytes("x", true).contains('\n'));
     }
 
     #[test]

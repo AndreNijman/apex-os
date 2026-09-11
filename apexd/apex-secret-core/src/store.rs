@@ -214,7 +214,8 @@ pub fn valid_service_name(name: &str) -> bool {
         && !name.starts_with('.')
 }
 
-/// Per-project capability grants: project root -> `service:capability`.
+/// Capability grants: a project root — or [`ANY_PROJECT`] — to
+/// `service:capability`.
 ///
 /// Keyed on the capability NAME rather than on its arguments. Deliberate:
 /// `git-push origin` and `git-push origin my-branch` are the same permission,
@@ -231,14 +232,40 @@ fn grant_key(service: &str, capability: &str) -> String {
     format!("{service}:{capability}")
 }
 
+/// The project key that means "wherever the agent happens to be".
+///
+/// Not a path, so it can never collide with one: [`crate`]'s callers require a
+/// project key to be absolute, and `*` is not.
+///
+/// It exists because MCP servers are global and grants are per project. A
+/// memory server is defined once in `~/.claude.json` and is therefore present
+/// in every directory, so without this every new worktree is a directory where
+/// that server is unauthorised until somebody notices and grants it again — and
+/// what the agent reports is a broken server, not a missing permission.
+///
+/// **Only for an operation that names nothing.** `mcp.request` declares no
+/// resource and no parameters, so the endpoint can only be the one pinned when
+/// the credential was stored: granting it everywhere widens *where* it may be
+/// asked for and not *what* it reaches. `git.push` acts on a resource resolved
+/// out of the repository the caller is standing in, so the same key there would
+/// be a different permission in every directory. `Service::grant` is where that
+/// is enforced, because the CLI is not the trust boundary.
+pub const ANY_PROJECT: &str = "*";
+
 impl Grants {
     /// Fails closed: no project, no grant.
+    ///
+    /// [`ANY_PROJECT`] is checked after the named project and never instead of
+    /// it: a request that carries no project at all still matches nothing,
+    /// which is the property `grants_fail_closed_without_a_project` pins.
     pub fn allows(&self, project: Option<&str>, service: &str, capability: &str) -> bool {
         let Some(project) = project else { return false };
         let key = grant_key(service, capability);
-        self.projects
-            .get(project)
-            .is_some_and(|keys| keys.contains(&key))
+        [project, ANY_PROJECT].iter().any(|scope| {
+            self.projects
+                .get(*scope)
+                .is_some_and(|keys| keys.contains(&key))
+        })
     }
 
     /// Whether any of `names` is granted. Fails closed the same way.
@@ -775,6 +802,46 @@ mod tests {
         assert!(!grants.allows(Some("/p"), "demo", "git-push"));
         assert!(!grants.allows(Some("/q"), "demo", "git-fetch"));
         assert!(!grants.allows(Some("/p"), "other", "git-fetch"));
+    }
+
+    #[test]
+    fn a_grant_held_everywhere_matches_any_project_and_still_no_project() {
+        // The key that exists because MCP servers are global and grants are
+        // per project. It widens *where* an operation may be asked for.
+        let mut grants = Grants::default();
+        grants.allow(ANY_PROJECT, "memory", "mcp.request");
+        assert!(grants.allows(Some("/p"), "memory", "mcp.request"));
+        assert!(grants.allows(Some("/somewhere/else/entirely"), "memory", "mcp.request"));
+
+        // And it widens nothing else. A caller with no project at all still
+        // matches nothing — the fail-closed property the test above pins is
+        // not a special case of this one, and `*` must not become the hole in
+        // it. `mcp.request` is refused on a `Use` before this is ever reached,
+        // because the daemon requires an absolute project on the record; this
+        // is the second place that has to hold.
+        assert!(!grants.allows(None, "memory", "mcp.request"));
+        // Still per capability and per service.
+        assert!(!grants.allows(Some("/p"), "memory", "git.push"));
+        assert!(!grants.allows(Some("/p"), "other", "mcp.request"));
+
+        // Withdrawing it is withdrawing one key, and it takes the grant with
+        // it everywhere rather than in the project the revoke was run from.
+        assert!(grants.revoke(ANY_PROJECT, "memory", "mcp.request"));
+        assert!(!grants.allows(Some("/p"), "memory", "mcp.request"));
+    }
+
+    #[test]
+    fn removing_a_credential_forgets_what_it_was_allowed_everywhere_too() {
+        // `forget_service` walks every key, and `*` is a key. If it did not,
+        // re-adding a credential under the same name would silently inherit a
+        // grant that applies in every project — the widest version of the
+        // failure that function exists to prevent.
+        let mut grants = Grants::default();
+        grants.allow(ANY_PROJECT, "memory", "mcp.request");
+        grants.allow("/p", "memory", "mcp.request");
+        assert_eq!(grants.forget_service("memory"), 2);
+        assert!(!grants.allows(Some("/p"), "memory", "mcp.request"));
+        assert!(grants.projects.is_empty(), "{:?}", grants.projects);
     }
 
     #[test]

@@ -104,6 +104,7 @@ fn paths() -> BTreeMap<&'static str, PathBuf> {
     m.insert("blueprint", crate::blueprint::user_blueprint_path());
     m.insert("blueprint-state", crate::blueprint::applied_state_path());
     m.insert("tasks", crate::task::tasks_path());
+    m.insert("qualification", crate::qualify::db_path());
     m
 }
 

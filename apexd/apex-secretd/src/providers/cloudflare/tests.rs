@@ -330,9 +330,17 @@ impl Fixture {
     }
 }
 
+/// One row of [`every_operation`]: the operation id, the resource to ask it
+/// for, and the options its own declaration accepts.
+type OperationCase = (
+    &'static str,
+    &'static str,
+    Vec<(&'static str, &'static str)>,
+);
+
 /// Every operation the provider declares, with a resource and options that its
 /// own declaration accepts.
-fn every_operation() -> Vec<(&'static str, &'static str, Vec<(&'static str, &'static str)>)> {
+fn every_operation() -> Vec<OperationCase> {
     vec![
         ("cloudflare.account.read", "", vec![]),
         ("cloudflare.worker.read", "project", vec![]),
@@ -1097,4 +1105,97 @@ fn the_options_a_caller_sends_survive_the_wire_unchanged() {
     let rec = CapabilityRecord::new("cloudflare", "cloudflare.worker.deploy", "project")
         .param("version", "1c4dd6be");
     assert_eq!(rec.params, params);
+}
+
+#[test]
+fn a_cloudflare_operation_cannot_be_granted_in_every_project_even_though_it_names_nothing() {
+    // The collision between P1-002 and P1-018, as a runtime assertion rather
+    // than a declaration one.
+    //
+    // `--everywhere` (the `*` grant key) is gated on the operation reaching the
+    // same thing in every project. P1-018 implemented that as
+    // `OperationSpec::names_nothing`, which is true here: `cloudflare.account.read`
+    // declares no resource and no parameters. But it resolves the account out of
+    // the project's own `apex.toml` — bound, `GET /accounts/{id}` for THAT
+    // project; unbound, `GET /accounts` for every account the token can see — so
+    // it reaches a different thing in a different directory, and a `*` grant
+    // would let an agent in a project the owner never approved read that
+    // project's account with the one stored token.
+    //
+    // Two mutations prove this bites, and they fail it for different reasons:
+    // make `may_be_granted_everywhere` compute `op.names_nothing()` again
+    // instead of reading the declaration, or flip this operation's own
+    // `same_everywhere` to true. Both were run, and both turn this red.
+    let tag = format!("everywhere-{}", std::process::id());
+    let store = std::env::temp_dir().join(format!("apex-cf-store-{tag}"));
+    let project = std::env::temp_dir().join(format!("apex-cf-project-{tag}"));
+    std::fs::remove_dir_all(&store).ok();
+    std::fs::create_dir_all(&project).expect("project");
+    std::fs::write(project.join("apex.toml"), PROJECT_FILE).expect("apex.toml");
+
+    let mut registry = Registry::new();
+    registry
+        .register(Box::new(CloudflareProvider::new()))
+        .expect("register");
+    let service = Service::new(Store::new(store.clone()), false, registry);
+    let peer = me();
+    assert_eq!(
+        service.add(
+            peer,
+            NewService {
+                service: "cloudflare",
+                host: "127.0.0.1",
+                scheme: "http",
+                username: None,
+                path: "",
+                auth: None,
+                port: None,
+            },
+            SecretValue::new(TOKEN.as_bytes().to_vec()),
+        ),
+        Response::Ok
+    );
+
+    // Refused everywhere. `*` IS the everywhere key; the trailing bool is
+    // `revoke`, not `everywhere`.
+    let reply = service.grant(
+        peer,
+        apex_secret_core::store::ANY_PROJECT,
+        "cloudflare",
+        "cloudflare.account.read",
+        false,
+    );
+    let (_, message) = reply
+        .as_error()
+        .expect("`*` must be refused for an operation that resolves per project");
+    assert!(
+        message.contains("resolves against the project"),
+        "the refusal has to say why: {message}"
+    );
+
+    // ...and allowed in the project the owner named, which is the whole point
+    // of refusing the other one rather than refusing both.
+    let named = service.grant(
+        peer,
+        project.to_str().expect("utf8"),
+        "cloudflare",
+        "cloudflare.account.read",
+        false,
+    );
+    assert!(
+        named.as_error().is_none(),
+        "the named project must still be grantable: {named:?}"
+    );
+    match named {
+        Response::Grants { projects } => assert!(
+            projects
+                .get(project.to_str().expect("utf8"))
+                .is_some_and(|caps| caps.iter().any(|c| c.contains("cloudflare.account.read"))),
+            "{projects:?}"
+        ),
+        other => panic!("a grant answers with the grants: {other:?}"),
+    }
+
+    std::fs::remove_dir_all(&store).ok();
+    std::fs::remove_dir_all(&project).ok();
 }
