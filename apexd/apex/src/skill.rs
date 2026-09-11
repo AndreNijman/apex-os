@@ -473,8 +473,15 @@ pub fn inventory(home: &Path, cwd: Option<&Path>) -> Inventory {
             continue;
         };
         let skills = install.join("skills");
-        if !skills.exists() {
-            continue;
+        // Absent is a reason to skip; refused is not. `.exists()` cannot tell
+        // them apart, and skipping on a refusal would drop the plugin's skills
+        // out of the inventory *and* out of `unreadable_roots` — a silent zero,
+        // which is the one thing this module exists to refuse to say.
+        // `collect_root` records the refusal, so it is handed the path.
+        match std::fs::symlink_metadata(&skills) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {}
         }
         let marketplace = marketplace_of(home, &plugin);
         collect_root(
@@ -638,17 +645,35 @@ pub fn audit(json: bool) -> i32 {
                     .collect::<Vec<_>>(),
             })
         );
-    } else if problems.is_empty() {
-        println!("{} skills, no problems", inv.skills.len());
-        for s in &inv.skills {
-            if let Kind::Executable { scripts } = &s.kind {
-                println!("  {} ships {}: {}", s.name, scripts.len(), scripts.join(" "));
+    } else {
+        if problems.is_empty() {
+            println!("{} skills, no problems", inv.skills.len());
+        } else {
+            println!("{} problem(s):", problems.len());
+            for p in &problems {
+                println!("  {p}");
             }
         }
-    } else {
-        println!("{} problem(s):", problems.len());
-        for p in &problems {
-            println!("  {p}");
+        // Then what can execute, and where each one came from — printed
+        // whether or not there were problems, which it was not before. A
+        // machine WITH a problem is exactly where somebody needs the list of
+        // things that can run on it, and the old shape hid that list behind a
+        // clean bill of health.
+        //
+        // The origin in full, not `list`'s one-word column, because the word
+        // cannot say the thing that decides what to do: a skill that came from
+        // a plugin is REPLACED whenever the plugin updates, so editing it in
+        // place does not survive, while one in your own profile is yours.
+        for s in &inv.skills {
+            if let Kind::Executable { scripts } = &s.kind {
+                println!(
+                    "  {} ships {}, from {}: {}",
+                    s.name,
+                    scripts.len(),
+                    s.origin.describe(),
+                    scripts.join(" ")
+                );
+            }
         }
     }
     i32::from(!problems.is_empty())
