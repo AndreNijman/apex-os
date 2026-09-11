@@ -94,6 +94,13 @@ for m in re.finditer(r'\n    def p_(\w+)\(self\).*?(?=\n    def |\Z)', src, re.S
     bodies[m.group(1)] = m.group(0)
 edges = {}
 for name, body in bodies.items():
+    # Back buttons are edges too, and following them makes the graph almost
+    # undirected: with `Begin` pointing straight at wifi, `keyboard` was still
+    # "reachable" — through wifi's own Back button — and still landed before
+    # `account` in the walk. A mutation proved it: moving the keyboard page out
+    # of the forward flow entirely changed no assertion. So drop the reverse
+    # edges and walk only the way a user actually goes.
+    body = re.sub(r'self\.btn\(\s*"Back".*?\)\s*,\s*False\)', '', body, flags=re.S)
     targets = re.findall(r'self\.go\(\s*"(\w+)"', body)
     targets += re.findall(r'go\(\s*"(\w+)"\s*\)', body)
     # Ternary forms: self.go("a" if cond else "b")
@@ -147,6 +154,27 @@ elif [ "$kb_pos" -lt "$acct_pos" ]; then
 else
     bad "the keyboard page comes before the account page" \
         "keyboard is step $kb_pos, account is step $acct_pos"
+fi
+
+# The ordering above is a property of the whole graph; this is the single edge
+# the criterion actually rests on. Stated separately because a graph assertion
+# can stay green while the one step that matters moves — which is exactly what
+# the mutation showed.
+prim="$(python3 - "$GUI" <<'PY2' 2>/dev/null
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r'\n    def p_welcome\(self\).*?(?=\n    def |\Z)', src, re.S)
+body = m.group(0) if m else ""
+# The primary action is the apex-go button; "Back"/"Quit" are apex-ghost.
+g = re.search(r'self\.btn\(\s*"[^"]*"\s*,\s*"apex-go"\s*,\s*lambda[^)]*self\.go\(\s*"(\w+)"', body)
+print(g.group(1) if g else "")
+PY2
+)"
+if [ "$prim" = "keyboard" ]; then
+    ok "the welcome page's primary button leads straight to the keyboard page"
+else
+    bad "the welcome page's primary button leads straight to the keyboard page" \
+        "it leads to '${prim:-<not found>}' — the keyboard step is not in the forward flow"
 fi
 
 # test-installer.sh's render suite extracts page names with grep -oE '"[a-z]+"'.

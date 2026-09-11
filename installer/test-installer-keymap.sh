@@ -474,16 +474,37 @@ is "asking for the layout already in force exits cleanly instead of restarting" 
 is "…and starts the compositor exactly once" "1" "$(wc -l < "$W/stub.log" | tr -d ' ')"
 
 # (4f) A stale state file from an earlier boot must not choose a layout for
-# somebody. The session clears it before the first launch.
+# somebody who never picked one.
+#
+# The first version of this asserted that the FIRST compositor start carried no
+# layout, with a stub GUI that exited 0 immediately. That could not fail: the
+# session only reads the state file after a restart request, so with no request
+# the file was never consulted and the assertion held whether or not the clear
+# happened. A mutant that deleted the clear outright survived it — the same
+# shape as this unit's earlier N8, an assertion about a value that had never
+# been shown capable of moving.
+#
+# The stale file only matters when the GUI ASKS for a restart and does not write
+# one — a failed write, or a crash between the two. Then an uncleared file is a
+# layout chosen by whoever used this machine last. So: seed a stale file, ask
+# for a restart, write nothing.
+cat > "$W/bin/gui-silent" <<'STUB'
+#!/usr/bin/env bash
+n=$(cat "$STUB_COUNT" 2>/dev/null || echo 1)
+[ "$n" -le 1 ] && exit 75     # asks for a restart, deliberately writes no state
+exit 0
+STUB
+chmod +x "$W/bin/gui-silent"
+
 : > "$W/stub.log"; printf '0' > "$W/stub.count"
 printf 'layout=ru\nvariant=\n' > "$W/state"
-STUB_COUNT="$W/stub.count" STUB_LOG="$W/stub.log" STUB_STATE="$W/state" \
-    STUB_RESTARTS=0 \
-    APEX_INSTALLER_CAGE="$W/bin/cage" APEX_INSTALLER_GUI="$W/bin/gui" \
+rc=$(STUB_COUNT="$W/stub.count" STUB_LOG="$W/stub.log" STUB_STATE="$W/state" \
+    APEX_INSTALLER_CAGE="$W/bin/cage" APEX_INSTALLER_GUI="$W/bin/gui-silent" \
     APEX_INSTALLER_STATE="$W/state" APEX_INSTALLER_LOG="$W/session.log" \
-    bash "$SESSION" >/dev/null 2>&1
-is "a stale state file from an earlier boot is cleared, not obeyed" \
-   "1 layout=<unset> variant=<unset> resumed=<unset>" "$(sed -n '1p' "$W/stub.log")"
+    bash "$SESSION" >/dev/null 2>&1; printf '%s' "$?")
+is "a restart request with no fresh state is refused, not served from a stale file" "70" "$rc"
+is "…and the compositor is never restarted into the stale layout" \
+   "1" "$(wc -l < "$W/stub.log" | tr -d ' ')"
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "5. the GUI's half of the contract"
@@ -559,6 +580,33 @@ if grep -qE '^GUI_CMD=\(/usr/bin/apex-installer-session\)' "$PWD/apex-installer-
     ok "apex-installer-launch runs the session script, not cage directly"
 else
     bad "apex-installer-launch runs the session script, not cage directly"
+fi
+
+# …and the thing it execs has to be IN THE IMAGE. This was a real defect, found
+# only because it was looked for: the launcher was repointed at
+# /usr/bin/apex-installer-session and nothing copied that file into the image, so
+# the ISO would have had no installer at all — cage never starts, every boot
+# lands on the diagnostic screen. Every assertion above passed while that was
+# true, because they all read the source tree, where the file plainly exists.
+#
+# The target is resolved out of the launcher rather than hardcoded, so renaming
+# the script cannot quietly slip past this.
+_target="$(grep -oE '^GUI_CMD=\(([^ )]+)' "$PWD/apex-installer-launch" | cut -d'(' -f2)"
+_base="$(basename "${_target:-none}")"
+if [ -z "$_target" ]; then
+    bad "the launcher's exec target is installed into the image" "could not read GUI_CMD"
+else
+    _missing=""
+    grep -q "COPY $_base /usr/bin/$_base" "$PWD/Containerfile.installer" \
+        || _missing="$_missing Containerfile.installer"
+    grep -q "$_base" "$PWD/build-live-iso.sh" \
+        || _missing="$_missing build-live-iso.sh"
+    if [ -z "$_missing" ]; then
+        ok "the launcher's exec target ($_base) is installed by both the Containerfile and the ISO build"
+    else
+        bad "the launcher's exec target ($_base) is installed into the image" \
+            "absent from:$_missing — the ISO would boot with no installer"
+    fi
 fi
 
 finish
