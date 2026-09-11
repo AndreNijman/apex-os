@@ -99,6 +99,99 @@
 //!   capabilities and not credentials cannot rest on a remark in somebody
 //!   else's documentation staying true.
 //!
+//! ## §13.11, and a finding that decided its shape
+//!
+//! An AI Gateway run looked like it would need a second host. The
+//! provider-specific endpoint is `gateway.ai.cloudflare.com`, the framework
+//! pins a credential to the host it was stored for, and that would have meant
+//! the owner storing the same token twice under two service names.
+//!
+//! It does not. AI Gateway's REST API page documents the **gatewayed form of
+//! the ordinary call** — `POST /accounts/{id}/ai/run/{model}` with a
+//! `cf-aig-gateway-id` header, on `api.cloudflare.com` like everything else
+//! here — so `workers-ai.run` and `ai-gateway.run` are the same URL and the
+//! same credential, and what separates them is a header and a grant. The pin
+//! never has to be argued with.
+//!
+//! **Where that comes from, and where it does not.** Every other claim in this
+//! provider is checked against the pinned schema. This one cannot be: the
+//! schema's `workers-ai-post-run-model` declares two path parameters and **no
+//! headers at all**, and the string `cf-aig` does not occur anywhere in its
+//! 25MB. So the schema neither documents this nor contradicts it, and the
+//! source is the documentation:
+//!
+//! * <https://developers.cloudflare.com/ai-gateway/usage/rest-api/> shows the
+//!   gatewayed call with the model in the URL path and the `cf-aig-gateway-id`
+//!   header, and says in as many words that "the existing Workers AI endpoint
+//!   with the model ID in the URL path also continues to work";
+//! * <https://developers.cloudflare.com/workers-ai/get-started/rest-api/> shows
+//!   the ungatewayed one — the same path, `Authorization` only, a `prompt`
+//!   body — which is what `workers-ai.run` sends;
+//! * <https://developers.cloudflare.com/ai-gateway/configuration/custom-metadata/>
+//!   is where `cf-aig-metadata`'s limits come from: at most five entries,
+//!   values of string, number or boolean, and keys beginning `cf.` reserved to
+//!   Cloudflare. [`usage_metadata`] sends three strings and a test asserts all
+//!   three limits.
+//!
+//! One line on that first page reads "Workers AI requests always require this
+//! header", which looks like it contradicts the second page. It does not: that
+//! sentence is about AI Gateway's own front door, `POST /ai/run` with the model
+//! in the **body**. This build uses the path form for both operations, which
+//! that same page says keeps working. If it ever stops,
+//! `a_gatewayed_run_is_the_same_host_and_the_same_credential_as_an_ungatewayed_one`
+//! is the test that describes what was assumed.
+//!
+//! Two consequences worth stating where they will be read:
+//!
+//! * **the gateway id comes from §13.1's file and never from the caller.**
+//!   Cloudflare creates a gateway on the first authenticated request that names
+//!   one that does not exist, so a caller that could name a gateway could
+//!   create one — and bill it;
+//! * **the model is bound too.** `@cf/meta/llama-3.1-8b-instruct` is not an
+//!   [`apex_secret_core::operation::Syntax::Name`] — the grammar wants an
+//!   alphanumeric first character — so a model could not be named as a resource
+//!   even if this build wanted the agent to choose one. §13.14's cost
+//!   guardrails start here, with the owner deciding which models a project may
+//!   run.
+//!
+//! §13.11's remainder is **not** here and cannot be: *"APEX local AI service
+//! may route to… Workers AI, AI Gateway"*. `apex-aid` is that service, and two
+//! things about it, both checked rather than assumed:
+//!
+//! * `apexd_core::ai::Backend` is a *compute* backend — `Cuda`, `Rocm`,
+//!   `Vulkan`, `Cpu` — with no notion of a remote provider to select. Named
+//!   here in plain backticks and not as an intra-doc link on purpose:
+//!   `apexd-core` is not a dependency of this crate, which is itself part of
+//!   the point, and a link to it would be a rustdoc warning rather than a link;
+//! * the inference runtime is started under `bubblewrap` with `--unshare-net`,
+//!   and `apex-aid`'s own module note calls that flag the load-bearing one.
+//!   The backend cannot reach `api.cloudflare.com` because it cannot reach
+//!   anything.
+//!
+//! So routing the local service through Cloudflare is not a missing URL, it is
+//! a design change in another crate: something outside the sandbox would have
+//! to make the brokered call and hand the answer in. What this provider
+//! supplies is that brokered route, which is the half that belongs here.
+//!
+//! ## §13.10, and the one thing this surface does that no other does
+//!
+//! Access and Tunnels are §13.10's, and they are the first operations here that
+//! can **create a credential**. `POST /access/service_tokens` answers with a
+//! `client_secret`; Cloudflare shows it once. §13.10 says where it goes —
+//! *"directly into protected storage… the agent receives handles/capabilities,
+//! not plaintext secrets"* — and [`crate::provider::Bound::creates`] is how it
+//! gets there: this module names the service before the call so the framework
+//! can refuse a collision while refusing is free, hands back the value after,
+//! and returns the `client_id` and the handle to the caller.
+//!
+//! The pin is the part worth reading twice. A service token is presented to the
+//! application Access guards, never to the API that issued it, so the stored
+//! credential is pinned to a **host in this project's own zone** — resolved
+//! through [`binding::Binding::record`], with §13.9's label boundary and its
+//! `records` narrowing. A project that narrowed itself to some names cannot pin
+//! a credential to a different one, and a credential pinned to
+//! `api.cloudflare.com` would be a pin that says the wrong thing.
+//!
 //! ## What has never run against Cloudflare
 //!
 //! All of it. There is no account and no token on this machine, so every
@@ -207,6 +300,61 @@ const COMMENT: ParamSpec = ParamSpec {
     summary: "a line stored with the record, for whoever reads the zone later",
 };
 
+/// `prompt`, one line for a model to answer.
+///
+/// `Text`, so it is one line and it goes in a JSON body this module builds. A
+/// conversation — several messages, several lines — is [`INPUT_FILE`], for the
+/// same reason a D1 migration is a file and a query is a line.
+const PROMPT: ParamSpec = ParamSpec {
+    name: "prompt",
+    syntax: Syntax::Text,
+    required: false,
+    summary: "what to ask the model, as one line",
+};
+
+/// `file`, a JSON document in the project to send as the request.
+const INPUT_FILE: ParamSpec = ParamSpec {
+    name: "file",
+    syntax: Syntax::Path,
+    required: false,
+    summary: "a .json file inside the project to send instead — messages, \
+              parameters, whatever the model takes",
+};
+
+/// `scopes`, which Cloudflare services may read a stored secret.
+///
+/// `Text` rather than `Name` because it is a list and a comma is not a `Name`
+/// character. Each entry is checked against Cloudflare's own closed set before
+/// the credential is spent.
+const SCOPES: ParamSpec = ParamSpec {
+    name: "scopes",
+    syntax: Syntax::Text,
+    required: true,
+    summary: "which services may read it: workers, ai_gateway, dex, access, \
+              containers or websearch, comma separated",
+};
+
+/// `comment`, a line stored beside a secret.
+const COMMENT_ON_SECRET: ParamSpec = ParamSpec {
+    name: "comment",
+    syntax: Syntax::Text,
+    required: false,
+    summary: "a line stored with it, for whoever reads the store later",
+};
+
+/// `file`, the project file holding a secret's value.
+///
+/// The alternative to the request body, and not a third way of sending one: a
+/// value has to arrive as bytes, and these are the only two byte-shaped inputs
+/// an operation has. Optional here because the body is the other half.
+const VALUE_FILE: ParamSpec = ParamSpec {
+    name: "file",
+    syntax: Syntax::Path,
+    required: false,
+    summary: "a file inside the project holding the value, if it is not being \
+              piped in",
+};
+
 /// `sql`, one statement to run against a D1 database.
 ///
 /// `Text`, which is one line — so this carries a statement and not a script. A
@@ -223,11 +371,12 @@ const SQL: ParamSpec = ParamSpec {
 
 /// The vocabulary, in §13.2's shape.
 ///
-/// Twenty-three names: **twenty-two of §13.2's thirty-two**, plus
-/// `worker.route.read`, which is §13.3's "Worker routes" rather than one of
-/// §13.2's examples. So **ten** of §13.2's list are still unimplemented and
-/// belong to P1-008 through P1-017 — the Secrets Store, Access, Tunnels,
-/// Workers AI and the AI gateway.
+/// Thirty-four names: **all thirty-two of §13.2's**, plus `worker.route.read`
+/// and `access.service-token.create`, which are §13.3's "Worker routes" and
+/// "service tokens" rather than §13.2's examples. §13.2's list is complete as
+/// of P1-009; what is left of §13 is behaviour rather than vocabulary — §13.4's
+/// scoped credentials, §13.7's staged rollout, §13.13's preview environments
+/// and §13.14's budgets.
 ///
 /// Declaring one this module cannot perform would put it in
 /// `apex secret capabilities`, let an owner grant it, and then fail at use
@@ -582,6 +731,282 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             aliases: &[],
             same_everywhere: false,
         },
+        // ── §13.11, Workers AI and the AI Gateway ───────────────────────────
+        //
+        // §13.11 says the APEX AI service "may route to" Workers AI and the AI
+        // Gateway, and §13.14 wants what that costs attributable to a task.
+        // Three things about the shape, because two of them are the opposite of
+        // what the obvious reading suggests:
+        //
+        // * **an AI Gateway run is the same host and the same credential.** The
+        //   provider-specific endpoint at `gateway.ai.cloudflare.com` exists,
+        //   but Cloudflare's REST API page documents the gatewayed form of the
+        //   ordinary call: `POST /accounts/{id}/ai/run/{model}` with a
+        //   `cf-aig-gateway-id` header. So there is no second host, no second
+        //   stored credential and no pin to argue with — the difference between
+        //   these two operations is a header and a grant;
+        // * **the gateway comes from the project's file and never the caller.**
+        //   Cloudflare creates a gateway on first use if the id does not exist,
+        //   so a caller that could name one could create one by typo — and
+        //   bill it;
+        // * **the model is bound too**, and not only for §13.14's guardrails:
+        //   `@cf/meta/llama-3.1-8b-instruct` is not a `Syntax::Name`, so a
+        //   model could not be a resource even if this build wanted it to be.
+        OperationSpec {
+            id: "cloudflare.workers-ai.run",
+            summary: "run one of the Workers AI models this project binds",
+            // **Write, and not a judgement about inference.** It costs money
+            // and it is not repeatable, which is what `Effect` is for. A build
+            // that called it a read because nothing is stored would let a
+            // `Read` grant spend an account's balance.
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[PROMPT, INPUT_FILE],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.ai-gateway.run",
+            summary: "run one of this project's models through one of its AI \
+                      gateways, with the request tagged for this task",
+            effect: Effect::Write,
+            // `<gateway>/<model>`: both bound, because both cost money.
+            resource: WITHIN,
+            params: &[PROMPT, INPUT_FILE],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.ai-gateway.edit",
+            // What it changes, and what it will not touch. `PUT` REPLACES a
+            // gateway, so this is a read-modify-write — and it refuses outright
+            // when the gateway carries an exporter credential, because a
+            // replace it cannot faithfully reproduce is a replace that would
+            // delete one.
+            summary: "change the caching, rate limiting and log collection of \
+                      one of this project's AI gateways",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[
+                ParamSpec {
+                    name: "cache-ttl",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "seconds to cache a response for, 0 to turn caching off",
+                },
+                ParamSpec {
+                    name: "rate-limit",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "how many requests are allowed in each interval",
+                },
+                ParamSpec {
+                    name: "rate-limit-interval",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "the length of that interval in seconds",
+                },
+                ParamSpec {
+                    name: "collect-logs",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "true to keep logs for requests through it, false to stop",
+                },
+            ],
+            aliases: &[],
+            same_everywhere: false,
+        },
+
+        // ── §13.6, the Secrets Store ────────────────────────────────────────
+        //
+        // The mirror image of §13.10's service token, and worth reading beside
+        // it. There, a secret Cloudflare issued came back and had to be kept
+        // here. Here, a secret the owner holds goes the other way — and comes
+        // back never, because `secrets-store_value` is `writeOnly` and
+        // `x-sensitive` in Cloudflare's own schema: *"this is 'write only' —
+        // the API never returns this value"*. So §13.6's second sentence is
+        // the whole design: **APEX stores only the provider reference, and
+        // never fictitious plaintext.** Nothing below writes to this service's
+        // own store.
+        //
+        // **Where the value comes from, and why not a parameter.** A parameter
+        // reaches the audit trail: `CapabilityRecord::summary` renders every
+        // one as `name=value` and that string is the `detail` of every refused
+        // line. A `value` parameter would therefore write the secret into a
+        // file an administrator greps, on the one path where the operation did
+        // not even happen. So the value arrives as the request BODY — the way
+        // `apex secret add` sends one, as bytes after the request line rather
+        // than as a field — or out of a file in the project, read under
+        // `project::read_file`'s rules. One or the other, never both, never
+        // neither. There is no `value` parameter and no operation here declares
+        // one, so the framework refuses it before this module is asked.
+        OperationSpec {
+            id: "cloudflare.secret.create",
+            summary: "put a secret into one of this project's Secrets Store \
+                      stores, without it passing through the agent",
+            effect: Effect::Write,
+            // `<store>/<name>` — the store the project bound, and what to call
+            // the secret in it.
+            resource: WITHIN,
+            params: &[SCOPES, COMMENT_ON_SECRET, VALUE_FILE],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.secret.rotate",
+            summary: "replace the value of a secret in one of this project's \
+                      Secrets Store stores",
+            effect: Effect::Write,
+            resource: WITHIN,
+            params: &[COMMENT_ON_SECRET, VALUE_FILE],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.secret.bind",
+            // **Binding is by reference, which is the point.** What goes onto
+            // the worker is a store id and a secret name; the value stays in
+            // the Secrets Store and is never read by anything here. That is
+            // §13.6's "references/metadata only" applied to the verb that
+            // sounds most like it would need plaintext.
+            summary: "give one of this project's workers a reference to a \
+                      secret in one of its stores",
+            effect: Effect::Write,
+            resource: WITHIN,
+            params: &[
+                ParamSpec {
+                    name: "worker",
+                    syntax: Syntax::Name,
+                    required: true,
+                    summary: "which of this project's workers to bind it to",
+                },
+                ParamSpec {
+                    name: "binding",
+                    syntax: Syntax::Name,
+                    required: true,
+                    summary: "the name the worker's code will read it under",
+                },
+            ],
+            aliases: &[],
+            same_everywhere: false,
+        },
+
+        // ── §13.10, Cloudflare One ──────────────────────────────────────────
+        //
+        // Four of §13.2's names and one addition, and the thing that makes this
+        // block different from every other one above: two of these endpoints
+        // answer with a CREDENTIAL. `POST /access/service_tokens` hands back a
+        // `client_secret` the API will never show again, and
+        // `GET /cfd_tunnel/{id}/token` hands back a connector token as its whole
+        // result. §13.10 says where those go — "directly into protected
+        // storage… the agent receives handles/capabilities, not plaintext
+        // secrets" — and `Bound::creates` is how they get there.
+        //
+        // Three things are deliberately NOT declared here, each for a reason
+        // that would otherwise have to be discovered at use time:
+        //
+        // * **creating a tunnel.** `POST /cfd_tunnel` exists, and a tunnel is
+        //   addressed by an id that does not exist until it does — so unlike an
+        //   R2 bucket, which §13.1's file can name into existence, a tunnel
+        //   cannot resolve through the project's own binding until after it has
+        //   been made. The owner creates it and writes the id down;
+        // * **reading a tunnel's token.** It is a credential, and a credential
+        //   this build cannot pin honestly: `cloudflared` presents it to the
+        //   Cloudflare edge over QUIC, not to any HTTPS host the store could
+        //   name. Storing it would mean writing a `host` the pin cannot mean.
+        //   §12's `cloudflared auth -> APEX` is where a broker-owned connector
+        //   would spend it, and that is where it belongs;
+        // * **a tunnel's `tunnel_secret`.** `PATCH /cfd_tunnel/{id}` accepts
+        //   one, which would have an agent handing the broker a credential —
+        //   the exact inverse of what this service is for, and the same
+        //   argument `hyperdrive.edit` makes about an origin password.
+        OperationSpec {
+            id: "cloudflare.access.read",
+            summary: "read the configuration of one of this project's Access \
+                      applications",
+            effect: Effect::Read,
+            resource: NAMED,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.access.edit",
+            // **What it is, and — because "edit" could mean anything — what it
+            // is not.** It cannot change an application's policies, its
+            // session duration, its name, or who may reach it. That is not
+            // timidity: `PUT /access/apps/{app_id}` REPLACES an application,
+            // the schema for one is a `oneOf` over eleven kinds, and a build
+            // that read an application it only partly understood and wrote it
+            // back would eventually widen an authorisation policy by omission.
+            // Revoking the sessions is the one Access mutation that is
+            // bounded, has no body, and cannot grant anybody anything.
+            summary: "revoke every session issued for one of this project's \
+                      Access applications — it cannot change who may reach it",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.access.service-token.create",
+            // **The addition, and §13.3 is where it comes from**: its
+            // networking/security list names "service tokens" beside "Access",
+            // as `worker.route.read` came from the same list naming "Worker
+            // routes". A separate name and not a parameter of `access.edit`,
+            // because issuing a credential is a different decision from
+            // revoking a session and an owner should get to make it separately.
+            summary: "issue an Access service token for a host in this \
+                      project's zone, and keep the secret in this service",
+            effect: Effect::Write,
+            // The HOST the token is for, checked against the project's bound
+            // zone — not the token's name. The host is what the stored
+            // credential gets pinned to, so it is the thing the project has to
+            // be allowed to name.
+            resource: NAMED,
+            params: &[
+                ParamSpec {
+                    name: "name",
+                    syntax: Syntax::Name,
+                    required: true,
+                    summary: "what to call the token in the Cloudflare dashboard",
+                },
+                ParamSpec {
+                    name: "duration",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "how long it lives: 8760h, 730h, 168h, 24h or forever",
+                },
+            ],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.tunnel.read",
+            summary: "read the status and connections of one of this project's \
+                      tunnels — never its connector token",
+            effect: Effect::Read,
+            resource: NAMED,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.tunnel.edit",
+            summary: "rename one of this project's tunnels — it cannot change \
+                      what the tunnel routes or the secret it runs on",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[ParamSpec {
+                name: "name",
+                syntax: Syntax::Name,
+                required: true,
+                summary: "what to call it",
+            }],
+            aliases: &[],
+            same_everywhere: false,
+        },
         OperationSpec {
             id: "cloudflare.r2.bucket.create",
             summary: "create one of the R2 buckets this project declares, in \
@@ -645,6 +1070,29 @@ enum Target {
     /// question only the zone can answer, and answering it costs a credential
     /// — so it happens in `perform` and not here.
     Record(Record),
+    /// A model this project binds, run through a gateway it also binds. Two
+    /// bound things, because both of them cost money and neither is the
+    /// agent's to choose — Cloudflare creates a gateway on first use if the id
+    /// does not exist, so a caller that could name one could bill one.
+    Gatewayed { gateway: Resource, model: Resource },
+    /// A secret in one of this project's stores, and the worker a reference to
+    /// it is being put on. Two bound things, because binding changes both.
+    SecretBinding {
+        store: Resource,
+        secret: String,
+        worker: Worker,
+    },
+    /// A host in this project's zone that an Access service token is being
+    /// issued for.
+    ///
+    /// The token itself is account-scoped at Cloudflare and names no host at
+    /// all. The host is here because it is what the credential this operation
+    /// creates gets **pinned** to, and a pin is only worth having if the
+    /// project had to be allowed to name the host — so it resolves through
+    /// [`Binding::record`], the same label-boundary and `records` narrowing
+    /// §13.9 uses. A project that narrowed itself to some names cannot pin a
+    /// credential to a different one.
+    ServiceToken { account: Account, host: String },
 }
 
 impl From<BindingError> for ProviderError {
@@ -729,6 +1177,69 @@ impl CloudflareProvider {
                     key,
                 });
             }
+            "cloudflare.ai-gateway.run" => {
+                let (gateway, model) = split_first(req.resource);
+                let Some(model) = model else {
+                    return Err(ProviderError::NoSuchResource(format!(
+                        "'{gateway}' names a gateway and not a model to run \
+                         through it: {gateway}/<model>"
+                    )));
+                };
+                return Ok(Target::Gatewayed {
+                    gateway: binding.resource("gateways", gateway)?,
+                    model: binding.resource("models", &model)?,
+                });
+            }
+            "cloudflare.workers-ai.run" => {
+                return Ok(Target::Bound {
+                    table: "models",
+                    resource: binding.resource("models", req.resource)?,
+                    key: None,
+                });
+            }
+            "cloudflare.ai-gateway.edit" => {
+                return Ok(Target::Bound {
+                    table: "gateways",
+                    resource: binding.resource("gateways", req.resource)?,
+                    key: None,
+                });
+            }
+            id if id.starts_with("cloudflare.secret.") => {
+                // `<store>/<name>`: the store is bound, the secret inside it is
+                // named. A project creates secrets, so a file listing every one
+                // it will ever make could not be written in advance — the STORE
+                // is where the boundary goes.
+                let (store, name) = split_first(req.resource);
+                let store = binding.resource("secrets", store)?;
+                let Some(secret) = name else {
+                    return Err(ProviderError::NoSuchResource(format!(
+                        "'{}' names a store and not a secret in it. All three \
+                         secret operations need both: {}/<name>",
+                        store.name, store.name
+                    )));
+                };
+                if id == "cloudflare.secret.bind" {
+                    let Some(named) = req.params.get("worker") else {
+                        return Err(ProviderError::Refused(
+                            "this operation needs a 'worker' option saying which \
+                             of this project's workers to bind it to"
+                                .to_string(),
+                        ));
+                    };
+                    return Ok(Target::SecretBinding {
+                        store,
+                        secret,
+                        // Bound too, and by the same file: a reference may only
+                        // be put on a worker this project owns.
+                        worker: binding.worker(named)?,
+                    });
+                }
+                return Ok(Target::Bound {
+                    table: "secrets",
+                    resource: store,
+                    key: Some(secret),
+                });
+            }
             id if id.starts_with("cloudflare.kv.") => {
                 let (namespace, key) = split_first(req.resource);
                 return Ok(Target::Bound {
@@ -737,13 +1248,25 @@ impl CloudflareProvider {
                     key,
                 });
             }
+            "cloudflare.access.service-token.create" => {
+                // The host, not the token's name: see `Target::ServiceToken`.
+                let record = binding.record(req.resource)?;
+                return Ok(Target::ServiceToken {
+                    account: binding.account()?,
+                    host: record.name,
+                });
+            }
             id if id.starts_with("cloudflare.d1.")
                 || id.starts_with("cloudflare.queue.")
-                || id.starts_with("cloudflare.hyperdrive.") =>
+                || id.starts_with("cloudflare.hyperdrive.")
+                || id.starts_with("cloudflare.access.")
+                || id.starts_with("cloudflare.tunnel.") =>
             {
                 let table = match id.split('.').nth(1) {
                     Some("d1") => "d1",
                     Some("queue") => "queues",
+                    Some("access") => "access",
+                    Some("tunnel") => "tunnels",
                     _ => "hyperdrive",
                 };
                 return Ok(Target::Bound {
@@ -863,9 +1386,66 @@ impl CloudflareProvider {
                     "cloudflare.hyperdrive.edit" => {
                         format!("change the name or caching of hyperdrive configuration {where_}")
                     }
+                    "cloudflare.workers-ai.run" => format!("run the model {where_}"),
+                    "cloudflare.ai-gateway.edit" => {
+                        format!("change the caching and limits of ai gateway {where_}")
+                    }
+                    "cloudflare.secret.create" => format!(
+                        "put the secret {} into store {where_}",
+                        key.as_deref().unwrap_or("")
+                    ),
+                    "cloudflare.secret.rotate" => format!(
+                        "replace the value of secret {} in store {where_}",
+                        key.as_deref().unwrap_or("")
+                    ),
+                    "cloudflare.access.read" => {
+                        format!("read the configuration of access application {where_}")
+                    }
+                    "cloudflare.access.edit" => format!(
+                        "revoke every session issued for access application {where_}"
+                    ),
+                    "cloudflare.tunnel.read" => format!("read tunnel {where_}"),
+                    "cloudflare.tunnel.edit" => format!(
+                        "rename tunnel {where_} to {}",
+                        params.get("name").map(String::as_str).unwrap_or("")
+                    ),
                     other => format!("{other} on {where_}"),
                 }
             }
+            Target::Gatewayed { gateway, model } => format!(
+                "run the model {} [{}] through ai gateway {} [{}] in account {} [{}]",
+                model.name,
+                model.id,
+                gateway.name,
+                gateway.id,
+                gateway.account.named(),
+                gateway.account.id
+            ),
+            Target::SecretBinding {
+                store,
+                secret,
+                worker,
+            } => format!(
+                "give {} ({}) a reference to the secret {secret} in store {} [{}], \
+                 as {}",
+                worker.name,
+                worker.environment,
+                store.name,
+                store.id,
+                params.get("binding").map(String::as_str).unwrap_or("")
+            ),
+            Target::ServiceToken { account, host } => format!(
+                // The sentence `perform` compares against what `bind` was
+                // pinned on, so it names the account AND the host: those are
+                // the two values that decide where the request goes and where
+                // the credential it creates would be kept.
+                "issue the access service token '{}' in account {} [{}], for {host}, \
+                 and keep its secret as '{}'",
+                params.get("name").map(String::as_str).unwrap_or(""),
+                account.named(),
+                account.id,
+                token_service(host)
+            ),
             Target::Record(record) => {
                 let kind = record.kind.as_deref().unwrap_or("any");
                 let where_ = format!("{} in zone {} [{}]", record.name, record.zone.name, record.zone.id);
@@ -913,6 +1493,7 @@ impl CloudflareProvider {
             method: "GET",
             path,
             body: Body::None,
+            headers: Vec::new(),
         };
         Ok(match (req.operation.id, target) {
             ("cloudflare.account.read", Target::Accounts) => get("/accounts".to_string()),
@@ -929,11 +1510,13 @@ impl CloudflareProvider {
                 method: "POST",
                 path: format!("{}/tails", script(worker)),
                 body: Body::None,
+                headers: Vec::new(),
             },
             ("cloudflare.worker.upload-version", Target::Worker(worker)) => Call {
                 method: "POST",
                 path: format!("{}/versions", script(worker)),
                 body: self.version_body(req)?,
+                headers: Vec::new(),
             },
             (id @ ("cloudflare.worker.deploy" | "cloudflare.worker.rollback"), Target::Worker(worker)) => {
                 let rollback = id == "cloudflare.worker.rollback";
@@ -951,6 +1534,7 @@ impl CloudflareProvider {
                         if rollback { "?force=true" } else { "" }
                     ),
                     body: self.deployment_body(req)?,
+                    headers: Vec::new(),
                 }
             }
             ("cloudflare.r2.object.read", Target::Object { bucket, key }) => {
@@ -958,7 +1542,14 @@ impl CloudflareProvider {
             }
             ("cloudflare.r2.object.write", Target::Object { bucket, key }) => {
                 let Some(key) = key else {
-                    return Err(ProviderError::Refused(format!(
+                    // `NoSuchResource` and not `Refused`: `example-assets` does
+                    // not RESOLVE to an object, which is a different answer
+                    // from "you may not write objects". The framework turns the
+                    // two into `BadRequest` and `PermissionDenied`, and a
+                    // caller sent to the grant table by a typo is the same
+                    // defect this Cloudflare block has now produced three
+                    // times.
+                    return Err(ProviderError::NoSuchResource(format!(
                         "'{}' names a bucket and not an object. Writing needs a \
                          key as well: {}/<key>",
                         bucket.name, bucket.name
@@ -968,6 +1559,7 @@ impl CloudflareProvider {
                     method: "PUT",
                     path: objects(bucket, Some(key)),
                     body: self.object_body(req, key)?,
+                    headers: Vec::new(),
                 }
             }
             ("cloudflare.d1.read", Target::Bound { resource, .. }) => get(format!(
@@ -990,6 +1582,7 @@ impl CloudflareProvider {
                     resource.account.id, resource.id
                 ),
                 body: CloudflareProvider::sql_body(req, id == "cloudflare.d1.migrate")?,
+                headers: Vec::new(),
             },
             ("cloudflare.kv.read", Target::Bound { resource, key, .. }) => {
                 get(kv_value(resource, key.as_deref())?)
@@ -998,6 +1591,7 @@ impl CloudflareProvider {
                 method: "PUT",
                 path: kv_value(resource, key.as_deref())?,
                 body: self.kv_body(req)?,
+                headers: Vec::new(),
             },
             ("cloudflare.queue.publish", Target::Bound { resource, .. }) => {
                 let Some(message) = req.params.get("message") else {
@@ -1018,12 +1612,14 @@ impl CloudflareProvider {
                         resource.account.id, resource.id
                     ),
                     body: Body::Json(serde_json::Value::Object(body).to_string()),
+                    headers: Vec::new(),
                 }
             }
             ("cloudflare.queue.manage", Target::Bound { resource, .. }) => Call {
                 method: "PATCH",
                 path: format!("/accounts/{}/queues/{}", resource.account.id, resource.id),
                 body: queue_settings(req)?,
+                headers: Vec::new(),
             },
             ("cloudflare.hyperdrive.read", Target::Bound { resource, .. }) => get(format!(
                 "/accounts/{}/hyperdrive/configs/{}",
@@ -1041,6 +1637,7 @@ impl CloudflareProvider {
                     resource.account.id, resource.id
                 ),
                 body: hyperdrive_settings(req)?,
+                headers: Vec::new(),
             },
             ("cloudflare.dns.read", Target::Record(record)) => {
                 // The one read that does not need a lookup: the filter IS the
@@ -1055,11 +1652,103 @@ impl CloudflareProvider {
                 method: "POST",
                 path: record.path(),
                 body: CloudflareProvider::record_body(req, record, true)?,
+                headers: Vec::new(),
             },
+            (
+                "cloudflare.workers-ai.run",
+                Target::Bound {
+                    table: "models",
+                    resource,
+                    ..
+                },
+            ) => Call::new("POST", run_path(resource), inference_body(req)?),
+            ("cloudflare.ai-gateway.run", Target::Gatewayed { gateway, model }) => Call {
+                method: "POST",
+                path: run_path(model),
+                body: inference_body(req)?,
+                // The two headers §13.11 and §13.14 need, and nothing else. The
+                // gateway id comes out of the project's own file; the metadata
+                // is composed here and carries no path and no prompt.
+                headers: vec![
+                    ("cf-aig-gateway-id", gateway.id.clone()),
+                    ("cf-aig-metadata", usage_metadata(req)),
+                ],
+            },
+            (
+                "cloudflare.secret.create",
+                Target::Bound {
+                    resource,
+                    key: Some(name),
+                    ..
+                },
+            ) => Call {
+                method: "POST",
+                path: secrets(resource),
+                // An ARRAY of one. The documented endpoint takes a list, and
+                // this build sends exactly one element: a bulk create would
+                // mean several values on one request, and there is one body.
+                body: Body::Json(
+                    serde_json::Value::Array(vec![secret_object(req, name, true)?]).to_string(),
+                ),
+                headers: Vec::new(),
+            },
+            ("cloudflare.access.read", Target::Bound { resource, .. }) => get(format!(
+                "/accounts/{}/access/apps/{}",
+                resource.account.id, resource.id
+            )),
+            ("cloudflare.access.edit", Target::Bound { resource, .. }) => Call {
+                method: "POST",
+                path: format!(
+                    "/accounts/{}/access/apps/{}/revoke_tokens",
+                    resource.account.id, resource.id
+                ),
+                // No body, and nothing a caller could put in one. That is what
+                // makes this the Access mutation worth declaring: there is no
+                // field to get wrong and no policy to widen.
+                body: Body::None,
+                headers: Vec::new(),
+            },
+            ("cloudflare.access.service-token.create", Target::ServiceToken { account, .. }) => {
+                Call {
+                    method: "POST",
+                    path: format!("/accounts/{}/access/service_tokens", account.id),
+                    body: service_token_body(req)?,
+                    headers: Vec::new(),
+                }
+            }
+            ("cloudflare.tunnel.read", Target::Bound { resource, .. }) => get(format!(
+                "/accounts/{}/cfd_tunnel/{}",
+                resource.account.id, resource.id
+            )),
+            ("cloudflare.tunnel.edit", Target::Bound { resource, .. }) => {
+                let Some(name) = req.params.get("name") else {
+                    return Err(ProviderError::Refused(
+                        "this operation needs a 'name' option saying what to \
+                         call it"
+                            .to_string(),
+                    ));
+                };
+                let mut body = serde_json::Map::new();
+                body.insert("name".into(), name.clone().into());
+                Call {
+                    // PATCH and never the configurations PUT: `tunnel_secret`
+                    // is the other field this endpoint accepts, and it is not
+                    // declared, so the framework refuses it before this module
+                    // is asked.
+                    method: "PATCH",
+                    path: format!(
+                        "/accounts/{}/cfd_tunnel/{}",
+                        resource.account.id, resource.id
+                    ),
+                    body: Body::Json(serde_json::Value::Object(body).to_string()),
+                    headers: Vec::new(),
+                }
+            }
             ("cloudflare.r2.bucket.create", Target::Bucket(bucket)) => Call {
                 method: "POST",
                 path: format!("/accounts/{}/r2/buckets", bucket.account.id),
                 body: bucket_body(req, bucket)?,
+                headers: Vec::new(),
             },
             (id, _) => {
                 return Err(ProviderError::Failed(format!(
@@ -1451,7 +2140,10 @@ fn media_type(key: &str) -> &'static str {
 /// The path of one key in one namespace.
 fn kv_value(namespace: &Resource, key: Option<&str>) -> Result<String, ProviderError> {
     let Some(key) = key else {
-        return Err(ProviderError::Refused(format!(
+        // See the note on R2's: a resource that does not resolve is
+        // `NoSuchResource`, so the caller is told about the name and not about
+        // a permission.
+        return Err(ProviderError::NoSuchResource(format!(
             "'{}' names a namespace and not a key. Both KV operations need one: \
              {}/<key>",
             namespace.name, namespace.name
@@ -1581,6 +2273,681 @@ fn hyperdrive_settings(req: &Bind<'_>) -> Result<Body, ProviderError> {
     Ok(Body::Json(serde_json::Value::Object(body).to_string()))
 }
 
+/// The fields `PUT /ai-gateway/gateways/{id}` documents, so a read-modify-write
+/// can put back everything it did not mean to change.
+///
+/// Copied from the schema's own property list rather than from what the GET
+/// happened to return: a `PUT` REPLACES a gateway, and a field this build drops
+/// because it did not recognise it is a setting somebody loses.
+const GATEWAY_FIELDS: &[&str] = &[
+    "authentication",
+    "byok_only",
+    "cache_invalidate_on_update",
+    "cache_ttl",
+    "collect_logs",
+    "dlp",
+    "guardrails",
+    "log_classification",
+    "log_management",
+    "log_management_strategy",
+    "logpush",
+    "logpush_public_key",
+    "rate_limiting_interval",
+    "rate_limiting_limit",
+    "rate_limiting_technique",
+    "retry_backoff",
+    "retry_delay",
+    "retry_max_attempts",
+    "spend_limits",
+    "store_id",
+    "workers_ai_billing_mode",
+    "zdr",
+];
+
+/// The body of a gateway change: everything it already had, plus what was asked
+/// for.
+///
+/// **A read, then a write, because the endpoint is a `PUT` that replaces.** Its
+/// schema marks `rate_limiting_interval`, `rate_limiting_limit`,
+/// `collect_logs`, `cache_ttl` and `cache_invalidate_on_update` REQUIRED, so a
+/// request carrying only the field being changed is not a smaller edit — it is
+/// a rejected one, and everything else the gateway had would go back to a
+/// default anyway.
+///
+/// **It refuses outright when the gateway carries an exporter credential.** A
+/// gateway's `otel` list and its `stripe` block each hold an `authorization`,
+/// and this build has two bad options and no good one: put it back as the GET
+/// returned it — which writes whatever the API chose to show, possibly a
+/// redaction — or leave it out, which deletes it. Refusing is the third thing,
+/// and it is the only one that cannot silently break somebody's telemetry.
+fn gateway_settings(
+    api: &Api,
+    gateway: &Resource,
+    req: &Bind<'_>,
+    value: &SecretValue,
+) -> Result<Body, ProviderError> {
+    let reply = api::call(
+        api,
+        &Call::new("GET", gateway_path(gateway), Body::None),
+        value,
+        req.owner,
+    )
+    .map_err(|e| ProviderError::Failed(e.to_string()))?;
+    if !reply.ok() {
+        return Err(ProviderError::Failed(format!(
+            "cloudflare answered HTTP {} when this read gateway {}, so what it \
+             already holds is not known and nothing was changed",
+            reply.status, gateway.name
+        )));
+    }
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(&reply.body) else {
+        return Err(ProviderError::Failed(
+            "the gateway reply was not the json envelope, so nothing was changed"
+                .to_string(),
+        ));
+    };
+    let Some(current) = body.get("result").and_then(|r| r.as_object()) else {
+        return Err(ProviderError::Failed(
+            "the gateway reply carried no configuration, so nothing was changed"
+                .to_string(),
+        ));
+    };
+    if carries_authorization(body.get("result").unwrap_or(&serde_json::Value::Null)) {
+        return Err(ProviderError::Refused(format!(
+            "gateway {} carries an exporter credential — an `authorization` on \
+             its OTel or Stripe configuration. Changing a gateway is a PUT that \
+             replaces it, so this build would have to write that credential back \
+             without being able to read it honestly, or drop it and delete it. \
+             It will not do either: change this gateway in the Cloudflare \
+             dashboard. Nothing was changed",
+            gateway.name
+        )));
+    }
+
+    let mut settings = serde_json::Map::new();
+    for field in GATEWAY_FIELDS {
+        if let Some(existing) = current.get(*field) {
+            if !existing.is_null() {
+                settings.insert((*field).to_string(), existing.clone());
+            }
+        }
+    }
+
+    let mut changed = false;
+    if let Some(ttl) = req.params.get("cache-ttl") {
+        settings.insert(
+            "cache_ttl".into(),
+            seconds(ttl, "a cache ttl", 0..=2_678_400)?.into(),
+        );
+        changed = true;
+    }
+    if let Some(limit) = req.params.get("rate-limit") {
+        settings.insert(
+            "rate_limiting_limit".into(),
+            seconds(limit, "a rate limit", 0..=1_000_000)?.into(),
+        );
+        changed = true;
+    }
+    if let Some(interval) = req.params.get("rate-limit-interval") {
+        settings.insert(
+            "rate_limiting_interval".into(),
+            seconds(interval, "a rate limiting interval", 0..=86_400)?.into(),
+        );
+        changed = true;
+    }
+    if let Some(collect) = req.params.get("collect-logs") {
+        settings.insert("collect_logs".into(), flag(collect)?.into());
+        changed = true;
+    }
+    if !changed {
+        return Err(ProviderError::Refused(
+            "this operation changes nothing: give it a 'cache-ttl', \
+             'rate-limit', 'rate-limit-interval' or 'collect-logs' option"
+                .to_string(),
+        ));
+    }
+    // The five the schema marks required. A gateway that answered without one
+    // of them would otherwise produce a request the far side refuses, after
+    // the credential had been spent twice.
+    for (field, fallback) in [
+        ("rate_limiting_interval", serde_json::json!(0)),
+        ("rate_limiting_limit", serde_json::json!(0)),
+        ("collect_logs", serde_json::json!(true)),
+        ("cache_ttl", serde_json::json!(0)),
+        ("cache_invalidate_on_update", serde_json::json!(false)),
+    ] {
+        settings.entry(field.to_string()).or_insert(fallback);
+    }
+    Ok(Body::Json(serde_json::Value::Object(settings).to_string()))
+}
+
+/// Where one gateway lives.
+fn gateway_path(gateway: &Resource) -> String {
+    format!(
+        "/accounts/{}/ai-gateway/gateways/{}",
+        gateway.account.id, gateway.id
+    )
+}
+
+/// Whether anything anywhere in a value is an `authorization`.
+///
+/// Deliberately blunt — any depth, any container. This decides whether a
+/// replace is safe to attempt, and a check that looked only where the
+/// credential is today would stop being right the moment Cloudflare adds a
+/// third exporter.
+fn carries_authorization(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.iter().any(|(key, nested)| {
+                (key == "authorization" && !nested.is_null()) || carries_authorization(nested)
+            })
+        }
+        serde_json::Value::Array(items) => items.iter().any(carries_authorization),
+        _ => false,
+    }
+}
+
+/// Where a model is run.
+fn run_path(model: &Resource) -> String {
+    format!("/accounts/{}/ai/run/{}", model.account.id, model.id)
+}
+
+/// The JSON body of an inference request: one line, or a document from the
+/// project.
+///
+/// The same body-or-file shape §13.6's secrets use, for the same reason — a
+/// prompt is one line and a conversation is not — with one addition.
+/// **`stream` is refused.** The transport here is a `curl` that hands back a
+/// completed reply; a streamed response would arrive as server-sent-event
+/// framing in `output`, which is not a stream, is not the JSON the caller
+/// expects, and would look like a working feature.
+fn inference_body(req: &Bind<'_>) -> Result<Body, ProviderError> {
+    let document = match (req.params.get("prompt"), req.params.get("file")) {
+        (Some(_), Some(_)) => {
+            return Err(ProviderError::Refused(
+                "give this operation a 'prompt' or a 'file', not both: they are \
+                 two answers to the same question, and this build will not pick"
+                    .to_string(),
+            ))
+        }
+        (None, None) => {
+            return Err(ProviderError::Refused(
+                "this operation needs a 'prompt' option holding what to ask, or \
+                 a 'file' option naming a .json document in the project to send"
+                    .to_string(),
+            ))
+        }
+        (Some(prompt), None) => {
+            let mut body = serde_json::Map::new();
+            body.insert("prompt".into(), prompt.clone().into());
+            serde_json::Value::Object(body)
+        }
+        (None, Some(file)) => {
+            if !file.ends_with(".json") {
+                return Err(ProviderError::Refused(format!(
+                    "'{}' is not a .json file. A model request is JSON this \
+                     project wrote down, not whatever happens to be at that path",
+                    file.escape_debug()
+                )));
+            }
+            let bytes = project::read_file(
+                std::path::Path::new(req.project),
+                file,
+                req.owner.uid,
+                &req.owner.name,
+                MAX_PAYLOAD,
+            )
+            .map_err(|e| ProviderError::NoSuchResource(e.to_string()))?;
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                return Err(ProviderError::Refused(format!(
+                    "'{}' is not JSON, so it is not a model request",
+                    file.escape_debug()
+                )));
+            };
+            if !value.is_object() {
+                return Err(ProviderError::Refused(format!(
+                    "'{}' is JSON but not an object, and a model request is an \
+                     object",
+                    file.escape_debug()
+                )));
+            }
+            value
+        }
+    };
+    if document.get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Err(ProviderError::Refused(
+            "this build cannot ask for a streamed response. The broker runs a \
+             child that hands back a finished reply, so `stream: true` would \
+             deliver server-sent-event framing in place of the answer — which \
+             would look like it worked. Ask for it without `stream`"
+                .to_string(),
+        ));
+    }
+    Ok(Body::Json(document.to_string()))
+}
+
+/// What `cf-aig-metadata` carries, so §13.14's usage can be attributed.
+///
+/// Three entries of the five AI Gateway allows, all strings, none beginning
+/// `cf.` — that prefix is Cloudflare's own and it strips customer-supplied keys
+/// that use it.
+///
+/// **The audit id is the correlation key and the project path is not sent.**
+/// This machine's trail already maps an audit id to a project, an agent session
+/// and an origin; putting the id in the far side's log is enough to join the
+/// two, and putting an owner's directory layout in somebody else's logs would
+/// be more than enough. The project's own directory NAME goes in, reduced to
+/// characters a header can carry — it is the one word that makes a gateway log
+/// readable without a lookup.
+fn usage_metadata(req: &Bind<'_>) -> String {
+    let project = std::path::Path::new(req.project)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|name| {
+            name.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                .take(48)
+                .collect::<String>()
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "project".to_string());
+    serde_json::json!({
+        "apex_audit": req.audit_id,
+        "apex_project": project,
+        "apex_operation": req.operation.id,
+    })
+    .to_string()
+}
+
+/// The path a store's secrets live under.
+fn secrets(store: &Resource) -> String {
+    format!(
+        "/accounts/{}/secrets_store/stores/{}/secrets",
+        store.account.id, store.id
+    )
+}
+
+/// Cloudflare's own closed set of services that may read a stored secret.
+const SCOPE_NAMES: &[&str] = &[
+    "workers",
+    "ai_gateway",
+    "dex",
+    "access",
+    "containers",
+    "websearch",
+];
+
+/// The `{name, value, scopes, comment}` object a create or a rotate sends.
+///
+/// `creating` decides which fields are required: a create names the secret and
+/// its scopes, and a rotate changes a value on a secret that already has both.
+fn secret_object(
+    req: &Bind<'_>,
+    name: &str,
+    creating: bool,
+) -> Result<serde_json::Value, ProviderError> {
+    let mut object = serde_json::Map::new();
+    if creating {
+        object.insert("name".into(), name.into());
+        let Some(scopes) = req.params.get("scopes") else {
+            return Err(ProviderError::Refused(format!(
+                "this operation needs a 'scopes' option saying which services \
+                 may read it: {}",
+                SCOPE_NAMES.join(", ")
+            )));
+        };
+        let mut listed = Vec::new();
+        for scope in scopes.split(',').map(str::trim) {
+            if !SCOPE_NAMES.contains(&scope) {
+                return Err(ProviderError::Refused(format!(
+                    "'{}' is not a Cloudflare secret scope. One of: {}",
+                    scope.escape_debug(),
+                    SCOPE_NAMES.join(", ")
+                )));
+            }
+            if !listed.iter().any(|s| s == scope) {
+                listed.push(scope.to_string());
+            }
+        }
+        if listed.is_empty() {
+            return Err(ProviderError::Refused(
+                "this operation needs at least one scope".to_string(),
+            ));
+        }
+        object.insert("scopes".into(), listed.into());
+    }
+    object.insert("value".into(), secret_value(req)?.into());
+    if let Some(comment) = req.params.get("comment") {
+        object.insert("comment".into(), comment.clone().into());
+    }
+    Ok(serde_json::Value::Object(object))
+}
+
+/// The value of a secret: the bytes the caller piped in, or a file in the
+/// project. One or the other, never both and never neither.
+///
+/// **Never a parameter**, and the reason is in §13.6's block note: a parameter
+/// is rendered into `CapabilityRecord::summary` and becomes the `detail` of
+/// every refused audit line, so a `value` option would write the secret into a
+/// file an administrator greps — on the path where the operation did not even
+/// happen.
+fn secret_value(req: &Bind<'_>) -> Result<String, ProviderError> {
+    /// `secrets-store_value`'s own `maxLength`.
+    const MAX: usize = 64 * 1024;
+
+    let bytes = match (req.body.is_empty(), req.params.get("file")) {
+        (false, Some(_)) => {
+            return Err(ProviderError::Refused(
+                "this operation was given a value on its input AND a 'file'. \
+                 They are two answers to the same question, and this build will \
+                 not pick"
+                    .to_string(),
+            ))
+        }
+        (true, None) => {
+            return Err(ProviderError::Refused(
+                "this operation needs the secret's value. Pipe it in, or name a \
+                 'file' inside the project that holds it — it is deliberately \
+                 not an option, because an option is written to the audit trail"
+                    .to_string(),
+            ))
+        }
+        (false, None) => req.body.to_vec(),
+        (true, Some(file)) => project::read_file(
+            std::path::Path::new(req.project),
+            file,
+            req.owner.uid,
+            &req.owner.name,
+            MAX as u64,
+        )
+        .map_err(|e| ProviderError::NoSuchResource(e.to_string()))?,
+    };
+    if bytes.len() > MAX {
+        return Err(ProviderError::Refused(format!(
+            "that value is {} bytes and Cloudflare's limit is {MAX}",
+            bytes.len()
+        )));
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Err(ProviderError::Refused(
+            "that value is not text, and a Secrets Store secret is a JSON string"
+                .to_string(),
+        ));
+    };
+    // One trailing newline, and one only. `printf %s` and `echo` differ by
+    // exactly this byte, and a secret that works from one and not the other is
+    // an afternoon somebody does not get back. A value that is ONLY newlines is
+    // left alone, so this cannot empty something the caller meant to send.
+    let trimmed = text.strip_suffix('\n').unwrap_or(&text);
+    let trimmed = trimmed.strip_suffix('\r').unwrap_or(trimmed);
+    if trimmed.is_empty() {
+        return Err(ProviderError::Refused(
+            "that value is empty, and an empty secret is not one".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Which secret in a store a NAME means.
+///
+/// The same five answers as [`dns::look_up`], for the same reason: a credential
+/// that was refused is not a store that is empty, and a build that collapsed
+/// the two would tell a caller "no such secret" and have it create a second one
+/// beside the first.
+///
+/// It has one hazard DNS does not. The endpoint's filter is `search`, and
+/// **`search` is a substring match** — asking for `API_KEY` matches `API_KEY`
+/// and `API_KEY_OLD` both. So every result is checked against the exact name
+/// before anything is counted, and a build that took the first result back
+/// would rotate the wrong secret. That is not a hypothetical shape of mistake;
+/// it is the ordinary one.
+fn look_up_secret(
+    api: &Api,
+    store: &Resource,
+    name: &str,
+    value: &SecretValue,
+    owner: &crate::broker::Owner,
+) -> Lookup {
+    let call = Call {
+        method: "GET",
+        // `per_page` at the documented maximum, so that a store with many
+        // similarly-named secrets is one page rather than a silent truncation.
+        path: format!("{}?search={name}&per_page=100", secrets(store)),
+        body: Body::None,
+        headers: Vec::new(),
+    };
+    let reply = match api::call(api, &call, value, owner) {
+        Ok(reply) => reply,
+        Err(e) => return Lookup::CouldNotRun(e.to_string()),
+    };
+    if reply.status == 0 {
+        return Lookup::CouldNotRun("the api could not be reached".to_string());
+    }
+    if reply.status == 401 || reply.status == 403 {
+        return Lookup::Denied(reply.status);
+    }
+    if !reply.ok() {
+        return Lookup::CouldNotRun(format!(
+            "cloudflare answered HTTP {} to the lookup",
+            reply.status
+        ));
+    }
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(&reply.body) else {
+        return Lookup::CouldNotRun("the reply was not the json envelope".to_string());
+    };
+    if body.get("success").and_then(|s| s.as_bool()) != Some(true) {
+        return Lookup::CouldNotRun("the store did not answer successfully".to_string());
+    }
+    let Some(results) = body.get("result").and_then(|r| r.as_array()) else {
+        return Lookup::CouldNotRun("the reply carried no list of secrets".to_string());
+    };
+    let matching: Vec<&serde_json::Value> = results
+        .iter()
+        .filter(|r| r.get("name").and_then(|n| n.as_str()) == Some(name))
+        .collect();
+    if matching.is_empty() {
+        // A page that did not hold it is not a store that does not hold it.
+        // `total_count` is how the far side says there is more, and saying
+        // "absent" here would be the same defect in a different costume.
+        let total = body
+            .get("result_info")
+            .and_then(|i| i.get("total_count"))
+            .and_then(serde_json::Value::as_u64);
+        if total.is_some_and(|total| total > results.len() as u64) {
+            return Lookup::CouldNotRun(format!(
+                "the store answered with {} of {} secrets and this build reads \
+                 one page, so whether '{name}' is there is not something this \
+                 measured",
+                results.len(),
+                total.unwrap_or_default()
+            ));
+        }
+        return Lookup::Absent;
+    }
+    match matching.len() {
+        1 => match matching[0].get("id").and_then(|i| i.as_str()) {
+            Some(id) if binding::valid_store_id(id) => Lookup::Found(id.to_string()),
+            _ => Lookup::CouldNotRun("the secret it answered with has no usable id".to_string()),
+        },
+        n => Lookup::Ambiguous(n),
+    }
+}
+
+/// The multipart body that puts a secret reference onto a worker.
+///
+/// A read-modify-write, because the settings `PATCH` replaces the `bindings`
+/// list wholesale: sending only the new one would take every other binding off
+/// the worker. So the existing list is read, the reference is added to it — or
+/// replaces one of the same name — and the whole list goes back.
+///
+/// The window between the read and the write is real and is not closed here. It
+/// is the same window `dns.update` has, and the same one `access.edit` would
+/// have if this build rewrote applications: two requests cannot be one.
+fn settings_with_secret(
+    api: &Api,
+    worker: &Worker,
+    store: &Resource,
+    secret: &str,
+    binding_name: &str,
+    value: &SecretValue,
+    owner: &crate::broker::Owner,
+) -> Result<Body, ProviderError> {
+    let reply = api::call(
+        api,
+        &Call {
+            method: "GET",
+            path: format!("{}/settings", script(worker)),
+            body: Body::None,
+            headers: Vec::new(),
+        },
+        value,
+        owner,
+    )
+    .map_err(|e| ProviderError::Failed(e.to_string()))?;
+    if !reply.ok() {
+        return Err(ProviderError::Failed(format!(
+            "cloudflare answered HTTP {} when this read {}'s settings, so its \
+             bindings are not known and nothing was changed",
+            reply.status, worker.name
+        )));
+    }
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(&reply.body) else {
+        return Err(ProviderError::Failed(
+            "the settings reply was not the json envelope, so nothing was changed"
+                .to_string(),
+        ));
+    };
+    // **Every existing binding goes back as `inherit`, and not as it arrived.**
+    //
+    // A `secret_text` binding's `text` is `writeOnly` AND required in
+    // Cloudflare's own schema: the GET returns the binding without its value,
+    // and sending that object back would either be refused for a missing
+    // required field or quietly write an empty secret. The same is true of
+    // every other kind that carries write-only material. `inherit` is the shape
+    // the API provides for exactly this — "keep the binding that is already
+    // there" — and using it for ALL of them, rather than enumerating which
+    // kinds are safe to echo, is the version that stays correct when Cloudflare
+    // adds the thirty-seventh kind.
+    let mut bindings: Vec<serde_json::Value> = body
+        .get("result")
+        .and_then(|r| r.get("bindings"))
+        .and_then(|b| b.as_array())
+        .map(|existing| {
+            existing
+                .iter()
+                .filter_map(|b| b.get("name").and_then(|n| n.as_str()))
+                .map(|name| serde_json::json!({"type": "inherit", "name": name}))
+                .collect()
+        })
+        .unwrap_or_default();
+    // Same name, same binding: a worker cannot read two things under one name,
+    // so this replaces rather than adding a second.
+    bindings.retain(|b| b.get("name").and_then(|n| n.as_str()) != Some(binding_name));
+    bindings.push(serde_json::json!({
+        "type": "secrets_store_secret",
+        "name": binding_name,
+        "store_id": store.id,
+        "secret_name": secret,
+    }));
+
+    let settings = serde_json::json!({ "bindings": bindings });
+    let mut form = Multipart::new().map_err(|e| ProviderError::Failed(e.to_string()))?;
+    form.part(
+        "settings",
+        None,
+        "application/json",
+        settings.to_string().as_bytes(),
+    );
+    Ok(form.finish())
+}
+
+/// What a credential created by [`SPEC`]'s service-token operation is stored
+/// under.
+///
+/// Derived from the host rather than from the token's name, and the difference
+/// matters: the name is a label in somebody's dashboard, and the host is what
+/// the store pins the credential to. One brokered token per host, which is also
+/// why a second one is refused rather than silently replacing the first —
+/// Cloudflare shows a `client_secret` once.
+fn token_service(host: &str) -> String {
+    format!("cf-access.{host}")
+}
+
+/// Whether a string is a duration Cloudflare's service-token endpoint accepts.
+///
+/// `forever`, or Go's duration syntax — `8760h`, `2h45m`, `300ms` — with the
+/// units the schema lists. Checked here rather than sent, for the reason the R2
+/// location hint is: a request that fails at the far side has already spent the
+/// credential, and for THIS operation a failed request may also have created a
+/// token whose secret nobody will ever see.
+fn valid_duration(value: &str) -> bool {
+    const UNITS: &[&str] = &["ns", "us", "\u{b5}s", "ms", "s", "m", "h"];
+    if value == "forever" {
+        return true;
+    }
+    let mut rest = value;
+    let mut pairs = 0;
+    while !rest.is_empty() {
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits == 0 {
+            return false;
+        }
+        rest = &rest[digits..];
+        // Longest unit first, or `ms` would be read as `m` followed by an `s`
+        // that is not a number.
+        let Some(unit) = UNITS
+            .iter()
+            .filter(|u| rest.starts_with(**u))
+            .max_by_key(|u| u.len())
+        else {
+            return false;
+        };
+        rest = &rest[unit.len()..];
+        pairs += 1;
+    }
+    pairs > 0
+}
+
+/// The JSON body that issues an Access service token.
+fn service_token_body(req: &Bind<'_>) -> Result<Body, ProviderError> {
+    let Some(name) = req.params.get("name") else {
+        return Err(ProviderError::Refused(
+            "this operation needs a 'name' option saying what to call the token"
+                .to_string(),
+        ));
+    };
+    let mut body = serde_json::Map::new();
+    body.insert("name".into(), name.clone().into());
+    if let Some(duration) = req.params.get("duration") {
+        if !valid_duration(duration) {
+            return Err(ProviderError::Refused(format!(
+                "'{}' is not a duration Cloudflare accepts: 'forever', or a run \
+                 of number-and-unit like 8760h or 2h45m, with units ns, us, ms, \
+                 s, m or h",
+                duration.escape_debug()
+            )));
+        }
+        body.insert("duration".into(), duration.clone().into());
+    }
+    Ok(Body::Json(serde_json::Value::Object(body).to_string()))
+}
+
+/// The `client_id` and `client_secret` out of a service-token reply.
+///
+/// Both or neither. A reply that carries one and not the other is not a token
+/// this build can keep, and saying so is better than storing half a credential
+/// under a name that will then look usable.
+fn service_token_in(body: &str) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let result = value.get("result")?;
+    let id = result.get("client_id")?.as_str()?.to_string();
+    let secret = result.get("client_secret")?.as_str()?.to_string();
+    if id.is_empty() || secret.is_empty() {
+        return None;
+    }
+    Some((id, secret))
+}
+
 /// The JSON body that creates a bucket.
 ///
 /// Both options are closed sets in Cloudflare's own documentation, so a value
@@ -1663,7 +3030,41 @@ fn without_the_tail_url(body: &str) -> String {
 /// The same argument as `without_the_tail_url`, applied to a field this build
 /// does not expect to see rather than one it does.
 fn without_the_origin_secrets(body: &str) -> String {
-    const SECRETS: &[&str] = &["password", "access_client_secret"];
+    without(
+        body,
+        &["password", "access_client_secret"],
+        "\napex: this configuration carried an origin credential, which is \
+         not something a brokered operation hands back. It has been removed \
+         from this reply.",
+    )
+}
+
+/// An Access application, with anything credential-shaped taken out.
+///
+/// An application is not obviously a place a secret lives, and for a
+/// self-hosted one it is not. A **SaaS** application is a different matter:
+/// Cloudflare's own schema gives `access_oidc_saas_app` and the generic OAuth
+/// configuration a `client_secret`, and this operation is a read an agent may
+/// hold. Same argument as the Hyperdrive password, applied to a field that is
+/// only sometimes there — which is exactly the case a build finds out about in
+/// production if it waits to be shown one.
+fn without_the_app_secrets(body: &str) -> String {
+    without(
+        body,
+        &["client_secret", "access_client_secret"],
+        "\napex: this application carried a client secret, which is not \
+         something a brokered read hands back. It has been removed from this \
+         reply.",
+    )
+}
+
+/// A reply with some named fields taken out of it, wherever they are.
+///
+/// Descends into nested objects and arrays, because that is where the field
+/// actually is — a Hyperdrive password lives under `result.origin`, and a SaaS
+/// client secret under `result.saas_app`. A scrub that only looked at the top
+/// level would report success having removed nothing.
+fn without(body: &str, keys: &[&str], note: &str) -> String {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
         return body.to_string();
     };
@@ -1672,8 +3073,8 @@ fn without_the_origin_secrets(body: &str) -> String {
     while let Some(node) = stack.pop() {
         match node {
             serde_json::Value::Object(map) => {
-                for secret in SECRETS {
-                    if map.remove(*secret).is_some() {
+                for key in keys {
+                    if map.remove(*key).is_some() {
                         removed = true;
                     }
                 }
@@ -1685,11 +3086,7 @@ fn without_the_origin_secrets(body: &str) -> String {
     }
     let mut out = serde_json::to_string(&value).unwrap_or_else(|_| body.to_string());
     if removed {
-        out.push_str(
-            "\napex: this configuration carried an origin credential, which is \
-             not something a brokered operation hands back. It has been removed \
-             from this reply.",
-        );
+        out.push_str(note);
     }
     out
 }
@@ -1719,12 +3116,31 @@ impl Provider for CloudflareProvider {
 
     fn bind(&self, req: &Bind<'_>) -> Result<Bound, ProviderError> {
         let target = self.resolve(req)?;
+        // §13.10: an operation that will create a credential says so HERE, so
+        // the framework can refuse a name that is already taken before
+        // Cloudflare issues a secret it will never show again.
+        let creates = match &target {
+            Target::ServiceToken { host, .. } => {
+                let name = token_service(host);
+                if !apex_secret_core::store::valid_service_name(&name) {
+                    return Err(ProviderError::Refused(format!(
+                        "the credential this would create would be stored as \
+                         '{name}', and that is not a name this service can \
+                         store under. A host of up to {} characters fits",
+                        64 - "cf-access.".len()
+                    )));
+                }
+                Some(name)
+            }
+            _ => None,
+        };
         Ok(Bound {
             endpoint: Endpoint {
                 scheme: self.api.scheme.clone(),
                 host: self.api.host.clone(),
             },
             detail: CloudflareProvider::detail(req.operation, &target, req.params),
+            creates,
         })
     }
 
@@ -1810,6 +3226,94 @@ impl Provider for CloudflareProvider {
                     method: if id == "cloudflare.dns.update" { "PATCH" } else { "DELETE" },
                     path: format!("{}/{id_of}", record.path()),
                     body,
+                    headers: Vec::new(),
+                }
+            }
+            ("cloudflare.secret.rotate", Target::Bound { resource, key, .. }) => {
+                let Some(name) = key else {
+                    return Err(ProviderError::Refused(
+                        "this operation needs a secret as well as a store".to_string(),
+                    ));
+                };
+                // Built BEFORE anything is spent, so a rotate with no value is
+                // refused without a request being made.
+                let body = Body::Json(secret_object(req, name, false)?.to_string());
+                let id_of = match look_up_secret(&self.api, resource, name, value, req.owner) {
+                    Lookup::Found(id) => id,
+                    Lookup::Absent => {
+                        return Err(ProviderError::NoSuchResource(format!(
+                            "store {} answered, and holds no secret called \
+                             '{name}'. Nothing was changed — `cloudflare.secret.create` \
+                             is what makes one",
+                            resource.name
+                        )))
+                    }
+                    Lookup::Denied(status) => {
+                        return Err(ProviderError::Refused(format!(
+                            "cloudflare answered HTTP {status} when this looked \
+                             up '{name}' in store {}. That is the credential \
+                             being refused, which is not the same as the secret \
+                             not being there — so nothing was changed",
+                            resource.name
+                        )))
+                    }
+                    Lookup::Ambiguous(n) => {
+                        return Err(ProviderError::Failed(format!(
+                            "{n} secrets in store {} answer to the exact name \
+                             '{name}'. This build will not guess which one you \
+                             meant, so nothing was changed",
+                            resource.name
+                        )))
+                    }
+                    Lookup::CouldNotRun(why) => {
+                        return Err(ProviderError::Failed(format!(
+                            "'{name}' could not be looked up in store {}: {why}. \
+                             Nothing was changed, and this is not a report that \
+                             the secret is absent",
+                            resource.name
+                        )))
+                    }
+                };
+                Call {
+                    method: "PATCH",
+                    path: format!("{}/{id_of}", secrets(resource)),
+                    body,
+                    headers: Vec::new(),
+                }
+            }
+            ("cloudflare.ai-gateway.edit", Target::Bound { resource, .. }) => Call::new(
+                "PUT",
+                gateway_path(resource),
+                gateway_settings(&self.api, resource, req, value)?,
+            ),
+            (
+                "cloudflare.secret.bind",
+                Target::SecretBinding {
+                    store,
+                    secret,
+                    worker,
+                },
+            ) => {
+                let Some(binding_name) = req.params.get("binding") else {
+                    return Err(ProviderError::Refused(
+                        "this operation needs a 'binding' option saying what the \
+                         worker's code will read it under"
+                            .to_string(),
+                    ));
+                };
+                Call {
+                    method: "PATCH",
+                    path: format!("{}/settings", script(worker)),
+                    body: settings_with_secret(
+                        &self.api,
+                        worker,
+                        store,
+                        secret,
+                        binding_name,
+                        value,
+                        req.owner,
+                    )?,
+                    headers: Vec::new(),
                 }
             }
             _ => self.build(req, &target)?,
@@ -1822,6 +3326,14 @@ impl Provider for CloudflareProvider {
         // refusal reason.
         let body = match req.operation.id {
             "cloudflare.worker.tail" if reply.ok() => without_the_tail_url(&reply.body),
+            "cloudflare.access.read" if reply.ok() => without_the_app_secrets(&reply.body),
+            // The one reply in this module that IS a credential. The secret is
+            // taken out here and the framework scrubs it again on the way out;
+            // two layers, because the provider is where the shape is known and
+            // the framework is where forgetting is not an option.
+            "cloudflare.access.service-token.create" if reply.ok() => {
+                without(&reply.body, &["client_secret"], "")
+            }
             "cloudflare.hyperdrive.read" | "cloudflare.hyperdrive.edit" if reply.ok() => {
                 without_the_origin_secrets(&reply.body)
             }
@@ -1841,9 +3353,62 @@ impl Provider for CloudflareProvider {
         } else {
             format!("apex: cloudflare answered HTTP {}\n{body}", reply.status)
         };
+        // §13.10, the half that needs the value: the secret goes to the
+        // framework, which stores it under the name `bind` declared. What the
+        // caller gets is the `client_id` and a sentence naming the handle.
+        let mut created = None;
+        let mut output = output;
+        if req.operation.id == "cloudflare.access.service-token.create" && reply.ok() {
+            let Target::ServiceToken { host, .. } = &target else {
+                return Err(ProviderError::Failed(
+                    "this operation resolved to something that is not a service \
+                     token"
+                        .to_string(),
+                ));
+            };
+            match service_token_in(&reply.body) {
+                Some((client_id, secret)) => {
+                    created = Some(crate::provider::Created {
+                        // The host the project named, which is what this
+                        // credential may be sent to and nowhere else. An Access
+                        // service token is presented to the application it
+                        // guards, never to the API that issued it — so pinning
+                        // it to `api.cloudflare.com` would be a pin that says
+                        // the wrong thing.
+                        host: host.clone(),
+                        // Always https. Cloudflare Access does not protect
+                        // anything else, and the store would refuse it anyway
+                        // for a host that is not loopback.
+                        scheme: "https".to_string(),
+                        username: Some(client_id.clone()),
+                        value: SecretValue::new(secret.into_bytes()),
+                    });
+                    output.push_str(&format!(
+                        "\napex: the client id is {client_id}. Its secret is not \
+                         in this reply — Cloudflare shows one once, and this \
+                         service kept it."
+                    ));
+                }
+                // The token EXISTS and its secret could not be read. Loud,
+                // because the only thing that can be done about it is done by
+                // a person: this build cannot fetch that secret again and
+                // neither can anybody else.
+                None => {
+                    return Err(ProviderError::Failed(format!(
+                        "cloudflare created a service token for {host} and \
+                         answered with something this build could not read a \
+                         client id and secret out of. The token exists and its \
+                         secret is gone — delete it in the Cloudflare dashboard \
+                         and try again"
+                    )))
+                }
+            }
+        }
+
         Ok(Performed {
             code: i32::from(!reply.ok()),
             output,
+            created,
         })
     }
 }

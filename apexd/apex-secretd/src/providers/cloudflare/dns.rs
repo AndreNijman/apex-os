@@ -175,6 +175,7 @@ pub fn look_up(
         // has been through `valid_name` and the type through [`TYPES`].
         path: format!("{}?name.exact={}&type={}", record.path(), record.name, kind),
         body: Body::None,
+        headers: Vec::new(),
     };
     let reply = match api::call(api, &call, value, owner) {
         Ok(reply) => reply,

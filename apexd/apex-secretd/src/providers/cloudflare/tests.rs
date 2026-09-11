@@ -65,6 +65,49 @@ const RECORD_B: &str = "00998877ff66ee55dd44cc33bb22aa11";
 /// The one bucket §13.1's file binds.
 const BUCKET: &str = "example-assets";
 
+/// §13.10's two ids the fixture's file binds. An Access application id is
+/// `oneOf [32 hex, uuid]` in Cloudflare's own schema, so the fixture uses the
+/// UUID half — the shape a validator written for hex alone would refuse.
+const APP_ID: &str = "f174e90a-fafe-4643-bbbc-4a0ed4fc8415";
+const TUNNEL_ID: &str = "f70ff985-a4ef-4643-bbbc-4a0ed4fc8415";
+
+/// What the double answers with when a service token is issued. The secret is
+/// the thing this whole unit exists to keep out of the caller's hands, so it is
+/// distinctive enough that finding it anywhere means it travelled.
+const CLIENT_ID: &str = "8a1b2c3d4e5f60718293a4b5c6d7e8f9.access";
+const CLIENT_SECRET: &str = "apex-cf-service-token-secret-0d4e1a-do-not-leak";
+
+/// The SaaS client secret the double puts in an Access application, which a
+/// self-hosted one would not carry and an OIDC SaaS one does.
+const APP_SECRET: &str = "apex-cf-saas-client-secret-77b2-do-not-leak";
+
+/// §13.6's store, and the two secrets in it. The second name CONTAINS the
+/// first, which is the whole hazard: the list endpoint's filter is `search`,
+/// and `search` is a substring match.
+const STORE_ID: &str = "8c8b1387108e49be85669169793e7bd2";
+const SECRET_ID: &str = "3fd85f74b32742f1bff64a85009dda07";
+const OLD_SECRET_ID: &str = "11112222333344445555666677778888";
+
+/// What a test sends as a secret's value. Distinctive, so finding it in the
+/// body the double received means the caller's own bytes arrived — and finding
+/// it anywhere else means they leaked.
+const SECRET_VALUE: &str = "apex-secret-store-value-5c2f-do-not-leak";
+
+/// §13.11's two, as §13.1's file binds them. A gateway id is a slug the ACCOUNT
+/// chose and a model name starts with `@` — neither is a shape any other id in
+/// this provider has.
+const GATEWAY_ID: &str = "apex-gateway";
+const MODEL: &str = "@cf/meta/llama-3.1-8b-instruct";
+
+/// The exporter credential the double puts on a gateway, nested inside an
+/// array — which is where a real one is, and where a scrub that walked only
+/// objects would never look.
+const OTEL_SECRET: &str = "apex-otel-authorization-9f31-do-not-leak";
+
+/// The connector token the double would hand back for a tunnel. Nothing in this
+/// build asks for it; the constant is here so a test can prove that.
+const TUNNEL_TOKEN: &str = "apex-cf-tunnel-token-3e9c-do-not-leak";
+
 /// What the double stores for the one object a test reads back. Not JSON, and
 /// it carries the credential the request arrived with, so a read that came back
 /// unscrubbed would show it.
@@ -97,6 +140,21 @@ jobs = "ffeeddccbbaa99887766554433221100"
 [cloudflare.hyperdrive]
 pg = "0f0e0d0c0b0a09080706050403020100"
 
+[cloudflare.access]
+dashboard = "f174e90a-fafe-4643-bbbc-4a0ed4fc8415"
+
+[cloudflare.secrets]
+app = "8c8b1387108e49be85669169793e7bd2"
+
+[cloudflare.gateways]
+main = "apex-gateway"
+
+[cloudflare.models]
+fast = "@cf/meta/llama-3.1-8b-instruct"
+
+[cloudflare.tunnels]
+office = "f70ff985-a4ef-4643-bbbc-4a0ed4fc8415"
+
 [cloudflare.preview]
 worker = "project-preview"
 
@@ -113,6 +171,10 @@ struct Seen {
     /// What the request said its body was. R2 puts an object's media type here
     /// and the provider chooses it from a table, so it is worth recording.
     content_type: Option<String>,
+    /// Every header the request carried, lower-cased. §13.11 puts the gateway
+    /// and the task's own id in headers, and a test cannot measure what the
+    /// double does not record.
+    headers: BTreeMap<String, String>,
     body: String,
 }
 
@@ -169,6 +231,7 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
 
     let mut authorization = None;
     let mut content_type = None;
+    let mut headers: BTreeMap<String, String> = BTreeMap::new();
     let mut length = 0usize;
     loop {
         let mut line = String::new();
@@ -189,6 +252,9 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
         if let Some(value) = line.trim().strip_prefix("Content-Type: ") {
             content_type = Some(value.to_string());
         }
+        if let Some((name, value)) = line.trim().split_once(": ") {
+            headers.insert(name.to_ascii_lowercase(), value.to_string());
+        }
     }
     let mut body = vec![0u8; length];
     if length > 0 && reader.read_exact(&mut body).is_err() {
@@ -201,6 +267,7 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
         path: path.clone(),
         authorization: authorization.clone(),
         content_type: content_type.clone(),
+        headers,
         body,
     });
 
@@ -273,7 +340,17 @@ fn answer(method: &str, target: &str) -> (u16, String) {
                 {"id":"route2","pattern":"admin.example.com/*","script":"somebody-else"}]"#,
         ),
         ("GET", p) if p.ends_with("/settings") => {
-            ok(r#"{"bindings":[],"compatibility_date":"2026-09-01","usage_model":"standard"}"#)
+            // A binding that is already there. `secret.bind` sends the whole
+            // list back, so a build that forgot to merge would take this one
+            // off the worker — silently, and only noticed in production.
+            //
+            // The `secret_text` one is the hazard: its `text` is `writeOnly`
+            // and REQUIRED, so the API returns it without a value and a build
+            // that echoed the object back would write an empty secret or be
+            // refused for a missing field.
+            ok(
+                r#"{"bindings":[{"type":"plain_text","name":"GREETING","text":"hi"},{"type":"secret_text","name":"OLD_SECRET"}],"compatibility_date":"2026-09-01","usage_model":"standard"}"#,
+            )
         }
         ("POST", p) if p.ends_with("/versions") => {
             ok(r#"{"id":"1c4dd6be-0000-4000-8000-abcdefabcdef","number":7}"#)
@@ -326,6 +403,100 @@ fn answer(method: &str, target: &str) -> (u16, String) {
         )),
         ("PATCH", p) if p == format!("/accounts/{ACCOUNT}/hyperdrive/configs/{HD_ID}") => {
             ok(&format!(r#"{{"id":"{HD_ID}","name":"pg","caching":{{"disabled":false}}}}"#))
+        }
+
+        // ── §13.11, Workers AI and the AI Gateway ───────────────────────────
+        ("POST", p) if p == format!("/accounts/{ACCOUNT}/ai/run/{MODEL}") => {
+            ok(r#"{"response":"Cloudflare is a network.","usage":{"prompt_tokens":9,"completion_tokens":6}}"#)
+        }
+        // **Every value here is one no fallback could have produced.** The
+        // read-modify-write fills in five defaults for fields the schema marks
+        // required, so a gateway answering with those same defaults would make
+        // "it was preserved" and "it was defaulted" the same observation — and
+        // a mutation that dropped the read entirely stayed green against an
+        // earlier version of this reply. `rate_limiting_limit` is 42 against a
+        // fallback of 0, `cache_invalidate_on_update` is true against false,
+        // and `logpush` and `retry_max_attempts` are not defaulted at all.
+        ("GET", p) if p == gateway_path() => ok(&format!(
+            r#"{{"id":"{GATEWAY_ID}","cache_ttl":60,"collect_logs":true,"rate_limiting_limit":42,"rate_limiting_interval":60,"cache_invalidate_on_update":true,"logpush":true,"retry_max_attempts":3,"created_at":"2026-09-01T00:00:00Z","modified_at":"2026-09-01T00:00:00Z","is_default":false}}"#
+        )),
+        ("GET", p) if p == gateway_path_of("with-otel") => ok(&format!(
+            r#"{{"id":"with-otel","cache_ttl":60,"collect_logs":true,"rate_limiting_limit":0,"rate_limiting_interval":0,"cache_invalidate_on_update":false,"otel":[{{"url":"https://otel.example.invalid","authorization":"{OTEL_SECRET}"}}]}}"#
+        )),
+        ("PUT", p) if p == gateway_path() => ok(&format!(
+            r#"{{"id":"{GATEWAY_ID}","cache_ttl":300,"collect_logs":true}}"#
+        )),
+
+        // ── §13.6, the Secrets Store ────────────────────────────────────────
+        //
+        // Every reply is METADATA. `secrets-store_value` is `writeOnly` in
+        // Cloudflare's own schema — "the API never returns this value" — so a
+        // double that echoed a value back would be testing against an API that
+        // does not exist.
+        ("POST", p) if p == secrets_path("") => ok(&format!(
+            r#"[{{"id":"{SECRET_ID}","name":"API_KEY","store_id":"{STORE_ID}","status":"active","scopes":["workers"],"created":"2026-09-12T00:00:00Z"}}]"#
+        )),
+        ("GET", p) if p == secrets_path("") => {
+            // `search` is a SUBSTRING match, and this double behaves like one.
+            // A build that trusted the filter would rotate whichever of these
+            // came back first.
+            let wanted = param("search");
+            let one = |id: &str, name: &str| {
+                format!(
+                    r#"{{"id":"{id}","name":"{name}","store_id":"{STORE_ID}","status":"active","scopes":["workers"]}}"#
+                )
+            };
+            let mut found: Vec<String> = Vec::new();
+            for (id, name) in [(SECRET_ID, "API_KEY"), (OLD_SECRET_ID, "API_KEY_OLD")] {
+                if wanted.is_empty() || name.contains(&wanted) {
+                    found.push(one(id, name));
+                }
+            }
+            let n = found.len();
+            (
+                200,
+                format!(
+                    r#"{{"success":true,"errors":[],"messages":[],"result":[{}],"result_info":{{"count":{n},"page":1,"per_page":100,"total_count":{n}}}}}"#,
+                    found.join(",")
+                ),
+            )
+        }
+        ("PATCH", p) if p == secrets_path(&format!("/{SECRET_ID}")) => ok(&format!(
+            r#"{{"id":"{SECRET_ID}","name":"API_KEY","store_id":"{STORE_ID}","status":"active","scopes":["workers"]}}"#
+        )),
+        ("PATCH", p) if p.ends_with("/settings") => {
+            ok(r#"{"bindings":[],"compatibility_date":"2026-09-01"}"#)
+        }
+
+        // ── §13.10, Cloudflare One ──────────────────────────────────────────
+        //
+        // The Access application is an OIDC SaaS one, so it carries a
+        // `client_secret` the documented schema really does return. A double
+        // that answered with a self-hosted application would let a build with
+        // no scrub at all pass.
+        ("GET", p) if p == format!("/accounts/{ACCOUNT}/access/apps/{APP_ID}") => ok(&format!(
+            r#"{{"id":"{APP_ID}","name":"dashboard","domain":"admin.example.com","type":"saas","saas_app":{{"client_id":"{CLIENT_ID}","client_secret":"{APP_SECRET}","auth_type":"oidc"}}}}"#
+        )),
+        ("POST", p) if p == format!("/accounts/{ACCOUNT}/access/apps/{APP_ID}/revoke_tokens") => {
+            ok("true")
+        }
+        ("POST", p) if p == format!("/accounts/{ACCOUNT}/access/service_tokens") => (
+            201,
+            format!(
+                r#"{{"success":true,"errors":[],"messages":[],"result":{{"id":"1e0b9a4c-0000-4000-8000-abcdefabcdef","name":"ci","client_id":"{CLIENT_ID}","client_secret":"{CLIENT_SECRET}","duration":"8760h"}}}}"#
+            ),
+        ),
+        ("GET", p) if p == format!("/accounts/{ACCOUNT}/cfd_tunnel/{TUNNEL_ID}") => ok(&format!(
+            r#"{{"id":"{TUNNEL_ID}","name":"office","status":"healthy","connections":[],"created_at":"2026-09-01T00:00:00Z"}}"#
+        )),
+        ("PATCH", p) if p == format!("/accounts/{ACCOUNT}/cfd_tunnel/{TUNNEL_ID}") => ok(&format!(
+            r#"{{"id":"{TUNNEL_ID}","name":"branch-office","status":"healthy"}}"#
+        )),
+        // The endpoint this build does not declare. It answers, so that a test
+        // asserting the token never comes back is measuring a refusal to ask
+        // rather than a double that had nothing to give.
+        ("GET", p) if p == format!("/accounts/{ACCOUNT}/cfd_tunnel/{TUNNEL_ID}/token") => {
+            ok(&format!(r#""{TUNNEL_TOKEN}""#))
         }
 
         // ── §13.9, DNS ──────────────────────────────────────────────────────
@@ -394,6 +565,20 @@ const ORIGIN_PASSWORD: &str = "apex-hyperdrive-origin-4c7f-do-not-leak";
 /// Where the double keeps one namespace's values.
 fn kv_path(suffix: &str) -> String {
     format!("/accounts/{ACCOUNT}/storage/kv/namespaces/{KV_ID}/values{suffix}")
+}
+
+/// Where this project's one gateway lives.
+fn gateway_path() -> String {
+    gateway_path_of(GATEWAY_ID)
+}
+
+fn gateway_path_of(id: &str) -> String {
+    format!("/accounts/{ACCOUNT}/ai-gateway/gateways/{id}")
+}
+
+/// Where the double keeps this store's secrets.
+fn secrets_path(suffix: &str) -> String {
+    format!("/accounts/{ACCOUNT}/secrets_store/stores/{STORE_ID}/secrets{suffix}")
 }
 
 /// Where the double keeps this zone's records.
@@ -514,6 +699,13 @@ impl Fixture {
         self.service.use_capability(me(), record, Vec::new())
     }
 
+    /// The same, with bytes after the request line — which is how a secret's
+    /// value travels, and the reason it is not an option.
+    fn use_with_input(&self, record: CapabilityRecord, input: &str) -> Response {
+        self.service
+            .use_capability(me(), record, input.as_bytes().to_vec())
+    }
+
     fn trail(&self) -> String {
         std::fs::read_to_string(Store::new(self.store.clone()).audit_path()).unwrap_or_default()
     }
@@ -593,6 +785,42 @@ fn every_operation() -> Vec<OperationCase> {
         ("cloudflare.queue.manage", "jobs", vec![("paused", "true")], 1),
         ("cloudflare.hyperdrive.read", "pg", vec![], 1),
         ("cloudflare.hyperdrive.edit", "pg", vec![("caching", "on")], 1),
+        (
+            "cloudflare.secret.create",
+            "app/API_KEY",
+            vec![("scopes", "workers"), ("file", "secrets/value.txt")],
+            1,
+        ),
+        (
+            "cloudflare.secret.rotate",
+            "app/API_KEY",
+            vec![("file", "secrets/value.txt")],
+            2,
+        ),
+        (
+            "cloudflare.secret.bind",
+            "app/API_KEY",
+            vec![("worker", "project"), ("binding", "API_KEY")],
+            2,
+        ),
+        ("cloudflare.workers-ai.run", "fast", vec![("prompt", "What is Cloudflare?")], 1),
+        (
+            "cloudflare.ai-gateway.run",
+            "main/fast",
+            vec![("prompt", "What is Cloudflare?")],
+            1,
+        ),
+        ("cloudflare.ai-gateway.edit", "main", vec![("cache-ttl", "300")], 2),
+        ("cloudflare.access.read", "dashboard", vec![], 1),
+        ("cloudflare.access.edit", "dashboard", vec![], 1),
+        (
+            "cloudflare.access.service-token.create",
+            "admin.example.com",
+            vec![("name", "ci"), ("duration", "8760h")],
+            1,
+        ),
+        ("cloudflare.tunnel.read", "office", vec![], 1),
+        ("cloudflare.tunnel.edit", "office", vec![("name", "branch-office")], 1),
         ("cloudflare.dns.read", "www.example.com", vec![("type", "A")], 1),
         (
             "cloudflare.dns.create",
@@ -633,6 +861,8 @@ fn with_files(fixture: &Fixture) {
     std::fs::write(fixture.project.join("dist/today.sql"), UPLOADED).expect("today.sql");
     std::fs::create_dir_all(fixture.project.join("migrations")).expect("migrations");
     std::fs::write(fixture.project.join("migrations/001.sql"), MIGRATION).expect("001.sql");
+    std::fs::create_dir_all(fixture.project.join("secrets")).expect("secrets");
+    std::fs::write(fixture.project.join("secrets/value.txt"), SECRET_VALUE).expect("value.txt");
 }
 
 /// A migration: several statements over several lines, which is exactly what a
@@ -1275,22 +1505,43 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
     for op in SPEC.operations {
         // `worker.route.read` is the one addition, and it is §13.3's "Worker
         // routes" rather than an invention.
-        if op.id == "cloudflare.worker.route.read" {
+        if op.id == "cloudflare.worker.route.read"
+            || op.id == "cloudflare.access.service-token.create"
+        {
             continue;
         }
         assert!(listed.contains(&op.id), "'{}' is not in §13.2", op.id);
     }
-    // Twenty-two of §13.2's thirty-two, and one addition. The arithmetic is asserted
-    // because the module note states it and a later task will read that note
-    // to work out what is left.
+    // Twenty-six of §13.2's thirty-two, and two additions. The arithmetic is
+    // asserted because the module note states it and a later task will read
+    // that note to work out what is left.
     let from_13_2 = SPEC
         .operations
         .iter()
         .filter(|op| listed.contains(&op.id))
         .count();
-    assert_eq!(from_13_2, 22);
-    assert_eq!(SPEC.operations.len(), 23);
-    assert_eq!(SECTION_13_2.len() - from_13_2, 10, "still unimplemented");
+    assert_eq!(from_13_2, 32, "every name §13.2 lists is implemented");
+    assert_eq!(SPEC.operations.len(), 34);
+    assert_eq!(SECTION_13_2.len() - from_13_2, 0, "still unimplemented");
+
+    // **Running a model is a write, and this is the only thing that says so.**
+    //
+    // Nothing stored, nothing changed — so `Effect::Read` looks defensible, and
+    // it was reachable: flipping `cloudflare.workers-ai.run` to `Read` turned
+    // no test red before this assertion existed. It has to be `Write` because
+    // `Effect` is what a grant is scoped by, and a read-only grant that can
+    // spend the account's balance is a read-only grant in name only. Inference
+    // costs money and does not give the same answer twice; both are what
+    // `Write` means here.
+    for op in SPEC.operations {
+        if op.id.ends_with(".run") {
+            assert!(
+                op.effect.is_write(),
+                "'{}' costs money, so a Read grant must not reach it",
+                op.id
+            );
+        }
+    }
 
     // Nothing is declared twice, and every summary reads as a sentence about
     // what the owner is being asked to allow.
@@ -1461,8 +1712,12 @@ fn a_write_that_names_only_a_bucket_is_refused_rather_than_writing_the_bucket() 
         f.record("cloudflare.r2.object.write", "example-assets")
             .param("file", "dist/today.sql"),
     );
-    let (_, message) = reply.as_error().expect("refused");
+    let (error, message) = reply.as_error().expect("refused");
     assert!(message.contains("names a bucket and not an object"), "{message}");
+    // The KIND, not just that it was refused: a resource that does not resolve
+    // is a `BadRequest`, and reporting it as `PermissionDenied` would send
+    // somebody who made a typo to look at the grant table.
+    assert_eq!(error, ErrorKind::BadRequest, "{message}");
     assert!(f.fake.seen().is_empty());
 }
 
@@ -1736,8 +1991,9 @@ fn a_kv_write_takes_a_value_or_a_file_and_never_both() {
 
     // ...and a namespace with no key names no value.
     let reply = f.use_it(f.record("cloudflare.kv.read", "cache"));
-    let (_, message) = reply.as_error().expect("refused");
+    let (error, message) = reply.as_error().expect("refused");
     assert!(message.contains("names a namespace and not a key"), "{message}");
+    assert_eq!(error, ErrorKind::BadRequest, "{message}");
 }
 
 #[test]
@@ -2232,6 +2488,930 @@ fn the_trail_names_the_record_and_the_zone_that_was_changed() {
         used.detail,
         format!("change the A record at www.example.com in zone example.com [{ZONE}]")
     );
+}
+
+// ── §13.11, Workers AI and the AI Gateway ───────────────────────────────────
+//
+// Nine mutations were run against the arms below, one at a time, each restored
+// by copying the pristine file back — and then touching it, which the earlier
+// rounds of this program did not have to do and this one did. `cp -p` restores
+// the ORIGINAL mtime, which is older than the artifact cargo just built from
+// the mutant, so cargo skips the rebuild and the next run measures the MUTANT'S
+// BINARY against pristine source. That was caught here by a restored tree
+// failing a test it had just passed; every verdict below was re-taken after the
+// restore started bumping the mtime.
+//
+// Every one turns a named test red:
+//
+// * the header guard in `api::call` stops consulting `printable` —
+//   `a_header_carrying_a_second_line_is_refused_before_curl_is_configured`;
+// * `cf-aig-gateway-id` is not sent — `a_gatewayed_run_is_the_same_host_…`;
+// * `binding.resource("models", …)` replaced by the caller's own string, which
+//   is the defect §13.11 exists to prevent — `a_model_or_a_gateway_this_…`;
+// * the project's whole PATH sent as the metadata's project —
+//   `a_gatewayed_run_is_tagged_with_this_task_…`;
+// * `carries_authorization` never fires — `a_gateway_carrying_an_exporter_…`;
+// * the `stream` check dropped — `a_streamed_response_is_refused_…`;
+// * `GATEWAY_FIELDS` put back nothing — `a_gateway_edit_puts_back_everything_…`;
+// * `workers-ai.run` declared `Effect::Read` — `the_declaration_is_well_formed_…`;
+// * `valid_model` stops checking segments — `a_model_name_is_checked_as_…`.
+//
+// **Three of those nine did not bite the first time**, and the tests were the
+// thing that changed, not the code:
+//
+// * the project-path leak passed, because the filter that makes a name
+//   header-safe strips `/` as a side effect, so a leaked path arrives with no
+//   slash in it and neither "contains no slash" nor "is not the path" notices;
+// * the read-modify-write passed with the read discarded entirely, because the
+//   assertion asked about `collect_logs` — which the required-field fallback
+//   sets to `true` regardless, so preserved and defaulted looked the same;
+// * `Effect::Read` on a paid operation passed, because nothing asserted it.
+//
+// All three are the shape this unit was warned about: a check that is real in
+// the code and invisible to the test, which is indistinguishable from no check
+// at all the day somebody edits the code.
+
+#[test]
+fn a_gatewayed_run_is_the_same_host_and_the_same_credential_as_an_ungatewayed_one() {
+    // The finding this design rests on. The provider-specific endpoint at
+    // `gateway.ai.cloudflare.com` would be a second host, and the framework
+    // pins a credential to the host it was stored for — so it would need a
+    // second stored credential. Cloudflare's REST API page documents the
+    // gatewayed form of the ORDINARY call instead: same URL, plus a
+    // `cf-aig-gateway-id` header. This asserts that shape, because if it ever
+    // stopped being the shape, the pin would be the thing that noticed.
+    let f = Fixture::new("aigateway", Mode::Normal, &granted_everything());
+    let plain = f.use_it(f.record("cloudflare.workers-ai.run", "fast").param("prompt", "hi"));
+    assert!(matches!(plain, Response::Performed { exit_code: 0, .. }), "{plain:?}");
+    let gatewayed = f.use_it(
+        f.record("cloudflare.ai-gateway.run", "main/fast").param("prompt", "hi"),
+    );
+    assert!(matches!(gatewayed, Response::Performed { exit_code: 0, .. }), "{gatewayed:?}");
+
+    let sent = f.fake.seen();
+    let runs: Vec<&Seen> = sent.iter().filter(|s| s.path.contains("/ai/run/")).collect();
+    assert_eq!(runs.len(), 2, "two runs, two requests");
+    assert_eq!(runs[0].path, runs[1].path, "the gateway changed the URL");
+    // The ungatewayed one carries no gateway header, and the gatewayed one
+    // carries the id from the PROJECT'S FILE.
+    assert!(!runs[0].headers.contains_key("cf-aig-gateway-id"), "{:?}", runs[0].headers);
+    assert_eq!(
+        runs[1].headers.get("cf-aig-gateway-id").map(String::as_str),
+        Some(GATEWAY_ID),
+        "{:?}",
+        runs[1].headers
+    );
+}
+
+#[test]
+fn a_gatewayed_run_is_tagged_with_this_task_and_not_with_this_machine_s_paths() {
+    // P1-009's third criterion: usage attributable to a task and a project.
+    // The correlation key is the audit id, which this machine's own trail maps
+    // to the project, the session and the origin — so the far side's log needs
+    // nothing else, and the owner's directory layout stays here.
+    let f = Fixture::new("aimeta", Mode::Normal, &granted_everything());
+    let reply = f.use_it(
+        f.record("cloudflare.ai-gateway.run", "main/fast").param("prompt", "hi"),
+    );
+    assert!(matches!(reply, Response::Performed { exit_code: 0, .. }), "{reply:?}");
+
+    let sent = f.fake.seen();
+    let run = sent.iter().find(|s| s.path.contains("/ai/run/")).expect("nothing was sent");
+    let raw = run.headers.get("cf-aig-metadata").expect("no metadata header");
+    let meta: serde_json::Value = serde_json::from_str(raw).expect("metadata must be json");
+    let object = meta.as_object().expect("an object");
+
+    // AI Gateway keeps the first five entries and strips anything beginning
+    // `cf.`, which is its own namespace.
+    assert!(object.len() <= 5, "more than five entries: {raw}");
+    assert!(object.keys().all(|k| !k.starts_with("cf.")), "{raw}");
+    assert!(object.values().all(|v| v.is_string() || v.is_number() || v.is_boolean()), "{raw}");
+
+    assert_eq!(
+        object.get("apex_operation").and_then(|v| v.as_str()),
+        Some("cloudflare.ai-gateway.run")
+    );
+    // The audit id is a real one from this request, and it is what joins the
+    // far side's log to this machine's trail.
+    let audit = object.get("apex_audit").and_then(|v| v.as_str()).expect("no audit id");
+    assert!(!audit.is_empty() && audit != "test", "{raw}");
+    assert!(f.trail().contains(audit), "the id sent is not one this trail holds: {audit}");
+
+    // The project's NAME is there and its PATH is not.
+    //
+    // **The equality is the assertion, and the two weaker checks below it are
+    // not enough on their own.** A mutation that sent `req.project` whole was
+    // run against this test and it stayed green: the character filter that
+    // makes a name header-safe also strips `/`, so the full path arrives as
+    // `tmpapex-cf-project-…` — no slash in it, and not equal to the path
+    // either, so both of the obvious checks pass while every directory on the
+    // way to the project is in somebody else's logs. Only pinning the value to
+    // the directory's OWN name catches that.
+    let project = f.project.to_string_lossy().into_owned();
+    let expected: String = f
+        .project
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("the fixture's project has a name")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(48)
+        .collect();
+    assert_eq!(
+        object.get("apex_project").and_then(|v| v.as_str()),
+        Some(expected.as_str()),
+        "{raw}"
+    );
+    assert!(!raw.contains(&project), "the project's path was sent to cloudflare: {raw}");
+    // The same path with its separators taken out — the exact shape the leak
+    // takes once the filter has been through it.
+    let squashed: String = project.chars().filter(|c| *c != '/').collect();
+    assert!(
+        !raw.contains(&squashed),
+        "the project's path was sent with its separators stripped: {raw}"
+    );
+    assert!(
+        object.get("apex_project").and_then(|v| v.as_str()).is_some_and(|p| !p.contains('/')),
+        "{raw}"
+    );
+}
+
+#[test]
+fn a_model_or_a_gateway_this_project_did_not_bind_never_reaches_cloudflare() {
+    // A model cannot even be NAMED as a resource — `@cf/...` is not a
+    // `Syntax::Name` — so binding is not a policy choice here, it is the only
+    // way to address one. The gateway is bound for a different reason worth
+    // stating: Cloudflare creates a gateway on first use if the id is unknown,
+    // so a caller that could name one could bill one.
+    let f = Fixture::new("unboundai", Mode::Normal, &granted_everything());
+    for (operation, resource) in [
+        ("cloudflare.workers-ai.run", "somebody-elses-model"),
+        ("cloudflare.ai-gateway.run", "somebody-elses-gateway/fast"),
+        ("cloudflare.ai-gateway.run", "main/somebody-elses-model"),
+        ("cloudflare.ai-gateway.edit", "somebody-elses-gateway"),
+    ] {
+        let mut rec = f.record(operation, resource);
+        if operation.ends_with(".run") {
+            rec = rec.param("prompt", "hi");
+        } else {
+            rec = rec.param("cache-ttl", "300");
+        }
+        let reply = f.use_it(rec);
+        let (error, message) = match reply.as_error() {
+            Some(pair) => pair,
+            None => panic!("{operation} accepted '{resource}'"),
+        };
+        assert_eq!(error, ErrorKind::BadRequest, "{operation}: {message}");
+        assert!(message.contains("apex.toml"), "{message}");
+    }
+    assert!(f.fake.seen().is_empty(), "an unbound model or gateway reached the api");
+
+    // ...and the model name itself is refused by the vocabulary, which is the
+    // thing that makes the binding unavoidable rather than merely advisable.
+    assert!(!operation::valid_name(MODEL), "'{MODEL}' would be nameable as a resource");
+}
+
+#[test]
+fn a_streamed_response_is_refused_rather_than_delivered_as_framing() {
+    // The transport is a `curl` that hands back a finished reply. A streamed
+    // answer would arrive as server-sent-event framing in `output`: not a
+    // stream, not the JSON the caller asked for, and indistinguishable from a
+    // working feature until somebody tries to parse it.
+    let f = Fixture::new("aistream", Mode::Normal, &granted_everything());
+    std::fs::create_dir_all(f.project.join("ai")).expect("ai");
+    std::fs::write(
+        f.project.join("ai/streamed.json"),
+        r#"{"messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .expect("write");
+    let reply = f.use_it(
+        f.record("cloudflare.workers-ai.run", "fast").param("file", "ai/streamed.json"),
+    );
+    let (_, message) = reply.as_error().expect("a streamed request must be refused");
+    assert!(message.contains("streamed response"), "{message}");
+    assert!(f.fake.seen().is_empty(), "it was sent anyway");
+
+    // The same document without `stream` goes through, so this is a check on
+    // one field rather than a refusal of every file.
+    std::fs::write(
+        f.project.join("ai/ok.json"),
+        r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .expect("write");
+    let ok = f.use_it(f.record("cloudflare.workers-ai.run", "fast").param("file", "ai/ok.json"));
+    assert!(matches!(ok, Response::Performed { exit_code: 0, .. }), "{ok:?}");
+}
+
+#[test]
+fn a_gateway_edit_puts_back_everything_it_did_not_mean_to_change() {
+    // `PUT` REPLACES a gateway, and its schema marks five fields required — so
+    // a request carrying only the changed field is not a smaller edit, it is a
+    // rejected one, and everything the gateway had would go back to a default.
+    // Hence the read first, and hence this assertion: the field that was asked
+    // for changed, and a field nobody mentioned survived.
+    let f = Fixture::new("aiedit", Mode::Normal, &granted_everything());
+    let reply = f.use_it(f.record("cloudflare.ai-gateway.edit", "main").param("cache-ttl", "300"));
+    assert!(matches!(reply, Response::Performed { exit_code: 0, .. }), "{reply:?}");
+
+    let sent = f.fake.seen();
+    assert_eq!(sent.len(), 2, "a replace has to read first: {sent:?}");
+    assert_eq!(sent[0].method, "GET");
+    let put = &sent[1];
+    assert_eq!(put.method, "PUT");
+    let body: serde_json::Value = serde_json::from_str(&put.body).expect("json body");
+    assert_eq!(body.get("cache_ttl").and_then(|v| v.as_u64()), Some(300), "{}", put.body);
+
+    // Untouched, and still there — the whole reason for the read.
+    //
+    // **Every value checked here is one the fallbacks could not have supplied.**
+    // A mutation that put back nothing at all still passed an earlier version
+    // of this assertion, because it asked about `collect_logs` — which the
+    // required-field fallback sets to `true` regardless, making a preserved
+    // value and a defaulted one indistinguishable. These four are not
+    // defaulted: `rate_limiting_limit` falls back to 0 and the gateway says 42,
+    // `cache_invalidate_on_update` falls back to false and the gateway says
+    // true, and `logpush` and `retry_max_attempts` have no fallback at all. If
+    // any of them arrives wrong, the read did not happen or was discarded.
+    assert_eq!(
+        body.get("rate_limiting_limit").and_then(|v| v.as_u64()),
+        Some(42),
+        "a fallback overwrote what the gateway already had: {}",
+        put.body
+    );
+    assert_eq!(
+        body.get("cache_invalidate_on_update").and_then(|v| v.as_bool()),
+        Some(true),
+        "{}",
+        put.body
+    );
+    assert_eq!(body.get("logpush").and_then(|v| v.as_bool()), Some(true), "{}", put.body);
+    assert_eq!(
+        body.get("retry_max_attempts").and_then(|v| v.as_u64()),
+        Some(3),
+        "a setting this build does not know about was dropped: {}",
+        put.body
+    );
+    assert_eq!(body.get("collect_logs").and_then(|v| v.as_bool()), Some(true), "{}", put.body);
+    // The five the schema marks required are all present, whatever was asked.
+    for required in [
+        "rate_limiting_interval",
+        "rate_limiting_limit",
+        "collect_logs",
+        "cache_ttl",
+        "cache_invalidate_on_update",
+    ] {
+        assert!(body.get(required).is_some(), "{required} is missing: {}", put.body);
+    }
+    // Read-only fields the API returns are NOT written back.
+    for readonly in ["created_at", "modified_at", "id", "is_default"] {
+        assert!(body.get(readonly).is_none(), "{readonly} was written back: {}", put.body);
+    }
+}
+
+#[test]
+fn a_gateway_carrying_an_exporter_credential_is_not_rewritten_at_all() {
+    // The case a replace cannot do honestly. A gateway's OTel exporter carries
+    // an `authorization`, nested inside an ARRAY; putting it back means writing
+    // whatever the API chose to show, and leaving it out means deleting it.
+    // Refusing is the third option and the only one that cannot silently break
+    // somebody's telemetry.
+    let f = Fixture::new("aiotel", Mode::Normal, &granted_everything());
+    std::fs::write(
+        f.project.join("apex.toml"),
+        PROJECT_FILE.replace(r#"main = "apex-gateway""#, r#"main = "with-otel""#),
+    )
+    .expect("rewrite");
+    let reply = f.use_it(f.record("cloudflare.ai-gateway.edit", "main").param("cache-ttl", "300"));
+    let (error, message) = reply.as_error().expect("a gateway with a credential must be refused");
+    assert_eq!(error, ErrorKind::PermissionDenied, "{message}");
+    assert!(message.contains("exporter credential"), "{message}");
+    assert!(message.contains("Nothing was changed"), "{message}");
+
+    // It read, and it did not write — and the credential is not in the reply.
+    let sent = f.fake.seen();
+    assert!(sent.iter().all(|s| s.method != "PUT"), "the gateway was rewritten anyway");
+    assert!(!message.contains(OTEL_SECRET), "the exporter credential came back: {message}");
+    assert!(!f.trail().contains(OTEL_SECRET), "the exporter credential is in the trail");
+}
+
+#[test]
+fn a_header_this_build_composes_can_never_carry_a_second_line() {
+    // `quoted` escapes a backslash and a quote and does nothing about a
+    // newline, and a newline in a header value is a second curl configuration
+    // line — which is a second header, or an option. Every composed value is
+    // held to printable ASCII before it gets there.
+    assert!(api::printable("apex-gateway"));
+    assert!(api::printable(r#"{"apex_audit":"1a0-1","apex_project":"demo"}"#));
+    for evil in [
+        "one\ntwo",
+        "one\r\nheader: two",
+        "one\u{0}two",
+        "",
+        "caf\u{e9}",
+        "one\ttwo",
+    ] {
+        assert!(!api::printable(evil), "'{}' was accepted", evil.escape_debug());
+    }
+}
+
+// ── §13.6, the Secrets Store ────────────────────────────────────────────────
+//
+// Seven mutations were run against the arms below, one at a time, each restored
+// by copying the pristine file back so that cargo rebuilt rather than reusing
+// the mutant's binary. Every one turns a named test red:
+//
+// * the lookup trusting `search` instead of checking the exact name, which is
+//   the ordinary mistake here because `search` is a SUBSTRING match and a store
+//   holding `API_KEY` and `API_KEY_OLD` answers for both —
+//   `rotating_a_secret_matches_the_exact_name_and_not_a_prefix_of_it`;
+// * a refused credential reported as a missing secret —
+//   `a_secret_that_is_not_there_is_told_apart_from_a_credential_…`;
+// * "you named no secret" reported as "you may not" —
+//   `a_store_this_project_did_not_bind_…`. That one is the THIRD instance of
+//   this defect in the Cloudflare block, and the two it joins (R2's
+//   bucket-with-no-key and KV's namespace-with-no-key) were found while writing
+//   it and fixed in the same commit;
+// * a value given twice silently picked, and scopes forwarded unchecked —
+//   `a_value_given_twice_or_not_at_all_…`, `a_scope_cloudflare_does_not_…`;
+// * the binding replacing the worker's bindings instead of merging into them,
+//   which would take every other binding off the worker —
+//   `a_binding_is_a_reference_and_the_worker_s_other_bindings_survive_it`;
+// * the shell's trailing newline sent as part of the secret —
+//   `a_secret_value_travels_as_input_and_never_as_an_option`.
+
+#[test]
+fn a_secret_value_travels_as_input_and_never_as_an_option() {
+    // **The claim §13.6's block note makes, measured.** A parameter is rendered
+    // into `CapabilityRecord::summary` and becomes the `detail` of every
+    // refused audit line — so this test proves BOTH halves: the value the
+    // caller piped in reached Cloudflare and is nowhere in the trail, while a
+    // parameter of the same operation is in the trail in full. The second half
+    // is what makes the first a decision rather than a coincidence.
+    let f = Fixture::new("secretbody", Mode::Normal, &granted_everything());
+    // Sent the way a shell sends one — `echo` puts a newline on the end, and a
+    // secret that works from `printf %s` and not from `echo` is an afternoon
+    // somebody does not get back. One trailing newline is taken off.
+    let reply = f.use_with_input(
+        f.record("cloudflare.secret.create", "app/API_KEY").param("scopes", "workers"),
+        &format!("{SECRET_VALUE}\n"),
+    );
+    let Response::Performed { output, exit_code, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(*exit_code, 0, "{output}");
+
+    // It arrived, as the value of the one secret being created.
+    let sent = f.fake.seen();
+    let create = sent
+        .iter()
+        .find(|s| s.method == "POST" && s.path.contains("/secrets_store/"))
+        .expect("nothing was sent");
+    assert!(
+        create.body.contains(&format!(r#""value":"{SECRET_VALUE}""#)),
+        "the value did not arrive, or arrived with the shell's newline on it: {}",
+        create.body
+    );
+    assert!(create.body.contains(r#""name":"API_KEY""#), "{}", create.body);
+    assert!(create.body.contains(r#""scopes":["workers"]"#), "{}", create.body);
+
+    // It is not in the trail...
+    assert!(!f.trail().contains(SECRET_VALUE), "the secret is in the audit trail");
+
+    // ...and here is what would have happened if it HAD been an option.
+    // `AuditLine::from_record` writes `CapabilityRecord::summary` as the detail
+    // of every REFUSED line, and `summary` renders each parameter as
+    // `name=value`. So one refused request — a store this project does not bind
+    // — puts its options in the trail verbatim, on the path where the operation
+    // never even happened. That is the argument for the body, measured rather
+    // than asserted.
+    let refused = f.use_with_input(
+        f.record("cloudflare.secret.create", "somebody-elses-store/API_KEY")
+            .param("scopes", "workers"),
+        SECRET_VALUE,
+    );
+    assert!(refused.as_error().is_some(), "{refused:?}");
+    let trail = f.trail();
+    assert!(
+        trail.contains("scopes=workers"),
+        "a parameter did not reach the trail, so the reason the value is not one \
+         no longer holds: {trail}"
+    );
+    assert!(!trail.contains(SECRET_VALUE), "the secret reached the trail on a refusal");
+
+    // §13.6: "APEX stores only the provider reference/metadata, not fictitious
+    // plaintext". Nothing was written to this service's own store.
+    assert!(
+        Store::new(f.store.clone()).list(me().uid).iter().all(|s| s.service == "cloudflare"),
+        "a secret pushed to Cloudflare was also stored here"
+    );
+}
+
+#[test]
+fn no_secret_operation_declares_a_value_option() {
+    // The property above, as a property of the DECLARATION rather than of one
+    // code path: the framework refuses an option no operation declares, so a
+    // vocabulary with no `value` cannot be handed one however the caller asks.
+    for op in SPEC.operations.iter().filter(|op| op.id.starts_with("cloudflare.secret.")) {
+        assert!(
+            !op.params.iter().any(|p| p.name == "value" || p.name == "secret"),
+            "'{}' declares an option that would put a secret in the audit trail",
+            op.id
+        );
+    }
+    let f = Fixture::new("novalue", Mode::Normal, &granted_everything());
+    let reply = f.use_it(
+        f.record("cloudflare.secret.create", "app/API_KEY")
+            .param("scopes", "workers")
+            .param("value", SECRET_VALUE),
+    );
+    let (error, message) = reply.as_error().expect("an undeclared option must be refused");
+    assert_eq!(error, ErrorKind::BadRequest, "{message}");
+    assert!(f.fake.seen().is_empty(), "it was sent anyway");
+}
+
+#[test]
+fn rotating_a_secret_matches_the_exact_name_and_not_a_prefix_of_it() {
+    // The endpoint's filter is `search`, and `search` is a SUBSTRING match: a
+    // store holding `API_KEY` and `API_KEY_OLD` answers a search for `API_KEY`
+    // with both. A build that took the first result would rotate whichever came
+    // back first — silently, and the caller would be told it worked.
+    let f = Fixture::new("rotate", Mode::Normal, &granted_everything());
+    let reply = f.use_with_input(f.record("cloudflare.secret.rotate", "app/API_KEY"), SECRET_VALUE);
+    let Response::Performed { output, exit_code, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(*exit_code, 0, "{output}");
+
+    let sent = f.fake.seen();
+    let patch = sent.iter().find(|s| s.method == "PATCH").expect("nothing was changed");
+    assert!(patch.path.ends_with(SECRET_ID), "the wrong secret was rotated: {}", patch.path);
+    assert!(!patch.path.contains(OLD_SECRET_ID), "{}", patch.path);
+    assert!(patch.body.contains(SECRET_VALUE), "{}", patch.body);
+    // A rotate does not rename or re-scope: those are the fields a replace
+    // would reset, and this endpoint is a PATCH precisely so it need not.
+    assert!(!patch.body.contains(r#""name""#), "{}", patch.body);
+    assert!(!f.trail().contains(SECRET_VALUE), "the new value is in the audit trail");
+}
+
+#[test]
+fn a_secret_that_is_not_there_is_told_apart_from_a_credential_that_was_refused() {
+    // The five answers, again, because the alternative is the defect this
+    // codebase has now found about fifteen times: a refusal reported as an
+    // absence. A caller told "no such secret" creates a second one beside the
+    // first.
+    let f = Fixture::new("fivewaysecret", Mode::Normal, &granted_everything());
+    let reply = f.use_with_input(f.record("cloudflare.secret.rotate", "app/NOT_THERE"), SECRET_VALUE);
+    let (error, message) = reply.as_error().expect("a missing secret must be refused");
+    assert_eq!(error, ErrorKind::BadRequest, "{message}");
+    assert!(message.contains("holds no secret"), "{message}");
+    assert!(message.contains("Nothing was changed"), "{message}");
+    // Nothing was PATCHed — the lookup ran and stopped there.
+    assert!(
+        f.fake.seen().iter().all(|s| s.method != "PATCH"),
+        "something was changed after a failed lookup"
+    );
+
+    // ...and a credential the far side refuses is NOT reported as an absence.
+    let denied = Fixture::new("deniedsecret", Mode::EchoUnauthorized, &granted_everything());
+    let reply = denied.use_with_input(
+        denied.record("cloudflare.secret.rotate", "app/API_KEY"),
+        SECRET_VALUE,
+    );
+    let (error, message) = reply.as_error().expect("a refused credential is not a success");
+    assert_ne!(
+        error,
+        ErrorKind::BadRequest,
+        "a refused credential was reported as a missing secret: {message}"
+    );
+    assert!(message.contains("not the same as the secret not being there"), "{message}");
+}
+
+#[test]
+fn a_binding_is_a_reference_and_the_worker_s_other_bindings_survive_it() {
+    // §13.6: "references/metadata only". What goes onto the worker is a store
+    // id and a secret NAME; nothing here ever reads the value, and there is no
+    // path by which it could.
+    //
+    // The settings PATCH replaces the `bindings` list wholesale, so this is a
+    // read-modify-write — and the pre-existing binding in the double is what
+    // proves the merge happened rather than a replacement that looked fine.
+    let f = Fixture::new("bind", Mode::Normal, &granted_everything());
+    let reply = f.use_it(
+        f.record("cloudflare.secret.bind", "app/API_KEY")
+            .param("worker", "project")
+            .param("binding", "API_KEY"),
+    );
+    let Response::Performed { output, exit_code, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(*exit_code, 0, "{output}");
+
+    let sent = f.fake.seen();
+    let patch = sent
+        .iter()
+        .find(|s| s.method == "PATCH" && s.path.ends_with("/settings"))
+        .expect("the worker's settings were not changed");
+    assert!(patch.body.contains(r#""type":"secrets_store_secret""#), "{}", patch.body);
+    assert!(patch.body.contains(&format!(r#""store_id":"{STORE_ID}""#)), "{}", patch.body);
+    assert!(patch.body.contains(r#""secret_name":"API_KEY""#), "{}", patch.body);
+    // The reference carries no value, and there is nowhere for one to come
+    // from: Cloudflare never returns it.
+    assert!(!patch.body.contains("\"text\":\"" ) || patch.body.contains("GREETING"), "{}", patch.body);
+    assert!(!patch.body.contains(SECRET_VALUE), "{}", patch.body);
+    // ...and the bindings that were already there are still there, as
+    // `inherit` — which is what keeps `OLD_SECRET`'s value. Sending that one
+    // back the way it arrived, with no `text`, is how a build silently empties
+    // a secret it was never asked to touch.
+    assert!(patch.body.contains("GREETING"), "an existing binding was dropped: {}", patch.body);
+    assert!(patch.body.contains("OLD_SECRET"), "an existing secret binding was dropped: {}", patch.body);
+    assert!(
+        patch.body.contains(r#"{"name":"OLD_SECRET","type":"inherit"}"#)
+            || patch.body.contains(r#"{"type":"inherit","name":"OLD_SECRET"}"#),
+        "an existing secret binding was sent back without its value instead of inherited: {}",
+        patch.body
+    );
+    assert!(
+        !patch.body.contains(r#""type":"secret_text""#),
+        "a write-only binding was echoed back: {}",
+        patch.body
+    );
+}
+
+#[test]
+fn a_store_this_project_did_not_bind_never_reaches_cloudflare() {
+    // The §13.1 boundary for §13.6: a project reaches the secrets in the stores
+    // its own file lists. The ERROR KIND is asserted — "you did not bind that"
+    // must not arrive as "you may not".
+    let f = Fixture::new("unboundstore", Mode::Normal, &granted_everything());
+    for (resource, why) in [
+        ("somebody-elses-store/API_KEY", "a store this project does not bind"),
+        ("app", "a store with no secret named in it"),
+    ] {
+        let reply = f.use_with_input(
+            f.record("cloudflare.secret.create", resource).param("scopes", "workers"),
+            SECRET_VALUE,
+        );
+        let (error, message) = match reply.as_error() {
+            Some(pair) => pair,
+            None => panic!("{why} was accepted"),
+        };
+        assert_eq!(error, ErrorKind::BadRequest, "{why}: {message}");
+    }
+    assert!(f.fake.seen().is_empty(), "an unbound store reached the api");
+}
+
+#[test]
+fn a_scope_cloudflare_does_not_document_is_refused_before_the_credential_is_spent() {
+    let f = Fixture::new("scopes", Mode::Normal, &granted_everything());
+    for bad in ["everything", "workers,everything", "Workers", ""] {
+        let reply = f.use_with_input(
+            f.record("cloudflare.secret.create", "app/API_KEY").param("scopes", bad),
+            SECRET_VALUE,
+        );
+        assert!(reply.as_error().is_some(), "'{bad}' was accepted as a scope");
+    }
+    assert!(f.fake.seen().is_empty(), "a bad scope reached the api");
+
+    // ...and every scope the schema lists is accepted, so the check above is
+    // not simply refusing everything.
+    let ok = f.use_with_input(
+        f.record("cloudflare.secret.create", "app/API_KEY")
+            .param("scopes", "workers,ai_gateway,access"),
+        SECRET_VALUE,
+    );
+    assert!(matches!(ok, Response::Performed { exit_code: 0, .. }), "{ok:?}");
+}
+
+#[test]
+fn a_value_given_twice_or_not_at_all_is_refused_rather_than_guessed() {
+    let f = Fixture::new("bothorneither", Mode::Normal, &granted_everything());
+    with_files(&f);
+    // Neither.
+    let neither = f.use_it(
+        f.record("cloudflare.secret.create", "app/API_KEY").param("scopes", "workers"),
+    );
+    let (_, message) = neither.as_error().expect("a secret with no value is not one");
+    assert!(message.contains("needs the secret's value"), "{message}");
+    // Both.
+    let both = f.use_with_input(
+        f.record("cloudflare.secret.create", "app/API_KEY")
+            .param("scopes", "workers")
+            .param("file", "secrets/value.txt"),
+        SECRET_VALUE,
+    );
+    let (_, message) = both.as_error().expect("two values is not one value");
+    assert!(message.contains("will not pick"), "{message}");
+    assert!(f.fake.seen().is_empty(), "one of them was sent anyway");
+}
+
+// ── §13.10, Cloudflare One ──────────────────────────────────────────────────
+//
+// Seven mutations were run against the arms below, one at a time, each restored
+// by copying the pristine file back so that cargo rebuilt rather than reusing
+// the mutant's binary. Every one turns a named test red:
+//
+// * the provider no longer stripping `client_secret` from its own reply —
+//   `the_provider_takes_the_token_secret_out_before_the_framework_ever_sees_it`.
+//   Worth reading the note in that test: with BOTH layers present this mutation
+//   changed nothing any test going through `use_capability` could see, because
+//   the framework's scrub caught it. The test was rewritten to call `perform`
+//   directly, and only then did the mutation bite. Two layers need two tests;
+//   the framework's is `service.rs`'s `SEAM-M1`;
+// * the created credential pinned to `api.cloudflare.com` — the API that
+//   ISSUED it rather than the host it may be sent to — and the host taken from
+//   the caller instead of resolved through the project's binding:
+//   `an_access_service_token_is_kept_here_…`,
+//   `a_host_this_project_did_not_bind_…`;
+// * `access.read` no longer scrubbing a SaaS `client_secret`, and the scrub no
+//   longer descending into arrays —
+//   `an_access_application_that_carries_a_client_secret_…`,
+//   `a_credential_nested_in_an_array_is_still_taken_out`. The second of those
+//   also needed its own test: every secret the double nests today is inside an
+//   OBJECT, so array descent was untested until something asserted it;
+// * the duration forwarded to Cloudflare unchecked —
+//   `a_service_token_duration_cloudflare_would_refuse_…`;
+// * an Access application id validated as 32 hex alone, which refuses the UUID
+//   half of Cloudflare's own `oneOf` —
+//   `an_access_service_token_is_kept_here_…`.
+
+#[test]
+fn an_access_service_token_is_kept_here_and_the_caller_gets_a_handle() {
+    // §13.10, end to end: "Broker service-token/Tunnel/Access credentials
+    // directly into protected storage. The agent receives handles/capabilities,
+    // not plaintext secrets."
+    //
+    // Three things are measured, and the third is the one a build gets wrong:
+    // the secret did not come back, the secret IS in the store byte for byte,
+    // and it is pinned to the HOST the project named rather than to the API
+    // that issued it. A credential stored against `api.cloudflare.com` would
+    // look stored and be a pin that says the wrong thing.
+    let f = Fixture::new("token", Mode::Normal, &granted_everything());
+    let reply = f.use_it(
+        f.record("cloudflare.access.service-token.create", "admin.example.com")
+            .param("name", "ci"),
+    );
+    let Response::Performed { output, exit_code, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(*exit_code, 0, "{output}");
+    assert!(!output.contains(CLIENT_SECRET), "the secret came back: {output}");
+    // The client id is not a secret and is useless without its other half, so
+    // it does come back — an agent that could not name the token it just made
+    // would have got a capability it cannot use.
+    assert!(output.contains(CLIENT_ID), "{output}");
+    assert!(output.contains("cf-access.admin.example.com"), "{output}");
+
+    let store = Store::new(f.store.clone());
+    let uid = me().uid;
+    let info = store
+        .info(uid, "cf-access.admin.example.com")
+        .expect("the secret was not kept");
+    assert_eq!(info.host, "admin.example.com", "pinned to the wrong host");
+    assert_eq!(info.scheme, "https");
+    assert_eq!(info.username, CLIENT_ID);
+    assert_eq!(
+        store.value(uid, "cf-access.admin.example.com").expect("value").as_str(),
+        Some(CLIENT_SECRET),
+        "a different secret was stored"
+    );
+
+    // Not in the trail either, which is the file an administrator greps.
+    assert!(!f.trail().contains(CLIENT_SECRET), "the secret is in the audit trail");
+}
+
+#[test]
+fn a_second_service_token_for_the_same_host_is_refused_before_one_is_issued() {
+    // Cloudflare shows a `client_secret` once. So a second token for a host
+    // whose secret is already stored has to be refused BEFORE the call, not
+    // after: a refusal afterwards leaves a token that exists, is in nobody's
+    // hands, and cannot be fetched again. The double's `seen()` is what proves
+    // the order — nothing was asked.
+    let f = Fixture::new("token2", Mode::Normal, &granted_everything());
+    let first = f.use_it(
+        f.record("cloudflare.access.service-token.create", "admin.example.com")
+            .param("name", "ci"),
+    );
+    assert!(matches!(first, Response::Performed { exit_code: 0, .. }), "{first:?}");
+    let calls = f.fake.seen().len();
+
+    let second = f.use_it(
+        f.record("cloudflare.access.service-token.create", "admin.example.com")
+            .param("name", "ci-again"),
+    );
+    let (error, message) = second.as_error().expect("a second token must be refused");
+    assert_eq!(error, ErrorKind::BadRequest, "{message}");
+    assert!(message.contains("cf-access.admin.example.com"), "{message}");
+    assert_eq!(f.fake.seen().len(), calls, "a second token was issued anyway");
+}
+
+#[test]
+fn a_host_this_project_did_not_bind_cannot_have_a_credential_pinned_to_it() {
+    // The pin is only worth having if the project had to be allowed to name the
+    // host, so this resolves through the same label-boundary check §13.9 uses:
+    // `notexample.com` is not inside `example.com`, however much it ends in the
+    // same letters. The ERROR KIND is asserted and not merely that something
+    // was refused — "you did not bind that" reported as "you may not" is the
+    // defect this Cloudflare block has now produced twice.
+    let f = Fixture::new("tokenzone", Mode::Normal, &granted_everything());
+    for host in ["notexample.com", "admin.example.com.attacker.test", "elsewhere.test"] {
+        let reply = f.use_it(
+            f.record("cloudflare.access.service-token.create", host).param("name", "ci"),
+        );
+        let (error, message) = match reply.as_error() {
+            Some(pair) => pair,
+            None => panic!("'{host}' was accepted as a host in this project's zone"),
+        };
+        assert_eq!(error, ErrorKind::BadRequest, "{host}: {message}");
+        assert!(message.contains("example.com"), "{message}");
+    }
+    assert!(f.fake.seen().is_empty(), "an unbound host reached the api");
+}
+
+#[test]
+fn a_service_token_duration_cloudflare_would_refuse_is_refused_before_the_call() {
+    // For every other operation, sending a value the far side rejects wastes a
+    // request. For this one it can do worse: a request that fails *after*
+    // creating the token leaves a secret nobody will ever see. So the duration
+    // is checked here, against the syntax the schema documents.
+    let f = Fixture::new("duration", Mode::Normal, &granted_everything());
+    for bad in ["8760", "h", "2h45", "forever-and-ever", "-5h", "8760H", ""] {
+        let reply = f.use_it(
+            f.record("cloudflare.access.service-token.create", "admin.example.com")
+                .param("name", "ci")
+                .param("duration", bad),
+        );
+        assert!(
+            reply.as_error().is_some(),
+            "'{}' was accepted as a duration",
+            bad.escape_debug()
+        );
+    }
+    assert!(f.fake.seen().is_empty(), "a bad duration reached the api");
+
+    // ...and the shapes the schema documents are accepted, so the check above
+    // is not simply refusing everything.
+    for good in ["forever", "8760h", "2h45m", "300ms", "30s"] {
+        assert!(valid_duration(good), "'{good}' is a duration Cloudflare accepts");
+    }
+}
+
+#[test]
+fn an_access_application_that_carries_a_client_secret_does_not_hand_it_back() {
+    // An Access application is not obviously a place a secret lives, and for a
+    // self-hosted one it is not. An OIDC SaaS application is: Cloudflare's own
+    // schema gives it a `client_secret`, and this is a READ an agent may hold.
+    // The double sends one, so this measures a removal rather than an absence.
+    let f = Fixture::new("appsecret", Mode::Normal, &["cloudflare.access.read"]);
+    let reply = f.use_it(f.record("cloudflare.access.read", "dashboard"));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert!(!output.contains(APP_SECRET), "the saas client secret came back: {output}");
+    assert!(output.contains("has been removed"), "{output}");
+    // The rest of the application still arrives — a scrub that returned
+    // nothing would pass the assertion above and be useless.
+    assert!(output.contains("admin.example.com"), "{output}");
+    assert!(output.contains(APP_ID), "{output}");
+}
+
+#[test]
+fn a_tunnel_is_read_without_ever_asking_for_its_connector_token() {
+    // The token endpoint is not declared, so no grant can reach it. The double
+    // answers that path anyway — a test that passed because there was nothing
+    // to fetch would prove nothing — and the assertion is that this build never
+    // asks.
+    let f = Fixture::new("tunnel", Mode::Normal, &granted_everything());
+    let reply = f.use_it(f.record("cloudflare.tunnel.read", "office"));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert!(output.contains("healthy"), "{output}");
+    assert!(!output.contains(TUNNEL_TOKEN), "the connector token came back: {output}");
+    assert!(
+        f.fake.seen().iter().all(|s| !s.path.ends_with("/token")),
+        "this build asked for the connector token"
+    );
+    // And there is no operation that could: the vocabulary is closed by what is
+    // declared, so this is a property of the build and not of one code path.
+    assert!(
+        !SPEC.operations.iter().any(|op| op.id.contains("tunnel.token")),
+        "a tunnel token operation was declared"
+    );
+}
+
+#[test]
+fn the_provider_takes_the_token_secret_out_before_the_framework_ever_sees_it() {
+    // **The two layers, told apart.** The framework scrubs a created credential
+    // out of anything on its way to the caller — proved in `service.rs` against
+    // a provider that deliberately leaks one — and this module takes it out as
+    // well. With both in place, removing either one changes nothing a test
+    // going through `use_capability` can see, so this one goes around the
+    // framework and calls `perform` directly. What it measures is the
+    // provider's own half: the value leaves here in `created` and nowhere else.
+    let f = Fixture::new("twolayer", Mode::Normal, &["cloudflare.access.service-token.create"]);
+    let provider = CloudflareProvider::at(f.fake.port);
+    let owner = crate::broker::owner(me().uid).expect("own uid");
+    let service = apex_secret_core::store::ServiceInfo {
+        service: "cloudflare".into(),
+        host: "127.0.0.1".into(),
+        scheme: "http".into(),
+        username: "x-access-token".into(),
+        path: String::new(),
+        auth: "bearer".into(),
+        port: Some(f.fake.port),
+        added: 0,
+    };
+    let operation = SPEC
+        .operations
+        .iter()
+        .find(|op| op.id == "cloudflare.access.service-token.create")
+        .expect("declared");
+    let mut params = operation::Params::new();
+    params.insert("name".into(), "ci".into());
+    let project = f.project.to_string_lossy().into_owned();
+    let req = Bind {
+        operation,
+        resource: "admin.example.com",
+        params: &params,
+        body: &[],
+        project: &project,
+        service: &service,
+        owner: &owner,
+        audit_id: "test-audit-id",
+    };
+    let bound = provider.bind(&req).expect("binds");
+    assert_eq!(
+        bound.creates.as_deref(),
+        Some("cf-access.admin.example.com"),
+        "the name has to be declared BEFORE the call, or a collision cannot be refused in time"
+    );
+    let performed = provider
+        .perform(&req, &bound, &SecretValue::new(TOKEN.as_bytes().to_vec()))
+        .expect("performs");
+    assert!(
+        !performed.output.contains(CLIENT_SECRET),
+        "the provider handed the secret to the framework in its output: {}",
+        performed.output
+    );
+    let created = performed.created.expect("the secret must leave here as a credential");
+    assert_eq!(created.value.as_str(), Some(CLIENT_SECRET));
+    assert_eq!(created.host, "admin.example.com");
+    assert_eq!(created.username.as_deref(), Some(CLIENT_ID));
+}
+
+#[test]
+fn a_credential_nested_in_an_array_is_still_taken_out() {
+    // The scrub descends into objects AND arrays. Both matter and neither is
+    // hypothetical: a Hyperdrive password is at `result.origin.password`, an
+    // Access SaaS secret at `result.saas_app.client_secret`, and an AI
+    // Gateway's OTel exporter carries an `authorization` inside a LIST. A
+    // top-level scrub, or one that walked objects only, would report success
+    // having removed nothing — which is the failure that looks exactly like
+    // success.
+    let body = r#"{"result":{"top":"kept","inner":{"password":"p1"},"list":[{"password":"p2"},{"keep":"yes"}]}}"#;
+    let out = without(body, &["password"], "\nremoved");
+    assert!(!out.contains("p1"), "an object-nested secret survived: {out}");
+    assert!(!out.contains("p2"), "an array-nested secret survived: {out}");
+    assert!(out.contains("kept") && out.contains("yes"), "it removed too much: {out}");
+    assert!(out.ends_with("removed"), "it removed something and did not say so: {out}");
+
+    // A reply with nothing to remove is returned unchanged and says nothing.
+    let clean = r#"{"result":{"top":"kept"}}"#;
+    assert!(!without(clean, &["password"], "\nremoved").contains("removed"));
+    // ...and something that is not the envelope at all comes back as it is,
+    // rather than becoming the string "null".
+    assert_eq!(without("not json", &["password"], "\nremoved"), "not json");
+}
+
+#[test]
+fn the_cloudflare_one_verbs_are_separate_grants() {
+    // §13.2's whole argument, on the surface where it matters most: reading an
+    // Access application, revoking its sessions and issuing a credential are
+    // three decisions, and an owner gets to make them one at a time.
+    let f = Fixture::new("onegrants", Mode::Normal, &["cloudflare.access.read"]);
+    let allowed = f.use_it(f.record("cloudflare.access.read", "dashboard"));
+    assert!(matches!(allowed, Response::Performed { exit_code: 0, .. }), "{allowed:?}");
+
+    for (operation, resource, option) in [
+        ("cloudflare.access.edit", "dashboard", None),
+        (
+            "cloudflare.access.service-token.create",
+            "admin.example.com",
+            Some(("name", "ci")),
+        ),
+        ("cloudflare.tunnel.read", "office", None),
+        ("cloudflare.tunnel.edit", "office", Some(("name", "renamed"))),
+    ] {
+        let mut rec = f.record(operation, resource);
+        if let Some((name, value)) = option {
+            rec = rec.param(name, value);
+        }
+        let reply = f.use_it(rec);
+        let (error, message) = reply
+            .as_error()
+            .unwrap_or_else(|| panic!("'{operation}' ran under a grant for access.read"));
+        assert_eq!(error, ErrorKind::PermissionDenied, "{operation}: {message}");
+    }
 }
 
 /// §13.2's list, so the test above compares against the roadmap rather than
