@@ -159,6 +159,27 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
                 caller,
                 kind,
                 "ask for a system-access grant",
+                // §7's second column, for the session being started (P0-014).
+                //
+                // The policy is THIS request's dimension 6 — normalised and
+                // validated above — and not the daemon's configured default,
+                // which `Config::policy()` only assembles for a session
+                // started without the flags. A session started with
+                // `--origin-policy remote` overrides it, and reading the
+                // config here would mean the per-session dimension governs
+                // nothing.
+                //
+                // `scope: None` is not an oversight: this call is deliberately
+                // ahead of `registry.allocate()`, so that a refused password
+                // leaves no reserved id behind, and there is therefore no id
+                // for the key to have signed over. `Challenge.session` is
+                // `Option<u32>` for exactly this caller.
+                &crate::privilege::Elevating {
+                    policy: policy.origin,
+                    scope: None,
+                    ttl_ms,
+                    factor: req.second_factor.as_ref(),
+                },
             )
             .map_err(|e| GrantRefused(e.to_string()))?;
             Some((kind, ttl_ms, grant_origin, proof))

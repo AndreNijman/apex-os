@@ -1026,8 +1026,8 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
 
         Request::RevokeSystemGrant { id } => privilege::revoke_system_grant(daemon, caller, id),
 
-        Request::RenewSystemGrant { id, ttl_ms } => {
-            privilege::renew_system_grant(daemon, caller, id, ttl_ms)
+        Request::RenewSystemGrant { id, ttl_ms, second_factor } => {
+            privilege::renew_system_grant(daemon, caller, id, ttl_ms, second_factor.as_ref())
         }
 
         // ── the secret broker ───────────────────────────────────────────────

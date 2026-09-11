@@ -537,3 +537,52 @@ fn an_unknown_origin_name_is_refused_with_the_ones_that_work() {
     // succeed, and it must say something.
     assert!(!msg.is_empty(), "{reply}");
 }
+
+#[test]
+fn a_remote_session_asking_for_root_is_told_to_touch_a_key_not_to_set_the_flag() {
+    // The first test anywhere that reaches `session.rs`'s construction of
+    // `Elevating`, and it exists to close a hole the card has carried since
+    // round 10.
+    //
+    // `privilege::tests` calls `decide_origin` with a hand-built `Elevating`,
+    // so a defect in how a *caller* fills that struct is invisible to every
+    // one of them. The live one is `session.rs`'s `policy: policy.origin`
+    // being replaced by the config default — the "reads the wrong policy
+    // instance" defect, and the sixth instance of a gate whose only caller
+    // cannot fail it. It would pass the entire unit suite.
+    //
+    // The two readings are distinguishable with no key, no password and no
+    // session ever being started, because they refuse with different
+    // sentences. The REQUEST's policy is permissive, so the gate gets as far
+    // as "none was touched for this request". The CONFIG default is
+    // `local_elevation_only`, whose refusal instead tells the caller the
+    // owner can allow it with `--origin-policy remote`. Asserting which
+    // sentence comes back is asserting which policy instance the gate read.
+    //
+    // Nothing here can prompt. `authorise_grant` runs before the worktree,
+    // the checkpoint, the reserved id and the PTY, and this is refused inside
+    // it — at the origin gate, before polkit is asked anything. That is the
+    // constraint this whole file is shaped by.
+    let h = harness!("remote-elevation-policy");
+    let mut c = h.conn();
+    if c.call(r#"{"cmd":"declare_origin","origin":"claude-remote-control"}"#)["reply"] == "error" {
+        // This process could not be classified at all, so there is no origin
+        // to narrow — the same guard the tests above use for a runner.
+        return;
+    }
+    let reply = c.call(
+        r#"{"cmd":"run","cwd":"/tmp","cols":80,"rows":24,"system":"session","origin":"remote_elevation_allowed"}"#,
+    );
+    assert_eq!(reply["reply"], "error", "{reply}");
+    let msg = reply["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("none was touched"),
+        "the gate must read the request's own origin policy, which permits remote elevation, \
+         and refuse only for the missing factor: {msg}"
+    );
+    assert!(
+        !msg.contains("--origin-policy"),
+        "that is the refusal for a policy which forbids remote elevation, so the gate read the \
+         config default instead of the policy on the request: {msg}"
+    );
+}

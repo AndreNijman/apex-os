@@ -795,6 +795,18 @@ pub enum Request {
         /// The new window, from now. Bounded like any other, and it is a
         /// fresh authentication rather than an extension of the old consent.
         ttl_ms: u64,
+        /// A security key's answer, when the session that holds this grant is
+        /// driven from an origin §7 does not give the local column to. See
+        /// [`RunRequest::second_factor`], which this follows exactly — down to
+        /// not bumping the protocol.
+        ///
+        /// The challenge it answers must have been issued for **this session**
+        /// (`session: Some(id)`), not for a session being started:
+        /// `webauthn::SecondFactor::may_answer_for` compares the scope in both
+        /// directions, so a touch collected while starting a session cannot
+        /// renew an existing grant.
+        #[serde(default)]
+        second_factor: Option<SubmittedFactor>,
     },
 
     // ── the secret broker (§4) ──────────────────────────────────────────────
@@ -926,6 +938,31 @@ fn default_log_bytes() -> usize {
     64 * 1024
 }
 
+/// A security key's answer to an elevation challenge (§7, P0-014).
+///
+/// What a client sends is the *answer*, never the verdict. A
+/// [`crate::webauthn::SecondFactor`] has no public constructor and no public
+/// field, so it cannot be serialised into this protocol at all: the daemon has
+/// to mint one by redeeming the challenge itself and checking the signature.
+/// That is the whole reason the receipt is a type rather than a `bool` — a
+/// `bool` on this wire would be a client asserting that it had been verified.
+///
+/// The three fields are exactly what a human at another machine can copy back
+/// from the reply they were given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmittedFactor {
+    /// The nonce from [`Response::ElevationChallenge`], naming which challenge
+    /// this answers. Spent on arrival, whatever the daemon decides next.
+    pub nonce: String,
+    /// Which enrolled key answered, by label — the name `apex agent key list`
+    /// prints.
+    pub credential: String,
+    /// The four lines `fido2-assert -G` printed, verbatim: base64 client data
+    /// hash, relying party id, base64 authenticator data (the CBOR byte
+    /// string, as libfido2 prints it) and base64 DER signature.
+    pub assertion: String,
+}
+
 /// The parameters of a new session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRequest {
@@ -975,6 +1012,22 @@ pub struct RunRequest {
     /// window to be explicit. See [`crate::grant::ttl_for`].
     #[serde(default)]
     pub ttl_ms: Option<u64>,
+    /// A security key's answer, for a session asking to elevate from an origin
+    /// §7 does not give the local column to (P0-014).
+    ///
+    /// `None` is the ordinary case, and it is what every local request is:
+    /// [`crate::webauthn::may_elevate`] declines to have an opinion about a
+    /// local origin, so a session started by a human at this machine never
+    /// needs one. From anywhere else this is what `--origin-policy remote`
+    /// costs.
+    ///
+    /// **Not a `PROTOCOL_VERSION` bump**, for the reason
+    /// [`Request::ElevationChallenge`] records: a daemon that predates the
+    /// field ignores it and then refuses the elevation for want of a local
+    /// origin. The failure mode of an unknown field here is losing an
+    /// elevation, never gaining one.
+    #[serde(default)]
+    pub second_factor: Option<SubmittedFactor>,
     pub cols: u16,
     pub rows: u16,
     /// Environment additions, applied after the sandbox is built.
@@ -1566,6 +1619,7 @@ mod tests {
                 worktree: None,
                 checkpoint: false,
                 ttl_ms: None,
+                second_factor: None,
                 cols: 80,
                 rows: 24,
                 env: vec![],
@@ -1576,7 +1630,12 @@ mod tests {
         assert!(run(SystemAccess::Session).waits_on_a_human());
         assert!(run(SystemAccess::Unsafe).waits_on_a_human());
         assert!(!run(SystemAccess::None).waits_on_a_human());
-        assert!(Request::RenewSystemGrant { id: 1, ttl_ms: 60_000 }.waits_on_a_human());
+        assert!(Request::RenewSystemGrant {
+            id: 1,
+            ttl_ms: 60_000,
+            second_factor: None
+        }
+        .waits_on_a_human());
         // Giving privilege up asks nobody, so it keeps its deadline.
         assert!(!Request::RevokeSystemGrant { id: 1 }.waits_on_a_human());
         assert!(!Request::SystemGrants.waits_on_a_human());
@@ -1604,6 +1663,17 @@ mod tests {
                 worktree: Some("issue-217".into()),
                 checkpoint: true,
                 ttl_ms: None,
+                // Carried through the round trip with a value, not `None`:
+                // the field is the one thing on this request that a daemon
+                // reads to decide whether root is handed out, and a
+                // round-trip test that only ever sends `None` would not
+                // notice a rename.
+                second_factor: Some(SubmittedFactor {
+                    nonce: "bm9uY2U=".into(),
+                    credential: "yubikey".into(),
+                    assertion: "Y2RoCmFwZXgtYWdlbnQubG9jYWxob3N0\napex-agent.localhost\nWCU=\nMEQ=\n"
+                        .into(),
+                }),
                 cols: 80,
                 rows: 24,
                 env: vec![("K".into(), "V".into())],
@@ -1625,6 +1695,7 @@ mod tests {
                 worktree: None,
                 checkpoint: false,
                 ttl_ms: None,
+                second_factor: None,
                 cols: 80,
                 rows: 24,
                 env: vec![],
@@ -1646,7 +1717,11 @@ mod tests {
             Request::Grants,
             Request::SystemGrants,
             Request::RevokeSystemGrant { id: 3 },
-            Request::RenewSystemGrant { id: 3, ttl_ms: 900_000 },
+            Request::RenewSystemGrant {
+                id: 3,
+                ttl_ms: 900_000,
+                second_factor: None,
+            },
             Request::ElevationChallenge {
                 session: None,
                 kind: GrantKind::BreakGlass,
