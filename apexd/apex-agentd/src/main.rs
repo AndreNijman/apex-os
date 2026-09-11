@@ -1138,6 +1138,30 @@ fn collect_sessions(daemon: &Arc<Daemon>) -> Vec<SessionInfo> {
     out
 }
 
+/// The one lock for every test in this crate that redirects an XDG variable.
+///
+/// `set_var` is process-global and `cargo test` runs targets in threads, so a
+/// test that points `XDG_STATE_HOME` at a temporary directory is changing what
+/// every other thread sees. `grants.rs` had a lock for that and so did
+/// `lock_tests`, and two locks over one variable serialise nothing: a
+/// `grants::tests` tempdir dropping between this module's `issue` and its
+/// `grant::load` restored the real `XDG_STATE_HOME` mid-test, and the grant
+/// record was looked for in a directory it had never been written to. It
+/// failed only under the full suite, never alone, which is the signature.
+///
+/// One lock, at the crate root, where both can reach it.
+#[cfg(test)]
+pub mod test_env {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    pub fn lock() -> MutexGuard<'static, ()> {
+        static L: OnceLock<Mutex<()>> = OnceLock::new();
+        L.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod lock_tests {
     //! §7's lock rules, at the point where a decision becomes an effect
@@ -1206,11 +1230,7 @@ mod lock_tests {
         fn new() -> Sandbox {
             use std::sync::atomic::{AtomicU32, Ordering};
             static N: AtomicU32 = AtomicU32::new(0);
-            static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-            let guard = L
-                .get_or_init(|| std::sync::Mutex::new(()))
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let guard = crate::test_env::lock();
             let path = std::env::temp_dir().join(format!(
                 "apex-lock-test-{}-{}",
                 std::process::id(),
