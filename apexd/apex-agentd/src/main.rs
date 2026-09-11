@@ -494,6 +494,40 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
         }
 
         Request::Inject { id, source } => inject::handle(daemon, caller, id, &source),
+        Request::Input { id, data } => {
+            // A session may not type into a sibling.
+            //
+            // This is the only verb on the socket that acts on a session other
+            // than the caller's own AND has an effect the target cannot tell
+            // from a person at the keyboard. `Signal` acts on another session
+            // too, but a signal is visible to the agent as a signal; text
+            // arriving on the PTY is indistinguishable from typing, so an
+            // agent that could send it could instruct another agent and
+            // borrow its permissions. Hooks run inside the sandbox and reach
+            // this socket, so the caller has to be established rather than
+            // assumed.
+            //
+            // Resolved from the connection's peer credentials by the same
+            // ancestry walk the privilege verbs use, never from the request:
+            // `$APEX_AGENT_SESSION` lives inside a sandbox the agent controls.
+            // A connection that is not inside any session — the shell, or a
+            // person in an ordinary terminal — is what this verb is for.
+            let who = privilege::origin(daemon, caller);
+            if let Some(refusal) = privilege::refuse_input(&who, id) {
+                return refusal;
+            }
+            let Some(handle) = lookup(daemon, id) else {
+                return no_such_session(id);
+            };
+            match session::write_input(&handle, data.as_bytes()) {
+                session::Input::Written => Response::Ok,
+                session::Input::Exited => Response::error(
+                    ErrorKind::SessionExited,
+                    format!("session {id} has already exited"),
+                ),
+                session::Input::Failed(e) => Response::error(ErrorKind::Internal, e),
+            }
+        }
 
         Request::Signal { id, signal } => {
             let Some(number) = apex_agent_core::session::signal_number(&signal) else {

@@ -66,6 +66,7 @@ complete -c apex -n '__apex_at 1' -a pkg -d 'the package layer'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a run -d 'start an agent here'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a list -d 'sessions'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a attach -d 'reattach to a session'
+complete -c apex -n '__apex_group agent; and __apex_at 2' -a input -d 'type text into a session'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a pause -d 'stop a session'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a resume -d 'continue a paused session'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a kill -d 'end a session'
@@ -81,7 +82,7 @@ complete -c apex -n '__apex_group agent; and __apex_at 2' -a rm -d 'forget a fin
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a prune -d 'forget every finished session'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a enable -d 'turn the runtime on'
 
-for v in attach pause resume kill logs rm status diff undo
+for v in attach input pause resume kill logs rm status diff undo
     complete -c apex -n "__apex_verb agent $v" -a '(_apex_session_ids)' -d session
 end
 complete -c apex -n '__apex_verb agent default' -a '(_apex_agent_names)' -d agent
