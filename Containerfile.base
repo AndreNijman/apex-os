@@ -125,7 +125,17 @@ RUN set -eux; \
     # §3.3: root is delegated. Neither elevation action may be reachable
     # without a human, and neither may cache the answer — `_keep` is a window
     # in which the answer is yes and nobody was asked.
-    ! grep -q '_keep' /usr/share/polkit-1/actions/org.apexos.agent.policy; \
+    #
+    # Anchored to an <allow_*> element, and that is a bug fix rather than
+    # tidying. The assertion used to be a bare `! grep -q '_keep'` over the
+    # whole file, which the policy file's own comment matches: it has a
+    # section headed "and never the _keep variants" explaining why
+    # auth_admin_keep is forbidden. So the check failed on a correct file, and
+    # `set -eux` made that a failed image build — for prose that agrees with
+    # it. It could only ever have failed, never passed, which is the same
+    # defect as an assertion that can only ever pass, with the sign flipped.
+    ! grep -qE '<allow_[a-z]+>[a-z_]*_keep' \
+        /usr/share/polkit-1/actions/org.apexos.agent.policy; \
     ! grep -q '<allow_any>yes' /usr/share/polkit-1/actions/org.apexos.agent.policy; \
     ! grep -q '<allow_inactive>yes' /usr/share/polkit-1/actions/org.apexos.agent.policy
 
