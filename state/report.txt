@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-11 22:15 AWST
+APEX ROADMAP — resume report — 2026-09-12 02:02 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,30 +16,30 @@ APEX ROADMAP — resume report — 2026-09-11 22:15 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p0-014     ALIVE      P0-014,P0-015                      task/p0-014-remote-lock
+  p0-014     dead 223m  P0-014,P0-015                      task/p0-014-remote-lock
              head 2dd67e7f test(privilege): the gate's passing branch had no tes
-             dirty 9 file(s), 0 unpushed, card 16m
+             dirty 10 file(s), 0 unpushed, card 243m
              NEXT **Round 11 (2026-09-11). Commit 4b is DONE and pushed: `2dd67e7`.*
 
-  p2-010     ALIVE      P2-011                             task/p2-010-hardware-storage
+  p2-010     dead 223m  P2-011                             task/p2-010-hardware-storage
              head 23b543ad test(agentd): §P2-011 two guards the battery caught b
-             dirty 1 file(s), 0 unpushed, card 8m
+             dirty 1 file(s), 0 unpushed, card 235m
              NEXT **Round 11. `budget.rs` and its tests are WRITTEN, committed and p
 
-  p1-025     ALIVE      P1-026                             task/p1-025-skills-plugins
-             head be1e1780 test(provenance): the two arms nothing reached, and a
-             dirty 0 file(s), 0 unpushed, card 10m
-             NEXT **THE UNIT IS COMPLETE.** Round 11 closed the three things round 1
+  base-partials dead 221m  BASE-009,BASE-010,BASE-013,BASE-014 task/base-partials
+             head 836df42f feat(greet): the session picker names the desktops, n
+             dirty 0 file(s), 0 unpushed, card 262m
+             NEXT Round 11 in progress. BASE-018, BASE-002, BASE-016, BASE-005 CLOSE
 
-  p1-023     ALIVE      P1-024                             task/p1-023-handoff-lifecycle
-             head 665a3cc Merge task/p0-015-lock-tests into roadmap/v2.2 (P0-015
-             dirty 0 file(s), 0 unpushed, card 4m
-             NEXT **THIS UNIT IS COMPLETE. P1-023, P1-024 and P1-029 are all done. N
+  desktop-ai-apps dead 221m  (new, from the 2026-09-11 CLAUDE.md decision) task/desktop-ai-apps
+             head fbf06a4f Merge task/p1-023-push-to-talk-daemon into roadmap/v2
+             dirty 0 file(s), 0 unpushed, card 225m
+             NEXT Read Containerfile.core stage 5a-zed and tests/test-apex-editors.s
 
-  p1-035     dead 11m   P1-037                             task/p1-035-agent-tooling
-             head feb336eb test(agent): SigBlk=0 in sigwait is the syscall, not 
-             dirty 3 file(s), 0 unpushed, card 12m
-             NEXT **THE UNIT IS COMPLETE.** P1-035, P1-036 and P1-037 are all DONE, 
+  p1-005     dead 223m  P1-005,P1-006,P1-007               task/p1-005-cloudflare-caps
+             head fbf06a4f Merge task/p1-023-push-to-talk-daemon into roadmap/v2
+             dirty 0 file(s), 0 unpushed, card 223m
+             NEXT Confirm the documented Cloudflare REST paths for R2 / D1 / KV / Qu
 
 
 ────────────────────────────────────────────────────────────────────────────
@@ -78,11 +78,11 @@ APEX ROADMAP — resume report — 2026-09-11 22:15 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 22:15:35 AWST 8ms
+  snapshot timer: active   last 2min 15s Sat
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    2d28ded  roadmap-state
+    apex-os    40a01cd  roadmap-state
     apex-os    7b3fb62  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
     apex-os    1951fdc  wt-disposable-
@@ -99,15 +99,15 @@ APEX ROADMAP — resume report — 2026-09-11 22:15 AWST
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
     apex-os    9b605a1  wt-p0-011b-
-    apex-os    c8a1562  wt-p0-014-
+    apex-os    85e4480  wt-p0-014-
     apex-os    580c657  wt-p0-019-os-
     apex-os    00c1973  wt-p0-025-os-
     apex-os    eda5ef8  wt-p1-001-
     apex-os    a23175f  wt-p1-002-
     apex-os    c260504  wt-p1-018-
-    apex-shell ebf86c2  apex-shell-
+    apex-shell 9839ace  apex-shell-
     apex-shell df979e1  int-shell-
-    apex-shell 6b59431  wt-base-shell-
+    apex-shell f8beed1  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
     apex-shell 75049cf  wt-greeter-shell-
     apex-shell ed92eaa  wt-lockhint-
@@ -134,34 +134,34 @@ APEX ROADMAP — resume report — 2026-09-11 22:15 AWST
   5 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
+    desktop-ai-apps (new, from the 2026-09-11 CLAU   Ship the Claude and ChatGPT desktop apps in the image, updat
     p0-014         P0-014,P0-015                    Remote Control privilege policy and lock-state policy, wired
-    p1-023         P1-023,P1-024,P1-029             Global push-to-talk routing, cross-agent handoff packet, loc
-    p1-025         P1-025,P1-026,P1-027,P1-028      Skill inventory and audit, plugin provenance and isolation, 
-    p1-035         P1-035,P1-036,P1-037             Screenshot/file injection into TUI agents, worktree test/con
+    p1-005         P1-005,P1-006,P1-007             Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets
+    base-partials  BASE-002,BASE-005,BASE-009,BAS   Close the eight BASE preservation items still marked partial
     p2-e           P2-010,P2-011,P2-014,P2-015      Hardware qualification database, agent cgroup budgets, Stora
 
   READY (dependencies believed satisfied — confirm against the agent table above):
-    desktop-ai-apps (new, from the 2026-09-11 CLAU   Ship the Claude and ChatGPT desktop apps in the image, updat
     p1-038-hardware P1-038                           The 18 labwc matrix rows that need real applications
-    p1-005         P1-005,P1-006,P1-007             Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets
-                   conflicts with p1-002
     p1-008         P1-008,P1-009,P1-010             Cloudflare One, Workers AI and AI Gateway, Secrets Store
                    conflicts with p1-002, p1-005
-    p1-011         P1-011,P1-012,P1-013             Temporary task credentials, transparent brokered wrangler/cl
-                   conflicts with p1-005, p1-008
     p1-014         P1-014,P1-015,P1-016,P1-017      Cloudflare environment protection, worktree preview environm
                    conflicts with p1-011
+    p1-025         P1-025,P1-026,P1-027,P1-028      Skill inventory and audit, plugin provenance and isolation, 
     p1-040-per-output-scaling P1-040                           Per-output scaling: two densities, two sizes, one shell
     p1-052-relay   P1-051,P1-052                    The APEX Remote remainder: relay, reconnect, mDNS, connectio
+    p1-053a        P1-053,P1-054,P1-055             Android app foundation, Agent Center parity, full PTY/TUI re
+    p1-053b        P1-056,P1-057,P1-058             Android Projects/Workspaces/Worktrees/Tasks/Review UX, capab
+                   conflicts with p1-053a
 
   HELD:
-    p1-061         after p1-025
+    p1-011         after p1-005
+    p2-a           after p1-005
     final          after *
 
   COMPLETE (every roadmap item done — not offered again).
   This says the WORK is done, not that it is landed — check the
   unlanded section above before assuming roadmap/v2.2 carries it:
-    p1-018, p1-020, p1-044
+    p1-018, p1-020, p1-023, p1-035, p1-044
 
 ────────────────────────────────────────────────────────────────────────────
   how to resume

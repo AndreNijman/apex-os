@@ -1,7 +1,7 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-11T22:40+08:00",
-  "_round": "Round 13. THREE UNITS FINISHED AND LANDED in one session, plus the user-directed editors work, plus CI running for the first time in the program's history. Counts 60/24/41/2 -> 64 done / 25 partial / 36 todo / 2 blocked of 127. Landed on apex-os: p1-035 (c3e29af2), p1-025 (ba105394), p1-023's apex-os half (fbf06a4f), the zed fix (ec91e92) and four CI commits; on apex-shell: the p1-023 shell half and the launcher's terminal routing (9888537).",
+  "updated": "2026-09-12T02:10+08:00",
+  "_round": "Round 14. All five round-13 agents died together on the session limit at ~22:45 (resets 2am); the limit reset and the same five units were re-dispatched at 02:10 with fresh agents. Two of the five had pushed real progress first - p0-014's commit 4b (2dd67e7) and p2-010's budget.rs with its tests (23b543ad) - and two died carrying findings that are now in their successors' briefs rather than lost.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 1afd807 -> fbf06a4f across nine pushes. Units: p1-035 merge c3e29af2 (P1-035/P1-036/P1-037; disposable 46 -> 58/0 re-verified by the orchestrator ON the landed tip, mutation 9 KILLED 50/8); p1-025 merge ba105394 (P1-025/026/027/028; six mutation pairs, two checked for VACUITY rather than assumed, clippy PASS, workspace 0 failures over five repeats); p1-023's apex-os half merge fbf06a4f (P1-024; workspace 2366 -> 2372/0, handoff e2e 6 -> 8/0 with SKIP count 0). Plus ec91e92 the zed desktop-entry fix and the terminal-entry launchability merge, both user-directed.",
     "apex-shell": "roadmap/v2.2 665a3cc -> 9888537: the p1-023 shell half and DesktopExec.qml's terminal routing with its headless runner and fixtures."
@@ -30,13 +30,13 @@
       "branch": "task/p0-014-remote-lock",
       "second_worktree": "/var/tmp/apex-work/wt-p0-015-shell",
       "second_branch": "task/p0-015-lock-tests",
-      "agent_id": "a0d4b3b493991eca5",
+      "agent_id": "af5342261e9b13e15",
       "queue_id": "p0-014",
-      "dispatched": "2026-09-11T22:02+08:00",
+      "dispatched": "2026-09-12T02:08+08:00",
       "fresh_agent_for_card": "p0-014",
-      "session": "round 12 orchestrator, pid 59982",
+      "session": "round 14 orchestrator, pid 59982",
       "title": "finish commit 4 (the enforcement) and commit 5, on a branch whose first six commits have landed",
-      "at_dispatch": "The last P0 work. HEAD 62b0fea is a merge of the integration tip into the branch; FOUR dirty paths (apex-agent-core Cargo.toml + webauthn.rs, apex-agentd Cargo.toml + privilege.rs) are commit 4b mid-write. The card's next action is exact: lift Signer and its flag constants and challenge builders out of the #[cfg(test)] child into a pub mod test_support behind a test-support feature, because the only thing in this repository that can mint a VALID assertion is that Signer - a sequence it cannot reach can be tested against refusals and never once against a receipt. Then commit 5, the validate_for relaxation, last. Asked again for test-apex-privilege-requests.sh and system_grants.rs before/after: those nine assertions are the last of round 5's two red suites and four rounds of orchestrators have tracked them.",
+      "at_dispatch": "Commit 4b DONE and pushed (2dd67e7), on top of commits 1-3 and the harness fix; 10 dirty paths to finish, commit and push. HANDED THE CI EVIDENCE ITS CARD SAID DID NOT EXIST: a GitHub runner's /proc/N/cgroup reads '/system.slice/hosted-compute-agent.service', a THIRD classification distinct from this laptop's session scope and from scheduled-job, and two request_origin tests fail there while nine pass - on a tip that already carries cca4442. Told explicitly NOT to weaken the gate to make CI green: a runner genuinely has no human at it, the gate saying so is the gate working, and the harness is what must present a real local origin. Then commit 5, and the long-open before/after counts.",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
@@ -47,13 +47,13 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p2-010",
       "branch": "task/p2-010-hardware-storage",
-      "agent_id": "af0cbe156be6ff879",
+      "agent_id": "adc7ed64356ca851f",
       "queue_id": "p2-e",
-      "dispatched": "2026-09-11T22:02+08:00",
+      "dispatched": "2026-09-12T02:08+08:00",
       "fresh_agent_for_card": "p2-010",
-      "session": "round 12 orchestrator, pid 59982",
+      "session": "round 14 orchestrator, pid 59982",
       "title": "P2-011 agent cgroup budgets - the last item of a unit whose other three are done and recorded",
-      "at_dispatch": "CARD'S NEXT IS ONE STEP STALE and the brief makes correcting it the first card edit: it still says 'write budget.rs', but 1086478 (§P2-011 per-agent cgroup budgets) and 84aea0a (§P2-011 against a real daemon) are both pushed. Three of four items are already landed; P2-011 is the last and is largely built. Remaining: mutation proofs, a full run, clippy, and an honest per-item verdict. Re-handed the measured design facts, especially that io is absent at every cgroup level and must be a Reading carrying that reason rather than a budget of zero.",
+      "at_dispatch": "budget.rs and its tests written, committed and pushed (23b543ad); one dirty path to finish. CARRIES FORWARD ITS PREDECESSOR'S DYING FINDING, which the orchestrator independently hit days earlier and abandoned a run over: apex-agentd's unit tests can HANG FOREVER - three threads blocked with no timeout, egress::tests on a unix-socket read and two pty::tests on pipe reads. Any full-workspace run can stall a CI job or an agent indefinitely, and a hang is not a pass. Told to settle what it is and, if it is outside P2-011's scope, record it precisely as a FOUND rather than fix it silently.",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
@@ -69,13 +69,13 @@
       "branch": "task/base-partials",
       "second_worktree": "/var/tmp/apex-work/wt-base-shell",
       "second_branch": "task/base-partials-shell",
-      "agent_id": "a68032f7b7ef20d26",
+      "agent_id": "a1fc68867fbb12acf",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-11T22:35+08:00",
-      "session": "round 13 orchestrator, pid 59982",
+      "dispatched": "2026-09-12T02:08+08:00",
+      "session": "round 14 orchestrator, pid 59982",
       "queue_id": "base-partials",
       "title": "Close the four BASE preservation items still partial",
-      "at_dispatch": "Four of eight closed and landed. THE KATANA BAN HITS TWO OF THE FOUR: BASE-009 is Gaming Mode and was going to lean on the gaming box, BASE-010 needs a live model no machine here has loaded. Told plainly that a precisely named missing assertion on those two is the expected and correct outcome, and that closing either on a weaker check is not. BASE-013 and BASE-014 are the reachable pair - the greeter fix (836df42, 'the session picker names the desktops, not the compositors') is already on the branch unlanded, and its predecessor PROVED wtype works, which is the machinery BASE-014's last assertion needed: no test in either repo has ever pressed a key after labwc --reconfigure."
+      "at_dispatch": "Four of eight closed and landed; BASE-009, BASE-010, BASE-013, BASE-014 remain. The shell worktree carries 3 dirty paths that are its predecessor's step 0 - 'lock in the shell WIP, but verify the QML actually loads and mutation-prove before committing' - and that instruction was repeated verbatim. THE KATANA BAN HITS TWO OF THE FOUR and the brief says a precisely named gap on BASE-009 and BASE-010 is the correct outcome, not a failure. BASE-013/BASE-014 are the reachable pair: the greeter fix is already on the branch unlanded, and wtype was PROVED to work, which is the machinery BASE-014's last assertion needed."
     },
     {
       "slug": "desktop-ai-apps",
@@ -85,13 +85,13 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-ai-apps",
       "branch": "task/desktop-ai-apps",
-      "agent_id": "aba27eef62778675f",
+      "agent_id": "a87d87d332240f853",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-11T22:35+08:00",
-      "session": "round 13 orchestrator, pid 59982",
+      "dispatched": "2026-09-12T02:08+08:00",
+      "session": "round 14 orchestrator, pid 59982",
       "queue_id": "desktop-ai-apps",
       "title": "Ship the Claude and ChatGPT desktop apps in the image, updated only by apex update",
-      "at_dispatch": "Andre's product decision, dispatched with its measurements already taken so the agent works the gap rather than the survey: Claude Desktop is installed manually under /usr/local, which is /var/usrlocal and therefore NOT in the image - the precise reason a fresh install lacks it; the daily user timer that must be retired is real and running with its schedule recorded; and ChatGPT desktop is installed nowhere and appears in no Containerfile, so settling its packaging is the FIRST job rather than an assumption, and 'there is no honest way to ship it' is an acceptable answer if that is what it finds. Pointed at stage 5a-zed as the pattern to follow BECAUSE it just failed silently for months the other way, and told to retire the live timer only after an in-image version lands - disabling it today would leave Andre with no updates at all."
+      "at_dispatch": "Card written, nothing committed. CARRIES FORWARD THE ADVISOR FINDING ITS PREDECESSOR RECORDED AS IT DIED, which changes how the work is verified rather than what is built: the image copy at /usr/bin will be SHADOWED by the L16's /usr/local stopgap tree, since /usr/local/bin precedes /usr/bin on PATH and Claude Desktop is installed there manually today. So 'it works' on this machine may be measuring the stopgap. Told to check `command -v` against both prefixes explicitly and say in the evidence which one answered."
     },
     {
       "slug": "p1-005",
@@ -103,13 +103,13 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p1-005",
       "branch": "task/p1-005-cloudflare-caps",
-      "agent_id": "aebb501c7f1f76442",
+      "agent_id": "a78afd4e40b9e9730",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-11T22:35+08:00",
-      "session": "round 13 orchestrator, pid 59982",
+      "dispatched": "2026-09-12T02:08+08:00",
+      "session": "round 14 orchestrator, pid 59982",
       "queue_id": "p1-005",
       "title": "Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets",
-      "at_dispatch": "First of the mutually-conflicting Cloudflare suite to be dispatched; p1-002, p1-008 and p1-011 must stay undispatched while it holds a slot. Told to build ON the existing cloudflare provider and the reworked secret-broker contract rather than beside them, and given the hard constraint: NO live account calls, no real credentials, no real bucket/database/namespace/queue/record - prove it against fixtures the way the trust gate was proven against a minted CA rather than production sigstore, and if a criterion truly needs a live account, say so and leave it partial."
+      "at_dispatch": "Card written, nothing committed; its NEXT is to confirm the documented Cloudflare REST paths from documentation and from the code already on the tip, NOT by calling a live account. The no-live-calls constraint was restated with the reason: prove it against fixtures the way the trust gate was proven against a minted CA rather than production sigstore, and if a criterion truly needs a live account, leave it partial and say so."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
