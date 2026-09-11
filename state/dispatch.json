@@ -1,12 +1,12 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-12T02:10+08:00",
-  "_round": "Round 14. All five round-13 agents died together on the session limit at ~22:45 (resets 2am); the limit reset and the same five units were re-dispatched at 02:10 with fresh agents. Two of the five had pushed real progress first - p0-014's commit 4b (2dd67e7) and p2-010's budget.rs with its tests (23b543ad) - and two died carrying findings that are now in their successors' briefs rather than lost.",
+  "updated": "2026-09-12T03:05+08:00",
+  "_round": "Round 15. THREE UNITS FINISHED AND LANDED since round 14 - desktop-ai-apps, base-partials and p1-005 - and four fresh units were dispatched into the freed slots. Counts 64/25/36/2 -> 67 done / 25 partial / 33 todo / 2 blocked of 127. BASE is down to two partials, both hardware-blocked and both named as assertions rather than topics.",
   "_landed_this_round": {
-    "apex-os": "roadmap/v2.2 1afd807 -> fbf06a4f across nine pushes. Units: p1-035 merge c3e29af2 (P1-035/P1-036/P1-037; disposable 46 -> 58/0 re-verified by the orchestrator ON the landed tip, mutation 9 KILLED 50/8); p1-025 merge ba105394 (P1-025/026/027/028; six mutation pairs, two checked for VACUITY rather than assumed, clippy PASS, workspace 0 failures over five repeats); p1-023's apex-os half merge fbf06a4f (P1-024; workspace 2366 -> 2372/0, handoff e2e 6 -> 8/0 with SKIP count 0). Plus ec91e92 the zed desktop-entry fix and the terminal-entry launchability merge, both user-directed.",
-    "apex-shell": "roadmap/v2.2 665a3cc -> 9888537: the p1-023 shell half and DesktopExec.qml's terminal routing with its headless runner and fixtures."
+    "apex-os": "roadmap/v2.2 fbf06a4f -> 4f80746e across three merges. 3bf8e558 desktop-ai-apps: both AI apps baked into the image from new stage 5a-aiapps, proven END TO END in a scratch fedora-bootc:43 container with the stanza text extracted verbatim, 11 mutation pairs. 59245497 base-partials: BASE-013 and BASE-014 closed, five product defects fixed. 4f80746e p1-005: sixteen Cloudflare capabilities, +39 tests to 2448/0, 23 mutation pairs, no live account touched.",
+    "apex-shell": "roadmap/v2.2 9888537 -> cd324ec: the base-partials shell half (Settings names the mode, the PowerMenu gate, the PowerControl verb nothing asserted)."
   },
-  "_status_recorded_this_round": "P1-035, P1-036, P1-037, P1-025, P1-027, P1-024, P1-029 -> done. P1-026 and P1-028 -> partial, and both say WHY in the evidence rather than claiming the word: P1-026's 'runs inside a sandbox' is partial BY ARCHITECTURE (QML plugins run in-process in the shell; MCP servers are confinable only if wrapped; hooks and scripts are reported unconfined), and P1-028's 'hardened profiles reduce cloud-side tools' is real but coarser than worded (--sandbox strict removes the whole cloud plane; there is no per-server switch anywhere in APEX).",
+  "_status_recorded_this_round": "BASE-013, BASE-014, P1-006 -> done. BASE-009, BASE-010, P1-005, P1-007 -> partial, every one with its missing assertion named. The four partials are honest in different ways and the distinction matters: BASE-009 and BASE-010 are HARDWARE-blocked (the live Desktop->Gaming switch IS loginctl terminate-user and needs the gaming box, which Andre has put off-limits; placement and idle-unload need a GPU with a loaded model, and no reachable machine has one). P1-005 and P1-007 are STRUCTURE-blocked: R2's narrower-token half belongs to P1-011, and DNS's elevated class cannot be required because no elevated class exists in apex-secret-core - adding one is a field on OperationSpec across 28 literals in 6 files plus a break-glass grant path, which the agent deliberately refused to take unilaterally mid-integration.",
   "_deliberately_held": {
     "p1-005 / p1-008 / p1-011 / p1-014": "The Cloudflare capability suite, 13 tasks, mutually conflicting (p1-005 with p1-002, p1-008 with p1-002 and p1-005, p1-011 with p1-005 and p1-008, p1-014 with p1-011), so at most ONE can hold a slot at a time. NOT dispatched again this round, and the reason is arithmetic rather than preference: the ceiling is six and five units were one item from finishing. p1-005 is FIRST IN LINE the moment a slot frees, and the slot that frees soonest is p1-035's - its remaining work is one uncommitted file. Confirm p1-002 is not in the unlanded set before dispatching p1-005.",
     "p1-038-hardware": "Still not dispatchable unattended, and the reason has not changed: the 18 labwc matrix rows need real applications on a real session. Cannot be done headless, and cannot be done on the L16 while Andre is using it. A katana job once gaming is over, or a job for Andre with a checklist. The step-by-step list is in state/agents/p1-038.md. Do not pretend otherwise.",
@@ -57,64 +57,84 @@
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
-      "slug": "base-partials",
+      "slug": "p1-008",
       "items": [
-        "BASE-009",
-        "BASE-010",
-        "BASE-013",
-        "BASE-014"
+        "P1-008",
+        "P1-009",
+        "P1-010"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p1-008",
+      "branch": "task/p1-008-cloudflare-one",
+      "agent_id": "a6a5f547e766361e4",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-12T03:02+08:00",
+      "session": "round 15 orchestrator, pid 59982",
+      "queue_id": "p1-008",
+      "title": "Cloudflare One, Workers AI and AI Gateway, Secrets Store",
+      "card": "NONE AT DISPATCH - told to create it as an early action.",
+      "at_dispatch": "Dispatched straight after p1-005 landed and pointed at it as the model: that unit took the provider to 22 of section 13.2's 32 names and THE TEN REMAINING ARE THIS UNIT'S. Handed p1-005's two defects as the shape to expect (error KIND asserted, not merely that an error happened) and warned that the missing elevated class will probably reach it too - if so, leave the criterion partial rather than adding a field across 28 literals mid-integration. No live account calls; the loopback double that 401s unauthenticated requests is already in the tree."
+    },
+    {
+      "slug": "p1-040",
+      "items": [
+        "P1-040"
+      ],
+      "repo": "apex-shell",
+      "worktree": "/var/tmp/apex-work/wt-p1-040",
+      "branch": "task/p1-040-per-output-scaling",
+      "agent_id": "a87fd6a859519fd98",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-12T03:02+08:00",
+      "session": "round 15 orchestrator, pid 59982",
+      "queue_id": "p1-040",
+      "title": "Per-output scaling: two densities, two sizes, one shell",
+      "card": "NONE AT DISPATCH - told to create it as an early action.",
+      "at_dispatch": "The harness already exists - run-scaling-test.sh brings up two headless outputs at different densities and is 30/0 - so the assertion has somewhere to live on day one. The cost is the refactor: one factor through two singletons with 831 call sites across 82 files. Told explicitly to judge the scope and, if the full migration is genuinely its own unit, to record the design and land whatever narrower provable improvement it can rather than half-migrating 831 call sites."
+    },
+    {
+      "slug": "p2-b",
+      "items": [
+        "(see queue.json p2-b)"
       ],
       "repo": "both",
-      "worktree": "/var/tmp/apex-work/wt-base-os",
-      "branch": "task/base-partials",
-      "second_worktree": "/var/tmp/apex-work/wt-base-shell",
-      "second_branch": "task/base-partials-shell",
-      "agent_id": "a1fc68867fbb12acf",
+      "worktree": "/var/tmp/apex-work/wt-p2-b",
+      "branch": "task/p2-b-accessibility-i18n",
+      "agent_id": "ab0d75f96ea53bd12",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-12T02:08+08:00",
-      "session": "round 14 orchestrator, pid 59982",
-      "queue_id": "base-partials",
-      "title": "Close the four BASE preservation items still partial",
-      "at_dispatch": "Four of eight closed and landed; BASE-009, BASE-010, BASE-013, BASE-014 remain. The shell worktree carries 3 dirty paths that are its predecessor's step 0 - 'lock in the shell WIP, but verify the QML actually loads and mutation-prove before committing' - and that instruction was repeated verbatim. THE KATANA BAN HITS TWO OF THE FOUR and the brief says a precisely named gap on BASE-009 and BASE-010 is the correct outcome, not a failure. BASE-013/BASE-014 are the reachable pair: the greeter fix is already on the branch unlanded, and wtype was PROVED to work, which is the machinery BASE-014's last assertion needed."
+      "dispatched": "2026-09-12T03:02+08:00",
+      "session": "round 15 orchestrator, pid 59982",
+      "queue_id": "p2-b",
+      "title": "Accessibility baseline and internationalisation baseline",
+      "card": "NONE AT DISPATCH - told to create it as an early action.",
+      "at_dispatch": "New unit, no card. Told that a baseline is a MEASUREMENT rather than an aspiration: accessibility closes by asking the running artefact about accessible names, focus order and contrast, not by grepping for a property; i18n closes by proving strings extract and substitute, not that a framework supports it in principle. Where a criterion cannot be honestly measured headless, name it and leave it partial."
     },
     {
-      "slug": "desktop-ai-apps",
+      "slug": "p1-052",
       "items": [
-        "(new, from the 2026-09-11 CLAUDE.md decision)"
+        "P1-051",
+        "P1-052"
       ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-ai-apps",
-      "branch": "task/desktop-ai-apps",
-      "agent_id": "a87d87d332240f853",
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/wt-p1-052",
+      "branch": "task/p1-052-relay",
+      "agent_id": "add3217c1c951ec31",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-12T02:08+08:00",
-      "session": "round 14 orchestrator, pid 59982",
-      "queue_id": "desktop-ai-apps",
-      "title": "Ship the Claude and ChatGPT desktop apps in the image, updated only by apex update",
-      "at_dispatch": "Card written, nothing committed. CARRIES FORWARD THE ADVISOR FINDING ITS PREDECESSOR RECORDED AS IT DIED, which changes how the work is verified rather than what is built: the image copy at /usr/bin will be SHADOWED by the L16's /usr/local stopgap tree, since /usr/local/bin precedes /usr/bin on PATH and Claude Desktop is installed there manually today. So 'it works' on this machine may be measuring the stopgap. Told to check `command -v` against both prefixes explicitly and say in the evidence which one answered."
-    },
-    {
-      "slug": "p1-005",
-      "items": [
-        "P1-005",
-        "P1-006",
-        "P1-007"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-005",
-      "branch": "task/p1-005-cloudflare-caps",
-      "agent_id": "a78afd4e40b9e9730",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-12T02:08+08:00",
-      "session": "round 14 orchestrator, pid 59982",
-      "queue_id": "p1-005",
-      "title": "Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets",
-      "at_dispatch": "Card written, nothing committed; its NEXT is to confirm the documented Cloudflare REST paths from documentation and from the code already on the tip, NOT by calling a live account. The no-live-calls constraint was restated with the reason: prove it against fixtures the way the trust gate was proven against a minted CA rather than production sigstore, and if a criterion truly needs a live account, leave it partial and say so."
+      "dispatched": "2026-09-12T03:02+08:00",
+      "session": "round 15 orchestrator, pid 59982",
+      "queue_id": "p1-052",
+      "title": "The APEX Remote remainder: relay, reconnect, mDNS, connection quality, two shell pages",
+      "card": "NONE AT DISPATCH - told to create it as an early action.",
+      "at_dispatch": "The queue note tells it what is left and what is NOT its: P1-051 stays partial for a reason outside this unit (the device key in Android Keystore with setUserAuthenticationRequired, a per-approval challenge and attestation - p1-053a's work, whose desktop half is p0-014's CTAP2 verifier, in flight right now), so it must not close P1-051 alone. THE SHAPING CONSTRAINT: do not deploy anything to Andre's Cloudflare account. Write the relay's server side with tests against a local double, exactly as the capability sets were proven against a loopback transport and the trust gate against a minted CA. 'Written, tested, ready to deploy' is a complete and honest outcome, and the card says what deploying would require."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
   "_findings": [
-    "ROADMAP/state/FINDINGS-round5.md — three defects found by running the TIP rather than a branch, all three checked to be pre-existing rather than assumed. (1) `apex ai status --json` returns prose, not JSON, on any machine with nvidia-smi installed but no loaded driver: gpu.rs detects 'no NVIDIA' by the binary being ABSENT, but the L16 has /usr/bin/nvidia-smi and it exits 9. Same 'permission denied is not absence' class as the ~14 already found, wearing 'driver not loaded'. Owner: P1-043, i.e. the live p1-039 agent. (2) `apex remote pair|devices|revoke|status|enable` is documented NOWHERE in docs/, and check-doc-verbs.sh structurally cannot catch it -- it validates documented-verb -> real-command, not the reverse. Owner: the next integrate or followups round, against the tip; followups-int3 was deliberately told not to do it from a stale base. (3) THE IMPORTANT ONE: tests/test-privilege-requests.sh is 30/8 on the tip AND 30/8 with the identical eight names in the identical order at the pre-landing tip 4ab5f75, and all eight fail for the same reason as the single cargo test failure that three integration rounds have written off as 'the cgroup/origin artifact' -- a test runner's cgroup reads as scheduled-job, so §7's gate refuses a root approval before the behaviour under test is reached. That is nine unverified assertions across two harnesses, covering the approval path, including 'a denied request cannot be flipped to approved'. Not an artifact; a hole in the harness. p0-014's 3c3abd3 suggests it has already started on this class."
+    "TWO DEFECTS OF ONE SHAPE in the Cloudflare provider, both surfaced only because a test asserted the error KIND rather than that an error happened: NoRecord fell through to Refused and NoResource to PermissionDenied, so 'you did not bind that' reached the caller as 'you may not'.",
+    "FIVE PRODUCT DEFECTS from base-partials, two of which would have hit Andre directly: a remembered session that no longer exists made the greeter fall back to SORT ORDER, so a machine could land on a different desktop than the user chose; and the PowerMenu offered Gaming Mode on machines with no gamescope. Also labwc missing from the Settings compositor control entirely, layers.max(1) turning 'unknown' into 'one layer', and locate() ignoring Roots while deciding which binary gets EXECUTED - which had left three resolver tests asserting against the developer's real machine rather than the fixture.",
+    "A MULTI-AGENT HAZARD worth designing around: a file in one agent's session scratchpad was overwritten mid-run by another unit's harness, because two harnesses shared a pristine/ directory. The affected agent switched to unique names and verified every file byte-identical afterwards, but a restore-the-wrong-file race between concurrent agents is a silent way to record a false mutation verdict.",
+    "THREE PRE-EXISTING FLAKY TESTS recorded rather than touched, each failing once under parallel load and passing otherwise: apex-agentd grants::…another_boot… (its own module comment documents a set_var race), apex::provenance, and apex-agentd system_grants. None is in this round's diff.",
+    "NAMING NEEDS ANDRE'S RATIFICATION and is now user-visible: 'Floating' is ratified at ROADMAP.md:1031, but 'Scrolling' (niri) and 'Tiling' (Hyprland) are not - and the greeter and Settings now show them. Asked."
   ],
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt — the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {

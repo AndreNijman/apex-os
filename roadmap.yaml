@@ -816,7 +816,7 @@ tasks:
 - id: P0-014
   title: Remote Control privilege policy
   priority: P0
-  status: partial
+  status: done
   area: remote-control
   depends_on:
   - P0-013
@@ -829,26 +829,28 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    PART-LANDED on roadmap/v2.2 2026-09-11 (round 10), merge 432e16c of task/p0-014-remote-lock (6 commits).
-    Section 7's table was already reproduced as Capability::ruling with a test that writes the same table out
-    again as data; the broker's may_use_broker takes no origin at all, which is the strongest form that claim can
-    take. What landed this round is the FIDO/WebAuthn path that --origin-policy remote previously parsed and had
-    nothing behind: enrolment, a one-issue-one-attempt challenge, and webauthn::redeem_and_verify as a PURE
-    FUNCTION in apex-agent-core rather than in the daemon - not for tidiness, but because the only thing in this
-    repository that can mint a VALID assertion is the Signer in webauthn.rs's own cfg(test) child, so the same
-    sequence written in apex-agentd could be tested against refusals and never once against a receipt it minted.
-    The redeem is FIRST, before the credential lookup and before a byte of the assertion is parsed, so every later
-    refusal has already spent the nonce; both halves are tested. Request/Response::ElevationChallenge appended
-    with NO protocol bump (the Event and ToolCheck precedent: an unknown cmd fails to deserialise and answers
-    bad_request, so the failure mode is losing an elevation, never gaining one). Nine mutants measured, eight
-    caught; the ninth is reported rather than dropped - the nonce tripwire in verify_for_challenge CANNOT be
-    killed, because the receipt is built from the challenge just redeemed so the two nonces agree by construction,
-    and the comment above it says exactly that. THE MEASURED RESULT OF THE HARNESS FIX (cca4442, 3c3abd3):
-    tests/test-privilege-requests.sh was 30 passed / 8 failed on the recorded baseline and is 39 passed / 0 failed
-    on this landed tip. unshare -r gives the test a real effective uid 0 with no sudo and no prompt, which is what
-    those assertions had been waiting for. PARTIAL because commit 4 (the enforcement wiring across protocol.rs,
-    elevation.rs, grants.rs, privilege.rs) and commit 5 (the validate_for relaxation) are still uncommitted in
-    /var/tmp/apex-work/wt-p0-014.
+    Remote Control privilege policy, wired. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 8a2d7f83 (branch
+    625d806e, four commits): section 7's second column goes live, and a security key authorises what no password
+    can. A CTAP2 assertion verifier built against three vectors real devices signed, each hand-verified with
+    openssl before a line of Rust was written; SecondFactor is constructible ONLY by
+    webauthn::verify_for_challenge so it cannot be forged by a caller that merely wants to look verified;
+    may_elevate gives OriginPolicy::allows_elevation_from its first non-test caller; authorise_grant consults it;
+    and the validate_for relaxation lands last. Workspace 2351 -> 2432 passed / 0 failed, clippy clean. Nine
+    mutation pairs on commit 3 alone. THE TWO COUNTS FOUR ROUNDS OF ORCHESTRATORS TRACKED ARE UNCHANGED, AND THAT
+    IS THE ANSWER: tests/test-privilege-requests.sh 39/0 -> 39/0 (re-verified 39/0 by the orchestrator on the
+    landed tip) and apexd/apex-agentd/tests/system_grants.rs 12/0 -> 12/0. Neither suite exercises the relaxed
+    value - the shell suite matches neither spelling of origin.policy, and the Rust suite files from a non-local
+    harness with no receipt so it is refused at decide_origin exactly as before. Relaxing validate costs them
+    nothing; the honest result is a pair of unchanged numbers rather than a win. THE CI CGROUP QUESTION HAS A
+    THIRD ANSWER, neither of the two offered: CI's own log shows tests/in-login-session.sh WORKS on a GitHub
+    runner (logind session 2, session-2.scope, uid 1001), so the harness does present a real local origin there.
+    The two failures were in the separate, deliberately unwrapped step that preserves the non-local column,
+    asserting rules that are functions of the request alone (may_be_declared, unprintable_actor) while sitting
+    behind an origin observation that fails on a runner. Moved ahead of it - refuses strictly more, never less,
+    gate untouched. Reproduced locally with NO sudo and NO prompt via unshare -C --map-current-user, which yields
+    cgroup 0::/ and matches neither branch of classify exactly like a runner: 9 passed / 2 failed before, naming
+    the same two tests CI named, 11/0 after. That mechanism is reusable and is on the card beside in-login-
+    session.sh.
 - id: P0-015
   title: Lock-state policy for autonomous sessions
   priority: P0
