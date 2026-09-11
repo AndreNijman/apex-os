@@ -39,6 +39,7 @@ pub mod device;
 pub mod identity;
 pub mod noise;
 pub mod pairing;
+pub mod relay;
 pub mod rendezvous;
 pub mod wire;
 

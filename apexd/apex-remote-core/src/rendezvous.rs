@@ -131,6 +131,99 @@ impl std::fmt::Display for Path {
 /// connection every time, including on the network where it was unnecessary.
 pub const PREFERENCE: [Path; 2] = [Path::Lan, Path::Relay];
 
+/// How good a connection is, in the words a person is shown.
+///
+/// Three bands and not a number, because a number is what a page ends up
+/// rendering and "83 ms" tells nobody whether their terminal is going to feel
+/// wrong. The number is kept as well — [`Connection::rtt_ms`] — for anyone
+/// who wants it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quality {
+    /// Nothing has been measured yet. Distinct from `Poor`: a connection that
+    /// has just opened has not failed, and a page that showed the worst band
+    /// while waiting for the first ping would be lying for fifteen seconds
+    /// every time.
+    Unmeasured,
+    Good,
+    Fair,
+    Poor,
+}
+
+impl Quality {
+    /// The band a round trip falls in.
+    ///
+    /// The boundaries are about a terminal, not about a network. Local echo
+    /// stops feeling immediate somewhere around 100 ms of round trip, and
+    /// past about a quarter of a second typing feels like it is happening to
+    /// somebody else. They are deliberately not "LAN" and "relay": a relay in
+    /// the same city can be better than a congested Wi-Fi network, and the
+    /// point of measuring is to say which one the person actually has.
+    pub fn of(rtt_ms: Option<u64>) -> Quality {
+        match rtt_ms {
+            None => Quality::Unmeasured,
+            Some(ms) if ms < 80 => Quality::Good,
+            Some(ms) if ms < 250 => Quality::Fair,
+            Some(_) => Quality::Poor,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Quality::Unmeasured => "unmeasured",
+            Quality::Good => "good",
+            Quality::Fair => "fair",
+            Quality::Poor => "poor",
+        }
+    }
+}
+
+impl std::fmt::Display for Quality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// One connection a device is holding right now.
+///
+/// P1-052's last criterion asks for the connection path and its quality to be
+/// visible. This is the value that carries both, and it is defined here so
+/// that the daemon, the CLI and the shell page render one thing rather than
+/// three that agree until one of them is edited.
+///
+/// Live only. Nothing here is written to the device store: a round trip
+/// measured four hours ago is not a fact about now, and persisting it would
+/// mean a page could show a quality for a device that is not connected.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Connection {
+    pub device_id: String,
+    pub device_name: String,
+    /// `"lan"` or `"relay"` — [`Path::as_str`].
+    pub path: String,
+    /// Unix milliseconds at which this connection authenticated.
+    pub since_ms: u64,
+    /// The most recent measured round trip, or `None` before the first one
+    /// comes back.
+    pub rtt_ms: Option<u64>,
+}
+
+impl Connection {
+    pub fn quality(&self) -> Quality {
+        Quality::of(self.rtt_ms)
+    }
+
+    /// What the owner is told about privacy on this connection's path.
+    ///
+    /// Routed through [`Path`] rather than re-written, so a page cannot
+    /// invent a friendlier version of it.
+    pub fn disclosure(&self) -> &'static str {
+        if self.path == Path::Relay.as_str() {
+            Path::Relay.disclosure()
+        } else {
+            Path::Lan.disclosure()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +291,72 @@ mod tests {
         assert!(Path::Relay.disclosure().contains("relay"));
         assert!(Path::Relay.disclosure().contains("addresses"));
         assert!(!Path::Lan.disclosure().contains("relay"));
+    }
+
+    #[test]
+    fn an_unmeasured_connection_is_not_a_bad_one() {
+        // A page that showed the worst band until the first ping came back
+        // would tell every owner their connection was poor for the first
+        // fifteen seconds of every session.
+        assert_eq!(Quality::of(None), Quality::Unmeasured);
+        assert_ne!(Quality::of(None), Quality::Poor);
+    }
+
+    #[test]
+    fn the_quality_bands_are_about_a_terminal_and_are_ordered() {
+        assert_eq!(Quality::of(Some(0)), Quality::Good);
+        assert_eq!(Quality::of(Some(79)), Quality::Good);
+        assert_eq!(Quality::of(Some(80)), Quality::Fair);
+        assert_eq!(Quality::of(Some(249)), Quality::Fair);
+        assert_eq!(Quality::of(Some(250)), Quality::Poor);
+        assert_eq!(Quality::of(Some(10_000)), Quality::Poor);
+        // Monotonic: a worse round trip never reports a better band.
+        let rank = |q: Quality| match q {
+            Quality::Unmeasured => 0,
+            Quality::Good => 1,
+            Quality::Fair => 2,
+            Quality::Poor => 3,
+        };
+        let mut last = 0;
+        for ms in (0..600).step_by(7) {
+            let r = rank(Quality::of(Some(ms)));
+            assert!(r >= last, "{ms} ms reported a better band than {} ms did", ms - 7);
+            last = r;
+        }
+    }
+
+    #[test]
+    fn the_band_is_not_a_synonym_for_the_path() {
+        // The measurement has to be able to disagree with the path, or it is
+        // not a measurement. A relay in the same city beats congested Wi-Fi,
+        // and an owner deciding whether to move closer to the router needs to
+        // be told which one they actually have.
+        let relay = Connection {
+            device_id: "d".into(),
+            device_name: "phone".into(),
+            path: Path::Relay.as_str().into(),
+            since_ms: 0,
+            rtt_ms: Some(30),
+        };
+        let lan = Connection { path: Path::Lan.as_str().into(), rtt_ms: Some(400), ..relay.clone() };
+        assert_eq!(relay.quality(), Quality::Good);
+        assert_eq!(lan.quality(), Quality::Poor);
+        // And the disclosure still follows the path, not the band.
+        assert!(relay.disclosure().contains("relay"));
+        assert!(!lan.disclosure().contains("relay"));
+    }
+
+    #[test]
+    fn a_connection_round_trips_through_json_the_way_the_control_socket_sends_it() {
+        let c = Connection {
+            device_id: "abc".into(),
+            device_name: "a phone".into(),
+            path: Path::Relay.as_str().into(),
+            since_ms: 17,
+            rtt_ms: None,
+        };
+        let text = serde_json::to_string(&c).expect("serialise");
+        assert!(text.contains(r#""rtt_ms":null"#), "{text}");
+        assert_eq!(serde_json::from_str::<Connection>(&text).expect("parse"), c);
     }
 }

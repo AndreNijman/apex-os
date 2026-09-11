@@ -1,0 +1,25 @@
+{
+  // The relay is NOT deployed. This file is what a deployment would use, and
+  // ROADMAP/design/P1-052-relay.md says exactly what running it would cost
+  // and what it would expose. Deploying is Andre's decision and his account.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "apex-remote-relay",
+  "main": "src/index.js",
+
+  // Pinned, not "today". A compatibility date is the one setting that
+  // silently changes runtime behaviour under a Worker nobody has touched, and
+  // this one is chosen: from 2026-04-07 the runtime answers WebSocket Close
+  // frames itself, which is the behaviour src/index.js is written against.
+  "compatibility_date": "2026-04-07",
+
+  "durable_objects": {
+    "bindings": [{ "name": "ROOM", "class_name": "RelayRoom" }]
+  },
+
+  // SQLite-backed, which is the only kind the Workers Free plan offers — and
+  // this Worker stores nothing at all, so the backend costs nothing either
+  // way. The migration is still required for the class to exist.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelayRoom"] }],
+
+  "observability": { "enabled": true }
+}
