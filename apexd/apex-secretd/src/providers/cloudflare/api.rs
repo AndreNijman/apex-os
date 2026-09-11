@@ -130,6 +130,16 @@ pub enum Body {
     /// A multipart body, already assembled. Goes in a file, because stdin is
     /// taken and because a Worker bundle is not text.
     Multipart { boundary: String, bytes: Vec<u8> },
+    /// The bytes of one file, sent as they are.
+    ///
+    /// R2's object upload and KV's value write are not JSON and not multipart
+    /// — the body *is* the object. Same reason as [`Body::Multipart`] for the
+    /// file: stdin already carries the configuration, and a `data-binary` read
+    /// from a path is the only way left to hand curl bytes that may be binary.
+    Raw {
+        content_type: &'static str,
+        bytes: Vec<u8>,
+    },
 }
 
 /// One API call.
@@ -352,6 +362,25 @@ pub fn call(
                 quoted(&format!(
                     "Content-Type: multipart/form-data; boundary={boundary}"
                 ))
+            ));
+            config.push_str(&format!(
+                "data-binary = {}\n",
+                quoted(&format!("@{}", path.display()))
+            ));
+        }
+        Body::Raw {
+            content_type,
+            bytes,
+        } => {
+            scratch = Scratch::new(owner)?;
+            let path = scratch.write("body", bytes, owner)?;
+            // `content_type` is `&'static str` and not a caller's string, so
+            // there is no header to inject here. That is the whole reason the
+            // type is what it is: an R2 object's media type is chosen from a
+            // table in this build, not sent by whoever asked for the upload.
+            config.push_str(&format!(
+                "header = {}\n",
+                quoted(&format!("Content-Type: {content_type}"))
             ));
             config.push_str(&format!(
                 "data-binary = {}\n",

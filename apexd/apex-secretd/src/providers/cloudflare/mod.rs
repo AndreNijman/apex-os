@@ -48,16 +48,70 @@
 //! `bind` resolves a remote with `git remote get-url` and `perform` runs
 //! `git push <remote>`, which resolves it again inside the child.
 //!
+//! ## What R2 can and cannot carry
+//!
+//! §13.5 asks for bucket- and object-scoped capabilities, and that is what the
+//! three R2 operations are: the bucket is one the project's own file lists, and
+//! an object is a key under it. Three limits are in the build rather than in a
+//! plan, and each is a consequence of something else here being right:
+//!
+//! * **an object comes back as text.** [`crate::broker::run_curl`] hands back a
+//!   `String`, and every reply in this service travels to the caller as one. A
+//!   read of a PNG therefore arrives lossily converted. Text objects — a SQL
+//!   dump, a JSON manifest, a log — are exact, and those are what an agent has
+//!   any business reading through a broker;
+//! * **an object key is a [`apex_secret_core::operation::Syntax::Path`]**, so
+//!   `backups/2026-09-12.sql` can be named and `backups/2026-09-12T10:00.sql`
+//!   cannot: `:` is refused by the grammar because a resource that could carry
+//!   one could be read as a URL. The grammar is load-bearing and the key
+//!   restriction is the price;
+//! * **ten megabytes**, [`MAX_PAYLOAD`], against the documented endpoint's 300.
+//!   A backup larger than that is not an agent operation.
+//!
+//! §13.5 also calls R2 "the preferred first-party cloud target for encrypted
+//! APEX backups". That is P1-010's, and the object write below is the half of
+//! it that does not need a backup format to exist first.
+//!
+//! ## The four storage surfaces, and the one thing they share
+//!
+//! D1, KV, Queues and Hyperdrive are §13.3's, and every one of them is
+//! addressed by an **id** — there is no name-based path for any of the four,
+//! the way there is for an R2 bucket. So §13.1's file carries the name the
+//! project uses and the id the API needs, one table per product, and a name it
+//! does not list does not resolve. A build that took the id from the caller
+//! would have no binding at all: "which database" would be the agent's answer
+//! rather than the owner's.
+//!
+//! Three consequences worth stating where they will be read:
+//!
+//! * **a D1 database id is a UUID and the other three are 32 hex.** That is
+//!   Cloudflare's split, not a convenience, and one validator for both would
+//!   either refuse every real D1 id or admit 36 characters of anything into a
+//!   URL path;
+//! * **a KV read answers with the value's bytes**, like an R2 object read, so
+//!   the same lossy-text limitation applies to a value that is not UTF-8;
+//! * **a Hyperdrive configuration carries the password of the database it
+//!   fronts.** `edit` declares a name and three caching settings and nothing
+//!   else, so the framework refuses an origin field before this module is
+//!   asked; and `read` has its reply stripped of `password` and
+//!   `access_client_secret` even though the documentation says they are
+//!   write-only and never returned. A guarantee that an agent gets
+//!   capabilities and not credentials cannot rest on a remark in somebody
+//!   else's documentation staying true.
+//!
 //! ## What has never run against Cloudflare
 //!
 //! All of it. There is no account and no token on this machine, so every
 //! operation below has been exercised against a loopback server that speaks the
 //! same envelope and refuses without an `Authorization` header, and none of it
-//! against `api.cloudflare.com`. The paths are the documented ones; that they
-//! are the documented ones is not the same as having called them.
+//! against `api.cloudflare.com`. The paths are the documented ones — read out
+//! of `cloudflare/api-schemas`' `openapi.json` at `d5003a19`, and cross-checked
+//! against the rendered reference — and that they are the documented ones is
+//! not the same as having called them.
 
 pub mod api;
 pub mod binding;
+pub mod dns;
 
 use apex_secret_core::operation::{
     self, Effect, OperationSpec, ParamSpec, ProviderSpec, ResourceKind, Syntax,
@@ -68,7 +122,8 @@ use apex_secret_core::SecretValue;
 use crate::provider::{Bind, Bound, Endpoint, Performed, Provider, ProviderError};
 
 use api::{Api, Body, Call, Multipart};
-use binding::{Account, Binding, BindingError, Worker, Zone};
+use binding::{Account, Binding, BindingError, Bucket, Resource, Worker, Zone};
+use dns::{Lookup, Record};
 
 /// The worker, zone or bucket a caller names.
 const NAMED: ResourceKind = ResourceKind::Name;
@@ -91,13 +146,88 @@ const VERSION: ParamSpec = ParamSpec {
     summary: "the version id to put in front of traffic",
 };
 
+/// The bucket, database, namespace or object a caller names as a path within
+/// something the project bound. `example-assets/backups/db.sql`.
+const WITHIN: ResourceKind = ResourceKind::Path;
+
+/// `file`, a path inside the project whose bytes are the request.
+///
+/// The counterpart to §13.4's rule about credentials, for payloads: the bytes
+/// an agent uploads come out of the project it is working in, read by the
+/// daemon under [`project::read_file`]'s rules, rather than travelling through
+/// the protocol as a parameter. A `Syntax::Path` cannot name `/etc/shadow`,
+/// and `read_file` would refuse it anyway — it is not the caller's file.
+const FILE: ParamSpec = ParamSpec {
+    name: "file",
+    syntax: Syntax::Path,
+    required: true,
+    summary: "the file inside the project whose bytes to send",
+};
+
+/// `type`, a DNS record type. Upper-cased and checked against
+/// [`dns::TYPES`], after [`dns::ELEVATED`] has had its say.
+const KIND: ParamSpec = ParamSpec {
+    name: "type",
+    syntax: Syntax::Name,
+    required: true,
+    summary: "the record type: A, AAAA, CNAME, TXT, MX and so on",
+};
+
+/// `content`, what a record points at.
+///
+/// `Text` because a TXT record's value is free-form and an SPF line has
+/// spaces in it. It goes in a JSON body this module builds, which is what
+/// [`Syntax::Text`] requires of whoever declares one.
+const CONTENT: ParamSpec = ParamSpec {
+    name: "content",
+    syntax: Syntax::Text,
+    required: true,
+    summary: "what the record points at — an address, a name, a text value",
+};
+
+/// The fields a record carries besides its content, on create and on update.
+const TTL: ParamSpec = ParamSpec {
+    name: "ttl",
+    syntax: Syntax::Name,
+    required: false,
+    summary: "seconds to cache it for, or 1 for automatic",
+};
+
+const PROXIED: ParamSpec = ParamSpec {
+    name: "proxied",
+    syntax: Syntax::Name,
+    required: false,
+    summary: "true to serve it through Cloudflare, false to answer with the origin",
+};
+
+const COMMENT: ParamSpec = ParamSpec {
+    name: "comment",
+    syntax: Syntax::Text,
+    required: false,
+    summary: "a line stored with the record, for whoever reads the zone later",
+};
+
+/// `sql`, one statement to run against a D1 database.
+///
+/// `Text`, which is one line — so this carries a statement and not a script. A
+/// migration is several statements over several lines, and that is
+/// `cloudflare.d1.migrate`, which reads them out of a file in the project
+/// instead. The two are separate §13.2 names for that reason as much as for the
+/// grant.
+const SQL: ParamSpec = ParamSpec {
+    name: "sql",
+    syntax: Syntax::Text,
+    required: true,
+    summary: "the statement to run, as one line",
+};
+
 /// The vocabulary, in §13.2's shape.
 ///
-/// Seven names: **six of §13.2's thirty-two**, plus `worker.route.read`, which
-/// is §13.3's "Worker routes" rather than one of §13.2's examples. So
-/// **twenty-six** of §13.2's list are still unimplemented and belong to P1-005
-/// through P1-017 — R2, D1, KV, Queues, Hyperdrive, DNS, Secrets Store, Access,
-/// Tunnels, Workers AI and the AI gateway.
+/// Twenty-three names: **twenty-two of §13.2's thirty-two**, plus
+/// `worker.route.read`, which is §13.3's "Worker routes" rather than one of
+/// §13.2's examples. So **ten** of §13.2's list are still unimplemented and
+/// belong to P1-008 through P1-017 — the Secrets Store, Access, Tunnels,
+/// Workers AI and the AI gateway.
 ///
 /// Declaring one this module cannot perform would put it in
 /// `apex secret capabilities`, let an owner grant it, and then fail at use
@@ -199,6 +329,286 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             aliases: &[],
             same_everywhere: false,
         },
+        // ── §13.3's storage surfaces: D1, KV, Queues, Hyperdrive ────────────
+        //
+        // Nine names, four products, and one thing in common: every one of them
+        // is addressed by an id, and the id is in the project's own file. None
+        // of these has a name-based path the way an R2 bucket does, so a build
+        // that let the caller give the id would have no binding left — "which
+        // database" would be the agent's answer rather than the owner's.
+        OperationSpec {
+            id: "cloudflare.d1.read",
+            summary: "read the size, tables and settings of one of this \
+                      project's D1 databases",
+            effect: Effect::Read,
+            resource: NAMED,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.d1.query",
+            summary: "run one SQL statement against one of this project's D1 \
+                      databases",
+            // **Write, and not a judgement about the statement.** A build that
+            // read the SQL and called `SELECT` a read would be wrong the first
+            // time somebody wrote `WITH x AS (DELETE …) SELECT …`, and wrong in
+            // the direction that matters. The owner grants the ability to run a
+            // statement; what the statement does is the statement's.
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[SQL],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.d1.migrate",
+            summary: "apply a .sql migration file from this project to one of \
+                      its D1 databases",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[ParamSpec {
+                summary: "the .sql file inside the project to apply",
+                ..FILE
+            }],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.kv.read",
+            summary: "read one key out of one of this project's KV namespaces",
+            effect: Effect::Read,
+            resource: WITHIN,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.kv.write",
+            summary: "write one key in one of this project's KV namespaces",
+            effect: Effect::Write,
+            resource: WITHIN,
+            params: &[
+                ParamSpec {
+                    name: "value",
+                    syntax: Syntax::Text,
+                    required: false,
+                    summary: "the value to store, as one line",
+                },
+                ParamSpec {
+                    required: false,
+                    summary: "a file inside the project whose bytes to store instead",
+                    ..FILE
+                },
+            ],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.queue.publish",
+            summary: "put one message on one of this project's queues",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[ParamSpec {
+                name: "message",
+                syntax: Syntax::Text,
+                required: true,
+                summary: "the message to send",
+            }],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.queue.manage",
+            // What it is, and — because "manage" could mean anything — what it
+            // is not. It cannot create a queue, delete one, rename one, or
+            // change who consumes it. Those are not declared, so they cannot be
+            // granted, and an owner reading this line is told as much.
+            summary: "change how one of this project's queues delivers: pause \
+                      it, delay it, or set how long it keeps a message",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[
+                ParamSpec {
+                    name: "paused",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "true to stop delivering, false to start again",
+                },
+                ParamSpec {
+                    name: "delivery-delay",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "seconds to hold a message before delivering it, 0 to 86400",
+                },
+                ParamSpec {
+                    name: "retention",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "seconds to keep an undelivered message, 60 to 1209600",
+                },
+            ],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.hyperdrive.read",
+            summary: "read the settings of one of this project's Hyperdrive \
+                      configurations",
+            effect: Effect::Read,
+            resource: NAMED,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.hyperdrive.edit",
+            // **The origin's credentials are deliberately not here.** A
+            // Hyperdrive configuration carries the password of the database it
+            // fronts, and an `edit` that took one would have an agent handing a
+            // credential *to* the broker — the exact inverse of what this
+            // service is for. The framework refuses an option no operation
+            // declares, so declaring only these four is what closes it.
+            summary: "change the name or the caching of one of this project's \
+                      Hyperdrive configurations — never its origin or its \
+                      credentials",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[
+                ParamSpec {
+                    name: "name",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "what to call it",
+                },
+                ParamSpec {
+                    name: "caching",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "on or off",
+                },
+                ParamSpec {
+                    name: "max-age",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "seconds to cache a query result for",
+                },
+                ParamSpec {
+                    name: "stale-while-revalidate",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "seconds a stale result may still be served while it refreshes",
+                },
+            ],
+            aliases: &[],
+            same_everywhere: false,
+        },
+
+        // ── §13.5, R2 ───────────────────────────────────────────────────────
+        OperationSpec {
+            id: "cloudflare.r2.object.read",
+            summary: "read one object out of one of this project's R2 buckets, \
+                      or list what is in it",
+            effect: Effect::Read,
+            // `example-assets` lists that bucket; `example-assets/db/today.sql`
+            // reads that object. One operation and not two, because §13.2
+            // names one and because the grant an owner gives is the same
+            // either way: this project's buckets, read.
+            resource: WITHIN,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.r2.object.write",
+            summary: "put a file from this project into one of its R2 buckets",
+            effect: Effect::Write,
+            resource: WITHIN,
+            params: &[FILE],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        // ── §13.9, DNS ──────────────────────────────────────────────────────
+        //
+        // Four verbs and not one `dns.write`, which is §13.2's whole argument
+        // in miniature: an agent that may point a preview hostname at a new
+        // worker needs `update`, and giving it `delete` at the same time is a
+        // different decision that an owner should get to make separately.
+        OperationSpec {
+            id: "cloudflare.dns.read",
+            summary: "read the DNS records at one name in this project's zone",
+            effect: Effect::Read,
+            resource: NAMED,
+            params: &[ParamSpec {
+                required: false,
+                ..KIND
+            }],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.dns.create",
+            summary: "add a DNS record at one name in this project's zone",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[KIND, CONTENT, TTL, PROXIED, COMMENT],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.dns.update",
+            summary: "change the DNS record at one name in this project's zone",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[
+                KIND,
+                ParamSpec {
+                    required: false,
+                    ..CONTENT
+                },
+                TTL,
+                PROXIED,
+                COMMENT,
+            ],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.dns.delete",
+            summary: "remove the DNS record at one name in this project's zone",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[KIND],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.r2.bucket.create",
+            summary: "create one of the R2 buckets this project declares, in \
+                      the account it is bound to",
+            effect: Effect::Write,
+            // A NAME, and one the project already lists under `buckets`. An
+            // agent granted this cannot create a bucket the owner never wrote
+            // down — the grant says which verb, and §13.1's file says which
+            // thing, including a thing that does not exist yet.
+            resource: NAMED,
+            params: &[
+                ParamSpec {
+                    name: "location",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "the region hint to create it in: apac, eeur, enam, oc, weur or wnam",
+                },
+                ParamSpec {
+                    name: "storage-class",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "Standard or InfrequentAccess",
+                },
+            ],
+            aliases: &[],
+            same_everywhere: false,
+        },
     ],
 };
 
@@ -216,6 +626,25 @@ enum Target {
     Account(Account),
     Worker(Worker),
     Route { zone: Zone, worker: Worker },
+    /// A bucket this project declares. It is a target before it exists —
+    /// `r2.bucket.create` is what makes it — which is why the project file
+    /// listing it is what decides the name and not the other way round.
+    Bucket(Bucket),
+    /// An object in one of this project's buckets, or the bucket's own listing
+    /// when the caller named no key.
+    Object { bucket: Bucket, key: Option<String> },
+    /// A database, namespace, queue or Hyperdrive config this project bound,
+    /// and — for KV — the key under it. One variant for the four, because what
+    /// distinguishes them is the path they build and not what they are.
+    Bound {
+        table: &'static str,
+        resource: Resource,
+        key: Option<String>,
+    },
+    /// A name in this project's zone. Which *record* at that name is a
+    /// question only the zone can answer, and answering it costs a credential
+    /// — so it happens in `perform` and not here.
+    Record(Record),
 }
 
 impl From<BindingError> for ProviderError {
@@ -226,7 +655,12 @@ impl From<BindingError> for ProviderError {
             // from "it broke".
             BindingError::NoWorker { .. }
             | BindingError::NoZone { .. }
-            | BindingError::NoBucket { .. } => ProviderError::NoSuchResource(e.to_string()),
+            | BindingError::NoBucket { .. }
+            | BindingError::NoRecord { .. }
+            | BindingError::NoResource { .. } => ProviderError::NoSuchResource(e.to_string()),
+            // Everything else is a file that is wrong rather than a name that
+            // is not bound — a missing id, an id that is not one, a project
+            // with no Cloudflare section at all.
             _ => ProviderError::Refused(e.to_string()),
         }
     }
@@ -278,6 +712,54 @@ impl CloudflareProvider {
         }
 
         let binding = binding?;
+
+        // Which noun the operation acts on decides which resolver runs, and
+        // getting that wrong is not a silent bug: a build that resolved every
+        // resource as a worker would answer "this project does not bind a
+        // worker called 'example-assets'" for a bucket — a true sentence about
+        // the wrong question, and the reader would go and add an environment.
+        match req.operation.id {
+            "cloudflare.r2.bucket.create" => {
+                return Ok(Target::Bucket(binding.bucket(req.resource)?));
+            }
+            "cloudflare.r2.object.read" | "cloudflare.r2.object.write" => {
+                let (bucket, key) = split_first(req.resource);
+                return Ok(Target::Object {
+                    bucket: binding.bucket(bucket)?,
+                    key,
+                });
+            }
+            id if id.starts_with("cloudflare.kv.") => {
+                let (namespace, key) = split_first(req.resource);
+                return Ok(Target::Bound {
+                    table: "kv",
+                    resource: binding.resource("kv", namespace)?,
+                    key,
+                });
+            }
+            id if id.starts_with("cloudflare.d1.")
+                || id.starts_with("cloudflare.queue.")
+                || id.starts_with("cloudflare.hyperdrive.") =>
+            {
+                let table = match id.split('.').nth(1) {
+                    Some("d1") => "d1",
+                    Some("queue") => "queues",
+                    _ => "hyperdrive",
+                };
+                return Ok(Target::Bound {
+                    table,
+                    resource: binding.resource(table, req.resource)?,
+                    key: None,
+                });
+            }
+            id if id.starts_with("cloudflare.dns.") => {
+                let mut record = binding.record(req.resource)?;
+                record.kind = CloudflareProvider::record_type(req)?;
+                return Ok(Target::Record(record));
+            }
+            _ => {}
+        }
+
         let worker = binding.worker(req.resource)?;
         if req.operation.id == "cloudflare.worker.route.read" {
             let Some(name) = binding.zone.clone() else {
@@ -315,6 +797,89 @@ impl CloudflareProvider {
                 "read the routes zone {} [{}] sends to {} ({})",
                 zone.name, zone.id, worker.name, worker.environment
             ),
+            Target::Bucket(bucket) => format!(
+                "create the bucket {} in account {} [{}]",
+                bucket.name,
+                bucket.account.named(),
+                bucket.account.id
+            ),
+            Target::Object { bucket, key } => {
+                let where_ = format!(
+                    "bucket {} in account {} [{}]",
+                    bucket.name,
+                    bucket.account.named(),
+                    bucket.account.id
+                );
+                match (operation.id, key) {
+                    ("cloudflare.r2.object.write", Some(key)) => {
+                        // The file is in the sentence because it decides what
+                        // is uploaded, and an owner reading the trail afterwards
+                        // wants to know what went into the bucket.
+                        let file = params.get("file").map(String::as_str).unwrap_or("");
+                        format!("write {file} to object {key} in {where_}")
+                    }
+                    (_, Some(key)) => format!("read object {key} in {where_}"),
+                    (_, None) => format!("list the objects in {where_}"),
+                }
+            }
+            Target::Bound {
+                table,
+                resource,
+                key,
+            } => {
+                let _ = table;
+                let where_ = format!(
+                    "{} [{}] in account {} [{}]",
+                    resource.name,
+                    resource.id,
+                    resource.account.named(),
+                    resource.account.id
+                );
+                match operation.id {
+                    "cloudflare.d1.read" => format!("read database {where_}"),
+                    "cloudflare.d1.query" => format!(
+                        "run one statement against database {where_}: {}",
+                        params.get("sql").map(String::as_str).unwrap_or("")
+                    ),
+                    "cloudflare.d1.migrate" => format!(
+                        "apply {} to database {where_}",
+                        params.get("file").map(String::as_str).unwrap_or("")
+                    ),
+                    "cloudflare.kv.read" => format!(
+                        "read key {} in namespace {where_}",
+                        key.as_deref().unwrap_or("")
+                    ),
+                    "cloudflare.kv.write" => format!(
+                        "write key {} in namespace {where_}",
+                        key.as_deref().unwrap_or("")
+                    ),
+                    "cloudflare.queue.publish" => format!("put a message on queue {where_}"),
+                    "cloudflare.queue.manage" => {
+                        format!("change the delivery settings of queue {where_}")
+                    }
+                    "cloudflare.hyperdrive.read" => {
+                        format!("read hyperdrive configuration {where_}")
+                    }
+                    "cloudflare.hyperdrive.edit" => {
+                        format!("change the name or caching of hyperdrive configuration {where_}")
+                    }
+                    other => format!("{other} on {where_}"),
+                }
+            }
+            Target::Record(record) => {
+                let kind = record.kind.as_deref().unwrap_or("any");
+                let where_ = format!("{} in zone {} [{}]", record.name, record.zone.name, record.zone.id);
+                match operation.id {
+                    "cloudflare.dns.read" => format!("read the {kind} records at {where_}"),
+                    "cloudflare.dns.create" => format!(
+                        "add a {kind} record at {where_} pointing at {}",
+                        params.get("content").map(String::as_str).unwrap_or("")
+                    ),
+                    "cloudflare.dns.update" => format!("change the {kind} record at {where_}"),
+                    "cloudflare.dns.delete" => format!("remove the {kind} record at {where_}"),
+                    other => format!("{other} on the {kind} record at {where_}"),
+                }
+            }
             Target::Worker(worker) => {
                 let where_ = format!(
                     "{} ({}) in account {} [{}]",
@@ -388,11 +953,339 @@ impl CloudflareProvider {
                     body: self.deployment_body(req)?,
                 }
             }
+            ("cloudflare.r2.object.read", Target::Object { bucket, key }) => {
+                get(objects(bucket, key.as_deref()))
+            }
+            ("cloudflare.r2.object.write", Target::Object { bucket, key }) => {
+                let Some(key) = key else {
+                    return Err(ProviderError::Refused(format!(
+                        "'{}' names a bucket and not an object. Writing needs a \
+                         key as well: {}/<key>",
+                        bucket.name, bucket.name
+                    )));
+                };
+                Call {
+                    method: "PUT",
+                    path: objects(bucket, Some(key)),
+                    body: self.object_body(req, key)?,
+                }
+            }
+            ("cloudflare.d1.read", Target::Bound { resource, .. }) => get(format!(
+                "/accounts/{}/d1/database/{}",
+                resource.account.id, resource.id
+            )),
+            (
+                id @ ("cloudflare.d1.query" | "cloudflare.d1.migrate"),
+                Target::Bound { resource, .. },
+            ) => Call {
+                method: "POST",
+                // The same endpoint for both, which is not a shortcut: it is
+                // what `wrangler d1 migrations apply` does. `/import` is a
+                // three-step init/ingest/poll protocol around an upload to a
+                // temporary URL, and that is not one brokered call. What
+                // separates a migration from a query here is the grant, and
+                // where the statements came from.
+                path: format!(
+                    "/accounts/{}/d1/database/{}/query",
+                    resource.account.id, resource.id
+                ),
+                body: CloudflareProvider::sql_body(req, id == "cloudflare.d1.migrate")?,
+            },
+            ("cloudflare.kv.read", Target::Bound { resource, key, .. }) => {
+                get(kv_value(resource, key.as_deref())?)
+            }
+            ("cloudflare.kv.write", Target::Bound { resource, key, .. }) => Call {
+                method: "PUT",
+                path: kv_value(resource, key.as_deref())?,
+                body: self.kv_body(req)?,
+            },
+            ("cloudflare.queue.publish", Target::Bound { resource, .. }) => {
+                let Some(message) = req.params.get("message") else {
+                    return Err(ProviderError::Refused(
+                        "this operation needs a 'message' option".to_string(),
+                    ));
+                };
+                let mut body = serde_json::Map::new();
+                body.insert("body".into(), message.clone().into());
+                // Not the caller's to choose. A content type is a
+                // header-shaped string, and the one thing this build sends is
+                // a line of text.
+                body.insert("content_type".into(), "text".into());
+                Call {
+                    method: "POST",
+                    path: format!(
+                        "/accounts/{}/queues/{}/messages",
+                        resource.account.id, resource.id
+                    ),
+                    body: Body::Json(serde_json::Value::Object(body).to_string()),
+                }
+            }
+            ("cloudflare.queue.manage", Target::Bound { resource, .. }) => Call {
+                method: "PATCH",
+                path: format!("/accounts/{}/queues/{}", resource.account.id, resource.id),
+                body: queue_settings(req)?,
+            },
+            ("cloudflare.hyperdrive.read", Target::Bound { resource, .. }) => get(format!(
+                "/accounts/{}/hyperdrive/configs/{}",
+                resource.account.id, resource.id
+            )),
+            ("cloudflare.hyperdrive.edit", Target::Bound { resource, .. }) => Call {
+                // PATCH and never PUT: Cloudflare's PUT replaces a Hyperdrive
+                // configuration and "must include the name and complete origin
+                // connection details" — which means the origin password. There
+                // is no way for this build to send one and no reason it should
+                // ever hold one.
+                method: "PATCH",
+                path: format!(
+                    "/accounts/{}/hyperdrive/configs/{}",
+                    resource.account.id, resource.id
+                ),
+                body: hyperdrive_settings(req)?,
+            },
+            ("cloudflare.dns.read", Target::Record(record)) => {
+                // The one read that does not need a lookup: the filter IS the
+                // question. A name with no type gives every record at it.
+                let mut path = format!("{}?name.exact={}", record.path(), record.name);
+                if let Some(kind) = &record.kind {
+                    path.push_str(&format!("&type={kind}"));
+                }
+                get(path)
+            }
+            ("cloudflare.dns.create", Target::Record(record)) => Call {
+                method: "POST",
+                path: record.path(),
+                body: CloudflareProvider::record_body(req, record, true)?,
+            },
+            ("cloudflare.r2.bucket.create", Target::Bucket(bucket)) => Call {
+                method: "POST",
+                path: format!("/accounts/{}/r2/buckets", bucket.account.id),
+                body: bucket_body(req, bucket)?,
+            },
             (id, _) => {
                 return Err(ProviderError::Failed(format!(
                     "the cloudflare provider declares '{id}' and does not implement it"
                 )))
             }
+        })
+    }
+
+    /// The record type the caller named, checked in the order that gives the most
+    /// useful refusal.
+    ///
+    /// §13.9's reserved shapes are checked **first**, so that asking to change an
+    /// `NS` record is answered with the class it belongs to rather than with a
+    /// remark about the type list. `SOA` is not a type Cloudflare will accept at
+    /// all, and it still gets the §13.9 answer, because the person asking is
+    /// trying to rewrite a zone's authority and deserves to be told that.
+    fn record_type(req: &Bind<'_>) -> Result<Option<String>, ProviderError> {
+        let Some(given) = req.params.get("type") else {
+            return Ok(None);
+        };
+        let kind = given.to_ascii_uppercase();
+        if req.operation.effect.is_write() {
+            if let Some(why) = dns::elevated(&kind) {
+                return Err(ProviderError::Refused(format!(
+                    "changing a {kind} record is not something an ordinary project \
+                     grant may do: {why}. §13.9 puts registrar, nameserver and \
+                     DNSSEC-root changes in an elevated capability class, and this \
+                     build has no such class — so it refuses rather than doing it \
+                     under an ordinary grant. Reading one is allowed"
+                )));
+            }
+        }
+        if !dns::TYPES.contains(&kind.as_str()) {
+            return Err(ProviderError::Refused(format!(
+                "'{}' is not a DNS record type",
+                given.escape_debug()
+            )));
+        }
+        Ok(Some(kind))
+    }
+
+    /// The JSON body of a record create or update.
+    ///
+    /// `creating` is what separates the two, and the difference is deliberate:
+    /// a create sends the whole record, and an update sends only the fields it was
+    /// asked to change. The endpoint behind an update is `PATCH` for that reason —
+    /// `PUT` overwrites a record with what the request carries, so an update that
+    /// set only `content` through `PUT` would quietly reset the TTL and the proxy
+    /// flag to whatever the request happened to leave out.
+    fn record_body(req: &Bind<'_>, record: &Record, creating: bool) -> Result<Body, ProviderError> {
+        let mut body = serde_json::Map::new();
+        if creating {
+            let Some(kind) = &record.kind else {
+                return Err(ProviderError::Refused(
+                    "this operation needs a 'type' option saying what kind of \
+                     record to add"
+                        .to_string(),
+                ));
+            };
+            let Some(content) = req.params.get("content") else {
+                return Err(ProviderError::Refused(
+                    "this operation needs a 'content' option saying what the record \
+                     points at"
+                        .to_string(),
+                ));
+            };
+            body.insert("type".into(), kind.clone().into());
+            body.insert("name".into(), record.name.clone().into());
+            body.insert("content".into(), content.clone().into());
+        } else if let Some(content) = req.params.get("content") {
+            body.insert("content".into(), content.clone().into());
+        }
+
+        if let Some(ttl) = req.params.get("ttl") {
+            // 1 is Cloudflare's "automatic". Anything else is seconds, and a value
+            // outside the range it accepts is refused here rather than spent.
+            let seconds: u32 = ttl.parse().map_err(|_| {
+                ProviderError::Refused(format!("'{}' is not a number of seconds", ttl.escape_debug()))
+            })?;
+            if seconds != 1 && !(60..=86400).contains(&seconds) {
+                return Err(ProviderError::Refused(format!(
+                    "{seconds} is not a TTL Cloudflare accepts: 1 for automatic, or \
+                     60 to 86400 seconds"
+                )));
+            }
+            body.insert("ttl".into(), seconds.into());
+        }
+        if let Some(proxied) = req.params.get("proxied") {
+            let flag = match proxied.as_str() {
+                "true" => true,
+                "false" => false,
+                other => {
+                    return Err(ProviderError::Refused(format!(
+                        "'{}' is not true or false",
+                        other.escape_debug()
+                    )))
+                }
+            };
+            body.insert("proxied".into(), flag.into());
+        }
+        if let Some(comment) = req.params.get("comment") {
+            body.insert("comment".into(), comment.clone().into());
+        }
+
+        if !creating && body.is_empty() {
+            return Err(ProviderError::Refused(
+                "this operation changes nothing: give it a 'content', 'ttl', \
+                 'proxied' or 'comment' option"
+                    .to_string(),
+            ));
+        }
+        Ok(Body::Json(serde_json::Value::Object(body).to_string()))
+    }
+
+    /// The `{"sql": …}` body both D1 write operations send.
+    ///
+    /// `migrating` is where the two differ, and the difference is the reason
+    /// §13.2 names them separately: a query carries one line the caller wrote,
+    /// and a migration carries a file the project holds. A file may have as
+    /// many statements and as many newlines as it likes, because it never
+    /// passes through [`Syntax::Text`] — serde escapes it into the body.
+    fn sql_body(req: &Bind<'_>, migrating: bool) -> Result<Body, ProviderError> {
+        let sql = if migrating {
+            let Some(file) = req.params.get("file") else {
+                return Err(ProviderError::Refused(
+                    "this operation needs a 'file' option naming the .sql file \
+                     to apply"
+                        .to_string(),
+                ));
+            };
+            if !file.ends_with(".sql") {
+                return Err(ProviderError::Refused(format!(
+                    "'{}' is not a .sql file. A migration is SQL this project \
+                     wrote down, not whatever happens to be at that path",
+                    file.escape_debug()
+                )));
+            }
+            let bytes = project::read_file(
+                std::path::Path::new(req.project),
+                file,
+                req.owner.uid,
+                &req.owner.name,
+                MAX_PAYLOAD,
+            )
+            .map_err(|e| ProviderError::NoSuchResource(e.to_string()))?;
+            String::from_utf8(bytes).map_err(|_| {
+                ProviderError::Refused(format!(
+                    "'{}' is not text, so it is not SQL",
+                    file.escape_debug()
+                ))
+            })?
+        } else {
+            let Some(sql) = req.params.get("sql") else {
+                return Err(ProviderError::Refused(
+                    "this operation needs a 'sql' option".to_string(),
+                ));
+            };
+            sql.clone()
+        };
+        let mut body = serde_json::Map::new();
+        body.insert("sql".into(), sql.into());
+        Ok(Body::Json(serde_json::Value::Object(body).to_string()))
+    }
+
+    /// What goes into a KV key: a line the caller wrote, or a file the project
+    /// holds — one or the other, never both and never neither.
+    fn kv_body(&self, req: &Bind<'_>) -> Result<Body, ProviderError> {
+        match (req.params.get("value"), req.params.get("file")) {
+            (Some(_), Some(_)) => Err(ProviderError::Refused(
+                "give this operation a 'value' or a 'file', not both: they are \
+                 two answers to the same question, and this build will not pick"
+                    .to_string(),
+            )),
+            (None, None) => Err(ProviderError::Refused(
+                "this operation needs a 'value' option holding what to store, \
+                 or a 'file' option naming a file in the project to store"
+                    .to_string(),
+            )),
+            (Some(value), None) => Ok(Body::Raw {
+                content_type: "text/plain; charset=utf-8",
+                bytes: value.clone().into_bytes(),
+            }),
+            (None, Some(file)) => {
+                let bytes = project::read_file(
+                    std::path::Path::new(req.project),
+                    file,
+                    req.owner.uid,
+                    &req.owner.name,
+                    MAX_PAYLOAD,
+                )
+                .map_err(|e| ProviderError::NoSuchResource(e.to_string()))?;
+                Ok(Body::Raw {
+                    content_type: "application/octet-stream",
+                    bytes,
+                })
+            }
+        }
+    }
+
+    /// The bytes of a project file, as the body of an R2 upload.
+    ///
+    /// Same read as a Worker module's — [`project::read_file`]'s `O_NOFOLLOW`
+    /// walk, owned by the caller, capped — because it is the same problem: a
+    /// root daemon opening a path a caller chose. What is different is that
+    /// nothing here looks at the contents. An R2 object is whatever the project
+    /// put in it.
+    fn object_body(&self, req: &Bind<'_>, key: &str) -> Result<Body, ProviderError> {
+        let Some(file) = req.params.get("file") else {
+            return Err(ProviderError::Refused(
+                "this operation needs a 'file' option naming the file inside \
+                 the project to upload"
+                    .to_string(),
+            ));
+        };
+        let bytes = project::read_file(
+            std::path::Path::new(req.project),
+            file,
+            req.owner.uid,
+            &req.owner.name,
+            MAX_PAYLOAD,
+        )
+        .map_err(|e| ProviderError::NoSuchResource(e.to_string()))?;
+        Ok(Body::Raw {
+            content_type: media_type(key),
+            bytes,
         })
     }
 
@@ -496,6 +1389,234 @@ fn script(worker: &Worker) -> String {
     )
 }
 
+/// The first segment of a resource, and whatever is left.
+///
+/// `example-assets/db/today.sql` is a bucket and a key, and the key keeps its
+/// slashes because R2 object keys have them. The framework has already held
+/// the whole string to [`apex_secret_core::operation::valid_path`] — no
+/// leading or trailing `/`, no `//`, no `..`, no `:` — so the split cannot
+/// produce an empty bucket or a key that climbs.
+fn split_first(resource: &str) -> (&str, Option<String>) {
+    match resource.split_once('/') {
+        Some((first, rest)) => (first, Some(rest.to_string())),
+        None => (resource, None),
+    }
+}
+
+/// The path for one bucket's objects, or for one object in it.
+fn objects(bucket: &Bucket, key: Option<&str>) -> String {
+    let base = format!(
+        "/accounts/{}/r2/buckets/{}/objects",
+        bucket.account.id, bucket.name
+    );
+    match key {
+        Some(key) => format!("{base}/{key}"),
+        None => base,
+    }
+}
+
+/// What to call an object's bytes, from the name the caller gave it.
+///
+/// A `&'static str` out of a fixed table rather than anything the caller sends,
+/// because this ends up in a header. The default is deliberately the useless
+/// one: an unknown extension is bytes, not a guess.
+fn media_type(key: &str) -> &'static str {
+    let extension = key.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    match extension {
+        "json" | "map" => "application/json",
+        "txt" | "log" => "text/plain; charset=utf-8",
+        "md" => "text/markdown; charset=utf-8",
+        "csv" => "text/csv; charset=utf-8",
+        "html" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "xml" => "application/xml",
+        "sql" => "application/sql",
+        "wasm" => "application/wasm",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" | "tgz" => "application/gzip",
+        "tar" => "application/x-tar",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/vnd.microsoft.icon",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+/// The path of one key in one namespace.
+fn kv_value(namespace: &Resource, key: Option<&str>) -> Result<String, ProviderError> {
+    let Some(key) = key else {
+        return Err(ProviderError::Refused(format!(
+            "'{}' names a namespace and not a key. Both KV operations need one: \
+             {}/<key>",
+            namespace.name, namespace.name
+        )));
+    };
+    Ok(format!(
+        "/accounts/{}/storage/kv/namespaces/{}/values/{key}",
+        namespace.account.id, namespace.id
+    ))
+}
+
+/// A whole number of seconds inside the range Cloudflare documents for it.
+///
+/// Refused here rather than sent, for the reason the R2 location hint is: a
+/// request that fails at the far side has already spent the credential, and the
+/// reply an owner reads then describes an API error instead of a typo.
+fn seconds(
+    value: &str,
+    name: &str,
+    range: std::ops::RangeInclusive<u32>,
+) -> Result<u32, ProviderError> {
+    let parsed: u32 = value.parse().map_err(|_| {
+        ProviderError::Refused(format!(
+            "'{}' is not a number of seconds",
+            value.escape_debug()
+        ))
+    })?;
+    if !range.contains(&parsed) {
+        return Err(ProviderError::Refused(format!(
+            "{parsed} is outside the range cloudflare accepts for {name}: {} to {}",
+            range.start(),
+            range.end()
+        )));
+    }
+    Ok(parsed)
+}
+
+/// `true` or `false`, and nothing else.
+fn flag(value: &str) -> Result<bool, ProviderError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(ProviderError::Refused(format!(
+            "'{}' is not true or false",
+            other.escape_debug()
+        ))),
+    }
+}
+
+/// The `{"settings": …}` body of a queue change.
+fn queue_settings(req: &Bind<'_>) -> Result<Body, ProviderError> {
+    let mut settings = serde_json::Map::new();
+    if let Some(paused) = req.params.get("paused") {
+        settings.insert("delivery_paused".into(), flag(paused)?.into());
+    }
+    if let Some(delay) = req.params.get("delivery-delay") {
+        settings.insert(
+            "delivery_delay".into(),
+            seconds(delay, "a delivery delay", 0..=86_400)?.into(),
+        );
+    }
+    if let Some(retention) = req.params.get("retention") {
+        settings.insert(
+            "message_retention_period".into(),
+            seconds(retention, "a retention period", 60..=1_209_600)?.into(),
+        );
+    }
+    if settings.is_empty() {
+        return Err(ProviderError::Refused(
+            "this operation changes nothing: give it a 'paused', \
+             'delivery-delay' or 'retention' option"
+                .to_string(),
+        ));
+    }
+    let mut body = serde_json::Map::new();
+    body.insert("settings".into(), settings.into());
+    Ok(Body::Json(serde_json::Value::Object(body).to_string()))
+}
+
+/// The body of a Hyperdrive change: a name and caching, and nothing that could
+/// be a credential.
+fn hyperdrive_settings(req: &Bind<'_>) -> Result<Body, ProviderError> {
+    let mut body = serde_json::Map::new();
+    if let Some(name) = req.params.get("name") {
+        body.insert("name".into(), name.clone().into());
+    }
+    let mut caching = serde_json::Map::new();
+    if let Some(on) = req.params.get("caching") {
+        let on = match on.as_str() {
+            "on" => true,
+            "off" => false,
+            other => {
+                return Err(ProviderError::Refused(format!(
+                    "'{}' is not on or off",
+                    other.escape_debug()
+                )))
+            }
+        };
+        // Cloudflare's field is `disabled`. Inverting it here, rather than
+        // asking an owner to grant something spelled in negatives, is the
+        // difference between a capability somebody reads correctly and one
+        // they do not.
+        caching.insert("disabled".into(), (!on).into());
+    }
+    if let Some(max_age) = req.params.get("max-age") {
+        caching.insert(
+            "max_age".into(),
+            seconds(max_age, "a cache age", 0..=86_400)?.into(),
+        );
+    }
+    if let Some(stale) = req.params.get("stale-while-revalidate") {
+        caching.insert(
+            "stale_while_revalidate".into(),
+            seconds(stale, "a stale window", 0..=86_400)?.into(),
+        );
+    }
+    if !caching.is_empty() {
+        body.insert("caching".into(), caching.into());
+    }
+    if body.is_empty() {
+        return Err(ProviderError::Refused(
+            "this operation changes nothing: give it a 'name', 'caching', \
+             'max-age' or 'stale-while-revalidate' option"
+                .to_string(),
+        ));
+    }
+    Ok(Body::Json(serde_json::Value::Object(body).to_string()))
+}
+
+/// The JSON body that creates a bucket.
+///
+/// Both options are closed sets in Cloudflare's own documentation, so a value
+/// outside them is refused here rather than sent and refused there. The reason
+/// is not politeness: a request that fails at the far side has already spent
+/// the credential, and the reply an owner reads then describes an API error
+/// instead of a typo.
+fn bucket_body(req: &Bind<'_>, bucket: &Bucket) -> Result<Body, ProviderError> {
+    const LOCATIONS: &[&str] = &["apac", "eeur", "enam", "oc", "weur", "wnam"];
+    const CLASSES: &[&str] = &["Standard", "InfrequentAccess"];
+
+    let mut body = serde_json::Map::new();
+    body.insert("name".into(), bucket.name.clone().into());
+    if let Some(location) = req.params.get("location") {
+        if !LOCATIONS.contains(&location.as_str()) {
+            return Err(ProviderError::Refused(format!(
+                "'{}' is not an R2 location hint. One of: {}",
+                location.escape_debug(),
+                LOCATIONS.join(", ")
+            )));
+        }
+        body.insert("locationHint".into(), location.clone().into());
+    }
+    if let Some(class) = req.params.get("storage-class") {
+        if !CLASSES.contains(&class.as_str()) {
+            return Err(ProviderError::Refused(format!(
+                "'{}' is not an R2 storage class. One of: {}",
+                class.escape_debug(),
+                CLASSES.join(", ")
+            )));
+        }
+        body.insert("storageClass".into(), class.clone().into());
+    }
+    Ok(Body::Json(serde_json::Value::Object(body).to_string()))
+}
+
 /// A tail session's reply, with the part of it that is a credential taken out.
 ///
 /// `POST …/tails` answers with `{"result":{"id":…,"url":"wss://…","expires_at":…}}`
@@ -524,6 +1645,50 @@ fn without_the_tail_url(body: &str) -> String {
             "\napex: the session's WebSocket URL is authorisation in itself, so \
              it is not returned. This build starts a tail session; it does not \
              relay the stream.",
+        );
+    }
+    out
+}
+
+/// A Hyperdrive configuration, with anything credential-shaped taken out.
+///
+/// Cloudflare's own documentation says `origin.password` and
+/// `access_client_secret` are write-only and that the API never returns them.
+/// This removes them anyway, and the reason is the whole shape of this service:
+/// **a broker that hands a caller a secret because the far side volunteered one
+/// has still handed the caller a secret.** The guarantee an owner is given here
+/// is that an agent gets capabilities and not credentials, and that guarantee
+/// cannot rest on a remark in somebody else's documentation staying true.
+///
+/// The same argument as `without_the_tail_url`, applied to a field this build
+/// does not expect to see rather than one it does.
+fn without_the_origin_secrets(body: &str) -> String {
+    const SECRETS: &[&str] = &["password", "access_client_secret"];
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.to_string();
+    };
+    let mut removed = false;
+    let mut stack = vec![&mut value];
+    while let Some(node) = stack.pop() {
+        match node {
+            serde_json::Value::Object(map) => {
+                for secret in SECRETS {
+                    if map.remove(*secret).is_some() {
+                        removed = true;
+                    }
+                }
+                stack.extend(map.values_mut());
+            }
+            serde_json::Value::Array(items) => stack.extend(items.iter_mut()),
+            _ => {}
+        }
+    }
+    let mut out = serde_json::to_string(&value).unwrap_or_else(|_| body.to_string());
+    if removed {
+        out.push_str(
+            "\napex: this configuration carried an origin credential, which is \
+             not something a brokered operation hands back. It has been removed \
+             from this reply.",
         );
     }
     out
@@ -582,7 +1747,73 @@ impl Provider for CloudflareProvider {
                     .to_string(),
             ));
         }
-        let call = self.build(req, &target)?;
+        // §13.9's update and delete name a record the way a person does, and
+        // the API addresses one by id — so the id is discovered here, with the
+        // credential, and never taken from the caller. See [`dns`] for why an
+        // id parameter would make the `records` narrowing meaningless.
+        let call = match (req.operation.id, &target) {
+            (id @ ("cloudflare.dns.update" | "cloudflare.dns.delete"), Target::Record(record)) => {
+                let Some(kind) = record.kind.clone() else {
+                    return Err(ProviderError::Refused(
+                        "this operation needs a 'type' option: a name can hold \
+                         several records and only the type says which one"
+                            .to_string(),
+                    ));
+                };
+                // Build the body BEFORE spending anything, so an update that
+                // changes nothing is refused without a request being made.
+                let body = if id == "cloudflare.dns.update" {
+                    CloudflareProvider::record_body(req, record, false)?
+                } else {
+                    Body::None
+                };
+                let id_of = match dns::look_up(&self.api, record, &kind, value, req.owner) {
+                    Lookup::Found(id) => id,
+                    // The four answers that are not one record, each said in
+                    // its own words. None of them builds a second request, and
+                    // none of them is reported as any of the others.
+                    Lookup::Absent => {
+                        return Err(ProviderError::NoSuchResource(format!(
+                            "zone {} answered, and holds no {kind} record at {}. \
+                             Nothing was changed",
+                            record.zone.name, record.name
+                        )))
+                    }
+                    Lookup::Denied(status) => {
+                        return Err(ProviderError::Refused(format!(
+                            "cloudflare answered HTTP {status} when this looked \
+                             up the {kind} record at {}. That is the credential \
+                             being refused, which is not the same as the record \
+                             not being there — so nothing was changed, and this \
+                             build will not treat it as an absence",
+                            record.name
+                        )))
+                    }
+                    Lookup::Ambiguous(n) => {
+                        return Err(ProviderError::Refused(format!(
+                            "{n} {kind} records answer to {}. This build will \
+                             not guess which one you meant, so nothing was \
+                             changed",
+                            record.name
+                        )))
+                    }
+                    Lookup::CouldNotRun(why) => {
+                        return Err(ProviderError::Failed(format!(
+                            "the {kind} record at {} could not be looked up: \
+                             {why}. Nothing was changed, and this is not a \
+                             report that the record is absent",
+                            record.name
+                        )))
+                    }
+                };
+                Call {
+                    method: if id == "cloudflare.dns.update" { "PATCH" } else { "DELETE" },
+                    path: format!("{}/{id_of}", record.path()),
+                    body,
+                }
+            }
+            _ => self.build(req, &target)?,
+        };
         let reply = api::call(&self.api, &call, value, req.owner)
             .map_err(|e| ProviderError::Failed(e.to_string()))?;
 
@@ -591,6 +1822,9 @@ impl Provider for CloudflareProvider {
         // refusal reason.
         let body = match req.operation.id {
             "cloudflare.worker.tail" if reply.ok() => without_the_tail_url(&reply.body),
+            "cloudflare.hyperdrive.read" | "cloudflare.hyperdrive.edit" if reply.ok() => {
+                without_the_origin_secrets(&reply.body)
+            }
             "cloudflare.worker.route.read" if reply.ok() => {
                 let name = match &target {
                     Target::Route { worker, .. } => worker.name.as_str(),

@@ -45,10 +45,65 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use apex_secret_core::operation;
 use apex_secret_core::project::{ProjectConfig, ProjectError};
 
 /// Length of a Cloudflare account or zone id.
 const ID_LEN: usize = 32;
+
+/// The shape an id has.
+///
+/// Two shapes and not one, because Cloudflare uses two. Account, zone, KV
+/// namespace, queue, Hyperdrive config and DNS record ids are all 32 lower-case
+/// hex; a **D1 database id is a UUID** with hyphens, and `wrangler` calls the
+/// field `db.uuid` for that reason. A single validator would either refuse
+/// every real D1 id or accept 36 characters of anything in a URL path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdShape {
+    /// 32 lower-case hex characters.
+    Hex32,
+    /// `8-4-4-4-12` lower-case hex.
+    Uuid,
+}
+
+impl IdShape {
+    pub fn accepts(&self, id: &str) -> bool {
+        match self {
+            IdShape::Hex32 => valid_id(id),
+            IdShape::Uuid => valid_uuid(id),
+        }
+    }
+
+    pub fn describe(&self) -> &'static str {
+        match self {
+            IdShape::Hex32 => "32 hexadecimal characters",
+            IdShape::Uuid => "a UUID, like 1a2b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d",
+        }
+    }
+}
+
+/// The `[cloudflare.<table>]` tables a project may bind, and the id shape each
+/// one's values have to be.
+///
+/// These names are reserved: an environment may not be called one of them, or
+/// `[cloudflare.kv]` would mean two things at once. See
+/// [`BindingError::ReservedSection`].
+pub const RESOURCES: &[(&str, IdShape, &str)] = &[
+    ("d1", IdShape::Uuid, "D1 database"),
+    ("kv", IdShape::Hex32, "KV namespace"),
+    ("queues", IdShape::Hex32, "queue"),
+    ("hyperdrive", IdShape::Hex32, "Hyperdrive config"),
+];
+
+/// What one of those tables says about a name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resource {
+    pub account: Account,
+    /// What the project calls it.
+    pub name: String,
+    /// What the API is addressed by.
+    pub id: String,
+}
 
 /// What a project binds.
 #[derive(Debug, Clone, Default)]
@@ -66,6 +121,16 @@ pub struct Binding {
     /// `[cloudflare] buckets` — R2, so P1-005's. Resolvable now so that the
     /// meaning of a name is decided in one place rather than per task.
     pub buckets: Vec<String>,
+    /// `[cloudflare.d1]`, `[cloudflare.kv]`, `[cloudflare.queues]` and
+    /// `[cloudflare.hyperdrive]` — P1-006's, keyed by table name. Each holds
+    /// `<name> = "<id>"`, because these four are addressed by an id the project
+    /// has to write down: unlike an R2 bucket, none of them has a name-based
+    /// path, and unlike an account id, there is more than one per project.
+    pub resources: BTreeMap<String, BTreeMap<String, String>>,
+    /// `[cloudflare] records` — §13.9's narrowing, P1-007's. Empty means the
+    /// bound zone and nothing narrower; a non-empty list means these names and
+    /// no others, apex included only if it is written down.
+    pub records: Vec<String>,
     /// `[cloudflare.<name>] worker`, by environment name.
     pub environments: BTreeMap<String, String>,
 }
@@ -80,8 +145,14 @@ pub enum BindingError {
     Project(ProjectError),
     /// No `[identity.cloudflare]` at all.
     Unbound { path: PathBuf },
-    /// A key that has to be a 32-hex id is not one.
+    /// A key that has to be an id is not one of the right shape.
     BadId { path: PathBuf, key: String },
+    /// A resource is written down under a name no request could ever carry.
+    BadName {
+        path: PathBuf,
+        table: String,
+        named: String,
+    },
     /// The account id is missing, so nothing can be addressed.
     NoAccount { path: PathBuf, account: Option<String> },
     /// No worker in any environment answers to that name.
@@ -97,15 +168,36 @@ pub enum BindingError {
         bound: Option<String>,
     },
     /// That is not one of this project's buckets.
-    ///
-    /// Reachable only from [`Binding::bucket`], which no operation calls yet —
-    /// see that method for why it is here before P1-005 is.
-    #[allow(dead_code)]
     NoBucket {
         path: PathBuf,
         named: String,
         bound: Vec<String>,
     },
+    /// That is not a record this project may act on: either it is not inside
+    /// the bound zone at all, or the project narrowed itself to a list that
+    /// does not hold it.
+    NoRecord {
+        path: PathBuf,
+        named: String,
+        zone: String,
+        bound: Vec<String>,
+    },
+    /// That is not one of this project's databases, namespaces, queues or
+    /// Hyperdrive configs. One variant for the four, because the answer has the
+    /// same shape every time and so does the fix.
+    NoResource {
+        path: PathBuf,
+        /// The table it would have been in — `d1`, `kv`, `queues`,
+        /// `hyperdrive`.
+        table: String,
+        /// What to call that kind of thing in a sentence.
+        kind: String,
+        named: String,
+        bound: Vec<String>,
+    },
+    /// An environment is named after one of the reserved resource tables, so
+    /// `[cloudflare.kv]` would have to mean two things at once.
+    ReservedSection { path: PathBuf, name: String },
     /// The zone is named but its id is not, so a zone-scoped call cannot be
     /// addressed.
     NoZoneId { path: PathBuf, zone: String },
@@ -135,11 +227,31 @@ impl std::fmt::Display for BindingError {
                  `apex cf status` prints the ids this credential can see",
                 path.display()
             ),
-            BindingError::BadId { path, key } => write!(
+            BindingError::BadId { path, key } => {
+                // The shape depends on which key it is: a D1 database id is a
+                // UUID and everything else here is 32 hex, so a message that
+                // named only one of them would send half its readers looking
+                // for the wrong thing.
+                let want = key
+                    .strip_prefix("cloudflare.")
+                    .and_then(|rest| rest.split('.').next())
+                    .and_then(|table| RESOURCES.iter().find(|(name, _, _)| name == &table))
+                    .map(|(_, shape, _)| shape.describe())
+                    .unwrap_or("32 hexadecimal characters");
+                write!(
+                    f,
+                    "{} sets {key} to something that is not a Cloudflare id. \
+                     One is {want}",
+                    path.display()
+                )
+            }
+            BindingError::BadName { path, table, named } => write!(
                 f,
-                "{} sets {key} to something that is not a Cloudflare id. One is \
-                 {ID_LEN} hexadecimal characters",
-                path.display()
+                "{} binds a resource called '{}' under [cloudflare.{table}], and \
+                 that is not a name a request can carry. Use letters, digits, \
+                 '_', '.' and '-'",
+                path.display(),
+                named.escape_debug()
             ),
             BindingError::NoAccount { path, account } => match account {
                 Some(name) => write!(
@@ -192,6 +304,56 @@ impl std::fmt::Display for BindingError {
                 named.escape_debug(),
                 path.display(),
                 listed(bound)
+            ),
+            BindingError::NoRecord {
+                path,
+                named,
+                zone,
+                bound,
+            } => {
+                if bound.is_empty() {
+                    write!(
+                        f,
+                        "'{}' is not a name in {zone}, which is the zone {} \
+                         binds. A project may only act on records in its own \
+                         zone",
+                        named.escape_debug(),
+                        path.display()
+                    )
+                } else {
+                    write!(
+                        f,
+                        "this project does not bind a record called '{}'. {} \
+                         narrows [cloudflare] records to {}. Add it there if it \
+                         should be one",
+                        named.escape_debug(),
+                        path.display(),
+                        listed(bound)
+                    )
+                }
+            }
+            BindingError::NoResource {
+                path,
+                table,
+                kind,
+                named,
+                bound,
+            } => write!(
+                f,
+                "this project does not bind a {kind} called '{}'. {} binds {} \
+                 under [cloudflare.{table}]. A {kind} is bound by name and id:\n  \
+                 [cloudflare.{table}]\n  {} = \"…\"",
+                named.escape_debug(),
+                path.display(),
+                listed(bound),
+                named.escape_debug()
+            ),
+            BindingError::ReservedSection { path, name } => write!(
+                f,
+                "{} has a [cloudflare.{name}] section with a worker in it, and \
+                 '{name}' is the name of a resource table. Rename the \
+                 environment: one section cannot be both",
+                path.display()
             ),
             BindingError::NoZoneId { path, zone } => write!(
                 f,
@@ -246,11 +408,30 @@ pub struct Zone {
 }
 
 /// A bucket this project binds.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bucket {
     pub account: Account,
     pub name: String,
+}
+
+/// `8-4-4-4-12` lower-case hex, which is what a D1 database id is.
+///
+/// Written out rather than pulled in as a dependency, and strict about case
+/// for the same reason [`valid_id`] is: this goes into a URL path, and the set
+/// of characters that cannot appear there is the point.
+fn valid_uuid(id: &str) -> bool {
+    let groups: Vec<&str> = id.split('-').collect();
+    if groups.len() != 5 {
+        return false;
+    }
+    for (group, want) in groups.iter().zip([8, 4, 4, 4, 12]) {
+        if group.len() != want
+            || !group.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn valid_id(id: &str) -> bool {
@@ -280,9 +461,51 @@ impl Binding {
 
         let mut environments = BTreeMap::new();
         for name in config.sections(&["cloudflare"]) {
+            // A resource table is not an environment. Without this an
+            // environment could be called `kv`, and `[cloudflare.kv]` would
+            // have to be both a list of namespaces and a worker binding —
+            // which would read the key `worker` as a namespace called
+            // "worker" and refuse the whole file for a bad id. Refused by
+            // name instead, so the person is told what actually collided.
+            if RESOURCES.iter().any(|(table, _, _)| *table == name) {
+                if config.string(&["cloudflare", &name, "worker"])?.is_some() {
+                    return Err(BindingError::ReservedSection {
+                        path: path.clone(),
+                        name: name.clone(),
+                    });
+                }
+                continue;
+            }
             if let Some(worker) = config.string(&["cloudflare", &name, "worker"])? {
                 environments.insert(name, worker.to_string());
             }
+        }
+
+        let mut resources = BTreeMap::new();
+        for (table, shape, kind) in RESOURCES {
+            let mut bound = BTreeMap::new();
+            for (name, id) in config.pairs(&["cloudflare", table])? {
+                // A name the vocabulary could never carry is refused where it
+                // is written rather than being silently unaddressable: a
+                // namespace called `my cache` is not a `Syntax::Name`, so no
+                // request could ever name it.
+                if !operation::valid_name(&name) {
+                    return Err(BindingError::BadName {
+                        path: path.clone(),
+                        table: table.to_string(),
+                        named: name,
+                    });
+                }
+                if !shape.accepts(&id) {
+                    return Err(BindingError::BadId {
+                        path: path.clone(),
+                        key: format!("cloudflare.{table}.{name}"),
+                    });
+                }
+                let _ = kind;
+                bound.insert(name, id);
+            }
+            resources.insert(table.to_string(), bound);
         }
 
         Ok(Binding {
@@ -291,6 +514,8 @@ impl Binding {
             zone: config.string(&["cloudflare", "zone"])?.map(str::to_string),
             zone_id: id(&["cloudflare", "zone_id"])?,
             buckets: config.strings(&["cloudflare", "buckets"])?,
+            records: config.strings(&["cloudflare", "records"])?,
+            resources,
             environments,
             path,
         })
@@ -305,7 +530,11 @@ impl Binding {
             && self.account_id.is_none()
             && self.zone.is_none()
             && self.buckets.is_empty()
+            && self.records.is_empty()
             && self.environments.is_empty()
+            // Every table, or a project that binds only `[cloudflare.kv]` is
+            // told to write a file it has already written.
+            && self.resources.values().all(BTreeMap::is_empty)
     }
 
     /// The account every account-scoped call is addressed to.
@@ -384,15 +613,106 @@ impl Binding {
         })
     }
 
+    /// What a name in one of the resource tables means: an account, and the id
+    /// the API is addressed by.
+    ///
+    /// One resolver for D1, KV, Queues and Hyperdrive, because §13.1's answer
+    /// is the same for all four — *the project writes the name down next to the
+    /// id, or the request does not happen.* The four differ in what the id
+    /// looks like and in nothing else, and that difference is handled where the
+    /// file is read rather than here.
+    pub fn resource(&self, table: &str, named: &str) -> Result<Resource, BindingError> {
+        let account = self.account()?;
+        let kind = RESOURCES
+            .iter()
+            .find(|(name, _, _)| *name == table)
+            .map(|(_, _, kind)| *kind)
+            .unwrap_or(table);
+        let bound = self.resources.get(table);
+        let Some(id) = bound.and_then(|t| t.get(named)) else {
+            return Err(BindingError::NoResource {
+                path: self.path.clone(),
+                table: table.to_string(),
+                kind: kind.to_string(),
+                named: named.to_string(),
+                bound: bound.map(|t| t.keys().cloned().collect()).unwrap_or_default(),
+            });
+        };
+        Ok(Resource {
+            account,
+            name: named.to_string(),
+            id: id.clone(),
+        })
+    }
+
+    /// What a record NAME means: a name inside the bound zone that this
+    /// project is allowed to touch.
+    ///
+    /// §13.9's "ordinary project grants may operate only on bound zones and
+    /// records", in the two steps it actually has:
+    ///
+    /// * the name must be inside the bound zone, on a **label boundary** —
+    ///   `notexample.com` is not in `example.com`, and a suffix test without
+    ///   the dot would say it was;
+    /// * if the project narrowed itself with `records`, the name must be one
+    ///   of those. An entry may be written either way round — `www` or
+    ///   `www.example.com` — because both are how people write them, and the
+    ///   zone is right there to complete the short form.
+    ///
+    /// A project that lists no records gets its whole zone, which is the
+    /// narrowing §13.9 asks for and no more. The elevated shapes are refused
+    /// on top of this, by type, in [`super::dns::elevated`].
+    pub fn record(&self, named: &str) -> Result<super::dns::Record, BindingError> {
+        let Some(zone_name) = self.zone.clone() else {
+            return Err(BindingError::NoZone {
+                path: self.path.clone(),
+                named: named.to_string(),
+                bound: None,
+            });
+        };
+        let zone = self.zone(&zone_name)?;
+        if !super::dns::inside(&zone.name, named) {
+            return Err(BindingError::NoRecord {
+                path: self.path.clone(),
+                named: named.to_string(),
+                zone: zone.name.clone(),
+                bound: Vec::new(),
+            });
+        }
+        if !self.records.is_empty() {
+            let allowed = self.records.iter().any(|bound| {
+                bound == named || format!("{bound}.{}", zone.name) == named
+            });
+            if !allowed {
+                return Err(BindingError::NoRecord {
+                    path: self.path.clone(),
+                    named: named.to_string(),
+                    zone: zone.name.clone(),
+                    bound: self.records.clone(),
+                });
+            }
+        }
+        Ok(super::dns::Record {
+            zone,
+            name: named.to_string(),
+            kind: None,
+        })
+    }
+
     /// What a bucket NAME means: an account, and a bucket in it.
     ///
-    /// §13.5's, and therefore P1-005's. It is here, ahead of any operation
-    /// that calls it, because *what a Cloudflare name means* is one question
-    /// and answering it in one module is the point of this file — a second
-    /// resolver written next to R2's operations would be a second place for
-    /// "the project did not bind that" to be decided differently. Tested, and
-    /// `allow(dead_code)` until P1-005 declares an operation that reaches it.
-    #[allow(dead_code)]
+    /// §13.5's, and therefore P1-005's. It was written here ahead of any
+    /// operation that calls it, because *what a Cloudflare name means* is one
+    /// question and answering it in one module is the point of this file — a
+    /// second resolver written next to R2's operations would be a second place
+    /// for "the project did not bind that" to be decided differently. P1-005's
+    /// three operations are what reach it now.
+    ///
+    /// A bucket is the one resource that can be named before it exists:
+    /// `cloudflare.r2.bucket.create` makes the thing the project already
+    /// declares. So this answers for a name in the file, not for a bucket in
+    /// the account, and the difference is deliberate — the account is not
+    /// something `bind` may ask about.
     pub fn bucket(&self, named: &str) -> Result<Bucket, BindingError> {
         let account = self.account()?;
         if !self.buckets.iter().any(|b| b == named) {

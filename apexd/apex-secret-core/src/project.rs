@@ -46,6 +46,7 @@
 //! `.git/config`. What bounds a hostile caller is the grant, the host pin, and
 //! the scope of the credential itself.
 
+use std::collections::BTreeMap;
 use std::os::unix::io::FromRawFd;
 use std::path::{Path, PathBuf};
 
@@ -477,6 +478,43 @@ impl ProjectConfig {
         }
     }
 
+    /// A table of `name = "value"` at a dotted key, or nothing.
+    ///
+    /// §13.1 binds an account and a zone, and the two of them fit in scalar
+    /// keys. P1-006's resources do not: a project has several D1 databases and
+    /// several KV namespaces, each with a name its own code uses and an id the
+    /// REST API is addressed by, and neither a list of strings nor a pair of
+    /// scalars can carry that. `[cloudflare.kv]` with one line per namespace
+    /// can.
+    ///
+    /// Ordered, so a refusal that lists what is bound reads the same way
+    /// twice. A sub-table is skipped rather than refused — `[cloudflare]`
+    /// holds both `zone = "…"` and `[cloudflare.production]`, so a table
+    /// containing a table is ordinary — but a key whose value is a number or a
+    /// list is an error, for the reason [`ProjectConfig::string`] gives: it is
+    /// somebody configuring this and getting it wrong, and calling it absent
+    /// sends them looking for a line that is right in front of them.
+    pub fn pairs(&self, keys: &[&str]) -> Result<BTreeMap<String, String>, ProjectError> {
+        let Some(toml::Value::Table(table)) = self.at(keys) else {
+            return Ok(BTreeMap::new());
+        };
+        let mut out = BTreeMap::new();
+        for (name, value) in table {
+            match value {
+                toml::Value::String(s) => {
+                    out.insert(name.clone(), s.clone());
+                }
+                toml::Value::Table(_) => {}
+                _ => {
+                    let mut key = keys.to_vec();
+                    key.push(name);
+                    return Err(self.bad(&key, "a string in quotes"));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// The names of the sub-tables of a table — `preview` and `production` for
     /// §13.1's `[cloudflare.preview]` and `[cloudflare.production]`.
     ///
@@ -752,5 +790,39 @@ mod tests {
         assert_eq!(cfg.strings(&["cloudflare", "buckets"]).unwrap(), vec!["a", "b"]);
         assert!(cfg.strings(&["cloudflare", "bad"]).is_err());
         assert!(cfg.strings(&["cloudflare", "absent"]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_table_of_names_is_read_as_pairs_and_a_sub_table_in_it_is_not_one() {
+        // What P1-006's resources need: a name the project's own code uses and
+        // an id the API is addressed by, several times over.
+        let cfg = ProjectConfig::parse(
+            Path::new("/p/apex.toml"),
+            "[cloudflare]\nzone = \"example.com\"\n\
+             [cloudflare.kv]\ncache = \"00112233445566778899aabbccddeeff\"\n\
+             sessions = \"ffeeddccbbaa99887766554433221100\"\n\
+             [cloudflare.production]\nworker = \"project\"\n",
+        )
+        .expect("parses");
+        let kv = cfg.pairs(&["cloudflare", "kv"]).expect("pairs");
+        assert_eq!(kv.len(), 2);
+        assert_eq!(kv["cache"], "00112233445566778899aabbccddeeff");
+        // `[cloudflare]` holds a scalar and two sub-tables. The scalar is a
+        // pair; the sub-tables are skipped rather than refused, or every
+        // §13.1 file would fail to read.
+        let cloudflare = cfg.pairs(&["cloudflare"]).expect("pairs");
+        assert_eq!(cloudflare.keys().collect::<Vec<_>>(), vec!["zone"]);
+        // Absent is empty, not an error: a project that binds no namespace is
+        // an ordinary project.
+        assert!(cfg.pairs(&["cloudflare", "d1"]).expect("absent").is_empty());
+
+        // ...and a value that is not a string is somebody getting it wrong.
+        let wrong = ProjectConfig::parse(
+            Path::new("/p/apex.toml"),
+            "[cloudflare.kv]\ncache = 12345\n",
+        )
+        .expect("parses");
+        let err = wrong.pairs(&["cloudflare", "kv"]).unwrap_err();
+        assert!(err.to_string().contains("cloudflare.kv.cache"), "{err}");
     }
 }
