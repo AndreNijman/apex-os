@@ -268,8 +268,12 @@ mod tests {
         assert_eq!(elevated("NS"), Some(ELEVATED[0].1));
         assert_eq!(elevated("A"), None);
         assert_eq!(elevated("TXT"), None);
-        // Case matters: the caller's type is upper-cased before it gets here,
-        // and a lower-case `ns` slipping past would be the whole guard.
+        // This answers about the string it is given and nothing else. The
+        // caller's `ns` becomes `NS` in `mod.rs::record_type` before it gets
+        // here, so THAT is where case is handled and
+        // `changing_a_delegation_or_a_dnssec_record_is_refused_as_an_elevated_shape`
+        // is what proves it end to end — this line only pins the narrow
+        // contract, which is that the lookup is exact.
         assert_eq!(elevated("ns"), None);
     }
 
