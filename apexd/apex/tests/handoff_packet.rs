@@ -212,6 +212,9 @@ impl Harness {
             // reports neither the same way.
             disposable: false,
             copy_out: None,
+            // This fixture asks for no elevation at all, so there is nothing
+            // for a second factor to authorise.
+            second_factor: None,
         }));
         if reply["reply"] != "session" {
             // A daemon that will not start a session at all is a broken

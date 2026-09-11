@@ -23,6 +23,10 @@ libc.workspace = true
 # The integration test drives a real daemon over its socket and reads the
 # replies as JSON. It needs the protocol types to check them against §7's
 # vocabulary rather than against string literals it could get wrong.
+# `test-support` is what lets `privilege::decide_origin`'s PASSING branch be
+# tested at all: a `SecondFactor` cannot be constructed outside
+# `apex-agent-core`, so without the signer every test of that gate would
+# assert a refusal. Dev-only, so `cargo build` of the daemon never sees it.
 [dev-dependencies]
-apex-agent-core = { path = "../apex-agent-core" }
+apex-agent-core = { path = "../apex-agent-core", features = ["test-support"] }
 serde_json.workspace = true

@@ -127,6 +127,30 @@ impl Harness {
             })
             .unwrap_or_default()
     }
+
+    /// The audit trail, once it has at least `want` lines.
+    ///
+    /// `start` waits for the control socket, and the startup sweep that writes
+    /// these lines is not ordered against the socket appearing — so reading
+    /// the file the instant the daemon answers is a race. Because
+    /// `audit_lines` turns a missing file into an empty vector, losing that
+    /// race did not read as "not yet", it read as "the daemon recorded
+    /// nothing", and the assertion failed naming a trail of `[]`. Measured at
+    /// roughly one run in eight, on a tree with no change to the sweep.
+    ///
+    /// Polled to a deadline rather than slept on, and it returns whatever it
+    /// has when the deadline passes, so a genuine failure still fails — with
+    /// the real contents printed — instead of hanging or being masked.
+    fn audit_lines_once_written(&self, want: usize) -> Vec<serde_json::Value> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let lines = self.audit_lines();
+            if lines.len() >= want || Instant::now() >= deadline {
+                return lines;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 
 fn now_ms() -> u128 {
@@ -216,7 +240,7 @@ fn a_grant_from_another_boot_is_reported_as_ended_on_the_next_start() {
 
     // What the machine says: an audit line naming the reboot, with the grant
     // it was about.
-    let trail = h.audit_lines();
+    let trail = h.audit_lines_once_written(1);
     let ended: Vec<&serde_json::Value> = trail
         .iter()
         .filter(|l| l["event"] == "ended-at-reboot")
@@ -285,7 +309,7 @@ fn the_ending_is_recorded_once_however_many_daemons_see_it() {
     };
     // This one's window had already run out before the reboot, so it expired
     // on its own — the distinction the boot rule keeps rather than collapses.
-    let first = h.audit_lines();
+    let first = h.audit_lines_once_written(1);
     assert_eq!(
         first.iter().filter(|l| l["grant"] == 4).count(),
         1,
@@ -309,7 +333,7 @@ fn the_ending_is_recorded_once_however_many_daemons_see_it() {
     while Instant::now() < deadline && UnixStream::connect(&sock2).is_err() {
         std::thread::sleep(Duration::from_millis(25));
     }
-    let after = h.audit_lines();
+    let after = h.audit_lines_once_written(first.len());
     let _ = second.kill();
     let _ = second.wait();
     assert_eq!(after.len(), first.len(), "the ending was written twice: {after:#?}");

@@ -374,6 +374,34 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_remote_elevation_policy_now_survives_the_self_repair_that_used_to_erase_it() {
+        // This is the observable half of P0-014's last commit, and the reason
+        // the relaxation had to land last rather than first.
+        //
+        // `normalise` resets the WHOLE policy to default when `validate`
+        // errors — not just the offending key. So while `validate` refused
+        // `remote_elevation_allowed`, an owner who wrote it into the config
+        // file lost that line *and* every other dimension they had set, with
+        // one note to explain it. The setting was therefore unreachable no
+        // matter what the daemon did with it, which is why relaxing `validate`
+        // first would have shipped a mode that lies in the other direction.
+        let mut cfg = Config {
+            origin: OriginPolicy::RemoteElevationAllowed,
+            // A second non-default dimension, because the failure mode being
+            // guarded against is a blanket reset: if the origin value were
+            // still refused, this would come back `Project` and the test would
+            // catch the erasure rather than only the setting.
+            sandbox: SandboxPolicy::Unrestricted,
+            ..Config::default()
+        };
+        assert_eq!(cfg.policy().validate(), Ok(()));
+        let notes = cfg.normalise();
+        assert!(notes.is_empty(), "nothing should have been corrected: {notes:?}");
+        assert_eq!(cfg.origin, OriginPolicy::RemoteElevationAllowed);
+        assert_eq!(cfg.sandbox, SandboxPolicy::Unrestricted);
+    }
+
+    #[test]
     fn elevation_is_never_a_stored_default_whatever_the_file_says() {
         // §3.4: "no remember forever". Dimension 3 is a grant, not a setting.
         // A configuration file that named an elevated default would make

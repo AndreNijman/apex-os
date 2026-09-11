@@ -672,14 +672,16 @@ fn a_root_request_is_never_decided_without_a_local_human() {
 }
 
 #[test]
-fn remote_elevation_is_configurable_and_refused_until_it_can_be_authenticated() {
-    // P0-014's third criterion, honestly. §7 allows an owner to opt into
-    // remote elevation "with strong WebAuthn/FIDO2 authentication", and
-    // nothing in this build can ask for a security key. The setting exists,
-    // parses and round-trips — so the vocabulary is there for the task that
-    // implements it — and it is refused, because a policy that relaxed the
-    // local-approval rule with nothing in its place would be worse than not
-    // having the setting.
+fn remote_elevation_is_configurable_and_is_now_authenticated_rather_than_refused() {
+    // P0-014's third criterion, closed. This test used to assert that the
+    // setting parsed and was then REFUSED, because §7 allows an owner to opt
+    // into remote elevation "with strong WebAuthn/FIDO2 authentication" and
+    // nothing in the build could ask for a security key. That refusal was the
+    // honest answer for as long as it was true.
+    //
+    // It is no longer true, so the assertion is inverted rather than deleted:
+    // the verifier, the challenge round trip and the gate all exist, and
+    // `apex-agentd`'s `privilege::decide_origin` reads this very value.
     assert_eq!(
         OriginPolicy::parse("remote"),
         Some(OriginPolicy::RemoteElevationAllowed)
@@ -688,19 +690,26 @@ fn remote_elevation_is_configurable_and_refused_until_it_can_be_authenticated() 
         origin: OriginPolicy::RemoteElevationAllowed,
         ..AgentPolicy::default()
     };
-    let err = p.validate().expect_err("must be refused");
-    let msg = err.to_string();
-    assert!(msg.contains("WebAuthn") || msg.contains("FIDO"), "{msg}");
-    // The refusal has to say what is missing rather than that the value is
-    // wrong: the owner asked for something §7 permits.
-    assert!(msg.contains("locally"), "{msg}");
+    assert_eq!(p.validate(), Ok(()));
 
-    // The default is the one this build enforces, and it is the restrictive
-    // one.
+    // What the setting does NOT do, which is the half worth asserting now
+    // that it is accepted: it moves one dimension and nothing else. It is an
+    // opt-in to a second authentication path, not a preset, so it must not
+    // quietly bring root, a looser sandbox or exported secrets with it.
+    let d = AgentPolicy::default();
+    assert_eq!(p.system, d.system);
+    assert_eq!(p.sandbox, d.sandbox);
+    assert_eq!(p.secrets, d.secrets);
+    assert_eq!(p.native, d.native);
+    assert_eq!(p.effective_network(), d.effective_network());
+
+    // And it is still not the default: an owner has to ask for it per
+    // session. §7's second column stays closed unless somebody opens it.
     assert_eq!(
         AgentPolicy::default().origin,
         OriginPolicy::LocalElevationOnly
     );
+    assert_ne!(AgentPolicy::default().origin, p.origin);
 }
 
 fn sample_request() -> PrivilegeRequest {
