@@ -94,6 +94,15 @@ pub struct Bind<'a> {
     pub service: &'a ServiceInfo,
     /// The account the operation runs as.
     pub owner: &'a Owner,
+    /// §11's audit id for this request, which §15 correlates a task graph on.
+    ///
+    /// Read-only, like everything else here, and the only field a provider has
+    /// that identifies THIS request rather than what it asks for. It exists
+    /// because §13.11's usage has to be attributable to a task without the
+    /// provider being told anything about the task: an id that appears in this
+    /// machine's own trail and in a far side's log is enough to join the two,
+    /// and a project path in somebody else's logs would be more than enough.
+    pub audit_id: &'a str,
 }
 
 /// Scheme and host a credential would be sent to.
@@ -136,17 +145,66 @@ pub struct Bound {
     /// The operation in words, for the audit line and the reply. Read by a
     /// person, so it says what happened, not what type it was.
     pub detail: String,
+    /// The name a credential this operation CREATES would be stored under, for
+    /// the operations that create one. `None` for everything else, which is
+    /// almost everything.
+    ///
+    /// Declared here — before the call, next to the endpoint — rather than
+    /// alongside the value it names, and that is the whole design. §13.10 says
+    /// a service token or a Tunnel credential goes into protected storage and
+    /// the agent gets a handle; the far side issues such a credential **once**
+    /// and never shows it again. So the framework has to be able to refuse a
+    /// name that is already taken while refusing is still free. Afterwards is
+    /// too late: the token exists, the reply is the only copy, and a refusal
+    /// then would destroy it.
+    pub creates: Option<String>,
+}
+
+/// A credential an operation created, on its way into the store.
+///
+/// §13.10: *"Broker service-token/Tunnel/Access credentials directly into
+/// protected storage. The agent receives handles/capabilities, not plaintext
+/// secrets."* A provider cannot reach the store — [`Bind`] says so in as many
+/// words, and that is worth keeping — so this is how a created credential gets
+/// there: the provider hands it back through a field the framework owns, and
+/// [`crate::service::Service::use_capability`] stores it, scrubs it out of
+/// anything on its way to the caller, and records the line.
+///
+/// The name is not here. It is on [`Bound::creates`], for the reason that
+/// field's note gives.
+#[derive(Debug)]
+pub struct Created {
+    /// The host the new credential may be sent to, and nowhere else. This is
+    /// the pin the framework will apply to every future use of it, so a
+    /// provider that cannot name an honest host must not create one at all.
+    pub host: String,
+    /// `https`, or `http` for a loopback host — the store refuses anything
+    /// else, because a credential sent in clear over a network is a credential
+    /// you no longer have.
+    pub scheme: String,
+    /// The username half, where the credential has one: an Access service
+    /// token's `client_id` is not a secret and is useless without its
+    /// `client_secret`, so it is stored beside it rather than returned alone.
+    pub username: Option<String>,
+    /// The secret itself. Never `Clone`, never printed, and the reason this
+    /// struct does not derive `Clone` either.
+    pub value: SecretValue,
 }
 
 /// What an operation produced.
 ///
-/// The credential is *not* scrubbed here — the framework does that, with both
-/// the stored value and any minted one, so scrubbing is an invariant rather
-/// than a thing each provider has to remember.
-#[derive(Debug, Clone)]
+/// The credential is *not* scrubbed here — the framework does that, with the
+/// stored value, any minted one, and any one this operation created, so
+/// scrubbing is an invariant rather than a thing each provider has to
+/// remember.
+#[derive(Debug)]
 pub struct Performed {
     pub code: i32,
     pub output: String,
+    /// A credential this operation created, for the framework to store. Its
+    /// name is [`Bound::creates`], which the framework checked before the
+    /// operation ran.
+    pub created: Option<Created>,
 }
 
 /// Why a provider refused or failed.
@@ -504,6 +562,7 @@ mod tests {
             project: "/tmp",
             service: &service,
             owner: &owner,
+            audit_id: "test",
         };
         let bound = Bound {
             endpoint: Endpoint {
@@ -511,6 +570,7 @@ mod tests {
                 host: "example.com".into(),
             },
             detail: "read a thing".into(),
+            creates: None,
         };
         let minted = Stub(&ONE)
             .mint(&req, &bound, &SecretValue::new(b"not-a-real-token".to_vec()))

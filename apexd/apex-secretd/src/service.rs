@@ -495,6 +495,7 @@ impl Service {
             project: &project,
             service: &info,
             owner: &owner,
+            audit_id: &audit_id,
         };
         let bound = match backend.bind(&req) {
             Ok(bound) => bound,
@@ -518,6 +519,39 @@ impl Service {
             );
         }
         let endpoint = bound.endpoint.to_string();
+
+        // §13.10's half that has to happen BEFORE anything runs.
+        //
+        // An operation that will create a credential — an Access service token,
+        // a Tunnel credential — declares the name it would be stored under when
+        // it binds. The far side issues such a secret **once** and never shows
+        // it again, so a name that is already taken has to be refused here,
+        // while refusing is still free. Refusing after the call would leave a
+        // credential that exists at Cloudflare, is in nobody's hands, and
+        // cannot be fetched again.
+        if let Some(name) = &bound.creates {
+            if !store::valid_service_name(name) {
+                return refuse(
+                    &record,
+                    StoreError::BadServiceName(name.clone()).to_string(),
+                    ErrorKind::BadRequest,
+                );
+            }
+            if self.store.info(peer.uid, name).is_some() {
+                return refuse(
+                    &record,
+                    format!(
+                        "this operation would store the credential it creates as \
+                         '{name}', and a credential is already stored under that \
+                         name. Overwriting it would destroy a secret the provider \
+                         will not show again, so this service will not do it. \
+                         Remove the stored one with `apex secret remove {name}` \
+                         if that is what you meant"
+                    ),
+                    ErrorKind::BadRequest,
+                );
+            }
+        }
 
         // Every check has passed. Only now is the value read.
         let stored = match self.store.value(peer.uid, &record.provider) {
@@ -556,7 +590,20 @@ impl Service {
                 return refuse(&record, reason, kind_of(&e));
             }
         };
-        let output = scrub_all(&out.output, &[Some(&stored), minted.as_ref()]);
+        // Three credentials in play now, not two: the stored one, a minted one,
+        // and one this operation may just have CREATED. The third is scrubbed
+        // here for the same reason the other two are — a provider that puts a
+        // `client_secret` in its own output is not hypothetical, because the
+        // natural way to write such an operation is to hand back the reply, and
+        // for these operations the reply *is* the secret.
+        let mut output = scrub_all(
+            &out.output,
+            &[
+                Some(&stored),
+                minted.as_ref(),
+                out.created.as_ref().map(|c| &c.value),
+            ],
+        );
 
         self.record(AuditLine {
             endpoint: Some(endpoint.clone()),
@@ -565,12 +612,119 @@ impl Service {
             ..AuditLine::from_record(&audit_id, AuditEvent::Used, peer.uid, peer.pid, &record)
         });
 
+        // §13.10's other half: *"the agent receives handles/capabilities, not
+        // plaintext secrets"*. The provider could not have done this itself —
+        // `Bind` deliberately gives it no way to reach the store — so the
+        // framework is where a created credential is kept, and therefore the
+        // one place it cannot be forgotten.
+        let mut code = out.code;
+        match (bound.creates.as_deref(), out.created) {
+            (Some(name), Some(created)) => match self.keep(peer, name, created) {
+                Ok(note) => output.push_str(&note),
+                // The operation HAPPENED. Saying so plainly matters more than
+                // the exit code: somewhere there is now a credential nobody
+                // holds, and the only person who can clean that up is the one
+                // reading this sentence.
+                Err(why) => {
+                    code = 1;
+                    output.push_str(&format!(
+                        "\napex: this operation succeeded and the credential it \
+                         created COULD NOT BE STORED as '{name}': {why}. The \
+                         provider issues that secret once, so it is now lost — \
+                         delete what this created at the provider and run it \
+                         again."
+                    ));
+                }
+            },
+            // A provider that hands back a credential without having declared
+            // it would. Nothing is stored and nothing is returned: the value is
+            // dropped here, which loses it, and losing it is the right end for
+            // a secret that arrived through a path this service did not check.
+            (None, Some(_)) => {
+                code = 1;
+                output.push_str(
+                    "\napex: this provider returned a credential without \
+                     declaring that it creates one, so there was no name to \
+                     store it under and no check that the name was free. It has \
+                     been discarded rather than handed over.",
+                );
+            }
+            (_, None) => {}
+        }
+
         Response::Performed {
             record: Box::new(record),
             endpoint,
-            exit_code: out.code,
+            exit_code: code,
             output,
         }
+    }
+
+    /// Put a credential a brokered operation just created into the store.
+    ///
+    /// §13.10, and the narrow reading of it: the secret goes where the owner's
+    /// other secrets go, under a name the operation declared before it ran, and
+    /// what comes back is that name. The value never enters a [`Response`] —
+    /// it cannot, `SecretValue` is not `Serialize` — and it is not returned
+    /// here either.
+    ///
+    /// The host is the pin every future use of this credential will be held to,
+    /// which is why a provider that cannot name an honest one must not create a
+    /// credential at all.
+    fn keep(
+        &self,
+        peer: Peer,
+        name: &str,
+        created: provider::Created,
+    ) -> Result<String, String> {
+        if created.host.is_empty()
+            || created.host.len() > 253
+            || !created.host.chars().all(valid_host_char)
+        {
+            return Err(format!(
+                "'{}' is not a host name to pin it to",
+                created.host.escape_debug()
+            ));
+        }
+        let info = ServiceInfo {
+            service: name.to_string(),
+            host: created.host.to_ascii_lowercase(),
+            scheme: created.scheme.clone(),
+            // The half of a service token that is not a secret. Stored beside
+            // the half that is, because a `client_id` on its own is useless and
+            // a `client_secret` on its own cannot be presented.
+            username: created
+                .username
+                .clone()
+                .unwrap_or_else(|| "x-access-token".to_string()),
+            path: String::new(),
+            auth: "bearer".to_string(),
+            port: None,
+            added: store::now_ms(),
+        };
+        // `put` refuses a scheme that is not https outside loopback, so a
+        // credential this daemon creates gets the same protection as one the
+        // owner typed in.
+        self.store
+            .put(peer.uid, &info, &created.value)
+            .map_err(|e| e.to_string())?;
+        self.record(AuditLine::administrative(
+            &self.next_audit_id(),
+            AuditEvent::Stored,
+            peer.uid,
+            peer.pid,
+            name,
+            &format!(
+                "credential created by a brokered operation, for {}://{}",
+                info.scheme, info.host
+            ),
+        ));
+        Ok(format!(
+            "\napex: the credential this created is stored as '{name}', pinned to \
+             {}://{}. It is not in this reply and cannot be read back out of \
+             this service; `apex secret list` shows that it is there.",
+            info.scheme, info.host
+        ))
     }
 }
 
@@ -1194,6 +1348,237 @@ mod tests {
             }
             assert!(resp.as_error().is_some(), "'{}' was accepted", evil.escape_debug());
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── §13.10: a credential an operation CREATES ───────────────────────────
+    //
+    // The seam these three tests exist for is small and easy to get subtly
+    // wrong, so each one is written against a provider that behaves the way the
+    // careless implementation would: it puts the secret it just issued straight
+    // into its own output. A test whose fake provider politely withheld the
+    // value could not tell a working scrub from a missing one.
+    //
+    // Four mutations were run against the arms these cover, one at a time, each
+    // restored by copying the pristine file back so that cargo rebuilt rather
+    // than measuring a mutant against a stale binary. Every one turns a named
+    // test red:
+    //
+    // * the framework's scrub no longer given the created value, so the
+    //   provider's own output hands it over —
+    //   `a_credential_an_operation_creates_is_stored_and_never_comes_back`;
+    // * `keep` reporting that it stored the credential without storing it —
+    //   the same test, which is why that one asserts the stored BYTES and not
+    //   merely that a service appeared;
+    // * the collision check removed, so a second create destroys the first
+    //   token's secret — `a_created_credential_never_overwrites_one_…`;
+    // * an undeclared credential reported as a clean run —
+    //   `a_provider_that_returns_a_credential_it_never_declared_…`.
+
+    /// What the fake provider issues. Distinctive enough that finding it
+    /// anywhere downstream means it travelled.
+    const ISSUED: &str = "apex-issued-secret-6b41f0-do-not-leak";
+
+    use apex_secret_core::operation::ProviderSpec;
+
+    /// A provider that creates a credential, the way §13.10's Access service
+    /// token and Tunnel credential do.
+    struct Creator {
+        /// Whether `perform` ran. A refusal that is supposed to happen BEFORE
+        /// anything is issued has to be measured, not assumed.
+        ran: std::sync::atomic::AtomicBool,
+    }
+
+    const CREATOR: ProviderSpec = ProviderSpec {
+        id: "creator",
+        summary: "issues credentials, so the framework's half of §13.10 can be tested",
+        operations: &[
+            OperationSpec {
+                id: "creator.token.create",
+                summary: "issue a token and leave it with this service rather than the caller",
+                effect: apex_secret_core::operation::Effect::Write,
+                resource: apex_secret_core::operation::ResourceKind::Name,
+                params: &[],
+                aliases: &[],
+                same_everywhere: false,
+            },
+            OperationSpec {
+                id: "creator.token.smuggle",
+                summary: "hand back a credential without declaring one, which must not work",
+                effect: apex_secret_core::operation::Effect::Write,
+                resource: apex_secret_core::operation::ResourceKind::Name,
+                params: &[],
+                aliases: &[],
+                same_everywhere: false,
+            },
+        ],
+    };
+
+    impl provider::Provider for Creator {
+        fn spec(&self) -> &'static ProviderSpec {
+            &CREATOR
+        }
+
+        fn bind(&self, req: &provider::Bind<'_>) -> Result<provider::Bound, provider::ProviderError> {
+            Ok(provider::Bound {
+                endpoint: provider::Endpoint {
+                    scheme: "https".to_string(),
+                    host: "api.example.test".to_string(),
+                },
+                detail: format!("issue a token for {}", req.resource),
+                // The declaration the framework checks before anything runs —
+                // except for `smuggle`, which deliberately does not make it.
+                creates: match req.operation.id {
+                    "creator.token.create" => Some(format!("issued-{}", req.resource)),
+                    _ => None,
+                },
+            })
+        }
+
+        fn perform(
+            &self,
+            _req: &provider::Bind<'_>,
+            _bound: &provider::Bound,
+            _value: &SecretValue,
+        ) -> Result<provider::Performed, provider::ProviderError> {
+            self.ran.store(true, Ordering::SeqCst);
+            Ok(provider::Performed {
+                code: 0,
+                // What the careless provider does: hands back the reply, and
+                // for this operation the reply IS the secret.
+                output: format!(r#"{{"client_id":"id-42","client_secret":"{ISSUED}"}}"#),
+                created: Some(provider::Created {
+                    host: "origin.example.test".to_string(),
+                    scheme: "https".to_string(),
+                    username: Some("id-42".to_string()),
+                    value: SecretValue::new(ISSUED.as_bytes().to_vec()),
+                }),
+            })
+        }
+    }
+
+    /// A service serving only [`Creator`], with a credential stored for it and
+    /// both its operations granted in `/tmp/p`.
+    fn creator_service(tag: &str) -> (Service, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-secretd-creates-{}-{tag}-{}",
+            std::process::id(),
+            store::now_ms()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        let mut registry = Registry::new();
+        registry
+            .register(Box::new(Creator {
+                ran: std::sync::atomic::AtomicBool::new(false),
+            }))
+            .expect("register");
+        let service = Service::new(Store::new(dir.clone()), false, registry);
+        let peer = me();
+        service.add(
+            peer,
+            demo_service("creator", "api.example.test", "https"),
+            SecretValue::new(b"a-stored-credential".to_vec()),
+        );
+        for op in ["creator.token.create", "creator.token.smuggle"] {
+            service.grant(peer, "/tmp/p", "creator", op, false);
+        }
+        (service, dir)
+    }
+
+    #[test]
+    fn a_credential_an_operation_creates_is_stored_and_never_comes_back() {
+        // §13.10: "the agent receives handles/capabilities, not plaintext
+        // secrets". Both halves are measured — that the caller did NOT get the
+        // secret, and that it IS in the store, byte for byte. A build that
+        // scrubbed the output and stored nothing would pass the first half and
+        // lose the credential forever, which is worse than not implementing it.
+        let (svc, dir) = creator_service("stored");
+        let peer = me();
+        let reply = svc.use_capability(peer, record("creator", "creator.token.create", "alpha", "/tmp/p"), Vec::new());
+
+        let Response::Performed { output, exit_code, .. } = &reply else {
+            panic!("{reply:?}");
+        };
+        assert_eq!(*exit_code, 0, "{output}");
+        assert!(!output.contains(ISSUED), "the secret came back to the caller: {output}");
+        assert!(output.contains("stored as 'issued-alpha'"), "{output}");
+        assert!(output.contains("https://origin.example.test"), "{output}");
+
+        // It is in the store, it is the real value, and it is pinned to the
+        // host the provider named rather than to the one it was created at.
+        let store = Store::new(dir.clone());
+        let info = store.info(peer.uid, "issued-alpha").expect("stored");
+        assert_eq!(info.host, "origin.example.test");
+        assert_eq!(info.scheme, "https");
+        assert_eq!(info.username, "id-42");
+        let kept = store.value(peer.uid, "issued-alpha").expect("value");
+        assert_eq!(kept.as_str(), Some(ISSUED), "a different secret was stored");
+
+        // And the trail says a credential was stored, not merely that an
+        // operation ran: this is the line an owner greps after an incident.
+        let lines = audit::tail(&trail(&dir), 50);
+        let stored = lines
+            .iter()
+            .find(|l| l.event == AuditEvent::Stored && l.provider == "issued-alpha")
+            .expect("no `stored` line for the created credential");
+        assert!(stored.detail.contains("created by a brokered operation"), "{stored:?}");
+        assert!(
+            !std::fs::read_to_string(trail(&dir)).unwrap_or_default().contains(ISSUED),
+            "the secret is in the audit trail"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_created_credential_never_overwrites_one_that_is_already_stored() {
+        // The provider issues such a secret ONCE. So the collision has to be
+        // refused before the call, not after it: a refusal afterwards would
+        // leave a credential that exists at the provider, is in nobody's hands,
+        // and cannot be fetched again. `ran` is what proves the order.
+        let (svc, dir) = creator_service("collision");
+        let peer = me();
+        svc.add(
+            peer,
+            demo_service("issued-alpha", "somewhere.example.test", "https"),
+            SecretValue::new(b"the one that was already there".to_vec()),
+        );
+
+        let reply = svc.use_capability(peer, record("creator", "creator.token.create", "alpha", "/tmp/p"), Vec::new());
+        let (kind, message) = reply.as_error().expect("a collision must be refused");
+        assert_eq!(kind, ErrorKind::BadRequest, "{message}");
+        assert!(message.contains("issued-alpha"), "{message}");
+        assert!(message.contains("apex secret remove"), "{message}");
+
+        // Nothing ran, so nothing was issued...
+        let store = Store::new(dir.clone());
+        assert_eq!(
+            store.value(peer.uid, "issued-alpha").expect("value").as_str(),
+            Some("the one that was already there"),
+            "the stored credential was overwritten"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_provider_that_returns_a_credential_it_never_declared_has_it_discarded() {
+        // The framework checks the NAME before the call. A provider that
+        // produced a value without having declared one would slip past that
+        // check, so the value is dropped rather than stored under a name nobody
+        // vetted — and dropped rather than returned, which is the whole point.
+        let (svc, dir) = creator_service("smuggle");
+        let peer = me();
+        let reply = svc.use_capability(peer, record("creator", "creator.token.smuggle", "beta", "/tmp/p"), Vec::new());
+
+        let Response::Performed { output, exit_code, .. } = &reply else {
+            panic!("{reply:?}");
+        };
+        assert!(!output.contains(ISSUED), "the smuggled secret came back: {output}");
+        assert_eq!(*exit_code, 1, "a discarded credential is not a clean run: {output}");
+        assert!(output.contains("discarded"), "{output}");
+        assert!(
+            Store::new(dir.clone()).info(peer.uid, "issued-beta").is_none(),
+            "it was stored under a name nothing checked"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
