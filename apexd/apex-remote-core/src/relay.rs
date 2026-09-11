@@ -712,6 +712,39 @@ mod tests {
         assert_eq!(Notice::parse(br#"{"something":"else"}"#), None);
     }
 
+    #[test]
+    fn the_worker_and_this_client_spell_the_wire_values_the_same_way() {
+        // Two independently maintained spellings of one wire value is the
+        // drift that leaves a desktop waiting through a relay that has
+        // already paired it, and neither side would fail a test of its own.
+        // So this reads the Worker's source and checks it against the enum.
+        //
+        // Reading the file rather than generating it: a generated constant is
+        // a build step, and a build step in a tree that has no JavaScript
+        // toolchain is a thing that stops being run.
+        let room = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../relay/src/room.js");
+        let text = std::fs::read_to_string(&room)
+            .unwrap_or_else(|e| panic!("{}: {e}", room.display()));
+
+        for notice in [Notice::Waiting, Notice::Paired, Notice::PeerGone] {
+            // The JS source writes them in single quotes.
+            let needle = format!("'{}'", notice.text());
+            assert!(
+                text.contains(&needle),
+                "the Worker does not send {needle} for {notice:?}"
+            );
+        }
+        // And the two role words, which travel in the query string the client
+        // builds and the Worker parses.
+        for role in [Role::Host, Role::Guest] {
+            assert!(
+                text.contains(&format!("\"{}\"", role.as_str())),
+                "the Worker does not know the role {role}"
+            );
+        }
+    }
+
     // ── the handshake ────────────────────────────────────────────────────
 
     #[test]
