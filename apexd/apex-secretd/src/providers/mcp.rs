@@ -149,6 +149,8 @@ impl Provider for McpProvider {
             // audit line that carried one would invite somebody to grep the
             // trail for what a session was asking a server about.
             detail: format!("mcp request to {}", req.service.service),
+            // An MCP request answers; it does not issue a credential.
+            creates: None,
         })
     }
 
@@ -176,6 +178,7 @@ impl Provider for McpProvider {
         Ok(Performed {
             code: http.out.code,
             output: http.out.text,
+            created: None,
         })
     }
 }

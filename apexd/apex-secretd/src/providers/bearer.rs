@@ -127,6 +127,7 @@ impl Provider for BearerProvider {
         Ok(Bound {
             endpoint: Endpoint::from_url(&url)?,
             detail: format!("{} {}", req.operation.id, self.path(req)),
+            creates: None,
         })
     }
 
@@ -175,6 +176,7 @@ impl Provider for BearerProvider {
             // way a badly written API reports an auth failure, and the
             // framework is what keeps that out of the caller's hands.
             output: format!("{status} {body}"),
+            created: None,
         })
     }
 }

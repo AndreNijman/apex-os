@@ -255,6 +255,8 @@ impl Provider for GitProvider {
         Ok(Bound {
             endpoint,
             detail: op.summary(),
+            // A git push creates nothing a credential could be made of.
+            creates: None,
         })
     }
 
@@ -272,6 +274,7 @@ impl Provider for GitProvider {
         Ok(Performed {
             code: out.code,
             output: out.text,
+            created: None,
         })
     }
 }
