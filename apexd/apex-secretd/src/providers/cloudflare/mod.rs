@@ -1725,6 +1725,7 @@ impl Provider for CloudflareProvider {
                 host: self.api.host.clone(),
             },
             detail: CloudflareProvider::detail(req.operation, &target, req.params),
+            creates: None,
         })
     }
 
@@ -1844,6 +1845,7 @@ impl Provider for CloudflareProvider {
         Ok(Performed {
             code: i32::from(!reply.ok()),
             output,
+            created: None,
         })
     }
 }
