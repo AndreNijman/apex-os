@@ -44,6 +44,14 @@ const ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
 /// The zone id it binds.
 const ZONE: &str = "fedcba9876543210fedcba9876543210";
 
+/// The one bucket §13.1's file binds.
+const BUCKET: &str = "example-assets";
+
+/// What the double stores for the one object a test reads back. Not JSON, and
+/// it carries the credential the request arrived with, so a read that came back
+/// unscrubbed would show it.
+const OBJECT: &str = "-- apex backup\n-- fetched with {{authorization}}\nCREATE TABLE t (id INTEGER);\n";
+
 /// The `wss://` URL the double hands back for a tail session. It carries its
 /// own authorisation, which is why the provider must not pass it on.
 const TAIL_URL: &str = "wss://tail.example.invalid/session/apex-tail-secret-91be";
@@ -72,6 +80,9 @@ struct Seen {
     method: String,
     path: String,
     authorization: Option<String>,
+    /// What the request said its body was. R2 puts an object's media type here
+    /// and the provider chooses it from a table, so it is worth recording.
+    content_type: Option<String>,
     body: String,
 }
 
@@ -127,6 +138,7 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
     let path = words.next().unwrap_or("").to_string();
 
     let mut authorization = None;
+    let mut content_type = None;
     let mut length = 0usize;
     loop {
         let mut line = String::new();
@@ -144,6 +156,9 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
         if let Some(value) = line.trim().strip_prefix("Content-Length: ") {
             length = value.trim().parse().unwrap_or(0);
         }
+        if let Some(value) = line.trim().strip_prefix("Content-Type: ") {
+            content_type = Some(value.to_string());
+        }
     }
     let mut body = vec![0u8; length];
     if length > 0 && reader.read_exact(&mut body).is_err() {
@@ -155,6 +170,7 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
         method: method.clone(),
         path: path.clone(),
         authorization: authorization.clone(),
+        content_type: content_type.clone(),
         body,
     });
 
@@ -181,12 +197,28 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
         r#""messages":[]"#,
         &format!(r#""messages":[{{"code":1,"message":"authenticated with {authorization}"}}]"#),
     );
+    // ...and a reply that is not the envelope carries it too. R2 and KV answer
+    // a read with the stored bytes and `application/octet-stream`, so there is
+    // no `messages` array to put it in, and a scrub that only ever ran on JSON
+    // would go unnoticed on exactly the two operations whose replies are not
+    // JSON.
+    let body = body.replace("{{authorization}}", &authorization);
     reply(&mut stream, status, &body);
 }
 
 /// The documented paths, with the documented shapes.
-fn answer(method: &str, path: &str) -> (u16, String) {
-    let path = path.strip_prefix("/client/v4").unwrap_or(path);
+///
+/// The query string is split off before matching: DNS is the only surface here
+/// that carries one, and it carries it on the *lookup* that decides which
+/// record a name means, so a double that matched on the whole request-target
+/// would 404 exactly the request whose answer the mutation depends on.
+fn answer(method: &str, target: &str) -> (u16, String) {
+    let target = target.strip_prefix("/client/v4").unwrap_or(target);
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (target, ""),
+    };
+    let _ = query;
     let ok = |result: &str| {
         (
             200u16,
@@ -216,6 +248,22 @@ fn answer(method: &str, path: &str) -> (u16, String) {
         ("POST", p) if p.ends_with("/tails") => ok(&format!(
             r#"{{"id":"tail-1","url":"{TAIL_URL}","expires_at":"2026-09-07T00:00:00Z"}}"#
         )),
+
+        // ── §13.5, R2 ───────────────────────────────────────────────────────
+        ("POST", p) if p == format!("/accounts/{ACCOUNT}/r2/buckets") => ok(
+            r#"{"name":"example-assets","location":"apac","storage_class":"Standard","creation_date":"2026-09-12T00:00:00.000Z"}"#,
+        ),
+        ("GET", p) if p == objects_path("") => ok(
+            r#"[{"key":"db/today.sql","size":19,"etag":"aa","last_modified":"2026-09-12T00:00:00.000Z"}]"#,
+        ),
+        // A read answers with the object's own bytes and no envelope at all —
+        // `application/octet-stream`, which is what the documented endpoint
+        // returns on success even though its failures are JSON.
+        ("GET", p) if p.starts_with(&objects_path("/")) => (200, OBJECT.to_string()),
+        ("PUT", p) if p.starts_with(&objects_path("/")) => {
+            ok(r#"{"key":"db/today.sql","size":19,"etag":"bb","version":"v2"}"#)
+        }
+
         _ => (
             404,
             format!(
@@ -227,12 +275,25 @@ fn answer(method: &str, path: &str) -> (u16, String) {
 
 fn reply(stream: &mut TcpStream, status: u16, body: &str) {
     let reason = if status == 200 { "OK" } else { "Error" };
+    // An object's bytes are not the envelope, and saying they are would be the
+    // one lie in this double that a provider could come to depend on.
+    let kind = if body.starts_with('{') || body.starts_with('[') {
+        "application/json"
+    } else {
+        "application/octet-stream"
+    };
     let _ = write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n\
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {kind}\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
+}
+
+/// The prefix every R2 object path in the double shares, with `suffix` after
+/// `objects` — `""` for the bucket's listing, `"/"` for one object.
+fn objects_path(suffix: &str) -> String {
+    format!("/accounts/{ACCOUNT}/r2/buckets/{BUCKET}/objects{suffix}")
 }
 
 struct Fixture {
@@ -365,17 +426,36 @@ fn every_operation() -> Vec<OperationCase> {
         ),
         ("cloudflare.worker.tail", "project", vec![]),
         ("cloudflare.worker.route.read", "project", vec![]),
+        ("cloudflare.r2.object.read", "example-assets/db/today.sql", vec![]),
+        (
+            "cloudflare.r2.object.write",
+            "example-assets/db/today.sql",
+            vec![("file", "dist/today.sql")],
+        ),
+        (
+            "cloudflare.r2.bucket.create",
+            "example-assets",
+            vec![("location", "apac"), ("storage-class", "Standard")],
+        ),
     ]
 }
 
-fn with_module(fixture: &Fixture) {
+/// The files the project holds for the operations that upload one: a Worker
+/// module, and something to put in a bucket.
+fn with_files(fixture: &Fixture) {
     std::fs::create_dir_all(fixture.project.join("dist")).expect("dist");
     std::fs::write(
         fixture.project.join("dist/worker.js"),
         "export default { fetch: () => new Response('hi') };\n",
     )
     .expect("worker.js");
+    std::fs::write(fixture.project.join("dist/today.sql"), UPLOADED).expect("today.sql");
 }
+
+/// What a test puts into a bucket. Distinctive, so finding it in the body the
+/// double received means the project's own file arrived and not something that
+/// merely has the right length.
+const UPLOADED: &str = "INSERT INTO t VALUES (1);\n";
 
 fn granted_everything() -> Vec<&'static str> {
     SPEC.operations.iter().map(|op| op.id).collect()
@@ -407,7 +487,7 @@ fn every_declared_operation_reaches_cloudflare_with_the_credential_and_returns_w
     // credential is shown to have reached the far side, and shown not to be in
     // the reply, the output, the serialised response or the audit trail.
     let f = Fixture::new("surface", Mode::Normal, &granted_everything());
-    with_module(&f);
+    with_files(&f);
 
     for (operation, resource, options) in every_operation() {
         let mut rec = f.record(operation, resource);
@@ -471,7 +551,7 @@ fn the_agent_side_holds_no_credential_even_when_it_holds_every_operation() {
     // even be constructed with one — `SecretValue` implements no `Serialize` —
     // so this checks the reachable surface rather than restating the type.
     let f = Fixture::new("noread", Mode::Normal, &granted_everything());
-    with_module(&f);
+    with_files(&f);
     let peer = me();
 
     let mut replies = vec![
@@ -607,7 +687,7 @@ fn an_upload_carries_the_project_s_own_module_and_the_metadata_that_names_it() {
     // where it gets checked: the module arrives, the metadata names it, and
     // the annotation goes in the body rather than on a command line.
     let f = Fixture::new("upload", Mode::Normal, &["cloudflare.worker.upload-version"]);
-    with_module(&f);
+    with_files(&f);
     let reply = f.use_it(
         f.record("cloudflare.worker.upload-version", "project")
             .param("script", "dist/worker.js")
@@ -663,7 +743,7 @@ fn a_grant_for_one_worker_verb_does_not_grant_its_siblings() {
     // "Cloudflare write". Deploying is not rolling back and neither is
     // uploading, so a grant for one has to stop at one.
     let f = Fixture::new("siblings", Mode::Normal, &["cloudflare.worker.deploy"]);
-    with_module(&f);
+    with_files(&f);
     let allowed = f.use_it(
         f.record("cloudflare.worker.deploy", "project")
             .param("version", "1c4dd6be-0000-4000-8000-abcdefabcdef"),
@@ -715,7 +795,7 @@ fn a_message_with_a_quote_in_it_survives_two_layers_of_escaping() {
     // as malformed JSON at Cloudflare — which is a functional bug a scrub test
     // and a binding test would both pass straight over.
     let f = Fixture::new("quoting", Mode::Normal, &granted_everything());
-    with_module(&f);
+    with_files(&f);
     let awkward = r#"say "hi" \ and "then" stop"#;
 
     // The JSON body path: through `quoted()` into a curl config line.
@@ -911,7 +991,7 @@ fn the_declared_shape_is_enforced_before_the_provider_is_asked_anything() {
     // framework: an operation that takes no resource, a resource that is a
     // URL, an option nobody declared, a required option left out.
     let f = Fixture::new("shape", Mode::Normal, &granted_everything());
-    with_module(&f);
+    with_files(&f);
     for (operation, resource, options) in [
         ("cloudflare.account.read", "something", vec![]),
         ("cloudflare.worker.read", "https://attacker.example/x", vec![]),
@@ -1010,7 +1090,7 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
         }
         assert!(listed.contains(&op.id), "'{}' is not in §13.2", op.id);
     }
-    // Six of §13.2's thirty-two, and one addition. The arithmetic is asserted
+    // Nine of §13.2's thirty-two, and one addition. The arithmetic is asserted
     // because the module note states it and a later task will read that note
     // to work out what is left.
     let from_13_2 = SPEC
@@ -1018,9 +1098,9 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
         .iter()
         .filter(|op| listed.contains(&op.id))
         .count();
-    assert_eq!(from_13_2, 6);
-    assert_eq!(SPEC.operations.len(), 7);
-    assert_eq!(SECTION_13_2.len() - from_13_2, 26, "still unimplemented");
+    assert_eq!(from_13_2, 9);
+    assert_eq!(SPEC.operations.len(), 10);
+    assert_eq!(SECTION_13_2.len() - from_13_2, 23, "still unimplemented");
 
     // Nothing is declared twice, and every summary reads as a sentence about
     // what the owner is being asked to allow.
@@ -1032,6 +1112,217 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
     for op in SPEC.operations {
         assert!(op.summary.len() > 20, "'{}' has a summary nobody can act on", op.id);
     }
+}
+
+// ── §13.5, R2 ───────────────────────────────────────────────────────────────
+//
+// Six mutations were run against the arms below, one at a time, each restored
+// by copying the pristine file back so that cargo rebuilt rather than reusing
+// the mutant's binary. Every one turns a named test red:
+//
+// * the bucket dropped out of the object path — `an_r2_object_is_addressed_…`;
+// * `binding.bucket()` replaced by the caller's own string, which is the
+//   defect §13.5 exists to prevent — `a_bucket_this_project_does_not_bind_…`;
+// * the upload sending the path instead of the file's bytes, the media type
+//   table answering `text/plain` for `.sql`, and the `Content-Type` header
+//   dropped from a raw body — all three, `an_upload_to_r2_carries_…`;
+// * the location hint forwarded instead of checked against Cloudflare's own
+//   set — `a_bucket_is_created_with_the_name_…`.
+
+#[test]
+fn an_r2_object_is_addressed_by_the_bucket_this_project_bound_and_the_key_under_it() {
+    // The documented paths, exactly. `example-assets` on its own lists the
+    // bucket; `example-assets/db/today.sql` is one object in it; and the
+    // account id in front of both came out of apex.toml rather than out of the
+    // request.
+    let f = Fixture::new("r2paths", Mode::Normal, &granted_everything());
+    with_files(&f);
+    f.use_it(f.record("cloudflare.r2.object.read", "example-assets"));
+    f.use_it(f.record("cloudflare.r2.object.read", "example-assets/db/today.sql"));
+    f.use_it(
+        f.record("cloudflare.r2.object.write", "example-assets/db/today.sql")
+            .param("file", "dist/today.sql"),
+    );
+    f.use_it(f.record("cloudflare.r2.bucket.create", "example-assets"));
+
+    let seen: Vec<(String, String)> = f
+        .fake
+        .seen()
+        .into_iter()
+        .map(|s| (s.method, s.path))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("GET".into(), format!("/client/v4/accounts/{ACCOUNT}/r2/buckets/{BUCKET}/objects")),
+            (
+                "GET".into(),
+                format!("/client/v4/accounts/{ACCOUNT}/r2/buckets/{BUCKET}/objects/db/today.sql")
+            ),
+            (
+                "PUT".into(),
+                format!("/client/v4/accounts/{ACCOUNT}/r2/buckets/{BUCKET}/objects/db/today.sql")
+            ),
+            ("POST".into(), format!("/client/v4/accounts/{ACCOUNT}/r2/buckets")),
+        ]
+    );
+}
+
+#[test]
+fn a_bucket_this_project_does_not_bind_never_reaches_cloudflare() {
+    // §13.5 asks for bucket-scoped capabilities, and this is what scoped means
+    // here: the grant is per operation, and *which* bucket it may touch is the
+    // project file's answer, not the caller's. All three R2 operations are
+    // checked, because a guard on the two that read a key and not on the one
+    // that creates a bucket would let an agent make buckets in the account at
+    // will.
+    let f = Fixture::new("r2unbound", Mode::Normal, &granted_everything());
+    with_files(&f);
+    for (operation, resource, options) in [
+        ("cloudflare.r2.object.read", "somebody-elses-bucket/db/today.sql", vec![]),
+        (
+            "cloudflare.r2.object.write",
+            "somebody-elses-bucket/db/today.sql",
+            vec![("file", "dist/today.sql")],
+        ),
+        ("cloudflare.r2.bucket.create", "somebody-elses-bucket", vec![]),
+    ] {
+        let mut rec = f.record(operation, resource);
+        for (name, value) in &options {
+            rec = rec.param(name, value);
+        }
+        let reply = f.use_it(rec);
+        let (kind, message) = reply
+            .as_error()
+            .unwrap_or_else(|| panic!("{operation} accepted an unbound bucket"));
+        assert_eq!(kind, ErrorKind::BadRequest, "{operation}");
+        assert!(message.contains("somebody-elses-bucket"), "{message}");
+        assert!(message.contains("example-assets"), "{message}");
+        assert!(message.contains("apex.toml"), "{message}");
+    }
+    assert!(
+        f.fake.seen().is_empty(),
+        "an unbound bucket still reached the api"
+    );
+}
+
+#[test]
+fn an_upload_to_r2_carries_the_project_s_own_file_and_a_media_type_from_a_table() {
+    // The body IS the object, so there is nothing here to escape and nothing
+    // to wrap — which makes the two things worth checking the two that could
+    // go wrong: that the bytes are the project's file rather than a path, and
+    // that the media type came from this build rather than from the caller.
+    let f = Fixture::new("r2upload", Mode::Normal, &["cloudflare.r2.object.write"]);
+    with_files(&f);
+    let reply = f.use_it(
+        f.record("cloudflare.r2.object.write", "example-assets/db/today.sql")
+            .param("file", "dist/today.sql"),
+    );
+    assert!(matches!(reply, Response::Performed { exit_code: 0, .. }), "{reply:?}");
+
+    let sent = f.fake.seen();
+    let put = sent.first().expect("one request");
+    assert_eq!(put.method, "PUT");
+    assert_eq!(put.body, UPLOADED, "the object's bytes are the project's file");
+    assert_eq!(put.content_type.as_deref(), Some("application/sql"));
+    assert_eq!(sent.len(), 1);
+}
+
+#[test]
+fn an_object_named_for_something_this_build_does_not_know_is_bytes_rather_than_a_guess() {
+    let f = Fixture::new("r2type", Mode::Normal, &["cloudflare.r2.object.write"]);
+    with_files(&f);
+    std::fs::write(f.project.join("dist/blob.whatever"), "x").expect("blob");
+    f.use_it(
+        f.record("cloudflare.r2.object.write", "example-assets/db/blob.whatever")
+            .param("file", "dist/blob.whatever"),
+    );
+    assert_eq!(
+        f.fake.seen()[0].content_type.as_deref(),
+        Some("application/octet-stream")
+    );
+}
+
+#[test]
+fn an_upload_to_r2_will_not_follow_a_link_out_of_the_project() {
+    // The same root-reading-a-caller's-path problem as a Worker module, on the
+    // operation that was written second. A guard that held for one upload and
+    // not the other would be no guard at all.
+    let f = Fixture::new("r2link", Mode::Normal, &["cloudflare.r2.object.write"]);
+    std::fs::create_dir_all(f.project.join("dist")).expect("dist");
+    std::os::unix::fs::symlink("/etc/hostname", f.project.join("dist/today.sql")).expect("link");
+    let reply = f.use_it(
+        f.record("cloudflare.r2.object.write", "example-assets/db/today.sql")
+            .param("file", "dist/today.sql"),
+    );
+    let (_, message) = reply.as_error().expect("a symlinked payload must be refused");
+    assert!(message.contains("symbolic link"), "{message}");
+    assert!(f.fake.seen().is_empty(), "it was sent anyway");
+}
+
+#[test]
+fn a_write_that_names_only_a_bucket_is_refused_rather_than_writing_the_bucket() {
+    // `example-assets` is a legal resource for this operation's declaration —
+    // a `Path` of one segment — and it names no object. Sending it would `PUT`
+    // the bucket's own listing URL.
+    let f = Fixture::new("r2nokey", Mode::Normal, &["cloudflare.r2.object.write"]);
+    with_files(&f);
+    let reply = f.use_it(
+        f.record("cloudflare.r2.object.write", "example-assets")
+            .param("file", "dist/today.sql"),
+    );
+    let (_, message) = reply.as_error().expect("refused");
+    assert!(message.contains("names a bucket and not an object"), "{message}");
+    assert!(f.fake.seen().is_empty());
+}
+
+#[test]
+fn a_bucket_is_created_with_the_name_the_project_declares_and_options_from_a_closed_set() {
+    let f = Fixture::new("r2create", Mode::Normal, &["cloudflare.r2.bucket.create"]);
+    let reply = f.use_it(
+        f.record("cloudflare.r2.bucket.create", "example-assets")
+            .param("location", "apac")
+            .param("storage-class", "InfrequentAccess"),
+    );
+    assert!(matches!(reply, Response::Performed { exit_code: 0, .. }), "{reply:?}");
+    let sent = f.fake.seen();
+    let create = sent.first().expect("one request");
+    assert_eq!(create.method, "POST");
+    assert!(create.body.contains(r#""name":"example-assets""#), "{}", create.body);
+    assert!(create.body.contains(r#""locationHint":"apac""#), "{}", create.body);
+    assert!(create.body.contains(r#""storageClass":"InfrequentAccess""#), "{}", create.body);
+
+    // ...and a value outside the documented set is refused here rather than
+    // spent on a request that will fail at the other end.
+    for (param, value) in [("location", "mars"), ("storage-class", "Cheap")] {
+        let reply = f.use_it(
+            f.record("cloudflare.r2.bucket.create", "example-assets").param(param, value),
+        );
+        let (_, message) = reply.as_error().unwrap_or_else(|| panic!("{param}={value} was sent"));
+        assert!(message.contains(value), "{message}");
+    }
+    assert_eq!(f.fake.seen().len(), 1, "a refused option still reached the api");
+}
+
+#[test]
+fn an_object_read_answers_with_bytes_and_still_has_the_credential_taken_out() {
+    // R2 answers a read with the object itself and no envelope. Every other
+    // operation's reply is JSON, so a scrub that happened to key on the
+    // envelope would pass everywhere except here — and here is where a
+    // project's own data comes back through the broker.
+    let f = Fixture::new("r2read", Mode::Normal, &["cloudflare.r2.object.read"]);
+    let reply = f.use_it(f.record("cloudflare.r2.object.read", "example-assets/db/today.sql"));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("refused: {reply:?}");
+    };
+    // The object arrived...
+    assert!(output.contains("CREATE TABLE t (id INTEGER);"), "{output}");
+    // ...the double really did echo the credential into it...
+    assert!(output.contains("fetched with Bearer"), "{output}");
+    // ...and it is not in what came back.
+    assert!(!output.contains(TOKEN), "the object read handed back the token");
+    assert!(output.contains("«redacted»"), "{output}");
+    assert!(!f.trail().contains(TOKEN));
 }
 
 /// §13.2's list, so the test above compares against the roadmap rather than

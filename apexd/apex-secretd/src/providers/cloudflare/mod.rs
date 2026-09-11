@@ -48,13 +48,39 @@
 //! `bind` resolves a remote with `git remote get-url` and `perform` runs
 //! `git push <remote>`, which resolves it again inside the child.
 //!
+//! ## What R2 can and cannot carry
+//!
+//! §13.5 asks for bucket- and object-scoped capabilities, and that is what the
+//! three R2 operations are: the bucket is one the project's own file lists, and
+//! an object is a key under it. Three limits are in the build rather than in a
+//! plan, and each is a consequence of something else here being right:
+//!
+//! * **an object comes back as text.** [`crate::broker::run_curl`] hands back a
+//!   `String`, and every reply in this service travels to the caller as one. A
+//!   read of a PNG therefore arrives lossily converted. Text objects — a SQL
+//!   dump, a JSON manifest, a log — are exact, and those are what an agent has
+//!   any business reading through a broker;
+//! * **an object key is a [`apex_secret_core::operation::Syntax::Path`]**, so
+//!   `backups/2026-09-12.sql` can be named and `backups/2026-09-12T10:00.sql`
+//!   cannot: `:` is refused by the grammar because a resource that could carry
+//!   one could be read as a URL. The grammar is load-bearing and the key
+//!   restriction is the price;
+//! * **ten megabytes**, [`MAX_PAYLOAD`], against the documented endpoint's 300.
+//!   A backup larger than that is not an agent operation.
+//!
+//! §13.5 also calls R2 "the preferred first-party cloud target for encrypted
+//! APEX backups". That is P1-010's, and the object write below is the half of
+//! it that does not need a backup format to exist first.
+//!
 //! ## What has never run against Cloudflare
 //!
 //! All of it. There is no account and no token on this machine, so every
 //! operation below has been exercised against a loopback server that speaks the
 //! same envelope and refuses without an `Authorization` header, and none of it
-//! against `api.cloudflare.com`. The paths are the documented ones; that they
-//! are the documented ones is not the same as having called them.
+//! against `api.cloudflare.com`. The paths are the documented ones — read out
+//! of `cloudflare/api-schemas`' `openapi.json` at `d5003a19`, and cross-checked
+//! against the rendered reference — and that they are the documented ones is
+//! not the same as having called them.
 
 pub mod api;
 pub mod binding;
@@ -68,7 +94,7 @@ use apex_secret_core::SecretValue;
 use crate::provider::{Bind, Bound, Endpoint, Performed, Provider, ProviderError};
 
 use api::{Api, Body, Call, Multipart};
-use binding::{Account, Binding, BindingError, Worker, Zone};
+use binding::{Account, Binding, BindingError, Bucket, Worker, Zone};
 
 /// The worker, zone or bucket a caller names.
 const NAMED: ResourceKind = ResourceKind::Name;
@@ -91,13 +117,31 @@ const VERSION: ParamSpec = ParamSpec {
     summary: "the version id to put in front of traffic",
 };
 
+/// The bucket, database, namespace or object a caller names as a path within
+/// something the project bound. `example-assets/backups/db.sql`.
+const WITHIN: ResourceKind = ResourceKind::Path;
+
+/// `file`, a path inside the project whose bytes are the request.
+///
+/// The counterpart to §13.4's rule about credentials, for payloads: the bytes
+/// an agent uploads come out of the project it is working in, read by the
+/// daemon under [`project::read_file`]'s rules, rather than travelling through
+/// the protocol as a parameter. A `Syntax::Path` cannot name `/etc/shadow`,
+/// and `read_file` would refuse it anyway — it is not the caller's file.
+const FILE: ParamSpec = ParamSpec {
+    name: "file",
+    syntax: Syntax::Path,
+    required: true,
+    summary: "the file inside the project whose bytes to send",
+};
+
 /// The vocabulary, in §13.2's shape.
 ///
-/// Seven names: **six of §13.2's thirty-two**, plus `worker.route.read`, which
+/// Ten names: **nine of §13.2's thirty-two**, plus `worker.route.read`, which
 /// is §13.3's "Worker routes" rather than one of §13.2's examples. So
-/// **twenty-six** of §13.2's list are still unimplemented and belong to P1-005
-/// through P1-017 — R2, D1, KV, Queues, Hyperdrive, DNS, Secrets Store, Access,
-/// Tunnels, Workers AI and the AI gateway.
+/// **twenty-three** of §13.2's list are still unimplemented and belong to
+/// P1-006 through P1-017 — D1, KV, Queues, Hyperdrive, DNS, Secrets Store,
+/// Access, Tunnels, Workers AI and the AI gateway.
 ///
 /// Declaring one this module cannot perform would put it in
 /// `apex secret capabilities`, let an owner grant it, and then fail at use
@@ -199,6 +243,57 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             aliases: &[],
             same_everywhere: false,
         },
+        // ── §13.5, R2 ───────────────────────────────────────────────────────
+        OperationSpec {
+            id: "cloudflare.r2.object.read",
+            summary: "read one object out of one of this project's R2 buckets, \
+                      or list what is in it",
+            effect: Effect::Read,
+            // `example-assets` lists that bucket; `example-assets/db/today.sql`
+            // reads that object. One operation and not two, because §13.2
+            // names one and because the grant an owner gives is the same
+            // either way: this project's buckets, read.
+            resource: WITHIN,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.r2.object.write",
+            summary: "put a file from this project into one of its R2 buckets",
+            effect: Effect::Write,
+            resource: WITHIN,
+            params: &[FILE],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.r2.bucket.create",
+            summary: "create one of the R2 buckets this project declares, in \
+                      the account it is bound to",
+            effect: Effect::Write,
+            // A NAME, and one the project already lists under `buckets`. An
+            // agent granted this cannot create a bucket the owner never wrote
+            // down — the grant says which verb, and §13.1's file says which
+            // thing, including a thing that does not exist yet.
+            resource: NAMED,
+            params: &[
+                ParamSpec {
+                    name: "location",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "the region hint to create it in: apac, eeur, enam, oc, weur or wnam",
+                },
+                ParamSpec {
+                    name: "storage-class",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "Standard or InfrequentAccess",
+                },
+            ],
+            aliases: &[],
+            same_everywhere: false,
+        },
     ],
 };
 
@@ -216,6 +311,13 @@ enum Target {
     Account(Account),
     Worker(Worker),
     Route { zone: Zone, worker: Worker },
+    /// A bucket this project declares. It is a target before it exists —
+    /// `r2.bucket.create` is what makes it — which is why the project file
+    /// listing it is what decides the name and not the other way round.
+    Bucket(Bucket),
+    /// An object in one of this project's buckets, or the bucket's own listing
+    /// when the caller named no key.
+    Object { bucket: Bucket, key: Option<String> },
 }
 
 impl From<BindingError> for ProviderError {
@@ -227,6 +329,9 @@ impl From<BindingError> for ProviderError {
             BindingError::NoWorker { .. }
             | BindingError::NoZone { .. }
             | BindingError::NoBucket { .. } => ProviderError::NoSuchResource(e.to_string()),
+            // Everything else is a file that is wrong rather than a name that
+            // is not bound — a missing id, an id that is not one, a project
+            // with no Cloudflare section at all.
             _ => ProviderError::Refused(e.to_string()),
         }
     }
@@ -278,6 +383,26 @@ impl CloudflareProvider {
         }
 
         let binding = binding?;
+
+        // Which noun the operation acts on decides which resolver runs, and
+        // getting that wrong is not a silent bug: a build that resolved every
+        // resource as a worker would answer "this project does not bind a
+        // worker called 'example-assets'" for a bucket — a true sentence about
+        // the wrong question, and the reader would go and add an environment.
+        match req.operation.id {
+            "cloudflare.r2.bucket.create" => {
+                return Ok(Target::Bucket(binding.bucket(req.resource)?));
+            }
+            "cloudflare.r2.object.read" | "cloudflare.r2.object.write" => {
+                let (bucket, key) = split_first(req.resource);
+                return Ok(Target::Object {
+                    bucket: binding.bucket(bucket)?,
+                    key,
+                });
+            }
+            _ => {}
+        }
+
         let worker = binding.worker(req.resource)?;
         if req.operation.id == "cloudflare.worker.route.read" {
             let Some(name) = binding.zone.clone() else {
@@ -315,6 +440,31 @@ impl CloudflareProvider {
                 "read the routes zone {} [{}] sends to {} ({})",
                 zone.name, zone.id, worker.name, worker.environment
             ),
+            Target::Bucket(bucket) => format!(
+                "create the bucket {} in account {} [{}]",
+                bucket.name,
+                bucket.account.named(),
+                bucket.account.id
+            ),
+            Target::Object { bucket, key } => {
+                let where_ = format!(
+                    "bucket {} in account {} [{}]",
+                    bucket.name,
+                    bucket.account.named(),
+                    bucket.account.id
+                );
+                match (operation.id, key) {
+                    ("cloudflare.r2.object.write", Some(key)) => {
+                        // The file is in the sentence because it decides what
+                        // is uploaded, and an owner reading the trail afterwards
+                        // wants to know what went into the bucket.
+                        let file = params.get("file").map(String::as_str).unwrap_or("");
+                        format!("write {file} to object {key} in {where_}")
+                    }
+                    (_, Some(key)) => format!("read object {key} in {where_}"),
+                    (_, None) => format!("list the objects in {where_}"),
+                }
+            }
             Target::Worker(worker) => {
                 let where_ = format!(
                     "{} ({}) in account {} [{}]",
@@ -388,11 +538,62 @@ impl CloudflareProvider {
                     body: self.deployment_body(req)?,
                 }
             }
+            ("cloudflare.r2.object.read", Target::Object { bucket, key }) => {
+                get(objects(bucket, key.as_deref()))
+            }
+            ("cloudflare.r2.object.write", Target::Object { bucket, key }) => {
+                let Some(key) = key else {
+                    return Err(ProviderError::Refused(format!(
+                        "'{}' names a bucket and not an object. Writing needs a \
+                         key as well: {}/<key>",
+                        bucket.name, bucket.name
+                    )));
+                };
+                Call {
+                    method: "PUT",
+                    path: objects(bucket, Some(key)),
+                    body: self.object_body(req, key)?,
+                }
+            }
+            ("cloudflare.r2.bucket.create", Target::Bucket(bucket)) => Call {
+                method: "POST",
+                path: format!("/accounts/{}/r2/buckets", bucket.account.id),
+                body: bucket_body(req, bucket)?,
+            },
             (id, _) => {
                 return Err(ProviderError::Failed(format!(
                     "the cloudflare provider declares '{id}' and does not implement it"
                 )))
             }
+        })
+    }
+
+    /// The bytes of a project file, as the body of an R2 upload.
+    ///
+    /// Same read as a Worker module's — [`project::read_file`]'s `O_NOFOLLOW`
+    /// walk, owned by the caller, capped — because it is the same problem: a
+    /// root daemon opening a path a caller chose. What is different is that
+    /// nothing here looks at the contents. An R2 object is whatever the project
+    /// put in it.
+    fn object_body(&self, req: &Bind<'_>, key: &str) -> Result<Body, ProviderError> {
+        let Some(file) = req.params.get("file") else {
+            return Err(ProviderError::Refused(
+                "this operation needs a 'file' option naming the file inside \
+                 the project to upload"
+                    .to_string(),
+            ));
+        };
+        let bytes = project::read_file(
+            std::path::Path::new(req.project),
+            file,
+            req.owner.uid,
+            &req.owner.name,
+            MAX_PAYLOAD,
+        )
+        .map_err(|e| ProviderError::NoSuchResource(e.to_string()))?;
+        Ok(Body::Raw {
+            content_type: media_type(key),
+            bytes,
         })
     }
 
@@ -494,6 +695,101 @@ fn script(worker: &Worker) -> String {
         "/accounts/{}/workers/scripts/{}",
         worker.account.id, worker.name
     )
+}
+
+/// The first segment of a resource, and whatever is left.
+///
+/// `example-assets/db/today.sql` is a bucket and a key, and the key keeps its
+/// slashes because R2 object keys have them. The framework has already held
+/// the whole string to [`apex_secret_core::operation::valid_path`] — no
+/// leading or trailing `/`, no `//`, no `..`, no `:` — so the split cannot
+/// produce an empty bucket or a key that climbs.
+fn split_first(resource: &str) -> (&str, Option<String>) {
+    match resource.split_once('/') {
+        Some((first, rest)) => (first, Some(rest.to_string())),
+        None => (resource, None),
+    }
+}
+
+/// The path for one bucket's objects, or for one object in it.
+fn objects(bucket: &Bucket, key: Option<&str>) -> String {
+    let base = format!(
+        "/accounts/{}/r2/buckets/{}/objects",
+        bucket.account.id, bucket.name
+    );
+    match key {
+        Some(key) => format!("{base}/{key}"),
+        None => base,
+    }
+}
+
+/// What to call an object's bytes, from the name the caller gave it.
+///
+/// A `&'static str` out of a fixed table rather than anything the caller sends,
+/// because this ends up in a header. The default is deliberately the useless
+/// one: an unknown extension is bytes, not a guess.
+fn media_type(key: &str) -> &'static str {
+    let extension = key.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    match extension {
+        "json" | "map" => "application/json",
+        "txt" | "log" => "text/plain; charset=utf-8",
+        "md" => "text/markdown; charset=utf-8",
+        "csv" => "text/csv; charset=utf-8",
+        "html" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "xml" => "application/xml",
+        "sql" => "application/sql",
+        "wasm" => "application/wasm",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" | "tgz" => "application/gzip",
+        "tar" => "application/x-tar",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/vnd.microsoft.icon",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+/// The JSON body that creates a bucket.
+///
+/// Both options are closed sets in Cloudflare's own documentation, so a value
+/// outside them is refused here rather than sent and refused there. The reason
+/// is not politeness: a request that fails at the far side has already spent
+/// the credential, and the reply an owner reads then describes an API error
+/// instead of a typo.
+fn bucket_body(req: &Bind<'_>, bucket: &Bucket) -> Result<Body, ProviderError> {
+    const LOCATIONS: &[&str] = &["apac", "eeur", "enam", "oc", "weur", "wnam"];
+    const CLASSES: &[&str] = &["Standard", "InfrequentAccess"];
+
+    let mut body = serde_json::Map::new();
+    body.insert("name".into(), bucket.name.clone().into());
+    if let Some(location) = req.params.get("location") {
+        if !LOCATIONS.contains(&location.as_str()) {
+            return Err(ProviderError::Refused(format!(
+                "'{}' is not an R2 location hint. One of: {}",
+                location.escape_debug(),
+                LOCATIONS.join(", ")
+            )));
+        }
+        body.insert("locationHint".into(), location.clone().into());
+    }
+    if let Some(class) = req.params.get("storage-class") {
+        if !CLASSES.contains(&class.as_str()) {
+            return Err(ProviderError::Refused(format!(
+                "'{}' is not an R2 storage class. One of: {}",
+                class.escape_debug(),
+                CLASSES.join(", ")
+            )));
+        }
+        body.insert("storageClass".into(), class.clone().into());
+    }
+    Ok(Body::Json(serde_json::Value::Object(body).to_string()))
 }
 
 /// A tail session's reply, with the part of it that is a credential taken out.
