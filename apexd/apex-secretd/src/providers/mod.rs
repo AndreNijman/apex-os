@@ -51,6 +51,9 @@ mod tests {
             registry.operation_ids(),
             vec![
                 "cloudflare.account.read",
+                "cloudflare.r2.bucket.create",
+                "cloudflare.r2.object.read",
+                "cloudflare.r2.object.write",
                 "cloudflare.worker.deploy",
                 "cloudflare.worker.read",
                 "cloudflare.worker.rollback",

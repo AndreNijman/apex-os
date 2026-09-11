@@ -97,10 +97,6 @@ pub enum BindingError {
         bound: Option<String>,
     },
     /// That is not one of this project's buckets.
-    ///
-    /// Reachable only from [`Binding::bucket`], which no operation calls yet —
-    /// see that method for why it is here before P1-005 is.
-    #[allow(dead_code)]
     NoBucket {
         path: PathBuf,
         named: String,
@@ -246,7 +242,6 @@ pub struct Zone {
 }
 
 /// A bucket this project binds.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bucket {
     pub account: Account,
@@ -386,13 +381,18 @@ impl Binding {
 
     /// What a bucket NAME means: an account, and a bucket in it.
     ///
-    /// §13.5's, and therefore P1-005's. It is here, ahead of any operation
-    /// that calls it, because *what a Cloudflare name means* is one question
-    /// and answering it in one module is the point of this file — a second
-    /// resolver written next to R2's operations would be a second place for
-    /// "the project did not bind that" to be decided differently. Tested, and
-    /// `allow(dead_code)` until P1-005 declares an operation that reaches it.
-    #[allow(dead_code)]
+    /// §13.5's, and therefore P1-005's. It was written here ahead of any
+    /// operation that calls it, because *what a Cloudflare name means* is one
+    /// question and answering it in one module is the point of this file — a
+    /// second resolver written next to R2's operations would be a second place
+    /// for "the project did not bind that" to be decided differently. P1-005's
+    /// three operations are what reach it now.
+    ///
+    /// A bucket is the one resource that can be named before it exists:
+    /// `cloudflare.r2.bucket.create` makes the thing the project already
+    /// declares. So this answers for a name in the file, not for a bucket in
+    /// the account, and the difference is deliberate — the account is not
+    /// something `bind` may ask about.
     pub fn bucket(&self, named: &str) -> Result<Bucket, BindingError> {
         let account = self.account()?;
         if !self.buckets.iter().any(|b| b == named) {
