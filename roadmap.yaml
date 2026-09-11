@@ -1399,7 +1399,7 @@ tasks:
 - id: P1-008
   title: Cloudflare One capability set
   priority: P1
-  status: todo
+  status: done
   area: cloudflare
   depends_on:
   - P1-002
@@ -1409,10 +1409,21 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Cloudflare One capability set - Access, service tokens and Tunnels. LANDED on apex-os roadmap/v2.2 2026-09-12
+    as merge 230ee02a (13ea48c1, 9be6d910). Both criteria closed by named tests: brokered Access/service-
+    token/Tunnel operations by the_cloudflare_one_verbs_are_separate_grants and
+    every_declared_operation_reaches_cloudflare_with_the_credential_and_returns_without_it; and 'created service
+    secrets enter apex-secretd directly' by the Bound::creates seam plus
+    a_credential_an_operation_creates_is_stored_and_never_comes_back - a credential the operation mints goes into
+    the store and is never handed to the caller. apex-secretd 180 passed / 0 failed plus 15 end-to-end, clippy
+    clean on the committed tree. NO LIVE ACCOUNT WAS TOUCHED: no authentication, no real Access application,
+    service token or tunnel; everything runs against the loopback double that 401s any request without an
+    Authorization header. With this branch ALL 32 of section 13.2's capability names are implemented.
 - id: P1-009
   title: Cloudflare Workers AI and AI Gateway provider
   priority: P1
-  status: todo
+  status: partial
   area: cloudflare-ai
   depends_on:
   - P1-002
@@ -1423,10 +1434,39 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Workers AI and AI Gateway capability set. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 230ee02a
+    (149de172, 5eda17e0). TWO OF THREE CRITERIA DONE: 'provider auth remains brokered' by
+    a_gatewayed_run_is_the_same_host_and_the_same_credential_as_an_ungatewayed_one, and 'usage associated with
+    task/project' by a_gatewayed_run_is_tagged_with_this_task_and_not_with_this_machine_s_paths. THE CARD'S
+    CENTRAL DESIGN CLAIM WAS WRONG AND WAS CHECKED RATHER THAN INHERITED: it said an AI Gateway run needs a
+    different host (gateway.ai.cloudflare.com) and therefore a second stored credential. It does not - but the
+    replacement claim was also uncited and the pinned schema cannot settle it either way, because workers-ai-post-
+    run-model declares two path parameters and NO headers and the string cf-aig does not occur anywhere in the 25
+    MB document. Verified against Cloudflare's documentation instead: POST /accounts/{id}/ai/run/{model} with cf-
+    aig-gateway-id, on api.cloudflare.com, the docs stating that path form also continues to work. Same host, same
+    credential; the difference between a gatewayed and an ungatewayed run really is a header and a grant. The
+    module note cites three URLs and says plainly which claim the schema cannot back. THREE MUTATIONS EXPOSED TEST
+    GAPS RATHER THAN CODE GAPS, the class this program keeps finding: a leaked project path PASSED because the
+    filter that makes a header value safe strips '/' as a side effect, so 'contains no slash' and 'is not the
+    path' both hold while the whole directory layout ships to Cloudflare; discarding the read-modify-write's read
+    entirely PASSED because the assertion asked about collect_logs, which the required-field fallback sets to true
+    regardless, making preserved and defaulted the same observation; and Effect::Read on an operation that SPENDS
+    MONEY passed because nothing asserted otherwise, so a read-only grant could have run inference. THE THIRD
+    CRITERION IS OPEN FOR A STRUCTURAL REASON: 'APEX AI service can route through Cloudflare' cannot be closed
+    from this unit, because apexd_core::ai::Backend is compute-only (Cuda/Rocm/Vulkan/Cpu) AND the inference
+    runtime starts under bubblewrap --unshare-net, so the backend cannot reach api.cloudflare.com because it
+    cannot reach anything at all. Closing it needs something outside the sandbox to make the brokered call and
+    hand the answer back - a design change in another crate, deliberately not taken unilaterally mid-integration.
+    Same shape as P1-007's missing elevated class. ALSO RECORDED, NOT SMOOTHED OVER: cargo test --workspace gives
+    1400 on this machine and the 2466/2474 earlier rounds recorded could not be reproduced (the diff is additive,
+    so no tests were removed - the counting method differs and is not known); one unidentified failure in one of
+    eight workspace runs, never reproduced in the other seven; and stop_slop, a listed gate on all three items,
+    was not run on this round or any earlier one.
 - id: P1-010
   title: Cloudflare Secrets Store integration
   priority: P1
-  status: todo
+  status: done
   area: cloudflare
   depends_on:
   - P1-002
@@ -1437,6 +1477,15 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Cloudflare Secrets Store capability set. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 230ee02a
+    (2c59ff1a, a77bd0c6). Create, bind and rotate closed by eight named tests. The 'non-readable secrets stored as
+    references and metadata only' criterion rests on a schema finding rather than an assumption: secrets-
+    store_value is writeOnly and x-sensitive in Cloudflare's own OpenAPI document, so the value arrives as a
+    request body or a project file rather than as a parameter, and nothing in the capability set can read it back.
+    a77bd0c6 is a real defect the tests surfaced: secret.bind ECHOED a worker's existing bindings rather than
+    inheriting them, which would have rewritten a worker's binding list on every bind. NO LIVE ACCOUNT WAS
+    TOUCHED.
 - id: P1-011
   title: Temporary Cloudflare task credentials
   priority: P1

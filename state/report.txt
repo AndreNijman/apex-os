@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-12 07:03 AWST
+APEX ROADMAP — resume report — 2026-09-12 07:27 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -7,61 +7,53 @@ APEX ROADMAP — resume report — 2026-09-12 07:03 AWST
   BASE          16         2         -         -
   L              -         1         -         2
   P0            20         5         -         -
-  P1            29        13        20         -
+  P1            31        14        17         -
   P2             4         3        12         -
-  ALL           69        24        32         2   of 127
+  ALL           71        25        29         2   of 127
 
   P0 not done: P0-001(part), P0-002(part), P0-007(part), P0-015(part), P0-021(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p1-008     dead 192m  P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
-             head a77bd0c6 fix(cloudflare): secret.bind inherits a worker's exis
-             dirty 10 file(s), 0 unpushed, card 202m
-             NEXT P1-008 and P1-010 are done and pushed. Next action: commit 4, **P1
+  p1-008     ALIVE      P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
+             head 5eda17e0 docs(cloudflare): name apexd-core's Backend without l
+             dirty 0 file(s), 0 unpushed, card 1m
+             NEXT **The unit is DONE and pushed** — tip `5eda17e0`, five commits, no
 
-  p1-040     dead 215m  P1-040                             task/p1-040-per-output-scaling
-             head 174709a test(scaling): a manual factor must reach the per-outp
-             dirty 0 file(s), 0 unpushed, card 216m
-             NEXT (no card)
-
-  p2-b       dead 192m  (see queue.json p2-b)              task/p2-b-accessibility-i18n
+  p2-b       ALIVE      (see queue.json p2-b)              task/p2-b-accessibility-i18n
              head 7ba196e test(a11y): measure how far Reduce Motion actually rea
-             dirty 0 file(s), 0 unpushed, card 197m
+             dirty 0 file(s), 0 unpushed, card 13m
              NEXT 0. **DESIGN FORK to settle before writing the installer page** (fr
 
-  p1-052     dead 191m  P1-051,P1-052                      task/p1-052-relay
-             head 4cc8cb0c feat(remote): announce _apex-remote._tcp for as long 
-             dirty 0 file(s), 0 unpushed, card 197m
-             NEXT apex-shell: the QR pairing page and the paired-device page (P1-051
+  p1-052     ALIVE      P1-051,P1-052                      task/p1-052-relay
+             head 373e833c style(remote): three clippy lints in the relay's own 
+             dirty 0 file(s), 0 unpushed, card 2m
+             NEXT apex-shell: the two pages themselves. The encoder underneath them 
 
-  p0-finish  dead 192m  P0-001,P0-002,P0-007,P0-015,P0-021 task/p0-finish
-             head 4147d843 fix(tests): one env lock for the crate, and a version
-             dirty 4 file(s), 0 unpushed, card 203m
+  p0-finish  ALIVE      P0-001,P0-002,P0-007,P0-015,P0-021 task/p0-finish
+             head 392108e5 ci(image): the rust job needs a login session, and wi
+             dirty 0 file(s), 0 unpushed, card 19m
              NEXT P0-007, P0-015 and P0-002 are done and pushed. Outstanding: the lo
-
-  suite-reliability dead 155m  (infrastructure)                   task/suite-reliability
-             head 441770d2 test(agentd): the remote-elevation test could only ev
-             dirty 0 file(s), 0 unpushed, card 206m
-             NEXT All three defects are FIXED, mutation-proven, committed and pushed
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 61504ca2 ci(image): the image build fails where the other work
+  int-os:  tip 230ee02a Merge task/p1-008-cloudflare-one into roadmap/v2.2 (P
     task/p0-finish
       f372c089 fix(build): the second assertion that can only ever fail, one   [0/10 added lines on tip]
       f31f4020 feat(grant): a session grant can be narrowed to named verbs (   [1/10 added lines on tip]
       7eaa0cdb test(lock): §7's lock rules asserted where the decision becom   [2/10 added lines on tip]
       71c7b5af test(secret): the at-rest boundary, measured as real root (P0   [1/10 added lines on tip]
       4147d843 fix(tests): one env lock for the crate, and a version ratchet   [1/10 added lines on tip]
-    task/p1-008-cloudflare-one
-      9be6d910 feat(secretd): a credential an operation creates goes into th   [2/10 added lines on tip]
-      13ea48c1 feat(cloudflare): P1-008, Cloudflare One — Access, service to   [3/10 added lines on tip]
-      2c59ff1a feat(cloudflare): P1-010, Secrets Store — create, bind and ro   [3/10 added lines on tip]
-      a77bd0c6 fix(cloudflare): secret.bind inherits a worker's existing bin   [0/10 added lines on tip]
+      aacd15ec fix(protocol): the older guards ratchet behind the current on   [4/10 added lines on tip]
+      4501f620 test(lock): §7's hold is asserted on the kernel, not on the d   [2/10 added lines on tip]
+      8609cb55 fix(agent): --capabilities must not swallow the prompt that f   [1/10 added lines on tip]
+      47455d93 fix(secret-test): measure the daemon's uid, not the uid of th   [0/10 added lines on tip]
+      41a2f86e fix(handoff-test): contain the fixture's config home, so the    [1/10 added lines on tip]
+      20332ca1 fix(secret): the zero-guard is a compile-time assertion, not    [1/10 added lines on tip]
+      392108e5 ci(image): the rust job needs a login session, and without on   [0/10 added lines on tip]
     task/p1-050-remote-protocol
       09c977d9 fix(clippy): the integration tip was not clean, and two of th   [2/10 added lines on tip]
     task/p1-052-relay
@@ -70,10 +62,12 @@ APEX ROADMAP — resume report — 2026-09-12 07:03 AWST
       704743fb feat(remote): measure the connection, and survive losing it (   [0/10 added lines on tip]
       e028a546 feat(relay): the Worker and the Durable Object, written and n   [0/10 added lines on tip]
       4cc8cb0c feat(remote): announce _apex-remote._tcp for as long as the d   [2/10 added lines on tip]
+      373e833c style(remote): three clippy lints in the relay's own test cod   [0/3 added lines on tip]
     task/p2-b-accessibility-i18n
       a0dd1999 feat(greet): accessible login screen and a keyboard-layout re   [0/10 added lines on tip]
       e5d049ad test(greet): parse the greeter, self-test the mutants, instal   [0/10 added lines on tip]
       69f59cb0 fix(ci): actually run the greeter accessibility suite, and ma   [0/10 added lines on tip]
+      fc4dbd2d feat(installer): the engine honours an operator's keyboard, v   [2/10 added lines on tip]
 
   int-shell:  tip b195195 Merge task/p1-040-per-output-scaling into roadmap/v2.2
     fix/labwc-desktop-parity  — squash-merged, safe to delete
@@ -84,6 +78,8 @@ APEX ROADMAP — resume report — 2026-09-12 07:03 AWST
       landed whole as 4e267eb fix: screenshots and popup input regions off Hyprland (#
     task/p0-016-agent-settings  — squash-merged, safe to delete
       landed whole as 4335e42 fix(agents): the sudo caveat was written before no_new_p
+    task/p1-052-relay
+      673efe0 feat(remote): a QR encoder, proven against an independent one    [0/10 added lines on tip]
     task/p2-b-accessibility-i18n
       83775dc feat(a11y): the shared settings controls name themselves and a   [2/10 added lines on tip]
       7ba196e test(a11y): measure how far Reduce Motion actually reaches, an   [2/10 added lines on tip]
@@ -96,11 +92,11 @@ APEX ROADMAP — resume report — 2026-09-12 07:03 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 1min 20s Sat
+  snapshot timer: active   last 4s Sat 2026-09-12
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    8fe8d23  roadmap-state
+    apex-os    1832c10  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    55f08ae  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -121,9 +117,9 @@ APEX ROADMAP — resume report — 2026-09-12 07:03 AWST
     apex-os    746639a  wt-p0-014-
     apex-os    580c657  wt-p0-019-os-
     apex-os    00c1973  wt-p0-025-os-
-    apex-os    488c35e  wt-p0-finish-
+    apex-os    2c9c560  wt-p0-finish-
     apex-os    eda5ef8  wt-p1-001-
-    apex-shell 95c7f35  apex-shell-
+    apex-shell 4531ac0  apex-shell-
     apex-shell df979e1  int-shell-
     apex-shell 68c971d  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
@@ -146,13 +142,13 @@ APEX ROADMAP — resume report — 2026-09-12 07:03 AWST
     apex-shell 589d611  wt-p1-040-
     apex-shell 086727e  wt-p1-044-shell-
     apex-shell fb019fa  wt-p1-048-
-    apex-shell 8c537b2  wt-p1-052-shell-
+    apex-shell a83c886  wt-p1-052-shell-
     apex-shell 7cbd7fa  wt-p2-b-
 
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  6 agent(s) dispatched, ceiling 6
+  4 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
     p1-008         P1-008,P1-009,P1-010             Cloudflare One, Workers AI and AI Gateway, Secrets Store
