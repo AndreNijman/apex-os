@@ -44,6 +44,19 @@ const ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
 /// The zone id it binds.
 const ZONE: &str = "fedcba9876543210fedcba9876543210";
 
+/// The ids §13.1's file binds for P1-006's four resource tables. A D1 database
+/// is a UUID and the other three are 32 hex, which is Cloudflare's own split
+/// and the reason the binding has two id shapes rather than one.
+const DB_ID: &str = "1a2b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d";
+const KV_ID: &str = "00112233445566778899aabbccddeeff";
+const QUEUE_ID: &str = "ffeeddccbbaa99887766554433221100";
+const HD_ID: &str = "0f0e0d0c0b0a09080706050403020100";
+
+/// What the double has stored under the one KV key a test reads. Not JSON —
+/// KV answers a read with the value's bytes — and it carries the credential the
+/// request arrived with.
+const KV_VALUE: &str = "stored by apex, read back with {{authorization}}";
+
 /// The two record ids the double hands out. 32 lowercase hex, which is the
 /// shape the provider checks before one becomes part of a URL.
 const RECORD_A: &str = "aa11bb22cc33dd44ee55ff6677889900";
@@ -71,6 +84,18 @@ account_id = "0123456789abcdef0123456789abcdef"
 zone = "example.com"
 zone_id = "fedcba9876543210fedcba9876543210"
 buckets = ["example-assets"]
+
+[cloudflare.d1]
+project-db = "1a2b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d"
+
+[cloudflare.kv]
+cache = "00112233445566778899aabbccddeeff"
+
+[cloudflare.queues]
+jobs = "ffeeddccbbaa99887766554433221100"
+
+[cloudflare.hyperdrive]
+pg = "0f0e0d0c0b0a09080706050403020100"
 
 [cloudflare.preview]
 worker = "project-preview"
@@ -275,6 +300,34 @@ fn answer(method: &str, target: &str) -> (u16, String) {
             ok(r#"{"key":"db/today.sql","size":19,"etag":"bb","version":"v2"}"#)
         }
 
+        // ── §13.3's storage surfaces ────────────────────────────────────────
+        ("GET", p) if p == format!("/accounts/{ACCOUNT}/d1/database/{DB_ID}") => ok(&format!(
+            r#"{{"uuid":"{DB_ID}","name":"project-db","num_tables":3,"file_size":16384}}"#
+        )),
+        ("POST", p) if p == format!("/accounts/{ACCOUNT}/d1/database/{DB_ID}/query") => ok(
+            r#"[{"success":true,"results":[{"n":1}],"meta":{"changes":0,"duration":0.4}}]"#,
+        ),
+        // A KV read answers with the value's bytes and no envelope, the same
+        // way an R2 object read does.
+        ("GET", p) if p.starts_with(&kv_path("")) => (200, KV_VALUE.to_string()),
+        ("PUT", p) if p.starts_with(&kv_path("")) => ok("null"),
+        ("POST", p) if p == format!("/accounts/{ACCOUNT}/queues/{QUEUE_ID}/messages") => {
+            ok(r#"{"errors":[],"messages":[]}"#)
+        }
+        ("PATCH", p) if p == format!("/accounts/{ACCOUNT}/queues/{QUEUE_ID}") => ok(&format!(
+            r#"{{"queue_id":"{QUEUE_ID}","queue_name":"jobs","settings":{{"delivery_paused":true}}}}"#
+        )),
+        // The documentation says an origin password is write-only and never
+        // comes back. This double sends one anyway: what a build does when the
+        // far side hands it a secret it did not ask for is not something to
+        // find out in production.
+        ("GET", p) if p == format!("/accounts/{ACCOUNT}/hyperdrive/configs/{HD_ID}") => ok(&format!(
+            r#"{{"id":"{HD_ID}","name":"pg","origin":{{"host":"db.example.invalid","port":5432,"database":"app","user":"app","password":"{ORIGIN_PASSWORD}","scheme":"postgres"}},"caching":{{"disabled":false}}}}"#
+        )),
+        ("PATCH", p) if p == format!("/accounts/{ACCOUNT}/hyperdrive/configs/{HD_ID}") => {
+            ok(&format!(r#"{{"id":"{HD_ID}","name":"pg","caching":{{"disabled":false}}}}"#))
+        }
+
         // ── §13.9, DNS ──────────────────────────────────────────────────────
         //
         // The zone answers about the name it was asked about, and each name
@@ -331,6 +384,16 @@ fn answer(method: &str, target: &str) -> (u16, String) {
             ),
         ),
     }
+}
+
+/// The password the double puts in a Hyperdrive reply, which the documented
+/// API never would. Distinctive, so finding it anywhere downstream means it
+/// travelled rather than merely resembling something.
+const ORIGIN_PASSWORD: &str = "apex-hyperdrive-origin-4c7f-do-not-leak";
+
+/// Where the double keeps one namespace's values.
+fn kv_path(suffix: &str) -> String {
+    format!("/accounts/{ACCOUNT}/storage/kv/namespaces/{KV_ID}/values{suffix}")
 }
 
 /// Where the double keeps this zone's records.
@@ -516,6 +579,20 @@ fn every_operation() -> Vec<OperationCase> {
             vec![("location", "apac"), ("storage-class", "Standard")],
             1,
         ),
+        ("cloudflare.d1.read", "project-db", vec![], 1),
+        ("cloudflare.d1.query", "project-db", vec![("sql", "SELECT 1")], 1),
+        (
+            "cloudflare.d1.migrate",
+            "project-db",
+            vec![("file", "migrations/001.sql")],
+            1,
+        ),
+        ("cloudflare.kv.read", "cache/greeting", vec![], 1),
+        ("cloudflare.kv.write", "cache/greeting", vec![("value", "hello")], 1),
+        ("cloudflare.queue.publish", "jobs", vec![("message", "work to do")], 1),
+        ("cloudflare.queue.manage", "jobs", vec![("paused", "true")], 1),
+        ("cloudflare.hyperdrive.read", "pg", vec![], 1),
+        ("cloudflare.hyperdrive.edit", "pg", vec![("caching", "on")], 1),
         ("cloudflare.dns.read", "www.example.com", vec![("type", "A")], 1),
         (
             "cloudflare.dns.create",
@@ -554,7 +631,13 @@ fn with_files(fixture: &Fixture) {
     )
     .expect("worker.js");
     std::fs::write(fixture.project.join("dist/today.sql"), UPLOADED).expect("today.sql");
+    std::fs::create_dir_all(fixture.project.join("migrations")).expect("migrations");
+    std::fs::write(fixture.project.join("migrations/001.sql"), MIGRATION).expect("001.sql");
 }
+
+/// A migration: several statements over several lines, which is exactly what a
+/// `Syntax::Text` parameter could not have carried.
+const MIGRATION: &str = "CREATE TABLE t (id INTEGER PRIMARY KEY);\nINSERT INTO t VALUES (1);\n";
 
 /// What a test puts into a bucket. Distinctive, so finding it in the body the
 /// double received means the project's own file arrived and not something that
@@ -1197,7 +1280,7 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
         }
         assert!(listed.contains(&op.id), "'{}' is not in §13.2", op.id);
     }
-    // Thirteen of §13.2's thirty-two, and one addition. The arithmetic is asserted
+    // Twenty-two of §13.2's thirty-two, and one addition. The arithmetic is asserted
     // because the module note states it and a later task will read that note
     // to work out what is left.
     let from_13_2 = SPEC
@@ -1205,9 +1288,9 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
         .iter()
         .filter(|op| listed.contains(&op.id))
         .count();
-    assert_eq!(from_13_2, 13);
-    assert_eq!(SPEC.operations.len(), 14);
-    assert_eq!(SECTION_13_2.len() - from_13_2, 19, "still unimplemented");
+    assert_eq!(from_13_2, 22);
+    assert_eq!(SPEC.operations.len(), 23);
+    assert_eq!(SECTION_13_2.len() - from_13_2, 10, "still unimplemented");
 
     // Nothing is declared twice, and every summary reads as a sentence about
     // what the owner is being asked to allow.
@@ -1430,6 +1513,376 @@ fn an_object_read_answers_with_bytes_and_still_has_the_credential_taken_out() {
     assert!(!output.contains(TOKEN), "the object read handed back the token");
     assert!(output.contains("«redacted»"), "{output}");
     assert!(!f.trail().contains(TOKEN));
+}
+
+// ── §13.3's storage surfaces: D1, KV, Queues, Hyperdrive ────────────────────
+//
+// Nine mutations were run against the arms below, one at a time, each restored
+// by copying the pristine file back so that cargo rebuilt rather than reusing
+// the mutant's binary. Every one turns a named test red:
+//
+// * one id shape for all four tables, so a KV id passes as a D1 one, and the
+//   reserved-table guard removed so an environment may shadow `[cloudflare.kv]`
+//   — `a_d1_id_and_a_kv_id_are_different_shapes_…`,
+//   `an_environment_may_not_be_named_after_a_resource_table`;
+// * `is_empty` forgetting the new tables — `a_project_that_binds_only_a_…`;
+// * `NoResource` falling out of the `NoSuchResource` arm, which is the same
+//   defect `NoRecord` had one unit earlier and which this test found again —
+//   `a_database_namespace_queue_or_config_…`;
+// * a migration accepting any file, and a queue setting skipping its
+//   documented range — `a_migration_is_a_file_of_statements_…`,
+//   `a_queue_change_is_checked_against_the_ranges_…`;
+// * `caching = off` no longer inverted into Cloudflare's `disabled` —
+//   `a_hyperdrive_edit_cannot_carry_a_database_credential`;
+// * the origin scrub not descending into nested objects, which is where the
+//   password actually is — `an_origin_credential_the_api_volunteers_…`;
+// * a KV write given both a value and a file quietly picking one —
+//   `a_kv_write_takes_a_value_or_a_file_and_never_both`.
+
+#[test]
+fn every_storage_resource_is_addressed_by_the_id_its_project_wrote_down() {
+    // Nine operations, nine documented paths, and every id in them came out of
+    // apex.toml. None of these four products has a name-based path, so this is
+    // the whole of what "project resource binding enforced" can mean for them.
+    let f = Fixture::new("p6paths", Mode::Normal, &granted_everything());
+    with_files(&f);
+    for (operation, resource, options, _) in every_operation() {
+        if !["d1", "kv", "queue", "hyperdrive"].contains(&operation.split('.').nth(1).unwrap_or("")) {
+            continue;
+        }
+        let mut rec = f.record(operation, resource);
+        for (name, value) in &options {
+            rec = rec.param(name, value);
+        }
+        let reply = f.use_it(rec);
+        assert!(
+            matches!(reply, Response::Performed { exit_code: 0, .. }),
+            "{operation}: {reply:?}"
+        );
+    }
+    let seen: Vec<(String, String)> = f.fake.seen().into_iter().map(|s| (s.method, s.path)).collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("GET".into(), format!("/client/v4/accounts/{ACCOUNT}/d1/database/{DB_ID}")),
+            ("POST".into(), format!("/client/v4/accounts/{ACCOUNT}/d1/database/{DB_ID}/query")),
+            ("POST".into(), format!("/client/v4/accounts/{ACCOUNT}/d1/database/{DB_ID}/query")),
+            (
+                "GET".into(),
+                format!("/client/v4/accounts/{ACCOUNT}/storage/kv/namespaces/{KV_ID}/values/greeting")
+            ),
+            (
+                "PUT".into(),
+                format!("/client/v4/accounts/{ACCOUNT}/storage/kv/namespaces/{KV_ID}/values/greeting")
+            ),
+            ("POST".into(), format!("/client/v4/accounts/{ACCOUNT}/queues/{QUEUE_ID}/messages")),
+            ("PATCH".into(), format!("/client/v4/accounts/{ACCOUNT}/queues/{QUEUE_ID}")),
+            ("GET".into(), format!("/client/v4/accounts/{ACCOUNT}/hyperdrive/configs/{HD_ID}")),
+            ("PATCH".into(), format!("/client/v4/accounts/{ACCOUNT}/hyperdrive/configs/{HD_ID}")),
+        ]
+    );
+}
+
+#[test]
+fn a_database_namespace_queue_or_config_this_project_did_not_bind_never_reaches_cloudflare() {
+    let f = Fixture::new("p6unbound", Mode::Normal, &granted_everything());
+    with_files(&f);
+    for (operation, resource, kind, options) in [
+        ("cloudflare.d1.read", "somebody-elses-db", "D1 database", vec![]),
+        ("cloudflare.kv.read", "somebody-elses-ns/key", "KV namespace", vec![]),
+        (
+            "cloudflare.queue.publish",
+            "somebody-elses-queue",
+            "queue",
+            vec![("message", "x")],
+        ),
+        (
+            "cloudflare.hyperdrive.read",
+            "somebody-elses-config",
+            "Hyperdrive config",
+            vec![],
+        ),
+    ] {
+        let mut rec = f.record(operation, resource);
+        for (name, value) in &options {
+            rec = rec.param(name, value);
+        }
+        let reply = f.use_it(rec);
+        let (error, message) = match reply.as_error() {
+            Some(pair) => pair,
+            None => panic!("{operation} accepted an unbound resource"),
+        };
+        assert_eq!(error, ErrorKind::BadRequest, "{operation}");
+        assert!(message.contains(kind), "{message}");
+        assert!(message.contains("apex.toml"), "{message}");
+    }
+    assert!(f.fake.seen().is_empty(), "an unbound resource reached the api");
+}
+
+#[test]
+fn a_d1_id_and_a_kv_id_are_different_shapes_and_neither_is_accepted_for_the_other() {
+    // Cloudflare's own split: a D1 database id is a UUID, everything else here
+    // is 32 hex. One validator would either refuse every real D1 id or let 36
+    // characters of anything into a URL path.
+    use apex_secret_core::project::ProjectConfig;
+    use std::path::Path;
+    let binding = |text: &str| {
+        let config = ProjectConfig::parse(Path::new("/p/apex.toml"), text).expect("parses");
+        super::binding::Binding::of(&config)
+    };
+    let head = format!("[identity.cloudflare]\naccount_id = \"{ACCOUNT}\"\n");
+
+    // Each in its own table: fine.
+    assert!(binding(&format!("{head}[cloudflare.d1]\ndb = \"{DB_ID}\"\n")).is_ok());
+    assert!(binding(&format!("{head}[cloudflare.kv]\nns = \"{KV_ID}\"\n")).is_ok());
+    // Crossed over: refused, and the message names the shape that key wants.
+    let err = binding(&format!("{head}[cloudflare.d1]\ndb = \"{KV_ID}\"\n")).unwrap_err();
+    assert!(err.to_string().contains("UUID"), "{err}");
+    let err = binding(&format!("{head}[cloudflare.kv]\nns = \"{DB_ID}\"\n")).unwrap_err();
+    assert!(err.to_string().contains("32 hexadecimal"), "{err}");
+    // ...and a name no request could ever carry is refused where it is written
+    // rather than being silently unaddressable.
+    let err = binding(&format!("{head}[cloudflare.kv]\n\"my cache\" = \"{KV_ID}\"\n")).unwrap_err();
+    assert!(err.to_string().contains("my cache"), "{err}");
+}
+
+#[test]
+fn an_environment_may_not_be_named_after_a_resource_table() {
+    // `[cloudflare.kv]` cannot be both a list of namespaces and a worker
+    // binding. Without this the key `worker` would be read as a namespace
+    // called "worker" with an id of whatever the worker is called, and the
+    // whole file would be refused for a bad id — a true refusal about the
+    // wrong thing.
+    use apex_secret_core::project::ProjectConfig;
+    use std::path::Path;
+    let text = format!(
+        "[identity.cloudflare]\naccount_id = \"{ACCOUNT}\"\n\
+         [cloudflare.kv]\nworker = \"project\"\n"
+    );
+    let config = ProjectConfig::parse(Path::new("/p/apex.toml"), &text).expect("parses");
+    let err = super::binding::Binding::of(&config).unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("[cloudflare.kv]"), "{message}");
+    assert!(message.contains("Rename the environment"), "{message}");
+}
+
+#[test]
+fn a_project_that_binds_only_a_namespace_is_told_to_add_a_line_not_to_write_a_file() {
+    // `is_empty` decides which of two refusals a person gets, and a new binding
+    // that is not counted there turns "add an account id" into "this project
+    // binds no Cloudflare account at all".
+    use apex_secret_core::project::ProjectConfig;
+    use std::path::Path;
+    let text = format!("[cloudflare.kv]\ncache = \"{KV_ID}\"\n");
+    let config = ProjectConfig::parse(Path::new("/p/apex.toml"), &text).expect("parses");
+    let binding = super::binding::Binding::of(&config).expect("binds");
+    assert!(!binding.is_empty(), "a project binding a namespace binds something");
+    let err = binding.resource("kv", "cache").unwrap_err();
+    assert!(err.to_string().contains("account_id"), "{err}");
+}
+
+#[test]
+fn a_migration_is_a_file_of_statements_and_a_query_is_one_line() {
+    // The two D1 write verbs, and why §13.2 has both. A `Syntax::Text` option
+    // is one line, so a migration could never have travelled as one.
+    let f = Fixture::new("p6d1", Mode::Normal, &granted_everything());
+    with_files(&f);
+    f.use_it(f.record("cloudflare.d1.query", "project-db").param("sql", "SELECT 1"));
+    f.use_it(
+        f.record("cloudflare.d1.migrate", "project-db")
+            .param("file", "migrations/001.sql"),
+    );
+    let sent = f.fake.seen();
+    assert!(sent[0].body.contains(r#""sql":"SELECT 1""#), "{}", sent[0].body);
+    // The whole file, newlines and all, JSON-escaped into the body.
+    assert!(sent[1].body.contains("CREATE TABLE t (id INTEGER PRIMARY KEY);"), "{}", sent[1].body);
+    assert!(sent[1].body.contains("INSERT INTO t VALUES (1);"), "{}", sent[1].body);
+    assert!(sent[1].body.contains(r"\n"), "the newlines were escaped, not dropped");
+
+    // A migration that is not a migration is refused before it is read.
+    std::fs::write(f.project.join("migrations/notes.txt"), "DROP TABLE t;\n").expect("notes");
+    let reply = f.use_it(
+        f.record("cloudflare.d1.migrate", "project-db")
+            .param("file", "migrations/notes.txt"),
+    );
+    let (_, message) = reply.as_error().expect("refused");
+    assert!(message.contains(".sql"), "{message}");
+    assert_eq!(f.fake.seen().len(), 2, "the .txt was sent anyway");
+}
+
+#[test]
+fn a_kv_write_takes_a_value_or_a_file_and_never_both() {
+    let f = Fixture::new("p6kv", Mode::Normal, &granted_everything());
+    with_files(&f);
+    f.use_it(f.record("cloudflare.kv.write", "cache/greeting").param("value", "hello"));
+    assert_eq!(f.fake.seen()[0].body, "hello");
+
+    f.use_it(
+        f.record("cloudflare.kv.write", "cache/greeting").param("file", "dist/today.sql"),
+    );
+    assert_eq!(f.fake.seen()[1].body, UPLOADED);
+
+    for options in [
+        vec![("value", "hello"), ("file", "dist/today.sql")],
+        vec![],
+    ] {
+        let mut rec = f.record("cloudflare.kv.write", "cache/greeting");
+        for (name, value) in &options {
+            rec = rec.param(name, value);
+        }
+        assert!(f.use_it(rec).as_error().is_some(), "{options:?} was accepted");
+    }
+    assert_eq!(f.fake.seen().len(), 2);
+
+    // ...and a namespace with no key names no value.
+    let reply = f.use_it(f.record("cloudflare.kv.read", "cache"));
+    let (_, message) = reply.as_error().expect("refused");
+    assert!(message.contains("names a namespace and not a key"), "{message}");
+}
+
+#[test]
+fn a_kv_read_answers_with_bytes_and_still_has_the_credential_taken_out() {
+    let f = Fixture::new("p6kvread", Mode::Normal, &["cloudflare.kv.read"]);
+    let reply = f.use_it(f.record("cloudflare.kv.read", "cache/greeting"));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("refused: {reply:?}");
+    };
+    assert!(output.contains("stored by apex"), "{output}");
+    assert!(output.contains("read back with Bearer"), "the double really echoed it");
+    assert!(!output.contains(TOKEN), "the value read handed back the token");
+    assert!(output.contains("«redacted»"), "{output}");
+}
+
+#[test]
+fn a_queue_change_is_checked_against_the_ranges_cloudflare_documents() {
+    let f = Fixture::new("p6queue", Mode::Normal, &granted_everything());
+    f.use_it(
+        f.record("cloudflare.queue.manage", "jobs")
+            .param("paused", "true")
+            .param("delivery-delay", "60")
+            .param("retention", "345600"),
+    );
+    let body = &f.fake.seen()[0].body;
+    assert!(body.contains(r#""delivery_paused":true"#), "{body}");
+    assert!(body.contains(r#""delivery_delay":60"#), "{body}");
+    assert!(body.contains(r#""message_retention_period":345600"#), "{body}");
+
+    for (param, value) in [
+        ("delivery-delay", "86401"),
+        ("retention", "59"),
+        ("retention", "1209601"),
+        ("paused", "yes"),
+        ("delivery-delay", "soon"),
+    ] {
+        let reply = f.use_it(f.record("cloudflare.queue.manage", "jobs").param(param, value));
+        assert!(reply.as_error().is_some(), "{param}={value} was sent");
+    }
+    // ...and a change with nothing in it does not spend a request.
+    assert!(f.use_it(f.record("cloudflare.queue.manage", "jobs")).as_error().is_some());
+    assert_eq!(f.fake.seen().len(), 1);
+}
+
+#[test]
+fn a_published_message_does_not_get_to_choose_its_own_content_type() {
+    let f = Fixture::new("p6publish", Mode::Normal, &["cloudflare.queue.publish"]);
+    f.use_it(f.record("cloudflare.queue.publish", "jobs").param("message", "work to do"));
+    let body = &f.fake.seen()[0].body;
+    assert!(body.contains(r#""body":"work to do""#), "{body}");
+    assert!(body.contains(r#""content_type":"text""#), "{body}");
+    // A content type is a header-shaped string, and this operation declares no
+    // option for one — so the framework refuses it before the provider is
+    // asked anything.
+    let reply = f.use_it(
+        f.record("cloudflare.queue.publish", "jobs")
+            .param("message", "x")
+            .param("content_type", "application/json"),
+    );
+    assert!(reply.as_error().is_some(), "a caller chose a content type");
+    assert_eq!(f.fake.seen().len(), 1);
+}
+
+#[test]
+fn a_hyperdrive_edit_cannot_carry_a_database_credential() {
+    // The inverse of everything else here: an agent handing a secret TO the
+    // broker. `edit` declares a name and three caching settings, so the
+    // framework refuses the rest — and this is the assertion that would go red
+    // if somebody later added an `origin` option.
+    let f = Fixture::new("p6hdedit", Mode::Normal, &["cloudflare.hyperdrive.edit"]);
+    for (param, value) in [
+        ("password", "hunter2"),
+        ("user", "postgres"),
+        ("host", "db.attacker.test"),
+        ("origin", "postgres://user:pw@db.attacker.test/app"),
+        ("access_client_secret", "x"),
+    ] {
+        let reply = f.use_it(f.record("cloudflare.hyperdrive.edit", "pg").param(param, value));
+        let (_, message) = reply
+            .as_error()
+            .unwrap_or_else(|| panic!("hyperdrive.edit accepted '{param}'"));
+        assert!(message.contains("no '"), "{message}");
+    }
+    assert!(f.fake.seen().is_empty(), "a credential reached the api");
+
+    // What it can do.
+    f.use_it(
+        f.record("cloudflare.hyperdrive.edit", "pg")
+            .param("caching", "off")
+            .param("max-age", "60"),
+    );
+    let body = &f.fake.seen()[0].body;
+    assert_eq!(f.fake.seen()[0].method, "PATCH");
+    // `caching = off` is Cloudflare's `disabled = true`, inverted here so the
+    // owner grants something spelled the way they think about it.
+    assert!(body.contains(r#""disabled":true"#), "{body}");
+    assert!(body.contains(r#""max_age":60"#), "{body}");
+    assert!(!body.contains("origin"), "{body}");
+}
+
+#[test]
+fn an_origin_credential_the_api_volunteers_does_not_reach_the_caller() {
+    // Cloudflare documents `origin.password` as write-only and says the API
+    // never returns it. The double returns one anyway, because a guarantee that
+    // an agent gets capabilities and not credentials cannot rest on a remark in
+    // somebody else's documentation staying true.
+    let f = Fixture::new("p6hdread", Mode::Normal, &["cloudflare.hyperdrive.read"]);
+    let reply = f.use_it(f.record("cloudflare.hyperdrive.read", "pg"));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("refused: {reply:?}");
+    };
+    // The configuration came back...
+    assert!(output.contains("db.example.invalid"), "{output}");
+    assert!(output.contains(r#""user":"app""#), "{output}");
+    // ...and the password did not.
+    assert!(!output.contains(ORIGIN_PASSWORD), "the origin password came back: {output}");
+    assert!(!output.contains("password"), "{output}");
+    assert!(output.contains("origin credential"), "{output}");
+    assert!(!f.trail().contains(ORIGIN_PASSWORD), "the trail holds it");
+    // The double really did send one, so this is a removal and not an absence.
+    assert_eq!(f.fake.seen().len(), 1);
+}
+
+#[test]
+fn a_grant_for_one_storage_verb_does_not_grant_its_siblings() {
+    // "Semantic read/write/migrate/manage operations represented" — and
+    // separately grantable, which is the point of representing them.
+    let f = Fixture::new("p6verbs", Mode::Normal, &["cloudflare.d1.read"]);
+    with_files(&f);
+    let allowed = f.use_it(f.record("cloudflare.d1.read", "project-db"));
+    assert!(matches!(allowed, Response::Performed { exit_code: 0, .. }), "{allowed:?}");
+    for (refused, options) in [
+        ("cloudflare.d1.query", vec![("sql", "SELECT 1")]),
+        ("cloudflare.d1.migrate", vec![("file", "migrations/001.sql")]),
+    ] {
+        let mut rec = f.record(refused, "project-db");
+        for (name, value) in &options {
+            rec = rec.param(name, value);
+        }
+        assert!(
+            f.use_it(rec).as_error().is_some(),
+            "'{refused}' went through on a grant for read"
+        );
+    }
+    assert_eq!(f.fake.seen().len(), 1);
 }
 
 // ── §13.9, DNS ──────────────────────────────────────────────────────────────
