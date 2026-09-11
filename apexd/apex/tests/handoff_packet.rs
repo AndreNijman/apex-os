@@ -125,6 +125,15 @@ impl Harness {
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
             .env("HOME", &home)
+            // Without this, `paths::scratch_root` falls back to the fixed
+            // `/tmp/apex-agent`, which is the LIVE daemon's scratch root: a
+            // test daemon would create session directories in it, under ids
+            // that collide with the real ones. Every other daemon fixture sets
+            // it (apex-agentd/tests/hook_bridge.rs:66); this one did not.
+            .env(
+                apex_agent_core::paths::SCRATCH_ROOT_ENV,
+                root.join("scratch"),
+            )
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
