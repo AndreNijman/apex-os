@@ -1,12 +1,12 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-12T04:15+08:00",
-  "_round": "Round 16. P0 FEATURE WORK IS FINISHED: P0-014, the last of it, landed as merge 8a2d7f83, and p2-010 closed its whole unit at f39fd664. Counts 67/25/33/2 -> 69 done / 24 partial / 32 todo / 2 blocked of 127. Six agents in flight: four carried over (p1-008, p1-040, p2-b, p1-052) and two dispatched now - p0-finish for the last five P0 partials, and suite-reliability for three infrastructure defects other units found and none of them owned.",
+  "updated": "2026-09-12T07:15+08:00",
+  "_round": "Round 17. The session limit killed all five round-16 agents at ~04:40 (resets 7am); four were re-dispatched at 07:12 and two units had already finished. Every one of the five had pushed real progress first, and three of them had finished MOST of their items - so the loss was one partial commit each, not a round.",
   "_landed_this_round": {
-    "apex-os": "roadmap/v2.2 4f80746e -> f39fd664. 8a2d7f83 p0-014 (P0-014 done: section 7's second column live, a CTAP2 second factor authorising what no password can, workspace 2351 -> 2432/0). f39fd664 p2-010 (P2-011 done: 14-row mutation battery 14/14 red, agentd 200/0, live budget check 8/0). THE MOST IMPORTANT THING IN EITHER: 706489ec. roadmap/v2.2 HAD BEEN UNABLE TO BUILD AN IMAGE SINCE 2026-09-07 - Containerfile.base's section 3.3 check was a bare `! grep -q '_keep'` over a policy file whose own comment section is headed 'and never the _keep variants', so the assertion matched the prose explaining it and set -eux turned that into a failed build. Verified both directions by the orchestrator against the shipped file before landing: the old expression fails on a correct file, the anchored one passes and still catches a real auth_admin_keep. Five days invisible because build-image.yml runs only on main.",
-    "apex-shell": "unchanged at cd324ec."
+    "apex-os": "roadmap/v2.2 f39fd664 -> 61504ca2. e11ee7ea suite-reliability (three infrastructure defects, one of them a FLEET HAZARD - see _findings). 61504ca2 build-sandbox-tooling, written by the orchestrator: build-image.yml's rust job lacked the bubblewrap setup pr-validation.yml got yesterday, and since base needs rust and image needs base, a missing Ubuntu package was stopping the image being built AT ALL.",
+    "apex-shell": "roadmap/v2.2 cd324ec -> b195195: p1-040's per-output scaling assertion, mutation-proven, with the full migration argued as its own unit."
   },
-  "_status_recorded_this_round": "P0-014 and P2-011 -> done. P0-014's asked-for counts came back UNCHANGED (test-privilege-requests.sh 39/0 -> 39/0, system_grants 12/0 -> 12/0) and that is recorded as the answer rather than massaged: neither suite exercises the relaxed value. Four rounds of orchestrators tracked those two numbers.",
+  "_status_recorded_this_round": "P1-040 stays partial with its named assertion DELIVERED. Counts hold at 69 done / 24 partial / 32 todo / 2 blocked.",
   "_deliberately_held": {
     "p1-005 / p1-008 / p1-011 / p1-014": "The Cloudflare capability suite, 13 tasks, mutually conflicting (p1-005 with p1-002, p1-008 with p1-002 and p1-005, p1-011 with p1-005 and p1-008, p1-014 with p1-011), so at most ONE can hold a slot at a time. NOT dispatched again this round, and the reason is arithmetic rather than preference: the ceiling is six and five units were one item from finishing. p1-005 is FIRST IN LINE the moment a slot frees, and the slot that frees soonest is p1-035's - its remaining work is one uncommitted file. Confirm p1-002 is not in the unlanded set before dispatching p1-005.",
     "p1-038-hardware": "Still not dispatchable unattended, and the reason has not changed: the 18 labwc matrix rows need real applications on a real session. Cannot be done headless, and cannot be done on the L16 while Andre is using it. A katana job once gaming is over, or a job for Andre with a checklist. The step-by-step list is in state/agents/p1-038.md. Do not pretend otherwise.",
@@ -29,31 +29,14 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p1-008",
       "branch": "task/p1-008-cloudflare-one",
-      "agent_id": "a6a5f547e766361e4",
+      "agent_id": "a503f892360e3db87",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-12T03:02+08:00",
-      "session": "round 15 orchestrator, pid 59982",
+      "dispatched": "2026-09-12T07:12+08:00",
+      "session": "round 17 orchestrator, pid 59982",
       "queue_id": "p1-008",
       "title": "Cloudflare One, Workers AI and AI Gateway, Secrets Store",
       "card": "NONE AT DISPATCH - told to create it as an early action.",
-      "at_dispatch": "Dispatched straight after p1-005 landed and pointed at it as the model: that unit took the provider to 22 of section 13.2's 32 names and THE TEN REMAINING ARE THIS UNIT'S. Handed p1-005's two defects as the shape to expect (error KIND asserted, not merely that an error happened) and warned that the missing elevated class will probably reach it too - if so, leave the criterion partial rather than adding a field across 28 literals mid-integration. No live account calls; the loopback double that 401s unauthenticated requests is already in the tree."
-    },
-    {
-      "slug": "p1-040",
-      "items": [
-        "P1-040"
-      ],
-      "repo": "apex-shell",
-      "worktree": "/var/tmp/apex-work/wt-p1-040",
-      "branch": "task/p1-040-per-output-scaling",
-      "agent_id": "a87fd6a859519fd98",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-12T03:02+08:00",
-      "session": "round 15 orchestrator, pid 59982",
-      "queue_id": "p1-040",
-      "title": "Per-output scaling: two densities, two sizes, one shell",
-      "card": "NONE AT DISPATCH - told to create it as an early action.",
-      "at_dispatch": "The harness already exists - run-scaling-test.sh brings up two headless outputs at different densities and is 30/0 - so the assertion has somewhere to live on day one. The cost is the refactor: one factor through two singletons with 831 call sites across 82 files. Told explicitly to judge the scope and, if the full migration is genuinely its own unit, to record the design and land whatever narrower provable improvement it can rather than half-migrating 831 call sites."
+      "at_dispatch": "P1-008 and P1-010 are done and pushed, and ALL 32 of section 13.2's names are now implemented. What remains is commit 4, P1-009: workers-ai.run, ai-gateway.run, ai-gateway.edit, with the design already on the card (Call needs a headers field for cf-aig-gateway-id and cf-aig-metadata; Bind needs audit_id; [cloudflare.models] and [cloudflare.gateways] tables; IdShape::Slug already in the tree). Handed p1-005's two defects as the shape to expect, since a models table an agent can address outside its binding is the same one."
     },
     {
       "slug": "p2-b",
@@ -63,14 +46,14 @@
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p2-b",
       "branch": "task/p2-b-accessibility-i18n",
-      "agent_id": "ab0d75f96ea53bd12",
+      "agent_id": "a4080c44067765e3b",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-12T03:02+08:00",
-      "session": "round 15 orchestrator, pid 59982",
+      "dispatched": "2026-09-12T07:12+08:00",
+      "session": "round 17 orchestrator, pid 59982",
       "queue_id": "p2-b",
       "title": "Accessibility baseline and internationalisation baseline",
       "card": "NONE AT DISPATCH - told to create it as an early action.",
-      "at_dispatch": "New unit, no card. Told that a baseline is a MEASUREMENT rather than an aspiration: accessibility closes by asking the running artefact about accessible names, focus order and contrast, not by grepping for a property; i18n closes by proving strings extract and substitute, not that a framework supports it in principle. Where a criterion cannot be honestly measured headless, name it and leave it partial."
+      "at_dispatch": "Has commits and a researched DESIGN FORK it wanted settled before writing the installer page: the criterion is keyboard layout before password CREATION, and the point is that the user can TYPE their password on their own layout - recording the choice in the answers file does not achieve that, because nothing in apex-installer-launch touches XKB and GTK4 on Wayland takes its keymap from the compositor. Told to pick one of the three options it recorded, write down which and why, and leave the item partial with the assertion named if the honest answer is that it needs a change outside this unit."
     },
     {
       "slug": "p1-052",
@@ -81,14 +64,14 @@
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p1-052",
       "branch": "task/p1-052-relay",
-      "agent_id": "add3217c1c951ec31",
+      "agent_id": "a81e3ce8d37ff5535",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-12T03:02+08:00",
-      "session": "round 15 orchestrator, pid 59982",
+      "dispatched": "2026-09-12T07:12+08:00",
+      "session": "round 17 orchestrator, pid 59982",
       "queue_id": "p1-052",
       "title": "The APEX Remote remainder: relay, reconnect, mDNS, connection quality, two shell pages",
       "card": "NONE AT DISPATCH - told to create it as an early action.",
-      "at_dispatch": "The queue note tells it what is left and what is NOT its: P1-051 stays partial for a reason outside this unit (the device key in Android Keystore with setUserAuthenticationRequired, a per-approval challenge and attestation - p1-053a's work, whose desktop half is p0-014's CTAP2 verifier, in flight right now), so it must not close P1-051 alone. THE SHAPING CONSTRAINT: do not deploy anything to Andre's Cloudflare account. Write the relay's server side with tests against a local double, exactly as the capability sets were proven against a loopback transport and the trust gate against a minted CA. 'Written, tested, ready to deploy' is a complete and honest outcome, and the card says what deploying would require."
+      "at_dispatch": "mDNS announce is done and pushed. What remains is the apex-shell QR pairing page and paired-device page, and its predecessor was building the QR encoder as its own module with fixtures as the oracle. Re-handed the two hard constraints: do not close P1-051 from here (the Android Keystore half is p1-053a's), and do not deploy anything to Andre's Cloudflare account - 'written, tested, ready to deploy' is the complete outcome. Also warned that Metrics is now an instance of ThemeSet after p1-040 landed, so a page that sizes itself must read the new shape."
     },
     {
       "slug": "p0-finish",
@@ -102,31 +85,14 @@
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p0-finish",
       "branch": "task/p0-finish",
-      "agent_id": "a89ad5b4c1c4f37c6",
+      "agent_id": "a0755ad065e20362f",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-12T04:12+08:00",
-      "session": "round 16 orchestrator, pid 59982",
+      "dispatched": "2026-09-12T07:12+08:00",
+      "session": "round 17 orchestrator, pid 59982",
       "queue_id": "p0-finish",
       "title": "The last five P0 partials",
       "card": "NONE AT DISPATCH - told to create it as an early action.",
-      "at_dispatch": "Dispatched because P0-014 closing leaves these five as all that stands between the roadmap and a complete P0. ORDER MATTERS AND THE BRIEF SAYS WHY: P0-015's criterion 2 has no subject - 'short-lived root grants revoke on lock' cannot be tested while SystemAccess::Session and Unsafe are both refused, because no such grant exists to revoke - so P0-007 comes first and P0-015 follows from it. Told to check whether P0-014's landing (may_elevate, authorise_grant, a CTAP2 second factor) changed that premise rather than trusting the old evidence. P0-001 is mostly hardware and the gaming box is off-limits, so it was framed as 'reduce it to a precise checklist of what remains and what each needs' - except the one criterion that just became testable, 'Daily and Gaming images build cleanly', now that the branch can build at all."
-    },
-    {
-      "slug": "suite-reliability",
-      "items": [
-        "(infrastructure)"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-suite",
-      "branch": "task/suite-reliability",
-      "agent_id": "a4bbf9824093e245e",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-12T04:12+08:00",
-      "session": "round 16 orchestrator, pid 59982",
-      "queue_id": "suite-reliability",
-      "title": "The fork/unsetenv deadlock, a fixture writing to the real config, and an image build that never runs on this branch",
-      "card": "NONE AT DISPATCH - told to create it as an early action.",
-      "at_dispatch": "Three defects found by three different units this week, none of them the finder's to fix. (1) The fork/unsetenv deadlock, handed over fully root-caused so it is not re-derived, with the fix named - build envp before the fork and execve, plus a poll deadline - and the warning that between fork and exec only async-signal-safe calls are legal, which is the bug itself. (2) handoff_packet.rs sets HOME but not XDG_CONFIG_HOME, so an inherited value redirects apex task into the developer's REAL ~/.config/apex/tasks.toml; told to add the assertion and not just the line, since the file already carries a comment about the identical mistake with SCRATCH_ROOT_ENV. (3) build-image.yml runs only on main, which is why a build-breaking assertion sat invisible for five days; add workflow_dispatch, explicitly NOT a push trigger (an hour and several GB per landing is not the trade), and then RUN it once against roadmap/v2.2 - nobody has ever seen this branch build, and a failure there is the most valuable thing the unit could produce."
+      "at_dispatch": "P0-007, P0-015 and P0-002 are DONE and pushed - three of five. Outstanding: P0-001's build evidence and remainder checklist, and P0-021, on which its own probe agent was reporting when the session ended. Told the image build is now running in CI and that a CI build is stronger evidence for 'Daily and Gaming images build cleanly' than a laptop build, and costs nothing. Told P0-001 is EXPECTED to end partial - the deliverable is the honest checklist, not a simulated install - and, because of the fleet hazard, that it must not push a tag or promote anything."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -138,12 +104,15 @@
     "NAMING NEEDS ANDRE'S RATIFICATION and is now user-visible: 'Floating' is ratified at ROADMAP.md:1031, but 'Scrolling' (niri) and 'Tiling' (Hyprland) are not - and the greeter and Settings now show them. Asked.",
     "THE HANG THAT KILLED TWO SESSIONS IS ROOT-CAUSED, one defect with three symptoms: pty::spawn forks and the child calls unsetenv (pty.rs:211), which takes glibc's environment lock - held at fork time by a grants::tests thread inside set_var, so it can never be released in the child. The child deadlocks in __lll_lock_wait_private and NEVER REACHES execvp, so FD_CLOEXEC never fires and it holds every inherited fd forever: both read_sync pipe write-ends and another test's UnixStream::pair server end whose parent had already dropped it. Proven from /proc and eu-stack on two independent instances, one hung 4 h 03 m. Nothing there has a deadline. Now dispatched as suite-reliability.",
     "A DEAD AGENT'S PROCESSES OUTLIVE ITS SESSION. A mutation battery from an agent that died at 22:45 was still running four hours later, blocked on the hung cargo, and RESUMED SPLICING MUTANTS INTO THE WORKTREE the moment the hang cleared. Check what is actually running before concluding a hang or a dirty file is yours - and the p2-010 successor's 'one dirty path to finish' turned out to be exactly that: a spliced mutant, restored rather than committed.",
-    "THE CI CGROUP QUESTION HAD A THIRD ANSWER. in-login-session.sh WORKS on a GitHub runner (logind session 2, session-2.scope, uid 1001); the two failures were in a deliberately unwrapped step asserting rules that are functions of the request alone while sitting behind an origin observation that fails there. Moved ahead of it: refuses strictly more, never less. Reproducible locally with no sudo via `unshare -C --map-current-user`, which yields cgroup 0::/ and matches neither branch of classify - 9/2 before, 11/0 after. That mechanism is reusable."
+    "THE CI CGROUP QUESTION HAD A THIRD ANSWER. in-login-session.sh WORKS on a GitHub runner (logind session 2, session-2.scope, uid 1001); the two failures were in a deliberately unwrapped step asserting rules that are functions of the request alone while sitting behind an origin observation that fails there. Moved ahead of it: refuses strictly more, never less. Reproducible locally with no sudo via `unshare -C --map-current-user`, which yields cgroup 0::/ and matches neither branch of classify - 9/2 before, 11/0 after. That mechanism is reusable.",
+    "FLEET HAZARD, FOUND AND FIXED BEFORE IT WAS TRIGGERED. build-image.yml has had workflow_dispatch since 48fb1b26 - the brief that sent an agent to 'add workflow_dispatch' was working from a false premise - and its promote step was gated on the string test 'the push produced a digest' and nothing else, while push-retry.sh always moved the floating :core and :base tags. ONE DISPATCH FROM ANY REF WOULD HAVE SHIPPED THAT BRANCH TO EVERY DEPLOYED MACHINE and poisoned the next main build's core. The agent found it while acting on a brief that told it to dispatch a build, and fixed it BEFORE dispatching. Now gated on github.ref == 'refs/heads/main', proven by executing the extracted shell against stub podman and skopeo: a non-main ref writes 4 per-SHA tags and no floating name; main writes 17, byte-identical to the pre-patch set.",
+    "THE FORK/unsetenv DEADLINE CAUGHT THE RACE ON ITS FIRST RUN: a four-hour hang became a named failure in 10.01 s. The fix builds the environment and the full PATH candidate list in the PARENT and hands them to execve, because between fork and exec only async-signal-safe calls are legal. Mutant (child takes the env lock again): 5 of 5 runs wedged on spawn 1 or 2 of 300. Fixed: 300/300 clean, 5 runs of 5.",
+    "CLIPPY IS NOT INSTALLED ON THIS MACHINE AT ALL - no cargo-clippy, clippy-driver or rustup on PATH. tests/run-clippy.sh's container is the only way to check it, and a unit's first compile off this laptop failed the whole workspace on a lint nothing local had caught. Every brief says so now."
   ],
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt — the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {
     "pid": 59982,
-    "note": "Interactive session, heartbeat guarded on pid. Took the write path back after the unattended orchestrator exited at 21:43:55."
+    "note": "Interactive session; heartbeat guarded on pid. The image build was dispatched from here, not by an agent."
   },
   "_previous_pause": {
     "when": "2026-09-07T15:32+08:00 to 2026-09-08T08:56+08:00",
@@ -154,7 +123,9 @@
   "_completed_units": {
     "trust-enforcement": "COMPLETE AND LANDED 2026-09-08 (apex-os e67fab9 -> 583355e). Removed from queue.json units as well as from this table, and for the same reason followups-integrate-3 had to be: its items are '(new, from P1-047)' rather than roadmap ids, so resume.sh can never see it as finished and would have offered it as READY forever the moment its agent left the table.",
     "p0-014": "COMPLETE AND LANDED 2026-09-12 (merge 8a2d7f83). P0-014 done - the last P0 feature work. P0-015 remains partial and is now p0-finish's, because its criterion 2 has no subject until P0-007 provides a short-lived root grant to revoke.",
-    "p2-010 (queue id p2-e)": "COMPLETE AND LANDED 2026-09-12 (merge f39fd664). All four items proven by mutation battery: P2-010 7 rows, P2-011 14 rows, P2-014 16 rows, every one red with restores verified identical. Its final round made NO commit, deliberately - the 'dirty path' it was sent to finish was a spliced mutant left by its dead predecessor, restored rather than committed."
+    "p2-010 (queue id p2-e)": "COMPLETE AND LANDED 2026-09-12 (merge f39fd664). All four items proven by mutation battery: P2-010 7 rows, P2-011 14 rows, P2-014 16 rows, every one red with restores verified identical. Its final round made NO commit, deliberately - the 'dirty path' it was sent to finish was a spliced mutant left by its dead predecessor, restored rather than committed.",
+    "p1-040": "COMPLETE 2026-09-12, landed on apex-shell as merge b195195. P1-040 stays partial by design; its named assertion is delivered and the full 116-file migration is argued as its own unit on the card.",
+    "suite-reliability": "COMPLETE 2026-09-12, landed as merge e11ee7ea. All three defects fixed and mutation-proven; the third turned out to be a fleet hazard rather than the missing trigger the brief described."
   },
   "_verification_on_the_landed_tip": {
     "cargo": "cargo test --locked --workspace --no-fail-fast: 36 binaries, 2339 passed, 1 failed. The one failure is renewing_a_grant_that_does_not_exist_is_refused_without_asking_anybody in apex-agentd/tests/system_grants.rs - the SAME pre-existing cgroup/origin artifact the baseline (1964 passed / 1 failed) carried. No new failure. The landings added 6 test binaries and 375 tests.",
@@ -173,5 +144,6 @@
     "task/p1-025-skills-plugins": "Merged cleanly, compiled, and then ABORTED before commit. Its own tip does not survive CI's clippy: apex/src/digest.rs's describe/is_measured/same_as and skill.rs's Origin::describe have no committed caller, and cargo clippy --all-targets -- -D warnings turns that into an error. The callers are in provenance.rs, which is P1-026 and is uncommitted in the worktree. Nothing is wrong with the work; it is half of a commit. It lands the moment P1-026 is committed. Do NOT 'fix' this by adding #[allow(dead_code)].",
     "task/p1-050-remote-protocol": "Nothing to land - SETTLED rather than assumed. resume.sh listed 09c977d as unlanded on a 2/10-added-lines heuristic; its actual content (the type_complexity alias in the Cloudflare provider tests, and the format! with nothing to interpolate in the CLI's Cloudflare tests) is already on the tip, and the tip carries MORE of that branch than the branch does. Safe to delete."
   },
-  "_ci": "CI RAN FOR THE FIRST TIME IN THIS PROGRAM, and this is the record of what that cost and bought. pr-validation.yml triggered ONLY on `pull_request: branches: [main]`, and the program is forbidden from opening a PR until final integration - so sixty landed items, twelve landings and ~2000 Rust tests had been verified on exactly one laptop. `gh run list --branch roadmap/v2.2` returned nothing at all. Fixed in four commits, each one exposing the next problem: (1) push + workflow_dispatch triggers added; the first run failed in 18s. (2) The parity check cloned apex-shell's DEFAULT branch, so it compared apex-os roadmap/v2.2 against apex-shell main and reported drift on two touchpad defaults - while the two INTEGRATION branches agreed perfectly at 22 settings. It now clones the matching branch and PRINTS which one it used. THE DRIFT IT EXPOSED IS REAL AND IS KEPT: apex-shell main has drag_lock=true and click_method=clickfinger where apex-os main's generator has false and buttonAreas, so whoever does the final integration must land both sides together or opening the Input page silently changes a user's touchpad behaviour. (3) The path classifier read github.event.pull_request.* and died with exit 128 on a push; it is now event-aware and, when no range can be determined, selects EVERYTHING - this file already records four occasions where a selector picked nothing, the job skipped, and the workflow passed. (4) Six confinement assertions in mcp_sidecar_live.rs had never run anywhere but the L16 because the runner has no bubblewrap; installed rather than skipped, because they are the assertions that the sandbox IS a sandbox. Then bwrap failed on Ubuntu 24.04's kernel.apparmor_restrict_unprivileged_userns=1, so the sysctl is relaxed and PROVEN with a smoke check before any test runs. THE FINDING THAT PAYS FOR ALL OF IT: on the runner, /proc/N/cgroup reads '/system.slice/hosted-compute-agent.service', which is neither a login session nor a user service - a THIRD classification distinct from the L16's session scope and from scheduled-job. Two request_origin tests fail there while nine pass. Four rounds of orchestrators wrote that the workflow file was the only evidence of what CI presents; it is now measured, and p0-014 has been sent the exact string while it is still live."
+  "_ci": "CI RAN FOR THE FIRST TIME IN THIS PROGRAM, and this is the record of what that cost and bought. pr-validation.yml triggered ONLY on `pull_request: branches: [main]`, and the program is forbidden from opening a PR until final integration - so sixty landed items, twelve landings and ~2000 Rust tests had been verified on exactly one laptop. `gh run list --branch roadmap/v2.2` returned nothing at all. Fixed in four commits, each one exposing the next problem: (1) push + workflow_dispatch triggers added; the first run failed in 18s. (2) The parity check cloned apex-shell's DEFAULT branch, so it compared apex-os roadmap/v2.2 against apex-shell main and reported drift on two touchpad defaults - while the two INTEGRATION branches agreed perfectly at 22 settings. It now clones the matching branch and PRINTS which one it used. THE DRIFT IT EXPOSED IS REAL AND IS KEPT: apex-shell main has drag_lock=true and click_method=clickfinger where apex-os main's generator has false and buttonAreas, so whoever does the final integration must land both sides together or opening the Input page silently changes a user's touchpad behaviour. (3) The path classifier read github.event.pull_request.* and died with exit 128 on a push; it is now event-aware and, when no range can be determined, selects EVERYTHING - this file already records four occasions where a selector picked nothing, the job skipped, and the workflow passed. (4) Six confinement assertions in mcp_sidecar_live.rs had never run anywhere but the L16 because the runner has no bubblewrap; installed rather than skipped, because they are the assertions that the sandbox IS a sandbox. Then bwrap failed on Ubuntu 24.04's kernel.apparmor_restrict_unprivileged_userns=1, so the sysctl is relaxed and PROVEN with a smoke check before any test runs. THE FINDING THAT PAYS FOR ALL OF IT: on the runner, /proc/N/cgroup reads '/system.slice/hosted-compute-agent.service', which is neither a login session nor a user service - a THIRD classification distinct from the L16's session scope and from scheduled-job. Two request_origin tests fail there while nine pass. Four rounds of orchestrators wrote that the workflow file was the only evidence of what CI presents; it is now measured, and p0-014 has been sent the exact string while it is still live.",
+  "_image_build": "THE FIRST IMAGE BUILD OF THIS BRANCH IS RUNNING: gh run 34656544347, workflow_dispatch on roadmap/v2.2, started 23:03. THREE separate defects had to be fixed before it could even start, and each one looked like the whole answer when it was found: (1) 706489ec, a polkit assertion that could only ever fail because it matched the comment explaining it; (2) a privilege test that resolves the agent program on PATH BEFORE the origin gate, so it passes on Andre's laptop and fails on every runner - guarded, with the real repair recorded as P0-013's; (3) 61504ca2, build-image.yml's rust job missing bubblewrap. It is safe to dispatch now ONLY because the fleet hazard below was fixed first."
 }

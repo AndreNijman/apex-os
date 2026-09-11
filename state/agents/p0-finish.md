@@ -103,6 +103,22 @@ not addressed by the existing evidence at all.
 
 ## FOUND
 
+- **PREDICTION, written 2026-09-12 before the answer, round 13.** CI run
+  `34656544347` (`build-image.yml`, `workflow_dispatch` on `roadmap/v2.2`,
+  the first image build ever attempted from that branch) **will fail in the
+  `base` job**, at `Containerfile.base:338` of `origin/roadmap/v2.2` @
+  `61504ca2` —
+  `test -L /usr/lib/systemd/system/multi-user.target.wants/apex-secretd.service`
+  — the last line before
+  `echo "agent sandbox: bwrap functional; agentd opt-in; secretd enabled…"`.
+  Checked, not assumed: `git merge-base --is-ancestor f372c089
+  origin/roadmap/v2.2` answers **NO**, so the fix for that assertion is on
+  `task/p0-finish` and nowhere else. The three defects the orchestrator named
+  (the polkit assertion, the PATH-before-origin privilege test, the missing
+  bubblewrap setup in the rust job) are all upstream of this one; none of them
+  is this line. If the run instead fails earlier or passes, the predecessor's
+  measurement inside `:core` was wrong and `f372c089` should be re-examined.
+
 - **`build-image.yml` has no ref gating on push or promote.** `on:` carries
   `workflow_dispatch` with no branch restriction, and the push/sign/promote
   steps are gated only on `steps.push.outputs.digest != ''` — which gates on
