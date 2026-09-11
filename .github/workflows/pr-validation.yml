@@ -983,6 +983,20 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-editors.sh
 
+      # The desktop AI apps are part of the product, not add-ons: ChatGPT and
+      # Claude Desktop ship in the image, arrive with `apex update`, and must
+      # bring no updater of their own. Both vendors package for mutable
+      # distributions and therefore subscribe the machine to their own
+      # repository on install — OpenAI's rpm ships an enabled
+      # /etc/yum.repos.d/chatgpt.repo, Anthropic's deb writes an apt source
+      # from its maintainer script. On APEX that is a live hazard rather than
+      # dead weight, because apex-pkg builds user extensions with dnf against
+      # the host's repos. This runs the structural half here; the live half
+      # needs the installed apps and skips in CI.
+      - name: The desktop AI apps ship with the system and bring no updater
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-ai-apps.sh
+
       # §20's remote compute and handoff. The largest group of cases in it is
       # about one refusal: `apex build --on` has to decide which directory on
       # the far side is this project, and the failure mode of a wrong answer is
