@@ -688,7 +688,17 @@ mod tests {
             "this guard names protocol {GENERIC_CAPABILITY_VERSION}, which is ahead of \
              {current}, so it would refuse every daemon"
         );
-        assert!(GENERIC_CAPABILITY_VERSION > 0, "a guard at zero can never fire");
+        // Compile-time, not runtime. The value is a constant, so there is no
+        // run in which it could differ, and `const _` fails the BUILD instead
+        // of one test — which is what a guard whose whole job is to be
+        // impossible to leave wrong should do. Clippy's
+        // `assertions_on_constants` asks for exactly this, and it is a
+        // strengthening rather than a concession: a `cargo test` nobody ran
+        // cannot miss it.
+        const _: () = assert!(
+            GENERIC_CAPABILITY_VERSION > 0,
+            "a guard at zero can never fire"
+        );
     }
 
     #[test]
