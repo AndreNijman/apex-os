@@ -648,21 +648,44 @@ fi
 # being exercised, so this section gets daemons of its own and really kills
 # them.
 #
-# Two deaths, because they reach the engine by completely different routes and
-# only one of them runs any APEX code at all:
-#
-#   SIGTERM — the daemon's signal thread runs its shutdown, which sends SIGHUP
-#   and then SIGTERM to every live session's process group. This is APEX's own
-#   code doing the work, the same path as apex agent kill.
+# Two deaths are run because they LOOK like two routes. They are not, and that
+# is this section's finding rather than its premise — the first draft said the
+# SIGTERM half was APEX's own shutdown doing the work, and nothing had checked
+# it:
 #
 #   SIGKILL — none of APEX's code runs. What reaches the engine is the kernel's
 #   doing: the dead daemon's PTY master fd closes, and the kernel sends SIGHUP
 #   to the foreground process group of the slave. The engine traps EXIT, INT
 #   and TERM but NOT HUP, and bash runs an EXIT trap even while it is dying of
 #   an untrapped fatal signal (measured: exit status 129, trap body executed).
-#   That is the whole mechanism, which is why the mutation that proves this
-#   section can go red is "make the engine ignore SIGHUP" and lives in the
-#   engine rather than in apexd.
+#
+#   SIGTERM — the SAME kernel route, because APEX's own shutdown DOES NOT RUN.
+#   `block_termination_signals` (apex-agentd/src/main.rs) installs the mask
+#   with `pthread_sigmask` only after `spawn_expiry_thread` has already started
+#   a thread, and a spawned Rust thread does not carry the mask anyway.
+#   MEASURED on /proc/<pid>/task/*/status, a scratch daemon of its own:
+#
+#       apex-agentd      SigBlk=0000000000004003   HUP+INT+TERM blocked
+#       apex-agentd-gra  SigBlk=0000000000000000
+#       apex-agentd-sig  SigBlk=0000000000000000
+#
+#   so a process-directed SIGTERM is delivered to a thread that does not block
+#   it and the daemon dies by DEFAULT DISPOSITION: measured exit status 143,
+#   with the log holding only its `listening on` line — the signal thread's
+#   "stopping sessions" never prints, the control socket is never removed, and
+#   `shutdown` → `registry::terminate` never runs for any session.
+#
+# Which is why the mutation that proves this section can go red is "make the
+# ENGINE ignore SIGHUP", and why it reddens BOTH halves, four assertions each.
+# Two mutations inside `registry::terminate` — send only SIGTERM, and signal
+# nobody at all — both SURVIVE with everything green: APEX's own shutdown
+# signalling is not what tears a capsule down today. (`apex agent kill` is a
+# third path again, `Request::Signal` → `pty::signal_group`, never `terminate`,
+# and it is unaffected by either mutation.)
+#
+# Both cases stay anyway. The day someone gives that signal thread its mask,
+# the SIGTERM half begins exercising a genuinely different route and "signals
+# nobody" becomes a kill — and this section is what notices.
 #
 # Each case gets its OWN daemon, runtime directory, disposable root and capsule
 # log. Sharing the suite's log would have made every assertion here satisfiable
@@ -763,6 +786,12 @@ daemon_death_case() {   # daemon_death_case <label> <signal> <how it reads>
         bad "and the teardown really ran: the capsule engine was asked to remove ${capsule}"
         sed 's/^/      | /' "$CAPSULE_LOG" >&2
     fi
+    # `pgrep -f "$dir"` reaches the ENGINE and not only the agent because this
+    # case's own directory rides in the engine's own argv: the observation file
+    # is a POSITIONAL adapter argument, so it appears on the engine's command
+    # line and again on the agent's. Do not "simplify" this to a match on the
+    # engine's name — that would also catch the user's own environments, which
+    # this suite must never touch.
     local survivors
     survivors="$(pgrep -f "$dir" 2>/dev/null | tr '\n' ' ')"
     if [ -z "$survivors" ]; then
