@@ -227,6 +227,14 @@ pub struct Inventory {
     pub unreadable_roots: Vec<String>,
     /// Roots that were looked at, whether or not they held anything.
     pub roots: Vec<String>,
+    /// Canonical paths of the roots already collected, so one directory
+    /// reached by two routes is counted once. See [`collect_root`].
+    ///
+    /// Deliberately not in [`Inventory::roots`]: that list is what was *asked
+    /// for*, in the words the user would recognise, and a reader checking
+    /// where the command looked should see the path they set — not its
+    /// resolution through whatever symlinks lie under it.
+    seen_roots: Vec<String>,
 }
 
 impl Inventory {
@@ -394,6 +402,26 @@ fn measure(name: &str, path: &Path, origin: Origin) -> Skill {
 
 /// Every skill directory under one root, or the fact that the root is closed.
 fn collect_root(root: &Path, origin: impl Fn(&str) -> Origin, into: &mut Inventory) {
+    // One directory reached by two routes is one directory. `apex skill list`
+    // run from your own home reaches `~/.claude/skills` twice — once as the
+    // user profile and once as the project checkout, because `$HOME` is then
+    // also the cwd — and every skill on the machine was listed twice, under
+    // two different origins, with the count doubled. 34 became 68 by changing
+    // directory. Measured, not reasoned about: it is what the suite's first
+    // fixture did.
+    //
+    // Deduplicated on the CANONICAL path, and a root that cannot be
+    // canonicalised is NOT treated as a duplicate — over-reporting a root is a
+    // repeated row, while wrongly folding two roots together would drop a whole
+    // source of skills out of the inventory without a word. The unreadable case
+    // then falls through to `read_dir` below, which records the refusal.
+    if let Ok(real) = std::fs::canonicalize(root) {
+        let real = real.display().to_string();
+        if into.seen_roots.contains(&real) {
+            return;
+        }
+        into.seen_roots.push(real);
+    }
     into.roots.push(root.display().to_string());
     let entries = match std::fs::read_dir(root) {
         Ok(e) => e,
@@ -458,9 +486,18 @@ pub fn inventory(home: &Path, cwd: Option<&Path>) -> Inventory {
 
     if let Some(dir) = cwd {
         let project = dir.join(".claude/skills");
-        if project.exists() || std::fs::symlink_metadata(&project).is_ok() {
-            let owner = dir.to_path_buf();
-            collect_root(&project, |_| Origin::Project(owner.clone()), &mut inv);
+        // Absent is a reason to skip; refused is not — and `.exists()` answers
+        // false for both. `collect_root` is what records a refusal, so every
+        // case except a clean NotFound is handed to it rather than dropped
+        // here. The `||` this replaced still let a refusal through, but only
+        // because the second test happened to catch it; one edit to the first
+        // would have restored the silent zero.
+        match std::fs::symlink_metadata(&project) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                let owner = dir.to_path_buf();
+                collect_root(&project, |_| Origin::Project(owner.clone()), &mut inv);
+            }
         }
     }
 
