@@ -334,3 +334,58 @@ opens with *"You've launched an older version of Zen Browser"*.
 Copy the profile, then **delete `compatibility.ini` from the copy.** Zen
 regenerates it and runs its normal profile-upgrade path. Do not delete the
 databases, and do not do any of this while the source browser is running.
+
+## Desktop AI apps — shipped with the system
+
+**ChatGPT** and **Claude Desktop** are part of APEX-OS, not add-ons. Both are in
+the image (stage `5a-aiapps` in `Containerfile.core`), both are on a fresh
+install, and both arrive on an existing machine through a normal
+`sudo apex update`. There is no separate install step and nothing to download by
+hand.
+
+| | source | how it is installed | where it lands |
+|---|---|---|---|
+| ChatGPT | OpenAI's rpm-md repo (`persistent.oaistatic.com`) | `dnf5` from the vendor rpm | `/usr/lib/chatgpt`, `/usr/bin/chatgpt` |
+| Claude Desktop | Anthropic's apt repo (`downloads.claude.ai`) | deb unpacked into `/usr` | `/usr/lib/claude-desktop`, `/usr/bin/claude-desktop` |
+
+Anthropic publishes no rpm, which is why the deb is unpacked rather than
+installed — and unpacking is also what keeps its maintainer script from running.
+ChatGPT goes through `dnf` on purpose: `apex-pkg` decides whether something is
+image-owned by asking the system rpmdb, so an rpm-installed ChatGPT makes
+`apex install chatgpt` refuse to shadow it. Unpacking it would have left that
+guard blind to 442 MB of application.
+
+### They do not update themselves
+
+**A version bump is an image rebuild.** Both vendors package for mutable
+distributions, where installing the app also subscribes the machine to the
+vendor's repository — OpenAI's rpm ships `/etc/yum.repos.d/chatgpt.repo` with
+`enabled=1`, and Anthropic's `postinst` writes an apt source and an
+unattended-upgrades snippet. The build removes the first and never runs the
+second, and asserts both.
+
+That is not tidiness. `/usr` is read-only, so neither updater could ever
+succeed; but `apex-pkg` builds user system extensions with `dnf` against the
+**host's** repo set, so an enabled vendor repo would turn `apex install chatgpt`
+into a newer build layered into an extension that shadows the image's own
+`/usr`. A self-update through a side channel, which is exactly what shipping
+these apps in the image is meant to prevent.
+
+If you find `/etc/yum.repos.d/chatgpt.repo` on a machine, it was put there by a
+hand-install of the vendor rpm, not by an APEX image.
+
+### Scheme handlers, and the one surprise
+
+`claude://` opens Claude Desktop and `codex://` opens ChatGPT — note that
+ChatGPT's scheme is `codex`, not `chatgpt`. Both are asserted at build time by
+reading them back out of `mimeinfo.cache`, because an entry on disk that never
+reached that cache is not a registered handler.
+
+ChatGPT's desktop entry also registers `x-scheme-handler/http` and `https` for
+itself, so it appears in the "Open With" list for any web link. It does **not**
+become the default browser: `files/desktop/xdg/mimeapps.list` keeps http and
+https pointed at `firefox.desktop`, and the build asserts that.
+
+Both apps are Electron, and Electron defaults to X11. `/etc/environment` sets
+`ELECTRON_OZONE_PLATFORM_HINT=auto` so they run as native Wayland clients under
+Hyprland instead of going through XWayland.
