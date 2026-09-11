@@ -2102,19 +2102,45 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Mixed-DPI shell scaling: the desk got one size, and the test that guarded the sizes could not fail. LANDED on
-    apex-shell roadmap/v2.2 2026-09-08 as part of 690014a -> a90cef6 (the scaling commit is 2cf7a8e as rebased).
-    What is now true: theme/scaling.js is one breakpoint table both the shell and node read, Metrics reads it
-    rather than carrying a second copy, geometric properties may not use Theme.fs() and font sizes may not use
-    Theme.px() (the 7px legibility floor must not clamp a layout), and naming an output moves the reference factor
-    to that output's density. Verified on the landed tip: check-scale-tokens 8/0 including its own self-test
-    mutants, and run-scaling-test 30/0 on TWO headless outputs at different densities - HEADLESS-1 resolves 1.5
-    and HEADLESS-2 resolves 1, and naming either makes it the reference. REMAINDER, one assertion, stated
-    precisely: 'two outputs at compositor scale 1 with different densities each get their own size' is NOT
-    delivered. Per-item scaling was not attempted because the shell resolves one factor through two singletons
-    with 831 call sites across 82 files; the page states when the desk cannot share one size rather than claiming
-    a per-output result it does not compute. Anyone taking this on should read theme/scaling.js and Metrics.qml
-    first and treat the call-site count as the actual cost.
+    Mixed-DPI shell scaling: the desk got one size, and the test that guarded the sizes could not fail. ROUND 1
+    LANDED on apex-shell roadmap/v2.2 2026-09-08 as part of 690014a -> a90cef6 (the scaling commit is 2cf7a8e as
+    rebased): theme/scaling.js is one breakpoint table both the shell and node read, Metrics reads it rather than
+    carrying a second copy, geometric properties may not use Theme.fs() and font sizes may not use Theme.px() (the
+    7px legibility floor must not clamp a layout), and naming an output moves the reference factor to that
+    output's density. Verified then: check-scale-tokens 8/0 including its own self-test mutants, and run-scaling-
+    test 30/0 on TWO headless outputs at different densities - HEADLESS-1 resolves 1.5 and HEADLESS-2 resolves 1.
+    ROUND 2, 2026-09-12, apex-shell branch task/p1-040-per-output-scaling (430f773, 03829aa) off roadmap/v2.2
+    cd324ec: the remainder - 'two outputs at compositor scale 1 with different densities each get their own size'
+    - IS NOW DELIVERED, in production code, for the surfaces that can carry it, and asserted against laid-out
+    pixels. theme/ThemeSet.qml is the token table as a function of one scale and Metrics is now an INSTANCE of it
+    (the reference output's), so a second output gets its own set without a second copy of the arithmetic;
+    theme/OutputScale.qml is the one policy turning a logical height into a factor, breakpoint table plus the
+    manual override that outranks it, and Metrics' own scale goes through it. windows/DisplayConfirm.qml and
+    windows/ConfirmDialog.qml build their own ThemeSet from their own screen. MEASURED on two headless outputs
+    BOTH AT COMPOSITOR SCALE 1: HEADLESS-1 3840x2160 -> factor 1.5, DisplayConfirm card 600px wide, radius 23;
+    HEADLESS-2 1920x1080 -> factor 1.0, same card 400px wide, radius 15. run-scaling-test 30/0 -> 48/0 mixed, 49/0
+    with the outputs brought into agreement by SCALING_SCALES='2 1', 29/0 on one output; check-scale-tokens 8/0 ->
+    16/0; check-headless-runners 25/0 unchanged; run-popup-smoke 0 errors; run-display-transaction 42/0; run-
+    display-unplug 21/0; scaling-test.js 39/0. Mutation pairs, restored byte-identical by sha256 with cp: M1
+    factorForScreen ignores its screen 43/5, M2 the card back on global Theme.px 46/2, M3 the objectName the suite
+    finds the card by is renamed 39/5 (it FAILS rather than vanishing, because 'exactly one card was found' is
+    itself an assertion), M4 ConfirmDialog radius becomes a literal 46/2, M5 runner claims two outputs and the
+    backend supplies one 28/1. check-scale-tokens had to learn the migrated spelling: its rules matched Theme.fs(
+    only, so a file fell out of the guard the moment it was migrated - it now matches (Theme|Metrics|theme).,
+    requires exactly one definition of fs() carrying the floor, and refuses a per-output surface that reads any
+    size from the global Theme. STILL PARTIAL, deliberately: 114 of 116 files read the global Theme. The blocker
+    is NOT the call-site count (measured 2758 reads across 116 files on this tip; the older 831/82 figure's method
+    is unrecorded). QtQuick's Screen attached property resolves the right output per item with no plumbing -
+    measured correct 1ms after construction, before first paint at 39-84ms - so a file migrates with one property
+    declaration plus a rename. What blocks bulk migration is three things: TopBar writes its notch widths into
+    ShellState singleton fields that one bar per output would fight over (3 writes, 4 reads in PopupDismiss, plus
+    Popups.dashboardPageWidth), so those must become per-screen state first; the bar height is the layout datum
+    every other surface anchors to (Border and Osd both set margins.top from Theme.notchHeight), so the bar and
+    its whole notch subtree are one indivisible step; and nine files read Theme from a QtObject/Singleton root
+    where Screen cannot attach (27 refs across DashboardLayout, Popups, PluginService, WallpaperService,
+    SettingsService). The staged design for the rest is on ROADMAP/state/agents/p1-040.md. The Display page's
+    statement about when the desk cannot share one size remains correct and is still the answer for the unmigrated
+    114.
 - id: P1-041
   title: Creator color-management stack
   priority: P1
