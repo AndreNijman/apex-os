@@ -1719,8 +1719,23 @@ RUN set -eux; \
           /usr/share/wayland-sessions/labwc.desktop \
           /usr/share/wayland-sessions/hyprland-uwsm.desktop; \
     [ -f /usr/share/wayland-sessions/hyprland.desktop ] || \
-      printf '[Desktop Entry]\nName=Hyprland\nComment=Dynamic tiling Wayland compositor\nExec=Hyprland\nType=Application\nDesktopNames=Hyprland\n' \
-        > /usr/share/wayland-sessions/hyprland.desktop
+      printf '[Desktop Entry]\nName=APEX Tiling\nComment=Windows tile themselves and reflow as you open and close them (Hyprland)\nExec=Hyprland\nType=Application\nDesktopNames=Hyprland\n' \
+        > /usr/share/wayland-sessions/hyprland.desktop; \
+    # THE SESSION PICKER SHOWS `Name=`, AND THIS ENTRY COMES FROM THE HYPRLAND
+    # PACKAGE, so it is the one session whose wording this repo cannot decide in
+    # a file it owns. apex-labwc.desktop and niri.desktop carry product names of
+    # their own (APEX Floating, APEX Scrolling); without this line the carousel
+    # would read "APEX Floating / APEX Scrolling / Hyprland" and the odd one out
+    # would be the DEFAULT session. Renaming is safe because everything that
+    # depends on this entry depends on its ID or DesktopNames, never on Name:
+    # apex-greet's defaultSession is the literal "hyprland" (the file stem),
+    # /var/lib/apex-greet/last-session stores the stem, and apex-session-select
+    # validates against the stem.
+    sed -i 's/^Name=.*/Name=APEX Tiling/' /usr/share/wayland-sessions/hyprland.desktop; \
+    # The directory-wide sweep that this rename exists to satisfy lives in
+    # Containerfile.apex, at the one point in the build where every session
+    # entry is present (apex-labwc lands below, apex-gaming a tier up).
+    grep -q '^Name=APEX Tiling$' /usr/share/wayland-sessions/hyprland.desktop
 
 # labwc as a THIRD user session, offered alongside Hyprland and niri.
 #
