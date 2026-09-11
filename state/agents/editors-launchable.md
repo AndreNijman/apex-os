@@ -40,8 +40,21 @@ apex-os `main`, run
   PUSHED.
 - apex-os 1aabcf7 — tightened the package assertion that could not fail against
   its own mutant, plus a control. PUSHED.
-- Nine mutation pairs run, every restore byte-identical (sha256 checked):
-  4 against apex-shell DesktopExec.qml, 5 against the two Containerfiles.
+- apex-shell b36db7c — Path= measured on BOTH arms (it was claimed in a comment
+  and the routed code path had never run), plus load-checks of the two edited
+  QML files. PUSHED.
+- TEN mutation pairs run, every restore byte-identical (sha256 checked):
+  5 against apex-shell DesktopExec.qml, 5 against the two Containerfiles.
+- Load-checked the two edited QML files rather than reasoning about them:
+  run-popup-smoke.sh (loads the whole shell.qml, so AppLauncher) → ERROR count 0;
+  run-labwc-matrix-test.sh (instantiates AppDock) → 60 passed, 0 failed.
+- END-TO-END chain verified against the SHIPPED helper (rpm unpacked to the
+  scratchpad, never installed): upstream xdg-terminal-exec 0.14.1, given a list
+  of exactly APEX's shape (one bare `<id>.desktop` line) in $XDG_CONFIG_DIRS,
+  selects that entry and invokes it as `<terminal> -e foo bar`. `-e` is what
+  Alacritty takes (`-e, --command <COMMAND>...`). So the real chain is:
+  click → DesktopExec.launch → xdg-terminal-exec → /etc/xdg/xdg-terminals.list
+  → Alacritty.desktop → `alacritty -e nvim`.
 
 ## IN PROGRESS
 - nothing
@@ -85,7 +98,9 @@ apex-os `main`, run
   worktrees, read-only against the live system.)
 
 ## COUNTS
-- apex-shell tests/run-terminal-entry-test.sh: new suite, 12 passed 0 failed.
+- apex-shell tests/run-terminal-entry-test.sh: new suite, 14 passed 0 failed.
+- apex-shell tests/run-popup-smoke.sh: ERROR count 0. tests/run-labwc-matrix-
+  test.sh: 60 passed 0 failed. (Both pre-existing, both load my edits.)
 - apex-shell tests/check-headless-runners.sh: 25/0 before, 25/0 after — the new
   runner is inside its swept set and clean (the suite's assertion count is fixed,
   it does not grow per runner).
@@ -105,3 +120,10 @@ exactly that. Same branch name in both repos on purpose.
 apex-os task/terminal-entries-launchable already contains ec91e92 (the zed half),
 so it merges into roadmap/v2.2 without an add/add conflict on
 tests/test-apex-editors.sh either way round.
+
+CAVEAT — CORE MUST REBUILD BEFORE BASE. The new assertion lives in
+Containerfile.base and checks for a package Containerfile.core installs. Build
+base against a cached/stale `:core` image that predates this and it FATALs with
+"…ships but xdg-terminal-exec does not". That is the assertion doing its job,
+not a bug — but `fix/base-cache` and `fix/restore-base-cache` in the branch list
+say base caching has caught this repo out before, so: rebuild core first.
