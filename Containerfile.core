@@ -1146,12 +1146,19 @@ RUN set -eux; \
         cups cups-filters cups-pk-helper ghostscript \
         gutenprint gutenprint-cups hplip \
         nss-mdns system-config-printer \
-        sane-backends sane-airscan simple-scan; \
+        sane-backends sane-airscan simple-scan \
+        avahi-tools; \
     systemctl enable cups.socket; \
     systemctl enable avahi-daemon.service avahi-daemon.socket; \
     systemctl is-enabled avahi-daemon.service \
         || { echo "FATAL: avahi is not enabled — no printer on this network would ever be found"; exit 1; }; \
     command -v simple-scan; \
+    # avahi-tools is named because apex-remoted publishes _apex-remote._tcp by
+    # running avahi-publish-service for as long as it is up (P1-052). It was
+    # already present as somebody else's dependency, which is exactly the kind
+    # of thing that disappears in a rebase nobody connects to remote access
+    # breaking. Asserted here so the build fails instead.
+    command -v avahi-publish-service; \
     authselect enable-feature with-mdns4 >/dev/null 2>&1 || true; \
     grep '^hosts:' /etc/nsswitch.conf; \
     grep -q mdns /etc/nsswitch.conf \
