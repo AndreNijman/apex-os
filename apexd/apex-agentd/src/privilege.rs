@@ -19,8 +19,11 @@ use std::sync::Arc;
 use apex_agent_core::grant::GrantKind;
 use apex_agent_core::origin::{OriginSource, SessionOrigin};
 use apex_agent_core::paths;
-use apex_agent_core::policy::{AgentPolicy, RequestOrigin};
-use apex_agent_core::protocol::{ErrorKind, Response};
+use apex_agent_core::policy::{AgentPolicy, OriginPolicy, RequestOrigin};
+use apex_agent_core::protocol::{ErrorKind, Response, SubmittedFactor};
+use apex_agent_core::webauthn::{
+    self, AssertionError, Elevation, RemoteElevationRefused, SecondFactor,
+};
 use apex_agent_core::request::{
     self, Decision, Grants, PrivilegeRequest, RequestError, Verb,
 };
@@ -342,19 +345,138 @@ pub fn may_be_granted(who: &Origin, what: &'static str) -> Result<RequestOrigin,
     Ok(source.origin)
 }
 
-/// [`may_be_granted`], then the password.
+/// What is being elevated, for the gate §7's second column goes through
+/// (P0-014).
+///
+/// A struct rather than three more parameters on [`authorise_grant`] — and the
+/// policy is **passed rather than looked up**, which is the part of this a
+/// reader will want to argue with. Two reasons, both measured before a line of
+/// it was written:
+///
+///   - **The two callers find it in different places.** A session being started
+///     is governed by the request's own `--origin-policy`; a renewal is
+///     governed by the recorded policy of the session that holds the grant.
+///     Looking it up in here would have to pick one and be wrong for the other.
+///   - **`Config.origin` is not it.** `Config::policy()` assembles the
+///     *default* `AgentPolicy` for sessions started without the flags, and a
+///     session started with `--origin-policy remote` overrides it. Reading the
+///     config at the gate would mean the per-session dimension P0-014 is named
+///     after governs nothing — and a naive test would pass.
+///
+/// The same reasoning rules out `who.policy.origin`, which is what a reader
+/// reaching for the nearest field would use: [`may_be_granted`] returns early
+/// for a sessioned connection, `origin()` assigns `policy` only on its two
+/// sessioned branches, and every unsessioned branch is `..Origin::default()`.
+/// So `who.policy.origin` at this point is provably always
+/// `LocalElevationOnly` — a gate that could never open.
+pub struct Elevating<'a> {
+    /// The governing per-session policy. See above for why it is an argument.
+    pub policy: OriginPolicy,
+    /// The session being elevated, or `None` for one being started.
+    ///
+    /// `None` is the *primary* case, and not an oversight:
+    /// [`authorise_grant`] runs before the session id is reserved, so that a
+    /// refused password leaves nothing behind. `SecondFactor::may_answer_for`
+    /// compares this in both directions, so a touch collected while starting a
+    /// session cannot renew an existing grant, and a touch for session 7
+    /// cannot start a new one.
+    pub scope: Option<u32>,
+    /// The window being asked for, already bounded by `grant::ttl_for`. Part
+    /// of what the key signed.
+    pub ttl_ms: u64,
+    /// What the client sent back, if a key answered at all.
+    pub factor: Option<&'a SubmittedFactor>,
+}
+
+/// §7's two columns, decided over values.
+///
+/// Split out of [`authorise_grant`] so the decision is testable without a
+/// daemon: everything here is a function of the origin, the policy and what
+/// answered. Redeeming the nonce is the one part that needs the daemon, so it
+/// arrives as a closure — which also makes "the nonce is not spent for a
+/// caller that was refused before the gate" an assertion a test can make, by
+/// passing a closure that panics.
+///
+/// The order is the security property:
+///
+///   1. **[`may_be_granted`]'s first, third and fourth steps still decide, and
+///      still first.** A connection from inside a session, and an origin that
+///      could not be established, are refused here — ahead of any policy and
+///      any key. An agent cannot buy itself root with a touch, and a
+///      connection nobody could identify is not offered the chance to try.
+///   2. **Its second step — the local column — is the one §7 lets the owner
+///      open**, so a non-local origin is carried forward to the gate instead
+///      of being returned as [`GrantError::NotLocal`].
+///   3. **[`webauthn::may_elevate`] then decides once, for both columns.** It
+///      declines to have an opinion about a local origin, which is why this is
+///      not a second, weaker copy of step 1: the local column is
+///      `may_be_granted` plus polkit, and it stays that way.
+///   4. **Only if the gate said "nothing answered" *and* something did answer,
+///      badly, is the assertion's own error surfaced.** That is the reason
+///      `may_elevate` checks the policy before the factor: under a policy the
+///      owner never opted out of, the sentence the user reads has to name the
+///      setting they must change, not the key they do not have.
+fn decide_origin(
+    who: &Origin,
+    what: &'static str,
+    kind: GrantKind,
+    elevating: &Elevating<'_>,
+    redeem: impl FnOnce(&SubmittedFactor) -> Result<SecondFactor, AssertionError>,
+) -> Result<RequestOrigin, GrantError> {
+    let origin = match may_be_granted(who, what) {
+        Ok(local) => local,
+        Err(GrantError::NotLocal { origin, .. }) => origin,
+        Err(other) => return Err(other),
+    };
+    // Spent only once the origin is settled, and never for a caller step 1
+    // already refused: a session that sends a touch has its request refused
+    // without also having its challenge burned. A local caller that sends one
+    // does spend it for nothing, which is harmless and is not worth a second
+    // copy of `is_local()` here to avoid.
+    let answered = elevating.factor.map(redeem);
+    let elevation = Elevation {
+        scope: elevating.scope,
+        kind,
+        ttl_ms: elevating.ttl_ms,
+        origin,
+    };
+    let receipt = answered.as_ref().and_then(|a| a.as_ref().ok());
+    match webauthn::may_elevate(elevating.policy, &elevation, receipt) {
+        Ok(()) => Ok(origin),
+        Err(RemoteElevationRefused::NoSecondFactor { origin }) => match answered {
+            // A key answered and the answer did not check out. The gate can
+            // only say "nothing answered", because a refused assertion never
+            // became a receipt; why it was refused is here.
+            Some(Err(why)) => Err(GrantError::SecondFactorRefused(why)),
+            _ => Err(GrantError::RemoteElevation(
+                RemoteElevationRefused::NoSecondFactor { origin },
+            )),
+        },
+        Err(refused) => Err(GrantError::RemoteElevation(refused)),
+    }
+}
+
+/// [`decide_origin`], then the password.
 ///
 /// Returns the origin to record on the grant alongside the proof that a human
 /// was asked. The proof is a token only this function and its sibling can
 /// produce, so `GrantAuthority::issue` cannot be reached without one.
+///
+/// P0-014 added the `elevating` argument and nothing else about the shape of
+/// this function: the origin decision moved into [`decide_origin`], polkit
+/// still comes last, and every refusal that used to happen before a password
+/// dialog still does.
 pub fn authorise_grant(
     daemon: &Arc<Daemon>,
     who: &Origin,
     peer: Option<Peer>,
     kind: GrantKind,
     what: &'static str,
+    elevating: &Elevating<'_>,
 ) -> Result<(RequestOrigin, Authenticated), GrantError> {
-    let origin = may_be_granted(who, what)?;
+    let origin = decide_origin(who, what, kind, elevating, |sent| {
+        crate::elevation::redeem(daemon, sent)
+    })?;
     let Some(peer) = peer else {
         return Err(GrantError::OriginUnknown(
             "the kernel would not report the peer credentials of this connection".into(),
@@ -430,6 +552,7 @@ pub fn renew_system_grant(
     peer: Option<Peer>,
     id: u32,
     ttl_ms: u64,
+    second_factor: Option<&SubmittedFactor>,
 ) -> Response {
     let who = origin(daemon, peer);
     // Who is asking, before what they are asking about. Two reasons, and the
@@ -438,18 +561,27 @@ pub fn renew_system_grant(
     // that depended on which id was passed would be one an agent could probe
     // its way around. The second is that neither check needs polkit, so the
     // ordering costs nothing.
-    if let Err(e) = may_be_granted(&who, "renew a system-access grant") {
-        return Response::error(ErrorKind::PermissionDenied, e.to_string());
+    //
+    // P0-014 narrowed this to everything EXCEPT `NotLocal`, and that narrowing
+    // is the whole of §7's second column on this verb. A non-local caller
+    // refused here would be refused *before* the gate, which is a refusal the
+    // owner's own `OriginPolicy` never gets to see — the enforcement would
+    // have been unreachable no matter which key answered. Every other refusal
+    // still happens here: from inside a session, and an origin that could not
+    // be established, both still ahead of polkit and ahead of the lookup.
+    match may_be_granted(&who, "renew a system-access grant") {
+        Ok(_) | Err(GrantError::NotLocal { .. }) => {}
+        Err(e) => return Response::error(ErrorKind::PermissionDenied, e.to_string()),
     }
     // Then: the grant has to exist and be alive before anybody is asked for a
     // password. Prompting for a grant that has already expired teaches people
     // to type their password at dialogs that achieve nothing.
-    let Some(kind) = daemon
+    let Some((kind, session)) = daemon
         .grants
         .list(request::now_ms())
         .into_iter()
         .find(|(g, state, _)| g.id == id && state.is_active())
-        .map(|(g, _, _)| g.kind)
+        .map(|(g, _, _)| (g.kind, g.session))
     else {
         return Response::error(
             ErrorKind::NoSuchRequest,
@@ -459,7 +591,50 @@ pub fn renew_system_grant(
             ),
         );
     };
-    let proof = match authorise_grant(daemon, &who, peer, kind, "renew a system-access grant") {
+    // The window, checked before the gate rather than inside
+    // `GrantAuthority::renew` after it. `grant::ttl_for` validates and does not
+    // clamp, so the number a key signs over is the number that arrived either
+    // way — what moving it earlier buys is that a typo in `--ttl` is refused
+    // in front of the user instead of after a password dialog, and, since
+    // P0-014, instead of after a challenge has been spent on it. `renew`
+    // re-checks; this is not the enforcement.
+    if let Err(e) = apex_agent_core::grant::ttl_for(kind, Some(ttl_ms)) {
+        return Response::error(ErrorKind::BadRequest, GrantError::Ttl(e).to_string());
+    }
+    // §7's governing policy for this verb is the recorded policy of the
+    // session that HOLDS the grant — see `Elevating` for why it is passed
+    // rather than looked up in there, and why neither the config's default nor
+    // the asking connection's own policy is it. The asking connection is the
+    // human's shell, whose policy is the default.
+    //
+    // Read in its own block so the registry lock is released before
+    // `authorise_grant` takes the challenge lock, following the convention
+    // `origin` above already sets. Fails closed: a grant whose session the
+    // registry no longer knows is governed by `OriginPolicy::default()`, which
+    // is `LocalElevationOnly`.
+    let policy = {
+        let reg = daemon.registry.lock().expect("registry lock");
+        reg.get(session)
+            .and_then(|h| h.lock().ok().map(|s| s.info.policy.origin))
+            .unwrap_or_default()
+    };
+    let elevating = Elevating {
+        policy,
+        // The grant names its session, so unlike a session being started this
+        // caller has an id — and a touch collected for a session start cannot
+        // be spent here, because `may_answer_for` compares the two directions.
+        scope: Some(session),
+        ttl_ms,
+        factor: second_factor,
+    };
+    let proof = match authorise_grant(
+        daemon,
+        &who,
+        peer,
+        kind,
+        "renew a system-access grant",
+        &elevating,
+    ) {
         Ok((_, proof)) => proof,
         Err(e) => return Response::error(ErrorKind::PermissionDenied, e.to_string()),
     };

@@ -5,7 +5,9 @@
 //! `remote_elevation_allowed` is the owner's opt-out from the second column,
 //! and what the opt-out costs is a touch on a security key. This module is the
 //! first half of collecting that touch: the daemon issues a nonce, keeps it in
-//! its own memory, and says what the key must sign over.
+//! its own memory, and says what the key must sign over. [`redeem`] is the
+//! second half, added with its reader in commit 4 — it spends the nonce and
+//! hands back a receipt only the verifier can mint.
 //!
 //! ## Why this is a module of its own and not four lines in `privilege.rs`
 //!
@@ -29,9 +31,11 @@
 use std::sync::Arc;
 
 use apex_agent_core::grant::GrantKind;
-use apex_agent_core::protocol::{ErrorKind, Response};
+use apex_agent_core::protocol::{ErrorKind, Response, SubmittedFactor};
 use apex_agent_core::request;
-use apex_agent_core::webauthn::{b64_encode, CredentialStore};
+use apex_agent_core::webauthn::{
+    self, b64_encode, AssertionError, CredentialStore, SecondFactor,
+};
 
 use crate::Daemon;
 
@@ -83,6 +87,60 @@ pub fn challenge(
         expires_ms: challenge.expires_ms,
         instructions: challenge.instructions(&id, &credential.rp_id),
     }
+}
+
+/// Turn what a client sent back into a receipt, or say why not.
+///
+/// The daemon's half of the sequence, and it is a lock and a call: everything
+/// that decides anything is [`webauthn::redeem_and_verify`], which lives beside
+/// the only signer in this repository that can produce a valid assertion.
+///
+/// ## Two things a reader should know
+///
+/// The challenge lock is held across the `openssl` subprocess that checks the
+/// signature. Deliberate, and it costs exactly one thing worth naming: two
+/// elevations answered in the same instant are serialised. Nothing else is
+/// taken while it is held — not the registry, not the grant authority, not the
+/// config — so it cannot deadlock against anything, and issuing a challenge
+/// grants nothing, so there is no lock ordering to get wrong.
+///
+/// The counter is written to disk **only on success**. Commit 3 left that
+/// decision here on purpose: `redeem_and_verify` moves the counter in memory
+/// and says out loud that when to write a file is a daemon's business and not a
+/// pure function's. Only on success, because a refused assertion that could
+/// still move the stored counter would be a way to lock the owner out of their
+/// own key — present a bad signature carrying a huge counter, and every later
+/// genuine touch reads as a replay.
+pub fn redeem(
+    daemon: &Arc<Daemon>,
+    sent: &SubmittedFactor,
+) -> Result<SecondFactor, AssertionError> {
+    let mut keys = CredentialStore::load();
+    let now = request::now_ms();
+    let minted = {
+        let mut challenges = daemon.challenges.lock().expect("challenge lock");
+        webauthn::redeem_and_verify(
+            &mut challenges,
+            &mut keys,
+            &sent.nonce,
+            &sent.credential,
+            &sent.assertion,
+            now,
+        )
+    };
+    if minted.is_ok() {
+        if let Err(e) = keys.save() {
+            // Not a refusal, and not swallowed either. The elevation this just
+            // authorised is sound; what is lost is the replay protection for
+            // the NEXT one, and the owner has to be able to find that out.
+            eprintln!(
+                "apex-agentd: the signature counter for {:?} could not be recorded, so this \
+                 assertion could be presented again until the key is used successfully: {e}",
+                sent.credential
+            );
+        }
+    }
+    minted
 }
 
 /// Which enrolled key has to answer.
