@@ -972,6 +972,63 @@ pub fn choose_attach(sessions: Option<&[u32]>, opted_out: bool, interactive: boo
     }
 }
 
+/// Which session `apex task handoff` would hand off, or why it will not.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HandoffTarget {
+    /// Write the packet for this session.
+    Session(u32),
+    /// Refuse, and say why. The string is printed as-is.
+    No(String),
+}
+
+/// Which of a task's sessions a handoff packet would describe.
+///
+/// Pure and separate for the same reason `choose_attach` is: it is a **guard**,
+/// and the two cases that matter — nothing to hand off, and too many things to
+/// hand off — are the two a developer with one session open never sees.
+///
+/// A handoff packet is a record OF A SESSION: its transcript tail, the files it
+/// changed, the grants it holds, the worktree the daemon attributes to it. A
+/// task is a binding, and none of those things can be read off one. So this
+/// resolves the task to its session and refuses when it cannot, rather than
+/// writing a thinner packet from the task record and letting the receiving
+/// agent believe it got the same document.
+///
+/// The refusals, and why each is a refusal rather than a choice:
+///
+/// * the runtime could not be asked — there is no session list to resolve, and
+///   "no sessions" and "nobody answered" are different facts;
+/// * no session is running in the task's root — a packet written from nothing
+///   would carry an empty transcript and a grant list that means nothing;
+/// * more than one — picking one would be a guess about which work the user
+///   meant to hand over, and the packet names a session in its own filename, so
+///   the wrong guess is a document that looks right.
+pub fn choose_handoff(sessions: Option<&[u32]>) -> HandoffTarget {
+    match sessions {
+        None => HandoffTarget::No(
+            "cannot hand off: the agent runtime is not running, so it cannot say which \
+             session is working in this task's root"
+                .to_string(),
+        ),
+        Some([]) => HandoffTarget::No(
+            "cannot hand off: no agent session is running in this task's root. A handoff \
+             packet is the record of a session — its transcript, the files it changed and \
+             the grants it holds — so there is nothing here to write one from"
+                .to_string(),
+        ),
+        Some([one]) => HandoffTarget::Session(*one),
+        Some(many) => HandoffTarget::No(format!(
+            "cannot hand off: {} sessions are running in this task's root ({}), so which one \
+             is your choice — `apex agent handoff <id> --to <agent>`",
+            many.len(),
+            many.iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1641,6 +1698,61 @@ mod tests {
         assert!(matches!(none, Attach::No(ref w) if w.contains("no agent session")), "{none:?}");
         assert!(matches!(absent, Attach::No(ref w) if w.contains("not running")), "{absent:?}");
         assert_ne!(none, absent);
+    }
+
+    // ── handing a task's session to another agent ────────────────────────────
+
+    #[test]
+    fn a_task_with_exactly_one_session_hands_that_one_off() {
+        assert_eq!(choose_handoff(Some(&[7])), HandoffTarget::Session(7));
+    }
+
+    #[test]
+    fn a_handoff_is_refused_rather_than_guessed_when_several_sessions_qualify() {
+        // And the ids are NAMED. A refusal that says "2 sessions" leaves the
+        // user to go and find out which, when the caller already knows: the
+        // next command they type is `apex agent handoff <id>`, so the id is
+        // the one thing the message has to carry.
+        let h = choose_handoff(Some(&[7, 9]));
+        assert!(matches!(h, HandoffTarget::No(ref w) if w.contains("2 sessions")), "{h:?}");
+        assert!(matches!(h, HandoffTarget::No(ref w) if w.contains("7, 9")), "{h:?}");
+        assert!(
+            matches!(h, HandoffTarget::No(ref w) if w.contains("apex agent handoff")),
+            "the refusal should name the command that resolves it: {h:?}"
+        );
+    }
+
+    #[test]
+    fn no_session_and_no_runtime_are_different_refusals() {
+        // The same distinction `choose_attach` makes, for the same reason:
+        // "nobody is working in this task" and "nobody answered when we asked"
+        // are different facts, and collapsing them would tell a user with a
+        // stopped daemon that their session does not exist.
+        let none = choose_handoff(Some(&[]));
+        let absent = choose_handoff(None);
+        assert!(
+            matches!(none, HandoffTarget::No(ref w) if w.contains("no agent session")),
+            "{none:?}"
+        );
+        assert!(
+            matches!(absent, HandoffTarget::No(ref w) if w.contains("not running")),
+            "{absent:?}"
+        );
+        assert_ne!(none, absent);
+    }
+
+    #[test]
+    fn the_empty_refusal_says_what_a_packet_is_made_of() {
+        // Otherwise the user reads "no session" as a missing flag and goes
+        // looking for one, rather than understanding that the document is a
+        // record of a running session and there is none.
+        let h = choose_handoff(Some(&[]));
+        let why = match h {
+            HandoffTarget::No(w) => w,
+            other => panic!("{other:?}"),
+        };
+        assert!(why.contains("transcript"), "{why}");
+        assert!(why.contains("grants"), "{why}");
     }
 
     // ── the state file ───────────────────────────────────────────────────────

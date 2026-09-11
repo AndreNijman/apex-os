@@ -3,6 +3,19 @@ name: PR validation
 on:
   pull_request:
     branches: [main]
+  # The roadmap v2.2 program integrates onto `roadmap/v2.2` and is forbidden
+  # from opening a PR until the final integration, so for the whole of that
+  # program NOTHING here ever ran: `pull_request` was the only trigger, and
+  # sixty landed roadmap items were verified entirely on one laptop. That is
+  # one machine's kernel, one cgroup layout, one set of installed packages.
+  #
+  # `push` on the integration branch gives every landing a second environment
+  # for free, and `workflow_dispatch` lets a task branch be checked BEFORE it
+  # lands rather than after — `gh workflow run pr-validation.yml --ref <branch>`.
+  # Neither changes what a pull request does.
+  push:
+    branches: [roadmap/v2.2]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,11 +37,44 @@ jobs:
       - name: Classify changed paths
         id: paths
         env:
+          EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          # The range depends on the event, and until now only one event could
+          # produce one. `github.event.pull_request.*` is EMPTY on a push, so
+          # the first push-triggered run of this workflow died here with
+          # `git diff --name-only "" ""` and exit 128 before a single test ran.
+          #
+          # Whatever cannot be determined selects EVERYTHING. This file already
+          # records three separate bugs where a selector picked nothing, the
+          # job was skipped, and a skipped job counted as success — so the
+          # unknown case fails towards running too much, never too little.
+          case "$EVENT" in
+            pull_request)
+              base="$BASE_SHA"; head="$HEAD_SHA" ;;
+            push)
+              head="$SHA"; base="$PUSH_BEFORE"
+              # All-zeros on a branch's first push, and unreachable after a
+              # force-push; both mean "no usable predecessor".
+              if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+                 || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+                base="$(git merge-base origin/main "$head" 2>/dev/null || true)"
+              fi ;;
+            *)
+              head="$SHA"; base="$(git merge-base origin/main "$head" 2>/dev/null || true)" ;;
+          esac
+
+          if [ -n "${base:-}" ] && [ -n "${head:-}" ]; then
+            files="$(git diff --name-only "$base" "$head")"
+            echo "::notice::classified $EVENT over ${base}..${head}"
+          else
+            files=""
+            echo "::notice::$EVENT gave no usable diff range; selecting every suite"
+          fi
           printf '%s\n' "$files"
 
           rust=false
@@ -62,6 +108,11 @@ jobs:
           # engine, session launchers, guards. A PR touching only that used to
           # run nothing but a syntax check that did not even reach it.
           grep -Eq '^(files/|tests/)' <<<"$files" && engine=true
+
+          # The fail-towards-running rule, applied.
+          if [ -z "${base:-}" ] || [ -z "${head:-}" ]; then
+            rust=true; installer=true; engine=true
+          fi
 
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
           echo "installer=$installer" >> "$GITHUB_OUTPUT"
@@ -156,8 +207,29 @@ jobs:
           # apex-shell is a separate repository, so it is checked out here. The
           # checker exits 77 (skip) when it is absent, which keeps this from
           # failing for a reason that is nothing to do with the change.
-          git clone --depth 1 -q https://github.com/AndreNijman/apex-shell \
-            /tmp/apex-shell-parity || true
+          # Clone the MATCHING branch where one exists, and say which one was
+          # used. This job's first ever run compared apex-os `roadmap/v2.2`
+          # against apex-shell `main` and failed on two touchpad defaults —
+          # while the two INTEGRATION branches agreed perfectly (22 settings,
+          # identical keys and defaults). A parity check that silently compares
+          # a branch against someone else's default branch reports drift that
+          # is not there and hides drift that is.
+          #
+          # The real drift it exposed is between the two MAINS, and it is kept
+          # rather than papered over: apex-shell main has drag_lock=true and
+          # click_method=clickfinger where apex-os main's generator has false
+          # and buttonAreas. Whoever performs the final integration must land
+          # both sides together, or opening the Input page silently changes a
+          # user's touchpad behaviour.
+          ref="${GITHUB_REF_NAME:-}"
+          if [ -n "$ref" ] && git clone --depth 1 -q --branch "$ref" \
+               https://github.com/AndreNijman/apex-shell /tmp/apex-shell-parity 2>/dev/null; then
+            echo "input parity: comparing against apex-shell branch '$ref'"
+          else
+            git clone --depth 1 -q https://github.com/AndreNijman/apex-shell \
+              /tmp/apex-shell-parity || true
+            echo "input parity: no matching apex-shell branch; comparing against its default branch"
+          fi
           set +e
           python3 files/scripts/check-input-parity \
             --service /tmp/apex-shell-parity/src/services/config_tab/InputService.qml
@@ -472,6 +544,18 @@ jobs:
       - name: §33 qualify — nothing is recorded without consent, and a check nobody tried is not a check that failed
         run: ./tests/test-apex-qualify.sh
 
+      # P1-025/026/027/028, structural half, and it belongs in `static` for the
+      # usual reason: its subject is the shape of the source, and a PR that
+      # changed only a doc would skip the job that guards it. What it holds is
+      # that no reader in these modules turns a refused read into a fact — the
+      # defect this repository has now found in about fifteen places — and that
+      # the dead code which kept this branch out of the tree was fixed by
+      # giving it callers rather than by `#[allow(dead_code)]`. The second one
+      # cannot be caught by clippy: silencing the lint is what makes clippy
+      # green.
+      - name: §P1-025 skills & provenance — a refused read is never an absence, and dead code was called rather than silenced
+        run: ./tests/test-apex-skill.sh
+
       # §26's channels, structural half, and this one has to be in `static`:
       # every assertion compares .github/workflows against apexd/, which are
       # different path selectors. A PR touching only build-image.yml sets
@@ -531,6 +615,39 @@ jobs:
 
       - name: Toolchain
         run: rustup component add clippy
+
+      # bubblewrap is not on the GitHub runner, and six assertions in
+      # apex/tests/mcp_sidecar_live.rs depend on it: they confine a real MCP
+      # server and then check that the confinement actually holds — no network
+      # where none was asked for, no reach into the agent's HOME, no inherited
+      # variables, the broker socket opened only on request. Without bwrap each
+      # one fails on `apex mcp run: this MCP server cannot be confined`.
+      #
+      # Installed rather than skipped, deliberately. The alternative pattern in
+      # this repository is to skip when a tool is missing, and that is right for
+      # a suite needing a compositor or a GPU — but these six are the assertions
+      # that the sandbox IS a sandbox, and a security boundary that quietly does
+      # not get checked in CI is the one you least want quiet. This file already
+      # records four occasions where something skipped and the workflow passed.
+      - name: Sandbox tooling the confinement assertions need
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          command -v bwrap
+          bwrap --version
+          # Ubuntu 24.04 ships kernel.apparmor_restrict_unprivileged_userns=1,
+          # which denies an unprivileged user namespace — so bwrap installs
+          # fine and then fails with "setting up uid map: Permission denied"
+          # and "loopback: Failed RTM_NEWADDR". The runner is ephemeral and
+          # unshared, so relaxing it here affects nothing else.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Proven, not assumed: a sandbox that cannot start must fail HERE,
+          # naming the reason, rather than three steps later as five confusing
+          # assertion failures about MCP servers.
+          bwrap --dev-bind / / --unshare-net --unshare-user true \
+            || { echo "FATAL: bwrap cannot create a user namespace on this runner"; exit 1; }
+          echo "bwrap can create a user namespace"
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -766,6 +883,28 @@ jobs:
           test -x "$APEX"
           ./tests/test-apex-qualify.sh --with-binary
 
+      # P1-025/026/027/028's binary half: the four verbs against fixture HOMEs,
+      # including a skills directory that exists and is refused (which must
+      # never read as a machine with no skills), a plugin edited after it was
+      # recorded, a baseline store that cannot be parsed (could-not-run, not
+      # first-sight — the latter is what a DELETED store looks like), and a
+      # documentation-only plugin, which must not come out "sandboxed" on a
+      # vacuously true field.
+      #
+      # Each fixture gets its own XDG_STATE_HOME as well as its own HOME:
+      # `apex provenance record` writes a baseline store and `store_path`
+      # prefers XDG_STATE_HOME, so a suite setting only HOME would write over
+      # the runner's real one.
+      - name: §P1-025 skills & provenance — apex skill / provenance / mcp planes against fixture homes
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-skill.sh --with-binary
+
       # §26's binary half: `apex channel` against fixture machines on each of
       # the four channel tags and on the legacy alias every installed machine
       # actually follows.
@@ -833,6 +972,30 @@ jobs:
       - name: Run trusted-device assertions
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-host.sh
+
+      # The editors APEX ships have to be launchable, not merely present. Zed
+      # shipped on every image with no desktop entry at all — the install read a
+      # filename the tarball has never used and `|| true` swallowed the failure —
+      # so the binary worked from a shell and the editor was invisible in every
+      # launcher. This runs the structural half here; the live half needs the
+      # unpacked zed.app and skips in CI.
+      - name: The shipped editors are launchable
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-editors.sh
+
+      # The desktop AI apps are part of the product, not add-ons: ChatGPT and
+      # Claude Desktop ship in the image, arrive with `apex update`, and must
+      # bring no updater of their own. Both vendors package for mutable
+      # distributions and therefore subscribe the machine to their own
+      # repository on install — OpenAI's rpm ships an enabled
+      # /etc/yum.repos.d/chatgpt.repo, Anthropic's deb writes an apt source
+      # from its maintainer script. On APEX that is a live hazard rather than
+      # dead weight, because apex-pkg builds user extensions with dnf against
+      # the host's repos. This runs the structural half here; the live half
+      # needs the installed apps and skips in CI.
+      - name: The desktop AI apps ship with the system and bring no updater
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-ai-apps.sh
 
       # §20's remote compute and handoff. The largest group of cases in it is
       # about one refusal: `apex build --on` has to decide which directory on

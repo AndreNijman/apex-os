@@ -409,7 +409,12 @@ pub fn remove_worktree(project: &Project, name: &str, delete_branch: bool) -> Re
 /// Written to `.git/info/exclude` rather than `.gitignore`: the worktree
 /// directory is this machine's runtime state, not something to commit into the
 /// user's repository and push to their colleagues.
-fn ensure_ignored(project: &Project) -> Result<()> {
+///
+/// Public because `.apex/` stopped being only the worktree directory: §16's
+/// handoff packet lives there too, and it has to, because a sandboxed session
+/// can read the project and cannot read `$HOME`. One helper, so a second
+/// writer into `.apex/` cannot forget the exclude.
+pub fn ensure_ignored(project: &Project) -> Result<()> {
     let root = Path::new(&project.root);
     let Some(common) = git::common_dir(root) else {
         return Ok(());

@@ -90,6 +90,22 @@ Two contracts cross the tier boundary and must survive any future edit:
 `/usr/share/apex-os/secureboot/kernel-signed` (core → base and flavor
 verification). Both are plain files under `/usr`, and CI asserts both.
 
+### What the AI apps added
+
+The two desktop AI apps (`docs/packages.md`) are third-party downloads, so by
+the rule above they belong in `core` — and they are the largest single addition
+that tier has taken. Measured in a scratch `fedora-bootc:43` container:
+**1.3 GB for `/usr/lib/chatgpt` and 548 MB for `/usr/lib/claude-desktop`**,
+~1.9 GB of payload before compression.
+
+This is a real tension, stated plainly rather than left to be discovered: the
+product decision says an app version bump is an image rebuild, and a core
+rebuild is a multi-gigabyte download for every machine on the fleet. The
+consequence is that these apps' versions move when core moves, and not on the
+vendors' own release cadence. Pushing them up a tier to make bumps cheaper is
+not available — a `dnf` transaction above `core` puts an rpmdb-sized layer into
+every user's next update, which is the problem this whole document is about.
+
 ### The weekly rebuild
 
 The cron used to rebuild unconditionally. That would now be the dominant cost:

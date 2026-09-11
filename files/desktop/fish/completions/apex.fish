@@ -67,6 +67,7 @@ complete -c apex -n '__apex_group agent; and __apex_at 2' -a run -d 'start an ag
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a list -d 'sessions'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a attach -d 'reattach to a session'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a input -d 'type text into a session'
+complete -c apex -n '__apex_group agent; and __apex_at 2' -a handoff -d 'hand a session to another agent'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a pause -d 'stop a session'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a resume -d 'continue a paused session'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a kill -d 'end a session'
@@ -82,7 +83,7 @@ complete -c apex -n '__apex_group agent; and __apex_at 2' -a rm -d 'forget a fin
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a prune -d 'forget every finished session'
 complete -c apex -n '__apex_group agent; and __apex_at 2' -a enable -d 'turn the runtime on'
 
-for v in attach input pause resume kill logs rm status diff undo
+for v in attach input handoff pause resume kill logs rm status diff undo
     complete -c apex -n "__apex_verb agent $v" -a '(_apex_session_ids)' -d session
 end
 complete -c apex -n '__apex_verb agent default' -a '(_apex_agent_names)' -d agent
@@ -90,6 +91,7 @@ complete -c apex -n '__apex_verb agent event' \
     -a 'working waiting_for_user permission_request complete failed' -d state
 
 complete -c apex -n '__apex_group agent' -s a -l agent -x -a '(_apex_agent_names)' -d 'which agent'
+complete -c apex -n '__apex_verb agent handoff' -s t -l to -x -a '(_apex_agent_names)' -d 'hand it to'
 complete -c apex -n '__apex_group agent' -s s -l sandbox -x -a 'strict project unrestricted' -d 'confinement'
 
 # ── apex project ────────────────────────────────────────────────────────────
