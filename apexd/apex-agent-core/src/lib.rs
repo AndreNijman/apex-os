@@ -52,6 +52,7 @@ pub mod config;
 pub mod destination;
 pub mod git;
 pub mod grant;
+pub mod handoff;
 pub mod hook;
 pub mod journal;
 pub mod layout;
