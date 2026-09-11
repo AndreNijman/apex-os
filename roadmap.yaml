@@ -1647,7 +1647,7 @@ tasks:
 - id: P1-025
   title: Skill inventory/sync/audit
   priority: P1
-  status: todo
+  status: done
   area: agent-profile
   depends_on:
   - P0-009
@@ -1657,10 +1657,20 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Skill inventory, sync and audit. LANDED on apex-os roadmap/v2.2 2026-09-11 as merge ba105394 (branch tip
+    be1e178). apexd/apex/src/skill.rs plus tests/test-apex-skill.sh (73 assertions). Both criteria met: skills
+    carry origin, digest and type, and executable skills are distinguishable from reference ones - measured on the
+    real machine at 34 skills of which 4 executable. Two mutation pairs guard the parts that would fail silently:
+    the dedup early-return in collect_root deleted takes the shell suite 73/0 -> 69/4 ('alpha appears on 2 rows' -
+    a directory reached by two routes counted twice), and digest.rs's exclusion matching by name rather than by
+    key takes the unit suite 522/0 -> 521/1, where the excluded list became [.in_use, tools/.in_use] and an
+    EXECUTABLE left the digest. Clippy PASS, cargo test --workspace --no-fail-fast 0 failures over five clean
+    repeats.
 - id: P1-026
   title: Plugin/marketplace provenance and isolation
   priority: P1
-  status: todo
+  status: partial
   area: agent-profile
   depends_on:
   - P0-009
@@ -1671,10 +1681,27 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Plugin and marketplace provenance and isolation. LANDED on apex-os roadmap/v2.2 2026-09-11 as merge ba105394;
+    apexd/apex/src/provenance.rs plus apex provenance show/record. CRITERION 1 DONE: marketplace origin and
+    commit/hash are tracked, and provenance means the hash of what RUNS rather than a recorded URL nobody re-
+    checks - the in-repo model is verify.rs's trust gate, and the same three-state discipline applies here. Two
+    mutation pairs prove the parts that matter, both of the permission-denied-is-not-absence class:
+    provenance.rs's 'git status could not run' arm flipped to Some(false) takes 522/0 -> 521/1 on
+    a_git_status_that_could_not_run_is_not_a_clean_working_tree, and the EACCES arm collapsed to None takes 522/0
+    -> 521/1 on a_registry_that_is_there_and_refused_is_not_a_registry_that_is_absent (unreadable.len() 0 vs 1).
+    Both were checked for VACUITY rather than assumed: the EACCES mutant's root-skip branch never fired (uid 1000,
+    no skip line under --nocapture), and the Attest mutant makes the store unreadable with invalid JSON rather
+    than a mode bit so it has no privilege-dependent skip. CRITERION 2 IS PARTIAL BY ARCHITECTURE, NOT BY EFFORT,
+    and the evidence says so rather than letting the word 'sandbox' carry more than the mechanism does: QML
+    plugins run IN-PROCESS in apex-shell and cannot be confined without an apex-shell change; MCP servers are
+    confinable only if wrapped; hooks and scripts are reported unconfined. That is the honest state, and on APEX
+    'isolation' already means the read-only OS layer rather than a security sandbox - a capsule shares the real
+    HOME and gets /run/host read-write as the user.
 - id: P1-027
   title: Memory provider interface
   priority: P1
-  status: todo
+  status: done
   area: memory
   depends_on: []
   acceptance:
@@ -1684,10 +1711,18 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Memory provider interface. LANDED on apex-os roadmap/v2.2 2026-09-11 as merge ba105394 (5917833). All three
+    criteria met, and the first is a CONSTRAINT rather than a goal: Andre's memory is an Obsidian vault on a
+    Synology NAS, NFS-mounted on an Orange Pi and exposed as an MCP server, it is authoritative, and it stays
+    authoritative. Delivered as a READ-ONLY view with zero writes - the live vault was never probed during
+    development, let alone written to - and the memory view declares that APEX owns no store of its own. Provider
+    health and project mapping are visible; there is no migration, forced or otherwise, which is the criterion
+    that would have been easiest to fail by building something better and quietly making it the source of truth.
 - id: P1-028
   title: Separate local and cloud-side connector trust planes
   priority: P1
-  status: todo
+  status: partial
   area: agent-security
   depends_on:
   - P0-004
@@ -1697,6 +1732,15 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Separate local and cloud-side connector trust planes. LANDED on apex-os roadmap/v2.2 2026-09-11 as merge
+    ba105394 (5917833). CRITERION 1 DONE: the security surface distinguishes local from remote connectors,
+    measured live at 1 local plane and 2 cloud planes. CRITERION 2 IS REAL BUT NARROWER THAN THE WORDING, and is
+    recorded that way instead of being claimed: 'hardened profiles can reduce cloud-side tools/connectors' is
+    satisfied only in the coarse sense - --sandbox strict removes the WHOLE cloud plane - because there is no per-
+    server switch anywhere in APEX, and the readout says so rather than implying a granularity that does not
+    exist. Whoever takes the remainder is implementing per-connector selection, not wiring up something that is
+    already there.
 - id: P1-029
   title: Represent local/remote/scheduled/cloud agent lifecycle types
   priority: P1
