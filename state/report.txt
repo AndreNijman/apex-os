@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-12 02:55 AWST
+APEX ROADMAP — resume report — 2026-09-12 03:02 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -6,58 +6,53 @@ APEX ROADMAP — resume report — 2026-09-12 02:55 AWST
               done   partial      todo   blocked
   BASE          16         2         -         -
   L              -         1         -         2
-  P0            19         6         -         -
+  P0            20         5         -         -
   P1            29        13        20         -
-  P2             3         3        13         -
-  ALL           67        25        33         2   of 127
+  P2             4         3        12         -
+  ALL           69        24        32         2   of 127
 
-  P0 not done: P0-001(part), P0-002(part), P0-007(part), P0-014(part), P0-015(part), P0-021(part)
+  P0 not done: P0-001(part), P0-002(part), P0-007(part), P0-015(part), P0-021(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
   p0-014     ALIVE      P0-014,P0-015                      task/p0-014-remote-lock
-             head 0ac4cffd Merge origin/roadmap/v2.2 into task/p0-014-remote-loc
-             dirty 1 file(s), 0 unpushed, card 3m
+             head 625d806e test(privilege): the gate reads a policy off the requ
+             dirty 0 file(s), 0 unpushed, card 3m
              NEXT **Round 12 (2026-09-12). COMMIT 5 IS DONE AND PUSHED — P0-014 is c
 
   p2-010     ALIVE      P2-011                             task/p2-010-hardware-storage
              head 23b543ad test(agentd): §P2-011 two guards the battery caught b
-             dirty 0 file(s), 0 unpushed, card 7m
+             dirty 0 file(s), 0 unpushed, card 4m
              NEXT **THE UNIT IS COMPLETE.** All four items — P2-010, P2-011, P2-014,
 
-  base-partials ALIVE      BASE-009,BASE-010,BASE-013,BASE-014 task/base-partials
-             head 627db31a ci(labwc): a missing test dependency skips rather tha
-             dirty 0 file(s), 0 unpushed, card 5m
-             NEXT Round 12 (fresh agent; round 11's agent died on a usage limit at s
+  p1-008     ALIVE      P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
+             head 4f80746e Merge task/p1-005-cloudflare-caps into roadmap/v2.2 (
+             dirty 0 file(s), 0 unpushed, card -
+             NEXT (no card)
 
-  desktop-ai-apps dead 20m   (new, from the 2026-09-11 CLAUDE.md decision) task/desktop-ai-apps
-             head d7b12d37 docs: record the shipped AI apps, their update path, 
-             dirty 0 file(s), 0 unpushed, card 21m
-             NEXT Nothing outstanding on the branch. The remaining work is not this 
+  p1-040     ALIVE      P1-040                             task/p1-040-per-output-scaling
+             head cd324ec Merge task/base-partials-shell into roadmap/v2.2 (BASE
+             dirty 1 file(s), 0 unpushed, card -
+             NEXT (no card)
 
-  p1-005     ALIVE      P1-005,P1-006,P1-007               task/p1-005-cloudflare-caps
-             head bd280cbf fix(cf status): an environment is a section that bind
-             dirty 0 file(s), 0 unpushed, card 1m
-             NEXT **Unit done.** All three items are implemented, tested and pushed 
+  p2-b       ALIVE      (see queue.json p2-b)              task/p2-b-accessibility-i18n
+             head cd324ec Merge task/base-partials-shell into roadmap/v2.2 (BASE
+             dirty 0 file(s), 0 unpushed, card -
+             NEXT (no card)
+
+  p1-052     ALIVE      P1-051,P1-052                      task/p1-052-relay
+             head 4f80746e Merge task/p1-005-cloudflare-caps into roadmap/v2.2 (
+             dirty 0 file(s), 0 unpushed, card 2m
+             NEXT Orientation. Mapping the existing `apex-remote-core` client, the P
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 4f80746e Merge task/p1-005-cloudflare-caps into roadmap/v2.2 (
-    task/p0-014-remote-lock
-      726f9d93 feat(privilege): §7's second column was a policy nothing cons   [1/10 added lines on tip]
-      2dd67e7f test(privilege): the gate's passing branch had no test, becau   [3/10 added lines on tip]
-      706489ec fix(build): a polkit assertion that can only ever fail, so ro   [1/10 added lines on tip]
-      98a7c248 feat(privilege): §7's second column goes live, and a security   [3/10 added lines on tip]
+  int-os:  tip f39fd664 Merge task/p2-010-hardware-storage into roadmap/v2.2 
     task/p1-050-remote-protocol
       09c977d9 fix(clippy): the integration tip was not clean, and two of th   [2/10 added lines on tip]
-    task/p2-010-hardware-storage
-      1086478b feat(agentd): §P2-011 per-agent cgroup budgets, and never a b   [2/10 added lines on tip]
-      84aea0a8 test(agentd): §P2-011 against a real daemon, and the window t   [2/10 added lines on tip]
-      635b683e fix(agentd): §P2-011 a daemon in a login session was refused    [0/10 added lines on tip]
-      23b543ad test(agentd): §P2-011 two guards the battery caught being gre   [3/10 added lines on tip]
 
   int-shell:  tip cd324ec Merge task/base-partials-shell into roadmap/v2.2 (BASE
     fix/labwc-desktop-parity  — squash-merged, safe to delete
@@ -78,11 +73,11 @@ APEX ROADMAP — resume report — 2026-09-12 02:55 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: Failed to retrieve unit state: Connection timed out   last 18s Sat 2026-09-12
+  snapshot timer: active   last 1min 28s Sat
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    8b59f47  roadmap-state
+    apex-os    7f7985c  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    55f08ae  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -105,7 +100,7 @@ APEX ROADMAP — resume report — 2026-09-12 02:55 AWST
     apex-os    00c1973  wt-p0-025-os-
     apex-os    eda5ef8  wt-p1-001-
     apex-os    a23175f  wt-p1-002-
-    apex-shell 1efb424  apex-shell-
+    apex-shell 05e3379  apex-shell-
     apex-shell df979e1  int-shell-
     apex-shell 68c971d  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
@@ -131,30 +126,28 @@ APEX ROADMAP — resume report — 2026-09-12 02:55 AWST
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  5 agent(s) dispatched, ceiling 6
+  6 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
     p0-014         P0-014,P0-015                    Remote Control privilege policy and lock-state policy, wired
-    p1-005         P1-005,P1-006,P1-007             Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets
-    base-partials  BASE-002,BASE-005,BASE-009,BAS   Close the eight BASE preservation items still marked partial
+    p1-008         P1-008,P1-009,P1-010             Cloudflare One, Workers AI and AI Gateway, Secrets Store
+    p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
     p2-e           P2-010,P2-011,P2-014,P2-015      Hardware qualification database, agent cgroup budgets, Stora
 
   READY (dependencies believed satisfied — confirm against the agent table above):
     p1-038-hardware P1-038                           The 18 labwc matrix rows that need real applications
-    p1-008         P1-008,P1-009,P1-010             Cloudflare One, Workers AI and AI Gateway, Secrets Store
-                   conflicts with p1-002, p1-005
+    p1-005         P1-005,P1-006,P1-007             Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets
+                   conflicts with p1-002
+    p1-011         P1-011,P1-012,P1-013             Temporary task credentials, transparent brokered wrangler/cl
+                   conflicts with p1-005, p1-008
     p1-014         P1-014,P1-015,P1-016,P1-017      Cloudflare environment protection, worktree preview environm
                    conflicts with p1-011
     p1-025         P1-025,P1-026,P1-027,P1-028      Skill inventory and audit, plugin provenance and isolation, 
     p1-040-per-output-scaling P1-040                           Per-output scaling: two densities, two sizes, one shell
     p1-052-relay   P1-051,P1-052                    The APEX Remote remainder: relay, reconnect, mDNS, connectio
     p1-053a        P1-053,P1-054,P1-055             Android app foundation, Agent Center parity, full PTY/TUI re
-    p1-053b        P1-056,P1-057,P1-058             Android Projects/Workspaces/Worktrees/Tasks/Review UX, capab
-                   conflicts with p1-053a
 
   HELD:
-    p1-011         after p1-005
-    p2-a           after p1-005
     final          after *
 
   COMPLETE (every roadmap item done — not offered again).

@@ -2921,7 +2921,7 @@ tasks:
 - id: P2-011
   title: Agent cgroup resource budgets
   priority: P2
-  status: todo
+  status: done
   area: agent-runtime
   depends_on: []
   acceptance:
@@ -2930,13 +2930,21 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    The one item of the p2-010 unit still outstanding; its unit landed without it (merge 7da2571). Shape already
-    measured and handed forward, so it is not a fresh investigation: a NEW apexd/apex-agentd/src/budget.rs with a
-    one-line hook, because P1-020 put ~1,700 lines into apex-agentd and a new file merges where a refactor would
-    not. cpu, memory and pids delegate to app.slice; io is ABSENT at every level and must be a Reading carrying
-    that reason, never a budget of zero. systemd-run --user --scope needs no polkit prompt and no Delegate= drop-
-    in, measured killed at exactly 5s with exit 143. The live RuntimeMaxSec check needs a user bus, so it stays
-    opt-in and out of pr-validation.yml. Budgets must be proved against a test daemon, never the live apex-agentd.
+    Per-agent cgroup budgets in apex-agentd. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge f39fd664 (1086478,
+    84aea0a, 635b683, 23b543ad): apexd/apex-agentd/src/budget.rs with a one-line hook in session.rs, and
+    apexd/apex-agentd/tests/budget.rs. A NEW FILE rather than a refactor, deliberately: P1-020 had landed ~1,700
+    lines into apex-agentd on a tip this branch did not carry, so a new file merges where a refactor would have
+    conflicted. Config surface is Config.extra['budget'], and the hook uses the cfg already in scope in session.rs
+    rather than locking daemon.config a second time. cpu, memory and pids delegate to app.slice; IO IS ABSENT AT
+    EVERY CGROUP LEVEL AND IS REPORTED AS A Reading CARRYING THAT REASON, NEVER AS A BUDGET OF ZERO - the
+    permission-denied-is-not-absence discipline in its sixteenth location. systemd-run --user --scope was measured
+    to need no polkit prompt and no Delegate= drop-in, killed at exactly 5 s with exit 143; the live RuntimeMaxSec
+    check needs a user bus so it stays opt-in and out of pr-validation.yml. PROVEN BY A 14-ROW MUTATION BATTERY,
+    14/14 RED, baseline and restored identical: agentd 200 passed / 0 failed, the live half 8/0 in 5.58 s,
+    workspace 2380/0, clippy PASS. TWO ROWS DISAGREE BETWEEN CI AND THE LIVE HALF, which is the argument for
+    having both: B12 is caught ONLY by the live half, so CI does not protect that behaviour, and B11 is its mirror
+    - red in CI, green live - because its code path exists only for a login-session daemon. 635b683 is a real
+    defect the battery exposed: a daemon running inside a login session was refused its own user manager.
 - id: P2-012
   title: Secure browser automation capsule
   priority: P2
