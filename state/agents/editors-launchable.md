@@ -8,10 +8,26 @@ worktree: /var/tmp/apex-work/wt-editors2        (apex-os,    branch pushed)
 branch: task/terminal-entries-launchable  (same name in both repos)
 
 ## NEXT
-Dispatch CI once the orchestrator's workflow_dispatch trigger lands:
-`gh workflow run pr-validation.yml --ref task/terminal-entries-launchable`
-(apex-os) and the apex-shell equivalent, then read the structural layer's
-result with `gh run view --log`. Everything else is done and pushed.
+Nothing outstanding. The one thing left needs somebody else first: CI cannot yet
+be dispatched on a task branch (see CI below). When `workflow_dispatch` reaches
+apex-os `main`, run
+`gh workflow run pr-validation.yml --ref task/terminal-entries-launchable`.
+
+## CI — tried, blocked, substituted
+- `gh workflow run pr-validation.yml --ref task/terminal-entries-launchable`
+  → HTTP 422 "Workflow does not have 'workflow_dispatch' trigger". The trigger
+  IS on roadmap/v2.2 (0b16268f) but the dispatch API reads the DEFAULT branch,
+  and main still has only `pull_request`.
+- The `push:` trigger that did land is filtered to `branches: [roadmap/v2.2]`,
+  so merging v2.2 forward into this branch would NOT make CI run on it. Not
+  done — it would only muddy the integrator's diff for no signal.
+- Substitute, which is the same image CI uses (`runs-on: ubuntu-24.04`):
+  both suites run in a clean `docker.io/library/ubuntu:24.04` container with
+  `--network=none` and the repo mounted read-only.
+    tests/test-apex-editors.sh    → 17 passed, 0 failed, 3 skipped
+    tests/run-terminal-entry-test.sh → "SKIP: quickshell not installed", exit 0
+  That is the structural layer doing exactly what it was written for: green
+  where there is no zed.app, no nvim.desktop, no APEX image and no compositor.
 
 ## DONE
 - apex-shell 3f8a286 — src/services/DesktopExec.qml + both call sites +
