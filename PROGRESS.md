@@ -1395,3 +1395,94 @@ file merges where a refactor would conflict; `cpu`/`memory`/`pids` delegate to
 `app.slice`; and **`io` is absent at every level, so it must be a `Reading`
 carrying that reason and never a budget of zero** — the same
 permission-denied-is-not-absence discipline, in its fifteenth location.
+
+- **2026-09-11 22:05** — **Two orchestrators existed at once, and the record of
+  how that resolved is worth more than the round itself.**
+
+  The weekly limit reset at 21:00. `apex-roadmap-resume.timer` fired at 21:02
+  and started an unattended `claude -p` orchestrator, because
+  `state/orchestrator.pid` was three days stale — the previous session had died
+  on the limit, and nothing refreshes that file except a live orchestrator. An
+  interactive session came up fifteen minutes later, found it **mid-landing**
+  (local `roadmap/v2.2` ahead of origin in both repos), and **stood down from
+  every write** rather than fight it. Two orchestrators dispatching from one
+  queue is the failure the queue's own comment warns about, and the cure is one
+  of them doing nothing.
+
+  The unattended round was the most productive of the program: nine task
+  branches landed, both repos pushed (apex-os `583355e → 1afd807`, apex-shell
+  `a90cef6 → 665a3cc`), eleven roadmap items recorded from the landing rather
+  than from a card. **49/29/47/2 → 60 done / 24 partial / 41 todo / 2 blocked.**
+  BASE went 10 → 14 done, P2 opened its account at 3.
+
+  It exited cleanly at 21:43:55 with "waiting on the six agents now" — so its
+  six agents died with it. `resume.sh` still labelled all six **ALIVE**, because
+  their `.output` files were minutes old: the twenty-minute mtime heuristic
+  cannot see a dead parent. `ps` could, and did. Worth remembering the next time
+  the report says ALIVE.
+
+### The editors Andre reported, measured before anything was changed
+
+He said nvim and zed both fail, then clarified: *"it says provided by apex
+already when i install but the existing one doesn't run."*
+
+Measured on **both** machines, read-only: `/usr/bin/nvim` is the real 64-bit
+`neovim-0.11.6` rpm and runs on both. Zed's binary runs on both. **Neither
+machine has a Zed desktop entry.** `TERMINAL=alacritty` *is* shipped by the
+image, so it is not a machine-local difference — my first hypothesis, and it
+was wrong. `xdg-terminal-exec` is absent on both. The L16 has `~/.config/nvim`;
+katana has none.
+
+And `apex-pkg` refusing with "already provided by APEX-OS" is **correct**: it
+stops an overlay shadowing the image's copy, which is the guard whose absence
+once left 53 of katana's binaries 32-bit. The defect is that the provided copy
+cannot be **launched**, not that the guard is wrong.
+
+**Zed's half is fixed and landed as `ec91e92`.** `Containerfile.core` installed
+the desktop entry from `zed.app/share/applications/zed.desktop` — a name the
+tarball has never shipped, upstream's is `dev.zed.Zed.desktop` — and
+`2>/dev/null || true` swallowed the failure. No icon either. So the binary ran
+fine from a shell and the editor did not exist from the desktop, on every APEX
+machine, since the stage was written. The fetch stays non-fatal *and that
+posture is now asserted*, so nobody "fixes" this by breaking offline builds;
+everything after a successful unpack is checked instead of hoped.
+
+Two mutations, both restored byte-identical: M1 the filename bug 14/1 → 12/3,
+M2 the `|| true` swallow alone 14/1 → 13/2. **M2 did not bite at first**, and
+that is the finding: the assertion grepped one physical line for `install` and
+another for `|| true`, so it could not fail against the very mutant it existed
+for. Continuations are joined before the structural checks now. Third time this
+week that an assertion which cannot fail has been caught — twice in agents'
+work, once in the orchestrator's own.
+
+The other half is with an agent on `task/terminal-entries-launchable`, measuring
+headlessly whether the launcher honours `Terminal=true` at all. `nvim.desktop`
+declares it, and the shell's claim that `execute()` "respects Terminal=" is a
+comment, not evidence. It was told to report that the launcher is fine and the
+complaint is something else, if that is what it measures.
+
+### Queued, not started: the desktop AI apps
+
+Andre's 2026-09-11 CLAUDE.md decision — both AI desktop apps ship **in the
+image**, arrive on existing machines through `sudo apex update` alone, and
+**never self-update**. Nothing in `roadmap.yaml` covers it, so it is now a queue
+unit with the measurements already taken: Claude Desktop is installed manually
+under `/usr/local`, which is `/var/usrlocal` and therefore **not part of the
+image** — precisely why the current state fails the first criterion; the daily
+user timer that must be retired is real and running; and **ChatGPT desktop is
+not installed anywhere and appears in no Containerfile**, so its packaging
+source is the unit's first job rather than an assumption.
+
+### Round 12: five roadmap units, and one slot spent on Andre's defect
+
+`p1-025` (all four items built; six named mutation proofs and clippy left),
+`p2-010` (three items landed, P2-011 built and needing proof — its card was a
+step stale again), `p0-014` (the last P0 work, commit 4b mid-write),
+`p1-035` (P1-037's daemon-death measurement), `p1-023` (P1-024, whose card's
+`NEXT` is a measurement: check the wall clock and grep for `SKIP`, because four
+tests against a `sleep 300` session finishing in 0.1 s means nothing was
+asserted).
+
+`base-partials` is **held one round** so the ceiling stays at six. Four of its
+eight items are closed and pushed; of the four left, BASE-009 needs katana,
+which is gaming, and BASE-010 needs a live model no machine here has loaded.

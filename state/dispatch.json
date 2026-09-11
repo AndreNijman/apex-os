@@ -1,20 +1,12 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-11T21:40+08:00",
-  "_round": "Round 10. All six round-9 agents were dead on arrival - dispatch.json was three days old and ListAgents showed no session on the machine - so nothing was messaged and six fresh agents carry the six cards. THE DIFFERENCE FROM ROUNDS 8 AND 9: this round LANDED. Nine task branches went onto roadmap/v2.2 in both repos (apex-os 583355e -> 1afd807, apex-shell a90cef6 -> 665a3cc) and eleven roadmap items were recorded from the landing rather than from a card. Counts moved 49/29/47/2 -> 60 done / 24 partial / 41 todo / 2 blocked of 127.",
+  "updated": "2026-09-11T22:05+08:00",
+  "_round": "Round 12. TWO ORCHESTRATORS EXISTED AT ONCE and this is the record of how it resolved. The weekly limit reset at 21:00 on 2026-09-11; apex-roadmap-resume.timer fired at 21:02 and started an unattended `claude -p` orchestrator (pid 19362) because state/orchestrator.pid was three days stale. An interactive session came up 15 minutes later, found it mid-landing - local roadmap/v2.2 was ahead of origin in BOTH repos - and STOOD DOWN from every write rather than fight it, which is the failure the queue's own comment warns about. The unattended round was the most productive of the program: nine task branches landed, both repos pushed (apex-os 583355e -> 1afd807, apex-shell a90cef6 -> 665a3cc), eleven roadmap items recorded, counts 49/29/47/2 -> 60 done / 24 partial / 41 todo / 2 blocked. It exited cleanly at 21:43:55 saying 'waiting on the six agents now' - so its six agents died with it, and resume.sh still labelled them ALIVE because their .output files were minutes old. The 20-minute mtime heuristic cannot see a dead parent; ps could, and did.",
   "_landed_this_round": {
-    "apex-os": "583355e -> 1afd807. Five merges plus one integration fix: task/p1-035-agent-tooling (6d7d4a1, 12 commits, P1-035/P1-036/P1-037), task/p2-010-hardware-storage (7da2571, 14 commits, P2-010/P2-014/P2-015), task/p1-023-push-to-talk-daemon (09846c9, 2 commits), task/base-partials (65bd5c7, 4 commits, BASE-002/005/016/018), task/p0-014-remote-lock (432e16c, 6 commits), and 1afd807 fixing a clippy::redundant_guards the branch's older clippy could not see.",
-    "apex-shell": "a90cef6 -> 665a3cc. Three merges: task/p1-023-handoff-lifecycle (dc2283e, 8 commits), task/p1-029-lifecycle-types (4ba3b01), task/p0-015-lock-tests (665a3cc).",
-    "_method": "MERGED, not rebased or cherry-picked, and that was a deliberate change of mechanism. The branches left bc4f06e and 4b7f84d while the tip moved through P1-020's ~1,700 lines in apex-agentd; a 12-commit cherry-pick conflicted on its FIRST commit and would have conflicted repeatedly. One merge resolves the same divergence once, keeps every commit message (which is where this program stores its mutation proofs), makes resume.sh's unlanded list exact because the commits become ancestors, and means the next landing of the same branch merges only its new commits instead of re-applying landed patches. Task branch refs were NOT rewritten, so every agent worktree is exactly where its card left it.",
-    "_integration_decisions": [
-      "paths.rs: the tip and task/p1-035 had independently fixed the shared-scratch defect under DIFFERENT env var names. The branch's shape won (SCRATCH_ROOT / SCRATCH_ROOT_ENV as named constants, a relative root refused rather than honoured, a unit test) and the tip's one caller, apex-agentd/tests/hook_bridge.rs, now names the constant. The variable is APEX_AGENT_SCRATCH_ROOT; APEX_AGENT_SCRATCH no longer exists.",
-      "client.rs publish_hook: the tip's signature (takes the whole hook::Observation) won over the branch's seven positional arguments, and carries the branch's new field as obs.test.clone(). apex/src/agent.rs keeps the tip's call site.",
-      "apex-agentd/src/inject.rs was written against the pre-refactor creds: Option<Peer> and now takes &privilege::Caller, like every other handler.",
-      "privilege.rs: refuse_input is hoisted ABOVE declare, so the tip's rewritten declare doc stays attached to the function it describes.",
-      "Request::Event, hook::Observation, SessionInfo and RunRequest each gained fields from two branches at once. Every struct literal in the tree was completed; sample_live_info in session.rs gained actor/telemetry/children/injected/capsule and session_input.rs's RunRequest gained disposable/copy_out."
-    ]
+    "apex-os": "roadmap/v2.2 1afd807 -> ec91e92, PUSHED. task/editors-desktop-entries, one commit, fast-forward, verified on the landed tip (check-no-conflict-markers PASS, tests/test-apex-editors.sh 14 passed / 1 failed where the single failure IS the defect on this machine - the running image predates the fix and has no Zed entry). This is user-directed work from Andre, not a roadmap unit: 'nvim and zed have to work'. ZED'S HALF IS DIAGNOSED AND FIXED. /usr/bin/zed has been on every APEX machine since stage 5a-zed was written and Zed has never had a launcher entry on any of them - confirmed identically on the L16 and on katana. Containerfile.core installed the entry from zed.app/share/applications/zed.desktop, a name the tarball has NEVER shipped (upstream's is dev.zed.Zed.desktop), and `2>/dev/null || true` swallowed the failure; no icon was installed either. The binary ran fine from a shell, so nothing looked broken from a terminal. The fetch stays non-fatal and that posture is now asserted too, so nobody 'fixes' this by breaking offline builds; everything after a successful unpack is checked - entry present, TryExec names a binary really on PATH, icon resolves in hicolor. Two mutations, both restored byte-identical: M1 the original filename bug 14/1 -> 12/3, M2 the `|| true` swallow alone 14/1 -> 13/2. M2 did NOT bite at first, and that is the finding worth keeping: the assertion grepped one physical line for `install` and another for `|| true`, so it could not fail against the very mutant it existed for. Shell continuations are joined before the structural checks now.",
+    "apex-shell": "unchanged at 665a3cc."
   },
-  "_status_recorded_this_round": "Eleven items recorded from the landing: P1-035 done, P1-036 done, P1-037 PARTIAL (see below), P2-010/P2-014/P2-015 done, P1-023 done, P1-029 done, BASE-002/BASE-005/BASE-016/BASE-018 done. P0-014 and P0-015 updated in place, still partial. P2-011 given evidence while staying todo, so the measured shape of the work is not lost again. P1-037 is partial for ONE named reason and it is not the feature: three places said the engine's teardown also runs when the DAEMON dies and none had measured it. The measurement now exists - a 162-line section giving each death its own daemon, runtime dir, disposable root and capsule log - but it is UNCOMMITTED in /var/tmp/apex-work/wt-p1-035. Committing and proving it is the whole of that unit's remaining work.",
+  "_status_recorded_this_round": "Nothing recorded by this round: no roadmap item changed status. The zed fix is user-directed work outside the roadmap, and none of the six units finished. Counts hold at 60 done / 24 partial / 41 todo / 2 blocked of 127, as the unattended round left them.",
   "_deliberately_held": {
     "p1-005 / p1-008 / p1-011 / p1-014": "The Cloudflare capability suite, 13 tasks, mutually conflicting (p1-005 with p1-002, p1-008 with p1-002 and p1-005, p1-011 with p1-005 and p1-008, p1-014 with p1-011), so at most ONE can hold a slot at a time. NOT dispatched again this round, and the reason is arithmetic rather than preference: the ceiling is six and five units were one item from finishing. p1-005 is FIRST IN LINE the moment a slot frees, and the slot that frees soonest is p1-035's - its remaining work is one uncommitted file. Confirm p1-002 is not in the unlanded set before dispatching p1-005.",
     "p1-038-hardware": "Still not dispatchable unattended, and the reason has not changed: the 18 labwc matrix rows need real applications on a real session. Cannot be done headless, and cannot be done on the L16 while Andre is using it. A katana job once gaming is over, or a job for Andre with a checklist. The step-by-step list is in state/agents/p1-038.md. Do not pretend otherwise.",
@@ -22,7 +14,9 @@
     "apex remote is documented nowhere": "FINDINGS-round5 item 2, still unowned after three rounds. apex remote pair|devices|revoke|status|enable appears in no doc, and check-doc-verbs.sh structurally cannot catch it because it validates documented-verb -> real-command and not the reverse. It belongs to the next integrate or followups round, against the tip. Recorded here so it is not lost a fourth time.",
     "test-apex-task.sh": "NEW this round, and nobody owns it. 70 passed / 1 failed, and it is pre-existing: checked at 583355e before any of this round's merges and red there too. The assertion wants 'understands up to' in the refusal for a tasks.toml written by a newer apex; the message was reworded and the suite was not. A third red suite that the recorded CI baseline (which was taken at 1ab542c) does not show. One line to fix, in either direction - give it to the next followups round.",
     "the branches that are now safe to delete": "apex-os fix/pkg-multilib, fix/pkg-multilib-2, task/p1-018-mcp-auth, task/p1-050-remote-protocol (settled this round by content, not by heuristic); apex-shell fix/labwc-desktop-parity, fix/popup-first-open-and-media-keys, fix/screenshot-off-hyprland, task/p0-016-agent-settings. Left in place rather than deleted - deletion is cheap and irreversible, and nothing depends on it happening this round.",
-    "integrate-4 housekeeping": "Three items were owed from integrate-4's card. ONE IS NOW DONE: the four nested shell suites have been run from the repo root on the landed tip and are green (see _verification_on_the_landed_tip). Still owed: the per-commit build check for the four p1-020os commits, and squash-merged branch cleanup by git merge-tree --write-tree comparison (the deletable list is under 'the branches that are now safe to delete')."
+    "integrate-4 housekeeping": "Three items were owed from integrate-4's card. ONE IS NOW DONE: the four nested shell suites have been run from the repo root on the landed tip and are green (see _verification_on_the_landed_tip). Still owed: the per-commit build check for the four p1-020os commits, and squash-merged branch cleanup by git merge-tree --write-tree comparison (the deletable list is under 'the branches that are now safe to delete').",
+    "base-partials": "HELD ONE ROUND, deliberately, to keep the ceiling at six while a user-directed unit holds a slot. Four of its eight items are closed (BASE-018, BASE-002, BASE-016, BASE-005) and pushed; the four left are BASE-009, BASE-010, BASE-013, BASE-014. Two of those are exactly the ones that cannot be finished right now: BASE-009 is Gaming Mode and KATANA IS GAMING, and BASE-010 needs a live model that no machine here has loaded. Its branch also carries 836df42 'feat(greet): the session picker names the desktops, not the compositors' - the BASE-013 criterion-3 defect the recon identified, now fixed on the branch and unlanded. First in line next round.",
+    "editors-launchable (user-directed)": "HOLDS THE SIXTH SLOT. Andre reported that nvim and zed do not work, then clarified: 'it says provided by apex already when i install but the existing one doesnt run'. Measured on BOTH machines before any change: /usr/bin/nvim is the real 64-bit neovim-0.11.6 rpm and runs on both; zed's binary runs on both; NEITHER machine has a Zed desktop entry; TERMINAL=alacritty IS shipped by the image so it is not a machine-local difference; xdg-terminal-exec is ABSENT on both; the L16 has ~/.config/nvim and katana has none. apex-pkg refusing with 'already provided by APEX-OS' is CORRECT - it stops an overlay shadowing the image's copy, which is the guard that was missing when 53 of katana's binaries went 32-bit - so the defect is that the provided copy cannot be LAUNCHED, not that the guard is wrong. Zed's half is fixed and landed (ec91e92). The agent on task/terminal-entries-launchable is measuring the other half headlessly: whether the launcher honours Terminal=true at all, since nvim.desktop declares it and the shell's claim that execute() 'respects Terminal=' is a comment, not evidence. It was told explicitly to report that the launcher is fine and the complaint is something else, if that is what it measures."
   },
   "agents": [
     {
@@ -36,13 +30,13 @@
       "branch": "task/p0-014-remote-lock",
       "second_worktree": "/var/tmp/apex-work/wt-p0-015-shell",
       "second_branch": "task/p0-015-lock-tests",
-      "agent_id": "abf88d0f3d0e01430",
+      "agent_id": "a0d4b3b493991eca5",
       "queue_id": "p0-014",
-      "dispatched": "2026-09-11T21:45+08:00",
+      "dispatched": "2026-09-11T22:02+08:00",
       "fresh_agent_for_card": "p0-014",
-      "session": "round 10 orchestrator",
+      "session": "round 12 orchestrator, pid 59982",
       "title": "finish commit 4 (the enforcement) and commit 5, on a branch whose first six commits have landed",
-      "at_dispatch": "All six commits landed (merge 432e16c). Seven dirty paths are commit 4 mid-write; the predecessor's last words were 'now Elevating, decide_origin and the rewritten authorise_grant'. Told to commit and push that BEFORE merging the new tip in, then commit 5, then the mutation proofs. Handed the measured result of its own harness fix - test-privilege-requests.sh 30/8 -> 39/0 on the landed tip, closing FINDINGS-round5 item 3 - and one remaining assertion of the same class to settle: system_grants.rs's renewing_a_grant_that_does_not_exist_is_refused_without_asking_anybody still fails on the tip for the scheduled-job-cgroup reason, and it must say whether commit 4 closes it or whether that harness needs the same unshare -r treatment.",
+      "at_dispatch": "The last P0 work. HEAD 62b0fea is a merge of the integration tip into the branch; FOUR dirty paths (apex-agent-core Cargo.toml + webauthn.rs, apex-agentd Cargo.toml + privilege.rs) are commit 4b mid-write. The card's next action is exact: lift Signer and its flag constants and challenge builders out of the #[cfg(test)] child into a pub mod test_support behind a test-support feature, because the only thing in this repository that can mint a VALID assertion is that Signer - a sequence it cannot reach can be tested against refusals and never once against a receipt. Then commit 5, the validate_for relaxation, last. Asked again for test-apex-privilege-requests.sh and system_grants.rs before/after: those nine assertions are the last of round 5's two red suites and four rounds of orchestrators have tracked them.",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
@@ -53,13 +47,13 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p2-010",
       "branch": "task/p2-010-hardware-storage",
-      "agent_id": "a61aa1f0da9205060",
+      "agent_id": "af0cbe156be6ff879",
       "queue_id": "p2-e",
-      "dispatched": "2026-09-11T21:45+08:00",
+      "dispatched": "2026-09-11T22:02+08:00",
       "fresh_agent_for_card": "p2-010",
-      "session": "round 10 orchestrator",
+      "session": "round 12 orchestrator, pid 59982",
       "title": "P2-011 agent cgroup budgets - the last item of a unit whose other three are done and recorded",
-      "at_dispatch": "P2-010, P2-014 and P2-015 landed (merge 7da2571) and are recorded done with re-measured counts. Only P2-011 remains. Told to merge the new tip in FIRST, because P1-020's ~1,700 apex-agentd lines are exactly what budget.rs hooks into and the branch did not carry them. The measured shape was re-handed whole, including that io is absent at every level and must be a Reading carrying that reason and never a budget of zero. Also handed the clippy finding from its own landing: its firmware.rs redundant_guards passes under clippy-local's rust:1.97 and fails under run-clippy.sh's 1.98.",
+      "at_dispatch": "CARD'S NEXT IS ONE STEP STALE and the brief makes correcting it the first card edit: it still says 'write budget.rs', but 1086478 (§P2-011 per-agent cgroup budgets) and 84aea0a (§P2-011 against a real daemon) are both pushed. Three of four items are already landed; P2-011 is the last and is largely built. Remaining: mutation proofs, a full run, clippy, and an honest per-item verdict. Re-handed the measured design facts, especially that io is absent at every cgroup level and must be a Reading carrying that reason rather than a budget of zero.",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
@@ -70,35 +64,13 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p1-025",
       "branch": "task/p1-025-skills-plugins",
-      "agent_id": "a339e506e3a882ee7",
+      "agent_id": "a68d7cd244b756c27",
       "queue_id": "p1-025",
-      "dispatched": "2026-09-11T21:45+08:00",
+      "dispatched": "2026-09-11T22:02+08:00",
       "fresh_agent_for_card": "p1-025",
-      "session": "round 10 orchestrator",
+      "session": "round 12 orchestrator, pid 59982",
       "title": "P1-026 provenance - and it is what unblocks its own unit's landing",
-      "at_dispatch": "THE ONE UNIT THAT DID NOT LAND, and it was told exactly why: the merge was clean and compiled, then was aborted because digest.rs's describe/is_measured/same_as and skill.rs's Origin::describe have no committed caller and CI's clippy runs -D warnings. The callers are in the uncommitted provenance.rs, which is P1-026. Nothing is wrong with the work; it is half of a commit. Explicitly told NOT to resolve this with #[allow(dead_code)]. Pointed at apexd/apex/src/verify.rs ON THE NEW TIP as the in-repo example of provenance done properly - a pinned root rather than one the signature handed you, and a verdict distinguishing failed from absent from could-not-run.",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
-    },
-    {
-      "slug": "base-partials",
-      "items": [
-        "BASE-009",
-        "BASE-010",
-        "BASE-013",
-        "BASE-014"
-      ],
-      "repo": "both",
-      "worktree": "/var/tmp/apex-work/wt-base-os",
-      "branch": "task/base-partials",
-      "second_worktree": "/var/tmp/apex-work/wt-base-shell",
-      "second_branch": "task/base-partials-shell",
-      "agent_id": "a064fadad606034e5",
-      "queue_id": "base-partials",
-      "dispatched": "2026-09-11T21:45+08:00",
-      "fresh_agent_for_card": "base-partials",
-      "session": "round 10 orchestrator",
-      "title": "the four BASE preservation items still open, in the order the card sets",
-      "at_dispatch": "BASE-002, BASE-005, BASE-016 and BASE-018 landed (merge 65bd5c7) and are recorded done, with their qualifications carried into the evidence rather than dropped. Remaining order from the card: BASE-013, BASE-014, BASE-010, BASE-009. Re-handed the three things the card establishes and a fresh agent would otherwise re-derive: BASE-013's criterion 3 is a REAL defect at GreetContext.qml:332-335 and changing displayName's meaning is a deliberate tested edit (two suites assert it); BASE-014's last assertion is reachable because wtype was PROVEN to work and nothing in either repo has ever pressed a key after labwc --reconfigure; BASE-010 and BASE-009 may have to close with their gap named and measured rather than with a test that passes by never running.",
+      "at_dispatch": "Nearly done: all four items implemented and pushed through be1e178, worktree clean. What is left is exactly the card's list - six named mutation proofs (revision_of's dirty:Some(false) when git status fails; read_registry's EACCES arm returning None; the .in_use exclusion matching at any depth; the root dedup in collect_root; Attest's FirstSight-vs-Unmeasurable split on an unreadable store; the new drift check in test-apex-verbs.sh), then clippy, then a full run. The brief names the EACCES arm and the FirstSight/Unmeasurable split as the two that matter most: both are the permission-denied-is-not-absence class, and a mutant there that does not go red means the assertion never reached the arm.",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
@@ -111,13 +83,13 @@
       "branch": "task/p1-023-handoff-lifecycle",
       "second_worktree": "/var/tmp/apex-work/wt-p1-023-os",
       "second_branch": "task/p1-023-push-to-talk-daemon",
-      "agent_id": "a6d8bb62adbeac742",
+      "agent_id": "a58feea064b980bb2",
       "queue_id": "p1-023",
-      "dispatched": "2026-09-11T21:45+08:00",
+      "dispatched": "2026-09-11T22:02+08:00",
       "fresh_agent_for_card": "p1-023",
-      "session": "round 10 orchestrator",
+      "session": "round 12 orchestrator, pid 59982",
       "title": "P1-024 only - the cross-agent handoff packet",
-      "at_dispatch": "Both halves landed (apex-shell dc2283e, apex-os 09846c9); P1-023 and P1-029 are both recorded done. Only P1-024 remains, and the card's ## P1-024 SCOPING says it is NOT a shell item and NOT a data structure - told to read that before starting and not to re-derive the hold-vs-toggle or daemon findings. Also told what happened to its pipefail sweep at integration: the tip won in five of six conflicts because grading on the reported count is stronger than grep -q FAIL and is not a grep -q through a pipe either, and its own form won in the sixth (count_errors in run-agent-center-smoke.sh). Its measured finding about producer | grep -q under pipefail is not in question.",
+      "at_dispatch": "The shell half is LANDED (its content is fully on 665a3cc). The apex-os half carries four commits for P1-024's handoff packet through f0c0eac, including one that fixed a fixture writing into the LIVE daemon's state. The card's NEXT is the most important instruction in the unit and it is a measurement, not a build step: run the handoff_packet test and CHECK THE WALL CLOCK AND GREP FOR SKIP before believing the verdict - the fixture's session() returns None down a skip path and every test then returns, so four tests against a `sleep 300` session finishing in ~0.1 s means nothing was asserted. That is the difference between P1-024 being done and looking done.",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
@@ -128,13 +100,13 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p1-035",
       "branch": "task/p1-035-agent-tooling",
-      "agent_id": "a120bef0418935120",
+      "agent_id": "af8ef130bbf6e3519",
       "queue_id": "p1-035",
-      "dispatched": "2026-09-11T21:45+08:00",
+      "dispatched": "2026-09-11T22:02+08:00",
       "fresh_agent_for_card": "p1-035",
-      "session": "round 10 orchestrator",
+      "session": "round 12 orchestrator, pid 59982",
       "title": "commit, run and mutation-prove the daemon-death measurement - then the unit is complete",
-      "at_dispatch": "All twelve commits landed (merge 6d7d4a1); P1-035 and P1-036 are recorded done. The card says THE UNIT IS COMPLETE and it is not quite: one modified tracked file in the worktree, tests/test-agent-disposable.sh +162 lines, is the daemon-death measurement the round-9 brief asked for, and it is uncommitted. P1-037 is recorded partial for that reason and no other. Told to commit it, run it, mutation-prove it with the mutation its own text names (make the engine ignore SIGHUP - the mechanism for the SIGKILL half, since none of APEX's code runs then), make all three places say what was measured, leave the hedge the section itself flags, and then STOP rather than inventing more work. Handed the three integration decisions in its own files: paths.rs SCRATCH_ROOT_ENV won, client.rs's Observation-taking publish_hook won, inject.rs moved to &privilege::Caller.",
+      "at_dispatch": "P1-035 and P1-036 are done and proven; P1-037 is nearly done. Only three scratch mutate runners are dirty and they stay uncommitted. The card's NEXT is a measurement: run tests/test-agent-disposable.sh on the merged tree and record REAL counts for the new 'the capsule when the DAEMON dies' section (b787429, 162 lines). That section exists because an earlier agent asserted in three places that the engine's trap runs on daemon death without measuring it; the next agent measured and found BOTH deaths tear the capsule down. Told each case needs its own daemon, root and log - sharing the suite's log lets an earlier session's rm line satisfy a later grep, so the assertion passes without testing anything.",
       "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     }
   ],
@@ -144,8 +116,8 @@
   ],
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt — the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {
-    "pid": 19362,
-    "note": "THIS SESSION IS THE AUTORESUME-LAUNCHED ORCHESTRATOR. Ancestry: systemd --user -> autoresume.sh (2107) -> timeout 4h -> claude -p (19362). Two consequences worth writing down. (1) autoresume.sh holds flock on state/autoresume.lock for as long as this process lives, so a second timer firing skips - that guard is automatic and needs nothing. (2) THE SIX AGENTS ARE SUBAGENTS OF PID 19362 AND DIE WITH IT. Ending the orchestrator's turn ends them; the 4h timeout ends them. That is how rounds 8 and 9 lost six agents each - not a usage limit alone, but the session they lived inside going away. An orchestrator's job is therefore to stay up and keep landing while its agents work, not to dispatch and exit. state/orchestrator.pid is 19362 with a heartbeat loop guarded on that pid (touch every 5 min, exits when 19362 does), so autoresume's 45-minute heartbeat check sees a live orchestrator and its 20-minute subagent-output check sees the agents."
+    "pid": 59982,
+    "note": "The interactive session took the write path back only after the unattended one exited, and registered pid 59982 with a heartbeat loop guarded on it. The gap that let two run at once is the one to close: orchestrator.pid was stale because the previous session died on a limit, and nothing refreshes that file except a live orchestrator."
   },
   "_previous_pause": {
     "when": "2026-09-07T15:32+08:00 to 2026-09-08T08:56+08:00",

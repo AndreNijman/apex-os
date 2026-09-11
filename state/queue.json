@@ -1,8 +1,19 @@
 {
   "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
-  "updated": "2026-09-08T12:20+08:00",
+  "updated": "2026-09-11T22:08+08:00",
   "concurrency_ceiling": 6,
   "units": [
+    {
+      "id": "desktop-ai-apps",
+      "repo": "apex-os",
+      "items": [
+        "(new, from the 2026-09-11 CLAUDE.md decision)"
+      ],
+      "after": [],
+      "conflicts": [],
+      "title": "Ship the Claude and ChatGPT desktop apps in the image, updated only by apex update",
+      "note": "A PRODUCT DECISION Andre recorded in CLAUDE.md on 2026-09-11, not a roadmap item - nothing in roadmap.yaml covers it, so it needs its own unit. Three acceptance criteria, in his words: both apps are BAKED INTO THE IMAGE and present on a fresh install with real integration (desktop entries, portal/Wayland handling, claude:// and the ChatGPT scheme handler, tray icons) rather than a bare unpacked Electron tree; existing installs get them through `sudo apex update` alone, with no separate install step; and NEITHER APP SELF-UPDATES, with no per-app auto-update timer beside the OS update workflow - a version bump is a rebuild of the image. MEASURED ON THE L16 2026-09-11, read-only, do not re-derive: Claude Desktop 1.49585.0 is installed MANUALLY into /usr/local/lib/claude-desktop with /usr/local/bin/claude-desktop a symlink and com.anthropic.Claude.desktop as its entry - and /usr/local is /var/usrlocal, machine-local and NOT part of the image, which is exactly why the current state fails criterion 1. The stopgap this unit must retire exists and is running: ~/.local/bin/update-claude-desktop driven by claude-desktop-update.timer (OnBootSec=10min, OnUnitActiveSec=1d, RandomizedDelaySec=30min, Persistent=true) - its deb-fetch/verify/install logic is the thing to fold into the image build, and the timer is the model the decision rules out. CHATGPT DESKTOP IS NOT INSTALLED ANYWHERE and appears in no Containerfile; its packaging source is unresearched, which CLAUDE.md says explicitly, and settling that is the unit's first job rather than an assumption. Anthropic's official .deb lives in its own apt repo at downloads.claude.ai and the Linux app does not self-update by design, which suits criterion 3; APEX is bootc/rpm-ostree, so the deb has to be unpacked into the image rather than installed by apt. TRAP: the image build asserts what it ships (Containerfile.base gained hard build-time assertions for the trust anchor, and stage 5a-zed now asserts its desktop entry after the zed defect) - an app tree shipped without an assertion that its entry point, desktop file and scheme handler are present is how a broken app reaches every machine at once. Retire the live timer only AFTER the in-image version lands, per the decision's own wording."
+    },
     {
       "id": "p1-038-hardware",
       "repo": "apex-shell",
@@ -412,7 +423,8 @@
   },
   "_notes": {
     "trust-enforcement": "DISPATCHED 2026-09-07 15:02 (round 6), the slot freed by followups-integrate-3 finishing. Its `after: [integrate-3]` is long satisfied. No card existed; the agent creates ROADMAP/state/agents/trust-enforcement.md and its own worktree /var/tmp/apex-work/wt-trust on branch task/trust-enforcement.",
-    "p1-025": "UNBLOCKED as of round 6. `after: [p1-018]` is satisfied: p1-018's work is landed by content on roadmap/v2.2 (the diff of every file origin/task/p1-018-mcp-auth touches against the tip is empty, even though the branch is 10 commits 'ahead' by graph). Not dispatched only because the ceiling is six; first in line next round alongside one of the Cloudflare units."
+    "p1-025": "UNBLOCKED as of round 6. `after: [p1-018]` is satisfied: p1-018's work is landed by content on roadmap/v2.2 (the diff of every file origin/task/p1-018-mcp-auth touches against the tip is empty, even though the branch is 10 commits 'ahead' by graph). Not dispatched only because the ceiling is six; first in line next round alongside one of the Cloudflare units.",
+    "editors": "User-directed, outside the roadmap: Andre reported nvim and zed do not work. Zed's half is fixed and landed (ec91e92 - the image had installed the desktop entry from a filename the tarball never shipped, behind `|| true`, so the editor was invisible in every launcher on every machine). The other half is with an agent on task/terminal-entries-launchable, measuring whether the launcher honours Terminal=true, which nvim.desktop declares. Not added as a queue unit because it is one defect with a branch already open; if it grows, give it one."
   },
   "_hardware_blocked": {
     "P1-042 tablet leg": "Four of five creator input/audio legs are landed. The fifth owes one assertion - 'a stylus enumerates, is classified tablet, and its settings reach the compositor' - and NO TABLET EXISTS on either machine: libwacom finds none on the L16 or on katana. This is NOT a katana-while-gaming wait, so no amount of patience clears it; somebody has to plug a tablet in. Not dispatchable unattended, and deliberately not left inside a queue unit where it would keep a finished unit READY.",
