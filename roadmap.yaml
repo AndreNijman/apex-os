@@ -1066,21 +1066,24 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Shell half complete on task/p0-018-display-finish (4419e89, corrected by ae61e9a), on top of a9aeb2e. The
-    named gap — the light palette computed and unreachable — is closed as a mechanism: WallpaperService has a
-    mode, persisted beside the scheme in wallpaper.json, passed to BOTH matugen invocations, so a light palette is
-    producible and the measured contrast figures describe something real. Verified: matugen 4.2.0 -m light gives
-    surface #fdf9f3 against #141311 dark on the shipped wallpaper, every template in matugen.toml.in renders in
-    light without error, and run-agent-state-render-test.sh drives both palettes through the real Theme in a
-    headless compositor, 17 of 17, worst light contrast 4.81:1. A Light/Dark toggle was written and then
-    deliberately removed: 212 `color:` bindings across src/ are Qt.rgba(1, 1, 1, alpha), a foreground that reads
-    only on a dark surface, 20 of them in the settings pages including the description under every section heading
-    — the switch would have handed the user a blank Settings window, and check-color-tokens.sh could not see them
-    because it bounds hex literals and the n/255 disguise, not that form. So light mode is documented as
-    unsupported in Colors.qml beside the values it blocks, reachable by setting "mode": "light" in wallpaper.json
-    for anyone working on it, and check-color-tokens.sh now ratchets those 212 sites so the count cannot rise and
-    cannot fall silently. Partial, not done, for two reasons that remain: those 212 sites, and that no human has
-    looked at the badge weights on a real panel.
+    Agent Center and embedded agent terminal colour rendering. THE TWO-BRANCH CONFLICT IS RESOLVED, AND IT WAS NOT
+    A CONFLICT: task/p0-018-display-finish and task/p0-021-agent-colors were reported as independently claiming
+    this item, so the p0-finish agent correctly declined to commit to either rather than pick a winner by side
+    effect. Content-checked by the orchestrator 2026-09-12: the diff of every file EACH branch touches against
+    apex-shell roadmap/v2.2 (b195195) is EMPTY for both. Both are already landed by content and are stale only in
+    the sense that they sit far behind the tip; both are safe to delete. They were never competing -
+    p0-018-display-finish carries the palette mechanism (4419e89 the light palette was correct and unreachable,
+    ae61e9a light mode is reachable and must not be offered yet, plus the display guard and keybind work) and
+    p0-021-agent-colors carries the agent-state tokens that depend on it (37fa439 status tokens had one value
+    picked on a dark surface, 9200d3f FOUR OF SEVEN AGENT STATES RENDERED AS THE PALETTE'S FOREGROUND, 68c4280 the
+    request card measured its badge with the font scaler). Two halves of one item, landed in order. CRITERIA 1, 2,
+    3 AND 5 ARE CLOSED OR NOT APPLICABLE, and the remainder recorded previously was WRONG: the '212 sites' figure
+    is misfiled - ZERO of them are in agent files - and criterion 3 is vacuous by its own 'If', because no PTY is
+    embedded, by documented design. THE ONE REAL GAP IS CRITERION 4: agent identity reaches only a label string,
+    so 'Claude, OpenCode, Codex, Gemini and generic PTY sessions render consistently' is structural but
+    UNASSERTED. The missing test is specified exactly in ROADMAP/evidence/P0-021-agent-colour.md - it needs an
+    assertion that the same state renders the same token across all five session kinds, driven from agentstate.js
+    rather than from a screenshot.
 - id: P0-022
   title: Add Agents and Workspaces help/onboarding inside the Agents tab
   priority: P0

@@ -122,7 +122,33 @@ at `Containerfile.base:338` of `origin/roadmap/v2.2` @ `61504ca2`,
 
 **It was not reached.** `base` needs `rust`, and `rust` failed upstream of it,
 so `base` never ran. The prediction is neither confirmed nor refuted by this
-run; it stands for the first run that reaches `base`. What is checked rather
+run; it stands for the first run that reaches `base`.
+
+The run has since finished, and its shape confirms the mechanism empirically
+rather than only by reading the gate:
+
+| Job | Result |
+|---|---|
+| `changes` | ✓ 8s |
+| `rust` | **X 1m51s** — Clippy ✓, Test ✗ (101) |
+| `core` | **✓ 43m25s**, pushed and cosign-signed |
+| `base` | **skipped, 0s** |
+| `image`, `qcow2` | skipped |
+
+`base` at **0s** is the gate firing: nothing inside `Containerfile.base` was
+evaluated.
+
+**Two facts worth carrying forward.** First, `core` **builds cleanly from
+`roadmap/v2.2`** — so the branch's `Containerfile.core` is sound and the
+build criterion's remaining risk is entirely in `base` and beyond. That also
+retires the predecessor's reason for building core locally: a `:core` from
+this branch now exists in the registry, where the published one had been
+built from `main` and predated `Containerfile.core` installing
+`xdg-terminal-exec`. Second, the run carried **`PUBLISH: false`** throughout —
+only the per-SHA tag was pushed, the friendly `:core` tag was left alone, and
+nothing reached any deployed machine. The ref gate added after the
+`workflow_dispatch` hazard was found has now been exercised on a real
+non-`main` dispatch and holds. What is checked rather
 than assumed: `git merge-base --is-ancestor f372c089 origin/roadmap/v2.2`
 answers **NO**, so the fix for that assertion exists only on `task/p0-finish`.
 
@@ -176,7 +202,7 @@ existing evidence at `ROADMAP/evidence/P0-001-hardware-qualification.md`
 
 | Criterion | Verdict | The assertion that is missing, and what it takes |
 |---|---|---|
-| Daily and Gaming images build cleanly | **SPLIT — the old PASS is about a different tree** | PASS for digest `308127d9`, built from `main`, which both machines boot. **FAIL for `roadmap/v2.2` @ `61504ca2`**: run `34656544347` died in `rust`. Closes when a branch carrying BOTH `392108e5` and `f372c089` builds green through `image`. Costs one CI run, no hardware. |
+| Daily and Gaming images build cleanly | **SPLIT — the old PASS is about a different tree** | PASS for digest `308127d9`, built from `main`, which both machines boot. **FAIL for `roadmap/v2.2`**: run `34656544347` died in `rust`, which skipped `base` and `image`. Partial advance measured in the same run: **`core` builds green from the branch** (43m25s, pushed and signed), so the remaining risk is `base` and beyond. Closes when a branch carrying BOTH `392108e5` and `f372c089` builds green through `image`. Costs one CI run, no hardware. |
 | Fresh install succeeds | UNVERIFIED | Needs a wipe and a real install on real hardware. Not attemptable — this laptop is Andre's daily machine and katana is off-limits. Only Andre can authorise it. |
 | Upgrade succeeds | **PASS, re-measured today** | `bootc status` on the L16: booted `sha256:308127d9` (2026-09-05T13:36), rollback `sha256:5e206de5` (2026-09-05T03:29) — two different digests of the same `:daily` tag, so an upgrade was performed and the machine is running the newer one. |
 | Rollback succeeds | **UNVERIFIED, but better-positioned than the roadmap says** | The roadmap's narrative leans on katana, whose rollback slot holds the *same* digest as the booted one, so a reboot there would prove little. **The L16's does not**: rollback digest `5e206de5` ≠ booted `308127d9`, and ostree checksum `c9230df8…` ≠ `f3f505fc…`. A rollback reboot *here* would therefore prove something. What it takes: **one consented reboot**, which this unit must not perform. Nothing else. |

@@ -110,6 +110,37 @@ here. `base`'s gate is explicit —
 Consequence for the prediction below: run 34656544347 never reaches
 `Containerfile.base`, so it can neither confirm nor refute it.
 
+### The run finished, and it confirms the mechanism rather than only the reading
+
+Final state of 34656544347:
+
+| Job | Result |
+|---|---|
+| `changes` | ✓ 8s |
+| `rust` | **X 1m51s** — Clippy ✓, Test ✗ (exit 101) |
+| `core` | **✓ 43m25s** — built, pushed and cosign-signed |
+| `base` | **skipped, 0s** |
+| `image`, `qcow2` | skipped |
+
+`base` reporting **0s** is the gate firing exactly as read: it was not
+attempted, so no assertion inside `Containerfile.base` was evaluated. The
+prediction about line 338 therefore remains open.
+
+**A real partial advance for this criterion, worth recording separately:**
+`core` **builds cleanly from `roadmap/v2.2`** — 43m25s, pushed and signed.
+So the branch's `Containerfile.core` is sound, and the build criterion's
+remaining risk lives entirely in `base` and beyond. (This also removes the
+predecessor's reason for building core locally: a `:core` built from this
+branch now exists in the registry. The published `:core` had been built from
+`main` and predated `Containerfile.core` installing `xdg-terminal-exec`,
+which is why a local `base` build against it failed on a correct assertion.)
+
+**Fleet safety, verified on a real non-`main` dispatch:** the run carried
+`PUBLISH: false` throughout, so only the per-SHA tag was pushed and the
+friendly `:core` tag was left where it was. Nothing was promoted to any
+deployed machine. The ref gate added after the `workflow_dispatch` hazard was
+found does what it claims, and this run is the evidence.
+
 Fixed on `task/p0-finish` as `392108e5`, proved in both directions:
 
 | Placement | Result |

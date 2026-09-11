@@ -292,6 +292,52 @@ input device or the wlroots X11 backend, and there is no `Xvfb`, `Xephyr`,
 for the same reason. What IS shipped is the layer below it — libxkbcommon, the
 single component that decides the answer — asserted against the real library.
 
+## Packages installed on this laptop (round 2), and what each unblocked
+
+Andre lifted the no-install constraint mid-round: `sudo apex install <pkg>`
+builds a systemd sysext and merges it live. Two installs, both to close a row
+that was otherwise going to be reported unmeasurable:
+
+- **`xorg-x11-server-Xvfb`** — closed the design fork's named partial. The
+  wlroots HEADLESS backend creates no input device, so the seat has no keyboard
+  capability and a GTK client reads a fixed `us` keymap whatever
+  `XKB_DEFAULT_LAYOUT` says. The wlroots **X11** backend does create one, so
+  cage runs on a private Xvfb and the criterion becomes assertable. This is the
+  difference between "not measurable here" and `test-installer-keymap.sh`
+  test 3b.
+- **`qt6-qttools-devel`** — `qt6-qttools` alone does NOT ship the binaries; the
+  devel subpackage is what provides `/usr/bin/lupdate-qt6` and `lrelease-qt6`.
+  This is what makes "prove strings extract and substitute" measurable at all,
+  against the card's earlier finding that no lupdate existed on this box.
+
+Caveat recorded, not acted on: `apex install` rebuilds the extension from all
+enabled repos, and `/etc/yum.repos.d/chatgpt.repo` is enabled, so the extension
+now also carries `chatgpt` (29 → 36 packages, 643 → 651 MB). Left alone — that
+repo is Andre's call.
+
+## A harness bug that would have made every mutation verdict worthless
+
+The first mutation harness backed each file up to `$BK/$(basename f).orig` and
+restored with `cp`. Partway through the run the working tree's
+`apex-installer-session` was found holding **the launcher's contents** (369
+lines instead of 171). The committed version was intact; only the working tree
+was corrupted, and it was caught by an editor notice rather than by the harness,
+which had no integrity check at all.
+
+Worth recording because of what it implies: the run was producing verdicts
+against a tree that was wrong in a place no assertion looked at, so every
+"CAUGHT"/"SURVIVED" after the corruption meant nothing. The backup/restore logic
+was afterwards reproduced in isolation and behaved correctly, and the suite alone
+(28/28) leaves the tree clean — so the cause is in the harness, not in the suite
+or the files.
+
+Take 2 does not use a hand-rolled backup at all: restores are `git checkout --`,
+which is authoritative about content and gives a fresh mtime (the property the
+"plain `cp`, never `mv`, never `cp -p`" rule exists to protect), and the whole
+file set is compared against HEAD **after every mutate and every restore**. A
+step that finds the tree dirty in an unexpected place aborts the run and names
+itself instead of reporting a verdict.
+
 ## The predecessor's last note, run down: the premise was false, and it is a defect
 
 The note was that a bad-username case failed the same way in the new work as in
