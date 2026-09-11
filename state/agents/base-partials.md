@@ -52,6 +52,49 @@ this round, see RESULTS.
 
 ## RESULTS (round 12) — per item
 
+### BASE-014 — CLOSED. apex-os `eb26c072` on task/base-partials.
+The last open assertion ("the rebound key fires after --reconfigure") now
+exists and runs. `tests/test-labwc-keybind-reload.sh` **18 passed, 0 failed,
+0 skipped**.
+- **A NEW FILE, not a section in either labwc suite, and that was a safety
+  decision.** `test-labwc-session.sh` nests inside the PARENT display — this
+  agent's env carries Andre's `WAYLAND_DISPLAY=wayland-1` and `DISPLAY=:0`, so
+  its `APEX_LABWC_SESSION_TESTS=1` opt-in would have opened windows on his
+  desktop. It is also in NO workflow, so anything added there runs nowhere.
+  The new suite runs under `WLR_BACKENDS=headless` (note: plural — `WLR_BACKEND`
+  silently falls through to DRM and fails on seat access) in a private
+  XDG_RUNTIME_DIR with WAYLAND_DISPLAY/DISPLAY unset.
+- **`labwc --reconfigure` SIGHUPs `$LABWC_PID`** (confirmed in labwc(1) and in
+  the binary's strings), which is INHERITED. The suite unsets it on entry and
+  sets it explicitly to the pid it started. Isolation is asserted as four hard
+  failures before the first keypress; if any fails the suite refuses to press
+  anything.
+- Keypresses are observable because generated commands are PATH-resolved names:
+  the model binds SUPER+T to `alacritty`, and a stub of that name on a private
+  PATH records each run.
+- Five phases: control (shipped binding fires), negative (unbound key, waited
+  the SAME 5s), **the bug reproduced** (`--no-reload` → new key dead, old key
+  alive), the criterion (after `--reconfigure` → new fires, old dead), and the
+  shipped tool's OWN reload (`apply` with no `--no-reload`, covering
+  `reload_labwc()`'s call site).
+- MUTATION-PROVED four ways, TWO against the product:
+  `reload_labwc()` made a no-op → phase E reddens (16/2) while D stays green,
+  which is exactly the split those phases draw; the explicit `--reconfigure`
+  deleted → D reddens (15/3); LABWC_PID aimed at a bogus pid → the isolation
+  guard fires and the suite REFUSES to press anything (5/2); the shipped
+  rc.xml losing its SUPER+T binding → the control fails and the suite STOPS
+  rather than banking vacuous passes (6/2).
+- Wired into pr-validation.yml after the keybind-generator step (which already
+  vendors the apex-shell tree this needs) with labwc+wtype installed, and into
+  that job's ShellCheck gate. shellcheck/bash -n clean, check-ignore exit 1,
+  YAML re-parsed.
+- **NAMED GAP:** whether the GitHub runner can start labwc headless is NOT
+  verified — pr-validation.yml runs on push to `roadmap/v2.2`, which this
+  branch must not push, and this branch's own copy of the workflow has only
+  `pull_request: [main]`. The suite skips at status 0 where labwc or wtype will
+  not run, so the untested outcome is a skip, never a false red.
+
+
 ### BASE-013 — CLOSED. apex-shell `ea83d21` on task/base-partials-shell.
 The predecessor's dirty WIP (MiscPage.qml, Compositor.qml,
 check-compositor-naming.sh) was NOT committed as found. Its step 0 was "verify
