@@ -16,4 +16,8 @@ libc.workspace = true
 snow = "0.9.6"
 data-encoding = "2.11.1"
 rand = "0.9.5"
+# RFC 6455 names SHA-1 for the WebSocket accept value. It is a protocol
+# constant there, not a security primitive, and the crate is already in the
+# lock through snow, so this edge costs nothing new to build or to audit.
+sha1 = "0.10.7"
 sha2 = "0.10.9"
