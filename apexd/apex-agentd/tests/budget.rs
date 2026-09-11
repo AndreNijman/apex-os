@@ -251,7 +251,22 @@ macro_rules! harness {
         match Harness::start($tag, $config, $transport) {
             Some(h) => h,
             None => {
-                // A skip is not a pass, so it says which one this was.
+                // A `return` in a #[test] is reported as a PASS, and the
+                // eprintln is swallowed unless somebody passed --nocapture. So
+                // for a run that explicitly asked for the live half, a daemon
+                // that would not start has to be a failure: APEX_BUDGET_LIVE=1
+                // means "prove it", and a green tick over an assertion that
+                // never executed is the exact shape that let FOUND (seventh)
+                // ship. Same reasoning as APEX_REQUIRE_APEX_CLI in
+                // pr-validation.yml.
+                assert!(
+                    !live_wanted(),
+                    "APEX_BUDGET_LIVE=1 was set, so this test was asked to \
+                     prove the scope is real — but apex-agentd would not \
+                     start for {}, and skipping here would report that as a \
+                     pass",
+                    $tag
+                );
                 eprintln!("SKIP {}: apex-agentd would not start", $tag);
                 return;
             }
