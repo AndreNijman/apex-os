@@ -410,4 +410,129 @@ else
     skp "…and keys off ids rather than labels" "not present"
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+section "§7 which session is preselected, lifted out of the shipped QML"
+# ─────────────────────────────────────────────────────────────────────────────
+# The other half of "which session boots". §1-§3 decide what is ON the carousel;
+# this decides which entry is SELECTED when the greeter opens, and it is the
+# half that can lock a user out.
+#
+# The file's own comment above `defaultSession` records the precedent: a
+# positional default made hyprland-uwsm.desktop the default because it sorted
+# first, and it bounce-looped at login on real hardware. `defaultSession` was
+# added so the default is NAMED. But the protection was wired only to the
+# no-memory path, so a REMEMBERED session that is no longer installed fell back
+# to position 0 — the very thing the named default abolishes.
+#
+# That is reachable on any machine that has used Gaming Mode once. `last-session`
+# is written on every login, so it reads `apex-gaming`; the TryExec gate in §1
+# removes that entry whenever gamescope is absent, which is every boot before the
+# sysext merges. Same class of defect, same file, one path over.
+#
+# Extracted and RUN rather than restated, for the same reason §1 and §5 are: a
+# restatement of the selection rule would agree with itself forever.
+if ! command -v node >/dev/null 2>&1; then
+    skp "the greeter's selection rule is extractable and runnable"
+    skp "a remembered session that is still installed is selected"
+    skp "a remembered session that is GONE falls back to the named default"
+    skp "…and not to whatever sorts first"
+    skp "no memory at all still selects the named default"
+    skp "an unknown default selects nothing rather than guessing"
+else
+SEL_JS="$WORK/selectwanted.js"
+python3 - "$GREETER" "$SEL_JS" <<'PY'
+import re, sys
+
+src = open(sys.argv[1], encoding="utf-8").read()
+
+# The function, by name, to its closing brace at the same indent. QML functions
+# in this file are indented four spaces, so "\n    }" ends it — the same shape
+# §5's extractor relies on.
+start = src.find("    function _selectWanted() {")
+if start < 0:
+    sys.exit("no _selectWanted in the greeter")
+end = src.find("\n    }", start)
+if end < 0:
+    sys.exit("_selectWanted is not terminated")
+body = src[start:end + len("\n    }")]
+
+# The named default, so the harness cannot invent one that happens to agree.
+m = re.search(r'readonly\s+property\s+string\s+defaultSession:\s*"([^"]*)"', src)
+if not m:
+    sys.exit("no defaultSession in the greeter")
+default = m.group(1)
+
+# `function _selectWanted() {` -> a plain JS function over an injected ctx.
+body = body.replace("function _selectWanted() {", "function _selectWanted(ctx) {", 1)
+
+harness = body + """
+
+const DEFAULT = %r;
+function run(want, ids) {
+    const ctx = {
+        _wantSession: want,
+        defaultSession: DEFAULT,
+        sessions: ids.map(id => ({ id })),
+        sessionIndex: 0,
+    };
+    _selectWanted(ctx);
+    return ctx.sessions.length ? ctx.sessions[ctx.sessionIndex].id : null;
+}
+const cases = JSON.parse(process.argv[2]);
+console.log(JSON.stringify(cases.map(c => run(c[0], c[1]))));
+console.error(DEFAULT);
+""" % default
+open(sys.argv[2], "w", encoding="utf-8").write(harness)
+PY
+sel_rc=$?
+is "the greeter's selection rule is extractable and runnable" "0" "$sel_rc"
+
+# The sorted enumeration a built image actually produces. apex-gaming sorts
+# FIRST, which is what makes "index 0" and "the named default" different answers
+# — if they were the same, every assertion below would pass vacuously.
+INSTALLED='["apex-gaming","apex-labwc","hyprland","niri"]'
+NOGAMING='["apex-labwc","hyprland","niri"]'
+
+sel_default="$(node "$SEL_JS" '[]' 2>&1 >/dev/null)"
+sel_out="$(node "$SEL_JS" "[[\"niri\",$INSTALLED],[\"apex-gaming\",$NOGAMING],[\"\",$INSTALLED]]" 2>/dev/null)"
+
+if [ -z "$sel_out" ]; then
+    bad "a remembered session that is still installed is selected" "the harness produced nothing"
+    bad "a remembered session that is GONE falls back to the named default" "no output"
+    bad "…and not to whatever sorts first" "no output"
+    bad "no memory at all still selects the named default" "no output"
+else
+    # Plausibility: the default read out of the QML must be one of the entries,
+    # or every "falls back to the default" assertion below is unreachable.
+    case "$NOGAMING" in
+        *"\"$sel_default\""*) ok "the named default ($sel_default) is a session this image installs" ;;
+        *) bad "the named default ($sel_default) is a session this image installs" ;;
+    esac
+
+    got1="$(printf '%s' "$sel_out" | sed 's/.*\[//;s/\].*//' | cut -d, -f1 | tr -d '" ')"
+    got2="$(printf '%s' "$sel_out" | sed 's/.*\[//;s/\].*//' | cut -d, -f2 | tr -d '" ')"
+    got3="$(printf '%s' "$sel_out" | sed 's/.*\[//;s/\].*//' | cut -d, -f3 | tr -d '" ')"
+
+    is "a remembered session that is still installed is selected" "niri" "$got1"
+    is "a remembered session that is GONE falls back to the named default" \
+       "$sel_default" "$got2"
+    # Stated separately and on purpose: this is the lockout. apex-gaming is
+    # remembered, gamescope is absent so the entry was filtered out, and the old
+    # code left sessionIndex at 0 — apex-labwc here, a session the user never
+    # chose, with different keybinds and a different shell layout.
+    if [ "$got2" = "apex-labwc" ]; then
+        bad "…and not to whatever sorts first" "selected the first sorted entry"
+    else
+        ok "…and not to whatever sorts first"
+    fi
+    is "no memory at all still selects the named default" "$sel_default" "$got3"
+
+    # An unknown default must select nothing rather than guess: the greeter
+    # would show its own index-0 entry, which is a display default, not a
+    # decision this function invented.
+    got4="$(node "$SEL_JS" '[["nosuchsession",["zzz-only"]]]' 2>/dev/null | tr -d '[]" ')"
+    is "an unknown default selects nothing rather than guessing" "zzz-only" "$got4"
+fi
+fi
+
 finish
