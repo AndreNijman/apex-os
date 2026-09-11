@@ -249,23 +249,45 @@ pub fn spawn(
     // the returned `pgid` real: login_tty's setsid has definitely run by the
     // time the pipe resolves, so a kill issued immediately after this returns
     // cannot race the process group into existence.
-    let outcome = read_sync(sync_read);
+    let outcome = read_sync(sync_read, EXEC_DEADLINE_MS);
     unsafe { libc::close(sync_read) };
 
-    if let Some((stage, errno)) = outcome {
-        // Reap the child that is already on its way out, so it does not linger
-        // as a zombie for a session that never started.
-        let mut status: libc::c_int = 0;
-        unsafe { libc::waitpid(pid, &mut status, 0) };
-        unsafe { libc::close(master) };
-        let err = std::io::Error::from_raw_os_error(errno);
-        let what = match stage {
-            STAGE_LOGIN_TTY => "attaching the agent to its terminal",
-            STAGE_CHDIR => "entering the working directory",
-            STAGE_NO_NEW_PRIVS => "locking the session out of privilege escalation",
-            _ => "starting the agent program",
-        };
-        return Err(err).context(what.to_string());
+    match outcome {
+        Exec::Started => {}
+        Exec::Failed(stage, errno) => {
+            // Reap the child that is already on its way out, so it does not
+            // linger as a zombie for a session that never started.
+            let mut status: libc::c_int = 0;
+            unsafe { libc::waitpid(pid, &mut status, 0) };
+            unsafe { libc::close(master) };
+            let err = std::io::Error::from_raw_os_error(errno);
+            let what = match stage {
+                STAGE_LOGIN_TTY => "attaching the agent to its terminal",
+                STAGE_CHDIR => "entering the working directory",
+                STAGE_NO_NEW_PRIVS => "locking the session out of privilege escalation",
+                _ => "starting the agent program",
+            };
+            return Err(err).context(what.to_string());
+        }
+        Exec::Stuck => {
+            // The child is wedged somewhere before exec and will never say so.
+            // Kill it: a child that never execs never runs FD_CLOEXEC, so for
+            // as long as it lives it holds open every descriptor it inherited
+            // at fork — this process's pipes, sockets and terminals included.
+            // Leaving it alive is what turns one stuck spawn into unrelated
+            // reads elsewhere in the program that never see end-of-file.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+                let mut status: libc::c_int = 0;
+                libc::waitpid(pid, &mut status, 0);
+                libc::close(master);
+            }
+            bail!(
+                "the agent process was still not running {EXEC_DEADLINE_MS} ms \
+                 after it was forked, so it was killed; it never reached the \
+                 program, and nothing was started"
+            );
+        }
     }
 
     set_nonblocking(master)?;
@@ -286,14 +308,64 @@ const STAGE_CHDIR: u8 = 2;
 const STAGE_EXEC: u8 = 3;
 const STAGE_NO_NEW_PRIVS: u8 = 4;
 
-/// Wait for the child to exec or report a failure.
+/// How long the parent waits for the child to reach `execve`.
 ///
-/// `None` means the pipe closed empty: `FD_CLOEXEC` fired, so exec succeeded.
-/// `Some((stage, errno))` is a pre-exec failure the child described.
-fn read_sync(fd: RawFd) -> Option<(u8, i32)> {
+/// Between fork and exec the child runs a handful of syscalls, so this is not a
+/// performance budget — it is the line between a spawn that reports a failure
+/// and one that hangs forever. It exists because the wait below used to be a
+/// bare `read` with no deadline: when a child blocked before exec, the parent
+/// blocked with it, and a test that hangs reports neither pass nor fail. That
+/// cost two agent sessions and four hours of a wedged worktree, where the same
+/// defect with a deadline would have been one red test in ten seconds.
+const EXEC_DEADLINE_MS: u64 = 10_000;
+
+/// What the sync pipe said about the child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exec {
+    /// The pipe closed empty: `FD_CLOEXEC` fired, so exec succeeded.
+    Started,
+    /// A pre-exec failure the child described: stage marker and errno.
+    Failed(u8, i32),
+    /// The deadline passed with the child neither exec'd nor failed.
+    Stuck,
+}
+
+/// Wait for the child to exec or report a failure, for at most `deadline_ms`.
+fn read_sync(fd: RawFd, deadline_ms: u64) -> Exec {
     let mut buf = [0u8; 3];
     let mut filled = 0usize;
+    let start = std::time::Instant::now();
     while filled < buf.len() {
+        let elapsed = start.elapsed().as_millis() as u64;
+        if elapsed >= deadline_ms {
+            return Exec::Stuck;
+        }
+        // poll, not a bare blocking read, is the whole point: the deadline has
+        // to be enforced by the wait itself. EINTR is retried against the
+        // original deadline rather than restarting it, so a signal storm
+        // cannot extend the wait indefinitely.
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // Safe: poll reads and writes one pollfd we own.
+        let rc = unsafe { libc::poll(&mut pfd, 1, (deadline_ms - elapsed) as i32) };
+        if rc == 0 {
+            return Exec::Stuck;
+        }
+        if rc < 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            // An unpollable descriptor is not the child's fault; fall through
+            // to the same "nothing was reported" reading as an empty pipe.
+            break;
+        }
+        // Readable, hung up, or in error — in every case the answer is to read
+        // and let the result speak. A hangup with no bytes is a successful
+        // exec, which is exactly what this pipe exists to signal.
+        //
         // Safe: read into a buffer we own, bounded by its remaining length.
         let n = unsafe {
             libc::read(
@@ -315,10 +387,10 @@ fn read_sync(fd: RawFd) -> Option<(u8, i32)> {
         break;
     }
     if filled < buf.len() {
-        return None;
+        return Exec::Started;
     }
     let errno = i32::from(buf[1]) | (i32::from(buf[2]) << 8);
-    Some((buf[0], errno))
+    Exec::Failed(buf[0], errno)
 }
 
 /// Put a descriptor into non-blocking mode.
