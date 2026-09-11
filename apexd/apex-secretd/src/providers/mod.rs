@@ -50,6 +50,9 @@ mod tests {
         assert_eq!(
             registry.operation_ids(),
             vec![
+                "cloudflare.access.edit",
+                "cloudflare.access.read",
+                "cloudflare.access.service-token.create",
                 "cloudflare.account.read",
                 "cloudflare.d1.migrate",
                 "cloudflare.d1.query",
@@ -67,6 +70,8 @@ mod tests {
                 "cloudflare.r2.bucket.create",
                 "cloudflare.r2.object.read",
                 "cloudflare.r2.object.write",
+                "cloudflare.tunnel.edit",
+                "cloudflare.tunnel.read",
                 "cloudflare.worker.deploy",
                 "cloudflare.worker.read",
                 "cloudflare.worker.rollback",

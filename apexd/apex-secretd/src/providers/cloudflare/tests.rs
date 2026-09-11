@@ -65,6 +65,26 @@ const RECORD_B: &str = "00998877ff66ee55dd44cc33bb22aa11";
 /// The one bucket §13.1's file binds.
 const BUCKET: &str = "example-assets";
 
+/// §13.10's two ids the fixture's file binds. An Access application id is
+/// `oneOf [32 hex, uuid]` in Cloudflare's own schema, so the fixture uses the
+/// UUID half — the shape a validator written for hex alone would refuse.
+const APP_ID: &str = "f174e90a-fafe-4643-bbbc-4a0ed4fc8415";
+const TUNNEL_ID: &str = "f70ff985-a4ef-4643-bbbc-4a0ed4fc8415";
+
+/// What the double answers with when a service token is issued. The secret is
+/// the thing this whole unit exists to keep out of the caller's hands, so it is
+/// distinctive enough that finding it anywhere means it travelled.
+const CLIENT_ID: &str = "8a1b2c3d4e5f60718293a4b5c6d7e8f9.access";
+const CLIENT_SECRET: &str = "apex-cf-service-token-secret-0d4e1a-do-not-leak";
+
+/// The SaaS client secret the double puts in an Access application, which a
+/// self-hosted one would not carry and an OIDC SaaS one does.
+const APP_SECRET: &str = "apex-cf-saas-client-secret-77b2-do-not-leak";
+
+/// The connector token the double would hand back for a tunnel. Nothing in this
+/// build asks for it; the constant is here so a test can prove that.
+const TUNNEL_TOKEN: &str = "apex-cf-tunnel-token-3e9c-do-not-leak";
+
 /// What the double stores for the one object a test reads back. Not JSON, and
 /// it carries the credential the request arrived with, so a read that came back
 /// unscrubbed would show it.
@@ -96,6 +116,12 @@ jobs = "ffeeddccbbaa99887766554433221100"
 
 [cloudflare.hyperdrive]
 pg = "0f0e0d0c0b0a09080706050403020100"
+
+[cloudflare.access]
+dashboard = "f174e90a-fafe-4643-bbbc-4a0ed4fc8415"
+
+[cloudflare.tunnels]
+office = "f70ff985-a4ef-4643-bbbc-4a0ed4fc8415"
 
 [cloudflare.preview]
 worker = "project-preview"
@@ -326,6 +352,37 @@ fn answer(method: &str, target: &str) -> (u16, String) {
         )),
         ("PATCH", p) if p == format!("/accounts/{ACCOUNT}/hyperdrive/configs/{HD_ID}") => {
             ok(&format!(r#"{{"id":"{HD_ID}","name":"pg","caching":{{"disabled":false}}}}"#))
+        }
+
+        // ── §13.10, Cloudflare One ──────────────────────────────────────────
+        //
+        // The Access application is an OIDC SaaS one, so it carries a
+        // `client_secret` the documented schema really does return. A double
+        // that answered with a self-hosted application would let a build with
+        // no scrub at all pass.
+        ("GET", p) if p == format!("/accounts/{ACCOUNT}/access/apps/{APP_ID}") => ok(&format!(
+            r#"{{"id":"{APP_ID}","name":"dashboard","domain":"admin.example.com","type":"saas","saas_app":{{"client_id":"{CLIENT_ID}","client_secret":"{APP_SECRET}","auth_type":"oidc"}}}}"#
+        )),
+        ("POST", p) if p == format!("/accounts/{ACCOUNT}/access/apps/{APP_ID}/revoke_tokens") => {
+            ok("true")
+        }
+        ("POST", p) if p == format!("/accounts/{ACCOUNT}/access/service_tokens") => (
+            201,
+            format!(
+                r#"{{"success":true,"errors":[],"messages":[],"result":{{"id":"1e0b9a4c-0000-4000-8000-abcdefabcdef","name":"ci","client_id":"{CLIENT_ID}","client_secret":"{CLIENT_SECRET}","duration":"8760h"}}}}"#
+            ),
+        ),
+        ("GET", p) if p == format!("/accounts/{ACCOUNT}/cfd_tunnel/{TUNNEL_ID}") => ok(&format!(
+            r#"{{"id":"{TUNNEL_ID}","name":"office","status":"healthy","connections":[],"created_at":"2026-09-01T00:00:00Z"}}"#
+        )),
+        ("PATCH", p) if p == format!("/accounts/{ACCOUNT}/cfd_tunnel/{TUNNEL_ID}") => ok(&format!(
+            r#"{{"id":"{TUNNEL_ID}","name":"branch-office","status":"healthy"}}"#
+        )),
+        // The endpoint this build does not declare. It answers, so that a test
+        // asserting the token never comes back is measuring a refusal to ask
+        // rather than a double that had nothing to give.
+        ("GET", p) if p == format!("/accounts/{ACCOUNT}/cfd_tunnel/{TUNNEL_ID}/token") => {
+            ok(&format!(r#""{TUNNEL_TOKEN}""#))
         }
 
         // ── §13.9, DNS ──────────────────────────────────────────────────────
@@ -593,6 +650,16 @@ fn every_operation() -> Vec<OperationCase> {
         ("cloudflare.queue.manage", "jobs", vec![("paused", "true")], 1),
         ("cloudflare.hyperdrive.read", "pg", vec![], 1),
         ("cloudflare.hyperdrive.edit", "pg", vec![("caching", "on")], 1),
+        ("cloudflare.access.read", "dashboard", vec![], 1),
+        ("cloudflare.access.edit", "dashboard", vec![], 1),
+        (
+            "cloudflare.access.service-token.create",
+            "admin.example.com",
+            vec![("name", "ci"), ("duration", "8760h")],
+            1,
+        ),
+        ("cloudflare.tunnel.read", "office", vec![], 1),
+        ("cloudflare.tunnel.edit", "office", vec![("name", "branch-office")], 1),
         ("cloudflare.dns.read", "www.example.com", vec![("type", "A")], 1),
         (
             "cloudflare.dns.create",
@@ -1275,22 +1342,24 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
     for op in SPEC.operations {
         // `worker.route.read` is the one addition, and it is §13.3's "Worker
         // routes" rather than an invention.
-        if op.id == "cloudflare.worker.route.read" {
+        if op.id == "cloudflare.worker.route.read"
+            || op.id == "cloudflare.access.service-token.create"
+        {
             continue;
         }
         assert!(listed.contains(&op.id), "'{}' is not in §13.2", op.id);
     }
-    // Twenty-two of §13.2's thirty-two, and one addition. The arithmetic is asserted
-    // because the module note states it and a later task will read that note
-    // to work out what is left.
+    // Twenty-six of §13.2's thirty-two, and two additions. The arithmetic is
+    // asserted because the module note states it and a later task will read
+    // that note to work out what is left.
     let from_13_2 = SPEC
         .operations
         .iter()
         .filter(|op| listed.contains(&op.id))
         .count();
-    assert_eq!(from_13_2, 22);
-    assert_eq!(SPEC.operations.len(), 23);
-    assert_eq!(SECTION_13_2.len() - from_13_2, 10, "still unimplemented");
+    assert_eq!(from_13_2, 26);
+    assert_eq!(SPEC.operations.len(), 28);
+    assert_eq!(SECTION_13_2.len() - from_13_2, 6, "still unimplemented");
 
     // Nothing is declared twice, and every summary reads as a sentence about
     // what the owner is being asked to allow.
@@ -2232,6 +2301,315 @@ fn the_trail_names_the_record_and_the_zone_that_was_changed() {
         used.detail,
         format!("change the A record at www.example.com in zone example.com [{ZONE}]")
     );
+}
+
+// ── §13.10, Cloudflare One ──────────────────────────────────────────────────
+//
+// Seven mutations were run against the arms below, one at a time, each restored
+// by copying the pristine file back so that cargo rebuilt rather than reusing
+// the mutant's binary. Every one turns a named test red:
+//
+// * the provider no longer stripping `client_secret` from its own reply —
+//   `the_provider_takes_the_token_secret_out_before_the_framework_ever_sees_it`.
+//   Worth reading the note in that test: with BOTH layers present this mutation
+//   changed nothing any test going through `use_capability` could see, because
+//   the framework's scrub caught it. The test was rewritten to call `perform`
+//   directly, and only then did the mutation bite. Two layers need two tests;
+//   the framework's is `service.rs`'s `SEAM-M1`;
+// * the created credential pinned to `api.cloudflare.com` — the API that
+//   ISSUED it rather than the host it may be sent to — and the host taken from
+//   the caller instead of resolved through the project's binding:
+//   `an_access_service_token_is_kept_here_…`,
+//   `a_host_this_project_did_not_bind_…`;
+// * `access.read` no longer scrubbing a SaaS `client_secret`, and the scrub no
+//   longer descending into arrays —
+//   `an_access_application_that_carries_a_client_secret_…`,
+//   `a_credential_nested_in_an_array_is_still_taken_out`. The second of those
+//   also needed its own test: every secret the double nests today is inside an
+//   OBJECT, so array descent was untested until something asserted it;
+// * the duration forwarded to Cloudflare unchecked —
+//   `a_service_token_duration_cloudflare_would_refuse_…`;
+// * an Access application id validated as 32 hex alone, which refuses the UUID
+//   half of Cloudflare's own `oneOf` —
+//   `an_access_service_token_is_kept_here_…`.
+
+#[test]
+fn an_access_service_token_is_kept_here_and_the_caller_gets_a_handle() {
+    // §13.10, end to end: "Broker service-token/Tunnel/Access credentials
+    // directly into protected storage. The agent receives handles/capabilities,
+    // not plaintext secrets."
+    //
+    // Three things are measured, and the third is the one a build gets wrong:
+    // the secret did not come back, the secret IS in the store byte for byte,
+    // and it is pinned to the HOST the project named rather than to the API
+    // that issued it. A credential stored against `api.cloudflare.com` would
+    // look stored and be a pin that says the wrong thing.
+    let f = Fixture::new("token", Mode::Normal, &granted_everything());
+    let reply = f.use_it(
+        f.record("cloudflare.access.service-token.create", "admin.example.com")
+            .param("name", "ci"),
+    );
+    let Response::Performed { output, exit_code, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(*exit_code, 0, "{output}");
+    assert!(!output.contains(CLIENT_SECRET), "the secret came back: {output}");
+    // The client id is not a secret and is useless without its other half, so
+    // it does come back — an agent that could not name the token it just made
+    // would have got a capability it cannot use.
+    assert!(output.contains(CLIENT_ID), "{output}");
+    assert!(output.contains("cf-access.admin.example.com"), "{output}");
+
+    let store = Store::new(f.store.clone());
+    let uid = me().uid;
+    let info = store
+        .info(uid, "cf-access.admin.example.com")
+        .expect("the secret was not kept");
+    assert_eq!(info.host, "admin.example.com", "pinned to the wrong host");
+    assert_eq!(info.scheme, "https");
+    assert_eq!(info.username, CLIENT_ID);
+    assert_eq!(
+        store.value(uid, "cf-access.admin.example.com").expect("value").as_str(),
+        Some(CLIENT_SECRET),
+        "a different secret was stored"
+    );
+
+    // Not in the trail either, which is the file an administrator greps.
+    assert!(!f.trail().contains(CLIENT_SECRET), "the secret is in the audit trail");
+}
+
+#[test]
+fn a_second_service_token_for_the_same_host_is_refused_before_one_is_issued() {
+    // Cloudflare shows a `client_secret` once. So a second token for a host
+    // whose secret is already stored has to be refused BEFORE the call, not
+    // after: a refusal afterwards leaves a token that exists, is in nobody's
+    // hands, and cannot be fetched again. The double's `seen()` is what proves
+    // the order — nothing was asked.
+    let f = Fixture::new("token2", Mode::Normal, &granted_everything());
+    let first = f.use_it(
+        f.record("cloudflare.access.service-token.create", "admin.example.com")
+            .param("name", "ci"),
+    );
+    assert!(matches!(first, Response::Performed { exit_code: 0, .. }), "{first:?}");
+    let calls = f.fake.seen().len();
+
+    let second = f.use_it(
+        f.record("cloudflare.access.service-token.create", "admin.example.com")
+            .param("name", "ci-again"),
+    );
+    let (error, message) = second.as_error().expect("a second token must be refused");
+    assert_eq!(error, ErrorKind::BadRequest, "{message}");
+    assert!(message.contains("cf-access.admin.example.com"), "{message}");
+    assert_eq!(f.fake.seen().len(), calls, "a second token was issued anyway");
+}
+
+#[test]
+fn a_host_this_project_did_not_bind_cannot_have_a_credential_pinned_to_it() {
+    // The pin is only worth having if the project had to be allowed to name the
+    // host, so this resolves through the same label-boundary check §13.9 uses:
+    // `notexample.com` is not inside `example.com`, however much it ends in the
+    // same letters. The ERROR KIND is asserted and not merely that something
+    // was refused — "you did not bind that" reported as "you may not" is the
+    // defect this Cloudflare block has now produced twice.
+    let f = Fixture::new("tokenzone", Mode::Normal, &granted_everything());
+    for host in ["notexample.com", "admin.example.com.attacker.test", "elsewhere.test"] {
+        let reply = f.use_it(
+            f.record("cloudflare.access.service-token.create", host).param("name", "ci"),
+        );
+        let (error, message) = match reply.as_error() {
+            Some(pair) => pair,
+            None => panic!("'{host}' was accepted as a host in this project's zone"),
+        };
+        assert_eq!(error, ErrorKind::BadRequest, "{host}: {message}");
+        assert!(message.contains("example.com"), "{message}");
+    }
+    assert!(f.fake.seen().is_empty(), "an unbound host reached the api");
+}
+
+#[test]
+fn a_service_token_duration_cloudflare_would_refuse_is_refused_before_the_call() {
+    // For every other operation, sending a value the far side rejects wastes a
+    // request. For this one it can do worse: a request that fails *after*
+    // creating the token leaves a secret nobody will ever see. So the duration
+    // is checked here, against the syntax the schema documents.
+    let f = Fixture::new("duration", Mode::Normal, &granted_everything());
+    for bad in ["8760", "h", "2h45", "forever-and-ever", "-5h", "8760H", ""] {
+        let reply = f.use_it(
+            f.record("cloudflare.access.service-token.create", "admin.example.com")
+                .param("name", "ci")
+                .param("duration", bad),
+        );
+        assert!(
+            reply.as_error().is_some(),
+            "'{}' was accepted as a duration",
+            bad.escape_debug()
+        );
+    }
+    assert!(f.fake.seen().is_empty(), "a bad duration reached the api");
+
+    // ...and the shapes the schema documents are accepted, so the check above
+    // is not simply refusing everything.
+    for good in ["forever", "8760h", "2h45m", "300ms", "30s"] {
+        assert!(valid_duration(good), "'{good}' is a duration Cloudflare accepts");
+    }
+}
+
+#[test]
+fn an_access_application_that_carries_a_client_secret_does_not_hand_it_back() {
+    // An Access application is not obviously a place a secret lives, and for a
+    // self-hosted one it is not. An OIDC SaaS application is: Cloudflare's own
+    // schema gives it a `client_secret`, and this is a READ an agent may hold.
+    // The double sends one, so this measures a removal rather than an absence.
+    let f = Fixture::new("appsecret", Mode::Normal, &["cloudflare.access.read"]);
+    let reply = f.use_it(f.record("cloudflare.access.read", "dashboard"));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert!(!output.contains(APP_SECRET), "the saas client secret came back: {output}");
+    assert!(output.contains("has been removed"), "{output}");
+    // The rest of the application still arrives — a scrub that returned
+    // nothing would pass the assertion above and be useless.
+    assert!(output.contains("admin.example.com"), "{output}");
+    assert!(output.contains(APP_ID), "{output}");
+}
+
+#[test]
+fn a_tunnel_is_read_without_ever_asking_for_its_connector_token() {
+    // The token endpoint is not declared, so no grant can reach it. The double
+    // answers that path anyway — a test that passed because there was nothing
+    // to fetch would prove nothing — and the assertion is that this build never
+    // asks.
+    let f = Fixture::new("tunnel", Mode::Normal, &granted_everything());
+    let reply = f.use_it(f.record("cloudflare.tunnel.read", "office"));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert!(output.contains("healthy"), "{output}");
+    assert!(!output.contains(TUNNEL_TOKEN), "the connector token came back: {output}");
+    assert!(
+        f.fake.seen().iter().all(|s| !s.path.ends_with("/token")),
+        "this build asked for the connector token"
+    );
+    // And there is no operation that could: the vocabulary is closed by what is
+    // declared, so this is a property of the build and not of one code path.
+    assert!(
+        !SPEC.operations.iter().any(|op| op.id.contains("tunnel.token")),
+        "a tunnel token operation was declared"
+    );
+}
+
+#[test]
+fn the_provider_takes_the_token_secret_out_before_the_framework_ever_sees_it() {
+    // **The two layers, told apart.** The framework scrubs a created credential
+    // out of anything on its way to the caller — proved in `service.rs` against
+    // a provider that deliberately leaks one — and this module takes it out as
+    // well. With both in place, removing either one changes nothing a test
+    // going through `use_capability` can see, so this one goes around the
+    // framework and calls `perform` directly. What it measures is the
+    // provider's own half: the value leaves here in `created` and nowhere else.
+    let f = Fixture::new("twolayer", Mode::Normal, &["cloudflare.access.service-token.create"]);
+    let provider = CloudflareProvider::at(f.fake.port);
+    let owner = crate::broker::owner(me().uid).expect("own uid");
+    let service = apex_secret_core::store::ServiceInfo {
+        service: "cloudflare".into(),
+        host: "127.0.0.1".into(),
+        scheme: "http".into(),
+        username: "x-access-token".into(),
+        path: String::new(),
+        auth: "bearer".into(),
+        port: Some(f.fake.port),
+        added: 0,
+    };
+    let operation = SPEC
+        .operations
+        .iter()
+        .find(|op| op.id == "cloudflare.access.service-token.create")
+        .expect("declared");
+    let mut params = operation::Params::new();
+    params.insert("name".into(), "ci".into());
+    let project = f.project.to_string_lossy().into_owned();
+    let req = Bind {
+        operation,
+        resource: "admin.example.com",
+        params: &params,
+        body: &[],
+        project: &project,
+        service: &service,
+        owner: &owner,
+    };
+    let bound = provider.bind(&req).expect("binds");
+    assert_eq!(
+        bound.creates.as_deref(),
+        Some("cf-access.admin.example.com"),
+        "the name has to be declared BEFORE the call, or a collision cannot be refused in time"
+    );
+    let performed = provider
+        .perform(&req, &bound, &SecretValue::new(TOKEN.as_bytes().to_vec()))
+        .expect("performs");
+    assert!(
+        !performed.output.contains(CLIENT_SECRET),
+        "the provider handed the secret to the framework in its output: {}",
+        performed.output
+    );
+    let created = performed.created.expect("the secret must leave here as a credential");
+    assert_eq!(created.value.as_str(), Some(CLIENT_SECRET));
+    assert_eq!(created.host, "admin.example.com");
+    assert_eq!(created.username.as_deref(), Some(CLIENT_ID));
+}
+
+#[test]
+fn a_credential_nested_in_an_array_is_still_taken_out() {
+    // The scrub descends into objects AND arrays. Both matter and neither is
+    // hypothetical: a Hyperdrive password is at `result.origin.password`, an
+    // Access SaaS secret at `result.saas_app.client_secret`, and an AI
+    // Gateway's OTel exporter carries an `authorization` inside a LIST. A
+    // top-level scrub, or one that walked objects only, would report success
+    // having removed nothing — which is the failure that looks exactly like
+    // success.
+    let body = r#"{"result":{"top":"kept","inner":{"password":"p1"},"list":[{"password":"p2"},{"keep":"yes"}]}}"#;
+    let out = without(body, &["password"], "\nremoved");
+    assert!(!out.contains("p1"), "an object-nested secret survived: {out}");
+    assert!(!out.contains("p2"), "an array-nested secret survived: {out}");
+    assert!(out.contains("kept") && out.contains("yes"), "it removed too much: {out}");
+    assert!(out.ends_with("removed"), "it removed something and did not say so: {out}");
+
+    // A reply with nothing to remove is returned unchanged and says nothing.
+    let clean = r#"{"result":{"top":"kept"}}"#;
+    assert!(!without(clean, &["password"], "\nremoved").contains("removed"));
+    // ...and something that is not the envelope at all comes back as it is,
+    // rather than becoming the string "null".
+    assert_eq!(without("not json", &["password"], "\nremoved"), "not json");
+}
+
+#[test]
+fn the_cloudflare_one_verbs_are_separate_grants() {
+    // §13.2's whole argument, on the surface where it matters most: reading an
+    // Access application, revoking its sessions and issuing a credential are
+    // three decisions, and an owner gets to make them one at a time.
+    let f = Fixture::new("onegrants", Mode::Normal, &["cloudflare.access.read"]);
+    let allowed = f.use_it(f.record("cloudflare.access.read", "dashboard"));
+    assert!(matches!(allowed, Response::Performed { exit_code: 0, .. }), "{allowed:?}");
+
+    for (operation, resource, option) in [
+        ("cloudflare.access.edit", "dashboard", None),
+        (
+            "cloudflare.access.service-token.create",
+            "admin.example.com",
+            Some(("name", "ci")),
+        ),
+        ("cloudflare.tunnel.read", "office", None),
+        ("cloudflare.tunnel.edit", "office", Some(("name", "renamed"))),
+    ] {
+        let mut rec = f.record(operation, resource);
+        if let Some((name, value)) = option {
+            rec = rec.param(name, value);
+        }
+        let reply = f.use_it(rec);
+        let (error, message) = reply
+            .as_error()
+            .unwrap_or_else(|| panic!("'{operation}' ran under a grant for access.read"));
+        assert_eq!(error, ErrorKind::PermissionDenied, "{operation}: {message}");
+    }
 }
 
 /// §13.2's list, so the test above compares against the roadmap rather than

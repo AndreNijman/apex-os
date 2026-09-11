@@ -99,6 +99,25 @@
 //!   capabilities and not credentials cannot rest on a remark in somebody
 //!   else's documentation staying true.
 //!
+//! ## §13.10, and the one thing this surface does that no other does
+//!
+//! Access and Tunnels are §13.10's, and they are the first operations here that
+//! can **create a credential**. `POST /access/service_tokens` answers with a
+//! `client_secret`; Cloudflare shows it once. §13.10 says where it goes —
+//! *"directly into protected storage… the agent receives handles/capabilities,
+//! not plaintext secrets"* — and [`crate::provider::Bound::creates`] is how it
+//! gets there: this module names the service before the call so the framework
+//! can refuse a collision while refusing is free, hands back the value after,
+//! and returns the `client_id` and the handle to the caller.
+//!
+//! The pin is the part worth reading twice. A service token is presented to the
+//! application Access guards, never to the API that issued it, so the stored
+//! credential is pinned to a **host in this project's own zone** — resolved
+//! through [`binding::Binding::record`], with §13.9's label boundary and its
+//! `records` narrowing. A project that narrowed itself to some names cannot pin
+//! a credential to a different one, and a credential pinned to
+//! `api.cloudflare.com` would be a pin that says the wrong thing.
+//!
 //! ## What has never run against Cloudflare
 //!
 //! All of it. There is no account and no token on this machine, so every
@@ -223,11 +242,11 @@ const SQL: ParamSpec = ParamSpec {
 
 /// The vocabulary, in §13.2's shape.
 ///
-/// Twenty-three names: **twenty-two of §13.2's thirty-two**, plus
-/// `worker.route.read`, which is §13.3's "Worker routes" rather than one of
-/// §13.2's examples. So **ten** of §13.2's list are still unimplemented and
-/// belong to P1-008 through P1-017 — the Secrets Store, Access, Tunnels,
-/// Workers AI and the AI gateway.
+/// Twenty-eight names: **twenty-six of §13.2's thirty-two**, plus
+/// `worker.route.read` and `access.service-token.create`, which are §13.3's
+/// "Worker routes" and "service tokens" rather than §13.2's examples. So
+/// **six** of §13.2's list are still unimplemented — the Secrets Store's
+/// three, Workers AI's one and the AI gateway's two.
 ///
 /// Declaring one this module cannot perform would put it in
 /// `apex secret capabilities`, let an owner grant it, and then fail at use
@@ -582,6 +601,122 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             aliases: &[],
             same_everywhere: false,
         },
+        // ── §13.10, Cloudflare One ──────────────────────────────────────────
+        //
+        // Four of §13.2's names and one addition, and the thing that makes this
+        // block different from every other one above: two of these endpoints
+        // answer with a CREDENTIAL. `POST /access/service_tokens` hands back a
+        // `client_secret` the API will never show again, and
+        // `GET /cfd_tunnel/{id}/token` hands back a connector token as its whole
+        // result. §13.10 says where those go — "directly into protected
+        // storage… the agent receives handles/capabilities, not plaintext
+        // secrets" — and `Bound::creates` is how they get there.
+        //
+        // Three things are deliberately NOT declared here, each for a reason
+        // that would otherwise have to be discovered at use time:
+        //
+        // * **creating a tunnel.** `POST /cfd_tunnel` exists, and a tunnel is
+        //   addressed by an id that does not exist until it does — so unlike an
+        //   R2 bucket, which §13.1's file can name into existence, a tunnel
+        //   cannot resolve through the project's own binding until after it has
+        //   been made. The owner creates it and writes the id down;
+        // * **reading a tunnel's token.** It is a credential, and a credential
+        //   this build cannot pin honestly: `cloudflared` presents it to the
+        //   Cloudflare edge over QUIC, not to any HTTPS host the store could
+        //   name. Storing it would mean writing a `host` the pin cannot mean.
+        //   §12's `cloudflared auth -> APEX` is where a broker-owned connector
+        //   would spend it, and that is where it belongs;
+        // * **a tunnel's `tunnel_secret`.** `PATCH /cfd_tunnel/{id}` accepts
+        //   one, which would have an agent handing the broker a credential —
+        //   the exact inverse of what this service is for, and the same
+        //   argument `hyperdrive.edit` makes about an origin password.
+        OperationSpec {
+            id: "cloudflare.access.read",
+            summary: "read the configuration of one of this project's Access \
+                      applications",
+            effect: Effect::Read,
+            resource: NAMED,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.access.edit",
+            // **What it is, and — because "edit" could mean anything — what it
+            // is not.** It cannot change an application's policies, its
+            // session duration, its name, or who may reach it. That is not
+            // timidity: `PUT /access/apps/{app_id}` REPLACES an application,
+            // the schema for one is a `oneOf` over eleven kinds, and a build
+            // that read an application it only partly understood and wrote it
+            // back would eventually widen an authorisation policy by omission.
+            // Revoking the sessions is the one Access mutation that is
+            // bounded, has no body, and cannot grant anybody anything.
+            summary: "revoke every session issued for one of this project's \
+                      Access applications — it cannot change who may reach it",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.access.service-token.create",
+            // **The addition, and §13.3 is where it comes from**: its
+            // networking/security list names "service tokens" beside "Access",
+            // as `worker.route.read` came from the same list naming "Worker
+            // routes". A separate name and not a parameter of `access.edit`,
+            // because issuing a credential is a different decision from
+            // revoking a session and an owner should get to make it separately.
+            summary: "issue an Access service token for a host in this \
+                      project's zone, and keep the secret in this service",
+            effect: Effect::Write,
+            // The HOST the token is for, checked against the project's bound
+            // zone — not the token's name. The host is what the stored
+            // credential gets pinned to, so it is the thing the project has to
+            // be allowed to name.
+            resource: NAMED,
+            params: &[
+                ParamSpec {
+                    name: "name",
+                    syntax: Syntax::Name,
+                    required: true,
+                    summary: "what to call the token in the Cloudflare dashboard",
+                },
+                ParamSpec {
+                    name: "duration",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "how long it lives: 8760h, 730h, 168h, 24h or forever",
+                },
+            ],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.tunnel.read",
+            summary: "read the status and connections of one of this project's \
+                      tunnels — never its connector token",
+            effect: Effect::Read,
+            resource: NAMED,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.tunnel.edit",
+            summary: "rename one of this project's tunnels — it cannot change \
+                      what the tunnel routes or the secret it runs on",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[ParamSpec {
+                name: "name",
+                syntax: Syntax::Name,
+                required: true,
+                summary: "what to call it",
+            }],
+            aliases: &[],
+            same_everywhere: false,
+        },
         OperationSpec {
             id: "cloudflare.r2.bucket.create",
             summary: "create one of the R2 buckets this project declares, in \
@@ -645,6 +780,17 @@ enum Target {
     /// question only the zone can answer, and answering it costs a credential
     /// — so it happens in `perform` and not here.
     Record(Record),
+    /// A host in this project's zone that an Access service token is being
+    /// issued for.
+    ///
+    /// The token itself is account-scoped at Cloudflare and names no host at
+    /// all. The host is here because it is what the credential this operation
+    /// creates gets **pinned** to, and a pin is only worth having if the
+    /// project had to be allowed to name the host — so it resolves through
+    /// [`Binding::record`], the same label-boundary and `records` narrowing
+    /// §13.9 uses. A project that narrowed itself to some names cannot pin a
+    /// credential to a different one.
+    ServiceToken { account: Account, host: String },
 }
 
 impl From<BindingError> for ProviderError {
@@ -737,13 +883,25 @@ impl CloudflareProvider {
                     key,
                 });
             }
+            "cloudflare.access.service-token.create" => {
+                // The host, not the token's name: see `Target::ServiceToken`.
+                let record = binding.record(req.resource)?;
+                return Ok(Target::ServiceToken {
+                    account: binding.account()?,
+                    host: record.name,
+                });
+            }
             id if id.starts_with("cloudflare.d1.")
                 || id.starts_with("cloudflare.queue.")
-                || id.starts_with("cloudflare.hyperdrive.") =>
+                || id.starts_with("cloudflare.hyperdrive.")
+                || id.starts_with("cloudflare.access.")
+                || id.starts_with("cloudflare.tunnel.") =>
             {
                 let table = match id.split('.').nth(1) {
                     Some("d1") => "d1",
                     Some("queue") => "queues",
+                    Some("access") => "access",
+                    Some("tunnel") => "tunnels",
                     _ => "hyperdrive",
                 };
                 return Ok(Target::Bound {
@@ -863,9 +1021,32 @@ impl CloudflareProvider {
                     "cloudflare.hyperdrive.edit" => {
                         format!("change the name or caching of hyperdrive configuration {where_}")
                     }
+                    "cloudflare.access.read" => {
+                        format!("read the configuration of access application {where_}")
+                    }
+                    "cloudflare.access.edit" => format!(
+                        "revoke every session issued for access application {where_}"
+                    ),
+                    "cloudflare.tunnel.read" => format!("read tunnel {where_}"),
+                    "cloudflare.tunnel.edit" => format!(
+                        "rename tunnel {where_} to {}",
+                        params.get("name").map(String::as_str).unwrap_or("")
+                    ),
                     other => format!("{other} on {where_}"),
                 }
             }
+            Target::ServiceToken { account, host } => format!(
+                // The sentence `perform` compares against what `bind` was
+                // pinned on, so it names the account AND the host: those are
+                // the two values that decide where the request goes and where
+                // the credential it creates would be kept.
+                "issue the access service token '{}' in account {} [{}], for {host}, \
+                 and keep its secret as '{}'",
+                params.get("name").map(String::as_str).unwrap_or(""),
+                account.named(),
+                account.id,
+                token_service(host)
+            ),
             Target::Record(record) => {
                 let kind = record.kind.as_deref().unwrap_or("any");
                 let where_ = format!("{} in zone {} [{}]", record.name, record.zone.name, record.zone.id);
@@ -1056,6 +1237,55 @@ impl CloudflareProvider {
                 path: record.path(),
                 body: CloudflareProvider::record_body(req, record, true)?,
             },
+            ("cloudflare.access.read", Target::Bound { resource, .. }) => get(format!(
+                "/accounts/{}/access/apps/{}",
+                resource.account.id, resource.id
+            )),
+            ("cloudflare.access.edit", Target::Bound { resource, .. }) => Call {
+                method: "POST",
+                path: format!(
+                    "/accounts/{}/access/apps/{}/revoke_tokens",
+                    resource.account.id, resource.id
+                ),
+                // No body, and nothing a caller could put in one. That is what
+                // makes this the Access mutation worth declaring: there is no
+                // field to get wrong and no policy to widen.
+                body: Body::None,
+            },
+            ("cloudflare.access.service-token.create", Target::ServiceToken { account, .. }) => {
+                Call {
+                    method: "POST",
+                    path: format!("/accounts/{}/access/service_tokens", account.id),
+                    body: service_token_body(req)?,
+                }
+            }
+            ("cloudflare.tunnel.read", Target::Bound { resource, .. }) => get(format!(
+                "/accounts/{}/cfd_tunnel/{}",
+                resource.account.id, resource.id
+            )),
+            ("cloudflare.tunnel.edit", Target::Bound { resource, .. }) => {
+                let Some(name) = req.params.get("name") else {
+                    return Err(ProviderError::Refused(
+                        "this operation needs a 'name' option saying what to \
+                         call it"
+                            .to_string(),
+                    ));
+                };
+                let mut body = serde_json::Map::new();
+                body.insert("name".into(), name.clone().into());
+                Call {
+                    // PATCH and never the configurations PUT: `tunnel_secret`
+                    // is the other field this endpoint accepts, and it is not
+                    // declared, so the framework refuses it before this module
+                    // is asked.
+                    method: "PATCH",
+                    path: format!(
+                        "/accounts/{}/cfd_tunnel/{}",
+                        resource.account.id, resource.id
+                    ),
+                    body: Body::Json(serde_json::Value::Object(body).to_string()),
+                }
+            }
             ("cloudflare.r2.bucket.create", Target::Bucket(bucket)) => Call {
                 method: "POST",
                 path: format!("/accounts/{}/r2/buckets", bucket.account.id),
@@ -1581,6 +1811,93 @@ fn hyperdrive_settings(req: &Bind<'_>) -> Result<Body, ProviderError> {
     Ok(Body::Json(serde_json::Value::Object(body).to_string()))
 }
 
+/// What a credential created by [`SPEC`]'s service-token operation is stored
+/// under.
+///
+/// Derived from the host rather than from the token's name, and the difference
+/// matters: the name is a label in somebody's dashboard, and the host is what
+/// the store pins the credential to. One brokered token per host, which is also
+/// why a second one is refused rather than silently replacing the first —
+/// Cloudflare shows a `client_secret` once.
+fn token_service(host: &str) -> String {
+    format!("cf-access.{host}")
+}
+
+/// Whether a string is a duration Cloudflare's service-token endpoint accepts.
+///
+/// `forever`, or Go's duration syntax — `8760h`, `2h45m`, `300ms` — with the
+/// units the schema lists. Checked here rather than sent, for the reason the R2
+/// location hint is: a request that fails at the far side has already spent the
+/// credential, and for THIS operation a failed request may also have created a
+/// token whose secret nobody will ever see.
+fn valid_duration(value: &str) -> bool {
+    const UNITS: &[&str] = &["ns", "us", "\u{b5}s", "ms", "s", "m", "h"];
+    if value == "forever" {
+        return true;
+    }
+    let mut rest = value;
+    let mut pairs = 0;
+    while !rest.is_empty() {
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits == 0 {
+            return false;
+        }
+        rest = &rest[digits..];
+        // Longest unit first, or `ms` would be read as `m` followed by an `s`
+        // that is not a number.
+        let Some(unit) = UNITS
+            .iter()
+            .filter(|u| rest.starts_with(**u))
+            .max_by_key(|u| u.len())
+        else {
+            return false;
+        };
+        rest = &rest[unit.len()..];
+        pairs += 1;
+    }
+    pairs > 0
+}
+
+/// The JSON body that issues an Access service token.
+fn service_token_body(req: &Bind<'_>) -> Result<Body, ProviderError> {
+    let Some(name) = req.params.get("name") else {
+        return Err(ProviderError::Refused(
+            "this operation needs a 'name' option saying what to call the token"
+                .to_string(),
+        ));
+    };
+    let mut body = serde_json::Map::new();
+    body.insert("name".into(), name.clone().into());
+    if let Some(duration) = req.params.get("duration") {
+        if !valid_duration(duration) {
+            return Err(ProviderError::Refused(format!(
+                "'{}' is not a duration Cloudflare accepts: 'forever', or a run \
+                 of number-and-unit like 8760h or 2h45m, with units ns, us, ms, \
+                 s, m or h",
+                duration.escape_debug()
+            )));
+        }
+        body.insert("duration".into(), duration.clone().into());
+    }
+    Ok(Body::Json(serde_json::Value::Object(body).to_string()))
+}
+
+/// The `client_id` and `client_secret` out of a service-token reply.
+///
+/// Both or neither. A reply that carries one and not the other is not a token
+/// this build can keep, and saying so is better than storing half a credential
+/// under a name that will then look usable.
+fn service_token_in(body: &str) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let result = value.get("result")?;
+    let id = result.get("client_id")?.as_str()?.to_string();
+    let secret = result.get("client_secret")?.as_str()?.to_string();
+    if id.is_empty() || secret.is_empty() {
+        return None;
+    }
+    Some((id, secret))
+}
+
 /// The JSON body that creates a bucket.
 ///
 /// Both options are closed sets in Cloudflare's own documentation, so a value
@@ -1663,7 +1980,41 @@ fn without_the_tail_url(body: &str) -> String {
 /// The same argument as `without_the_tail_url`, applied to a field this build
 /// does not expect to see rather than one it does.
 fn without_the_origin_secrets(body: &str) -> String {
-    const SECRETS: &[&str] = &["password", "access_client_secret"];
+    without(
+        body,
+        &["password", "access_client_secret"],
+        "\napex: this configuration carried an origin credential, which is \
+         not something a brokered operation hands back. It has been removed \
+         from this reply.",
+    )
+}
+
+/// An Access application, with anything credential-shaped taken out.
+///
+/// An application is not obviously a place a secret lives, and for a
+/// self-hosted one it is not. A **SaaS** application is a different matter:
+/// Cloudflare's own schema gives `access_oidc_saas_app` and the generic OAuth
+/// configuration a `client_secret`, and this operation is a read an agent may
+/// hold. Same argument as the Hyperdrive password, applied to a field that is
+/// only sometimes there — which is exactly the case a build finds out about in
+/// production if it waits to be shown one.
+fn without_the_app_secrets(body: &str) -> String {
+    without(
+        body,
+        &["client_secret", "access_client_secret"],
+        "\napex: this application carried a client secret, which is not \
+         something a brokered read hands back. It has been removed from this \
+         reply.",
+    )
+}
+
+/// A reply with some named fields taken out of it, wherever they are.
+///
+/// Descends into nested objects and arrays, because that is where the field
+/// actually is — a Hyperdrive password lives under `result.origin`, and a SaaS
+/// client secret under `result.saas_app`. A scrub that only looked at the top
+/// level would report success having removed nothing.
+fn without(body: &str, keys: &[&str], note: &str) -> String {
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
         return body.to_string();
     };
@@ -1672,8 +2023,8 @@ fn without_the_origin_secrets(body: &str) -> String {
     while let Some(node) = stack.pop() {
         match node {
             serde_json::Value::Object(map) => {
-                for secret in SECRETS {
-                    if map.remove(*secret).is_some() {
+                for key in keys {
+                    if map.remove(*key).is_some() {
                         removed = true;
                     }
                 }
@@ -1685,11 +2036,7 @@ fn without_the_origin_secrets(body: &str) -> String {
     }
     let mut out = serde_json::to_string(&value).unwrap_or_else(|_| body.to_string());
     if removed {
-        out.push_str(
-            "\napex: this configuration carried an origin credential, which is \
-             not something a brokered operation hands back. It has been removed \
-             from this reply.",
-        );
+        out.push_str(note);
     }
     out
 }
@@ -1719,13 +2066,31 @@ impl Provider for CloudflareProvider {
 
     fn bind(&self, req: &Bind<'_>) -> Result<Bound, ProviderError> {
         let target = self.resolve(req)?;
+        // §13.10: an operation that will create a credential says so HERE, so
+        // the framework can refuse a name that is already taken before
+        // Cloudflare issues a secret it will never show again.
+        let creates = match &target {
+            Target::ServiceToken { host, .. } => {
+                let name = token_service(host);
+                if !apex_secret_core::store::valid_service_name(&name) {
+                    return Err(ProviderError::Refused(format!(
+                        "the credential this would create would be stored as \
+                         '{name}', and that is not a name this service can \
+                         store under. A host of up to {} characters fits",
+                        64 - "cf-access.".len()
+                    )));
+                }
+                Some(name)
+            }
+            _ => None,
+        };
         Ok(Bound {
             endpoint: Endpoint {
                 scheme: self.api.scheme.clone(),
                 host: self.api.host.clone(),
             },
             detail: CloudflareProvider::detail(req.operation, &target, req.params),
-            creates: None,
+            creates,
         })
     }
 
@@ -1823,6 +2188,14 @@ impl Provider for CloudflareProvider {
         // refusal reason.
         let body = match req.operation.id {
             "cloudflare.worker.tail" if reply.ok() => without_the_tail_url(&reply.body),
+            "cloudflare.access.read" if reply.ok() => without_the_app_secrets(&reply.body),
+            // The one reply in this module that IS a credential. The secret is
+            // taken out here and the framework scrubs it again on the way out;
+            // two layers, because the provider is where the shape is known and
+            // the framework is where forgetting is not an option.
+            "cloudflare.access.service-token.create" if reply.ok() => {
+                without(&reply.body, &["client_secret"], "")
+            }
             "cloudflare.hyperdrive.read" | "cloudflare.hyperdrive.edit" if reply.ok() => {
                 without_the_origin_secrets(&reply.body)
             }
@@ -1842,10 +2215,62 @@ impl Provider for CloudflareProvider {
         } else {
             format!("apex: cloudflare answered HTTP {}\n{body}", reply.status)
         };
+        // §13.10, the half that needs the value: the secret goes to the
+        // framework, which stores it under the name `bind` declared. What the
+        // caller gets is the `client_id` and a sentence naming the handle.
+        let mut created = None;
+        let mut output = output;
+        if req.operation.id == "cloudflare.access.service-token.create" && reply.ok() {
+            let Target::ServiceToken { host, .. } = &target else {
+                return Err(ProviderError::Failed(
+                    "this operation resolved to something that is not a service \
+                     token"
+                        .to_string(),
+                ));
+            };
+            match service_token_in(&reply.body) {
+                Some((client_id, secret)) => {
+                    created = Some(crate::provider::Created {
+                        // The host the project named, which is what this
+                        // credential may be sent to and nowhere else. An Access
+                        // service token is presented to the application it
+                        // guards, never to the API that issued it — so pinning
+                        // it to `api.cloudflare.com` would be a pin that says
+                        // the wrong thing.
+                        host: host.clone(),
+                        // Always https. Cloudflare Access does not protect
+                        // anything else, and the store would refuse it anyway
+                        // for a host that is not loopback.
+                        scheme: "https".to_string(),
+                        username: Some(client_id.clone()),
+                        value: SecretValue::new(secret.into_bytes()),
+                    });
+                    output.push_str(&format!(
+                        "\napex: the client id is {client_id}. Its secret is not \
+                         in this reply — Cloudflare shows one once, and this \
+                         service kept it."
+                    ));
+                }
+                // The token EXISTS and its secret could not be read. Loud,
+                // because the only thing that can be done about it is done by
+                // a person: this build cannot fetch that secret again and
+                // neither can anybody else.
+                None => {
+                    return Err(ProviderError::Failed(format!(
+                        "cloudflare created a service token for {host} and \
+                         answered with something this build could not read a \
+                         client id and secret out of. The token exists and its \
+                         secret is gone — delete it in the Cloudflare dashboard \
+                         and try again"
+                    )))
+                }
+            }
+        }
+
         Ok(Performed {
             code: i32::from(!reply.ok()),
             output,
-            created: None,
+            created,
         })
     }
 }
