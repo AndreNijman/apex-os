@@ -2,80 +2,93 @@
 items: (new, from the 2026-09-11 CLAUDE.md product decision — not a roadmap item)
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-ai-apps
-branch: task/desktop-ai-apps
+branch: task/desktop-ai-apps  @ d7b12d37 (pushed, clean)
 
 ## NEXT
-Write the Containerfile.core stanza (after 5a-zed) + tests/test-apex-ai-apps.sh,
-after a scratch fedora:43 podman run proves the ChatGPT rpm installs and its
-%post does not abort the build.
+Nothing outstanding on the branch. The remaining work is not this agent's to do:
+land the branch in an image build, then (and only then) retire the live stopgap
+on l16 — `systemctl --user disable --now claude-desktop-update.timer` and remove
+`/usr/local/lib/claude-desktop`, which currently SHADOWS the image copy on PATH.
+Retiring it before the image lands leaves Andre with no Claude Desktop at all.
 
 ## DONE
 - Worktree created at /var/tmp/apex-work/wt-ai-apps on task/desktop-ai-apps from
   origin/roadmap/v2.2 @ fbf06a4f, pushed with -u before any work.
 - **ChatGPT desktop packaging: SETTLED — an official OpenAI Linux app exists and
-  ships an RPM.** CLAUDE.md's "needs researching" is out of date. Measured, not
-  assumed:
-  - OpenAI released the ChatGPT desktop app for Linux in public preview on
-    2026-08-11, supporting Fedora 43/44 (APEX's base) with x86_64 + aarch64
-    rpm and deb packages.
-  - Live rpm-md repo: `https://persistent.oaistatic.com/codex-app-prod/linux/rpm/$basearch`
-    — `repodata/repomd.xml` fetched OK. It carries exactly ONE package, the
-    current one: `chatgpt-26.908.40401-1.x86_64.rpm` (442,811,393 bytes),
-    summary "ChatGPT by OpenAI", url https://developers.openai.com/codex/app.
-    Older builds are not retained, so a pinned-version URL would rot; resolve
-    latest at build time via repomd → primary.xml (the zed/sing-box posture).
-  - Signed: `Header OpenPGP V4 RSA/SHA512 signature, key ID 4a3b4a566c4660e4`.
-    The package carries its own key at
-    `/etc/pki/rpm-gpg/RPM-GPG-KEY-chatgpt-3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4.asc`.
-  - Payload: `/usr/bin/chatgpt` (relative symlink → `../lib/chatgpt/codex-launcher`),
-    `/usr/lib/chatgpt/**` (Electron; 6824 files), `/usr/share/applications/chatgpt.desktop`,
-    `/usr/share/pixmaps/chatgpt.png`, `/usr/share/metainfo/com.openai.chatgpt.metainfo.xml`.
-  - **No systemd unit, no timer, no cron anywhere in the payload.** The app's
-    update channel is the `/etc/yum.repos.d/chatgpt.repo` it ships
-    (`enabled=1`, gpgcheck=1, repo_gpgcheck=1) — that file, not a daemon, is
-    what has to be removed to satisfy criterion 3.
-  - The one blocker on record (openai/codex#42948, "%post mkdir /var/lib/chatgpt:
-    Read-only file system" on Fedora Atomic/Bazzite) is **fixed in this build**.
-    Read out of the shipped rpm rather than trusted: `pretrans` now opens with
-    `if [ -e /run/ostree-booted ]; then exit 0; fi` and `postinstall`'s
-    `refresh_dnf5_keys()` returns early on the same test. No `/var/lib/chatgpt`
-    anywhere in the current scriptlets.
-  - So "there is no honest way to ship it" is NOT the answer: dnf5-install the
-    vendor rpm into the image, verified against its own pinned key fingerprint,
-    and delete the repo file it drops.
-- Claude Desktop packaging confirmed: apt only, no rpm repo (five candidate rpm
-  prefixes under downloads.claude.ai all 404; `apt/stable/dists/stable/InRelease`
-  is 200 and signed). Latest `claude-desktop 1.52386.0` (l16's stopgap has
-  1.49585.0). Deb unpacks to `/usr/lib/claude-desktop`, `/usr/bin/claude-desktop`
-  (relative symlink), icons in hicolor 16/32/48/128/256, entry
-  `com.anthropic.Claude.desktop`.
+  ships an RPM.** CLAUDE.md's "needs researching when implementing" is out of
+  date and should be amended (left alone: it is Andre's decision document).
+  - Released 2026-08-11 in public preview, Fedora 43/44 supported — APEX's base.
+  - Live rpm-md repo `https://persistent.oaistatic.com/codex-app-prod/linux/rpm/$basearch`,
+    carrying exactly ONE build at a time: `chatgpt-26.908.40401-1.x86_64.rpm`
+    (442,811,393 bytes). No per-version URL to pin, so the stanza resolves the
+    filename from repomd -> primary.xml at build time (the sing-box posture).
+  - Signed by `3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4` "Codex Linux Repository".
+  - The one blocker on record (openai/codex#42948, `%post` `mkdir /var/lib/chatgpt`
+    on Fedora Atomic) is FIXED in this build — read out of the shipped rpm, not
+    trusted: `pretrans` and `postinstall` both short-circuit on
+    `[ -e /run/ostree-booted ]`, and no `/var/lib/chatgpt` remains anywhere.
+- Claude Desktop: apt only, no rpm (five rpm/yum prefixes under
+  downloads.claude.ai all 404; `apt/stable/dists/stable/InRelease` 200 + signed).
+  Latest 1.52386.0. Key `31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE` "Anthropic
+  Claude Code Release Signing", embedded as a heredoc in the deb's `postinst`.
+- **Stage `5a-aiapps` written into Containerfile.core** (after 5a-claude),
+  plus `ELECTRON_OZONE_PLATFORM_HINT=auto` in /etc/environment,
+  plus `tests/test-apex-ai-apps.sh` (50 assertions) wired into pr-validation.yml,
+  plus docs/packages.md and docs/update-cost.md.
+  Commits `16eafdad` (feat) and `d7b12d37` (docs), both pushed.
+- Proved in a scratch `quay.io/fedora/fedora-bootc:43` container, not assumed:
+  key fingerprints match, `rpm -K` verifies, `dnf5 install` exits 0, `gpgv`
+  verifies InRelease, the deb sha256 matches, both schemes land in
+  mimeinfo.cache, sizes measured.
+- Mutation-proved: 11 deletions, 11 NAMED assertions went red, Containerfile.core
+  restored byte-identical (sha256
+  af1e1d53dc0efea1ec04c495913f3530c436560ad92b5cb74ff145f5279e7ac4).
 
 ## IN PROGRESS
-- Containerfile.core stanza + test suite.
+- nothing
 
 ## FOUND
 - claude-memory MCP is down (502 Bad Gateway) this session; no vault context.
-- **The ChatGPT scheme is `codex://`, not `chatgpt://`.** Its entry ships
-  `MimeType=x-scheme-handler/codex;x-scheme-handler/http;x-scheme-handler/https;…`
-  — it registers itself as an http/https handler. APEX already pins
-  `x-scheme-handler/http=firefox.desktop` in `/etc/xdg/mimeapps.list` and
-  asserts it at Containerfile.base:2002, so the default browser is safe; but
-  ChatGPT will appear in every "Open With" list for a web link. Product call.
-- Claude's entry is clean: `MimeType=x-scheme-handler/claude;`, plus
-  `StartupWMClass=com.anthropic.Claude`, `SingleMainWindow=true` and two desktop
-  actions (New Chat, New Claude Code Session).
-- Claude's deb `postinst` registers Anthropic's apt repo + an
-  unattended-upgrades snippet ("the VS Code / Chrome / 1Password model"), and a
-  GNOME Shell search provider. Unpacking the deb instead of dpkg-installing it
-  means none of that runs — which is exactly what criterion 3 wants. Its
-  comments name a sibling `rpm-scripts.sh`, so an Anthropic rpm may be coming,
-  but none is published today.
-- ChatGPT's icon ships ONLY at `/usr/share/pixmaps/chatgpt.png` — nothing in
-  hicolor. Spec-legal fallback, but it is the same shape as the Zed defect and
-  the live editors test only searches `/usr/share/icons`.
-- The repo has NO `ELECTRON_OZONE_PLATFORM_HINT`/ozone setting and NO
-  appindicator package anywhere — the Wayland and tray halves of criterion 1
-  have no support in the image today.
+- **The brief's "ChatGPT desktop is installed nowhere" is wrong.** It is live on
+  l16 — not in /usr/local, but inside the `apex-user.raw` system extension
+  merged over /usr since 2026-09-11 20:59. `/usr/bin/chatgpt` exists and
+  `rpm -qf` says no package owns it. Consequence: once the image ships ChatGPT,
+  the extension's copy will shadow the image's, so that extension needs
+  rebuilding without chatgpt when the image lands.
+- **`/etc/yum.repos.d/chatgpt.repo` is live on l16 right now** (enabled=1,
+  baseurl persistent.oaistatic.com), dropped by that hand-install. apex-pkg
+  builds extensions with dnf against the host's repo set, so this is a real
+  path by which the app updates outside `apex update`. The new suite fails on
+  it deliberately.
+- **The ChatGPT scheme is `codex://`, not `chatgpt://`.**
+- ChatGPT's entry registers `x-scheme-handler/http` and `https` for itself.
+  Confirmed in a clean container that it becomes the http/https handler where
+  nothing else claims them. On APEX it cannot take the default —
+  files/desktop/xdg/mimeapps.list pins firefox and Containerfile.base asserts
+  it — but ChatGPT will appear in every "Open With" list. Product call, left as
+  upstream ships it.
+- ChatGPT's icon ships ONLY at /usr/share/pixmaps/chatgpt.png (1024x1024),
+  nothing in hicolor. Spec-legal, one lookup-path change from the Zed defect;
+  the stanza installs it into hicolor/1024x1024 as well.
+- **Tray icons already work and need no package.** Measured on the live session
+  bus: quickshell owns `org.kde.StatusNotifierWatcher`, and BOTH apps have live
+  `org.freedesktop.StatusNotifierItem-*` names right now. Chromium speaks SNI
+  directly; no appindicator library required.
+- `gpg` dies at build time with `can't create directory '/root/.gnupg'` — /root
+  is a symlink to /var/roothome, absent at build time. Same trap stage 5a-claude
+  documents for npm. Every gpg call in the stanza passes `--homedir`.
+- `dnf5` prints "skipped OpenPGP checks for 1 package from repository:
+  @commandline" — local package gpgcheck is OFF by default, so the stanza's own
+  pinned-fingerprint `rpm -K` is the real verification, not decoration.
+- SIZE: /usr/lib/chatgpt 1.3 GB, /usr/lib/claude-desktop 548 MB. ~1.9 GB into
+  core, the tier whose rebuilds cost the fleet ~5 GB. Recorded in
+  docs/update-cost.md as a stated tension, not silently.
+- `python3-libdnf5` now enters the image as a ChatGPT dependency
+  (`python3-libdnf5 if libdnf5`), for a scriptlet that does nothing on ostree.
+- A negative control in my own trial was a no-op at first (`sed s/claude/cIaude/`
+  on InRelease changed nothing — only `Claude` with a capital C appears). Redone
+  with a real byte flip: `gpgv` exits 1. An assertion that cannot fail is worse
+  than none, including in the trial harness.
 
 ## BLOCKED ON
 - nothing
