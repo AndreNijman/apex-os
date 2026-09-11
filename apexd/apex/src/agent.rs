@@ -27,12 +27,20 @@ use apex_agent_core::statusline as statusline_core;
 use apex_agent_core::term::{self, RawMode, WinSize};
 use apex_agent_core::webauthn;
 use apex_agent_core::worktree::{ConflictState, TestState};
-use apex_agent_core::{adapter, checkpoint, config, git, layout, mux, profile, project};
+use apex_agent_core::{adapter, checkpoint, config, git, handoff, layout, mux, profile, project};
 use clap::{Args, Subcommand};
 
 use crate::ops;
 
 /// `apex agent <verb>`.
+/// How much of the outgoing transcript a handoff packet carries by default.
+///
+/// Named rather than inline because `apex task handoff` delegates to this verb
+/// and has to pass the same number: two spellings of one default drift, and the
+/// symptom would be a packet with a different amount of evidence in it
+/// depending on which of two commands the user typed.
+pub(crate) const HANDOFF_TRANSCRIPT_BYTES: usize = 16 * 1024;
+
 #[derive(Subcommand)]
 pub enum AgentCmd {
     /// Start an agent on a managed terminal and attach to it.
@@ -66,6 +74,30 @@ pub enum AgentCmd {
         /// is the remote's, which is why `apex agent list --host` exists.
         #[arg(long, value_name = "HOST")]
         host: Option<String>,
+    },
+    /// Write a handoff packet for a session and continue the work elsewhere.
+    ///
+    /// §16: Claude runs out of context or quota and the work has to carry on
+    /// under a different agent. This reads what the runtime knows about the
+    /// session — worktree, checkpoint, changed files, transcript tail, the
+    /// grants it held — writes it as a document into the project's `.apex/`,
+    /// and starts the target agent pointed at that document.
+    ///
+    /// Three of §16's nine fields have no producer in this build. They are
+    /// written as absent WITH THE REASON, never guessed: a plausible plan the
+    /// next agent cannot check is worse than a blank it can see.
+    Handoff {
+        /// Session to hand off. Defaults to the most recent one in this project.
+        id: Option<u32>,
+        /// Adapter to hand it to (`codex`, `opencode`, `gemini`, `claude`).
+        #[arg(long, short = 't', value_name = "AGENT")]
+        to: String,
+        /// Write the packet and stop, without starting anything.
+        #[arg(long)]
+        no_start: bool,
+        /// How many bytes of the outgoing transcript to carry.
+        #[arg(long, default_value_t = HANDOFF_TRANSCRIPT_BYTES)]
+        transcript_bytes: usize,
     },
     /// Type text into a session's terminal.
     ///
@@ -826,6 +858,8 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             None => attach(id, !no_replay),
         },
         AgentCmd::Input { id, text, submit } => input(id, &text.join(" "), submit),
+        AgentCmd::Handoff { id, to, no_start, transcript_bytes } =>
+            handoff(id, &to, no_start, transcript_bytes),
         AgentCmd::Pause { id } => signal(id, "stop", "paused"),
         AgentCmd::Resume { id } => signal(id, "cont", "resumed"),
         AgentCmd::Kill { id, signal: sig } => signal(id, &sig, "signalled"),
@@ -1374,6 +1408,413 @@ fn install_winch_forwarder(id: u32, initial: WinSize) {
             }
         })
         .ok();
+}
+
+/// Where a session's handoff packet goes.
+///
+/// Inside the project, not under `$XDG_STATE_HOME`, and that is forced rather
+/// than chosen: the receiving session is sandboxed, and under `--sandbox
+/// project` the rest of `$HOME` is not hidden but ABSENT. A packet in the
+/// runtime's own state directory would be handed to an agent that cannot open
+/// it, and the failure would look like the agent ignoring instructions.
+///
+/// One file per (session, target), overwritten. A second handoff of the same
+/// session to the same agent is a retry, and a directory filling with
+/// timestamped near-duplicates is how an agent ends up reading the wrong one.
+fn handoff_path(root: &Path, id: u32, to: &str) -> PathBuf {
+    root.join(".apex")
+        .join("handoff")
+        .join(format!("session-{id}-to-{to}.md"))
+}
+
+/// The opening instruction the receiving agent gets.
+///
+/// It says READ THE FILE FIRST, and it says what the file is. An agent handed
+/// a path with no explanation treats it as one input among many; the whole
+/// point of §16 is that this is the state of the work.
+///
+/// Split out so it can be tested without a daemon, and so the words the next
+/// agent acts on are in one place rather than inline in a request builder.
+fn handoff_prompt(path: &Path) -> String {
+    format!(
+        "Read {} before doing anything else. It is a handoff packet: another agent was \
+         working on this and stopped, and that file is everything the runtime knows about \
+         where it got to. Sections that say the runtime could not supply them are gaps in \
+         the tooling, not statements that there was nothing there. Continue the work it \
+         describes.",
+        path.display()
+    )
+}
+
+/// The files that changed since the session's checkpoint.
+///
+/// The same comparison `apex agent diff` makes and for the same reason: tree
+/// against tree, never tree against working tree, because `git diff <commit>`
+/// only considers tracked paths and a file the agent CREATED is exactly what
+/// the next agent needs to know about.
+///
+/// `Ok(None)` means there was nothing to compare against, which is a different
+/// answer from `Ok(Some(vec![]))` — "nothing changed" — and the packet keeps
+/// them apart.
+///
+/// The BASE is returned alongside the files, not just used and discarded. When
+/// the session has no checkpoint of its own the comparison falls back to the
+/// project's most recent one, and a list of changed files measured against a
+/// base the packet never names is a number without a unit: the next agent
+/// cannot tell whether `src/main.rs` changed during this session's work or
+/// during somebody else's, last week.
+fn handoff_changes(
+    root: &Path,
+    session: &SessionInfo,
+) -> Result<Option<(checkpoint::Checkpoint, Vec<String>)>> {
+    let base = match session.checkpoint.as_deref() {
+        Some(cp) => Some(checkpoint::find(root, cp)?),
+        None => checkpoint::latest(root)?,
+    };
+    let Some(base) = base else {
+        return Ok(None);
+    };
+    let now = checkpoint::current_tree(root)?;
+    let text = git::git(root, &["diff", "--name-only", &base.commit, &now, "--"])?;
+    let files = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect();
+    Ok(Some((base, files)))
+}
+
+/// The privilege verbs pre-approved for the outgoing session's PROJECT.
+///
+/// These are the grants the incoming agent INHERITS, and that is measured
+/// rather than assumed: `request::Grants::allows(project, verb)` matches on
+/// the project root alone — no session, no expiry, no boot id — and a handoff
+/// starts the new session in the outgoing session's `cwd`, so it is the same
+/// project. Read the second function below before writing prose about either:
+/// §16 has one heading for grants and this runtime has two families, whose
+/// transfer semantics are opposites.
+///
+/// Best-effort on purpose: a runtime that cannot answer must not stop a
+/// handoff, because the packet is still worth having without this section. The
+/// distinction the packet needs is between "asked and there were none" and
+/// "could not ask", so the failure returns `None` and the reason is recorded.
+/// Collapsing those two would hand the receiving agent a failed lookup dressed
+/// as a fact about its own authority.
+/// The worktree row the daemon attributes the outgoing session to.
+///
+/// Matched on `WorktreeStatus.sessions`, which is the daemon's own
+/// session-to-worktree attribution, rather than on a path comparison here.
+/// `worktree::statuses` resolves a session's cwd to the DEEPEST worktree
+/// containing it, so a path match written at this end would disagree with the
+/// daemon for exactly the nested case that attribution exists to settle.
+///
+/// `None` asks for every remembered project. The session id is unique across
+/// them, so it costs one wider reply and removes a slug-resolution step that
+/// could fail on its own and be mistaken for "no tests recorded".
+fn handoff_worktree_row(session: u32) -> Option<apex_agent_core::worktree::WorktreeStatus> {
+    client::worktrees(None)
+        .ok()?
+        .into_iter()
+        .find(|w| w.sessions.contains(&session))
+}
+
+fn handoff_project_grants(project: Option<&str>) -> Option<Vec<String>> {
+    let project = project?;
+    let reply = client::call(&Request::Grants).ok()?;
+    match reply {
+        Response::Grants { projects } => Some(projects.get(project).cloned().unwrap_or_default()),
+        _ => None,
+    }
+}
+
+/// The system-access grants the OUTGOING session holds, as the daemon says.
+///
+/// Filtered to that session, because `SystemGrant.session` is the field that
+/// makes it a grant and not a standing root capability (§3.3) — and it is
+/// exactly why none of these reaches the incoming agent. A grant belonging to
+/// a sibling session is not this handoff's business and listing it would read
+/// as inherited.
+///
+/// The daemon's own state word and sentence are carried rather than
+/// re-derived, for the reason written on `fetch_grants`: the state depends on
+/// the running kernel's boot id, so a client computing it could disagree with
+/// the daemon that issued the grant.
+fn handoff_system_grants(session: u32) -> Option<Vec<String>> {
+    let (grants, states) = fetch_grants().ok()?;
+    Some(
+        grants
+            .iter()
+            .zip(states.iter())
+            .filter(|(g, _)| g.session == session)
+            .map(|(g, (state, said))| {
+                // Break-glass carries no capability list because it does not
+                // work through `request` at all; "-" there would read as a gap
+                // in the record rather than as the point of the mode. Same
+                // wording as `apex agent grants`, so the two agree.
+                let covers = if g.capabilities.is_empty() {
+                    "root inside the session (sudo)".to_string()
+                } else {
+                    g.capabilities.join(", ")
+                };
+                format!("`#{} {}` — {covers} ({state}: {said})", g.id, g.kind)
+            })
+            .collect(),
+    )
+}
+
+fn handoff(id: Option<u32>, to: &str, no_start: bool, transcript_bytes: usize) -> Result<i32> {
+    // The target has to be an adapter this runtime can launch, checked BEFORE
+    // anything is written. A packet for an agent that does not exist is a file
+    // nobody will ever read, and the error belongs in front of the user rather
+    // than after a successful-looking write.
+    let target = adapter::by_id(to).with_context(|| {
+        format!(
+            "no agent adapter named {to:?}; `apex agent adapters` lists them"
+        )
+    })?;
+
+    let (dir, session) = session_context(id)?;
+    let session = session.context(
+        "no session to hand off. Name one with `apex agent handoff <id> --to <agent>`, or run \
+         this from a project that has one",
+    )?;
+
+    let root = git::toplevel(&dir).with_context(|| {
+        format!(
+            "{} is not inside a git repository, so there is nowhere in the project to put the \
+             packet where a sandboxed session could read it",
+            dir.display()
+        )
+    })?;
+
+    let mut unavailable = handoff::Handoff::structural_gaps();
+
+    // The base the changed-file list is measured against, when it is not the
+    // session's own checkpoint. Carried into the `checkpoint` section's reason
+    // so the two sections cannot contradict each other.
+    let mut fallback_base: Option<String> = None;
+
+    let changed = match handoff_changes(&root, &session) {
+        Ok(Some((base, files))) => {
+            if session.checkpoint.is_none() {
+                fallback_base = Some(format!("{} ({})", base.id, base.label));
+            }
+            Some(files)
+        }
+        Ok(None) => {
+            unavailable.push(handoff::Missing::new(
+                "changed files",
+                "This project has no checkpoint, so there is no before-state to compare \
+                 against. `apex agent run --checkpoint` is what makes this answerable.",
+            ));
+            None
+        }
+        Err(e) => {
+            unavailable.push(handoff::Missing::new(
+                "changed files",
+                &format!("The comparison against the checkpoint failed: {e}."),
+            ));
+            None
+        }
+    };
+
+    let transcript = match client::logs(session.id, transcript_bytes) {
+        Ok(t) if !t.trim().is_empty() => Some(t),
+        Ok(_) => {
+            unavailable.push(handoff::Missing::new(
+                "important transcript summary",
+                "The session's transcript is empty.",
+            ));
+            None
+        }
+        Err(e) => {
+            unavailable.push(handoff::Missing::new(
+                "important transcript summary",
+                &format!("The transcript could not be read: {e}."),
+            ));
+            None
+        }
+    };
+
+    // The test state is the daemon's observation, not a suite run from here:
+    // a handoff that ran somebody's tests would take minutes and change the
+    // tree it is reporting on.
+    let test_state = match handoff_worktree_row(session.id) {
+        Some(row) => Some(handoff::describe_tests(&row.tests, row.head.as_deref())),
+        None => {
+            unavailable.push(handoff::Missing::new(
+                "test state",
+                "The runtime has a per-worktree test record, but it did not return a row \
+                 for this session. That is a failed lookup and not an observation: it does \
+                 not mean no suite has been run here. `apex agent worktrees` asks the same \
+                 question directly.",
+            ));
+            None
+        }
+    };
+
+    let project_grants = handoff_project_grants(session.project.as_deref());
+    if project_grants.is_none() {
+        unavailable.push(handoff::Missing::new(
+            "project grants",
+            "The runtime did not answer the project-grant query. This says nothing \
+             about whether anything is pre-approved here — ask with `apex request \
+             grants` before assuming either way.",
+        ));
+    }
+
+    let system_grants = handoff_system_grants(session.id);
+    if system_grants.is_none() {
+        unavailable.push(handoff::Missing::new(
+            "system grants",
+            "The runtime did not answer the system-grant query, so this says nothing \
+             about what the outgoing session held.",
+        ));
+    }
+
+    if session.checkpoint.is_none() {
+        // Two different sentences, because the two cases leave the reader in
+        // different positions. With a fallback base the changed-file list
+        // above is real but is measured from somewhere the session did not
+        // choose; without one there is no list at all.
+        unavailable.push(handoff::Missing::new(
+            "checkpoint",
+            &match fallback_base.as_deref() {
+                Some(base) => format!(
+                    "This session was not started with `--checkpoint`, so it has no \
+                     before-state of its own. The changed files above are measured \
+                     against the project's most recent checkpoint, `{base}`, which was \
+                     taken by something else — so that list may include work this \
+                     session did not do, and may omit work it did before that \
+                     checkpoint.",
+                ),
+                None => "This session was not started with `--checkpoint`, so there is \
+                     no recorded before-state of its own."
+                    .to_string(),
+            },
+        ));
+    }
+
+    let packet = handoff::Handoff {
+        version: handoff::HANDOFF_VERSION,
+        from_session: session.id,
+        from_agent: session.agent.clone(),
+        to_agent: target.id.to_string(),
+        created_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        project: session.project.clone(),
+        worktree: session.worktree.clone(),
+        cwd: session.cwd.clone(),
+        argv: {
+            let mut v = vec![session.program.clone()];
+            v.extend(session.args.iter().cloned());
+            v
+        },
+        goal: None,
+        plan: None,
+        changed_files: changed,
+        test_state,
+        transcript,
+        memory_slug: None,
+        checkpoint: session.checkpoint.clone(),
+        project_grants,
+        system_grants,
+        unavailable,
+    };
+
+    // `.apex/` goes into `.git/info/exclude` and not the user's `.gitignore`,
+    // through the same helper `apex agent run --worktree` uses. A handoff that
+    // left an untracked file showing up in the next `git status` would be this
+    // tool making a mess in somebody's repository.
+    if let Some(p) = project::detect(&root) {
+        project::ensure_ignored(&p).ok();
+    }
+
+    let path = handoff_path(&root, session.id, target.id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(&path, packet.markdown())
+        .with_context(|| format!("writing {}", path.display()))?;
+
+    // stdout is the path and nothing else, so this composes. Everything a
+    // person reads goes to stderr.
+    println!("{}", path.display());
+    let gaps = packet.unavailable.len();
+    eprintln!(
+        "apex: handoff packet for session {} written for {} ({} of {} fields this build \
+         cannot supply are marked absent with their reason)",
+        session.id,
+        target.id,
+        gaps,
+        handoff::FIELDS.len()
+    );
+
+    if no_start {
+        eprintln!("apex: --no-start, so nothing was launched. Start it yourself with:");
+        eprintln!("apex:   apex agent run -a {} --cwd {}", target.id, session.cwd);
+        return Ok(0);
+    }
+
+    // Started in the OUTGOING session's directory, which is its worktree when
+    // it had one. `worktree:` is deliberately not passed: that would create a
+    // second worktree and hand the next agent an empty one, when the whole
+    // point is to continue in the tree the work is already in.
+    let req = Request::Run(RunRequest {
+        agent: Some(target.id.to_string()),
+        prompt: Some(handoff_prompt(&path)),
+        args: vec![],
+        cwd: session.cwd.clone(),
+        policy: session.policy,
+        request_origin: None,
+        worktree: None,
+        checkpoint: false,
+        ttl_ms: None,
+        cols: 80,
+        rows: 24,
+        env: vec![],
+        // A handoff continues real work in the outgoing session's own tree, so
+        // the incoming session is an ordinary one. `disposable: true` would run
+        // it in a throwaway capsule whose writes are discarded unless
+        // `copy_out` names somewhere, which is the opposite of continuing.
+        disposable: false,
+        copy_out: None,
+    });
+    // Deliberately NOT `client::call(&req)?`. The `?` would return the error
+    // up to the top-level handler, which prints it and knows nothing about the
+    // packet — so the one thing the user still has, a written document and its
+    // path, would go unmentioned at exactly the moment they need to be told
+    // how to carry on by hand. A failed launch has two shapes, a transport
+    // error and a reply that is not a session, and both leave the packet on
+    // disk; they get one message.
+    let started = client::call(&req);
+    let refusal = match started {
+        Ok(Response::Session(info)) => {
+            eprintln!(
+                "apex: session {} started under {} in {}",
+                info.id, info.agent, info.cwd
+            );
+            eprintln!("apex: attach to it with `apex agent attach {}`", info.id);
+            return Ok(0);
+        }
+        Ok(other) => format!("{other:?}"),
+        Err(e) => format!("{e}"),
+    };
+    eprintln!(
+        "apex: the packet is written at {} but the {} session did not start: {refusal}",
+        path.display(),
+        target.id
+    );
+    eprintln!(
+        "apex: nothing is lost — start it yourself with `apex agent run -a {} --cwd {}` and \
+         tell it to read that file first",
+        target.id, session.cwd
+    );
+    Ok(1)
 }
 
 /// Build the bytes `apex agent input` puts on the wire.
@@ -3532,6 +3973,53 @@ fn key_list() -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_handoff_prompt_names_the_packet_and_says_to_read_it_first() {
+        // The one part of the handoff that the integration tests cannot see:
+        // it is only sent when a session actually launches, and launching one
+        // needs an installed agent. So the words the next agent acts on are
+        // asserted here.
+        //
+        // All three claims matter. An agent handed a bare path treats it as
+        // one input among many, when the point of §16 is that the file is the
+        // state of the work. And it must say that an unsupplied section is a
+        // gap in the tooling: without that, an agent reads "no plan" as "there
+        // was no plan" and starts over.
+        let p = handoff_prompt(Path::new("/p/.apex/handoff/session-4-to-codex.md"));
+        assert!(
+            p.contains("/p/.apex/handoff/session-4-to-codex.md"),
+            "the prompt does not name the packet: {p}"
+        );
+        assert!(
+            p.contains("before doing anything else"),
+            "the prompt does not put the packet first: {p}"
+        );
+        assert!(
+            p.contains("not statements that there was nothing there"),
+            "the prompt does not warn that an absent section is a tooling gap: {p}"
+        );
+    }
+
+    #[test]
+    fn the_packet_path_is_per_session_and_per_target() {
+        // One file per (session, target), overwritten on a retry. A directory
+        // filling with timestamped near-duplicates is how an agent ends up
+        // reading the wrong handoff, and a path that ignored the target would
+        // have the second handoff of a session overwrite the first.
+        let root = Path::new("/p");
+        let a = handoff_path(root, 4, "codex");
+        assert_eq!(
+            a,
+            Path::new("/p/.apex/handoff/session-4-to-codex.md"),
+            "the packet path moved; a sandboxed session reads it by this path"
+        );
+        assert_ne!(a, handoff_path(root, 5, "codex"), "two sessions collided");
+        assert_ne!(a, handoff_path(root, 4, "opencode"), "two targets collided");
+        // Inside the project. The reason is in `handoff_path`'s own comment:
+        // under `--sandbox project` the rest of $HOME is absent, not hidden.
+        assert!(a.starts_with(root), "the packet left the project: {a:?}");
+    }
 
     /// A `run` invocation with nothing set, so a test can turn on exactly the
     /// one flag it is about.

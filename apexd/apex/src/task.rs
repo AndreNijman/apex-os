@@ -55,8 +55,8 @@ use clap::{Args, Subcommand};
 use apex_agent_core::protocol::SessionInfo;
 use apex_agent_core::{adapter, checkpoint, client, git, layout, paths, project};
 use apexd_core::task::{
-    check_id, check_project_root, choose_attach, plan, Attach, Found, Observed, ResumePlan, Task,
-    TaskState, Tasks,
+    check_id, check_project_root, choose_attach, choose_handoff, plan, Attach, Found,
+    HandoffTarget, Observed, ResumePlan, Task, TaskState, Tasks,
 };
 
 use crate::blueprint::EXIT_ERROR;
@@ -121,6 +121,25 @@ pub enum TaskCmd {
         /// still reaches it.
         #[arg(long, conflicts_with = "label")]
         forget: bool,
+    },
+    /// Hand this task's work to another agent.
+    ///
+    /// Section 16 of the roadmap spells the handoff `apex task handoff
+    /// <task-id> codex`, and this is that command. It resolves the task to the
+    /// session running in its root and calls `apex agent handoff`, which is
+    /// where the packet is actually written — a task is a binding, and a
+    /// handoff packet is a record of a SESSION, so there is exactly one thing
+    /// here that can produce the document.
+    ///
+    /// It refuses rather than guessing when the task has no session or more
+    /// than one. See `choose_handoff`.
+    Handoff {
+        id: String,
+        /// Adapter to hand it to (`codex`, `opencode`, `gemini`, `claude`).
+        agent: String,
+        /// Write the packet and stop, without starting anything.
+        #[arg(long)]
+        no_start: bool,
     },
     /// Forget a task. Nothing it referenced is touched.
     Rm { id: String },
@@ -682,6 +701,7 @@ fn dispatch(args: TaskArgs) -> Result<i32> {
         TaskCmd::Show { id, json } => cmd_show(&id, json),
         TaskCmd::Resume { id, no_attach, json } => cmd_resume(&id, no_attach, json),
         TaskCmd::Checkpoint { id, label, forget } => cmd_checkpoint(&id, label, forget),
+        TaskCmd::Handoff { id, agent, no_start } => cmd_handoff(&id, &agent, no_start),
         TaskCmd::Rm { id } => cmd_rm(&id),
         TaskCmd::Path => {
             println!("tasks   {}", tasks_path().display());
@@ -969,6 +989,47 @@ fn cmd_resume(id: &str, no_attach: bool, json: bool) -> Result<i32> {
             // second thing to get wrong about a terminal.
             Ok(crate::agent::agent(attach_cmd(sid)))
         }
+    }
+}
+
+/// Section 16's `apex task handoff <task-id> <agent>`.
+///
+/// The task is resolved to its session HERE and the packet is written THERE:
+/// `apex agent handoff` is called as itself rather than reimplemented, so the
+/// adapter validation, the `.git/info/exclude` handling, the grant queries and
+/// the launch-failure contract are all the shipped verb's, and there is one
+/// packet renderer rather than two that agree until they do not.
+fn cmd_handoff(id: &str, agent: &str, no_start: bool) -> Result<i32> {
+    let tasks = load()?;
+    let task = tasks.get(id)?;
+    let work = working_root(task);
+    // One daemon round trip, matched by working directory — `sessions_for`'s
+    // rule, not a stored session id, which would be wrong the moment the
+    // session ended.
+    let live = all_sessions().map(|ss| sessions_for(&work, &ss));
+    match choose_handoff(live.as_deref()) {
+        HandoffTarget::No(why) => {
+            eprintln!("apex task: {why}");
+            Ok(EXIT_ERROR)
+        }
+        HandoffTarget::Session(sid) => {
+            eprintln!("task {id:?}: handing session {sid} to {agent}");
+            Ok(crate::agent::agent(handoff_cmd(sid, agent, no_start)))
+        }
+    }
+}
+
+/// The `apex agent handoff <id> --to <agent>` invocation a task handoff makes.
+///
+/// A function rather than an inline literal for the same reason `attach_cmd` is
+/// one: the constructed command is the interface between the two verbs, and it
+/// is worth being able to see every field of it in one place.
+fn handoff_cmd(id: u32, agent: &str, no_start: bool) -> crate::agent::AgentCmd {
+    crate::agent::AgentCmd::Handoff {
+        id: Some(id),
+        to: agent.to_string(),
+        no_start,
+        transcript_bytes: crate::agent::HANDOFF_TRANSCRIPT_BYTES,
     }
 }
 

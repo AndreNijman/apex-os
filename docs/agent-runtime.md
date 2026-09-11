@@ -84,6 +84,8 @@ apex agent attach 4
 apex agent pause 4 / resume 4 / kill 4
 apex agent input 4 "run the tests"            # types it, leaves it unsent
 apex agent input 4 "run the tests" --submit   # and presses Enter
+apex agent handoff 4 --to codex               # writes the packet, starts codex on it
+apex agent handoff 4 --to codex --no-start    # writes the packet and stops
 apex agent logs 4
 apex agent diff 4
 apex agent undo 4
@@ -847,6 +849,105 @@ worktree, no branch.
 One interaction worth knowing: `apex agent worktrees` lists a disposable
 session under the tree you started it in, which is the tree the capsule
 copied. That session cannot change it.
+---
+
+## Handing work to another agent
+
+An agent runs out of context, or out of quota, and the work has to carry on
+somewhere else. `apex agent handoff` writes down what the runtime knows about
+a session and starts a different agent pointed at it:
+
+```
+apex agent handoff 4 --to codex
+apex agent handoff 4 --to codex --no-start   # write it, launch nothing
+```
+
+If the work is bound to a task, hand the task over and let it find the session:
+
+```
+apex task handoff installer-bug codex
+apex task handoff installer-bug codex --no-start
+```
+
+That is the same packet, written by the same command — `apex task handoff`
+resolves the task to the agent session running in its root and calls
+`apex agent handoff`. A packet is the record of a **session**: its transcript,
+the files it changed, the worktree the runtime attributes to it, the grants it
+holds. None of those can be read off a task, which is a binding. So the task
+form refuses rather than guessing when the task has no session running in it,
+or when it has more than one — and when it refuses for that second reason it
+names the ids, because the next thing to type is `apex agent handoff <id>`.
+
+The packet is a Markdown file in the project, at
+`.apex/handoff/session-4-to-codex.md`. Inside the project rather than under
+`$XDG_STATE_HOME`, and that is forced rather than chosen: the receiving
+session is sandboxed, and under `--sandbox project` the rest of `$HOME` is not
+merely hidden but absent, so a packet in the runtime's own state directory
+would be handed to an agent that could not open it. `.apex/` is added to
+`.git/info/exclude`, not to your `.gitignore`.
+
+`stdout` is the path and nothing else, so the command composes. Everything a
+person reads goes to `stderr`. If the receiving agent fails to start, the exit
+status is 1 and the packet stays where it is.
+
+### An absent field says why it is absent
+
+The packet has a heading for each of the nine things a handoff should carry.
+Three of them have no producer in this build, and they are written as absent
+**with the reason**:
+
+| field | why it is empty |
+| --- | --- |
+| `goal` | the opening instruction is a positional argument and is not recorded apart from the rest of the command line, which is carried instead |
+| `plan` | the runtime does not record one |
+| `memory project slug` | this runtime has no memory system |
+
+`test state` used to be a fourth. It is not one any more: the runtime keeps a
+per-worktree test record, so the packet asks the daemon for the row that owns
+the outgoing session and writes down what it says. When nobody has run a suite
+there, that is reported as the observation it is — "APEX has not observed a test
+run in this worktree" — and not as a field this build cannot answer. A recorded
+pass names the commit it passed AT, and says **STALE** when the worktree has
+moved on since, because a pass against code that is no longer there would
+otherwise persuade the incoming agent to skip the one check that would have
+corrected it. If the lookup itself fails, the packet says the lookup failed
+rather than reporting that no suite has been run.
+
+A plausible plan reconstructed from the transcript's first heading would be a
+guess wearing the label of a fact, handed to an agent with no way to check it.
+That is worse than a blank, because the receiving agent would act on it. For
+the same reason the transcript is labelled as the tail it is, not as the
+"summary" the field name asks for: nothing here decided what was important.
+
+An empty field and an unanswerable one are also kept apart. No changed files
+is `Nothing has changed since the checkpoint`; a runtime that could not look
+says so.
+
+### The two kinds of grant transfer in opposite directions
+
+This is the part to read before assuming what the new agent can do.
+
+- **Pre-approved project grants carry over.** A grant recorded by an approved
+  privilege request is stored against the *project root*, with no session and
+  no expiry, and a handoff starts the incoming agent in the same project. So
+  every privilege verb pre-approved here already applies to it. Nothing is
+  re-requested and nobody is asked again. Withdraw one with
+  `apex request revoke`.
+- **System-access grants do not.** Those are bound to a concrete session
+  (§3.3), and that is the session being handed off. The packet lists them so
+  the next agent knows what the work needed, and says plainly that it does not
+  have them; getting one back costs a local password.
+
+The packet reports the two under separate headings for that reason. One list
+would have to pick one family's semantics, and either choice is a false
+statement about the other.
+
+### The transcript is not sent anywhere
+
+Everything in the packet was already on this machine, and the packet stays on
+this machine: it is a file in your project that the next agent reads. Deleting
+it is safe, and `apex agent handoff` will write it again.
+
 ---
 
 ## Status, and the open event protocol
