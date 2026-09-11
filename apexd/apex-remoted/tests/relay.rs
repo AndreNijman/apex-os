@@ -33,6 +33,7 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -80,6 +81,8 @@ struct Observed {
 struct Relay {
     port: u16,
     seen: Arc<Mutex<Observed>>,
+    /// Every socket the relay is holding, so a test can drop them all.
+    cut: Arc<Mutex<Vec<TcpStream>>>,
 }
 
 impl Relay {
@@ -87,18 +90,21 @@ impl Relay {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
         let port = listener.local_addr().expect("addr").port();
         let seen = Arc::new(Mutex::new(Observed::default()));
-        let rooms: Arc<Mutex<HashMap<String, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
+        let cut: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+        let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
         let recorder = Arc::clone(&seen);
+        let holder = Arc::clone(&cut);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let rooms = Arc::clone(&rooms);
                 let recorder = Arc::clone(&recorder);
+                let holder = Arc::clone(&holder);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, rooms, recorder);
+                    let _ = serve(stream, rooms, recorder, holder);
                 });
             }
         });
-        Relay { port, seen }
+        Relay { port, seen, cut }
     }
 
     fn url(&self) -> String {
@@ -109,14 +115,31 @@ impl Relay {
         self.seen.lock().expect("observed")
     }
 
+    /// Drop every connection the relay holds, the way a network change does:
+    /// no close frame, no warning, a socket that simply stops being there.
+    fn cut_everything(&self) {
+        if let Ok(mut v) = self.cut.lock() {
+            for s in v.drain(..) {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+        }
+    }
+
 }
+
+/// A waiting host: the parked socket, and whether a guest has claimed it.
+type Rooms = Arc<Mutex<HashMap<String, (TcpStream, Arc<AtomicBool>)>>>;
 
 /// One connection, from its request line to the end of its session.
 fn serve(
     mut stream: TcpStream,
-    rooms: Arc<Mutex<HashMap<String, TcpStream>>>,
+    rooms: Rooms,
     seen: Arc<Mutex<Observed>>,
+    cut: Arc<Mutex<Vec<TcpStream>>>,
 ) -> std::io::Result<()> {
+    if let Ok(s) = stream.try_clone() {
+        cut.lock().expect("cut").push(s);
+    }
     // The request head, byte at a time, so nothing after it is swallowed.
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
@@ -187,15 +210,46 @@ fn serve(
             seen.lock().expect("seen").arrivals.push("host".into());
             accept(&mut stream, &key)?;
             send_text(&mut stream, Notice::Waiting.text().as_bytes())?;
-            rooms.lock().expect("rooms").insert(rendezvous.to_string(), stream);
+
+            // A REQUIREMENT, not double bookkeeping: a relay that parks a
+            // waiting host and never notices when its socket dies answers the
+            // desktop's very next dial with 409 for ever, and the machine is
+            // unreachable until the daemon is restarted. Found by this suite
+            // -- the first version of the double did exactly that, and
+            // `a_network_change_costs_the_session_and_costs_nothing_else`
+            // failed with "the desktop did not re-arm". The Worker has to
+            // evict too; see ROADMAP/design/P1-052-relay.md.
+            //
+            // `peek` rather than `read`: it blocks until there is something
+            // to say and consumes nothing, so the session that may later run
+            // over this socket still gets every byte.
+            let taken = Arc::new(AtomicBool::new(false));
+            {
+                let watch = stream.try_clone()?;
+                let rooms = Arc::clone(&rooms);
+                let taken = Arc::clone(&taken);
+                let id = rendezvous.to_string();
+                std::thread::spawn(move || {
+                    let mut probe = [0u8; 1];
+                    let dead = matches!(watch.peek(&mut probe), Ok(0) | Err(_));
+                    if dead && !taken.load(Ordering::SeqCst) {
+                        rooms.lock().expect("rooms").remove(&id);
+                    }
+                });
+            }
+            rooms
+                .lock()
+                .expect("rooms")
+                .insert(rendezvous.to_string(), (stream, taken));
             // Parked. The guest that arrives next takes it and does the copy.
             Ok(())
         }
         Role::Guest => {
             let host = rooms.lock().expect("rooms").remove(rendezvous);
-            let Some(mut host) = host else {
+            let Some((mut host, taken)) = host else {
                 return refuse(&mut stream, 409, "Conflict");
             };
+            taken.store(true, Ordering::SeqCst);
             seen.lock().expect("seen").arrivals.push("guest".into());
             accept(&mut stream, &key)?;
             send_text(&mut stream, Notice::Paired.text().as_bytes())?;
@@ -384,6 +438,11 @@ impl Harness {
                 "--allow-foreground",
                 "--handshake-timeout-ms",
                 "1000",
+                // The shipped interval is fifteen seconds, which is right for
+                // a phone and wrong for a suite that has to watch a
+                // measurement happen. The daemon clamps this at 50 ms.
+                "--ping-interval-ms",
+                "100",
             ])
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
@@ -459,20 +518,40 @@ impl Harness {
     }
 
     /// One connection to the desktop THROUGH THE RELAY, as a guest.
+    ///
+    /// A 409 is retried rather than fatal, and that is what a device does
+    /// too: the desktop consumes its waiting connection the moment a device
+    /// attaches and opens the next one immediately after, so a device that
+    /// arrives in that window is told "no host" about a machine that is
+    /// running. Treating it as an outage would make every second connection
+    /// a failure.
     fn through_the_relay(&self) -> WsPipe {
         let endpoint = Endpoint::parse(&self.relay.url()).expect("endpoint");
-        let socket = TcpStream::connect(("127.0.0.1", self.relay.port)).expect("dial relay");
-        socket.set_nodelay(true).ok();
-        socket.set_read_timeout(Some(Duration::from_secs(20))).ok();
-        let mut writing = socket.try_clone().expect("clone");
-        let mut reading = socket.try_clone().expect("clone");
-        let opening = Opening::new();
-        writing
-            .write_all(&opening.request(&endpoint, &self.rendezvous(), Role::Guest))
-            .expect("request");
-        writing.flush().expect("flush");
-        opening.accept(&mut reading).expect("the relay refused the guest");
+        let rendezvous = self.rendezvous();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let socket = TcpStream::connect(("127.0.0.1", self.relay.port)).expect("dial relay");
+            socket.set_nodelay(true).ok();
+            socket.set_read_timeout(Some(Duration::from_secs(20))).ok();
+            let mut writing = socket.try_clone().expect("clone");
+            let mut reading = socket.try_clone().expect("clone");
+            let opening = Opening::new();
+            writing
+                .write_all(&opening.request(&endpoint, &rendezvous, Role::Guest))
+                .expect("request");
+            writing.flush().expect("flush");
+            match opening.accept(&mut reading) {
+                Ok(()) => return self.joined(socket, reading, writing),
+                Err(e) if format!("{e}").contains("409") && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => panic!("the relay refused the guest: {e}"),
+            }
+        }
+    }
 
+    fn joined(&self, socket: TcpStream, reading: TcpStream, writing: TcpStream) -> WsPipe {
+        let _ = socket;
         let mut rx = WsReceiver::new(reading);
         // The relay says `paired` before a byte of the session moves.
         loop {
@@ -624,7 +703,25 @@ impl Session {
         write_message(&mut self.pipe, &sealed);
     }
 
+    /// Read one frame, answering keepalives on the way.
+    ///
+    /// The desktop measures its own connections, so a `Ping` arrives whenever
+    /// it likes. Answering it is what makes the measurement possible at all;
+    /// `a_device_that_never_answers` below is the control that shows the
+    /// desktop does not simply invent one.
     fn recv(&mut self) -> Frame {
+        loop {
+            let message = read_message(&mut self.pipe);
+            let plain = self.channel.open(&message).expect("open");
+            match Frame::decode(&plain).expect("decode") {
+                Frame::Ping { token } => self.send(Frame::Pong { token }),
+                frame => return frame,
+            }
+        }
+    }
+
+    /// Read one frame WITHOUT answering anything.
+    fn recv_raw(&mut self) -> Frame {
         let message = read_message(&mut self.pipe);
         let plain = self.channel.open(&message).expect("open");
         Frame::decode(&plain).expect("decode")
@@ -909,4 +1006,142 @@ fn window_contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
         && haystack.len() >= needle.len()
         && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn the_desktop_measures_the_connection_and_a_device_cannot_invent_the_answer() {
+    let h = harness!("quality");
+    let device = Device::new();
+    let offer = h.offer();
+    assert_eq!(device.pair(&h, &offer, "measured")["ok"], true);
+    assert!(h.hosts_seen(2));
+
+    let mut session = device.connect(&h, desktop_key(&h)).expect("a session");
+    // `recv` answers pings, so driving the session is what lets the
+    // measurement complete.
+    assert_eq!(session.call(r#"{"cmd":"hello"}"#)["reply"], "hello");
+
+    let measured = wait_for(&h, |c| c.first().and_then(|c| c["rtt_ms"].as_u64()).is_some());
+    let c = &measured[0];
+    assert_eq!(c["path"], "relay", "the measured connection was not the relayed one: {c}");
+    assert_eq!(c["device_name"], "measured", "{c}");
+    // A round trip over loopback is not zero and is not a second. Both ends
+    // matter: 0 would mean the clock was read once, and a large number would
+    // mean the elapsed time was measured from the wrong event.
+    let rtt = c["rtt_ms"].as_u64().expect("a round trip");
+    assert!(rtt < 5_000, "a loopback round trip of {rtt} ms is not a measurement");
+    drop(session);
+
+    // The control. A device that answers nothing must leave the desktop with
+    // no measurement rather than with a good one: an unmeasured connection
+    // and a fast one have to be different states, or the number means
+    // nothing.
+    assert!(h.hosts_seen(3));
+    let silent = Device::new();
+    let offer = h.offer();
+    assert_eq!(silent.pair(&h, &offer, "silent")["ok"], true);
+    assert!(h.hosts_seen(4));
+    let mut quiet = silent.connect(&h, desktop_key(&h)).expect("a session");
+    // Read the pings and deliberately do not answer them -- and then answer
+    // with a token this desktop never sent. A device that could name its own
+    // token could report any quality it liked, including a good one for a
+    // connection that is unusable, which is the whole value of the number
+    // gone. The desktop has to time only round trips it started.
+    for _ in 0..3 {
+        assert!(matches!(quiet.recv_raw(), Frame::Ping { .. }));
+    }
+    quiet.send(Frame::Pong { token: 0xdead_beef });
+    // Long enough that a desktop which was going to record it has.
+    std::thread::sleep(Duration::from_millis(500));
+    let listed = h.control(r#"{"cmd":"status"}"#)["connections"].clone();
+    let quiet_entry = listed
+        .as_array()
+        .expect("connections")
+        .iter()
+        .find(|c| c["device_name"] == "silent")
+        .unwrap_or_else(|| panic!("the silent device was not listed: {listed}"));
+    assert!(
+        quiet_entry["rtt_ms"].is_null(),
+        "a device that answered nothing was given a round trip: {quiet_entry}"
+    );
+}
+
+#[test]
+fn a_network_change_costs_the_session_and_costs_nothing_else() {
+    // What this proves, exactly: when every relay socket dies mid-session,
+    // the desktop re-arms on its own, a device that dials again gets a fresh
+    // Noise_IK session, the agent runtime's sessions are all still there with
+    // the same ids, the device is still paired, and the dead connection is
+    // not left in the live list.
+    //
+    // What it does NOT prove, and must not be read as proving: that a phone
+    // re-dials. The device half of "reconnect across Wi-Fi/mobile-network
+    // changes" is the Android app's (P1-053) and is not in this repository.
+    // Nor is "the PTY survives" a property this branch adds -- apex-agentd
+    // owns the PTYs and goes on owning them whether or not anything is
+    // connected, which is P1-030's decision. What is asserted here is that
+    // the remote layer does not undo it.
+    let h = harness!("cut");
+    let device = Device::new();
+    let offer = h.offer();
+    assert_eq!(device.pair(&h, &offer, "roaming")["ok"], true);
+    assert!(h.hosts_seen(2));
+
+    let mut session = device.connect(&h, desktop_key(&h)).expect("a session");
+    let started = session.call(
+        r#"{"cmd":"run","agent":"generic","cwd":"/tmp","sandbox":"unrestricted","cols":80,"rows":24,"args":["/bin/cat"]}"#,
+    );
+    assert_eq!(started["reply"], "session", "{started}");
+    let id = started["id"].as_u64().expect("an id");
+    let hosts_before = h.relay.seen().arrivals.iter().filter(|a| *a == "host").count();
+
+    // The network goes away. No close frame, no warning.
+    h.relay.cut_everything();
+    drop(session);
+
+    // The desktop notices and re-arms, without being told to.
+    assert!(
+        h.hosts_seen(hosts_before + 1),
+        "the desktop did not re-arm after the relay dropped everything"
+    );
+    // And it does not leave the dead connection in the live list, which is
+    // what a status page would render as a device that is still there.
+    let empty = wait_for(&h, |c| c.is_empty());
+    assert!(empty.is_empty(), "a connection survived its own socket: {empty:?}");
+
+    // A fresh session, over a fresh relay connection, finds the session the
+    // old one started -- same id, still running.
+    let mut again = device.connect(&h, desktop_key(&h)).expect("a second session");
+    let listed = again.call(r#"{"cmd":"list"}"#);
+    let ids: Vec<u64> = listed["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .filter_map(|s| s["id"].as_u64())
+        .collect();
+    assert!(ids.contains(&id), "the session did not survive the reconnect: {listed}");
+
+    // The device never had to pair again.
+    let devices = h.control(r#"{"cmd":"devices"}"#);
+    assert_eq!(devices["devices"].as_array().map(Vec::len), Some(1), "{devices}");
+}
+
+/// Poll the daemon's live connection list until `ready`, then return it.
+fn wait_for(
+    h: &Harness,
+    ready: impl Fn(&[serde_json::Value]) -> bool,
+) -> Vec<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last = Vec::new();
+    while Instant::now() < deadline {
+        last = h.control(r#"{"cmd":"status"}"#)["connections"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if ready(&last) {
+            return last;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    last
 }

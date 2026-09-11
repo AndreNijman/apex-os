@@ -142,7 +142,7 @@ impl From<RelayError> for DialError {
 /// a device has arrived, the session is handed to its own thread and this
 /// loop immediately opens the next waiting connection, so a desktop is
 /// reachable by a second device while the first is connected.
-pub fn supervise(state: Arc<State>, endpoint: Endpoint, agentd: std::path::PathBuf) {
+pub fn supervise(state: Arc<State>, endpoint: Endpoint) {
     let rendezvous = apex_remote_core::rendezvous::rendezvous_id(&state.identity.public_bytes());
     eprintln!(
         "apex-remoted: relay {endpoint}, rendezvous {rendezvous} \
@@ -154,9 +154,8 @@ pub fn supervise(state: Arc<State>, endpoint: Endpoint, agentd: std::path::PathB
             Ok(joined) => {
                 backoff = BACKOFF_MIN;
                 let state = Arc::clone(&state);
-                let agentd = agentd.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = splice(joined, &state, &agentd) {
+                    if let Err(e) = splice(joined, &state) {
                         eprintln!("apex-remoted: a relayed session ended: {e}");
                     }
                 });
@@ -270,7 +269,7 @@ pub fn dial(endpoint: &Endpoint, rendezvous: &str, role: Role) -> Result<Joined,
 }
 
 /// Copy a joined relay connection onto this daemon's own listener.
-fn splice(mut joined: Joined, state: &Arc<State>, _agentd: &std::path::Path) -> std::io::Result<()> {
+fn splice(mut joined: Joined, state: &Arc<State>) -> std::io::Result<()> {
     let local = TcpStream::connect(("127.0.0.1", state.port))?;
     local.set_nodelay(true).ok();
     let source = local.local_addr()?.port();
