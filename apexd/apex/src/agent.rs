@@ -1734,6 +1734,12 @@ fn handoff(id: Option<u32>, to: &str, no_start: bool, transcript_bytes: usize) -
         cols: 80,
         rows: 24,
         env: vec![],
+        // A handoff continues real work in the outgoing session's own tree, so
+        // the incoming session is an ordinary one. `disposable: true` would run
+        // it in a throwaway capsule whose writes are discarded unless
+        // `copy_out` names somewhere, which is the opposite of continuing.
+        disposable: false,
+        copy_out: None,
     });
     // Deliberately NOT `client::call(&req)?`. The `?` would return the error
     // up to the top-level handler, which prints it and knows nothing about the
