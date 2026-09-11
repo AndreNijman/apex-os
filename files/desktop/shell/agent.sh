@@ -191,17 +191,18 @@ if [ -n "${BASH_VERSION}" ]; then
 
         case "$prev" in
             --agent|-a) COMPREPLY=($(compgen -W "$(_apex_agent_names)" -- "$cur")); return ;;
+            --to|-t) COMPREPLY=($(compgen -W "$(_apex_agent_names)" -- "$cur")); return ;;
             --sandbox|-s) COMPREPLY=($(compgen -W "strict project unrestricted" -- "$cur")); return ;;
         esac
 
         if [ "$COMP_CWORD" -eq 2 ]; then
-            COMPREPLY=($(compgen -W "run list attach input pause resume kill logs status \
+            COMPREPLY=($(compgen -W "run list attach input handoff pause resume kill logs status \
                 default adapters diff undo checkpoint event rm prune enable" -- "$cur"))
             return
         fi
 
         case "$verb" in
-            attach|input|pause|resume|kill|logs|rm|status|diff|undo)
+            attach|input|handoff|pause|resume|kill|logs|rm|status|diff|undo)
                 COMPREPLY=($(compgen -W "$(_apex_session_ids)" -- "$cur")) ;;
             default)
                 COMPREPLY=($(compgen -W "$(_apex_agent_names)" -- "$cur")) ;;
@@ -313,14 +314,14 @@ fi
 if [ -n "${ZSH_VERSION}" ]; then
     _apex_agent_zsh() {
         local -a verbs
-        verbs=(run list attach input pause resume kill logs status default adapters
+        verbs=(run list attach input handoff pause resume kill logs status default adapters
                diff undo checkpoint event rm prune enable)
         if (( CURRENT == 3 )); then
             _describe 'agent verb' verbs
             return
         fi
         case "${words[3]}" in
-            attach|input|pause|resume|kill|logs|rm|status|diff|undo)
+            attach|input|handoff|pause|resume|kill|logs|rm|status|diff|undo)
                 local -a ids
                 ids=(${(f)"$(_apex_session_ids)"})
                 _describe 'session' ids ;;
