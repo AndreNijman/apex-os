@@ -624,6 +624,18 @@ jobs:
           sudo apt-get install -y -qq bubblewrap
           command -v bwrap
           bwrap --version
+          # Ubuntu 24.04 ships kernel.apparmor_restrict_unprivileged_userns=1,
+          # which denies an unprivileged user namespace — so bwrap installs
+          # fine and then fails with "setting up uid map: Permission denied"
+          # and "loopback: Failed RTM_NEWADDR". The runner is ephemeral and
+          # unshared, so relaxing it here affects nothing else.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Proven, not assumed: a sandbox that cannot start must fail HERE,
+          # naming the reason, rather than three steps later as five confusing
+          # assertion failures about MCP servers.
+          bwrap --dev-bind / / --unshare-net --unshare-user true \
+            || { echo "FATAL: bwrap cannot create a user namespace on this runner"; exit 1; }
+          echo "bwrap can create a user namespace"
 
       - name: Cache Cargo
         uses: actions/cache@v4
