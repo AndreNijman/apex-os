@@ -278,10 +278,7 @@ fn accept(stream: &mut TcpStream, key: &str) -> std::io::Result<()> {
 
 /// Copy one direction, recording every payload the operator would see.
 fn copy(mut from: TcpStream, mut to: TcpStream, seen: Arc<Mutex<Observed>>) -> std::io::Result<()> {
-    loop {
-        let Some((op, payload)) = read_client_frame(&mut from)? else {
-            break;
-        };
+    while let Some((op, payload)) = read_client_frame(&mut from)? {
         match op {
             0x2 | 0x0 => {
                 seen.lock().expect("seen").payloads.push(payload.clone());
