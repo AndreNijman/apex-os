@@ -169,8 +169,29 @@ jobs:
           # apex-shell is a separate repository, so it is checked out here. The
           # checker exits 77 (skip) when it is absent, which keeps this from
           # failing for a reason that is nothing to do with the change.
-          git clone --depth 1 -q https://github.com/AndreNijman/apex-shell \
-            /tmp/apex-shell-parity || true
+          # Clone the MATCHING branch where one exists, and say which one was
+          # used. This job's first ever run compared apex-os `roadmap/v2.2`
+          # against apex-shell `main` and failed on two touchpad defaults —
+          # while the two INTEGRATION branches agreed perfectly (22 settings,
+          # identical keys and defaults). A parity check that silently compares
+          # a branch against someone else's default branch reports drift that
+          # is not there and hides drift that is.
+          #
+          # The real drift it exposed is between the two MAINS, and it is kept
+          # rather than papered over: apex-shell main has drag_lock=true and
+          # click_method=clickfinger where apex-os main's generator has false
+          # and buttonAreas. Whoever performs the final integration must land
+          # both sides together, or opening the Input page silently changes a
+          # user's touchpad behaviour.
+          ref="${GITHUB_REF_NAME:-}"
+          if [ -n "$ref" ] && git clone --depth 1 -q --branch "$ref" \
+               https://github.com/AndreNijman/apex-shell /tmp/apex-shell-parity 2>/dev/null; then
+            echo "input parity: comparing against apex-shell branch '$ref'"
+          else
+            git clone --depth 1 -q https://github.com/AndreNijman/apex-shell \
+              /tmp/apex-shell-parity || true
+            echo "input parity: no matching apex-shell branch; comparing against its default branch"
+          fi
           set +e
           python3 files/scripts/check-input-parity \
             --service /tmp/apex-shell-parity/src/services/config_tab/InputService.qml
