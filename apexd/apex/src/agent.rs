@@ -949,6 +949,11 @@ fn run(args: RunArgs) -> Result<i32> {
         worktree: args.worktree.clone(),
         checkpoint: args.checkpoint,
         ttl_ms: args.ttl,
+        // Nothing to send yet: collecting an assertion needs a challenge to
+        // have been asked for, and the command that asks for one is the next
+        // commit. The daemon's reader landed with this one so that the gate
+        // and the field it reads arrive together.
+        second_factor: None,
         cols: size.cols,
         rows: size.rows,
         env: Vec::new(),
@@ -1706,7 +1711,7 @@ fn revoke_grant(id: u32) -> Result<i32> {
 
 fn renew_grant(id: u32, ttl_ms: u64) -> Result<i32> {
     let mut c = Client::connect()?;
-    match c.call(&Request::RenewSystemGrant { id, ttl_ms })? {
+    match c.call(&Request::RenewSystemGrant { id, ttl_ms, second_factor: None })? {
         Response::SystemGrants { states, .. } => {
             for (_, said) in states {
                 println!("{said}");

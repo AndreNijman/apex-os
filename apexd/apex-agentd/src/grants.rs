@@ -45,6 +45,7 @@ use apex_agent_core::grant::{
     self, BootStamp, ClosureReason, GrantKind, GrantState, SystemGrant,
 };
 use apex_agent_core::policy::RequestOrigin;
+use apex_agent_core::webauthn::{AssertionError, RemoteElevationRefused};
 
 /// Everything the daemon knows about system-access grants.
 pub struct GrantAuthority {
@@ -80,6 +81,25 @@ pub enum GrantError {
     NotAuthenticated(String),
     /// The peer could not be pinned for polkit.
     SubjectUnreadable(String),
+    /// §7's second column, decided (P0-014).
+    ///
+    /// The origin is not local, and whether that can be authorised at all is
+    /// the owner's `OriginPolicy` — plus, when it is allowed, a touch on an
+    /// enrolled security key that names this exact elevation.
+    ///
+    /// This is what a non-local caller is now told instead of
+    /// [`GrantError::NotLocal`]. `NotLocal` is still what
+    /// [`crate::privilege::may_be_granted`] answers, because that function
+    /// asks "is this the local column"; what P0-014 changed is that the answer
+    /// to that question is no longer the end of the decision.
+    RemoteElevation(RemoteElevationRefused),
+    /// A key answered, and the answer did not check out.
+    ///
+    /// Kept apart from [`GrantError::RemoteElevation`] because the two ask
+    /// different things of the reader: that one is a setting to change or a
+    /// touch to collect, this one is a signature, a counter or a challenge
+    /// that ran out.
+    SecondFactorRefused(AssertionError),
 }
 
 impl std::fmt::Display for GrantError {
@@ -113,6 +133,16 @@ impl std::fmt::Display for GrantError {
             GrantError::Ttl(e) => write!(f, "{e}"),
             GrantError::NotAuthenticated(why) => write!(f, "{why}"),
             GrantError::SubjectUnreadable(why) => write!(f, "{why}"),
+            // Already a sentence naming what to do; see
+            // `RemoteElevationRefused`'s own `Display`.
+            GrantError::RemoteElevation(why) => write!(f, "{why}"),
+            GrantError::SecondFactorRefused(why) => write!(
+                f,
+                "the security key's answer was refused: {why}. The challenge it answered has \
+                 been spent either way — one issue, one attempt, so that a challenge cannot be \
+                 ground against — which means a new one has to be issued before the key is \
+                 touched again"
+            ),
         }
     }
 }
@@ -852,6 +882,14 @@ mod tests {
             },
             GrantError::OriginUnknown("/proc/9/cgroup: no such file".into()),
             GrantError::NotActive { id: 1, state: "expired".into() },
+            GrantError::RemoteElevation(RemoteElevationRefused::PolicyForbids {
+                origin: RequestOrigin::RemoteControl,
+            }),
+            GrantError::RemoteElevation(RemoteElevationRefused::NoSecondFactor {
+                origin: RequestOrigin::RemoteControl,
+            }),
+            GrantError::SecondFactorRefused(AssertionError::BadSignature),
+            GrantError::SecondFactorRefused(AssertionError::NoUserPresence),
         ] {
             let msg = e.to_string();
             assert!(msg.len() > 60, "unhelpful refusal: {msg}");
@@ -865,5 +903,18 @@ mod tests {
         }
         .to_string()
         .contains("§7"));
+        // The two P0-014 refusals have to name the thing the owner can change
+        // — the setting, or the fact that the touch has to be collected again
+        // — rather than merely saying no.
+        assert!(
+            GrantError::RemoteElevation(RemoteElevationRefused::PolicyForbids {
+                origin: RequestOrigin::RemoteControl
+            })
+            .to_string()
+            .contains("--origin-policy remote")
+        );
+        assert!(GrantError::SecondFactorRefused(AssertionError::BadSignature)
+            .to_string()
+            .contains("spent"));
     }
 }

@@ -917,8 +917,8 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
 
         Request::RevokeSystemGrant { id } => privilege::revoke_system_grant(daemon, creds, id),
 
-        Request::RenewSystemGrant { id, ttl_ms } => {
-            privilege::renew_system_grant(daemon, creds, id, ttl_ms)
+        Request::RenewSystemGrant { id, ttl_ms, second_factor } => {
+            privilege::renew_system_grant(daemon, creds, id, ttl_ms, second_factor.as_ref())
         }
 
         // ── the secret broker ───────────────────────────────────────────────
