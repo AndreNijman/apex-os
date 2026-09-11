@@ -660,32 +660,49 @@ fi
 #   an untrapped fatal signal (measured: exit status 129, trap body executed).
 #
 #   SIGTERM — the SAME kernel route, because APEX's own shutdown DOES NOT RUN.
-#   `block_termination_signals` (apex-agentd/src/main.rs) installs the mask
-#   with `pthread_sigmask` only after `spawn_expiry_thread` has already started
-#   a thread, and a spawned Rust thread does not carry the mask anyway.
+#   `block_termination_signals` (apex-agentd/src/main.rs:169) installs the mask
+#   AFTER `spawn_expiry_thread` at 164 has already started a thread. Threads do
+#   inherit a mask, so that one thread — and only it — runs unmasked, and a
+#   process-directed signal goes to the first thread that does not block it.
 #   MEASURED on /proc/<pid>/task/*/status, a scratch daemon of its own:
 #
-#       apex-agentd      SigBlk=0000000000004003   HUP+INT+TERM blocked
-#       apex-agentd-gra  SigBlk=0000000000000000
-#       apex-agentd-sig  SigBlk=0000000000000000
+#       apex-agentd      SigBlk=0000000000004003  syscall=288
+#       apex-agentd-gra  SigBlk=0000000000000000  syscall=230  ← spawned at 164
+#       apex-agentd-sig  SigBlk=0000000000000000  syscall=128  ← see below
 #
-#   so a process-directed SIGTERM is delivered to a thread that does not block
-#   it and the daemon dies by DEFAULT DISPOSITION: measured exit status 143,
-#   with the log holding only its `listening on` line — the signal thread's
-#   "stopping sessions" never prints, the control socket is never removed, and
-#   `shutdown` → `registry::terminate` never runs for any session.
+#   so SIGTERM lands on the grants thread and the daemon dies by DEFAULT
+#   DISPOSITION: measured exit status 143, the log holding only its `listening
+#   on` line — "stopping sessions" never prints, the control socket is never
+#   removed, and `shutdown` → `registry::terminate` never runs for any session.
+#
+#   Do NOT read the signal thread's zero as a second unmasked thread: that one
+#   is a DISPLAY ARTIFACT of the syscall it is in. `sigwait` is
+#   `rt_sigtimedwait` (syscall 128), which parks the waited-for bits out of
+#   `blocked` for the duration of the wait, and /proc prints `blocked`.
+#   MEASURED with a probe of three threads: spawned before the mask reads 0,
+#   spawned after it and merely sleeping reads 0000000000004003, spawned after
+#   it and sitting in sigwait reads 0. Same mask, different syscall.
 #
 # Which is why the mutation that proves this section can go red is "make the
 # ENGINE ignore SIGHUP", and why it reddens BOTH halves, four assertions each.
 # Two mutations inside `registry::terminate` — send only SIGTERM, and signal
 # nobody at all — both SURVIVE with everything green: APEX's own shutdown
-# signalling is not what tears a capsule down today. (`apex agent kill` is a
-# third path again, `Request::Signal` → `pty::signal_group`, never `terminate`,
-# and it is unaffected by either mutation.)
+# signalling is not what tears a capsule down. (`apex agent kill` is a third
+# path again, `Request::Signal` → `pty::signal_group`, never `terminate`, and
+# it is unaffected by either mutation.)
 #
-# Both cases stay anyway. The day someone gives that signal thread its mask,
-# the SIGTERM half begins exercising a genuinely different route and "signals
-# nobody" becomes a kill — and this section is what notices.
+# And it stays that way even once the ordering is fixed, which is worth knowing
+# before anyone treats this section as the guard on that fix. MEASURED by
+# moving line 169 above 164, rebuilding, and running both of these cases again:
+# the shutdown then really does run (exit 0, "signal 15, stopping sessions",
+# socket removed) — and "terminate signals nobody" STILL survives 58/0,
+# because `shutdown` is followed by `process::exit`, the PTY master closes
+# anyway, and the kernel's SIGHUP arrives just the same. What these twelve
+# assertions guarantee is the OUTCOME — the capsule goes, whoever sends the
+# signal — and the engine's traps are the only code that can break it.
+#
+# Both cases stay regardless: they cost one daemon each and they are what will
+# notice if the outcome ever stops holding on either death.
 #
 # Each case gets its OWN daemon, runtime directory, disposable root and capsule
 # log. Sharing the suite's log would have made every assertion here satisfiable
