@@ -299,11 +299,23 @@ impl Session {
         write_message(&mut self.socket, &sealed);
     }
 
-    /// Read one frame.
+    /// Read one frame, answering keepalives on the way.
+    ///
+    /// The desktop measures its own connections, so a `Ping` arrives whenever
+    /// it likes — including as the first frame of a session, before the
+    /// device has asked for anything. It is not a session event and no
+    /// assertion here is about one, so it is answered and stepped over, which
+    /// is exactly what a device does. A test that treated it as the next
+    /// frame would be asserting that the desktop never measures anything.
     fn recv(&mut self) -> Frame {
-        let message = read_message(&mut self.socket);
-        let plain = self.channel.open(&message).expect("open");
-        Frame::decode(&plain).expect("decode")
+        loop {
+            let message = read_message(&mut self.socket);
+            let plain = self.channel.open(&message).expect("open");
+            match Frame::decode(&plain).expect("decode") {
+                Frame::Ping { token } => self.send(Frame::Pong { token }),
+                frame => return frame,
+            }
+        }
     }
 
     /// Send one control frame and read its reply, keeping anything that

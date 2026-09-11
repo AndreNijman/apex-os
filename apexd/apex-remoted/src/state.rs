@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use apex_remote_core::device::{DeviceStore, StoreError};
 use apex_remote_core::identity::Identity;
 use apex_remote_core::pairing::Offer;
-use apex_remote_core::rendezvous::Path as RemotePath;
+use apex_remote_core::rendezvous::{Connection, Path as RemotePath};
 
 use crate::relay::Sources;
 
@@ -36,6 +36,21 @@ pub struct Live {
     /// a flag the connection thread checks, because the thread is blocked in
     /// a read and would not check anything until the phone sent something.
     pub socket: std::net::TcpStream,
+    /// What the device calls itself, so a listing does not have to go back to
+    /// the store for a name it already had.
+    pub device_name: String,
+    /// Which path this connection arrived on.
+    pub path: RemotePath,
+    /// Unix milliseconds at which it authenticated.
+    pub since_ms: u64,
+    /// The most recent measured round trip, written by the frame loop's
+    /// `Pong` arm and read by anybody asking for status.
+    ///
+    /// Shared rather than copied: the measurement happens on the connection's
+    /// own thread and the reader is the control socket's, and a value that
+    /// had to be pushed somewhere on every ping would be a lock held across
+    /// a write.
+    pub rtt_ms: Arc<Mutex<Option<u64>>>,
 }
 
 pub struct State {
@@ -59,6 +74,8 @@ pub struct State {
     pub relay_sources: Sources,
     /// Where the device store lives.
     pub store_path: PathBuf,
+    /// How often an open connection is measured.
+    pub ping_interval: std::time::Duration,
     devices: Mutex<DeviceStore>,
     /// The pairing offer, when one is open. In memory only: a token that
     /// survived a restart would be one the owner did not ask to survive.
@@ -73,6 +90,7 @@ impl State {
         port: u16,
         relay: Option<String>,
         store_path: PathBuf,
+        ping_interval: std::time::Duration,
     ) -> Result<Arc<State>, StoreError> {
         let devices = DeviceStore::load(&store_path)?;
         Ok(Arc::new(State {
@@ -81,6 +99,7 @@ impl State {
             port,
             relay,
             store_path,
+            ping_interval,
             relay_sources: Sources::default(),
             devices: Mutex::new(devices),
             offer: Mutex::new(None),
@@ -149,6 +168,27 @@ impl State {
         }
     }
 
+    /// Every connection open right now, with its path and its round trip.
+    ///
+    /// P1-052's last criterion. Live only: nothing here is read back from the
+    /// device store, because a quality measured during a session that has
+    /// ended is not a fact about now and a page that showed one would be
+    /// telling the owner about a connection that does not exist.
+    pub fn connections(&self) -> Vec<Connection> {
+        let Ok(live) = self.live.lock() else {
+            return Vec::new();
+        };
+        live.iter()
+            .map(|l| Connection {
+                device_id: l.device_id.clone(),
+                device_name: l.device_name.clone(),
+                path: l.path.as_str().to_string(),
+                since_ms: l.since_ms,
+                rtt_ms: l.rtt_ms.lock().ok().and_then(|v| *v),
+            })
+            .collect()
+    }
+
     /// How a connection from this address reached the machine.
     ///
     /// Relay only when BOTH halves say so: the address is loopback *and* its
@@ -214,10 +254,16 @@ mod tests {
         let p2 = s2.peer_addr().ok();
         assert_ne!(p1, p2, "two connections share an address");
 
-        let live = Mutex::new(vec![
-            Live { device_id: "d".into(), peer: p1, socket: s1 },
-            Live { device_id: "d".into(), peer: p2, socket: s2 },
-        ]);
+        let sample = |peer, socket| Live {
+            device_id: "d".into(),
+            peer,
+            socket,
+            device_name: "a phone".into(),
+            path: RemotePath::Lan,
+            since_ms: 0,
+            rtt_ms: Arc::new(Mutex::new(None)),
+        };
+        let live = Mutex::new(vec![sample(p1, s1), sample(p2, s2)]);
         // Exercised through the same predicate the daemon uses, over a
         // standalone list so no daemon has to be started.
         let remove = |v: &mut Vec<Live>, id: &str, peer: Option<SocketAddr>| {

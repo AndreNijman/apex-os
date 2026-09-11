@@ -80,6 +80,7 @@ apex-remoted — the desktop service for APEX Remote
                       deadline is what stops an idle connection holding a
                       thread on the only network listener in the stack.
   --relay <url>       the rendezvous to fall back to when no LAN path works
+  --ping-interval-ms  how often an open connection is measured (default 15000)
   --allow-foreground  run outside a systemd user unit (see below)
   --help
 
@@ -112,6 +113,19 @@ fn run(args: &[String]) -> Result<(), String> {
             std::time::Duration::from_millis(ms.clamp(1_000, 120_000))
         }
     };
+    // How often an open connection is measured. A flag for the same reason
+    // --handshake-timeout-ms is one: the shipped value is right for a phone
+    // and wrong for a suite that has to watch a measurement happen. Clamped,
+    // so it cannot be turned into a flood a device pays for.
+    let ping_interval = match flag(args, "--ping-interval-ms") {
+        None => serve::PING_INTERVAL,
+        Some(v) => {
+            let ms: u64 = v
+                .parse()
+                .map_err(|_| format!("--ping-interval-ms {v} is not a number"))?;
+            std::time::Duration::from_millis(ms.clamp(50, 600_000))
+        }
+    };
     let allow_foreground = args.iter().any(|a| a == "--allow-foreground");
 
     guard_placement(allow_foreground)?;
@@ -124,7 +138,7 @@ fn run(args: &[String]) -> Result<(), String> {
 
     let listener = TcpListener::bind(("0.0.0.0", port))
         .map_err(|e| format!("cannot listen on port {port}: {e}"))?;
-    let state = State::new(identity, machine, port, relay, store_path)
+    let state = State::new(identity, machine, port, relay, store_path, ping_interval)
         .map_err(|e| format!("the paired-device store is unusable: {e}"))?;
 
     let control_path = crate::state::control_socket();
@@ -157,8 +171,7 @@ fn run(args: &[String]) -> Result<(), String> {
         match apex_remote_core::relay::Endpoint::parse(&url) {
             Ok(endpoint) => {
                 let state = Arc::clone(&state);
-                let agentd = agentd.clone();
-                std::thread::spawn(move || relay::supervise(state, endpoint, agentd));
+                std::thread::spawn(move || relay::supervise(state, endpoint));
             }
             Err(e) => eprintln!(
                 "apex-remoted: the configured relay is not usable, so this machine is \
