@@ -12,6 +12,14 @@
 #  They are applied into two named nftables sets rather than by rewriting the
 #  ruleset, so a malformed exception can never take the base policy with it.
 #
+#  They are also applied ONE AT A TIME. The first version built a single
+#  `nft add element` per protocol, which meant one typo in one file failed the
+#  whole command and closed every other port the user had opened — silently,
+#  because the unit runs this with ExecStart=- and it printed "exceptions
+#  reapplied" either way. The base policy survived, which was the architectural
+#  claim; the user's other exceptions did not, which is the same bug wearing a
+#  smaller hat.
+#
 #  Run as root for anything that changes state. Reading is unprivileged, and
 #  says so when it cannot see the live ruleset rather than reporting an empty
 #  one — `nft list` needs CAP_NET_ADMIN, and a firewall tool that answers "no
@@ -29,6 +37,27 @@ die()  { printf 'apex-firewall: error: %s\n' "$*" >&2; exit 1; }
 
 need_root() {
     [ "$(id -u)" = 0 ] || die "$1 needs root; try: sudo apex firewall $1"
+}
+
+# The name becomes a path, and `deny` reaches the path before it reaches the
+# catalogue. Without this, `apex firewall deny ../../../etc/issue` was an
+# `rm -f` outside the exception directory, run as root.
+valid_name() {
+    case "$1" in
+        *[!a-z0-9-]*|"" ) return 1 ;;
+        -*)               return 1 ;;
+        *)                return 0 ;;
+    esac
+}
+
+# tcp or udp, and a port or a port range the set's `flags interval` can hold.
+valid_spec() {
+    case "$1" in tcp|udp) ;; *) return 1 ;; esac
+    case "$2" in
+        *[!0-9-]*|"") return 1 ;;
+        *-*) [ "${2%%-*}" -ge 1 ] 2>/dev/null && [ "${2##*-}" -le 65535 ] 2>/dev/null ;;
+        *)   [ "$2" -ge 1 ] 2>/dev/null && [ "$2" -le 65535 ] 2>/dev/null ;;
+    esac
 }
 
 # The named services a user may open, as `name proto port description`.
@@ -51,6 +80,7 @@ ipp          tcp 631   Sharing a printer attached to this machine
 steam-remote udp 27036 Steam Remote Play from another machine on this network
 sunshine     tcp 47989 Sunshine game streaming host
 ollama       tcp 11434 A local model server, reachable from other machines
+apex-remote  tcp 7717  APEX Remote on this network, so a paired phone reaches this machine directly
 syncthing    tcp 22000 Syncthing peer connections
 EOF
 }
@@ -97,39 +127,56 @@ cmd_status() {
     echo "  established replies, loopback, ICMP, DHCP, mDNS/LLMNR, ssh"
     echo
     echo "exceptions you have added:"
-    local any=0 f name
+    local any=0 f name proto port
     for f in "$CONF_DIR"/*.conf; do
         [ -e "$f" ] || continue
         name="$(basename "$f" .conf)"
-        printf '  %-13s %s\n' "$name" "$(head -1 "$f" 2>/dev/null || echo '(unreadable)')"
+        proto=""; port=""
+        read -r proto port _ < "$f" 2>/dev/null
+        if valid_spec "${proto:-}" "${port:-}"; then
+            printf '  %-13s %s %s\n' "$name" "$proto" "$port"
+        else
+            # Re-checked here rather than remembered from the last reload, so
+            # a status run tells the truth even if nothing has reloaded since.
+            # Reporting a port as open when the reload rejected it is the one
+            # answer this tool must never give.
+            printf '  %-13s could not be applied — rejected: %s\n' \
+                "$name" "$(printf '%s %s' "${proto:-}" "${port:-}" | sed 's/^ *//;s/ *$//')"
+        fi
         any=1
     done
     [ "$any" = 1 ] || echo "  (none)"
 }
 
+# One file. Returns non-zero without touching the sets if it cannot be read as
+# an exception, so a neighbouring file's typo costs nothing.
+apply_one() {
+    local f="$1" proto="" port=""
+    read -r proto port _ < "$f" 2>/dev/null
+    valid_spec "${proto:-}" "${port:-}" || return 1
+    nft add element $TABLE "allowed_$proto" "{ $port }" 2>/dev/null
+}
+
 apply_sets() {
     local state; state="$(ruleset_state)"
     [ "$state" = loaded ] || { warn "the ruleset is not loaded; the exception is recorded and will apply when it is"; return 0; }
-    local tcp="" udp="" f proto port
-    for f in "$CONF_DIR"/*.conf; do
-        [ -e "$f" ] || continue
-        read -r proto port _ < "$f" || continue
-        case "$proto" in
-            tcp) tcp="${tcp:+$tcp, }$port" ;;
-            udp) udp="${udp:+$udp, }$port" ;;
-            *)   warn "ignoring $f: '$proto' is not tcp or udp" ;;
-        esac
-    done
     nft flush set $TABLE allowed_tcp 2>/dev/null
     nft flush set $TABLE allowed_udp 2>/dev/null
-    [ -n "$tcp" ] && nft add element $TABLE allowed_tcp "{ $tcp }"
-    [ -n "$udp" ] && nft add element $TABLE allowed_udp "{ $udp }"
-    return 0
+    local f rejected=0
+    for f in "$CONF_DIR"/*.conf; do
+        [ -e "$f" ] || continue
+        if ! apply_one "$f"; then
+            warn "$(basename "$f") is not a service exception; leaving it out"
+            rejected=$((rejected + 1))
+        fi
+    done
+    [ "$rejected" = 0 ]
 }
 
 cmd_allow() {
     local name="${1:-}"
     [ -n "$name" ] || die "which service? see: apex firewall list"
+    valid_name "$name" || die "'$name' is not a service name; see: apex firewall list"
     # Resolve the name BEFORE demanding root. Reading the catalogue needs no
     # privilege, and making someone type a password to be told they misspelled
     # a service is a worse command than one that answers first.
@@ -138,23 +185,39 @@ cmd_allow() {
     need_root allow
     mkdir -p "$CONF_DIR"
     printf '%s %s\n' $spec > "${CONF_DIR}/${name}.conf"
-    apply_sets
+    apply_sets || warn "another exception file could not be applied; see: apex firewall status"
     msg "allowed '$name' ($spec) on every interface"
 }
 
 cmd_deny() {
     local name="${1:-}"
     [ -n "$name" ] || die "which service? see: apex firewall status"
+    # Before the -e test, not after: the name is about to become a path, and
+    # answering "that was never open" for ../../etc/issue would mean this had
+    # already gone looking outside the exception directory.
+    valid_name "$name" || die "'$name' is not a service name; see: apex firewall list"
     # Same order as allow: say it was never open before asking for a password.
     # /etc/apex/firewall.d is world-readable precisely so this can answer.
     [ -e "${CONF_DIR}/${name}.conf" ] || die "'$name' was not allowed"
     need_root deny
     rm -f "${CONF_DIR}/${name}.conf"
-    apply_sets
+    apply_sets || warn "another exception file could not be applied; see: apex firewall status"
     msg "removed '$name'"
 }
 
-cmd_reload() { need_root reload; apply_sets; msg "exceptions reapplied"; }
+# The unit runs this as ExecStart=-, so its exit status is not what keeps the
+# machine up — but it is what a person and a test can read, and reporting
+# success for a reload that dropped an exception is how a closed port looks
+# open.
+cmd_reload() {
+    need_root reload
+    if apply_sets; then
+        msg "exceptions reapplied"
+    else
+        warn "some exceptions were not applied; see: apex firewall status"
+        return 1
+    fi
+}
 
 usage() {
     cat <<'EOF'

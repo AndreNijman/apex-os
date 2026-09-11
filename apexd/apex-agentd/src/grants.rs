@@ -255,6 +255,22 @@ impl GrantAuthority {
             .map(|g| g.id)
     }
 
+    /// Every grant this process is holding that is still in force.
+    ///
+    /// The live map, never the store: the store is written so a human can
+    /// read what happened and is not authority, because everything this
+    /// daemon can write, a granted session can rewrite.
+    pub fn active(&self, now_ms: u64) -> Vec<SystemGrant> {
+        let live = self.live.lock().expect("grants lock");
+        let mut out: Vec<SystemGrant> = live
+            .values()
+            .filter(|g| g.state_at(now_ms, &self.boot).is_active())
+            .cloned()
+            .collect();
+        out.sort_by_key(|g| g.id);
+        out
+    }
+
     /// Take a grant back.
     pub fn revoke(&self, id: u32, now_ms: u64) -> Result<SystemGrant, GrantError> {
         self.close_live(id, ClosureReason::Revoked, now_ms)

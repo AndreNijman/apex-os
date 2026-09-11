@@ -109,7 +109,17 @@ fn passwd_home() -> Option<PathBuf> {
 
 /// The daemon's control socket. One per user, not per session.
 pub fn control_socket() -> PathBuf {
-    runtime_dir().join("apex-agentd/control.sock")
+    control_socket_in(&runtime_dir())
+}
+
+/// The same socket, under a runtime directory the caller already has.
+///
+/// The `*_in` form exists for the reason the store's do: a function that builds
+/// a sandbox specification has to stay pure to be asserted exhaustively, and
+/// reading `$XDG_RUNTIME_DIR` inside it would make the argv depend on the
+/// environment of whichever test ran first.
+pub fn control_socket_in(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("apex-agentd/control.sock")
 }
 
 /// Root of the persistent session store.

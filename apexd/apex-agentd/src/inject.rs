@@ -30,7 +30,6 @@ use apex_agent_core::journal;
 use apex_agent_core::paths;
 use apex_agent_core::protocol::{ErrorKind, Response};
 
-use crate::peer::Peer;
 use crate::privilege;
 use crate::pty;
 use crate::Daemon;
@@ -46,9 +45,9 @@ use crate::Daemon;
 pub const MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Handle one `Inject`.
-pub fn handle(daemon: &Arc<Daemon>, creds: Option<Peer>, id: u32, source: &str) -> Response {
+pub fn handle(daemon: &Arc<Daemon>, caller: &privilege::Caller, id: u32, source: &str) -> Response {
     // 1. Who is asking. See the module note: this is the boundary.
-    let who = privilege::origin(daemon, creds);
+    let who = privilege::origin(daemon, caller);
     if let Some(session) = who.session {
         return Response::error(
             ErrorKind::PermissionDenied,

@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-storage-notice — tell the user when a disk starts complaining.
+#
+#  §48 asks for failure warnings. This is the half that reaches somebody who is
+#  not looking at a settings page.
+#
+#  ── What it will not do ─────────────────────────────────────────────────────
+#
+#  * It never fires for a row that could not be measured. `apex storage
+#    warnings` exits 1 only for rows needing attention; a SMART log nobody
+#    could open prints and exits 0. A notifier that woke somebody because it
+#    ran without privilege is a notifier that gets muted, and a muted notifier
+#    misses the disk that is actually failing.
+#  * It never repeats itself. The same warnings on the next run are the same
+#    warnings, and a daily toast saying what was said yesterday is noise. The
+#    digest of the warning set is kept, and a notification goes out when the
+#    set CHANGES — including when a new disk starts failing while an old
+#    warning is still standing.
+#  * It never runs as root. notify-send needs a session bus, root has no
+#    session, and a root unit trying to reach one either fails or reaches the
+#    wrong user's. This is a systemd USER unit for that reason.
+#
+#  ── Why not the doctor ──────────────────────────────────────────────────────
+#  `apex doctor` prints the same rows, and it is the right surface for somebody
+#  asking. A disk reporting itself as failing is not something to leave until
+#  the user thinks to ask.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+APEX="${APEX_BIN:-/usr/bin/apex}"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/apex"
+SEEN="$STATE/storage-warnings.seen"
+
+log() { printf 'apex-storage-notice: %s\n' "$*" >&2; }
+
+[[ -x "$APEX" ]] || { log "no apex binary at $APEX"; exit 0; }
+
+out="$("$APEX" storage warnings 2>&1)"
+rc=$?
+
+# The exit status is the whole signal, and it is captured before anything else
+# runs. `if ! "$APEX" ...; then rc=$?` would capture the status of the
+# NEGATION — 0 or 1 — rather than the command's, which is how an exit 10 came
+# back as 1 in apex-boot-health and a stale notice was never cleared.
+case "$rc" in
+    0)
+        # Nothing needing attention. Forget what was said, so that the same
+        # warning returning tomorrow is announced again rather than suppressed
+        # by a digest nobody cleared.
+        rm -f "$SEEN"
+        exit 0
+        ;;
+    1) ;;
+    *)
+        log "apex storage warnings exited $rc; saying nothing"
+        log "$out"
+        exit 0
+        ;;
+esac
+
+# Only the rows that need doing. `apex storage warnings` prints the
+# unavailable ones too, and those must not reach the digest or a run without
+# privilege would look like a change every time the reason string moved.
+attention="$(printf '%s\n' "$out" | grep '^\[attention\]' || true)"
+[[ -n "$attention" ]] || { log "exit 1 with no attention rows; saying nothing"; exit 0; }
+
+digest="$(printf '%s' "$attention" | sha256sum | cut -d' ' -f1)"
+if [[ -f "$SEEN" && "$(cat "$SEEN")" == "$digest" ]]; then
+    exit 0
+fi
+
+mkdir -p "$STATE"
+printf '%s\n' "$digest" > "$SEEN"
+
+count="$(printf '%s\n' "$attention" | wc -l)"
+body="$(printf '%s\n' "$attention" | sed 's/^\[attention\] *//')"
+
+if command -v notify-send >/dev/null 2>&1; then
+    # --urgency=critical, deliberately: every row that reaches here is a disk
+    # that has already lost something or is about to.
+    notify-send --app-name='APEX-OS' --urgency=critical --icon=drive-harddisk \
+        "Storage needs attention" \
+        "$body" || log "notify-send failed"
+else
+    log "no notify-send; printing instead"
+fi
+printf '%s\n' "$body"
+log "announced $count warning(s)"
+exit 0

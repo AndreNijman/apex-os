@@ -86,6 +86,15 @@ const TOOLCHAIN_RO: &[&str] = &[
     ".config/git",
     ".local/share/mise",
     ".asdf",
+    // The per-MCP sandbox policies (§10.2). `apex mcp run` reads one inside the
+    // session, because the agent is what starts an MCP server — and without
+    // this the file is behind the home mask, so every server would silently get
+    // the default and a policy the user wrote would do nothing.
+    //
+    // Read-only, and that is the point rather than an accident: a session that
+    // could write here could widen the confinement of every MCP server it
+    // starts, in one file, without touching a definition anybody would look at.
+    ".config/apex/mcp",
 ];
 
 /// Credential files that live inside an allowlisted directory and are blanked

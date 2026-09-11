@@ -17,8 +17,9 @@
 //! exactly what the kernel is good at.
 
 mod broker;
-mod egress;
 mod disposable;
+mod egress;
+mod elevation;
 mod grants;
 mod inject;
 mod origin;
@@ -69,6 +70,19 @@ pub struct Daemon {
     /// event handler drops the session before recording. Same discipline as
     /// the grant authority above, for the same reason.
     pub tests: worktrees::TestObservations,
+    /// The elevation challenges this process has issued and not yet seen
+    /// answered (§7, P0-014).
+    ///
+    /// In memory, and deliberately: a challenge that survived a restart would
+    /// be a request to touch a key outliving the process that asked for it,
+    /// and a daemon restarting is exactly when a stale one should stop being
+    /// good. `ChallengeStore` expires its own contents on every `issue` and
+    /// every `redeem`, so it needs no place in the expiry tick — which is
+    /// also why this is a plain `Mutex` like `registry` and `config` rather
+    /// than an authority owning its own lock: nothing here has an ordering
+    /// relationship with the grant lock, because issuing a challenge grants
+    /// nothing.
+    pub challenges: Mutex<apex_agent_core::webauthn::ChallengeStore>,
 }
 
 impl Daemon {
@@ -79,6 +93,7 @@ impl Daemon {
             grants: grants::GrantAuthority::new(),
             auth: Box::new(PolkitAuthenticator),
             tests: worktrees::TestObservations::new(),
+            challenges: Mutex::new(apex_agent_core::webauthn::ChallengeStore::new()),
         }
     }
 }
@@ -232,6 +247,7 @@ fn block_termination_signals() {
 /// is to end the session, and that is what this does.
 fn spawn_expiry_thread(daemon: Arc<Daemon>) {
     use apex_agent_core::grant::SystemGrant;
+    use apex_agent_core::lock::{LockWatch, Loginctl};
 
     std::thread::Builder::new()
         .name("apex-agentd-grants".into())
@@ -241,6 +257,15 @@ fn spawn_expiry_thread(daemon: Arc<Daemon>) {
             // session, because what is being tracked is a promise the audit
             // trail made and not a property of the process.
             let mut ending: Vec<SystemGrant> = Vec::new();
+            // §7's lock rules. This thread rather than a second one because
+            // the two jobs are the same job: both end with a grant closing
+            // and a session that cannot outlive it, and sharing `ending`
+            // means a break-glass session revoked by a screen lock gets the
+            // same SIGTERM-then-SIGKILL escalation as one whose window ran
+            // out. A separate thread would have needed its own copy of that,
+            // which is exactly how the two paths would drift apart.
+            let mut watch = LockWatch::new();
+            let mut observer = Loginctl::new();
             loop {
                 std::thread::sleep(EXPIRY_TICK);
                 let now = request::now_ms();
@@ -250,61 +275,230 @@ fn spawn_expiry_thread(daemon: Arc<Daemon>) {
                     if !ends_session {
                         continue;
                     }
-                    let Some(handle) = lookup(&daemon, grant.session) else {
-                        continue;
-                    };
-                    let mut s = handle.lock().expect("session lock");
-                    if !s.info.is_live() {
-                        continue;
+                    if end_session_for_grant(
+                        &daemon,
+                        &grant,
+                        "its break-glass window is over and no_new_privs cannot be put back on \
+                         a running process",
+                        now,
+                    ) {
+                        ending.push(grant);
                     }
-                    eprintln!(
-                        "apex-agentd: ending session {} — its break-glass window is over and \
-                         no_new_privs cannot be put back on a running process",
-                        grant.session
-                    );
-                    registry::terminate(&mut s);
-                    registry::write_record(&s.info);
-                    drop(s);
-                    // A separate line from the grant's own `expired`, and it
-                    // deliberately does not claim the session is gone. The
-                    // grant expiring and the process ending are two facts, and
-                    // an `expired` line that implied the second would be a log
-                    // that lies in exactly the case that matters: a session
-                    // that declined SIGTERM and still has root.
-                    grant_note(&grant, "session-ending", now);
-                    ending.push(grant);
                 }
 
-                // The escalation, and then the confirmation. `SIGTERM` is a
-                // request; §3.4's expiry is not.
-                ending.retain(|grant| {
-                    let Some(handle) = lookup(&daemon, grant.session) else {
-                        grant_note(grant, "session-ended", now);
-                        return false;
-                    };
-                    let mut s = handle.lock().expect("session lock");
-                    if !s.info.is_live() {
-                        grant_note(grant, "session-ended", now);
-                        return false;
-                    }
-                    let asked = s.closing_since_ms.unwrap_or(now);
-                    if now.saturating_sub(asked) >= registry::TERMINATE_GRACE_MS
-                        && registry::force_kill(&mut s)
-                    {
-                        eprintln!(
-                            "apex-agentd: session {} did not exit within {}ms of its break-glass \
-                             window ending; killed",
-                            grant.session,
-                            registry::TERMINATE_GRACE_MS
-                        );
-                        drop(s);
-                        grant_note(grant, "session-killed", now);
-                    }
-                    true
-                });
+                lock_tick(&daemon, &mut watch, &mut observer, &mut ending, now);
+
+                escalate_ending(&daemon, &mut ending, now);
             }
         })
         .ok();
+}
+
+/// Ask a session to end because the grant it was running under has closed.
+///
+/// Shared by expiry and by revoke-on-lock, and that sharing is the point:
+/// closing a break-glass grant is not the same thing as ending its session,
+/// because `PR_SET_NO_NEW_PRIVS` was cleared between `fork` and `exec` and no
+/// process can put it back. A revocation that only dropped the grant from the
+/// authority's map would leave a session that still has root and a record
+/// saying it does not.
+///
+/// Returns whether the session is still live and therefore has to be watched
+/// through [`escalate_ending`].
+fn end_session_for_grant(
+    daemon: &Arc<Daemon>,
+    grant: &apex_agent_core::grant::SystemGrant,
+    why: &str,
+    now: u64,
+) -> bool {
+    let Some(handle) = lookup(daemon, grant.session) else {
+        return false;
+    };
+    let mut s = handle.lock().expect("session lock");
+    if !s.info.is_live() {
+        return false;
+    }
+    eprintln!("apex-agentd: ending session {} — {why}", grant.session);
+    registry::terminate(&mut s);
+    registry::write_record(&s.info);
+    drop(s);
+    // A separate line from the grant's own closure, and it deliberately does
+    // not claim the session is gone. The grant ending and the process ending
+    // are two facts, and a line that implied the second would be a log that
+    // lies in exactly the case that matters: a session that declined SIGTERM
+    // and still has root.
+    grant_note(grant, "session-ending", now);
+    true
+}
+
+/// The escalation, and then the confirmation. `SIGTERM` is a request; §3.4's
+/// expiry is not, and neither is §7's revoke-on-lock.
+fn escalate_ending(
+    daemon: &Arc<Daemon>,
+    ending: &mut Vec<apex_agent_core::grant::SystemGrant>,
+    now: u64,
+) {
+    ending.retain(|grant| {
+        let Some(handle) = lookup(daemon, grant.session) else {
+            grant_note(grant, "session-ended", now);
+            return false;
+        };
+        let mut s = handle.lock().expect("session lock");
+        if !s.info.is_live() {
+            grant_note(grant, "session-ended", now);
+            return false;
+        }
+        let asked = s.closing_since_ms.unwrap_or(now);
+        if now.saturating_sub(asked) >= registry::TERMINATE_GRACE_MS && registry::force_kill(&mut s)
+        {
+            eprintln!(
+                "apex-agentd: session {} did not exit within {}ms of its grant ending; killed",
+                grant.session,
+                registry::TERMINATE_GRACE_MS
+            );
+            drop(s);
+            grant_note(grant, "session-killed", now);
+        }
+        true
+    });
+}
+
+/// One observation of the screen, and whatever §7 says follows from it.
+///
+/// The policy is re-read from the configuration file on every tick rather
+/// than taken from `daemon.config`, which is loaded once at startup. A lock
+/// rule that needed the runtime restarted before it applied would be a
+/// setting that lies about when it takes effect, and `apex agent lock` is
+/// meant to be something the owner changes and then walks away from the
+/// machine.
+fn lock_tick(
+    daemon: &Arc<Daemon>,
+    watch: &mut apex_agent_core::lock::LockWatch,
+    observer: &mut dyn apex_agent_core::lock::LockObserver,
+    ending: &mut Vec<apex_agent_core::grant::SystemGrant>,
+    now: u64,
+) {
+    use apex_agent_core::lock::{GrantView, SessionView};
+
+    let state = observer.observe();
+    let policy = Config::load().lock;
+
+    let sessions: Vec<SessionView> = daemon
+        .registry
+        .lock()
+        .expect("registry lock")
+        .list()
+        .into_iter()
+        .filter_map(|h| {
+            let s = h.lock().expect("session lock");
+            s.info.is_live().then(|| SessionView {
+                id: s.info.id,
+                origin: s.info.request_origin,
+                paused: s.info.paused,
+            })
+        })
+        .collect();
+    let grants: Vec<GrantView> = daemon
+        .grants
+        .active(now)
+        .into_iter()
+        .map(|g| GrantView { id: g.id })
+        .collect();
+
+    let actions = watch.step(&policy, &state, &sessions, &grants);
+    if actions.is_empty() {
+        return;
+    }
+    if let Some(why) = state.reason() {
+        eprintln!(
+            "apex-agentd: the screen state could not be read ({why}), which §7's rules treat \
+             as locked"
+        );
+    }
+
+    for (id, why) in actions.hold {
+        hold_session(daemon, id, &why);
+    }
+    for id in actions.resume {
+        resume_session(daemon, id);
+    }
+    for id in actions.revoke {
+        match daemon.grants.revoke(id, now) {
+            Ok(grant) => {
+                eprintln!(
+                    "apex-agentd: {} — the screen locked, and §7 revokes short-lived root \
+                     grants by default (`apex agent lock --root-grants keep` to stop this)",
+                    grant.describe(now, daemon.grants.boot())
+                );
+                if grant.kind.expiry_ends_the_session()
+                    && end_session_for_grant(
+                        daemon,
+                        &grant,
+                        "the screen locked, its break-glass grant was revoked, and \
+                         no_new_privs cannot be put back on a running process",
+                        now,
+                    )
+                {
+                    ending.push(grant);
+                }
+            }
+            // Not an error worth failing over: a grant can expire between the
+            // list and the revoke, and the outcome is the one that was
+            // wanted either way.
+            Err(e) => eprintln!("apex-agentd: grant {id} was not revoked on lock: {e}"),
+        }
+    }
+}
+
+/// Stop a session because the screen is locked.
+///
+/// The same `SIGSTOP` and the same `paused` flag `apex agent pause` sets, so
+/// there is one notion of a stopped session rather than two. The flag is set
+/// only after the signal succeeded, for the reason `Request::Signal` gives:
+/// a flag set first would claim a session was paused when the signal failed.
+fn hold_session(daemon: &Arc<Daemon>, id: u32, why: &str) {
+    let Some(handle) = lookup(daemon, id) else {
+        return;
+    };
+    let mut s = handle.lock().expect("session lock");
+    if !s.info.is_live() {
+        return;
+    }
+    match pty::signal_group(s.pgid, libc::SIGSTOP) {
+        Ok(()) => {
+            s.info.paused = true;
+            s.info.detail = Some("held — the screen is locked".to_string());
+            registry::write_record(&s.info);
+            eprintln!("apex-agentd: session {id} held — {why}");
+        }
+        // The watch has already recorded the hold, so the unlock will send a
+        // SIGCONT to a session that was never stopped, which is harmless. The
+        // line is here so the log does not claim a hold that did not happen.
+        Err(e) => eprintln!("apex-agentd: session {id} could not be held ({e})"),
+    }
+}
+
+/// Start a session again because the screen was unlocked.
+///
+/// Only ever called for a session this daemon's own lock watch stopped —
+/// a session the user paused by hand is never held, so it is never resumed.
+fn resume_session(daemon: &Arc<Daemon>, id: u32) {
+    let Some(handle) = lookup(daemon, id) else {
+        return;
+    };
+    let mut s = handle.lock().expect("session lock");
+    if !s.info.is_live() {
+        return;
+    }
+    match pty::signal_group(s.pgid, libc::SIGCONT) {
+        Ok(()) => {
+            s.info.paused = false;
+            s.info.detail = None;
+            registry::write_record(&s.info);
+            eprintln!("apex-agentd: session {id} resumed — the screen was unlocked");
+        }
+        Err(e) => eprintln!("apex-agentd: session {id} could not be resumed ({e})"),
+    }
 }
 
 /// One more line about a grant that has already ended, in both trails.
@@ -371,7 +565,11 @@ fn serve(daemon: &Arc<Daemon>, stream: UnixStream) -> Result<()> {
     // request is parsed. The kernel filled them in at connect(2) and they
     // cannot change for the life of the connection — whereas anything read out
     // of a request line is whatever the client chose to send.
-    let creds = peer::credentials(&stream);
+    // The peer credentials, plus whatever narrowing this connection latches
+    // onto itself. The latch lives here, on the stack of the thread serving
+    // one connection, so it dies with the socket: nothing persists it, and no
+    // other connection can see it.
+    let mut caller = privilege::Caller::new(peer::credentials(&stream));
 
     let mut reader = BufReader::new(stream.try_clone().context("cloning the connection")?);
     let mut writer = stream;
@@ -411,7 +609,7 @@ fn serve(daemon: &Arc<Daemon>, stream: UnixStream) -> Result<()> {
             return session::handle_attach(daemon, writer, reader, id, cols, rows, replay);
         }
 
-        let response = dispatch(daemon, request, creds);
+        let response = dispatch(daemon, request, &mut caller);
         respond(&mut writer, &response)?;
     }
 }
@@ -426,10 +624,12 @@ fn respond(writer: &mut UnixStream, response: &Response) -> Result<()> {
 
 /// Handle every verb except `Attach`.
 ///
-/// `creds` is the connection's peer credentials, or `None` when the kernel
-/// would not report them. It is passed rather than looked up so that no handler
-/// can accidentally consult the request for identity instead.
-fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -> Response {
+/// `caller` is the connection: the peer credentials the kernel reported at
+/// `connect(2)`, and any origin the connection has narrowed itself to. It is
+/// passed rather than looked up so that no handler can accidentally consult
+/// the request for identity instead, and it is `&mut` for exactly one verb —
+/// `DeclareOrigin`, which is the only thing that may change it.
+fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Caller) -> Response {
     match request {
         Request::Hello => {
             let cfg = daemon.config.lock().expect("config lock");
@@ -440,7 +640,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             }
         }
 
-        Request::Run(req) => match session::start(daemon, req, creds) {
+        Request::Run(req) => match session::start(daemon, req, caller) {
             Ok(info) => Response::Session(Box::new(info)),
             Err(e) => session::run_error(e),
         },
@@ -487,7 +687,41 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             }
         }
 
-        Request::Inject { id, source } => inject::handle(daemon, creds, id, &source),
+        Request::Inject { id, source } => inject::handle(daemon, caller, id, &source),
+        Request::Input { id, data } => {
+            // A session may not type into a sibling.
+            //
+            // This is the only verb on the socket that acts on a session other
+            // than the caller's own AND has an effect the target cannot tell
+            // from a person at the keyboard. `Signal` acts on another session
+            // too, but a signal is visible to the agent as a signal; text
+            // arriving on the PTY is indistinguishable from typing, so an
+            // agent that could send it could instruct another agent and
+            // borrow its permissions. Hooks run inside the sandbox and reach
+            // this socket, so the caller has to be established rather than
+            // assumed.
+            //
+            // Resolved from the connection's peer credentials by the same
+            // ancestry walk the privilege verbs use, never from the request:
+            // `$APEX_AGENT_SESSION` lives inside a sandbox the agent controls.
+            // A connection that is not inside any session — the shell, or a
+            // person in an ordinary terminal — is what this verb is for.
+            let who = privilege::origin(daemon, caller);
+            if let Some(refusal) = privilege::refuse_input(&who, id) {
+                return refusal;
+            }
+            let Some(handle) = lookup(daemon, id) else {
+                return no_such_session(id);
+            };
+            match session::write_input(&handle, data.as_bytes()) {
+                session::Input::Written => Response::Ok,
+                session::Input::Exited => Response::error(
+                    ErrorKind::SessionExited,
+                    format!("session {id} has already exited"),
+                ),
+                session::Input::Failed(e) => Response::error(ErrorKind::Internal, e),
+            }
+        }
 
         Request::Signal { id, signal } => {
             let Some(number) = apex_agent_core::session::signal_number(&signal) else {
@@ -532,6 +766,8 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             event,
             detail,
             native,
+            agent_id,
+            agent_type,
             test,
         } => {
             // An event that names neither is not a smaller event, it is a
@@ -600,6 +836,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             // order matters only in that both must happen.
             if let Some(e) = lifecycle {
                 s.apply_tool_transition(e.tool_transition());
+                s.apply_graph_event(e, agent_id.as_deref(), agent_type.as_deref());
             }
             match parsed {
                 Some(p) => s.set_state(p, detail),
@@ -629,6 +866,21 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             if let Some(note) = test {
                 daemon.tests.record(Path::new(&cwd), &note);
             }
+            Response::Ok
+        }
+
+        Request::Telemetry { id, telemetry } => {
+            let Some(handle) = lookup(daemon, id) else {
+                return no_such_session(id);
+            };
+            let mut s = handle.lock().expect("session lock");
+            // `last_activity` is deliberately NOT touched. A status line runs
+            // on a timer, so treating it as activity would keep every idle
+            // session looking busy — and `session::next_state`'s idle rule,
+            // which decides `waiting_for_user`, reads exactly that field. The
+            // session is described here, not observed doing anything.
+            s.info.telemetry = Some(*telemetry);
+            registry::write_record(&s.info);
             Response::Ok
         }
 
@@ -714,7 +966,9 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             Response::Ok
         }
 
-        Request::DeclareOrigin { origin } => privilege::declare(daemon, creds, &origin),
+        Request::DeclareOrigin { origin, actor } => {
+            privilege::declare(daemon, caller, &origin, actor)
+        }
 
         Request::Prune => {
             let handles = daemon.registry.lock().expect("registry lock").list();
@@ -743,16 +997,16 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
         }
 
         // ── privilege requests ──────────────────────────────────────────────
-        // Every one of these takes `creds` and none of them takes a session id
+        // Every one of these takes `caller` and none of them takes a session id
         // from the wire.
         Request::PrivilegeRequest { verb, args, reason } => {
-            privilege::file(daemon, creds, &verb, &args, &reason)
+            privilege::file(daemon, caller, &verb, &args, &reason)
         }
 
         Request::Requests => privilege::list(),
 
         Request::Decide { id, decision } => match request::Decision::parse(&decision) {
-            Some(d) => privilege::decide(daemon, creds, id, d),
+            Some(d) => privilege::decide(daemon, caller, id, d),
             None => Response::error(
                 ErrorKind::BadRequest,
                 format!("'{decision}' is not a decision; use once, project or deny"),
@@ -764,16 +1018,16 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
         Request::Grants => privilege::grants(),
 
         Request::Revoke { project, key } => {
-            privilege::revoke(daemon, creds, &project, key.as_deref())
+            privilege::revoke(daemon, caller, &project, key.as_deref())
         }
 
         // ── system-access grants ────────────────────────────────────────────
         Request::SystemGrants => privilege::system_grants(daemon),
 
-        Request::RevokeSystemGrant { id } => privilege::revoke_system_grant(daemon, creds, id),
+        Request::RevokeSystemGrant { id } => privilege::revoke_system_grant(daemon, caller, id),
 
         Request::RenewSystemGrant { id, ttl_ms } => {
-            privilege::renew_system_grant(daemon, creds, id, ttl_ms)
+            privilege::renew_system_grant(daemon, caller, id, ttl_ms)
         }
 
         // ── the secret broker ───────────────────────────────────────────────
@@ -786,7 +1040,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             project,
         } => broker::use_capability(
             daemon,
-            creds,
+            caller,
             &service,
             &operation,
             &resource,
@@ -794,6 +1048,16 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             body.as_deref(),
             project.as_deref(),
         ),
+
+        // §7's remote elevation. Issuing a challenge grants nothing and gates
+        // on nothing — see `elevation`'s module comment for why the gate is
+        // not consulted here.
+        Request::ElevationChallenge {
+            session,
+            kind,
+            ttl_ms,
+            credential,
+        } => elevation::challenge(daemon, session, kind, ttl_ms, credential.as_deref()),
 
         // Granting is NOT here. A grant changes what is allowed, and
         // `apex-secretd` refuses one from any caller inside a session —
@@ -812,8 +1076,42 @@ fn no_such_session(id: u32) -> Response {
 
 fn live_info(daemon: &Arc<Daemon>, id: u32) -> Option<SessionInfo> {
     let handle = lookup(daemon, id)?;
-    let info = handle.lock().expect("session lock").info.clone();
+    let mut info = handle.lock().expect("session lock").info.clone();
+    add_process_children(std::slice::from_mut(&mut info));
     Some(info)
+}
+
+/// Where the process table is read from. A constant so the one place that is
+/// not the fixture-driven parser is named rather than spelled inline twice.
+const PROC: &str = "/proc";
+
+/// Add each live session's forked processes to the copy about to be sent out.
+///
+/// Read time, not event time, and never written to the record. A subagent is
+/// history — it happened, and the record is the only evidence — but a process
+/// is a thing that either exists right now or does not, and the kernel is
+/// already keeping that list. Persisting it would mean writing the session
+/// record every time a compiler started, and answering "is it still running?"
+/// from a file rather than from `/proc`.
+///
+/// This is also what §P1-020 means by MCP servers and tool processes being
+/// representable: they publish nothing, and they do not have to. A confined
+/// session is inside its own pid namespace, but the daemon is outside it and
+/// the host `/proc` still lists every descendant, so the tree is readable for
+/// every adapter.
+fn add_process_children(infos: &mut [SessionInfo]) {
+    if !infos.iter().any(|i| i.is_live()) {
+        return;
+    }
+    let procs = apex_agent_core::graph::read_processes(Path::new(PROC));
+    for info in infos.iter_mut() {
+        if !info.is_live() {
+            continue;
+        }
+        let mut tree = apex_agent_core::graph::process_tree(&procs, info.pid);
+        apex_agent_core::graph::fill_rss(Path::new(PROC), &mut tree);
+        info.children.append(&mut tree);
+    }
 }
 
 /// Live sessions plus persisted records for ones this daemon no longer owns.
@@ -835,5 +1133,6 @@ fn collect_sessions(daemon: &Arc<Daemon>) -> Vec<SessionInfo> {
         }
     }
     out.sort_by_key(|i| i.id);
+    add_process_children(&mut out);
     out
 }
