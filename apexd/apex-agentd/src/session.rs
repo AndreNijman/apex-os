@@ -499,6 +499,14 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     } else {
         sandbox::build_argv(&spec, &program, &args).map_err(SandboxRefused)?
     };
+    // §P2-011. A pure exec-chain prefix when a budget is configured, and the
+    // identity function when one is not — which is the default, so an
+    // unbudgeted session's argv is byte-identical to what it was before this
+    // line existed. `spec.runtime_dir` and not the daemon's own: the child's
+    // `XDG_RUNTIME_DIR` is what decides whether systemd-run can reach a user
+    // manager, and they are not always the same directory.
+    let argv = crate::budget::wrap(argv, id, req.disposable, &spec.runtime_dir, &cfg)
+        .map_err(BudgetRefused)?;
     let env = sandbox::resolved_env(&spec);
 
     // A confined session gets its environment from bwrap's --setenv, so the
@@ -896,6 +904,25 @@ impl std::fmt::Display for TtlRefused {
 
 impl std::error::Error for TtlRefused {}
 
+/// A resource budget that cannot be delivered (§P2-011).
+///
+/// Its own type rather than a bare `anyhow!` because the kind is the point: a
+/// budget refusal is never fixed by authorising anything, and it is never the
+/// caller's request that is wrong — it is the machine or the configuration —
+/// so `BadRequest` would send the user to look in the wrong place. The rule
+/// behind every one of these is the same: a budget that is silently not
+/// applied is worse than a session that did not start.
+#[derive(Debug)]
+pub struct BudgetRefused(pub String);
+
+impl std::fmt::Display for BudgetRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for BudgetRefused {}
+
 /// Map a `start` failure to a response, keeping the distinctions the client
 /// needs in order to explain what to do next.
 pub fn run_error(e: anyhow::Error) -> Response {
@@ -918,6 +945,9 @@ pub fn run_error(e: anyhow::Error) -> Response {
         return Response::error(ErrorKind::PermissionDenied, format!("{e:#}"));
     }
     if e.downcast_ref::<TtlRefused>().is_some() {
+        return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
+    }
+    if e.downcast_ref::<BudgetRefused>().is_some() {
         return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
     }
     Response::error(ErrorKind::BadRequest, format!("{e:#}"))
