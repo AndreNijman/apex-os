@@ -76,6 +76,26 @@ on:
       - "config/**"
       - "kernel/**"
       - ".github/**"
+  # ═══ WHY THE INTEGRATION BRANCH IS BUILT BY DISPATCH, NOT BY A PUSH ═══
+  #
+  # `push` above is main-only, and stays that way. An image build is ~1 hour and
+  # several GB of runner time; paying that on every landing of an integration
+  # branch buys nothing a dispatch does not, and the roadmap program lands many
+  # times a day. So the integration branch is built when somebody wants to know
+  # whether it builds:
+  #
+  #     gh workflow run build-image.yml --ref roadmap/v2.2
+  #
+  # That was already possible — this dispatch trigger is not new. What was
+  # missing, and what made using it a bad idea, is the PUBLISH guard below: a
+  # dispatch from a non-main ref used to move `:apex`, `:daily`, `:gaming-mesa`,
+  # `:gaming-nvidia`, every `platform-*`, `edge`, `:core` and `:base` — i.e. ship
+  # an unreviewed branch to every deployed machine. It now builds, signs and
+  # verifies without touching a name anything tracks.
+  #
+  # NOTE, because it is not obvious and it matters: a dispatch runs the workflow
+  # file FROM THE REF DISPATCHED. Dispatching a branch that predates this guard
+  # runs the unguarded file.
   workflow_dispatch:
     inputs:
       build_qcow2:
@@ -136,6 +156,18 @@ env:
   # ONLY thing keeping already-deployed machines updating after the collapse to a
   # single image. But it is NOT a speed optimisation, and should not be cited as one.
   IMAGE: ghcr.io/andrenijman/apex-os
+  # ═══ THE ONE THING THAT SEPARATES A BUILD FROM A RELEASE ═══
+  #
+  # Every floating tag this workflow writes — :core, :base, :apex, :daily,
+  # :gaming-mesa, :gaming-nvidia, platform-*, edge — is a name somebody else's
+  # machine is tracking, or that another workflow builds FROM. Moving one is a
+  # release to the fleet, and it used to happen on EVERY run of this workflow
+  # from ANY ref, guarded by nothing but "did the push produce a digest".
+  #
+  # A non-main run now pushes and signs its per-SHA tags, which nothing tracks,
+  # and moves no floating name. That is what makes `gh workflow run
+  # build-image.yml --ref <branch>` a safe way to ask "does this branch build".
+  PUBLISH: ${{ github.ref == 'refs/heads/main' }}
   # No CACHE_PREFIX: nothing reads or writes a registry build cache any more.
   # `--cache-to` killed two builds outright (podman "image not known" mid-push)
   # and `--cache-from` became meaningless once base stopped producing
@@ -509,6 +541,13 @@ jobs:
             sleep $(( attempt * 30 ))
           done
           digest="$(cat "$digestfile")"
+          # A build is not a release. The per-SHA tag above is pushed from any
+          # ref; the friendly name below is what installed machines and other
+          # workflows resolve, so only main may move it. See PUBLISH at the top.
+          if [ "${PUBLISH:-false}" != "true" ]; then
+            echo "not publishing from ${GITHUB_REF:-unknown}: pushed $repo:$sha_tag, left :$friendly where it was"
+            exit 0
+          fi
           # skopeo, not `podman push` again: same repository, so every blob is
           # already present and this is a manifest write. `podman push` does not
           # take that shortcut — it re-uploads.
@@ -983,6 +1022,13 @@ jobs:
             sleep $(( attempt * 30 ))
           done
           digest="$(cat "$digestfile")"
+          # A build is not a release. The per-SHA tag above is pushed from any
+          # ref; the friendly name below is what installed machines and other
+          # workflows resolve, so only main may move it. See PUBLISH at the top.
+          if [ "${PUBLISH:-false}" != "true" ]; then
+            echo "not publishing from ${GITHUB_REF:-unknown}: pushed $repo:$sha_tag, left :$friendly where it was"
+            exit 0
+          fi
           # skopeo, not `podman push` again: same repository, so every blob is
           # already present and this is a manifest write. `podman push` does not
           # take that shortcut — it re-uploads.
@@ -1286,13 +1332,24 @@ jobs:
             skopeo copy --retry-times 3 --src-creds "$creds" --dest-creds "$creds" \
               "docker://$IMAGE@$digest" "docker://$IMAGE:$1"
           }
-          # Platform + per-SHA tags first; the names installed machines actually
-          # track are moved LAST, so any earlier registry failure leaves the
-          # fleet on the previous signed release rather than half-migrated.
+          # Per-SHA names first. Nothing tracks these, so they are written from
+          # any ref: they are what makes a non-main build a real, complete,
+          # inspectable build rather than a dry run.
+          for f in apex daily gaming-mesa gaming-nvidia; do
+            promote "$f-${{ github.sha }}"
+          done
+          if [ "${PUBLISH:-false}" != "true" ]; then
+            echo "not publishing from ${GITHUB_REF:-unknown}: per-SHA tags written;"
+            echo "  :apex :daily :gaming-mesa :gaming-nvidia :platform-* :edge NOT moved."
+            echo "  This build is complete; it is simply not a release."
+            exit 0
+          fi
+          # The floating names, and the ones installed machines actually track
+          # are moved LAST, so any earlier registry failure leaves the fleet on
+          # the previous signed release rather than half-migrated.
           for f in apex daily gaming-mesa gaming-nvidia; do
             promote "platform-$f-${{ github.sha }}"
             promote "platform-$f"
-            promote "$f-${{ github.sha }}"
           done
           for f in apex daily gaming-mesa gaming-nvidia; do
             promote "$f"
@@ -1325,9 +1382,18 @@ jobs:
           creds="$GHCR_USER:$GHCR_TOKEN"
           want="${{ steps.push.outputs.digest }}"
           fail=0
-          for t in apex daily gaming-mesa gaming-nvidia edge \
-                   platform-apex platform-daily platform-gaming-mesa platform-gaming-nvidia \
-                   "daily-${{ github.sha }}"; do
+          # A non-main run moved no floating name, so asserting they point here
+          # would fail for a reason that is not the build — and a red run whose
+          # redness means nothing is worse than no run. It checks what it did
+          # write instead, so the step still proves something on every ref.
+          if [ "${PUBLISH:-false}" = "true" ]; then
+            TAGS="apex daily gaming-mesa gaming-nvidia edge
+                  platform-apex platform-daily platform-gaming-mesa platform-gaming-nvidia
+                  daily-${{ github.sha }}"
+          else
+            TAGS="apex-${{ github.sha }} daily-${{ github.sha }}"
+          fi
+          for t in $TAGS; do
             got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$t" 2>/dev/null || echo MISSING)"
             if [ "$got" = "$want" ]; then
               echo "  ok   :$t -> $got"
