@@ -834,6 +834,16 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-host.sh
 
+      # The editors APEX ships have to be launchable, not merely present. Zed
+      # shipped on every image with no desktop entry at all — the install read a
+      # filename the tarball has never used and `|| true` swallowed the failure —
+      # so the binary worked from a shell and the editor was invisible in every
+      # launcher. This runs the structural half here; the live half needs the
+      # unpacked zed.app and skips in CI.
+      - name: The shipped editors are launchable
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-editors.sh
+
       # §20's remote compute and handoff. The largest group of cases in it is
       # about one refusal: `apex build --on` has to decide which directory on
       # the far side is this project, and the failure mode of a wrong answer is
