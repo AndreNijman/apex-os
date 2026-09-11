@@ -79,11 +79,26 @@ Item {
     readonly property string defaultSession: "hyprland"
 
     function _selectWanted() {
-        // A remembered session always wins.
+        // A remembered session wins — WHILE IT IS STILL INSTALLED.
+        //
+        // The `return` that used to sit where the comment below is turned this
+        // into the same lockout the block above describes. `last-session` is
+        // written on every login, so after one trip through Gaming Mode it
+        // reads `apex-gaming` — and the TryExec gate removes that entry the
+        // moment gamescope is absent, which is every boot where the sysext has
+        // not merged yet. The remembered id then matched nothing, this function
+        // returned having selected nothing, and sessionIndex stayed at its
+        // default 0: the FIRST SORTED ENTRY, which is exactly the positional
+        // default that `defaultSession` exists to abolish.
+        //
+        // So a user who once tried Gaming Mode was silently moved to whatever
+        // sorts first — apex-labwc on a built image — and the named default
+        // they would otherwise have landed on was never consulted, because the
+        // protection below was only ever wired to the empty-memory path.
         if (ctx._wantSession !== "") {
             for (var i = 0; i < ctx.sessions.length; i++)
                 if (ctx.sessions[i].id === ctx._wantSession) { ctx.sessionIndex = i; return }
-            return
+            // Remembered but no longer installed: fall through to the default.
         }
         // Otherwise fall back to the named default rather than glob position.
         for (var j = 0; j < ctx.sessions.length; j++)
