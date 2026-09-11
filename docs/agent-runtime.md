@@ -329,6 +329,53 @@ correction.
 
 ---
 
+## What a screen lock does
+
+§7 gives three rules for a locked screen: ordinary agents may continue, Remote
+Control may continue if configured, short-lived root grants default to
+revocation, and the owner may override any of it.
+
+```bash
+apex agent lock                          # what the screen is doing, and what will happen
+apex agent lock --remote continue        # Remote Control keeps working while you are away
+apex agent lock --agents hold            # nothing runs unattended
+apex agent lock --root-grants keep       # a grant survives the lock
+```
+
+The runtime notices within a few seconds. A held session is stopped with the
+same `SIGSTOP` and reported with the same `paused` flag as `apex agent pause`,
+and unlocking starts again exactly the sessions the lock stopped — a session
+you paused by hand stays paused.
+
+Revoking a break-glass grant on lock ends its session, for the reason expiry
+does: `PR_SET_NO_NEW_PRIVS` was cleared between `fork` and `exec` and no
+process can put it back, so a session whose grant merely left the authority's
+map would still have root while the record said it did not.
+
+### Where the lock state comes from
+
+logind's `LockedHint`, on the graphical session. APEX Shell sets it from
+`WlSessionLock.secure` — the state the compositor has acknowledged, not the
+request to lock — so a lock that fails to engage is never reported as engaged.
+
+Before that existed the property read `no` on a session that had been locked
+for an hour, which is the same thing it reads on one nobody has touched. One
+value for two states is not a measurement, which is why the policy shipped
+with no reader behind it until the shell could answer.
+
+Three states are not two. A machine with no graphical session has no screen to
+lock, and every rule here passes it over; a screen whose state could not be
+read is treated as locked, and `apex agent lock` prints the reason. An absent
+`LockedHint` counts as unreadable rather than as `no`: `loginctl -p <property>
+--value` prints nothing and exits 0 for a property it does not know, so a
+logind without the property would otherwise look exactly like an unlocked
+screen forever.
+
+A session whose origin the daemon could not establish gets the stricter of the
+two "may continue" rules, because it could be either.
+
+---
+
 ## Network modes
 
 Four, and three of them are the same kernel fact. `bwrap --unshare-net` gives
@@ -641,6 +688,84 @@ runtime state, not something to commit and push to your colleagues.
 
 Re-running with the same name reattaches to the same worktree.
 
+### What each worktree is up to
+
+```
+apex agent worktrees
+apex agent worktrees --project my-repo --json
+```
+
+```
+WORKTREE               BRANCH                          DIFF  CONFLICTS   TESTS       READY
+my-repo                main                           dirty  -           unobserved  uncommitted changes in the worktree
+issue-217              agent/issue-217             4f +81/-12  clean       passed      yes
+issue-221              agent/issue-221             2f +19/-3   1 file(s)   failed      would conflict in 1 file
+```
+
+Four questions per worktree — has it got a diff, would it merge back, what
+happened to the tests, is it ready to hand over — and `--json` carries the same
+answers with the conflicted paths and the full blocker list.
+
+**Nothing this command does touches a worktree you are working in.** That
+constraint shapes two of the four answers, and both are worth understanding
+before you trust the column.
+
+**Conflicts** come from `git merge-tree --write-tree`, run from the project
+root against branch names. The obvious implementation — `git merge --no-commit`
+in the worktree — would leave a `MERGE_HEAD` and a half-merged index in a
+checkout an agent is typing into. `merge-tree` computes the same merge entirely
+in the object database.
+
+One caveat stated exactly, because "reads only" would be false: `--write-tree`
+*does* write the merged tree and its blobs into the repository's shared object
+store, as unreferenced objects that `git gc` later removes. No working tree, no
+index, no stash and no ref is touched. The integration suite asserts that
+literally — after a status call on a genuinely conflicted worktree,
+`MERGE_HEAD` is absent, `git ls-files --stage` is unchanged entry for entry,
+`git status --porcelain` is byte-identical, and no ref has moved.
+
+Base is the **main working tree's current branch, read when you ask**. Nothing
+records the branch a worktree was created from, so this is an observation now
+and not a memory of the branch point. Move the main tree to another branch and
+every answer here is against that one instead.
+
+**Tests are observed, never run.** The runtime does not run your suite to
+answer a status query: that has a build directory, a CPU cost, and for a suite
+that touches a daemon or a port a real chance of breaking the session that is
+mid-task. So the column is the last test run APEX *saw go past* in that tree,
+through the hook stream it already receives, and its default is `unobserved` —
+which is not a failure, just an absence.
+
+What each word means, precisely:
+
+- `unobserved` — no test run has been seen in this tree. Most worktrees.
+- `running` — a run started and nothing has reported its end. A run whose
+  completion never arrives stays here for as long as the daemon lives, because
+  "nobody told us how it ended" is not a pass.
+- `passed` — a completion event arrived for that run and it was not a failure
+  event. Whether the agent upstream distinguishes those for a non-zero exit is
+  upstream's behaviour, not something APEX can compel; if it ever reports a
+  failed suite as an ordinary completion, this says `passed`.
+- `failed` — a failure event arrived. This blocks readiness.
+
+A test run is matched to the tree the **session** lives in, taken from the
+session's own recorded working directory — not from wherever the hook process
+happened to run. A session cannot report a suite result against a tree it does
+not live in. And the observations are process memory: restart the daemon and
+everything is `unobserved` again, which is the honest answer, because nobody
+here saw a test run. A `passed` written to disk would outlive the commit it
+referred to and be read as a fresh verdict.
+
+**READY is local.** The field is `ready_to_propose`, and it asks nothing of
+GitHub: has an upstream, in sync with it, ahead of base, clean tree, no
+conflicts, no observed test failure. It is the answer to "is this worth a
+human's attention yet", not to "what does the pull request say".
+
+`--project` takes a project **slug**, the kind `apex project list` prints, and
+never a path. Answering this request makes the daemon run git in the project's
+root, so the set of directories it can reach is exactly the set you have
+already chosen to remember.
+
 ### Undo
 
 ```
@@ -670,6 +795,60 @@ Two deliberate boundaries:
   system-wide removal because you undid a working tree is not a call this makes
   for you.
 
+### A session you throw away
+
+```
+apex agent run "see if this PR is worth reviewing" --disposable
+apex agent run "build it and keep the artefacts" --disposable --copy-out ~/out
+```
+
+The session runs inside a disposable capsule, and the engine deletes that
+capsule at the end of the session. APEX **copies** your working directory in
+rather than sharing it, so what the agent does to that copy goes with the
+environment. Your own tree stays byte-identical afterwards, index included.
+
+Nothing comes back unless you say where. `--copy-out DIR` copies the capsule's
+`~/out` to `DIR` as the environment closes, and copies nothing else, and it
+runs before the teardown. Leave it out and the agent's work goes with the
+capsule, which is the point.
+
+`apex agent status` names the capsule and says both of those things. A session
+whose edits are about to vanish should not read like an ordinary one.
+
+The capsule engine performs the teardown and the daemon holds no teardown code
+of its own. The engine is the session's own process, and its `trap` fires when
+the agent finishes, when `apex agent kill` arrives, and when the daemon goes
+away. If the machine loses power mid-session, `apex disposable list` and
+`apex disposable purge` clear up what is left. Each environment carries the id
+of the session that owned it, so a leftover says where it came from.
+
+**It is a throwaway environment and not a security boundary.** distrobox
+mounts the host's root filesystem at `/run/host` inside each capsule, no flag
+removes it, and the process runs as your own uid. A program in there can read
+and write your files. `apex disposable plan` prints the whole boundary, and
+[recovery.md](recovery.md) states it in full. `--sandbox` is the mechanism for
+confinement: it masks `$HOME`, puts `~/.ssh` out of reach, and rebuilds the
+environment from an allowlist.
+
+APEX **refuses these pairs rather than combining them**:
+
+- `--sandbox` with a confining policy. bwrap would wrap the container client
+  and not the agent inside the capsule, so the pair would read as "confined
+  and disposable" while delivering neither.
+- `--worktree`. APEX would create the branch on your machine and leave it
+  empty, because the agent commits to the copy and the capsule takes those
+  commits with it. A linked worktree is worse: its `.git` is a file pointing
+  at an absolute host path the capsule cannot reach, so the copy is not a
+  working checkout at all.
+- `--checkpoint`. It would snapshot a tree this session cannot change, and
+  `apex agent undo` would then offer to roll back work this agent did not do.
+
+Each refusal lands before the daemon creates anything: no environment, no
+worktree, no branch.
+
+One interaction worth knowing: `apex agent worktrees` lists a disposable
+session under the tree you started it in, which is the tree the capsule
+copied. That session cannot change it.
 ---
 
 ## Handing work to another agent
@@ -771,6 +950,82 @@ The session id comes from `$APEX_AGENT_SESSION`, which the runtime sets in every
 session, so a hook script needs no arguments. That is the whole protocol: an
 agent with hooks can wire them straight to it, and one without still gets the
 inferred states.
+
+---
+
+## Handing a file to a session
+
+A screenshot, a log, a crash dump: something in front of you that the agent
+already running should look at.
+
+```
+apex agent send 3 ~/Downloads/backtrace.txt
+apex agent send 3 --last-screenshot
+```
+
+The runtime copies the file into the session's own scratch directory, then
+types that path into the session's terminal. The sandbox already binds that
+directory read-write, and the session takes it with it when it ends.
+
+`--last-screenshot` takes no picture and opens no selection overlay. It reads
+the newest file in `~/Pictures/Screenshots`, which is where APEX Shell's Print
+keybind writes. Press Print, then run it.
+
+### It does not press Enter
+
+The path is left on the agent's input line, and you send it. That is the whole
+of what keeps a person in the loop, because the channel a file arrives on is
+the same one your keyboard uses.
+
+### What a program reading that terminal can and cannot tell
+
+Bytes written to a PTY arrive as keystrokes. There is no field in a terminal
+for "this came from somewhere else", so a language model reading its own input
+cannot tell an injected byte from a typed one. Four things make the difference
+not matter:
+
+* **Only a path travels on that channel, never the contents.** The file
+  reaches the model through its own read tool, where its harness already treats
+  the result as data rather than as instruction. Handing a file over makes it
+  as trusted as `cat` would, and no more.
+* **The runtime composes the text, not you.** You name a source; the
+  destination is built from the session's scratch path, a counter and a name
+  reduced to letters, digits, dot, dash and underscore. A file called
+  `x⏎/quit⏎.png` cannot put a newline on the terminal, because the bytes on the
+  terminal were never yours. A name carrying a control character gets a refusal
+  rather than a repair.
+* **Nothing is submitted.** No newline, no carriage return.
+* **Every one lands somewhere the session cannot reach**: the systemd journal,
+  which also holds the mirror of every system-access grant.
+
+  ```
+  journalctl --user -t apex-agentd APEX_INJECT_SESSION=3
+  ```
+
+Two costs, said plainly. The bytes land wherever that terminal's foreground
+process is reading, so if the agent has opened an editor or a pager the path
+goes into that instead. And someone who has just been shown a path can be
+talked into pressing Enter: staging is a speed bump in front of a human, not a
+boundary.
+
+One in-band signal does exist. A terminal application that has asked for
+bracketed paste (`DECSET 2004`) receives pasted text wrapped in markers, which
+is how a TUI tells a paste from typing. The runtime owns the session's
+terminal, so it knows whether the application asked, and it sends the markers
+only then. That gives the *application* a way to know. It still gives the model
+none, because whether the distinction survives into the prompt is the
+application's choice.
+
+### Refused to an agent
+
+A session may not use this verb, on another session or on itself. The runtime
+reads the source with its own access, outside every sandbox, so a session that
+could ask for this could name `~/.ssh/id_ed25519` and have the file carried
+across the boundary for it. The daemon resolves the caller from `SO_PEERCRED`
+and `/proc` ancestry, the same way it resolves a privilege request's, and
+refuses anything that lands on a managed session.
+
+`apex agent status <id>` counts the files a session has taken.
 
 ---
 
@@ -951,12 +1206,18 @@ a dedicated service. That service is `apex-secretd`.
 printf %s "$TOKEN" | apex secret add github --host github.com
 apex secret capabilities                 # what the service offers
 apex secret grant github git.push        # per project
+apex secret grant claude-memory mcp.request --everywhere
 apex secret use github git.push origin   # run by the agent
 apex secret migrate                      # move what is already in plaintext
 apex secret audit
 ```
 
-You rarely type the third line. A managed session finds a `git` on its PATH
+`--everywhere` is the only line there that widens a grant past the project it
+was made in, and exactly one shipped operation qualifies for it. *A grant held
+in every project* below says which, and why the operation that looks like the
+obvious second candidate is refused.
+
+You rarely type `apex secret use`. A managed session finds a `git` on its PATH
 that sends `push`, `fetch` and `ls-remote` here and execs `/usr/bin/git` for
 everything else, so a skill keeps running `git push` and nothing was rewritten
 — §12's requirement. That shim holds no credential and enforces nothing:
@@ -1056,6 +1317,170 @@ Not carried: a server-initiated notification down a stream the server holds
 open. Each message is one request and one reply. And an `Mcp-Session-Id` is
 remembered per account and service, so two sessions talking to one server share
 that server's idea of the conversation.
+
+Nothing above says which servers a machine actually has, and there are four
+places a definition can live — your own `~/.claude.json`, its per-directory
+block, a repository's `.mcp.json`, and every enabled plugin's. `apex mcp list`
+reads all four and answers, per server, the two questions that matter here:
+where the definition is, and whether the agent can read the credential.
+
+```
+claude-memory
+  transport   http, https://mem.example/mcp
+  credential  a value in the definition's Authorization header, which the agent reads
+  defined in  ~/.claude.json (every directory)
+  fix         apex mcp connect claude-memory
+
+1 MCP credential is readable by any agent that runs as you
+```
+
+`apex mcp connect` is that fix, one server at a time and by hand: the credential
+is read from **stdin**, stored, proved against the server itself, and only then
+removed from the file the agent reads. What is left behind is the `stdio`
+definition above. The order is the one *Moving what a machine already has*
+argues for below, for the same reason — an interrupted run leaves a machine that
+still has its credential. `--dry-run` prints the plan and writes nothing.
+
+Listing is read-only and always allowed. Connecting is not: it refuses from
+inside a session, and unless it is a dry run it refuses while a `claude` with
+the same `HOME` is running, because that process holds `~/.claude.json` in
+memory and writes it back on exit.
+
+### A grant held in every project
+
+A grant is per project, which is the right default — the same operation in a
+different directory is usually a different permission. `mcp.request` is the
+exception, and `apex secret grant --everywhere` is the exception's key: a `*`
+where the project path would go.
+
+It is safe there for one reason. The request goes to the endpoint pinned when
+the credential was stored, whatever directory it is asked in, so `*` widens
+*where the operation may be asked for* and not *what it reaches*. It is worth
+having because an MCP server is defined once and is therefore present in every
+directory: without it, every new worktree is one where the agent's memory server
+is unauthorised until somebody notices.
+
+**`cloudflare.account.read` does not qualify — and it is the reason this is a
+declared field rather than a computed one.** The first version of the gate
+computed the answer: no resource argument and no parameters, therefore nothing
+project-shaped to resolve, therefore the same thing everywhere.
+`cloudflare.account.read` declares no resource and no parameters, so it passes
+that test exactly, and its `bind` still reads the project's own `apex.toml`.
+Bound, the request is `GET /accounts/{id}` for that project's account; in a
+directory that binds none it is `GET /accounts`, every account the token can
+see. Two projects, two different requests, one stored token — so a `*` grant
+would let an agent in a project the owner never approved read that project's
+account. It is refused, and `apex cf status` needs a grant in the project it is
+run in.
+
+The correction is about where the fact lives. Naming nothing is a fact about the
+**declaration**; where a request ends up is a fact about the provider's
+**`bind`**, which is the same split *Where a provider plugs in* describes above,
+and no amount of reading the declaration recovers it. An allow-list inside the
+service would be fail-closed and silent — the next provider to add an operation
+of this shape gets the safe answer, and nobody is ever asked the question.
+
+So the question is asked, of the only party who can answer it. Every operation
+declares `same_everywhere`. There is no `Default` for that struct and nothing in
+the tree constructs one with `..`, so **a new operation does not compile until
+its author has written down which of the two it is**, and the gate reads that
+field and computes nothing of its own.
+
+Two things then hold the answer to account. Registration refuses the outright
+contradiction: an operation that takes a resource or a parameter is a different
+permission per directory by construction, so claiming otherwise is not a
+judgement call. Naming nothing is *necessary and not sufficient*, and that
+asymmetry is the whole point. Then a test binds every operation carrying the
+claim in two projects — one with an `apex.toml` that binds an account, one bare
+— and requires the two results to be identical. It compares the audited
+`detail` sentence and not just the endpoint, because both of
+`cloudflare.account.read`'s answers are on `api.cloudflare.com`: the endpoint
+alone would have passed it, and two empty directories would have passed it too.
+`mcp.request` is the only shipped operation that carries the claim, and that
+test spells the set out, so adding one is a line somebody writes on purpose.
+
+### One sandbox per MCP server
+
+§10.2. Everything above is about the credential. An MCP server is also *a
+program the agent starts*, and by default it starts inside the agent's own
+sandbox with everything that sandbox has: the project writable, the network, the
+caches, the profile. `npx -y @modelcontextprotocol/server-memory` is third-party
+code fetched from a registry at first run, given the agent's whole reach, to
+store notes in one file.
+
+`apex mcp confine` rewrites the definition so the server starts inside a sandbox
+of its own:
+
+```json
+"memory": {"command": "apex",
+           "args": ["mcp", "run", "memory", "--",
+                    "npx", "-y", "@modelcontextprotocol/server-memory"]}
+```
+
+The server's own command stays in the definition rather than moving into a
+policy file, so what a server runs is still visible where somebody would look
+for it. `apex mcp run` is the wrapper the agent then spawns, and it builds its
+argv with the same function that confines a session — a second bubblewrap
+profile in this codebase would be a second thing to get wrong, and would drift
+from the one that is tested.
+
+Three dimensions, each default-deny, and the honest worth of each:
+
+**Filesystem.** Masking `$HOME`, `/run` and `$XDG_RUNTIME_DIR` costs nothing
+extra, because session confinement already does it. What this adds is a
+*different* home — one private directory per server — so a server that writes
+beside itself writes where neither the agent nor the next server can see. The
+project root is not bound unless the policy asks.
+
+**Network.** `--unshare-net`, which is the whole of the kernel enforcement.
+`network = true` hands the server the *parent's* namespace, and that is a
+ceiling rather than a grant: a namespace cannot be un-shared upward, so a server
+declared `network = true` inside an offline session still has none. An MCP
+server is not a way out of a session that was confined without one.
+
+**Secrets**, where the honest answer is narrower than the word suggests. The
+wrapper runs as the agent's own account, so neither daemon can tell it apart
+from the agent — **per-MCP identity at the broker does not exist**, and a
+credential this server could fetch is one the agent could fetch. What *is*
+enforceable is reachability: both daemons' sockets live under the masked
+directories, so by default the server can open neither. `broker = true` binds
+back the one socket a confined process is ever given, `apex-agentd`'s, and the
+grant table decides from there. `apex-secretd`'s socket is not bound and must
+not be — a session does not get it either, and an MCP server holding a door into
+the secret daemon that the agent starting it lacks is a sandbox inverted.
+
+A policy is `<name>.toml` under `$XDG_CONFIG_HOME/apex/mcp`, and then
+`/etc/apex/mcp` for a default an image or an administrator ships. The user's own
+wins, because the person running a server is the one who decides what it may
+reach. Every
+field defaults closed, so a file only ever widens. An unknown key is refused
+rather than ignored — a policy carrying `netwrok = true` that started the server
+with no network would read as a setting which had been applied — and a file that
+does not parse is an error, never a quiet fall back to the default: the default
+is *tighter*, so falling back would break the server and blame the server. The
+directory is bound read-only into a session, for the same reason it is worth
+having.
+
+`apex mcp policy` prints what each server will actually get, and where that was
+decided:
+
+```
+memory
+  network     none — its own empty namespace
+  filesystem  a private home, 0 read-only and 1 writable path(s) it names
+  secrets     cannot reach apex-agentd or apex-secretd at all
+  decided by  ~/.config/apex/mcp/memory.toml
+  started     with everything the agent session has — apex mcp confine memory
+```
+
+The last line is the one to read: a policy exists and the definition still does
+not use it. An endpoint server has neither policy nor wrapper — there is no
+process here to confine, because the request is made by `apex-secretd` — and
+confining one is refused with that explanation rather than writing a definition
+which cannot work.
+
+What this confines is the MCP server's own code. It is **not** a boundary
+against a hostile agent, and the limit is stated below.
 
 ### Moving what a machine already has
 
@@ -1193,6 +1618,14 @@ uid, and no reply the service can send contains one.
 Two providers: `git`, with `git.push`, `git.fetch` and `git.ls-remote`, and
 `mcp`, with `mcp.request`. git is the framework's reference implementation and
 the one that can be exercised without an account. Cloudflare is P1-002.
+
+A session cannot be stopped from *un*-confining one of its own MCP servers,
+because `~/.claude.json` is writable inside a session — so it can rewrite a
+definition to drop the `apex mcp run` wrapper, and could have run the same
+program directly in any case. Closing that means starting the agent with
+`--strict-mcp-config` and a configuration file the daemon wrote, which is a
+change to how sessions are launched; it is named here rather than half-built.
+The per-server sandbox confines the server's code, which is a different job.
 
 `gh`-style API capabilities (read issues, open a PR) are a second vocabulary
 with a second validation surface, and `gh` inside a managed session is

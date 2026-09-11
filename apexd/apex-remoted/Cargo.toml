@@ -1,0 +1,23 @@
+[package]
+name = "apex-remoted"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+apex-remote-core = { path = "../apex-remote-core" }
+apex-agent-core = { path = "../apex-agent-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+# The end-to-end suite drives both daemons over their real sockets and reads
+# the replies as the daemon's own types, so `claude-remote-control` and the
+# protocol revision are checked against the vocabulary rather than against
+# string literals a test could get wrong.
+[dev-dependencies]
+apex-agent-core = { path = "../apex-agent-core" }

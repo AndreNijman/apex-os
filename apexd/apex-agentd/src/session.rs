@@ -21,7 +21,7 @@ use apex_agent_core::session as logic;
 use apex_agent_core::term::WinSize;
 
 use crate::egress;
-use crate::peer::Peer;
+use crate::privilege::Caller;
 use crate::pty;
 use crate::registry::{self, now_secs, Handle};
 use crate::Daemon;
@@ -39,7 +39,7 @@ const POLL_INTERVAL_MS: i32 = 1000;
 /// reason the privilege verbs take it: the origin has to come from the
 /// kernel's view of who connected, and a handler that could reach for the
 /// request instead would eventually do so.
-pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Result<SessionInfo> {
+pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<SessionInfo> {
     let cwd = PathBuf::from(&req.cwd);
     if !cwd.is_absolute() {
         bail!("working directory {} must be absolute", cwd.display());
@@ -112,7 +112,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     //
     // Refused rather than defaulted when it cannot be established: the default
     // is `local-terminal`, which is what §7 reserves root for.
-    let who = crate::privilege::origin(daemon, peer);
+    let who = crate::privilege::origin(daemon, caller);
     let session_origin = crate::privilege::for_new_session(&who, req.request_origin)
         .map_err(OriginRefused)?;
 
@@ -128,6 +128,17 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     // written out there. The TTL is checked first, so a typo in `--ttl` fails
     // in front of the user instead of after a password dialog they then find
     // out was pointless.
+    // §P1-037. Checked here, with the TTL, and for the same reason: a caller
+    // who asked for two mechanisms that cannot both apply should find that out
+    // in front of their own terminal, not after a capsule has been created.
+    crate::disposable::check(
+        req.disposable,
+        policy.sandbox.is_confined(),
+        req.copy_out.as_deref(),
+        req.worktree.is_some(),
+        req.checkpoint,
+    )?;
+
     let wanted_grant = policy.needs_grant();
     if wanted_grant.is_none() && req.ttl_ms.is_some() {
         // A `--ttl` with nothing to bound is a user who believes they asked
@@ -145,7 +156,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
             let (grant_origin, proof) = crate::privilege::authorise_grant(
                 daemon,
                 &who,
-                peer,
+                caller,
                 kind,
                 "ask for a system-access grant",
             )
@@ -218,7 +229,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     // by design — a session whose hooks could not be installed reports its
     // state from the PTY scanner, which is the fallback §6.1 keeps and not a
     // reason to refuse to start. `hook_settings` says what went wrong, once.
-    let hook_settings = install_hook_settings(adapter, &scratch);
+    let hook_settings = install_hook_settings(adapter, &scratch, detected.as_ref().map(|p| std::path::Path::new(&p.root)));
 
     // §12: the shim's directory goes first on the session's PATH, so a skill's
     // own `git push` reaches the broker without the skill knowing there is one.
@@ -443,7 +454,30 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         )
     });
 
-    let argv = sandbox::build_argv(&spec, &program, &args).map_err(SandboxRefused)?;
+    // §P1-037. A disposable session's PTY child is the disposable ENGINE, and
+    // the adapter runs inside the capsule it creates. `build_argv` is not in
+    // that path at all: the policy is `unrestricted` here — `disposable::
+    // check` refused any other above — so bwrap would add nothing, and if it
+    // were added it would confine the container client rather than the agent.
+    //
+    // The engine's own EXIT/INT/TERM traps are what remove the environment,
+    // so there is no teardown here to get wrong: killing this child tears the
+    // capsule down, which is exactly the behaviour `apex agent kill` should
+    // have.
+    let capsule = req.disposable.then(|| crate::disposable::name_for(id));
+    let argv = if req.disposable {
+        // The engine's own overrides, set EXPLICITLY rather than relied on to
+        // arrive by inheritance. They decide which directory it removes
+        // recursively and which program it drives, and the inheritance that
+        // carries them today is a bug elsewhere that a correct fix would take
+        // away — see `disposable::engine_env`.
+        for pair in crate::disposable::engine_env(|n| std::env::var(n).ok()) {
+            spec.env_set.push(pair);
+        }
+        crate::disposable::argv(id, &workdir, req.copy_out.as_deref(), &program, &args)?
+    } else {
+        sandbox::build_argv(&spec, &program, &args).map_err(SandboxRefused)?
+    };
     let env = sandbox::resolved_env(&spec);
 
     // A confined session gets its environment from bwrap's --setenv, so the
@@ -466,12 +500,23 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         policy,
         request_origin: Some(session_origin.origin),
         origin_source: Some(session_origin.source),
+        // Which remote device asked for this session, when the connection
+        // that asked named one. Carried from the connection rather than from
+        // the `Run` request: a session that could name its own actor could
+        // name somebody else's phone.
+        actor: who.actor.clone(),
+        capsule: capsule.clone(),
         grant: issued.as_ref().map(|g| g.id),
         grant_expires_ms: issued.as_ref().map(|g| g.expires_ms),
         // Nothing has been heard from the agent yet. Claude fills this in on
         // its first hook event; an agent that never publishes one leaves it
         // absent, which reads as "not reported" rather than as a mode.
         native_observed: None,
+        // Empty, not absent: this daemon has the graph, and a session that has
+        // delegated nothing yet must be distinguishable from one whose runtime
+        // cannot tell. See `SessionInfo::children`.
+        telemetry: None,
+        children: Vec::new(),
         pid: spawned.pid,
         started: now_secs(),
         last_activity: now_secs(),
@@ -481,6 +526,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         checkpoint: checkpoint_id,
         cols: size.cols,
         rows: size.rows,
+        injected: 0,
     };
 
     let handle = {
@@ -620,7 +666,11 @@ const REDACTED_SETTINGS_FILE: &str = "claude-settings-redacted.json";
 /// the PTY scanner decides state, exactly as it does for an agent nobody has
 /// integrated. The failures are logged because a silently unintegrated Claude
 /// looks identical to a working one until somebody measures the state.
-fn install_hook_settings(adapter: &adapter::Adapter, scratch: &Path) -> Option<PathBuf> {
+fn install_hook_settings(
+    adapter: &adapter::Adapter,
+    scratch: &Path,
+    project: Option<&Path>,
+) -> Option<PathBuf> {
     if !adapter.hooks {
         return None;
     }
@@ -635,8 +685,13 @@ fn install_hook_settings(adapter: &adapter::Adapter, scratch: &Path) -> Option<P
             return None;
         }
     };
+    // The user's own status line, read here rather than inside the settings
+    // document, because `hook::settings_json` is pure and this is a filesystem
+    // question. See `statusline::overlay` for why the presentation keys have
+    // to travel with it and why the command must not.
+    let status = apex_agent_core::statusline::user_status_line(&paths::home(), project);
     let path = hook::settings_path(scratch);
-    let document = hook::settings_json(&apex).to_string();
+    let document = hook::settings_json(&apex, status.as_ref()).to_string();
     match std::fs::write(&path, document) {
         Ok(()) => Some(path),
         Err(e) => {
@@ -1283,6 +1338,11 @@ mod tests {
             cols: 80,
             rows: 24,
             attached: 0,
+            actor: None,
+            telemetry: None,
+            children: vec![],
+            injected: 0,
+            capsule: None,
         }
     }
 

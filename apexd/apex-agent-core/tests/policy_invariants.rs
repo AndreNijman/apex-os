@@ -715,6 +715,7 @@ fn sample_request() -> PrivilegeRequest {
         project: Some("/home/tester/Projects/demo".into()),
         request_origin: None,
         origin_source: None,
+        actor: None,
         decision: Decision::Pending,
         created_ms: 1_700_000_000_000,
         decided_ms: None,
@@ -783,13 +784,25 @@ fn the_settings_file_apex_injects_cannot_move_the_agents_permission_mode() {
     // symptom would be Claude asking for confirmations it had been told not
     // to ask for.
     //
-    // So: the document APEX writes contains hooks and nothing else.
-    let doc = apex_agent_core::hook::settings_json(std::path::Path::new("/usr/bin/apex"));
+    // So: an ALLOWLIST, not a free hand. Two keys, each here for a stated
+    // reason, and a third would have to be argued for in this test before it
+    // could ship.
+    //
+    //   hooks       §6.1's lifecycle bridge. A list key, so Claude combines it
+    //               across sources and the user's own hooks keep running.
+    //   statusLine  §P1-021's telemetry. An OBJECT key, so this document
+    //               replaces the user's — which is exactly why
+    //               `apex agent statusline` runs the user's own command and
+    //               copies its output through. It is presentation and a
+    //               measurement; nothing about it touches a permission.
+    let doc = apex_agent_core::hook::settings_json(std::path::Path::new("/usr/bin/apex"), None);
     let obj = doc.as_object().expect("an object");
+    let mut keys: Vec<&String> = obj.keys().collect();
+    keys.sort();
     assert_eq!(
-        obj.keys().collect::<Vec<_>>(),
-        vec!["hooks"],
-        "APEX's settings document carries more than hooks: {doc}"
+        keys,
+        vec!["hooks", "statusLine"],
+        "APEX's settings document carries a key nobody has argued for: {doc}"
     );
     for forbidden in ["permissions", "defaultMode", "permissionMode", "allowedTools"] {
         assert!(
@@ -797,6 +810,18 @@ fn the_settings_file_apex_injects_cannot_move_the_agents_permission_mode() {
             "{forbidden} appears in the settings APEX injects: {doc}"
         );
     }
+
+    // And the status line APEX names is APEX's own. A document that carried
+    // the user's command instead would leave the terminal looking right and
+    // the Agent Center empty, which is the failure that looks like success.
+    let status = doc["statusLine"].as_object().expect("a statusLine object");
+    assert_eq!(status["type"], "command");
+    assert_eq!(status["command"], "/usr/bin/apex agent statusline");
+    assert_eq!(
+        status.len(),
+        2,
+        "with no user status line to copy from, the overlay invents nothing: {doc}"
+    );
 }
 
 #[test]

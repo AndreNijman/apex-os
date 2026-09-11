@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apexd-core", "apexd", "apex", "apex-agent-core", "apex-agentd", "apex-aid", "apex-secret-core", "apex-secretd"]
+members = ["apexd-core", "apexd", "apex", "apex-agent-core", "apex-agentd", "apex-aid", "apex-secret-core", "apex-secretd", "apex-remote-core", "apex-remoted"]
 
 [workspace.package]
 version = "0.1.0"

@@ -57,6 +57,7 @@ RUN set -eux; cd /build/apexd; cargo build --release --locked; \
     install -Dm755 target/release/apexd       /out/usr/bin/apexd; \
     install -Dm755 target/release/apex        /out/usr/bin/apex; \
     install -Dm755 target/release/apex-agentd /out/usr/bin/apex-agentd; \
+    install -Dm755 target/release/apex-remoted /out/usr/bin/apex-remoted; \
     install -Dm755 target/release/apex-secretd /out/usr/bin/apex-secretd; \
     install -Dm755 target/release/apex-aid    /out/usr/bin/apex-aid
 
@@ -184,6 +185,17 @@ RUN systemctl enable apexd.service
 # CLI prints the enable command when the socket is absent.
 COPY files/system/units/apex-agentd.service /usr/lib/systemd/user/apex-agentd.service
 
+# ── APEX Remote (apex-remoted, §46) ─────────────────────────────────────────
+# A USER unit, and not enabled, for the same reason as apex-agentd plus one
+# more: this is the only thing in the agent stack that listens on a network,
+# and a network listener that starts because the image contains it is not a
+# decision anybody made. `apex remote enable` is that decision.
+#
+# The firewall stays shut either way. The port is in the catalogue as
+# `apex-remote` and needs `sudo apex firewall allow apex-remote`, which the
+# relay path does not need at all.
+COPY files/system/units/apex-remoted.service /usr/lib/systemd/user/apex-remoted.service
+
 # ── protected secret service (apex-secretd, §11) ────────────────────────────
 # A SYSTEM unit, and enabled — the opposite of apex-agentd, on purpose. It holds
 # every brokered credential and has no verb that returns one, so a git
@@ -302,6 +314,13 @@ RUN set -eux; \
     # Opt-in by design: a per-user daemon holding PTYs must not be enabled for
     # users who never run an agent. Assert it is NOT wired into any target.
     test ! -e /usr/lib/systemd/user/default.target.wants/apex-agentd.service; \
+    # APEX Remote: the same opt-in rule, and the stronger reason for it. This
+    # is the only unit in the agent stack that opens a network listener, so an
+    # image that enabled it would put one on every machine that installed the
+    # image rather than on every machine whose owner asked for one.
+    test -s /usr/lib/systemd/user/apex-remoted.service; \
+    grep -q '^ExecStart=/usr/bin/apex-remoted$' /usr/lib/systemd/user/apex-remoted.service; \
+    test ! -e /usr/lib/systemd/user/default.target.wants/apex-remoted.service; \
     # The secret service is the other way round: a SYSTEM unit, and enabled,
     # because everything that brokers a credential depends on it answering.
     test -s /usr/lib/systemd/system/apex-secretd.service; \
@@ -792,6 +811,35 @@ RUN set -eux; \
         /usr/lib/systemd/system/apex-boot-health.service \
         /usr/lib/systemd/system/apex-boot-notice.service
 
+# ── §48: the disk-health warning ────────────────────────────────────────────
+# A USER timer, because notify-send needs a session bus and root has none. It
+# is ENABLED by default, unlike apex-agentd and apex-aid: those start a daemon
+# that holds resources, this runs one read-only pass a day and says nothing
+# unless a disk has something to report. A warning mechanism nobody switched on
+# is a warning mechanism that does not exist.
+COPY files/system/libexec/apex-storage-notice /usr/libexec/apex-storage-notice
+COPY files/system/units/apex-storage-notice.service \
+     /usr/lib/systemd/user/apex-storage-notice.service
+COPY files/system/units/apex-storage-notice.timer \
+     /usr/lib/systemd/user/apex-storage-notice.timer
+RUN set -eux; \
+    chmod 0755 /usr/libexec/apex-storage-notice; \
+    bash -n /usr/libexec/apex-storage-notice; \
+    : '── the tool it depends on has to be in this image ──'; \
+    : 'apex storage reads sysfs for everything but the SMART log, and'; \
+    : 'smartctl is what reads that. Without it every wear row is'; \
+    : 'unavailable, which is honest and useless.'; \
+    test -x /usr/sbin/smartctl; \
+    : 'The notice is a desktop notification and nothing else can send one.'; \
+    command -v notify-send; \
+    systemctl --global enable apex-storage-notice.timer; \
+    test -L /etc/systemd/user/timers.target.wants/apex-storage-notice.timer; \
+    : '── and it must NOT be a system unit ──'; \
+    : 'A system unit reaching for a session bus either fails or finds the'; \
+    : 'wrong user, and the warning goes to somebody who cannot act on it.'; \
+    test ! -e /usr/lib/systemd/system/apex-storage-notice.service; \
+    echo "apex-storage-notice enabled as a user timer"
+
 COPY files/system/libexec/apex-boot-windows /usr/libexec/apex-boot-windows
 COPY files/system/sudoers/apex-boot-windows /etc/sudoers.d/020-apex-boot-windows
 RUN set -eux; \
@@ -1099,6 +1147,48 @@ RUN systemctl --global enable apex-shell-firstrun.service
 # The extension records the OS version it was built for and systemd refuses to
 # merge a mismatched one; apex-sysext-rebuild.service turns that refusal into an
 # automatic rebuild after an OS upgrade instead of vanished packages.
+# ── roadmap §27: what the machine needs to verify an image itself ───────────
+#
+# `apex update` refuses an image whose cosign signature does not verify, and it
+# does the verification with skopeo and openssl — cosign is not packaged for
+# Fedora at all, so a gate built on it would be dead code on every machine this
+# project ships to.
+#
+# `fulcio-root.pem` is the Sigstore root the signing certificate must chain to.
+# It is PINNED, and shipped rather than taken from the signature, because a
+# cosign signature's `chain` annotation carries Fulcio's intermediate AND root:
+# verifying a certificate against a root the certificate handed you proves
+# nothing at all.
+#
+# This file is load-bearing in the dangerous direction. Under the shipped
+# default (`signature=enforce`) a root that is missing or unreadable is
+# `CouldNotRun`, which REFUSES — so a build that shipped the wrong bytes here
+# would refuse every update on every machine. Hence the assertions below: the
+# build fails rather than the fleet.
+COPY files/system/trust/fulcio-root.pem  /usr/share/apex-os/trust/fulcio-root.pem
+COPY files/system/trust/enforcement.conf /usr/share/apex-os/trust/enforcement.conf
+RUN set -eux; \
+    # It has to be a certificate at all, and openssl has to be here to say so —
+    # the same openssl the verifier will use at runtime.
+    command -v openssl >/dev/null || { echo "FATAL: the trust gate needs openssl"; exit 1; }; \
+    command -v skopeo  >/dev/null || { echo "FATAL: the trust gate needs skopeo"; exit 1; }; \
+    openssl x509 -noout -in /usr/share/apex-os/trust/fulcio-root.pem; \
+    # And it has to be THE Sigstore root, by fingerprint. Checked here because
+    # the failure mode of the wrong root is not a broken feature, it is a fleet
+    # that will not update: every good signature would stop chaining.
+    want=3B:A7:B6:CC:4E:95:46:9D:4D:33:4B:49:CB:25:7A:D8:53:70:76:FA:84:B0:CA:87:FF:4E:CF:E6:A5:46:80:C1; \
+    got="$(openssl x509 -noout -fingerprint -sha256 \
+             -in /usr/share/apex-os/trust/fulcio-root.pem | sed 's/.*=//')"; \
+    test "$got" = "$want" || { echo "FATAL: pinned Fulcio root is $got, expected $want"; exit 1; }; \
+    # A self-signed root, i.e. actually a root and not an intermediate that
+    # would need one.
+    test "$(openssl x509 -noout -subject -in /usr/share/apex-os/trust/fulcio-root.pem)" \
+       = "$(openssl x509 -noout -issuer  -in /usr/share/apex-os/trust/fulcio-root.pem | sed 's/^issuer=/subject=/')"; \
+    # The defaults have to parse as the runtime parses them, or a typo here
+    # ships a machine whose enforcement is not what this file says.
+    grep -qx 'signature=enforce'  /usr/share/apex-os/trust/enforcement.conf; \
+    grep -qx 'provenance=warn'    /usr/share/apex-os/trust/enforcement.conf
+
 COPY --chmod=0755 files/system/libexec/apex-pkg /usr/libexec/apex-pkg
 COPY files/system/units/apex-sysext-rebuild.service \
      /usr/lib/systemd/system/apex-sysext-rebuild.service
@@ -1251,6 +1341,13 @@ RUN set -eux; \
     # Exceptions are applied into named sets, never by rewriting the policy.
     grep -q 'tcp dport @allowed_tcp accept' /usr/share/apex/nftables/apex.nft; \
     test -s /usr/share/apex/firewall/services; \
+    # APEX Remote's port is in the catalogue and is NOT opened. A network
+    # listener whose port the image opened would make `apex firewall` a record
+    # of what shipped rather than of what the owner allowed — and the relay
+    # path works with it shut, so opening it is a choice about speed and
+    # privacy rather than a requirement.
+    grep -q '^apex-remote  *tcp  *7717 ' /usr/share/apex/firewall/services; \
+    ! grep -q 'apex-remote' /usr/share/apex/nftables/apex.nft; \
     # Enabled by default. A firewall that ships disabled is documentation.
     systemctl enable apex-firewall.service; \
     test -L /etc/systemd/system/multi-user.target.wants/apex-firewall.service; \

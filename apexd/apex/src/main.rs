@@ -12,6 +12,7 @@ mod boot;
 mod cloudflare;
 mod dispatch;
 mod disposable;
+mod firmware;
 mod gaming;
 mod gitshim;
 mod host;
@@ -20,13 +21,17 @@ mod migrate;
 mod mode;
 mod ops;
 mod proxy;
+mod qualify;
 mod recover;
+mod remote;
 mod schema;
 mod request;
 mod secret;
+mod storage;
 mod task;
 mod touchpad;
 mod trust;
+mod verify;
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -122,6 +127,39 @@ enum Cmd {
     Channel {
         #[command(subcommand)]
         cmd: channel::ChannelCmd,
+    },
+    /// What this class of machine is known to do, and who established it (§33).
+    ///
+    /// A local database, kept only with explicit consent and sent nowhere.
+    /// Every check has three answers rather than two: a row nobody has tried
+    /// reads as not known, with the sentence saying who can settle it, because
+    /// "nobody has suspended this machine" is not "suspend is broken".
+    Qualify {
+        #[command(subcommand)]
+        cmd: qualify::QualifyCmd,
+    },
+    /// The disks in this machine, their health, and what nobody could ask
+    /// them (§48).
+    ///
+    /// Wear, temperature, TRIM, encryption, mount state and free space, with
+    /// every row carrying either a measurement or the reason there is none.
+    /// Reading needs no root except for the SMART log, which reports as
+    /// unavailable with the remedy rather than disappearing.
+    Storage {
+        #[command(subcommand)]
+        cmd: storage::StorageCmd,
+    },
+    /// Firmware: what this machine carries and what has an update waiting
+    /// (§P2-015).
+    ///
+    /// Reads fwupd's own JSON and never its exit status — measured, that
+    /// status means "nothing to do" when it is non-zero and accompanies an
+    /// explicit error document when it is zero. Secure Boot key and
+    /// revocation stores are listed apart from hardware, because most of what
+    /// fwupd calls updatable is one of those rather than a component.
+    Firmware {
+        #[command(subcommand)]
+        cmd: firmware::FirmwareCmd,
     },
     /// Persistent state: which schema each store is on, and what a rollback
     /// would do to it (§25).
@@ -397,6 +435,20 @@ enum Cmd {
         /// Which area to report. Everything, if you do not say.
         #[arg(value_enum)]
         area: Option<DeviceArea>,
+    },
+    /// APEX Remote: pair a phone with this machine, and take it away again.
+    ///
+    /// The phone talks to `apex-remoted`, a per-user unprivileged service that
+    /// is a client of the agent runtime rather than part of it. Everything it
+    /// forwards is recorded as `claude-remote-control`, so a remote request can
+    /// edit a project, run tests and push — and cannot approve a root
+    /// operation or start a break-glass session, whichever device asks.
+    ///
+    /// Reading and revoking need no privilege. Pairing needs you: an agent
+    /// cannot pair a device on your behalf.
+    Remote {
+        #[command(subcommand)]
+        cmd: remote::RemoteCmd,
     },
     /// Projects, agent worktrees and checkpoints.
     Project {
@@ -982,6 +1034,17 @@ struct UpdateArgs {
     /// the fix is in the release being held.
     #[arg(long)]
     force: bool,
+    /// Deploy the next image even though its signature does not verify.
+    ///
+    /// §27's gate refuses an update whose image the machine cannot verify —
+    /// see `docs/trust-enforcement.md` for what "cannot" covers and how to
+    /// change it permanently. This is the one-off way past it.
+    ///
+    /// Deliberately not `--force`: that is §26's rollout stop, for a machine
+    /// that came back from its last update broken. Working around a health
+    /// stop must not silently stop checking signatures.
+    #[arg(long)]
+    allow_unverified: bool,
     /// Keep ostree's per-object fsync on during the pull. Roughly halves update
     /// speed (measured: ~8 MiB/s with it, ~14.6 without, because 179k objects at
     /// 2.98 ms of fsync each outweighs the download itself) in exchange for
@@ -1261,6 +1324,9 @@ async fn main() {
         // `bootc switch`, which is in the privileged set below beside Update,
         // Rollback and Pin.
         Cmd::Channel { cmd } => channel::main(cmd),
+        Cmd::Qualify { cmd } => qualify::main(cmd),
+        Cmd::Storage { cmd } => storage::main(cmd),
+        Cmd::Firmware { cmd } => firmware::main(cmd),
         Cmd::Schema { cmd } => schema::main(cmd),
         Cmd::Trust(args) => trust::main(args),
         // Read-only except for `add`/`remove`/`probe`, which write only the
@@ -1290,6 +1356,7 @@ async fn main() {
             skip_packages: args.skip_packages,
             skip_flatpak: args.skip_flatpak,
             force: args.force,
+            allow_unverified: args.allow_unverified,
         }),
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Metrics(args) => cmd_metrics(args).await,
@@ -1361,6 +1428,7 @@ async fn main() {
         Cmd::Env { cmd } => ops::env(&env_argv(cmd)),
         Cmd::Firewall { cmd } => ops::firewall(&firewall_argv(cmd)),
         Cmd::Devices { area } => ops::devices(&devices_argv(area)),
+        Cmd::Remote { cmd } => remote::remote(cmd),
         Cmd::Plugin { cmd } => ops::plugin(&plugin_argv(cmd)),
     };
     std::process::exit(code);
@@ -1984,10 +2052,11 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
                         if topo.ecore_list().is_empty() { "(none)".into() } else { topo.ecore_list() },
                         topo.source.as_str()
                     );
-                    println!(
-                        "nvidia-smi: {}",
-                        if apexd_core::gpu::nvidia_smi_available() { "present" } else { "absent" }
-                    );
+                    // The STATE, not merely whether the file exists. On a
+                    // machine that ships nvidia-smi with no driver loaded —
+                    // the L16, measured — "present" is true and tells somebody
+                    // debugging absent clock locks nothing at all.
+                    println!("nvidia-smi: {}", apexd_core::gpu::nvidia_smi_state().as_str());
                 }
             }
             0
@@ -2557,6 +2626,22 @@ async fn cmd_doctor(json: bool) -> i32 {
         ok: metrics_up,
         what: "metrics endpoint reachable on 127.0.0.1:9723".to_string(),
     });
+
+    // §48: disk-health warnings reach the doctor. Only the rows with something
+    // to do become a WARN — a row nobody could measure is printed with its
+    // reason and passes, because `apex doctor` runs unprivileged and a SMART
+    // log nobody could open must not turn every run red.
+    for (ok, what) in storage::doctor_lines(&storage::Roots::from_env()) {
+        checks.push(recover::Check { ok, what });
+    }
+
+    // §P2-015: the same rule for firmware. An update waiting is a WARN; a
+    // machine where fwupd could not be consulted at all passes with the
+    // reason on the line, because `apex doctor` runs unprivileged and
+    // measured, nothing in any Containerfile installs fwupd today.
+    for (ok, what) in firmware::doctor_lines(&firmware::Roots::from_env()) {
+        checks.push(recover::Check { ok, what });
+    }
 
     print!("{}", recover::render_doctor(&checks, json));
     0

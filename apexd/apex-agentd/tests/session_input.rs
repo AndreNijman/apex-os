@@ -125,6 +125,8 @@ impl Harness {
             cols: 80,
             rows: 24,
             env: vec![],
+            disposable: false,
+            copy_out: None,
         }));
         if reply["reply"] != "session" {
             // A daemon that will not start a session is a broken fixture on

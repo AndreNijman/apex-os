@@ -351,6 +351,7 @@ mod tests {
             resource: ResourceKind::Name,
             params: &[],
             aliases: &["one-read"],
+            same_everywhere: false,
         }],
     };
 
@@ -364,6 +365,7 @@ mod tests {
             resource: ResourceKind::Name,
             params: &[],
             aliases: &[],
+            same_everywhere: false,
         }],
     };
 
@@ -377,6 +379,7 @@ mod tests {
             resource: ResourceKind::Name,
             params: &[],
             aliases: &[],
+            same_everywhere: false,
         }],
     };
 
