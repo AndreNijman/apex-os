@@ -1317,16 +1317,51 @@ RUN set -eux; \
 # ── Stage 5a-zed: Zed editor (/usr, official tarball) ──────────────────────
 # Zed is not packaged for Fedora (upstream ships a Flatpak or a raw tarball, and
 # Flatpaks cannot be installed at bootc build time). Fetch the official Linux
-# tarball into /usr/lib and symlink the launcher onto PATH. Non-fatal, same
-# posture as sing-box: a fetch failure leaves Zed absent (neovim/nano still there)
-# but never aborts the image build. The tarball unpacks to `zed.app/`.
+# tarball into /usr/lib and symlink the launcher onto PATH. The FETCH stays
+# non-fatal, same posture as sing-box: no network, no Zed, but the image still
+# builds and neovim/nano remain. The tarball unpacks to `zed.app/`.
+#
+# ── What is NOT non-fatal, and why this block is assertive now ──────────────
+# Everything after a successful unpack is checked, because the previous version
+# shipped a working Zed that no launcher could see, on every APEX image, and
+# nothing noticed. Two mistakes compounded:
+#
+#   1. It installed from `zed.app/share/applications/zed.desktop`. The tarball
+#      has never shipped that name — the file is `dev.zed.Zed.desktop`.
+#   2. `2>/dev/null || true` on the install swallowed the resulting failure.
+#
+# So `/usr/bin/zed` ran fine from a shell and Zed was absent from every menu,
+# every launcher and every "Open With" list. A user reasonably calls that "Zed
+# doesn't work". The fetch failing is a fact about the network; the tarball
+# unpacking and the entry not arriving is a bug, and the build now says so.
+#
+# The icons are installed for the same reason: `Icon=zed` in the entry resolves
+# through the hicolor theme, and an entry with an unresolvable icon is the same
+# invisible half-failure one step further along.
 RUN set -eux; \
     if curl -fsSL "https://zed.dev/api/releases/stable/latest/zed-linux-x86_64.tar.gz" -o /tmp/zed.tgz \
        && tar -xzf /tmp/zed.tgz -C /usr/lib; then \
         ln -sf /usr/lib/zed.app/bin/zed /usr/bin/zed; \
-        install -Dm644 /usr/lib/zed.app/share/applications/zed.desktop \
-            /usr/share/applications/dev.zed.Zed.desktop 2>/dev/null || true; \
-        echo "zed: installed to /usr/lib/zed.app"; \
+        install -Dm644 /usr/lib/zed.app/share/applications/dev.zed.Zed.desktop \
+            /usr/share/applications/dev.zed.Zed.desktop; \
+        for px in 512x512 1024x1024; do \
+            if [ -f "/usr/lib/zed.app/share/icons/hicolor/${px}/apps/zed.png" ]; then \
+                install -Dm644 "/usr/lib/zed.app/share/icons/hicolor/${px}/apps/zed.png" \
+                    "/usr/share/icons/hicolor/${px}/apps/zed.png"; \
+            fi; \
+        done; \
+        # The launcher entry has to exist, name a binary that is really on PATH,
+        # and carry an icon the theme can resolve. Asserted against the shipped
+        # files rather than trusted, because all three failed silently before.
+        test -s /usr/share/applications/dev.zed.Zed.desktop \
+            || { echo "FATAL: zed unpacked but shipped no desktop entry; it would be invisible in every launcher"; exit 1; }; \
+        grep -q '^TryExec=zed$' /usr/share/applications/dev.zed.Zed.desktop \
+            || { echo "FATAL: zed desktop entry has no TryExec=zed; upstream changed it and the launcher gate is now wrong"; exit 1; }; \
+        test -x /usr/bin/zed \
+            || { echo "FATAL: /usr/bin/zed is not executable; the entry names a binary that is not there"; exit 1; }; \
+        test -s /usr/share/icons/hicolor/512x512/apps/zed.png \
+            || { echo "FATAL: zed shipped no 512x512 icon; the entry's Icon=zed would not resolve"; exit 1; }; \
+        echo "zed: installed to /usr/lib/zed.app, entry + icon asserted"; \
     else echo "zed: fetch FAILED (editor absent; non-fatal — neovim/nano remain)"; fi; \
     rm -f /tmp/zed.tgz
 
