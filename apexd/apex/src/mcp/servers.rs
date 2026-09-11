@@ -596,6 +596,12 @@ pub fn as_json(found: &[Server]) -> Value {
             };
             serde_json::json!({
                 "name": s.name,
+                // P1-028: `transport` says how the agent reaches it, `plane`
+                // says which side of this machine it is on. They are not the
+                // same question — a reader who had only `transport` would have
+                // to know that "stdio" means confinable and that every other
+                // value means the credential is the only boundary.
+                "plane": crate::connector::Plane::of(&s.transport).tag(),
                 "transport": transport,
                 "address": address,
                 "credential": credential,
