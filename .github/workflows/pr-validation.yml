@@ -987,6 +987,24 @@ jobs:
       - name: Run capsule device-profile assertions (live where the hardware is)
         run: ./tests/test-apex-env-devices-live.sh
 
+      # What the login session picker calls the three desktops. BASE-013's
+      # third criterion — compositor names stay implementation details for
+      # normal users — failed on the one surface every user sees at every
+      # login: the greeter rendered `Name=` verbatim, so the carousel read
+      # "labwc (APEX) / niri / Hyprland".
+      #
+      # This runs here rather than only in an image build because two of the
+      # three things it checks are build rules: Containerfile.base's rename of
+      # the Hyprland package's own entry, and Containerfile.apex's sweep over
+      # the finished directory. Both are LIFTED OUT of the Containerfiles and
+      # run against a staging tree, so the gate that normally costs a
+      # multi-hour image build is exercised on every PR in under a second, and
+      # the greeter's enumeration is lifted out of GreetContext.qml and run
+      # rather than re-implemented — this tree already carries three copies of
+      # that loop. It starts no compositor and opens no window.
+      - name: Run session-picker wording assertions
+        run: ./tests/test-apex-greet-sessions.sh
+
       # §9's resolver, which is the same engine as the package suite above and
       # a separate file because it is a separate claim: that engine INSTALLS,
       # this one CHOOSES. A choice is a policy, and the policy is invisible
@@ -1296,7 +1314,8 @@ jobs:
             tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
             tests/test-apex-modes.sh tests/test-apex-plugin.sh \
             tests/test-apex-host.sh tests/test-apex-dispatch.sh \
-            tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh
+            tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh \
+            tests/test-apex-greet-sessions.sh
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
       # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict

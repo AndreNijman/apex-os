@@ -81,6 +81,14 @@ successful launch — values passed through the environment so a hostile
 username cannot inject shell — with the actual `Greetd.launch` deferred
 until the write flushes. An unwritable state dir is tolerated silently.
 
+The greeter prints `Name` verbatim, so the entries decide the wording, not
+this file. The shipped four read **APEX Floating**, **APEX Scrolling**, **APEX
+Tiling** and **APEX Gaming Mode**. Each compositor keeps its own name in
+`Comment`, in the file name and in `DesktopNames` — the ids that
+`apex-session-select`, `last-session` and the portals config key off.
+`tests/test-apex-greet-sessions.sh` runs this enumeration and fails if a
+compositor's name reaches the picker.
+
 ### Wallpaper
 
 `/usr/share/backgrounds/apex/default.jpg`, blurred (`MultiEffect`,
