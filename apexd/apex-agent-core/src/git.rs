@@ -112,6 +112,33 @@ pub fn common_dir(dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Whether `dir` is a LINKED worktree rather than a repository's main one.
+///
+/// `--git-dir` and `--git-common-dir` name the same directory in a main
+/// worktree and different ones in a linked worktree
+/// (`.git/worktrees/<name>` against `.git`). MEASURED on git 2.55.0 rather
+/// than assumed, from both sides.
+///
+/// Asked because a linked worktree is not a project: every worktree of the
+/// repository is visible from inside it, so anything that enumerates
+/// "this project's worktrees" from a linked one produces a second copy of
+/// every row, with the linked worktree's own name on all of them.
+pub fn is_linked_worktree(dir: &Path) -> bool {
+    let Some(out) = git_opt(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+    ) else {
+        // Not a repository at all. Not a linked worktree either, and saying
+        // "yes" here would hide an ordinary directory from a listing.
+        return false;
+    };
+    let mut lines = out.lines();
+    match (lines.next(), lines.next()) {
+        (Some(git_dir), Some(common)) => git_dir != common,
+        _ => false,
+    }
+}
+
 /// One registered worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
@@ -307,6 +334,171 @@ pub fn add_worktree(repo: &Path, path: &Path, branch: &str, base: Option<&str>) 
     git(repo, &args).map(|_| ())
 }
 
+/// How many commits each side of `base...head` has that the other does not.
+///
+/// `(ahead, behind)` from `head`'s point of view: ahead is what `head` carries
+/// and `base` does not. `None` when either ref does not resolve, which is a
+/// legitimate answer for a worktree whose base branch was deleted.
+pub fn ahead_behind(dir: &Path, base: &str, head: &str) -> Option<(u32, u32)> {
+    let range = format!("{base}...{head}");
+    let out = git_opt(dir, &["rev-list", "--left-right", "--count", &range])?;
+    parse_ahead_behind(&out)
+}
+
+/// Parse `git rev-list --left-right --count`, which prints `behind<TAB>ahead`.
+///
+/// Split out because the column order is the one thing here that is easy to
+/// get backwards and impossible to notice: the LEFT count is `base`'s own
+/// commits, which is how far `head` is BEHIND.
+pub fn parse_ahead_behind(text: &str) -> Option<(u32, u32)> {
+    let mut parts = text.split_whitespace();
+    let behind: u32 = parts.next()?.parse().ok()?;
+    let ahead: u32 = parts.next()?.parse().ok()?;
+    Some((ahead, behind))
+}
+
+/// The upstream of `branch` (`origin/foo`), or `None` when it has none.
+pub fn upstream_of(dir: &Path, branch: &str) -> Option<String> {
+    let spec = format!("{branch}@{{upstream}}");
+    let out = git_opt(dir, &["rev-parse", "--abbrev-ref", &spec])?;
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// A summary of `git diff --numstat`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffStat {
+    pub files: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+/// The committed delta of `head` against `base`, as files/insertions/deletions.
+///
+/// Three dots, so this is what `head` added since the merge base rather than
+/// every difference between two branches — the same range a reviewer would
+/// read.
+pub fn diff_stat(dir: &Path, base: &str, head: &str) -> Option<DiffStat> {
+    let range = format!("{base}...{head}");
+    let out = git_opt(dir, &["diff", "--numstat", &range])?;
+    Some(parse_numstat(&out))
+}
+
+/// Parse `git diff --numstat`.
+///
+/// A binary file's counts are `-` rather than a number. Those lines count as a
+/// changed file and add nothing to the line totals, which is the honest answer:
+/// a binary change has no line count, and treating `-` as zero would report a
+/// changed file with an empty diff.
+pub fn parse_numstat(text: &str) -> DiffStat {
+    let mut stat = DiffStat::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let (Some(add), Some(del)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        // A third field is the path. Without one this is not a numstat line.
+        if parts.next().is_none() {
+            continue;
+        }
+        stat.files += 1;
+        stat.insertions += add.parse::<u32>().unwrap_or(0);
+        stat.deletions += del.parse::<u32>().unwrap_or(0);
+    }
+    stat
+}
+
+/// What a merge of two branches WOULD do, without doing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeProbe {
+    /// The merge would apply cleanly.
+    Clean,
+    /// The merge would conflict, in these paths.
+    Conflicted(Vec<String>),
+    /// Git could not answer. Carries the reason for a human, never a guess.
+    Unknown(String),
+}
+
+/// Whether merging `head` into `base` would conflict — asked WITHOUT merging.
+///
+/// This is the whole reason the module prefers plumbing. The obvious
+/// implementation, `git merge --no-commit` in the worktree, would leave a
+/// half-merged index and a `MERGE_HEAD` in a checkout that an agent — or
+/// Andre — is sitting in and typing into. `merge-tree` computes the same merge
+/// entirely in the object database and writes nothing any working tree can
+/// see.
+///
+/// Run it from the project root against REF NAMES, never from inside the agent
+/// worktree: then the answer cannot depend on that tree's HEAD, its index or
+/// its uncommitted dirt.
+///
+/// One honest caveat, because "reads only" would be an overclaim:
+/// `--write-tree` DOES write the merged tree and its blobs into the common
+/// object store as unreferenced objects. Nothing points at them, `git gc`
+/// removes them, and no index, stash, branch or working tree is touched — but
+/// the repository is not left byte-for-byte identical, and a doc that said
+/// otherwise would be wrong.
+///
+/// Exit codes, measured on git 2.55.0 rather than assumed: 0 is clean, 1 is
+/// conflicts, and everything else is a question git declined to answer
+/// (unrelated histories and an unresolvable ref both exit 128). Only 0 and 1
+/// are trusted; anything else degrades to [`MergeProbe::Unknown`] so that one
+/// odd worktree cannot fail a whole status listing.
+pub fn merge_tree_probe(repo: &Path, base: &str, head: &str) -> MergeProbe {
+    let out = Command::new("git")
+        .current_dir(repo)
+        .args(["merge-tree", "--write-tree", "--name-only", "-z", base, head])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => return MergeProbe::Unknown(format!("running git merge-tree: {e}")),
+    };
+    match out.status.code() {
+        Some(0) => MergeProbe::Clean,
+        Some(1) => {
+            let names = parse_merge_tree_z(&String::from_utf8_lossy(&out.stdout));
+            if names.is_empty() {
+                // Exit 1 with nothing named is still a conflict, and calling it
+                // clean because the parse came up empty would invert the
+                // answer. Report it as unknown instead.
+                return MergeProbe::Unknown(
+                    "git merge-tree reported a conflict without naming a path".to_string(),
+                );
+            }
+            MergeProbe::Conflicted(names)
+        }
+        _ => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let line = err.trim().lines().next().unwrap_or("git merge-tree failed");
+            MergeProbe::Unknown(line.to_string())
+        }
+    }
+}
+
+/// Parse the NUL-separated `git merge-tree --write-tree --name-only -z` output.
+///
+/// Measured shape: the tree OID, then one conflicted path per field, then an
+/// EMPTY field, then a structured message section this does not read. `-z`
+/// rather than newlines because a path is allowed to contain a newline and the
+/// line-based form would split one path into two.
+pub fn parse_merge_tree_z(text: &str) -> Vec<String> {
+    text.split('\0')
+        .skip(1) // the tree OID
+        .take_while(|f| !f.is_empty())
+        .map(|f| f.to_string())
+        .collect()
+}
+
 /// Remove a worktree and, when `delete_branch`, its branch.
 pub fn remove_worktree(repo: &Path, path: &Path, delete_branch: bool) -> Result<()> {
     let path_str = path.to_string_lossy().to_string();
@@ -420,6 +612,87 @@ detached
     fn slugify_collapses_runs_of_separators() {
         assert_eq!(slugify("a   b"), "a-b");
         assert_eq!(slugify("a---b"), "a-b");
+    }
+
+    #[test]
+    fn ahead_behind_reads_the_columns_in_git_order() {
+        // `--left-right --count` prints LEFT then RIGHT, and with `base...head`
+        // the left side is base's own commits — which is how far head is
+        // BEHIND. Getting this backwards would report a worktree with nothing
+        // to propose as ready and vice versa, so it is pinned.
+        assert_eq!(parse_ahead_behind("1\t1"), Some((1, 1)));
+        assert_eq!(parse_ahead_behind("0\t4"), Some((4, 0)), "4 ahead, 0 behind");
+        assert_eq!(parse_ahead_behind("3\t0"), Some((0, 3)), "0 ahead, 3 behind");
+        assert_eq!(parse_ahead_behind(""), None);
+        assert_eq!(parse_ahead_behind("7"), None, "one column is not an answer");
+        assert_eq!(parse_ahead_behind("a\tb"), None);
+    }
+
+    #[test]
+    fn numstat_totals_lines_and_counts_files() {
+        let text = "1\t1\tf.txt\n1\t0\tn.txt\n";
+        assert_eq!(
+            parse_numstat(text),
+            DiffStat {
+                files: 2,
+                insertions: 2,
+                deletions: 1
+            }
+        );
+        assert_eq!(parse_numstat(""), DiffStat::default());
+    }
+
+    #[test]
+    fn a_binary_file_counts_as_changed_with_no_lines() {
+        // git prints `-` for a binary file's counts. It is a changed file with
+        // no line count; reporting zero changed files would hide it, and
+        // parsing `-` as a number would drop the file.
+        let stat = parse_numstat("-\t-\tlogo.png\n2\t1\tsrc/main.rs\n");
+        assert_eq!(stat.files, 2, "the binary file is still a changed file");
+        assert_eq!(stat.insertions, 2);
+        assert_eq!(stat.deletions, 1);
+    }
+
+    #[test]
+    fn merge_tree_z_yields_only_the_conflicted_paths() {
+        // Real captured output (git 2.55.0): OID, the conflicted path, an
+        // empty field, then the message section — which must NOT be mistaken
+        // for more paths.
+        //
+        // `\x00` and not `\0`: the message section's first field is the digit
+        // `1`, so `\01` reads as an octal escape that Rust does not have (it
+        // is a NUL followed by a one) and clippy::octal_escapes refuses it.
+        // Written unambiguously, because getting this literal wrong would
+        // silently change which fields the parser is being shown.
+        let text = concat!(
+            "6513cc3bd3dcd48685fdde56dc293742f6f2f367\x00",
+            "f.txt\x00",
+            "\x00", // the empty field that ends the path list
+            "1\x00f.txt\x00Auto-merging\x00Auto-merging f.txt\n\x00",
+        );
+        assert_eq!(parse_merge_tree_z(text), vec!["f.txt".to_string()]);
+    }
+
+    #[test]
+    fn merge_tree_z_on_a_clean_merge_names_nothing() {
+        // A clean merge prints the tree OID and nothing else. If this returned
+        // the OID as a "conflicted path", every clean worktree would report a
+        // conflict in a file named after a hash.
+        let text = "4a9e153f2fbfe9a04e637ce84ecc51c8ef78201e\0";
+        assert!(parse_merge_tree_z(text).is_empty());
+        assert!(parse_merge_tree_z("4a9e153\0").is_empty());
+    }
+
+    #[test]
+    fn merge_tree_z_keeps_a_path_containing_a_newline() {
+        // The reason for `-z`. A line-based parser would split this one path
+        // into two, and one of the halves would name a file that does not
+        // exist.
+        let text = "abc123\0weird\nname.txt\0other.txt\0\0info";
+        assert_eq!(
+            parse_merge_tree_z(text),
+            vec!["weird\nname.txt".to_string(), "other.txt".to_string()]
+        );
     }
 }
 
