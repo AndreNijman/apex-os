@@ -70,6 +70,12 @@ pub const TOOL_IN_FLIGHT_MAX_SECS: u64 = 900;
 /// binary output that happened to contain `ESC ]`, not a real notification.
 const MAX_OSC_PAYLOAD: usize = 4096;
 
+/// Longest CSI parameter run remembered while scanning.
+///
+/// `?1049;2004` is ten bytes and no real private-mode list is close to this;
+/// anything longer is binary output that happened to contain `ESC [`.
+const MAX_CSI_PARAMS: usize = 64;
+
 /// A fixed-capacity byte ring holding the tail of a session's output.
 ///
 /// Deliberately byte-oriented and not line-oriented: this is replayed straight
@@ -199,6 +205,8 @@ enum Scan {
     Ground,
     /// Saw `ESC`.
     Esc,
+    /// Inside `ESC [ ...`, collecting parameter bytes.
+    Csi,
     /// Inside `ESC ] … `.
     Osc,
     /// Inside an OSC and saw `ESC`, which may begin the `ESC \` terminator.
@@ -217,6 +225,11 @@ pub struct OutputScanner {
     osc: Vec<u8>,
     /// Set when an OSC payload overran; suppresses the completion event.
     overran: bool,
+    /// Parameter bytes of the CSI being collected, bounded by
+    /// [`MAX_CSI_PARAMS`].
+    csi: Vec<u8>,
+    /// Whether the application has `DECSET 2004` on right now.
+    bracketed_paste: bool,
 }
 
 impl Default for OutputScanner {
@@ -231,7 +244,21 @@ impl OutputScanner {
             scan: Scan::Ground,
             osc: Vec::new(),
             overran: false,
+            csi: Vec::new(),
+            bracketed_paste: false,
         }
+    }
+
+    /// Whether the program on this PTY has asked for bracketed paste.
+    ///
+    /// Read by the daemon before it types a path into a session
+    /// ([`crate::inject`]): the markers are a service to an application that
+    /// asked for them and line noise to one that did not, and the only way to
+    /// know which this is, is to have watched it ask. The daemon owns the
+    /// master from the moment the session is spawned, so it has seen every
+    /// byte the application ever wrote and cannot have missed the request.
+    pub fn bracketed_paste(&self) -> bool {
+        self.bracketed_paste
     }
 
     /// Feed a chunk of PTY output, returning every signal it completed.
@@ -244,16 +271,47 @@ impl OutputScanner {
                     0x07 => out.push(Signal::Bell),
                     _ => {}
                 },
-                Scan::Esc => {
-                    if b == b']' {
+                Scan::Esc => match b {
+                    b']' => {
                         self.scan = Scan::Osc;
                         self.osc.clear();
                         self.overran = false;
+                    }
+                    b'[' => {
+                        self.scan = Scan::Csi;
+                        self.csi.clear();
+                    }
+                    // Not an OSC and not a CSI. The remaining escape forms
+                    // cannot contain BEL, so plain ground scanning is safe; if
+                    // this byte is itself an ESC we are starting over.
+                    0x1b => self.scan = Scan::Esc,
+                    _ => self.scan = Scan::Ground,
+                },
+                Scan::Csi => {
+                    if (0x20..=0x3f).contains(&b) {
+                        // A parameter or intermediate byte. Past the bound this
+                        // is no longer a private mode set, so remembering stops
+                        // while the search for the terminator continues.
+                        if self.csi.len() < MAX_CSI_PARAMS {
+                            self.csi.push(b);
+                        } else if !self.csi.is_empty() {
+                            self.csi.clear();
+                        }
+                    } else if (0x40..=0x7e).contains(&b) {
+                        self.apply_csi(b);
+                        self.scan = Scan::Ground;
                     } else {
-                        // Not an OSC. CSI and the other escape forms cannot
-                        // contain BEL, so plain ground scanning is safe; if
-                        // this byte is itself an ESC we are starting over.
-                        self.scan = if b == 0x1b { Scan::Esc } else { Scan::Ground };
+                        // Not part of a CSI at all: an abandoned sequence. Fall
+                        // back to ground and let this byte mean what it would
+                        // have meant there, so a BEL inside a malformed escape
+                        // is still a bell -- which is what the scanner did
+                        // before it knew what a CSI was.
+                        self.scan = Scan::Ground;
+                        match b {
+                            0x1b => self.scan = Scan::Esc,
+                            0x07 => out.push(Signal::Bell),
+                            _ => {}
+                        }
                     }
                 }
                 Scan::Osc => match b {
@@ -281,6 +339,29 @@ impl OutputScanner {
             }
         }
         out
+    }
+
+    /// Apply a completed CSI, when it is one of the modes this cares about.
+    ///
+    /// Exactly one is: `ESC [ ? 2004 h` and its `l`. Everything else a program
+    /// does to its terminal is the program's own business, and a scanner that
+    /// modelled more of it would be a terminal emulator.
+    fn apply_csi(&mut self, final_byte: u8) {
+        if final_byte != b'h' && final_byte != b'l' {
+            return;
+        }
+        // `?` marks a DEC private mode. The parameters after it are
+        // semicolon-separated and 2004 may be any one of them, because
+        // `ESC [ ? 1049 ; 2004 h` is a legal way to ask for both.
+        let Some(params) = self.csi.strip_prefix(b"?") else {
+            return;
+        };
+        let on = final_byte == b'h';
+        for part in params.split(|b| *b == b';') {
+            if part == b"2004" {
+                self.bracketed_paste = on;
+            }
+        }
     }
 
     fn push_osc(&mut self, b: u8) {
@@ -583,6 +664,83 @@ mod tests {
         assert!(s.feed(&junk).is_empty(), "overrun must not emit a signal");
         // The scanner is back in ground state and still sees a real bell.
         assert_eq!(s.feed(b"\x07"), vec![Signal::Bell]);
+    }
+
+    #[test]
+    fn bracketed_paste_is_off_until_the_application_asks() {
+        let mut s = OutputScanner::new();
+        assert!(!s.bracketed_paste());
+        s.feed(b"hello world\n");
+        assert!(!s.bracketed_paste(), "plain output must not turn it on");
+        s.feed(b"\x1b[?2004h");
+        assert!(s.bracketed_paste());
+        s.feed(b"\x1b[?2004l");
+        assert!(!s.bracketed_paste(), "the application asked for it to stop");
+    }
+
+    #[test]
+    fn the_mode_is_recognised_when_it_arrives_beside_others() {
+        // Every full-screen TUI sends the alternate screen and bracketed paste
+        // together, and some send them in one sequence.
+        let mut s = OutputScanner::new();
+        s.feed(b"\x1b[?1049;2004h");
+        assert!(s.bracketed_paste());
+        s.feed(b"\x1b[?1049;2004l");
+        assert!(!s.bracketed_paste());
+    }
+
+    #[test]
+    fn a_sequence_split_across_reads_is_still_one_sequence() {
+        // The reason the scanner carries state at all. A 4 KiB read boundary
+        // lands wherever it lands.
+        let mut s = OutputScanner::new();
+        s.feed(b"\x1b[?20");
+        assert!(!s.bracketed_paste(), "incomplete is not on");
+        s.feed(b"04h");
+        assert!(s.bracketed_paste());
+    }
+
+    #[test]
+    fn a_number_that_merely_contains_2004_is_not_the_mode() {
+        let mut s = OutputScanner::new();
+        s.feed(b"\x1b[?12004h");
+        assert!(!s.bracketed_paste(), "12004 is not 2004");
+        s.feed(b"\x1b[?20041h");
+        assert!(!s.bracketed_paste(), "20041 is not 2004");
+        // And a public mode 2004 is a different mode from the private one.
+        s.feed(b"\x1b[2004h");
+        assert!(!s.bracketed_paste(), "no ? means no DEC private mode");
+    }
+
+    #[test]
+    fn learning_about_csi_did_not_cost_the_scanner_a_bell() {
+        // Before this scanner knew what a CSI was, `ESC [` fell straight back
+        // to ground and a BEL after it was a bell. It still is: a malformed
+        // escape must not swallow the one signal an agent uses to say it wants
+        // attention.
+        assert_eq!(scan(b"\x1b[31\x07"), vec![Signal::Bell]);
+        assert_eq!(scan(b"\x1b[\x07"), vec![Signal::Bell]);
+        // A well-formed CSI still ends at its final byte, and the bell after
+        // it is seen.
+        assert_eq!(scan(b"\x1b[31m\x07"), vec![Signal::Bell]);
+        // And an OSC that follows a CSI still parses.
+        assert_eq!(
+            scan(b"\x1b[2J\x1b]9;done\x07"),
+            vec![Signal::Notification("done".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_oversized_csi_cannot_grow_without_bound_and_recovers() {
+        let mut s = OutputScanner::new();
+        let mut junk = Vec::from(&b"\x1b[?"[..]);
+        junk.extend(std::iter::repeat(b'1').take(MAX_CSI_PARAMS + 64));
+        junk.extend_from_slice(b"h");
+        s.feed(&junk);
+        assert!(!s.bracketed_paste());
+        // Back in ground state: a real request is still recognised.
+        s.feed(b"\x1b[?2004h");
+        assert!(s.bracketed_paste());
     }
 
     #[test]

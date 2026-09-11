@@ -24,7 +24,8 @@ use anyhow::{Context, Result};
 use apex_agent_core::paths;
 use apex_agent_core::protocol::{AgentState, SessionInfo};
 use apex_agent_core::destination::Allowlist;
-use apex_agent_core::hook::ToolTransition;
+use apex_agent_core::graph;
+use apex_agent_core::hook::{HookEvent, ToolTransition};
 use apex_agent_core::sandbox::SandboxSpec;
 use apex_agent_core::session::{self as logic, OutputScanner, Scrollback, SCROLLBACK_BYTES};
 
@@ -170,12 +171,59 @@ impl Session {
         self.info.last_activity = now_secs();
     }
 
+    /// Record what a published lifecycle event says about the session graph
+    /// (§P1-020).
+    ///
+    /// Three of the events matter and the rest are none of this method's
+    /// business. `subagent_start` and `subagent_stop` open and close a node;
+    /// `stop` — the end of a turn — closes whatever is still open, because
+    /// nothing Claude delegated outlives the reply it was delegated for and a
+    /// `SubagentStop` is a hook that can fail to arrive. See
+    /// [`apex_agent_core::graph`] for why the record holds no state field to
+    /// go stale in the first place.
+    pub fn apply_graph_event(
+        &mut self,
+        event: HookEvent,
+        agent_id: Option<&str>,
+        agent_type: Option<&str>,
+    ) {
+        let at = now_secs();
+        match event {
+            HookEvent::SubagentStart => {
+                graph::subagent_started(&mut self.info.children, agent_id, agent_type, at)
+            }
+            HookEvent::SubagentStop => {
+                graph::subagent_stopped(&mut self.info.children, agent_id, agent_type, at)
+            }
+            // Two sweeps, two words, because they are two different facts.
+            // The turn ending is provisional — a subagent can outlive it, and
+            // `subagent_stopped` will overwrite the entry if the real report
+            // turns up. The session ending is not: the agent is on its way
+            // out, and nothing it delegated survives the process.
+            HookEvent::Stop => {
+                graph::close_open(&mut self.info.children, graph::ChildEnd::ParentStop, at);
+            }
+            HookEvent::SessionEnd => {
+                graph::close_open(&mut self.info.children, graph::ChildEnd::ParentExit, at);
+            }
+            _ => {}
+        }
+    }
+
     /// Record that the process ended.
     pub fn set_exited(&mut self, code: Option<i32>, signal: Option<i32>) {
         self.info.exit_code = code;
         self.info.exit_signal = signal;
         self.info.state = apex_agent_core::session::exit_state(code, signal);
         self.info.last_activity = now_secs();
+        // Nothing this session started is still running, whatever the last
+        // hook said. This is the sweep that keeps the graph from claiming a
+        // subagent is working under an agent that is gone.
+        graph::close_open(
+            &mut self.info.children,
+            graph::ChildEnd::ParentExit,
+            self.info.last_activity,
+        );
         self.attachers.clear();
         self.info.attached = 0;
         if let Some(log) = self.log.as_mut() {
@@ -568,6 +616,12 @@ fn reconcile_stale_records_in(store: &Path) {
         if info.exit_code.is_none() && info.exit_signal.is_none() {
             info.exit_code = Some(-1);
         }
+        // A record left behind by a daemon that died holds whatever the graph
+        // looked like at the last write, which for a session that was working
+        // is a set of open subagents. The parent is demonstrably gone, so they
+        // are closed here for the same reason `set_exited` closes them: the
+        // one thing the graph must never do is report a dead agent as alive.
+        graph::close_open(&mut info.children, graph::ChildEnd::ParentExit, now_secs());
         write_record_in(store, &info);
     }
 }
@@ -795,9 +849,12 @@ mod tests {
             policy: apex_agent_core::AgentPolicy::default(),
             request_origin: Some(apex_agent_core::policy::RequestOrigin::LocalTerminal),
             origin_source: Some(apex_agent_core::origin::OriginSource::Observed),
+            actor: None,
             grant: None,
             grant_expires_ms: None,
             native_observed: None,
+            telemetry: None,
+        children: Vec::new(),
             pid: 0,
             started: 0,
             last_activity: 0,
@@ -807,6 +864,8 @@ mod tests {
             checkpoint: None,
             cols: 80,
             rows: 24,
+            injected: 0,
+            capsule: None,
         }
     }
 

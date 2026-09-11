@@ -1,0 +1,27 @@
+# APEX-OS — when the disk-health warning runs.
+#
+# Daily, and with Persistent=true so a machine that was off at the scheduled
+# hour checks once when it comes back rather than skipping a day. A disk that
+# started failing on Friday should not wait until Tuesday because the laptop
+# was shut.
+#
+# OnStartupSec, not a fixed clock time: a laptop is rarely awake at 03:00, and
+# a timer nobody is present for is a notification nobody sees. Ten minutes
+# after the user manager starts is a session somebody is sitting in front of.
+#
+# RandomizedDelaySec is not set. There is no server to stampede — this reads
+# local files — and a delay would only make the "ten minutes into the session"
+# reasoning less true.
+
+[Unit]
+Description=Check disk health daily
+Documentation=man:apex(1)
+
+[Timer]
+OnStartupSec=10min
+OnUnitActiveSec=1d
+Persistent=true
+Unit=apex-storage-notice.service
+
+[Install]
+WantedBy=timers.target

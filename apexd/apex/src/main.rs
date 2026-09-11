@@ -12,6 +12,7 @@ mod boot;
 mod cloudflare;
 mod dispatch;
 mod disposable;
+mod firmware;
 mod gaming;
 mod gitshim;
 mod host;
@@ -20,20 +21,24 @@ mod migrate;
 mod mode;
 mod ops;
 mod proxy;
+mod qualify;
 mod recover;
+mod remote;
 mod schema;
 mod request;
 mod secret;
+mod storage;
 mod task;
 mod touchpad;
 mod trust;
+mod verify;
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use apexd_core::tier::Tier;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::ops::LocalView;
 use crate::proxy::{
@@ -122,6 +127,39 @@ enum Cmd {
     Channel {
         #[command(subcommand)]
         cmd: channel::ChannelCmd,
+    },
+    /// What this class of machine is known to do, and who established it (§33).
+    ///
+    /// A local database, kept only with explicit consent and sent nowhere.
+    /// Every check has three answers rather than two: a row nobody has tried
+    /// reads as not known, with the sentence saying who can settle it, because
+    /// "nobody has suspended this machine" is not "suspend is broken".
+    Qualify {
+        #[command(subcommand)]
+        cmd: qualify::QualifyCmd,
+    },
+    /// The disks in this machine, their health, and what nobody could ask
+    /// them (§48).
+    ///
+    /// Wear, temperature, TRIM, encryption, mount state and free space, with
+    /// every row carrying either a measurement or the reason there is none.
+    /// Reading needs no root except for the SMART log, which reports as
+    /// unavailable with the remedy rather than disappearing.
+    Storage {
+        #[command(subcommand)]
+        cmd: storage::StorageCmd,
+    },
+    /// Firmware: what this machine carries and what has an update waiting
+    /// (§P2-015).
+    ///
+    /// Reads fwupd's own JSON and never its exit status — measured, that
+    /// status means "nothing to do" when it is non-zero and accompanies an
+    /// explicit error document when it is zero. Secure Boot key and
+    /// revocation stores are listed apart from hardware, because most of what
+    /// fwupd calls updatable is one of those rather than a component.
+    Firmware {
+        #[command(subcommand)]
+        cmd: firmware::FirmwareCmd,
     },
     /// Persistent state: which schema each store is on, and what a rollback
     /// would do to it (§25).
@@ -363,6 +401,10 @@ enum Cmd {
     /// instead of guessing.
     ///
     /// Unprivileged: plugins live in your own `~/.config/apex-shell/plugins`.
+    Plugin {
+        #[command(subcommand)]
+        cmd: PluginCmd,
+    },
     /// The incoming firewall: what is dropped, and the exceptions you opened.
     ///
     /// APEX drops inbound traffic by default. Reading needs no privilege;
@@ -371,9 +413,42 @@ enum Cmd {
         #[command(subcommand)]
         cmd: FirewallCmd,
     },
-    Plugin {
+    /// Printers, scanners, shares, cards, links, radios and docks: what is
+    /// there, what is not, and what could not be looked at.
+    ///
+    /// The third answer is the point. A failed stat is falsy and an empty list
+    /// is falsy, so one line of code turns "permission denied" and "there are
+    /// none" into the same report — which is how `apex recover status` came to
+    /// tell users with packages installed that they had none. Nothing here
+    /// folds an unreadable path, an absent daemon or a refused D-Bus call into
+    /// an absence.
+    ///
+    /// It also names the firewall where a service this machine offers is what
+    /// the policy is dropping, because "the printer does not work" is what the
+    /// user sees and "631 is closed" is what is true.
+    ///
+    /// Unprivileged, and read-only: it pairs nothing, scans for nothing,
+    /// authorises no dock and changes no connection. Every one of those is a
+    /// polkit action, and a status command that raises an authentication dialog
+    /// is a status command nobody runs twice.
+    Devices {
+        /// Which area to report. Everything, if you do not say.
+        #[arg(value_enum)]
+        area: Option<DeviceArea>,
+    },
+    /// APEX Remote: pair a phone with this machine, and take it away again.
+    ///
+    /// The phone talks to `apex-remoted`, a per-user unprivileged service that
+    /// is a client of the agent runtime rather than part of it. Everything it
+    /// forwards is recorded as `claude-remote-control`, so a remote request can
+    /// edit a project, run tests and push — and cannot approve a root
+    /// operation or start a break-glass session, whichever device asks.
+    ///
+    /// Reading and revoking need no privilege. Pairing needs you: an agent
+    /// cannot pair a device on your behalf.
+    Remote {
         #[command(subcommand)]
-        cmd: PluginCmd,
+        cmd: remote::RemoteCmd,
     },
     /// Projects, agent worktrees and checkpoints.
     Project {
@@ -819,6 +894,30 @@ enum FirewallCmd {
     Reload,
 }
 
+/// The areas `apex devices` can report on.
+///
+/// A `ValueEnum` rather than a free string so a misspelling is answered by clap
+/// with the list of real areas, before anything is executed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum DeviceArea {
+    /// Printers, CUPS queues, mDNS discovery, and sharing one from here.
+    Print,
+    /// Scanners, and why the list may not arrive at all.
+    Scan,
+    /// SMB, NFS, WebDAV, MTP, cameras — and whether they exist outside GTK.
+    Share,
+    /// SD cards, USB disks, auto-mounting, and the seat it needs.
+    Media,
+    /// Links, captive portals, VPN, WireGuard, enterprise Wi-Fi, hotspot.
+    Network,
+    /// Adapters, radio blocks, paired devices, headset codecs.
+    Bluetooth,
+    /// Hotplug, Thunderbolt authorisation, USB-C ports and partners.
+    Dock,
+    /// Every area.
+    All,
+}
+
 #[derive(Subcommand)]
 enum PluginCmd {
     /// Installed plugins, whether each one is valid, and why not.
@@ -935,6 +1034,17 @@ struct UpdateArgs {
     /// the fix is in the release being held.
     #[arg(long)]
     force: bool,
+    /// Deploy the next image even though its signature does not verify.
+    ///
+    /// §27's gate refuses an update whose image the machine cannot verify —
+    /// see `docs/trust-enforcement.md` for what "cannot" covers and how to
+    /// change it permanently. This is the one-off way past it.
+    ///
+    /// Deliberately not `--force`: that is §26's rollout stop, for a machine
+    /// that came back from its last update broken. Working around a health
+    /// stop must not silently stop checking signatures.
+    #[arg(long)]
+    allow_unverified: bool,
     /// Keep ostree's per-object fsync on during the pull. Roughly halves update
     /// speed (measured: ~8 MiB/s with it, ~14.6 without, because 179k objects at
     /// 2.98 ms of fsync each outweighs the download itself) in exchange for
@@ -1007,6 +1117,14 @@ enum ShellCmd {
     Focus,
     /// Start the screen-recorder setup strip.
     Record,
+    /// Start or stop push-to-talk.
+    ///
+    /// A toggle rather than hold-to-talk because niri has no bind that fires
+    /// on key release, so press-and-hold would work on Hyprland and labwc and
+    /// do nothing useful on niri. The shell shows a microphone indicator
+    /// naming the session the words are going to, and stops on its own after
+    /// ninety seconds.
+    Voice,
     /// List every target this wrapper knows, with the IPC call behind it.
     List,
     /// Call an arbitrary target/function, for anything not covered above.
@@ -1206,6 +1324,9 @@ async fn main() {
         // `bootc switch`, which is in the privileged set below beside Update,
         // Rollback and Pin.
         Cmd::Channel { cmd } => channel::main(cmd),
+        Cmd::Qualify { cmd } => qualify::main(cmd),
+        Cmd::Storage { cmd } => storage::main(cmd),
+        Cmd::Firmware { cmd } => firmware::main(cmd),
         Cmd::Schema { cmd } => schema::main(cmd),
         Cmd::Trust(args) => trust::main(args),
         // Read-only except for `add`/`remove`/`probe`, which write only the
@@ -1235,6 +1356,7 @@ async fn main() {
             skip_packages: args.skip_packages,
             skip_flatpak: args.skip_flatpak,
             force: args.force,
+            allow_unverified: args.allow_unverified,
         }),
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Metrics(args) => cmd_metrics(args).await,
@@ -1305,6 +1427,8 @@ async fn main() {
         }
         Cmd::Env { cmd } => ops::env(&env_argv(cmd)),
         Cmd::Firewall { cmd } => ops::firewall(&firewall_argv(cmd)),
+        Cmd::Devices { area } => ops::devices(&devices_argv(area)),
+        Cmd::Remote { cmd } => remote::remote(cmd),
         Cmd::Plugin { cmd } => ops::plugin(&plugin_argv(cmd)),
     };
     std::process::exit(code);
@@ -1437,6 +1561,23 @@ fn firewall_argv(cmd: FirewallCmd) -> Vec<String> {
         FirewallCmd::Deny { name } => vec!["deny".to_string(), name],
         FirewallCmd::Reload => vec!["reload".to_string()],
     }
+}
+
+/// Pure, like `firewall_argv`: the helper is a separate process, so a wrong
+/// word here is not a compile error but a diagnostic that reports the wrong
+/// area — or, with no default, no area at all.
+fn devices_argv(area: Option<DeviceArea>) -> Vec<String> {
+    vec![match area.unwrap_or(DeviceArea::All) {
+        DeviceArea::Print => "print",
+        DeviceArea::Scan => "scan",
+        DeviceArea::Share => "share",
+        DeviceArea::Media => "media",
+        DeviceArea::Network => "network",
+        DeviceArea::Bluetooth => "bluetooth",
+        DeviceArea::Dock => "dock",
+        DeviceArea::All => "all",
+    }
+    .to_string()]
 }
 
 fn plugin_argv(cmd: PluginCmd) -> Vec<String> {
@@ -1911,10 +2052,11 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
                         if topo.ecore_list().is_empty() { "(none)".into() } else { topo.ecore_list() },
                         topo.source.as_str()
                     );
-                    println!(
-                        "nvidia-smi: {}",
-                        if apexd_core::gpu::nvidia_smi_available() { "present" } else { "absent" }
-                    );
+                    // The STATE, not merely whether the file exists. On a
+                    // machine that ships nvidia-smi with no driver loaded —
+                    // the L16, measured — "present" is true and tells somebody
+                    // debugging absent clock locks nothing at all.
+                    println!("nvidia-smi: {}", apexd_core::gpu::nvidia_smi_state().as_str());
                 }
             }
             0
@@ -2030,6 +2172,7 @@ fn shell_targets() -> Vec<(&'static str, &'static str, &'static str)> {
         ("network hotspot", "hotspot-toggle", "toggle"),
         ("focus", "focus-toggle", "toggle"),
         ("record", "screenrec-on", "toggle"),
+        ("voice", "voice-ptt", "toggle"),
     ]
 }
 
@@ -2239,6 +2382,7 @@ fn cmd_shell(cmd: ShellCmd) -> i32 {
         ShellCmd::Power => shell_ipc("PowerMenu-toggle", "toggle", &[]),
         ShellCmd::Focus => shell_ipc("focus-toggle", "toggle", &[]),
         ShellCmd::Record => shell_ipc("screenrec-on", "toggle", &[]),
+        ShellCmd::Voice => shell_ipc("voice-ptt", "toggle", &[]),
 
         ShellCmd::Audio { which } => {
             let target = match which.as_str() {
@@ -2482,6 +2626,22 @@ async fn cmd_doctor(json: bool) -> i32 {
         ok: metrics_up,
         what: "metrics endpoint reachable on 127.0.0.1:9723".to_string(),
     });
+
+    // §48: disk-health warnings reach the doctor. Only the rows with something
+    // to do become a WARN — a row nobody could measure is printed with its
+    // reason and passes, because `apex doctor` runs unprivileged and a SMART
+    // log nobody could open must not turn every run red.
+    for (ok, what) in storage::doctor_lines(&storage::Roots::from_env()) {
+        checks.push(recover::Check { ok, what });
+    }
+
+    // §P2-015: the same rule for firmware. An update waiting is a WARN; a
+    // machine where fwupd could not be consulted at all passes with the
+    // reason on the line, because `apex doctor` runs unprivileged and
+    // measured, nothing in any Containerfile installs fwupd today.
+    for (ok, what) in firmware::doctor_lines(&firmware::Roots::from_env()) {
+        checks.push(recover::Check { ok, what });
+    }
 
     print!("{}", recover::render_doctor(&checks, json));
     0
@@ -3099,6 +3259,66 @@ mod tests {
             vec!["apex", "status"],
             vec!["apex", "tier"],
             vec!["apex", "fan", "status"],
+        ] {
+            assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
+        }
+    }
+
+    // ── apex devices ────────────────────────────────────────────────────────
+
+    fn devices(argv: &[&str]) -> Vec<String> {
+        match Cli::try_parse_from(argv).expect("parses").command {
+            Cmd::Devices { area } => devices_argv(area),
+            _ => panic!("not a devices verb"),
+        }
+    }
+
+    #[test]
+    fn every_area_reaches_the_helper_by_the_name_the_helper_dispatches_on() {
+        // The helper's `case` arms are these words. A rename on one side is not
+        // a compile error on the other: it is `apex devices dock` printing the
+        // usage text and exiting 2.
+        for (typed, sent) in [
+            ("print", "print"),
+            ("scan", "scan"),
+            ("share", "share"),
+            ("media", "media"),
+            ("network", "network"),
+            ("bluetooth", "bluetooth"),
+            ("dock", "dock"),
+            ("all", "all"),
+        ] {
+            assert_eq!(devices(&["apex", "devices", typed]), vec![sent]);
+        }
+    }
+
+    #[test]
+    fn no_area_asks_for_everything_rather_than_for_nothing() {
+        // The helper defaults to `all` on its own, but only because nothing is
+        // passed. Sending an empty argv would work by coincidence; sending the
+        // word means the default survives a change to the helper's dispatch.
+        assert_eq!(devices(&["apex", "devices"]), vec!["all"]);
+    }
+
+    #[test]
+    fn an_area_that_does_not_exist_is_refused_before_anything_runs() {
+        // A free-string argument would hand "dcok" to the helper, which prints
+        // usage to stderr and exits 2. clap answers with the list instead, and
+        // no subprocess starts.
+        assert!(Cli::try_parse_from(["apex", "devices", "dcok"]).is_err());
+    }
+
+    #[test]
+    fn reading_the_devices_is_never_a_privileged_verb() {
+        // Root would report something different rather than something more: it
+        // walks through the 0000 directory whose refusal is the answer, it has
+        // no seat, and its bluetoothctl sees a different set of paired devices
+        // than the session asking the question.
+        for argv in [
+            vec!["apex", "devices"],
+            vec!["apex", "devices", "media"],
+            vec!["apex", "devices", "network"],
+            vec!["apex", "devices", "dock"],
         ] {
             assert_eq!(privilege(&argv), None, "{argv:?} demanded root");
         }

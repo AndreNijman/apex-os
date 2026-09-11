@@ -673,6 +673,14 @@ impl SysWriter for RealWriter {
             Action::FanVendorAttr { path, value, what } => {
                 Ok(self.write_tolerant(Path::new(path), value, what))
             }
+            // Tolerant like the fan attributes, and for the same reason: a
+            // driver that refuses a GPU knob (an amdgpu built without the
+            // manual DPM feature mask, an i915 that clamps a floor differently
+            // than its own published limits) must not abort the rest of a game
+            // plan, least of all the plan that puts the machine back.
+            Action::GpuSysfsAttr { path, value, what } => {
+                Ok(self.write_tolerant(Path::new(path), value, what))
+            }
             Action::FanSafeRestore {
                 enable_path,
                 pwm_path,

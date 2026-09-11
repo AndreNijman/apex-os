@@ -479,6 +479,15 @@ pub struct PrivilegeRequest {
     /// How [`PrivilegeRequest::request_origin`] was arrived at.
     #[serde(default)]
     pub origin_source: Option<OriginSource>,
+    /// Which remote actor the origin was declared for, when one was named.
+    ///
+    /// A paired device id when the request reached the daemon through APEX
+    /// Remote, `None` for everything else. `request_origin` says a remote
+    /// something filed this; this says which device, which is what a human
+    /// reading the prompt actually wants to know before handing out root.
+    /// Never a key or a token — this record is on disk and in the audit log.
+    #[serde(default)]
+    pub actor: Option<String>,
     pub decision: Decision,
     /// Milliseconds since the epoch, when filed.
     pub created_ms: u64,
@@ -822,6 +831,7 @@ mod tests {
             project: Some("/home/tester/Projects/demo".into()),
             request_origin: Some(RequestOrigin::LocalTerminal),
             origin_source: Some(OriginSource::Inherited),
+            actor: None,
             decision: Decision::Pending,
             created_ms: 1_700_000_000_000,
             decided_ms: None,
