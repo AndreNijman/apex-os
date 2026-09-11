@@ -1081,6 +1081,29 @@ jobs:
         working-directory: installer
         run: ./test-installer.sh
 
+      # The keyboard/locale/timezone half. Kept as its own step so a failure
+      # names which half broke rather than being buried in the big suite.
+      #
+      # Both degrade honestly on this runner rather than lying: the engine cases
+      # SKIP when no APEX-OS image can be put where preflight looks, and the
+      # end-to-end keymap measurement SKIPs without Xvfb, cage and python3-gi.
+      # Installing them here is what makes the criterion actually measured in CI
+      # instead of skipped on every run.
+      - name: Install the compositor and X server the keymap suite measures with
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb cage python3-gi gir1.2-gtk-4.0 \
+                                      libxkbcommon0 xkb-data binutils \
+            || echo "note: some packages unavailable; the suite will SKIP those sections"
+
+      - name: Run installer locale/timezone suite
+        working-directory: installer
+        run: ./test-installer-locale.sh
+
+      - name: Run installer keyboard suite
+        working-directory: installer
+        run: ./test-installer-keymap.sh
+
   engine:
     name: Package engine
     needs: changes
