@@ -1634,7 +1634,7 @@ tasks:
 - id: P1-024
   title: Cross-agent handoff packet
   priority: P1
-  status: todo
+  status: done
   area: agent-runtime
   depends_on:
   - P1-020
@@ -1644,6 +1644,29 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Cross-agent handoff packet. LANDED on apex-os roadmap/v2.2 2026-09-11 as merge fbf06a4f (branch tip 521653a):
+    apexd/apex-agent-core/src/handoff.rs, apexd/apex/tests/handoff_packet.rs, and the apex task handoff verb. What
+    the suite actually asserts, rather than a count: the packet lands INSIDE the project and not in the runtime
+    state dir a sandboxed session cannot read; all nine section-16 headings are present; the three producerless
+    fields explain themselves; the test state is daemon-sourced; the session is named; the transcript tail is
+    carried; .apex/ is excluded via .git/info/exclude with the repo left clean; project grants report as inherited
+    while session grants do not; another session's grant is filtered out; an unknown target is refused BEFORE any
+    write; and a failed launch keeps the packet while exiting 1. Counts: workspace 2366 -> 2372 passed / 0 failed
+    across 37 binaries, handoff e2e 6 -> 8/0, apexd-core task tests 54 -> 58/0, core handoff units 18/0, clippy 0
+    warnings. THE SUSPECTED SKIP WAS NOT A SKIP, and settling it is the evidence that matters. Four tests
+    finishing in ~0.1 s against a sleep 300 session looked like the fixture returning None down a skip path, which
+    was this unit's own earlier FOUND. It was settled three ways, none of them the pass line: SKIP count 0 across
+    the whole 37-binary run, both skip paths being printing paths; --test-threads=1 costing 0.73 s against 0.16 s
+    parallel, which a body that returns early cannot do; and 4 mutants applied, 4 caught, 0 survived, the decisive
+    one breaking the Request::Worktrees row match so the suite failed on wording that only appears when the
+    daemon's row is NOT matched - proving the CLI really does ask the daemon. sleep 300 is the SESSION's
+    background command, run by the daemon's PTY child, and no test ever waits on it. TWO FINDINGS THAT OUTLIVE THE
+    FEATURE: a unit test iterated test state and asserted 'Not supplied', satisfied through the UNEXPLAINED
+    fallback branch - green BECAUSE the packet was incomplete, and it would have defended the stale behaviour it
+    existed to catch; and a mutation harness that restores with mv reports the wrong verdict silently, because mv
+    backdates the mtime, cargo skips the rebuild, and a byte-identical git-clean tree runs the MUTANT's binary -
+    the dangerous inverse records an uncompiled mutant as SURVIVED.
 - id: P1-025
   title: Skill inventory/sync/audit
   priority: P1
@@ -1754,13 +1777,9 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED on roadmap/v2.2 2026-09-11 (round 10), apex-shell merge 4ba3b01 of task/p1-029-lifecycle-types
-    (ef3724a). The Agent Center says which KIND of agent a row is: src/services/agentlifecycle.js, the pill in
-    SessionRow and RemoteSessionRow, tests/agent-lifecycle-test.js and its ci.yml step. 48 passed / 0 failed,
-    10/10 mutants caught; on the landed tip all 22 static suites and all 17 node suites are green. THE FINDING
-    THAT MADE IT SMALL: apex-agentd has reported request_origin (7 values) on every session record since section 7
-    and the shell read NONE of them, so this was a shell change and not the cross-repo daemon job the roadmap
-    assumed.
+    Agent lifecycle types. LANDED on apex-shell roadmap/v2.2 2026-09-11 at 4ba3b01: agentlifecycle.js plus its
+    test, confirmed present on the tip rather than taken from a card. Verified alongside the P1-023/P1-024 work
+    that shares its surface; the Agent Center says which KIND of agent a row is (ef3724a).
 - id: P1-030
   title: Finish Fish agent integration
   priority: P1

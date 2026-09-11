@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-11 21:49 AWST
+APEX ROADMAP — resume report — 2026-09-11 22:15 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -7,9 +7,9 @@ APEX ROADMAP — resume report — 2026-09-11 21:49 AWST
   BASE          14         4         -         -
   L              -         1         -         2
   P0            19         6         -         -
-  P1            24        10        28         -
+  P1            28        11        23         -
   P2             3         3        13         -
-  ALL           60        24        41         2   of 127
+  ALL           64        25        36         2   of 127
 
   P0 not done: P0-001(part), P0-002(part), P0-007(part), P0-014(part), P0-015(part), P0-021(part)
 
@@ -17,60 +17,49 @@ APEX ROADMAP — resume report — 2026-09-11 21:49 AWST
   agents
 ────────────────────────────────────────────────────────────────────────────
   p0-014     ALIVE      P0-014,P0-015                      task/p0-014-remote-lock
-             head 62b0fea Merge origin/roadmap/v2.2 into task/p0-014-remote-lock
-             dirty 4 file(s), 0 unpushed, card 10m
-             NEXT **Round 10 (2026-09-11). Next action: commit 4b — expose the `Sign
+             head 2dd67e7f test(privilege): the gate's passing branch had no tes
+             dirty 9 file(s), 0 unpushed, card 16m
+             NEXT **Round 11 (2026-09-11). Commit 4b is DONE and pushed: `2dd67e7`.*
 
   p2-010     ALIVE      P2-011                             task/p2-010-hardware-storage
-             head 84aea0a test(agentd): §P2-011 against a real daemon, and the w
-             dirty 0 file(s), 0 unpushed, card 17m
-             NEXT **Round 10. Merged `origin/roadmap/v2.2` (fast-forward to `1afd807
+             head 23b543ad test(agentd): §P2-011 two guards the battery caught b
+             dirty 1 file(s), 0 unpushed, card 8m
+             NEXT **Round 11. `budget.rs` and its tests are WRITTEN, committed and p
 
   p1-025     ALIVE      P1-026                             task/p1-025-skills-plugins
-             head be1e178 test(provenance): the two arms nothing reached, and a 
-             dirty 0 file(s), 0 unpushed, card 7m
-             NEXT round 10. Branch is GREEN and pushed: c636b9a (P1-026), 83e3ef6 (m
+             head be1e1780 test(provenance): the two arms nothing reached, and a
+             dirty 0 file(s), 0 unpushed, card 10m
+             NEXT **THE UNIT IS COMPLETE.** Round 11 closed the three things round 1
 
   p1-023     ALIVE      P1-024                             task/p1-023-handoff-lifecycle
              head 665a3cc Merge task/p0-015-lock-tests into roadmap/v2.2 (P0-015
-             dirty 0 file(s), 0 unpushed, card 11m
-             NEXT Run, in /var/tmp/apex-work/wt-p1-023-os/apexd:
+             dirty 0 file(s), 0 unpushed, card 4m
+             NEXT **THIS UNIT IS COMPLETE. P1-023, P1-024 and P1-029 are all done. N
 
-  p1-035     ALIVE      P1-037                             task/p1-035-agent-tooling
-             head ceb4b9d Merge remote-tracking branch 'origin/roadmap/v2.2' int
-             dirty 3 file(s), 0 unpushed, card 5m
-             NEXT Round 10 (2026-09-11). The unit was NOT quite complete: one uncomm
+  p1-035     dead 11m   P1-037                             task/p1-035-agent-tooling
+             head feb336eb test(agent): SigBlk=0 in sigwait is the syscall, not 
+             dirty 3 file(s), 0 unpushed, card 12m
+             NEXT **THE UNIT IS COMPLETE.** P1-035, P1-036 and P1-037 are all DONE, 
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip ec91e92 fix(zed): the editor shipped on every image with no wa
+  int-os:  tip fbf06a4f Merge task/p1-023-push-to-talk-daemon into roadmap/v2
     task/base-partials
-      836df42 feat(greet): the session picker names the desktops, not the co   [0/10 added lines on tip]
+      836df42f feat(greet): the session picker names the desktops, not the c   [0/10 added lines on tip]
     task/p0-014-remote-lock
-      726f9d9 feat(privilege): §7's second column was a policy nothing consu   [1/10 added lines on tip]
-    task/p1-023-push-to-talk-daemon
-      afbeaf3 wip(handoff): P1-024 cross-agent handoff packet, recovered unc   [0/10 added lines on tip]
-      f9a8428 fix(handoff): the recovered packet did not build on the merged   [3/10 added lines on tip]
-      9f2ddcb test(handoff): the handoff fixture wrote into the live daemon'   [2/7 added lines on tip]
-      f0c0eac feat(handoff): the packet carries the test state, which it had   [0/10 added lines on tip]
-    task/p1-025-skills-plugins
-      31e5860 feat(skill): P1-025 — an inventory that carries origin, digest   [0/10 added lines on tip]
-      5917833 feat(connector): P1-027 memory providers and P1-028 connector    [0/10 added lines on tip]
-      c636b9a feat(provenance): P1-026 — a recorded origin nothing re-checks   [1/10 added lines on tip]
-      509f3f4 test(skill): the suite for the four verbs, and the two defects   [2/10 added lines on tip]
-      4e5f5ea test(verbs): wire the new suite into CI, and close the drift i   [1/10 added lines on tip]
-      be1e178 test(provenance): the two arms nothing reached, and a phrase t   [3/10 added lines on tip]
-    task/p1-035-agent-tooling
-      b787429 test(agent): nothing had ever killed the daemon to see the cap   [0/10 added lines on tip]
+      726f9d93 feat(privilege): §7's second column was a policy nothing cons   [1/10 added lines on tip]
+      2dd67e7f test(privilege): the gate's passing branch had no test, becau   [3/10 added lines on tip]
     task/p1-050-remote-protocol
-      09c977d fix(clippy): the integration tip was not clean, and two of the   [2/10 added lines on tip]
+      09c977d9 fix(clippy): the integration tip was not clean, and two of th   [2/10 added lines on tip]
     task/p2-010-hardware-storage
-      1086478 feat(agentd): §P2-011 per-agent cgroup budgets, and never a bu   [2/10 added lines on tip]
-      84aea0a test(agentd): §P2-011 against a real daemon, and the window th   [2/10 added lines on tip]
+      1086478b feat(agentd): §P2-011 per-agent cgroup budgets, and never a b   [2/10 added lines on tip]
+      84aea0a8 test(agentd): §P2-011 against a real daemon, and the window t   [2/10 added lines on tip]
+      635b683e fix(agentd): §P2-011 a daemon in a login session was refused    [0/10 added lines on tip]
+      23b543ad test(agentd): §P2-011 two guards the battery caught being gre   [3/10 added lines on tip]
 
-  int-shell:  tip 665a3cc Merge task/p0-015-lock-tests into roadmap/v2.2 (P0-015
+  int-shell:  tip 9888537 Merge task/terminal-entries-launchable into roadmap/v2
     fix/labwc-desktop-parity  — squash-merged, safe to delete
       landed whole as f609a6c fix(labwc): complete desktop parity (#6)
     fix/popup-first-open-and-media-keys  — squash-merged, safe to delete
@@ -79,8 +68,7 @@ APEX ROADMAP — resume report — 2026-09-11 21:49 AWST
       landed whole as 4e267eb fix: screenshots and popup input regions off Hyprland (#
     task/p0-016-agent-settings  — squash-merged, safe to delete
       landed whole as 4335e42 fix(agents): the sudo caveat was written before no_new_p
-    task/terminal-entries-launchable
-      3f8a286 fix(launcher): a Terminal=true entry got no terminal, so nvim    [2/10 added lines on tip]
+    (nothing — every task branch's content is on the integration tip)
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -90,15 +78,16 @@ APEX ROADMAP — resume report — 2026-09-11 21:49 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 2min 36s Fri
+  snapshot timer: active   last 22:15:35 AWST 8ms
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    aba48fe  roadmap-state
+    apex-os    2d28ded  roadmap-state
     apex-os    7b3fb62  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
     apex-os    1951fdc  wt-disposable-
     apex-os    2e3bbcd  wt-editors-
+    apex-os    31a3d16  wt-editors2-
     apex-os    59b7328  wt-followups-int3-
     apex-os    0683355  wt-greeter-os-
     apex-os    c74f38d  wt-multilib2-
@@ -110,16 +99,15 @@ APEX ROADMAP — resume report — 2026-09-11 21:49 AWST
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
     apex-os    9b605a1  wt-p0-011b-
-    apex-os    ded7c1a  wt-p0-014-
+    apex-os    c8a1562  wt-p0-014-
     apex-os    580c657  wt-p0-019-os-
     apex-os    00c1973  wt-p0-025-os-
     apex-os    eda5ef8  wt-p1-001-
     apex-os    a23175f  wt-p1-002-
     apex-os    c260504  wt-p1-018-
-    apex-os    7685dc3  wt-p1-020-os-
-    apex-shell 402a8a2  apex-shell-
+    apex-shell ebf86c2  apex-shell-
     apex-shell df979e1  int-shell-
-    apex-shell bbc0e6e  wt-base-shell-
+    apex-shell 6b59431  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
     apex-shell 75049cf  wt-greeter-shell-
     apex-shell ed92eaa  wt-lockhint-
