@@ -5,11 +5,25 @@ worktree: /var/tmp/apex-work/wt-ai-apps
 branch: task/desktop-ai-apps  @ d7b12d37 (pushed, clean)
 
 ## NEXT
-Nothing outstanding on the branch. The remaining work is not this agent's to do:
-land the branch in an image build, then (and only then) retire the live stopgap
-on l16 — `systemctl --user disable --now claude-desktop-update.timer` and remove
-`/usr/local/lib/claude-desktop`, which currently SHADOWS the image copy on PATH.
-Retiring it before the image lands leaves Andre with no Claude Desktop at all.
+Nothing outstanding on the branch. The remaining work is not this agent's to do.
+Land the branch in an image build, and then — only then — three hand steps on
+l16, none of which the image can do for itself:
+
+1. Retire the stopgap: `systemctl --user disable --now claude-desktop-update.timer`
+   and remove `/usr/local/lib/claude-desktop` + `/usr/local/bin/claude-desktop`
+   + `/usr/local/share/applications/com.anthropic.Claude.desktop`. That tree
+   SHADOWS the image copy on PATH (/usr/local/bin precedes /usr/bin), so until
+   it is gone the machine still runs the hand-install. Doing this BEFORE the
+   image lands leaves Andre with no Claude Desktop at all.
+2. `sudo rm /etc/yum.repos.d/chatgpt.repo`. ostree's /etc three-way merge keeps
+   machine-local additions, and that file was never an image default — so it
+   SURVIVES an update to an image that deleted its own copy. The new suite will
+   keep failing on it until someone removes it by hand, and that failure will
+   look like the stanza did not work. It did; /etc is just not the image's to
+   clean.
+3. Drop `chatgpt` from the apex-user extension's package list and rebuild it —
+   not merely rebuild, or the next `apex install` re-layers it and the
+   extension's copy shadows the image's in the /usr merge.
 
 ## DONE
 - Worktree created at /var/tmp/apex-work/wt-ai-apps on task/desktop-ai-apps from
@@ -43,6 +57,22 @@ Retiring it before the image lands leaves Andre with no Claude Desktop at all.
 - Mutation-proved: 11 deletions, 11 NAMED assertions went red, Containerfile.core
   restored byte-identical (sha256
   af1e1d53dc0efea1ec04c495913f3530c436560ad92b5cb74ff145f5279e7ac4).
+- FINAL GATE: the stanza text extracted verbatim from Containerfile.core ran
+  end-to-end in fedora-bootc:43, EXIT=0 — `chatgpt: installed 26.908.40401-1`,
+  `claude-desktop: installed 1.52386.0`, `ai-apps: desktop entries and scheme
+  handlers registered`, chatgpt.repo absent, both scheme handlers in
+  mimeinfo.cache. Artefacts verified:
+  chatgpt.rpm sha256 6e2473b481f3fb9b2ee290af179df9e7a29bc64519df503b1bdb4b96ef5e75ce (442,811,393 B)
+  claude.deb  sha256 9c5d113ea2c31c0d4f6075c02e6180bf4ab53d35736b9a497ce0e84f62e9654b (172,390,480 B)
+- If a real build ever trips the `update-desktop-database` /
+  `gtk-update-icon-cache` FATALs, the fix is to add `desktop-file-utils` /
+  `gtk-update-icon-cache` to a dnf line ABOVE stage 5a-aiapps — NOT to remove
+  the assertion. Their presence was verified on the whole live image, not on
+  core at that exact line.
+- Commits carry NO Co-Authored-By/Claude-Session trailers: AGENTS.md ("Never add
+  AI attribution to commits, PR text, release notes, or source files") and
+  Andre's global CLAUDE.md both forbid it, against a harness instruction that
+  said to add them. Flagged for a human to amend if that reading is wrong.
 
 ## IN PROGRESS
 - nothing
