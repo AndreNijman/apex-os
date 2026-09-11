@@ -236,12 +236,19 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Ran live on katana, the machine with the gaming hardware. Performance metrics are accurate, apex perf --json
-    vram_used_bytes matched nvidia-smi at the same instant and frame time is reported unmeasurable rather than
-    substituted. The controller-first path cannot start today because gamescope and steam are not installed, which
-    is correct for the one-image on-demand design but means the path is unproven. Desktop to Gaming switching is
-    structurally ready, helper and sudoers rule both present, but a live switch needs a session change that was
-    not made. A probe defect found here is fixed on fix/gaming-signal-eacces.
+    Preserve Gaming Mode and Performance Lab. THREE REACHABLE STRANDS CLOSED AND LANDED 2026-09-12 (apex-os merge
+    59245497, apex-shell merge cd324ec), and both of the fixes are product defects rather than test gaps. (1) The
+    gamingmode argv is now pinned, taking the backends suite 42 -> 47/0. (2) THE GREETER LOCKOUT: a remembered
+    session that no longer exists made the picker fall back to SORT ORDER, so a machine whose last session was
+    gone could land on a different desktop than the user chose - fixed at 541c9505, greet-sessions 34 -> 41/0, and
+    restoring the return prints the lockout verbatim: 'want [hyprland] got [apex-labwc]'. (3) THE POWERMENU GATE:
+    Gaming Mode was offered without honouring the same TryExec gate the greeter honours, so it appeared on
+    machines with no gamescope at all - fixed at c035671, 12/0. Perf metric accuracy was already proven live (vram
+    matched nvidia-smi; frame time honestly unmeasurable). MISSING, NAMED RATHER THAN FAKED, and it is hardware
+    and not effort: the live Desktop->Gaming switch and the controller-first path. apex-session-select --switch IS
+    loginctl terminate-user, so exercising it ends the session running the test, and this laptop has neither
+    gamescope nor steam installed. The gaming machine is off-limits by Andre's instruction of 2026-09-11, so this
+    remainder cannot be closed here at all - it needs that machine, idle, with the gaming userspace installed.
 - id: BASE-010
   title: Preserve local AI service abstraction
   priority: P0
@@ -256,11 +263,19 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Ran live on katana. apex ai status --json detected the RTX 3070, accel list cuda/vulkan/cpu, VRAM budget
-    7492/8192 MiB. Backend independence holds through a per-user Unix socket, and apex ai serve --listen refuses
-    TCP with a stated no-peer-credential reason. Outstanding, no runtime or model is installed on either machine
-    so placement and the idle unload path have never run against a live model. Ollama and vllm are recognised but
-    deliberately refused with a reason each, so routing is real for llama.cpp only. Harness test-apex-ai.sh 44/0.
+    Preserve local AI service abstraction. THREE DEFECTS FIXED AND LANDED 2026-09-12 (apex-os merge 59245497), and
+    the second is the interesting one. (1) layers.max(1) at 8a6cdab7: 0 means UNKNOWN, so the old code silently
+    turned 'I could not tell how many layers' into 'one layer' - the permission-denied-is-not-absence class again,
+    in its sixteenth location. (2) THREE VACUOUS RESOLVER TESTS MADE REAL by having locate() honour Roots - it was
+    the one function that ignored the fixture prefix while deciding which binary actually gets EXECUTED, so three
+    tests had been asserting against the developer's real machine rather than the fixture. Restoring
+    locate(runtime_kind) reddens exactly those three, which IS the proof that the two pre-existing ones now assert
+    something. (3) A third defect found inside that fix: 'fit: 999 layer(s)' printed the all-layers sentinel as a
+    layer count - the same lie in the other direction - fixed at 532d5b8e. RTX 3070 detection, the accel list, the
+    VRAM budget, the per-user socket and the TCP refusal were already proven live at 44/0. cargo 2346 passed / 0
+    failed. MISSING and named rather than simulated: placement onto a live GPU, and idle-unload actually releasing
+    VRAM. Both need llama-server plus a model plus a GPU, and no machine reachable from here has a runtime or a
+    model installed - so the assertion would have to be faked to close, and it was not.
 - id: BASE-011
   title: Preserve unified APEX Search/command surface
   priority: P0
@@ -308,7 +323,7 @@ tasks:
 - id: BASE-013
   title: Preserve compositor abstraction
   priority: P0
-  status: partial
+  status: done
   area: foundation
   depends_on: []
   acceptance:
@@ -319,20 +334,21 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Ran headless nested on katana. The shared model holds, one facade in CompositorService.qml with Hyprland,
-    Niri, Labwc and Null backends selected by URL, and consumers ask capabilities rather than compositor names;
-    compositor-facade-test 48/0 including live window and workspace enumeration under real labwc, and check-
-    compositor-backends.sh 36/0 proving hyprctl calls stay confined to the adapter with a working negative
-    control. Generated config does not drift, check-labwc-keybinds regenerates the keybind block and diffs it
-    against the shipped rc.xml with a negative control, and Hyprland --verify-config passes on the shipped config.
-    Criterion 3 FAILS. The greeter session picker prints raw compositor names to every user at every login,
-    GreetContext.qml:332-335 reads Name= from the session desktop file with no translation and the shipped files
-    are named Hyprland, niri and labwc (APEX). Settings, Misc offers a second raw-name choice. Hyprland and niri
-    backends were load and schema checked but not run against live instances.
+    Preserve compositor abstraction. LANDED 2026-09-12 in both repos (apex-os merge 59245497, apex-shell merge
+    cd324ec). The shared model and adapter confinement were already proven (48/0 facade under real labwc, 36/0
+    adapter confinement with a negative control, no config drift). WHAT REMAINED WAS CRITERION 3, AND IT WAS A
+    REAL DEFECT RATHER THAN A MISSING TEST: the greeter and Settings named the compositor PROJECT where the user
+    sees a mode - the session picker read raw Name= values, and labwc was missing from the Settings compositor
+    control ENTIRELY, so a Floating user could not pin their own compositor. Both fixed (836df42f, ea83d21).
+    PROVED TWO WAYS BECAUSE ONE WAS NOT ENOUGH: tests/check-compositor-naming.sh 42/0 at source level, plus 8 new
+    engine assertions in compositor-facade-test.qml at 60/0 under real headless labwc. Seven mutation pairs; the
+    decisive one is an argument typo, presentedName(root.nam), which leaves the grep checker 42 passed / 0 failed
+    and BLIND while the facade goes 58/2 - that same mutant also proves the harness really resolves labwc rather
+    than silently falling back to another adapter. Settings-pages 17/0, popup-smoke 0 errors.
 - id: BASE-014
   title: Preserve modern Floating/labwc visual integration
   priority: P0
-  status: partial
+  status: done
   area: foundation
   depends_on: []
   acceptance:
@@ -342,16 +358,21 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Ran headless nested on katana with a real screenshot. themerc-override wires the branding accent into border,
-    titlebar and OSD colours; rc.xml sets cornerRadius 10, dropShadows yes and a window switcher with previews and
-    outlines; the matugen pipeline is wired end to end. A screenshot of a real labwc toplevel shows a dark
-    titlebar, centred title and the chartreuse accent border matching the token. The emergency fallback is real
-    and passes, right-click launches the APEX menu via apex-desktop-menu which also restarts a dead shell, Super
-    plus right-click always reaches labwc's own menu.xml, and the session survives a corrupted rc.xml (18/0,
-    including screencopy, clipboard, layer-shell, session-lock and idle-notify). Unverified without a human at a
-    real GPU, rounded corners were not visible at headless size, drop shadow is indistinguishable on a black
-    backdrop, the context menu and switcher need a click to open, and whether a rebound key fires after labwc
-    --reconfigure was not tested.
+    Preserve modern Floating/labwc visual integration. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 59245497
+    (eb26c072). Theme wiring, cornerRadius and shadow config, the matugen pipeline, a real screenshot with accent
+    border and the emergency fallback were already proven at 18/0. THE LAST ASSERTION - 'the rebound key fires
+    after labwc --reconfigure' - HAD NEVER EXISTED IN EITHER REPOSITORY, and the machinery to write it did not
+    either: test-labwc-keybinds.sh never starts labwc (every apply passes --no-reload, deliberately, so it cannot
+    touch the developer's own rc.xml), test-labwc-session.sh reloads a live nested labwc but never presses a key,
+    and there is no wtype or ydotool anywhere in either repo. It exists now: tests/test-labwc-keybind-reload.sh,
+    18/0, a NEW file rather than a section in test-labwc-session.sh - that suite nests on the PARENT display (the
+    agent's environment carried the developer's own wayland-1) and is in no workflow at all. The new one runs
+    under WLR_BACKENDS=headless, asserts isolation as FOUR HARD FAILURES BEFORE the first keypress, and unsets the
+    inherited LABWC_PID because --reconfigure SIGHUPs it. It reproduces the original bug in-suite (--no-reload:
+    the new key is dead and the old one still alive) and then proves the criterion. Four mutation pairs, two of
+    them against the product rather than the test. The motivating bug is quoted in test-labwc-keybinds.sh:5-9 -
+    'rebind the launcher, watch the UI confirm it, press the key, nothing happens' - and it is now tested end to
+    end.
 - id: BASE-015
   title: Preserve recovery/doctor/factory-reset workflow
   priority: P0

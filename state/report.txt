@@ -1,56 +1,60 @@
-APEX ROADMAP — resume report — 2026-09-12 02:02 AWST
+APEX ROADMAP — resume report — 2026-09-12 02:52 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
 ────────────────────────────────────────────────────────────────────────────
               done   partial      todo   blocked
-  BASE          14         4         -         -
+  BASE          16         2         -         -
   L              -         1         -         2
   P0            19         6         -         -
   P1            28        11        23         -
   P2             3         3        13         -
-  ALL           64        25        36         2   of 127
+  ALL           66        23        36         2   of 127
 
   P0 not done: P0-001(part), P0-002(part), P0-007(part), P0-014(part), P0-015(part), P0-021(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p0-014     dead 223m  P0-014,P0-015                      task/p0-014-remote-lock
-             head 2dd67e7f test(privilege): the gate's passing branch had no tes
-             dirty 10 file(s), 0 unpushed, card 243m
-             NEXT **Round 11 (2026-09-11). Commit 4b is DONE and pushed: `2dd67e7`.*
+  p0-014     ALIVE      P0-014,P0-015                      task/p0-014-remote-lock
+             head 0ac4cffd Merge origin/roadmap/v2.2 into task/p0-014-remote-loc
+             dirty 0 file(s), 0 unpushed, card 0m
+             NEXT **Round 12 (2026-09-12). COMMIT 5 IS DONE AND PUSHED — P0-014 is c
 
-  p2-010     dead 223m  P2-011                             task/p2-010-hardware-storage
+  p2-010     ALIVE      P2-011                             task/p2-010-hardware-storage
              head 23b543ad test(agentd): §P2-011 two guards the battery caught b
-             dirty 1 file(s), 0 unpushed, card 235m
-             NEXT **Round 11. `budget.rs` and its tests are WRITTEN, committed and p
+             dirty 0 file(s), 0 unpushed, card 3m
+             NEXT **THE UNIT IS COMPLETE.** All four items — P2-010, P2-011, P2-014,
 
-  base-partials dead 221m  BASE-009,BASE-010,BASE-013,BASE-014 task/base-partials
-             head 836df42f feat(greet): the session picker names the desktops, n
-             dirty 0 file(s), 0 unpushed, card 262m
-             NEXT Round 11 in progress. BASE-018, BASE-002, BASE-016, BASE-005 CLOSE
+  base-partials ALIVE      BASE-009,BASE-010,BASE-013,BASE-014 task/base-partials
+             head 627db31a ci(labwc): a missing test dependency skips rather tha
+             dirty 0 file(s), 0 unpushed, card 2m
+             NEXT Round 12 (fresh agent; round 11's agent died on a usage limit at s
 
-  desktop-ai-apps dead 221m  (new, from the 2026-09-11 CLAUDE.md decision) task/desktop-ai-apps
-             head fbf06a4f Merge task/p1-023-push-to-talk-daemon into roadmap/v2
-             dirty 0 file(s), 0 unpushed, card 225m
-             NEXT Read Containerfile.core stage 5a-zed and tests/test-apex-editors.s
+  desktop-ai-apps dead 17m   (new, from the 2026-09-11 CLAUDE.md decision) task/desktop-ai-apps
+             head d7b12d37 docs: record the shipped AI apps, their update path, 
+             dirty 0 file(s), 0 unpushed, card 18m
+             NEXT Nothing outstanding on the branch. The remaining work is not this 
 
-  p1-005     dead 223m  P1-005,P1-006,P1-007               task/p1-005-cloudflare-caps
-             head fbf06a4f Merge task/p1-023-push-to-talk-daemon into roadmap/v2
-             dirty 0 file(s), 0 unpushed, card 223m
-             NEXT Confirm the documented Cloudflare REST paths for R2 / D1 / KV / Qu
+  p1-005     ALIVE      P1-005,P1-006,P1-007               task/p1-005-cloudflare-caps
+             head 40339d4f feat(cloudflare): D1, KV, Queues and Hyperdrive capab
+             dirty 2 file(s), 0 unpushed, card 3m
+             NEXT **Unit done.** All three items are implemented, tested and pushed 
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip fbf06a4f Merge task/p1-023-push-to-talk-daemon into roadmap/v2
-    task/base-partials
-      836df42f feat(greet): the session picker names the desktops, not the c   [0/10 added lines on tip]
+  int-os:  tip 59245497 Merge task/base-partials into roadmap/v2.2 (BASE-013,
     task/p0-014-remote-lock
       726f9d93 feat(privilege): §7's second column was a policy nothing cons   [1/10 added lines on tip]
       2dd67e7f test(privilege): the gate's passing branch had no test, becau   [3/10 added lines on tip]
+      706489ec fix(build): a polkit assertion that can only ever fail, so ro   [1/10 added lines on tip]
+      98a7c248 feat(privilege): §7's second column goes live, and a security   [3/10 added lines on tip]
+    task/p1-005-cloudflare-caps
+      82dd4d4b feat(cloudflare): §13.5's R2 capability set, bucket- and obje   [3/10 added lines on tip]
+      9d14bac0 feat(cloudflare): §13.9's DNS capability set, and a lookup th   [1/10 added lines on tip]
+      40339d4f feat(cloudflare): D1, KV, Queues and Hyperdrive capability se   [1/10 added lines on tip]
     task/p1-050-remote-protocol
       09c977d9 fix(clippy): the integration tip was not clean, and two of th   [2/10 added lines on tip]
     task/p2-010-hardware-storage
@@ -59,7 +63,7 @@ APEX ROADMAP — resume report — 2026-09-12 02:02 AWST
       635b683e fix(agentd): §P2-011 a daemon in a login session was refused    [0/10 added lines on tip]
       23b543ad test(agentd): §P2-011 two guards the battery caught being gre   [3/10 added lines on tip]
 
-  int-shell:  tip 9888537 Merge task/terminal-entries-launchable into roadmap/v2
+  int-shell:  tip cd324ec Merge task/base-partials-shell into roadmap/v2.2 (BASE
     fix/labwc-desktop-parity  — squash-merged, safe to delete
       landed whole as f609a6c fix(labwc): complete desktop parity (#6)
     fix/popup-first-open-and-media-keys  — squash-merged, safe to delete
@@ -78,12 +82,13 @@ APEX ROADMAP — resume report — 2026-09-12 02:02 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 2min 15s Sat
+  snapshot timer: active   last 1min 2s Sat
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    40a01cd  roadmap-state
-    apex-os    7b3fb62  wt-base-os-
+    apex-os    da24fe0  roadmap-state
+    apex-os    4d32e35  wt-ai-apps-
+    apex-os    55f08ae  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
     apex-os    1951fdc  wt-disposable-
     apex-os    2e3bbcd  wt-editors-
@@ -99,15 +104,14 @@ APEX ROADMAP — resume report — 2026-09-12 02:02 AWST
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
     apex-os    9b605a1  wt-p0-011b-
-    apex-os    85e4480  wt-p0-014-
+    apex-os    30ca746  wt-p0-014-
     apex-os    580c657  wt-p0-019-os-
     apex-os    00c1973  wt-p0-025-os-
     apex-os    eda5ef8  wt-p1-001-
     apex-os    a23175f  wt-p1-002-
-    apex-os    c260504  wt-p1-018-
-    apex-shell 9839ace  apex-shell-
+    apex-shell 8597dc9  apex-shell-
     apex-shell df979e1  int-shell-
-    apex-shell f8beed1  wt-base-shell-
+    apex-shell 68c971d  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
     apex-shell 75049cf  wt-greeter-shell-
     apex-shell ed92eaa  wt-lockhint-
@@ -134,7 +138,6 @@ APEX ROADMAP — resume report — 2026-09-12 02:02 AWST
   5 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
-    desktop-ai-apps (new, from the 2026-09-11 CLAU   Ship the Claude and ChatGPT desktop apps in the image, updat
     p0-014         P0-014,P0-015                    Remote Control privilege policy and lock-state policy, wired
     p1-005         P1-005,P1-006,P1-007             Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets
     base-partials  BASE-002,BASE-005,BASE-009,BAS   Close the eight BASE preservation items still marked partial
