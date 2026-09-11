@@ -1168,6 +1168,36 @@ jobs:
       - name: Run session-picker wording assertions
         run: ./tests/test-apex-greet-sessions.sh
 
+      # What a screen reader and a keyboard-only user get from the login
+      # screen. P2-003's "accessible login" and P2-004's "keyboard layout
+      # before password" both land on the same surface, so they are measured
+      # on the same one.
+      #
+      # This is NOT a grep for Accessible.name. The shipped GreetSurface.qml is
+      # built under qmltestrunner on the offscreen platform, the accessible
+      # name and role are READ OFF THE LIVE OBJECTS — the same attached objects
+      # QAccessible publishes to AT-SPI — and the focus order is measured by
+      # posting real Qt.Key_Tab events through the window's delivery agent. The
+      # difference is not academic: `KeyNavigation.tab: passwordInput` reads
+      # like a complete tab chain and was in fact a two-element ring that could
+      # not reach the session picker at all.
+      #
+      # It opens no window and starts no compositor; WAYLAND_DISPLAY is removed
+      # from the environment before the runner is invoked. It skips with
+      # status 0 where qmltestrunner is not installed.
+      - name: Run greeter accessibility assertions
+        run: ./tests/test-apex-greet-a11y.sh
+
+      # The greeter's keyboard-layout readout. Three files in this repository
+      # already fix which layout the greeter STARTS on, because a password
+      # typed on the wrong map locks a user out of the machine they just
+      # installed — but nothing told the user what that layout was. The
+      # extraction that reads it out of sway is lifted from GreetContext.qml
+      # and RUN against sway's own JSON shape with a stub swaymsg, the way the
+      # session-picker suite above treats the same file. Starts no compositor.
+      - name: Run greeter keyboard-layout assertions
+        run: ./tests/test-apex-greet-layout.sh
+
       # §9's resolver, which is the same engine as the package suite above and
       # a separate file because it is a separate claim: that engine INSTALLS,
       # this one CHOOSES. A choice is a policy, and the policy is invisible
@@ -1516,6 +1546,7 @@ jobs:
             tests/test-apex-host.sh tests/test-apex-dispatch.sh \
             tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh \
             tests/test-apex-greet-sessions.sh \
+            tests/test-apex-greet-a11y.sh tests/test-apex-greet-layout.sh \
             tests/test-labwc-keybind-reload.sh
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
