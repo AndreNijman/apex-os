@@ -106,8 +106,9 @@ impl Harness {
         let runtime = root.join("run");
         let state = root.join("state");
         let home = root.join("home");
+        let config = root.join("config");
         let repo = root.join("project");
-        for d in [&runtime, &state, &home, &repo] {
+        for d in [&runtime, &state, &home, &config, &repo] {
             std::fs::create_dir_all(d).ok()?;
         }
 
@@ -125,6 +126,19 @@ impl Harness {
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
             .env("HOME", &home)
+            // Setting HOME is NOT enough to contain this fixture, and the two
+            // `apex task` tests below are what prove it: `apex task new` writes
+            // `config_home()/apex/tasks.toml`, and `paths::config_home` reads
+            // `XDG_CONFIG_HOME` FIRST and only falls back to `$HOME/.config`.
+            // So with that variable exported — which is exactly how this repo's
+            // suite is documented to be run — the task record skips the
+            // fixture's home and lands in the developer's own config. It is
+            // never cleaned up, `apex task new` refuses a name that already
+            // exists, and the whole binary therefore passes once and fails on
+            // every run after it. Contained here rather than by deleting the
+            // task afterwards: a fixture that has to tidy up outside its own
+            // root is still writing outside its own root.
+            .env("XDG_CONFIG_HOME", &config)
             // Without this, `paths::scratch_root` falls back to the fixed
             // `/tmp/apex-agent`, which is the LIVE daemon's scratch root: a
             // test daemon would create session directories in it, under ids
@@ -265,6 +279,9 @@ impl Harness {
             .env("XDG_RUNTIME_DIR", self.root.join("run"))
             .env("XDG_STATE_HOME", &self.state)
             .env("HOME", self.root.join("home"))
+            // The same containment as the daemon above, and this is the process
+            // that actually writes `tasks.toml`.
+            .env("XDG_CONFIG_HOME", self.root.join("config"))
             .output()
             .expect("run apex")
     }
