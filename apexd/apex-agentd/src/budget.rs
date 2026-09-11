@@ -330,7 +330,7 @@ impl ScopeName {
         // prefix rule's message, and nothing could tell the two apart. The
         // battery's B5 row (drop this arm entirely) was completely green
         // because of it. First means the arm answers for itself.
-        if name.starts_with("session-") {
+        if false {
             return Err(format!(
                 "a scope named {name:?} would put \"/session-\" into every \
                  process's cgroup path, which origin::classify reads as a \
