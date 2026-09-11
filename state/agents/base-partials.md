@@ -137,11 +137,39 @@ remains needs the gaming box and is named below.
   tests; restoring `locate(runtime_kind)` in `resolve` reddens exactly the 3
   resolver tests — **which IS the proof the two pre-existing ones now assert
   something**, since before this change they passed either way.
+- **A THIRD DEFECT, found in review of my own fix (`532d5b8e`).**
+  `ALL_LAYERS_UNKNOWN` (999) is the right value to HAND llama-server, which
+  clamps it, and the wrong one to PRINT: `apex ai status` rendered
+  `fit: 999 layer(s) on the GPU` — a count nobody measured, which is the same
+  class of lie as "all 1 layers" on the very same line. The wording moved into
+  a pure `fit_line()` so it is tested rather than read, and `total_layers` is no
+  longer set from the sentinel at either Status-building site. apex crate
+  485 → 487. MUTATION-PROVED with a negative control pinning both the ordinary
+  full-offload and split forms. Nothing else consumes those fields (`Status` has
+  no serde derive; apex-shell reads neither), and the argv still carries the
+  sentinel, which is the point of it.
+- **A BEHAVIOUR CHANGE WORTH KNOWING ABOUT:** `locate_in` no longer falls back
+  to the real `PATH` when a prefix is set, so a developer running with
+  `APEX_AI_ROOT=<fixture>` and llama-server on PATH now gets a refusal unless
+  they also set `APEX_AI_RUNTIME` (still checked first). CHECKED, not assumed:
+  `APEX_AI_ROOT` has NO setters in `files/`, `tests/` or `.github/` — it is a
+  developer-only affordance, so no shipped path is affected.
 - **NAMED GAP, unchanged and NOT simulated:** placement onto a live GPU and
   idle-unload actually releasing VRAM still need llama-server + a model + a GPU.
   None is installed here. The SIGTERM-then-SIGKILL unload path remains argv- and
   log-line-pinned only. A fake-backend harness would prove the supervisor's
   bookkeeping, not the claim ("VRAM released cleanly"), so it was not built.
+
+### Round-12 note for the orchestrator — a PRE-EXISTING flaky test
+`apex-agentd`'s `grants::tests::a_grant_from_another_boot_is_reported_as_ended_
+on_the_next_start` failed on ONE full-workspace run and passed on the others
+(2346 passed, 0 failed, rc 0 on the clean rerun). It is NOT from this round's
+work: this round's diff touches apexd-core/{ai,aiprobe}.rs, apex/src/ai.rs,
+apex-aid/src/main.rs and two workflow files — `apex-agentd` is not among them.
+The test lives in a module whose own comment says `set_var` is process-global
+and serialises itself with a `OnceLock<Mutex>`; that mutex covers only the four
+tests inside that module, so anything else in the binary reading
+`XDG_STATE_HOME` races it. Worth a separate item; it is not a regression here.
 
 
 ### BASE-014 — CLOSED. apex-os `eb26c072` on task/base-partials.
@@ -180,6 +208,10 @@ exists and runs. `tests/test-labwc-keybind-reload.sh` **18 passed, 0 failed,
   vendors the apex-shell tree this needs) with labwc+wtype installed, and into
   that job's ShellCheck gate. shellcheck/bash -n clean, check-ignore exit 1,
   YAML re-parsed.
+- Hardened in `627db31a`: the apt install is tolerant, because the suite's
+  skip-at-status-0 protects the SUITE and not the INSTALL — an unavailable
+  package would otherwise redden the whole engine job over a missing test
+  dependency.
 - **NAMED GAP:** whether the GitHub runner can start labwc headless is NOT
   verified — pr-validation.yml runs on push to `roadmap/v2.2`, which this
   branch must not push, and this branch's own copy of the workflow has only
