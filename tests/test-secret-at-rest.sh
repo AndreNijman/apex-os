@@ -124,12 +124,29 @@ SENTINEL="apex-atrest-2b7d40e9-do-not-leak"
 section "the service, as real root"
 export APEX_SECRETD_SOCKET="${WORK}/secretd.sock"
 STORE="${WORK}/store"
+# Every apex-secretd already on this machine, recorded BEFORE the spawn. There
+# are none on the L16, but a developer running the shipped system unit would
+# make `pgrep -x apex-secretd` return two pids, and picking one by sort order
+# would read the SYSTEM daemon's uid and store while claiming to describe this
+# one's. The difference is invisible in the output — both are root — so the set
+# is taken first and the new pid is the one that was not in it.
+PRE_SECRETD="$(pgrep -x apex-secretd 2>/dev/null | tr '\n' ' ')"
 # setsid so the daemon is not in this script's process group and a stray
 # Ctrl-C cannot take it down before cleanup records what it found.
 sudo -n setsid "$SECRETD" --socket "$APEX_SECRETD_SOCKET" --store "$STORE" \
     > "${WORK}/secretd.log" 2>&1 &
 for _ in $(seq 1 100); do [ -S "$APEX_SECRETD_SOCKET" ] && break; sleep 0.1; done
-SECRETD_PID="$(pgrep -f "apex-secretd --socket ${APEX_SECRETD_SOCKET}" | head -n1)"
+# `pgrep -x`, matching the process NAME, not `pgrep -f` over the command line.
+# `sudo -n setsid apex-secretd --socket X` leaves sudo resident with that exact
+# string in its own argv, so `pgrep -f … | head -n1` returns SUDO — whose
+# effective uid is also 0. The uid assertion below would then have been reading
+# the uid of sudo rather than of the daemon, i.e. assuming from the fact that
+# sudo was typed the very thing it claims to measure from the kernel.
+SECRETD_PID=""
+for _p in $(pgrep -x apex-secretd 2>/dev/null); do
+    case " ${PRE_SECRETD} " in *" ${_p} "*) continue ;; esac
+    SECRETD_PID="$_p"
+done
 [ -S "$APEX_SECRETD_SOCKET" ] || {
     bad "the secret service came up as root"
     sed 's/^/      /' "${WORK}/secretd.log"
@@ -139,6 +156,10 @@ ok "the secret service came up as root"
 # The uid it is ACTUALLY running as, from the kernel, not from the fact that
 # sudo was typed. This is the premise every assertion below rests on, so it is
 # read rather than assumed.
+daemon_comm="$(ps -o comm= -p "$SECRETD_PID" 2>/dev/null | tr -d ' ')"
+[ "$daemon_comm" = "apex-secretd" ] \
+    && ok "the pid being measured is apex-secretd itself, not the sudo that started it" \
+    || bad "the pid being measured is apex-secretd itself (comm is '${daemon_comm}')"
 daemon_uid="$(ps -o uid= -p "$SECRETD_PID" 2>/dev/null | tr -d ' ')"
 [ "$daemon_uid" = "0" ] \
     && ok "the daemon's real uid is 0" \
