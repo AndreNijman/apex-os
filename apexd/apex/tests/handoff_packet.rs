@@ -417,17 +417,46 @@ fn the_packet_is_written_into_the_project_and_stdout_is_its_path() {
     for f in FIELDS {
         assert!(md.contains(&format!("## {f}")), "no `## {f}` heading in:\n{md}");
     }
-    // And the four with no producer say WHY, rather than leaving a blank the
-    // next agent would read as "there was no plan".
-    for f in ["goal", "plan", "test state", "memory project slug"] {
-        let at = md.find(&format!("## {f}\n")).unwrap_or_else(|| panic!("{f}"));
+    // The body under a heading, up to the next one.
+    let section = |f: &str| -> String {
+        let at = md
+            .find(&format!("## {f}\n"))
+            .unwrap_or_else(|| panic!("no `## {f}` heading"));
         let body = &md[at + f.len() + 4..];
-        let body = &body[..body.find("\n## ").unwrap_or(body.len())];
+        body[..body.find("\n## ").unwrap_or(body.len())].to_string()
+    };
+
+    // And the three with no producer say WHY, rather than leaving a blank the
+    // next agent would read as "there was no plan".
+    for f in ["goal", "plan", "memory project slug"] {
+        let body = section(f);
         assert!(
             body.contains("Not supplied") && body.trim().len() > 30,
             "the `{f}` section is blank or unexplained: {body:?}"
         );
     }
+
+    // `test state` is NOT one of them any more, and this is the assertion that
+    // says so end to end rather than in a unit test against a constructed
+    // packet: the daemon was asked, it answered, and the answer reached the
+    // document. The fixture never runs a suite, so the true answer here is
+    // that APEX has observed none — which the packet must state as an
+    // observation and not as "this build cannot tell you", the two being the
+    // distinction the whole module exists to keep.
+    let tests = section("test state");
+    assert!(
+        !tests.contains("Not supplied"),
+        "the runtime has a per-worktree test record now, so `test state` must not be \
+         rendered as a field this build cannot supply: {tests:?}"
+    );
+    assert!(
+        tests.contains("has not observed a test run"),
+        "the `test state` section does not carry the daemon's observation: {tests:?}"
+    );
+    assert!(
+        !tests.contains("no per-worktree test status"),
+        "the packet still claims this build has no test record: {tests:?}"
+    );
 
     // The outgoing session is identified, and the transcript is carried and
     // labelled as evidence rather than as the summary §16 asks for and

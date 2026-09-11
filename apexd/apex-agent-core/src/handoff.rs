@@ -20,18 +20,28 @@
 //! capability grants that may be re-requested
 //! ```
 //!
-//! ── FOUR OF THE NINE HAVE NO PRODUCER, AND THAT IS THE DESIGN PROBLEM ───────
+//! ── THREE OF THE NINE HAVE NO PRODUCER, AND THAT IS THE DESIGN PROBLEM ──────
 //!
-//! Five can be established from what the runtime already records: the worktree
+//! Six can be established from what the runtime already records: the worktree
 //! and the checkpoint sit on `SessionInfo`, the changed files come from the
 //! same checkpoint-to-tree comparison `apex agent diff` uses, the transcript
-//! comes from `Request::Logs`, and the grants come from `Request::Grants` and
+//! comes from `Request::Logs`, the test state comes from
+//! `Request::Worktrees`, and the grants come from `Request::Grants` and
 //! `Request::SystemGrants` — two queries, because there are two grant families
 //! and they transfer in opposite directions. See below; getting that one
 //! backwards is how this module's first draft told an agent to ask a human for
 //! authority it had already inherited.
 //!
-//! The other four cannot, and each is absent for its own reason:
+//! `test state` was a fourth gap when this module was written and is not one
+//! any more: `worktree::WorktreeStatus.tests` landed on the integration branch
+//! underneath it. The claim that no per-worktree test status exists therefore
+//! outlived its truth by three days, inside a document whose entire purpose is
+//! that an agent can trust what it says about its own absences. What caught it
+//! was not review — it was the unit test below asserting the exact gap list,
+//! written by the same draft with the comment "if a producer ever lands, this
+//! test is what makes somebody delete the corresponding entry". It did.
+//!
+//! The other three cannot, and each is absent for its own reason:
 //!
 //! * `goal` — the session's opening instruction is passed to the adapter and
 //!   ends up inside `SessionInfo.args` as a positional, with nothing marking
@@ -40,8 +50,6 @@
 //!   ARGV is carried instead, as evidence rather than as an answer.
 //! * `plan` — nothing in the runtime holds a plan. An agent's plan lives in
 //!   its own transcript and its own files.
-//! * `test state` — there is no per-worktree test status in this build. APEX
-//!   Shell's own help says so in a `todo` block.
 //! * `memory project slug` — memory is not a concept in apex-os at all.
 //!
 //! ── SO AN ABSENT FIELD SAYS WHY IT IS ABSENT ────────────────────────────────
@@ -98,6 +106,85 @@
 //! struct is serialisable as well, for anything that wants the packet as data.
 
 use serde::{Deserialize, Serialize};
+
+use crate::worktree::TestState;
+
+/// A commit for reading, not for typing into `git checkout`.
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
+/// The last test run APEX observed, as the sentence the packet carries.
+///
+/// `head` is the worktree's CURRENT commit, and it is the whole reason this is
+/// not a call to `TestState::as_str()`. A `Passed` records the commit the run
+/// passed AT (`worktree.rs`'s module doc makes the point), so if the tree has
+/// moved since, that pass describes code which is no longer there. An incoming
+/// agent told nothing but "tests: passed" would skip the one check that would
+/// have told it otherwise — so a stale pass has to say so in the same breath,
+/// not in a footnote the reader may not reach.
+///
+/// `Unobserved` renders as CONTENT and not as an absence, which is the
+/// distinction this module is built on. "APEX has not seen a run here" is a
+/// true, checkable statement about what the runtime observed; `plan` is a
+/// field nothing could ever answer. Filing `Unobserved` under `unavailable`
+/// would tell the reader the build cannot answer, at the moment it just did.
+pub fn describe_tests(tests: &TestState, head: Option<&str>) -> String {
+    // Where a completed run was measured, against where the worktree is now.
+    // A missing value on either side means the comparison cannot be made,
+    // which is said out loud rather than resolved to whichever answer is
+    // convenient.
+    fn currency(at: Option<&str>, head: Option<&str>) -> String {
+        match (at, head) {
+            (Some(at), Some(h)) if at == h => format!(
+                " The worktree is still at `{}`, so this describes the code that is there now.",
+                short(at)
+            ),
+            (Some(at), Some(h)) => format!(
+                " STALE: that run was at `{}` and the worktree is now at `{}`, so it \
+                 describes code that has since changed. Treat it as history rather than as \
+                 a current result, and run the suite before relying on it.",
+                short(at),
+                short(h)
+            ),
+            (Some(at), None) => format!(
+                " That run was at `{}`. The worktree's current commit could not be read, so \
+                 whether it still applies is unknown.",
+                short(at)
+            ),
+            (None, _) => " The commit it ran at was not recorded, so whether it still applies \
+                 is unknown."
+                .to_string(),
+        }
+    }
+
+    match tests {
+        TestState::Unobserved => "APEX has not observed a test run in this worktree. That is \
+             not a report that the tests pass, and not a report that they fail — nobody has \
+             run one here that the runtime saw go past. Run them yourself and treat the \
+             result as the first thing you know."
+            .to_string(),
+        TestState::Running { command, .. } => format!(
+            "A run of `{command}` started here and no completion has been reported. The \
+             runtime does not read that as a pass: a run whose ending never arrived stays in \
+             this state, so \"still going\" and \"nobody told us how it ended\" look the same \
+             from outside."
+        ),
+        TestState::Passed {
+            command, head: at, ..
+        } => format!(
+            "The last run of `{command}` that APEX observed completed and reported no \
+             failure.{}",
+            currency(at.as_deref(), head)
+        ),
+        TestState::Failed {
+            command, head: at, ..
+        } => format!(
+            "The last run of `{command}` that APEX observed reported a failure.{}",
+            currency(at.as_deref(), head)
+        ),
+    }
+}
 
 /// Bumped when a field's MEANING changes, never when one is added.
 ///
@@ -216,11 +303,6 @@ impl Handoff {
                 "plan",
                 "The runtime does not record a plan. Whatever plan existed is in \
                  the outgoing agent's own transcript and files.",
-            ),
-            Missing::new(
-                "test state",
-                "This build has no per-worktree test status. Run the project's \
-                 tests yourself and treat the result as the first thing you know.",
             ),
             Missing::new(
                 "memory project slug",
@@ -594,13 +676,18 @@ mod tests {
     }
 
     #[test]
-    fn the_four_structural_gaps_are_the_four_with_no_producer() {
+    fn the_three_structural_gaps_are_the_three_with_no_producer() {
         // If a producer ever lands, this test is what makes somebody delete
         // the corresponding entry rather than leave a packet claiming a field
         // is unobtainable when it is now sitting on the record.
+        //
+        // That is not hypothetical. `test state` was in this list until
+        // `worktree::WorktreeStatus.tests` landed on the integration branch,
+        // and this assertion is what failed and forced its removal. Leave the
+        // list exact; a `contains` would have let the stale entry through.
         let gaps = Handoff::structural_gaps();
         let names: Vec<&str> = gaps.iter().map(|m| m.field.as_str()).collect();
-        assert_eq!(names, ["goal", "plan", "test state", "memory project slug"]);
+        assert_eq!(names, ["goal", "plan", "memory project slug"]);
         for m in Handoff::structural_gaps() {
             assert!(
                 m.reason.len() > 40 && m.reason.ends_with('.'),
@@ -616,5 +703,105 @@ mod tests {
         let md = p.markdown();
         assert!(md.contains("was not given a worktree"), "{md}");
         assert!(md.contains("/home/t/p/.apex/worktrees/issue-217"), "{md}");
+    }
+
+    #[test]
+    fn fields_is_section_sixteens_list_and_not_merely_some_of_it() {
+        // `every_field_section_sixteen_names_appears_in_the_document` iterates
+        // over FIELDS, so FIELDS is its source of truth as well as its
+        // subject: delete an entry and that test checks one heading fewer and
+        // still passes. Measured, not reasoned — dropping "checkpoint" from
+        // FIELDS survived the whole suite until this assertion existed.
+        //
+        // So the list is pinned against §16 itself, spelled as §16 spells it.
+        assert_eq!(
+            FIELDS,
+            [
+                "goal",
+                "plan",
+                "changed files",
+                "worktree",
+                "test state",
+                "important transcript summary",
+                "memory project slug",
+                "checkpoint",
+                "capability grants that may be re-requested",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_packet_version_is_pinned_and_not_merely_echoed() {
+        // The rendered document prints HANDOFF_VERSION, so a test asserting
+        // the render matches the constant moves with the constant and can
+        // never fail. Bumping the version is a deliberate act — it tells every
+        // existing reader that a field's MEANING changed — so the literal is
+        // asserted here, and changing it deliberately means changing this line
+        // and the reader that keys off it together.
+        assert_eq!(HANDOFF_VERSION, 1);
+        assert!(packet().markdown().contains("packet version 1"));
+    }
+
+    #[test]
+    fn an_unobserved_suite_is_reported_as_a_fact_rather_than_as_an_absence() {
+        let s = describe_tests(&TestState::Unobserved, Some("abc123"));
+        // The distinction the whole module rests on: this build CAN answer
+        // "has APEX seen a run here", and the answer is no. That is not the
+        // same sentence as "this build cannot tell you".
+        assert!(s.contains("has not observed a test run"), "{s}");
+        assert!(!s.contains("Not supplied"), "{s}");
+        assert!(
+            !Handoff::structural_gaps()
+                .iter()
+                .any(|m| m.field == "test state"),
+            "test state has a producer now and must not be a structural gap"
+        );
+    }
+
+    #[test]
+    fn a_pass_at_a_commit_the_worktree_has_left_is_reported_stale() {
+        let passed = TestState::Passed {
+            command: "cargo test".into(),
+            finished: 1_757_200_000_000,
+            head: Some("aaaaaaaaaaaa1111".into()),
+        };
+        let moved = describe_tests(&passed, Some("bbbbbbbbbbbb2222"));
+        assert!(moved.contains("STALE"), "{moved}");
+        assert!(moved.contains("aaaaaaaaaaaa"), "{moved}");
+        assert!(moved.contains("bbbbbbbbbbbb"), "{moved}");
+
+        // And the same pass, with the tree still on it, must NOT be called
+        // stale — a renderer that shouted STALE unconditionally would pass the
+        // assertion above while being useless.
+        let current = describe_tests(&passed, Some("aaaaaaaaaaaa1111"));
+        assert!(!current.contains("STALE"), "{current}");
+        assert!(current.contains("still at"), "{current}");
+    }
+
+    #[test]
+    fn a_run_with_no_reported_ending_is_not_called_a_pass() {
+        let s = describe_tests(
+            &TestState::Running {
+                command: "cargo test".into(),
+                started: 1_757_200_000_000,
+                head: Some("aaaaaaaaaaaa1111".into()),
+            },
+            Some("aaaaaaaaaaaa1111"),
+        );
+        assert!(!s.contains("no failure"), "{s}");
+        assert!(s.contains("no completion has been reported"), "{s}");
+    }
+
+    #[test]
+    fn a_result_whose_commit_is_unknown_says_so_instead_of_guessing() {
+        let failed = TestState::Failed {
+            command: "cargo test".into(),
+            finished: 1_757_200_000_000,
+            head: None,
+        };
+        let s = describe_tests(&failed, Some("bbbbbbbbbbbb2222"));
+        assert!(s.contains("reported a failure"), "{s}");
+        assert!(s.contains("not recorded"), "{s}");
+        assert!(!s.contains("STALE"), "{s}");
     }
 }
