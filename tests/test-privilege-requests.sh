@@ -11,10 +11,21 @@
 #  That needs a real daemon, a real session and a real socket, so it is tested
 #  here against all three.
 #
-#  NOTHING IN THIS FILE NEEDS ROOT. Every approval uses `--no-run`, which
+#  NO ASSERTION IN THIS FILE NEEDS ROOT. Every approval uses `--no-run`, which
 #  records the decision without performing the operation, so running the suite
 #  never installs a package and never raises an authentication prompt. The
 #  execution path is the one thing asserted only by unit tests, deliberately.
+#
+#  One thing around the assertions does use root, and only when it has to: §7
+#  reserves approving a root operation for a human at this machine, and the
+#  daemon establishes that from the peer's cgroup. A runner started by systemd
+#  — a CI job, a timer-dispatched agent — is not in a login session and is
+#  refused before the behaviour under test is reached, which is how eight of
+#  these assertions went three integration rounds without executing once. So
+#  the suite re-enters itself inside a real logind session first, which costs
+#  one `sudo -n` (never a prompt) and drops straight back to the invoking
+#  user. See tests/in-login-session.sh for the mechanism, for why it is not
+#  allowed to fake one, and for what happens when it cannot get one.
 #
 #      ./tests/test-privilege-requests.sh
 # ─────────────────────────────────────────────────────────────────────────────
@@ -29,6 +40,18 @@ set -uo pipefail
 set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Before the temp tree, the daemon or the build: the environment this suite
+# needs is one the daemon will observe as local, and that has to be arranged
+# from outside the suite. The helper runs this file again with the guard set,
+# either inside a logind session it created or — saying why, out loud — in
+# place. Either way the suite runs exactly once, so this is `exec` and not a
+# call. The origin it actually got is asserted below, once the daemon is up,
+# rather than assumed from the fact that this line was reached.
+if [ -z "${APEX_LOGIN_SESSION_WRAPPED:-}" ] && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
+    exec "${ROOT}/tests/in-login-session.sh" "${BASH_SOURCE[0]}" "$@"
+fi
+
 WORK="$(mktemp -d)"
 
 pass=0; fail=0
@@ -104,6 +127,48 @@ else
     printf '\nprivilege: %d passed, %d failed\n' "$pass" "$fail"
     exit 1
 fi
+
+# ── the origin this runner presents ──────────────────────────────────────────
+#
+# The precondition for everything below that decides a request, made into an
+# assertion of its own. Without it, an environment the daemon cannot see a
+# human in produces eight failures further down whose messages are all about
+# the approval path and none of which mention the actual cause — which is
+# exactly how those eight sat unexecuted through three integration rounds.
+#
+# `local-terminal` and `apex-shell` are §7's two local origins, the ones
+# `RequestOrigin::is_local` answers true for; a shell prompt has a
+# controlling terminal and the desktop shell does not, and the daemon reads
+# that from `/proc/<pid>/stat`, so which of the two appears here depends on
+# how the suite was entered and neither is better than the other.
+#
+# `origin_source` is asserted alongside it because a local origin that arrived
+# by DECLARATION rather than observation would be the security hole this whole
+# mechanism exists to close, not a passing precondition.
+section "the origin this runner presents"
+probe="$("$APEX" request ask update \
+        --reason "Establishing which origin the daemon observes for this runner" \
+        --no-wait 2>/dev/null)"
+observed="$("$APEX" request list --all --json 2>/dev/null | python3 -c "
+import json, sys
+rs = json.load(sys.stdin)
+r = [x for x in rs if x['id'] == int('${probe:-0}')]
+print('%s/%s' % (r[0].get('request_origin'), r[0].get('origin_source')) if r else 'nothing-filed')
+" 2>/dev/null)"
+case "$observed" in
+    local-terminal/observed|apex-shell/observed)
+        ok "the daemon observes this runner as a human at this machine (${observed%%/*})" ;;
+    *)
+        bad "the daemon observes this runner as a human at this machine (got '${observed}')"
+        cat >&2 <<'WHY'
+      §7 reserves approving a root operation for a local origin, so every
+      assertion below that decides a request is going to fail for THIS reason
+      and not for the reason it is testing. tests/in-login-session.sh is what
+      arranges a local origin; if it printed a line above saying it could not,
+      that line is the cause.
+WHY
+        ;;
+esac
 
 # ── the vocabulary is closed ─────────────────────────────────────────────────
 section "the vocabulary is closed"

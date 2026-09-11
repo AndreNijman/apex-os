@@ -556,10 +556,48 @@ jobs:
       # APEX_REQUIRE_APEX_CLI turns that skip into a failure. Same shape as
       # APEX_REQUIRE_NIRI in tests/test-apex-input.sh: a developer running one
       # crate's tests still gets a skip, CI does not.
+      # Through tests/in-login-session.sh, which is what makes §7's LOCAL
+      # column reachable. `apex-agentd` decides whether a human is at this
+      # machine from the connecting peer's cgroup, and a GitHub runner's
+      # processes are in neither a login session nor a user service — so
+      # `origin::observe` cannot classify them at all, and every assertion
+      # about approving a root operation or holding a system-access grant is
+      # refused before it reaches the behaviour it is testing.
+      # `system_grants.rs`'s `renewing_a_grant_that_does_not_exist_…` is the
+      # one that shows it. The helper enters a real logind session first, or
+      # says out loud why it could not and runs the tests exactly as before.
       - name: Tests
-        run: cargo test --locked
+        run: ../tests/in-login-session.sh cargo test --locked
         env:
           APEX_REQUIRE_APEX_CLI: "1"
+
+      # §7's table has two columns and they live in two different
+      # environments, so no single `cargo test` run can cover both: inside a
+      # login session the origin is local, and outside one it is not. The step
+      # above buys the local column, which had never executed in CI. This step
+      # keeps the other one instead of trading it away.
+      #
+      # `request_origin.rs` asserts the RULE rather than a fixed answer, so it
+      # is green either way and is simply run again here. `system_grants.rs`
+      # is filtered to the single test that needs a non-local placement — the
+      # rest of that file needs a local one and is covered above — and the
+      # count is then checked, because a `cargo test` whose filter matches
+      # nothing exits 0 having run nothing, which is the green-tick-over-
+      # nothing-asserted shape docs/p1-progress.md records this repository
+      # being bitten by three times. Here it would fire the day somebody
+      # renames the test.
+      - name: The non-local column, from the runner's own placement
+        run: |
+          set -euo pipefail
+          cargo test --locked -p apex-agentd --test request_origin
+          out="$(cargo test --locked -p apex-agentd --test system_grants \
+                 a_non_local_caller_is_refused_a_grant_before_polkit_is_asked \
+                 -- --exact --nocapture 2>&1)"
+          printf '%s\n' "$out"
+          printf '%s' "$out" | grep -q '1 passed' || {
+              echo "::error::a_non_local_caller_is_refused_a_grant_before_polkit_is_asked did not run; has it been renamed?"
+              exit 1
+          }
 
       # §10's blueprint suite drives the COMPILED binary, so it belongs here
       # rather than in the `engine` job: this is where the toolchain and the
@@ -1110,6 +1148,27 @@ jobs:
       # reason unrelated to this code.
       - name: Run disposable-capsule assertions
         run: ./tests/test-agent-disposable.sh
+      # §7's other half, and the one the privilege suite deliberately does not
+      # touch: approving a request WITHOUT --no-run performs the operation and
+      # is gated on being root. That was argued from the code rather than run,
+      # on the grounds that testing it needs a real sudo prompt. It does not —
+      # `unshare -r` gives a process a real effective uid 0, established by the
+      # kernel and read the way ops::effective_uid reads it, and asks nobody
+      # for a password. Nothing in this suite can raise a prompt: no sudo, no
+      # pkexec, no pkcheck.
+      #
+      # The operation that then runs is contained by a mount namespace, with a
+      # stub bound over the absolute path `apex install` execs, so the real
+      # package engine is never reached. The two steps that genuinely need a
+      # person — sudo's own authentication, and capability over the real
+      # machine — are named at the end of the run with the commands to check
+      # them by hand.
+      #
+      # The apparmor knob two steps up is what makes `unshare -r` work on a
+      # 24.04 runner at all; without it this suite skips out loud rather than
+      # passing.
+      - name: Run root-approval assertions
+        run: ./tests/test-root-approval.sh
 
       # §5's two claims, neither of which the unit tests can reach: a portable
       # bundle carries no credential and no conversation, from a profile on a
@@ -1222,7 +1281,12 @@ jobs:
           # review — unquoted expansions and recursive deletes that an empty
           # variable turns into a path on the live system. The file is clean at
           # this level today, so any finding is one this PR introduced.
+          # tests/in-login-session.sh is here for the same reason the four
+          # libexec helpers are: it is the only thing under tests/ that
+          # invokes `sudo`, so an unquoted expansion in it is an unquoted
+          # expansion in a command that runs as root.
           shellcheck -S warning files/system/libexec/apex-pkg \
+            tests/in-login-session.sh \
             files/system/libexec/apex-env \
             files/system/libexec/apex-plugin \
             files/system/libexec/apex-disposable \
