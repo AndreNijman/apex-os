@@ -58,16 +58,79 @@ cd "$(dirname "$0")"
 
 ENGINE=./apex-install
 ANS=$(mktemp /tmp/apex-test-answers.XXXXXX)
-trap 'rm -f "$ANS"' EXIT
+
+# ── Getting the engine as far as its own guards ──────────────────────────────
+#
+# Every case below feeds the engine an answers file and expects a named refusal.
+# None of them could reach one. apex-install:353 refuses to continue unless the
+# APEX-OS image is present in ROOT podman storage, and that check runs BEFORE
+# argument parsing — so on any machine that is not the ISO build box the engine
+# died at preflight and every case in the three engine sections reported the
+# same "image is not present" text instead of the guard under test.
+#
+# That was not a regression. `git log -S` puts the image check in dddabd6f
+# (2026-07-23) and these cases in 33b744d5, five days later: they were written
+# against an engine that already refused them, and only ever passed where root
+# podman storage happened to hold localhost/apex-os:daily. pr-validation.yml
+# runs this suite on a bare ubuntu-24.04 runner, so they were dead in CI too.
+# The tell that needs no theory: the "no arguments" case asserts exit 2, and
+# preflight's die() exits 1.
+#
+# apex-install:56 is IMAGE="${APEX_IMAGE:-localhost/apex-os:${EDITION}}", with
+# the comment "override with APEX_IMAGE=... for testing". An empty tar imported
+# by podman is a valid image with no layers — no network, no build, removed
+# again on exit, so the suite does not depend on the ambient store either.
+#
+# sudo's env_reset strips APEX_* from the caller's environment, so this must be
+# passed as `sudo -n APEX_IMAGE=...` on each invocation and cannot be exported.
+SCRATCH_IMAGE="localhost/apex-engine-probe:test"
+ENGINE_IMAGE=""
+scratch_made=0
+cleanup() {
+    rm -f "$ANS"
+    [ "$scratch_made" = 1 ] && sudo -n podman rmi -f "$SCRATCH_IMAGE" >/dev/null 2>&1
+}
+trap cleanup EXIT
 chmod 600 "$ANS"
 
+ensure_engine_image() {
+    command -v podman >/dev/null 2>&1 || return 1
+    sudo -n true 2>/dev/null || return 1
+    if sudo -n podman image exists localhost/apex-os:daily 2>/dev/null; then
+        ENGINE_IMAGE="localhost/apex-os:daily"; return 0
+    fi
+    local t; t=$(mktemp /tmp/apex-empty.XXXXXX.tar) || return 1
+    tar -cf "$t" -T /dev/null 2>/dev/null \
+        && sudo -n podman import -q "$t" "$SCRATCH_IMAGE" >/dev/null 2>&1
+    local rc=$?
+    rm -f "$t"
+    [ "$rc" = 0 ] || return 1
+    scratch_made=1
+    ENGINE_IMAGE="$SCRATCH_IMAGE"
+    return 0
+}
+
 pass=0; fail=0
+
+# Skipping here is honest and failing is not: with no image the engine cannot be
+# exercised at all, and a suite that reports 20 failures on a laptop teaches
+# people to ignore it. But it must be LOUD, because a silent skip of the engine
+# half is how this went unnoticed for six weeks.
+ENGINE_RUNNABLE=1
+if ! ensure_engine_image; then
+    ENGINE_RUNNABLE=0
+    echo "SKIP: the engine half cannot run here — preflight needs an APEX-OS image in"
+    echo "      ROOT podman storage and neither one nor passwordless podman is available."
+fi
 
 # $1 = case name, $2 = expected substring in the failure reason, $3 = answers body
 check() {
     local name=$1 want=$2 body=$3 out
+    if [ "$ENGINE_RUNNABLE" != 1 ]; then
+        printf 'SKIP  %-30s no engine image\n' "$name"; return
+    fi
     printf '%s\n' "$body" > "$ANS"
-    out=$(sudo -n "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
+    out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
 
     if grep -q 'Unexpected error on line' <<<"$out"; then
         printf 'FAIL  %-30s ERR TRAP FIRED\n' "$name"; fail=$((fail+1)); return
@@ -87,8 +150,10 @@ check() {
 BASE=$'mode=disk\ndisk=/dev/zzz-does-not-exist\npassword=pw\nhostname=apex'
 
 echo "── argument handling ──────────────────────────────────────────────────"
-out=$(sudo -n "$ENGINE" </dev/null 2>&1); rc=$?
-if [ "$rc" = 2 ] && grep -q 'not a user interface' <<<"$out"; then
+out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" "$ENGINE" </dev/null 2>&1); rc=$?
+if [ "$ENGINE_RUNNABLE" != 1 ]; then
+    printf 'SKIP  %-30s no engine image\n' "no arguments"
+elif [ "$rc" = 2 ] && grep -q 'not a user interface' <<<"$out"; then
     printf 'PASS  %-30s (exit 2, starts nothing)\n' "no arguments"; pass=$((pass+1))
 else
     printf 'FAIL  %-30s exit=%s\n' "no arguments" "$rc"; fail=$((fail+1))

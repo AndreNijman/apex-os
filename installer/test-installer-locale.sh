@@ -275,13 +275,69 @@ done
 # The engine's own comment: an invalid value is only caught when it is USED, and
 # by then `bootc install --wipe` has already run. A bad layout must be refused
 # with the same "Nothing has been erased." promise the account checks make.
+#
+# ── Getting the engine as far as its own validation ─────────────────────────
+#
+# apex-install:353 refuses to go on unless the APEX-OS image is in ROOT podman
+# storage, and that check sits BEFORE argument parsing. So on any box that is
+# not the ISO build box the engine dies at preflight and never reaches a single
+# answers-file guard. (This is not hypothetical: test-installer.sh's whole
+# engine half has been dead for exactly this reason since the cases were added
+# five days after the check — including in CI, on a bare ubuntu runner.)
+#
+# apex-install:56 is `IMAGE="${APEX_IMAGE:-localhost/apex-os:${EDITION}}"`, with
+# the comment "override with APEX_IMAGE=... for testing". So point it at an
+# image that does exist. An empty tar imported by podman is a valid image with
+# no layers, costs nothing, needs no network, and is removed again on exit — so
+# the suite does not depend on whatever happens to be in the ambient store.
+#
+# Checked before use rather than assumed safe: the only `bootc install to-disk
+# --wipe` reachable before the validation block is inside `if [ "$UNATTENDED" =
+# 1 ]`, whose two gates (`apex.unattended` on /proc/cmdline, and
+# /usr/share/apex-installer/allow-unattended) are both shut on a developer box.
+# Everything else between preflight and validation is function definitions. The
+# disk named below cannot exist, so a value that PASSES validation stops at the
+# block-device check with nothing touched.
+SCRATCH_IMAGE="localhost/apex-locale-probe:test"
+ENGINE_IMAGE=""
+scratch_made=0
+drop_scratch() {
+    [ "$scratch_made" = 1 ] && sudo -n podman rmi -f "$SCRATCH_IMAGE" >/dev/null 2>&1
+    scratch_made=0
+}
+cleanup() { drop_scratch; rm -rf "$W"; }
+
+ensure_engine_image() {
+    command -v sudo   >/dev/null 2>&1 || return 1
+    command -v podman >/dev/null 2>&1 || return 1
+    sudo -n true 2>/dev/null || return 1
+    # Note: sudo's env_reset strips APEX_* from the caller's environment, so the
+    # override has to be passed as `sudo -n APEX_IMAGE=... ` and cannot be
+    # exported here.
+    if sudo -n podman image exists localhost/apex-os:daily 2>/dev/null; then
+        ENGINE_IMAGE="localhost/apex-os:daily"; return 0
+    fi
+    tar -cf "$W/empty.tar" -T /dev/null 2>/dev/null || return 1
+    sudo -n podman import -q "$W/empty.tar" "$SCRATCH_IMAGE" >/dev/null 2>&1 || return 1
+    scratch_made=1
+    ENGINE_IMAGE="$SCRATCH_IMAGE"
+    return 0
+}
+
+engine() {   # engine <answers-file> -> the engine's combined output
+    sudo -n APEX_IMAGE="$ENGINE_IMAGE" "$ENGINE" --headless "$1" 2>&1 </dev/null
+}
+
 section "a bad layout is refused before anything is erased"
-if ! command -v sudo >/dev/null 2>&1; then
-    skp "a nonsense layout is refused" "sudo not available"
+if ! ensure_engine_image; then
+    skp "a nonsense layout is refused" \
+        "needs passwordless sudo + podman to put an image where preflight can find one"
+    skp "a real layout gets past validation" "same"
 else
+    ok "the engine can reach its own validation (APEX_IMAGE=$ENGINE_IMAGE)"
     ANS="$W/answers"
     printf 'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=u\npassword=pw\nhostname=apex\nkeymap=NOT_A_LAYOUT\n' > "$ANS"
-    out="$(sudo -n "$ENGINE" --headless "$ANS" 2>&1 </dev/null)"
+    out="$(engine "$ANS")"
     if grep -q 'Unexpected error on line' <<<"$out"; then
         bad "a nonsense layout is refused" "the ERR trap fired instead of a clean refusal"
     elif grep -qF "Nothing has been erased" <<<"$out" && grep -qiF "layout" <<<"$out"; then
@@ -294,11 +350,17 @@ else
     # this check and fail later on the absent disk, or the validator is simply
     # rejecting everything and assertion (1) above proves nothing.
     printf 'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=u\npassword=pw\nhostname=apex\nkeymap=de\n' > "$ANS"
-    out="$(sudo -n "$ENGINE" --headless "$ANS" 2>&1 </dev/null)"
+    out="$(engine "$ANS")"
     if grep -qiF "is not a keyboard layout" <<<"$out"; then
         bad "a real layout is not refused" "the validator rejects valid layouts too"
+    elif grep -qF "is not a block device" <<<"$out"; then
+        # Named exactly: it must die at the BLOCK DEVICE check, which is the
+        # guard immediately after validation. Any other death would mean the
+        # layout got past validation for some unrelated reason.
+        ok "a real layout gets past validation and stops at the absent disk"
     else
-        ok "a real layout gets past validation and fails later, on the absent disk"
+        bad "a real layout gets past validation and stops at the absent disk" \
+            "got: $(grep -m1 APEX-INSTALL-FAILED <<<"$out" || echo '<no sentinel>')"
     fi
 fi
 
