@@ -1,0 +1,500 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  test-apex-skill.sh — executable assertions for P1-025/026/027/028: the
+#  agent's skills, where its plugins came from, and which trust plane a
+#  connector sits on.
+#
+#  Two modes, the split `test-apex-trust.sh` and `test-boot-v2.sh` already use:
+#
+#    (no argument)     Structural checks needing no toolchain — that the verbs
+#                      are wired into the CLI, that no reader in these modules
+#                      turns a refused read into a fact, and that the dead-code
+#                      the branch could not land with was fixed by giving it
+#                      callers rather than by silencing the compiler.
+#
+#    --with-binary     Drives the built `apex` against fixture HOMEs. It DIES
+#                      if the binary is absent rather than skipping: a skipped
+#                      check counts as a success, which is the failure this
+#                      repository has now recorded three times.
+#
+#  ── What this is guarding ───────────────────────────────────────────────────
+#  Four claims, each of which is easy to make falsely:
+#
+#    1. an inventory of skills — and "0 skills" from a directory nobody could
+#       read is the single most damaging sentence this code can print, because
+#       "nothing unexpected is installed" is exactly what somebody would rely
+#       on it for. `profile.rs`'s own skill counter still has that defect
+#       (`read_dir(...).flatten()` at profile.rs:1789); `apex skill list`
+#       refuses to.
+#
+#    2. provenance — a recorded origin that nothing re-checks against the bytes
+#       on disk is a label. The registry holds a marketplace, a version and an
+#       install path, and no hash at all; two of this machine's recorded
+#       versions are the literal string "unknown".
+#
+#    3. isolation — the word "sandbox" may only be spent where bubblewrap
+#       actually runs. This repository has had to correct that word twice.
+#
+#    4. trust planes — a connector that is a local program and one that is a
+#       cloud address are different exposures, and neither `apex mcp list` nor
+#       the JSON named the difference before.
+#
+#  Every fixture HOME gets its own $HOME *and* its own $XDG_STATE_HOME, because
+#  `apex provenance record` writes a baseline store and `store_path` prefers
+#  XDG_STATE_HOME over the home it is handed. A suite that set only HOME would
+#  write over the real store of whoever ran it.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WITH_BINARY=0
+[[ "${1:-}" == "--with-binary" ]] && WITH_BINARY=1
+
+PASS=0 FAIL=0
+ok()  { PASS=$((PASS + 1)); printf '  ok   %s\n' "$*"; }
+bad() { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$*"; }
+sec() { printf '\n== %s ==\n' "$*"; }
+has() { # has <needle> <haystack-file> <label>
+    if grep -qF -- "$1" "$2"; then ok "$3"; else
+        bad "$3 — no '$1' in:"; sed 's/^/       /' "$2" >&2
+    fi
+}
+hasnt() {
+    if grep -qF -- "$1" "$2"; then
+        bad "$3 — found '$1' in:"; sed 's/^/       /' "$2" >&2
+    else ok "$3"; fi
+}
+
+SKILLRS="$REPO/apexd/apex/src/skill.rs"
+PROVRS="$REPO/apexd/apex/src/provenance.rs"
+DIGESTRS="$REPO/apexd/apex/src/digest.rs"
+CONNRS="$REPO/apexd/apex/src/connector.rs"
+MAINRS="$REPO/apexd/apex/src/main.rs"
+for f in "$SKILLRS" "$PROVRS" "$DIGESTRS" "$CONNRS" "$MAINRS"; do
+    [[ -f "$f" ]] || { echo "FATAL: missing $f" >&2; exit 1; }
+done
+
+TMP="$(mktemp -d)"
+trap 'chmod -R u+rwX "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "the verbs are wired into the CLI, not merely written"
+# A module nobody dispatches to satisfies a grep and not a user. Each of these
+# is the dispatch arm, not the enum variant, because an arm is what a refactor
+# actually drops.
+for pair in \
+    'skill::list|apex skill list' \
+    'skill::audit|apex skill audit' \
+    'provenance::show|apex provenance show' \
+    'provenance::record|apex provenance record' \
+    'connector::planes_main|apex mcp planes' \
+    'connector::memory_main|apex mcp memory'
+do
+    # `|` and not `:`, because every symbol here contains `::` and `%%:*` would
+    # have cut each one down to its module name — six assertions that passed on
+    # a grep for the wrong string.
+    sym="${pair%%|*}"; verb="${pair#*|}"
+    if grep -q "${sym}(" "$MAINRS" "$REPO/apexd/apex/src/mcp.rs"; then
+        ok "$verb reaches $sym"
+    else
+        bad "$verb is declared but nothing calls $sym"
+    fi
+done
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "the dead code was given callers, not silenced"
+# This branch was merged, compiled and then ABORTED before commit because its
+# own tip did not survive `cargo clippy -- -D warnings`: digest.rs's helpers
+# were unreachable until provenance.rs existed to call them. The fix was to
+# finish the caller. `#[allow(dead_code)]` would have made the same red go
+# green while leaving an unreachable safety helper in a security module — and
+# the next reader would have no way to tell which of the two had happened.
+for f in "$SKILLRS" "$PROVRS" "$DIGESTRS" "$CONNRS"; do
+    if grep -q 'allow(dead_code)' "$f"; then
+        bad "$(basename "$f") silences dead_code instead of calling the code"
+    else
+        ok "$(basename "$f") has no allow(dead_code)"
+    fi
+done
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "a refused read is never an absence"
+# The defect shape this repository has now found in about fifteen places, and
+# these are the two modules whose whole subject is telling a measurement apart
+# from a guess. `Path::exists()` returns false for a directory that is there
+# and refused; so does `read_dir(..).ok()`, and so does `.flatten()` on the
+# iterator, which drops the per-entry Err.
+# Comment lines are stripped first. These modules document the defect at
+# length — `profile.rs`'s `read_dir(..).flatten()` is quoted in skill.rs's own
+# header — and a checker that read the description of a bug as the bug would
+# go red for the prose explaining why it is red. It would then be silenced by
+# deleting the explanation, which is the worst available outcome.
+code() { grep -vE '^[[:space:]]*(//|\*)' "$1"; }
+for f in "$SKILLRS" "$PROVRS"; do
+    n="$(code "$f" | grep -cE '\.exists\(\)')"
+    if [[ "$n" -eq 0 ]]; then
+        ok "$(basename "$f") has no .exists() reader"
+    else
+        bad "$(basename "$f") has $n .exists() call(s) in code; each reads EACCES as absence"
+        code "$f" | grep -nE '\.exists\(\)' | sed 's/^/       /' >&2
+    fi
+done
+for f in "$SKILLRS" "$PROVRS" "$DIGESTRS"; do
+    if code "$f" | grep -qE 'read_dir\([^)]*\)[[:space:]]*\.ok\(\)|\.flatten\(\)'; then
+        bad "$(basename "$f") drops a directory-read refusal (read_dir().ok() or .flatten())"
+    else
+        ok "$(basename "$f") keeps every directory-read refusal"
+    fi
+done
+# The tri-state itself: a comparison that cannot answer must not be allowed to
+# look like one that answered "no".
+if grep -q 'pub fn same_as(&self, other: &Digest) -> Option<bool>' "$DIGESTRS"; then
+    ok "Digest::same_as returns Option, so an unmeasurable pair is not a mismatch"
+else
+    bad "Digest::same_as no longer returns Option — an unmeasured tree can now read as changed"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "the word sandbox is spent only where bubblewrap runs"
+# P1-026's second criterion cannot be delivered whole: a plugin's hooks and
+# scripts are run by the agent and nothing in APEX confines them. The honest
+# report says so per component. The failure mode is a report that says
+# "sandboxed" because a field was vacuously true.
+has 'bubblewrap confines it' "$PROVRS" "a wrapped MCP server is the one thing called sandboxed"
+has 'Nothing here confines them' "$PROVRS" "hooks and executables are stated as unconfined"
+has 'hasExecutableContent' "$PROVRS" \
+    "the JSON pairs everythingExecutableIsSandboxed with whether there is anything to confine"
+has 'Nothing here' "$SKILLRS" "skill.rs says nothing confines a skill's scripts"
+# `trustOnFirstUse` in the data, not only in a paragraph: a match here means the
+# tree has not changed SINCE APEX first saw it, which is not verification.
+has 'trustOnFirstUse' "$PROVRS" "the JSON declares the baseline is trust-on-first-use"
+has '"signed": false' "$PROVRS" "the JSON declares that nothing here is signed"
+
+# ═════════════════════════════════════════════════════════════════════════════
+if [[ "$WITH_BINARY" -eq 0 ]]; then
+    printf '\n%s\n' "── binary checks skipped (pass --with-binary) ──"
+    printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+    [[ "$FAIL" -eq 0 ]] || exit 1
+    exit 0
+fi
+
+APEX="${APEX:-$REPO/apexd/target/debug/apex}"
+[[ -x "$APEX" ]] || APEX="${CARGO_TARGET_DIR:-}/debug/apex"
+if [[ ! -x "$APEX" ]]; then
+    echo "FATAL: no apex binary. Build it, or set APEX=/path/to/apex." >&2
+    echo "       A skipped assertion reports as a pass, which is the bug this refuses." >&2
+    exit 1
+fi
+
+# Run the CLI against a fixture HOME. Both HOME and XDG_STATE_HOME, always:
+# `provenance record` writes a baseline store and `store_path` prefers
+# XDG_STATE_HOME, so setting only HOME would write over the real one.
+# XDG_CONFIG_HOME too, so `apex mcp memory` cannot read the caller's
+# declaration. cwd is the fixture as well, so no `.mcp.json` in the checkout
+# leaks into `servers::discover`.
+run() { # run <home> <args…>  → prints exit code, output in $TMP/out|err
+    local h="$1"; shift
+    ( cd "$h" && HOME="$h" XDG_STATE_HOME="$h/.state" XDG_CONFIG_HOME="$h/.config" \
+        "$APEX" "$@" > "$TMP/out" 2> "$TMP/err" )
+    echo $?
+}
+
+# A fixture home with one skill directory.
+skillhome() { # skillhome <name> [<skill> …]
+    local h="$TMP/$1"; shift
+    mkdir -p "$h/.claude/skills"
+    for s in "$@"; do
+        mkdir -p "$h/.claude/skills/$s"
+        printf -- '---\nname: %s\n---\n\nA skill.\n' "$s" \
+            > "$h/.claude/skills/$s/SKILL.md"
+    done
+    printf '%s' "$h"
+}
+
+sec "apex skill list counts what it read, and says so"
+H="$(skillhome skills alpha beta)"
+rc="$(run "$H" skill list)"
+[[ "$rc" == 0 ]] && ok "apex skill list exits 0 on a readable profile" \
+    || { bad "apex skill list exited $rc"; sed 's/^/       /' "$TMP/err" >&2; }
+has '2 skills' "$TMP/out" "both skills are counted"
+has 'alpha' "$TMP/out" "the first skill is named"
+has 'documentation only' "$TMP/out" "a skill with no program is documentation only"
+
+sec "a skill that ships a program is told apart from one that does not"
+H="$(skillhome exec plain runner)"
+printf '#!/bin/sh\necho hi\n' > "$H/.claude/skills/runner/go.sh"
+chmod +x "$H/.claude/skills/runner/go.sh"
+run "$H" skill list >/dev/null
+has '1 ship a program' "$TMP/out" "the execute bit is what makes a skill executable"
+run "$H" skill audit >/dev/null
+has 'go.sh' "$TMP/out" "the audit names the program"
+has 'your own profile' "$TMP/out" "the audit says where a program-shipping skill came from"
+
+sec "a skills directory that cannot be read is NEVER reported as zero skills"
+# The assertion this whole unit exists for. `profile.rs`'s doctor still answers
+# "0 skills" here; that is the sentence somebody would rely on to conclude
+# nothing unexpected is installed, and it would be a refusal wearing an
+# absence's clothes.
+H="$(skillhome denied one two)"
+chmod 0000 "$H/.claude/skills"
+if [[ -r "$H/.claude/skills" ]]; then
+    printf '  skip  this user reads a 0000 directory (root or CAP_DAC_OVERRIDE)\n'
+else
+    rc="$(run "$H" skill list)"
+    [[ "$rc" != 0 ]] && ok "an unreadable skills directory exits non-zero ($rc)" \
+        || bad "an unreadable skills directory exited 0 — an incomplete inventory read as a success"
+    has 'no skills were READ' "$TMP/out" "it says nothing was READ rather than that there are none"
+    hasnt 'no skills on this machine' "$TMP/out" \
+        "it never says there are no skills on a machine it could not look at"
+    rc="$(run "$H" skill list --json)"
+    if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+sys.exit(0 if d.get("complete") is False and d.get("count")==0 else 1)' "$TMP/out"; then
+        ok "the JSON pairs count 0 with complete:false, so a consumer cannot read it as empty"
+    else
+        bad "the JSON reported count 0 without complete:false"
+        sed 's/^/       /' "$TMP/out" >&2
+    fi
+fi
+chmod 0755 "$H/.claude/skills"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A fixture home with one marketplace and one installed plugin.
+plughome() { # plughome <name>
+    local h="$TMP/$1"
+    mkdir -p "$h/.claude/plugins/marketplaces/mk" "$h/plug" "$h/.state" "$h/.config"
+    printf '{}\n' > "$h/plug/plugin.json"
+    printf '#!/bin/sh\necho one\n' > "$h/plug/run.sh"
+    chmod +x "$h/plug/run.sh"
+    cat > "$h/.claude/plugins/known_marketplaces.json" <<JSON
+{"mk": {"source": {"source": "github", "repo": "o/r"},
+        "installLocation": "$h/.claude/plugins/marketplaces/mk",
+        "lastUpdated": "2026-01-01T00:00:00.000Z"}}
+JSON
+    cat > "$h/.claude/plugins/installed_plugins.json" <<JSON
+{"version": 2, "plugins": {"p@mk": [
+  {"scope": "user", "installPath": "$h/plug", "version": "1.0.0",
+   "installedAt": "2026-01-01T00:00:00.000Z"}]}}
+JSON
+    printf '{"enabledPlugins": {"p@mk": true}}\n' > "$h/.claude/settings.json"
+    printf '%s' "$h"
+}
+
+sec "provenance: a first look is not a pass"
+H="$(plughome prov)"
+rc="$(run "$H" provenance show)"
+has 'no digest was ever recorded' "$TMP/out" "an unrecorded plugin says nothing was recorded"
+hasnt 'unchanged' "$TMP/out" "a first look never claims the tree is unchanged"
+if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+a=d["plugins"][0]["attest"]
+sys.exit(0 if a["state"]=="first-sight" and a["unchanged"] is None else 1)' \
+    <(run "$H" provenance show --json >/dev/null; cat "$TMP/out") 2>/dev/null; then
+    ok "the JSON verdict is first-sight with unchanged:null, not a pass"
+else
+    run "$H" provenance show --json >/dev/null
+    if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+a=d["plugins"][0]["attest"]
+sys.exit(0 if a["state"]=="first-sight" and a["unchanged"] is None else 1)' "$TMP/out"; then
+        ok "the JSON verdict is first-sight with unchanged:null, not a pass"
+    else
+        bad "a first look did not report first-sight/null"
+        sed 's/^/       /' "$TMP/out" >&2
+    fi
+fi
+
+sec "provenance: record, then an untouched tree is unchanged and an edited one is a finding"
+rc="$(run "$H" provenance record)"
+[[ "$rc" == 0 ]] && ok "apex provenance record exits 0" \
+    || { bad "apex provenance record exited $rc"; sed 's/^/       /' "$TMP/err" >&2; }
+[[ -f "$H/.state/apex/plugin-provenance.json" ]] \
+    && ok "the baseline store landed under XDG_STATE_HOME, not the caller's real one" \
+    || bad "no store at $H/.state/apex/plugin-provenance.json — record wrote somewhere else"
+run "$H" provenance show >/dev/null
+has 'hash to what was recorded' "$TMP/out" "an untouched tree reads as unchanged"
+
+# The finding the whole module exists to produce.
+printf '#!/bin/sh\necho TWO\n' > "$H/plug/run.sh"
+rc="$(run "$H" provenance show)"
+[[ "$rc" != 0 ]] && ok "an edited plugin exits non-zero ($rc)" \
+    || bad "an edited plugin exited 0 — the finding would not fail a script"
+has 'CHANGED' "$TMP/out" "the edit is reported as CHANGED"
+run "$H" provenance show --json >/dev/null
+if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+a=d["plugins"][0]["attest"]
+sys.exit(0 if a["state"]=="changed" and a["unchanged"] is False
+         and a["recorded"] != a["found"] else 1)' "$TMP/out"; then
+    ok "the JSON carries both hashes, so a reader can see which pair disagreed"
+else
+    bad "the changed verdict did not carry recorded and found"
+fi
+
+# A content-identical file that gained +x must still be a change: provenance is
+# the hash of what RUNS, and a chmod is the cheapest way to make a tree
+# executable without editing a byte of it.
+H="$(plughome chmodonly)"
+run "$H" provenance record >/dev/null
+chmod -x "$H/plug/run.sh"
+rc="$(run "$H" provenance show)"
+has 'CHANGED' "$TMP/out" "a changed execute bit changes the digest, with no byte edited"
+
+sec "provenance: runtime state inside the tree is not a change"
+# Claude Code writes .in_use/<pid> INSIDE the installed plugin. A digest that
+# covered it would report a change every time the plugin was used, and a check
+# that cries wolf on every run trains its reader to ignore the one time it
+# means something.
+H="$(plughome volatile)"
+run "$H" provenance record >/dev/null
+mkdir -p "$H/plug/.in_use" && : > "$H/plug/.in_use/4242"
+rc="$(run "$H" provenance show)"
+hasnt 'CHANGED' "$TMP/out" "a live-process marker is not a change"
+has 'excluded' "$TMP/out" "and the exclusion is reported, so the digest is never quietly partial"
+# But an exclusion must not hide a program. A script under a same-named
+# directory deeper in the tree is still measured.
+mkdir -p "$H/plug/tools/.in_use"
+printf '#!/bin/sh\necho hidden\n' > "$H/plug/tools/.in_use/go.sh"
+chmod +x "$H/plug/tools/.in_use/go.sh"
+rc="$(run "$H" provenance show)"
+has 'CHANGED' "$TMP/out" \
+    "a file under a deeper .in_use IS measured — an exclusion that hid a program would be a hole"
+
+sec "provenance: a store that cannot be read is not a machine with nothing recorded"
+# The most damaging collapse available here. An unreadable store makes every
+# plugin look unrecorded, which is exactly what a deleted store looks like —
+# and a report that said "not recorded" would be reporting a clean bill of
+# health for a machine whose records had just been destroyed.
+H="$(plughome badstore)"
+mkdir -p "$H/.state/apex"
+printf '{ this is not json' > "$H/.state/apex/plugin-provenance.json"
+rc="$(run "$H" provenance show)"
+[[ "$rc" != 0 ]] && ok "an unusable store exits non-zero ($rc)" \
+    || bad "an unusable store exited 0"
+has 'clean bill of health' "$TMP/out" "the report warns against reading it as healthy"
+run "$H" provenance show --json >/dev/null
+if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+a=d["plugins"][0]["attest"]
+sys.exit(0 if a["state"]=="could-not-run" and a["unchanged"] is None
+         and d["complete"] is False else 1)' "$TMP/out"; then
+    ok "the verdict is could-not-run (about this machine), not first-sight (about the records)"
+else
+    bad "an unreadable store made a plugin read as first-sight"
+    sed 's/^/       /' "$TMP/out" >&2
+fi
+# And record must refuse to clobber it rather than destroying the only evidence
+# that something had changed.
+rc="$(run "$H" provenance record)"
+[[ "$rc" != 0 ]] && ok "record refuses to overwrite a store it could not read ($rc)" \
+    || bad "record overwrote an unreadable store, destroying records it cannot reproduce"
+has 'destroy records' "$TMP/err" "and it says why it refused"
+
+sec "provenance: a plugin nobody could hash is neither a pass nor a failure"
+H="$(plughome missing)"
+rm -rf "$H/plug"
+rc="$(run "$H" provenance show)"
+[[ "$rc" != 0 ]] && ok "an unmeasurable plugin makes the report exit non-zero ($rc)" \
+    || bad "a plugin that could not be checked exited 0"
+has 'does NOT cover' "$TMP/out" "the report says which plugin it does not cover"
+run "$H" provenance show --json >/dev/null
+if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+sys.exit(0 if d["plugins"][0]["attest"]["state"]=="could-not-run"
+         and d["complete"] is False else 1)' "$TMP/out"; then
+    ok "could-not-run, and the report declares itself incomplete"
+else
+    bad "an unhashable plugin was not could-not-run/incomplete"
+fi
+
+sec "provenance: a documentation-only plugin is not reported as sandboxed"
+H="$(plughome docsonly)"
+rm -f "$H/plug/run.sh"
+run "$H" provenance show >/dev/null
+has 'no process of its own to confine' "$TMP/out" \
+    "a plugin with nothing to confine says so, rather than reporting as sandboxed"
+hasnt 'bubblewrap confines it' "$TMP/out" "and the word is not spent on it"
+run "$H" provenance show --json >/dev/null
+if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+c=d["plugins"][0]["confinement"]
+sys.exit(0 if c["everythingExecutableIsSandboxed"] is True
+         and c["hasExecutableContent"] is False else 1)' "$TMP/out"; then
+    ok "the vacuous true ships beside hasExecutableContent:false, so it cannot be misread"
+else
+    bad "everythingExecutableIsSandboxed was not paired with hasExecutableContent"
+fi
+
+sec "provenance: a git marketplace gets a commit, a non-git one gets a claim"
+H="$(plughome rev)"
+MK="$H/.claude/plugins/marketplaces/mk"
+printf '8f5c9d3f86ccaeedbaefd66b039cfb3743775e0e\n' > "$MK/.gcs-sha"
+run "$H" provenance show >/dev/null
+has 'claimed by .gcs-sha' "$TMP/out" "a revision file beside a non-git tree is a claim"
+has 'nothing here can check the files against it' "$TMP/out" "and the report says it cannot be re-checked"
+rm -f "$MK/.gcs-sha"
+if git -C "$MK" init -q 2>/dev/null; then
+    git -C "$MK" config user.email t@t; git -C "$MK" config user.name t
+    printf 'a\n' > "$MK/a"; git -C "$MK" add a; git -C "$MK" commit -qm one
+    run "$H" provenance show >/dev/null
+    has 'still matches it' "$TMP/out" "a clean checkout reports its working tree still matches"
+    printf 'b\n' > "$MK/a"
+    rc="$(run "$H" provenance show)"
+    has 'MODIFIED' "$TMP/out" \
+        "a modified checkout is reported — the one re-checkable origin claim in the feature"
+else
+    bad "git could not init a repository, so the only re-checkable origin claim went untested"
+fi
+
+sec "mcp planes: a local program and a cloud address are different exposures"
+H="$TMP/planes"; mkdir -p "$H/.state" "$H/.config"
+cat > "$H/.claude.json" <<'JSON'
+{"mcpServers": {
+  "localone": {"command": "/usr/bin/true", "args": []},
+  "cloudone": {"type": "http", "url": "https://example.invalid/mcp"}}}
+JSON
+rc="$(run "$H" mcp planes)"
+[[ "$rc" == 0 ]] && ok "apex mcp planes exits 0" || bad "apex mcp planes exited $rc"
+has 'localone' "$TMP/out" "the stdio server is listed"
+has 'cloudone' "$TMP/out" "the endpoint server is listed"
+run "$H" mcp planes --json >/dev/null
+if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+t=json.dumps(d)
+sys.exit(0 if "local" in t and "cloud" in t else 1)' "$TMP/out"; then
+    ok "both planes are named in the JSON"
+else
+    bad "the planes JSON does not name both planes"
+    sed 's/^/       /' "$TMP/out" >&2
+fi
+run "$H" mcp list >/dev/null
+has 'plane' "$TMP/out" "apex mcp list carries the plane too, not only the new verb"
+
+sec "mcp memory: a view, never a store, and never a guess presented as a fact"
+rc="$(run "$H" mcp memory)"
+[[ "$rc" == 0 ]] && ok "apex mcp memory exits 0" || bad "apex mcp memory exited $rc"
+run "$H" mcp memory --json >/dev/null
+if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+sys.exit(0 if d.get("apexOwnedStore") is False
+         and d.get("migrationRequired") is False else 1)' "$TMP/out"; then
+    ok "the JSON declares APEX owns no store and requires no migration"
+else
+    bad "the memory JSON does not declare apexOwnedStore:false / migrationRequired:false"
+    sed 's/^/       /' "$TMP/out" >&2
+fi
+# No --probe anywhere in this suite: probing opens a connection, and a test
+# that dialled somebody's memory server would be measuring their NAS.
+hasnt '--probe' "$TMP/err" "nothing here probed a live server"
+
+printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+[[ "$FAIL" -eq 0 ]] || exit 1
