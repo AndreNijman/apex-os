@@ -971,9 +971,9 @@ mod tests {
 
     #[test]
     fn the_three_length_encodings_are_each_used_at_their_boundary() {
-        let short = encode_client(Op::Binary, &vec![0u8; 125], [0; 4]);
+        let short = encode_client(Op::Binary, &[0u8; 125], [0; 4]);
         assert_eq!(short[1] & 0x7f, 125, "125 bytes must use the short form");
-        let medium = encode_client(Op::Binary, &vec![0u8; 126], [0; 4]);
+        let medium = encode_client(Op::Binary, &[0u8; 126], [0; 4]);
         assert_eq!(medium[1] & 0x7f, 126, "126 bytes must use the 16-bit form");
         assert_eq!(&medium[2..4], &126u16.to_be_bytes());
         let long = encode_client(Op::Binary, &vec![0u8; 65536], [0; 4]);
