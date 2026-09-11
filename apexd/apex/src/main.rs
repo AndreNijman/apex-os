@@ -12,6 +12,7 @@ mod boot;
 mod cloudflare;
 mod dispatch;
 mod disposable;
+mod firmware;
 mod gaming;
 mod gitshim;
 mod host;
@@ -20,11 +21,13 @@ mod migrate;
 mod mode;
 mod ops;
 mod proxy;
+mod qualify;
 mod recover;
 mod remote;
 mod schema;
 mod request;
 mod secret;
+mod storage;
 mod task;
 mod touchpad;
 mod trust;
@@ -124,6 +127,39 @@ enum Cmd {
     Channel {
         #[command(subcommand)]
         cmd: channel::ChannelCmd,
+    },
+    /// What this class of machine is known to do, and who established it (§33).
+    ///
+    /// A local database, kept only with explicit consent and sent nowhere.
+    /// Every check has three answers rather than two: a row nobody has tried
+    /// reads as not known, with the sentence saying who can settle it, because
+    /// "nobody has suspended this machine" is not "suspend is broken".
+    Qualify {
+        #[command(subcommand)]
+        cmd: qualify::QualifyCmd,
+    },
+    /// The disks in this machine, their health, and what nobody could ask
+    /// them (§48).
+    ///
+    /// Wear, temperature, TRIM, encryption, mount state and free space, with
+    /// every row carrying either a measurement or the reason there is none.
+    /// Reading needs no root except for the SMART log, which reports as
+    /// unavailable with the remedy rather than disappearing.
+    Storage {
+        #[command(subcommand)]
+        cmd: storage::StorageCmd,
+    },
+    /// Firmware: what this machine carries and what has an update waiting
+    /// (§P2-015).
+    ///
+    /// Reads fwupd's own JSON and never its exit status — measured, that
+    /// status means "nothing to do" when it is non-zero and accompanies an
+    /// explicit error document when it is zero. Secure Boot key and
+    /// revocation stores are listed apart from hardware, because most of what
+    /// fwupd calls updatable is one of those rather than a component.
+    Firmware {
+        #[command(subcommand)]
+        cmd: firmware::FirmwareCmd,
     },
     /// Persistent state: which schema each store is on, and what a rollback
     /// would do to it (§25).
@@ -1280,6 +1316,9 @@ async fn main() {
         // `bootc switch`, which is in the privileged set below beside Update,
         // Rollback and Pin.
         Cmd::Channel { cmd } => channel::main(cmd),
+        Cmd::Qualify { cmd } => qualify::main(cmd),
+        Cmd::Storage { cmd } => storage::main(cmd),
+        Cmd::Firmware { cmd } => firmware::main(cmd),
         Cmd::Schema { cmd } => schema::main(cmd),
         Cmd::Trust(args) => trust::main(args),
         // Read-only except for `add`/`remove`/`probe`, which write only the
@@ -2577,6 +2616,22 @@ async fn cmd_doctor(json: bool) -> i32 {
         ok: metrics_up,
         what: "metrics endpoint reachable on 127.0.0.1:9723".to_string(),
     });
+
+    // §48: disk-health warnings reach the doctor. Only the rows with something
+    // to do become a WARN — a row nobody could measure is printed with its
+    // reason and passes, because `apex doctor` runs unprivileged and a SMART
+    // log nobody could open must not turn every run red.
+    for (ok, what) in storage::doctor_lines(&storage::Roots::from_env()) {
+        checks.push(recover::Check { ok, what });
+    }
+
+    // §P2-015: the same rule for firmware. An update waiting is a WARN; a
+    // machine where fwupd could not be consulted at all passes with the
+    // reason on the line, because `apex doctor` runs unprivileged and
+    // measured, nothing in any Containerfile installs fwupd today.
+    for (ok, what) in firmware::doctor_lines(&firmware::Roots::from_env()) {
+        checks.push(recover::Check { ok, what });
+    }
 
     print!("{}", recover::render_doctor(&checks, json));
     0
