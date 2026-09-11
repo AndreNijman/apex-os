@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-12 03:02 AWST
+APEX ROADMAP — resume report — 2026-09-12 03:12 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,35 +16,35 @@ APEX ROADMAP — resume report — 2026-09-12 03:02 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p0-014     ALIVE      P0-014,P0-015                      task/p0-014-remote-lock
-             head 625d806e test(privilege): the gate reads a policy off the requ
-             dirty 0 file(s), 0 unpushed, card 3m
-             NEXT **Round 12 (2026-09-12). COMMIT 5 IS DONE AND PUSHED — P0-014 is c
-
-  p2-010     ALIVE      P2-011                             task/p2-010-hardware-storage
-             head 23b543ad test(agentd): §P2-011 two guards the battery caught b
-             dirty 0 file(s), 0 unpushed, card 4m
-             NEXT **THE UNIT IS COMPLETE.** All four items — P2-010, P2-011, P2-014,
-
   p1-008     ALIVE      P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
              head 4f80746e Merge task/p1-005-cloudflare-caps into roadmap/v2.2 (
-             dirty 0 file(s), 0 unpushed, card -
-             NEXT (no card)
+             dirty 0 file(s), 0 unpushed, card 4m
+             NEXT Orientation done, nothing written yet. Next action: call the advis
 
   p1-040     ALIVE      P1-040                             task/p1-040-per-output-scaling
-             head cd324ec Merge task/base-partials-shell into roadmap/v2.2 (BASE
-             dirty 1 file(s), 0 unpushed, card -
+             head 430f773 refactor(theme): the token table becomes a component, 
+             dirty 0 file(s), 0 unpushed, card 7m
              NEXT (no card)
 
   p2-b       ALIVE      (see queue.json p2-b)              task/p2-b-accessibility-i18n
              head cd324ec Merge task/base-partials-shell into roadmap/v2.2 (BASE
-             dirty 0 file(s), 0 unpushed, card -
-             NEXT (no card)
+             dirty 0 file(s), 0 unpushed, card 8m
+             NEXT 1. Two read-only surveys are running over both trees (a11y invento
 
   p1-052     ALIVE      P1-051,P1-052                      task/p1-052-relay
              head 4f80746e Merge task/p1-005-cloudflare-caps into roadmap/v2.2 (
-             dirty 0 file(s), 0 unpushed, card 2m
-             NEXT Orientation. Mapping the existing `apex-remote-core` client, the P
+             dirty 4 file(s), 0 unpushed, card 4m
+             NEXT Commit 1: `apex-remote-core::relay` — the endpoint/role/URL types 
+
+  p0-finish  ALIVE      P0-001,P0-002,P0-007,P0-015,P0-021 task/p0-finish
+             head f39fd664 Merge task/p2-010-hardware-storage into roadmap/v2.2 
+             dirty 0 file(s), 0 unpushed, card -
+             NEXT (no card)
+
+  suite-reliability ALIVE      (infrastructure)                   task/suite-reliability
+             head f39fd664 Merge task/p2-010-hardware-storage into roadmap/v2.2 
+             dirty 0 file(s), 0 unpushed, card -
+             NEXT (no card)
 
 
 ────────────────────────────────────────────────────────────────────────────
@@ -63,7 +63,8 @@ APEX ROADMAP — resume report — 2026-09-12 03:02 AWST
       landed whole as 4e267eb fix: screenshots and popup input regions off Hyprland (#
     task/p0-016-agent-settings  — squash-merged, safe to delete
       landed whole as 4335e42 fix(agents): the sudo caveat was written before no_new_p
-    (nothing — every task branch's content is on the integration tip)
+    task/p1-040-per-output-scaling
+      430f773 refactor(theme): the token table becomes a component, Metrics    [3/10 added lines on tip]
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -73,11 +74,11 @@ APEX ROADMAP — resume report — 2026-09-12 03:02 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 1min 28s Sat
+  snapshot timer: active   last 2min 10s Sat
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    7f7985c  roadmap-state
+    apex-os    0f12819  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    55f08ae  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -100,7 +101,7 @@ APEX ROADMAP — resume report — 2026-09-12 03:02 AWST
     apex-os    00c1973  wt-p0-025-os-
     apex-os    eda5ef8  wt-p1-001-
     apex-os    a23175f  wt-p1-002-
-    apex-shell 05e3379  apex-shell-
+    apex-shell fe47bdf  apex-shell-
     apex-shell df979e1  int-shell-
     apex-shell 68c971d  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
@@ -129,13 +130,12 @@ APEX ROADMAP — resume report — 2026-09-12 03:02 AWST
   6 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
-    p0-014         P0-014,P0-015                    Remote Control privilege policy and lock-state policy, wired
     p1-008         P1-008,P1-009,P1-010             Cloudflare One, Workers AI and AI Gateway, Secrets Store
     p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
-    p2-e           P2-010,P2-011,P2-014,P2-015      Hardware qualification database, agent cgroup budgets, Stora
 
   READY (dependencies believed satisfied — confirm against the agent table above):
     p1-038-hardware P1-038                           The 18 labwc matrix rows that need real applications
+    p0-014         P0-014,P0-015                    Remote Control privilege policy and lock-state policy, wired
     p1-005         P1-005,P1-006,P1-007             Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets
                    conflicts with p1-002
     p1-011         P1-011,P1-012,P1-013             Temporary task credentials, transparent brokered wrangler/cl
@@ -145,7 +145,6 @@ APEX ROADMAP — resume report — 2026-09-12 03:02 AWST
     p1-025         P1-025,P1-026,P1-027,P1-028      Skill inventory and audit, plugin provenance and isolation, 
     p1-040-per-output-scaling P1-040                           Per-output scaling: two densities, two sizes, one shell
     p1-052-relay   P1-051,P1-052                    The APEX Remote remainder: relay, reconnect, mDNS, connectio
-    p1-053a        P1-053,P1-054,P1-055             Android app foundation, Agent Center parity, full PTY/TUI re
 
   HELD:
     final          after *
@@ -153,7 +152,7 @@ APEX ROADMAP — resume report — 2026-09-12 03:02 AWST
   COMPLETE (every roadmap item done — not offered again).
   This says the WORK is done, not that it is landed — check the
   unlanded section above before assuming roadmap/v2.2 carries it:
-    p1-018, p1-020, p1-023, p1-035, p1-044
+    p1-018, p1-020, p1-023, p1-035, p1-044, p2-e
 
 ────────────────────────────────────────────────────────────────────────────
   how to resume

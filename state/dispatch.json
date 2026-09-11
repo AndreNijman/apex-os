@@ -1,12 +1,12 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-12T03:05+08:00",
-  "_round": "Round 15. THREE UNITS FINISHED AND LANDED since round 14 - desktop-ai-apps, base-partials and p1-005 - and four fresh units were dispatched into the freed slots. Counts 64/25/36/2 -> 67 done / 25 partial / 33 todo / 2 blocked of 127. BASE is down to two partials, both hardware-blocked and both named as assertions rather than topics.",
+  "updated": "2026-09-12T04:15+08:00",
+  "_round": "Round 16. P0 FEATURE WORK IS FINISHED: P0-014, the last of it, landed as merge 8a2d7f83, and p2-010 closed its whole unit at f39fd664. Counts 67/25/33/2 -> 69 done / 24 partial / 32 todo / 2 blocked of 127. Six agents in flight: four carried over (p1-008, p1-040, p2-b, p1-052) and two dispatched now - p0-finish for the last five P0 partials, and suite-reliability for three infrastructure defects other units found and none of them owned.",
   "_landed_this_round": {
-    "apex-os": "roadmap/v2.2 fbf06a4f -> 4f80746e across three merges. 3bf8e558 desktop-ai-apps: both AI apps baked into the image from new stage 5a-aiapps, proven END TO END in a scratch fedora-bootc:43 container with the stanza text extracted verbatim, 11 mutation pairs. 59245497 base-partials: BASE-013 and BASE-014 closed, five product defects fixed. 4f80746e p1-005: sixteen Cloudflare capabilities, +39 tests to 2448/0, 23 mutation pairs, no live account touched.",
-    "apex-shell": "roadmap/v2.2 9888537 -> cd324ec: the base-partials shell half (Settings names the mode, the PowerMenu gate, the PowerControl verb nothing asserted)."
+    "apex-os": "roadmap/v2.2 4f80746e -> f39fd664. 8a2d7f83 p0-014 (P0-014 done: section 7's second column live, a CTAP2 second factor authorising what no password can, workspace 2351 -> 2432/0). f39fd664 p2-010 (P2-011 done: 14-row mutation battery 14/14 red, agentd 200/0, live budget check 8/0). THE MOST IMPORTANT THING IN EITHER: 706489ec. roadmap/v2.2 HAD BEEN UNABLE TO BUILD AN IMAGE SINCE 2026-09-07 - Containerfile.base's section 3.3 check was a bare `! grep -q '_keep'` over a policy file whose own comment section is headed 'and never the _keep variants', so the assertion matched the prose explaining it and set -eux turned that into a failed build. Verified both directions by the orchestrator against the shipped file before landing: the old expression fails on a correct file, the anchored one passes and still catches a real auth_admin_keep. Five days invisible because build-image.yml runs only on main.",
+    "apex-shell": "unchanged at cd324ec."
   },
-  "_status_recorded_this_round": "BASE-013, BASE-014, P1-006 -> done. BASE-009, BASE-010, P1-005, P1-007 -> partial, every one with its missing assertion named. The four partials are honest in different ways and the distinction matters: BASE-009 and BASE-010 are HARDWARE-blocked (the live Desktop->Gaming switch IS loginctl terminate-user and needs the gaming box, which Andre has put off-limits; placement and idle-unload need a GPU with a loaded model, and no reachable machine has one). P1-005 and P1-007 are STRUCTURE-blocked: R2's narrower-token half belongs to P1-011, and DNS's elevated class cannot be required because no elevated class exists in apex-secret-core - adding one is a field on OperationSpec across 28 literals in 6 files plus a break-glass grant path, which the agent deliberately refused to take unilaterally mid-integration.",
+  "_status_recorded_this_round": "P0-014 and P2-011 -> done. P0-014's asked-for counts came back UNCHANGED (test-privilege-requests.sh 39/0 -> 39/0, system_grants 12/0 -> 12/0) and that is recorded as the answer rather than massaged: neither suite exercises the relaxed value. Four rounds of orchestrators tracked those two numbers.",
   "_deliberately_held": {
     "p1-005 / p1-008 / p1-011 / p1-014": "The Cloudflare capability suite, 13 tasks, mutually conflicting (p1-005 with p1-002, p1-008 with p1-002 and p1-005, p1-011 with p1-005 and p1-008, p1-014 with p1-011), so at most ONE can hold a slot at a time. NOT dispatched again this round, and the reason is arithmetic rather than preference: the ceiling is six and five units were one item from finishing. p1-005 is FIRST IN LINE the moment a slot frees, and the slot that frees soonest is p1-035's - its remaining work is one uncommitted file. Confirm p1-002 is not in the unlanded set before dispatching p1-005.",
     "p1-038-hardware": "Still not dispatchable unattended, and the reason has not changed: the 18 labwc matrix rows need real applications on a real session. Cannot be done headless, and cannot be done on the L16 while Andre is using it. A katana job once gaming is over, or a job for Andre with a checklist. The step-by-step list is in state/agents/p1-038.md. Do not pretend otherwise.",
@@ -19,43 +19,6 @@
     "editors-launchable (user-directed)": "HOLDS THE SIXTH SLOT. Andre reported that nvim and zed do not work, then clarified: 'it says provided by apex already when i install but the existing one doesnt run'. Measured on BOTH machines before any change: /usr/bin/nvim is the real 64-bit neovim-0.11.6 rpm and runs on both; zed's binary runs on both; NEITHER machine has a Zed desktop entry; TERMINAL=alacritty IS shipped by the image so it is not a machine-local difference; xdg-terminal-exec is ABSENT on both; the L16 has ~/.config/nvim and katana has none. apex-pkg refusing with 'already provided by APEX-OS' is CORRECT - it stops an overlay shadowing the image's copy, which is the guard that was missing when 53 of katana's binaries went 32-bit - so the defect is that the provided copy cannot be LAUNCHED, not that the guard is wrong. Zed's half is fixed and landed (ec91e92). The agent on task/terminal-entries-launchable is measuring the other half headlessly: whether the launcher honours Terminal=true at all, since nvim.desktop declares it and the shell's claim that execute() 'respects Terminal=' is a comment, not evidence. It was told explicitly to report that the launcher is fine and the complaint is something else, if that is what it measures."
   },
   "agents": [
-    {
-      "slug": "p0-014",
-      "items": [
-        "P0-014",
-        "P0-015"
-      ],
-      "repo": "both",
-      "worktree": "/var/tmp/apex-work/wt-p0-014",
-      "branch": "task/p0-014-remote-lock",
-      "second_worktree": "/var/tmp/apex-work/wt-p0-015-shell",
-      "second_branch": "task/p0-015-lock-tests",
-      "agent_id": "af5342261e9b13e15",
-      "queue_id": "p0-014",
-      "dispatched": "2026-09-12T02:08+08:00",
-      "fresh_agent_for_card": "p0-014",
-      "session": "round 14 orchestrator, pid 59982",
-      "title": "finish commit 4 (the enforcement) and commit 5, on a branch whose first six commits have landed",
-      "at_dispatch": "Commit 4b DONE and pushed (2dd67e7), on top of commits 1-3 and the harness fix; 10 dirty paths to finish, commit and push. HANDED THE CI EVIDENCE ITS CARD SAID DID NOT EXIST: a GitHub runner's /proc/N/cgroup reads '/system.slice/hosted-compute-agent.service', a THIRD classification distinct from this laptop's session scope and from scheduled-job, and two request_origin tests fail there while nine pass - on a tip that already carries cca4442. Told explicitly NOT to weaken the gate to make CI green: a runner genuinely has no human at it, the gate saying so is the gate working, and the harness is what must present a real local origin. Then commit 5, and the long-open before/after counts.",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
-    },
-    {
-      "slug": "p2-010",
-      "items": [
-        "P2-011"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p2-010",
-      "branch": "task/p2-010-hardware-storage",
-      "agent_id": "adc7ed64356ca851f",
-      "queue_id": "p2-e",
-      "dispatched": "2026-09-12T02:08+08:00",
-      "fresh_agent_for_card": "p2-010",
-      "session": "round 14 orchestrator, pid 59982",
-      "title": "P2-011 agent cgroup budgets - the last item of a unit whose other three are done and recorded",
-      "at_dispatch": "budget.rs and its tests written, committed and pushed (23b543ad); one dirty path to finish. CARRIES FORWARD ITS PREDECESSOR'S DYING FINDING, which the orchestrator independently hit days earlier and abandoned a run over: apex-agentd's unit tests can HANG FOREVER - three threads blocked with no timeout, egress::tests on a unix-socket read and two pty::tests on pipe reads. Any full-workspace run can stall a CI job or an agent indefinitely, and a hang is not a pass. Told to settle what it is and, if it is outside P2-011's scope, record it precisely as a FOUND rather than fix it silently.",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
-    },
     {
       "slug": "p1-008",
       "items": [
@@ -126,6 +89,44 @@
       "title": "The APEX Remote remainder: relay, reconnect, mDNS, connection quality, two shell pages",
       "card": "NONE AT DISPATCH - told to create it as an early action.",
       "at_dispatch": "The queue note tells it what is left and what is NOT its: P1-051 stays partial for a reason outside this unit (the device key in Android Keystore with setUserAuthenticationRequired, a per-approval challenge and attestation - p1-053a's work, whose desktop half is p0-014's CTAP2 verifier, in flight right now), so it must not close P1-051 alone. THE SHAPING CONSTRAINT: do not deploy anything to Andre's Cloudflare account. Write the relay's server side with tests against a local double, exactly as the capability sets were proven against a loopback transport and the trust gate against a minted CA. 'Written, tested, ready to deploy' is a complete and honest outcome, and the card says what deploying would require."
+    },
+    {
+      "slug": "p0-finish",
+      "items": [
+        "P0-001",
+        "P0-002",
+        "P0-007",
+        "P0-015",
+        "P0-021"
+      ],
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/wt-p0-finish",
+      "branch": "task/p0-finish",
+      "agent_id": "a89ad5b4c1c4f37c6",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-12T04:12+08:00",
+      "session": "round 16 orchestrator, pid 59982",
+      "queue_id": "p0-finish",
+      "title": "The last five P0 partials",
+      "card": "NONE AT DISPATCH - told to create it as an early action.",
+      "at_dispatch": "Dispatched because P0-014 closing leaves these five as all that stands between the roadmap and a complete P0. ORDER MATTERS AND THE BRIEF SAYS WHY: P0-015's criterion 2 has no subject - 'short-lived root grants revoke on lock' cannot be tested while SystemAccess::Session and Unsafe are both refused, because no such grant exists to revoke - so P0-007 comes first and P0-015 follows from it. Told to check whether P0-014's landing (may_elevate, authorise_grant, a CTAP2 second factor) changed that premise rather than trusting the old evidence. P0-001 is mostly hardware and the gaming box is off-limits, so it was framed as 'reduce it to a precise checklist of what remains and what each needs' - except the one criterion that just became testable, 'Daily and Gaming images build cleanly', now that the branch can build at all."
+    },
+    {
+      "slug": "suite-reliability",
+      "items": [
+        "(infrastructure)"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-suite",
+      "branch": "task/suite-reliability",
+      "agent_id": "a4bbf9824093e245e",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
+      "dispatched": "2026-09-12T04:12+08:00",
+      "session": "round 16 orchestrator, pid 59982",
+      "queue_id": "suite-reliability",
+      "title": "The fork/unsetenv deadlock, a fixture writing to the real config, and an image build that never runs on this branch",
+      "card": "NONE AT DISPATCH - told to create it as an early action.",
+      "at_dispatch": "Three defects found by three different units this week, none of them the finder's to fix. (1) The fork/unsetenv deadlock, handed over fully root-caused so it is not re-derived, with the fix named - build envp before the fork and execve, plus a poll deadline - and the warning that between fork and exec only async-signal-safe calls are legal, which is the bug itself. (2) handoff_packet.rs sets HOME but not XDG_CONFIG_HOME, so an inherited value redirects apex task into the developer's REAL ~/.config/apex/tasks.toml; told to add the assertion and not just the line, since the file already carries a comment about the identical mistake with SCRATCH_ROOT_ENV. (3) build-image.yml runs only on main, which is why a build-breaking assertion sat invisible for five days; add workflow_dispatch, explicitly NOT a push trigger (an hour and several GB per landing is not the trade), and then RUN it once against roadmap/v2.2 - nobody has ever seen this branch build, and a failure there is the most valuable thing the unit could produce."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -134,7 +135,10 @@
     "FIVE PRODUCT DEFECTS from base-partials, two of which would have hit Andre directly: a remembered session that no longer exists made the greeter fall back to SORT ORDER, so a machine could land on a different desktop than the user chose; and the PowerMenu offered Gaming Mode on machines with no gamescope. Also labwc missing from the Settings compositor control entirely, layers.max(1) turning 'unknown' into 'one layer', and locate() ignoring Roots while deciding which binary gets EXECUTED - which had left three resolver tests asserting against the developer's real machine rather than the fixture.",
     "A MULTI-AGENT HAZARD worth designing around: a file in one agent's session scratchpad was overwritten mid-run by another unit's harness, because two harnesses shared a pristine/ directory. The affected agent switched to unique names and verified every file byte-identical afterwards, but a restore-the-wrong-file race between concurrent agents is a silent way to record a false mutation verdict.",
     "THREE PRE-EXISTING FLAKY TESTS recorded rather than touched, each failing once under parallel load and passing otherwise: apex-agentd grants::…another_boot… (its own module comment documents a set_var race), apex::provenance, and apex-agentd system_grants. None is in this round's diff.",
-    "NAMING NEEDS ANDRE'S RATIFICATION and is now user-visible: 'Floating' is ratified at ROADMAP.md:1031, but 'Scrolling' (niri) and 'Tiling' (Hyprland) are not - and the greeter and Settings now show them. Asked."
+    "NAMING NEEDS ANDRE'S RATIFICATION and is now user-visible: 'Floating' is ratified at ROADMAP.md:1031, but 'Scrolling' (niri) and 'Tiling' (Hyprland) are not - and the greeter and Settings now show them. Asked.",
+    "THE HANG THAT KILLED TWO SESSIONS IS ROOT-CAUSED, one defect with three symptoms: pty::spawn forks and the child calls unsetenv (pty.rs:211), which takes glibc's environment lock - held at fork time by a grants::tests thread inside set_var, so it can never be released in the child. The child deadlocks in __lll_lock_wait_private and NEVER REACHES execvp, so FD_CLOEXEC never fires and it holds every inherited fd forever: both read_sync pipe write-ends and another test's UnixStream::pair server end whose parent had already dropped it. Proven from /proc and eu-stack on two independent instances, one hung 4 h 03 m. Nothing there has a deadline. Now dispatched as suite-reliability.",
+    "A DEAD AGENT'S PROCESSES OUTLIVE ITS SESSION. A mutation battery from an agent that died at 22:45 was still running four hours later, blocked on the hung cargo, and RESUMED SPLICING MUTANTS INTO THE WORKTREE the moment the hang cleared. Check what is actually running before concluding a hang or a dirty file is yours - and the p2-010 successor's 'one dirty path to finish' turned out to be exactly that: a spliced mutant, restored rather than committed.",
+    "THE CI CGROUP QUESTION HAD A THIRD ANSWER. in-login-session.sh WORKS on a GitHub runner (logind session 2, session-2.scope, uid 1001); the two failures were in a deliberately unwrapped step asserting rules that are functions of the request alone while sitting behind an origin observation that fails there. Moved ahead of it: refuses strictly more, never less. Reproducible locally with no sudo via `unshare -C --map-current-user`, which yields cgroup 0::/ and matches neither branch of classify - 9/2 before, 11/0 after. That mechanism is reusable."
   ],
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt — the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {
@@ -148,7 +152,9 @@
   },
   "_findings_amended": "ROADMAP/state/FINDINGS-round5.md item 1 now carries an AMENDED section. Its headline - 'apex ai status --json returns prose, not JSON' - was WRONG, and the p1-039 agent proved it by measuring the streams into separate files: stdout 803 bytes of valid JSON, stderr 50 bytes of prose, exit 0, and jq worked all along. What fails is a caller that merges them with 2>&1, which is what the suite line did. The CAUSE the finding named was right and is fixed (454ae3a): PATH presence stood in for hardware. Kept rather than rewritten, because the wrong headline is itself the lesson - a finding written from a suite's failure line inherits that line's assumptions.",
   "_completed_units": {
-    "trust-enforcement": "COMPLETE AND LANDED 2026-09-08 (apex-os e67fab9 -> 583355e). Removed from queue.json units as well as from this table, and for the same reason followups-integrate-3 had to be: its items are '(new, from P1-047)' rather than roadmap ids, so resume.sh can never see it as finished and would have offered it as READY forever the moment its agent left the table."
+    "trust-enforcement": "COMPLETE AND LANDED 2026-09-08 (apex-os e67fab9 -> 583355e). Removed from queue.json units as well as from this table, and for the same reason followups-integrate-3 had to be: its items are '(new, from P1-047)' rather than roadmap ids, so resume.sh can never see it as finished and would have offered it as READY forever the moment its agent left the table.",
+    "p0-014": "COMPLETE AND LANDED 2026-09-12 (merge 8a2d7f83). P0-014 done - the last P0 feature work. P0-015 remains partial and is now p0-finish's, because its criterion 2 has no subject until P0-007 provides a short-lived root grant to revoke.",
+    "p2-010 (queue id p2-e)": "COMPLETE AND LANDED 2026-09-12 (merge f39fd664). All four items proven by mutation battery: P2-010 7 rows, P2-011 14 rows, P2-014 16 rows, every one red with restores verified identical. Its final round made NO commit, deliberately - the 'dirty path' it was sent to finish was a spliced mutant left by its dead predecessor, restored rather than committed."
   },
   "_verification_on_the_landed_tip": {
     "cargo": "cargo test --locked --workspace --no-fail-fast: 36 binaries, 2339 passed, 1 failed. The one failure is renewing_a_grant_that_does_not_exist_is_refused_without_asking_anybody in apex-agentd/tests/system_grants.rs - the SAME pre-existing cgroup/origin artifact the baseline (1964 passed / 1 failed) carried. No new failure. The landings added 6 test binaries and 375 tests.",
