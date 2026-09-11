@@ -70,6 +70,14 @@ pub enum Reply {
         paired: usize,
         /// Whether a pairing offer is open right now, and for how much longer.
         offer_ms_left: Option<u64>,
+        /// Every connection open right now, with the path it came in on and
+        /// the last round trip measured on it.
+        ///
+        /// P1-052's last criterion, on the desktop side. Live rather than
+        /// remembered: a quality from a session that has ended is not a fact
+        /// about now.
+        #[serde(default)]
+        connections: Vec<apex_remote_core::rendezvous::Connection>,
     },
     /// A pairing offer. `qr` is the whole payload; `expires_ms` is when it
     /// stops being accepted.
@@ -204,6 +212,7 @@ fn status(state: &State) -> Reply {
         rendezvous: apex_remote_core::rendezvous::rendezvous_id(&state.identity.public_bytes()),
         paired,
         offer_ms_left: state.offer_ms_left(now),
+        connections: state.connections(),
     }
 }
 
@@ -362,6 +371,7 @@ mod tests {
                 machine: "l16".into(),
                 lan: vec!["10.0.0.1:7717".into()],
                 relay: None,
+                connections: Vec::new(),
                 rendezvous: "r".into(),
                 paired: 0,
                 offer_ms_left: Some(1000),

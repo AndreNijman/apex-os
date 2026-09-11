@@ -53,7 +53,14 @@ pub enum RemoteCmd {
         device: String,
     },
     /// Whether the service is running, and how a device would reach it.
-    Status,
+    ///
+    /// Including every connection open right now: which path it came in on,
+    /// and how good it is. That is the measurement P1-052 asks to be visible
+    /// on the desktop, and `--json` is how APEX Settings reads it.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
     /// Turn APEX Remote on for this account.
     ///
     /// Enables and starts the per-user service, the same way `apex agent
@@ -88,6 +95,8 @@ enum Reply {
         rendezvous: String,
         paired: usize,
         offer_ms_left: Option<u64>,
+        #[serde(default)]
+        connections: Vec<apex_remote_core::rendezvous::Connection>,
     },
     Offer {
         qr: String,
@@ -111,7 +120,7 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
         RemoteCmd::Pair { text } => pair(text),
         RemoteCmd::Devices { json } => devices(json),
         RemoteCmd::Revoke { device } => revoke(&device),
-        RemoteCmd::Status => status(),
+        RemoteCmd::Status { json } => status(json),
         RemoteCmd::Enable => enable(),
     };
     match result {
@@ -237,7 +246,8 @@ fn revoke(device: &str) -> Result<i32> {
     }
 }
 
-fn status() -> Result<i32> {
+fn status(json: bool) -> Result<i32> {
+    let reply = call(&Request::Status)?;
     let Reply::Status {
         version,
         key,
@@ -247,10 +257,42 @@ fn status() -> Result<i32> {
         rendezvous,
         paired,
         offer_ms_left,
-    } = call(&Request::Status)?
+        connections,
+    } = reply
     else {
         return unexpected();
     };
+    if json {
+        // The daemon's own reply, re-emitted rather than re-assembled: a
+        // second serialisation here is a second thing to keep in step with
+        // the page that reads it.
+        println!(
+            "{}",
+            serde_json::json!({
+                "machine": machine,
+                "protocol": version,
+                "identity": key,
+                "paired": paired,
+                "lan": lan,
+                "relay": relay,
+                "rendezvous": rendezvous,
+                "offer_ms_left": offer_ms_left,
+                "connections": connections
+                    .iter()
+                    .map(|c| serde_json::json!({
+                        "device_id": c.device_id,
+                        "device_name": c.device_name,
+                        "path": c.path,
+                        "since_ms": c.since_ms,
+                        "rtt_ms": c.rtt_ms,
+                        "quality": c.quality().as_str(),
+                        "disclosure": c.disclosure(),
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        );
+        return Ok(0);
+    }
     println!("machine        {machine}");
     println!("protocol       {version}");
     println!("identity       {key}");
@@ -274,10 +316,40 @@ fn status() -> Result<i32> {
         }
         None => println!("relay          none — this machine is reachable on the LAN only"),
     }
+    if connections.is_empty() {
+        println!("connected      no device is connected right now");
+    } else {
+        println!("connected      {} device(s)", connections.len());
+        for c in &connections {
+            // The round trip AND the band. The number is for whoever wants
+            // it; the word is what tells somebody whether their terminal is
+            // going to feel wrong.
+            let rtt = match c.rtt_ms {
+                Some(ms) => format!("{ms} ms"),
+                None => "not measured yet".to_string(),
+            };
+            println!("{}", connection_line(c, &rtt));
+        }
+    }
     if let Some(ms) = offer_ms_left {
         println!("\na pairing code is open for another {} seconds", ms / 1000);
     }
     Ok(0)
+}
+
+/// One line about one open connection.
+///
+/// Extracted so it can be asserted about without starting a daemon, and
+/// because the three things it has to carry — which device, which path, how
+/// good — are exactly P1-052's last criterion and are easy to lose one of.
+fn connection_line(c: &apex_remote_core::rendezvous::Connection, rtt: &str) -> String {
+    format!(
+        "  {} over {} — {} ({})",
+        c.device_name,
+        c.path,
+        c.quality(),
+        rtt
+    )
 }
 
 /// `systemctl --user enable --now apex-remoted`, and say what it did not do.
@@ -421,5 +493,43 @@ mod tests {
         assert!(ago(now.saturating_sub(3 * 86_400_000)).ends_with("d ago"));
         // A timestamp from the future is not a panic and not a negative.
         assert_eq!(ago(now + 60_000), "0s ago");
+    }
+
+    #[test]
+    fn a_status_reply_from_a_daemon_that_predates_connections_still_parses() {
+        // The CLI and the daemon land in one image but not in one build, and
+        // a shell page that showed nothing because a field was absent would
+        // be a regression nobody could see coming.
+        let old = r#"{"reply":"status","version":1,"key":"k","machine":"l16","lan":[],"relay":null,"rendezvous":"r","paired":0,"offer_ms_left":null}"#;
+        let Reply::Status { connections, .. } = serde_json::from_str(old).expect("parse") else {
+            panic!("not a status");
+        };
+        assert!(connections.is_empty());
+    }
+
+    #[test]
+    fn a_connection_line_names_the_device_the_path_and_the_band() {
+        // All three, because each has been the one somebody left out: a line
+        // with only a number does not say whether a third party is carrying
+        // it, and a line with only a path does not say whether it is usable.
+        let c = apex_remote_core::rendezvous::Connection {
+            device_id: "abcd".into(),
+            device_name: "pixel-8".into(),
+            path: "relay".into(),
+            since_ms: 0,
+            rtt_ms: Some(310),
+        };
+        let line = connection_line(&c, "310 ms");
+        assert!(line.contains("pixel-8"), "{line}");
+        assert!(line.contains("relay"), "{line}");
+        assert!(line.contains("poor"), "{line}");
+        assert!(line.contains("310 ms"), "{line}");
+
+        // And an unmeasured connection says so rather than reporting the
+        // worst band for a connection that has simply just opened.
+        let fresh = apex_remote_core::rendezvous::Connection { rtt_ms: None, ..c };
+        let line = connection_line(&fresh, "not measured yet");
+        assert!(line.contains("unmeasured"), "{line}");
+        assert!(!line.contains("poor"), "{line}");
     }
 }

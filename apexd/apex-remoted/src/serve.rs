@@ -24,6 +24,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use apex_remote_core::noise::{Channel, Handshake};
 use apex_remote_core::pairing::{PairingRequest, PairingError};
@@ -39,6 +40,14 @@ use crate::state::{Live, State};
 /// be steered towards.
 pub const HELLO_PAIR: u8 = b'P';
 pub const HELLO_SESSION: u8 = b'S';
+
+/// How often the desktop measures an open connection.
+///
+/// Fifteen seconds is a compromise between a page that is out of date and a
+/// radio that is kept awake. It is also the keepalive: a `Ping` is the only
+/// traffic an idle session has, and an idle session with no traffic is one a
+/// NAT eventually forgets.
+pub const PING_INTERVAL: Duration = Duration::from_secs(15);
 
 /// How long an unauthenticated peer may take to finish its handshake.
 ///
@@ -209,22 +218,36 @@ fn session(
     socket.set_read_timeout(None).ok();
     socket.set_write_timeout(None).ok();
 
+    // The peer address is what identifies THIS connection among a device's
+    // several, so it is read once here: after the socket is shut down there
+    // is nothing to read it from, and `unregister` would then match nothing.
+    // It is also what says which path this session arrived on, so it is read
+    // before the store is told.
+    let peer = socket.peer_addr().ok();
+    let path = state.path_of(peer);
+    let now = apex_remote_core::now_ms();
     {
         let mut store = state
             .devices()
             .map_err(|e| ServeError::Protocol(e.to_string()))?;
-        store.seen(&device_id, apex_remote_core::now_ms(), "lan");
+        // Not the literal "lan" it used to be: a relayed session reaches this
+        // listener too, and a device list that called every session local
+        // would be telling the owner nobody else was on the path.
+        store.seen(&device_id, now, path.as_str());
         let _ = state.save_devices(&store);
     }
-    // The peer address is what identifies THIS connection among a device's
-    // several, so it is read once here: after the socket is shut down there
-    // is nothing to read it from, and `unregister` would then match nothing.
-    let peer = socket.peer_addr().ok();
+    // Shared with the frame loop, which is the only writer, and with anybody
+    // asking for status, which is the only reader.
+    let rtt_ms: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
     if let Ok(s) = socket.try_clone() {
         state.register(Live {
             device_id: device_id.clone(),
             peer,
             socket: s,
+            device_name: device_name.clone(),
+            path,
+            since_ms: now,
+            rtt_ms: Arc::clone(&rtt_ms),
         });
     }
 
@@ -236,6 +259,7 @@ fn session(
         agentd,
         &device_id,
         &device_name,
+        rtt_ms,
     );
     state.unregister(&device_id, peer);
     result
@@ -248,6 +272,7 @@ fn session(
 /// that goes out of this connection goes through that one queue, because the
 /// Noise channel's nonce is a counter and two threads sealing concurrently
 /// would produce two messages claiming the same one.
+#[allow(clippy::too_many_arguments)]
 fn frames(
     mut inbound: TcpStream,
     outbound: TcpStream,
@@ -256,6 +281,7 @@ fn frames(
     agentd: &std::path::Path,
     device_id: &str,
     device_name: &str,
+    rtt_ms: Arc<Mutex<Option<u64>>>,
 ) -> Result<(), ServeError> {
     let sealer = Arc::new(Mutex::new(Sealer {
         channel,
@@ -263,6 +289,34 @@ fn frames(
     }));
     let mut ptys: Vec<PtyChannel> = Vec::new();
     let _ = device_name;
+
+    // The desktop measures its own connections. Answering a device's pings,
+    // which is all this used to do, tells the desktop nothing: a round trip
+    // is only known to whoever sent the first half of it.
+    let outstanding = Arc::new(Mutex::new(Outstanding::default()));
+    {
+        let sealer = Arc::clone(&sealer);
+        let outstanding = Arc::clone(&outstanding);
+        let interval = state.ping_interval;
+        std::thread::spawn(move || {
+            let mut token: u64 = 0;
+            loop {
+                token += 1;
+                {
+                    let Ok(mut o) = outstanding.lock() else { return };
+                    o.sent(token);
+                }
+                // The thread ends when the write fails, which is what a
+                // closed connection looks like from here. No flag to check
+                // and nothing to leak: one thread per open connection, gone
+                // when the connection is.
+                if send(&sealer, Frame::Ping { token }).is_err() {
+                    return;
+                }
+                std::thread::sleep(interval);
+            }
+        });
+    }
 
     loop {
         let message = match crate::net::read_message(&mut inbound) {
@@ -281,9 +335,19 @@ fn frames(
         let frame = Frame::decode(&plaintext).map_err(|e| ServeError::Protocol(e.to_string()))?;
         match frame {
             Frame::Ping { token } => send(&sealer, Frame::Pong { token })?,
-            // A desktop never receives one it did not ask for; answering it
-            // would let a device measure this machine's clock for free.
-            Frame::Pong { .. } => {}
+            // The other half of the measurement. A token that was never sent
+            // is ignored rather than timed: a device that echoed a number of
+            // its own choosing could otherwise report any quality it liked,
+            // including a good one for a connection that is unusable.
+            Frame::Pong { token } => {
+                if let Ok(mut o) = outstanding.lock() {
+                    if let Some(elapsed) = o.answered(token) {
+                        if let Ok(mut v) = rtt_ms.lock() {
+                            *v = Some(elapsed.as_millis() as u64);
+                        }
+                    }
+                }
+            }
             Frame::Control(line) => {
                 let reply = control(agentd, device_id, &line);
                 send(&sealer, Frame::Control(reply))?;
@@ -329,6 +393,43 @@ fn frames(
             }
         }
         let _ = state;
+    }
+}
+
+/// Pings that have gone out and not come back.
+///
+/// Bounded on purpose. A device that answers nothing would otherwise make
+/// this grow by one entry every interval for as long as the connection is
+/// open, which is a slow leak driven by the far end — exactly the shape of
+/// thing a remote peer should not be able to do.
+#[derive(Default)]
+struct Outstanding {
+    sent: std::collections::VecDeque<(u64, Instant)>,
+}
+
+impl Outstanding {
+    /// How many unanswered pings are remembered.
+    ///
+    /// Four intervals' worth. Past that a connection is not slow, it is gone,
+    /// and the answer to a ping from a minute ago is not a measurement of
+    /// anything current.
+    const DEPTH: usize = 4;
+
+    fn sent(&mut self, token: u64) {
+        self.sent.push_back((token, Instant::now()));
+        while self.sent.len() > Self::DEPTH {
+            self.sent.pop_front();
+        }
+    }
+
+    /// The round trip for a token this connection actually sent, or `None`.
+    ///
+    /// Consumed, so a device replaying one pong cannot pin a good reading in
+    /// place while the connection degrades.
+    fn answered(&mut self, token: u64) -> Option<Duration> {
+        let i = self.sent.iter().position(|(t, _)| *t == token)?;
+        let (_, at) = self.sent.remove(i)?;
+        Some(at.elapsed())
     }
 }
 
