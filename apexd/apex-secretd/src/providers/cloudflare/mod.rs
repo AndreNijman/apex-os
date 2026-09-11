@@ -158,8 +158,11 @@
 //! may route to… Workers AI, AI Gateway"*. `apex-aid` is that service, and two
 //! things about it, both checked rather than assumed:
 //!
-//! * [`apexd_core::ai::Backend`] is a *compute* backend — `Cuda`, `Rocm`,
-//!   `Vulkan`, `Cpu` — with no notion of a remote provider to select;
+//! * `apexd_core::ai::Backend` is a *compute* backend — `Cuda`, `Rocm`,
+//!   `Vulkan`, `Cpu` — with no notion of a remote provider to select. Named
+//!   here in plain backticks and not as an intra-doc link on purpose:
+//!   `apexd-core` is not a dependency of this crate, which is itself part of
+//!   the point, and a link to it would be a rustdoc warning rather than a link;
 //! * the inference runtime is started under `bubblewrap` with `--unshare-net`,
 //!   and `apex-aid`'s own module note calls that flag the load-bearing one.
 //!   The backend cannot reach `api.cloudflare.com` because it cannot reach
