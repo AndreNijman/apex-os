@@ -54,7 +54,7 @@ suite and a mutation pair.
 | screen reader | **partial** | Markup measured at runtime (see login row). The end-to-end AT-SPI walk is NOT done — see "What could not be measured". |
 | magnifier | not present | no magnifier in either repo; wlroots has no standard one |
 | high contrast | present, untested as a11y | six shaders in apex-shell `src/config/shaders/` incl. `HighContrast.glsl`, applied via Hyprland `decoration:screen_shader` only — niri and labwc get nothing, and it is shipped as a visual effect, not an a11y feature |
-| reduced motion | **present, 11% effective, 0 tests** (unchanged) | `SettingsService.reduceMotion` → `effectiveAnim`; reaches 48 of 451 `duration:` sites. 402 are int literals. `grep reduceMotion tests/` = 0 |
+| reduced motion | **MEASURED and ratcheted** | `tests/check-reduce-motion.sh` — 12 assertions. Reaches **39 of 450** animation durations (8.7%); **402 are bare int literals** no switch can touch; 9 resolve to neither. Counts pinned exactly in both directions, the chain asserted link by link, 3 self-tests. Runtime half (turn it on in a live shell, read a Behavior's duration back) NOT built — `SettingsService` imports Quickshell so qmltestrunner cannot load it. |
 | large text | partial by other means | no text-specific setting; only the global `Metrics.scale` (0.5–3.0). One real a11y constant: the 7px floor in `fs()`, enforced by `check-scale-tokens.sh` |
 | colour filters | **present** | shipped shaders + hyprshade's protanopia/deuteranopia/tritanopia, Hyprland only |
 | sticky keys | not present | 0 mentions in either repo |
@@ -153,21 +153,32 @@ Both repos on `task/p2-b-accessibility-i18n`, both pushed, neither rebased.
 
 **apex-os** — `a0dd1999`, `e5d049ad`, `69f59cb0`
 - `tests/test-apex-greet-a11y.sh` + `greet-a11y-test.qml` — **22 assertions**.
-- `tests/test-apex-greet-layout.sh` — **25 assertions**, including a two-mutant
-  inline self-test.
+- `tests/test-apex-greet-layout.sh` — **25 assertions** locally (23 + 1 skip on
+  the CI runner, which has no qmllint), including a two-mutant inline self-test.
 - Baseline before the fix: **15 of 17** accessibility/keyboard assertions failed
   on the shipped greeter.
-- CI: the layout suite passes on the runner. The a11y suite runs in a
-  **Fedora container** — ubuntu-24.04 ships Qt 6.4 and the greeter imports
-  `QtQuick.Effects` (MultiEffect, Qt 6.5+), so on the runner itself it skipped
-  on every run. Verified by running it: 22 assertions, same result.
+- CI **confirmed green on the branch** (run 34640150697): the a11y suite prints
+  `Totals: 22 passed, 0 failed` and the layout suite `23 passed, 0 failed, 1
+  skipped`. The a11y suite runs in a **Fedora container** — ubuntu-24.04 ships
+  Qt 6.4 and the greeter imports `QtQuick.Effects` (MultiEffect, Qt 6.5+), so on
+  the runner itself it skipped on every run. The first dispatch proved that:
+  `E: Unable to locate package qml6-module-qtquick-effects` → `SKIP`.
+- Two jobs in that run are red for reasons **predating this branch and untouched
+  by it** — this branch changes no Rust and no agent code:
+  `tests/test-agent-inject.sh` and `apex-agentd/tests/request_origin.rs` both
+  fail because `/proc/<pid>/cgroup` places the hosted runner's connection in
+  `system.slice/hosted-compute-agent.service`, which is neither a login session
+  nor a user service, so origin detection cannot classify it.
 
-**apex-shell** — `83775dc`
+**apex-shell** — `83775dc`, `7ba196e`
 - `tests/run-a11y-controls-test.sh` + `a11y-controls-test.qml` — **21
   assertions** over the shipped `src/components/config`.
 - `CfgRow` now hands its words to the control it holds; `CfgSwitch`,
   `CfgButton`, `CfgTile`, `CfgSegmented`, `CfgTextField`, `CfgSlider`,
   `CfgSwatch` gained roles, state, tab stops, Space/Enter and focus rings.
+- `tests/check-reduce-motion.sh` — **12 assertions** measuring and pinning how
+  far Reduce Motion reaches (39/450), with 3 self-tests including an inverse
+  prose mutant.
 - Wired into `ci.yml` and `structure-check`'s manifest.
 - Regression found and fixed: `check-wheel-value.sh`'s third self-test mutant
   anchored on the exact `CfgSwitch` line this change rewrites. It reported *"the
