@@ -6,21 +6,24 @@ branch: task/base-partials (apex-os), task/base-partials-shell (apex-shell)
 base: apex-os e67fab9, apex-shell a90cef6 (both origin/roadmap/v2.2)
 
 ## NEXT
-Round 11 in progress. BASE-018, BASE-002, BASE-016, BASE-005 CLOSED (round 9/10
-RESULTS below). Both branches MERGED (not rebased) with origin/roadmap/v2.2
-today and pushed: apex-os task/base-partials == 1afd807, apex-shell
-task/base-partials-shell == 665a3cc — both were fast-forwards, my round-9/10
-commits are contained in the landed tip.
+Round 11 in progress. BASE-018, BASE-002, BASE-016, BASE-005 CLOSED (rounds
+9/10). Both branches MERGED (not rebased) with origin/roadmap/v2.2 and pushed;
+both merges were fast-forwards.
 
-**Exact next action:** BASE-013 criterion 3 — add a session-id -> user-facing
-name map to the greeter (`files/desktop/apex-greet/GreetContext.qml`, the
-`Name=` sed at :332 inside the wayland-sessions enumeration) so the carousel
-stops printing `labwc (APEX)` / `niri` / `Hyprland`, plus the apex-shell
-`MiscPage.qml:213-224` segmented control which labels compositors with raw
-lowercase ids and omits labwc entirely. DO NOT touch the backends'
-`displayName` — two suites pin it (check-compositor-backends.sh:112,
-compositor-facade-test.qml:279-285) and its contract is the adapter's own name.
-Then BASE-014 (wtype key-after-reconfigure), BASE-010, BASE-009.
+**Exact next action:** BASE-013's apex-SHELL half. Edit
+`src/services/config_tab/pages/MiscPage.qml`: the compositor segmented control
+at :213-224 labels its options with raw lowercase ids (`hyprland`, `niri`) and
+OMITS labwc entirely even though `Compositor.isValidName` (src/state/
+Compositor.qml:68-70) accepts "labwc" — so a labwc user cannot pin their own
+compositor from Settings. Add the map as `presentedName(id)` + a `modeName`
+property on `src/state/Compositor.qml` (NOT on the backends: `displayName` is
+the adapter's own name and is pinned by check-compositor-backends.sh:112 and
+compositor-facade-test.qml:279-285 — leave it alone), relabel the control
+Auto/Tiling/Scrolling/Floating with the VALUES unchanged, add the labwc option,
+and fix the help text at :200 which names only niri as the degrading target.
+Then a new `tests/check-compositor-naming.sh` in apex-shell house style
+(ok/bad/want, two-space PASS/FAIL, `passed=/failed=` footer).
+Then BASE-014 (wtype), BASE-010, BASE-009.
 
 ### Round-10 correction to this card's own work order
 The previous NEXT said BASE-016 was still to do. It was already DONE at
@@ -31,6 +34,60 @@ and concludes wrongly from it — `test-apex-recover.sh` already drives the
 shipped `apex-disposable` through a stub capsule engine, and `pr-validation.yml`
 runs it in the `static` job, the one with no path filter). Counts re-verified
 this round, see RESULTS.
+
+## RESULTS (round 11) — per item
+
+### BASE-013 — apex-os half DONE. apex-os 836df42 on task/base-partials.
+Criterion 3 was recorded FAILING as a real defect. It was: the greeter renders
+each wayland-session's `Name=` verbatim, so the login carousel read
+`labwc (APEX) · niri · Hyprland` — three vendored project names, one of them
+the default session.
+- The fix is DATA, not code. The greeter stays a faithful desktop-entry
+  consumer (what the spec asks of it) and the entries carry product names:
+  apex-labwc -> **APEX Floating** (ROADMAP.md:1031 ratifies the word),
+  niri -> **APEX Scrolling**, hyprland -> **APEX Tiling** (both from
+  ROADMAP.md:91's "scrolling workstation" / "dynamic tiling workstation").
+  apex-gaming already read "APEX Gaming Mode" and is unchanged.
+  **PRODUCT DECISION NEEDING ANDRE'S RATIFICATION:** "Floating" is ratified in
+  the roadmap; "Scrolling" and "Tiling" are my reading of ROADMAP.md:91 and are
+  new user-visible words. Easy to change — they live in two .desktop files and
+  one Containerfile sed.
+- `hyprland.desktop` belongs to the Hyprland PACKAGE, so it is the one entry
+  this repo cannot word in a file it owns: Containerfile.base renames it after
+  the package lands, and Containerfile.apex sweeps the FINISHED directory (the
+  only point where all four exist) and refuses a build whose picker names a
+  compositor — which also catches the next package that drops an entry in.
+- Nothing that keys off these files keys off `Name`: the greeter's default is
+  the literal id "hyprland", last-session stores the file stem,
+  apex-session-select validates the stem, niri-portals.conf reads
+  `DesktopNames`. All asserted unchanged in §6 of the new suite.
+- `tests/test-apex-greet-sessions.sh` **34 passed, 0 failed, 0 skipped**. It
+  EXTRACTS AND RUNS rather than restates: the `sh -c` enumeration is lifted out
+  of GreetContext.qml, the rename out of Containerfile.base, the sweep out of
+  Containerfile.apex (reusing `files/scripts/check-containerfile-order`'s own
+  `logical_lines` so comment-stripping matches the Dockerfile parser). A gate
+  that otherwise only runs inside a multi-hour image build now runs per-PR in
+  under a second.
+- **The plausibility checks on each extraction earned their place immediately.**
+  The first extractor stopped at the `]` inside `[ -r "$f" ]` and returned a
+  50-char fragment; the sweep extractor first matched the OTHER loop in the same
+  RUN (the greeter enumeration replayed inside a single-quoted `ENUM='...'`,
+  whose `done'` defeats a `.*?done;` span). Both surfaced as FAILs, not as a
+  green suite over an empty script.
+- The build sweep counts what it swept and refuses `< 4`, because a sweep of a
+  directory that turned out empty would print nothing, exit 0, and be a build
+  step that cannot fail.
+- MUTATION-PROVED four ways, tree restored clean after each: restoring
+  `Name=labwc (APEX)` reddens 6 including the criterion assertion itself;
+  deleting the Containerfile.base rename reddens 6; and the suite carries two
+  in-file mutations that require the extracted BUILD GATE to refuse (a re-named
+  entry, and an entry with no `Name=`) before it will believe the gate works.
+- `check-containerfile-order` clean on both Containerfiles. `bash -n` clean.
+  `git check-ignore` on the new file: not ignored. stop_slop run on the two
+  prose files; on the ADDED lines only it is down to a single em-dash, which is
+  this file's own house style. shellcheck is ABSENT on the L16 (no package on
+  the atomic image) — the suite is wired into pr-validation.yml's ShellCheck
+  gate at :1299 so CI runs it.
 
 ## RESULTS (round 10) — per item
 
@@ -184,6 +241,65 @@ both contained in `task/base-partials`, and both carry named regression tests.
 - nothing yet
 
 ## FOUND
+- **BASE-009, a lockout-class greeter defect (NOT YET FIXED).**
+  `GreetContext.qml:83-86` `_selectWanted()`: when `/var/lib/apex-greet/
+  last-session` names a session the TryExec filter removed — exactly what
+  happens after a Gaming Mode switch if gamescope is later removed or the
+  sysext has not refreshed — it returns WITHOUT selecting anything, leaving
+  `sessionIndex` at its default 0, i.e. the first surviving sorted entry
+  (`apex-labwc`), not `defaultSession` ("hyprland"). The named-default
+  protection at :66-79 covers only the empty-`_wantSession` path. This is the
+  same class of defect as the hyprland-uwsm lockout the file's own comment
+  describes.
+- **BASE-009, second gap (NOT YET FIXED).** apex-shell `PowerMenu.qml:141-142`
+  gates the Gaming Mode row on helper + desktop file only, never on gamescope.
+  Where the entry exists but gamescope does not, the menu offers a switch that
+  logs the user out into a greeter that HIDES the session, landing them back on
+  the desktop with `last-session=apex-gaming` recorded — which then trips the
+  defect above. The build asserts the greeter hides it
+  (Containerfile.apex:129-138); nothing asserts the power menu agrees.
+- **BASE-009: `apex-session-select --switch` IS `loginctl terminate-user`**
+  (`files/system/libexec/apex-session-select:107`). It ends EVERY logind session
+  for the uid and tears down `user-<uid>.slice` — Andre's 5-day Steam client,
+  his seat0 desktop, and any agent's own ssh process tree. There is NO partial
+  form: `:95` exits 0 before it unless `--switch` is passed. DO NOT RUN IT. The
+  non-destructive half (validate + write + chown + sync, `:69-92`) runs without
+  `--switch` and is the most that can be exercised live.
+- **BASE-009 deliverable located:** apex-shell
+  `check-compositor-backends.sh:340-343`'s DISPATCH covers `desktopmode` but
+  NOT `gamingmode`, and `gamingmode` is also missing from that file's
+  "Not listed, with reasons" block. Nothing in either repo asserts the
+  `gamingmode` branch. `APEX_COMPOSITOR_DRY_RUN=1` makes it safe: `apex_run`
+  (compositor.sh:46-50) prints argv and returns, never execs. Verified live by
+  the recon agent: `gamingmode` prints
+  `sudo -n /usr/libexec/apex-session-select apex-gaming --switch` rc=0.
+- **BASE-010: an assertion that cannot fail, in the Rust tests.**
+  `apexd/apexd-core/src/aiprobe.rs:978-1001` `fn resolvable()` writes a fake
+  `llama-server` and returns its path — but every caller binds it as `_fake`
+  and nothing sets `APEX_AI_RUNTIME`, so the three resolve tests (`:1111`,
+  `:1141`, `:1163`) are written as `if let Ok(r) = resolve(...)` and assert
+  NOTHING on a machine with no llama-server. The docstring at `:344-345` claims
+  "`$APEX_AI_RUNTIME` … is what the shell suite points at a fake backend";
+  repo-wide, nothing sets it. That is the mechanical reason placement has never
+  run.
+- **BASE-010: a real planner defect.** `ai.rs:1327` `let layers = layers.max(1)`
+  means a manifest with `layers: 0` — which is exactly what `apex ai pull --url`
+  writes (`apex/src/ai.rs:1047`) — plans `Placement::Gpu { layers: 1 }` and
+  emits `--n-gpu-layers 1`, while the CLI simultaneously prints "cannot plan a
+  partial offload for it" (`apex/src/ai.rs:1074`).
+- **BASE-010 levers that make the item closable:** `APEX_AI_STORE` (a
+  hand-built store needs no root; `pull` needs root, the store does not),
+  `APEX_AI_RUNTIME` (must be a regular file), `idle_timeout` in
+  `~/.config/apex/ai.toml` (valid down to small values; supervisor tick is 5s,
+  `main.rs:81`). Unload is a real SIGTERM to the process group with a 5s grace
+  then SIGKILL (`runtime.rs:438`); the log line to assert is
+  `apex-aid: unloading {model} after {n}s idle` then `backend stopped in {ms} ms`
+  — the SIGTERM-vs-SIGKILL distinction IS the "VRAM released cleanly" claim.
+- katana (checked live this round): gamescope, steam, mangohud, wtype,
+  nvidia-smi all PRESENT; llama-server and ollama ABSENT; GPU at 0%/22 MiB and
+  no game running, but Andre is logged in on seat0 with a Steam client up 5
+  days. The L16 has NEITHER gamescope nor steam (steam only as a Flatpak, which
+  `apex-gaming-session:52`'s `command -v steam` does not satisfy).
 - CLAUDE.md records that katana now HAS steam + gamescope + mangohud installed
   (apex-user.raw, 219 pkgs) as of 2026-09-06. BASE-009's "gamescope and steam
   are not installed" is stale. Does not by itself close the item.
