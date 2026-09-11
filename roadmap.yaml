@@ -2118,29 +2118,38 @@ tasks:
     manual override that outranks it, and Metrics' own scale goes through it. windows/DisplayConfirm.qml and
     windows/ConfirmDialog.qml build their own ThemeSet from their own screen. MEASURED on two headless outputs
     BOTH AT COMPOSITOR SCALE 1: HEADLESS-1 3840x2160 -> factor 1.5, DisplayConfirm card 600px wide, radius 23;
-    HEADLESS-2 1920x1080 -> factor 1.0, same card 400px wide, radius 15. run-scaling-test 30/0 -> 48/0 mixed, 49/0
-    with the outputs brought into agreement by SCALING_SCALES='2 1', 29/0 on one output; check-scale-tokens 8/0 ->
+    HEADLESS-2 1920x1080 -> factor 1.0, same card 400px wide, radius 15. run-scaling-test 30/0 -> 53/0 mixed, 54/0
+    with the outputs brought into agreement by SCALING_SCALES='2 1', 32/0 on one output; check-scale-tokens 8/0 ->
     16/0; check-headless-runners 25/0 unchanged; run-popup-smoke 0 errors; run-display-transaction 42/0; run-
     display-unplug 21/0; scaling-test.js 39/0. Mutation pairs, restored byte-identical by sha256 with cp: M1
     factorForScreen ignores its screen 43/5, M2 the card back on global Theme.px 46/2, M3 the objectName the suite
     finds the card by is renamed 39/5 (it FAILS rather than vanishing, because 'exactly one card was found' is
     itself an assertion), M4 ConfirmDialog radius becomes a literal 46/2, M5 runner claims two outputs and the
-    backend supplies one 28/1. check-scale-tokens had to learn the migrated spelling: its rules matched Theme.fs(
-    only, so a file fell out of the guard the moment it was migrated - it now matches (Theme|Metrics|theme).,
-    requires exactly one definition of fs() carrying the floor, and refuses a per-output surface that reads any
-    size from the global Theme. STILL PARTIAL, deliberately: 114 of 116 files read the global Theme. The blocker
-    is NOT the call-site count (measured 2758 reads across 116 files on this tip; the older 831/82 figure's method
-    is unrecorded). QtQuick's Screen attached property resolves the right output per item with no plumbing -
-    measured correct 1ms after construction, before first paint at 39-84ms - so a file migrates with one property
-    declaration plus a rename. What blocks bulk migration is three things: TopBar writes its notch widths into
-    ShellState singleton fields that one bar per output would fight over (3 writes, 4 reads in PopupDismiss, plus
+    backend supplies one 28/1, M6 the manual override dropped from the per-output policy 51/2 (only HEADLESS-2
+    goes red - its own density wants 1.0 while the manual factor is 1.5, and HEADLESS-1's own density already
+    wants 1.5, which is why one output cannot prove this). A manual factor is an explicit instruction that applies
+    to the whole desk, per-output surfaces included, and the suite now asserts every per-output surface follows
+    it. check-scale-tokens had to learn the migrated spelling: its rules matched Theme.fs( only, so a file fell
+    out of the guard the moment it was migrated - it now matches (Theme|Metrics|theme)., requires exactly one
+    definition of fs() carrying the floor, and refuses a per-output surface that reads any size from the global
+    Theme. STILL PARTIAL, deliberately: 114 of 116 files read the global Theme. The blocker is NOT the call-site
+    count (measured 2758 reads across 116 files on this tip; the older 831/82 figure's method is unrecorded).
+    QtQuick's Screen attached property resolves the right output per item with no plumbing - measured correct 1ms
+    after construction, before first paint at 39-84ms - so a file migrates with one property declaration plus a
+    rename. What blocks bulk migration is three things: TopBar writes its notch widths into ShellState singleton
+    fields that one bar per output would fight over (3 writes, 4 reads in PopupDismiss, plus
     Popups.dashboardPageWidth), so those must become per-screen state first; the bar height is the layout datum
     every other surface anchors to (Border and Osd both set margins.top from Theme.notchHeight), so the bar and
     its whole notch subtree are one indivisible step; and nine files read Theme from a QtObject/Singleton root
     where Screen cannot attach (27 refs across DashboardLayout, Popups, PluginService, WallpaperService,
     SettingsService). The staged design for the rest is on ROADMAP/state/agents/p1-040.md. The Display page's
     statement about when the desk cannot share one size remains correct and is still the answer for the unmigrated
-    114.
+    114. ALSO: the scaling suites were never in CI. ci.yml named check-scale-tokens.sh and nothing else from this
+    item; tests/scaling-test.js exists precisely because the QML suite needs a compositor and skips without one -
+    'which is every CI runner this project has', in its own header - and had never been added, so the breakpoint
+    table it guards was unguarded in CI since it was written. Both are steps now, run-scaling-test.sh twice
+    (disagreeing desk, and SCALING_SCALES='2 1' agreeing), and it skips cleanly status 0 where there is no
+    compositor.
 - id: P1-041
   title: Creator color-management stack
   priority: P1
