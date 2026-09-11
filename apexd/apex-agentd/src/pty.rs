@@ -657,9 +657,7 @@ fn child_env(overrides: &[(String, String)], clear_env: bool) -> Result<Vec<CStr
 fn path_of(block: &[CString]) -> Option<&OsStr> {
     block.iter().find_map(|entry| {
         let bytes = entry.as_bytes();
-        bytes
-            .strip_prefix(b"PATH=")
-            .map(|value| OsStr::from_bytes(value))
+        bytes.strip_prefix(b"PATH=").map(OsStr::from_bytes)
     })
 }
 
