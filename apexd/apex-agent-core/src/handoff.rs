@@ -285,9 +285,9 @@ impl Handoff {
             .map(|m| m.reason.as_str())
     }
 
-    /// The reasons for the four fields no build can fill today.
+    /// The reasons for the three fields no build can fill today.
     ///
-    /// A function rather than four call sites, so the wording is in one place
+    /// A function rather than three call sites, so the wording is in one place
     /// and a future build that gains a producer deletes one entry here instead
     /// of hunting for prose.
     pub fn structural_gaps() -> Vec<Missing> {
@@ -522,7 +522,13 @@ mod tests {
         // receiving agent must never see an empty section it could read as
         // "there was no plan".
         let md = packet().markdown();
-        for f in ["goal", "plan", "test state", "memory project slug"] {
+        // `test state` is deliberately NOT in this list. It has a producer now,
+        // so it reaches the document through `why_missing` for neither reason:
+        // leaving it here asserted "Not supplied", which is precisely what a
+        // build WITHOUT the producer renders — the test would have defended the
+        // stale behaviour it was meant to catch, through `section`'s
+        // no-reason-recorded fallback rather than through a recorded reason.
+        for f in ["goal", "plan", "memory project slug"] {
             let start = md.find(&format!("## {f}\n")).expect(f);
             let body = &md[start + f.len() + 4..];
             let body = &body[..body.find("\n## ").unwrap_or(body.len())];
