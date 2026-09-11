@@ -565,7 +565,11 @@ pub struct RunArgs {
     /// quietly covering less than was asked for fails in the middle of a
     /// session instead of here. Refused with `--unsafe-everything`, which
     /// does not go through `apex request` and has no verbs to narrow.
-    #[arg(long, value_name = "VERBS", value_delimiter = ',', num_args = 1..)]
+    // No `num_args = 1..`: `prompt` is POSITIONAL, so a greedy multi-value flag
+    // would swallow it — `--capabilities install "fix the bug"` would read the
+    // prompt as a second verb and the daemon would refuse it as not a verb.
+    // The comma delimiter is how more than one is given.
+    #[arg(long, value_name = "VERBS", value_delimiter = ',')]
     pub capabilities: Option<Vec<String>>,
     /// Run in a dedicated git worktree, creating it if needed.
     #[arg(long, short)]
@@ -4469,6 +4473,61 @@ mod tests {
             !wide.forward_argv().join(" ").contains("--capabilities"),
             "a narrowing was invented"
         );
+    }
+
+    #[test]
+    fn narrowing_a_grant_does_not_swallow_the_prompt_that_follows_it() {
+        // `--capabilities` is the only list-valued flag on `apex agent run`,
+        // and `prompt` is POSITIONAL. Declared greedy — `num_args = 1..`, which
+        // is how this flag was first written — clap gives the flag everything
+        // up to the next `-`, so
+        //
+        //     apex agent run --capabilities install "fix the bug"
+        //
+        // parses as TWO verbs and NO prompt. The session then dies at the
+        // daemon with "fix the bug is not a verb", and the user is told their
+        // prompt is not a capability. Nothing else in this file would notice:
+        // `forward_argv` above is given a `RunArgs` built by hand, so it
+        // asserts what the struct carries and never how it was filled.
+        //
+        // Parsed through the real `Cli`, because the interaction being
+        // asserted is between a flag and a positional and only the whole
+        // parser has both.
+        use clap::Parser;
+        fn parse(argv: &[&str]) -> RunArgs {
+            match crate::Cli::try_parse_from(argv).expect("parses").command {
+                crate::Cmd::Agent { cmd: AgentCmd::Run(a) } => a,
+                _ => panic!("not `agent run`"),
+            }
+        }
+
+        let one = parse(&["apex", "agent", "run", "--capabilities", "install", "fix the bug"]);
+        assert_eq!(one.capabilities.as_deref(), Some(&["install".to_string()][..]));
+        assert_eq!(
+            one.prompt.as_deref(),
+            Some("fix the bug"),
+            "the capability list ate the prompt"
+        );
+
+        // More than one verb is the comma — the spelling `forward_argv` emits,
+        // so what this parses is what the far end of §20's hop is sent.
+        let two = parse(&[
+            "apex",
+            "agent",
+            "run",
+            "--capabilities",
+            "install,update",
+            "fix the bug",
+        ]);
+        assert_eq!(
+            two.capabilities.as_deref(),
+            Some(&["install".to_string(), "update".to_string()][..])
+        );
+        assert_eq!(two.prompt.as_deref(), Some("fix the bug"));
+
+        // And absent stays absent: no narrowing is the whole vocabulary, which
+        // is what every session before this flag existed was given.
+        assert!(parse(&["apex", "agent", "run", "fix the bug"]).capabilities.is_none());
     }
 
     #[test]
