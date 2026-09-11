@@ -17,6 +17,7 @@
 //! exactly what the kernel is good at.
 
 mod broker;
+mod budget;
 mod disposable;
 mod egress;
 mod elevation;
