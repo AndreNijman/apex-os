@@ -1036,6 +1036,7 @@ RUN set -eux; \
         7zip unzip unar xarchiver \
         btop qalculate-gtk neovim nano \
         alacritty fastfetch \
+        xdg-terminal-exec \
         pavucontrol \
         gparted parted gdisk udisks2 smartmontools \
         fwupd \
@@ -1046,6 +1047,19 @@ RUN set -eux; \
     command -v fwupdmgr; \
     command -v scrcpy; \
     command -v adb; \
+    # xdg-terminal-exec is what makes a `Terminal=true` desktop entry
+    # launchable at all: the launcher hands it the program and it supplies the
+    # terminal. It was absent from every APEX machine, so nvim — which ships
+    # from the neovim rpm above WITH Terminal=true — could be clicked and did
+    # nothing, while `apex install neovim` correctly refused it as already
+    # provided by the image. Meanwhile /etc/xdg/xdg-terminals.list, this
+    # helper's config file, has been shipped since apex-logs 31. The
+    # configuration was on every machine and the program that reads it was
+    # never installed. Asserted here so the pair cannot come apart again;
+    # Containerfile.base asserts that the two agree.
+    command -v xdg-terminal-exec; \
+    test -x /usr/bin/xdg-terminal-exec \
+        || { echo "FATAL: xdg-terminal-exec is not executable; every Terminal=true desktop entry (nvim included) would be unlaunchable"; exit 1; }; \
     # The share and device backends, asserted on the shipped artifact rather
     # than on the package names above. gvfsd-fuse is the one that matters most:
     # without it the GIO mounts exist only inside GTK's own process and
