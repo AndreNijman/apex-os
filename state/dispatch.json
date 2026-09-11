@@ -41,7 +41,8 @@
       "fresh_agent_for_card": "p0-014",
       "session": "round 10 orchestrator",
       "title": "finish commit 4 (the enforcement) and commit 5, on a branch whose first six commits have landed",
-      "at_dispatch": "All six commits landed (merge 432e16c). Seven dirty paths are commit 4 mid-write; the predecessor's last words were 'now Elevating, decide_origin and the rewritten authorise_grant'. Told to commit and push that BEFORE merging the new tip in, then commit 5, then the mutation proofs. Handed the measured result of its own harness fix - test-privilege-requests.sh 30/8 -> 39/0 on the landed tip, closing FINDINGS-round5 item 3 - and one remaining assertion of the same class to settle: system_grants.rs's renewing_a_grant_that_does_not_exist_is_refused_without_asking_anybody still fails on the tip for the scheduled-job-cgroup reason, and it must say whether commit 4 closes it or whether that harness needs the same unshare -r treatment."
+      "at_dispatch": "All six commits landed (merge 432e16c). Seven dirty paths are commit 4 mid-write; the predecessor's last words were 'now Elevating, decide_origin and the rewritten authorise_grant'. Told to commit and push that BEFORE merging the new tip in, then commit 5, then the mutation proofs. Handed the measured result of its own harness fix - test-privilege-requests.sh 30/8 -> 39/0 on the landed tip, closing FINDINGS-round5 item 3 - and one remaining assertion of the same class to settle: system_grants.rs's renewing_a_grant_that_does_not_exist_is_refused_without_asking_anybody still fails on the tip for the scheduled-job-cgroup reason, and it must say whether commit 4 closes it or whether that harness needs the same unshare -r treatment.",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
       "slug": "p2-010",
@@ -57,7 +58,8 @@
       "fresh_agent_for_card": "p2-010",
       "session": "round 10 orchestrator",
       "title": "P2-011 agent cgroup budgets - the last item of a unit whose other three are done and recorded",
-      "at_dispatch": "P2-010, P2-014 and P2-015 landed (merge 7da2571) and are recorded done with re-measured counts. Only P2-011 remains. Told to merge the new tip in FIRST, because P1-020's ~1,700 apex-agentd lines are exactly what budget.rs hooks into and the branch did not carry them. The measured shape was re-handed whole, including that io is absent at every level and must be a Reading carrying that reason and never a budget of zero. Also handed the clippy finding from its own landing: its firmware.rs redundant_guards passes under clippy-local's rust:1.97 and fails under run-clippy.sh's 1.98."
+      "at_dispatch": "P2-010, P2-014 and P2-015 landed (merge 7da2571) and are recorded done with re-measured counts. Only P2-011 remains. Told to merge the new tip in FIRST, because P1-020's ~1,700 apex-agentd lines are exactly what budget.rs hooks into and the branch did not carry them. The measured shape was re-handed whole, including that io is absent at every level and must be a Reading carrying that reason and never a budget of zero. Also handed the clippy finding from its own landing: its firmware.rs redundant_guards passes under clippy-local's rust:1.97 and fails under run-clippy.sh's 1.98.",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
       "slug": "p1-025",
@@ -73,7 +75,8 @@
       "fresh_agent_for_card": "p1-025",
       "session": "round 10 orchestrator",
       "title": "P1-026 provenance - and it is what unblocks its own unit's landing",
-      "at_dispatch": "THE ONE UNIT THAT DID NOT LAND, and it was told exactly why: the merge was clean and compiled, then was aborted because digest.rs's describe/is_measured/same_as and skill.rs's Origin::describe have no committed caller and CI's clippy runs -D warnings. The callers are in the uncommitted provenance.rs, which is P1-026. Nothing is wrong with the work; it is half of a commit. Explicitly told NOT to resolve this with #[allow(dead_code)]. Pointed at apexd/apex/src/verify.rs ON THE NEW TIP as the in-repo example of provenance done properly - a pinned root rather than one the signature handed you, and a verdict distinguishing failed from absent from could-not-run."
+      "at_dispatch": "THE ONE UNIT THAT DID NOT LAND, and it was told exactly why: the merge was clean and compiled, then was aborted because digest.rs's describe/is_measured/same_as and skill.rs's Origin::describe have no committed caller and CI's clippy runs -D warnings. The callers are in the uncommitted provenance.rs, which is P1-026. Nothing is wrong with the work; it is half of a commit. Explicitly told NOT to resolve this with #[allow(dead_code)]. Pointed at apexd/apex/src/verify.rs ON THE NEW TIP as the in-repo example of provenance done properly - a pinned root rather than one the signature handed you, and a verdict distinguishing failed from absent from could-not-run.",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
       "slug": "base-partials",
@@ -94,7 +97,8 @@
       "fresh_agent_for_card": "base-partials",
       "session": "round 10 orchestrator",
       "title": "the four BASE preservation items still open, in the order the card sets",
-      "at_dispatch": "BASE-002, BASE-005, BASE-016 and BASE-018 landed (merge 65bd5c7) and are recorded done, with their qualifications carried into the evidence rather than dropped. Remaining order from the card: BASE-013, BASE-014, BASE-010, BASE-009. Re-handed the three things the card establishes and a fresh agent would otherwise re-derive: BASE-013's criterion 3 is a REAL defect at GreetContext.qml:332-335 and changing displayName's meaning is a deliberate tested edit (two suites assert it); BASE-014's last assertion is reachable because wtype was PROVEN to work and nothing in either repo has ever pressed a key after labwc --reconfigure; BASE-010 and BASE-009 may have to close with their gap named and measured rather than with a test that passes by never running."
+      "at_dispatch": "BASE-002, BASE-005, BASE-016 and BASE-018 landed (merge 65bd5c7) and are recorded done, with their qualifications carried into the evidence rather than dropped. Remaining order from the card: BASE-013, BASE-014, BASE-010, BASE-009. Re-handed the three things the card establishes and a fresh agent would otherwise re-derive: BASE-013's criterion 3 is a REAL defect at GreetContext.qml:332-335 and changing displayName's meaning is a deliberate tested edit (two suites assert it); BASE-014's last assertion is reachable because wtype was PROVEN to work and nothing in either repo has ever pressed a key after labwc --reconfigure; BASE-010 and BASE-009 may have to close with their gap named and measured rather than with a test that passes by never running.",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
       "slug": "p1-023",
@@ -112,7 +116,8 @@
       "fresh_agent_for_card": "p1-023",
       "session": "round 10 orchestrator",
       "title": "P1-024 only - the cross-agent handoff packet",
-      "at_dispatch": "Both halves landed (apex-shell dc2283e, apex-os 09846c9); P1-023 and P1-029 are both recorded done. Only P1-024 remains, and the card's ## P1-024 SCOPING says it is NOT a shell item and NOT a data structure - told to read that before starting and not to re-derive the hold-vs-toggle or daemon findings. Also told what happened to its pipefail sweep at integration: the tip won in five of six conflicts because grading on the reported count is stronger than grep -q FAIL and is not a grep -q through a pipe either, and its own form won in the sixth (count_errors in run-agent-center-smoke.sh). Its measured finding about producer | grep -q under pipefail is not in question."
+      "at_dispatch": "Both halves landed (apex-shell dc2283e, apex-os 09846c9); P1-023 and P1-029 are both recorded done. Only P1-024 remains, and the card's ## P1-024 SCOPING says it is NOT a shell item and NOT a data structure - told to read that before starting and not to re-derive the hold-vs-toggle or daemon findings. Also told what happened to its pipefail sweep at integration: the tip won in five of six conflicts because grading on the reported count is stronger than grep -q FAIL and is not a grep -q through a pipe either, and its own form won in the sixth (count_errors in run-agent-center-smoke.sh). Its measured finding about producer | grep -q under pipefail is not in question.",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     },
     {
       "slug": "p1-035",
@@ -128,7 +133,8 @@
       "fresh_agent_for_card": "p1-035",
       "session": "round 10 orchestrator",
       "title": "commit, run and mutation-prove the daemon-death measurement - then the unit is complete",
-      "at_dispatch": "All twelve commits landed (merge 6d7d4a1); P1-035 and P1-036 are recorded done. The card says THE UNIT IS COMPLETE and it is not quite: one modified tracked file in the worktree, tests/test-agent-disposable.sh +162 lines, is the daemon-death measurement the round-9 brief asked for, and it is uncommitted. P1-037 is recorded partial for that reason and no other. Told to commit it, run it, mutation-prove it with the mutation its own text names (make the engine ignore SIGHUP - the mechanism for the SIGKILL half, since none of APEX's code runs then), make all three places say what was measured, leave the hedge the section itself flags, and then STOP rather than inventing more work. Handed the three integration decisions in its own files: paths.rs SCRATCH_ROOT_ENV won, client.rs's Observation-taking publish_hook won, inject.rs moved to &privilege::Caller."
+      "at_dispatch": "All twelve commits landed (merge 6d7d4a1); P1-035 and P1-036 are recorded done. The card says THE UNIT IS COMPLETE and it is not quite: one modified tracked file in the worktree, tests/test-agent-disposable.sh +162 lines, is the daemon-death measurement the round-9 brief asked for, and it is uncommitted. P1-037 is recorded partial for that reason and no other. Told to commit it, run it, mutation-prove it with the mutation its own text names (make the engine ignore SIGHUP - the mechanism for the SIGKILL half, since none of APEX's code runs then), make all three places say what was measured, leave the hedge the section itself flags, and then STOP rather than inventing more work. Handed the three integration decisions in its own files: paths.rs SCRATCH_ROOT_ENV won, client.rs's Observation-taking publish_hook won, inject.rs moved to &privilege::Caller.",
+      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks"
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -137,8 +143,8 @@
   ],
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt — the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {
-    "pid": 4283,
-    "note": "Re-registered after the limit: state/orchestrator.pid is 4283 with a heartbeat loop guarded on that pid, so the heartbeat goes stale within ten minutes of this session ending. The 12:18 autoresume firing correctly logged 'skipped: agents are still writing output' - the .output-mtime guard did its job while round 8 was alive."
+    "pid": 19362,
+    "note": "THIS SESSION IS THE AUTORESUME-LAUNCHED ORCHESTRATOR. Ancestry: systemd --user -> autoresume.sh (2107) -> timeout 4h -> claude -p (19362). Two consequences worth writing down. (1) autoresume.sh holds flock on state/autoresume.lock for as long as this process lives, so a second timer firing skips - that guard is automatic and needs nothing. (2) THE SIX AGENTS ARE SUBAGENTS OF PID 19362 AND DIE WITH IT. Ending the orchestrator's turn ends them; the 4h timeout ends them. That is how rounds 8 and 9 lost six agents each - not a usage limit alone, but the session they lived inside going away. An orchestrator's job is therefore to stay up and keep landing while its agents work, not to dispatch and exit. state/orchestrator.pid is 19362 with a heartbeat loop guarded on that pid (touch every 5 min, exits when 19362 does), so autoresume's 45-minute heartbeat check sees a live orchestrator and its 20-minute subagent-output check sees the agents."
   },
   "_previous_pause": {
     "when": "2026-09-07T15:32+08:00 to 2026-09-08T08:56+08:00",
