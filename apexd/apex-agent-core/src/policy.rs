@@ -66,10 +66,18 @@
 //! ## Fail closed on what is not built yet
 //!
 //! One value in this vocabulary still describes policy the runtime cannot
-//! enforce: raw secret export, and remote elevation, which §7 permits only
-//! behind a security key nothing here can ask for.
-//! [`AgentPolicy::validate`] refuses both and names why. All four network
-//! modes are enforced, and so are both system-access modes.
+//! enforce: raw secret export. [`AgentPolicy::validate`] refuses it and names
+//! why. All four network modes are enforced, and so are both system-access
+//! modes.
+//!
+//! Remote elevation used to be the second. It is not any more: P0-014 built
+//! the security key §7 requires — the verifier, the challenge round trip, and
+//! the gate in `apex-agentd`'s `privilege::decide_origin` that reads
+//! [`OriginPolicy`] — so [`OriginPolicy::RemoteElevationAllowed`] now
+//! validates. What it buys is narrow and worth stating exactly: a non-local
+//! caller may elevate **only** by presenting an assertion from an enrolled
+//! key, over a challenge this daemon issued, for this very elevation, with
+//! the user-verified bit set. Setting it grants nothing on its own.
 //!
 //! Refusing is the only honest option. A `--network allowlist` that parsed and
 //! then ran with an open network would be worse than no flag at all: it would
@@ -647,9 +655,21 @@ impl AgentPolicy {
         if self.secrets == SecretPolicy::Export {
             return Err(PolicyError::SecretExportUnavailable);
         }
-        if self.origin == OriginPolicy::RemoteElevationAllowed {
-            return Err(PolicyError::RemoteElevationUnavailable);
-        }
+        // `OriginPolicy::RemoteElevationAllowed` was refused here until
+        // P0-014's last commit, because §7 allows remote elevation only behind
+        // a security key and nothing in the build could ask for one. All of it
+        // now exists — the verifier, the challenge round trip, and the gate in
+        // `privilege::decide_origin` that consults this very value — so the
+        // refusal has become the only thing standing between the owner and a
+        // feature that works.
+        //
+        // The order mattered and is worth recording: relaxing this FIRST would
+        // have produced what `validate`'s own design calls a mode that lies.
+        // `config.rs`'s self-repair resets the whole policy to default when
+        // `validate` errors, so a stored `origin = remote_elevation_allowed`
+        // was silently erased; and `apex agent status` would have printed the
+        // setting as live while `may_be_granted` still hard-refused on
+        // `is_local()`. Enforcement landed first, and this is last.
         Ok(())
     }
 
@@ -713,8 +733,6 @@ pub enum PolicyError {
     BreakGlassCannotBeConfined(SandboxPolicy),
     /// Raw secret values in the session environment.
     SecretExportUnavailable,
-    /// Elevation authorised from a remote origin.
-    RemoteElevationUnavailable,
 }
 
 impl std::fmt::Display for PolicyError {
@@ -765,13 +783,6 @@ impl std::fmt::Display for PolicyError {
                 "raw secret values are never placed in a session's environment: the broker \
                  performs the operation and returns its result. Use `apex secret grant` to \
                  allow a capability"
-            ),
-            PolicyError::RemoteElevationUnavailable => write!(
-                f,
-                "§7 allows remote elevation only behind a WebAuthn/FIDO2 security key, and \
-                 nothing in this build can ask for one. This setting would drop the \
-                 local-approval rule and put nothing in its place. Approve the operation \
-                 locally instead"
             ),
         }
     }
@@ -1167,10 +1178,6 @@ mod tests {
                 AgentPolicy { secrets: SecretPolicy::Export, ..Default::default() },
                 PolicyError::SecretExportUnavailable,
             ),
-            (
-                AgentPolicy { origin: OriginPolicy::RemoteElevationAllowed, ..Default::default() },
-                PolicyError::RemoteElevationUnavailable,
-            ),
         ];
         for (policy, want) in cases {
             assert_eq!(policy.validate(), Err(want), "{policy:?}");
@@ -1255,9 +1262,49 @@ mod tests {
             AgentPolicy { network: NetworkPolicy::Offline, ..Default::default() },
             AgentPolicy { network: NetworkPolicy::Brokered, ..Default::default() },
             AgentPolicy { network: NetworkPolicy::Allowlist, ..Default::default() },
+            // P0-014's last commit. Refused by this function until the
+            // security key §7 requires actually existed; accepted now that
+            // `privilege::decide_origin` reads it and refuses every non-local
+            // caller who cannot present a verified assertion for the exact
+            // elevation being asked for.
+            AgentPolicy { origin: OriginPolicy::RemoteElevationAllowed, ..Default::default() },
         ] {
             assert_eq!(p.validate(), Ok(()), "{p:?}");
         }
+    }
+
+    #[test]
+    fn opting_in_to_remote_elevation_changes_nothing_but_the_origin_dimension() {
+        // The relaxation is one value in one dimension, and the risk of
+        // relaxing a validator is that it stops refusing something else at the
+        // same time. Asserted rather than assumed: the five other dimensions
+        // keep their own refusals while the origin dimension is permissive.
+        let permissive = OriginPolicy::RemoteElevationAllowed;
+        assert_eq!(
+            AgentPolicy { origin: permissive, secrets: SecretPolicy::Export, ..Default::default() }
+                .validate(),
+            Err(PolicyError::SecretExportUnavailable)
+        );
+        assert_eq!(
+            AgentPolicy {
+                origin: permissive,
+                system: SystemAccess::Unsafe,
+                sandbox: SandboxPolicy::Strict,
+                ..Default::default()
+            }
+            .validate(),
+            Err(PolicyError::BreakGlassCannotBeConfined(SandboxPolicy::Strict))
+        );
+        assert_eq!(
+            AgentPolicy {
+                origin: permissive,
+                network: NetworkPolicy::Brokered,
+                secrets: SecretPolicy::None,
+                ..Default::default()
+            }
+            .validate(),
+            Err(PolicyError::BrokeredNetworkNeedsBroker)
+        );
     }
 
     #[test]

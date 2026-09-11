@@ -45,7 +45,7 @@ use apex_agent_core::grant::{
     self, BootStamp, ClosureReason, GrantKind, GrantState, SystemGrant,
 };
 use apex_agent_core::policy::RequestOrigin;
-use apex_agent_core::webauthn::{AssertionError, RemoteElevationRefused};
+use apex_agent_core::webauthn::{AssertionError, RemoteElevationRefused, SecondFactor};
 
 /// Everything the daemon knows about system-access grants.
 pub struct GrantAuthority {
@@ -210,7 +210,7 @@ impl GrantAuthority {
     #[allow(clippy::too_many_arguments)]
     pub fn issue(
         &self,
-        _proof: Authenticated,
+        proof: Authenticated,
         kind: GrantKind,
         session: u32,
         agent: &str,
@@ -242,7 +242,7 @@ impl GrantAuthority {
             expires_ms: now_ms.saturating_add(ttl_ms),
             boot_id: self.boot.id.clone(),
             request_origin: origin,
-            authenticated_by: apex_agent_core::auth::action_for(kind).to_string(),
+            authenticated_by: proof.recorded_as(kind),
             closed: None,
         };
         let _ = grant::save(&dir, &g);
@@ -435,14 +435,88 @@ impl Default for GrantAuthority {
 
 /// Evidence that a human authenticated, for the call that mints a grant.
 ///
-/// A zero-sized token with a private field, constructible only by
-/// [`authenticate`]. `issue` and `renew` take one by value, so a call site
-/// that forgot the prompt does not compile. It proves nothing about *which*
+/// A token with a private field, constructible only by [`authenticate`] and
+/// [`authenticated_by_key`]. `issue` and `renew` take one by value, so a call
+/// site that forgot to ask does not compile. It proves nothing about *which*
 /// human or *when* — the daemon's ordering does that — but it does make the
-/// prompt impossible to leave out by accident, which is the failure mode a
+/// asking impossible to leave out by accident, which is the failure mode a
 /// comment cannot prevent.
+///
+/// ## There are two ways to mint one, and that is P0-014
+///
+/// This used to say "a token only [`authenticate`] can produce", and that
+/// sentence is now wrong. §7 has two columns and they are authenticated
+/// differently:
+///
+/// - **local** — polkit, exactly as before. [`authenticate`].
+/// - **non-local** — a verified assertion from an enrolled security key.
+///   [`authenticated_by_key`], reachable only from
+///   `privilege::decide_origin` having returned `Approved::ByKey`, which in
+///   turn requires the owner to have opted in *and* a real signature over the
+///   exact elevation being asked for.
+///
+/// The second is not a weakening, and the reason is in
+/// `files/system/polkit-1/actions/org.apexos.agent.policy`: both actions are
+/// `allow_any: no` and `allow_active: auth_admin`, and that file says in as
+/// many words that "there is no password that makes a remote caller local".
+/// A remote caller therefore *cannot pass* polkit — it is refused under
+/// `allow_any`, and even a locally-logged-in owner would get the dialog on
+/// the machine's own desktop, which the remote human by definition cannot
+/// reach. Asking polkit after a verified touch would not be a second lock; it
+/// would be a wall, and the security key would be dead code. So for the
+/// non-local column the key *replaces* polkit rather than adding to it. The
+/// local column is untouched.
+///
+/// The token carries which of the two happened, so
+/// [`crate::grant::SystemGrant::authenticated_by`] records it and an auditor
+/// can tell a touch from a password.
+///
+/// It carries a value now and no longer a `()`, and the derive list is the
+/// thing to be careful with: it is deliberately **not** `Clone`. The whole
+/// property is that `issue` and `renew` consume one, so one authentication
+/// mints one grant; a `Clone` would turn a single touch or password into as
+/// many grants as the holder cared to ask for, silently and with every test
+/// still green. Nothing needs it — checked by removing it and building the
+/// workspace, not by reading.
 #[derive(Debug)]
-pub struct Authenticated(());
+pub struct Authenticated(Method);
+
+/// How a human proved they were present.
+#[derive(Debug)]
+enum Method {
+    /// polkit authorised the action. The recorded value is the action id.
+    Polkit,
+    /// An enrolled security key signed for this exact elevation, named by the
+    /// label the owner enrolled it under.
+    SecurityKey(String),
+}
+
+impl Authenticated {
+    /// What [`crate::grant::SystemGrant::authenticated_by`] should say.
+    ///
+    /// The `security-key:` prefix is not decoration: it is what stops a key
+    /// enrolled under the label `org.apexos.agent.break-glass` from producing
+    /// an audit line that reads as though polkit had authorised it. Labels are
+    /// chosen by the owner, so the namespace has to be separated by something
+    /// the owner cannot write into the label's own value.
+    pub fn recorded_as(&self, kind: GrantKind) -> String {
+        match &self.0 {
+            Method::Polkit => apex_agent_core::auth::action_for(kind).to_string(),
+            Method::SecurityKey(label) => format!("security-key:{label}"),
+        }
+    }
+}
+
+/// The non-local column's proof: a receipt that has already been verified.
+///
+/// Takes the [`SecondFactor`] by reference rather than taking nothing, so this
+/// cannot be called by a path that has not got one. `SecondFactor` itself has
+/// no public constructor, so the only way to reach this function with a value
+/// is to have gone through `webauthn::redeem_and_verify` — a real signature,
+/// over a challenge this daemon issued, by a credential the owner enrolled.
+pub fn authenticated_by_key(factor: &SecondFactor) -> Authenticated {
+    Authenticated(Method::SecurityKey(factor.credential().to_string()))
+}
 
 /// Ask polkit, for a grant of `kind`, about `peer`.
 ///
@@ -469,7 +543,7 @@ pub fn authenticate(
         )));
     };
     match auth.check(action, &subject) {
-        Ok(Verdict::Authorized) => Ok(Authenticated(())),
+        Ok(Verdict::Authorized) => Ok(Authenticated(Method::Polkit)),
         Ok(Verdict::Refused) => Err(GrantError::NotAuthenticated(format!(
             "the local authentication for {action} was refused or cancelled, so no grant was \
              issued"
@@ -585,6 +659,73 @@ mod tests {
             &me(),
         )
         .expect("the stub authorises")
+    }
+
+    /// A receipt for `kind`, minted the way the daemon mints one.
+    fn touched(label: &str, kind: GrantKind) -> SecondFactor {
+        use apex_agent_core::webauthn::{test_support::Signer, test_support::UP_UV, Challenge};
+        let c = Challenge::with_nonce(None, kind, 900_000, 1_000, b"a-nonce-for-this-test");
+        Signer::new(label).receipt(&c, UP_UV, 1)
+    }
+
+    #[test]
+    fn a_grant_records_whether_a_password_or_a_key_authorised_it() {
+        // §7's two columns are authenticated by different things, and an
+        // audit line that could not tell them apart would answer "on whose
+        // authority" with the same sentence for a password typed at this
+        // keyboard and a touch collected from the other side of a network.
+        for kind in [GrantKind::SystemAccess, GrantKind::BreakGlass] {
+            let by_password = authenticate(&Stub(Ok(Verdict::Authorized)), kind, &me())
+                .expect("the stub authorises");
+            assert_eq!(
+                by_password.recorded_as(kind),
+                apex_agent_core::auth::action_for(kind),
+                "the local column still records the polkit action id it satisfied"
+            );
+
+            let by_key = authenticated_by_key(&touched("yubikey 5c nfc", kind));
+            assert_eq!(by_key.recorded_as(kind), "security-key:yubikey 5c nfc");
+            assert_ne!(by_key.recorded_as(kind), by_password.recorded_as(kind));
+        }
+    }
+
+    #[test]
+    fn a_key_labelled_like_a_polkit_action_cannot_forge_a_password_audit_line() {
+        // Labels are chosen by the owner at `apex agent key add`, and this
+        // field is what `journalctl APEX_GRANT_AUTH=...` is read by. Without
+        // a namespace the owner cannot write into, a key enrolled under the
+        // action's own id would produce a line indistinguishable from one a
+        // human typed a password for. That is not a privilege escalation —
+        // enrolling the key is the owner's own act — but it is an audit trail
+        // that can be made to say something that did not happen, which §3.4's
+        // "APEX audit ON" is about.
+        for kind in [GrantKind::SystemAccess, GrantKind::BreakGlass] {
+            let action = apex_agent_core::auth::action_for(kind);
+            let impersonating = authenticated_by_key(&touched(action, kind));
+            assert_ne!(impersonating.recorded_as(kind), action);
+            assert_eq!(impersonating.recorded_as(kind), format!("security-key:{action}"));
+        }
+    }
+
+    #[test]
+    fn the_grant_a_key_authorised_carries_that_into_the_record_and_the_journal_fields() {
+        // Not just the token: the whole way through `issue` to the field an
+        // auditor reads. A test of `recorded_as` alone would pass even if
+        // `issue` went on ignoring the proof, which is what it did before.
+        let _dir = tempdir::Dir::new();
+        let a = GrantAuthority::new();
+        let g = a.issue(
+            authenticated_by_key(&touched("the owner's key", GrantKind::SystemAccess)),
+            GrantKind::SystemAccess,
+            7,
+            "claude",
+            None,
+            900_000,
+            RequestOrigin::RemoteControl,
+            1_000,
+        );
+        assert_eq!(g.authenticated_by, "security-key:the owner's key");
+        assert_eq!(g.request_origin, RequestOrigin::RemoteControl);
     }
 
     #[test]
