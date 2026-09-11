@@ -6,10 +6,10 @@
 //! persistence, reattachment and status work without any cooperation from
 //! upstream — and why nothing here scrapes terminal pixels.
 
-use std::ffi::CString;
+use std::ffi::{CString, OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use apex_agent_core::term::WinSize;
@@ -68,16 +68,23 @@ pub fn spawn(
 
     let c_cwd = CString::new(cwd.as_os_str().as_bytes()).context("cwd contained a NUL byte")?;
 
-    let c_env: Vec<CString> = env
+    // The child's entire environment, assembled HERE, because the child cannot
+    // assemble it. See `child_env`: the calls that used to build it after the
+    // fork are the defect this file was rewritten to remove.
+    let c_envp = child_env(env, clear_env).context("building the agent environment")?;
+    let mut envp_ptrs: Vec<*const libc::c_char> = c_envp.iter().map(|s| s.as_ptr()).collect();
+    envp_ptrs.push(std::ptr::null());
+
+    // Every path the child will try, in `execvp`'s order, resolved against the
+    // PATH the child is about to be given rather than this process's own.
+    let candidates = program_candidates(&argv[0], cwd, path_of(&c_envp));
+    let c_candidates: Vec<CString> = candidates
         .iter()
-        .map(|(k, v)| CString::new(format!("{k}={v}")))
+        .map(|c| CString::new(c.as_os_str().as_bytes()))
         .collect::<std::result::Result<_, _>>()
-        .context("an environment entry contained a NUL byte")?;
-    let c_env_names: Vec<CString> = env
-        .iter()
-        .map(|(k, _)| CString::new(k.as_bytes()))
-        .collect::<std::result::Result<_, _>>()
-        .context("an environment name contained a NUL byte")?;
+        .context("a program path contained a NUL byte")?;
+    let candidate_ptrs: Vec<*const libc::c_char> =
+        c_candidates.iter().map(|s| s.as_ptr()).collect();
 
     let ws = libc::winsize {
         ws_row: size.rows,
@@ -163,6 +170,8 @@ pub fn spawn(
             // distinguishes this from a successful exec by the pipe carrying
             // bytes instead of closing empty.
             let fail = |stage: u8, code: i32| -> ! {
+                // Read here rather than passed in: every caller has just made
+                // the failing call, and the exec loop below sets it explicitly.
                 let errno = *libc::__errno_location();
                 let msg = [stage, errno as u8, (errno >> 8) as u8];
                 libc::write(sync_write, msg.as_ptr() as *const libc::c_void, msg.len());
@@ -202,19 +211,6 @@ pub fn spawn(
                 fail(STAGE_NO_NEW_PRIVS, 124);
             }
 
-            if clear_env {
-                // clearenv can allocate on some libcs; unsetting the names we
-                // know and then setting ours is enough, because the sandbox
-                // does the authoritative clearing for confined sessions and an
-                // unconfined session is the documented escape hatch.
-                for name in &c_env_names {
-                    libc::unsetenv(name.as_ptr());
-                }
-            }
-            for entry in &c_env {
-                libc::putenv(entry.as_ptr() as *mut libc::c_char);
-            }
-
             // Default the dispositions the daemon changed. exec resets handlers
             // but not SIG_IGN, and an inherited ignored SIGPIPE changes how
             // every pipeline the agent runs behaves.
@@ -229,9 +225,50 @@ pub fn spawn(
             // cannot be killed or interrupted.
             libc::sigprocmask(libc::SIG_SETMASK, &empty_mask, std::ptr::null_mut());
 
+            // The environment arrives as execve's third argument, and the PATH
+            // search already happened in the parent. THIS IS THE WHOLE POINT OF
+            // THE FILE'S SHAPE and it is not a style preference:
+            //
+            // Between fork and exec, a child of a MULTI-THREADED process may
+            // call only async-signal-safe functions. Every other thread is gone
+            // in the child, but the locks they held are not: they are copied in
+            // the locked state and nothing will ever unlock them. `unsetenv`,
+            // `putenv` and `setenv` all take glibc's environment lock, and
+            // putenv can reallocate `environ` and so take the malloc lock too.
+            // This child used to call unsetenv and putenv here, and when the
+            // daemon forked while any other thread was inside setenv, the child
+            // blocked in __lll_lock_wait_private and NEVER REACHED EXEC — so
+            // FD_CLOEXEC never fired and it held every descriptor it inherited
+            // open for as long as it lived, hanging reads in unrelated parts of
+            // the program that were waiting for an end-of-file it now pinned.
+            //
+            // execve is a bare syscall wrapper: no PATH lookup, no getenv, no
+            // allocation, no lock. Whoever adds a call here must check it
+            // against signal-safety(7) first.
+            //
+            // One deliberate difference from execvp: a file that is neither ELF
+            // nor has a shebang gives ENOEXEC here, where execvp would silently
+            // re-run it under /bin/sh. Reviving that would mean building a
+            // second argv before the fork; no agent program is in that shape,
+            // and a clear ENOEXEC beats an implicit shell.
+            //
             // On success this never returns and FD_CLOEXEC closes sync_write,
             // which is what the parent reads as "the agent is running".
-            libc::execvp(argv_ptrs[0], argv_ptrs.as_ptr());
+            let mut eacces = false;
+            // What an empty candidate list reports, matching execvp on an
+            // unsearchable PATH.
+            *libc::__errno_location() = libc::ENOENT;
+            for prog in &candidate_ptrs {
+                libc::execve(*prog, argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
+                if *libc::__errno_location() == libc::EACCES {
+                    eacces = true;
+                }
+            }
+            if eacces {
+                // execvp's rule: a candidate we were refused permission to run
+                // is more informative than a later one that did not exist.
+                *libc::__errno_location() = libc::EACCES;
+            }
             // 127 is the shell's convention for "command not found", which is
             // what this almost always is.
             fail(STAGE_EXEC, 127);
@@ -567,6 +604,85 @@ pub fn close(fd: RawFd) {
         // Safe: closing a descriptor we own exactly once.
         unsafe { libc::close(fd) };
     }
+}
+
+/// Build the environment block the child will exec with.
+///
+/// This is the daemon's own environment with `overrides` applied — which is
+/// what the child ended up with when it called `putenv` for itself, and is
+/// documented and measured on `spawn`: an unconfined session inherits every
+/// other variable the daemon holds.
+///
+/// It is built in the parent for one reason: after a fork, a child of a
+/// multi-threaded process may not touch the environment at all. `std::env` here
+/// is safe because this process still has all its threads, and Rust's own lock
+/// serialises this read against any `set_var` running beside it.
+///
+/// `clear_env` is honoured as `unsetenv`-then-`putenv` honoured it: every
+/// inherited entry for that name is dropped before ours is added, so a
+/// duplicated name cannot shadow it. Without it the first entry is replaced in
+/// place. The two differ only for an environment block that carries the same
+/// name twice, which is why callers could never tell them apart.
+fn child_env(overrides: &[(String, String)], clear_env: bool) -> Result<Vec<CString>> {
+    let mut block: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    for (k, v) in overrides {
+        let key = OsString::from(k);
+        let val = OsString::from(v);
+        if clear_env {
+            block.retain(|(name, _)| name != &key);
+            block.push((key, val));
+        } else if let Some(slot) = block.iter_mut().find(|(name, _)| name == &key) {
+            slot.1 = val;
+        } else {
+            block.push((key, val));
+        }
+    }
+    block
+        .iter()
+        .map(|(k, v)| {
+            let mut entry = k.clone();
+            entry.push("=");
+            entry.push(v);
+            CString::new(entry.as_os_str().as_bytes())
+        })
+        .collect::<std::result::Result<_, _>>()
+        .context("an environment entry contained a NUL byte")
+}
+
+/// The value of `PATH` inside an already-built environment block.
+///
+/// The child's PATH, not the daemon's: a caller that overrides PATH for a
+/// session expects the session's program to be found on it, and after the fork
+/// nothing can call `getenv` to find that out.
+fn path_of(block: &[CString]) -> Option<&OsStr> {
+    block.iter().find_map(|entry| {
+        let bytes = entry.as_bytes();
+        bytes
+            .strip_prefix(b"PATH=")
+            .map(|value| OsStr::from_bytes(value))
+    })
+}
+
+/// Every path `execvp` would have tried for `program`, in order.
+///
+/// Resolved here because the search reads the environment, and reading the
+/// environment after a fork is precisely the lock the child cannot take. The
+/// child tries these with plain `execve` instead, which is the same sequence of
+/// exec attempts execvp would have made.
+///
+/// Relative candidates are joined to `cwd`, which is where the child chdirs
+/// before exec — so this is the same set it would have resolved for itself, and
+/// an empty PATH entry keeps meaning "the working directory" as POSIX says.
+fn program_candidates(program: &str, cwd: &Path, path: Option<&OsStr>) -> Vec<PathBuf> {
+    let absolute = |p: PathBuf| if p.is_absolute() { p } else { cwd.join(p) };
+    if program.contains('/') {
+        return vec![absolute(PathBuf::from(program))];
+    }
+    // What execvp falls back to when PATH is unset: confstr(_CS_PATH).
+    let path = path.unwrap_or_else(|| OsStr::new("/bin:/usr/bin"));
+    std::env::split_paths(path)
+        .map(|dir| absolute(dir.join(program)))
+        .collect()
 }
 
 /// Resolve a program name the way `execvp` will, so a missing binary is
