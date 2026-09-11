@@ -284,8 +284,34 @@ jobs:
       # deliberately. Add the step back the same day `cargo fmt --all` lands.
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      # Through tests/in-login-session.sh, the same wrapper pr-validation.yml
+      # runs its tests under, and for the same reason — this job never got it.
+      #
+      # `apex-agentd` decides whether a human is at this machine from the
+      # CONNECTING PEER's cgroup (`origin::classify`). A GitHub-hosted runner
+      # places its processes in `/system.slice/hosted-compute-agent.service`,
+      # which is neither a login session nor a user service, so the daemon
+      # cannot classify the connection at all and refuses before reaching the
+      # behaviour under test. Six of `apex-agentd/tests/budget.rs`'s eight
+      # assertions fail that way, `cargo test` exits 101, and because `base`
+      # declares `needs: [changes, rust, core]` the failure SKIPS the whole
+      # image build — so this one missing wrapper is why no image can be built
+      # from any branch whose head is not already green here.
+      #
+      # Measured rather than argued, on 2026-09-12, by reproducing the runner's
+      # placement locally with a transient system-slice service running as the
+      # invoking uid:
+      #
+      #   /system.slice/…service, unwrapped   2 passed, 6 failed
+      #       "…places this connection in "/system.slice/…", which is neither
+      #        a login session nor a user service…"  — CI's message exactly
+      #   /system.slice/…service, wrapped     8 passed, 0 failed
+      #       (the helper minted session-7.scope and the tests ran in it)
+      #
+      # The helper runs the command in place when it cannot mint a session, so
+      # this cannot turn a legible failure into a skipped one.
       - name: Test
-        run: cargo test --locked
+        run: ../tests/in-login-session.sh cargo test --locked
 
   # ── Job 2: core (heavy, gated) ────────────────────────────────────────────
   core:
