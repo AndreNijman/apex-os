@@ -198,6 +198,11 @@ impl Harness {
             cols: 80,
             rows: 24,
             env: vec![],
+            // An ordinary session: the fixture asserts on the project root and
+            // the grants the daemon reports for it, and a disposable capsule
+            // reports neither the same way.
+            disposable: false,
+            copy_out: None,
         }));
         if reply["reply"] != "session" {
             // A daemon that will not start a session at all is a broken
