@@ -220,6 +220,115 @@ behaviour with its own probe items.
   installed system. Either restrict the list to what the target ships or add
   langpacks to `Containerfile.core`.
 
+## DESIGN FORK — SETTLED 2026-09-12 (round 2): option (b), and the reason is measured
+
+The fork below asked whether the chosen layout can reach the RUNNING cage
+session. It can, by exactly one route, and the other two are now ruled out by
+measurement rather than by argument.
+
+**Chosen: (b) — re-exec cage with `XKB_DEFAULT_LAYOUT` after the pick.**
+
+**(a) `localectl set-x11-keymap` is dead, not merely doubted.** The engine's own
+comment worries that `systemd-localed` may not answer over dbus. That worry is
+beside the point: even a localed that answers perfectly cannot change a running
+wlroots session. Measured on this box —
+
+    ldd /usr/lib64/libxkbcommon.so.0   →  linux-vdso, libc, ld-linux.  Nothing else.
+    strings libxkbcommon.so.0 | grep -Ei 'locale1|dbus|xorg\.conf|localectl'  →  empty
+    strings libxkbcommon.so.0 | grep '^XKB_DEFAULT'  →  RULES MODEL LAYOUT VARIANT OPTIONS
+
+libxkbcommon links **only libc**. It has no dbus dependency and not one string
+naming `org.freedesktop.locale1`, `localectl` or `xorg.conf`. Its entire
+configuration surface is those five environment variables. `localectl
+set-x11-keymap` writes `/etc/X11/xorg.conf.d/00-keyboard.conf` and
+`/etc/vconsole.conf` and broadcasts on dbus — three channels, none of which
+libxkbcommon reads. So (a) changes the INSTALLED system's files and leaves the
+keyboard under the user's hands exactly as it was. It is (c) wearing a costume.
+
+**(b) works, and the env var is read at keymap-compile time**, which is why a
+re-exec and not a poke is required. Measured with `ctypes` against the real
+library, making the same call wlroots makes (`xkb_keymap_new_from_names(ctx,
+NULL, 0)` — all-NULL RMLVO is what makes libxkbcommon consult the env):
+
+| `XKB_DEFAULT_LAYOUT` | KEY_Y | KEY_Z | KEY_Q | KEY_SEMICOLON |
+| --- | --- | --- | --- | --- |
+| `us` | y | z | q | ; |
+| `de` | z | y | q | ö |
+| `fr` | y | w | a | m |
+
+and setting the var *after* a keymap is compiled leaves that keymap unchanged —
+only the next compile sees it. That is the whole argument for (b) in one line:
+**the layout is fixed when the compositor starts, so the compositor has to start
+again.** cage is on the same path — `ldd /usr/bin/cage` shows both
+`libwlroots-0.18.so` and `libxkbcommon.so.0`.
+
+**(c) alone was never enough**, and the predecessor's engine work is (c). Kept:
+it is necessary — it is what puts the layout on the INSTALLED system. It is just
+not what lets the user type the password.
+
+**How (b) is built, given the launcher's "one path, no probes" rule.** No loop
+goes into `apex-installer-launch` — its retry-then-diagnose path is the safety
+net against a black screen and must not grow a second reason to re-run cage. A
+separate `apex-installer-session` owns the cage loop; the launcher's `GUI_CMD`
+changes by one line and its outer retry still wraps the whole thing. The restart
+is requested by exit code: measured, `cage -- sh -c 'exit 75'` returns **75**, so
+cage propagates its child's status and the GUI can ask for a restart without a
+state file being the only channel. Restarts are hard-capped, because an
+unbounded loop behind a compositor is the exact failure the launcher exists to
+prevent. The `keyboard` page goes immediately after `welcome`, so the only state
+crossing the restart is the layout itself.
+
+**What is NOT measurable on this laptop, named precisely.** The last link —
+*cage, on a seat with a real keyboard, started with `XKB_DEFAULT_LAYOUT=de`,
+hands a GTK4 client a keymap in which `Gdk.Display.map_keycode(29)` returns
+`z`* — is not assertable here. The wlroots **headless** backend creates no input
+device, so the seat has no keyboard capability and GDK falls back to a fixed
+keymap: the probe read `us` under `XKB_DEFAULT_LAYOUT=de`, which is a
+false-green shape and is therefore not shipped. The obvious workaround does not
+work either: a `zwp_virtual_keyboard_v1` client (`wtype`) uploads its **own**
+keymap, so it would measure wtype rather than cage. Closing it needs a real
+input device or the wlroots X11 backend, and there is no `Xvfb`, `Xephyr`,
+`Xwayland` or `weston` on this box. Same shape as the AT-SPI row, left partial
+for the same reason. What IS shipped is the layer below it — libxkbcommon, the
+single component that decides the answer — asserted against the real library.
+
+## The predecessor's last note, run down: the premise was false, and it is a defect
+
+The note was that a bad-username case failed the same way in the new work as in
+an existing suite, and that the existing suite must know how to neutralise it.
+**It does not.** `test-installer.sh` has no neutralisation, no stub, no fake
+image and no `APEX_*` override anywhere near its engine calls (`check()` at :67
+and the bare call at :90 are the only two, both plain `sudo -n "$ENGINE"`). Its
+entire engine half — argument handling, account validation, answers-file
+handling — dies at `apex-install:354`, `The APEX-OS image (localhost/apex-os:daily)
+is not present in the live environment`, before argument parsing is even reached.
+
+That is not a regression: `git log -S` puts the image check in `dddabd6f`
+(2026-07-23) and the engine test cases in `33b744d5` five days later. The suite
+was written against an engine that already refused it, and only ever passed on a
+box whose **root** podman storage held `localhost/apex-os:daily` — the ISO build
+box. `pr-validation.yml:1082` runs it on a bare `ubuntu-24.04` with no image, so
+those cases are dead in CI too. Corroborating tell that does not need the theory:
+its "no arguments" case at :90 asserts `rc = 2` and `not a user interface`, and
+preflight's `die()` exits 1 — so that case cannot pass here either.
+
+**The neutralisation, found and verified.** `apex-install:56` is
+`IMAGE="${APEX_IMAGE:-localhost/apex-os:${EDITION}}"` with the comment
+"override with APEX_IMAGE=... for testing". Verified safe before use, not
+assumed: the only `bootc install to-disk --wipe` reachable before the validation
+block is inside `if [ "$UNATTENDED" = 1 ]`, and both its gates are shut here
+(`apex.unattended` is not on `/proc/cmdline`, `/usr/share/apex-installer/allow-unattended`
+does not exist). Everything between preflight and validation is function
+definitions. Measured, with the override pointing at an image that does exist:
+
+    keymap=NOT_A_LAYOUT  → APEX-INSTALL-FAILED: Invalid keyboard layout 'NOT_A_LAYOUT'. Nothing has been erased.
+    keymap=de            → APEX-INSTALL-FAILED: /dev/zzz-does-not-exist is not a block device.   (past validation)
+    username='Bad Name'  → APEX-INSTALL-FAILED: Invalid username 'Bad Name'. … Nothing has been erased.
+
+The third line is `test-installer.sh`'s own dead case, alive. Note `sudo`'s
+`env_reset` strips `APEX_*` from the caller's environment, so it must be passed
+as `sudo -n APEX_IMAGE=… ./apex-install`, not exported beforehand.
+
 ## NEXT
 
 0. **DESIGN FORK to settle before writing the installer page** (from a full
