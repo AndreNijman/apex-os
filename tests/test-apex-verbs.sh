@@ -54,11 +54,12 @@ fi
 VERBS="
 status tier profile battery fan game mode workload perf gaming
 fingerprint pin rollback update shell metrics doctor changelog
-install remove resolve search repo pkg env
-agent project request secret
-blueprint apply sync plugin
+install remove resolve search repo pkg env devices firewall remote
+agent project request secret mcp skill provenance
+blueprint apply sync plugin cloudflare
 ai host build send open
 task recover disposable boot
+trust storage qualify firmware channel schema
 "
 
 for v in $VERBS; do
@@ -71,6 +72,32 @@ for v in $VERBS; do
         bad "apex $v is in the binary" "not a recognised subcommand"
     fi
 done
+
+# ── the other direction: a verb the binary has and this list does not ───────
+# The forward check above catches a verb that was DROPPED. It cannot catch one
+# that was ADDED without being listed, and by 2026-09-11 thirteen had been:
+# channel, cloudflare, devices, firewall, firmware, mcp, provenance, qualify,
+# remote, schema, skill, storage and trust. For each of those, the guard whose
+# entire purpose is to notice a silently vanished verb would not have noticed.
+#
+# The list stays hand-written — deriving it from the binary would make it agree
+# with whatever the binary happens to contain, which is the failure this file
+# was written about. This only asserts the two sets match, so drift is a red
+# build on the PR that introduces it rather than a gap found years later.
+top_verbs="$("$APEX_BIN" --help 2>&1 \
+    | sed -n '/^Commands:/,/^Options:/p' \
+    | grep -oE '^  [a-z][a-z-]*' | tr -d ' ')"
+unlisted=""
+for v in $top_verbs; do
+    # clap's own, deliberately not listed.
+    [ "$v" = "help" ] && continue
+    grep -qw -- "$v" <<<"$VERBS" || unlisted="$unlisted $v"
+done
+if [ -z "$unlisted" ]; then
+    ok "every verb in apex --help is in this file's list"
+else
+    bad "every verb in apex --help is in this file's list" "unlisted:$unlisted"
+fi
 
 # ── the guard on the guard ──────────────────────────────────────────────────
 # If the binary answered --help for anything at all, this file would pass while

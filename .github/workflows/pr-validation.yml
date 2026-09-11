@@ -472,6 +472,18 @@ jobs:
       - name: §33 qualify — nothing is recorded without consent, and a check nobody tried is not a check that failed
         run: ./tests/test-apex-qualify.sh
 
+      # P1-025/026/027/028, structural half, and it belongs in `static` for the
+      # usual reason: its subject is the shape of the source, and a PR that
+      # changed only a doc would skip the job that guards it. What it holds is
+      # that no reader in these modules turns a refused read into a fact — the
+      # defect this repository has now found in about fifteen places — and that
+      # the dead code which kept this branch out of the tree was fixed by
+      # giving it callers rather than by `#[allow(dead_code)]`. The second one
+      # cannot be caught by clippy: silencing the lint is what makes clippy
+      # green.
+      - name: §P1-025 skills & provenance — a refused read is never an absence, and dead code was called rather than silenced
+        run: ./tests/test-apex-skill.sh
+
       # §26's channels, structural half, and this one has to be in `static`:
       # every assertion compares .github/workflows against apexd/, which are
       # different path selectors. A PR touching only build-image.yml sets
@@ -765,6 +777,28 @@ jobs:
           cargo build -p apex --locked --manifest-path apexd/Cargo.toml
           test -x "$APEX"
           ./tests/test-apex-qualify.sh --with-binary
+
+      # P1-025/026/027/028's binary half: the four verbs against fixture HOMEs,
+      # including a skills directory that exists and is refused (which must
+      # never read as a machine with no skills), a plugin edited after it was
+      # recorded, a baseline store that cannot be parsed (could-not-run, not
+      # first-sight — the latter is what a DELETED store looks like), and a
+      # documentation-only plugin, which must not come out "sandboxed" on a
+      # vacuously true field.
+      #
+      # Each fixture gets its own XDG_STATE_HOME as well as its own HOME:
+      # `apex provenance record` writes a baseline store and `store_path`
+      # prefers XDG_STATE_HOME, so a suite setting only HOME would write over
+      # the runner's real one.
+      - name: §P1-025 skills & provenance — apex skill / provenance / mcp planes against fixture homes
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-skill.sh --with-binary
 
       # §26's binary half: `apex channel` against fixture machines on each of
       # the four channel tags and on the legacy alias every installed machine
