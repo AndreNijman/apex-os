@@ -1606,9 +1606,190 @@ impl Drop for TempDir {
     }
 }
 
+/// The one thing in this repository that can mint a valid assertion.
+///
+/// Gated behind `cfg(test)` in this crate and behind the `test-support`
+/// feature for anything else, so it is compiled out of every shipped binary.
+///
+/// ## Why a signer is exposed and a `SecondFactor` constructor is not
+///
+/// [`SecondFactor`] deliberately has no public constructor and no public
+/// field: a caller that could build one could assert that it had been
+/// verified, which is the entire property the type exists to carry. That
+/// stays true here. What this module hands out is a **private key**, not a
+/// receipt — every [`SecondFactor`] it produces is still minted by
+/// [`verify_for_challenge`] checking a real ECDSA signature over the real
+/// challenge binding. Holding a key of one's own is something any attacker
+/// can already do; it buys nothing, because the credential still has to be
+/// enrolled before the daemon will look at what it signed.
+///
+/// It exists because the gate P0-014 added — `apex-agentd`'s
+/// `privilege::decide_origin` — lives in the daemon crate, and without this
+/// every test of it that could be written would assert a *refusal*. A gate
+/// whose passing branch no test can reach is the defect this unit has now
+/// found five times, approached from the test side.
+///
+/// It proves nothing about the cryptography: a signature this crate both
+/// makes and checks only shows the crate agrees with itself. The real-device
+/// vectors own that, and this key owns no test of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use super::*;
+
+    // -----------------------------------------------------------------
+    // A key made here, for the one thing the vectors cannot do
+    // -----------------------------------------------------------------
+
+    /// A P-256 key pair `openssl` generated, and a signer for it.
+    ///
+    /// The vectors above are real and therefore **fixed**: each one's client
+    /// data was chosen by whatever program collected it, and no [`Challenge`]
+    /// this daemon can issue will hash to it. So no vector can ever drive
+    /// [`verify_for_challenge`] to `Ok` — every test in the section above
+    /// asserts a refusal, and the three that carry a signature past `openssl`
+    /// go through [`verify_assertion`] with the vector's own client data.
+    ///
+    /// That is exactly right for the verifier and useless for the receipt.
+    /// [`SecondFactor`] exists *because* it cannot be assembled by a caller
+    /// who merely wants to look verified, so a test that builds one by hand
+    /// and hands it to [`may_elevate`] has asserted nothing about the only
+    /// property the type has. This signer closes that gap: every receipt the
+    /// gate is fed below was minted by the shipped code path, over bytes a
+    /// private key that exists actually signed.
+    ///
+    /// It is **not** a substitute for the vectors, and it verifies nothing
+    /// about the verifier: a signature this module both makes and checks only
+    /// proves the module agrees with itself. The vectors still own every test
+    /// above, and this key owns no test of the cryptography.
+    pub struct Signer {
+        dir: TempDir,
+        key_pem_path: String,
+        pub credential: Credential,
+    }
+
+    impl Signer {
+        /// Arbitrary, and never sent anywhere: the relying party of an
+        /// enrolment is whatever the owner registered the key against, and
+        /// the only thing this module does with it is hash it.
+        const RP_ID: &'static str = "apex-agent.localhost";
+
+        pub fn new(label: &str) -> Signer {
+            let dir = TempDir::new("apex-webauthn-signer").expect("temp dir");
+            let key_pem_path = dir.path().join("key.pem").to_string_lossy().into_owned();
+            openssl(&[
+                "ecparam",
+                "-name",
+                "prime256v1",
+                "-genkey",
+                "-noout",
+                "-out",
+                &key_pem_path,
+            ]);
+            let pem = String::from_utf8(openssl(&["pkey", "-in", &key_pem_path, "-pubout"]))
+                .expect("openssl writes pem as text");
+            // Asserted before any test leans on the key: what `openssl`
+            // wrote is a SubjectPublicKeyInfo the *shipped* parser reads. A
+            // signer whose public half this module could not load would fail
+            // every test below for a reason that is not the test's.
+            PublicKey::from_spki_pem(&pem).expect("openssl wrote an spki this module reads");
+            Signer {
+                dir,
+                key_pem_path,
+                credential: Credential {
+                    label: label.into(),
+                    id: b64_encode(b"a-credential-id-made-for-this-test"),
+                    public_key_pem: pem,
+                    rp_id: Signer::RP_ID.into(),
+                    counter: 0,
+                    enrolled_ms: 1,
+                },
+            }
+        }
+
+        /// An assertion over `challenge`, with those flags and that counter.
+        ///
+        /// `flags` is the knob the gate cares about: `UP | UV` is a key with
+        /// a PIN set, bare `UP` is a key without one, and the difference is
+        /// the whole of [`RemoteElevationRefused::NotUserVerified`].
+        pub fn assert_for(&self, challenge: &Challenge, flags: u8, counter: u32) -> Assertion {
+            let mut auth_data = sha256(Signer::RP_ID.as_bytes()).to_vec();
+            auth_data.push(flags);
+            auth_data.extend_from_slice(&counter.to_be_bytes());
+            self.sign_over(challenge, auth_data)
+        }
+
+        /// [`Signer::assert_for`] with the authenticator data supplied whole,
+        /// so a test can sign one block and present a different one.
+        pub fn sign_over(&self, challenge: &Challenge, auth_data: Vec<u8>) -> Assertion {
+            let cdh = challenge.client_data_hash();
+            let mut message = auth_data.clone();
+            message.extend_from_slice(&cdh);
+            let msg = self.dir.path().join("message");
+            let sig = self.dir.path().join("signature");
+            std::fs::write(&msg, &message).expect("write the message");
+            openssl(&[
+                "pkeyutl",
+                "-sign",
+                "-inkey",
+                &self.key_pem_path,
+                "-rawin",
+                "-digest",
+                "sha256",
+                "-in",
+                &msg.to_string_lossy(),
+                "-out",
+                &sig.to_string_lossy(),
+            ]);
+            Assertion {
+                credential_id: self.credential.id_bytes().expect("the id is base64"),
+                client_data_hash: cdh.to_vec(),
+                rp_id: Signer::RP_ID.into(),
+                auth_data,
+                signature: std::fs::read(&sig).expect("read the signature back"),
+            }
+        }
+
+        /// A receipt, minted the way the daemon will mint one.
+        ///
+        /// `UserVerification::Discouraged` on purpose, and it is a design
+        /// decision rather than a test convenience — see
+        /// `the_gate_and_not_the_verifier_is_what_demands_a_pin`.
+        pub fn receipt(&self, challenge: &Challenge, flags: u8, counter: u32) -> SecondFactor {
+            let assertion = self.assert_for(challenge, flags, counter);
+            verify_for_challenge(
+                &self.credential,
+                challenge,
+                &assertion,
+                UserVerification::Discouraged,
+                challenge.issued_ms,
+            )
+            .expect("a signature this key made over this very challenge")
+        }
+    }
+
+    /// Run `openssl`, and fail the test with its own words if it will not.
+    fn openssl(args: &[&str]) -> Vec<u8> {
+        let out = Command::new("openssl")
+            .args(args)
+            .output()
+            .expect("openssl is in the image");
+        assert!(
+            out.status.success(),
+            "openssl {args:?} exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    pub const UP: u8 = flags::UP;
+    pub const UP_UV: u8 = flags::UP | flags::UV;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_support::{Signer, UP, UP_UV};
 
     fn hex(s: &str) -> Vec<u8> {
         assert!(s.len() % 2 == 0, "hex must be even length");
@@ -2512,152 +2693,6 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // A key made here, for the one thing the vectors cannot do
-    // -----------------------------------------------------------------
-
-    /// A P-256 key pair `openssl` generated, and a signer for it.
-    ///
-    /// The vectors above are real and therefore **fixed**: each one's client
-    /// data was chosen by whatever program collected it, and no [`Challenge`]
-    /// this daemon can issue will hash to it. So no vector can ever drive
-    /// [`verify_for_challenge`] to `Ok` — every test in the section above
-    /// asserts a refusal, and the three that carry a signature past `openssl`
-    /// go through [`verify_assertion`] with the vector's own client data.
-    ///
-    /// That is exactly right for the verifier and useless for the receipt.
-    /// [`SecondFactor`] exists *because* it cannot be assembled by a caller
-    /// who merely wants to look verified, so a test that builds one by hand
-    /// and hands it to [`may_elevate`] has asserted nothing about the only
-    /// property the type has. This signer closes that gap: every receipt the
-    /// gate is fed below was minted by the shipped code path, over bytes a
-    /// private key that exists actually signed.
-    ///
-    /// It is **not** a substitute for the vectors, and it verifies nothing
-    /// about the verifier: a signature this module both makes and checks only
-    /// proves the module agrees with itself. The vectors still own every test
-    /// above, and this key owns no test of the cryptography.
-    struct Signer {
-        dir: TempDir,
-        key_pem_path: String,
-        credential: Credential,
-    }
-
-    impl Signer {
-        /// Arbitrary, and never sent anywhere: the relying party of an
-        /// enrolment is whatever the owner registered the key against, and
-        /// the only thing this module does with it is hash it.
-        const RP_ID: &'static str = "apex-agent.localhost";
-
-        fn new(label: &str) -> Signer {
-            let dir = TempDir::new("apex-webauthn-signer").expect("temp dir");
-            let key_pem_path = dir.path().join("key.pem").to_string_lossy().into_owned();
-            openssl(&[
-                "ecparam",
-                "-name",
-                "prime256v1",
-                "-genkey",
-                "-noout",
-                "-out",
-                &key_pem_path,
-            ]);
-            let pem = String::from_utf8(openssl(&["pkey", "-in", &key_pem_path, "-pubout"]))
-                .expect("openssl writes pem as text");
-            // Asserted before any test leans on the key: what `openssl`
-            // wrote is a SubjectPublicKeyInfo the *shipped* parser reads. A
-            // signer whose public half this module could not load would fail
-            // every test below for a reason that is not the test's.
-            PublicKey::from_spki_pem(&pem).expect("openssl wrote an spki this module reads");
-            Signer {
-                dir,
-                key_pem_path,
-                credential: Credential {
-                    label: label.into(),
-                    id: b64_encode(b"a-credential-id-made-for-this-test"),
-                    public_key_pem: pem,
-                    rp_id: Signer::RP_ID.into(),
-                    counter: 0,
-                    enrolled_ms: 1,
-                },
-            }
-        }
-
-        /// An assertion over `challenge`, with those flags and that counter.
-        ///
-        /// `flags` is the knob the gate cares about: `UP | UV` is a key with
-        /// a PIN set, bare `UP` is a key without one, and the difference is
-        /// the whole of [`RemoteElevationRefused::NotUserVerified`].
-        fn assert_for(&self, challenge: &Challenge, flags: u8, counter: u32) -> Assertion {
-            let mut auth_data = sha256(Signer::RP_ID.as_bytes()).to_vec();
-            auth_data.push(flags);
-            auth_data.extend_from_slice(&counter.to_be_bytes());
-            self.sign_over(challenge, auth_data)
-        }
-
-        /// [`Signer::assert_for`] with the authenticator data supplied whole,
-        /// so a test can sign one block and present a different one.
-        fn sign_over(&self, challenge: &Challenge, auth_data: Vec<u8>) -> Assertion {
-            let cdh = challenge.client_data_hash();
-            let mut message = auth_data.clone();
-            message.extend_from_slice(&cdh);
-            let msg = self.dir.path().join("message");
-            let sig = self.dir.path().join("signature");
-            std::fs::write(&msg, &message).expect("write the message");
-            openssl(&[
-                "pkeyutl",
-                "-sign",
-                "-inkey",
-                &self.key_pem_path,
-                "-rawin",
-                "-digest",
-                "sha256",
-                "-in",
-                &msg.to_string_lossy(),
-                "-out",
-                &sig.to_string_lossy(),
-            ]);
-            Assertion {
-                credential_id: self.credential.id_bytes().expect("the id is base64"),
-                client_data_hash: cdh.to_vec(),
-                rp_id: Signer::RP_ID.into(),
-                auth_data,
-                signature: std::fs::read(&sig).expect("read the signature back"),
-            }
-        }
-
-        /// A receipt, minted the way the daemon will mint one.
-        ///
-        /// `UserVerification::Discouraged` on purpose, and it is a design
-        /// decision rather than a test convenience — see
-        /// `the_gate_and_not_the_verifier_is_what_demands_a_pin`.
-        fn receipt(&self, challenge: &Challenge, flags: u8, counter: u32) -> SecondFactor {
-            let assertion = self.assert_for(challenge, flags, counter);
-            verify_for_challenge(
-                &self.credential,
-                challenge,
-                &assertion,
-                UserVerification::Discouraged,
-                challenge.issued_ms,
-            )
-            .expect("a signature this key made over this very challenge")
-        }
-    }
-
-    /// Run `openssl`, and fail the test with its own words if it will not.
-    fn openssl(args: &[&str]) -> Vec<u8> {
-        let out = Command::new("openssl")
-            .args(args)
-            .output()
-            .expect("openssl is in the image");
-        assert!(
-            out.status.success(),
-            "openssl {args:?} exited {}: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        );
-        out.stdout
-    }
-
     /// The elevation a receipt from `challenge` should answer for, from
     /// `origin`.
     fn asking(challenge: &Challenge, origin: RequestOrigin) -> Elevation {
@@ -2677,9 +2712,6 @@ mod tests {
             .filter(|o| !o.is_local())
             .collect()
     }
-
-    const UP: u8 = flags::UP;
-    const UP_UV: u8 = flags::UP | flags::UV;
 
     // -----------------------------------------------------------------
     // The receipt
@@ -2815,6 +2847,49 @@ mod tests {
         );
         // And the one function that does return one is the verifier.
         assert!(shipped.contains("-> Result<SecondFactor, AssertionError>"));
+    }
+
+    #[test]
+    fn the_signer_is_gated_out_of_every_shipped_binary_and_mints_no_receipt_of_its_own() {
+        // `a_receipt_has_no_constructor_and_no_field_anybody_can_write` splits
+        // this file at `#[cfg(test)]`, and `test_support` is gated on
+        // `any(test, feature = "test-support")` — which does not contain that
+        // literal, so the signer now sits inside what that test calls
+        // "shipped". Its guard is therefore weaker than it reads, and this is
+        // the missing half rather than a second copy of it.
+        let source = include_str!("webauthn.rs");
+        // The gate itself. Loosen it and a key generator ships in apex-agentd.
+        assert!(
+            source.contains("#[cfg(any(test, feature = \"test-support\"))]\npub mod test_support {"),
+            "test_support lost its cfg gate"
+        );
+        let module = source
+            .split("pub mod test_support {")
+            .nth(1)
+            .expect("the module is declared")
+            .split("\n}\n")
+            .next()
+            .expect("the module ends");
+        // The property the exposure rests on: the signer holds a private key,
+        // and every receipt it hands back still comes out of the shipped
+        // verifier checking a real signature. A struct literal here would be
+        // the constructor `SecondFactor` exists in order not to have.
+        assert!(
+            module.contains("verify_for_challenge("),
+            "the signer stopped going through the verifier"
+        );
+        // `-> SecondFactor {` is a signature's brace, not a literal, and
+        // `receipt` legitimately has one — so the naive `contains` is a check
+        // that can only ever fail. Every occurrence must be a return type.
+        let built_by_hand: Vec<_> = module
+            .match_indices("SecondFactor {")
+            .filter(|(at, _)| !module[..*at].ends_with("-> "))
+            .map(|(at, _)| &module[at..(at + 60).min(module.len())])
+            .collect();
+        assert!(
+            built_by_hand.is_empty(),
+            "test_support started building a receipt by hand: {built_by_hand:?}"
+        );
     }
 
     // -----------------------------------------------------------------

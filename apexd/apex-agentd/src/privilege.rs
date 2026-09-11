@@ -1526,4 +1526,327 @@ mod tests {
         assert!(err.to_string().contains("session 9"), "{err}");
         assert!(err.to_string().contains("renew a system-access grant"), "{err}");
     }
+
+    // ---------------------------------------------------------------------
+    // decide_origin — §7's two columns (P0-014, commit 4)
+    // ---------------------------------------------------------------------
+
+    use apex_agent_core::webauthn::test_support::{Signer, UP, UP_UV};
+    use apex_agent_core::webauthn::Challenge;
+    use std::cell::Cell;
+
+    /// What a client sends. The contents never matter to `decide_origin`:
+    /// every test here supplies the redeem as a closure, because the point of
+    /// that closure being an argument is that the decision can be checked
+    /// without a daemon, a store or a socket.
+    fn submitted() -> SubmittedFactor {
+        SubmittedFactor {
+            nonce: "a-nonce".into(),
+            credential: "the owner's key".into(),
+            assertion: "four lines from fido2-assert".into(),
+        }
+    }
+
+    /// A redeem that must not be reached, and says so if it is.
+    fn never_redeemed(_: &SubmittedFactor) -> Result<SecondFactor, AssertionError> {
+        panic!("this caller was refused before the gate; its challenge must not be spent")
+    }
+
+    fn remote_origins() -> impl Iterator<Item = RequestOrigin> {
+        RequestOrigin::ALL.iter().copied().filter(|o| !o.is_local())
+    }
+
+    #[test]
+    fn the_local_column_is_not_asked_for_a_key_whatever_the_owner_set() {
+        // §7 gives root "local auth" locally, and that path is
+        // `may_be_granted` plus polkit. `decide_origin` must not become a
+        // second, weaker copy of it: neither the policy nor the presence of a
+        // key may change the answer for a local origin, or the local path has
+        // silently acquired a requirement §7 does not give it.
+        for origin in RequestOrigin::ALL.iter().copied().filter(|o| o.is_local()) {
+            for policy in OriginPolicy::ALL.iter().copied() {
+                for kind in [GrantKind::SystemAccess, GrantKind::BreakGlass] {
+                    let e = Elevating { policy, scope: None, ttl_ms: 900_000, factor: None };
+                    assert_eq!(
+                        decide_origin(&unsessioned(origin), "ask", kind, &e, never_redeemed),
+                        Ok(origin),
+                        "{origin} under {policy}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_connection_inside_a_session_is_refused_before_its_challenge_is_spent() {
+        // Step 1 of `may_be_granted` still decides, and still first. An agent
+        // cannot buy itself root with a touch — and it does not even get to
+        // spend the nonce finding that out, which matters because a spent
+        // challenge is a challenge the human has to collect again.
+        let s = submitted();
+        for origin in RequestOrigin::ALL.iter().copied() {
+            let who = Origin { session: Some(4), ..unsessioned(origin) };
+            let e = Elevating {
+                policy: OriginPolicy::RemoteElevationAllowed,
+                scope: None,
+                ttl_ms: 900_000,
+                factor: Some(&s),
+            };
+            let err = decide_origin(&who, "ask for a grant", GrantKind::BreakGlass, &e, never_redeemed)
+                .expect_err("must refuse");
+            assert_eq!(
+                err,
+                GrantError::FromInsideASession { session: 4, what: "ask for a grant" },
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_origin_that_could_not_be_established_is_refused_before_the_gate_too() {
+        // The other `may_be_granted` refusal that must survive P0-014: a
+        // connection nobody could classify is not offered the chance to try a
+        // key. Only `NotLocal` is carried forward.
+        let s = submitted();
+        let who = Origin::default(); // no request_origin at all
+        let e = Elevating {
+            policy: OriginPolicy::RemoteElevationAllowed,
+            scope: None,
+            ttl_ms: 900_000,
+            factor: Some(&s),
+        };
+        let err = decide_origin(&who, "ask for a grant", GrantKind::BreakGlass, &e, never_redeemed)
+            .expect_err("must refuse");
+        assert!(
+            !matches!(err, GrantError::RemoteElevation(_) | GrantError::SecondFactorRefused(_)),
+            "an unclassifiable connection was sent to the second-factor gate: {err}"
+        );
+    }
+
+    #[test]
+    fn a_remote_origin_under_the_default_policy_is_told_the_setting_and_not_the_key() {
+        // The order `may_elevate` documents, asserted from the caller's side:
+        // the policy is checked BEFORE the factor, so a user who never opted
+        // in reads a sentence about the setting they have to change rather
+        // than about a key they were never going to be asked for.
+        for origin in remote_origins() {
+            let e = Elevating {
+                policy: OriginPolicy::LocalElevationOnly,
+                scope: None,
+                ttl_ms: 900_000,
+                factor: None,
+            };
+            let err = decide_origin(&unsessioned(origin), "ask", GrantKind::SystemAccess, &e, never_redeemed)
+                .expect_err("must refuse");
+            assert_eq!(
+                err,
+                GrantError::RemoteElevation(RemoteElevationRefused::PolicyForbids { origin }),
+                "{origin}"
+            );
+            assert!(err.to_string().contains("--origin-policy remote"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_key_that_answered_badly_under_a_forbidding_policy_still_reads_as_the_policy() {
+        // The same ordering, now with a key in play and the harder direction:
+        // a bad assertion must NOT be what the user is told about when the
+        // owner never opted in, because fixing the key would not help them.
+        // The nonce is spent anyway — one issue, one attempt — and that is
+        // asserted rather than left to be discovered.
+        for origin in remote_origins() {
+            let s = submitted();
+            let spent = Cell::new(0);
+            let e = Elevating {
+                policy: OriginPolicy::LocalElevationOnly,
+                scope: None,
+                ttl_ms: 900_000,
+                factor: Some(&s),
+            };
+            let err = decide_origin(&unsessioned(origin), "ask", GrantKind::SystemAccess, &e, |_| {
+                spent.set(spent.get() + 1);
+                Err(AssertionError::BadSignature)
+            })
+            .expect_err("must refuse");
+            assert_eq!(
+                err,
+                GrantError::RemoteElevation(RemoteElevationRefused::PolicyForbids { origin }),
+                "{origin}"
+            );
+            assert_eq!(spent.get(), 1, "the challenge is spent exactly once, {origin}");
+        }
+    }
+
+    #[test]
+    fn a_remote_origin_the_owner_opted_in_for_and_nobody_answered_is_told_what_is_missing() {
+        for origin in remote_origins() {
+            let e = Elevating {
+                policy: OriginPolicy::RemoteElevationAllowed,
+                scope: None,
+                ttl_ms: 900_000,
+                factor: None,
+            };
+            let err = decide_origin(&unsessioned(origin), "ask", GrantKind::SystemAccess, &e, never_redeemed)
+                .expect_err("must refuse");
+            assert_eq!(
+                err,
+                GrantError::RemoteElevation(RemoteElevationRefused::NoSecondFactor { origin }),
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_that_answered_and_did_not_check_out_is_told_so_and_not_told_nothing_answered() {
+        // `may_elevate` can only ever say "nothing answered", because a
+        // refused assertion never became a receipt. The whole reason
+        // `decide_origin` keeps the `Result` around is to tell the two apart,
+        // and the sentence has to mention that the challenge is gone.
+        for why in [
+            AssertionError::BadSignature,
+            AssertionError::NoUserPresence,
+            AssertionError::NoSuchChallenge,
+            AssertionError::CounterWentBackwards { stored: 9, presented: 2 },
+        ] {
+            let s = submitted();
+            let e = Elevating {
+                policy: OriginPolicy::RemoteElevationAllowed,
+                scope: None,
+                ttl_ms: 900_000,
+                factor: Some(&s),
+            };
+            let err = decide_origin(
+                &unsessioned(RequestOrigin::RemoteControl),
+                "ask",
+                GrantKind::SystemAccess,
+                &e,
+                |_| Err(why.clone()),
+            )
+            .expect_err("must refuse");
+            assert_eq!(err, GrantError::SecondFactorRefused(why.clone()), "{why}");
+            assert!(err.to_string().contains("spent"), "{err}");
+        }
+    }
+
+    // -- the branch that needs a key that really signed ---------------------
+
+    /// A receipt for exactly that elevation, minted the way the daemon mints
+    /// one: a real ECDSA signature over the real challenge binding, checked by
+    /// the shipped verifier. See `webauthn::test_support` for why a signer is
+    /// exposed and a `SecondFactor` constructor is not.
+    fn receipt(signer: &Signer, scope: Option<u32>, kind: GrantKind, ttl_ms: u64, flags: u8) -> SecondFactor {
+        let c = Challenge::with_nonce(scope, kind, ttl_ms, 1_000, b"a-nonce-for-this-test");
+        signer.receipt(&c, flags, 1)
+    }
+
+    #[test]
+    fn a_remote_origin_the_owner_opted_in_for_is_let_through_by_a_key_that_really_signed() {
+        // The branch this whole commit exists for, and the only one that
+        // cannot be written without a signer. Both callers are covered: a
+        // session being started (`scope: None`, the primary case, because
+        // `authorise_grant` runs before the id is reserved) and a renewal of
+        // an existing grant (`scope: Some(..)`).
+        let signer = Signer::new("the owner's key");
+        for origin in remote_origins() {
+            for (scope, kind, ttl_ms) in [
+                (None, GrantKind::SystemAccess, 900_000u64),
+                (Some(7), GrantKind::BreakGlass, 60_000),
+            ] {
+                let s = submitted();
+                let factor = receipt(&signer, scope, kind, ttl_ms, UP_UV);
+                let e = Elevating {
+                    policy: OriginPolicy::RemoteElevationAllowed,
+                    scope,
+                    ttl_ms,
+                    factor: Some(&s),
+                };
+                assert_eq!(
+                    decide_origin(&unsessioned(origin), "ask", kind, &e, move |_| Ok(factor)),
+                    Ok(origin),
+                    "{origin} / {kind:?} / scope {scope:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_touch_answers_for_one_elevation_and_not_for_a_neighbouring_one() {
+        // `may_answer_for` compares session, kind and ttl, and the session in
+        // BOTH directions. Each row mints a real receipt for one elevation and
+        // presents it for another, so none of these refusals comes from a
+        // signature that failed — they come from consent that was given for
+        // something else.
+        let signer = Signer::new("the owner's key");
+        let start = (None, GrantKind::SystemAccess, 900_000u64);
+        for (touched, asked) in [
+            // a touch collected while starting a session cannot renew one
+            (start, (Some(7), GrantKind::SystemAccess, 900_000)),
+            // and a touch for session 7 cannot start a new session
+            ((Some(7), GrantKind::SystemAccess, 900_000), start),
+            // nor does session 7's touch answer for session 8
+            ((Some(7), GrantKind::SystemAccess, 900_000), (Some(8), GrantKind::SystemAccess, 900_000)),
+            // capability-scoped root is not break-glass root
+            (start, (None, GrantKind::BreakGlass, 900_000)),
+            // and a window is part of what was consented to
+            (start, (None, GrantKind::SystemAccess, 8 * 3_600_000)),
+        ] {
+            let s = submitted();
+            let factor = receipt(&signer, touched.0, touched.1, touched.2, UP_UV);
+            let e = Elevating {
+                policy: OriginPolicy::RemoteElevationAllowed,
+                scope: asked.0,
+                ttl_ms: asked.2,
+                factor: Some(&s),
+            };
+            let err = decide_origin(
+                &unsessioned(RequestOrigin::RemoteControl),
+                "ask",
+                asked.1,
+                &e,
+                move |_| Ok(factor),
+            )
+            .expect_err("a touch for something else must not answer");
+            // Refused by the gate over what was consented to, NOT reported as
+            // a broken signature: the key did sign, and telling the user their
+            // key is bad would send them to fix the wrong thing.
+            assert!(
+                matches!(err, GrantError::RemoteElevation(_)),
+                "touched {touched:?} asked {asked:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_with_no_pin_cannot_approve_root_from_anywhere_remote() {
+        // Both `GrantKind`s are root — §4.4 is capability-scoped root and §4.5
+        // is break-glass — so a bare touch is not enough and the refusal has
+        // to name `fido2-token -S`. The signature here is perfectly good; only
+        // the UV bit inside the signed bytes differs.
+        let signer = Signer::new("a key with no pin");
+        for kind in [GrantKind::SystemAccess, GrantKind::BreakGlass] {
+            let s = submitted();
+            let factor = receipt(&signer, None, kind, 900_000, UP);
+            let e = Elevating {
+                policy: OriginPolicy::RemoteElevationAllowed,
+                scope: None,
+                ttl_ms: 900_000,
+                factor: Some(&s),
+            };
+            let err = decide_origin(
+                &unsessioned(RequestOrigin::RemoteControl),
+                "ask",
+                kind,
+                &e,
+                move |_| Ok(factor),
+            )
+            .expect_err("a touch without a pin is not enough for root");
+            assert!(
+                matches!(
+                    err,
+                    GrantError::RemoteElevation(RemoteElevationRefused::NotUserVerified { .. })
+                ),
+                "{kind:?}: {err}"
+            );
+        }
+    }
 }
