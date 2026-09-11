@@ -112,6 +112,14 @@ answers **NO**, so the fix for that assertion exists only on `task/p0-finish`.
 So the honest statement of the build criterion is:
 **`roadmap/v2.2` needs BOTH `392108e5` (or `rust` will fail and skip `base`)
 AND `f372c089` (or `base` will fail at line 338). Neither suffices alone.**
+
+**Re-verified at the end of the round against the integration tip as it then
+stood, `230ee02a`** (it moved from `61504ca2` while this unit was working, so
+the claim was re-checked rather than left resting on a stale ref): both
+commits are still absent (`merge-base --is-ancestor` answers NO for each),
+`Containerfile.base:338` is still
+`test -L /usr/lib/systemd/system/multi-user.target.wants/apex-secretd.service`,
+and `build-image.yml`'s rust step is still a bare `cargo test --locked`.
 Whether there are further never-true assertions past line 338 is **unknown** —
 the local `core -> base -> apex` build that would have found them died with
 the predecessor's session and was not restarted, because CI building the image
@@ -240,6 +248,19 @@ Baseline on this worktree at `f39fd664`: **2517 passed / 0 failed**.
 After this round: **2530 passed / 0 failed**, `cargo test --locked
 --no-fail-fast`, XDG_CONFIG_HOME redirected. Clippy clean both locally and
 through `tests/run-clippy.sh` (the container gate, exit 0).
+
+**Every mutation verdict on this card was re-taken after the coordinator's
+`cp -p` correction, and all of them hold.** They were not at risk — every
+restore here used a plain `cp` with no `-p` and no `--preserve`, so no mtime
+was carried back and no run could have measured a mutant's binary against
+pristine source. Verified rather than asserted, three ways: the worktree is
+clean and the restored lines are what is committed (`git show HEAD:…` for
+`secret.rs`, `agent.rs` and `test-secret-at-rest.sh`), so the SOURCES are
+provably right; and the suite was then re-run with the five touched files
+forced stale, which reported **5 crates recompiled** — so the rebuild
+demonstrably happened rather than hitting a cache — for **2530 passed / 0
+failed, 0 error lines**. `./tests/test-secret-at-rest.sh` re-run: **19/0**.
+`cargo clippy --locked --workspace --all-targets -- -D warnings`: clean.
 
 Inherited from the predecessor and committed by this round:
 
