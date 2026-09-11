@@ -56,6 +56,7 @@ pub mod destination;
 pub mod git;
 pub mod grant;
 pub mod graph;
+pub mod handoff;
 pub mod hook;
 pub mod inject;
 pub mod journal;

@@ -375,6 +375,41 @@ COPY files/system/firefox/policies.json /etc/firefox/policies/policies.json
 COPY files/system/firefox/apex-default-prefs.js \
      /usr/lib64/firefox/browser/defaults/preferences/zz-apex-default-prefs.js
 COPY files/system/xdg/xdg-terminals.list /etc/xdg/xdg-terminals.list
+# ── The terminal choice, and the program that reads it ──────────────────────
+# That list is xdg-terminal-exec's config file: the one place a desktop says
+# which terminal a `Terminal=true` entry should open in, so every launcher does
+# not carry its own list. It has shipped since apex-logs 31 — and until
+# Containerfile.core started installing xdg-terminal-exec, nothing on the
+# machine read it. The config was on every APEX install and the reader was not,
+# so /usr/share/applications/nvim.desktop (Terminal=true, from the neovim rpm,
+# unremovable by apex-pkg because the image already provides it) could be
+# clicked and nothing happened. Andre reported it as "nvim works on mine but not
+# others"; it worked from a shell everywhere and from the desktop nowhere.
+#
+# All three parts are asserted against each other, because any one of them alone
+# is the same silent half-failure: a reader with no config falls back to
+# scanning for any terminal emulator it can find, and a config naming an entry
+# that is not installed selects nothing.
+RUN set -eux; \
+    test -x /usr/bin/xdg-terminal-exec \
+        || { echo "FATAL: /etc/xdg/xdg-terminals.list ships but xdg-terminal-exec does not; nothing reads it and Terminal=true entries stay unlaunchable"; exit 1; }; \
+    # `|| true` on the grep only: under `set -e` a command substitution that
+    # exits non-zero kills the RUN before the next line can say why, and the
+    # next line is the whole point of writing the check. ERE, not the GNU-only
+    # `\|` alternation. Skips comments, `-` exclusions and `/` directives, which
+    # is every kind of line in the file that is not a terminal.
+    xte_entry="$(grep -m1 -E -v '^[[:space:]]*([#/-]|$)' /etc/xdg/xdg-terminals.list || true)"; \
+    test -n "$xte_entry" \
+        || { echo "FATAL: /etc/xdg/xdg-terminals.list names no terminal; the fallback scan would pick one at random"; exit 1; }; \
+    test -s "/usr/share/applications/$xte_entry" \
+        || { echo "FATAL: xdg-terminals.list names $xte_entry, which is not installed in /usr/share/applications"; exit 1; }; \
+    # And it has to be the SAME terminal $TERMINAL names, or the desktop opens
+    # one and every script that honours $TERMINAL opens another.
+    xte_bin="$(sed -n 's/^TryExec=//p;s/^Exec=\([^ ]*\).*/\1/p' "/usr/share/applications/$xte_entry" | head -n1)"; \
+    env_bin="$(sed -n 's/^TERMINAL=//p' /etc/environment | head -n1)"; \
+    test "${xte_bin##*/}" = "${env_bin##*/}" \
+        || { echo "FATAL: xdg-terminals.list opens ${xte_bin##*/} but /etc/environment sets TERMINAL=${env_bin##*/}"; exit 1; }; \
+    echo "xdg-terminal-exec: $xte_entry (${xte_bin##*/}), agrees with TERMINAL"
 # XKB defaults generator: exports XKB_DEFAULT_LAYOUT/VARIANT/MODEL/OPTIONS from
 # the system keymap into the systemd manager environment, so greetd — and the
 # sway/labwc greeter host it spawns — use the layout the machine is actually

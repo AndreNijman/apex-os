@@ -136,6 +136,53 @@ pub enum McpCmd {
         /// One server. Every one this machine defines, when left out.
         name: Option<String>,
     },
+
+    /// The two trust planes: programs on this machine, and endpoints off it.
+    ///
+    /// The same set `list` shows, grouped by which side of this machine each
+    /// connector is on, because the two get different mitigations and neither
+    /// is the other's: a local program is confined by bubblewrap and a cloud
+    /// endpoint is not confined at all — its credential is the boundary.
+    ///
+    /// Also says what each named policy does to the cloud plane, and — because
+    /// the table would otherwise read as something it is not — that the
+    /// reduction is all-or-nothing rather than a per-connector switch.
+    Planes {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Memory providers: which server holds your memory, and whether it is up.
+    ///
+    /// APEX stores no memory of its own. This is a view over MCP servers
+    /// something else already defined, so the provider named authoritative
+    /// stays the source of truth and there is no migration to do.
+    ///
+    /// Which server is a memory provider is declared, in
+    /// `~/.config/apex/memory.toml`:
+    ///
+    /// ```text
+    /// authoritative = "claude-memory"
+    /// providers = ["claude-memory"]
+    /// ```
+    ///
+    /// With no declaration, a server whose name looks like a memory server's
+    /// is reported and labelled as a guess. Where two candidates exist and
+    /// nothing says which is authoritative, this reports the ambiguity rather
+    /// than choosing where your notes live.
+    Memory {
+        #[arg(long)]
+        json: bool,
+        /// Ask each provider to answer an MCP `initialize` handshake.
+        ///
+        /// Off by default. `initialize` changes nothing, but it is still a
+        /// request to somebody's server and a status command should not make
+        /// one unasked. It needs the credential in the broker and
+        /// `mcp.request` already granted here — this never grants one in order
+        /// to report on it.
+        #[arg(long)]
+        probe: bool,
+    },
 }
 
 pub fn main(cmd: McpCmd) -> i32 {
@@ -167,6 +214,8 @@ pub fn main(cmd: McpCmd) -> i32 {
         },
         McpCmd::Confine { name, dry_run } => report(confine::main(&name, dry_run)),
         McpCmd::Policy { name } => report(policy(name.as_deref())),
+        McpCmd::Planes { json } => report(crate::connector::planes_main(json)),
+        McpCmd::Memory { json, probe } => report(crate::connector::memory_main(json, probe)),
     }
 }
 
@@ -203,6 +252,15 @@ fn list(json: bool) -> Result<i32> {
     let mut readable = 0;
     for server in &found {
         println!("{}", server.name);
+        // P1-028's first criterion, in the listing a person already reads
+        // rather than only in a new verb. "stdio" and "http" are facts about
+        // the definition; which side of this machine the connector is on is
+        // what decides what can confine it, and a reader should not have to
+        // know that the first implies the second.
+        println!(
+            "  plane       {}",
+            crate::connector::Plane::of(&server.transport).describe()
+        );
         println!("  transport   {}", describe_transport(&server.transport));
         println!("  credential  {}", describe_credential(&server.credential));
         if let servers::Transport::Stdio { command, args } = &server.transport {
@@ -538,7 +596,7 @@ pub fn replies(body: &str) -> Vec<String> {
     out
 }
 
-fn first_line(text: &str) -> String {
+pub fn first_line(text: &str) -> String {
     let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
     if line.is_empty() {
         "the broker returned nothing that is an MCP message".to_string()
