@@ -604,6 +604,27 @@ jobs:
       - name: Toolchain
         run: rustup component add clippy
 
+      # bubblewrap is not on the GitHub runner, and six assertions in
+      # apex/tests/mcp_sidecar_live.rs depend on it: they confine a real MCP
+      # server and then check that the confinement actually holds — no network
+      # where none was asked for, no reach into the agent's HOME, no inherited
+      # variables, the broker socket opened only on request. Without bwrap each
+      # one fails on `apex mcp run: this MCP server cannot be confined`.
+      #
+      # Installed rather than skipped, deliberately. The alternative pattern in
+      # this repository is to skip when a tool is missing, and that is right for
+      # a suite needing a compositor or a GPU — but these six are the assertions
+      # that the sandbox IS a sandbox, and a security boundary that quietly does
+      # not get checked in CI is the one you least want quiet. This file already
+      # records four occasions where something skipped and the workflow passed.
+      - name: Sandbox tooling the confinement assertions need
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          command -v bwrap
+          bwrap --version
+
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
