@@ -1832,14 +1832,11 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED on roadmap/v2.2 2026-09-11 (round 10), merge 6d7d4a1 of task/p1-035-agent-tooling. Screenshot and file
-    injection into TUI agents: apex-agent-core/src/inject.rs with an OutputScanner that learned CSI so it tracks
-    DECSET 2004 bracketed paste from the session's own output; Request::Inject / Response::Injected (not a
-    protocol bump); the apex-agentd handler, which refuses any caller resolving to a managed session, refuses
-    relative paths and non-regular files, caps at 32 MiB and copies into the session scratch inbox; and apex agent
-    send. tests/test-agent-inject.sh 48 passed / 0 failed on the landed tip with a real daemon and real PTYs. The
-    five owed mutations are CLEARED - 7/7 killed, per the unit card; do not re-run that battery. MEASURED while
-    building: File::open on a FIFO BLOCKS until a writer arrives, which the first version got wrong.
+    Screenshot and file injection into TUI agents. LANDED on apex-os roadmap/v2.2 2026-09-11 as part of merge
+    c3e29af2. Pushed as 1bb5db4 (a test daemon and the real one shared every session's scratch) and 83ef1e0 (a
+    screenshot in front of you could not be handed to a running agent). tests/test-agent-inject.sh 48 passed / 0
+    failed, re-run on the merged tree rather than inherited. Seven mutation pairs killed 7/7 in an earlier round;
+    that battery is cleared and must not be re-run.
 - id: P1-036
   title: Worktree test/conflict/PR status
   priority: P1
@@ -1852,20 +1849,23 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED on roadmap/v2.2 2026-09-11 (round 10), merge 6d7d4a1 of task/p1-035-agent-tooling, commits 473b7f6 /
-    f4ec0ee / 3ec4467 / 290002e / 296b0ee. Per-worktree status for a remembered project: git.rs primitives
-    (ahead_behind, merge_tree_conflicts, diff_numstat, upstream_of), apex-agent-core/src/worktree.rs carrying
-    WorktreeStatus + Readiness + ConflictState + TestState, hook.rs detecting a test command on tool events and
-    carrying it as an optional Request::Event field, the daemon handler and apex agent worktrees [--json]. NOT a
-    protocol bump (ToolCheck precedent). The named guarantee is asserted against a genuinely conflicted repo:
-    after a status call MERGE_HEAD is absent, the index sha is unchanged and git status --porcelain is byte-
-    identical - which is why the conflict answer comes from merge-tree and not from a real merge. tests/test-
-    agent-worktrees.sh 61 passed / 0 failed on the landed tip. 7/7 mutations killed. FOUND and fixed on the way:
-    the request was keyed on a slug that was still a path-traversal hole.
+    Worktree test and conflict status for agent sessions. LANDED on apex-os roadmap/v2.2 2026-09-11 as part of
+    merge c3e29af2; pushed as 473b7f6 (the engine: git.rs primitives, worktree.rs, worktrees.rs, hook.rs
+    detection, Request/Response::Worktrees, the daemon handler and apex agent worktrees [--json]) and f4ec0ee
+    (hardening plus three doc-vs-code corrections). tests: worktrees 61 passed / 0 failed on the merged tree. TWO
+    DESIGN CONSTRAINTS that are load-bearing and were honoured: conflict state comes from git merge-tree --write-
+    tree and NEVER a real merge in a worktree someone is sitting in, with the named guarantee asserted (after a
+    status call on a real conflicted repo, MERGE_HEAD is absent, the index sha is unchanged and git status
+    --porcelain is byte-identical); and the request is keyed on a project slug or session id the caller can
+    already see, never a raw caller-supplied path. f4ec0ee exists because the slug keying was STILL a traversal
+    hole after the first pass - a project slug arriving from the socket was joined straight onto a path, so any
+    confined session could have made the daemon run merge-tree, which writes objects, in a directory of its
+    choosing. No PROTOCOL_VERSION bump: an unknown cmd gets BadRequest and the connection survives (ToolCheck
+    precedent, protocol.rs:509).
 - id: P1-037
   title: Agent disposable capsule integration
   priority: P1
-  status: partial
+  status: done
   area: capsules
   depends_on: []
   acceptance:
@@ -1874,18 +1874,27 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED on roadmap/v2.2 2026-09-11 (round 10), merge 6d7d4a1 of task/p1-035-agent-tooling, commits 26ae934 /
-    9870bd7 / d0c612d / f5879df / d701f37. Disposable session capsules: paths::disposable_engine, apex-
-    agentd/src/disposable.rs, RunRequest::{disposable,copy_out}, SessionInfo.capsule, the session.rs branch that
-    makes the session's PTY child the disposable ENGINE, apex agent run --disposable [--copy-out DIR], and the
-    --worktree / --checkpoint refusals. tests/test-agent-disposable.sh 46 passed / 0 failed on the landed tip; 8/8
-    mutations killed. PARTIAL for one named reason, not for the feature: three places in this feature say the
-    engine's teardown also runs when the DAEMON dies, and that was asserted rather than measured. The measurement
-    now exists - a 162-line section that gives each death its own daemon, runtime dir, disposable root and capsule
-    log (a shared log would let an earlier session's lines satisfy it, since session ids restart at 1), covering
-    SIGTERM through APEX's own shutdown path and SIGKILL through the kernel's SIGHUP on the orphaned PTY - but it
-    is UNCOMMITTED in /var/tmp/apex-work/wt-p1-035 and therefore not landed. It is snapshotted to
-    refs/wip/wt-p1-035. Done the moment that section is committed, run and mutation-proved.
+    Disposable capsules for agent sessions. LANDED on apex-os roadmap/v2.2 2026-09-11 as merge c3e29af2 (branch
+    tip feb336e). tests/test-agent-disposable.sh 46 -> 58 passed / 0 failed, re-verified 58/0 by the orchestrator
+    ON THE LANDED TIP, not taken from the branch. The twelve new assertions are the daemon-death section, six per
+    death, and each case runs on its own daemon, runtime dir, disposable root and capsule log - because sharing
+    the suite's log lets an earlier session's rm line satisfy a later grep, so the assertion passes without
+    testing anything. Mutation 9 (the engine ignores SIGHUP) KILLED at 50/8, four named assertions red per death,
+    engine restored byte-identical and verified with git diff --quiet. ISOLATION IS STATED HONESTLY, not implied:
+    a capsule shares the real HOME and gets /run/host read-write as the user, so isolation here means the read-
+    only OS layer and not a security sandbox. THE MEASUREMENT THAT MATTERS, and it corrects two earlier written
+    claims: BOTH daemon deaths tear the capsule down by the SAME route - the kernel's SIGHUP to the orphaned PTY's
+    foreground group when the dead daemon's master fd closes - and apex-agentd's own SIGTERM shutdown DOES NOT RUN
+    AT ALL. The inherited diagnosis (that threads do not inherit the signal mask) was wrong and so was its first
+    correction: apex-agentd-sig's SigBlk=0 is a DISPLAY ARTIFACT of sitting in rt_sigtimedwait, which parks the
+    waited-for bits out of blocked while it sleeps. Proved with a three-thread probe: before-mask sleeping 0,
+    after-mask sleeping 0x4003, after-mask in sigwait 0. Exactly one thread is genuinely unmasked, apex-agentd-
+    gra, spawned at main.rs:164 before the mask is applied at 169, and the whole fix is that one-line re-order -
+    measured: grants inherits 0x4003, exit status 0 instead of 143, the log prints 'signal 15, stopping sessions',
+    and the socket is removed. NOT THIS ITEM'S TO FIX and carried forward: that re-order, the stale control socket
+    left on disk because remove_file never runs, and the fact that the mutation promised as the guard on the fix
+    does not guard it - measured still surviving 58/0 on a fixed build, because shutdown() is followed by
+    process::exit and the kernel's SIGHUP arrives regardless.
 - id: P1-038
   title: Complete Floating/labwc real-world validation matrix
   priority: P1

@@ -93,6 +93,13 @@ apex-os `main`, run
 - Quickshell 0.3.1 exports `processContext` as a structured value type, so
   `Quickshell.execDetached({command: […], workingDirectory: …})` works from QML.
 
+- PRE-EXISTING, NOT MINE, for whoever owns CI: apex-shell's ci.yml runs
+  `shellcheck -S warning tests/*.sh`, and that is ALREADY red on
+  roadmap/v2.2 — `tests/run-hypr-configerrors-test.sh` alone, 5 findings
+  (SC2034 x2, SC2045, and friends). Verified by running shellcheck against the
+  pristine tip; my diff against v2.2 for that file is empty. My own files are
+  clean. Left untouched deliberately — out of this task's scope.
+
 ## BLOCKED ON
 - nothing. (katana was never touched — all measurement was on the L16 and in the
   worktrees, read-only against the live system.)
