@@ -13,13 +13,26 @@ dirty is committed and pushed as `ea83d21` on task/base-partials-shell, after
 being verified in the engine and mutation-proved seven ways (see RESULTS
 round 12). apex-os half was already `836df42f`.
 
-**Exact next action:** BASE-014's last assertion — the rebound key that fires
-after `labwc --reconfigure`. Home is apex-OS `tests/test-labwc-session.sh`,
-extending the reconfigure section at :224-255. `wtype` is at /usr/bin/wtype on
-this machine. Then BASE-009's safe piece (the `gamingmode` DISPATCH branch in
-apex-shell check-compositor-backends.sh:340-343 under APEX_COMPOSITOR_DRY_RUN=1)
-and BASE-010's two real defects (the vacuous aiprobe resolve tests, and
-ai.rs:1327's `layers.max(1)`).
+**ALL EIGHT ITEMS NOW HAVE WORK LANDED ON THE BRANCHES.** BASE-013 and
+BASE-014 are CLOSED. BASE-009 and BASE-010 are PARTIAL with every reachable
+half closed and the remainder named precisely — both remainders need hardware
+this laptop does not have and the gaming box is out of scope.
+
+**Exact next action for whoever follows:** nothing is in progress and both
+worktrees are clean and pushed. The two open questions are for ANDRE, not for
+an agent:
+  1. Ratify or change "Scrolling" and "Tiling" (see BASE-013). "Floating" is
+     already ratified at ROADMAP.md:1031.
+  2. Decide whether BASE-009/BASE-010's named hardware gaps are acceptable as
+     recorded, or whether the items stay open until a machine with
+     gamescope+steam and llama-server+a model runs them.
+
+Unverified-from-here, and deliberately left that way: the CI step added for
+BASE-014 installs labwc+wtype on the runner, and nothing on this branch can
+prove the runner starts labwc headless — pr-validation.yml triggers on push to
+roadmap/v2.2, which this branch must not push. The suite skips at status 0
+where labwc or wtype will not run, so the untested outcome is a skip, not a
+false red.
 
 Round 11 in progress. BASE-018, BASE-002, BASE-016, BASE-005 CLOSED (rounds
 9/10). Both branches MERGED (not rebased) with origin/roadmap/v2.2 and pushed;
@@ -51,6 +64,85 @@ runs it in the `static` job, the one with no path filter). Counts re-verified
 this round, see RESULTS.
 
 ## RESULTS (round 12) — per item
+
+### BASE-009 — PARTIAL, both fixable halves CLOSED. apex-shell `0ce3d30` +
+### `c035671`, apex-os `541c9505`.
+The item's three open strands were: the `gamingmode` dispatch with no assertion,
+the greeter lockout, and the power-menu gate. All three are now done. What
+remains needs the gaming box and is named below.
+- **`gamingmode` argv pinned.** `check-compositor-backends.sh` **47 passed, 0
+  failed** (42 before; 5 new). It could not go in DISPATCH: `covers()` demands a
+  DISTINCT command per compositor, and gamingmode is compositor-INDEPENDENT by
+  design, so `covers` would have failed it for being right. New `IDENTICAL` list
+  beside it asserts the exact argv `sudo -n <helper> apex-gaming --switch`, plus
+  two assertions that `loginctl`/`terminate-user` never appear in what
+  PowerControl.sh itself resolves. MUTATION-PROVED 3 ways (drop `--switch`;
+  make the id compositor-dependent; call `loginctl terminate-user` directly →
+  reddens 1/2/3). Nothing ran for real: `env -i`, DRY_RUN, stub helper.
+- **The greeter lockout FIXED** (`_selectWanted`'s bare `return`).
+  `test-apex-greet-sessions.sh` **41 passed, 0 failed** (34 before; 7 new §7).
+  The rule is EXTRACTED from GreetContext.qml and RUN under `node` against a
+  fabricated context — the same extract-and-run convention §1 and §5 use.
+  Fixture is the real sorted list (apex-gaming first) so "index 0" and "the
+  named default" are different answers. MUTATION-PROVED: restoring the `return`
+  reddens 2 and PRINTS THE LOCKOUT (`want [hyprland] got [apex-labwc]`);
+  renaming defaultSession reddens 4 including the plausibility check.
+- **The power-menu gate FIXED.** The probe tested helper + session FILE, never
+  gamescope, so the menu offered a switch the greeter would then hide. It now
+  reads `TryExec` out of the same entry, so menu and greeter cannot drift.
+  `tests/check-gaming-mode-gate.sh` **12 passed, 0 failed**, extracting and
+  RUNNING the probe's own `sh -c` against fixtures (paths via
+  APEX_SESSION_HELPER/APEX_SESSION_DIR). PowerMenu still builds:
+  `run-popup-smoke.sh` "all pages and popups opened cleanly", 0 errors.
+  MUTATION-PROVED 3 ways.
+- **TWO DEFECTS IN MY OWN TEST, both found by running it.** `env -i PATH=<fix>`
+  could not resolve `sh` (it resolves the program against the PATH it just set),
+  so every case exited 127 and the defect assertion passed for the wrong reason
+  — the POSITIVE CONTROL caught it. And "the row is filtered on the probe"
+  was two independent greps: rewriting the clause to drop the row
+  unconditionally left the suite green at 12/0. Both proven by mutation, not
+  argued, then fixed.
+- **NAMED GAP, needs the other machine:** the live Desktop→Gaming switch, the
+  controller-first path, and anything requiring gamescope/steam actually present
+  still cannot be exercised here. `apex-session-select --switch` IS
+  `loginctl terminate-user` and must never be run on this laptop; the L16 has
+  neither gamescope nor steam. Everything above is the argv, the gate and the
+  recovery — not the switch itself.
+
+### BASE-010 — PARTIAL, both named defects CLOSED. apex-os `8a6cdab7`.
+- **`ai.rs:1327`'s `layers.max(1)` FIXED.** `layers: 0` means UNKNOWN (that is
+  what `apex ai pull --url` writes), not "one layer". The clamp made every
+  uncatalogued model plan as a one-layer model: "all 1 layers fit" and
+  `--n-gpu-layers 1`, i.e. CPU speed for a model that fits entirely in VRAM,
+  while the CLI simultaneously printed "cannot plan a partial offload for it".
+  Now all-or-nothing: fits → `Gpu { layers: ALL_LAYERS_UNKNOWN }` (llama-server
+  clamps `-ngl` to the real count); does not fit → `Cpu` with a note saying WHY
+  no split was attempted. The existing test asserted `gpu_layers() <= 1`, which
+  pinned the DEFECT rather than the requirement; rewritten. `0` added to the
+  budget-invariant sweep.
+- **The vacuous resolver tests FIXED, at the source rather than with an env
+  var.** `locate()` was the one function in aiprobe that did not honour
+  `Roots::at` — whose own doc names the bug ("would silently make every read hit
+  the real machine") — and it is the function that decides WHICH BINARY GETS
+  EXECUTED. `locate_in(roots, runtime)` now resolves `/usr/bin` through the
+  prefix and does NOT fall back to the real PATH under one. The fake moved to
+  `<root>/usr/bin/llama-server`; the three `if let Ok(r)` bodies are `expect`s.
+  No `set_var` — the file's own comment rejected that and was right (it races
+  every other test in the binary, so a mutex over three would not protect
+  the rest).
+- `cargo test` whole workspace **2344 passed, 0 failed** across 36 binaries.
+  apexd-core alone 485 → 489.
+- MUTATION-PROVED both, with cargo confirmed to REBUILD each time (the
+  restore-with-`mv` trap): restoring `.max(1)` reddens exactly the 3 layer
+  tests; restoring `locate(runtime_kind)` in `resolve` reddens exactly the 3
+  resolver tests — **which IS the proof the two pre-existing ones now assert
+  something**, since before this change they passed either way.
+- **NAMED GAP, unchanged and NOT simulated:** placement onto a live GPU and
+  idle-unload actually releasing VRAM still need llama-server + a model + a GPU.
+  None is installed here. The SIGTERM-then-SIGKILL unload path remains argv- and
+  log-line-pinned only. A fake-backend harness would prove the supervisor's
+  bookkeeping, not the claim ("VRAM released cleanly"), so it was not built.
+
 
 ### BASE-014 — CLOSED. apex-os `eb26c072` on task/base-partials.
 The last open assertion ("the rebound key fires after --reconfigure") now
@@ -342,7 +434,7 @@ both contained in `task/base-partials`, and both carry named regression tests.
   efivarfs is refused wholesale.
 
 ## IN PROGRESS
-- nothing yet
+- nothing. Round 12 finished with both worktrees clean and pushed.
 
 ## FOUND
 - **BASE-009, a lockout-class greeter defect (NOT YET FIXED).**
