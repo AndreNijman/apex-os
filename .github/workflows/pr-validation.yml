@@ -1114,8 +1114,17 @@ jobs:
       # compositor reports a skip rather than a false green or a false red.
       - name: Install a compositor and a synthetic keyboard
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq labwc wtype
+          # Tolerant on purpose. The suite below skips with status 0 where labwc
+          # or wtype will not run, so a runner that cannot host a compositor
+          # reports a skip — but that safety net protects the SUITE, not this
+          # step. `apt-get install` of a package the image's enabled components
+          # do not carry exits non-zero and would redden the whole job over a
+          # missing test dependency, which is a worse outcome than not running
+          # the test. So a failed install is reported and the suite is left to
+          # skip.
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq labwc wtype \
+            || echo "labwc/wtype unavailable on this runner; the reload suite will skip"
 
       - name: Run the keybind reload assertions
         run: ./tests/test-labwc-keybind-reload.sh
