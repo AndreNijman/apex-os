@@ -25,6 +25,7 @@ use apex_agent_core::hook::{self as hook_core, HookEvent};
 use apex_agent_core::paths;
 use apex_agent_core::statusline as statusline_core;
 use apex_agent_core::term::{self, RawMode, WinSize};
+use apex_agent_core::webauthn;
 use apex_agent_core::worktree::{ConflictState, TestState};
 use apex_agent_core::{adapter, checkpoint, config, git, layout, mux, profile, project};
 use clap::{Args, Subcommand};
@@ -165,6 +166,26 @@ pub enum AgentCmd {
         /// Remove it instead of adding it.
         #[arg(long)]
         remove: bool,
+    },
+    /// Show or change what a screen lock does to running work (§7).
+    ///
+    /// §7: "ordinary agents may continue; Remote Control may continue if
+    /// configured; short-lived root grants should default to revocation; user
+    /// policy may override." This is the override, and with no flags it
+    /// prints what the machine will do — and what the screen is doing now.
+    ///
+    /// The runtime picks a change up on its next few-second tick; nothing has
+    /// to be restarted.
+    Lock {
+        /// Ordinary agent sessions on a locked screen: continue | hold.
+        #[arg(long, value_name = "WHAT", value_parser = parse_continues)]
+        agents: Option<bool>,
+        /// Remote Control sessions on a locked screen: continue | hold.
+        #[arg(long, value_name = "WHAT", value_parser = parse_continues)]
+        remote: Option<bool>,
+        /// Short-lived root grants when the screen locks: revoke | keep.
+        #[arg(long, value_name = "WHAT", value_parser = parse_revokes)]
+        root_grants: Option<bool>,
     },
     /// System-access grants: what has been granted, and to what (§4.4, §4.5).
     ///
@@ -323,6 +344,48 @@ pub enum AgentCmd {
     /// lingering systemd user instance (root has none by default) and then
     /// prints what running agents as root costs.
     Enable,
+    /// The security keys that can answer a remote elevation (§7).
+    ///
+    /// §7 reserves root for a human at this machine. `--origin-policy remote`
+    /// is the owner's opt-out, and what it costs is a touch on one of these
+    /// keys. An empty store is what makes that policy refuse to start, so
+    /// enrolling one is the first step of turning it on.
+    Key {
+        #[command(subcommand)]
+        cmd: KeyCmd,
+    },
+}
+
+/// `apex agent key <verb>`.
+#[derive(Subcommand)]
+pub enum KeyCmd {
+    /// Enrol a security key from what `fido2-cred -V` printed.
+    ///
+    /// The key is plugged into whatever machine the owner is at, which by
+    /// construction is not necessarily this one, so this takes the *output*
+    /// rather than talking to the device:
+    ///
+    ///   fido2-cred -M -rk -i params /dev/hidraw0 | fido2-cred -V -o cred.txt
+    ///   apex agent key add --label yubikey --rp-id apex.local --from cred.txt
+    ///
+    /// `fido2-cred -V` prints the credential id and then a PEM public key.
+    /// Both are stored as printed, so an operator can compare the file with
+    /// the paste.
+    Add {
+        /// What to call it. Named in a refusal, and in `--credential`.
+        #[arg(long, value_name = "NAME")]
+        label: String,
+        /// The relying party id the credential was created for. It is not this
+        /// machine's hostname unless that is what was passed to `fido2-cred`;
+        /// an assertion for a different one is refused.
+        #[arg(long, value_name = "ID")]
+        rp_id: String,
+        /// The file `fido2-cred -V` wrote. Omitted reads standard input.
+        #[arg(long, value_name = "PATH")]
+        from: Option<PathBuf>,
+    },
+    /// Every enrolled key.
+    List,
 }
 
 /// `apex agent profile <verb>`.
@@ -780,6 +843,11 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             destination,
             remove,
         } => allow(destination, remove),
+        AgentCmd::Lock {
+            agents,
+            remote,
+            root_grants,
+        } => lock_policy(agents, remote, root_grants),
         AgentCmd::Grants { active, json } => grants(active, json),
         AgentCmd::RevokeGrant { id } => revoke_grant(id),
         AgentCmd::RenewGrant { id, ttl } => renew_grant(id, ttl),
@@ -803,6 +871,14 @@ pub fn agent(cmd: AgentCmd) -> i32 {
         AgentCmd::Rm { id } => remove(id),
         AgentCmd::Prune => prune(),
         AgentCmd::Enable => enable(),
+        AgentCmd::Key { cmd } => match cmd {
+            KeyCmd::Add {
+                label,
+                rp_id,
+                from,
+            } => key_add(&label, &rp_id, from.as_deref()),
+            KeyCmd::List => key_list(),
+        },
     };
     report(result)
 }
@@ -836,6 +912,28 @@ dimension_parser!(parse_system_access, SystemAccess, "none, session or unsafe");
 dimension_parser!(parse_secrets, SecretPolicy, "brokered, none or export");
 dimension_parser!(parse_network, NetworkPolicy, "open, allowlist, brokered or offline");
 dimension_parser!(parse_origin_policy, OriginPolicy, "local or remote");
+
+/// `--agents` and `--remote` on `apex agent lock`.
+///
+/// §7 words both rules as "may continue", so the value is the sentence rather
+/// than a bare true/false: `--agents hold` says what will happen, where
+/// `--agents false` would leave the reader working out which way round it is.
+fn parse_continues(s: &str) -> std::result::Result<bool, String> {
+    match s {
+        "continue" | "continues" | "run" | "keep-running" => Ok(true),
+        "hold" | "held" | "pause" | "stop" => Ok(false),
+        _ => Err("use continue or hold".to_string()),
+    }
+}
+
+/// `--root-grants` on `apex agent lock`.
+fn parse_revokes(s: &str) -> std::result::Result<bool, String> {
+    match s {
+        "revoke" | "revoked" => Ok(true),
+        "keep" | "kept" | "hold" => Ok(false),
+        _ => Err("use revoke or keep".to_string()),
+    }
+}
 
 /// `--ttl`, in milliseconds.
 ///
@@ -1633,6 +1731,90 @@ fn default_agent(agent: Option<String>) -> Result<i32> {
     cfg.default_agent = agent.clone();
     cfg.save()?;
     println!("default agent is now {agent}");
+    Ok(0)
+}
+
+/// `apex agent lock [--agents …] [--remote …] [--root-grants …]`.
+///
+/// With no flags it reports, and the report leads with what the screen is
+/// actually doing — read from logind, which is the half of this that did not
+/// exist until apex-shell started calling `SetLockedHint`. A settings page
+/// that could not say whether the mechanism was working would be the same
+/// switch-with-no-wire this policy used to be.
+fn lock_policy(
+    agents: Option<bool>,
+    remote: Option<bool>,
+    root_grants: Option<bool>,
+) -> Result<i32> {
+    use apex_agent_core::lock::{LockObserver, Loginctl};
+
+    let (mut cfg, notes) = config::load_reporting();
+    for note in &notes {
+        eprintln!("apex: {note}");
+    }
+
+    if agents.is_none() && remote.is_none() && root_grants.is_none() {
+        let state = Loginctl::new().observe();
+        println!("screen                   {state}");
+        println!(
+            "ordinary agents          {}",
+            if cfg.lock.agents_continue {
+                "continue"
+            } else {
+                "hold"
+            }
+        );
+        println!(
+            "Remote Control           {}",
+            if cfg.lock.remote_control_continues {
+                "continue"
+            } else {
+                "hold"
+            }
+        );
+        println!(
+            "short-lived root grants  {}",
+            if cfg.lock.revoke_root_grants {
+                "revoke"
+            } else {
+                "keep"
+            }
+        );
+        if !cfg.lock.remote_control_continues {
+            println!(
+                "\n§7 lets Remote Control past a lock only when it is configured to:\n  \
+                 apex agent lock --remote continue"
+            );
+        }
+        return Ok(0);
+    }
+
+    if let Some(v) = agents {
+        cfg.lock.agents_continue = v;
+    }
+    if let Some(v) = remote {
+        cfg.lock.remote_control_continues = v;
+    }
+    if let Some(v) = root_grants {
+        cfg.lock.revoke_root_grants = v;
+    }
+    cfg.save()?;
+
+    let p = cfg.lock;
+    println!(
+        "on a locked screen: ordinary agents {}, Remote Control {}, short-lived root grants {}",
+        if p.agents_continue { "continue" } else { "are held" },
+        if p.remote_control_continues {
+            "continues"
+        } else {
+            "is held"
+        },
+        if p.revoke_root_grants {
+            "are revoked"
+        } else {
+            "are kept"
+        }
+    );
     Ok(0)
 }
 
@@ -3279,6 +3461,72 @@ fn format_age(unix_secs: u64) -> String {
         3600..=86_399 => format!("{}h ago", delta / 3600),
         _ => format!("{}d ago", delta / 86_400),
     }
+}
+
+// ── security keys (§7's remote elevation, P0-014) ───────────────────────────
+
+/// Enrol a security key.
+///
+/// Writes the store directly rather than going through the daemon, and that is
+/// a decision rather than a shortcut: the file is under the owner's own
+/// `XDG_STATE_HOME`, the owner is the only party whose enrolment means
+/// anything, and a protocol verb for it would be a way for a *session* to ask
+/// the daemon to trust a new key. There is deliberately no such way.
+///
+/// The one thing lost by not going through the daemon: a running daemon that
+/// verifies an assertion writes the same file back to record a signature
+/// counter, so an enrolment racing that write can lose one of the two. The
+/// consequence is a counter that reads low or a key that has to be enrolled
+/// again — never a key trusted that the owner did not enrol, because both
+/// writers only ever write what they were given. Not solved here; a lock
+/// belongs beside the store, and it is not what P0-014 is about.
+fn key_add(label: &str, rp_id: &str, from: Option<&Path>) -> Result<i32> {
+    let printed = match from {
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?,
+        None => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                .context("reading the credential from standard input")?;
+            text
+        }
+    };
+
+    let credential = webauthn::Credential::parse_fido2_cred(label, rp_id, &printed, apex_agent_core::request::now_ms())
+        .map_err(|e| anyhow!("{e}"))?;
+    let mut store = webauthn::CredentialStore::load();
+    store.add(credential).map_err(|e| anyhow!("{e}"))?;
+    store.save().map_err(|e| anyhow!("{e}"))?;
+
+    println!("apex: enrolled {label:?} for relying party {rp_id:?}.");
+    println!("      {}", webauthn::store_path().display());
+    if store.len() == 1 {
+        println!();
+        println!("      A remote elevation now has a key to ask. It still needs the owner to");
+        println!("      allow one: `apex agent run --origin-policy remote ...`.");
+    }
+    Ok(0)
+}
+
+/// Every enrolled key.
+///
+/// The listing `AssertionError::UnknownCredential` tells the operator to run,
+/// which is why it exists: an error naming a command that does not exist is
+/// worse than one that names nothing.
+fn key_list() -> Result<i32> {
+    let store = webauthn::CredentialStore::load();
+    if store.is_empty() {
+        println!("apex: no security key is enrolled.");
+        println!("      `apex agent key add --label <name> --rp-id <id> --from <file>`");
+        return Ok(0);
+    }
+    for c in &store.credentials {
+        println!(
+            "{:<20} rp={:<28} counter={}",
+            c.label, c.rp_id, c.counter
+        );
+    }
+    Ok(0)
 }
 
 #[cfg(test)]

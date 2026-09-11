@@ -23,6 +23,7 @@
 //!         ├─ proving a human is present    auth.rs
 //!         ├─ where a request came from     origin.rs
 //!         ├─ what a screen lock means      lock.rs
+//!         ├─ a security key was touched    webauthn.rs
 //!         ├─ sandbox policy                sandbox.rs
 //!         ├─ network destination policy    destination.rs
 //!         ├─ adapters                      adapter.rs
@@ -72,6 +73,7 @@ pub mod sandbox;
 pub mod session;
 pub mod statusline;
 pub mod term;
+pub mod webauthn;
 pub mod worktree;
 
 pub use policy::AgentPolicy;

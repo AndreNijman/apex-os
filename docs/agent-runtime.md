@@ -327,6 +327,53 @@ correction.
 
 ---
 
+## What a screen lock does
+
+§7 gives three rules for a locked screen: ordinary agents may continue, Remote
+Control may continue if configured, short-lived root grants default to
+revocation, and the owner may override any of it.
+
+```bash
+apex agent lock                          # what the screen is doing, and what will happen
+apex agent lock --remote continue        # Remote Control keeps working while you are away
+apex agent lock --agents hold            # nothing runs unattended
+apex agent lock --root-grants keep       # a grant survives the lock
+```
+
+The runtime notices within a few seconds. A held session is stopped with the
+same `SIGSTOP` and reported with the same `paused` flag as `apex agent pause`,
+and unlocking starts again exactly the sessions the lock stopped — a session
+you paused by hand stays paused.
+
+Revoking a break-glass grant on lock ends its session, for the reason expiry
+does: `PR_SET_NO_NEW_PRIVS` was cleared between `fork` and `exec` and no
+process can put it back, so a session whose grant merely left the authority's
+map would still have root while the record said it did not.
+
+### Where the lock state comes from
+
+logind's `LockedHint`, on the graphical session. APEX Shell sets it from
+`WlSessionLock.secure` — the state the compositor has acknowledged, not the
+request to lock — so a lock that fails to engage is never reported as engaged.
+
+Before that existed the property read `no` on a session that had been locked
+for an hour, which is the same thing it reads on one nobody has touched. One
+value for two states is not a measurement, which is why the policy shipped
+with no reader behind it until the shell could answer.
+
+Three states are not two. A machine with no graphical session has no screen to
+lock, and every rule here passes it over; a screen whose state could not be
+read is treated as locked, and `apex agent lock` prints the reason. An absent
+`LockedHint` counts as unreadable rather than as `no`: `loginctl -p <property>
+--value` prints nothing and exits 0 for a property it does not know, so a
+logind without the property would otherwise look exactly like an unlocked
+screen forever.
+
+A session whose origin the daemon could not establish gets the stricter of the
+two "may continue" rules, because it could be either.
+
+---
+
 ## Network modes
 
 Four, and three of them are the same kernel fact. `bwrap --unshare-net` gives
