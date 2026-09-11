@@ -661,14 +661,34 @@ mod tests {
     #[test]
     fn the_version_guard_names_the_revision_the_wire_changed_in() {
         // The one guard that is NOT just a fact about two constants, so it
-        // stays a test: it says the newest named revision IS the current one,
-        // which is a claim about what a future edit must remember to do. The
-        // store guard beside it is a floor and is checked at compile time.
-        assert_eq!(
-            GENERIC_CAPABILITY_VERSION,
-            apex_agent_core::protocol::PROTOCOL_VERSION,
-            "the guard must name the current revision, or it can never fire"
+        // stays a test. The store guard beside it is a floor and is checked at
+        // compile time.
+        //
+        // It used to assert equality with `PROTOCOL_VERSION`, standing in for
+        // "the newest named revision IS the current one". That held only while
+        // the secret service happened to be the last thing to change the wire.
+        // P0-007 added `RunRequest::capabilities` — an agent-runtime field the
+        // secret CLI never sends — and bumped the protocol to 6, at which
+        // point the equality failed for a change that has nothing to do with
+        // this guard, and the only ways to make it pass again were to bump a
+        // secret-service revision that did not move or to delete the
+        // assertion.
+        //
+        // So it now says the two things that are actually true and actually
+        // protective: this guard names a revision that exists (a guard above
+        // the current version refuses every daemon), and it is not zero (a
+        // guard at zero can never fire). The "newest named revision is the
+        // current one" ratchet is kept, once, beside the constants themselves
+        // — `protocol.rs`'s `every_version_guard_names_a_revision_that_exists`
+        // asserts `SCOPED_GRANT_VERSION == PROTOCOL_VERSION` — which is where
+        // a reader adding a wire field will actually look.
+        let current = apex_agent_core::protocol::PROTOCOL_VERSION;
+        assert!(
+            GENERIC_CAPABILITY_VERSION <= current,
+            "this guard names protocol {GENERIC_CAPABILITY_VERSION}, which is ahead of \
+             {current}, so it would refuse every daemon"
         );
+        assert!(GENERIC_CAPABILITY_VERSION > 0, "a guard at zero can never fire");
     }
 
     #[test]

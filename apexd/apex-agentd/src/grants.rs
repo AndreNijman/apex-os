@@ -584,16 +584,19 @@ mod tests {
     /// `apex agent grants` reads.
     mod tempdir {
         use std::path::PathBuf;
-        use std::sync::{Mutex, MutexGuard, OnceLock};
+        use std::sync::MutexGuard;
 
         /// `set_var` is process-global, so the tests that need it run one at a
         /// time. A lock rather than `--test-threads=1`, which would slow the
         /// whole suite for four tests.
+        ///
+        /// The crate's lock, not one of this module's own. A second lock over
+        /// the same variable serialises nothing against the first: `main.rs`'s
+        /// `lock_tests` also redirects `XDG_STATE_HOME`, and with two locks a
+        /// `Dir` dropping here restored the real one in the middle of a test
+        /// running there. See `crate::test_env`.
         fn lock() -> MutexGuard<'static, ()> {
-            static L: OnceLock<Mutex<()>> = OnceLock::new();
-            L.get_or_init(|| Mutex::new(()))
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+            crate::test_env::lock()
         }
 
         pub struct Dir {
