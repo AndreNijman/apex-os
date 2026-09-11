@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-12 07:27 AWST
+APEX ROADMAP — resume report — 2026-09-12 07:38 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -6,54 +6,41 @@ APEX ROADMAP — resume report — 2026-09-12 07:27 AWST
               done   partial      todo   blocked
   BASE          16         2         -         -
   L              -         1         -         2
-  P0            20         5         -         -
+  P0            23         2         -         -
   P1            31        14        17         -
   P2             4         3        12         -
-  ALL           71        25        29         2   of 127
+  ALL           74        22        29         2   of 127
 
-  P0 not done: P0-001(part), P0-002(part), P0-007(part), P0-015(part), P0-021(part)
+  P0 not done: P0-001(part), P0-021(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p1-008     ALIVE      P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
+  p1-008     dead 11m   P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
              head 5eda17e0 docs(cloudflare): name apexd-core's Backend without l
-             dirty 0 file(s), 0 unpushed, card 1m
+             dirty 0 file(s), 0 unpushed, card 12m
              NEXT **The unit is DONE and pushed** — tip `5eda17e0`, five commits, no
 
   p2-b       ALIVE      (see queue.json p2-b)              task/p2-b-accessibility-i18n
              head 7ba196e test(a11y): measure how far Reduce Motion actually rea
-             dirty 0 file(s), 0 unpushed, card 13m
+             dirty 0 file(s), 0 unpushed, card 23m
              NEXT 0. **DESIGN FORK to settle before writing the installer page** (fr
 
   p1-052     ALIVE      P1-051,P1-052                      task/p1-052-relay
              head 373e833c style(remote): three clippy lints in the relay's own 
-             dirty 0 file(s), 0 unpushed, card 2m
+             dirty 0 file(s), 0 unpushed, card 13m
              NEXT apex-shell: the two pages themselves. The encoder underneath them 
 
   p0-finish  ALIVE      P0-001,P0-002,P0-007,P0-015,P0-021 task/p0-finish
              head 392108e5 ci(image): the rust job needs a login session, and wi
-             dirty 0 file(s), 0 unpushed, card 19m
-             NEXT P0-007, P0-015 and P0-002 are done and pushed. Outstanding: the lo
+             dirty 0 file(s), 0 unpushed, card 2m
+             NEXT Round 13 finished its code work. Branch tip `392108e5`, 7 commits,
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 230ee02a Merge task/p1-008-cloudflare-one into roadmap/v2.2 (P
-    task/p0-finish
-      f372c089 fix(build): the second assertion that can only ever fail, one   [0/10 added lines on tip]
-      f31f4020 feat(grant): a session grant can be narrowed to named verbs (   [1/10 added lines on tip]
-      7eaa0cdb test(lock): §7's lock rules asserted where the decision becom   [2/10 added lines on tip]
-      71c7b5af test(secret): the at-rest boundary, measured as real root (P0   [1/10 added lines on tip]
-      4147d843 fix(tests): one env lock for the crate, and a version ratchet   [1/10 added lines on tip]
-      aacd15ec fix(protocol): the older guards ratchet behind the current on   [4/10 added lines on tip]
-      4501f620 test(lock): §7's hold is asserted on the kernel, not on the d   [2/10 added lines on tip]
-      8609cb55 fix(agent): --capabilities must not swallow the prompt that f   [1/10 added lines on tip]
-      47455d93 fix(secret-test): measure the daemon's uid, not the uid of th   [0/10 added lines on tip]
-      41a2f86e fix(handoff-test): contain the fixture's config home, so the    [1/10 added lines on tip]
-      20332ca1 fix(secret): the zero-guard is a compile-time assertion, not    [1/10 added lines on tip]
-      392108e5 ci(image): the rust job needs a login session, and without on   [0/10 added lines on tip]
+  int-os:  tip 24472b64 Merge task/p0-finish into roadmap/v2.2 (P0-007, P0-01
     task/p1-050-remote-protocol
       09c977d9 fix(clippy): the integration tip was not clean, and two of th   [2/10 added lines on tip]
     task/p1-052-relay
@@ -68,6 +55,8 @@ APEX ROADMAP — resume report — 2026-09-12 07:27 AWST
       e5d049ad test(greet): parse the greeter, self-test the mutants, instal   [0/10 added lines on tip]
       69f59cb0 fix(ci): actually run the greeter accessibility suite, and ma   [0/10 added lines on tip]
       fc4dbd2d feat(installer): the engine honours an operator's keyboard, v   [2/10 added lines on tip]
+      28f59fac feat(installer): choose a keyboard before creating a password   [2/10 added lines on tip]
+      fcd3b904 fix(tests): revive test-installer.sh's engine half, which has   [0/10 added lines on tip]
 
   int-shell:  tip b195195 Merge task/p1-040-per-output-scaling into roadmap/v2.2
     fix/labwc-desktop-parity  — squash-merged, safe to delete
@@ -92,11 +81,11 @@ APEX ROADMAP — resume report — 2026-09-12 07:27 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 4s Sat 2026-09-12
+  snapshot timer: active   last 9s Sat 2026-09-12
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    1832c10  roadmap-state
+    apex-os    768c498  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    55f08ae  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -119,7 +108,7 @@ APEX ROADMAP — resume report — 2026-09-12 07:27 AWST
     apex-os    00c1973  wt-p0-025-os-
     apex-os    2c9c560  wt-p0-finish-
     apex-os    eda5ef8  wt-p1-001-
-    apex-shell 4531ac0  apex-shell-
+    apex-shell fd3d439  apex-shell-
     apex-shell df979e1  int-shell-
     apex-shell 68c971d  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
@@ -142,7 +131,7 @@ APEX ROADMAP — resume report — 2026-09-12 07:27 AWST
     apex-shell 589d611  wt-p1-040-
     apex-shell 086727e  wt-p1-044-shell-
     apex-shell fb019fa  wt-p1-048-
-    apex-shell a83c886  wt-p1-052-shell-
+    apex-shell 1b67418  wt-p1-052-shell-
     apex-shell 7cbd7fa  wt-p2-b-
 
 ────────────────────────────────────────────────────────────────────────────
@@ -156,7 +145,6 @@ APEX ROADMAP — resume report — 2026-09-12 07:27 AWST
 
   READY (dependencies believed satisfied — confirm against the agent table above):
     p1-038-hardware P1-038                           The 18 labwc matrix rows that need real applications
-    p0-014         P0-014,P0-015                    Remote Control privilege policy and lock-state policy, wired
     p1-005         P1-005,P1-006,P1-007             Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets
                    conflicts with p1-002
     p1-011         P1-011,P1-012,P1-013             Temporary task credentials, transparent brokered wrangler/cl
@@ -166,6 +154,7 @@ APEX ROADMAP — resume report — 2026-09-12 07:27 AWST
     p1-025         P1-025,P1-026,P1-027,P1-028      Skill inventory and audit, plugin provenance and isolation, 
     p1-040-per-output-scaling P1-040                           Per-output scaling: two densities, two sizes, one shell
     p1-052-relay   P1-051,P1-052                    The APEX Remote remainder: relay, reconnect, mDNS, connectio
+    p1-053a        P1-053,P1-054,P1-055             Android app foundation, Agent Center parity, full PTY/TUI re
 
   HELD:
     final          after *
@@ -173,7 +162,7 @@ APEX ROADMAP — resume report — 2026-09-12 07:27 AWST
   COMPLETE (every roadmap item done — not offered again).
   This says the WORK is done, not that it is landed — check the
   unlanded section above before assuming roadmap/v2.2 carries it:
-    p1-018, p1-020, p1-023, p1-035, p1-044, p2-e
+    p0-014, p1-018, p1-020, p1-023, p1-035, p1-044, p2-e
 
 ────────────────────────────────────────────────────────────────────────────
   how to resume

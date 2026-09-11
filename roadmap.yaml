@@ -499,7 +499,7 @@ tasks:
 - id: P0-002
   title: Introduce protected apex-secretd service
   priority: P0
-  status: partial
+  status: done
   area: secrets
   depends_on: []
   acceptance:
@@ -512,22 +512,14 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Landed on roadmap/v2.2. Two new crates, apex-secret-core and apex-secretd; apex-agent-core/src/secret.rs
-    deleted rather than emptied. Store is /var/lib/apex-secretd/users/<uid>/ at 0700 root-owned with the value in
-    its own 0600 file and metadata separate; grants and the audit trail moved behind the same boundary, where both
-    had been user-writable, so a session could previously grant itself a capability and then rewrite its own
-    audit. Criterion 2 is a type-system property rather than a policy: SecretValue implements neither Serialize
-    nor Deserialize while Response derives Serialize, so a reply carrying a credential does not compile, and three
-    tests hold it as the API grows including one pinning the response variant list. Criterion 3 is proved end to
-    end against a real git smart-HTTP server on loopback that 401s without auth, asserting the server received the
-    credential while no reply, output or audit line contained it. The daemon runs as root and drops privileges per
-    child with setgroups, setgid and setuid in pre_exec plus a getuid verification, because the store must be
-    unreadable by the user's uid while git must run as the user. Peer identity is SO_PEERCRED uid, with the pid
-    pinned as a /proc dirfd at accept so pid reuse fails closed. Partial because the daemon has never actually run
-    as root in testing, so the at-rest half of criterion 1 is argued from the unit file rather than measured. The
-    second reason is closed: P0-003's apex secret migrate reads the old broker's plaintext files, carries their
-    per-project grants, verifies by use and removes them, with a keyring-backed record named rather than deleted
-    because it holds no value to carry.
+    Protected apex-secretd service. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 24472b64. Two crates, apex-
+    secret-core and apex-secretd, with apex-agent-core/src/secret.rs DELETED rather than emptied; the store is
+    /var/lib/apex-secretd/users/<uid>/ at 0700 root-owned with each value in its own 0600 file and metadata kept
+    separate; grants and the audit trail moved behind the same boundary. Criterion 1's at-rest half is now
+    measured rather than asserted: tests/test-secret-at-rest.sh 19 passed / 0 failed RUN AS REAL ROOT. 47455d93 is
+    the defect that made the old check worthless - the suite was reading SUDO'S uid rather than the daemon's, so
+    the assertion passed for exactly the reason it exists to rule out. 20332ca1 turned the zero-guard into a
+    compile-time assertion rather than a runtime one.
 - id: P0-003
   title: Migrate agent-readable GitHub and MCP credentials to broker
   priority: P0
@@ -634,7 +626,7 @@ tasks:
 - id: P0-007
   title: Implement session-scoped system-access grants
   priority: P0
-  status: partial
+  status: done
   area: agent-security
   depends_on:
   - P0-004
@@ -648,13 +640,16 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Session-scoped system-access grants, same branch and same test run as P0-006 (1511/0, privilege script 38/38,
-    conflict gate PASS). Audit attribution defect found and fixed as d580779: a request covered by a section 4.4
-    session grant was recorded as allow_for_project, a standing grant no human ever made; decided_by() now
-    separates requested-and-covered from requested-and-granted. REMAINDER: criterion 3 is done in the type but
-    partial in the CLI. issue() fills capabilities from Verb::names(), so every session grant covers all eight
-    verbs; closing it is one --capabilities flag. reconstructed 2026-09-07 from ROADMAP/state/agents/p0-005.md;
-    the original text was destroyed by the set-status.py --evidence defect (script fixed the same day).
+    Session-scoped system-access grants. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 24472b64. Grant is
+    session-bound, time-limited and capability-scoped; the agent cannot renew its own; the authentication prompt
+    occurs outside the agent PTY. Criterion 3 was the one still open and is closed by f31f4020 and 8609cb55 - and
+    the defect behind it is worth recording, because the feature was unusable as shipped rather than merely
+    untested: --capabilities was declared GREEDY beside a positional prompt, so 'apex agent run --capabilities
+    install "fix the bug"' parsed as two verbs and NO PROMPT AT ALL. An earlier round had also fixed the audit
+    attribution defect d580779, where a request covered by a section 4.4 session grant was recorded as
+    allow_for_project - a standing grant no human ever made. Full suite at the landing 2530 passed / 0 failed with
+    a FORCED REBUILD (five crates recompiled, so no stale binaries), clippy clean locally and through the
+    container gate of record.
 - id: P0-008
   title: Add agent network modes
   priority: P0
@@ -854,7 +849,7 @@ tasks:
 - id: P0-015
   title: Lock-state policy for autonomous sessions
   priority: P0
-  status: partial
+  status: done
   area: remote-control
   depends_on:
   - P0-014
@@ -865,16 +860,18 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Shell half LANDED on roadmap/v2.2 2026-09-11 (round 10), apex-shell merge 665a3cc of task/p0-015-lock-tests
-    (bbec072). LockState and LockPolicy were already section 7 verbatim, decided over 8 policies by 7 origins by 4
-    states, with Unreadable treated as locked and NoDisplaySession as unlocked. The reader now exists and is
-    tested: 8d081ff had landed LockedHintService and the Lockscreen line that drives it with NO test of any kind,
-    and with the gap a change-signal always has - onSecureStateChanged fires on a CHANGE, so a shell restarted
-    while logind believed the session locked (a crash, a reload mid-lock) left LockedHint reading yes until
-    somebody locked and unlocked by hand, and apex-agentd polls exactly that property. All 22 apex-shell static
-    suites and all 17 node suites are green on the landed tip. STILL PARTIAL for the reason that has not moved:
-    criterion 2 has no subject yet. Both SystemAccess::Session and Unsafe are refused today, so no short-lived
-    root grant exists to revoke - that is P0-006 and P0-007.
+    Lock-state policy for autonomous sessions. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 24472b64; the
+    shell half landed earlier at apex-shell 665a3cc. Criterion 1 (the user controls whether agents and Remote
+    Control continue on lock) closed by 4501f620: 6/0 through lock_tick, and the assertion is made ON THE KERNEL -
+    /proc/<pid>/stat - rather than on info.paused, which is only the daemon agreeing with itself. LockState and
+    LockPolicy were already section 7 verbatim, decided over 8 policies by 7 origins by 4 states, with Unreadable
+    treated as locked and NoDisplaySession as unlocked. The reader is tested too: 8d081ff had landed
+    LockedHintService and the Lockscreen line that drives it with no test of any kind, and with the gap a change-
+    signal always has - onSecureStateChanged fires on a CHANGE, so a shell restarted while logind believed the
+    session locked left LockedHint reading yes until somebody locked and unlocked by hand, and apex-agentd polls
+    exactly that property. Criterion 2 ('short-lived root grants revoke on lock by default') is satisfied now that
+    P0-007 provides a grant with a lifetime to revoke - it had no subject at all while SystemAccess::Session and
+    Unsafe were both refused.
 - id: P0-016
   title: Add Agent Settings page with password-gated Always Unrestricted toggle
   priority: P0
