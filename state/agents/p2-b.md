@@ -70,12 +70,13 @@ suite and a mutation pair.
 
 | sub-feature | state | assertion |
 | --- | --- | --- |
-| keyboard layout before password | **greeter DONE, installer NOT** | `tests/test-apex-greet-a11y.sh` test_030-034 (indicator visible, bound to the session, above and before the password field, switchable) + `tests/test-apex-greet-layout.sh` 22 assertions. **The installer still has no keyboard step at all** — see below. |
+| keyboard layout before password | **DONE — greeter and installer** | Greeter: `tests/test-apex-greet-a11y.sh` test_030-034 + `tests/test-apex-greet-layout.sh`. Installer (round 2): `installer/test-installer-keymap.sh` **30 assertions** and `installer/test-installer-locale.sh` **22**. The criterion itself is measured, not inferred — cage started with `XKB_DEFAULT_LAYOUT=de` hands a GTK4 client a keymap where the physical Y key gives `z`, Z gives `y`, `;` gives `ö`. The layout is applied to the RUNNING session by restarting the compositor, which is the only thing that can work (see the design fork). |
+| timezone choice | **DONE (installer)** | `test-installer-locale.sh`: an explicit timezone becomes `/etc/localtime`; an explicitly chosen UTC is **not** overruled by the pre-existing Perth fallback, while an absent choice still keeps it. |
 | multiple layouts | **greeter DONE** | `test-apex-greet-layout.sh` "both configured layouts survive extraction" / "a three-layout machine reports all three in order". Nothing in the desktop shell switches layouts yet. |
 | IME / fcitx5 | present in image, untested | `Containerfile.core:1182-1189` installs fcitx5 + chinese-addons/hangul/anthy/m17n; autostarted in 3 places. `QT_IM_MODULE`/`GTK_IM_MODULE` deliberately unset (Wayland text-input-v3). No suite asserts any of it. |
 | CJK | fonts present, shell will tofu | `Containerfile.core:1319-1329` ships Noto CJK sans+serif. But apex-shell hardcodes `font.family: "JetBrains Mono"` at ~45 sites, which has no CJK coverage. |
 | RTL | **absent, and the image cannot render it** | apex-shell: 0 `LayoutMirroring`, 0 `layoutDirection`. apex-os: **no `google-noto-sans-arabic/hebrew/thai/devanagari` package** — only DejaVu's partial coverage. Asymmetry worth noting: `fcitx5-m17n` provides INPUT for Arabic/Hebrew/Thai that the image cannot RENDER. |
-| locales / timezones | defaults only, no choice | `Containerfile.core:2027-2030` writes `LANG=en_US.UTF-8` + `KEYMAP=us`; `:809` installs **`glibc-langpack-en` only**; `:2044` hardcodes `/etc/localtime` → `Australia/Perth`. Installer has no step to change any of it. |
+| locales / timezones | **keyboard + timezone DONE, LOCALE still not offered** | The installer now collects keyboard and timezone and the engine honours both (above). **Locale is deliberately still not offered**, and this is a decision, not an omission: `Containerfile.core:809` installs **`glibc-langpack-en` only**, so a free locale picker would let a user choose one that silently degrades to `C.UTF-8` on the installed system — a worse failure than not asking, because it looks like it worked. Closing this row means adding langpacks to `Containerfile.core` first, then a picker restricted to what the target actually ships. Named, not faked. |
 | translated installer | **not present** | 0 `qsTr`/gettext in `installer/` |
 | translated shell | **not present** | 0 `qsTr`, 0 `.ts`/`.qm`, no lupdate/lrelease step. ~671 direct + 85 secondary hardcoded user-facing literals; 56% of them in `src/services/config_tab/` |
 | per-user language | not present | nothing per-user anywhere |
@@ -128,7 +129,55 @@ Full script: `scratchpad/mutate-greet.sh`.
 | N7 | a segmented pill's `Accessible.name` → `""` | `test_022_each_pill_names_its_option` |
 | N8 | `CfgRow` slot `enabled: !unavailable` → `true` | `test_045_a_disabled_control_ignores_the_keyboard` |
 
-**Two survived a first pass, and both were real weaknesses, not bad mutants:**
+### Round 2 — the installer keyboard work (13 pairs, all CAUGHT)
+
+Restores are `git checkout --` (authoritative content, fresh mtime), and the
+whole file set is re-compared against HEAD after every mutate and every restore.
+
+| # | mutant | caught by |
+| --- | --- | --- |
+| K1 | session never exports `XKB_DEFAULT_LAYOUT` | `the second start carries the chosen layout` |
+| K2 | restart cap removed | `a GUI that asks forever is capped` |
+| K3 | session stops validating the layout against xkb | `a layout xkb does not know is refused` |
+| K4 | stale state file no longer cleared | `a restart request with no fresh state is refused` |
+| K5 | variant never reaches the compositor | `a chosen variant reaches the compositor` |
+| K6 | GUI uses exit 76, session still expects 75 | `both halves use the same restart exit code` |
+| K7 | launcher bypasses the session script | `apex-installer-launch runs the session script` |
+| K8 | engine ignores an explicit keymap | `an explicit layout reaches the X11 keyboard config` |
+| K9 | Perth fallback overrules a deliberate UTC | `an explicitly chosen UTC is not overruled` |
+| K10 | engine stops validating the layout before erasing | `a nonsense layout is refused` |
+| K11 | keyboard page leaves the forward flow | `the welcome page's primary button leads straight to the keyboard page` |
+| K12 | Containerfile stops installing the session script | `the launcher's exec target … is installed` |
+| K13 | ISO build stops installing the session script | same |
+
+**Two survived the first pass, and both were the SUITE's fault, not bad mutants:**
+
+- **K4** survived because the assertion was **vacuous**. It checked that the
+  first compositor start carried no layout, using a stub GUI that exited 0
+  immediately — but the session only reads the state file after a restart
+  REQUEST, so with no request the file was never consulted and the assertion
+  held whether or not the clearing happened. Deleting the `rm -f` outright
+  changed nothing. Identical in shape to N8 below. Rewritten to seed a stale
+  layout, ask for a restart, and write no state — the only situation in which an
+  uncleared file actually applies a layout nobody chose.
+- **K11** survived because the page-order walk followed **Back buttons as
+  forward edges**, making the navigation graph nearly undirected. With `Begin`
+  pointed straight at wifi, `keyboard` was still "reachable" — via wifi's own
+  Back button — and still sorted before `account`. The one step the entire
+  criterion rests on could leave the forward flow without changing a single
+  assertion. Reverse edges are now stripped, and the edge that matters is
+  asserted on its own.
+
+**And a defect the pairs exposed that no assertion had been looking for:** K12/K13
+were added only after noticing that `apex-installer-launch` had been repointed at
+`/usr/bin/apex-installer-session` while **nothing installed that file into the
+image**. The ISO would have booted with no installer at all — cage never starts,
+every boot lands on the diagnostic screen — and every assertion in the suite
+passed, because they all read the source tree, where the file plainly exists.
+The guard now resolves the exec target out of the launcher rather than
+hardcoding a name.
+
+**Earlier rounds' survivors, kept for the record:**
 
 - **M2b** survived the tab-ring walk. Qt honours an explicit `KeyNavigation`
   link regardless of `activeFocusOnTab`, so the walk could not see the flag
