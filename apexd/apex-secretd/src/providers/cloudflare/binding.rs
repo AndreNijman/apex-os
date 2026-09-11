@@ -66,6 +66,10 @@ pub struct Binding {
     /// `[cloudflare] buckets` — R2, so P1-005's. Resolvable now so that the
     /// meaning of a name is decided in one place rather than per task.
     pub buckets: Vec<String>,
+    /// `[cloudflare] records` — §13.9's narrowing, P1-007's. Empty means the
+    /// bound zone and nothing narrower; a non-empty list means these names and
+    /// no others, apex included only if it is written down.
+    pub records: Vec<String>,
     /// `[cloudflare.<name>] worker`, by environment name.
     pub environments: BTreeMap<String, String>,
 }
@@ -100,6 +104,15 @@ pub enum BindingError {
     NoBucket {
         path: PathBuf,
         named: String,
+        bound: Vec<String>,
+    },
+    /// That is not a record this project may act on: either it is not inside
+    /// the bound zone at all, or the project narrowed itself to a list that
+    /// does not hold it.
+    NoRecord {
+        path: PathBuf,
+        named: String,
+        zone: String,
         bound: Vec<String>,
     },
     /// The zone is named but its id is not, so a zone-scoped call cannot be
@@ -189,6 +202,33 @@ impl std::fmt::Display for BindingError {
                 path.display(),
                 listed(bound)
             ),
+            BindingError::NoRecord {
+                path,
+                named,
+                zone,
+                bound,
+            } => {
+                if bound.is_empty() {
+                    write!(
+                        f,
+                        "'{}' is not a name in {zone}, which is the zone {} \
+                         binds. A project may only act on records in its own \
+                         zone",
+                        named.escape_debug(),
+                        path.display()
+                    )
+                } else {
+                    write!(
+                        f,
+                        "this project does not bind a record called '{}'. {} \
+                         narrows [cloudflare] records to {}. Add it there if it \
+                         should be one",
+                        named.escape_debug(),
+                        path.display(),
+                        listed(bound)
+                    )
+                }
+            }
             BindingError::NoZoneId { path, zone } => write!(
                 f,
                 "{} binds the zone {zone} but not its id, and a zone-scoped \
@@ -286,6 +326,7 @@ impl Binding {
             zone: config.string(&["cloudflare", "zone"])?.map(str::to_string),
             zone_id: id(&["cloudflare", "zone_id"])?,
             buckets: config.strings(&["cloudflare", "buckets"])?,
+            records: config.strings(&["cloudflare", "records"])?,
             environments,
             path,
         })
@@ -300,6 +341,7 @@ impl Binding {
             && self.account_id.is_none()
             && self.zone.is_none()
             && self.buckets.is_empty()
+            && self.records.is_empty()
             && self.environments.is_empty()
     }
 
@@ -376,6 +418,60 @@ impl Binding {
         Ok(Zone {
             id,
             name: zone.to_string(),
+        })
+    }
+
+    /// What a record NAME means: a name inside the bound zone that this
+    /// project is allowed to touch.
+    ///
+    /// §13.9's "ordinary project grants may operate only on bound zones and
+    /// records", in the two steps it actually has:
+    ///
+    /// * the name must be inside the bound zone, on a **label boundary** —
+    ///   `notexample.com` is not in `example.com`, and a suffix test without
+    ///   the dot would say it was;
+    /// * if the project narrowed itself with `records`, the name must be one
+    ///   of those. An entry may be written either way round — `www` or
+    ///   `www.example.com` — because both are how people write them, and the
+    ///   zone is right there to complete the short form.
+    ///
+    /// A project that lists no records gets its whole zone, which is the
+    /// narrowing §13.9 asks for and no more. The elevated shapes are refused
+    /// on top of this, by type, in [`super::dns::elevated`].
+    pub fn record(&self, named: &str) -> Result<super::dns::Record, BindingError> {
+        let Some(zone_name) = self.zone.clone() else {
+            return Err(BindingError::NoZone {
+                path: self.path.clone(),
+                named: named.to_string(),
+                bound: None,
+            });
+        };
+        let zone = self.zone(&zone_name)?;
+        if !super::dns::inside(&zone.name, named) {
+            return Err(BindingError::NoRecord {
+                path: self.path.clone(),
+                named: named.to_string(),
+                zone: zone.name.clone(),
+                bound: Vec::new(),
+            });
+        }
+        if !self.records.is_empty() {
+            let allowed = self.records.iter().any(|bound| {
+                bound == named || format!("{bound}.{}", zone.name) == named
+            });
+            if !allowed {
+                return Err(BindingError::NoRecord {
+                    path: self.path.clone(),
+                    named: named.to_string(),
+                    zone: zone.name.clone(),
+                    bound: self.records.clone(),
+                });
+            }
+        }
+        Ok(super::dns::Record {
+            zone,
+            name: named.to_string(),
+            kind: None,
         })
     }
 
