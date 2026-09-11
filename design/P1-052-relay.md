@@ -203,13 +203,17 @@ and it is the one thing I would do before deploying.
 
 ### 5.3 What it costs
 
-From Cloudflare's Durable Objects pricing page, read on 2026-09-12:
+From Cloudflare's own pages, read on 2026-09-12 — the per-dimension rates
+from the Durable Objects pricing page, the plan fee quoted verbatim from the
+Workers pricing page: *"The Workers Paid plan includes Workers, Pages
+Functions, Workers KV, Hyperdrive, and Durable Objects usage for a minimum
+charge of $5 USD per month for an account."*
 
 | | Workers Free | Workers Paid |
 | --- | --- | --- |
 | requests | 100,000 / day | 1 M / month, then $0.15/M |
 | duration | 13,000 GB-s / day | 400,000 GB-s / month, then $12.50/M GB-s |
-| plan fee | — | $5 / month |
+| plan fee | — | $5 / month minimum |
 
 Two things make this cheap for personal use and both are properties of the
 design rather than luck:
@@ -231,6 +235,37 @@ so no row is ever read or written and the storage dimension does not apply.
 For one person with a laptop and a phone this sits inside the free plan. The
 thing that would change that is other people using it: the relay is not
 authenticated, and anybody who learns a rendezvous id can occupy it. See §6.
+
+## 5.4 — unrelated to the relay: LAN discovery
+
+`apex-remoted` announces `_apex-remote._tcp` on the local network for as long
+as it runs, by holding an `avahi-publish-service` child. Deliberately not a
+file in `/etc/avahi/services/`, which would advertise the machine whether or
+not the service was running, whether or not the user had ever enabled APEX
+Remote, and whether or not the port was open.
+
+avahi is installed **and enabled** in the image — `Containerfile.core` enables
+it and fails the build if `systemctl is-enabled` disagrees — and
+`avahi-tools`, which carries `avahi-publish-service`, is now named in the same
+`dnf5 install` with a `command -v` assertion beside it. It was already present
+as somebody else's dependency, which is exactly the kind of thing that
+disappears in a rebase nobody connects to remote access breaking.
+
+The TXT record carries the protocol version and nothing else. In particular
+not the rendezvous id, which is stable across networks and would let anybody
+on a café network recognise the same laptop again next week. A device learns
+an address and a port and nothing about which machine it is; `Noise_IK` is
+what decides that, and a wrong desktop cannot read the attempt.
+
+The record names the port the daemon is actually on, not the catalogue's 7717
+default. Note that the port stays closed to the network until
+`sudo apex firewall allow apex-remote`, so on a machine that has not opened it
+a device will find the record, fail to connect, and fall back to the relay —
+which is the order `rendezvous::PREFERENCE` already declares.
+`--no-announce` turns it off for a machine that is only ever reached through a
+relay.
+
+The *browsing* half is the device's, and it is the Android app's (P1-053).
 
 ## 6. Known gaps, named
 
