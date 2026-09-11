@@ -299,6 +299,31 @@ jobs:
         uses: actions/checkout@v4
       - name: Toolchain
         run: rustup component add clippy
+
+      # The same setup pr-validation.yml needs, for the same six assertions,
+      # in the second workflow that runs them. apex/tests/mcp_sidecar_live.rs
+      # confines a real MCP server and checks the confinement holds; APEX ships
+      # bubblewrap so they pass on any APEX machine, and the GitHub runner is
+      # Ubuntu and does not. Without this the rust job fails, and because
+      # `base` needs `rust` and `image` needs `base`, THE IMAGE NEVER BUILDS —
+      # which is how this branch went from 2026-09-07 to 2026-09-12 without a
+      # single image, behind two other defects that each looked like the cause.
+      #
+      # Ubuntu 24.04 also ships kernel.apparmor_restrict_unprivileged_userns=1,
+      # so bwrap installs and then cannot create the namespace. Relaxed for the
+      # ephemeral runner and PROVEN before any test runs, so a sandbox that
+      # cannot start fails here, naming the reason, rather than later as five
+      # assertion failures that read like product defects.
+      - name: Sandbox tooling the confinement assertions need
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          bwrap --version
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --dev-bind / / --unshare-net --unshare-user true \
+            || { echo "FATAL: bwrap cannot create a user namespace on this runner"; exit 1; }
+          echo "bwrap can create a user namespace"
       - name: Cache cargo
         uses: actions/cache@v4
         with:
