@@ -2554,24 +2554,33 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Secure device pairing, apex-os half complete and pushed on task/p1-050-remote-protocol. 71f8a90 records a
-    mutation that SURVIVED and was fixed: 'any origin may pair' passed every test, because cargo test runs in a
-    login session so the refusal branch was unreachable; the rule moved into may_pair and is tested over all seven
-    section 7 origins, and the same mutant is now 25/1. 322fa45 fixes three defects found by reading the code
-    against its own comments, none of which any test could see: the handshake deadline was cleared before it
-    applied so a silent LAN peer held a thread forever, unregister removed nothing, and PtyChannel::open opened a
-    channel even when the daemon had not attached. REMAINDER: criteria 1 and 3 are apex-shell work that does not
-    exist yet -- the QR renderer and the paired-device page. Recorded by the orchestrator from the agent card, not
-    from a landing: this is pushed branch work that roadmap/v2.2 does NOT yet carry. A fresh agent is working the
-    item now and will supersede this line. Landed with P1-050 on roadmap/v2.2 as 1d4095c. Still partial for the
-    reason its own agent recorded rather than a missing test: --origin-policy remote stays refused, because the
-    device key is the device's own claim until it lives in Android Keystore with setUserAuthenticationRequired,
-    there is no per-approval challenge and there is no attestation. apex-shell also owes it a QR page and a
-    paired-device page.
+    APEX Remote pairing and device management. CRITERIA 1, 3 AND 5 DONE, landed on apex-shell roadmap/v2.2
+    2026-09-12 as merge a36f1a4 (cc0115e): the QR pairing page and the paired-device page. THE QR ENCODER FOUND
+    ITS OWN ORACLE TO BE WRONG, and the safeguards are the reason that claim is trustworthy. A 526-line encoder
+    and 36 segno fixtures existed with NO TEST. Written, the test failed 21 of 36: alignmentPositions used
+    Math.ceil where the specification truncates, so EVERY VERSION FROM 7 UP - including both pairing offers - laid
+    its alignment patterns in the wrong columns. Four cases still failed after that fix and segno was the one at
+    fault: its write_padding_bits quotes ISO/IEC 18004 section 7.4.10 in a comment ('if the bit stream does not
+    end at a codeword boundary') while the code has no such condition, so it appends a spurious 0x00 where the
+    0xec/0x11 pad codewords belong. Rather than reproduce a bug to make a test pass, the generator applies a one-
+    line correction, and three things stop that being 'fix the oracle to match me': it builds every case TWICE and
+    DERIVES the corrected list by diffing; the test pins that list at exactly four, so a spreading correction OR
+    an upstream fix turns it red; and section 7.4.10 is asserted directly off the codewords, so those assertions
+    survive deleting every fixture. The other 32 fill their symbol to capacity and provably cannot be reached -
+    asserted, not stated. A SECOND DEFECT THE SUITES CAUGHT THAT READING DID NOT: the pairing page asked for a
+    code from onOnScreenChanged while the ServiceRef beside it raises refCount from a binding on the same
+    property, and QML orders neither - the handler won, requestCode saw an inactive service, and THE PAGE SHOWED
+    NO CODE AT ALL. Fixed on both paths. 202 new assertions with EXACT green counts rather than floors, which
+    caught two of the agent's own counts being wrong; 12 mutants all red with a green control. The page draws
+    NOTHING when it has no offer, and that phase's central assertion is negative, because a placeholder QR looks
+    fine in a screenshot and is exactly the failure the feature exists to prevent. STAYS PARTIAL, AND MUST NOT BE
+    CLOSED FROM HERE: --origin-policy remote stays refused until the device key lives in Android Keystore with
+    setUserAuthenticationRequired, plus a per-approval challenge and attestation. That is p1-053a's work, and
+    p0-014's CTAP2 verifier is its desktop half.
 - id: P1-052
   title: Support direct LAN and encrypted internet relay for remote agents
   priority: P1
-  status: partial
+  status: done
   area: remote-agents
   depends_on:
   - P1-051
@@ -2587,22 +2596,23 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LAN and encrypted internet relay. Pushed groundwork on task/p1-050-remote-protocol:
-    apex_remote_core::rendezvous holds the id derivation and the disclosure text, the framing is transport-
-    agnostic by design so the Noise channel runs through any relay unchanged, and the firewall catalogue entry
-    plus 5353 are in place. FOUR NAMED REMAINDERS, none started: (1) nothing dials a relay -- it needs a
-    Cloudflare Worker plus Durable Object pairing two outbound WebSockets on a rendezvous id, a client in apex-
-    remoted holding one outbound connection open, and the same in the device; (2) reconnect across network changes
-    -- the daemon holds the PTY so a reconnect is a fresh Noise_IK handshake plus re-Open, and nothing writes that
-    resume logic; (3) LAN discovery over _apex-remote._tcp mDNS, deliberately NOT a static Avahi service file,
-    which would advertise the machine whether or not the service is running; (4) Frame::Ping/Pong carry a token
-    and nothing measures or renders the round trip. Recorded by the orchestrator from the agent card, not from a
-    landing: this is pushed branch work that roadmap/v2.2 does NOT yet carry. A fresh agent is working the item
-    now and will supersede this line. Landed with P1-050 on roadmap/v2.2 as 1d4095c: LAN direct connection, Noise
-    NK/IK and the rendezvous client are in apex-remote-core, and files/system/firewall/services gains an apex-
-    remote tcp 7717 entry that is offerable to apex firewall allow and is NOT opened by any default policy. Four
-    named remainders: no Cloudflare Worker or Durable Object relay is deployed, no reconnect across network
-    changes, no mDNS discovery, and connection quality is not rendered.
+    APEX Remote relay, reconnect, mDNS discovery and connection quality. LANDED on apex-os roadmap/v2.2 2026-09-12
+    as merge b79838a4 (branch tip 373e833c), with the apex-shell half at merge a36f1a4. The relay's server side
+    exists as code with tests against a local double: relay/ with its Durable Object room and
+    relay/test/room.test.mjs, plus reconnect across network changes, _apex-remote._tcp mDNS announcement, and
+    rendered connection quality. apex-remote-core 83 tests, apex-remoted 35+3+10+8. Clippy had NEVER run against
+    this branch's Rust because clippy was not installed on this machine until 2026-09-12; run now, it found three
+    lints, all in the relay's own test code, fixed in 373e833c, and cargo clippy --locked --workspace --all-
+    targets -- -D warnings exits 0. NOTHING WAS DEPLOYED, deliberately: no wrangler, no Worker, no Durable Object,
+    no account authentication - which remained the right posture after the build-image.yml fleet hazard found the
+    same day. DEPLOYMENT IS BLOCKED ON A DECISION THAT IS ANDRE'S RATHER THAN ON A DEFECT: apex-remoted refuses a
+    wss:// relay BY NAME and *.workers.dev is HTTPS-only. Three ways out are costed in
+    ROADMAP/design/P1-052-relay.md section 5 - rustls (about fifteen crates), an openssl s_client child in the
+    shape apex-secretd already uses for curl, or a custom domain served over ws://. A MUTATION VERDICT WAS
+    CORRECTED: an inherited pair recorded as SURVIVED was re-taken after the orchestrator's correction about
+    restores that preserve mtimes, and it reds at 7/1 with a 'Compiling apex-remoted' line on both the mutation
+    and the restore - the survival had been an artefact of a skipped rebuild. The remaining inherited pairs are
+    not re-measured and the card says so rather than implying they were.
 - id: P1-053
   title: Create polished first-party APEX Remote Android app foundation
   priority: P1

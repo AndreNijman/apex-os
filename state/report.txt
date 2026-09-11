@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-12 07:48 AWST
+APEX ROADMAP — resume report — 2026-09-12 07:52 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -7,49 +7,42 @@ APEX ROADMAP — resume report — 2026-09-12 07:48 AWST
   BASE          16         2         -         -
   L              -         1         -         2
   P0            23         2         -         -
-  P1            31        14        17         -
+  P1            32        13        17         -
   P2             4         3        12         -
-  ALL           74        22        29         2   of 127
+  ALL           75        21        29         2   of 127
 
   P0 not done: P0-001(part), P0-021(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p1-008     dead 21m   P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
+  p1-008     dead 25m   P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
              head 5eda17e0 docs(cloudflare): name apexd-core's Backend without l
-             dirty 0 file(s), 0 unpushed, card 22m
+             dirty 0 file(s), 0 unpushed, card 26m
              NEXT **The unit is DONE and pushed** — tip `5eda17e0`, five commits, no
 
   p2-b       ALIVE      (see queue.json p2-b)              task/p2-b-accessibility-i18n
              head 7ba196e test(a11y): measure how far Reduce Motion actually rea
-             dirty 0 file(s), 0 unpushed, card 33m
+             dirty 0 file(s), 0 unpushed, card 2m
              NEXT 0. **DESIGN FORK to settle before writing the installer page** (fr
 
   p1-052     ALIVE      P1-051,P1-052                      task/p1-052-relay
              head 373e833c style(remote): three clippy lints in the relay's own 
-             dirty 0 file(s), 0 unpushed, card 2m
+             dirty 0 file(s), 0 unpushed, card 3m
              NEXT **Everything dispatched to this unit is done.** P1-052 is complete
 
   p0-finish  ALIVE      P0-001,P0-002,P0-007,P0-015,P0-021 task/p0-finish
              head 392108e5 ci(image): the rust job needs a login session, and wi
-             dirty 0 file(s), 0 unpushed, card 12m
+             dirty 0 file(s), 0 unpushed, card 3m
              NEXT Round 13 finished its code work. Branch tip `392108e5`, 7 commits,
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 24472b64 Merge task/p0-finish into roadmap/v2.2 (P0-007, P0-01
+  int-os:  tip b79838a4 Merge task/p1-052-relay into roadmap/v2.2 (P1-052 don
     task/p1-050-remote-protocol
       09c977d9 fix(clippy): the integration tip was not clean, and two of th   [2/10 added lines on tip]
-    task/p1-052-relay
-      c0445ea0 feat(remote): a relay endpoint, roles and an RFC 6455 client    [2/10 added lines on tip]
-      5316dc3d feat(remote): dial the relay, splice it onto our own listener   [2/10 added lines on tip]
-      704743fb feat(remote): measure the connection, and survive losing it (   [0/10 added lines on tip]
-      e028a546 feat(relay): the Worker and the Durable Object, written and n   [0/10 added lines on tip]
-      4cc8cb0c feat(remote): announce _apex-remote._tcp for as long as the d   [2/10 added lines on tip]
-      373e833c style(remote): three clippy lints in the relay's own test cod   [0/3 added lines on tip]
     task/p2-b-accessibility-i18n
       a0dd1999 feat(greet): accessible login screen and a keyboard-layout re   [0/10 added lines on tip]
       e5d049ad test(greet): parse the greeter, self-test the mutants, instal   [0/10 added lines on tip]
@@ -58,7 +51,7 @@ APEX ROADMAP — resume report — 2026-09-12 07:48 AWST
       28f59fac feat(installer): choose a keyboard before creating a password   [2/10 added lines on tip]
       fcd3b904 fix(tests): revive test-installer.sh's engine half, which has   [0/10 added lines on tip]
 
-  int-shell:  tip b195195 Merge task/p1-040-per-output-scaling into roadmap/v2.2
+  int-shell:  tip 4dbe8ba test(hypr): the shellcheck gate was red for every unit
     fix/labwc-desktop-parity  — squash-merged, safe to delete
       landed whole as f609a6c fix(labwc): complete desktop parity (#6)
     fix/popup-first-open-and-media-keys  — squash-merged, safe to delete
@@ -67,9 +60,6 @@ APEX ROADMAP — resume report — 2026-09-12 07:48 AWST
       landed whole as 4e267eb fix: screenshots and popup input regions off Hyprland (#
     task/p0-016-agent-settings  — squash-merged, safe to delete
       landed whole as 4335e42 fix(agents): the sudo caveat was written before no_new_p
-    task/p1-052-relay
-      673efe0 feat(remote): a QR encoder, proven against an independent one    [0/10 added lines on tip]
-      cc0115e feat(remote): the QR pairing page and the paired-device page (   [1/10 added lines on tip]
     task/p2-b-accessibility-i18n
       83775dc feat(a11y): the shared settings controls name themselves and a   [2/10 added lines on tip]
       7ba196e test(a11y): measure how far Reduce Motion actually reaches, an   [2/10 added lines on tip]
@@ -82,11 +72,11 @@ APEX ROADMAP — resume report — 2026-09-12 07:48 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 44s Sat 2026-09-12
+  snapshot timer: active   last 1s Sat 2026-09-12
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    8c28304  roadmap-state
+    apex-os    2cc4bec  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    55f08ae  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -109,7 +99,7 @@ APEX ROADMAP — resume report — 2026-09-12 07:48 AWST
     apex-os    00c1973  wt-p0-025-os-
     apex-os    2c9c560  wt-p0-finish-
     apex-os    eda5ef8  wt-p1-001-
-    apex-shell 67c276c  apex-shell-
+    apex-shell 229cd32  apex-shell-
     apex-shell df979e1  int-shell-
     apex-shell 68c971d  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
