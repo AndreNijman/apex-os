@@ -129,3 +129,17 @@ You've hit your weekly limit · resets 9pm (Australia/Perth)
 2026-09-11 12:14:51 resume session ended (exit 1)
 2026-09-11 21:02:42 report refreshed (227 lines)
 2026-09-11 21:02:42 starting a resume session (78 items outstanding)
+Background tasks still running after 600s; terminating. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.
+All four nested apex-shell runners are green on the landed tip, including the one whose conflict I hand-resolved:
+
+- `run-compositor-facade-test.sh` **52/0**
+- `run-scaling-test.sh` **30/0**
+- `run-service-tier-test.sh` **88/0**
+- `run-agent-center-smoke.sh` **rc=0** — "the Agent Center rendered 6 session(s) and 1 request(s) cleanly"
+
+The smoke test skips silently with rc=0 unless `APEX_OS_ROOT` names an apex-os checkout, which is why the first pass reported nothing; re-run against `/var/tmp/apex-work/int-os` it actually executes. That mattered here — it is the file where I kept the branch's `count_errors` helper over the tip's drifted inline filter, and `bash -n` cannot tell you whether a resolved helper call is ever reached.
+
+This closes one of the three housekeeping items integrate-4's card has owed since round 6. The other two (the per-commit build check for the four p1-020os commits, and squash-merged branch cleanup by `merge-tree --write-tree`) are recorded in `dispatch.json` as still owed.
+
+State snapshotted to `refs/wip/roadmap-state`. Waiting on the six agents now.
+2026-09-11 21:43:55 resume session ended (exit 0)
