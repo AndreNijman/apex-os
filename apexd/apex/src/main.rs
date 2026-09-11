@@ -10,6 +10,8 @@ mod blueprint;
 mod channel;
 mod boot;
 mod cloudflare;
+mod connector;
+mod digest;
 mod dispatch;
 mod disposable;
 mod firmware;
@@ -20,6 +22,7 @@ mod mcp;
 mod migrate;
 mod mode;
 mod ops;
+mod provenance;
 mod proxy;
 mod qualify;
 mod recover;
@@ -27,6 +30,7 @@ mod remote;
 mod schema;
 mod request;
 mod secret;
+mod skill;
 mod storage;
 mod task;
 mod touchpad;
@@ -404,6 +408,38 @@ enum Cmd {
     Plugin {
         #[command(subcommand)]
         cmd: PluginCmd,
+    },
+    /// Agent skills: where each came from, what it hashes to, and whether it
+    /// ships a program.
+    ///
+    /// `apex agent profile doctor` already counts skills and names the ones
+    /// with no `SKILL.md`. This is the inventory rather than the health check:
+    /// per skill, its origin, a digest of the files on disk, and whether it is
+    /// executable or reference-only — none of which anything recorded before.
+    ///
+    /// Unprivileged, and read-only: it never writes to a skill.
+    Skill {
+        #[command(subcommand)]
+        cmd: SkillCmd,
+    },
+    /// Where an agent plugin came from, and whether what is on disk is still
+    /// what arrived.
+    ///
+    /// **Not `apex plugin`**, which is apex-shell's QML plugin platform. This
+    /// is the agent's plugins — Claude Code's, under `~/.claude/plugins`,
+    /// installed from marketplaces.
+    ///
+    /// The registry already records a marketplace, a version and an install
+    /// path, and nothing has ever checked any of it against the bytes on disk:
+    /// there is no hash in it at all. This re-hashes each installed tree every
+    /// run and compares it with a recorded baseline, so a plugin edited after
+    /// it was installed is a finding rather than a green tick.
+    ///
+    /// Unprivileged. `show` is read-only; `record` writes only APEX's own
+    /// baseline store.
+    Provenance {
+        #[command(subcommand)]
+        cmd: ProvenanceCmd,
     },
     /// The incoming firewall: what is dropped, and the exceptions you opened.
     ///
@@ -918,6 +954,62 @@ enum DeviceArea {
     All,
 }
 
+/// `apex skill <verb>` — P1-025's inventory.
+///
+/// Two verbs, and the split is the one `apex mcp` uses: `list` is the readout,
+/// `audit` is the same measurement reduced to what is wrong with it and an
+/// exit status a script can branch on.
+#[derive(Subcommand)]
+enum SkillCmd {
+    /// Every skill, with its origin, digest and type.
+    ///
+    /// Exits non-zero if a skills directory could not be read — an incomplete
+    /// inventory is not a successful one, because the count it prints is the
+    /// number somebody would rely on to say nothing unexpected is installed.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// What is wrong: unreadable directories, missing manifests, links out of
+    /// a skill, and every skill that ships a program.
+    ///
+    /// Exits non-zero when there is a problem.
+    Audit {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `apex provenance <verb>` — P1-026.
+///
+/// `show` measures; `record` is the only thing here that writes, and it writes
+/// nothing but APEX's own baselines. Recording is deliberately a separate verb
+/// rather than something `show` does on first sight: a check that silently
+/// adopted whatever it found as the truth could never report a change, because
+/// the change would become the new baseline before anybody read it.
+#[derive(Subcommand)]
+enum ProvenanceCmd {
+    /// Every marketplace and installed plugin: its origin, its revision, the
+    /// digest of its files, whether that digest still matches the recorded
+    /// one, and what confines each kind of executable content it ships.
+    ///
+    /// Exits non-zero when there is a finding, or when the report could not be
+    /// completed — an inventory that could not read a registry is not a
+    /// machine with no plugins.
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record the current digest of every installed plugin as the baseline
+    /// that later runs compare against.
+    ///
+    /// A tree that could not be hashed is not recorded, and a tree that had
+    /// CHANGED since the last record is named on stderr as it is overwritten —
+    /// re-recording is how a real finding gets erased, so it never happens
+    /// quietly.
+    Record,
+}
+
 #[derive(Subcommand)]
 enum PluginCmd {
     /// Installed plugins, whether each one is valid, and why not.
@@ -1430,6 +1522,14 @@ async fn main() {
         Cmd::Devices { area } => ops::devices(&devices_argv(area)),
         Cmd::Remote { cmd } => remote::remote(cmd),
         Cmd::Plugin { cmd } => ops::plugin(&plugin_argv(cmd)),
+        Cmd::Skill { cmd } => match cmd {
+            SkillCmd::List { json } => skill::list(json),
+            SkillCmd::Audit { json } => skill::audit(json),
+        },
+        Cmd::Provenance { cmd } => match cmd {
+            ProvenanceCmd::Show { json } => provenance::show(json),
+            ProvenanceCmd::Record => provenance::record(),
+        },
     };
     std::process::exit(code);
 }
