@@ -282,9 +282,26 @@ pub fn revision_of(dir: &Path) -> Revision {
 /// `FirstSight` nor `Unmeasurable` is a pass here, and only `Changed` is a
 /// failure — see [`Attest::is_finding`].
 ///
-/// When both branches are on one tip the orchestrator can unify these into one
-/// generic verdict; the arms line up one for one on purpose, and `reason()`
-/// and `tag()` are named to match `verify::Verdict::reason` and `as_str`.
+/// Both are now on one tip, so `verify::Verdict` **can** be imported here —
+/// and it is deliberately not, because the payloads say different things and
+/// merging them would cost the words that make each one true:
+///
+///   * `Verified { signer, at }` carries a certificate identity and the instant
+///     a chain was checked. Nobody signs a Claude Code plugin. There is no
+///     signer to put in it, and "verified" is the exact word this module exists
+///     to refuse — a match here means the tree has not changed since APEX first
+///     saw it, which is a far weaker claim.
+///   * `Changed { recorded, found }` carries two hashes so a reader can see
+///     which pair disagreed. `Failed(String)` has one free-text slot and would
+///     reduce that to prose.
+///   * `Absent` is about a publisher that signed nothing; [`Attest::FirstSight`]
+///     is about APEX's own records. They are not the same absence.
+///
+/// What is shared is the shape, on purpose: four values, `reason()` and `tag()`
+/// named after `verify::Verdict::reason` and `as_str`, and the same rule that
+/// could-not-run is neither a pass nor a failure. `trust.rs` imports
+/// `verify::Verdict` directly because it is about the same subject — a signed
+/// image. This is not, and borrowing the type would be borrowing the claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attest {
     /// The tree on disk hashes to what was recorded.

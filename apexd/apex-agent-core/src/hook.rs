@@ -300,6 +300,11 @@ pub struct Observation {
     /// dropped, so no subagent was recorded anywhere.
     pub agent_id: Option<String>,
     pub agent_type: Option<String>,
+    /// A test run starting or finishing, when this event is one (§P1-036).
+    ///
+    /// `None` for every event that is not a `Bash` tool call naming a known
+    /// runner, which is nearly all of them.
+    pub test: Option<crate::worktree::TestNote>,
 }
 
 /// Longest detail line a hook may publish.
@@ -362,7 +367,37 @@ pub fn observe(event: HookEvent, payload: &Payload) -> Observation {
         } else {
             None
         },
+        test: test_note(event, payload),
     }
+}
+
+/// Whether this event is a test run starting, passing or failing (§P1-036).
+///
+/// Detected here because this is where the payload is already parsed, and
+/// because it is the one place that knows the difference between
+/// `post_tool_use` and `post_tool_use_failure` — which, `Payload` carrying no
+/// exit code, is the ONLY evidence of a tool's outcome that exists.
+///
+/// Only `Bash` is considered. A test suite is a command; `Edit` on a file
+/// called `tests.rs` is not a test run.
+fn test_note(event: HookEvent, payload: &Payload) -> Option<crate::worktree::TestNote> {
+    use crate::worktree::{self, TestPhase};
+
+    let phase = match event {
+        HookEvent::PreToolUse => TestPhase::Started,
+        HookEvent::PostToolUse => TestPhase::Passed,
+        HookEvent::PostToolUseFailure => TestPhase::Failed,
+        _ => return None,
+    };
+    if payload.tool_name.as_deref() != Some("Bash") {
+        return None;
+    }
+    let command = payload.tool_input.get("command")?.as_str()?;
+    let runner = worktree::test_command(command)?;
+    Some(worktree::TestNote {
+        phase,
+        command: runner,
+    })
 }
 
 /// Longest permission-mode name kept.

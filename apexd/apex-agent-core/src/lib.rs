@@ -23,12 +23,15 @@
 //!         ├─ proving a human is present    auth.rs
 //!         ├─ where a request came from     origin.rs
 //!         ├─ what a screen lock means      lock.rs
+//!         ├─ a security key was touched    webauthn.rs
 //!         ├─ sandbox policy                sandbox.rs
 //!         ├─ network destination policy    destination.rs
 //!         ├─ adapters                      adapter.rs
 //!         ├─ agent profiles                profile.rs
 //!         ├─ claude's own hook lifecycle   hook.rs
+//!         ├─ handing a file to a session   inject.rs
 //!         ├─ projects + worktrees          project.rs
+//!         ├─ per-worktree status            worktree.rs
 //!         ├─ project window layouts        layout.rs
 //!         ├─ checkpoints                   checkpoint.rs
 //!         ├─ privilege requests            request.rs
@@ -54,6 +57,7 @@ pub mod git;
 pub mod grant;
 pub mod graph;
 pub mod hook;
+pub mod inject;
 pub mod journal;
 pub mod layout;
 pub mod mux;
@@ -69,6 +73,8 @@ pub mod sandbox;
 pub mod session;
 pub mod statusline;
 pub mod term;
+pub mod webauthn;
+pub mod worktree;
 
 pub use policy::AgentPolicy;
 pub use protocol::{AgentState, SandboxPolicy, SessionInfo};

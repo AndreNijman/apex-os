@@ -1038,9 +1038,12 @@ RUN set -eux; \
         alacritty fastfetch \
         pavucontrol \
         gparted parted gdisk udisks2 smartmontools \
+        fwupd \
         bluez bluez-tools bluez-obexd blueman pipewire-codec-aptx \
         scrcpy android-tools; \
     rpm -q scrcpy android-tools; \
+    rpm -q fwupd; \
+    command -v fwupdmgr; \
     command -v scrcpy; \
     command -v adb; \
     # The share and device backends, asserted on the shipped artifact rather
