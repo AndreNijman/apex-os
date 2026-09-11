@@ -698,3 +698,111 @@ fn changed_files_name_the_base_they_were_measured_against() {
         "the packet should say the fallback base may include other work:\n{section}"
     );
 }
+
+#[test]
+fn the_task_spelling_from_section_sixteen_writes_the_packet_for_the_tasks_session() {
+    // §16's Target is `apex task handoff <task-id> codex`, and until now the
+    // only way to get a packet was `apex agent handoff <session-id>`. This
+    // asserts the spec's own spelling reaches the same document — by looking at
+    // the artefact, not by reading the delegation: the packet is named after
+    // the SESSION, so a `task handoff` that resolved the task to the wrong
+    // session (or invented a packet of its own from the task record) produces a
+    // file with a different name and a different body.
+    let h = fixture!("taskverb");
+    let (id, _project) = session!(h);
+    assert!(
+        h.transcript_holds(id, "mismatched types"),
+        "the session never wrote to its terminal, so the carried-transcript \
+         assertion below would be vacuous"
+    );
+
+    let new = h.apex(&["task", "new", "handoff-demo"]);
+    assert!(
+        new.status.success(),
+        "could not create the task: {}",
+        String::from_utf8_lossy(&new.stderr)
+    );
+
+    let out = h.apex(&["task", "handoff", "handoff-demo", "codex", "--no-start"]);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "task handoff failed: {stderr}");
+
+    // Same stdout contract as the agent form: the path, alone, so it composes.
+    let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(
+        printed.ends_with(&format!(".apex/handoff/session-{id}-to-codex.md")),
+        "the task verb did not resolve to this task's session: {printed:?} (stderr {stderr})"
+    );
+    let path = PathBuf::from(&printed);
+    assert!(path.is_file(), "no packet at {printed}");
+
+    // And it is the WHOLE document, not a thinner one written from the task
+    // record: every §16 heading, the outgoing session named, the transcript
+    // tail carried, and the test state that only the daemon can answer.
+    let md = std::fs::read_to_string(&path).expect("read packet");
+    for f in FIELDS {
+        assert!(md.contains(&format!("## {f}")), "no `## {f}` heading in:\n{md}");
+    }
+    assert!(md.contains(&format!("session {id}")), "{md}");
+    assert!(
+        md.contains("mismatched types in src/main.rs"),
+        "the outgoing session's terminal output is not in the packet:\n{md}"
+    );
+    assert!(
+        md.contains("has not observed a test run"),
+        "the daemon's test-state observation did not reach the packet, so the task \
+         verb is not going through the same producer:\n{md}"
+    );
+
+    // The refusal path's promise, kept: it said which session it chose.
+    assert!(
+        stderr.contains(&format!("session {id}")),
+        "the command did not say which session it handed off: {stderr}"
+    );
+}
+
+#[test]
+fn a_task_with_two_sessions_is_refused_and_both_ids_are_named() {
+    // The case a developer with one session open never sees. Picking either
+    // one would be a guess about which work the user meant to hand over, and
+    // because the packet is named after the session it picked, the wrong guess
+    // is a document that looks entirely correct.
+    //
+    // Two sessions in the same root, because a refusal is only observable when
+    // there is something to be ambiguous about: one session would take the
+    // success path and prove nothing about the guard.
+    let h = fixture!("tasktwo");
+    let (first, _) = session!(h);
+    let (second, _) = session!(h);
+    assert_ne!(first, second, "the fixture started one session twice");
+
+    let new = h.apex(&["task", "new", "two-sessions"]);
+    assert!(
+        new.status.success(),
+        "could not create the task: {}",
+        String::from_utf8_lossy(&new.stderr)
+    );
+
+    let out = h.apex(&["task", "handoff", "two-sessions", "codex", "--no-start"]);
+    assert!(
+        !out.status.success(),
+        "an ambiguous handoff was accepted: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        stderr.contains(&first.to_string()) && stderr.contains(&second.to_string()),
+        "the refusal names neither or only one of the two sessions, so the user cannot \
+         act on it: {stderr}"
+    );
+    assert!(
+        stderr.contains("apex agent handoff"),
+        "the refusal should name the command that resolves it: {stderr}"
+    );
+    // Refused BEFORE anything was written, the same ordering the unknown-target
+    // test asserts for the agent form.
+    assert!(
+        !h.repo.join(".apex/handoff").exists(),
+        "a packet was written for an ambiguous handoff"
+    );
+}

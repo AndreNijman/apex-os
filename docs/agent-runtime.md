@@ -862,6 +862,22 @@ apex agent handoff 4 --to codex
 apex agent handoff 4 --to codex --no-start   # write it, launch nothing
 ```
 
+If the work is bound to a task, hand the task over and let it find the session:
+
+```
+apex task handoff installer-bug codex
+apex task handoff installer-bug codex --no-start
+```
+
+That is the same packet, written by the same command — `apex task handoff`
+resolves the task to the agent session running in its root and calls
+`apex agent handoff`. A packet is the record of a **session**: its transcript,
+the files it changed, the worktree the runtime attributes to it, the grants it
+holds. None of those can be read off a task, which is a binding. So the task
+form refuses rather than guessing when the task has no session running in it,
+or when it has more than one — and when it refuses for that second reason it
+names the ids, because the next thing to type is `apex agent handoff <id>`.
+
 The packet is a Markdown file in the project, at
 `.apex/handoff/session-4-to-codex.md`. Inside the project rather than under
 `$XDG_STATE_HOME`, and that is forced rather than chosen: the receiving

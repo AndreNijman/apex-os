@@ -33,6 +33,14 @@ use clap::{Args, Subcommand};
 use crate::ops;
 
 /// `apex agent <verb>`.
+/// How much of the outgoing transcript a handoff packet carries by default.
+///
+/// Named rather than inline because `apex task handoff` delegates to this verb
+/// and has to pass the same number: two spellings of one default drift, and the
+/// symptom would be a packet with a different amount of evidence in it
+/// depending on which of two commands the user typed.
+pub(crate) const HANDOFF_TRANSCRIPT_BYTES: usize = 16 * 1024;
+
 #[derive(Subcommand)]
 pub enum AgentCmd {
     /// Start an agent on a managed terminal and attach to it.
@@ -88,7 +96,7 @@ pub enum AgentCmd {
         #[arg(long)]
         no_start: bool,
         /// How many bytes of the outgoing transcript to carry.
-        #[arg(long, default_value_t = 16 * 1024)]
+        #[arg(long, default_value_t = HANDOFF_TRANSCRIPT_BYTES)]
         transcript_bytes: usize,
     },
     /// Type text into a session's terminal.
