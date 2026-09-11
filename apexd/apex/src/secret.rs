@@ -101,12 +101,18 @@ pub enum SecretCmd {
         operation: String,
         /// Allow it in every project instead of this one.
         ///
-        /// Only for an operation that names nothing — `mcp.request` is the one
-        /// there is. Such an operation can only reach the endpoint pinned when
-        /// its credential was stored, so this widens *where* it may be asked
-        /// for and not *what* it reaches. An MCP server is defined once and is
+        /// Only for an operation whose provider declares that it reaches the
+        /// same thing in every project — `mcp.request` is the one there is.
+        /// Such an operation reaches only the endpoint pinned when its
+        /// credential was stored, so this widens *where* it may be asked for
+        /// and not *what* it reaches. An MCP server is defined once and is
         /// therefore present in every directory; without this, every new
         /// worktree is one where it is unauthorised until somebody notices.
+        ///
+        /// Naming nothing is not enough on its own: `cloudflare.account.read`
+        /// takes no resource and no options and still resolves its account out
+        /// of the project's own `apex.toml`, so it is refused here and granted
+        /// per project.
         #[arg(long)]
         everywhere: bool,
     },

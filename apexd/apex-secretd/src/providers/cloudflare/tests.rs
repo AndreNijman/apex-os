@@ -1122,9 +1122,10 @@ fn a_cloudflare_operation_cannot_be_granted_in_every_project_even_though_it_name
     // would let an agent in a project the owner never approved read that
     // project's account with the one stored token.
     //
-    // Mutation that proves this bites: make `may_be_granted_everywhere` return
-    // `op.names_nothing()` again and this test fails while every other test in
-    // the workspace still passes.
+    // Two mutations prove this bites, and they fail it for different reasons:
+    // make `may_be_granted_everywhere` compute `op.names_nothing()` again
+    // instead of reading the declaration, or flip this operation's own
+    // `same_everywhere` to true. Both were run, and both turn this red.
     let tag = format!("everywhere-{}", std::process::id());
     let store = std::env::temp_dir().join(format!("apex-cf-store-{tag}"));
     let project = std::env::temp_dir().join(format!("apex-cf-project-{tag}"));

@@ -269,6 +269,31 @@ pub const STORES: &[Store] = &[
         // two timestamps are the whole of version 0.
         sample: "{\"created\": 1788600000, \"last_opened\": 1788700000, \"checkpoint\": \"1788439662000-a1b2c3d\"}",
     },
+    Store {
+        id: "qualification",
+        what: "the hardware qualification database: what this class of machine is known to do",
+        path: "~/.local/state/apex/qualification.json",
+        format: Format::Json,
+        authored: Authored::Machine,
+        version_key: "schema",
+        // Version 1 is the first shape this file has ever had — no build
+        // before this one wrote it, so there is no unversioned document to
+        // describe. A file with no `schema` key is one somebody typed, and
+        // reading it as v1 is right.
+        unversioned: 1,
+        current: crate::qualify::SCHEMA_VERSION,
+        // The claim is on the reader as much as on the migration:
+        // `qualify::Db` and `Record` flatten unknown keys into a map and write
+        // them back out, so an older build that meets a newer file preserves
+        // what it does not understand instead of deleting it on the next save.
+        // `an_unknown_key_survives_a_read_and_a_write` is that half.
+        rollback: Rollback::ReadableByOlder,
+        steps: &[],
+        // Every key v1 writes, including one of each verdict arm — a sample
+        // that carried only a `pass` would let a later step rename the reason
+        // field of the other two and `additive_only` would never notice.
+        sample: "{\"schema\": 1, \"consent\": \"granted\", \"machines\": {\"5f3a\": {\"machine\": {\"vendor\": \"LENOVO\", \"family\": \"ThinkPad L16 Gen 2\", \"product\": \"21SCCTO1WW\", \"chassis\": 10, \"cpu\": \"AMD Ryzen 7 PRO 8840HS\", \"gpus\": [\"1002:1900\"], \"kernel\": \"7.2.3-cachyos2.fc43.x86_64\", \"firmware\": \"R2UET31W (1.31 )\"}, \"results\": {\"sleep\": {\"verdict\": \"pass\", \"at\": 1788700000, \"build\": \"308127d9\"}, \"vrr\": {\"verdict\": \"fail\", \"detail\": \"never engaged\", \"at\": 1788700001, \"build\": \"308127d9\"}, \"rollback\": {\"verdict\": \"not-checked\", \"reason\": \"the reboot has not been exercised\", \"at\": 1788700002, \"build\": \"308127d9\"}}}}}",
+    },
 ];
 
 /// The store with this id, if this build knows it.

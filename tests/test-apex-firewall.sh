@@ -63,8 +63,34 @@ fi
 echo
 echo "── default drop, which is the entire point ────────────────────────────"
 has "input drops by default"        '^\s*type filter hook input priority filter; policy drop;$'
-has "forward drops by default"      '^\s*type filter hook forward priority filter; policy drop;$'
 has "output is allowed"             '^\s*type filter hook output priority filter; policy accept;$'
+
+# There WAS a forward chain, dropping by default, with a comment saying podman
+# was unaffected because it "hooks at its own priority in its own table".
+# tests/test-apex-firewall-live.sh measured that: every base chain at a hook is
+# evaluated, and a drop in any one of them is final, so this chain overrode
+# netavark, libvirt and incus and killed every rootful container's networking.
+# ip_forward is 0 until something deliberately turns it on, and the thing that
+# turns it on brings its own policy.
+# Not anchored to the line start: a forward chain written on one line is the
+# same chain, and an anchored pattern let exactly that mutant through.
+if grep -q 'type filter hook forward' "$RULES"; then
+    bad "no forward chain, which would override every container's own table" \
+        "a drop here is final regardless of what netavark accepts"
+else
+    ok "no forward chain, which would override every container's own table"
+fi
+
+# `nft -f` merges a table block into an existing table rather than replacing
+# it. Without these two lines a second load appends every rule again — measured
+# in a namespace, 14 accepts became 28 — and a doubled `limit rate` is silently
+# twice the rate it says.
+if grep -qx 'table inet apex' "$RULES" && grep -qx 'delete table inet apex' "$RULES"; then
+    ok "a second load replaces the table instead of appending to it"
+else
+    bad "a second load replaces the table instead of appending to it" \
+        "no 'table inet apex' / 'delete table inet apex' preamble"
+fi
 
 echo
 echo "── the rules without which the machine looks broken, not protected ────"
@@ -124,6 +150,23 @@ badline=$(grep -vE '^\s*(#|$)' "$CATALOGUE" | grep -vE '^[a-z0-9-]+ +(tcp|udp) +
 [ -z "$badline" ] && ok "every catalogue entry is well formed" \
                   || bad "every catalogue entry is well formed" "$badline"
 
+# The helper carries a copy of the catalogue so it still works when the image's
+# is missing, and nothing kept the two the same. A drifted fallback is worse
+# than no fallback: `allow` succeeds, writes a file, and opens a port the user
+# did not ask for — or refuses a service the catalogue lists.
+shipped=$(grep -vE '^\s*(#|$)' "$CATALOGUE" | awk '{$1=$1};1')
+# The FIRST heredoc only: usage() has one too, and swallowing it makes this
+# case fail for a reason that has nothing to do with the catalogue.
+builtin=$(awk '/cat <<.EOF.$/{if(!seen){f=1;seen=1;next}} /^EOF$/{f=0} f' "$HELPER" | awk 'NF{$1=$1};1')
+if [ -z "$builtin" ]; then
+    bad "the helper's built-in catalogue matches the shipped one" "no built-in catalogue found in the helper"
+elif [ "$shipped" = "$builtin" ]; then
+    ok "the helper's built-in catalogue matches the shipped one"
+else
+    bad "the helper's built-in catalogue matches the shipped one" \
+        "$(diff <(echo "$shipped") <(echo "$builtin") | head -3 | tr '\n' ' ')"
+fi
+
 if [ "$(id -u)" = 0 ]; then
     skipped "allow refuses an unprivileged caller"  "running as root"
     skipped "reload refuses an unprivileged caller" "running as root"
@@ -154,6 +197,20 @@ fi
 out=$(bash "$HELPER" allow definitely-not-a-service 2>&1)
 grep -qi 'no service called' <<<"$out" && ok "an unknown service is named, not opened" \
     || bad "an unknown service is named, not opened" "$(head -1 <<<"$out")"
+
+# The name becomes a path. `deny` reaches the path before the catalogue, so
+# without a check on the name, `deny ../../../etc/issue` was an `rm -f` outside
+# the exception directory, run as root. "was not allowed" is the WRONG answer
+# here and is asserted against: it would mean the tool had already gone looking
+# where it should not.
+for evil in ../../../etc/issue /etc/issue 'a;b' 'a b'; do
+    out=$(bash "$HELPER" deny "$evil" 2>&1); rc=$?
+    if [ "$rc" != 0 ] && grep -qi 'not a service name' <<<"$out"; then
+        ok "deny refuses '$evil' as a name rather than as a path"
+    else
+        bad "deny refuses '$evil' as a name rather than as a path" "rc=$rc: $(head -1 <<<"$out")"
+    fi
+done
 
 # The lesson this codebase learned the hard way today, in a fourteenth place:
 # `nft list` needs CAP_NET_ADMIN, and answering "no rules" to a caller who

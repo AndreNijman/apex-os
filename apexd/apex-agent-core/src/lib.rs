@@ -29,7 +29,9 @@
 //!         ├─ adapters                      adapter.rs
 //!         ├─ agent profiles                profile.rs
 //!         ├─ claude's own hook lifecycle   hook.rs
+//!         ├─ handing a file to a session   inject.rs
 //!         ├─ projects + worktrees          project.rs
+//!         ├─ per-worktree status            worktree.rs
 //!         ├─ project window layouts        layout.rs
 //!         ├─ checkpoints                   checkpoint.rs
 //!         ├─ privilege requests            request.rs
@@ -53,7 +55,9 @@ pub mod config;
 pub mod destination;
 pub mod git;
 pub mod grant;
+pub mod graph;
 pub mod hook;
+pub mod inject;
 pub mod journal;
 pub mod layout;
 pub mod mux;
@@ -67,8 +71,10 @@ pub mod protocol;
 pub mod request;
 pub mod sandbox;
 pub mod session;
+pub mod statusline;
 pub mod term;
 pub mod webauthn;
+pub mod worktree;
 
 pub use policy::AgentPolicy;
 pub use protocol::{AgentState, SandboxPolicy, SessionInfo};

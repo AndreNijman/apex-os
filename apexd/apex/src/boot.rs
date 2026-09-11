@@ -747,6 +747,70 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_loaderinfo_is_not_a_measurement_of_grub() {
+        // The same distinction one variable over, and the one nothing here
+        // asserted: a refused `LoaderInfo` read leaves `detect_bootloader`
+        // with no marker to see, so it answers off the kernel command line —
+        // which carries `ostree=` on every APEX image and therefore always
+        // says "grub". The label is allowed to be that guess; what must not
+        // happen is the guess arriving with nothing attached to say it is one.
+        let dir = std::env::temp_dir()
+            .join(format!("apex-boot-eacces-loaderinfo-{}", std::process::id()));
+        let efivars = dir.join("sys/firmware/efi/efivars");
+        std::fs::create_dir_all(&efivars).unwrap();
+        std::fs::create_dir_all(dir.join("proc")).unwrap();
+        std::fs::write(
+            dir.join("proc/cmdline"),
+            "BOOT_IMAGE=/vmlinuz ostree=/ostree/boot.1/apex/abc/0 root=UUID=x rw\n",
+        )
+        .unwrap();
+        let target = efivars.join(format!("LoaderInfo-{LOADER_GUID}"));
+        std::fs::write(
+            &target,
+            b"\x07\x00\x00\x00s\x00y\x00s\x00t\x00e\x00m\x00d\x00-\x00b\x00o\x00o\x00t\x00",
+        )
+        .unwrap();
+
+        let sealed = seal(&efivars, &target);
+        let facts = chain_facts(Some(dir.clone()));
+        unseal(&efivars);
+        std::fs::remove_dir_all(&dir).ok();
+
+        if !sealed {
+            return; // root, or CAP_DAC_OVERRIDE: the mode bit proves nothing here
+        }
+        assert_eq!(
+            facts.bootloader, "grub",
+            "the cmdline fallback is the label; that part is expected"
+        );
+        let why = facts
+            .bootloader_unavailable
+            .as_deref()
+            .expect("a refused LoaderInfo read must set bootloader_unavailable");
+        assert!(
+            why.contains("LoaderInfo") && why.contains("Permission denied"),
+            "the reason must name what could not be read, got: {why}"
+        );
+    }
+
+    #[test]
+    fn a_genuinely_absent_loaderinfo_is_a_reading_rather_than_a_refusal() {
+        // ENOENT is a measurement: a GRUB machine sets no LoaderInfo at all,
+        // and caveating the label there would put the warning on every
+        // machine in the fleet, where it would mean nothing.
+        let dir = std::env::temp_dir()
+            .join(format!("apex-boot-enoent-loaderinfo-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sys/firmware/efi/efivars")).unwrap();
+        let facts = chain_facts(Some(dir.clone()));
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            facts.bootloader_unavailable.is_none(),
+            "an absent LoaderInfo must not read as a refusal, got {:?}",
+            facts.bootloader_unavailable
+        );
+    }
+
+    #[test]
     fn a_genuinely_absent_stubinfo_is_still_measured_as_no_uki() {
         // The other half: ENOENT must stay `Ok(false)`, or the fix would turn
         // every GRUB machine — which never sets StubInfo — into a warning.

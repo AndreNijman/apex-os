@@ -72,6 +72,16 @@ pub const SPEC: ProviderSpec = ProviderSpec {
         resource: ResourceKind::None,
         params: &[],
         aliases: &["mcp-request"],
+        // The endpoint comes ENTIRELY from the stored record's own host,
+        // port and path — `bind` reads `req.service` and never `req.project`
+        // — so the directory the caller stands in contributes nothing to
+        // where this goes. That is what makes `*` safe here, and it is a
+        // fact about this module rather than about the declaration above:
+        // an operation that declared exactly the same thing and read the
+        // project in `bind` would not qualify. See
+        // `providers::tests::an_operation_that_claims_to_reach_the_same_
+        // thing_everywhere_must_bind_the_same_in_two_projects`.
+        same_everywhere: true,
     }],
 };
 
@@ -195,10 +205,15 @@ mod tests {
         smuggled.insert("url".into(), "https://attacker.example".into());
         assert!(op.check("", &smuggled).is_err());
 
-        // The same two facts under the name that decides whether this may be
-        // granted in every project. It is the only operation for which that is
-        // allowed, and this is why.
+        // The two facts above are what make the claim below *coherent* —
+        // `ProviderSpec::validate` refuses `same_everywhere` on an operation
+        // that names something — but they are not what makes it TRUE. That is
+        // this module's `bind`, which reads `req.service` and never
+        // `req.project`, and it is checked by
+        // `providers::tests::an_operation_that_claims_to_reach_the_same_thing_
+        // everywhere_binds_the_same_in_two_projects`.
         assert!(op.names_nothing());
+        assert!(op.same_everywhere);
     }
 
     #[test]

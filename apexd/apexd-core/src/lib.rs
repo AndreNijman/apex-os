@@ -48,6 +48,11 @@ pub mod channel;
 pub mod dispatch;
 pub mod fan;
 pub mod fingerprint;
+// §P2-015's firmware readout. Pure: the CLI runs fwupdmgr and hands the JSON
+// in. fwupd's exit status is never consulted anywhere, because it was measured
+// to mean "nothing to do" when non-zero and to accompany an explicit `Error`
+// document when zero — so the document is the only truth.
+pub mod firmware;
 pub mod game;
 pub mod gameprofile;
 pub mod gaming;
@@ -62,8 +67,17 @@ pub mod migrate;
 pub mod mode;
 pub mod perf;
 pub mod profile;
+// §33's hardware qualification database. Pure, like its neighbours: it holds
+// the document shape and the consent rule, and the CLI hands it a probe of the
+// machine and resolves the path.
+pub mod qualify;
 pub mod recover;
 pub mod select;
+// §48's Storage Manager. Pure: the CLI runs smartctl and reads sysfs, and
+// hands the text in — so every threshold, every bitmask and every "this could
+// not be read" is driven from fixtures rather than from whatever disk the
+// runner happens to have.
+pub mod storage;
 pub mod syswriter;
 // §21's Task. Deliberately NOT re-exported at the crate root: its `Observed`
 // would collide with `blueprint::Observed`, which is re-exported below, and

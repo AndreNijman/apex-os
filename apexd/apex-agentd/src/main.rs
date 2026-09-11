@@ -17,15 +17,18 @@
 //! exactly what the kernel is good at.
 
 mod broker;
+mod disposable;
 mod egress;
 mod elevation;
 mod grants;
+mod inject;
 mod origin;
 mod peer;
 mod privilege;
 mod pty;
 mod registry;
 mod session;
+mod worktrees;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -61,6 +64,12 @@ pub struct Daemon {
     /// polkit. Nothing in this repository's test suite raises a prompt, and
     /// this field is why that is enforceable.
     pub auth: Box<dyn Authenticator>,
+    /// Test runs seen going past, by worktree (§P1-036).
+    ///
+    /// Its own lock, and never taken while a session lock is held — the
+    /// event handler drops the session before recording. Same discipline as
+    /// the grant authority above, for the same reason.
+    pub tests: worktrees::TestObservations,
     /// The elevation challenges this process has issued and not yet seen
     /// answered (§7, P0-014).
     ///
@@ -83,6 +92,7 @@ impl Daemon {
             config: Mutex::new(Config::load()),
             grants: grants::GrantAuthority::new(),
             auth: Box::new(PolkitAuthenticator),
+            tests: worktrees::TestObservations::new(),
             challenges: Mutex::new(apex_agent_core::webauthn::ChallengeStore::new()),
         }
     }
@@ -555,7 +565,11 @@ fn serve(daemon: &Arc<Daemon>, stream: UnixStream) -> Result<()> {
     // request is parsed. The kernel filled them in at connect(2) and they
     // cannot change for the life of the connection — whereas anything read out
     // of a request line is whatever the client chose to send.
-    let creds = peer::credentials(&stream);
+    // The peer credentials, plus whatever narrowing this connection latches
+    // onto itself. The latch lives here, on the stack of the thread serving
+    // one connection, so it dies with the socket: nothing persists it, and no
+    // other connection can see it.
+    let mut caller = privilege::Caller::new(peer::credentials(&stream));
 
     let mut reader = BufReader::new(stream.try_clone().context("cloning the connection")?);
     let mut writer = stream;
@@ -595,7 +609,7 @@ fn serve(daemon: &Arc<Daemon>, stream: UnixStream) -> Result<()> {
             return session::handle_attach(daemon, writer, reader, id, cols, rows, replay);
         }
 
-        let response = dispatch(daemon, request, creds);
+        let response = dispatch(daemon, request, &mut caller);
         respond(&mut writer, &response)?;
     }
 }
@@ -610,10 +624,12 @@ fn respond(writer: &mut UnixStream, response: &Response) -> Result<()> {
 
 /// Handle every verb except `Attach`.
 ///
-/// `creds` is the connection's peer credentials, or `None` when the kernel
-/// would not report them. It is passed rather than looked up so that no handler
-/// can accidentally consult the request for identity instead.
-fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -> Response {
+/// `caller` is the connection: the peer credentials the kernel reported at
+/// `connect(2)`, and any origin the connection has narrowed itself to. It is
+/// passed rather than looked up so that no handler can accidentally consult
+/// the request for identity instead, and it is `&mut` for exactly one verb —
+/// `DeclareOrigin`, which is the only thing that may change it.
+fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Caller) -> Response {
     match request {
         Request::Hello => {
             let cfg = daemon.config.lock().expect("config lock");
@@ -624,7 +640,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             }
         }
 
-        Request::Run(req) => match session::start(daemon, req, creds) {
+        Request::Run(req) => match session::start(daemon, req, caller) {
             Ok(info) => Response::Session(Box::new(info)),
             Err(e) => session::run_error(e),
         },
@@ -671,6 +687,42 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             }
         }
 
+        Request::Inject { id, source } => inject::handle(daemon, caller, id, &source),
+        Request::Input { id, data } => {
+            // A session may not type into a sibling.
+            //
+            // This is the only verb on the socket that acts on a session other
+            // than the caller's own AND has an effect the target cannot tell
+            // from a person at the keyboard. `Signal` acts on another session
+            // too, but a signal is visible to the agent as a signal; text
+            // arriving on the PTY is indistinguishable from typing, so an
+            // agent that could send it could instruct another agent and
+            // borrow its permissions. Hooks run inside the sandbox and reach
+            // this socket, so the caller has to be established rather than
+            // assumed.
+            //
+            // Resolved from the connection's peer credentials by the same
+            // ancestry walk the privilege verbs use, never from the request:
+            // `$APEX_AGENT_SESSION` lives inside a sandbox the agent controls.
+            // A connection that is not inside any session — the shell, or a
+            // person in an ordinary terminal — is what this verb is for.
+            let who = privilege::origin(daemon, caller);
+            if let Some(refusal) = privilege::refuse_input(&who, id) {
+                return refusal;
+            }
+            let Some(handle) = lookup(daemon, id) else {
+                return no_such_session(id);
+            };
+            match session::write_input(&handle, data.as_bytes()) {
+                session::Input::Written => Response::Ok,
+                session::Input::Exited => Response::error(
+                    ErrorKind::SessionExited,
+                    format!("session {id} has already exited"),
+                ),
+                session::Input::Failed(e) => Response::error(ErrorKind::Internal, e),
+            }
+        }
+
         Request::Signal { id, signal } => {
             let Some(number) = apex_agent_core::session::signal_number(&signal) else {
                 return Response::error(
@@ -714,6 +766,9 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             event,
             detail,
             native,
+            agent_id,
+            agent_type,
+            test,
         } => {
             // An event that names neither is not a smaller event, it is a
             // request that says nothing. Refused rather than recorded, because
@@ -781,6 +836,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             // order matters only in that both must happen.
             if let Some(e) = lifecycle {
                 s.apply_tool_transition(e.tool_transition());
+                s.apply_graph_event(e, agent_id.as_deref(), agent_type.as_deref());
             }
             match parsed {
                 Some(p) => s.set_state(p, detail),
@@ -796,7 +852,58 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
                 }
             }
             registry::write_record(&s.info);
+
+            // §P1-036. The session lock is released BEFORE the observation
+            // store is touched. Two locks held at once, in this order here and
+            // the opposite order anywhere else, is how this daemon would
+            // deadlock — so it never holds both.
+            //
+            // The worktree comes from the session's OWN recorded `cwd`, never
+            // from the request: a session cannot report a test run against a
+            // tree it does not live in.
+            let cwd = s.info.cwd.clone();
+            drop(s);
+            if let Some(note) = test {
+                daemon.tests.record(Path::new(&cwd), &note);
+            }
             Response::Ok
+        }
+
+        Request::Telemetry { id, telemetry } => {
+            let Some(handle) = lookup(daemon, id) else {
+                return no_such_session(id);
+            };
+            let mut s = handle.lock().expect("session lock");
+            // `last_activity` is deliberately NOT touched. A status line runs
+            // on a timer, so treating it as activity would keep every idle
+            // session looking busy — and `session::next_state`'s idle rule,
+            // which decides `waiting_for_user`, reads exactly that field. The
+            // session is described here, not observed doing anything.
+            s.info.telemetry = Some(*telemetry);
+            registry::write_record(&s.info);
+            Response::Ok
+        }
+
+        Request::Worktrees { project } => {
+            // A snapshot, and the registry lock is released before any git
+            // command runs: enumerating worktrees and probing merges takes
+            // long enough that holding it across the work would block every
+            // other request — including the event another session is waiting
+            // on to publish its own state.
+            let sessions: Vec<worktrees::SessionWhere> = {
+                let reg = daemon.registry.lock().expect("registry lock");
+                reg.list()
+                    .iter()
+                    .filter_map(|h| {
+                        let s = h.lock().ok()?;
+                        Some(worktrees::SessionWhere {
+                            id: s.info.id,
+                            cwd: s.info.cwd.clone(),
+                        })
+                    })
+                    .collect()
+            };
+            worktrees::handle(project, &daemon.tests, &sessions)
         }
 
         Request::ToolCheck {
@@ -859,7 +966,9 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             Response::Ok
         }
 
-        Request::DeclareOrigin { origin } => privilege::declare(daemon, creds, &origin),
+        Request::DeclareOrigin { origin, actor } => {
+            privilege::declare(daemon, caller, &origin, actor)
+        }
 
         Request::Prune => {
             let handles = daemon.registry.lock().expect("registry lock").list();
@@ -888,16 +997,16 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
         }
 
         // ── privilege requests ──────────────────────────────────────────────
-        // Every one of these takes `creds` and none of them takes a session id
+        // Every one of these takes `caller` and none of them takes a session id
         // from the wire.
         Request::PrivilegeRequest { verb, args, reason } => {
-            privilege::file(daemon, creds, &verb, &args, &reason)
+            privilege::file(daemon, caller, &verb, &args, &reason)
         }
 
         Request::Requests => privilege::list(),
 
         Request::Decide { id, decision } => match request::Decision::parse(&decision) {
-            Some(d) => privilege::decide(daemon, creds, id, d),
+            Some(d) => privilege::decide(daemon, caller, id, d),
             None => Response::error(
                 ErrorKind::BadRequest,
                 format!("'{decision}' is not a decision; use once, project or deny"),
@@ -909,16 +1018,16 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
         Request::Grants => privilege::grants(),
 
         Request::Revoke { project, key } => {
-            privilege::revoke(daemon, creds, &project, key.as_deref())
+            privilege::revoke(daemon, caller, &project, key.as_deref())
         }
 
         // ── system-access grants ────────────────────────────────────────────
         Request::SystemGrants => privilege::system_grants(daemon),
 
-        Request::RevokeSystemGrant { id } => privilege::revoke_system_grant(daemon, creds, id),
+        Request::RevokeSystemGrant { id } => privilege::revoke_system_grant(daemon, caller, id),
 
         Request::RenewSystemGrant { id, ttl_ms, second_factor } => {
-            privilege::renew_system_grant(daemon, creds, id, ttl_ms, second_factor.as_ref())
+            privilege::renew_system_grant(daemon, caller, id, ttl_ms, second_factor.as_ref())
         }
 
         // ── the secret broker ───────────────────────────────────────────────
@@ -931,7 +1040,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, creds: Option<peer::Peer>) -
             project,
         } => broker::use_capability(
             daemon,
-            creds,
+            caller,
             &service,
             &operation,
             &resource,
@@ -967,8 +1076,42 @@ fn no_such_session(id: u32) -> Response {
 
 fn live_info(daemon: &Arc<Daemon>, id: u32) -> Option<SessionInfo> {
     let handle = lookup(daemon, id)?;
-    let info = handle.lock().expect("session lock").info.clone();
+    let mut info = handle.lock().expect("session lock").info.clone();
+    add_process_children(std::slice::from_mut(&mut info));
     Some(info)
+}
+
+/// Where the process table is read from. A constant so the one place that is
+/// not the fixture-driven parser is named rather than spelled inline twice.
+const PROC: &str = "/proc";
+
+/// Add each live session's forked processes to the copy about to be sent out.
+///
+/// Read time, not event time, and never written to the record. A subagent is
+/// history — it happened, and the record is the only evidence — but a process
+/// is a thing that either exists right now or does not, and the kernel is
+/// already keeping that list. Persisting it would mean writing the session
+/// record every time a compiler started, and answering "is it still running?"
+/// from a file rather than from `/proc`.
+///
+/// This is also what §P1-020 means by MCP servers and tool processes being
+/// representable: they publish nothing, and they do not have to. A confined
+/// session is inside its own pid namespace, but the daemon is outside it and
+/// the host `/proc` still lists every descendant, so the tree is readable for
+/// every adapter.
+fn add_process_children(infos: &mut [SessionInfo]) {
+    if !infos.iter().any(|i| i.is_live()) {
+        return;
+    }
+    let procs = apex_agent_core::graph::read_processes(Path::new(PROC));
+    for info in infos.iter_mut() {
+        if !info.is_live() {
+            continue;
+        }
+        let mut tree = apex_agent_core::graph::process_tree(&procs, info.pid);
+        apex_agent_core::graph::fill_rss(Path::new(PROC), &mut tree);
+        info.children.append(&mut tree);
+    }
 }
 
 /// Live sessions plus persisted records for ones this daemon no longer owns.
@@ -990,5 +1133,6 @@ fn collect_sessions(daemon: &Arc<Daemon>) -> Vec<SessionInfo> {
         }
     }
     out.sort_by_key(|i| i.id);
+    add_process_children(&mut out);
     out
 }

@@ -77,7 +77,7 @@ use apex_secret_core::client::Client;
 use apex_secret_core::operation::{self, Params};
 use apex_secret_core::protocol as secret_protocol;
 
-use crate::peer::Peer;
+use crate::privilege::Caller;
 use crate::privilege;
 use crate::Daemon;
 
@@ -101,7 +101,7 @@ const UNKNOWN_ORIGIN: &str = "unknown";
 #[allow(clippy::too_many_arguments)]
 pub fn use_capability(
     daemon: &Arc<Daemon>,
-    peer: Option<Peer>,
+    caller: &Caller,
     service: &str,
     operation: &str,
     resource: &str,
@@ -132,7 +132,7 @@ pub fn use_capability(
         );
     }
 
-    let who = privilege::origin(daemon, peer);
+    let who = privilege::origin(daemon, caller);
 
     // Dimension 4, checked before anything else about the request.
     //

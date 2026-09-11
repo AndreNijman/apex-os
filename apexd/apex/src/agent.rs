@@ -22,8 +22,11 @@ use apex_agent_core::protocol::{
     POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION, SYSTEM_GRANT_VERSION,
 };
 use apex_agent_core::hook::{self as hook_core, HookEvent};
+use apex_agent_core::paths;
+use apex_agent_core::statusline as statusline_core;
 use apex_agent_core::term::{self, RawMode, WinSize};
 use apex_agent_core::webauthn;
+use apex_agent_core::worktree::{ConflictState, TestState};
 use apex_agent_core::{adapter, checkpoint, config, git, layout, mux, profile, project};
 use clap::{Args, Subcommand};
 
@@ -64,6 +67,26 @@ pub enum AgentCmd {
         #[arg(long, value_name = "HOST")]
         host: Option<String>,
     },
+    /// Type text into a session's terminal.
+    ///
+    /// The text lands in the agent's prompt exactly as if it had been typed,
+    /// and stays there. Add --submit to send it. That is deliberate: the words
+    /// may have come from somewhere less certain than a keyboard, and reading
+    /// them before they become an instruction is the difference between a
+    /// typo and a command.
+    ///
+    /// APEX Shell's push-to-talk route is the other caller. A session cannot
+    /// call this on another session.
+    Input {
+        id: u32,
+        /// The text to type. Several words are joined with single spaces, so
+        /// quoting is optional.
+        #[arg(required = true, num_args = 1.., value_name = "TEXT")]
+        text: Vec<String>,
+        /// Press Enter after it, so the agent acts on the line.
+        #[arg(long)]
+        submit: bool,
+    },
     /// Suspend a session and everything it started.
     Pause { id: u32 },
     /// Resume a paused session.
@@ -75,12 +98,53 @@ pub enum AgentCmd {
         #[arg(long, default_value = "term")]
         signal: String,
     },
+    /// Hand a file to a running session: a screenshot, a log, a crash dump.
+    ///
+    /// The runtime copies it somewhere the session can read — a confined
+    /// session cannot see `~/Pictures` — and types that path into the
+    /// session's terminal. It does NOT press Enter: the path is left on the
+    /// agent's input line and you send it, which is what keeps a person in the
+    /// loop when the channel a file arrives on is the same one your keyboard
+    /// uses.
+    ///
+    /// The session id is required and never guessed. Typing into the wrong
+    /// agent is worse than typing a number.
+    Send {
+        id: u32,
+        /// Files to hand over, in the order given.
+        #[arg(value_name = "FILE")]
+        files: Vec<String>,
+        /// Hand over the newest screenshot instead of naming it.
+        ///
+        /// Press Print, then run this. It reads the directory APEX Shell's
+        /// screenshot keybind writes to (`~/Pictures/Screenshots`), so it
+        /// takes no picture itself and opens no selection overlay.
+        #[arg(long)]
+        last_screenshot: bool,
+        /// Machine-readable output, one object per file.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a session's transcript.
     Logs {
         id: u32,
         /// How many bytes of the tail to show.
         #[arg(long, default_value_t = 64 * 1024)]
         bytes: usize,
+    },
+    /// Per-worktree status: tests, conflicts, diff and local readiness.
+    ///
+    /// Answers the four questions worth asking about an agent worktree before
+    /// touching it — has it got a diff, would it merge back, what happened to
+    /// the tests, is it ready to hand over — without running anything in a
+    /// worktree somebody else is working in.
+    Worktrees {
+        /// One project by slug, instead of every remembered project.
+        #[arg(long, value_name = "SLUG")]
+        project: Option<String>,
+        /// Machine-readable output, one object per worktree.
+        #[arg(long)]
+        json: bool,
     },
     /// Show one session in detail, or the runtime's own status.
     Status { id: Option<u32> },
@@ -226,18 +290,47 @@ pub enum AgentCmd {
         /// session_start | pre_tool_use | post_tool_use | stop | …
         event: String,
     },
+    /// Claude's status line, wrapped (§P1-021).
+    ///
+    /// Not meant to be typed either. `apex-agentd` points a managed session's
+    /// `statusLine` here, the payload arrives on stdin as the JSON document
+    /// Claude produces, and what this prints is what appears under the prompt.
+    ///
+    /// It does two things and the ORDER is the point. First it runs the user's
+    /// own status-line command with the same payload and copies its output —
+    /// so the terminal status line is byte-for-byte what it was, which is the
+    /// criterion. Second it publishes the model, context and rate-limit
+    /// numbers to the daemon, which is the only way any of them reach the
+    /// Agent Center.
+    ///
+    /// Always exits 0. A status line that failed would be a broken daemon
+    /// putting an error where the user's prompt used to be.
+    #[command(hide = true)]
+    Statusline,
     /// Narrow where this session says it is driven from (§7).
     ///
     /// Run from inside a managed session — the runtime works out which session
     /// that is from the connection, so there is no id to pass and no way to
     /// speak about another session.
     ///
-    /// The declaration can only ever cost the session something. A local
+    /// Run from anywhere else it narrows the *connection* instead, for as long
+    /// as that connection is open. That is only useful to a program holding
+    /// the socket open across several requests, which is what `apex-remoted`
+    /// does; one `apex agent origin` from a shell narrows a connection that
+    /// closes immediately afterwards, and the command says so.
+    ///
+    /// The declaration can only ever cost the caller something. A local
     /// session may hand itself to Remote Control; nothing may declare itself
     /// local, and a Remote Control session may not declare its way back out.
     Origin {
         /// claude-remote-control | scheduled-job | mcp | subagent | cloud-job
         origin: String,
+        /// Which remote actor this is being declared for: a paired device id,
+        /// a host name, a job name. Recorded beside the origin on sessions and
+        /// privilege requests. Never a key or a token — it is printed on the
+        /// prompt a human reads before approving root.
+        #[arg(long)]
+        actor: Option<String>,
     },
     /// Forget a finished session and delete its transcript.
     Rm { id: u32 },
@@ -437,6 +530,29 @@ pub struct RunArgs {
     /// Where to run. Defaults to the current directory.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+    /// Run inside a disposable capsule and delete the whole environment when
+    /// the session ends (§19).
+    ///
+    /// The working directory is COPIED in, not shared, so whatever the agent
+    /// does to it goes with the environment. That is what makes the state
+    /// disposable — and it means nothing comes back unless `--copy-out` says
+    /// where to put it.
+    ///
+    /// A throwaway ENVIRONMENT, not a security boundary. distrobox mounts the
+    /// host filesystem at /run/host in every capsule and the process runs as
+    /// your own uid, so code in there can still reach your real home. For
+    /// confinement — $HOME masked, ~/.ssh unreachable — use `--sandbox`
+    /// instead; the two are refused together rather than pretending to
+    /// combine. `apex disposable plan` prints the whole boundary.
+    #[arg(long)]
+    pub disposable: bool,
+    /// Where the capsule's ~/out is copied when it closes. Needs
+    /// `--disposable`.
+    ///
+    /// Without it NOTHING leaves the environment. An agent that should hand
+    /// work back writes it to ~/out inside.
+    #[arg(long, value_name = "DIR", requires = "disposable")]
+    pub copy_out: Option<String>,
     /// Start it and return, instead of attaching.
     #[arg(long, short)]
     pub detach: bool,
@@ -709,10 +825,18 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             }
             None => attach(id, !no_replay),
         },
+        AgentCmd::Input { id, text, submit } => input(id, &text.join(" "), submit),
         AgentCmd::Pause { id } => signal(id, "stop", "paused"),
         AgentCmd::Resume { id } => signal(id, "cont", "resumed"),
         AgentCmd::Kill { id, signal: sig } => signal(id, &sig, "signalled"),
+        AgentCmd::Send {
+            id,
+            files,
+            last_screenshot,
+            json,
+        } => send(id, files, last_screenshot, json),
         AgentCmd::Logs { id, bytes } => logs(id, bytes),
+        AgentCmd::Worktrees { project, json } => worktrees(project, json),
         AgentCmd::Status { id } => status(id),
         AgentCmd::Default { agent } => default_agent(agent),
         AgentCmd::Allow {
@@ -742,7 +866,8 @@ pub fn agent(cmd: AgentCmd) -> i32 {
             detail,
         } => event(state, session, detail),
         AgentCmd::Hook { event } => return hook(&event),
-        AgentCmd::Origin { origin } => declare_origin(&origin),
+        AgentCmd::Statusline => return statusline(),
+        AgentCmd::Origin { origin, actor } => declare_origin(&origin, actor),
         AgentCmd::Rm { id } => remove(id),
         AgentCmd::Prune => prune(),
         AgentCmd::Enable => enable(),
@@ -957,6 +1082,8 @@ fn run(args: RunArgs) -> Result<i32> {
         cols: size.cols,
         rows: size.rows,
         env: Vec::new(),
+        disposable: args.disposable,
+        copy_out: args.copy_out.clone(),
     };
 
     let mut c = Client::connect()?;
@@ -1254,12 +1381,166 @@ fn install_winch_forwarder(id: u32, initial: WinSize) {
         .ok();
 }
 
+/// Build the bytes `apex agent input` puts on the wire.
+///
+/// Carriage return and not newline for --submit. CR is the byte a terminal
+/// actually sends when Enter is pressed, so it is what a program reading that
+/// terminal is written against: the line discipline's ICRNL turns it into a
+/// newline for anything reading lines, and a TUI reading its input raw — which
+/// is what the agents in this runtime do — treats CR as Enter.
+///
+/// The reason this comment is careful is that the obvious test does not support
+/// it. Measured on a real PTY against `sh -c 'read line'`: CR and LF BOTH end
+/// the line, because ICRNL is on by default. So apex-agentd's cooked-mode test
+/// proves the bytes arrive and that the terminator ends the line, and it does
+/// NOT discriminate between the two candidates. CR is chosen for the raw-mode
+/// case, where they differ and where no test in either crate reaches.
+///
+/// Split out from [`input`] so it can be tested without a running daemon: the
+/// whole behaviour of the flag is in this function.
+fn input_bytes(text: &str, submit: bool) -> String {
+    let mut data = text.to_string();
+    if submit {
+        data.push('\r');
+    }
+    data
+}
+
+fn input(id: u32, text: &str, submit: bool) -> Result<i32> {
+    let data = input_bytes(text, submit);
+    client::call(&Request::Input { id, data })?;
+    // On stderr, so a script's stdout stays empty. Says whether Enter was
+    // pressed, because "nothing happened" and "it is sitting in the prompt"
+    // look the same from outside the session and want different next steps.
+    if submit {
+        eprintln!("apex: sent to session {id}");
+    } else {
+        eprintln!("apex: typed into session {id}, not sent; add --submit to send it");
+    }
+    Ok(0)
+}
+
 fn signal(id: u32, name: &str, past_tense: &str) -> Result<i32> {
     client::call(&Request::Signal {
         id,
         signal: name.to_string(),
     })?;
     eprintln!("apex: session {id} {past_tense}");
+    Ok(0)
+}
+
+/// Where APEX Shell's screenshot keybind puts its files.
+///
+/// The same directory `src/scripts/screenshot.sh` writes to in apex-shell, and
+/// the path is spelled here rather than asked of the shell because this command
+/// has to work on a machine running any compositor, or none. The environment
+/// override is what lets the suite point it at a directory of its own; it is
+/// the same device `apex-disposable` uses for `APEX_DISPOSABLE_ROOT`.
+fn screenshot_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("APEX_SCREENSHOT_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    apex_agent_core::paths::home().join("Pictures/Screenshots")
+}
+
+/// The most recently modified regular file in the screenshots directory.
+///
+/// By modification time and not by name: the name carries a timestamp, but it
+/// is the timestamp of the capture rather than of the file, and a screenshot
+/// edited after it was taken is still the one the user is looking at.
+fn newest_screenshot() -> Result<PathBuf> {
+    let dir = screenshot_dir();
+    let entries = std::fs::read_dir(&dir)
+        .with_context(|| format!("no screenshots to hand over: cannot read {}", dir.display()))?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(when) = meta.modified() else { continue };
+        let better = match &best {
+            None => true,
+            Some((best_when, _)) => when > *best_when,
+        };
+        if better {
+            best = Some((when, entry.path()));
+        }
+    }
+    best.map(|(_, path)| path).ok_or_else(|| {
+        anyhow!(
+            "{} holds no screenshots yet. Press Print to take one",
+            dir.display()
+        )
+    })
+}
+
+/// `apex agent send`.
+fn send(id: u32, files: Vec<String>, last_screenshot: bool, json: bool) -> Result<i32> {
+    let mut sources: Vec<PathBuf> = Vec::new();
+    if last_screenshot {
+        sources.push(newest_screenshot()?);
+    }
+    for f in &files {
+        // Canonicalised here rather than in the daemon: the daemon's working
+        // directory is not yours, so a relative path would name a different
+        // file there — and it is refused there, so this is where a plain
+        // `apex agent send 3 shot.png` has to become a path.
+        sources.push(
+            std::fs::canonicalize(f).with_context(|| format!("cannot hand over {f}"))?,
+        );
+    }
+    if sources.is_empty() {
+        bail!("name a file to hand over, or --last-screenshot");
+    }
+
+    let mut client = Client::connect()?;
+    let mut bracketed_anywhere = false;
+    for source in &sources {
+        let resp = client.call(&Request::Inject {
+            id,
+            source: source.to_string_lossy().into_owned(),
+        })?;
+        let Response::Injected {
+            path, bracketed, ..
+        } = resp
+        else {
+            bail!("the runtime answered something other than an injection: {resp:?}");
+        };
+        bracketed_anywhere |= bracketed;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "session": id,
+                    "source": source.to_string_lossy(),
+                    "path": path,
+                    "bracketed": bracketed,
+                })
+            );
+        } else {
+            eprintln!("apex: {} -> session {id} as {path}", source.display());
+        }
+    }
+    if !json {
+        // Said every time, and deliberately. A user who believes the agent has
+        // already been asked will wait for an answer that is not coming.
+        eprintln!(
+            "apex: {} typed into session {id}'s terminal and NOT entered — press Enter there{}",
+            if sources.len() == 1 {
+                "path".to_string()
+            } else {
+                format!("{} paths", sources.len())
+            },
+            if bracketed_anywhere {
+                ". That agent reads pasted text as a paste"
+            } else {
+                ""
+            }
+        );
+    }
     Ok(0)
 }
 
@@ -1413,9 +1694,25 @@ fn print_session(s: &SessionInfo) {
     if let Some(c) = &s.checkpoint {
         println!("checkpoint   {c}");
     }
+    // Said in full, not as a one-word flag. A user looking at this session
+    // needs to know two things a capsule name does not convey on its own:
+    // the working tree is a COPY, and it is deleted when the session ends.
+    if let Some(capsule) = &s.capsule {
+        println!("capsule      {capsule} (disposable)");
+        println!(
+            "             the working tree here is a COPY, and this environment is \
+             deleted when the session ends"
+        );
+    }
     println!("pid          {}", s.pid);
     println!("terminal     {}x{}", s.cols, s.rows);
     println!("attached     {}", s.attached);
+    // Only when there have been some. A line of "files 0" on every session
+    // would be noise on every session that has never been handed one, which
+    // is almost all of them.
+    if s.injected > 0 {
+        println!("files sent   {}", s.injected);
+    }
     if let Some(summary) = s.exit_summary() {
         println!("outcome      {summary}");
     }
@@ -1620,6 +1917,100 @@ fn fetch_grants() -> Result<GrantListing> {
         Response::Error { message, .. } => bail!(message),
         other => bail!("unexpected reply: {other:?}"),
     }
+}
+
+/// `apex agent worktrees` — the four questions, per worktree (§P1-036).
+///
+/// The daemon answers, not this process, and that is deliberate: it holds the
+/// record of which sessions are where and of the test runs it watched go past,
+/// and it resolves the project slug to a path itself so that no caller names a
+/// directory for it to run git in.
+fn worktrees(project: Option<String>, json: bool) -> Result<i32> {
+    let rows = client::worktrees(project)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(0);
+    }
+
+    if rows.is_empty() {
+        println!(
+            "no worktrees. A project is remembered when an agent runs in it, \
+             and `apex agent run --worktree <name>` gives that agent a \
+             worktree of its own"
+        );
+        return Ok(0);
+    }
+
+    println!(
+        "{:<22} {:<26} {:>9}  {:<11} {:<11} READY",
+        "WORKTREE", "BRANCH", "DIFF", "CONFLICTS", "TESTS"
+    );
+    for w in &rows {
+        let branch = w.branch.as_deref().unwrap_or("(detached)");
+        let diff = if w.diff.files == 0 {
+            // A worktree with no committed delta and a dirty tree has
+            // something in it; "-" would read as "nothing here".
+            if w.dirty {
+                "dirty".to_string()
+            } else {
+                "-".to_string()
+            }
+        } else {
+            format!("{}f +{}/-{}", w.diff.files, w.diff.insertions, w.diff.deletions)
+        };
+        let conflicts = match &w.conflicts {
+            ConflictState::Clean => "clean".to_string(),
+            ConflictState::Conflicted { paths } => format!("{} file(s)", paths.len()),
+            ConflictState::Unknown { .. } => "unknown".to_string(),
+            ConflictState::NotApplicable => "-".to_string(),
+        };
+        let ready = if w.ready.ready_to_propose {
+            "yes".to_string()
+        } else {
+            // The first blocker, because it is the one to fix first and the
+            // whole list is in `--json`.
+            w.ready
+                .blockers
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "no".to_string())
+        };
+        println!(
+            "{:<22} {:<26} {:>9}  {:<11} {:<11} {}",
+            clip(&w.name, 22),
+            clip(branch, 26),
+            diff,
+            conflicts,
+            w.tests.as_str(),
+            ready
+        );
+    }
+
+    // Said once, at the bottom, rather than implied by a column heading that
+    // cannot carry it: this is the last test run the runtime SAW, and the
+    // runtime does not run anybody's suite to answer a status query.
+    if rows.iter().any(|w| w.tests != TestState::Unobserved) {
+        println!(
+            "\nTESTS is the last run APEX observed going past, not a fresh result — \
+             the tree may have moved since."
+        );
+    } else {
+        println!(
+            "\nTESTS is 'unobserved' until a test run happens inside a managed session. \
+             APEX never runs a suite itself to answer this."
+        );
+    }
+    Ok(0)
+}
+
+/// Trim a cell to fit, with an ellipsis rather than a hard cut.
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let keep: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{keep}…")
 }
 
 fn grants(active_only: bool, json: bool) -> Result<i32> {
@@ -2060,16 +2451,83 @@ fn hook(event: &str) -> i32 {
         return 0;
     };
     let observation = hook_core::observe(parsed, &payload);
-    if let Err(e) = client::publish_hook(
-        id,
-        parsed,
-        observation.state,
-        observation.detail,
-        observation.native,
-    ) {
+    if let Err(e) = client::publish_hook(id, &observation) {
         eprintln!("apex agent hook: {parsed} not published: {e:#}");
     }
     0
+}
+
+/// `apex agent statusline` — the wrapper around the user's own status line.
+///
+/// Returns an exit code directly rather than a `Result`, for the same reason
+/// [`hook`] does: there is only one, and it is 0. Claude treats a non-zero
+/// exit from a status line as an error, and every failure here — no daemon, a
+/// payload that will not parse, a user command that is not installed — must
+/// leave the prompt looking exactly as it did.
+///
+/// ## Why the user's own command runs FIRST
+///
+/// It is what the person sees. The publish is a round trip to a Unix socket
+/// and the daemon may be busy or gone; doing it first would put its latency in
+/// front of every status-line refresh, and a daemon that hangs would blank the
+/// line rather than merely lose a measurement.
+fn statusline() -> i32 {
+    use std::io::{Read, Write};
+
+    // Bounded for the reason `read_payload` is: it is a document the agent's
+    // own state ends up inside, and this process has no reason to hold a large
+    // one. Generous, because the status-line payload carries the whole
+    // workspace description and a `pr` block.
+    const MAX_PAYLOAD: u64 = 1024 * 1024;
+    let mut raw = Vec::new();
+    let _ = std::io::stdin()
+        .take(MAX_PAYLOAD)
+        .read_to_end(&mut raw);
+
+    // 1. The user's line, unchanged. `project_dir` rather than `current_dir`,
+    //    because that is the root a project's own `.claude/settings.json` sits
+    //    at and the daemon read the same three sources in the same order when
+    //    it wrote the overlay.
+    let doc: serde_json::Value = serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
+    let project = doc
+        .get("workspace")
+        .and_then(|w| w.get("project_dir"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+    let user = statusline_core::user_status_line(&paths::home(), project.as_deref());
+    if let Some(command) = user.as_ref().and_then(|u| u.command.as_deref()) {
+        if let Some(out) = statusline_core::chain(command, &raw) {
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(&out);
+            let _ = stdout.flush();
+        }
+    }
+
+    // 2. The measurement. Nothing below this line can change what was printed.
+    let Some(id) = client::current_session() else {
+        return 0;
+    };
+    let telemetry = statusline_core::parse(&doc, now_secs());
+    if telemetry.is_empty() {
+        // Nothing worth a round trip. A status line runs once a minute per
+        // session, and publishing an empty record would rewrite every
+        // session's file on a timer to say nothing.
+        return 0;
+    }
+    if let Err(e) = client::publish_telemetry(id, &telemetry) {
+        // Including a daemon that predates this request and answered with a
+        // parse error. The status line has already printed; this is a
+        // measurement that did not arrive.
+        eprintln!("apex agent statusline: not published: {e:#}");
+    }
+    0
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Read the payload Claude writes to a hook's stdin.
@@ -2118,10 +2576,11 @@ fn policy_decision(payload: &hook_core::Payload) -> Option<String> {
 /// be pointed at another session and does not read `$APEX_AGENT_SESSION`.
 /// Handing a session id to a verb that changes a permission-relevant property
 /// is exactly what the privilege verbs avoid, and for the same reason.
-fn declare_origin(origin: &str) -> Result<i32> {
+fn declare_origin(origin: &str, actor: Option<String>) -> Result<i32> {
     let wanted = parse_request_origin(origin).map_err(|e| anyhow::anyhow!("{e}"))?;
     match client::call(&Request::DeclareOrigin {
         origin: wanted.as_str().to_string(),
+        actor,
     })? {
         Response::Session(info) => {
             eprintln!(
@@ -2130,6 +2589,19 @@ fn declare_origin(origin: &str) -> Result<i32> {
                 info.request_origin
                     .map(|o| o.to_string())
                     .unwrap_or_else(|| "unrecorded".into())
+            );
+            Ok(0)
+        }
+        // The connection case. Said plainly rather than reported as a success,
+        // because from a shell it IS a no-op: `client::call` opens a
+        // connection, sends one request and closes it, so the latch it just
+        // set is gone before the next command runs. A program that holds the
+        // socket is the only caller this helps, and a user typing it deserves
+        // to be told that rather than left believing something was recorded.
+        Response::Ok => {
+            eprintln!(
+                "apex: this connection is now {wanted}, and it closes when this command exits — \
+                 a declaration on a connection lasts only as long as the connection"
             );
             Ok(0)
         }
@@ -3085,12 +3557,40 @@ mod tests {
             worktree: None,
             checkpoint: false,
             cwd: None,
+            disposable: false,
+            copy_out: None,
             detach: false,
             args: Vec::new(),
             host: None,
             remote_path: None,
             allow_dirty: false,
         }
+    }
+
+    #[test]
+    fn input_without_submit_adds_nothing_at_all() {
+        // The default has to be inert. A newline appended "helpfully" here is
+        // the whole difference between text waiting in a prompt and an agent
+        // acting on words that may have come from a speech-to-text hook.
+        assert_eq!(input_bytes("run the tests", false), "run the tests");
+        assert_eq!(input_bytes("", false), "");
+        // Text that already ends in a newline is passed through untouched:
+        // trimming it would be this function deciding, which is the caller's
+        // job in both directions.
+        assert_eq!(input_bytes("two lines\n", false), "two lines\n");
+    }
+
+    #[test]
+    fn input_with_submit_appends_exactly_one_carriage_return() {
+        assert_eq!(input_bytes("run the tests", true), "run the tests\r");
+        // Exactly one, and at the end. A doubled terminator would submit an
+        // empty line after the text, which in an agent's prompt is a second
+        // turn with nothing in it.
+        assert_eq!(input_bytes("x", true).matches('\r').count(), 1);
+        assert!(input_bytes("x", true).ends_with('\r'));
+        // CR and not LF. See `input_bytes` for why, including what the PTY
+        // test in apex-agentd does and does not prove about the choice.
+        assert!(!input_bytes("x", true).contains('\n'));
     }
 
     #[test]

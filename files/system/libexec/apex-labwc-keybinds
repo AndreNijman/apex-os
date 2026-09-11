@@ -90,6 +90,7 @@ VERBS = {
     "session-lock": "lock",
     "focus-toggle": "focus",
     "screenrec-on": "record",
+    "voice-ptt": "voice",
     "audioOut-toggle": "audio out",
     "audioIn-toggle": "audio in",
     "audioMix-toggle": "audio mixer",
