@@ -44,6 +44,11 @@ const ACCOUNT: &str = "0123456789abcdef0123456789abcdef";
 /// The zone id it binds.
 const ZONE: &str = "fedcba9876543210fedcba9876543210";
 
+/// The two record ids the double hands out. 32 lowercase hex, which is the
+/// shape the provider checks before one becomes part of a URL.
+const RECORD_A: &str = "aa11bb22cc33dd44ee55ff6677889900";
+const RECORD_B: &str = "00998877ff66ee55dd44cc33bb22aa11";
+
 /// The one bucket §13.1's file binds.
 const BUCKET: &str = "example-assets";
 
@@ -218,7 +223,13 @@ fn answer(method: &str, target: &str) -> (u16, String) {
         Some((path, query)) => (path, query),
         None => (target, ""),
     };
-    let _ = query;
+    let param = |name: &str| -> String {
+        query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+            .unwrap_or("")
+            .to_string()
+    };
     let ok = |result: &str| {
         (
             200u16,
@@ -264,6 +275,55 @@ fn answer(method: &str, target: &str) -> (u16, String) {
             ok(r#"{"key":"db/today.sql","size":19,"etag":"bb","version":"v2"}"#)
         }
 
+        // ── §13.9, DNS ──────────────────────────────────────────────────────
+        //
+        // The zone answers about the name it was asked about, and each name
+        // below is one of the five things a lookup can run into. A double that
+        // only ever answered "here is your record" would let a build that
+        // could not tell a 403 from an empty zone pass every test in this file.
+        ("GET", p) if p == records_path() => {
+            let name = param("name.exact");
+            let kind = param("type");
+            let one = |id: &str, name: &str, content: &str| {
+                format!(r#"{{"id":"{id}","name":"{name}","type":"{kind}","content":"{content}","ttl":1,"proxied":false}}"#)
+            };
+            match name.as_str() {
+                // Denied. A body that looks like every other failure, with the
+                // one documented denial signal in it.
+                "denied.example.com" => (
+                    403,
+                    r#"{"success":false,"errors":[{"code":10000,"message":"Forbidden","documentation_url":"https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/list"}],"messages":[],"result":null}"#.to_string(),
+                ),
+                // Absent: the zone answered, successfully, with nothing.
+                "gone.example.com" => ok("[]"),
+                // Ambiguous: two A records at one name is ordinary
+                // round-robin, and picking either would be a guess.
+                "many.example.com" => ok(&format!(
+                    "[{},{}]",
+                    one(RECORD_A, "many.example.com", "203.0.113.1"),
+                    one(RECORD_B, "many.example.com", "203.0.113.2")
+                )),
+                // A zone that ignored the filter and answered with the whole
+                // thing. The build has to notice that none of it is the record
+                // it asked for.
+                "unfiltered.example.com" => ok(&format!(
+                    "[{},{}]",
+                    one(RECORD_A, "www.example.com", "203.0.113.1"),
+                    one(RECORD_B, "other.example.com", "203.0.113.2")
+                )),
+                other => ok(&format!("[{}]", one(RECORD_A, other, "203.0.113.1"))),
+            }
+        }
+        ("POST", p) if p == records_path() => ok(&format!(
+            r#"{{"id":"{RECORD_A}","name":"new.example.com","type":"A","content":"203.0.113.7"}}"#
+        )),
+        ("PATCH", p) if p == format!("{}/{RECORD_A}", records_path()) => ok(&format!(
+            r#"{{"id":"{RECORD_A}","name":"www.example.com","type":"A","content":"203.0.113.8"}}"#
+        )),
+        ("DELETE", p) if p == format!("{}/{RECORD_A}", records_path()) => {
+            ok(&format!(r#"{{"id":"{RECORD_A}"}}"#))
+        }
+
         _ => (
             404,
             format!(
@@ -271,6 +331,11 @@ fn answer(method: &str, target: &str) -> (u16, String) {
             ),
         ),
     }
+}
+
+/// Where the double keeps this zone's records.
+fn records_path() -> String {
+    format!("/zones/{ZONE}/dns_records")
 }
 
 fn reply(stream: &mut TcpStream, status: u16, body: &str) {
@@ -392,19 +457,28 @@ impl Fixture {
 }
 
 /// One row of [`every_operation`]: the operation id, the resource to ask it
-/// for, and the options its own declaration accepts.
+/// for, the options its own declaration accepts, and **how many authenticated
+/// requests performing it should take**.
+///
+/// The count is a field rather than an assumption because it stopped being one
+/// everywhere. `dns.update` and `dns.delete` ask the zone which record a name
+/// means before changing it, so they are two requests each — and a test that
+/// asserted "one call per operation" would either have to be loosened into
+/// meaninglessness or be wrong. Written down, it stays a measurement: an
+/// operation that quietly started making an extra call would fail here.
 type OperationCase = (
     &'static str,
     &'static str,
     Vec<(&'static str, &'static str)>,
+    usize,
 );
 
 /// Every operation the provider declares, with a resource and options that its
 /// own declaration accepts.
 fn every_operation() -> Vec<OperationCase> {
     vec![
-        ("cloudflare.account.read", "", vec![]),
-        ("cloudflare.worker.read", "project", vec![]),
+        ("cloudflare.account.read", "", vec![], 1),
+        ("cloudflare.worker.read", "project", vec![], 1),
         (
             "cloudflare.worker.upload-version",
             "project",
@@ -413,31 +487,61 @@ fn every_operation() -> Vec<OperationCase> {
                 ("compatibility-date", "2026-09-01"),
                 ("message", "released by apex"),
             ],
+            1,
         ),
         (
             "cloudflare.worker.deploy",
             "project",
             vec![("version", "1c4dd6be-0000-4000-8000-abcdefabcdef")],
+            1,
         ),
         (
             "cloudflare.worker.rollback",
             "project",
             vec![("version", "0a0b0c0d-0000-4000-8000-000000000000")],
+            1,
         ),
-        ("cloudflare.worker.tail", "project", vec![]),
-        ("cloudflare.worker.route.read", "project", vec![]),
-        ("cloudflare.r2.object.read", "example-assets/db/today.sql", vec![]),
+        ("cloudflare.worker.tail", "project", vec![], 1),
+        ("cloudflare.worker.route.read", "project", vec![], 1),
+        ("cloudflare.r2.object.read", "example-assets/db/today.sql", vec![], 1),
         (
             "cloudflare.r2.object.write",
             "example-assets/db/today.sql",
             vec![("file", "dist/today.sql")],
+            1,
         ),
         (
             "cloudflare.r2.bucket.create",
             "example-assets",
             vec![("location", "apac"), ("storage-class", "Standard")],
+            1,
         ),
+        ("cloudflare.dns.read", "www.example.com", vec![("type", "A")], 1),
+        (
+            "cloudflare.dns.create",
+            "new.example.com",
+            vec![
+                ("type", "A"),
+                ("content", "203.0.113.7"),
+                ("ttl", "300"),
+                ("proxied", "false"),
+                ("comment", "added by apex"),
+            ],
+            1,
+        ),
+        (
+            "cloudflare.dns.update",
+            "www.example.com",
+            vec![("type", "A"), ("content", "203.0.113.8")],
+            2,
+        ),
+        ("cloudflare.dns.delete", "old.example.com", vec![("type", "A")], 2),
     ]
+}
+
+/// How many authenticated requests the whole surface should take.
+fn expected_calls() -> usize {
+    every_operation().iter().map(|(_, _, _, calls)| calls).sum()
 }
 
 /// The files the project holds for the operations that upload one: a Worker
@@ -489,7 +593,7 @@ fn every_declared_operation_reaches_cloudflare_with_the_credential_and_returns_w
     let f = Fixture::new("surface", Mode::Normal, &granted_everything());
     with_files(&f);
 
-    for (operation, resource, options) in every_operation() {
+    for (operation, resource, options, _) in every_operation() {
         let mut rec = f.record(operation, resource);
         for (name, value) in &options {
             rec = rec.param(name, value);
@@ -527,8 +631,8 @@ fn every_declared_operation_reaches_cloudflare_with_the_credential_and_returns_w
     let authorizations = f.fake.authorizations();
     assert_eq!(
         authorizations.len(),
-        SPEC.operations.len(),
-        "one call per operation: {authorizations:?}"
+        expected_calls(),
+        "every request the surface makes, and no others: {authorizations:?}"
     );
     for authorization in &authorizations {
         assert_eq!(authorization, &format!("Bearer {TOKEN}"));
@@ -541,6 +645,9 @@ fn every_declared_operation_reaches_cloudflare_with_the_credential_and_returns_w
         SPEC.operations.len(),
         "every operation should have left a used line"
     );
+    // One trail line per operation even where an operation took two requests:
+    // the trail records what was authorised, not what the wire carried.
+    assert!(expected_calls() > SPEC.operations.len());
 }
 
 #[test]
@@ -560,7 +667,7 @@ fn the_agent_side_holds_no_credential_even_when_it_holds_every_operation() {
         f.service.grants(peer),
         f.service.audit(peer, 100),
     ];
-    for (operation, resource, options) in every_operation() {
+    for (operation, resource, options, _) in every_operation() {
         let mut rec = f.record(operation, resource);
         for (name, value) in &options {
             rec = rec.param(name, value);
@@ -578,7 +685,7 @@ fn the_agent_side_holds_no_credential_even_when_it_holds_every_operation() {
     }
     // ...and it did reach Cloudflare, so this is a brokered operation and not
     // a set of calls that never happened.
-    assert_eq!(f.fake.authorizations().len(), SPEC.operations.len());
+    assert_eq!(f.fake.authorizations().len(), expected_calls());
 }
 
 #[test]
@@ -1090,7 +1197,7 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
         }
         assert!(listed.contains(&op.id), "'{}' is not in §13.2", op.id);
     }
-    // Nine of §13.2's thirty-two, and one addition. The arithmetic is asserted
+    // Thirteen of §13.2's thirty-two, and one addition. The arithmetic is asserted
     // because the module note states it and a later task will read that note
     // to work out what is left.
     let from_13_2 = SPEC
@@ -1098,9 +1205,9 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
         .iter()
         .filter(|op| listed.contains(&op.id))
         .count();
-    assert_eq!(from_13_2, 9);
-    assert_eq!(SPEC.operations.len(), 10);
-    assert_eq!(SECTION_13_2.len() - from_13_2, 23, "still unimplemented");
+    assert_eq!(from_13_2, 13);
+    assert_eq!(SPEC.operations.len(), 14);
+    assert_eq!(SECTION_13_2.len() - from_13_2, 19, "still unimplemented");
 
     // Nothing is declared twice, and every summary reads as a sentence about
     // what the owner is being asked to allow.
@@ -1323,6 +1430,355 @@ fn an_object_read_answers_with_bytes_and_still_has_the_credential_taken_out() {
     assert!(!output.contains(TOKEN), "the object read handed back the token");
     assert!(output.contains("«redacted»"), "{output}");
     assert!(!f.trail().contains(TOKEN));
+}
+
+// ── §13.9, DNS ──────────────────────────────────────────────────────────────
+//
+// Eight mutations were run against the arms below, one at a time, each restored
+// by copying the pristine file back so that cargo rebuilt rather than reusing
+// the mutant's binary. Every one turns a named test red:
+//
+// * `inside()` suffix-matching without the label boundary, so `notexample.com`
+//   is inside `example.com` — `a_name_outside_the_bound_zone_…`;
+// * the §13.9 type guard skipped on writes — `changing_a_delegation_…`;
+// * `Lookup::Denied` folded into `Lookup::Absent`, which is the defect this
+//   whole module is shaped around — `a_lookup_that_was_refused_…`;
+// * an ambiguous name answered with the first record instead of a refusal —
+//   `a_name_that_more_than_one_record_answers_to_…`;
+// * the name/type re-check dropped, so the far side's filter is trusted —
+//   `a_zone_that_answered_about_other_records_…`;
+// * `PUT` in place of `PATCH` on an update — `an_update_sends_only_the_fields_…`;
+// * the project's own `records` narrowing ignored — `a_project_that_narrows_…`;
+// * `is_record_id` accepting anything non-empty — `a_record_id_off_the_wire_…`.
+
+#[test]
+fn a_dns_record_is_addressed_by_name_in_the_zone_this_project_bound() {
+    // The documented paths, and the shape of the two-request verbs. An update
+    // asks the zone which record `www.example.com` means and only then changes
+    // it, which is why there are six requests here for four operations.
+    let f = Fixture::new("dnspaths", Mode::Normal, &granted_everything());
+    f.use_it(f.record("cloudflare.dns.read", "www.example.com").param("type", "A"));
+    f.use_it(
+        f.record("cloudflare.dns.create", "new.example.com")
+            .param("type", "A")
+            .param("content", "203.0.113.7"),
+    );
+    f.use_it(
+        f.record("cloudflare.dns.update", "www.example.com")
+            .param("type", "A")
+            .param("content", "203.0.113.8"),
+    );
+    f.use_it(f.record("cloudflare.dns.delete", "old.example.com").param("type", "A"));
+
+    let seen: Vec<(String, String)> = f.fake.seen().into_iter().map(|s| (s.method, s.path)).collect();
+    let records = format!("/client/v4/zones/{ZONE}/dns_records");
+    assert_eq!(
+        seen,
+        vec![
+            ("GET".into(), format!("{records}?name.exact=www.example.com&type=A")),
+            ("POST".into(), records.clone()),
+            ("GET".into(), format!("{records}?name.exact=www.example.com&type=A")),
+            ("PATCH".into(), format!("{records}/{RECORD_A}")),
+            ("GET".into(), format!("{records}?name.exact=old.example.com&type=A")),
+            ("DELETE".into(), format!("{records}/{RECORD_A}")),
+        ]
+    );
+}
+
+#[test]
+fn a_name_outside_the_bound_zone_never_reaches_cloudflare() {
+    // §13.9's first sentence. The label boundary is the case worth writing
+    // down: `notexample.com` ends in `example.com` and is a different
+    // registration, and a suffix test without the dot would hand it over.
+    let f = Fixture::new("dnszone", Mode::Normal, &granted_everything());
+    for outside in [
+        "notexample.com",
+        "example.com.attacker.test",
+        "attacker.test",
+        "com",
+    ] {
+        let reply = f.use_it(
+            f.record("cloudflare.dns.update", outside)
+                .param("type", "A")
+                .param("content", "203.0.113.9"),
+        );
+        let (kind, message) = reply
+            .as_error()
+            .unwrap_or_else(|| panic!("'{outside}' was accepted as a name in this zone"));
+        assert_eq!(kind, ErrorKind::BadRequest, "{outside}");
+        assert!(message.contains("example.com"), "{message}");
+    }
+    // ...and the apex itself IS in its own zone, which is the other half: a
+    // build that refused everything would pass the loop above.
+    let apex = f.use_it(f.record("cloudflare.dns.read", "example.com").param("type", "A"));
+    assert!(matches!(apex, Response::Performed { exit_code: 0, .. }), "{apex:?}");
+    assert_eq!(f.fake.seen().len(), 1, "only the apex read should have been sent");
+}
+
+#[test]
+fn a_project_that_narrows_itself_to_some_records_cannot_touch_the_others() {
+    // The second half of "bound zones/records": a project may cut itself down
+    // to a list, and then the zone is not enough.
+    let f = Fixture::new("dnsnarrow", Mode::Normal, &granted_everything());
+    std::fs::write(
+        f.project.join("apex.toml"),
+        format!(
+            "[identity.cloudflare]\naccount_id = \"{ACCOUNT}\"\n\
+             [cloudflare]\nzone = \"example.com\"\nzone_id = \"{ZONE}\"\n\
+             records = [\"www\", \"api.example.com\"]\n"
+        ),
+    )
+    .expect("write");
+
+    // Both spellings of a bound record resolve — `www` and the full name.
+    for allowed in ["www.example.com", "api.example.com"] {
+        let reply = f.use_it(f.record("cloudflare.dns.read", allowed).param("type", "A"));
+        assert!(
+            matches!(reply, Response::Performed { exit_code: 0, .. }),
+            "{allowed} is bound and was refused: {reply:?}"
+        );
+    }
+    // ...and a name in the same zone that is not on the list is not.
+    let reply = f.use_it(
+        f.record("cloudflare.dns.delete", "mail.example.com").param("type", "A"),
+    );
+    let (kind, message) = reply.as_error().expect("a narrowed project must not reach it");
+    assert_eq!(kind, ErrorKind::BadRequest);
+    assert!(message.contains("mail.example.com"), "{message}");
+    assert!(message.contains("www and api.example.com"), "{message}");
+    assert_eq!(f.fake.seen().len(), 2, "the refused name still reached the api");
+}
+
+#[test]
+fn changing_a_delegation_or_a_dnssec_record_is_refused_as_an_elevated_shape() {
+    // §13.9's second sentence, as far as a build with one capability class can
+    // take it. The owner has granted all four DNS verbs; every reserved type
+    // is still refused, and nothing reaches the api — which is the property
+    // that matters whether or not an elevated class ever exists.
+    let f = Fixture::new("dnselevated", Mode::Normal, &granted_everything());
+    for kind in ["NS", "DS", "DNSKEY", "SOA", "ns", "ds"] {
+        for (operation, options) in [
+            ("cloudflare.dns.create", vec![("content", "ns1.attacker.test")]),
+            ("cloudflare.dns.update", vec![("content", "ns1.attacker.test")]),
+            ("cloudflare.dns.delete", vec![]),
+        ] {
+            let mut rec = f.record(operation, "example.com").param("type", kind);
+            for (name, value) in &options {
+                rec = rec.param(name, value);
+            }
+            let reply = f.use_it(rec);
+            let (error, message) = reply
+                .as_error()
+                .unwrap_or_else(|| panic!("{operation} accepted a {kind} record"));
+            assert_eq!(error, ErrorKind::PermissionDenied, "{operation} {kind}");
+            assert!(message.contains("elevated"), "{message}");
+            assert!(message.contains("§13.9"), "{message}");
+        }
+    }
+    assert!(
+        f.fake.seen().is_empty(),
+        "a reserved record type reached the api: {:?}",
+        f.fake.seen()
+    );
+
+    // Reading one is allowed: §13.9 reserves *changes*, and an agent that
+    // cannot see where a zone is delegated cannot check its own work.
+    let read = f.use_it(f.record("cloudflare.dns.read", "example.com").param("type", "NS"));
+    assert!(matches!(read, Response::Performed { exit_code: 0, .. }), "{read:?}");
+    assert_eq!(f.fake.seen().len(), 1);
+}
+
+#[test]
+fn a_lookup_that_was_refused_is_not_reported_as_a_record_that_is_not_there() {
+    // The defect shape this codebase has found about fifteen times, on the one
+    // path here that could reintroduce it. The zone answers 403 — a body that
+    // looks like every other failure — and the answer must not be "no such
+    // record", because a caller told that would go and create a second one.
+    let f = Fixture::new("dnsdenied", Mode::Normal, &granted_everything());
+    let reply = f.use_it(
+        f.record("cloudflare.dns.update", "denied.example.com")
+            .param("type", "A")
+            .param("content", "203.0.113.9"),
+    );
+    let (kind, message) = reply.as_error().expect("a refused lookup is not a success");
+    assert_eq!(
+        kind,
+        ErrorKind::PermissionDenied,
+        "a denial must not be reported as a bad request about a missing record"
+    );
+    assert!(message.contains("403"), "{message}");
+    assert!(message.contains("not the same as the record not being there"), "{message}");
+    assert!(!message.contains("holds no"), "{message}");
+    // One request — the lookup. Nothing was changed.
+    let seen = f.fake.seen();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].method, "GET");
+}
+
+#[test]
+fn a_record_that_is_absent_says_the_zone_answered_and_holds_none() {
+    // The other side of the same distinction, and the reason it is worth
+    // having: this one really is an absence, and it says so in those words.
+    let f = Fixture::new("dnsabsent", Mode::Normal, &granted_everything());
+    let reply = f.use_it(f.record("cloudflare.dns.delete", "gone.example.com").param("type", "A"));
+    let (kind, message) = reply.as_error().expect("deleting nothing is not a success");
+    assert_eq!(kind, ErrorKind::BadRequest);
+    assert!(message.contains("answered"), "{message}");
+    assert!(message.contains("holds no A record"), "{message}");
+    assert_eq!(f.fake.seen().len(), 1, "it deleted something anyway");
+}
+
+#[test]
+fn a_name_that_more_than_one_record_answers_to_is_refused_rather_than_guessed() {
+    // Two A records at one name is round-robin, not a fault. Changing the
+    // first would change an arbitrary one of them.
+    let f = Fixture::new("dnsmany", Mode::Normal, &granted_everything());
+    let reply = f.use_it(
+        f.record("cloudflare.dns.update", "many.example.com")
+            .param("type", "A")
+            .param("content", "203.0.113.9"),
+    );
+    let (kind, message) = reply.as_error().expect("an ambiguous name must be refused");
+    assert_eq!(kind, ErrorKind::PermissionDenied);
+    assert!(message.contains("2 A records"), "{message}");
+    assert_eq!(f.fake.seen().len(), 1, "one of them was changed");
+}
+
+#[test]
+fn a_zone_that_answered_about_other_records_is_not_taken_at_its_word() {
+    // A filter that was sent is not a filter that was applied. If the query
+    // parameter were ever spelled wrongly, or stopped being honoured, the
+    // lookup would come back holding the whole zone — and the first record in
+    // it would be modified. Checking the names here turns that into a refusal.
+    let f = Fixture::new("dnsunfiltered", Mode::Normal, &granted_everything());
+    let reply = f.use_it(
+        f.record("cloudflare.dns.update", "unfiltered.example.com")
+            .param("type", "A")
+            .param("content", "203.0.113.9"),
+    );
+    let (kind, message) = reply.as_error().expect("records for other names are not this one");
+    assert_eq!(kind, ErrorKind::BadRequest);
+    assert!(message.contains("holds no A record"), "{message}");
+    assert_eq!(f.fake.seen().len(), 1, "somebody else's record was changed");
+}
+
+#[test]
+fn an_update_that_changes_nothing_is_refused_before_anything_is_looked_up() {
+    let f = Fixture::new("dnsnoop", Mode::Normal, &granted_everything());
+    let reply = f.use_it(f.record("cloudflare.dns.update", "www.example.com").param("type", "A"));
+    let (_, message) = reply.as_error().expect("an update with no fields is not an update");
+    assert!(message.contains("changes nothing"), "{message}");
+    assert!(f.fake.seen().is_empty(), "it spent a request finding out");
+}
+
+#[test]
+fn an_update_sends_only_the_fields_it_was_given() {
+    // PATCH and not PUT. Cloudflare's PUT overwrites a record with what the
+    // request carries, so an update that set only the content through PUT
+    // would quietly reset the TTL and the proxy flag.
+    let f = Fixture::new("dnspatch", Mode::Normal, &["cloudflare.dns.update"]);
+    f.use_it(
+        f.record("cloudflare.dns.update", "www.example.com")
+            .param("type", "A")
+            .param("content", "203.0.113.8"),
+    );
+    let sent = f.fake.seen();
+    let patch = sent.last().expect("two requests");
+    assert_eq!(patch.method, "PATCH");
+    assert!(patch.body.contains(r#""content":"203.0.113.8""#), "{}", patch.body);
+    assert!(!patch.body.contains("ttl"), "{}", patch.body);
+    assert!(!patch.body.contains("proxied"), "{}", patch.body);
+    assert!(!patch.body.contains("name"), "{}", patch.body);
+}
+
+#[test]
+fn a_create_carries_the_whole_record_and_values_cloudflare_would_accept() {
+    let f = Fixture::new("dnscreate", Mode::Normal, &["cloudflare.dns.create"]);
+    f.use_it(
+        f.record("cloudflare.dns.create", "new.example.com")
+            .param("type", "a")
+            .param("content", "203.0.113.7")
+            .param("ttl", "300")
+            .param("proxied", "true")
+            .param("comment", "added by apex"),
+    );
+    let sent = f.fake.seen();
+    let create = sent.first().expect("one request");
+    // The type is upper-cased, because that is what the zone stores.
+    assert!(create.body.contains(r#""type":"A""#), "{}", create.body);
+    assert!(create.body.contains(r#""name":"new.example.com""#), "{}", create.body);
+    assert!(create.body.contains(r#""content":"203.0.113.7""#), "{}", create.body);
+    assert!(create.body.contains(r#""ttl":300"#), "{}", create.body);
+    assert!(create.body.contains(r#""proxied":true"#), "{}", create.body);
+    assert!(create.body.contains(r#""comment":"added by apex""#), "{}", create.body);
+
+    // Values the far side would refuse are refused here, where refusing costs
+    // nothing and the message can name the option.
+    for (param, value) in [
+        ("ttl", "30"),
+        ("ttl", "999999"),
+        ("ttl", "soon"),
+        ("proxied", "yes"),
+        ("type", "NOTATYPE"),
+    ] {
+        let reply = f.use_it(
+            f.record("cloudflare.dns.create", "new.example.com")
+                .param("type", "A")
+                .param("content", "203.0.113.7")
+                .param(param, value),
+        );
+        assert!(
+            reply.as_error().is_some(),
+            "{param}={value} was sent to cloudflare"
+        );
+    }
+    assert_eq!(f.fake.seen().len(), 1, "a refused value still reached the api");
+}
+
+#[test]
+fn the_four_dns_verbs_are_four_grants() {
+    // §13.2's argument where it matters most: an agent that may point a
+    // hostname at a new worker should not thereby be able to delete the zone's
+    // records.
+    let f = Fixture::new("dnsverbs", Mode::Normal, &["cloudflare.dns.update"]);
+    let allowed = f.use_it(
+        f.record("cloudflare.dns.update", "www.example.com")
+            .param("type", "A")
+            .param("content", "203.0.113.8"),
+    );
+    assert!(matches!(allowed, Response::Performed { exit_code: 0, .. }), "{allowed:?}");
+    for refused in [
+        "cloudflare.dns.read",
+        "cloudflare.dns.create",
+        "cloudflare.dns.delete",
+    ] {
+        let reply = f.use_it(
+            f.record(refused, "www.example.com")
+                .param("type", "A")
+                .param("content", "203.0.113.8"),
+        );
+        assert!(reply.as_error().is_some(), "'{refused}' went through on a grant for update");
+    }
+    // The lookup and the patch, and nothing else.
+    assert_eq!(f.fake.seen().len(), 2);
+}
+
+#[test]
+fn the_trail_names_the_record_and_the_zone_that_was_changed() {
+    let f = Fixture::new("dnstrail", Mode::Normal, &["cloudflare.dns.update"]);
+    f.use_it(
+        f.record("cloudflare.dns.update", "www.example.com")
+            .param("type", "A")
+            .param("content", "203.0.113.8"),
+    );
+    let lines = audit::tail(&Store::new(f.store.clone()).audit_path(), 10);
+    let used = lines.iter().find(|l| l.event == AuditEvent::Used).expect("a use");
+    assert_eq!(used.operation, "cloudflare.dns.update");
+    assert_eq!(used.resource, "www.example.com");
+    assert_eq!(
+        used.detail,
+        format!("change the A record at www.example.com in zone example.com [{ZONE}]")
+    );
 }
 
 /// §13.2's list, so the test above compares against the roadmap rather than

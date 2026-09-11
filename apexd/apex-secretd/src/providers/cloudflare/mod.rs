@@ -84,6 +84,7 @@
 
 pub mod api;
 pub mod binding;
+pub mod dns;
 
 use apex_secret_core::operation::{
     self, Effect, OperationSpec, ParamSpec, ProviderSpec, ResourceKind, Syntax,
@@ -95,6 +96,7 @@ use crate::provider::{Bind, Bound, Endpoint, Performed, Provider, ProviderError}
 
 use api::{Api, Body, Call, Multipart};
 use binding::{Account, Binding, BindingError, Bucket, Worker, Zone};
+use dns::{Lookup, Record};
 
 /// The worker, zone or bucket a caller names.
 const NAMED: ResourceKind = ResourceKind::Name;
@@ -135,13 +137,56 @@ const FILE: ParamSpec = ParamSpec {
     summary: "the file inside the project whose bytes to send",
 };
 
+/// `type`, a DNS record type. Upper-cased and checked against
+/// [`dns::TYPES`], after [`dns::ELEVATED`] has had its say.
+const KIND: ParamSpec = ParamSpec {
+    name: "type",
+    syntax: Syntax::Name,
+    required: true,
+    summary: "the record type: A, AAAA, CNAME, TXT, MX and so on",
+};
+
+/// `content`, what a record points at.
+///
+/// `Text` because a TXT record's value is free-form and an SPF line has
+/// spaces in it. It goes in a JSON body this module builds, which is what
+/// [`Syntax::Text`] requires of whoever declares one.
+const CONTENT: ParamSpec = ParamSpec {
+    name: "content",
+    syntax: Syntax::Text,
+    required: true,
+    summary: "what the record points at — an address, a name, a text value",
+};
+
+/// The fields a record carries besides its content, on create and on update.
+const TTL: ParamSpec = ParamSpec {
+    name: "ttl",
+    syntax: Syntax::Name,
+    required: false,
+    summary: "seconds to cache it for, or 1 for automatic",
+};
+
+const PROXIED: ParamSpec = ParamSpec {
+    name: "proxied",
+    syntax: Syntax::Name,
+    required: false,
+    summary: "true to serve it through Cloudflare, false to answer with the origin",
+};
+
+const COMMENT: ParamSpec = ParamSpec {
+    name: "comment",
+    syntax: Syntax::Text,
+    required: false,
+    summary: "a line stored with the record, for whoever reads the zone later",
+};
+
 /// The vocabulary, in §13.2's shape.
 ///
-/// Ten names: **nine of §13.2's thirty-two**, plus `worker.route.read`, which
-/// is §13.3's "Worker routes" rather than one of §13.2's examples. So
-/// **twenty-three** of §13.2's list are still unimplemented and belong to
-/// P1-006 through P1-017 — D1, KV, Queues, Hyperdrive, DNS, Secrets Store,
-/// Access, Tunnels, Workers AI and the AI gateway.
+/// Fourteen names: **thirteen of §13.2's thirty-two**, plus
+/// `worker.route.read`, which is §13.3's "Worker routes" rather than one of
+/// §13.2's examples. So **nineteen** of §13.2's list are still unimplemented
+/// and belong to P1-006 through P1-017 — D1, KV, Queues, Hyperdrive, Secrets
+/// Store, Access, Tunnels, Workers AI and the AI gateway.
 ///
 /// Declaring one this module cannot perform would put it in
 /// `apex secret capabilities`, let an owner grant it, and then fail at use
@@ -267,6 +312,60 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             aliases: &[],
             same_everywhere: false,
         },
+        // ── §13.9, DNS ──────────────────────────────────────────────────────
+        //
+        // Four verbs and not one `dns.write`, which is §13.2's whole argument
+        // in miniature: an agent that may point a preview hostname at a new
+        // worker needs `update`, and giving it `delete` at the same time is a
+        // different decision that an owner should get to make separately.
+        OperationSpec {
+            id: "cloudflare.dns.read",
+            summary: "read the DNS records at one name in this project's zone",
+            effect: Effect::Read,
+            resource: NAMED,
+            params: &[ParamSpec {
+                required: false,
+                ..KIND
+            }],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.dns.create",
+            summary: "add a DNS record at one name in this project's zone",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[KIND, CONTENT, TTL, PROXIED, COMMENT],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.dns.update",
+            summary: "change the DNS record at one name in this project's zone",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[
+                KIND,
+                ParamSpec {
+                    required: false,
+                    ..CONTENT
+                },
+                TTL,
+                PROXIED,
+                COMMENT,
+            ],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.dns.delete",
+            summary: "remove the DNS record at one name in this project's zone",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[KIND],
+            aliases: &[],
+            same_everywhere: false,
+        },
         OperationSpec {
             id: "cloudflare.r2.bucket.create",
             summary: "create one of the R2 buckets this project declares, in \
@@ -318,6 +417,10 @@ enum Target {
     /// An object in one of this project's buckets, or the bucket's own listing
     /// when the caller named no key.
     Object { bucket: Bucket, key: Option<String> },
+    /// A name in this project's zone. Which *record* at that name is a
+    /// question only the zone can answer, and answering it costs a credential
+    /// — so it happens in `perform` and not here.
+    Record(Record),
 }
 
 impl From<BindingError> for ProviderError {
@@ -328,7 +431,8 @@ impl From<BindingError> for ProviderError {
             // from "it broke".
             BindingError::NoWorker { .. }
             | BindingError::NoZone { .. }
-            | BindingError::NoBucket { .. } => ProviderError::NoSuchResource(e.to_string()),
+            | BindingError::NoBucket { .. }
+            | BindingError::NoRecord { .. } => ProviderError::NoSuchResource(e.to_string()),
             // Everything else is a file that is wrong rather than a name that
             // is not bound — a missing id, an id that is not one, a project
             // with no Cloudflare section at all.
@@ -400,6 +504,11 @@ impl CloudflareProvider {
                     key,
                 });
             }
+            id if id.starts_with("cloudflare.dns.") => {
+                let mut record = binding.record(req.resource)?;
+                record.kind = CloudflareProvider::record_type(req)?;
+                return Ok(Target::Record(record));
+            }
             _ => {}
         }
 
@@ -463,6 +572,20 @@ impl CloudflareProvider {
                     }
                     (_, Some(key)) => format!("read object {key} in {where_}"),
                     (_, None) => format!("list the objects in {where_}"),
+                }
+            }
+            Target::Record(record) => {
+                let kind = record.kind.as_deref().unwrap_or("any");
+                let where_ = format!("{} in zone {} [{}]", record.name, record.zone.name, record.zone.id);
+                match operation.id {
+                    "cloudflare.dns.read" => format!("read the {kind} records at {where_}"),
+                    "cloudflare.dns.create" => format!(
+                        "add a {kind} record at {where_} pointing at {}",
+                        params.get("content").map(String::as_str).unwrap_or("")
+                    ),
+                    "cloudflare.dns.update" => format!("change the {kind} record at {where_}"),
+                    "cloudflare.dns.delete" => format!("remove the {kind} record at {where_}"),
+                    other => format!("{other} on the {kind} record at {where_}"),
                 }
             }
             Target::Worker(worker) => {
@@ -555,6 +678,20 @@ impl CloudflareProvider {
                     body: self.object_body(req, key)?,
                 }
             }
+            ("cloudflare.dns.read", Target::Record(record)) => {
+                // The one read that does not need a lookup: the filter IS the
+                // question. A name with no type gives every record at it.
+                let mut path = format!("{}?name.exact={}", record.path(), record.name);
+                if let Some(kind) = &record.kind {
+                    path.push_str(&format!("&type={kind}"));
+                }
+                get(path)
+            }
+            ("cloudflare.dns.create", Target::Record(record)) => Call {
+                method: "POST",
+                path: record.path(),
+                body: CloudflareProvider::record_body(req, record, true)?,
+            },
             ("cloudflare.r2.bucket.create", Target::Bucket(bucket)) => Call {
                 method: "POST",
                 path: format!("/accounts/{}/r2/buckets", bucket.account.id),
@@ -568,7 +705,113 @@ impl CloudflareProvider {
         })
     }
 
-    /// The bytes of a project file, as the body of an R2 upload.
+    /// The record type the caller named, checked in the order that gives the most
+/// useful refusal.
+///
+/// §13.9's reserved shapes are checked **first**, so that asking to change an
+/// `NS` record is answered with the class it belongs to rather than with a
+/// remark about the type list. `SOA` is not a type Cloudflare will accept at
+/// all, and it still gets the §13.9 answer, because the person asking is
+/// trying to rewrite a zone's authority and deserves to be told that.
+fn record_type(req: &Bind<'_>) -> Result<Option<String>, ProviderError> {
+    let Some(given) = req.params.get("type") else {
+        return Ok(None);
+    };
+    let kind = given.to_ascii_uppercase();
+    if req.operation.effect.is_write() {
+        if let Some(why) = dns::elevated(&kind) {
+            return Err(ProviderError::Refused(format!(
+                "changing a {kind} record is not something an ordinary project \
+                 grant may do: {why}. §13.9 puts registrar, nameserver and \
+                 DNSSEC-root changes in an elevated capability class, and this \
+                 build has no such class — so it refuses rather than doing it \
+                 under an ordinary grant. Reading one is allowed"
+            )));
+        }
+    }
+    if !dns::TYPES.contains(&kind.as_str()) {
+        return Err(ProviderError::Refused(format!(
+            "'{}' is not a DNS record type",
+            given.escape_debug()
+        )));
+    }
+    Ok(Some(kind))
+}
+
+/// The JSON body of a record create or update.
+///
+/// `creating` is what separates the two, and the difference is deliberate:
+/// a create sends the whole record, and an update sends only the fields it was
+/// asked to change. The endpoint behind an update is `PATCH` for that reason —
+/// `PUT` overwrites a record with what the request carries, so an update that
+/// set only `content` through `PUT` would quietly reset the TTL and the proxy
+/// flag to whatever the request happened to leave out.
+fn record_body(req: &Bind<'_>, record: &Record, creating: bool) -> Result<Body, ProviderError> {
+    let mut body = serde_json::Map::new();
+    if creating {
+        let Some(kind) = &record.kind else {
+            return Err(ProviderError::Refused(
+                "this operation needs a 'type' option saying what kind of \
+                 record to add"
+                    .to_string(),
+            ));
+        };
+        let Some(content) = req.params.get("content") else {
+            return Err(ProviderError::Refused(
+                "this operation needs a 'content' option saying what the record \
+                 points at"
+                    .to_string(),
+            ));
+        };
+        body.insert("type".into(), kind.clone().into());
+        body.insert("name".into(), record.name.clone().into());
+        body.insert("content".into(), content.clone().into());
+    } else if let Some(content) = req.params.get("content") {
+        body.insert("content".into(), content.clone().into());
+    }
+
+    if let Some(ttl) = req.params.get("ttl") {
+        // 1 is Cloudflare's "automatic". Anything else is seconds, and a value
+        // outside the range it accepts is refused here rather than spent.
+        let seconds: u32 = ttl.parse().map_err(|_| {
+            ProviderError::Refused(format!("'{}' is not a number of seconds", ttl.escape_debug()))
+        })?;
+        if seconds != 1 && !(60..=86400).contains(&seconds) {
+            return Err(ProviderError::Refused(format!(
+                "{seconds} is not a TTL Cloudflare accepts: 1 for automatic, or \
+                 60 to 86400 seconds"
+            )));
+        }
+        body.insert("ttl".into(), seconds.into());
+    }
+    if let Some(proxied) = req.params.get("proxied") {
+        let flag = match proxied.as_str() {
+            "true" => true,
+            "false" => false,
+            other => {
+                return Err(ProviderError::Refused(format!(
+                    "'{}' is not true or false",
+                    other.escape_debug()
+                )))
+            }
+        };
+        body.insert("proxied".into(), flag.into());
+    }
+    if let Some(comment) = req.params.get("comment") {
+        body.insert("comment".into(), comment.clone().into());
+    }
+
+    if !creating && body.is_empty() {
+        return Err(ProviderError::Refused(
+            "this operation changes nothing: give it a 'content', 'ttl', \
+             'proxied' or 'comment' option"
+                .to_string(),
+        ));
+    }
+    Ok(Body::Json(serde_json::Value::Object(body).to_string()))
+}
+
+/// The bytes of a project file, as the body of an R2 upload.
     ///
     /// Same read as a Worker module's — [`project::read_file`]'s `O_NOFOLLOW`
     /// walk, owned by the caller, capped — because it is the same problem: a
@@ -878,7 +1121,73 @@ impl Provider for CloudflareProvider {
                     .to_string(),
             ));
         }
-        let call = self.build(req, &target)?;
+        // §13.9's update and delete name a record the way a person does, and
+        // the API addresses one by id — so the id is discovered here, with the
+        // credential, and never taken from the caller. See [`dns`] for why an
+        // id parameter would make the `records` narrowing meaningless.
+        let call = match (req.operation.id, &target) {
+            (id @ ("cloudflare.dns.update" | "cloudflare.dns.delete"), Target::Record(record)) => {
+                let Some(kind) = record.kind.clone() else {
+                    return Err(ProviderError::Refused(
+                        "this operation needs a 'type' option: a name can hold \
+                         several records and only the type says which one"
+                            .to_string(),
+                    ));
+                };
+                // Build the body BEFORE spending anything, so an update that
+                // changes nothing is refused without a request being made.
+                let body = if id == "cloudflare.dns.update" {
+                    CloudflareProvider::record_body(req, record, false)?
+                } else {
+                    Body::None
+                };
+                let id_of = match dns::look_up(&self.api, record, &kind, value, req.owner) {
+                    Lookup::Found(id) => id,
+                    // The four answers that are not one record, each said in
+                    // its own words. None of them builds a second request, and
+                    // none of them is reported as any of the others.
+                    Lookup::Absent => {
+                        return Err(ProviderError::NoSuchResource(format!(
+                            "zone {} answered, and holds no {kind} record at {}. \
+                             Nothing was changed",
+                            record.zone.name, record.name
+                        )))
+                    }
+                    Lookup::Denied(status) => {
+                        return Err(ProviderError::Refused(format!(
+                            "cloudflare answered HTTP {status} when this looked \
+                             up the {kind} record at {}. That is the credential \
+                             being refused, which is not the same as the record \
+                             not being there — so nothing was changed, and this \
+                             build will not treat it as an absence",
+                            record.name
+                        )))
+                    }
+                    Lookup::Ambiguous(n) => {
+                        return Err(ProviderError::Refused(format!(
+                            "{n} {kind} records answer to {}. This build will \
+                             not guess which one you meant, so nothing was \
+                             changed",
+                            record.name
+                        )))
+                    }
+                    Lookup::CouldNotRun(why) => {
+                        return Err(ProviderError::Failed(format!(
+                            "the {kind} record at {} could not be looked up: \
+                             {why}. Nothing was changed, and this is not a \
+                             report that the record is absent",
+                            record.name
+                        )))
+                    }
+                };
+                Call {
+                    method: if id == "cloudflare.dns.update" { "PATCH" } else { "DELETE" },
+                    path: format!("{}/{id_of}", record.path()),
+                    body,
+                }
+            }
+            _ => self.build(req, &target)?,
+        };
         let reply = api::call(&self.api, &call, value, req.owner)
             .map_err(|e| ProviderError::Failed(e.to_string()))?;
 

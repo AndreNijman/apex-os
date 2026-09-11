@@ -939,7 +939,12 @@ mod tests {
         let (svc, dir) = temp_service("closed");
         let peer = me();
         svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"x".to_vec()));
-        for evil in ["exec", "sh", "git-clone", "curl", "git.clone", "cloudflare.dns.delete"] {
+        // `cloudflare.account.delete` is deliberately not a §13.2 name and
+        // never will be: this list wants a well-formed id that no provider
+        // declares, and it used to hold `cloudflare.dns.delete`, which stopped
+        // being one the day P1-007 implemented it. A name taken from the
+        // unimplemented end of §13.2 is a trap for whoever implements it next.
+        for evil in ["exec", "sh", "git-clone", "curl", "git.clone", "cloudflare.account.delete"] {
             let resp = svc.grant(peer, "/tmp/p", "demo", evil, false);
             assert!(
                 resp.as_error()

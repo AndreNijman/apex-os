@@ -51,6 +51,10 @@ mod tests {
             registry.operation_ids(),
             vec![
                 "cloudflare.account.read",
+                "cloudflare.dns.create",
+                "cloudflare.dns.delete",
+                "cloudflare.dns.read",
+                "cloudflare.dns.update",
                 "cloudflare.r2.bucket.create",
                 "cloudflare.r2.object.read",
                 "cloudflare.r2.object.write",
