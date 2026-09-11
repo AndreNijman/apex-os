@@ -2013,6 +2013,24 @@ fn clip(text: &str, width: usize) -> String {
     format!("{keep}…")
 }
 
+/// How the human proved they were there, for the listing's own column.
+///
+/// §7 has two columns and P0-014 gave them two different authentications: a
+/// password at this keyboard, or a touch on an enrolled security key from a
+/// remote origin the owner opted in for. An audit listing that showed neither
+/// would answer "on whose authority" the same way for both, so the field the
+/// daemon already records is surfaced here rather than only in `--json`.
+///
+/// The stored value is either a polkit action id or `security-key:<label>`;
+/// the prefix is what keeps a key labelled after an action id from reading as
+/// a password (see `grants.rs`, `Authenticated::recorded_as`).
+fn authorised_by(grant: &SystemGrant) -> String {
+    match grant.authenticated_by.strip_prefix("security-key:") {
+        Some(label) => format!("key {label}"),
+        None => "password".to_string(),
+    }
+}
+
 fn grants(active_only: bool, json: bool) -> Result<i32> {
     let (grants, states) = fetch_grants()?;
     let rows: Vec<_> = grants
@@ -2040,15 +2058,17 @@ fn grants(active_only: bool, json: bool) -> Result<i32> {
     if rows.is_empty() {
         println!(
             "no {}system-access grants. `apex agent run --system-access session` or \
-             `--unsafe-everything --ttl 15m` asks for one, and each takes a local password",
+             `--unsafe-everything --ttl 15m` asks for one. Locally that takes a password; \
+             from a remote origin it takes a touch on an enrolled security key, and only \
+             if the session was started with `--origin-policy remote`",
             if active_only { "active " } else { "" }
         );
         return Ok(0);
     }
 
     println!(
-        "{:>3}  {:<13} {:>7}  {:<21} {:<8} WHAT IT COVERS",
-        "ID", "MODE", "SESSION", "STATE", "WINDOW"
+        "{:>3}  {:<13} {:>7}  {:<21} {:<8} {:<20} WHAT IT COVERS",
+        "ID", "MODE", "SESSION", "STATE", "WINDOW", "AUTHORISED BY"
     );
     for (g, (state, _)) in &rows {
         let window = apex_agent_core::grant::format_ms(g.expires_ms.saturating_sub(g.issued_ms));
@@ -2060,8 +2080,14 @@ fn grants(active_only: bool, json: bool) -> Result<i32> {
             g.capabilities.join(", ")
         };
         let line = format!(
-            "{:>3}  {:<13} {:>7}  {:<21} {:<8} {}",
-            g.id, g.kind, g.session, state, window, covers
+            "{:>3}  {:<13} {:>7}  {:<21} {:<8} {:<20} {}",
+            g.id,
+            g.kind,
+            g.session,
+            state,
+            window,
+            authorised_by(g),
+            covers
         );
         // Only an active break-glass grant is red. A grant that has ended is
         // history, and colouring history teaches people to ignore the colour.
@@ -3538,6 +3564,39 @@ fn key_list() -> Result<i32> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_listing_says_whether_a_password_or_a_key_authorised_each_grant() {
+        // §7's two columns, as an auditor reads them. The daemon records the
+        // distinction; this is the half that shows it to a human, and without
+        // it `apex agent grants` answers "on whose authority" identically for
+        // a password typed here and a touch collected over a network.
+        fn grant(authenticated_by: &str) -> SystemGrant {
+            SystemGrant {
+                id: 1,
+                kind: GrantKind::SystemAccess,
+                session: 7,
+                agent: "claude".into(),
+                project: None,
+                capabilities: Vec::new(),
+                issued_ms: 0,
+                expires_ms: 900_000,
+                boot_id: "b".into(),
+                request_origin: RequestOrigin::LocalTerminal,
+                authenticated_by: authenticated_by.into(),
+                closed: None,
+            }
+        }
+        assert_eq!(authorised_by(&grant("org.apexos.agent.system-access")), "password");
+        assert_eq!(authorised_by(&grant("org.apexos.agent.break-glass")), "password");
+        assert_eq!(authorised_by(&grant("security-key:yubikey 5c")), "key yubikey 5c");
+        // The label cannot borrow the password wording: the prefix is checked,
+        // not merely searched for.
+        assert_eq!(
+            authorised_by(&grant("security-key:org.apexos.agent.break-glass")),
+            "key org.apexos.agent.break-glass"
+        );
+    }
+
     /// A `run` invocation with nothing set, so a test can turn on exactly the
     /// one flag it is about.
     fn run_args() -> RunArgs {
@@ -3684,7 +3743,7 @@ mod tests {
     #[test]
     fn an_unenforceable_dimension_is_refused_in_front_of_the_user_who_typed_it() {
         let cfg = config::Config::default();
-        let cases: [(RunArgs, &str); 3] = [
+        let cases: [(RunArgs, &str); 2] = [
             (
                 // Break-glass inside a sandbox that would keep no_new_privs
                 // on anyway: bwrap sets it unconditionally, so the pair would
@@ -3700,18 +3759,40 @@ mod tests {
                 RunArgs { secrets: Some(SecretPolicy::Export), ..run_args() },
                 "never placed in a session",
             ),
-            (
-                RunArgs {
-                    origin_policy: Some(OriginPolicy::RemoteElevationAllowed),
-                    ..run_args()
-                },
-                "Approve the operation locally",
-            ),
         ];
         for (args, expect) in cases {
             let err = resolve_policy(&cfg, &args).expect_err(expect);
             assert!(err.to_string().contains(expect), "{err}");
         }
+    }
+
+    #[test]
+    fn remote_elevation_is_no_longer_refused_in_front_of_the_user_who_typed_it() {
+        // This assertion FLIPPED in P0-014's last commit, and it is the third
+        // case that used to sit in the list above.
+        //
+        // `--origin-policy remote` was refused at this point because §7 allows
+        // remote elevation only behind a security key and nothing in the build
+        // could ask for one, so accepting the flag would have been a setting
+        // that reads as enabled and enforces nothing. All of it now exists,
+        // the daemon's gate consults this very value, and the flag therefore
+        // has to parse and be kept.
+        //
+        // It is kept as its own named test rather than deleted, so that the
+        // flip is visible to anyone reading the history of this file rather
+        // than being a line that quietly vanished from an array.
+        let cfg = config::Config::default();
+        let args = RunArgs {
+            origin_policy: Some(OriginPolicy::RemoteElevationAllowed),
+            ..run_args()
+        };
+        let policy = resolve_policy(&cfg, &args).expect("remote elevation is buildable now");
+        assert_eq!(policy.origin, OriginPolicy::RemoteElevationAllowed);
+        // And it moved exactly one dimension: the flag is an opt-in to a
+        // second authentication path, not a preset.
+        assert_eq!(policy.sandbox, AgentPolicy::default().sandbox);
+        assert_eq!(policy.system, AgentPolicy::default().system);
+        assert_eq!(policy.secrets, AgentPolicy::default().secrets);
     }
 
     #[test]

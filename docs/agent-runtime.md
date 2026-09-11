@@ -178,18 +178,75 @@ reporting none.
 
 ### What is refused until it is built
 
-Two values parse and are then refused: `--secrets export`, because §7's table
-denies raw secret reads from every origin including the local one, and
-`--origin-policy remote`, because §7 allows remote elevation only behind a
-security key nothing in this build can ask for. A flag that parsed and then did
-nothing would read as a protection in `apex agent status` and in a script, with
-nothing behind it.
+One value parses and is then refused: `--secrets export`, because §7's table
+denies raw secret reads from every origin including the local one. A flag that
+parsed and then did nothing would read as a protection in `apex agent status`
+and in a script, with nothing behind it.
+
+`--origin-policy remote` used to be the second, and is not any more. §7 allows
+remote elevation only behind a security key, and P0-014 built one, so the flag
+now parses, is stored and is enforced. See *Elevating from a remote origin*
+below for exactly what it does and does not buy.
 
 `--unsafe-everything --sandbox project` is refused too, for a different
 reason: not unbuilt, incoherent. `bwrap` sets `PR_SET_NO_NEW_PRIVS` on the
 sessions it wraps and nothing can clear it afterwards, so a confined
 break-glass session would run with the flag on while the policy reported it
 off.
+
+---
+
+## Elevating from a remote origin
+
+§7 gives root a different answer per origin: a human at this machine gets
+"local auth", and everywhere else gets "local approval required". The second
+column is what `--origin-policy remote` is about, and it is the owner's opt-in
+to a **different authentication**, not to a weaker one.
+
+Without it — the default — a non-local caller asking for a system-access or
+break-glass grant is refused outright, whatever it sends. With it, that caller
+is refused unless **all** of the following hold:
+
+1. it presents an assertion from a credential enrolled with
+   `apex agent key add`;
+2. the assertion is over a challenge this daemon issued (`apex agent` asks for
+   one, the key signs it, the answer comes back on the same request);
+3. the challenge names *this* elevation — the session, the grant kind and the
+   time limit are inside the signed bytes, so a touch collected to start a
+   session cannot renew a grant, and a touch for session 7 cannot answer for
+   session 8;
+4. the challenge has not been spent. One issue, one attempt: a refused
+   assertion burns it too, so a challenge cannot be ground against;
+5. the key had a PIN — the user-verified bit has to be set inside the
+   signature, because both grant kinds are root.
+
+### polkit is not asked on this path, and that is deliberate
+
+For the local column nothing changed: the password dialog is still what
+authorises a grant, and `org.apexos.agent.policy` is still the action it
+satisfies.
+
+For the remote column the key **replaces** polkit rather than adding to it.
+The reason is in the policy file itself: both actions are `allow_any: no` and
+`allow_active: auth_admin`, so a remote caller cannot pass polkit at all — it
+is refused under `allow_any`, and even an owner who also happened to be logged
+in locally would get the dialog on this machine's desktop, which the remote
+human by definition cannot reach. Asking anyway would mean a perfect touch on
+an enrolled key was always followed by a check hard-coded to say no, and §7's
+second column would be a setting that could never work.
+
+A security key is a possession factor, not a password, so this is not "a
+remote caller talking its way past a local check". The polkit defaults are
+correct and are unchanged; what changed is that apex-agentd no longer asks
+polkit about a caller polkit has already said it has no answer for.
+
+### The audit trail says which
+
+`SystemGrant.authenticated_by` records the polkit action id for a password and
+`security-key:<label>` for a touch, so `apex agent grants` has an
+`AUTHORISED BY` column and `journalctl APEX_GRANT_AUTH=...` can tell them
+apart. The prefix is what stops a key enrolled under the label
+`org.apexos.agent.break-glass` from producing a line that reads as a password.
 
 ---
 
@@ -1837,10 +1894,11 @@ Named because the roadmap asks for them and this does not do them:
 - **Test status and merge conflicts per worktree** in the Agent Center (§7).
   The worktree a session is on is shown; whether its tests pass is not.
 - **Disposable environments** and capsules.
-- **Enforcement for two permission values.** `--secrets export` and
-  `--origin-policy remote` parse and then refuse; see *Six permission
-  dimensions*. All four network modes and both system-access grants are
-  enforced.
+- **Enforcement for one permission value.** `--secrets export` parses and then
+  refuses; see *Six permission dimensions*. All four network modes, both
+  system-access grants and both origin policies are enforced —
+  `--origin-policy remote` was the other unenforced value until P0-014 and is
+  now live.
 - **A session grant pre-decides, it does not pre-execute.** The verbs a
   `--system-access session` grant covers arrive already decided, and are still
   run by `apex request approve` under a human's own root. There is no

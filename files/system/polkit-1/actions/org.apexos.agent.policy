@@ -60,6 +60,51 @@
   from the connection's cgroup rather than from anything the caller claims;
   this is the same rule stated where an administrator can read it.
 
+  == a second authentication path that does NOT come through polkit =======
+
+  Read this before concluding that these defaults are the whole of section 7.
+  They are not, and the sentence above is now only half the story.
+
+  Everything above stays true. A remote caller still cannot pass polkit: it
+  is refused under allow_any, and even an owner who also happened to be
+  logged in locally would get the auth_admin dialog on this machine's own
+  desktop, which the remote human by definition cannot reach. "There is no
+  password that makes a remote caller local" is still correct, and these
+  defaults are deliberately NOT being loosened to say otherwise.
+
+  What P0-014 added is a different kind of proof. A security key is a
+  possession factor, not a password: touching an enrolled FIDO2 key with a
+  PIN set proves the owner is holding the token, and that proof does not need
+  a dialog anywhere. So when, and only when, all of the following hold,
+  apex-agentd authorises the grant itself and never asks polkit at all:
+
+    * the session's origin policy is remote elevation allowed, which the
+      owner has to set per session (the origin policy flag on apex agent run,
+      or the origin key in the config file). It is not the default;
+    * the caller presents an assertion from a credential the owner enrolled
+      with `apex agent key add`;
+    * the assertion is over a challenge THIS daemon issued, naming this exact
+      elevation (session, kind and time limit are inside the signed bytes),
+      and it has not been spent;
+    * the user-verified bit is set, i.e. the key has a PIN.
+
+  Any of those missing is a refusal. The local column is untouched: a local
+  caller still goes to polkit, and these two actions are still what it
+  satisfies.
+
+  Why this replaces the password rather than adding to it: asking polkit
+  after a verified touch would not be a second lock, it would be a wall.
+  Every remote caller would be refused by the defaults above no matter how
+  good the key was, so the key would be unreachable code and section 7's
+  second column would be a setting that could never work.
+
+  The audit trail says which of the two happened. A grant authorised by a
+  touch records "security key" and the credential label in its
+  authenticated_by field instead of one of these action ids, so
+  `journalctl APEX_GRANT_AUTH=...` and `apex agent grants` both distinguish a
+  key from a password. The code is in apexd/apex-agentd/src/privilege.rs
+  (authorise_grant) and apexd/apex-agentd/src/grants.rs (Authenticated).
+
   Install (regular systemd host):
     sudo install -Dm644 files/system/polkit-1/actions/org.apexos.agent.policy \
          /usr/share/polkit-1/actions/org.apexos.agent.policy

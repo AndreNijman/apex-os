@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use apex_agent_core::grant::GrantKind;
-use apex_agent_core::origin::{OriginSource, SessionOrigin};
+use apex_agent_core::origin::{OriginError, OriginSource, SessionOrigin};
 use apex_agent_core::paths;
 use apex_agent_core::policy::{AgentPolicy, OriginPolicy, RequestOrigin};
 use apex_agent_core::protocol::{ErrorKind, Response, SubmittedFactor};
@@ -380,7 +380,6 @@ pub fn declare(
     wanted: &str,
     actor: Option<String>,
 ) -> Response {
-
     let Some(wanted) = RequestOrigin::parse(wanted) else {
         return Response::error(
             ErrorKind::BadRequest,
@@ -395,6 +394,34 @@ pub fn declare(
             ),
         );
     };
+
+    // Two refusals that are functions of the REQUEST and of nothing else, and
+    // they are answered here — before the daemon works out who is calling —
+    // so that they read the same way in every environment.
+    //
+    // A reordering, made after CI showed what leaving it costs.
+    // `may_be_declared` depends only on `wanted` and `unprintable_actor` only
+    // on `actor`, but both used to sit behind the observation of the caller's
+    // own origin. That observation fails outright where the cgroup is neither
+    // a login session nor a user service — a GitHub runner sits in
+    // `/system.slice/hosted-compute-agent.service` — so a caller that asked
+    // to declare `local-terminal` was told the daemon could not read /proc.
+    // True, and not the thing they got wrong; and a test asserting the real
+    // rule could not pass there.
+    //
+    // This refuses strictly MORE, never less. Nothing that reached the latch
+    // before reaches it now: the observation check below still stands, and
+    // these two only move earlier. The gate that says a runner has no human
+    // at it is untouched, because it is not this one.
+    if !wanted.may_be_declared() {
+        return Response::error(
+            ErrorKind::PermissionDenied,
+            OriginError::NotDeclarable(wanted).to_string(),
+        );
+    }
+    if let Some(bad) = actor.as_deref().and_then(unprintable_actor) {
+        return Response::error(ErrorKind::BadRequest, bad);
+    }
 
     let who = origin(daemon, caller);
     let Some(session) = who.session else {
@@ -455,9 +482,10 @@ fn declare_on_connection(
     if let Err(e) = current.declare(wanted) {
         return Response::error(ErrorKind::PermissionDenied, e.to_string());
     }
-    if let Some(bad) = actor.as_deref().and_then(unprintable_actor) {
-        return Response::error(ErrorKind::BadRequest, bad);
-    }
+    // The actor was shape-checked in `declare`, before the observation above,
+    // and this is its only caller — so a second copy here would be a check
+    // whose failing branch nothing can reach, which is the pattern this unit
+    // has now found six times. Moved rather than duplicated.
     caller.latch(wanted, actor);
     Response::Ok
 }
@@ -625,6 +653,25 @@ pub struct Elevating<'a> {
     pub factor: Option<&'a SubmittedFactor>,
 }
 
+/// Which of §7's two columns approved an elevation, and the proof if it was
+/// the second.
+///
+/// The two columns are authenticated by different things, and the difference
+/// has to survive out of [`decide_origin`] rather than being re-derived from
+/// the origin afterwards: re-deriving it would mean writing `is_local()` twice
+/// and trusting the two copies to agree. [`Approved::ByKey`] carries the
+/// receipt, so the branch that skips polkit cannot be reached without one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Approved {
+    /// A local origin. polkit still decides, exactly as it did before P0-014.
+    Local(RequestOrigin),
+    /// A non-local origin, the owner's policy permitting it, and a verified
+    /// assertion for this exact elevation. polkit is **not** asked — see
+    /// [`crate::grants::Authenticated`] for why asking it would be a wall
+    /// rather than a second lock.
+    ByKey(RequestOrigin, SecondFactor),
+}
+
 /// §7's two columns, decided over values.
 ///
 /// Split out of [`authorise_grant`] so the decision is testable without a
@@ -659,7 +706,7 @@ fn decide_origin(
     kind: GrantKind,
     elevating: &Elevating<'_>,
     redeem: impl FnOnce(&SubmittedFactor) -> Result<SecondFactor, AssertionError>,
-) -> Result<RequestOrigin, GrantError> {
+) -> Result<Approved, GrantError> {
     let origin = match may_be_granted(who, what) {
         Ok(local) => local,
         Err(GrantError::NotLocal { origin, .. }) => origin,
@@ -679,7 +726,25 @@ fn decide_origin(
     };
     let receipt = answered.as_ref().and_then(|a| a.as_ref().ok());
     match webauthn::may_elevate(elevating.policy, &elevation, receipt) {
-        Ok(()) => Ok(origin),
+        // §7's first column. Unchanged by P0-014, and deliberately so: the
+        // local path is `may_be_granted` plus polkit, and a key that happened
+        // to answer does not replace the password there.
+        Ok(()) if origin.is_local() => Ok(Approved::Local(origin)),
+        // The second column. `may_elevate` lets a non-local origin through
+        // only when a receipt answered for this exact elevation — every other
+        // way out of it is an `Err` — so the receipt is here by that
+        // function's contract.
+        Ok(()) => match receipt.cloned() {
+            Some(verified) => Ok(Approved::ByKey(origin, verified)),
+            // Unreachable through `may_elevate` as written. Left as a refusal
+            // rather than an `expect`, because the single thing that must
+            // never happen on this path is a non-local caller being approved
+            // with no proof — and a future edit to `may_elevate` that made
+            // this reachable would otherwise turn a panic into exactly that.
+            None => Err(GrantError::RemoteElevation(
+                RemoteElevationRefused::NoSecondFactor { origin },
+            )),
+        },
         Err(RemoteElevationRefused::NoSecondFactor { origin }) => match answered {
             // A key answered and the answer did not check out. The gate can
             // only say "nothing answered", because a refused assertion never
@@ -711,16 +776,63 @@ pub fn authorise_grant(
     what: &'static str,
     elevating: &Elevating<'_>,
 ) -> Result<(RequestOrigin, Authenticated), GrantError> {
-    let origin = decide_origin(who, what, kind, elevating, |sent| {
+    authorise_grant_with(daemon, who, caller, kind, what, elevating, |sent| {
         crate::elevation::redeem(daemon, sent)
-    })?;
-    let Some(peer) = caller.peer else {
-        return Err(GrantError::OriginUnknown(
-            "the kernel would not report the peer credentials of this connection".into(),
-        ));
-    };
-    let proof = authenticate(daemon.auth.as_ref(), kind, &peer)?;
-    Ok((origin, proof))
+    })
+}
+
+/// [`authorise_grant`] with the redeem supplied, following the seam
+/// [`decide_origin`] already uses for the same reason.
+///
+/// It exists for one assertion that cannot be made any other way: that a
+/// non-local caller carrying a verified receipt is authorised **without
+/// polkit being asked at all**. That is a statement about a call that does
+/// *not* happen, so it can only be tested by watching an authenticator that
+/// counts — and the real redeem would need a credential store on disk and a
+/// challenge in the daemon's memory to get as far as the branch being tested.
+/// The redeem wiring itself is covered by `tests/elevation_challenge.rs`.
+#[allow(clippy::too_many_arguments)]
+fn authorise_grant_with(
+    daemon: &Arc<Daemon>,
+    who: &Origin,
+    caller: &Caller,
+    kind: GrantKind,
+    what: &'static str,
+    elevating: &Elevating<'_>,
+    redeem: impl FnOnce(&SubmittedFactor) -> Result<SecondFactor, AssertionError>,
+) -> Result<(RequestOrigin, Authenticated), GrantError> {
+    let approved = decide_origin(who, what, kind, elevating, redeem)?;
+    match approved {
+        // The key IS the authentication here, and this is the line that makes
+        // P0-014's gate reachable in production rather than only in a test.
+        //
+        // polkit is deliberately not consulted. `org.apexos.agent.policy`
+        // gives both actions `allow_any: no` and `allow_active: auth_admin`,
+        // and says in its own comment that "there is no password that makes a
+        // remote caller local" — so a remote peer is refused under
+        // `allow_any`, and an owner who also happened to be logged in locally
+        // would get the dialog on the machine's desktop, which the remote
+        // human cannot reach. Asking anyway would mean a perfect touch on an
+        // enrolled key is always followed by a check hard-coded to say no:
+        // the gate would pass every unit test and be dead on the machine.
+        //
+        // The XML is correct and is not changed. What changed is that
+        // apex-agentd no longer asks polkit about a caller polkit has already
+        // said it has no answer for.
+        Approved::ByKey(origin, verified) => {
+            Ok((origin, crate::grants::authenticated_by_key(&verified)))
+        }
+        // The local column, byte for byte what it was before P0-014.
+        Approved::Local(origin) => {
+            let Some(peer) = caller.peer else {
+                return Err(GrantError::OriginUnknown(
+                    "the kernel would not report the peer credentials of this connection".into(),
+                ));
+            };
+            let proof = authenticate(daemon.auth.as_ref(), kind, &peer)?;
+            Ok((origin, proof))
+        }
+    }
 }
 
 /// Every system-access grant, with the state each is in now.
@@ -1567,9 +1679,13 @@ mod tests {
             for policy in OriginPolicy::ALL.iter().copied() {
                 for kind in [GrantKind::SystemAccess, GrantKind::BreakGlass] {
                     let e = Elevating { policy, scope: None, ttl_ms: 900_000, factor: None };
+                    // `Approved::Local` and not merely `Ok`: the point is
+                    // that the local column is sent to polkit, and a
+                    // `ByKey` here would mean a local caller had silently
+                    // stopped being asked for a password.
                     assert_eq!(
                         decide_origin(&unsessioned(origin), "ask", kind, &e, never_redeemed),
-                        Ok(origin),
+                        Ok(Approved::Local(origin)),
                         "{origin} under {policy}"
                     );
                 }
@@ -1760,9 +1876,15 @@ mod tests {
                     ttl_ms,
                     factor: Some(&s),
                 };
+                let want = factor.clone();
+                let got = decide_origin(&unsessioned(origin), "ask", kind, &e, move |_| Ok(factor));
+                // `ByKey`, carrying the very receipt that was minted. A
+                // `Local` here would mean the non-local column had been let
+                // through to polkit, which for a remote caller is a refusal
+                // no password can lift.
                 assert_eq!(
-                    decide_origin(&unsessioned(origin), "ask", kind, &e, move |_| Ok(factor)),
-                    Ok(origin),
+                    got,
+                    Ok(Approved::ByKey(origin, want)),
                     "{origin} / {kind:?} / scope {scope:?}"
                 );
             }
@@ -1813,6 +1935,198 @@ mod tests {
                 matches!(err, GrantError::RemoteElevation(_)),
                 "touched {touched:?} asked {asked:?}: {err}"
             );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // declare_origin answers the same way wherever it runs
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_local_origin_is_refused_by_name_even_where_the_caller_cannot_be_observed() {
+        // The regression test for a real CI failure, reproduced here rather
+        // than only on a runner. `Caller::new(None)` is a connection whose
+        // peer the kernel would not report, so `origin()` cannot classify it
+        // — which is exactly the state a GitHub runner is in, its cgroup
+        // being `/system.slice/hosted-compute-agent.service`: neither a login
+        // session nor a user service, so `classify` answers None.
+        //
+        // The rule under test does not depend on any of that.
+        // `may_be_declared` is a function of the wanted value alone, and the
+        // two local origins are refused by name whoever is asking. Before the
+        // reordering in `declare`, this came back "could not read /proc/…",
+        // which is a true sentence about the machine and not an answer to
+        // what was asked.
+        let (daemon, _calls) = daemon_that_refuses_every_password();
+        for name in ["local-terminal", "apex-shell"] {
+            let mut caller = Caller::new(None);
+            let reply = declare(&daemon, &mut caller, name, None);
+            let (kind, message) = reply.as_error().expect("must refuse");
+            assert_eq!(kind, ErrorKind::PermissionDenied, "{name}: {message}");
+            assert!(
+                message.contains(name),
+                "the refusal must name the value that was refused, not the environment \
+                 the daemon happens to be in: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_actor_that_could_rewrite_a_prompt_is_refused_before_anybody_is_classified() {
+        // The other CI failure, and the same cause. The actor is printed on
+        // the prompt a human reads before handing out root, so a newline in
+        // it is a second line of that prompt. Whether it is well formed is a
+        // property of the string, so it is answered without reference to who
+        // sent it — and `bad_request` is the kind, not `permission_denied`.
+        let (daemon, _calls) = daemon_that_refuses_every_password();
+        let mut caller = Caller::new(None);
+        let reply = declare(
+            &daemon,
+            &mut caller,
+            "claude-remote-control",
+            Some("phone\nAPPROVED".to_string()),
+        );
+        let (kind, message) = reply.as_error().expect("must refuse");
+        assert_eq!(kind, ErrorKind::BadRequest, "{message}");
+    }
+
+    // ---------------------------------------------------------------------
+    // The key REPLACES polkit for the non-local column (P0-014, commit 5)
+    // ---------------------------------------------------------------------
+
+    /// An authenticator that refuses everything and counts being asked.
+    ///
+    /// Refusing rather than authorising on purpose: a test whose stub says yes
+    /// cannot tell "polkit was not asked" from "polkit was asked and agreed",
+    /// and those are the two things this whole commit is about.
+    struct CountingRefusal(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl apex_agent_core::auth::Authenticator for CountingRefusal {
+        fn check(
+            &self,
+            _action: &str,
+            _subject: &apex_agent_core::auth::ProcessSubject,
+        ) -> Result<apex_agent_core::auth::Verdict, apex_agent_core::auth::AuthError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(apex_agent_core::auth::Verdict::Refused)
+        }
+    }
+
+    /// A daemon whose only authenticator refuses, and a handle to the count.
+    ///
+    /// `Daemon::new` hardcodes `PolkitAuthenticator`, so this is a struct
+    /// literal — every field is `pub` and the `auth` field's own doc comment
+    /// says it is boxed behind the trait "so a test can build a daemon that
+    /// never reaches polkit". This is the first test in the repository to
+    /// take it up on that.
+    fn daemon_that_refuses_every_password() -> (Arc<Daemon>, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let daemon = Arc::new(Daemon {
+            registry: std::sync::Mutex::new(crate::registry::Registry::new()),
+            config: std::sync::Mutex::new(apex_agent_core::config::Config::default()),
+            grants: crate::grants::GrantAuthority::new(),
+            auth: Box::new(CountingRefusal(calls.clone())),
+            tests: crate::worktrees::TestObservations::new(),
+            challenges: std::sync::Mutex::new(apex_agent_core::webauthn::ChallengeStore::new()),
+        });
+        (daemon, calls)
+    }
+
+    fn asked(calls: &Arc<std::sync::atomic::AtomicUsize>) -> usize {
+        calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A caller with a real, live pid, so `ProcessSubject::for_pid` succeeds
+    /// and a test that means to reach polkit is not stopped short of it by an
+    /// unreadable `/proc` entry.
+    fn caller_with_a_peer() -> Caller {
+        Caller::new(Some(Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        }))
+    }
+
+    #[test]
+    fn a_verified_key_authorises_a_remote_grant_and_polkit_is_never_asked() {
+        // The whole point of commit 5, and the defect it repairs is one that
+        // passes every unit test of `decide_origin`: the gate returns
+        // `Ok(origin)` correctly and the caller then dies one line later in
+        // `authenticate`, because `org.apexos.agent.policy` gives both actions
+        // `allow_any: no` and says in its own comment that "there is no
+        // password that makes a remote caller local".
+        //
+        // So this asserts a call that must NOT happen. The authenticator
+        // refuses everything: if polkit were still consulted, the grant would
+        // come back `NotAuthenticated` rather than `Ok`.
+        let signer = Signer::new("the owner's key");
+        for origin in remote_origins() {
+            for (scope, kind, ttl_ms) in [
+                (None, GrantKind::SystemAccess, 900_000u64),
+                (Some(7), GrantKind::BreakGlass, 60_000),
+            ] {
+                let (daemon, calls) = daemon_that_refuses_every_password();
+                let s = submitted();
+                let factor = receipt(&signer, scope, kind, ttl_ms, UP_UV);
+                let e = Elevating {
+                    policy: OriginPolicy::RemoteElevationAllowed,
+                    scope,
+                    ttl_ms,
+                    factor: Some(&s),
+                };
+                let (got, proof) = authorise_grant_with(
+                    &daemon,
+                    &unsessioned(origin),
+                    &caller_with_a_peer(),
+                    kind,
+                    "ask",
+                    &e,
+                    move |_| Ok(factor),
+                )
+                .expect("a verified key is the authentication for this column");
+                assert_eq!(got, origin);
+                // And the audit line says which of the two happened, so a
+                // touch collected over a network is not recorded as a password
+                // typed at this keyboard.
+                assert_eq!(proof.recorded_as(kind), "security-key:the owner's key");
+                assert_eq!(
+                    asked(&calls),
+                    0,
+                    "polkit was consulted for a {origin} caller, which is the wall this \
+                     commit exists to remove"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_local_column_still_goes_to_polkit_and_is_still_refused_when_it_says_no() {
+        // The negative control, and it is what keeps the test above from
+        // passing for the wrong reason. If `authorise_grant` had simply
+        // stopped calling `authenticate`, the assertion above would be green
+        // and every local elevation on the machine would have become
+        // passwordless. Same daemon, same refusing authenticator, local
+        // origin: refused, and asked exactly once.
+        for origin in RequestOrigin::ALL.iter().copied().filter(|o| o.is_local()) {
+            let (daemon, calls) = daemon_that_refuses_every_password();
+            let e = Elevating {
+                policy: OriginPolicy::RemoteElevationAllowed,
+                scope: None,
+                ttl_ms: 900_000,
+                factor: None,
+            };
+            let err = authorise_grant_with(
+                &daemon,
+                &unsessioned(origin),
+                &caller_with_a_peer(),
+                GrantKind::SystemAccess,
+                "ask",
+                &e,
+                never_redeemed,
+            )
+            .expect_err("the local column is polkit's, and polkit said no");
+            assert!(matches!(err, GrantError::NotAuthenticated(_)), "{origin}: {err}");
+            assert_eq!(asked(&calls), 1, "{origin}");
         }
     }
 
