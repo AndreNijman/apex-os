@@ -161,6 +161,48 @@ anything else. A GPU can sit at 99% while a game stutters and at 40% while it
 runs perfectly. A Performance Lab showing a confident number it did not measure
 is worse than one with an honest gap.
 
+### Two GPUs are two rows, and the headline follows the discrete one
+
+The lab used to have one set of GPU readings, filled from whichever DRM card
+answered first. On a hybrid laptop that is the iGPU. On the MSI Katana `card1`
+is Alder Lake-P Iris Xe and `card2` is an RTX 3070, so `apex perf` reported the
+iGPU's clock, labelled it "GPU", and never mentioned the card the games run on.
+
+Every card is now listed with its vendor, its driver and its own readings, and
+the headline rows follow the discrete card. Measured on that machine:
+
+```
+── GPU ──
+ card1        : Intel i915, boot display — clock 0 MHz, busy unavailable — i915
+                exposes engine busy through its PMU, not through sysfs
+*card2        : NVIDIA nvidia — clock 210 MHz, busy 0%
+clock         : 210 MHz
+busy          : 0%
+vram          : 0.0 / 8.0 GiB (0% used, 8.0 GiB free)
+```
+
+The three vendors answer different questions, and the lab says which:
+
+| | utilisation | current clock |
+|---|---|---|
+| amdgpu | `gpu_busy_percent` | `pp_dpm_sclk`, the `*`-marked level |
+| i915 | nothing in sysfs — the PMU, and the row says so | `gt_cur_freq_mhz` |
+| nvidia | `nvidia-smi --query-gpu=utilization.gpu` | `nvidia-smi` |
+
+`[gamemode.gpu]` is the AMD and Intel half of what `[gamemode.nvidia]` does for
+NVIDIA: `amd_perf_level` writes `power_dpm_force_performance_level` (validated
+against the eight values amdgpu accepts, because the driver answers an invalid
+one with `-EINVAL` and a refused write looks exactly like an applied one), and
+`intel_floor_percent` raises `gt_min_freq_mhz` to a percentage of the range the
+card publishes between `gt_RPn_freq_mhz` and `gt_RP0_freq_mhz`. Both default to
+leaving the card alone, both are clamped to limits the hardware reports, and
+both are restored on exit to the value that was read on the way in — never to a
+default, because a control whose prior value was not readable is left alone
+rather than set to a guess.
+
+What is deliberately absent: `pp_od_clk_voltage` and any power-limit write.
+Those can hang a card, and there is no hardware here to prove otherwise on.
+
 ### There is no single "package power" figure
 
 There used to be, and it was wrong. The reader took the first hwmon publishing

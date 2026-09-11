@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapter;
 use crate::paths;
+use crate::lock::LockPolicy;
 use crate::policy::{AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, SecretPolicy, SystemAccess};
 use crate::protocol::SandboxPolicy;
 use crate::term::DEFAULT_DETACH_KEY;
@@ -58,6 +59,16 @@ pub struct Config {
     /// session is refused rather than started with nothing it can reach.
     #[serde(default)]
     pub network_allow: Vec<String>,
+    /// §7's lock rules: what happens to running sessions, and to grants in
+    /// force, when the screen locks.
+    ///
+    /// Nested rather than three sibling keys, because unlike the six
+    /// permission dimensions these have no history to preserve — nothing has
+    /// ever written them — and they are one subject. The struct carries
+    /// `#[serde(default)]` itself, so setting one of the three keeps §7's
+    /// answer for the other two.
+    #[serde(default)]
+    pub lock: LockPolicy,
     /// Key that detaches from an attached session.
     #[serde(default = "default_detach_key")]
     pub detach_key: String,
@@ -88,6 +99,7 @@ impl Default for Config {
             network: NetworkPolicy::default(),
             origin: OriginPolicy::default(),
             network_allow: Vec::new(),
+            lock: LockPolicy::default(),
             detach_key: default_detach_key(),
             auto_checkpoint: false,
             extra: serde_json::Map::new(),

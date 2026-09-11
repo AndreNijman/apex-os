@@ -46,6 +46,11 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: ResourceKind::None,
             params: &[],
             aliases: &[],
+            // The honest twin of `cloudflare.account.read`: the same
+            // declaration — no resource, no parameters — and a `bind` that
+            // reads only the stored record. Declared true so the framework has
+            // a case where the claim holds as well as one where it does not.
+            same_everywhere: true,
         },
         OperationSpec {
             id: "demo.object.read",
@@ -54,6 +59,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: ResourceKind::Path,
             params: &[],
             aliases: &[],
+            same_everywhere: false,
         },
         OperationSpec {
             id: "demo.object.write",
@@ -67,6 +73,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
                 summary: "an annotation to store with it",
             }],
             aliases: &[],
+            same_everywhere: false,
         },
     ],
 };

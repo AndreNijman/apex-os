@@ -1076,9 +1076,12 @@ mod tests {
             policy: apex_agent_core::AgentPolicy::default(),
             request_origin: Some(apex_agent_core::policy::RequestOrigin::LocalTerminal),
             origin_source: Some(apex_agent_core::origin::OriginSource::Observed),
+            actor: None,
             grant: None,
             grant_expires_ms: None,
             native_observed: None,
+            telemetry: None,
+        children: Vec::new(),
             pid: 1,
             started: 0,
             last_activity: 0,
@@ -1088,6 +1091,8 @@ mod tests {
             checkpoint: None,
             cols: 80,
             rows: 24,
+            injected: 0,
+            capsule: None,
         }
     }
 

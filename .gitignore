@@ -13,6 +13,21 @@ node_modules/
 *.pem
 *.p12
 
+# ...with one deliberate exception, because the rule above silently ate it.
+# files/system/trust/fulcio-root.pem is a PUBLIC certificate — the pinned
+# Sigstore root that a signing certificate must chain to — and it is shipped by
+# Containerfile.base, which fails the build if its fingerprint is not the
+# expected one. It is not signing material and there is no private half.
+#
+# It was committed once and did not arrive: `*.pem` matched it, `git status`
+# said nothing, and the branch was green because the file existed untracked in
+# the worktree that wrote it. On a clean checkout the file is absent, and under
+# the shipped default (signature=enforce) a missing root is CouldNotRun, which
+# REFUSES — so the omission would not have broken a feature, it would have
+# stopped every machine in the fleet from updating. Negated by exact path
+# rather than by directory, so the next .pem to land here is a decision.
+!files/system/trust/fulcio-root.pem
+
 # OS cruft
 .DS_Store
 

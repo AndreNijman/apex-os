@@ -80,6 +80,7 @@ ipp          tcp 631   Sharing a printer attached to this machine
 steam-remote udp 27036 Steam Remote Play from another machine on this network
 sunshine     tcp 47989 Sunshine game streaming host
 ollama       tcp 11434 A local model server, reachable from other machines
+apex-remote  tcp 7717  APEX Remote on this network, so a paired phone reaches this machine directly
 syncthing    tcp 22000 Syncthing peer connections
 EOF
 }

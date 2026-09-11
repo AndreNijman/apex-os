@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::grant::GrantKind;
 use crate::origin::OriginSource;
 use crate::policy::{AgentPolicy, RequestOrigin};
 
@@ -71,6 +72,16 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// break-glass session that never expires, which is the one thing §3.4 forbids
 /// outright. The CLI refuses to send either mode to a daemon below
 /// [`SYSTEM_GRANT_VERSION`].
+///
+/// Still 5 after `DeclareOrigin` grew `actor` and began latching a
+/// non-session connection, and the reason is the rule the numbers above are
+/// applying rather than an exception to it. A daemon below this refuses a
+/// declaration from a connection that is not a session — loudly, with
+/// `permission_denied` — so a proxy that needs one cannot get a silent
+/// nothing and carry on forwarding remote requests under a local origin. The
+/// dropped key beside it is `actor`, which is a display string. A version
+/// number exists to catch a fail-open, and this change fails closed on its
+/// own.
 pub const PROTOCOL_VERSION: u32 = 5;
 
 /// The revision at which the credential store moved to `apex-secretd`.
@@ -331,6 +342,20 @@ pub struct SessionInfo {
     /// How [`SessionInfo::request_origin`] was arrived at.
     #[serde(default)]
     pub origin_source: Option<OriginSource>,
+    /// Which remote actor the origin was declared for, when one was named.
+    ///
+    /// Set from [`Request::DeclareOrigin`]'s `actor` on the connection that
+    /// asked for this session — a paired device id for APEX Remote, and
+    /// nothing at all for a session started locally. `request_origin` says
+    /// *what kind* of thing is driving the session and this says *which one*,
+    /// which is the difference between an audit trail that can answer "was it
+    /// my phone" and one that cannot.
+    ///
+    /// Never a key or a token. It is a display string, shown in the Agent
+    /// Center beside the origin, and a client that puts a credential here has
+    /// put a credential in a world-readable record.
+    #[serde(default)]
+    pub actor: Option<String>,
     /// The system-access grant this session runs under, when it has one.
     ///
     /// Present exactly when `policy.system` is not `none`, because the daemon
@@ -361,6 +386,38 @@ pub struct SessionInfo {
     /// `None` until the agent has said, and for agents that never do.
     #[serde(default)]
     pub native_observed: Option<String>,
+    /// What this session started: subagents, and the processes it forked
+    /// (§P1-020).
+    ///
+    /// `#[serde(default)]` so a record written before the graph existed still
+    /// loads, and — the part that matters more — so the shell can tell an
+    /// ABSENT list from an empty one. A daemon that predates this key writes
+    /// no key at all, and a client that read the absence as "no subagents"
+    /// would report a fact it has no evidence for. Empty means the daemon
+    /// looked and found none.
+    ///
+    /// What Claude's own status line last reported about this session
+    /// (§P1-021): the model it is on, how full its context window is, and how
+    /// much of the account's rate-limit windows is gone.
+    ///
+    /// `None` until a status line has run — an agent with none configured, an
+    /// adapter that has no status line, or a session that has not refreshed
+    /// yet. Deliberately not a default-filled struct: "we have never heard"
+    /// and "we heard, and everything was zero" are different facts and only
+    /// one of them is worth drawing.
+    ///
+    /// Carries its own `observed_at`, because a status line runs on a timer
+    /// and on events, so an observation can be a minute or an hour old
+    /// depending on whether the session is doing anything.
+    #[serde(default)]
+    pub telemetry: Option<crate::statusline::Telemetry>,
+    /// Written even when empty, which is the whole point: `skip_serializing_if`
+    /// would make a daemon that has the graph and found nothing indistinguishable
+    /// from one that does not have it.
+    ///
+    /// See [`crate::graph`] for why no entry here carries a state.
+    #[serde(default)]
+    pub children: Vec<crate::graph::ChildInfo>,
     /// PID of the session leader (the sandbox wrapper when confined).
     pub pid: i32,
     /// Unix seconds when the session was created.
@@ -377,6 +434,27 @@ pub struct SessionInfo {
     pub checkpoint: Option<String>,
     pub cols: u16,
     pub rows: u16,
+    /// How many files have been handed to this session with
+    /// [`Request::Inject`].
+    ///
+    /// Shown by `apex agent info` and by the Agent Center, because typing into
+    /// somebody's agent is the kind of thing that should be countable from
+    /// outside it. `#[serde(default)]` so a record written by a daemon that
+    /// predates this still loads: a missing count reads as none, which is what
+    /// it was.
+    #[serde(default)]
+    pub injected: u32,
+    /// The disposable capsule this session runs inside, if any (§P1-037).
+    ///
+    /// `None` for an ordinary session, which is nearly all of them. Carried so
+    /// that `apex agent status` can say the thing a user MUST be able to see
+    /// about such a session: its working tree is a copy, and everything in it
+    /// is deleted when the session ends unless a `--copy-out` was given.
+    ///
+    /// `#[serde(default)]`, so a record written before this reads as an
+    /// ordinary session — which is what it was.
+    #[serde(default)]
+    pub capsule: Option<String>,
 }
 
 impl SessionInfo {
@@ -426,6 +504,23 @@ pub enum Request {
     },
     /// Tell the PTY its window changed. Sent on its own connection.
     Resize { id: u32, cols: u16, rows: u16 },
+    /// Hand a file to a running session: copy it somewhere the session can
+    /// read, and type that path into its PTY (P1-035).
+    ///
+    /// `source` is a path on the HOST, read by the daemon with the daemon's
+    /// own access. That is the point — a confined session cannot see
+    /// `~/Pictures/Screenshots`, and the daemon can — and it is also the
+    /// reason this verb is refused to a caller that resolves to a managed
+    /// session. A session allowed to ask for this could name `~/.ssh/id_ed25519`
+    /// and have the daemon carry it across the sandbox boundary for it.
+    ///
+    /// Nothing about the destination or the typed text comes from the caller;
+    /// see [`crate::inject`] for what is written and why.
+    ///
+    /// Not a protocol bump, for the reason [`Request::ToolCheck`] is not: a
+    /// daemon that predates this answers "unknown request" and the CLI says so.
+    /// The failure loses a feature, never a restriction.
+    Inject { id: u32, source: String },
     /// Write text into a live session's terminal.
     ///
     /// The same write [`Request::Attach`] already performs, without the read
@@ -494,6 +589,49 @@ pub enum Request {
         /// in exactly the way an agent reporting its own `detail` is.
         #[serde(default)]
         native: Option<String>,
+        /// Which subagent this event is about (§P1-020).
+        ///
+        /// Set only on `subagent_start` and `subagent_stop`, from the
+        /// `agent_id` Claude puts on the payload. Absent everywhere else, and
+        /// absent on those two when the harness sent no id — see
+        /// [`crate::graph::subagent_started`] for what happens then.
+        ///
+        /// Additive for the same reason `event` and `native` are: a daemon
+        /// that predates this drops the key and records exactly what it
+        /// recorded before, which is a session with no graph rather than a
+        /// session whose confinement is looser than the client believes. It is
+        /// not a protocol bump.
+        #[serde(default)]
+        agent_id: Option<String>,
+        /// What kind of subagent it is: `Explore`, `general-purpose`, the name
+        /// of a project's own agent definition. Display only.
+        #[serde(default)]
+        agent_type: Option<String>,
+        /// A test run the bridge saw start or finish (§P1-036).
+        ///
+        /// Another optional key on this request, and not a protocol bump for
+        /// the reason the others are not: a daemon that predates it ignores
+        /// the field and records the event exactly as it always did. The
+        /// failure loses a status line, never a restriction.
+        #[serde(default)]
+        test: Option<crate::worktree::TestNote>,
+    },
+    /// Publish what Claude's status line reported (§P1-021).
+    ///
+    /// A request of its own rather than another optional field on
+    /// [`Request::Event`], because it is not an event: nothing happened, a
+    /// timer fired and a program described the session. Folding it into
+    /// `Event` would mean `last_activity` moved every minute for a session
+    /// nobody is using, and the idle rule that decides `waiting_for_user`
+    /// reads exactly that field.
+    ///
+    /// A daemon that predates this answers with a parse error, which
+    /// `apex agent statusline` swallows — the status line still prints, and
+    /// the Agent Center shows no telemetry rather than the session showing no
+    /// status line.
+    Telemetry {
+        id: u32,
+        telemetry: Box<crate::statusline::Telemetry>,
     },
     /// Ask whether a tool call this session is about to make is one its own
     /// confinement would refuse (§6.2).
@@ -517,6 +655,30 @@ pub enum Request {
         /// the next tool added upstream.
         #[serde(default)]
         tool_input: serde_json::Value,
+    },
+    /// Per-worktree status for a remembered project: tests, conflicts, diff
+    /// and local readiness (§P1-036).
+    ///
+    /// ## Why this takes a SLUG and not a path
+    ///
+    /// The obvious signature is `{ path: String }`, and it would be a hole.
+    /// Answering this request makes the daemon run git in the named directory,
+    /// including `merge-tree --write-tree`, which WRITES objects. A confined
+    /// session has the control socket bound in so that it can publish events,
+    /// so a path-keyed version would let any session point the daemon at a
+    /// repository of its choosing and have it write there. Keyed on a
+    /// remembered project's slug instead, the set of directories reachable
+    /// through this request is exactly the set the user already chose to
+    /// remember, and the daemon resolves the path itself.
+    ///
+    /// Not a protocol bump: an older daemon answers `BadRequest` for an
+    /// unknown `cmd` and the connection survives, so a new client against an
+    /// old daemon loses this listing and nothing else.
+    Worktrees {
+        /// A project slug (`project::Project::slug`), or `None` for every
+        /// project the user has remembered.
+        #[serde(default)]
+        project: Option<String>,
     },
     /// Read the tail of a session's transcript.
     Logs {
@@ -542,7 +704,34 @@ pub enum Request {
     /// This is what Remote Control uses. It is enabled after `claude` has
     /// started, so the session was genuinely local when it was created and
     /// nothing observable about the connection ever changes.
-    DeclareOrigin { origin: String },
+    ///
+    /// A connection that is **not** a session declares for the connection
+    /// instead of for a session record, and the declaration then stands for
+    /// every later request on that connection. That is the case a remote
+    /// proxy is in: `apex-remoted` terminates a paired device's channel and
+    /// forwards what it carries, and without this the origin of everything it
+    /// forwards would be whatever its own cgroup happens to say — which for a
+    /// service started from a login session is `local-terminal`, the origin §7
+    /// reserves root approval for. The latch is checked by
+    /// [`crate::origin::may_declare`] against the live observation on every
+    /// request, so it can only ever cost the connection something and can
+    /// never reach a local origin.
+    DeclareOrigin {
+        origin: String,
+        /// Who, on the far side of that connection, this is being declared
+        /// for: a paired device id, an fqdn, a job name.
+        ///
+        /// Recorded beside the origin on sessions and privilege requests, so
+        /// an audit trail says *which* remote device asked rather than only
+        /// that a remote something did. Never a key, a token or a secret —
+        /// it is written to records the user reads, and to the audit log.
+        ///
+        /// `#[serde(default)]` so every existing client keeps working: an
+        /// absent actor is "the origin is all that is known", which is what
+        /// every record written before this said.
+        #[serde(default)]
+        actor: Option<String>,
+    },
 
     // ── privilege requests (§4) ─────────────────────────────────────────────
     //
@@ -666,6 +855,44 @@ pub enum Request {
         #[serde(default)]
         project: Option<String>,
     },
+
+    // ── §7's remote elevation (P0-014) ──────────────────────────────────────
+    /// Ask for a challenge a security key can answer.
+    ///
+    /// §7 gives root capability and unsafe-everything "local auth" locally and
+    /// "local approval required" from everywhere else, and `OriginPolicy`'s
+    /// `remote_elevation_allowed` is the owner's opt-out. What the opt-out
+    /// costs is a touch on a security key, and this is how the daemon says
+    /// what to touch it over: it issues a nonce, keeps it in memory, and hands
+    /// back the exact bytes the key must sign.
+    ///
+    /// **Not a protocol bump**, for the reason [`Request::Event`] and
+    /// [`Request::ToolCheck`] both record: a daemon that has never heard of
+    /// this `cmd` fails to deserialise it and answers
+    /// [`ErrorKind::BadRequest`], which is refusing to elevate. The failure
+    /// mode of an unknown verb here is losing an elevation, never gaining one,
+    /// and that is the test those two set. Bumping would also claim revision 6
+    /// while three branches are open on this file.
+    ElevationChallenge {
+        /// The session to be elevated, or `None` for one that does not exist
+        /// yet — which is the *primary* case, because
+        /// `privilege::authorise_grant` runs before a session id is reserved.
+        /// See `webauthn::Challenge::session`.
+        #[serde(default)]
+        session: Option<u32>,
+        /// Which of §4's two elevated modes the touch will be consent to. Part
+        /// of what the key signs: a touch for a capability grant must not buy
+        /// break-glass.
+        kind: GrantKind,
+        /// The window being asked for. Also signed over, so a touch for a
+        /// minute cannot authorise eight hours.
+        ttl_ms: u64,
+        /// Which enrolled key, by label. Omitted when only one is enrolled;
+        /// with several enrolled and none named the daemon refuses and lists
+        /// them rather than picking.
+        #[serde(default)]
+        credential: Option<String>,
+    },
 }
 
 impl Request {
@@ -753,6 +980,42 @@ pub struct RunRequest {
     /// Environment additions, applied after the sandbox is built.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// Run this session inside a DISPOSABLE CAPSULE and delete the whole
+    /// environment when it closes (§19, §P1-037).
+    ///
+    /// The working directory is COPIED into the capsule's throwaway home, not
+    /// bound, so whatever the agent does to it goes with the environment —
+    /// which is what "discard state" means here. Nothing leaves unless
+    /// [`RunRequest::copy_out`] names somewhere for it to go.
+    ///
+    /// ## A throwaway environment, NOT a security boundary
+    ///
+    /// distrobox mounts the host's root filesystem at `/run/host` inside every
+    /// capsule — that is how `distrobox-export` reaches back out, and there is
+    /// no flag that removes it — and the process runs as the user's own uid.
+    /// So code in there can read and write the real HOME. What is disposable
+    /// is the ENVIRONMENT: its packages, its home, its state.
+    ///
+    /// For confinement — `$HOME` masked, `~/.ssh` unreachable, the environment
+    /// rebuilt from an allowlist — the mechanism is `policy.sandbox`. The two
+    /// are REFUSED together rather than combined: bwrap wrapping the capsule
+    /// engine would confine the container client and not the agent, so the
+    /// pair reads as "confined and disposable" and delivers neither.
+    ///
+    /// Optional and `#[serde(default)]`, the ToolCheck precedent: a daemon
+    /// that predates it ignores the field and starts an ordinary session. That
+    /// loses the environment, never a restriction — the failure is a session
+    /// on the host, which is what the caller would have got anyway.
+    #[serde(default)]
+    pub disposable: bool,
+    /// Where `~/out` inside a disposable capsule is copied when it closes.
+    ///
+    /// `None` — the default — means NOTHING leaves. Meaningless without
+    /// [`RunRequest::disposable`], and the daemon refuses the pair rather than
+    /// ignoring it, for the reason `ttl_ms` is refused on an ordinary session:
+    /// a caller who named a destination believes they asked for something.
+    #[serde(default)]
+    pub copy_out: Option<String>,
 }
 
 /// A control response.
@@ -777,6 +1040,24 @@ pub enum Response {
     Sessions { sessions: Vec<SessionInfo> },
     /// Attach accepted; the connection is now a raw PTY pipe.
     Attached { id: u32 },
+    /// A file was handed to a session.
+    ///
+    /// `path` is both where the copy landed and, verbatim, the text written to
+    /// the session's PTY — one field rather than two, so a caller cannot be
+    /// shown a path different from the one the agent was given.
+    Injected {
+        id: u32,
+        path: String,
+        /// Whether the text was wrapped as a bracketed paste, which happens
+        /// only when the program on that PTY has asked for the mode. Reported
+        /// so `apex agent send` can say whether the agent will see it as a
+        /// paste or as typing.
+        bracketed: bool,
+    },
+    /// Per-worktree status, main tree first, projects in listing order.
+    Worktrees {
+        worktrees: Vec<crate::worktree::WorktreeStatus>,
+    },
     Logs {
         id: u32,
         /// UTF-8 lossy transcript tail.
@@ -837,6 +1118,36 @@ pub enum Response {
     ToolDecision {
         #[serde(default)]
         deny: Option<String>,
+    },
+    /// A challenge to be signed by a security key, and how to sign it.
+    ///
+    /// Everything a human at another machine needs, because that is where the
+    /// key is: the remote-elevation path exists precisely for the case where
+    /// nobody is at this one.
+    ElevationChallenge {
+        /// The nonce that names this challenge, base64. Sent back with the
+        /// assertion so the daemon knows which challenge was answered.
+        nonce: String,
+        /// The exact bytes the key must sign over, base64.
+        ///
+        /// The client data itself and not its hash: `fido2-assert -w` takes
+        /// client data and hashes it, and a caller handed only a digest could
+        /// not use that mode. `webauthn::Challenge::binding` is what produced
+        /// them, and no two challenges can produce the same bytes.
+        binding: String,
+        /// The label of the key that has to answer.
+        credential: String,
+        /// That key's credential id, base64. `fido2-assert` is asked for an
+        /// assertion by id, and does not print it.
+        credential_id: String,
+        /// The relying party the credential was enrolled against.
+        rp_id: String,
+        /// When the challenge stops being good for anything.
+        expires_ms: u64,
+        /// The commands to run where the key is, for a human to read. Printed
+        /// rather than executed: by construction the key is not plugged into
+        /// this machine.
+        instructions: String,
     },
     /// Verb succeeded and has nothing to say.
     Ok,
@@ -1060,6 +1371,7 @@ mod tests {
             decision: crate::request::Decision::Pending,
             request_origin: Some(RequestOrigin::LocalTerminal),
             origin_source: Some(OriginSource::Inherited),
+            actor: None,
             created_ms: 1_700_000_000_000,
             decided_ms: None,
             executed_ms: None,
@@ -1084,9 +1396,12 @@ mod tests {
             policy: AgentPolicy::default(),
             request_origin: Some(RequestOrigin::LocalTerminal),
             origin_source: Some(OriginSource::Observed),
+            actor: Some("pixel-8-office".into()),
             grant: None,
             grant_expires_ms: None,
             native_observed: None,
+            telemetry: None,
+        children: Vec::new(),
             pid: 42,
             started: 1,
             last_activity: 2,
@@ -1096,6 +1411,8 @@ mod tests {
             checkpoint: None,
             cols: 80,
             rows: 24,
+            injected: 0,
+            capsule: None,
         }
     }
 
@@ -1116,6 +1433,11 @@ mod tests {
                 sessions: vec![sample_session(), sample_session()],
             },
             Response::Attached { id: 3 },
+            Response::Injected {
+                id: 3,
+                path: "/tmp/apex-agent/3/inbox/001-shot.png".into(),
+                bracketed: true,
+            },
             Response::Logs {
                 id: 3,
                 text: "output\n".into(),
@@ -1143,6 +1465,15 @@ mod tests {
                 endpoint: "https://github.com".into(),
                 exit_code: 0,
                 output: "Everything up-to-date".into(),
+            },
+            Response::ElevationChallenge {
+                nonce: "bm9uY2U=".into(),
+                binding: "YmluZGluZw==".into(),
+                credential: "yubikey".into(),
+                credential_id: "aWQ=".into(),
+                rp_id: "apex-agent.localhost".into(),
+                expires_ms: 1_700_000_000_000,
+                instructions: "fido2-assert -G -w -p -i /dev/stdin /dev/hidraw0".into(),
             },
             Response::ToolDecision { deny: None },
             Response::ToolDecision {
@@ -1238,6 +1569,8 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: vec![],
+                disposable: false,
+                copy_out: None,
             })
         };
         assert!(run(SystemAccess::Session).waits_on_a_human());
@@ -1254,6 +1587,10 @@ mod tests {
     fn every_request_variant_round_trips() {
         let variants = vec![
             Request::Hello,
+            Request::Inject {
+                id: 3,
+                source: "/home/t/Pictures/Screenshots/shot.png".into(),
+            },
             Request::Run(RunRequest {
                 agent: Some("claude".into()),
                 prompt: Some("go".into()),
@@ -1270,6 +1607,29 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: vec![("K".into(), "V".into())],
+                disposable: false,
+                copy_out: None,
+            }),
+            Request::Run(RunRequest {
+                // A disposable run, so the two new keys cross the wire in the
+                // round-trip too rather than only in their default form.
+                agent: Some("claude".into()),
+                prompt: Some("review this".into()),
+                args: vec![],
+                cwd: "/home/t/p".into(),
+                policy: AgentPolicy {
+                    sandbox: SandboxPolicy::Unrestricted,
+                    ..AgentPolicy::default()
+                },
+                request_origin: None,
+                worktree: None,
+                checkpoint: false,
+                ttl_ms: None,
+                cols: 80,
+                rows: 24,
+                env: vec![],
+                disposable: true,
+                copy_out: Some("/home/t/results".into()),
             }),
             Request::List,
             Request::PrivilegeRequest {
@@ -1287,6 +1647,12 @@ mod tests {
             Request::SystemGrants,
             Request::RevokeSystemGrant { id: 3 },
             Request::RenewSystemGrant { id: 3, ttl_ms: 900_000 },
+            Request::ElevationChallenge {
+                session: None,
+                kind: GrantKind::BreakGlass,
+                ttl_ms: 900_000,
+                credential: Some("yubikey".into()),
+            },
             Request::Revoke {
                 project: "/home/t/p".into(),
                 key: Some("install:clang".into()),
@@ -1328,6 +1694,12 @@ mod tests {
                 event: Some("pre_tool_use".into()),
                 detail: Some("d".into()),
                 native: Some("bypassPermissions".into()),
+                agent_id: None,
+                agent_type: None,
+                test: Some(crate::worktree::TestNote {
+                    phase: crate::worktree::TestPhase::Started,
+                    command: "cargo test".into(),
+                }),
             },
             Request::Event {
                 id: 1,
@@ -1335,6 +1707,19 @@ mod tests {
                 event: Some("task_created".into()),
                 detail: None,
                 native: None,
+                agent_id: None,
+                agent_type: None,
+                test: None,
+            },
+            Request::Event {
+                id: 1,
+                state: Some("working".into()),
+                event: Some("subagent_start".into()),
+                detail: Some("Explore started".into()),
+                native: None,
+                agent_id: Some("a-1".into()),
+                agent_type: Some("Explore".into()),
+                test: None,
             },
             Request::ToolCheck {
                 id: 1,
@@ -1346,6 +1731,11 @@ mod tests {
             Request::Prune,
             Request::DeclareOrigin {
                 origin: "claude-remote-control".into(),
+                actor: Some("pixel-8-office".into()),
+            },
+            Request::Worktrees { project: None },
+            Request::Worktrees {
+                project: Some("apex-os".into()),
             },
         ];
 
@@ -1369,6 +1759,9 @@ mod tests {
             event: None,
             detail: Some("line one\nline two".into()),
             native: None,
+            agent_id: None,
+            agent_type: None,
+            test: None,
         };
         let text = serde_json::to_string(&req).unwrap();
         assert!(!text.contains('\n'), "{text}");
@@ -1523,9 +1916,12 @@ mod tests {
             policy: AgentPolicy::default(),
             request_origin: None,
             origin_source: None,
+            actor: None,
             grant: None,
             grant_expires_ms: None,
             native_observed: None,
+            telemetry: None,
+        children: Vec::new(),
             pid: 123,
             started: 0,
             last_activity: 0,
@@ -1535,6 +1931,8 @@ mod tests {
             checkpoint: None,
             cols: 80,
             rows: 24,
+            injected: 0,
+            capsule: None,
         };
         assert!(info.is_live());
         assert_eq!(info.exit_summary(), None);

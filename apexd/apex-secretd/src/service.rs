@@ -645,28 +645,31 @@ fn valid_host_char(c: char) -> bool {
 
 /// Whether `*` (every project) is a safe key for this operation.
 ///
-/// P1-018 gated `--everywhere` on [`OperationSpec::names_nothing`], reasoning
-/// that an operation naming nothing "can only ever reach the endpoint pinned
-/// when its credential was stored, so granting it everywhere widens where it
-/// may be asked for and not what it reaches".
+/// **The operation's own declaration answers this**, and nothing here computes
+/// it. That is the whole of the fix, and it took two wrong shapes to get here:
 ///
-/// P1-002 landed the first provider for which that is false. `names_nothing`
-/// is a check on the *declaration* — no resource argument, no parameters — and
-/// `cloudflare.account.read` declares neither, yet resolves the account out of
-/// the project's own `apex.toml`: bound, it is `GET /accounts/{id}` for THAT
-/// project's account; unbound, `GET /accounts` for every account the token can
-/// see. So it does reach a different thing in a different directory, and a `*`
-/// grant would let an agent in a project the owner never approved read that
-/// project's account with the one stored token.
+/// 1. P1-018 gated `--everywhere` on [`OperationSpec::names_nothing`],
+///    reasoning that an operation naming nothing "can only ever reach the
+///    endpoint pinned when its credential was stored". P1-002 landed the
+///    counterexample in the same integration round: `cloudflare.account.read`
+///    declares no resource and no parameters and still resolves its account out
+///    of the project's own `apex.toml`. A rule over the declaration cannot see
+///    what a provider's `bind` reads.
+/// 2. The integration fix was `names_nothing() && id == "mcp.request"` — an
+///    allow-list. Fail-closed, and **silent**: the next provider to declare an
+///    operation like this gets the safe answer, the registry test keeps
+///    passing, and nobody is ever asked the question. Safe by accident is not
+///    safe by design.
 ///
-/// The property that actually matters is "reaches the same thing in every
-/// project", which no declaration currently states. Until one does, this is a
-/// list rather than a predicate over the declaration: a provider added later
-/// cannot inherit `*` by declaring no resource, which is what the gate was for.
+/// [`OperationSpec::same_everywhere`] is the question, asked of the one party
+/// that can answer it. There is no `Default` for `OperationSpec` and nothing
+/// constructs one with `..`, so an operation added later does not compile until
+/// its author has stated which of the two it is; and
+/// [`apex_secret_core::operation::ProviderSpec::validate`] refuses the
+/// incoherent half of the claim at registration, so this can read the field
+/// alone.
 pub(crate) fn may_be_granted_everywhere(op: &'static OperationSpec) -> bool {
-    // `mcp.request` reaches only the endpoint pinned when its credential was
-    // stored; the project it is asked in changes nothing about the call.
-    op.names_nothing() && op.id == "mcp.request"
+    op.same_everywhere
 }
 
 fn refuse_store(e: StoreError) -> Response {
