@@ -94,6 +94,15 @@ pub struct Bind<'a> {
     pub service: &'a ServiceInfo,
     /// The account the operation runs as.
     pub owner: &'a Owner,
+    /// §11's audit id for this request, which §15 correlates a task graph on.
+    ///
+    /// Read-only, like everything else here, and the only field a provider has
+    /// that identifies THIS request rather than what it asks for. It exists
+    /// because §13.11's usage has to be attributable to a task without the
+    /// provider being told anything about the task: an id that appears in this
+    /// machine's own trail and in a far side's log is enough to join the two,
+    /// and a project path in somebody else's logs would be more than enough.
+    pub audit_id: &'a str,
 }
 
 /// Scheme and host a credential would be sent to.
@@ -553,6 +562,7 @@ mod tests {
             project: "/tmp",
             service: &service,
             owner: &owner,
+            audit_id: "test",
         };
         let bound = Bound {
             endpoint: Endpoint {

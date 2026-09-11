@@ -93,6 +93,17 @@ const OLD_SECRET_ID: &str = "11112222333344445555666677778888";
 /// it anywhere else means they leaked.
 const SECRET_VALUE: &str = "apex-secret-store-value-5c2f-do-not-leak";
 
+/// §13.11's two, as §13.1's file binds them. A gateway id is a slug the ACCOUNT
+/// chose and a model name starts with `@` — neither is a shape any other id in
+/// this provider has.
+const GATEWAY_ID: &str = "apex-gateway";
+const MODEL: &str = "@cf/meta/llama-3.1-8b-instruct";
+
+/// The exporter credential the double puts on a gateway, nested inside an
+/// array — which is where a real one is, and where a scrub that walked only
+/// objects would never look.
+const OTEL_SECRET: &str = "apex-otel-authorization-9f31-do-not-leak";
+
 /// The connector token the double would hand back for a tunnel. Nothing in this
 /// build asks for it; the constant is here so a test can prove that.
 const TUNNEL_TOKEN: &str = "apex-cf-tunnel-token-3e9c-do-not-leak";
@@ -135,6 +146,12 @@ dashboard = "f174e90a-fafe-4643-bbbc-4a0ed4fc8415"
 [cloudflare.secrets]
 app = "8c8b1387108e49be85669169793e7bd2"
 
+[cloudflare.gateways]
+main = "apex-gateway"
+
+[cloudflare.models]
+fast = "@cf/meta/llama-3.1-8b-instruct"
+
 [cloudflare.tunnels]
 office = "f70ff985-a4ef-4643-bbbc-4a0ed4fc8415"
 
@@ -154,6 +171,10 @@ struct Seen {
     /// What the request said its body was. R2 puts an object's media type here
     /// and the provider chooses it from a table, so it is worth recording.
     content_type: Option<String>,
+    /// Every header the request carried, lower-cased. §13.11 puts the gateway
+    /// and the task's own id in headers, and a test cannot measure what the
+    /// double does not record.
+    headers: BTreeMap<String, String>,
     body: String,
 }
 
@@ -210,6 +231,7 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
 
     let mut authorization = None;
     let mut content_type = None;
+    let mut headers: BTreeMap<String, String> = BTreeMap::new();
     let mut length = 0usize;
     loop {
         let mut line = String::new();
@@ -230,6 +252,9 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
         if let Some(value) = line.trim().strip_prefix("Content-Type: ") {
             content_type = Some(value.to_string());
         }
+        if let Some((name, value)) = line.trim().split_once(": ") {
+            headers.insert(name.to_ascii_lowercase(), value.to_string());
+        }
     }
     let mut body = vec![0u8; length];
     if length > 0 && reader.read_exact(&mut body).is_err() {
@@ -242,6 +267,7 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
         path: path.clone(),
         authorization: authorization.clone(),
         content_type: content_type.clone(),
+        headers,
         body,
     });
 
@@ -378,6 +404,28 @@ fn answer(method: &str, target: &str) -> (u16, String) {
         ("PATCH", p) if p == format!("/accounts/{ACCOUNT}/hyperdrive/configs/{HD_ID}") => {
             ok(&format!(r#"{{"id":"{HD_ID}","name":"pg","caching":{{"disabled":false}}}}"#))
         }
+
+        // ── §13.11, Workers AI and the AI Gateway ───────────────────────────
+        ("POST", p) if p == format!("/accounts/{ACCOUNT}/ai/run/{MODEL}") => {
+            ok(r#"{"response":"Cloudflare is a network.","usage":{"prompt_tokens":9,"completion_tokens":6}}"#)
+        }
+        // **Every value here is one no fallback could have produced.** The
+        // read-modify-write fills in five defaults for fields the schema marks
+        // required, so a gateway answering with those same defaults would make
+        // "it was preserved" and "it was defaulted" the same observation — and
+        // a mutation that dropped the read entirely stayed green against an
+        // earlier version of this reply. `rate_limiting_limit` is 42 against a
+        // fallback of 0, `cache_invalidate_on_update` is true against false,
+        // and `logpush` and `retry_max_attempts` are not defaulted at all.
+        ("GET", p) if p == gateway_path() => ok(&format!(
+            r#"{{"id":"{GATEWAY_ID}","cache_ttl":60,"collect_logs":true,"rate_limiting_limit":42,"rate_limiting_interval":60,"cache_invalidate_on_update":true,"logpush":true,"retry_max_attempts":3,"created_at":"2026-09-01T00:00:00Z","modified_at":"2026-09-01T00:00:00Z","is_default":false}}"#
+        )),
+        ("GET", p) if p == gateway_path_of("with-otel") => ok(&format!(
+            r#"{{"id":"with-otel","cache_ttl":60,"collect_logs":true,"rate_limiting_limit":0,"rate_limiting_interval":0,"cache_invalidate_on_update":false,"otel":[{{"url":"https://otel.example.invalid","authorization":"{OTEL_SECRET}"}}]}}"#
+        )),
+        ("PUT", p) if p == gateway_path() => ok(&format!(
+            r#"{{"id":"{GATEWAY_ID}","cache_ttl":300,"collect_logs":true}}"#
+        )),
 
         // ── §13.6, the Secrets Store ────────────────────────────────────────
         //
@@ -517,6 +565,15 @@ const ORIGIN_PASSWORD: &str = "apex-hyperdrive-origin-4c7f-do-not-leak";
 /// Where the double keeps one namespace's values.
 fn kv_path(suffix: &str) -> String {
     format!("/accounts/{ACCOUNT}/storage/kv/namespaces/{KV_ID}/values{suffix}")
+}
+
+/// Where this project's one gateway lives.
+fn gateway_path() -> String {
+    gateway_path_of(GATEWAY_ID)
+}
+
+fn gateway_path_of(id: &str) -> String {
+    format!("/accounts/{ACCOUNT}/ai-gateway/gateways/{id}")
 }
 
 /// Where the double keeps this store's secrets.
@@ -746,6 +803,14 @@ fn every_operation() -> Vec<OperationCase> {
             vec![("worker", "project"), ("binding", "API_KEY")],
             2,
         ),
+        ("cloudflare.workers-ai.run", "fast", vec![("prompt", "What is Cloudflare?")], 1),
+        (
+            "cloudflare.ai-gateway.run",
+            "main/fast",
+            vec![("prompt", "What is Cloudflare?")],
+            1,
+        ),
+        ("cloudflare.ai-gateway.edit", "main", vec![("cache-ttl", "300")], 2),
         ("cloudflare.access.read", "dashboard", vec![], 1),
         ("cloudflare.access.edit", "dashboard", vec![], 1),
         (
@@ -1455,9 +1520,28 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
         .iter()
         .filter(|op| listed.contains(&op.id))
         .count();
-    assert_eq!(from_13_2, 29);
-    assert_eq!(SPEC.operations.len(), 31);
-    assert_eq!(SECTION_13_2.len() - from_13_2, 3, "still unimplemented");
+    assert_eq!(from_13_2, 32, "every name §13.2 lists is implemented");
+    assert_eq!(SPEC.operations.len(), 34);
+    assert_eq!(SECTION_13_2.len() - from_13_2, 0, "still unimplemented");
+
+    // **Running a model is a write, and this is the only thing that says so.**
+    //
+    // Nothing stored, nothing changed — so `Effect::Read` looks defensible, and
+    // it was reachable: flipping `cloudflare.workers-ai.run` to `Read` turned
+    // no test red before this assertion existed. It has to be `Write` because
+    // `Effect` is what a grant is scoped by, and a read-only grant that can
+    // spend the account's balance is a read-only grant in name only. Inference
+    // costs money and does not give the same answer twice; both are what
+    // `Write` means here.
+    for op in SPEC.operations {
+        if op.id.ends_with(".run") {
+            assert!(
+                op.effect.is_write(),
+                "'{}' costs money, so a Read grant must not reach it",
+                op.id
+            );
+        }
+    }
 
     // Nothing is declared twice, and every summary reads as a sentence about
     // what the owner is being asked to allow.
@@ -2406,6 +2490,330 @@ fn the_trail_names_the_record_and_the_zone_that_was_changed() {
     );
 }
 
+// ── §13.11, Workers AI and the AI Gateway ───────────────────────────────────
+//
+// Nine mutations were run against the arms below, one at a time, each restored
+// by copying the pristine file back — and then touching it, which the earlier
+// rounds of this program did not have to do and this one did. `cp -p` restores
+// the ORIGINAL mtime, which is older than the artifact cargo just built from
+// the mutant, so cargo skips the rebuild and the next run measures the MUTANT'S
+// BINARY against pristine source. That was caught here by a restored tree
+// failing a test it had just passed; every verdict below was re-taken after the
+// restore started bumping the mtime.
+//
+// Every one turns a named test red:
+//
+// * the header guard in `api::call` stops consulting `printable` —
+//   `a_header_carrying_a_second_line_is_refused_before_curl_is_configured`;
+// * `cf-aig-gateway-id` is not sent — `a_gatewayed_run_is_the_same_host_…`;
+// * `binding.resource("models", …)` replaced by the caller's own string, which
+//   is the defect §13.11 exists to prevent — `a_model_or_a_gateway_this_…`;
+// * the project's whole PATH sent as the metadata's project —
+//   `a_gatewayed_run_is_tagged_with_this_task_…`;
+// * `carries_authorization` never fires — `a_gateway_carrying_an_exporter_…`;
+// * the `stream` check dropped — `a_streamed_response_is_refused_…`;
+// * `GATEWAY_FIELDS` put back nothing — `a_gateway_edit_puts_back_everything_…`;
+// * `workers-ai.run` declared `Effect::Read` — `the_declaration_is_well_formed_…`;
+// * `valid_model` stops checking segments — `a_model_name_is_checked_as_…`.
+//
+// **Three of those nine did not bite the first time**, and the tests were the
+// thing that changed, not the code:
+//
+// * the project-path leak passed, because the filter that makes a name
+//   header-safe strips `/` as a side effect, so a leaked path arrives with no
+//   slash in it and neither "contains no slash" nor "is not the path" notices;
+// * the read-modify-write passed with the read discarded entirely, because the
+//   assertion asked about `collect_logs` — which the required-field fallback
+//   sets to `true` regardless, so preserved and defaulted looked the same;
+// * `Effect::Read` on a paid operation passed, because nothing asserted it.
+//
+// All three are the shape this unit was warned about: a check that is real in
+// the code and invisible to the test, which is indistinguishable from no check
+// at all the day somebody edits the code.
+
+#[test]
+fn a_gatewayed_run_is_the_same_host_and_the_same_credential_as_an_ungatewayed_one() {
+    // The finding this design rests on. The provider-specific endpoint at
+    // `gateway.ai.cloudflare.com` would be a second host, and the framework
+    // pins a credential to the host it was stored for — so it would need a
+    // second stored credential. Cloudflare's REST API page documents the
+    // gatewayed form of the ORDINARY call instead: same URL, plus a
+    // `cf-aig-gateway-id` header. This asserts that shape, because if it ever
+    // stopped being the shape, the pin would be the thing that noticed.
+    let f = Fixture::new("aigateway", Mode::Normal, &granted_everything());
+    let plain = f.use_it(f.record("cloudflare.workers-ai.run", "fast").param("prompt", "hi"));
+    assert!(matches!(plain, Response::Performed { exit_code: 0, .. }), "{plain:?}");
+    let gatewayed = f.use_it(
+        f.record("cloudflare.ai-gateway.run", "main/fast").param("prompt", "hi"),
+    );
+    assert!(matches!(gatewayed, Response::Performed { exit_code: 0, .. }), "{gatewayed:?}");
+
+    let sent = f.fake.seen();
+    let runs: Vec<&Seen> = sent.iter().filter(|s| s.path.contains("/ai/run/")).collect();
+    assert_eq!(runs.len(), 2, "two runs, two requests");
+    assert_eq!(runs[0].path, runs[1].path, "the gateway changed the URL");
+    // The ungatewayed one carries no gateway header, and the gatewayed one
+    // carries the id from the PROJECT'S FILE.
+    assert!(!runs[0].headers.contains_key("cf-aig-gateway-id"), "{:?}", runs[0].headers);
+    assert_eq!(
+        runs[1].headers.get("cf-aig-gateway-id").map(String::as_str),
+        Some(GATEWAY_ID),
+        "{:?}",
+        runs[1].headers
+    );
+}
+
+#[test]
+fn a_gatewayed_run_is_tagged_with_this_task_and_not_with_this_machine_s_paths() {
+    // P1-009's third criterion: usage attributable to a task and a project.
+    // The correlation key is the audit id, which this machine's own trail maps
+    // to the project, the session and the origin — so the far side's log needs
+    // nothing else, and the owner's directory layout stays here.
+    let f = Fixture::new("aimeta", Mode::Normal, &granted_everything());
+    let reply = f.use_it(
+        f.record("cloudflare.ai-gateway.run", "main/fast").param("prompt", "hi"),
+    );
+    assert!(matches!(reply, Response::Performed { exit_code: 0, .. }), "{reply:?}");
+
+    let sent = f.fake.seen();
+    let run = sent.iter().find(|s| s.path.contains("/ai/run/")).expect("nothing was sent");
+    let raw = run.headers.get("cf-aig-metadata").expect("no metadata header");
+    let meta: serde_json::Value = serde_json::from_str(raw).expect("metadata must be json");
+    let object = meta.as_object().expect("an object");
+
+    // AI Gateway keeps the first five entries and strips anything beginning
+    // `cf.`, which is its own namespace.
+    assert!(object.len() <= 5, "more than five entries: {raw}");
+    assert!(object.keys().all(|k| !k.starts_with("cf.")), "{raw}");
+    assert!(object.values().all(|v| v.is_string() || v.is_number() || v.is_boolean()), "{raw}");
+
+    assert_eq!(
+        object.get("apex_operation").and_then(|v| v.as_str()),
+        Some("cloudflare.ai-gateway.run")
+    );
+    // The audit id is a real one from this request, and it is what joins the
+    // far side's log to this machine's trail.
+    let audit = object.get("apex_audit").and_then(|v| v.as_str()).expect("no audit id");
+    assert!(!audit.is_empty() && audit != "test", "{raw}");
+    assert!(f.trail().contains(audit), "the id sent is not one this trail holds: {audit}");
+
+    // The project's NAME is there and its PATH is not.
+    //
+    // **The equality is the assertion, and the two weaker checks below it are
+    // not enough on their own.** A mutation that sent `req.project` whole was
+    // run against this test and it stayed green: the character filter that
+    // makes a name header-safe also strips `/`, so the full path arrives as
+    // `tmpapex-cf-project-…` — no slash in it, and not equal to the path
+    // either, so both of the obvious checks pass while every directory on the
+    // way to the project is in somebody else's logs. Only pinning the value to
+    // the directory's OWN name catches that.
+    let project = f.project.to_string_lossy().into_owned();
+    let expected: String = f
+        .project
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("the fixture's project has a name")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(48)
+        .collect();
+    assert_eq!(
+        object.get("apex_project").and_then(|v| v.as_str()),
+        Some(expected.as_str()),
+        "{raw}"
+    );
+    assert!(!raw.contains(&project), "the project's path was sent to cloudflare: {raw}");
+    // The same path with its separators taken out — the exact shape the leak
+    // takes once the filter has been through it.
+    let squashed: String = project.chars().filter(|c| *c != '/').collect();
+    assert!(
+        !raw.contains(&squashed),
+        "the project's path was sent with its separators stripped: {raw}"
+    );
+    assert!(
+        object.get("apex_project").and_then(|v| v.as_str()).is_some_and(|p| !p.contains('/')),
+        "{raw}"
+    );
+}
+
+#[test]
+fn a_model_or_a_gateway_this_project_did_not_bind_never_reaches_cloudflare() {
+    // A model cannot even be NAMED as a resource — `@cf/...` is not a
+    // `Syntax::Name` — so binding is not a policy choice here, it is the only
+    // way to address one. The gateway is bound for a different reason worth
+    // stating: Cloudflare creates a gateway on first use if the id is unknown,
+    // so a caller that could name one could bill one.
+    let f = Fixture::new("unboundai", Mode::Normal, &granted_everything());
+    for (operation, resource) in [
+        ("cloudflare.workers-ai.run", "somebody-elses-model"),
+        ("cloudflare.ai-gateway.run", "somebody-elses-gateway/fast"),
+        ("cloudflare.ai-gateway.run", "main/somebody-elses-model"),
+        ("cloudflare.ai-gateway.edit", "somebody-elses-gateway"),
+    ] {
+        let mut rec = f.record(operation, resource);
+        if operation.ends_with(".run") {
+            rec = rec.param("prompt", "hi");
+        } else {
+            rec = rec.param("cache-ttl", "300");
+        }
+        let reply = f.use_it(rec);
+        let (error, message) = match reply.as_error() {
+            Some(pair) => pair,
+            None => panic!("{operation} accepted '{resource}'"),
+        };
+        assert_eq!(error, ErrorKind::BadRequest, "{operation}: {message}");
+        assert!(message.contains("apex.toml"), "{message}");
+    }
+    assert!(f.fake.seen().is_empty(), "an unbound model or gateway reached the api");
+
+    // ...and the model name itself is refused by the vocabulary, which is the
+    // thing that makes the binding unavoidable rather than merely advisable.
+    assert!(!operation::valid_name(MODEL), "'{MODEL}' would be nameable as a resource");
+}
+
+#[test]
+fn a_streamed_response_is_refused_rather_than_delivered_as_framing() {
+    // The transport is a `curl` that hands back a finished reply. A streamed
+    // answer would arrive as server-sent-event framing in `output`: not a
+    // stream, not the JSON the caller asked for, and indistinguishable from a
+    // working feature until somebody tries to parse it.
+    let f = Fixture::new("aistream", Mode::Normal, &granted_everything());
+    std::fs::create_dir_all(f.project.join("ai")).expect("ai");
+    std::fs::write(
+        f.project.join("ai/streamed.json"),
+        r#"{"messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+    )
+    .expect("write");
+    let reply = f.use_it(
+        f.record("cloudflare.workers-ai.run", "fast").param("file", "ai/streamed.json"),
+    );
+    let (_, message) = reply.as_error().expect("a streamed request must be refused");
+    assert!(message.contains("streamed response"), "{message}");
+    assert!(f.fake.seen().is_empty(), "it was sent anyway");
+
+    // The same document without `stream` goes through, so this is a check on
+    // one field rather than a refusal of every file.
+    std::fs::write(
+        f.project.join("ai/ok.json"),
+        r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+    )
+    .expect("write");
+    let ok = f.use_it(f.record("cloudflare.workers-ai.run", "fast").param("file", "ai/ok.json"));
+    assert!(matches!(ok, Response::Performed { exit_code: 0, .. }), "{ok:?}");
+}
+
+#[test]
+fn a_gateway_edit_puts_back_everything_it_did_not_mean_to_change() {
+    // `PUT` REPLACES a gateway, and its schema marks five fields required — so
+    // a request carrying only the changed field is not a smaller edit, it is a
+    // rejected one, and everything the gateway had would go back to a default.
+    // Hence the read first, and hence this assertion: the field that was asked
+    // for changed, and a field nobody mentioned survived.
+    let f = Fixture::new("aiedit", Mode::Normal, &granted_everything());
+    let reply = f.use_it(f.record("cloudflare.ai-gateway.edit", "main").param("cache-ttl", "300"));
+    assert!(matches!(reply, Response::Performed { exit_code: 0, .. }), "{reply:?}");
+
+    let sent = f.fake.seen();
+    assert_eq!(sent.len(), 2, "a replace has to read first: {sent:?}");
+    assert_eq!(sent[0].method, "GET");
+    let put = &sent[1];
+    assert_eq!(put.method, "PUT");
+    let body: serde_json::Value = serde_json::from_str(&put.body).expect("json body");
+    assert_eq!(body.get("cache_ttl").and_then(|v| v.as_u64()), Some(300), "{}", put.body);
+
+    // Untouched, and still there — the whole reason for the read.
+    //
+    // **Every value checked here is one the fallbacks could not have supplied.**
+    // A mutation that put back nothing at all still passed an earlier version
+    // of this assertion, because it asked about `collect_logs` — which the
+    // required-field fallback sets to `true` regardless, making a preserved
+    // value and a defaulted one indistinguishable. These four are not
+    // defaulted: `rate_limiting_limit` falls back to 0 and the gateway says 42,
+    // `cache_invalidate_on_update` falls back to false and the gateway says
+    // true, and `logpush` and `retry_max_attempts` have no fallback at all. If
+    // any of them arrives wrong, the read did not happen or was discarded.
+    assert_eq!(
+        body.get("rate_limiting_limit").and_then(|v| v.as_u64()),
+        Some(42),
+        "a fallback overwrote what the gateway already had: {}",
+        put.body
+    );
+    assert_eq!(
+        body.get("cache_invalidate_on_update").and_then(|v| v.as_bool()),
+        Some(true),
+        "{}",
+        put.body
+    );
+    assert_eq!(body.get("logpush").and_then(|v| v.as_bool()), Some(true), "{}", put.body);
+    assert_eq!(
+        body.get("retry_max_attempts").and_then(|v| v.as_u64()),
+        Some(3),
+        "a setting this build does not know about was dropped: {}",
+        put.body
+    );
+    assert_eq!(body.get("collect_logs").and_then(|v| v.as_bool()), Some(true), "{}", put.body);
+    // The five the schema marks required are all present, whatever was asked.
+    for required in [
+        "rate_limiting_interval",
+        "rate_limiting_limit",
+        "collect_logs",
+        "cache_ttl",
+        "cache_invalidate_on_update",
+    ] {
+        assert!(body.get(required).is_some(), "{required} is missing: {}", put.body);
+    }
+    // Read-only fields the API returns are NOT written back.
+    for readonly in ["created_at", "modified_at", "id", "is_default"] {
+        assert!(body.get(readonly).is_none(), "{readonly} was written back: {}", put.body);
+    }
+}
+
+#[test]
+fn a_gateway_carrying_an_exporter_credential_is_not_rewritten_at_all() {
+    // The case a replace cannot do honestly. A gateway's OTel exporter carries
+    // an `authorization`, nested inside an ARRAY; putting it back means writing
+    // whatever the API chose to show, and leaving it out means deleting it.
+    // Refusing is the third option and the only one that cannot silently break
+    // somebody's telemetry.
+    let f = Fixture::new("aiotel", Mode::Normal, &granted_everything());
+    std::fs::write(
+        f.project.join("apex.toml"),
+        PROJECT_FILE.replace(r#"main = "apex-gateway""#, r#"main = "with-otel""#),
+    )
+    .expect("rewrite");
+    let reply = f.use_it(f.record("cloudflare.ai-gateway.edit", "main").param("cache-ttl", "300"));
+    let (error, message) = reply.as_error().expect("a gateway with a credential must be refused");
+    assert_eq!(error, ErrorKind::PermissionDenied, "{message}");
+    assert!(message.contains("exporter credential"), "{message}");
+    assert!(message.contains("Nothing was changed"), "{message}");
+
+    // It read, and it did not write — and the credential is not in the reply.
+    let sent = f.fake.seen();
+    assert!(sent.iter().all(|s| s.method != "PUT"), "the gateway was rewritten anyway");
+    assert!(!message.contains(OTEL_SECRET), "the exporter credential came back: {message}");
+    assert!(!f.trail().contains(OTEL_SECRET), "the exporter credential is in the trail");
+}
+
+#[test]
+fn a_header_this_build_composes_can_never_carry_a_second_line() {
+    // `quoted` escapes a backslash and a quote and does nothing about a
+    // newline, and a newline in a header value is a second curl configuration
+    // line — which is a second header, or an option. Every composed value is
+    // held to printable ASCII before it gets there.
+    assert!(api::printable("apex-gateway"));
+    assert!(api::printable(r#"{"apex_audit":"1a0-1","apex_project":"demo"}"#));
+    for evil in [
+        "one\ntwo",
+        "one\r\nheader: two",
+        "one\u{0}two",
+        "",
+        "caf\u{e9}",
+        "one\ttwo",
+    ] {
+        assert!(!api::printable(evil), "'{}' was accepted", evil.escape_debug());
+    }
+}
+
 // ── §13.6, the Secrets Store ────────────────────────────────────────────────
 //
 // Seven mutations were run against the arms below, one at a time, each restored
@@ -2929,6 +3337,7 @@ fn the_provider_takes_the_token_secret_out_before_the_framework_ever_sees_it() {
         project: &project,
         service: &service,
         owner: &owner,
+        audit_id: "test-audit-id",
     };
     let bound = provider.bind(&req).expect("binds");
     assert_eq!(

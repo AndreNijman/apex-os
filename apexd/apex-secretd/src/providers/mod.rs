@@ -54,6 +54,8 @@ mod tests {
                 "cloudflare.access.read",
                 "cloudflare.access.service-token.create",
                 "cloudflare.account.read",
+                "cloudflare.ai-gateway.edit",
+                "cloudflare.ai-gateway.run",
                 "cloudflare.d1.migrate",
                 "cloudflare.d1.query",
                 "cloudflare.d1.read",
@@ -81,6 +83,7 @@ mod tests {
                 "cloudflare.worker.route.read",
                 "cloudflare.worker.tail",
                 "cloudflare.worker.upload-version",
+                "cloudflare.workers-ai.run",
                 "git.fetch",
                 "git.ls-remote",
                 "git.push",
@@ -236,6 +239,7 @@ worker = "project"
                     project: project.to_str().expect("utf8"),
                     service: &service,
                     owner: &owner,
+                    audit_id: "test",
                 })
             };
             let in_bound = bind(&bound_dir);

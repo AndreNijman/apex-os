@@ -99,6 +99,77 @@
 //!   capabilities and not credentials cannot rest on a remark in somebody
 //!   else's documentation staying true.
 //!
+//! ## §13.11, and a finding that decided its shape
+//!
+//! An AI Gateway run looked like it would need a second host. The
+//! provider-specific endpoint is `gateway.ai.cloudflare.com`, the framework
+//! pins a credential to the host it was stored for, and that would have meant
+//! the owner storing the same token twice under two service names.
+//!
+//! It does not. AI Gateway's REST API page documents the **gatewayed form of
+//! the ordinary call** — `POST /accounts/{id}/ai/run/{model}` with a
+//! `cf-aig-gateway-id` header, on `api.cloudflare.com` like everything else
+//! here — so `workers-ai.run` and `ai-gateway.run` are the same URL and the
+//! same credential, and what separates them is a header and a grant. The pin
+//! never has to be argued with.
+//!
+//! **Where that comes from, and where it does not.** Every other claim in this
+//! provider is checked against the pinned schema. This one cannot be: the
+//! schema's `workers-ai-post-run-model` declares two path parameters and **no
+//! headers at all**, and the string `cf-aig` does not occur anywhere in its
+//! 25MB. So the schema neither documents this nor contradicts it, and the
+//! source is the documentation:
+//!
+//! * <https://developers.cloudflare.com/ai-gateway/usage/rest-api/> shows the
+//!   gatewayed call with the model in the URL path and the `cf-aig-gateway-id`
+//!   header, and says in as many words that "the existing Workers AI endpoint
+//!   with the model ID in the URL path also continues to work";
+//! * <https://developers.cloudflare.com/workers-ai/get-started/rest-api/> shows
+//!   the ungatewayed one — the same path, `Authorization` only, a `prompt`
+//!   body — which is what `workers-ai.run` sends;
+//! * <https://developers.cloudflare.com/ai-gateway/configuration/custom-metadata/>
+//!   is where `cf-aig-metadata`'s limits come from: at most five entries,
+//!   values of string, number or boolean, and keys beginning `cf.` reserved to
+//!   Cloudflare. [`usage_metadata`] sends three strings and a test asserts all
+//!   three limits.
+//!
+//! One line on that first page reads "Workers AI requests always require this
+//! header", which looks like it contradicts the second page. It does not: that
+//! sentence is about AI Gateway's own front door, `POST /ai/run` with the model
+//! in the **body**. This build uses the path form for both operations, which
+//! that same page says keeps working. If it ever stops,
+//! `a_gatewayed_run_is_the_same_host_and_the_same_credential_as_an_ungatewayed_one`
+//! is the test that describes what was assumed.
+//!
+//! Two consequences worth stating where they will be read:
+//!
+//! * **the gateway id comes from §13.1's file and never from the caller.**
+//!   Cloudflare creates a gateway on the first authenticated request that names
+//!   one that does not exist, so a caller that could name a gateway could
+//!   create one — and bill it;
+//! * **the model is bound too.** `@cf/meta/llama-3.1-8b-instruct` is not an
+//!   [`apex_secret_core::operation::Syntax::Name`] — the grammar wants an
+//!   alphanumeric first character — so a model could not be named as a resource
+//!   even if this build wanted the agent to choose one. §13.14's cost
+//!   guardrails start here, with the owner deciding which models a project may
+//!   run.
+//!
+//! §13.11's remainder is **not** here and cannot be: *"APEX local AI service
+//! may route to… Workers AI, AI Gateway"*. `apex-aid` is that service, and two
+//! things about it, both checked rather than assumed:
+//!
+//! * [`apexd_core::ai::Backend`] is a *compute* backend — `Cuda`, `Rocm`,
+//!   `Vulkan`, `Cpu` — with no notion of a remote provider to select;
+//! * the inference runtime is started under `bubblewrap` with `--unshare-net`,
+//!   and `apex-aid`'s own module note calls that flag the load-bearing one.
+//!   The backend cannot reach `api.cloudflare.com` because it cannot reach
+//!   anything.
+//!
+//! So routing the local service through Cloudflare is not a missing URL, it is
+//! a design change in another crate: something outside the sandbox would have
+//! to make the brokered call and hand the answer in. What this provider
+//! supplies is that brokered route, which is the half that belongs here.
+//!
 //! ## §13.10, and the one thing this surface does that no other does
 //!
 //! Access and Tunnels are §13.10's, and they are the first operations here that
@@ -226,6 +297,27 @@ const COMMENT: ParamSpec = ParamSpec {
     summary: "a line stored with the record, for whoever reads the zone later",
 };
 
+/// `prompt`, one line for a model to answer.
+///
+/// `Text`, so it is one line and it goes in a JSON body this module builds. A
+/// conversation — several messages, several lines — is [`INPUT_FILE`], for the
+/// same reason a D1 migration is a file and a query is a line.
+const PROMPT: ParamSpec = ParamSpec {
+    name: "prompt",
+    syntax: Syntax::Text,
+    required: false,
+    summary: "what to ask the model, as one line",
+};
+
+/// `file`, a JSON document in the project to send as the request.
+const INPUT_FILE: ParamSpec = ParamSpec {
+    name: "file",
+    syntax: Syntax::Path,
+    required: false,
+    summary: "a .json file inside the project to send instead — messages, \
+              parameters, whatever the model takes",
+};
+
 /// `scopes`, which Cloudflare services may read a stored secret.
 ///
 /// `Text` rather than `Name` because it is a list and a comma is not a `Name`
@@ -276,11 +368,12 @@ const SQL: ParamSpec = ParamSpec {
 
 /// The vocabulary, in §13.2's shape.
 ///
-/// Thirty-one names: **twenty-nine of §13.2's thirty-two**, plus
-/// `worker.route.read` and `access.service-token.create`, which are §13.3's
-/// "Worker routes" and "service tokens" rather than §13.2's examples. So
-/// **three** of §13.2's list are still unimplemented — Workers AI's one and the
-/// AI gateway's two.
+/// Thirty-four names: **all thirty-two of §13.2's**, plus `worker.route.read`
+/// and `access.service-token.create`, which are §13.3's "Worker routes" and
+/// "service tokens" rather than §13.2's examples. §13.2's list is complete as
+/// of P1-009; what is left of §13 is behaviour rather than vocabulary — §13.4's
+/// scoped credentials, §13.7's staged rollout, §13.13's preview environments
+/// and §13.14's budgets.
 ///
 /// Declaring one this module cannot perform would put it in
 /// `apex secret capabilities`, let an owner grant it, and then fail at use
@@ -635,6 +728,92 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             aliases: &[],
             same_everywhere: false,
         },
+        // ── §13.11, Workers AI and the AI Gateway ───────────────────────────
+        //
+        // §13.11 says the APEX AI service "may route to" Workers AI and the AI
+        // Gateway, and §13.14 wants what that costs attributable to a task.
+        // Three things about the shape, because two of them are the opposite of
+        // what the obvious reading suggests:
+        //
+        // * **an AI Gateway run is the same host and the same credential.** The
+        //   provider-specific endpoint at `gateway.ai.cloudflare.com` exists,
+        //   but Cloudflare's REST API page documents the gatewayed form of the
+        //   ordinary call: `POST /accounts/{id}/ai/run/{model}` with a
+        //   `cf-aig-gateway-id` header. So there is no second host, no second
+        //   stored credential and no pin to argue with — the difference between
+        //   these two operations is a header and a grant;
+        // * **the gateway comes from the project's file and never the caller.**
+        //   Cloudflare creates a gateway on first use if the id does not exist,
+        //   so a caller that could name one could create one by typo — and
+        //   bill it;
+        // * **the model is bound too**, and not only for §13.14's guardrails:
+        //   `@cf/meta/llama-3.1-8b-instruct` is not a `Syntax::Name`, so a
+        //   model could not be a resource even if this build wanted it to be.
+        OperationSpec {
+            id: "cloudflare.workers-ai.run",
+            summary: "run one of the Workers AI models this project binds",
+            // **Write, and not a judgement about inference.** It costs money
+            // and it is not repeatable, which is what `Effect` is for. A build
+            // that called it a read because nothing is stored would let a
+            // `Read` grant spend an account's balance.
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[PROMPT, INPUT_FILE],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.ai-gateway.run",
+            summary: "run one of this project's models through one of its AI \
+                      gateways, with the request tagged for this task",
+            effect: Effect::Write,
+            // `<gateway>/<model>`: both bound, because both cost money.
+            resource: WITHIN,
+            params: &[PROMPT, INPUT_FILE],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.ai-gateway.edit",
+            // What it changes, and what it will not touch. `PUT` REPLACES a
+            // gateway, so this is a read-modify-write — and it refuses outright
+            // when the gateway carries an exporter credential, because a
+            // replace it cannot faithfully reproduce is a replace that would
+            // delete one.
+            summary: "change the caching, rate limiting and log collection of \
+                      one of this project's AI gateways",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[
+                ParamSpec {
+                    name: "cache-ttl",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "seconds to cache a response for, 0 to turn caching off",
+                },
+                ParamSpec {
+                    name: "rate-limit",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "how many requests are allowed in each interval",
+                },
+                ParamSpec {
+                    name: "rate-limit-interval",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "the length of that interval in seconds",
+                },
+                ParamSpec {
+                    name: "collect-logs",
+                    syntax: Syntax::Name,
+                    required: false,
+                    summary: "true to keep logs for requests through it, false to stop",
+                },
+            ],
+            aliases: &[],
+            same_everywhere: false,
+        },
+
         // ── §13.6, the Secrets Store ────────────────────────────────────────
         //
         // The mirror image of §13.10's service token, and worth reading beside
@@ -888,6 +1067,11 @@ enum Target {
     /// question only the zone can answer, and answering it costs a credential
     /// — so it happens in `perform` and not here.
     Record(Record),
+    /// A model this project binds, run through a gateway it also binds. Two
+    /// bound things, because both of them cost money and neither is the
+    /// agent's to choose — Cloudflare creates a gateway on first use if the id
+    /// does not exist, so a caller that could name one could bill one.
+    Gatewayed { gateway: Resource, model: Resource },
     /// A secret in one of this project's stores, and the worker a reference to
     /// it is being put on. Two bound things, because binding changes both.
     SecretBinding {
@@ -988,6 +1172,33 @@ impl CloudflareProvider {
                 return Ok(Target::Object {
                     bucket: binding.bucket(bucket)?,
                     key,
+                });
+            }
+            "cloudflare.ai-gateway.run" => {
+                let (gateway, model) = split_first(req.resource);
+                let Some(model) = model else {
+                    return Err(ProviderError::NoSuchResource(format!(
+                        "'{gateway}' names a gateway and not a model to run \
+                         through it: {gateway}/<model>"
+                    )));
+                };
+                return Ok(Target::Gatewayed {
+                    gateway: binding.resource("gateways", gateway)?,
+                    model: binding.resource("models", &model)?,
+                });
+            }
+            "cloudflare.workers-ai.run" => {
+                return Ok(Target::Bound {
+                    table: "models",
+                    resource: binding.resource("models", req.resource)?,
+                    key: None,
+                });
+            }
+            "cloudflare.ai-gateway.edit" => {
+                return Ok(Target::Bound {
+                    table: "gateways",
+                    resource: binding.resource("gateways", req.resource)?,
+                    key: None,
                 });
             }
             id if id.starts_with("cloudflare.secret.") => {
@@ -1172,6 +1383,10 @@ impl CloudflareProvider {
                     "cloudflare.hyperdrive.edit" => {
                         format!("change the name or caching of hyperdrive configuration {where_}")
                     }
+                    "cloudflare.workers-ai.run" => format!("run the model {where_}"),
+                    "cloudflare.ai-gateway.edit" => {
+                        format!("change the caching and limits of ai gateway {where_}")
+                    }
                     "cloudflare.secret.create" => format!(
                         "put the secret {} into store {where_}",
                         key.as_deref().unwrap_or("")
@@ -1194,6 +1409,15 @@ impl CloudflareProvider {
                     other => format!("{other} on {where_}"),
                 }
             }
+            Target::Gatewayed { gateway, model } => format!(
+                "run the model {} [{}] through ai gateway {} [{}] in account {} [{}]",
+                model.name,
+                model.id,
+                gateway.name,
+                gateway.id,
+                gateway.account.named(),
+                gateway.account.id
+            ),
             Target::SecretBinding {
                 store,
                 secret,
@@ -1266,6 +1490,7 @@ impl CloudflareProvider {
             method: "GET",
             path,
             body: Body::None,
+            headers: Vec::new(),
         };
         Ok(match (req.operation.id, target) {
             ("cloudflare.account.read", Target::Accounts) => get("/accounts".to_string()),
@@ -1282,11 +1507,13 @@ impl CloudflareProvider {
                 method: "POST",
                 path: format!("{}/tails", script(worker)),
                 body: Body::None,
+                headers: Vec::new(),
             },
             ("cloudflare.worker.upload-version", Target::Worker(worker)) => Call {
                 method: "POST",
                 path: format!("{}/versions", script(worker)),
                 body: self.version_body(req)?,
+                headers: Vec::new(),
             },
             (id @ ("cloudflare.worker.deploy" | "cloudflare.worker.rollback"), Target::Worker(worker)) => {
                 let rollback = id == "cloudflare.worker.rollback";
@@ -1304,6 +1531,7 @@ impl CloudflareProvider {
                         if rollback { "?force=true" } else { "" }
                     ),
                     body: self.deployment_body(req)?,
+                    headers: Vec::new(),
                 }
             }
             ("cloudflare.r2.object.read", Target::Object { bucket, key }) => {
@@ -1328,6 +1556,7 @@ impl CloudflareProvider {
                     method: "PUT",
                     path: objects(bucket, Some(key)),
                     body: self.object_body(req, key)?,
+                    headers: Vec::new(),
                 }
             }
             ("cloudflare.d1.read", Target::Bound { resource, .. }) => get(format!(
@@ -1350,6 +1579,7 @@ impl CloudflareProvider {
                     resource.account.id, resource.id
                 ),
                 body: CloudflareProvider::sql_body(req, id == "cloudflare.d1.migrate")?,
+                headers: Vec::new(),
             },
             ("cloudflare.kv.read", Target::Bound { resource, key, .. }) => {
                 get(kv_value(resource, key.as_deref())?)
@@ -1358,6 +1588,7 @@ impl CloudflareProvider {
                 method: "PUT",
                 path: kv_value(resource, key.as_deref())?,
                 body: self.kv_body(req)?,
+                headers: Vec::new(),
             },
             ("cloudflare.queue.publish", Target::Bound { resource, .. }) => {
                 let Some(message) = req.params.get("message") else {
@@ -1378,12 +1609,14 @@ impl CloudflareProvider {
                         resource.account.id, resource.id
                     ),
                     body: Body::Json(serde_json::Value::Object(body).to_string()),
+                    headers: Vec::new(),
                 }
             }
             ("cloudflare.queue.manage", Target::Bound { resource, .. }) => Call {
                 method: "PATCH",
                 path: format!("/accounts/{}/queues/{}", resource.account.id, resource.id),
                 body: queue_settings(req)?,
+                headers: Vec::new(),
             },
             ("cloudflare.hyperdrive.read", Target::Bound { resource, .. }) => get(format!(
                 "/accounts/{}/hyperdrive/configs/{}",
@@ -1401,6 +1634,7 @@ impl CloudflareProvider {
                     resource.account.id, resource.id
                 ),
                 body: hyperdrive_settings(req)?,
+                headers: Vec::new(),
             },
             ("cloudflare.dns.read", Target::Record(record)) => {
                 // The one read that does not need a lookup: the filter IS the
@@ -1415,6 +1649,27 @@ impl CloudflareProvider {
                 method: "POST",
                 path: record.path(),
                 body: CloudflareProvider::record_body(req, record, true)?,
+                headers: Vec::new(),
+            },
+            (
+                "cloudflare.workers-ai.run",
+                Target::Bound {
+                    table: "models",
+                    resource,
+                    ..
+                },
+            ) => Call::new("POST", run_path(resource), inference_body(req)?),
+            ("cloudflare.ai-gateway.run", Target::Gatewayed { gateway, model }) => Call {
+                method: "POST",
+                path: run_path(model),
+                body: inference_body(req)?,
+                // The two headers §13.11 and §13.14 need, and nothing else. The
+                // gateway id comes out of the project's own file; the metadata
+                // is composed here and carries no path and no prompt.
+                headers: vec![
+                    ("cf-aig-gateway-id", gateway.id.clone()),
+                    ("cf-aig-metadata", usage_metadata(req)),
+                ],
             },
             (
                 "cloudflare.secret.create",
@@ -1432,6 +1687,7 @@ impl CloudflareProvider {
                 body: Body::Json(
                     serde_json::Value::Array(vec![secret_object(req, name, true)?]).to_string(),
                 ),
+                headers: Vec::new(),
             },
             ("cloudflare.access.read", Target::Bound { resource, .. }) => get(format!(
                 "/accounts/{}/access/apps/{}",
@@ -1447,12 +1703,14 @@ impl CloudflareProvider {
                 // makes this the Access mutation worth declaring: there is no
                 // field to get wrong and no policy to widen.
                 body: Body::None,
+                headers: Vec::new(),
             },
             ("cloudflare.access.service-token.create", Target::ServiceToken { account, .. }) => {
                 Call {
                     method: "POST",
                     path: format!("/accounts/{}/access/service_tokens", account.id),
                     body: service_token_body(req)?,
+                    headers: Vec::new(),
                 }
             }
             ("cloudflare.tunnel.read", Target::Bound { resource, .. }) => get(format!(
@@ -1480,12 +1738,14 @@ impl CloudflareProvider {
                         resource.account.id, resource.id
                     ),
                     body: Body::Json(serde_json::Value::Object(body).to_string()),
+                    headers: Vec::new(),
                 }
             }
             ("cloudflare.r2.bucket.create", Target::Bucket(bucket)) => Call {
                 method: "POST",
                 path: format!("/accounts/{}/r2/buckets", bucket.account.id),
                 body: bucket_body(req, bucket)?,
+                headers: Vec::new(),
             },
             (id, _) => {
                 return Err(ProviderError::Failed(format!(
@@ -2010,6 +2270,292 @@ fn hyperdrive_settings(req: &Bind<'_>) -> Result<Body, ProviderError> {
     Ok(Body::Json(serde_json::Value::Object(body).to_string()))
 }
 
+/// The fields `PUT /ai-gateway/gateways/{id}` documents, so a read-modify-write
+/// can put back everything it did not mean to change.
+///
+/// Copied from the schema's own property list rather than from what the GET
+/// happened to return: a `PUT` REPLACES a gateway, and a field this build drops
+/// because it did not recognise it is a setting somebody loses.
+const GATEWAY_FIELDS: &[&str] = &[
+    "authentication",
+    "byok_only",
+    "cache_invalidate_on_update",
+    "cache_ttl",
+    "collect_logs",
+    "dlp",
+    "guardrails",
+    "log_classification",
+    "log_management",
+    "log_management_strategy",
+    "logpush",
+    "logpush_public_key",
+    "rate_limiting_interval",
+    "rate_limiting_limit",
+    "rate_limiting_technique",
+    "retry_backoff",
+    "retry_delay",
+    "retry_max_attempts",
+    "spend_limits",
+    "store_id",
+    "workers_ai_billing_mode",
+    "zdr",
+];
+
+/// The body of a gateway change: everything it already had, plus what was asked
+/// for.
+///
+/// **A read, then a write, because the endpoint is a `PUT` that replaces.** Its
+/// schema marks `rate_limiting_interval`, `rate_limiting_limit`,
+/// `collect_logs`, `cache_ttl` and `cache_invalidate_on_update` REQUIRED, so a
+/// request carrying only the field being changed is not a smaller edit — it is
+/// a rejected one, and everything else the gateway had would go back to a
+/// default anyway.
+///
+/// **It refuses outright when the gateway carries an exporter credential.** A
+/// gateway's `otel` list and its `stripe` block each hold an `authorization`,
+/// and this build has two bad options and no good one: put it back as the GET
+/// returned it — which writes whatever the API chose to show, possibly a
+/// redaction — or leave it out, which deletes it. Refusing is the third thing,
+/// and it is the only one that cannot silently break somebody's telemetry.
+fn gateway_settings(
+    api: &Api,
+    gateway: &Resource,
+    req: &Bind<'_>,
+    value: &SecretValue,
+) -> Result<Body, ProviderError> {
+    let reply = api::call(
+        api,
+        &Call::new("GET", gateway_path(gateway), Body::None),
+        value,
+        req.owner,
+    )
+    .map_err(|e| ProviderError::Failed(e.to_string()))?;
+    if !reply.ok() {
+        return Err(ProviderError::Failed(format!(
+            "cloudflare answered HTTP {} when this read gateway {}, so what it \
+             already holds is not known and nothing was changed",
+            reply.status, gateway.name
+        )));
+    }
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(&reply.body) else {
+        return Err(ProviderError::Failed(
+            "the gateway reply was not the json envelope, so nothing was changed"
+                .to_string(),
+        ));
+    };
+    let Some(current) = body.get("result").and_then(|r| r.as_object()) else {
+        return Err(ProviderError::Failed(
+            "the gateway reply carried no configuration, so nothing was changed"
+                .to_string(),
+        ));
+    };
+    if carries_authorization(body.get("result").unwrap_or(&serde_json::Value::Null)) {
+        return Err(ProviderError::Refused(format!(
+            "gateway {} carries an exporter credential — an `authorization` on \
+             its OTel or Stripe configuration. Changing a gateway is a PUT that \
+             replaces it, so this build would have to write that credential back \
+             without being able to read it honestly, or drop it and delete it. \
+             It will not do either: change this gateway in the Cloudflare \
+             dashboard. Nothing was changed",
+            gateway.name
+        )));
+    }
+
+    let mut settings = serde_json::Map::new();
+    for field in GATEWAY_FIELDS {
+        if let Some(existing) = current.get(*field) {
+            if !existing.is_null() {
+                settings.insert((*field).to_string(), existing.clone());
+            }
+        }
+    }
+
+    let mut changed = false;
+    if let Some(ttl) = req.params.get("cache-ttl") {
+        settings.insert(
+            "cache_ttl".into(),
+            seconds(ttl, "a cache ttl", 0..=2_678_400)?.into(),
+        );
+        changed = true;
+    }
+    if let Some(limit) = req.params.get("rate-limit") {
+        settings.insert(
+            "rate_limiting_limit".into(),
+            seconds(limit, "a rate limit", 0..=1_000_000)?.into(),
+        );
+        changed = true;
+    }
+    if let Some(interval) = req.params.get("rate-limit-interval") {
+        settings.insert(
+            "rate_limiting_interval".into(),
+            seconds(interval, "a rate limiting interval", 0..=86_400)?.into(),
+        );
+        changed = true;
+    }
+    if let Some(collect) = req.params.get("collect-logs") {
+        settings.insert("collect_logs".into(), flag(collect)?.into());
+        changed = true;
+    }
+    if !changed {
+        return Err(ProviderError::Refused(
+            "this operation changes nothing: give it a 'cache-ttl', \
+             'rate-limit', 'rate-limit-interval' or 'collect-logs' option"
+                .to_string(),
+        ));
+    }
+    // The five the schema marks required. A gateway that answered without one
+    // of them would otherwise produce a request the far side refuses, after
+    // the credential had been spent twice.
+    for (field, fallback) in [
+        ("rate_limiting_interval", serde_json::json!(0)),
+        ("rate_limiting_limit", serde_json::json!(0)),
+        ("collect_logs", serde_json::json!(true)),
+        ("cache_ttl", serde_json::json!(0)),
+        ("cache_invalidate_on_update", serde_json::json!(false)),
+    ] {
+        settings.entry(field.to_string()).or_insert(fallback);
+    }
+    Ok(Body::Json(serde_json::Value::Object(settings).to_string()))
+}
+
+/// Where one gateway lives.
+fn gateway_path(gateway: &Resource) -> String {
+    format!(
+        "/accounts/{}/ai-gateway/gateways/{}",
+        gateway.account.id, gateway.id
+    )
+}
+
+/// Whether anything anywhere in a value is an `authorization`.
+///
+/// Deliberately blunt — any depth, any container. This decides whether a
+/// replace is safe to attempt, and a check that looked only where the
+/// credential is today would stop being right the moment Cloudflare adds a
+/// third exporter.
+fn carries_authorization(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.iter().any(|(key, nested)| {
+                (key == "authorization" && !nested.is_null()) || carries_authorization(nested)
+            })
+        }
+        serde_json::Value::Array(items) => items.iter().any(carries_authorization),
+        _ => false,
+    }
+}
+
+/// Where a model is run.
+fn run_path(model: &Resource) -> String {
+    format!("/accounts/{}/ai/run/{}", model.account.id, model.id)
+}
+
+/// The JSON body of an inference request: one line, or a document from the
+/// project.
+///
+/// The same body-or-file shape §13.6's secrets use, for the same reason — a
+/// prompt is one line and a conversation is not — with one addition.
+/// **`stream` is refused.** The transport here is a `curl` that hands back a
+/// completed reply; a streamed response would arrive as server-sent-event
+/// framing in `output`, which is not a stream, is not the JSON the caller
+/// expects, and would look like a working feature.
+fn inference_body(req: &Bind<'_>) -> Result<Body, ProviderError> {
+    let document = match (req.params.get("prompt"), req.params.get("file")) {
+        (Some(_), Some(_)) => {
+            return Err(ProviderError::Refused(
+                "give this operation a 'prompt' or a 'file', not both: they are \
+                 two answers to the same question, and this build will not pick"
+                    .to_string(),
+            ))
+        }
+        (None, None) => {
+            return Err(ProviderError::Refused(
+                "this operation needs a 'prompt' option holding what to ask, or \
+                 a 'file' option naming a .json document in the project to send"
+                    .to_string(),
+            ))
+        }
+        (Some(prompt), None) => {
+            let mut body = serde_json::Map::new();
+            body.insert("prompt".into(), prompt.clone().into());
+            serde_json::Value::Object(body)
+        }
+        (None, Some(file)) => {
+            if !file.ends_with(".json") {
+                return Err(ProviderError::Refused(format!(
+                    "'{}' is not a .json file. A model request is JSON this \
+                     project wrote down, not whatever happens to be at that path",
+                    file.escape_debug()
+                )));
+            }
+            let bytes = project::read_file(
+                std::path::Path::new(req.project),
+                file,
+                req.owner.uid,
+                &req.owner.name,
+                MAX_PAYLOAD,
+            )
+            .map_err(|e| ProviderError::NoSuchResource(e.to_string()))?;
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                return Err(ProviderError::Refused(format!(
+                    "'{}' is not JSON, so it is not a model request",
+                    file.escape_debug()
+                )));
+            };
+            if !value.is_object() {
+                return Err(ProviderError::Refused(format!(
+                    "'{}' is JSON but not an object, and a model request is an \
+                     object",
+                    file.escape_debug()
+                )));
+            }
+            value
+        }
+    };
+    if document.get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Err(ProviderError::Refused(
+            "this build cannot ask for a streamed response. The broker runs a \
+             child that hands back a finished reply, so `stream: true` would \
+             deliver server-sent-event framing in place of the answer — which \
+             would look like it worked. Ask for it without `stream`"
+                .to_string(),
+        ));
+    }
+    Ok(Body::Json(document.to_string()))
+}
+
+/// What `cf-aig-metadata` carries, so §13.14's usage can be attributed.
+///
+/// Three entries of the five AI Gateway allows, all strings, none beginning
+/// `cf.` — that prefix is Cloudflare's own and it strips customer-supplied keys
+/// that use it.
+///
+/// **The audit id is the correlation key and the project path is not sent.**
+/// This machine's trail already maps an audit id to a project, an agent session
+/// and an origin; putting the id in the far side's log is enough to join the
+/// two, and putting an owner's directory layout in somebody else's logs would
+/// be more than enough. The project's own directory NAME goes in, reduced to
+/// characters a header can carry — it is the one word that makes a gateway log
+/// readable without a lookup.
+fn usage_metadata(req: &Bind<'_>) -> String {
+    let project = std::path::Path::new(req.project)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|name| {
+            name.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                .take(48)
+                .collect::<String>()
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "project".to_string());
+    serde_json::json!({
+        "apex_audit": req.audit_id,
+        "apex_project": project,
+        "apex_operation": req.operation.id,
+    })
+    .to_string()
+}
+
 /// The path a store's secrets live under.
 fn secrets(store: &Resource) -> String {
     format!(
@@ -2165,6 +2711,7 @@ fn look_up_secret(
         // similarly-named secrets is one page rather than a silent truncation.
         path: format!("{}?search={name}&per_page=100", secrets(store)),
         body: Body::None,
+        headers: Vec::new(),
     };
     let reply = match api::call(api, &call, value, owner) {
         Ok(reply) => reply,
@@ -2248,6 +2795,7 @@ fn settings_with_secret(
             method: "GET",
             path: format!("{}/settings", script(worker)),
             body: Body::None,
+            headers: Vec::new(),
         },
         value,
         owner,
@@ -2675,6 +3223,7 @@ impl Provider for CloudflareProvider {
                     method: if id == "cloudflare.dns.update" { "PATCH" } else { "DELETE" },
                     path: format!("{}/{id_of}", record.path()),
                     body,
+                    headers: Vec::new(),
                 }
             }
             ("cloudflare.secret.rotate", Target::Bound { resource, key, .. }) => {
@@ -2726,8 +3275,14 @@ impl Provider for CloudflareProvider {
                     method: "PATCH",
                     path: format!("{}/{id_of}", secrets(resource)),
                     body,
+                    headers: Vec::new(),
                 }
             }
+            ("cloudflare.ai-gateway.edit", Target::Bound { resource, .. }) => Call::new(
+                "PUT",
+                gateway_path(resource),
+                gateway_settings(&self.api, resource, req, value)?,
+            ),
             (
                 "cloudflare.secret.bind",
                 Target::SecretBinding {
@@ -2755,6 +3310,7 @@ impl Provider for CloudflareProvider {
                         value,
                         req.owner,
                     )?,
+                    headers: Vec::new(),
                 }
             }
             _ => self.build(req, &target)?,
