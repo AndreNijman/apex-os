@@ -16,13 +16,12 @@
   },
   "_status_recorded_this_round": "Eleven items recorded from the landing: P1-035 done, P1-036 done, P1-037 PARTIAL (see below), P2-010/P2-014/P2-015 done, P1-023 done, P1-029 done, BASE-002/BASE-005/BASE-016/BASE-018 done. P0-014 and P0-015 updated in place, still partial. P2-011 given evidence while staying todo, so the measured shape of the work is not lost again. P1-037 is partial for ONE named reason and it is not the feature: three places said the engine's teardown also runs when the DAEMON dies and none had measured it. The measurement now exists - a 162-line section giving each death its own daemon, runtime dir, disposable root and capsule log - but it is UNCOMMITTED in /var/tmp/apex-work/wt-p1-035. Committing and proving it is the whole of that unit's remaining work.",
   "_deliberately_held": {
-    "p1-038-hardware": "Still not dispatchable unattended. The 18 labwc matrix rows need real applications on a real session: cannot be done headless and cannot be done on the L16 while Andre is using it. A katana job once gaming is over, or a job for Andre with a checklist.",
-    "p1-005 / p1-008 / p1-011 / p1-014": "The Cloudflare capability suite, 13 tasks, mutually conflicting (p1-005 with p1-002, p1-008 with p1-002 and p1-005, p1-011 with p1-005 and p1-008, p1-014 with p1-011), so at most ONE can hold a slot at a time. None dispatched: the ceiling went to the five card-carriers plus trust-enforcement. First in line next round together with p1-025.",
-    "p1-025": "NOW UNBLOCKED. Its only dependency was p1-018, which resume.sh reported as COMPLETE-but-unlanded in round 5; content-checked this round and it is landed - origin/task/p1-018-mcp-auth is 10 commits 'ahead' of roadmap/v2.2 by graph but the diff of every file it touches against the tip is EMPTY, so the work is in. The branch is safe to delete. p1-025 was not dispatched only because the ceiling is six.",
-    "p1-052-relay": "READY, not dispatched for the ceiling. Do NOT re-dispatch the old p1-050 unit; queue.json records why it was replaced.",
-    "apex remote is documented nowhere": "FINDINGS-round5 item 2, and the only round-5 finding with no owner: apex remote pair|devices|revoke|status|enable appears in no doc, and check-doc-verbs.sh structurally cannot catch it because it validates documented-verb -> real-command, not the reverse. followups-int3 was deliberately told not to document it from a stale base and has now finished. This belongs to the next integrate or followups round, against the tip. Recorded here so it is not lost a second time.",
-    "integrate-6": "No integration agent this round: the only finished-and-unlanded unit was followups-int3, which the orchestrator landed itself. Three housekeeping items are still owed from integrate-4's card and must be folded into the next integrate brief - the per-commit build check for the four p1-020os commits, the four now-guarded nested shell suites run from the repo ROOT with XDG_* at /var/tmp/apex-shell-xdg (run-nested-labwc.sh, run-labwc-matrix-test.sh, run-nexus-smoke.sh, run-agent-center-smoke.sh), and squash-merged branch cleanup by git merge-tree --write-tree comparison. Deletable now by that test: apex-shell fix/labwc-desktop-parity, fix/popup-first-open-and-media-keys, fix/screenshot-off-hyprland, task/p0-016-agent-settings; apex-os task/p1-018-mcp-auth, fix/pkg-multilib, fix/pkg-multilib-2.",
-    "pkg-multilib (the CLAUDE.md katana handoff)": "RESOLVED, no work needed - checked this round rather than assumed. CLAUDE.md's handoff says fix/pkg-multilib needs two additions (the app-twin EVR rule, and install_etc's removal pass eating 26 image-owned /etc files). Both are already ON the tip: origin/fix/pkg-multilib-2 carries aa7bf62 for the /etc defect and the host_evr app-twin logic, and the diff of all three files it touches (files/system/libexec/apex-pkg, tests/test-apex-multilib.sh, tests/test-apex-pkg.sh) against roadmap/v2.2 is EMPTY. roadmap/v2.2's apex-pkg has the rpm -qf image-owner guard at line 852. So katana's post-reboot apex install failure ends when this branch reaches an image build, and no roadmap item is outstanding: BASE-006 is done and its evidence already covers the six multilib defects. Both branches are safe to delete."
+    "p1-005 / p1-008 / p1-011 / p1-014": "The Cloudflare capability suite, 13 tasks, mutually conflicting (p1-005 with p1-002, p1-008 with p1-002 and p1-005, p1-011 with p1-005 and p1-008, p1-014 with p1-011), so at most ONE can hold a slot at a time. NOT dispatched again this round, and the reason is arithmetic rather than preference: the ceiling is six and five units were one item from finishing. p1-005 is FIRST IN LINE the moment a slot frees, and the slot that frees soonest is p1-035's - its remaining work is one uncommitted file. Confirm p1-002 is not in the unlanded set before dispatching p1-005.",
+    "p1-038-hardware": "Still not dispatchable unattended, and the reason has not changed: the 18 labwc matrix rows need real applications on a real session. Cannot be done headless, and cannot be done on the L16 while Andre is using it. A katana job once gaming is over, or a job for Andre with a checklist. The step-by-step list is in state/agents/p1-038.md. Do not pretend otherwise.",
+    "p1-052-relay / p1-053a / p1-040": "READY, held for the ceiling. Do NOT re-dispatch the old p1-050 unit; queue.json records why it was replaced.",
+    "apex remote is documented nowhere": "FINDINGS-round5 item 2, still unowned after three rounds. apex remote pair|devices|revoke|status|enable appears in no doc, and check-doc-verbs.sh structurally cannot catch it because it validates documented-verb -> real-command and not the reverse. It belongs to the next integrate or followups round, against the tip. Recorded here so it is not lost a fourth time.",
+    "test-apex-task.sh": "NEW this round, and nobody owns it. 70 passed / 1 failed, and it is pre-existing: checked at 583355e before any of this round's merges and red there too. The assertion wants 'understands up to' in the refusal for a tasks.toml written by a newer apex; the message was reworded and the suite was not. A third red suite that the recorded CI baseline (which was taken at 1ab542c) does not show. One line to fix, in either direction - give it to the next followups round.",
+    "the branches that are now safe to delete": "apex-os fix/pkg-multilib, fix/pkg-multilib-2, task/p1-018-mcp-auth, task/p1-050-remote-protocol (settled this round by content, not by heuristic); apex-shell fix/labwc-desktop-parity, fix/popup-first-open-and-media-keys, fix/screenshot-off-hyprland, task/p0-016-agent-settings. Left in place rather than deleted - deletion is cheap and irreversible, and nothing depends on it happening this round."
   },
   "agents": [
     {
@@ -34,125 +33,102 @@
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-p0-014",
       "branch": "task/p0-014-remote-lock",
-      "agent_id": "a9ec671c551237591",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T14:48+08:00",
-      "fresh_agent_for_card": "p0-014",
-      "title": "CTAP2 assertion verifier behind --origin-policy remote, in three independently mergeable commits -- the last P0 work in the roadmap",
       "second_worktree": "/var/tmp/apex-work/wt-p0-015-shell",
       "second_branch": "task/p0-015-lock-tests",
+      "agent_id": "abf88d0f3d0e01430",
       "queue_id": "p0-014",
-      "at_dispatch": "Commits 1, 2, 3 and the harness fix are pushed (a3bf2a8, 2b463d1, 41d7c53, cca4442) and commit 3's NINE mutation pairs are measured and recorded. FOUR dirty paths - protocol.rs plus elevation.rs/grants.rs/privilege.rs - are commit 4, the enforcement, mid-write; the predecessor's last words were 'now Elevating, decide_origin and the rewritten authorise_grant'. Brief: read the diff, finish, commit, push, then commit 5 (the validate_for relaxation) last. Asked again to report test-privilege-requests.sh and system_grants.rs before/after, because those nine assertions are the last of round 5's two red suites and the harness fix was meant to make them execute for the first time.",
-      "session": "round 9 orchestrator, pid 4283"
-    },
-    {
-      "slug": "p1-023",
-      "items": [
-        "(red suites)",
-        "(pipefail sweep)",
-        "P1-023",
-        "P1-024",
-        "P1-029"
-      ],
-      "repo": "both",
-      "worktree": "/var/tmp/apex-work/wt-p1-023",
-      "branch": "task/p1-023-handoff-lifecycle",
-      "agent_id": "a08ecf4d2d79733bc",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T14:48+08:00",
-      "fresh_agent_for_card": "p1-023",
-      "title": "voice-ptt wiring through all three keybind generators, then handoff packet and lifecycle types",
-      "second_worktree": "/var/tmp/apex-work/wt-p1-023-os",
-      "second_branch": "task/p1-023-push-to-talk-daemon",
-      "queue_id": "p1-023",
-      "at_dispatch": "Shell half clean at 7544834 with wiring, indicator and help prose all pushed and mutation-proven. The apex-os half is where the work is: EIGHT dirty paths and ~1,800 added lines - a new apex-agent-core/src/handoff.rs and apex/tests/handoff_packet.rs plus doc, fish-completion and agent.sh edits - and the predecessor's last report was '16/16 mutants caught, 0 survived, control green either side; final full run before committing'. Brief: do that run, COMMIT AND PUSH before extending anything, then P1-029. Reminded that check-agent-help.sh is 24/0 with slopcheck TOTAL:0 and that a new verb needs a fresh apex build for the doc-verb checker, since the installed one is older.",
-      "session": "round 9 orchestrator, pid 4283"
+      "dispatched": "2026-09-11T21:45+08:00",
+      "fresh_agent_for_card": "p0-014",
+      "session": "round 10 orchestrator",
+      "title": "finish commit 4 (the enforcement) and commit 5, on a branch whose first six commits have landed",
+      "at_dispatch": "All six commits landed (merge 432e16c). Seven dirty paths are commit 4 mid-write; the predecessor's last words were 'now Elevating, decide_origin and the rewritten authorise_grant'. Told to commit and push that BEFORE merging the new tip in, then commit 5, then the mutation proofs. Handed the measured result of its own harness fix - test-privilege-requests.sh 30/8 -> 39/0 on the landed tip, closing FINDINGS-round5 item 3 - and one remaining assertion of the same class to settle: system_grants.rs's renewing_a_grant_that_does_not_exist_is_refused_without_asking_anybody still fails on the tip for the scheduled-job-cgroup reason, and it must say whether commit 4 closes it or whether that harness needs the same unshare -r treatment."
     },
     {
       "slug": "p2-010",
       "items": [
-        "P2-010",
-        "P2-011",
-        "P2-014",
-        "P2-015"
+        "P2-011"
       ],
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p2-010",
       "branch": "task/p2-010-hardware-storage",
-      "agent_id": "afd439e13ee23878c",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T14:48+08:00",
-      "fresh_agent_for_card": "p2-010",
-      "title": "hardware qualification database, agent cgroup budgets, Storage Manager, firmware lifecycle",
+      "agent_id": "a61aa1f0da9205060",
       "queue_id": "p2-e",
-      "at_dispatch": "THREE of four items are DONE and pushed through 20f3ef2: P2-010, P2-014, P2-015. Only P2-011 cgroup budgets remains and then the unit is complete. One dirty path (tests/test-apex-firmware.sh) is the predecessor checking whether a firmware guard was itself a by-content lookup that vanishes instead of failing - finish, commit, push. P2-011's measured shape was handed forward: a NEW apexd/apex-agentd/src/budget.rs with a one-line hook (P1-020 put ~1,700 lines into apex-agentd on a tip this branch does not carry, so a new file merges where a refactor would not); cpu/memory/pids delegate to app.slice; io is ABSENT at every level and must be a Reading carrying that reason, never a budget of zero; systemd-run --user --scope needs no polkit and was measured killed at exactly 5s with exit 143; the live RuntimeMaxSec check needs a user bus so it stays opt-in and out of pr-validation.yml. Told to prove budgets against a test daemon, never the live apex-agentd.",
-      "session": "round 9 orchestrator, pid 4283"
+      "dispatched": "2026-09-11T21:45+08:00",
+      "fresh_agent_for_card": "p2-010",
+      "session": "round 10 orchestrator",
+      "title": "P2-011 agent cgroup budgets - the last item of a unit whose other three are done and recorded",
+      "at_dispatch": "P2-010, P2-014 and P2-015 landed (merge 7da2571) and are recorded done with re-measured counts. Only P2-011 remains. Told to merge the new tip in FIRST, because P1-020's ~1,700 apex-agentd lines are exactly what budget.rs hooks into and the branch did not carry them. The measured shape was re-handed whole, including that io is absent at every level and must be a Reading carrying that reason and never a budget of zero. Also handed the clippy finding from its own landing: its firmware.rs redundant_guards passes under clippy-local's rust:1.97 and fails under run-clippy.sh's 1.98."
     },
     {
-      "slug": "p1-035",
+      "slug": "p1-025",
       "items": [
-        "P1-035",
-        "P1-036",
-        "P1-037"
+        "P1-026"
       ],
       "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-035",
-      "branch": "task/p1-035-agent-tooling",
-      "agent_id": "a102e014609a092da",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T14:48+08:00",
-      "fresh_agent_for_card": "p1-035",
-      "title": "clear the five owed mutations on the pushed P1-035 commits, then P1-036 worktree status, then P1-037 disposable capsules",
-      "queue_id": "p1-035",
-      "at_dispatch": "P1-035 and P1-036 both DONE and pushed (473b7f6, f4ec0ee, plus 296b0ee and d701f37). Only three scratch mutate runners are dirty and they stay uncommitted, so P1-037 is committed up to d701f37. THE ONE THING CARRIED FORWARD DELIBERATELY: the advisor caught the predecessor asserting, in three places, that the engine's trap runs when the daemon dies - unmeasured. It had started measuring it instead. The brief says finish that measurement and make all three places say what was measured, because 'a cleanup runs on daemon death' is exactly the assertion that passes by never being exercised.",
-      "conflicts_note": "queue.json lists p1-035 as conflicting with p1-030. That conflict is moot this round: p1-030 is not dispatched and is not in the unlanded set.",
-      "session": "round 9 orchestrator, pid 4283"
+      "worktree": "/var/tmp/apex-work/wt-p1-025",
+      "branch": "task/p1-025-skills-plugins",
+      "agent_id": "a339e506e3a882ee7",
+      "queue_id": "p1-025",
+      "dispatched": "2026-09-11T21:45+08:00",
+      "fresh_agent_for_card": "p1-025",
+      "session": "round 10 orchestrator",
+      "title": "P1-026 provenance - and it is what unblocks its own unit's landing",
+      "at_dispatch": "THE ONE UNIT THAT DID NOT LAND, and it was told exactly why: the merge was clean and compiled, then was aborted because digest.rs's describe/is_measured/same_as and skill.rs's Origin::describe have no committed caller and CI's clippy runs -D warnings. The callers are in the uncommitted provenance.rs, which is P1-026. Nothing is wrong with the work; it is half of a commit. Explicitly told NOT to resolve this with #[allow(dead_code)]. Pointed at apexd/apex/src/verify.rs ON THE NEW TIP as the in-repo example of provenance done properly - a pinned root rather than one the signature handed you, and a verdict distinguishing failed from absent from could-not-run."
     },
     {
       "slug": "base-partials",
       "items": [
-        "BASE-002",
-        "BASE-005",
         "BASE-009",
         "BASE-010",
         "BASE-013",
-        "BASE-014",
-        "BASE-016",
-        "BASE-018"
+        "BASE-014"
       ],
       "repo": "both",
       "worktree": "/var/tmp/apex-work/wt-base-os",
       "branch": "task/base-partials",
       "second_worktree": "/var/tmp/apex-work/wt-base-shell",
       "second_branch": "task/base-partials-shell",
-      "agent_id": "add8ce2853ad24ffa",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T14:48+08:00",
-      "session": "round 9 orchestrator, pid 4283",
+      "agent_id": "a064fadad606034e5",
       "queue_id": "base-partials",
-      "title": "Close the eight BASE preservation items still marked partial",
-      "card": "NONE AT DISPATCH - told to create ROADMAP/state/agents/base-partials.md as its second action, before any code.",
-      "at_dispatch": "BASE-018 and BASE-002 are CLOSED on the branch (head cf7df30). Two dirty paths - pr-validation.yml and a new tests/test-apex-env-devices-live.sh - are the predecessor's 'all three mutations caught, including the shape change failing rather than skipping; wiring into CI'. Finish, commit, push. Remaining order from the card: BASE-016 (five named holes in test-apex-recover.sh, the suite the old evidence claimed did not exist), BASE-005 (AMD verifiable on this machine), BASE-013, BASE-014, BASE-010, BASE-009. BASE-014's last assertion is now reachable: the predecessor PROVED wtype works, and no test in either repo has ever pressed a key after labwc --reconfigure. Re-handed the no-name-translation-map finding and the warning that changing displayName's meaning is a deliberate tested edit (two suites assert it)."
+      "dispatched": "2026-09-11T21:45+08:00",
+      "fresh_agent_for_card": "base-partials",
+      "session": "round 10 orchestrator",
+      "title": "the four BASE preservation items still open, in the order the card sets",
+      "at_dispatch": "BASE-002, BASE-005, BASE-016 and BASE-018 landed (merge 65bd5c7) and are recorded done, with their qualifications carried into the evidence rather than dropped. Remaining order from the card: BASE-013, BASE-014, BASE-010, BASE-009. Re-handed the three things the card establishes and a fresh agent would otherwise re-derive: BASE-013's criterion 3 is a REAL defect at GreetContext.qml:332-335 and changing displayName's meaning is a deliberate tested edit (two suites assert it); BASE-014's last assertion is reachable because wtype was PROVEN to work and nothing in either repo has ever pressed a key after labwc --reconfigure; BASE-010 and BASE-009 may have to close with their gap named and measured rather than with a test that passes by never running."
     },
     {
-      "slug": "p1-025",
+      "slug": "p1-023",
       "items": [
-        "P1-025",
-        "P1-026",
-        "P1-027",
-        "P1-028"
+        "P1-024"
+      ],
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/wt-p1-023",
+      "branch": "task/p1-023-handoff-lifecycle",
+      "second_worktree": "/var/tmp/apex-work/wt-p1-023-os",
+      "second_branch": "task/p1-023-push-to-talk-daemon",
+      "agent_id": "a6d8bb62adbeac742",
+      "queue_id": "p1-023",
+      "dispatched": "2026-09-11T21:45+08:00",
+      "fresh_agent_for_card": "p1-023",
+      "session": "round 10 orchestrator",
+      "title": "P1-024 only - the cross-agent handoff packet",
+      "at_dispatch": "Both halves landed (apex-shell dc2283e, apex-os 09846c9); P1-023 and P1-029 are both recorded done. Only P1-024 remains, and the card's ## P1-024 SCOPING says it is NOT a shell item and NOT a data structure - told to read that before starting and not to re-derive the hold-vs-toggle or daemon findings. Also told what happened to its pipefail sweep at integration: the tip won in five of six conflicts because grading on the reported count is stronger than grep -q FAIL and is not a grep -q through a pipe either, and its own form won in the sixth (count_errors in run-agent-center-smoke.sh). Its measured finding about producer | grep -q under pipefail is not in question."
+    },
+    {
+      "slug": "p1-035",
+      "items": [
+        "P1-037"
       ],
       "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-025",
-      "branch": "task/p1-025-skills-plugins",
-      "agent_id": "a1c8f6ecbed4822da",
-      "output_glob": "/tmp/claude-1000/-var-home-andre-Projects-apex/*/tasks",
-      "dispatched": "2026-09-08T14:48+08:00",
-      "session": "round 9 orchestrator, pid 4283",
-      "queue_id": "p1-025",
-      "title": "Skill inventory and audit, plugin provenance and isolation, memory provider interface, connector trust planes",
-      "card": "ROADMAP/state/agents/p1-025.md - written by the round-7 agent before it was stopped; its NEXT is the read-first step.",
-      "at_dispatch": "P1-025, P1-027 and P1-028 are on the branch (31e5860, 5917833). Remaining: P1-026 provenance, then tests/test-apex-skill.sh and the shell suite for the new verbs, then mutations, then clippy and a full run. Two dirty paths - digest.rs modified, a new provenance.rs - are P1-026 mid-build. Pointed at apexd/apex/src/verify.rs ON THE NEW TIP as the in-repo example of provenance done properly: a pinned root rather than one the signature handed you, and a verdict distinguishing failed from absent from could-not-run, where could-not-run is neither a pass nor a failure. Re-stated that provenance means the hash of what RUNS and that the sandbox word must not carry more than the mechanism does."
+      "worktree": "/var/tmp/apex-work/wt-p1-035",
+      "branch": "task/p1-035-agent-tooling",
+      "agent_id": "a120bef0418935120",
+      "queue_id": "p1-035",
+      "dispatched": "2026-09-11T21:45+08:00",
+      "fresh_agent_for_card": "p1-035",
+      "session": "round 10 orchestrator",
+      "title": "commit, run and mutation-prove the daemon-death measurement - then the unit is complete",
+      "at_dispatch": "All twelve commits landed (merge 6d7d4a1); P1-035 and P1-036 are recorded done. The card says THE UNIT IS COMPLETE and it is not quite: one modified tracked file in the worktree, tests/test-agent-disposable.sh +162 lines, is the daemon-death measurement the round-9 brief asked for, and it is uncommitted. P1-037 is recorded partial for that reason and no other. Told to commit it, run it, mutation-prove it with the mutation its own text names (make the engine ignore SIGHUP - the mechanism for the SIGKILL half, since none of APEX's code runs then), make all three places say what was measured, leave the hedge the section itself flags, and then STOP rather than inventing more work. Handed the three integration decisions in its own files: paths.rs SCRATCH_ROOT_ENV won, client.rs's Observation-taking publish_hook won, inject.rs moved to &privilege::Caller."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",

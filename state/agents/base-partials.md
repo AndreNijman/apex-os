@@ -6,9 +6,21 @@ branch: task/base-partials (apex-os), task/base-partials-shell (apex-shell)
 base: apex-os e67fab9, apex-shell a90cef6 (both origin/roadmap/v2.2)
 
 ## NEXT
-BASE-018, BASE-002, BASE-016, BASE-005 are CLOSED (see RESULTS).
-Remaining work order: BASE-013, BASE-014 (wtype works — proved), BASE-010,
-BASE-009.
+Round 11 in progress. BASE-018, BASE-002, BASE-016, BASE-005 CLOSED (round 9/10
+RESULTS below). Both branches MERGED (not rebased) with origin/roadmap/v2.2
+today and pushed: apex-os task/base-partials == 1afd807, apex-shell
+task/base-partials-shell == 665a3cc — both were fast-forwards, my round-9/10
+commits are contained in the landed tip.
+
+**Exact next action:** BASE-013 criterion 3 — add a session-id -> user-facing
+name map to the greeter (`files/desktop/apex-greet/GreetContext.qml`, the
+`Name=` sed at :332 inside the wayland-sessions enumeration) so the carousel
+stops printing `labwc (APEX)` / `niri` / `Hyprland`, plus the apex-shell
+`MiscPage.qml:213-224` segmented control which labels compositors with raw
+lowercase ids and omits labwc entirely. DO NOT touch the backends'
+`displayName` — two suites pin it (check-compositor-backends.sh:112,
+compositor-facade-test.qml:279-285) and its contract is the adapter's own name.
+Then BASE-014 (wtype key-after-reconfigure), BASE-010, BASE-009.
 
 ### Round-10 correction to this card's own work order
 The previous NEXT said BASE-016 was still to do. It was already DONE at
