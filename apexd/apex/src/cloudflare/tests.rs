@@ -345,3 +345,28 @@ fn the_endpoints_are_the_ones_wrangler_uses() {
     assert_eq!(e.token, "https://dash.cloudflare.com/oauth2/token");
     assert_eq!(e.floor, Duration::from_secs(5));
 }
+
+#[test]
+fn status_json_calls_an_environment_a_section_that_binds_a_worker() {
+    // P1-006 gave `[cloudflare]` sub-tables that are not environments — `d1`,
+    // `kv`, `queues` and `hyperdrive` hold a project's resource ids. The JSON
+    // status listed every sub-table, so it would have called a KV namespace
+    // table an environment named `kv`, while the human-readable status — which
+    // has always required a `worker` key — did not. The two now agree.
+    use apex_secret_core::project::ProjectConfig;
+    use std::path::Path;
+    let config = ProjectConfig::parse(
+        Path::new("/p/apex.toml"),
+        "[identity.cloudflare]\naccount_id = \"0123456789abcdef0123456789abcdef\"\n\
+         [cloudflare.kv]\ncache = \"00112233445566778899aabbccddeeff\"\n\
+         [cloudflare.notes]\nnote = \"not an environment either\"\n\
+         [cloudflare.production]\nworker = \"project\"\n",
+    )
+    .expect("parses");
+    let named: Vec<String> = config
+        .sections(&["cloudflare"])
+        .into_iter()
+        .filter(|name| matches!(config.string(&["cloudflare", name, "worker"]), Ok(Some(_))))
+        .collect();
+    assert_eq!(named, vec!["production"]);
+}

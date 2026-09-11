@@ -560,7 +560,23 @@ fn status(json: bool) -> Result<i32> {
             "environments".into(),
             config
                 .as_ref()
-                .map(|c| serde_json::json!(c.sections(&["cloudflare"])))
+                // An environment is a `[cloudflare.<name>]` that binds a
+                // WORKER, which is what the human-readable output below has
+                // always printed. The JSON said "every sub-table", and the two
+                // disagreed the moment a project had a sub-table that was not
+                // an environment — `[cloudflare.kv]` and its three siblings are
+                // now exactly that, so `apex cf status --json` would have
+                // reported a KV namespace table as an environment called `kv`.
+                .map(|c| {
+                    let named: Vec<String> = c
+                        .sections(&["cloudflare"])
+                        .into_iter()
+                        .filter(|name| {
+                            matches!(c.string(&["cloudflare", name, "worker"]), Ok(Some(_)))
+                        })
+                        .collect();
+                    serde_json::json!(named)
+                })
                 .unwrap_or(serde_json::Value::Null),
         );
         println!("{}", serde_json::to_string_pretty(&out)?);
