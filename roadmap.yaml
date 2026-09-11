@@ -65,7 +65,7 @@ tasks:
 - id: BASE-002
   title: Preserve upstream TUI agent PTY runtime
   priority: P0
-  status: partial
+  status: done
   area: foundation
   depends_on: []
   acceptance:
@@ -76,16 +76,19 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Ran live with an isolated daemon on katana and L16. Attach, detach and persistence pass, a marker typed into a
-    detached session replayed exactly on reattach and survived a daemon kill and relaunch. Direct agent binaries
-    remain usable, claude, opencode, codex and kimi all print real upstream versions and resolve through npm paths
-    rather than an apex shim. Two defects block this. First, opencode and codex fail to start under the project
-    and strict sandboxes on the ordinary npm layout, because ~/.local/bin symlinks into ~/.local/lib/node_modules
-    and .local/lib is absent from TOOLCHAIN_RO (adapter.rs:50-56), so bwrap gets a dangling symlink; claude
-    survives only by falling back to a root-owned /usr/bin/claude that the other two do not have. Second,
-    Registry::new resets next_id to 1 on every daemon restart with no reconciliation against on-disk records
-    (apex-agentd/src/registry.rs:173-178), so sessions created after a restart overwrite earlier session records
-    and PTY logs at the same id.
+    CLOSED 2026-09-11 (round 10), landed on roadmap/v2.2 in merge 65bd5c7 of task/base-partials. The live half was
+    already proven: attach, detach and persistence on an isolated daemon on katana and the L16, a marker typed
+    into a detached session replayed exactly on reattach and survived a daemon kill and relaunch; claude,
+    opencode, codex and kimi all resolve to real upstream binaries through npm paths rather than an apex shim. The
+    two defects that held this open were STALE EVIDENCE, not open work - the roadmap's line numbers
+    (adapter.rs:50-56, registry.rs:173-178) are origin/main's, not this lineage's. 4b85f24 lets opencode and codex
+    start in a confined sandbox and 48a3872 stops a daemon restart overwriting the last sessions; both carry named
+    regression tests. cargo test -p apex-agent-core -p apex-agentd 671 passed / 0 failed, including
+    adapter::tests::a_symlinked_agent_reaches_the_package_its_bin_entry_points_at and
+    registry::tests::a_restart_neither_reuses_an_id_nor_overwrites_the_record_at_it. Mutation-proved both:
+    removing .local/lib/node_modules from TOOLCHAIN_RO reddens the first; restoring main's allocator reddens FIVE
+    registry tests. NOTE: the fix is .local/lib/node_modules and NOT .local/lib - adapter.rs asserts the wider
+    path is absent by design. Do not widen it.
 - id: BASE-003
   title: Preserve project/strict/unrestricted sandbox modes
   priority: P0
@@ -132,7 +135,7 @@ tasks:
 - id: BASE-005
   title: Preserve APEX Capsules and development environments
   priority: P0
-  status: partial
+  status: done
   area: foundation
   depends_on: []
   acceptance:
@@ -143,13 +146,22 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Ran live on katana. apex env create gputest --gpu nvidia made a real rootless podman/distrobox container with
-    /dev/nvidia0 and /dev/nvidiactl present inside it; apex env export wrote only a .desktop whose Exec routes
-    through distrobox-enter, no root and no polkit. apex-env refuses to run as root (files/system/libexec/apex-
-    env:592-605) so host /usr is never touched. Harness test-apex-env.sh 253/253, test-apex-verbs.sh 44/44,
-    against shipped libexec byte-identical to the branch. Two qualifications, AMD and hw device profiles are argv-
-    pinned but not hardware-verified, and isolation here means the read-only OS layer, not a security sandbox,
-    since a capsule shares the real HOME and gets /run/host read-write as the user.
+    CLOSED 2026-09-11 (round 10), landed on roadmap/v2.2 in merge 65bd5c7 of task/base-partials (2c77182). The one
+    outstanding qualification was that the amd and hw device profiles were argv-pinned and never hardware-
+    verified. Closed on the L16, which HAS the hardware (Radeon 780M, /dev/kfd present, the engine reads the
+    machine as amd). New tests/test-apex-env-devices-live.sh sources the SHIPPED files/system/libexec/apex-env and
+    calls gpu_flags, so a profile change changes the test, then hands exactly those flags to real rootless podman
+    and reads back whether each node is present and OPENABLE: 14 passed / 0 failed / 2 skipped. /dev/kfd and
+    /dev/dri/renderD128 both open inside the container with the amd profile's six arguments and both ABSENT
+    without them (negative control on every device assertion); /dev/bus/usb arrives for hw and not otherwise; none
+    adds nothing. The two skips are named: keep-groups is unverifiable here because amdgpu leaves /dev/kfd mode
+    0666, and nvidia has no device on this machine. Mutation-proved four ways, including that collapsing
+    gpu_flags' two printf lines FAILS the shape assertion rather than skipping past it. A DEFECT IN ITS OWN FIRST
+    COMMIT was found and fixed at 8a74816: the 'no container was left behind' assertion filtered podman ps -a on
+    the disposable engine's ^disp- prefix and could not fail - proven vacuous (five exited containers present,
+    suite still green) before being fixed. Standing qualification, unchanged and recorded rather than open:
+    capsule isolation is the read-only OS layer, not a security boundary - a capsule shares the real HOME and gets
+    /run/host read-write as the user. tests/test-apex-env.sh 265/0 on the landed tip.
 - id: BASE-006
   title: Preserve universal package abstraction
   priority: P0
@@ -363,7 +375,7 @@ tasks:
 - id: BASE-016
   title: Preserve disposable execution primitives
   priority: P0
-  status: partial
+  status: done
   area: foundation
   depends_on: []
   acceptance:
@@ -374,13 +386,17 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Ran live on katana. apex disposable run with --copy-in and --copy-out executed in a real container and tore
-    down completely, podman ps -a empty and the state tree gone, with copy-out content byte-identical on the host.
-    Ingress and egress are explicit and apex disposable plan prints the boundary including /run/host before
-    creating anything. Two gaps, the environment is not a security boundary by its own documentation and a write
-    to /run/host reached the real host filesystem when tested, so untrusted code is confined only by apex agent's
-    sandbox and not by this; and there is no tests/test-apex-disposable.sh, so the shipped shell script's teardown
-    fencing and image resolution have no shell-level coverage.
+    CLOSED 2026-09-11 (round 10), landed on roadmap/v2.2 in merge 65bd5c7 of task/base-partials (cf7df30). The
+    live half was already proven: apex disposable run with --copy-in and --copy-out executed in a real container
+    and tore down completely (podman ps -a empty, state tree gone, copy-out content byte-identical on the host),
+    and apex disposable plan prints the boundary including /run/host before creating anything. What held it open
+    was a FALSE PREMISE in its own evidence - 'there is no tests/test-apex-disposable.sh, so the shipped script
+    has no shell-level coverage'. tests/test-apex-recover.sh is that suite: it drives the shipped apex-disposable
+    through a stub capsule engine, and pr-validation.yml runs it in the static job, the one with no path filter.
+    Its five named holes are now filled. Counts re-run on the landed tip: tests/test-apex-recover.sh 98 passed / 0
+    failed structural, 220 passed / 0 failed with --with-binary. Standing qualification, recorded rather than
+    open: the environment is not a security boundary by its own documentation, and a write to /run/host reached
+    the real host filesystem when tested - untrusted code is confined by apex agent's sandbox, not by this.
 - id: BASE-017
   title: Preserve device handoff and remote compute primitives
   priority: P0
@@ -404,7 +420,7 @@ tasks:
 - id: BASE-018
   title: Preserve Boot v2 experimental path
   priority: P0
-  status: partial
+  status: done
   area: foundation
   depends_on: []
   acceptance:
@@ -415,14 +431,21 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Verified earlier this session (test-boot-v2.sh 60/60 structural, 85/85 with --with-binary, plus a green CI run
-    booting signed, unsigned, foreign and tampered UKIs under Secure-Boot-enforcing OVMF with swtpm). Reopened
-    from done because the EACCES sweep found a real defect in the same surface: a whole-directory efivarfs refusal
-    takes LoaderInfo down with StubInfo, so detect_bootloader falls back to the kernel cmdline and answers grub,
-    and the rescue-target route then offers GRUB-menu instructions on a systemd-boot and UKI machine. That is
-    wrong recovery advice rather than a wrong label. Fixed on roadmap/v2.2 with bootloader_unavailable carried
-    through to the route, and the Surface.bootloader label itself still prints grub with no caveat in the same
-    case, which is outstanding.
+    CLOSED 2026-09-11 (round 10), landed on roadmap/v2.2 in merge 65bd5c7 of task/base-partials (d385c96). The
+    boot half was already green: test-boot-v2.sh 60/60 structural and 85/85 --with-binary, plus CI booting signed,
+    unsigned, foreign and tampered UKIs under Secure-Boot-enforcing OVMF with swtpm. What reopened it was the
+    EACCES sweep's finding that a whole-directory efivarfs refusal took LoaderInfo down with StubInfo, so
+    detect_bootloader fell back to the kernel cmdline and answered grub - offering GRUB-menu recovery instructions
+    on a systemd-boot and UKI machine, which is wrong advice rather than a wrong label. The route was fixed
+    earlier; the remaining hole was that probe() consulted chain.bootloader_unavailable for the ROUTE and then
+    dropped it, so Surface could not carry it and both renderings of apex recover status printed a bare 'grub'
+    while apex boot status printed the caveat for the same machine. Now carried onto Surface with a caveat line
+    under the human label and a bootloaderUnavailable sibling key in the JSON (the VALUE is untouched: apex-
+    shell's RecoveryService.qml reads it and two shell suites pin the bare strings). The reason string stays out
+    of the human line because it is an efivarfs path plus an OS error, one token past the 96-column budget the
+    rendered report is measured against. cargo test -p apex 412 passed / 0 failed with 4 new tests; test-apex-
+    recover.sh --with-binary 201/0 (194 before), including a CHECKED seal - the suite walks mode 000 as root
+    first, so it proves the refusal is real before asserting through it.
 - id: P0-001
   title: Qualify current integrated image on real hardware
   priority: P0
@@ -785,16 +808,26 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Implemented on task/p0-013-request-origin, awaiting rebase. Section 7's table is reproduced as
-    Capability::ruling with a test that writes the same table out again as data. Project edit, tests and push run
-    remotely, checked at the three places that could have refused, and the broker's may_use_broker takes no origin
-    at all, which is the strongest form that claim can take. Root and unsafe-everything need a human, which also
-    closed a real hole, a systemd user timer running apex request allow is not a session and the previous check
-    let it through. A remote request needing local approval surfaces as an Origin line in the one prompt renderer
-    behind show, pending, ask and the interactive confirm, plus an ORIGIN column in the list. Partial for two
-    reasons: --origin-policy remote parses, stores and is refused by validate, but there is no working FIDO or
-    WebAuthn path behind it; and the root approval path is argued from evidence rather than tested, because
-    testing it needs a real sudo prompt.
+    PART-LANDED on roadmap/v2.2 2026-09-11 (round 10), merge 432e16c of task/p0-014-remote-lock (6 commits).
+    Section 7's table was already reproduced as Capability::ruling with a test that writes the same table out
+    again as data; the broker's may_use_broker takes no origin at all, which is the strongest form that claim can
+    take. What landed this round is the FIDO/WebAuthn path that --origin-policy remote previously parsed and had
+    nothing behind: enrolment, a one-issue-one-attempt challenge, and webauthn::redeem_and_verify as a PURE
+    FUNCTION in apex-agent-core rather than in the daemon - not for tidiness, but because the only thing in this
+    repository that can mint a VALID assertion is the Signer in webauthn.rs's own cfg(test) child, so the same
+    sequence written in apex-agentd could be tested against refusals and never once against a receipt it minted.
+    The redeem is FIRST, before the credential lookup and before a byte of the assertion is parsed, so every later
+    refusal has already spent the nonce; both halves are tested. Request/Response::ElevationChallenge appended
+    with NO protocol bump (the Event and ToolCheck precedent: an unknown cmd fails to deserialise and answers
+    bad_request, so the failure mode is losing an elevation, never gaining one). Nine mutants measured, eight
+    caught; the ninth is reported rather than dropped - the nonce tripwire in verify_for_challenge CANNOT be
+    killed, because the receipt is built from the challenge just redeemed so the two nonces agree by construction,
+    and the comment above it says exactly that. THE MEASURED RESULT OF THE HARNESS FIX (cca4442, 3c3abd3):
+    tests/test-privilege-requests.sh was 30 passed / 8 failed on the recorded baseline and is 39 passed / 0 failed
+    on this landed tip. unshare -r gives the test a real effective uid 0 with no sudo and no prompt, which is what
+    those assertions had been waiting for. PARTIAL because commit 4 (the enforcement wiring across protocol.rs,
+    elevation.rs, grants.rs, privilege.rs) and commit 5 (the validate_for relaxation) are still uncommitted in
+    /var/tmp/apex-work/wt-p0-014.
 - id: P0-015
   title: Lock-state policy for autonomous sessions
   priority: P0
@@ -809,16 +842,16 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Policy landed on task/p0-013-request-origin, not wired, and it cannot be until apex-shell changes. LockState
-    has four answers with Unreadable treated as locked and NoDisplaySession as unlocked, since a headless box has
-    no screen and answering locked there stops everything rather than protecting anything. LockPolicy::default is
-    section 7 verbatim and decide is checked over 8 policies by 7 origins by 4 states. There is no reader because
-    there is nothing to read: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind
-    reports LockedHint no on a session locked for an hour exactly as on one nobody has touched. A control-socket
-    verb was considered and rejected, logind accepts the hint only from the session owner and the daemon cannot
-    tell the shell from a managed session running as the same user. Dispatched as fix/locked-hint in apex-shell.
-    Criterion 2 also has no subject yet, both SystemAccess::Session and Unsafe are refused today so no short-lived
-    root grant exists to revoke, which is P0-006 and P0-007.
+    Shell half LANDED on roadmap/v2.2 2026-09-11 (round 10), apex-shell merge 665a3cc of task/p0-015-lock-tests
+    (bbec072). LockState and LockPolicy were already section 7 verbatim, decided over 8 policies by 7 origins by 4
+    states, with Unreadable treated as locked and NoDisplaySession as unlocked. The reader now exists and is
+    tested: 8d081ff had landed LockedHintService and the Lockscreen line that drives it with NO test of any kind,
+    and with the gap a change-signal always has - onSecureStateChanged fires on a CHANGE, so a shell restarted
+    while logind believed the session locked (a crash, a reload mid-lock) left LockedHint reading yes until
+    somebody locked and unlocked by hand, and apex-agentd polls exactly that property. All 22 apex-shell static
+    suites and all 17 node suites are green on the landed tip. STILL PARTIAL for the reason that has not moved:
+    criterion 2 has no subject yet. Both SystemAccess::Session and Unsafe are refused today, so no short-lived
+    root grant exists to revoke - that is P0-006 and P0-007.
 - id: P0-016
   title: Add Agent Settings page with password-gated Always Unrestricted toggle
   priority: P0
@@ -1574,7 +1607,7 @@ tasks:
 - id: P1-023
   title: Global push-to-talk routing
   priority: P1
-  status: todo
+  status: done
   area: voice
   depends_on: []
   acceptance:
@@ -1584,6 +1617,20 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    LANDED on roadmap/v2.2 2026-09-11 (round 10) in BOTH repos: apex-shell merge dc2283e of task/p1-023-handoff-
+    lifecycle (8 commits), apex-os merge 09846c9 of task/p1-023-push-to-talk-daemon (2 commits). Global push-to-
+    talk routing, end to end. Shell half: the verb wired through all three keybind generators, the microphone
+    indicator in CenterContent keyed on indicatorLabel !== '' so a REFUSAL is visible too, the 6s dismiss timer,
+    and the 'Speak to it' help section with both todo blocks. check-push-to-talk.sh 42/0, its node half 57
+    assertions, 14/14 mutants caught; check-agent-help.sh 24/0 with slopcheck TOTAL 0 and no new allowlist entry.
+    apex-os half: Request::Input { id, data }, session::write_input, privilege::refuse_input, apex agent input
+    <id> <text> [--submit], completion and doc parity, tests/session_input.rs; 11/11 mutants caught. THE DESIGN
+    FINDING, measured not argued: push-to-talk is a TOGGLE, because labwc and niri cannot fire on key RELEASE -
+    hold-to-talk is unimplementable on these compositors. The refusal in refuse_input is the load-bearing part: a
+    session may not type into a sibling (bytes on a PTY are indistinguishable from a person typing, so an agent
+    that could send them could borrow a sibling's grants), and a connection the kernel will not classify is
+    refused too rather than assumed human.
 - id: P1-024
   title: Cross-agent handoff packet
   priority: P1
@@ -1653,7 +1700,7 @@ tasks:
 - id: P1-029
   title: Represent local/remote/scheduled/cloud agent lifecycle types
   priority: P1
-  status: todo
+  status: done
   area: agent-runtime
   depends_on:
   - P1-020
@@ -1662,6 +1709,14 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    LANDED on roadmap/v2.2 2026-09-11 (round 10), apex-shell merge 4ba3b01 of task/p1-029-lifecycle-types
+    (ef3724a). The Agent Center says which KIND of agent a row is: src/services/agentlifecycle.js, the pill in
+    SessionRow and RemoteSessionRow, tests/agent-lifecycle-test.js and its ci.yml step. 48 passed / 0 failed,
+    10/10 mutants caught; on the landed tip all 22 static suites and all 17 node suites are green. THE FINDING
+    THAT MADE IT SMALL: apex-agentd has reported request_origin (7 values) on every session record since section 7
+    and the shell read NONE of them, so this was a shell change and not the cross-repo daemon job the roadmap
+    assumed.
 - id: P1-030
   title: Finish Fish agent integration
   priority: P1
@@ -2705,7 +2760,7 @@ tasks:
 - id: P2-010
   title: Hardware qualification database
   priority: P2
-  status: partial
+  status: done
   area: qualification
   depends_on:
   - P0-001
@@ -2715,15 +2770,14 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Hardware qualification database, first commit pushed as ee30c3b on task/p2-010-hardware-storage -- a machine's
-    compatibility record existed once and did not survive. The card carries the measurement that shapes the rest
-    of the unit, and it is a permission-denial-as-absence trap in two layers: `smartctl -j /dev/nvme0n1`
-    unprivileged exits 2 and returns a document with no health log, so a reader keying on the absence of
-    nvme_smart_health_information_log reports 'no SMART data' for a disk that has plenty; and `sudo smartctl -j
-    /dev/nvme0n1` exits 0 and ALSO returns no health log, because smartctl with no action option does nothing and
-    -a is what asks. Exit 0 plus an empty document is the same trap wearing root. Recorded by the orchestrator
-    from the agent card, not from a landing: this is pushed branch work that roadmap/v2.2 does NOT yet carry. A
-    fresh agent is working the item now and will supersede this line.
+    LANDED on roadmap/v2.2 2026-09-11 (round 10), merge 7da2571 of task/p2-010-hardware-storage. Hardware
+    qualification database: apex/src/qualify.rs and apex qualify, a machine compatibility record that now
+    persists. tests/test-apex-qualify.sh 27 passed / 0 failed on the landed tip. The measurement that shaped the
+    unit is kept because it is a permission-denial-as-absence trap in two layers: smartctl -j /dev/nvme0n1
+    unprivileged exits 2 and returns a document with NO health log, so a reader keying on the absence of
+    nvme_smart_health_information_log reports 'no SMART data' for a disk that has plenty - and sudo smartctl -j
+    exits 0 and ALSO returns no health log, because smartctl with no action option does nothing and -a is what
+    asks. Exit 0 plus an empty document is the same trap wearing root.
 - id: P2-011
   title: Agent cgroup resource budgets
   priority: P2
@@ -2735,6 +2789,14 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    The one item of the p2-010 unit still outstanding; its unit landed without it (merge 7da2571). Shape already
+    measured and handed forward, so it is not a fresh investigation: a NEW apexd/apex-agentd/src/budget.rs with a
+    one-line hook, because P1-020 put ~1,700 lines into apex-agentd and a new file merges where a refactor would
+    not. cpu, memory and pids delegate to app.slice; io is ABSENT at every level and must be a Reading carrying
+    that reason, never a budget of zero. systemd-run --user --scope needs no polkit prompt and no Delegate= drop-
+    in, measured killed at exactly 5s with exit 143. The live RuntimeMaxSec check needs a user bus, so it stays
+    opt-in and out of pr-validation.yml. Budgets must be proved against a test daemon, never the live apex-agentd.
 - id: P2-012
   title: Secure browser automation capsule
   priority: P2
@@ -2762,7 +2824,7 @@ tasks:
 - id: P2-014
   title: Build APEX Storage Manager and disk-health UX
   priority: P2
-  status: todo
+  status: done
   area: storage
   depends_on: []
   acceptance:
@@ -2773,10 +2835,21 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    LANDED on roadmap/v2.2 2026-09-11 (round 10), merge 7da2571 of task/p2-010-hardware-storage. Storage Manager
+    including apex storage erase and its refusal set, each arm naming its own reason rather than a generic
+    failure: Mounted, CarriesTheRunningSystem, IsTheEsp, NotAKnownBlockDevice, Unconfirmed, NeedsRoot,
+    CouldNotVerify, HasHolders, LoopDeviceInUse, BackingFileMismatch. A check that could not be performed is a
+    refusal, never a pass. tests/test-apex-storage.sh 40 passed / 0 failed on the landed tip. Mutation-proved on
+    the branch (see the unit card for the M1-M16 battery); one of the mutations proved the suite's own disk-serial
+    guard had been 96% BLIND - it reported the mutation in 1 of 25 runs before the fix and 25 of 25 after, and
+    seven checks in that file were the same silent shape. The destructive half runs against a loop device only,
+    never in pr-validation.yml, and asserts the sysfs backing_file really names the sparse file before anything is
+    written.
 - id: P2-015
   title: Integrate firmware and hardware lifecycle management
   priority: P2
-  status: todo
+  status: done
   area: firmware
   depends_on: []
   acceptance:
@@ -2787,6 +2860,17 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    LANDED on roadmap/v2.2 2026-09-11 (round 10), merge 7da2571 of task/p2-010-hardware-storage. Firmware
+    lifecycle readout, plus fwupd added to Containerfile.core with rpm -q and command -v fwupdmgr asserted on the
+    shipped artifact. tests/test-apex-firmware.sh 25 passed / 0 failed on the landed tip. The shapes the readout
+    must survive are pinned as inline miniatures rather than as captured fixtures - apexd-core/src/firmware.rs
+    REAL (7 rows) and the suite's devices_on_battery() (12 rows) - covering an absent Name key, an absent Version
+    key, a hex version, two rows sharing a name, four Secure Boot plugins, a uefi_capsule row that must not be
+    filtered with them, and require-ac-power on a row that consequently has no updatable flag. The 37 KB
+    scratchpad captures did NOT survive the session that made them; they are not needed, and fwupdmgr get-devices
+    --json answers as an ordinary user with no session bus and no prompt if the real document is ever wanted
+    again.
 - id: P2-016
   title: Multi-user, guest, kiosk and shared-machine support
   priority: P2
