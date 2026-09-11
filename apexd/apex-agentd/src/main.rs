@@ -1324,6 +1324,186 @@ mod lock_tests {
             .id
     }
 
+    /// A real child in its own process group, in the registry, live.
+    ///
+    /// `hold_session` sends SIGSTOP to a process GROUP, so a fake pgid would
+    /// either signal nothing or signal this test runner. `process_group(0)`
+    /// makes the child its own leader, so its pgid is its pid and the signal
+    /// reaches exactly one process that exists to receive it.
+    fn live_session(
+        d: &Arc<Daemon>,
+        id: u32,
+        origin: Option<RequestOrigin>,
+    ) -> (libc::pid_t, std::process::Child) {
+        use std::os::unix::process::CommandExt;
+        let child = unsafe {
+            std::process::Command::new("sleep")
+                .arg("60")
+                .pre_exec(|| {
+                    // Its own process group. `libc` rather than
+                    // `CommandExt::process_group`, which is the same call and
+                    // is already in use elsewhere in this repository.
+                    if libc::setpgid(0, 0) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                })
+                .spawn()
+        }
+        .expect("spawn sleep");
+        let pid = child.id() as libc::pid_t;
+        let info = apex_agent_core::protocol::SessionInfo {
+            id,
+            agent: "generic".into(),
+            program: "sleep".into(),
+            args: vec![],
+            cwd: "/tmp".into(),
+            project: None,
+            project_name: None,
+            worktree: None,
+            state: apex_agent_core::protocol::AgentState::Working,
+            detail: None,
+            paused: false,
+            policy: apex_agent_core::policy::AgentPolicy::default(),
+            request_origin: origin,
+            origin_source: None,
+            actor: None,
+            grant: None,
+            grant_expires_ms: None,
+            native_observed: None,
+            telemetry: None,
+            children: Vec::new(),
+            pid,
+            started: 0,
+            last_activity: 0,
+            // Live, which is what `hold_session` requires. Written out rather
+            // than defaulted so the one field the whole test depends on is
+            // visible in it.
+            exit_code: None,
+            exit_signal: None,
+            attached: 0,
+            checkpoint: None,
+            cols: 80,
+            rows: 24,
+            injected: 0,
+            capsule: None,
+        };
+        d.registry
+            .lock()
+            .expect("registry lock")
+            .insert(info, -1, pid, pid);
+        (pid, child)
+    }
+
+    /// The kernel's own word for what a process is doing, from
+    /// `/proc/<pid>/stat`. `T` is stopped.
+    ///
+    /// Read from /proc rather than inferred from `info.paused`, which is the
+    /// daemon's own bookkeeping: a `paused` flag set beside a signal that never
+    /// arrived is exactly the failure this is here to catch.
+    fn proc_state(pid: libc::pid_t) -> char {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        // The comm field can contain spaces and parentheses, so the state is
+        // the first field after the LAST ')'.
+        stat.rfind(')')
+            .and_then(|i| stat[i + 1..].split_whitespace().next())
+            .and_then(|f| f.chars().next())
+            .unwrap_or('?')
+    }
+
+    /// Wait for a process to reach `want`, up to two seconds.
+    ///
+    /// A signal is delivered asynchronously; asserting immediately after
+    /// `lock_tick` returns would be a race that passes on a fast machine.
+    fn settles_to(pid: libc::pid_t, want: char) -> char {
+        let mut last = '?';
+        for _ in 0..200 {
+            last = proc_state(pid);
+            if last == want {
+                return last;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        last
+    }
+
+    #[test]
+    fn a_remote_control_session_is_actually_stopped_by_a_lock_and_started_again_by_an_unlock() {
+        // P0-015 criterion 1, at the same depth criterion 2 is asserted at.
+        // §7: "ordinary agents may continue; Remote Control may continue IF
+        // CONFIGURED" — so with nothing configured a Remote Control session is
+        // held, and `LockPolicy::remote_control_continues` defaults to false
+        // for exactly that reading.
+        //
+        // The assertion is on /proc, not on `actions.hold` and not on
+        // `info.paused`: `step` already has tests for the decision, and a
+        // `paused` flag is the daemon agreeing with itself. What had never
+        // been asserted is that a process actually stops.
+        let sb = Sandbox::new();
+        let d = daemon();
+        let (pid, mut child) = live_session(&d, 11, Some(RequestOrigin::RemoteControl));
+        let mut watch = LockWatch::new();
+        let mut ending = Vec::new();
+        let now = 10_000;
+
+        lock_tick(&d, &mut watch, &mut FakeScreen(LockState::Unlocked), &mut ending, now);
+        assert_ne!(proc_state(pid), 'T', "an unlocked screen stopped a session");
+
+        lock_tick(&d, &mut watch, &mut FakeScreen(LockState::Locked), &mut ending, now + 1);
+        let state = settles_to(pid, 'T');
+        assert_eq!(state, 'T', "the screen locked and the session is still running");
+        let paused = d
+            .registry
+            .lock()
+            .expect("registry lock")
+            .list()
+            .into_iter()
+            .any(|h| {
+                let s = h.lock().expect("session lock");
+                s.info.id == 11 && s.info.paused
+            });
+        assert!(paused, "the process stopped but the record does not say so");
+
+        // And an unlock starts it again. A hold that could not be lifted would
+        // be a lock policy that ends every Remote Control session permanently.
+        lock_tick(&d, &mut watch, &mut FakeScreen(LockState::Unlocked), &mut ending, now + 2);
+        let state = settles_to(pid, 'S');
+        assert_ne!(state, 'T', "the screen unlocked and the session is still stopped");
+
+        // SIGKILL, not SIGTERM: a stopped process does not act on SIGTERM
+        // until it is continued, and this one may have been left stopped if
+        // the assertions above failed.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let _ = child.wait();
+        drop(sb);
+    }
+
+    #[test]
+    fn remote_control_keeps_running_across_a_lock_when_the_owner_configured_it() {
+        // "may continue IF CONFIGURED" — the other half, and what makes the
+        // test above about the DEFAULT rather than about `hold_session` being
+        // the only thing `lock_tick` can do. This is Andre's own setting:
+        // `apex agent lock --remote continue`.
+        let sb = Sandbox::new();
+        sb.with_lock_policy(r#"{"lock": {"remote_control_continues": true}}"#);
+        let d = daemon();
+        let (pid, mut child) = live_session(&d, 12, Some(RequestOrigin::RemoteControl));
+        let mut watch = LockWatch::new();
+        let mut ending = Vec::new();
+        let now = 10_000;
+
+        lock_tick(&d, &mut watch, &mut FakeScreen(LockState::Unlocked), &mut ending, now);
+        lock_tick(&d, &mut watch, &mut FakeScreen(LockState::Locked), &mut ending, now + 1);
+        // Give a wrong implementation the same 2s the other test gives a right
+        // one, so this is not passing merely by being read too early.
+        let state = settles_to(pid, 'T');
+        assert_ne!(state, 'T', "`--remote continue` was configured and the session was stopped anyway");
+
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let _ = child.wait();
+        drop(sb);
+    }
+
     #[test]
     fn a_root_grant_is_gone_after_the_screen_locks_and_the_default_is_what_does_it() {
         // P0-015 criterion 2. Asserted on `active_for` — the authority's own
