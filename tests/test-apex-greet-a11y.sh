@@ -86,7 +86,12 @@ section "the staged surface is the shipped one"
 # A staging step that silently truncated, or copied an older file, would make
 # every assertion below a statement about something this repository does not
 # ship. Checked, never assumed.
-if cmp -s "$SURFACE" "$STAGE/GreetSurface.qml"; then
+# sha256sum rather than cmp: coreutils is everywhere, diffutils is not — a
+# minimal Fedora container has no `cmp`, and this suite is run inside one by
+# pr-validation.yml because the Ubuntu runner's Qt is too old for the greeter's
+# QtQuick.Effects import. A missing tool must not read as a staging mismatch.
+sum_of() { sha256sum < "$1" | cut -d' ' -f1; }
+if [ "$(sum_of "$SURFACE")" = "$(sum_of "$STAGE/GreetSurface.qml")" ]; then
     ok "GreetSurface.qml staged byte for byte"
 else
     bad "GreetSurface.qml staged byte for byte" "the staged copy differs from the shipped file"
