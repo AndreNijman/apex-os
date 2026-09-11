@@ -2266,11 +2266,28 @@ fn settings_with_secret(
                 .to_string(),
         ));
     };
+    // **Every existing binding goes back as `inherit`, and not as it arrived.**
+    //
+    // A `secret_text` binding's `text` is `writeOnly` AND required in
+    // Cloudflare's own schema: the GET returns the binding without its value,
+    // and sending that object back would either be refused for a missing
+    // required field or quietly write an empty secret. The same is true of
+    // every other kind that carries write-only material. `inherit` is the shape
+    // the API provides for exactly this — "keep the binding that is already
+    // there" — and using it for ALL of them, rather than enumerating which
+    // kinds are safe to echo, is the version that stays correct when Cloudflare
+    // adds the thirty-seventh kind.
     let mut bindings: Vec<serde_json::Value> = body
         .get("result")
         .and_then(|r| r.get("bindings"))
         .and_then(|b| b.as_array())
-        .cloned()
+        .map(|existing| {
+            existing
+                .iter()
+                .filter_map(|b| b.get("name").and_then(|n| n.as_str()))
+                .map(|name| serde_json::json!({"type": "inherit", "name": name}))
+                .collect()
+        })
         .unwrap_or_default();
     // Same name, same binding: a worker cannot read two things under one name,
     // so this replaces rather than adding a second.

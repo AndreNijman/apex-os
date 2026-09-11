@@ -317,8 +317,13 @@ fn answer(method: &str, target: &str) -> (u16, String) {
             // A binding that is already there. `secret.bind` sends the whole
             // list back, so a build that forgot to merge would take this one
             // off the worker — silently, and only noticed in production.
+            //
+            // The `secret_text` one is the hazard: its `text` is `writeOnly`
+            // and REQUIRED, so the API returns it without a value and a build
+            // that echoed the object back would write an empty secret or be
+            // refused for a missing field.
             ok(
-                r#"{"bindings":[{"type":"plain_text","name":"GREETING","text":"hi"}],"compatibility_date":"2026-09-01","usage_model":"standard"}"#,
+                r#"{"bindings":[{"type":"plain_text","name":"GREETING","text":"hi"},{"type":"secret_text","name":"OLD_SECRET"}],"compatibility_date":"2026-09-01","usage_model":"standard"}"#,
             )
         }
         ("POST", p) if p.ends_with("/versions") => {
@@ -2605,8 +2610,23 @@ fn a_binding_is_a_reference_and_the_worker_s_other_bindings_survive_it() {
     // from: Cloudflare never returns it.
     assert!(!patch.body.contains("\"text\":\"" ) || patch.body.contains("GREETING"), "{}", patch.body);
     assert!(!patch.body.contains(SECRET_VALUE), "{}", patch.body);
-    // ...and the binding that was already there is still there.
+    // ...and the bindings that were already there are still there, as
+    // `inherit` — which is what keeps `OLD_SECRET`'s value. Sending that one
+    // back the way it arrived, with no `text`, is how a build silently empties
+    // a secret it was never asked to touch.
     assert!(patch.body.contains("GREETING"), "an existing binding was dropped: {}", patch.body);
+    assert!(patch.body.contains("OLD_SECRET"), "an existing secret binding was dropped: {}", patch.body);
+    assert!(
+        patch.body.contains(r#"{"name":"OLD_SECRET","type":"inherit"}"#)
+            || patch.body.contains(r#"{"type":"inherit","name":"OLD_SECRET"}"#),
+        "an existing secret binding was sent back without its value instead of inherited: {}",
+        patch.body
+    );
+    assert!(
+        !patch.body.contains(r#""type":"secret_text""#),
+        "a write-only binding was echoed back: {}",
+        patch.body
+    );
 }
 
 #[test]
