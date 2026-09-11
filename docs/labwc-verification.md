@@ -34,7 +34,8 @@ you have not walked it, it has not been walked.
 ## Screen sharing and portals
 
 The automated test proves the config names installed backends. It cannot prove a
-video call actually gets a picture. Log into **labwc (APEX)** and check:
+video call actually gets a picture. Log into **APEX Floating** (the session
+picker's name for labwc) and check:
 
 - [ ] **Firefox** — screen share in a Jitsi/Meet call. Whole screen, then a
       single window.

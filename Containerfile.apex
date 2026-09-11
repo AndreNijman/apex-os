@@ -147,6 +147,34 @@ RUN set -eux; \
     grep -q 'defaultSession: "hyprland"' /usr/share/apex-greet/GreetContext.qml \
         || { echo "FATAL: greeter no longer names its default session; apex-gaming would sort first and become the default"; exit 1; }; \
     grep -q 'ctx.defaultSession' /usr/share/apex-greet/GreetContext.qml; \
+    # ── The picker's WORDING, swept over the complete set ──────────────────
+    # Every session entry exists by now: niri and hyprland from Containerfile
+    # .base, apex-labwc from the labwc stage, apex-gaming from the COPY above.
+    # BASE-013's third criterion is that compositor names stay implementation
+    # details for normal users, and `Name=` is the only line of these files a
+    # user ever reads — the greeter renders it verbatim at every login. A
+    # regression here is silent: the session still works, it just tells every
+    # user which compositor project APEX vendored. The sweep is over the whole
+    # directory rather than the files this repo owns, so the next package that
+    # drops a session entry in is caught by the build instead of by a user.
+    # `swept` is not decoration. A sweep over a directory that turned out to be
+    # empty — a moved path, a COPY that landed a tier later — would print
+    # nothing and exit 0, and this gate would be a build step that cannot fail.
+    # The count is asserted afterwards, and the whole block is what
+    # tests/test-apex-greet-sessions.sh lifts out and runs.
+    swept=0; \
+    for f in /usr/share/wayland-sessions/*.desktop; do \
+        n="$(sed -n 's/^Name=//p' "$f" | head -n1 | tr 'A-Z' 'a-z')"; \
+        [ -n "$n" ] || { echo "FATAL: $f has no Name="; exit 1; }; \
+        case "$n" in \
+            *labwc*|*hyprland*|*niri*|*sway*|*wlroots*|*openbox*|*gamescope*|*wayfire*|*river*) \
+                echo "FATAL: $f shows users the compositor's name: ${n}"; exit 1 ;; \
+        esac; \
+        echo "session wording: $(basename "$f" .desktop) -> $(sed -n 's/^Name=//p' "$f" | head -n1)"; \
+        swept=$((swept + 1)); \
+    done; \
+    [ "$swept" -ge 4 ] || { echo "FATAL: the wording sweep saw $swept session entries; it expected at least 4 (niri, hyprland, apex-labwc, apex-gaming)"; exit 1; }; \
+    echo "session picker: $swept entries checked, none names a compositor"; \
     echo "gaming session: shipped, TryExec-gated, hidden until its packages are installed"
 
 # ── The image carries its GPU drivers; assert it, here, at the end ─────────
