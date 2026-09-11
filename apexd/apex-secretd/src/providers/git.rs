@@ -360,6 +360,7 @@ mod tests {
             project: "/home/x/p",
             service: &info,
             owner: &owner,
+            audit_id: "test",
         };
         let op = GitProvider::op(&req).expect("a checked request must parse");
         assert_eq!(op.remote(), "origin");
@@ -382,6 +383,7 @@ mod tests {
             project: "/home/x/p",
             service: &info,
             owner: &owner,
+            audit_id: "test",
         };
         assert!(matches!(
             GitProvider::op(&req),
@@ -397,6 +399,7 @@ mod tests {
             project: "/home/x/p",
             service: &info,
             owner: &owner,
+            audit_id: "test",
         };
         assert!(matches!(
             GitProvider::op(&req),
@@ -419,6 +422,7 @@ mod tests {
             project: "/nonexistent-apex-secretd-provider-test",
             service: &info,
             owner: &owner,
+            audit_id: "test",
         };
         assert!(matches!(
             GitProvider.bind(&req),

@@ -495,6 +495,7 @@ impl Service {
             project: &project,
             service: &info,
             owner: &owner,
+            audit_id: &audit_id,
         };
         let bound = match backend.bind(&req) {
             Ok(bound) => bound,

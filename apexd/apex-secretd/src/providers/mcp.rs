@@ -250,6 +250,7 @@ mod tests {
             project: "/tmp",
             service: &service,
             owner: &owner,
+            audit_id: "test",
         };
         let e = McpProvider::new(std::env::temp_dir()).bind(&req).expect_err("no path, no endpoint");
         assert!(e.to_string().contains("--path"), "{e}");
@@ -280,6 +281,7 @@ mod tests {
             project: "/tmp",
             service: &service,
             owner: &owner,
+            audit_id: "test",
         };
         let provider = McpProvider::new(std::env::temp_dir());
         assert!(provider.bind(&req).is_err());

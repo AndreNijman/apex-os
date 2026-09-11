@@ -81,11 +81,16 @@ pub enum IdShape {
     /// still checked as strictly as the generated shapes, for the same reason:
     /// it is interpolated into a URL path.
     ///
-    /// Written here with §13.10's two tables rather than with §13.11's, because
-    /// *what an id looks like* is one question and this enum is where it is
-    /// answered. `cloudflare.ai-gateway.*` is what reaches it.
-    #[allow(dead_code)]
     Slug,
+    /// A Workers AI model name: `@cf/meta/llama-3.1-8b-instruct`.
+    ///
+    /// The schema gives `model_name` no pattern at all, so this is written from
+    /// the documented shape rather than copied from one: an `@`, then
+    /// `/`-separated segments of letters, digits, `.`, `_` and `-`. It is the
+    /// only id here that starts with a character `operation::valid_name` would
+    /// refuse, which is precisely why a model has to be bound rather than
+    /// named.
+    Model,
 }
 
 impl IdShape {
@@ -95,6 +100,7 @@ impl IdShape {
             IdShape::Uuid => valid_uuid(id),
             IdShape::Hex32OrUuid => valid_id(id) || valid_uuid(id),
             IdShape::Slug => valid_slug(id),
+            IdShape::Model => valid_model(id),
         }
     }
 
@@ -110,6 +116,7 @@ impl IdShape {
                 "a lower-case slug of letters, digits and '_', with '-' between \
                  groups, like my-gateway"
             }
+            IdShape::Model => "a model name, like @cf/meta/llama-3.1-8b-instruct",
         }
     }
 }
@@ -139,6 +146,14 @@ pub const RESOURCES: &[(&str, IdShape, &str)] = &[
     // — this project's operations reach the secrets in the stores its own file
     // lists and no others.
     ("secrets", IdShape::Hex32, "Secrets Store store"),
+    // §13.11's two. The model table is the one that looks unnecessary and is
+    // not: `@cf/meta/llama-3.1-8b-instruct` cannot be a `Syntax::Name` — the
+    // grammar wants an alphanumeric first character — so a model could not be
+    // named as a resource even if this build wanted the agent to choose one.
+    // Binding it is the only way, and it is also the right way: §13.14's cost
+    // guardrails start with the owner deciding which models a project may run.
+    ("gateways", IdShape::Slug, "AI Gateway"),
+    ("models", IdShape::Model, "model"),
 ];
 
 /// What one of those tables says about a name.
@@ -488,6 +503,35 @@ fn valid_uuid(id: &str) -> bool {
 /// own file.
 pub fn valid_store_id(id: &str) -> bool {
     valid_id(id)
+}
+
+/// A Workers AI model name, as it appears in a URL path.
+///
+/// `@` then `/`-separated segments. Strict about the same things every other
+/// shape here is strict about, and one more: no segment may be `.` or `..`,
+/// because this is interpolated into a path and a model name is the one id in
+/// this file that legitimately contains slashes.
+fn valid_model(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix('@') else {
+        return false;
+    };
+    if rest.is_empty() || rest.len() > 120 {
+        return false;
+    }
+    let segments: Vec<&str> = rest.split('/').collect();
+    // `@cf/author/model` is the documented shape; two segments is the fewest
+    // that can name anything.
+    if segments.len() < 2 {
+        return false;
+    }
+    segments.iter().all(|segment| {
+        !segment.is_empty()
+            && *segment != "."
+            && *segment != ".."
+            && segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    })
 }
 
 fn valid_id(id: &str) -> bool {
@@ -925,6 +969,64 @@ worker = "project"
         }
         // ...and the shape a real one has is accepted.
         assert!(binding(FULL).account().is_ok());
+    }
+
+    #[test]
+    fn a_model_name_is_checked_as_strictly_as_every_other_id() {
+        // A model name is the one id in this file that legitimately contains
+        // slashes, and it is interpolated into the path of a call that spends
+        // money. Every other shape here can rely on "no slashes" doing the
+        // work; this one cannot, so it says what a segment may be instead.
+        for evil in [
+            "cf/meta/llama-3.1-8b-instruct",       // no '@' at all
+            "@",                                   // nothing after it
+            "@cf",                                 // one segment names nothing
+            "@cf/../../accounts/somebody-else/ai", // the reason segments are checked
+            "@cf/./llama",
+            "@cf//llama",                          // an empty segment
+            "@cf/meta/llama?per_page=1",           // a query, not a name
+            "@cf/meta/llama#x",
+            "@cf/meta/llama%2e%2e",
+            "@cf/meta/llama instruct",             // a space
+            "@cf/meta/llama\n",
+        ] {
+            let text = format!(
+                "[identity.cloudflare]\naccount_id = \"0123456789abcdef0123456789abcdef\"\n\
+                 [cloudflare.models]\nfast = \"{}\"\n",
+                evil.escape_debug()
+            );
+            let config = ProjectConfig::parse(Path::new("/p/apex.toml"), &text).expect("parses");
+            let err = Binding::of(&config).unwrap_err();
+            assert!(
+                matches!(err, BindingError::BadId { .. }),
+                "'{}' was accepted as a model name",
+                evil.escape_debug()
+            );
+        }
+
+        // ...and the documented shape is accepted, from Cloudflare's own
+        // Workers AI REST example.
+        let good = "[identity.cloudflare]\naccount_id = \"0123456789abcdef0123456789abcdef\"\n\
+                    [cloudflare.models]\nfast = \"@cf/meta/llama-3.1-8b-instruct\"\n\
+                    [cloudflare.gateways]\nmain = \"apex-gateway\"\n";
+        let b = binding(good);
+        assert_eq!(b.resource("models", "fast").expect("bound").id, "@cf/meta/llama-3.1-8b-instruct");
+        assert_eq!(b.resource("gateways", "main").expect("bound").id, "apex-gateway");
+
+        // A gateway id is a slug, and a slug that is really a path is not one.
+        for evil in ["../other", "Apex-Gateway", "apex gateway", "apex/gateway"] {
+            let text = format!(
+                "[identity.cloudflare]\naccount_id = \"0123456789abcdef0123456789abcdef\"\n\
+                 [cloudflare.gateways]\nmain = \"{}\"\n",
+                evil.escape_debug()
+            );
+            let config = ProjectConfig::parse(Path::new("/p/apex.toml"), &text).expect("parses");
+            assert!(
+                matches!(Binding::of(&config).unwrap_err(), BindingError::BadId { .. }),
+                "'{}' was accepted as a gateway id",
+                evil.escape_debug()
+            );
+        }
     }
 
     #[test]

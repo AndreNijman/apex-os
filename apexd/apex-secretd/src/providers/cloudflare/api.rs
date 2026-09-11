@@ -149,6 +149,38 @@ pub struct Call {
     /// Path under [`API_PREFIX`], leading slash included.
     pub path: String,
     pub body: Body,
+    /// Extra request headers, beyond the ones every call carries.
+    ///
+    /// The NAME is `&'static str` — it comes out of this build and never out of
+    /// a request, so there is no header a caller can invent. The value is a
+    /// `String` because some of them are composed (a gateway id from the
+    /// project's file, a metadata document built here), and every byte of it is
+    /// checked against [`printable`] before it reaches curl's configuration:
+    /// [`quoted`] escapes `\` and `"` and does nothing about a newline, and a
+    /// newline in a header value is a second configuration line.
+    pub headers: Vec<(&'static str, String)>,
+}
+
+impl Call {
+    /// A call with no extra headers, which is all of them but two.
+    pub fn new(method: &'static str, path: String, body: Body) -> Call {
+        Call {
+            method,
+            path,
+            body,
+            headers: Vec::new(),
+        }
+    }
+}
+
+/// Whether every byte of a header value is printable ASCII.
+///
+/// The guard that makes [`Call::headers`] safe to build from composed strings.
+/// A control character would end the curl configuration line early and start
+/// another; anything above `0x7e` is not something this build has any business
+/// putting in a header.
+pub fn printable(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 4096 && value.bytes().all(|b| (0x20..=0x7e).contains(&b))
 }
 
 /// What came back.
@@ -189,6 +221,8 @@ pub enum TransportError {
     NoScratch(String),
     /// The child ran but its output could not be understood.
     Unreadable,
+    /// A header this build composed carries something that cannot go in one.
+    BadHeader(&'static str),
 }
 
 impl std::fmt::Display for TransportError {
@@ -209,6 +243,11 @@ impl std::fmt::Display for TransportError {
             TransportError::NoScratch(reason) => {
                 write!(f, "a working file for the request could not be made: {reason}")
             }
+            TransportError::BadHeader(name) => write!(
+                f,
+                "the '{name}' header this build composed carries a character \
+                 that cannot go in a header, so the request was not made"
+            ),
             TransportError::Unreadable => f.write_str(
                 "the api client returned something this build could not read as \
                  a response",
@@ -347,6 +386,16 @@ pub fn call(
         "header = {}\n",
         quoted(&format!("User-Agent: apex-secretd/{}", env!("CARGO_PKG_VERSION")))
     ));
+
+    for (name, value) in &request.headers {
+        // Refused rather than sanitised. A value this build composed and cannot
+        // send is a bug in this build, and quietly stripping the byte that
+        // makes it unsendable would hide it.
+        if !printable(value) {
+            return Err(TransportError::BadHeader(name));
+        }
+        config.push_str(&format!("header = {}\n", quoted(&format!("{name}: {value}"))));
+    }
 
     match &request.body {
         Body::None => {}
@@ -575,11 +624,7 @@ mod tests {
         let owner = crate::broker::owner(unsafe { libc::getuid() }).expect("own uid");
         let reply = call(
             &Api::loopback(9),
-            &Call {
-                method: "GET",
-                path: "/accounts".to_string(),
-                body: Body::None,
-            },
+            &Call::new("GET", "/accounts".to_string(), Body::None),
             &SecretValue::new(b"apex-cf-unreachable-token".to_vec()),
             &owner,
         )
@@ -592,6 +637,64 @@ mod tests {
         // And the credential is not in it, which is the reason this comes back
         // as a Reply the framework scrubs rather than as an Err it does not.
         assert!(!reply.body.contains("apex-cf-unreachable-token"), "{}", reply.body);
+    }
+
+    /// The guard at the point where it matters, not the predicate behind it.
+    ///
+    /// [`printable`] has its own test, but a test of a predicate stays green if
+    /// the caller stops consulting it. This one goes through [`call`], which is
+    /// the only thing that writes a header into curl's configuration file —
+    /// where [`quoted`] escapes `\` and `"` and does nothing whatever about a
+    /// newline, and a newline is a second configuration line: another header,
+    /// or an option like `output` pointed somewhere it should not be.
+    ///
+    /// Port 9 again, so nothing is contacted. Which is itself the assertion:
+    /// the refusal must come back **before** the request is built, so a
+    /// connection that would otherwise report status 0 never even happens.
+    #[test]
+    fn a_header_carrying_a_second_line_is_refused_before_curl_is_configured() {
+        // Safe: getuid cannot fail.
+        let owner = crate::broker::owner(unsafe { libc::getuid() }).expect("own uid");
+        for evil in ["one\ntwo", "one\r\nheader: injected", "one\u{0}two", ""] {
+            let request = Call {
+                method: "POST",
+                path: "/accounts".to_string(),
+                body: Body::None,
+                headers: vec![("cf-aig-metadata", evil.to_string())],
+            };
+            let error = call(
+                &Api::loopback(9),
+                &request,
+                &SecretValue::new(b"apex-cf-header-token".to_vec()),
+                &owner,
+            )
+            .expect_err(&format!("'{}' was sent", evil.escape_debug()));
+            assert!(
+                matches!(error, TransportError::BadHeader("cf-aig-metadata")),
+                "'{}' produced {error:?}",
+                evil.escape_debug()
+            );
+            // Named in the message, because a build that cannot send a header it
+            // composed has a bug and the reader needs to know which header.
+            assert!(error.to_string().contains("cf-aig-metadata"), "{error}");
+        }
+
+        // And a well-formed one is not refused — so this is a check on the
+        // value and not a refusal of every extra header.
+        let fine = Call {
+            method: "POST",
+            path: "/accounts".to_string(),
+            body: Body::None,
+            headers: vec![("cf-aig-gateway-id", "apex-gateway".to_string())],
+        };
+        let reply = call(
+            &Api::loopback(9),
+            &fine,
+            &SecretValue::new(b"apex-cf-header-token".to_vec()),
+            &owner,
+        )
+        .expect("a printable header must be sendable");
+        assert_eq!(reply.status, 0, "nothing is listening on discard");
     }
 
     #[test]
