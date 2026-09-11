@@ -64,6 +64,47 @@ const APEX: &str = env!("CARGO_BIN_EXE_apex");
 /// repository has already shipped once — see the comment in
 /// `apex-agentd/tests/session_input.rs` about four tests reporting ok in
 /// 0.13 s having asserted nothing.
+/// Every environment name this fixture must pin before it runs anything.
+///
+/// This is not tidiness. `paths::config_home()` reads `$XDG_CONFIG_HOME` BEFORE
+/// falling back to `$HOME/.config`, so overriding HOME does NOT redirect it: on
+/// any machine where that variable is exported — and it is, on plenty — this
+/// suite ran against the developer's own `~/.config/apex`, and the `apex task
+/// new` below wrote a real task into their real `tasks.toml`. That is outside
+/// the fixture directory, so `Drop` never cleaned it up, and the suite was not
+/// re-runnable afterwards. The same resolution governs `blueprint.toml`,
+/// `memory.toml` and `games.toml`, which is why the name is pinned for every
+/// command rather than only the ones that write tasks.
+const PINNED_ENV: [&str; 5] = [
+    "XDG_RUNTIME_DIR",
+    "XDG_STATE_HOME",
+    "XDG_CONFIG_HOME",
+    "HOME",
+    apex_agent_core::paths::SCRATCH_ROOT_ENV,
+];
+
+/// Refuse to run a command that could reach outside the fixture.
+///
+/// The value of this is that it fires for the name NOBODY THOUGHT OF. Two have
+/// already been missed here: `SCRATCH_ROOT_ENV`, whose comment explaining the
+/// identical mistake sits a few lines below, and then `XDG_CONFIG_HOME` in the
+/// same breath. A fixture that forgets one does not fail loudly — it silently
+/// edits the developer's files — so the check has to be structural, and it has
+/// to run on the command BEFORE it is spawned.
+fn assert_hermetic(what: &str, cmd: &Command) {
+    for name in PINNED_ENV {
+        let pinned = cmd
+            .get_envs()
+            .any(|(k, v)| k == std::ffi::OsStr::new(name) && v.is_some());
+        assert!(
+            pinned,
+            "{what} does not pin ${name}, so it can read and write the developer's \
+             real files instead of this fixture's. Every name in PINNED_ENV has to \
+             be set on the command."
+        );
+    }
+}
+
 fn daemon_bin() -> PathBuf {
     let p = Path::new(APEX)
         .parent()
@@ -107,7 +148,8 @@ impl Harness {
         let state = root.join("state");
         let home = root.join("home");
         let repo = root.join("project");
-        for d in [&runtime, &state, &home, &repo] {
+        let config = root.join("config");
+        for d in [&runtime, &state, &home, &repo, &config] {
             std::fs::create_dir_all(d).ok()?;
         }
 
@@ -121,9 +163,12 @@ impl Harness {
         git(&repo, &["add", "README.md"])?;
         git(&repo, &["commit", "-qm", "first"])?;
 
-        let child = Command::new(daemon_bin())
-            .env("XDG_RUNTIME_DIR", &runtime)
+        let mut cmd = Command::new(daemon_bin());
+        cmd.env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
+            // `HOME` is not enough on its own: config_home reads this first.
+            // See PINNED_ENV.
+            .env("XDG_CONFIG_HOME", &config)
             .env("HOME", &home)
             // Without this, `paths::scratch_root` falls back to the fixed
             // `/tmp/apex-agent`, which is the LIVE daemon's scratch root: a
@@ -135,9 +180,9 @@ impl Harness {
                 root.join("scratch"),
             )
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
+            .stderr(Stdio::null());
+        assert_hermetic("the test daemon", &cmd);
+        let child = cmd.spawn().ok()?;
 
         let socket = runtime.join("apex-agentd").join("control.sock");
         let h = Harness {
@@ -258,14 +303,24 @@ impl Harness {
 
     /// Run the CLI under test against this fixture's daemon.
     fn apex(&self, args: &[&str]) -> Output {
-        Command::new(APEX)
-            .args(args)
+        let mut cmd = Command::new(APEX);
+        cmd.args(args)
             .current_dir(&self.repo)
             .env("XDG_RUNTIME_DIR", self.root.join("run"))
             .env("XDG_STATE_HOME", &self.state)
+            // The CLI resolves config_home exactly as the daemon does, and
+            // `apex task new` WRITES through it. See PINNED_ENV.
+            .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("HOME", self.root.join("home"))
-            .output()
-            .expect("run apex")
+            // The same scratch root the daemon was given, so the CLI looks for
+            // sessions where this fixture's daemon actually put them rather
+            // than in the live daemon's /tmp/apex-agent.
+            .env(
+                apex_agent_core::paths::SCRATCH_ROOT_ENV,
+                self.root.join("scratch"),
+            );
+        assert_hermetic("the apex CLI under test", &cmd);
+        cmd.output().expect("run apex")
     }
 
     /// Record a system-access grant against `session`, the way an approved
