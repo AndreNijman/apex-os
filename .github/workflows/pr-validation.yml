@@ -1185,37 +1185,35 @@ jobs:
       # It opens no window and starts no compositor; WAYLAND_DISPLAY is removed
       # from the environment before the runner is invoked. It skips with
       # status 0 where qmltestrunner is not installed.
-      # Both greeter suites skip with status 0 where their tools are absent,
-      # and a skip that is never noticed is the way a suite goes quietly
-      # vacuous — so the tools are installed rather than hoped for.
+      # ubuntu-24.04 ships Qt 6.4, and the greeter imports QtQuick.Effects for
+      # its wallpaper blur — MultiEffect is Qt 6.5 and later. So this suite can
+      # never run on the runner itself: apt has no qml6-module-qtquick-effects
+      # to install, the surface would fail to build, and the suite would skip on
+      # every PR for ever. A skip nobody notices is how a suite goes quietly
+      # vacuous, which is the failure this whole unit exists to measure.
       #
-      # qmltestrunner builds the real GreetSurface.qml, which imports
-      # QtQuick.Effects for its wallpaper blur, so qml6-module-qtquick-effects
-      # is as load-bearing as the runner itself: without it the surface fails
-      # to load and the suite reports a load failure rather than a skip.
+      # So it runs in a Fedora container, which is what APEX is built from
+      # anyway — the Qt the greeter actually ships against rather than the one
+      # the runner happens to carry. Verified by running it: 22 assertions, same
+      # result as on a Fedora workstation.
       #
-      # Tolerant in the same way the labwc step above is: a failed install is
-      # reported and the suites are left to skip, because reddening the whole
-      # job over a missing test dependency is worse than not running the test.
-      - name: Install the Qt QML test runner
-        run: |
-          sudo apt-get update -qq || true
-          sudo apt-get install -y -qq \
-            qt6-declarative-dev-tools \
-            qml6-module-qttest qml6-module-qtquick \
-            qml6-module-qtquick-effects qml6-module-qtquick-window \
-            || echo "qmltestrunner unavailable on this runner; the greeter QML suites will skip"
-
+      # A container that cannot be pulled or a dnf that cannot resolve leaves
+      # the suite unrun and says so, rather than reddening the job over a
+      # network hiccup — the same trade the labwc step above makes.
       - name: Run greeter accessibility assertions
-        run: ./tests/test-apex-greet-a11y.sh
+        run: |
+          if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
+                dnf -y install --setopt=install_weak_deps=False \
+                    qt6-qtdeclarative-devel >/dev/null 2>&1 || exit 97
+                ./tests/test-apex-greet-a11y.sh'; then
+              rc=$?
+              if [ "$rc" -eq 97 ]; then
+                  echo "could not install Qt in the container; the greeter a11y suite did not run"
+              else
+                  exit "$rc"
+              fi
+          fi
 
-      # The greeter's keyboard-layout readout. Three files in this repository
-      # already fix which layout the greeter STARTS on, because a password
-      # typed on the wrong map locks a user out of the machine they just
-      # installed — but nothing told the user what that layout was. The
-      # extraction that reads it out of sway is lifted from GreetContext.qml
-      # and RUN against sway's own JSON shape with a stub swaymsg, the way the
-      # session-picker suite above treats the same file. Starts no compositor.
       - name: Run greeter keyboard-layout assertions
         run: ./tests/test-apex-greet-layout.sh
 
