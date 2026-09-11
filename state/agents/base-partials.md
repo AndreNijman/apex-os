@@ -6,6 +6,21 @@ branch: task/base-partials (apex-os), task/base-partials-shell (apex-shell)
 base: apex-os e67fab9, apex-shell a90cef6 (both origin/roadmap/v2.2)
 
 ## NEXT
+Round 12 (fresh agent; round 11's agent died on a usage limit at step 0).
+
+**BASE-013 is CLOSED, both halves.** The shell WIP the previous agent left
+dirty is committed and pushed as `ea83d21` on task/base-partials-shell, after
+being verified in the engine and mutation-proved seven ways (see RESULTS
+round 12). apex-os half was already `836df42f`.
+
+**Exact next action:** BASE-014's last assertion — the rebound key that fires
+after `labwc --reconfigure`. Home is apex-OS `tests/test-labwc-session.sh`,
+extending the reconfigure section at :224-255. `wtype` is at /usr/bin/wtype on
+this machine. Then BASE-009's safe piece (the `gamingmode` DISPATCH branch in
+apex-shell check-compositor-backends.sh:340-343 under APEX_COMPOSITOR_DRY_RUN=1)
+and BASE-010's two real defects (the vacuous aiprobe resolve tests, and
+ai.rs:1327's `layers.max(1)`).
+
 Round 11 in progress. BASE-018, BASE-002, BASE-016, BASE-005 CLOSED (rounds
 9/10). Both branches MERGED (not rebased) with origin/roadmap/v2.2 and pushed;
 both merges were fast-forwards.
@@ -34,6 +49,52 @@ and concludes wrongly from it — `test-apex-recover.sh` already drives the
 shipped `apex-disposable` through a stub capsule engine, and `pr-validation.yml`
 runs it in the `static` job, the one with no path filter). Counts re-verified
 this round, see RESULTS.
+
+## RESULTS (round 12) — per item
+
+### BASE-013 — CLOSED. apex-shell `ea83d21` on task/base-partials-shell.
+The predecessor's dirty WIP (MiscPage.qml, Compositor.qml,
+check-compositor-naming.sh) was NOT committed as found. Its step 0 was "verify
+the QML actually loads and mutation-prove before committing", and both steps
+changed the shipped result.
+- The control offered raw ids as labels and OMITTED labwc entirely, so a
+  Floating user could not pin their own compositor at all and a hand-set
+  override left the control with nothing highlighted. Fixed with
+  `presentedName(id)` + a `modeName` property on `src/state/Compositor.qml`;
+  `displayName` deliberately untouched (it is the adapter's own name and two
+  suites pin that contract).
+- `tests/check-compositor-naming.sh` **42 passed, 0 failed** — source level.
+- **`tests/compositor-facade-test.qml` 60 passed, 0 failed, 8 NEW** — engine
+  level, under real headless labwc. The grep checker is a reading of the code,
+  which is exactly the standard that left these items partial, so the map is
+  now also asked of the running engine.
+- MUTATION-PROVED SEVEN ways, restored with `cp` after each (never `mv`, never
+  `git checkout --`: the WIP was uncommitted and checkout would have destroyed
+  it — a safety copy was taken first).
+  Label back to `"hyprland"` reddens 2; deleting the labwc option reddens 3;
+  `Compositor.name` on the CONTINUATION line of the Active row reddens 1
+  (confirming the predecessor's whole-file rewrite of that assertion is real);
+  LabwcBackend.displayName collapsed to "Floating" reddens 1; NiriBackend
+  gaining `gaps` reddens the help text's claim; `presentedName` deleted
+  wholesale reddens 6 rather than dropping the count silently.
+- **The seventh mutation is why the second suite exists.** Typo the ARGUMENT,
+  not the function — `presentedName(root.nam)` — and the source still says
+  "presentedName" everywhere the checker greps: it stays **42/0 and blind**
+  while the facade goes **58/2**. That also proves the harness genuinely
+  resolves `labwc`; a `""` name would leave expected and actual both empty and
+  pass.
+- MiscPage's bindings proven to construct by `run-settings-pages-test.sh`
+  **17 passed, 0 failed**.
+- Gates: shellcheck -S warning clean (shellcheck IS present on the L16 now, at
+  ~/.local/bin/shellcheck — the round-11 card recorded it absent); bash -n
+  clean; `check-headless-runners.sh` **25/0** with the new file inside its
+  no-allowlist scan; `check-no-conflict-markers.sh` clean; check-ignore exit 1.
+  Wired into ci.yml beside check-compositor-backends.sh and into its
+  required-files gate; ci.yml re-parsed as YAML after editing.
+- **STILL NEEDS ANDRE'S RATIFICATION** (unchanged): "Floating" is ratified at
+  ROADMAP.md:1031; "Scrolling" and "Tiling" are a reading of ROADMAP.md:91 and
+  are new user-visible words. They live in one map + one option list in
+  apex-shell and two .desktop files + one Containerfile sed in apex-os.
 
 ## RESULTS (round 11) — per item
 
