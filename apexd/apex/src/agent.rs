@@ -25,6 +25,7 @@ use apex_agent_core::hook::{self as hook_core, HookEvent};
 use apex_agent_core::paths;
 use apex_agent_core::statusline as statusline_core;
 use apex_agent_core::term::{self, RawMode, WinSize};
+use apex_agent_core::worktree::{ConflictState, TestState};
 use apex_agent_core::{adapter, checkpoint, config, git, layout, mux, profile, project};
 use clap::{Args, Subcommand};
 
@@ -76,12 +77,53 @@ pub enum AgentCmd {
         #[arg(long, default_value = "term")]
         signal: String,
     },
+    /// Hand a file to a running session: a screenshot, a log, a crash dump.
+    ///
+    /// The runtime copies it somewhere the session can read — a confined
+    /// session cannot see `~/Pictures` — and types that path into the
+    /// session's terminal. It does NOT press Enter: the path is left on the
+    /// agent's input line and you send it, which is what keeps a person in the
+    /// loop when the channel a file arrives on is the same one your keyboard
+    /// uses.
+    ///
+    /// The session id is required and never guessed. Typing into the wrong
+    /// agent is worse than typing a number.
+    Send {
+        id: u32,
+        /// Files to hand over, in the order given.
+        #[arg(value_name = "FILE")]
+        files: Vec<String>,
+        /// Hand over the newest screenshot instead of naming it.
+        ///
+        /// Press Print, then run this. It reads the directory APEX Shell's
+        /// screenshot keybind writes to (`~/Pictures/Screenshots`), so it
+        /// takes no picture itself and opens no selection overlay.
+        #[arg(long)]
+        last_screenshot: bool,
+        /// Machine-readable output, one object per file.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a session's transcript.
     Logs {
         id: u32,
         /// How many bytes of the tail to show.
         #[arg(long, default_value_t = 64 * 1024)]
         bytes: usize,
+    },
+    /// Per-worktree status: tests, conflicts, diff and local readiness.
+    ///
+    /// Answers the four questions worth asking about an agent worktree before
+    /// touching it — has it got a diff, would it merge back, what happened to
+    /// the tests, is it ready to hand over — without running anything in a
+    /// worktree somebody else is working in.
+    Worktrees {
+        /// One project by slug, instead of every remembered project.
+        #[arg(long, value_name = "SLUG")]
+        project: Option<String>,
+        /// Machine-readable output, one object per worktree.
+        #[arg(long)]
+        json: bool,
     },
     /// Show one session in detail, or the runtime's own status.
     Status { id: Option<u32> },
@@ -405,6 +447,29 @@ pub struct RunArgs {
     /// Where to run. Defaults to the current directory.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+    /// Run inside a disposable capsule and delete the whole environment when
+    /// the session ends (§19).
+    ///
+    /// The working directory is COPIED in, not shared, so whatever the agent
+    /// does to it goes with the environment. That is what makes the state
+    /// disposable — and it means nothing comes back unless `--copy-out` says
+    /// where to put it.
+    ///
+    /// A throwaway ENVIRONMENT, not a security boundary. distrobox mounts the
+    /// host filesystem at /run/host in every capsule and the process runs as
+    /// your own uid, so code in there can still reach your real home. For
+    /// confinement — $HOME masked, ~/.ssh unreachable — use `--sandbox`
+    /// instead; the two are refused together rather than pretending to
+    /// combine. `apex disposable plan` prints the whole boundary.
+    #[arg(long)]
+    pub disposable: bool,
+    /// Where the capsule's ~/out is copied when it closes. Needs
+    /// `--disposable`.
+    ///
+    /// Without it NOTHING leaves the environment. An agent that should hand
+    /// work back writes it to ~/out inside.
+    #[arg(long, value_name = "DIR", requires = "disposable")]
+    pub copy_out: Option<String>,
     /// Start it and return, instead of attaching.
     #[arg(long, short)]
     pub detach: bool,
@@ -680,7 +745,14 @@ pub fn agent(cmd: AgentCmd) -> i32 {
         AgentCmd::Pause { id } => signal(id, "stop", "paused"),
         AgentCmd::Resume { id } => signal(id, "cont", "resumed"),
         AgentCmd::Kill { id, signal: sig } => signal(id, &sig, "signalled"),
+        AgentCmd::Send {
+            id,
+            files,
+            last_screenshot,
+            json,
+        } => send(id, files, last_screenshot, json),
         AgentCmd::Logs { id, bytes } => logs(id, bytes),
+        AgentCmd::Worktrees { project, json } => worktrees(project, json),
         AgentCmd::Status { id } => status(id),
         AgentCmd::Default { agent } => default_agent(agent),
         AgentCmd::Allow {
@@ -886,6 +958,8 @@ fn run(args: RunArgs) -> Result<i32> {
         cols: size.cols,
         rows: size.rows,
         env: Vec::new(),
+        disposable: args.disposable,
+        copy_out: args.copy_out.clone(),
     };
 
     let mut c = Client::connect()?;
@@ -1192,6 +1266,121 @@ fn signal(id: u32, name: &str, past_tense: &str) -> Result<i32> {
     Ok(0)
 }
 
+/// Where APEX Shell's screenshot keybind puts its files.
+///
+/// The same directory `src/scripts/screenshot.sh` writes to in apex-shell, and
+/// the path is spelled here rather than asked of the shell because this command
+/// has to work on a machine running any compositor, or none. The environment
+/// override is what lets the suite point it at a directory of its own; it is
+/// the same device `apex-disposable` uses for `APEX_DISPOSABLE_ROOT`.
+fn screenshot_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("APEX_SCREENSHOT_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    apex_agent_core::paths::home().join("Pictures/Screenshots")
+}
+
+/// The most recently modified regular file in the screenshots directory.
+///
+/// By modification time and not by name: the name carries a timestamp, but it
+/// is the timestamp of the capture rather than of the file, and a screenshot
+/// edited after it was taken is still the one the user is looking at.
+fn newest_screenshot() -> Result<PathBuf> {
+    let dir = screenshot_dir();
+    let entries = std::fs::read_dir(&dir)
+        .with_context(|| format!("no screenshots to hand over: cannot read {}", dir.display()))?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(when) = meta.modified() else { continue };
+        let better = match &best {
+            None => true,
+            Some((best_when, _)) => when > *best_when,
+        };
+        if better {
+            best = Some((when, entry.path()));
+        }
+    }
+    best.map(|(_, path)| path).ok_or_else(|| {
+        anyhow!(
+            "{} holds no screenshots yet. Press Print to take one",
+            dir.display()
+        )
+    })
+}
+
+/// `apex agent send`.
+fn send(id: u32, files: Vec<String>, last_screenshot: bool, json: bool) -> Result<i32> {
+    let mut sources: Vec<PathBuf> = Vec::new();
+    if last_screenshot {
+        sources.push(newest_screenshot()?);
+    }
+    for f in &files {
+        // Canonicalised here rather than in the daemon: the daemon's working
+        // directory is not yours, so a relative path would name a different
+        // file there — and it is refused there, so this is where a plain
+        // `apex agent send 3 shot.png` has to become a path.
+        sources.push(
+            std::fs::canonicalize(f).with_context(|| format!("cannot hand over {f}"))?,
+        );
+    }
+    if sources.is_empty() {
+        bail!("name a file to hand over, or --last-screenshot");
+    }
+
+    let mut client = Client::connect()?;
+    let mut bracketed_anywhere = false;
+    for source in &sources {
+        let resp = client.call(&Request::Inject {
+            id,
+            source: source.to_string_lossy().into_owned(),
+        })?;
+        let Response::Injected {
+            path, bracketed, ..
+        } = resp
+        else {
+            bail!("the runtime answered something other than an injection: {resp:?}");
+        };
+        bracketed_anywhere |= bracketed;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "session": id,
+                    "source": source.to_string_lossy(),
+                    "path": path,
+                    "bracketed": bracketed,
+                })
+            );
+        } else {
+            eprintln!("apex: {} -> session {id} as {path}", source.display());
+        }
+    }
+    if !json {
+        // Said every time, and deliberately. A user who believes the agent has
+        // already been asked will wait for an answer that is not coming.
+        eprintln!(
+            "apex: {} typed into session {id}'s terminal and NOT entered — press Enter there{}",
+            if sources.len() == 1 {
+                "path".to_string()
+            } else {
+                format!("{} paths", sources.len())
+            },
+            if bracketed_anywhere {
+                ". That agent reads pasted text as a paste"
+            } else {
+                ""
+            }
+        );
+    }
+    Ok(0)
+}
+
 fn logs(id: u32, bytes: usize) -> Result<i32> {
     let text = client::logs(id, bytes)?;
     print!("{text}");
@@ -1342,9 +1531,25 @@ fn print_session(s: &SessionInfo) {
     if let Some(c) = &s.checkpoint {
         println!("checkpoint   {c}");
     }
+    // Said in full, not as a one-word flag. A user looking at this session
+    // needs to know two things a capsule name does not convey on its own:
+    // the working tree is a COPY, and it is deleted when the session ends.
+    if let Some(capsule) = &s.capsule {
+        println!("capsule      {capsule} (disposable)");
+        println!(
+            "             the working tree here is a COPY, and this environment is \
+             deleted when the session ends"
+        );
+    }
     println!("pid          {}", s.pid);
     println!("terminal     {}x{}", s.cols, s.rows);
     println!("attached     {}", s.attached);
+    // Only when there have been some. A line of "files 0" on every session
+    // would be noise on every session that has never been handed one, which
+    // is almost all of them.
+    if s.injected > 0 {
+        println!("files sent   {}", s.injected);
+    }
     if let Some(summary) = s.exit_summary() {
         println!("outcome      {summary}");
     }
@@ -1465,6 +1670,100 @@ fn fetch_grants() -> Result<GrantListing> {
         Response::Error { message, .. } => bail!(message),
         other => bail!("unexpected reply: {other:?}"),
     }
+}
+
+/// `apex agent worktrees` — the four questions, per worktree (§P1-036).
+///
+/// The daemon answers, not this process, and that is deliberate: it holds the
+/// record of which sessions are where and of the test runs it watched go past,
+/// and it resolves the project slug to a path itself so that no caller names a
+/// directory for it to run git in.
+fn worktrees(project: Option<String>, json: bool) -> Result<i32> {
+    let rows = client::worktrees(project)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(0);
+    }
+
+    if rows.is_empty() {
+        println!(
+            "no worktrees. A project is remembered when an agent runs in it, \
+             and `apex agent run --worktree <name>` gives that agent a \
+             worktree of its own"
+        );
+        return Ok(0);
+    }
+
+    println!(
+        "{:<22} {:<26} {:>9}  {:<11} {:<11} READY",
+        "WORKTREE", "BRANCH", "DIFF", "CONFLICTS", "TESTS"
+    );
+    for w in &rows {
+        let branch = w.branch.as_deref().unwrap_or("(detached)");
+        let diff = if w.diff.files == 0 {
+            // A worktree with no committed delta and a dirty tree has
+            // something in it; "-" would read as "nothing here".
+            if w.dirty {
+                "dirty".to_string()
+            } else {
+                "-".to_string()
+            }
+        } else {
+            format!("{}f +{}/-{}", w.diff.files, w.diff.insertions, w.diff.deletions)
+        };
+        let conflicts = match &w.conflicts {
+            ConflictState::Clean => "clean".to_string(),
+            ConflictState::Conflicted { paths } => format!("{} file(s)", paths.len()),
+            ConflictState::Unknown { .. } => "unknown".to_string(),
+            ConflictState::NotApplicable => "-".to_string(),
+        };
+        let ready = if w.ready.ready_to_propose {
+            "yes".to_string()
+        } else {
+            // The first blocker, because it is the one to fix first and the
+            // whole list is in `--json`.
+            w.ready
+                .blockers
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "no".to_string())
+        };
+        println!(
+            "{:<22} {:<26} {:>9}  {:<11} {:<11} {}",
+            clip(&w.name, 22),
+            clip(branch, 26),
+            diff,
+            conflicts,
+            w.tests.as_str(),
+            ready
+        );
+    }
+
+    // Said once, at the bottom, rather than implied by a column heading that
+    // cannot carry it: this is the last test run the runtime SAW, and the
+    // runtime does not run anybody's suite to answer a status query.
+    if rows.iter().any(|w| w.tests != TestState::Unobserved) {
+        println!(
+            "\nTESTS is the last run APEX observed going past, not a fresh result — \
+             the tree may have moved since."
+        );
+    } else {
+        println!(
+            "\nTESTS is 'unobserved' until a test run happens inside a managed session. \
+             APEX never runs a suite itself to answer this."
+        );
+    }
+    Ok(0)
+}
+
+/// Trim a cell to fit, with an ellipsis rather than a hard cut.
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let keep: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{keep}…")
 }
 
 fn grants(active_only: bool, json: bool) -> Result<i32> {
@@ -2945,6 +3244,8 @@ mod tests {
             worktree: None,
             checkpoint: false,
             cwd: None,
+            disposable: false,
+            copy_out: None,
             detach: false,
             args: Vec::new(),
             host: None,

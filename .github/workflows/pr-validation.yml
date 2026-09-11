@@ -987,6 +987,36 @@ jobs:
       - name: Run privilege-request assertions
         run: ./tests/test-privilege-requests.sh
 
+      # P1-035's three claims, none of which a unit test can reach: the typed
+      # path arrives at the session it was addressed to and at no other; nothing
+      # that arrives can submit the line; and a managed session may not use the
+      # verb at all. All three need a real daemon, a real PTY and a real socket,
+      # and the suite builds its own — its own XDG_RUNTIME_DIR, its own state,
+      # killed by pid.
+      - name: Run file-injection assertions
+        run: ./tests/test-agent-inject.sh
+
+      # P1-036's named guarantee, which is the whole reason the conflict answer
+      # comes from `merge-tree` and not from a real merge: after a status call
+      # on a GENUINELY CONFLICTED worktree, MERGE_HEAD is absent, the staged
+      # entries are unchanged, `git status --porcelain` is byte-identical and
+      # no ref has moved. A unit test cannot reach any of it — it needs a real
+      # repository with a real conflict, and the suite builds one, along with
+      # its own daemon on its own socket and its own project store.
+      - name: Run worktree-status assertions
+        run: ./tests/test-agent-worktrees.sh
+
+      # P1-037's acceptance line — an agent session that runs in a disposable
+      # capsule and discards its state — against the REAL disposable engine
+      # from this checkout, a real daemon and a real PTY. Only the capsule
+      # engine is faked, through the override the engine already documents, and
+      # the fake logs every call: a fake that merely exited 0 would let every
+      # assertion pass with the agent running on the host. So this needs no
+      # podman, no distrobox and no image pull, and it cannot fail here for a
+      # reason unrelated to this code.
+      - name: Run disposable-capsule assertions
+        run: ./tests/test-agent-disposable.sh
+
       # §5's two claims, neither of which the unit tests can reach: a portable
       # bundle carries no credential and no conversation, from a profile on a
       # real filesystem; and a confined session cannot rewrite the instructions

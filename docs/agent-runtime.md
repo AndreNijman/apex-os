@@ -637,6 +637,84 @@ runtime state, not something to commit and push to your colleagues.
 
 Re-running with the same name reattaches to the same worktree.
 
+### What each worktree is up to
+
+```
+apex agent worktrees
+apex agent worktrees --project my-repo --json
+```
+
+```
+WORKTREE               BRANCH                          DIFF  CONFLICTS   TESTS       READY
+my-repo                main                           dirty  -           unobserved  uncommitted changes in the worktree
+issue-217              agent/issue-217             4f +81/-12  clean       passed      yes
+issue-221              agent/issue-221             2f +19/-3   1 file(s)   failed      would conflict in 1 file
+```
+
+Four questions per worktree — has it got a diff, would it merge back, what
+happened to the tests, is it ready to hand over — and `--json` carries the same
+answers with the conflicted paths and the full blocker list.
+
+**Nothing this command does touches a worktree you are working in.** That
+constraint shapes two of the four answers, and both are worth understanding
+before you trust the column.
+
+**Conflicts** come from `git merge-tree --write-tree`, run from the project
+root against branch names. The obvious implementation — `git merge --no-commit`
+in the worktree — would leave a `MERGE_HEAD` and a half-merged index in a
+checkout an agent is typing into. `merge-tree` computes the same merge entirely
+in the object database.
+
+One caveat stated exactly, because "reads only" would be false: `--write-tree`
+*does* write the merged tree and its blobs into the repository's shared object
+store, as unreferenced objects that `git gc` later removes. No working tree, no
+index, no stash and no ref is touched. The integration suite asserts that
+literally — after a status call on a genuinely conflicted worktree,
+`MERGE_HEAD` is absent, `git ls-files --stage` is unchanged entry for entry,
+`git status --porcelain` is byte-identical, and no ref has moved.
+
+Base is the **main working tree's current branch, read when you ask**. Nothing
+records the branch a worktree was created from, so this is an observation now
+and not a memory of the branch point. Move the main tree to another branch and
+every answer here is against that one instead.
+
+**Tests are observed, never run.** The runtime does not run your suite to
+answer a status query: that has a build directory, a CPU cost, and for a suite
+that touches a daemon or a port a real chance of breaking the session that is
+mid-task. So the column is the last test run APEX *saw go past* in that tree,
+through the hook stream it already receives, and its default is `unobserved` —
+which is not a failure, just an absence.
+
+What each word means, precisely:
+
+- `unobserved` — no test run has been seen in this tree. Most worktrees.
+- `running` — a run started and nothing has reported its end. A run whose
+  completion never arrives stays here for as long as the daemon lives, because
+  "nobody told us how it ended" is not a pass.
+- `passed` — a completion event arrived for that run and it was not a failure
+  event. Whether the agent upstream distinguishes those for a non-zero exit is
+  upstream's behaviour, not something APEX can compel; if it ever reports a
+  failed suite as an ordinary completion, this says `passed`.
+- `failed` — a failure event arrived. This blocks readiness.
+
+A test run is matched to the tree the **session** lives in, taken from the
+session's own recorded working directory — not from wherever the hook process
+happened to run. A session cannot report a suite result against a tree it does
+not live in. And the observations are process memory: restart the daemon and
+everything is `unobserved` again, which is the honest answer, because nobody
+here saw a test run. A `passed` written to disk would outlive the commit it
+referred to and be read as a fresh verdict.
+
+**READY is local.** The field is `ready_to_propose`, and it asks nothing of
+GitHub: has an upstream, in sync with it, ahead of base, clean tree, no
+conflicts, no observed test failure. It is the answer to "is this worth a
+human's attention yet", not to "what does the pull request say".
+
+`--project` takes a project **slug**, the kind `apex project list` prints, and
+never a path. Answering this request makes the daemon run git in the project's
+root, so the set of directories it can reach is exactly the set you have
+already chosen to remember.
+
 ### Undo
 
 ```
@@ -666,6 +744,60 @@ Two deliberate boundaries:
   system-wide removal because you undid a working tree is not a call this makes
   for you.
 
+### A session you throw away
+
+```
+apex agent run "see if this PR is worth reviewing" --disposable
+apex agent run "build it and keep the artefacts" --disposable --copy-out ~/out
+```
+
+The session runs inside a disposable capsule, and the engine deletes that
+capsule at the end of the session. APEX **copies** your working directory in
+rather than sharing it, so what the agent does to that copy goes with the
+environment. Your own tree stays byte-identical afterwards, index included.
+
+Nothing comes back unless you say where. `--copy-out DIR` copies the capsule's
+`~/out` to `DIR` as the environment closes, and copies nothing else, and it
+runs before the teardown. Leave it out and the agent's work goes with the
+capsule, which is the point.
+
+`apex agent status` names the capsule and says both of those things. A session
+whose edits are about to vanish should not read like an ordinary one.
+
+The capsule engine performs the teardown and the daemon holds no teardown code
+of its own. The engine is the session's own process, and its `trap` fires when
+the agent finishes, when `apex agent kill` arrives, and when the daemon goes
+away. If the machine loses power mid-session, `apex disposable list` and
+`apex disposable purge` clear up what is left. Each environment carries the id
+of the session that owned it, so a leftover says where it came from.
+
+**It is a throwaway environment and not a security boundary.** distrobox
+mounts the host's root filesystem at `/run/host` inside each capsule, no flag
+removes it, and the process runs as your own uid. A program in there can read
+and write your files. `apex disposable plan` prints the whole boundary, and
+[recovery.md](recovery.md) states it in full. `--sandbox` is the mechanism for
+confinement: it masks `$HOME`, puts `~/.ssh` out of reach, and rebuilds the
+environment from an allowlist.
+
+APEX **refuses these pairs rather than combining them**:
+
+- `--sandbox` with a confining policy. bwrap would wrap the container client
+  and not the agent inside the capsule, so the pair would read as "confined
+  and disposable" while delivering neither.
+- `--worktree`. APEX would create the branch on your machine and leave it
+  empty, because the agent commits to the copy and the capsule takes those
+  commits with it. A linked worktree is worse: its `.git` is a file pointing
+  at an absolute host path the capsule cannot reach, so the copy is not a
+  working checkout at all.
+- `--checkpoint`. It would snapshot a tree this session cannot change, and
+  `apex agent undo` would then offer to roll back work this agent did not do.
+
+Each refusal lands before the daemon creates anything: no environment, no
+worktree, no branch.
+
+One interaction worth knowing: `apex agent worktrees` lists a disposable
+session under the tree you started it in, which is the tree the capsule
+copied. That session cannot change it.
 ---
 
 ## Status, and the open event protocol
@@ -694,6 +826,82 @@ The session id comes from `$APEX_AGENT_SESSION`, which the runtime sets in every
 session, so a hook script needs no arguments. That is the whole protocol: an
 agent with hooks can wire them straight to it, and one without still gets the
 inferred states.
+
+---
+
+## Handing a file to a session
+
+A screenshot, a log, a crash dump: something in front of you that the agent
+already running should look at.
+
+```
+apex agent send 3 ~/Downloads/backtrace.txt
+apex agent send 3 --last-screenshot
+```
+
+The runtime copies the file into the session's own scratch directory, then
+types that path into the session's terminal. The sandbox already binds that
+directory read-write, and the session takes it with it when it ends.
+
+`--last-screenshot` takes no picture and opens no selection overlay. It reads
+the newest file in `~/Pictures/Screenshots`, which is where APEX Shell's Print
+keybind writes. Press Print, then run it.
+
+### It does not press Enter
+
+The path is left on the agent's input line, and you send it. That is the whole
+of what keeps a person in the loop, because the channel a file arrives on is
+the same one your keyboard uses.
+
+### What a program reading that terminal can and cannot tell
+
+Bytes written to a PTY arrive as keystrokes. There is no field in a terminal
+for "this came from somewhere else", so a language model reading its own input
+cannot tell an injected byte from a typed one. Four things make the difference
+not matter:
+
+* **Only a path travels on that channel, never the contents.** The file
+  reaches the model through its own read tool, where its harness already treats
+  the result as data rather than as instruction. Handing a file over makes it
+  as trusted as `cat` would, and no more.
+* **The runtime composes the text, not you.** You name a source; the
+  destination is built from the session's scratch path, a counter and a name
+  reduced to letters, digits, dot, dash and underscore. A file called
+  `x⏎/quit⏎.png` cannot put a newline on the terminal, because the bytes on the
+  terminal were never yours. A name carrying a control character gets a refusal
+  rather than a repair.
+* **Nothing is submitted.** No newline, no carriage return.
+* **Every one lands somewhere the session cannot reach**: the systemd journal,
+  which also holds the mirror of every system-access grant.
+
+  ```
+  journalctl --user -t apex-agentd APEX_INJECT_SESSION=3
+  ```
+
+Two costs, said plainly. The bytes land wherever that terminal's foreground
+process is reading, so if the agent has opened an editor or a pager the path
+goes into that instead. And someone who has just been shown a path can be
+talked into pressing Enter: staging is a speed bump in front of a human, not a
+boundary.
+
+One in-band signal does exist. A terminal application that has asked for
+bracketed paste (`DECSET 2004`) receives pasted text wrapped in markers, which
+is how a TUI tells a paste from typing. The runtime owns the session's
+terminal, so it knows whether the application asked, and it sends the markers
+only then. That gives the *application* a way to know. It still gives the model
+none, because whether the distinction survives into the prompt is the
+application's choice.
+
+### Refused to an agent
+
+A session may not use this verb, on another session or on itself. The runtime
+reads the source with its own access, outside every sandbox, so a session that
+could ask for this could name `~/.ssh/id_ed25519` and have the file carried
+across the boundary for it. The daemon resolves the caller from `SO_PEERCRED`
+and `/proc` ancestry, the same way it resolves a privilege request's, and
+refuses anything that lands on a managed session.
+
+`apex agent status <id>` counts the files a session has taken.
 
 ---
 

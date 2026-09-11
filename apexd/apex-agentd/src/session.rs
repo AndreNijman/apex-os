@@ -128,6 +128,17 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     // written out there. The TTL is checked first, so a typo in `--ttl` fails
     // in front of the user instead of after a password dialog they then find
     // out was pointless.
+    // §P1-037. Checked here, with the TTL, and for the same reason: a caller
+    // who asked for two mechanisms that cannot both apply should find that out
+    // in front of their own terminal, not after a capsule has been created.
+    crate::disposable::check(
+        req.disposable,
+        policy.sandbox.is_confined(),
+        req.copy_out.as_deref(),
+        req.worktree.is_some(),
+        req.checkpoint,
+    )?;
+
     let wanted_grant = policy.needs_grant();
     if wanted_grant.is_none() && req.ttl_ms.is_some() {
         // A `--ttl` with nothing to bound is a user who believes they asked
@@ -443,7 +454,30 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         )
     });
 
-    let argv = sandbox::build_argv(&spec, &program, &args).map_err(SandboxRefused)?;
+    // §P1-037. A disposable session's PTY child is the disposable ENGINE, and
+    // the adapter runs inside the capsule it creates. `build_argv` is not in
+    // that path at all: the policy is `unrestricted` here — `disposable::
+    // check` refused any other above — so bwrap would add nothing, and if it
+    // were added it would confine the container client rather than the agent.
+    //
+    // The engine's own EXIT/INT/TERM traps are what remove the environment,
+    // so there is no teardown here to get wrong: killing this child tears the
+    // capsule down, which is exactly the behaviour `apex agent kill` should
+    // have.
+    let capsule = req.disposable.then(|| crate::disposable::name_for(id));
+    let argv = if req.disposable {
+        // The engine's own overrides, set EXPLICITLY rather than relied on to
+        // arrive by inheritance. They decide which directory it removes
+        // recursively and which program it drives, and the inheritance that
+        // carries them today is a bug elsewhere that a correct fix would take
+        // away — see `disposable::engine_env`.
+        for pair in crate::disposable::engine_env(|n| std::env::var(n).ok()) {
+            spec.env_set.push(pair);
+        }
+        crate::disposable::argv(id, &workdir, req.copy_out.as_deref(), &program, &args)?
+    } else {
+        sandbox::build_argv(&spec, &program, &args).map_err(SandboxRefused)?
+    };
     let env = sandbox::resolved_env(&spec);
 
     // A confined session gets its environment from bwrap's --setenv, so the
@@ -471,6 +505,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         // the `Run` request: a session that could name its own actor could
         // name somebody else's phone.
         actor: who.actor.clone(),
+        capsule: capsule.clone(),
         grant: issued.as_ref().map(|g| g.id),
         grant_expires_ms: issued.as_ref().map(|g| g.expires_ms),
         // Nothing has been heard from the agent yet. Claude fills this in on
@@ -491,6 +526,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         checkpoint: checkpoint_id,
         cols: size.cols,
         rows: size.rows,
+        injected: 0,
     };
 
     let handle = {

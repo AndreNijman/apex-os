@@ -433,6 +433,27 @@ pub struct SessionInfo {
     pub checkpoint: Option<String>,
     pub cols: u16,
     pub rows: u16,
+    /// How many files have been handed to this session with
+    /// [`Request::Inject`].
+    ///
+    /// Shown by `apex agent info` and by the Agent Center, because typing into
+    /// somebody's agent is the kind of thing that should be countable from
+    /// outside it. `#[serde(default)]` so a record written by a daemon that
+    /// predates this still loads: a missing count reads as none, which is what
+    /// it was.
+    #[serde(default)]
+    pub injected: u32,
+    /// The disposable capsule this session runs inside, if any (§P1-037).
+    ///
+    /// `None` for an ordinary session, which is nearly all of them. Carried so
+    /// that `apex agent status` can say the thing a user MUST be able to see
+    /// about such a session: its working tree is a copy, and everything in it
+    /// is deleted when the session ends unless a `--copy-out` was given.
+    ///
+    /// `#[serde(default)]`, so a record written before this reads as an
+    /// ordinary session — which is what it was.
+    #[serde(default)]
+    pub capsule: Option<String>,
 }
 
 impl SessionInfo {
@@ -482,6 +503,23 @@ pub enum Request {
     },
     /// Tell the PTY its window changed. Sent on its own connection.
     Resize { id: u32, cols: u16, rows: u16 },
+    /// Hand a file to a running session: copy it somewhere the session can
+    /// read, and type that path into its PTY (P1-035).
+    ///
+    /// `source` is a path on the HOST, read by the daemon with the daemon's
+    /// own access. That is the point — a confined session cannot see
+    /// `~/Pictures/Screenshots`, and the daemon can — and it is also the
+    /// reason this verb is refused to a caller that resolves to a managed
+    /// session. A session allowed to ask for this could name `~/.ssh/id_ed25519`
+    /// and have the daemon carry it across the sandbox boundary for it.
+    ///
+    /// Nothing about the destination or the typed text comes from the caller;
+    /// see [`crate::inject`] for what is written and why.
+    ///
+    /// Not a protocol bump, for the reason [`Request::ToolCheck`] is not: a
+    /// daemon that predates this answers "unknown request" and the CLI says so.
+    /// The failure loses a feature, never a restriction.
+    Inject { id: u32, source: String },
     /// Deliver a signal by name (`int`, `term`, `kill`, `stop`, `cont`).
     Signal { id: u32, signal: String },
     /// Publish a state transition. This is the open event protocol: any client
@@ -543,6 +581,14 @@ pub enum Request {
         /// of a project's own agent definition. Display only.
         #[serde(default)]
         agent_type: Option<String>,
+        /// A test run the bridge saw start or finish (§P1-036).
+        ///
+        /// Another optional key on this request, and not a protocol bump for
+        /// the reason the others are not: a daemon that predates it ignores
+        /// the field and records the event exactly as it always did. The
+        /// failure loses a status line, never a restriction.
+        #[serde(default)]
+        test: Option<crate::worktree::TestNote>,
     },
     /// Publish what Claude's status line reported (§P1-021).
     ///
@@ -583,6 +629,30 @@ pub enum Request {
         /// the next tool added upstream.
         #[serde(default)]
         tool_input: serde_json::Value,
+    },
+    /// Per-worktree status for a remembered project: tests, conflicts, diff
+    /// and local readiness (§P1-036).
+    ///
+    /// ## Why this takes a SLUG and not a path
+    ///
+    /// The obvious signature is `{ path: String }`, and it would be a hole.
+    /// Answering this request makes the daemon run git in the named directory,
+    /// including `merge-tree --write-tree`, which WRITES objects. A confined
+    /// session has the control socket bound in so that it can publish events,
+    /// so a path-keyed version would let any session point the daemon at a
+    /// repository of its choosing and have it write there. Keyed on a
+    /// remembered project's slug instead, the set of directories reachable
+    /// through this request is exactly the set the user already chose to
+    /// remember, and the daemon resolves the path itself.
+    ///
+    /// Not a protocol bump: an older daemon answers `BadRequest` for an
+    /// unknown `cmd` and the connection survives, so a new client against an
+    /// old daemon loses this listing and nothing else.
+    Worktrees {
+        /// A project slug (`project::Project::slug`), or `None` for every
+        /// project the user has remembered.
+        #[serde(default)]
+        project: Option<String>,
     },
     /// Read the tail of a session's transcript.
     Logs {
@@ -846,6 +916,42 @@ pub struct RunRequest {
     /// Environment additions, applied after the sandbox is built.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// Run this session inside a DISPOSABLE CAPSULE and delete the whole
+    /// environment when it closes (§19, §P1-037).
+    ///
+    /// The working directory is COPIED into the capsule's throwaway home, not
+    /// bound, so whatever the agent does to it goes with the environment —
+    /// which is what "discard state" means here. Nothing leaves unless
+    /// [`RunRequest::copy_out`] names somewhere for it to go.
+    ///
+    /// ## A throwaway environment, NOT a security boundary
+    ///
+    /// distrobox mounts the host's root filesystem at `/run/host` inside every
+    /// capsule — that is how `distrobox-export` reaches back out, and there is
+    /// no flag that removes it — and the process runs as the user's own uid.
+    /// So code in there can read and write the real HOME. What is disposable
+    /// is the ENVIRONMENT: its packages, its home, its state.
+    ///
+    /// For confinement — `$HOME` masked, `~/.ssh` unreachable, the environment
+    /// rebuilt from an allowlist — the mechanism is `policy.sandbox`. The two
+    /// are REFUSED together rather than combined: bwrap wrapping the capsule
+    /// engine would confine the container client and not the agent, so the
+    /// pair reads as "confined and disposable" and delivers neither.
+    ///
+    /// Optional and `#[serde(default)]`, the ToolCheck precedent: a daemon
+    /// that predates it ignores the field and starts an ordinary session. That
+    /// loses the environment, never a restriction — the failure is a session
+    /// on the host, which is what the caller would have got anyway.
+    #[serde(default)]
+    pub disposable: bool,
+    /// Where `~/out` inside a disposable capsule is copied when it closes.
+    ///
+    /// `None` — the default — means NOTHING leaves. Meaningless without
+    /// [`RunRequest::disposable`], and the daemon refuses the pair rather than
+    /// ignoring it, for the reason `ttl_ms` is refused on an ordinary session:
+    /// a caller who named a destination believes they asked for something.
+    #[serde(default)]
+    pub copy_out: Option<String>,
 }
 
 /// A control response.
@@ -870,6 +976,24 @@ pub enum Response {
     Sessions { sessions: Vec<SessionInfo> },
     /// Attach accepted; the connection is now a raw PTY pipe.
     Attached { id: u32 },
+    /// A file was handed to a session.
+    ///
+    /// `path` is both where the copy landed and, verbatim, the text written to
+    /// the session's PTY — one field rather than two, so a caller cannot be
+    /// shown a path different from the one the agent was given.
+    Injected {
+        id: u32,
+        path: String,
+        /// Whether the text was wrapped as a bracketed paste, which happens
+        /// only when the program on that PTY has asked for the mode. Reported
+        /// so `apex agent send` can say whether the agent will see it as a
+        /// paste or as typing.
+        bracketed: bool,
+    },
+    /// Per-worktree status, main tree first, projects in listing order.
+    Worktrees {
+        worktrees: Vec<crate::worktree::WorktreeStatus>,
+    },
     Logs {
         id: u32,
         /// UTF-8 lossy transcript tail.
@@ -1144,6 +1268,8 @@ mod tests {
             checkpoint: None,
             cols: 80,
             rows: 24,
+            injected: 0,
+            capsule: None,
         }
     }
 
@@ -1164,6 +1290,11 @@ mod tests {
                 sessions: vec![sample_session(), sample_session()],
             },
             Response::Attached { id: 3 },
+            Response::Injected {
+                id: 3,
+                path: "/tmp/apex-agent/3/inbox/001-shot.png".into(),
+                bracketed: true,
+            },
             Response::Logs {
                 id: 3,
                 text: "output\n".into(),
@@ -1286,6 +1417,8 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: vec![],
+                disposable: false,
+                copy_out: None,
             })
         };
         assert!(run(SystemAccess::Session).waits_on_a_human());
@@ -1302,6 +1435,10 @@ mod tests {
     fn every_request_variant_round_trips() {
         let variants = vec![
             Request::Hello,
+            Request::Inject {
+                id: 3,
+                source: "/home/t/Pictures/Screenshots/shot.png".into(),
+            },
             Request::Run(RunRequest {
                 agent: Some("claude".into()),
                 prompt: Some("go".into()),
@@ -1318,6 +1455,29 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 env: vec![("K".into(), "V".into())],
+                disposable: false,
+                copy_out: None,
+            }),
+            Request::Run(RunRequest {
+                // A disposable run, so the two new keys cross the wire in the
+                // round-trip too rather than only in their default form.
+                agent: Some("claude".into()),
+                prompt: Some("review this".into()),
+                args: vec![],
+                cwd: "/home/t/p".into(),
+                policy: AgentPolicy {
+                    sandbox: SandboxPolicy::Unrestricted,
+                    ..AgentPolicy::default()
+                },
+                request_origin: None,
+                worktree: None,
+                checkpoint: false,
+                ttl_ms: None,
+                cols: 80,
+                rows: 24,
+                env: vec![],
+                disposable: true,
+                copy_out: Some("/home/t/results".into()),
             }),
             Request::List,
             Request::PrivilegeRequest {
@@ -1371,6 +1531,10 @@ mod tests {
                 native: Some("bypassPermissions".into()),
                 agent_id: None,
                 agent_type: None,
+                test: Some(crate::worktree::TestNote {
+                    phase: crate::worktree::TestPhase::Started,
+                    command: "cargo test".into(),
+                }),
             },
             Request::Event {
                 id: 1,
@@ -1380,6 +1544,7 @@ mod tests {
                 native: None,
                 agent_id: None,
                 agent_type: None,
+                test: None,
             },
             Request::Event {
                 id: 1,
@@ -1389,6 +1554,7 @@ mod tests {
                 native: None,
                 agent_id: Some("a-1".into()),
                 agent_type: Some("Explore".into()),
+                test: None,
             },
             Request::ToolCheck {
                 id: 1,
@@ -1401,6 +1567,10 @@ mod tests {
             Request::DeclareOrigin {
                 origin: "claude-remote-control".into(),
                 actor: Some("pixel-8-office".into()),
+            },
+            Request::Worktrees { project: None },
+            Request::Worktrees {
+                project: Some("apex-os".into()),
             },
         ];
 
@@ -1426,6 +1596,7 @@ mod tests {
             native: None,
             agent_id: None,
             agent_type: None,
+            test: None,
         };
         let text = serde_json::to_string(&req).unwrap();
         assert!(!text.contains('\n'), "{text}");
@@ -1595,6 +1766,8 @@ mod tests {
             checkpoint: None,
             cols: 80,
             rows: 24,
+            injected: 0,
+            capsule: None,
         };
         assert!(info.is_live());
         assert_eq!(info.exit_summary(), None);

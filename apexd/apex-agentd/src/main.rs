@@ -18,13 +18,16 @@
 
 mod broker;
 mod egress;
+mod disposable;
 mod grants;
+mod inject;
 mod origin;
 mod peer;
 mod privilege;
 mod pty;
 mod registry;
 mod session;
+mod worktrees;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -60,6 +63,12 @@ pub struct Daemon {
     /// polkit. Nothing in this repository's test suite raises a prompt, and
     /// this field is why that is enforceable.
     pub auth: Box<dyn Authenticator>,
+    /// Test runs seen going past, by worktree (§P1-036).
+    ///
+    /// Its own lock, and never taken while a session lock is held — the
+    /// event handler drops the session before recording. Same discipline as
+    /// the grant authority above, for the same reason.
+    pub tests: worktrees::TestObservations,
 }
 
 impl Daemon {
@@ -69,6 +78,7 @@ impl Daemon {
             config: Mutex::new(Config::load()),
             grants: grants::GrantAuthority::new(),
             auth: Box::new(PolkitAuthenticator),
+            tests: worktrees::TestObservations::new(),
         }
     }
 }
@@ -483,6 +493,8 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
             }
         }
 
+        Request::Inject { id, source } => inject::handle(daemon, caller, id, &source),
+
         Request::Signal { id, signal } => {
             let Some(number) = apex_agent_core::session::signal_number(&signal) else {
                 return Response::error(
@@ -528,6 +540,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
             native,
             agent_id,
             agent_type,
+            test,
         } => {
             // An event that names neither is not a smaller event, it is a
             // request that says nothing. Refused rather than recorded, because
@@ -611,6 +624,20 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
                 }
             }
             registry::write_record(&s.info);
+
+            // §P1-036. The session lock is released BEFORE the observation
+            // store is touched. Two locks held at once, in this order here and
+            // the opposite order anywhere else, is how this daemon would
+            // deadlock — so it never holds both.
+            //
+            // The worktree comes from the session's OWN recorded `cwd`, never
+            // from the request: a session cannot report a test run against a
+            // tree it does not live in.
+            let cwd = s.info.cwd.clone();
+            drop(s);
+            if let Some(note) = test {
+                daemon.tests.record(Path::new(&cwd), &note);
+            }
             Response::Ok
         }
 
@@ -627,6 +654,28 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
             s.info.telemetry = Some(*telemetry);
             registry::write_record(&s.info);
             Response::Ok
+        }
+
+        Request::Worktrees { project } => {
+            // A snapshot, and the registry lock is released before any git
+            // command runs: enumerating worktrees and probing merges takes
+            // long enough that holding it across the work would block every
+            // other request — including the event another session is waiting
+            // on to publish its own state.
+            let sessions: Vec<worktrees::SessionWhere> = {
+                let reg = daemon.registry.lock().expect("registry lock");
+                reg.list()
+                    .iter()
+                    .filter_map(|h| {
+                        let s = h.lock().ok()?;
+                        Some(worktrees::SessionWhere {
+                            id: s.info.id,
+                            cwd: s.info.cwd.clone(),
+                        })
+                    })
+                    .collect()
+            };
+            worktrees::handle(project, &daemon.tests, &sessions)
         }
 
         Request::ToolCheck {

@@ -210,6 +210,10 @@ pub fn publish_event(id: u32, state: &str, detail: Option<String>) -> Result<()>
         // one that never ran.
         agent_id: None,
         agent_type: None,
+        // Same reasoning: a test observation is something the hook bridge
+        // DERIVES from a tool payload it was handed, not something a caller
+        // asserts about itself. `apex agent event` cannot set it.
+        test: None,
     })?;
     Ok(())
 }
@@ -235,6 +239,7 @@ pub fn publish_hook(id: u32, obs: &crate::hook::Observation) -> Result<()> {
         native: obs.native.clone(),
         agent_id: obs.agent_id.clone(),
         agent_type: obs.agent_type.clone(),
+        test: obs.test.clone(),
     })?;
     Ok(())
 }
@@ -249,6 +254,14 @@ pub fn publish_telemetry(id: u32, t: &crate::statusline::Telemetry) -> Result<()
         telemetry: Box::new(t.clone()),
     })?;
     Ok(())
+}
+
+/// Per-worktree status for one remembered project, or all of them (§P1-036).
+pub fn worktrees(project: Option<String>) -> Result<Vec<crate::worktree::WorktreeStatus>> {
+    match call(&Request::Worktrees { project })? {
+        Response::Worktrees { worktrees } => Ok(worktrees),
+        other => bail!("unexpected reply to worktrees: {other:?}"),
+    }
 }
 
 /// Read the session id from the environment, for a process running *inside* a

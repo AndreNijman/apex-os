@@ -31,9 +31,17 @@ pub struct Spawned {
 
 /// Launch `argv` on a new PTY.
 ///
-/// `env` fully replaces the child's environment when `clear_env` is set, which
-/// is what an unconfined session uses to get the same default-deny treatment
-/// the sandbox applies through `--clearenv`.
+/// `clear_env` unsets the names in `env` before setting them, so those names
+/// cannot arrive with an inherited value. It does NOT clear the environment —
+/// the implementation below says so, and it is MEASURED: an unconfined session
+/// started from this daemon inherits every other variable the daemon holds, 80
+/// of them on a developer's machine, `HOME` and `PATH` among them.
+///
+/// So this is not the `--clearenv` treatment a confined session gets, and it
+/// is not default-deny. A confined session's environment is bwrap's, built
+/// from `--setenv` alone; an unconfined session is the documented escape hatch
+/// and its environment is the daemon's. Whoever narrows this must check
+/// `disposable::engine_env`, which exists because of it.
 pub fn spawn(
     argv: &[String],
     cwd: &Path,
