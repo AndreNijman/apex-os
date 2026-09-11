@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  test-installer-locale.sh — the keyboard, locale and timezone the installer
+#  writes into the installed system (roadmap P2-004, "keyboard layout before
+#  password creation").
+#
+#  ── The defect ──────────────────────────────────────────────────────────────
+#
+#  Every APEX install lands on `us` / `en_US.UTF-8` / `Australia/Perth`.
+#
+#  Not by choice — there was nowhere to make one. The GUI's ten pages
+#  (welcome → wifi → disk → mode → part → account → secureboot → confirm → run
+#  → done) had no locale, keyboard or timezone step, and the engine's
+#  `set_locale_keymap_in()` only COPIES whatever the live ISO already resolved.
+#  The live ISO's values come from a kickstart that hardcodes exactly those
+#  three (`installer/bib-config.toml`).
+#
+#  So a user in Germany installs APEX, is asked to create a password, types it
+#  on a keyboard the installer has decided is American, and then cannot log in
+#  to the machine they just installed — the same lockout the greeter's keymap
+#  generator, sway-greet.conf and labwc-greet/environment each carry a note
+#  about, arriving one step earlier in the story.
+#
+#  ── Why it extracts rather than restates ────────────────────────────────────
+#
+#  `set_locale_keymap_in()` cannot be called directly: it is halfway through an
+#  engine that refuses to run without a block device, and everything before it
+#  would erase one. So the function is LIFTED OUT OF THE SHIPPED ENGINE with
+#  sed and run against a fake deploy tree — the pattern test-installer.sh
+#  already uses for `scratch_fs_ok`/`pick_scratch`, whose comment says it tests
+#  "what installs, not a paraphrase of it".
+#
+#  The extraction is checked for plausibility before it is used: an extraction
+#  that silently produced an empty function would make every assertion below
+#  pass for no reason, so a short or shapeless one is a FAILURE, never a skip.
+#
+#  ── What it will not do ─────────────────────────────────────────────────────
+#
+#  It touches no block device, runs no installer, and needs no root. Everything
+#  happens inside a mktemp deploy tree, and `localectl`, `timedatectl` and
+#  `setfiles` are stubbed on a private PATH so the function cannot read or
+#  change this machine.
+#
+#  Run from anywhere: ./installer/test-installer-locale.sh
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+# Deliberately +e, like every suite in this tree: CI invokes a suite as
+# `bash -e {0}`, and under -e an assignment from a failing command ends the run
+# silently, mid-section.
+set +e
+
+cd "$(dirname "$0")" || exit 2
+ENGINE="$PWD/apex-install"
+GUI="$PWD/apex-installer-gui"
+for f in "$ENGINE" "$GUI"; do
+    [ -f "$f" ] || { echo "FATAL: cannot find $f" >&2; exit 2; }
+done
+
+pass=0; fail=0; skip=0
+ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
+bad() { printf 'FAIL  %s%s\n' "$1" "${2:+  — $2}"; fail=$((fail + 1)); }
+skp() { printf 'SKIP  %s%s\n' "$1" "${2:+  — $2}"; skip=$((skip + 1)); }
+section() { printf '\n── %s ──\n' "$1"; }
+is() {
+    local name=$1 want=$2 got=$3
+    if [ "$got" = "$want" ]; then ok "$name"
+    else bad "$name" "want [$want] got [$got]"; fi
+}
+finish() {
+    printf '\ninstaller-locale: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
+    [ "$fail" -eq 0 ]
+}
+
+W="$(mktemp -d "${TMPDIR:-/tmp}/apex-inst-locale.XXXXXX")" || exit 2
+cleanup() { rm -rf "$W"; }
+trap cleanup EXIT INT TERM
+
+# ── The page order, read out of the GUI ──────────────────────────────────────
+# The criterion is "keyboard layout before password CREATION", and the password
+# is created on the `account` page. That is an ORDER claim, so it is checked as
+# one — and against the navigation graph, not the registry: the registry is an
+# unordered dict, and a page present in it but unreachable from welcome would
+# satisfy a membership test while never appearing.
+section "the keyboard step comes before the password is created"
+
+python3 - "$GUI" > "$W/order.txt" 2>/dev/null <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+# Each page builder is `def p_<name>(self):` and its forward links are the
+# self.go("...") calls inside it. Walk from welcome and print the reachable
+# order, depth-first along the first forward edge that is not a back link.
+bodies = {}
+for m in re.finditer(r'\n    def p_(\w+)\(self\).*?(?=\n    def |\Z)', src, re.S):
+    bodies[m.group(1)] = m.group(0)
+edges = {}
+for name, body in bodies.items():
+    targets = re.findall(r'self\.go\(\s*"(\w+)"', body)
+    targets += re.findall(r'go\(\s*"(\w+)"\s*\)', body)
+    # Ternary forms: self.go("a" if cond else "b")
+    for a, b in re.findall(r'self\.go\(\s*"(\w+)"\s+if\s+.*?\s+else\s+"(\w+)"\s*\)', body):
+        targets += [a, b]
+    edges[name] = targets
+seen, order, stack = set(), [], ["welcome"]
+while stack:
+    n = stack.pop(0)
+    if n in seen or n not in edges:
+        continue
+    seen.add(n); order.append(n)
+    for t in edges[n]:
+        if t not in seen:
+            stack.append(t)
+print(" ".join(order))
+PY
+ORDER="$(cat "$W/order.txt")"
+
+if [ -z "$ORDER" ]; then
+    bad "the page graph was extracted from the GUI" "extraction produced nothing"
+    finish; exit 1
+fi
+ok "the page graph was extracted from the GUI"
+echo "      reachable from welcome: $ORDER"
+
+# The premise: if `account` is not in the graph the extraction is wrong and
+# every ordering claim below is vacuous.
+case " $ORDER " in
+    *" account "*) ok "the account page is reachable from welcome" ;;
+    *) bad "the account page is reachable from welcome" "extraction is wrong; the order assertions below would be vacuous"
+       finish; exit 1 ;;
+esac
+
+pos_of() {   # pos_of <page>
+    local i=0 p
+    for p in $ORDER; do
+        i=$((i + 1))
+        [ "$p" = "$1" ] && { printf '%s' "$i"; return 0; }
+    done
+    printf '0'
+}
+
+kb_pos=$(pos_of keyboard)
+acct_pos=$(pos_of account)
+if [ "$kb_pos" -eq 0 ]; then
+    bad "there is a keyboard page at all" \
+        "no page named 'keyboard' is reachable from welcome — a user cannot choose a layout before typing a password"
+elif [ "$kb_pos" -lt "$acct_pos" ]; then
+    ok "the keyboard page comes before the account page ($kb_pos < $acct_pos)"
+else
+    bad "the keyboard page comes before the account page" \
+        "keyboard is step $kb_pos, account is step $acct_pos"
+fi
+
+# test-installer.sh's render suite extracts page names with grep -oE '"[a-z]+"'.
+# A page named keyboard-locale or kb_tz is silently DROPPED from it with no
+# failure at all, so the name is asserted here rather than discovered later.
+if printf '%s' "$ORDER" | tr ' ' '\n' | grep -qx 'keyboard'; then
+    ok "the page's name survives test-installer.sh's [a-z]+ page-name extraction"
+else
+    skp "the page's name survives test-installer.sh's [a-z]+ extraction" "no keyboard page"
+fi
+
+# ── The engine half ──────────────────────────────────────────────────────────
+section "the engine honours the operator's choice"
+
+FN="$W/fn.sh"
+sed -n '/^set_locale_keymap_in()/,/^}/p' "$ENGINE" > "$FN"
+n_lines=$(wc -l < "$FN")
+if [ "$n_lines" -lt 30 ]; then
+    bad "set_locale_keymap_in extracted from the engine" "only $n_lines lines; the extraction is wrong"
+    finish; exit 1
+fi
+ok "set_locale_keymap_in extracted from the engine ($n_lines lines)"
+
+# Stubs. The function reads the LIVE machine through localectl/timedatectl and
+# relabels through setfiles; none of that may happen here, and a stub that
+# answered would make the override assertions meaningless.
+mkdir -p "$W/bin"
+for t in localectl timedatectl setfiles; do
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$W/bin/$t"
+    chmod +x "$W/bin/$t"
+done
+
+run_fn() {   # run_fn <deploy> [KEYMAP] [KEYVARIANT] [TIMEZONE]
+    local deploy="$1" km="${2:-}" kv="${3:-}" tz="${4:-}"
+    PATH="$W/bin:$PATH" \
+    KEYMAP="$km" KEYVARIANT="$kv" TIMEZONE="$tz" \
+    LOG="$W/engine.log" DEPLOY="$deploy" \
+    bash -c '
+        set +u
+        have() { command -v "$1" >/dev/null 2>&1; }
+        log()  { printf "%s\n" "$*" >> "$LOG"; }
+        . '"$FN"'
+        set_locale_keymap_in "$DEPLOY"
+    ' >/dev/null 2>&1
+}
+
+mk_deploy() {   # mk_deploy -> prints a fresh fake deploy root
+    local d; d="$(mktemp -d "$W/deploy.XXXXXX")"
+    mkdir -p "$d/etc" "$d/usr/share/zoneinfo/Europe" "$d/usr/share/zoneinfo/Australia"
+    : > "$d/usr/share/zoneinfo/Europe/Berlin"
+    : > "$d/usr/share/zoneinfo/Australia/Perth"
+    printf '%s' "$d"
+}
+
+# (1) An explicit German layout must reach all three files.
+D1="$(mk_deploy)"
+run_fn "$D1" de "" ""
+got="$(sed -n 's/.*Option "XkbLayout" "\([^"]*\)".*/\1/p' "$D1/etc/X11/xorg.conf.d/00-keyboard.conf" 2>/dev/null)"
+is "an explicit layout reaches the X11 keyboard config" "de" "$got"
+got="$(sed -n 's/^KEYMAP=//p' "$D1/etc/vconsole.conf" 2>/dev/null)"
+is "…and the console keymap" "de" "$got"
+
+# (2) A variant travels with it. A German user on the `nodeadkeys` variant who
+#     gets plain `de` still has a different keyboard than the one they chose.
+D2="$(mk_deploy)"
+run_fn "$D2" de nodeadkeys ""
+got="$(sed -n 's/.*Option "XkbVariant" "\([^"]*\)".*/\1/p' "$D2/etc/X11/xorg.conf.d/00-keyboard.conf" 2>/dev/null)"
+is "an explicit variant reaches the X11 keyboard config" "nodeadkeys" "$got"
+
+# (3) THE REGRESSION THIS GUARDS. With no choice the function must behave
+#     exactly as it always has — fall back to `us` when the live environment
+#     cannot be read — rather than writing an empty layout, which is a keyboard
+#     config that configures nothing.
+D3="$(mk_deploy)"
+run_fn "$D3" "" "" ""
+got="$(sed -n 's/.*Option "XkbLayout" "\([^"]*\)".*/\1/p' "$D3/etc/X11/xorg.conf.d/00-keyboard.conf" 2>/dev/null)"
+is "no choice still falls back to us, as it always did" "us" "$got"
+
+# (4) A chosen timezone becomes the symlink.
+D4="$(mk_deploy)"
+run_fn "$D4" "" "" "Europe/Berlin"
+got="$(readlink "$D4/etc/localtime" 2>/dev/null | sed 's|.*/zoneinfo/||')"
+is "an explicit timezone becomes /etc/localtime" "Europe/Berlin" "$got"
+
+# (5) An operator who explicitly picks UTC means UTC. The pre-existing
+#     ""|"UTC" -> Australia/Perth fallback exists to replace systemd's INFERRED
+#     UTC, and must not overrule a deliberate one.
+D5="$(mk_deploy)"
+mkdir -p "$D5/usr/share/zoneinfo"; : > "$D5/usr/share/zoneinfo/UTC"
+run_fn "$D5" "" "" "UTC"
+got="$(readlink "$D5/etc/localtime" 2>/dev/null | sed 's|.*/zoneinfo/||')"
+is "an explicitly chosen UTC is not overruled by the Perth fallback" "UTC" "$got"
+
+# (6) No timezone chosen keeps the long-standing fallback.
+D6="$(mk_deploy)"
+run_fn "$D6" "" "" ""
+got="$(readlink "$D6/etc/localtime" 2>/dev/null | sed 's|.*/zoneinfo/||')"
+is "no choice keeps the existing Australia/Perth fallback" "Australia/Perth" "$got"
+
+# ── The answers file ─────────────────────────────────────────────────────────
+# The engine dies on an unknown key, so a GUI that writes one the engine does
+# not know breaks EVERY install. The two halves have to land together, and this
+# is the assertion that says they did.
+section "the answers file carries the new keys"
+for k in keymap keyvariant timezone; do
+    if grep -qE "^\s+$k\)" "$ENGINE"; then
+        ok "the engine accepts '$k' in the answers file"
+    else
+        bad "the engine accepts '$k' in the answers file" \
+            "unknown keys are fatal; the GUI writing this would break every install"
+    fi
+done
+
+# Cleared before parsing, for the reason the engine's own comment gives: a stale
+# value reaching `bootc install to-disk --wipe` is how this file already lost a
+# real USB stick once.
+for v in KEYMAP KEYVARIANT TIMEZONE; do
+    if grep -qE "^KEYMAP=\"\"|^$v=\"\"|; $v=\"\"" "$ENGINE"; then
+        ok "$v is cleared before the answers file is parsed"
+    else
+        bad "$v is cleared before the answers file is parsed"
+    fi
+done
+
+# ── Validation happens before the disk is touched ────────────────────────────
+# The engine's own comment: an invalid value is only caught when it is USED, and
+# by then `bootc install --wipe` has already run. A bad layout must be refused
+# with the same "Nothing has been erased." promise the account checks make.
+section "a bad layout is refused before anything is erased"
+if ! command -v sudo >/dev/null 2>&1; then
+    skp "a nonsense layout is refused" "sudo not available"
+else
+    ANS="$W/answers"
+    printf 'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=u\npassword=pw\nhostname=apex\nkeymap=NOT_A_LAYOUT\n' > "$ANS"
+    out="$(sudo -n "$ENGINE" --headless "$ANS" 2>&1 </dev/null)"
+    if grep -q 'Unexpected error on line' <<<"$out"; then
+        bad "a nonsense layout is refused" "the ERR trap fired instead of a clean refusal"
+    elif grep -qF "Nothing has been erased" <<<"$out" && grep -qiF "layout" <<<"$out"; then
+        ok "a nonsense layout is refused, naming the layout, before the disk is touched"
+    else
+        bad "a nonsense layout is refused" "got: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+    fi
+
+    # And a real one must NOT be refused for being a layout — it has to get past
+    # this check and fail later on the absent disk, or the validator is simply
+    # rejecting everything and assertion (1) above proves nothing.
+    printf 'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=u\npassword=pw\nhostname=apex\nkeymap=de\n' > "$ANS"
+    out="$(sudo -n "$ENGINE" --headless "$ANS" 2>&1 </dev/null)"
+    if grep -qiF "is not a keyboard layout" <<<"$out"; then
+        bad "a real layout is not refused" "the validator rejects valid layouts too"
+    else
+        ok "a real layout gets past validation and fails later, on the absent disk"
+    fi
+fi
+
+finish

@@ -425,16 +425,35 @@ set_locale_keymap_in() {  # $1=deploy dir
   local deploy="$1" layout="" variant="" lang="" xkbdir tz=""
   [ -d "$deploy/etc" ] || return 0
 
+  # ── The operator's own choice wins ─────────────────────────────────────────
+  # The installer now has a keyboard step before the account step, and what it
+  # collected arrives as KEYMAP / KEYVARIANT / TIMEZONE. That choice beats every
+  # inference below, because the inferences are about the LIVE ISO — whose
+  # kickstart hardcodes `us` and `Australia/Perth` — and not about the person
+  # standing in front of the machine.
+  #
+  # An absent value is not a choice: the answers file omits empty keys entirely
+  # (the front end writes `if a.get(k)`), so an operator who skipped the step
+  # falls through to exactly the behaviour this function has always had.
+  if [ -n "${KEYMAP:-}" ]; then
+    layout="$KEYMAP"
+    variant="${KEYVARIANT:-}"
+    log "locale/keymap: using the operator's choice layout=$layout${variant:+ variant=$variant}"
+  fi
+
   # Prefer whatever the LIVE environment is using — the operator may have set a
   # layout in the installer. localectl needs dbus and may not answer here, so
   # every read is best-effort and the placeholder "(unset)" is rejected, not
   # treated as a value (the bug above).
-  if have localectl; then
+  if [ -z "$layout" ] && have localectl; then
     layout=$(localectl status 2>/dev/null \
       | sed -n 's/^[[:space:]]*X11 Layout:[[:space:]]*//p' | head -1)
     variant=$(localectl status 2>/dev/null \
       | sed -n 's/^[[:space:]]*X11 Variant:[[:space:]]*//p' | head -1)
   fi
+  # Only the inferred pair is sanitised for the "(unset)" placeholder; an
+  # operator's value has already been validated against xkb's own layout list
+  # before anything was erased.
   case "$layout"  in "(unset)"|"n/a") layout="" ;;  esac
   case "$variant" in "(unset)"|"n/a") variant="" ;; esac
   # Fall back to the live env's vconsole keymap, then to `us`. Written as a plain
@@ -483,13 +502,20 @@ set_locale_keymap_in() {  # $1=deploy dir
   # `timezone Australia/Perth --utc`, so a real operator install lands here with
   # it already correct), and fall back to the same value the kickstart uses so the
   # two install paths agree.
-  if [ -L /etc/localtime ]; then
+  if [ -n "${TIMEZONE:-}" ]; then
+    tz="$TIMEZONE"
+  fi
+  if [ -z "$tz" ] && [ -L /etc/localtime ]; then
     tz=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')
   fi
   if [ -z "$tz" ] && have timedatectl; then
     tz=$(timedatectl show --property=Timezone --value 2>/dev/null)
   fi
-  case "$tz" in ""|"UTC") tz="Australia/Perth" ;; esac
+  # An operator who explicitly chose UTC means it; only an INFERRED "UTC" is the
+  # systemd fallback this line exists to replace.
+  if [ -z "${TIMEZONE:-}" ]; then
+    case "$tz" in ""|"UTC") tz="Australia/Perth" ;; esac
+  fi
   if [ -e "$deploy/usr/share/zoneinfo/$tz" ]; then
     ln -sfn "../usr/share/zoneinfo/$tz" "$deploy/etc/localtime" 2>>"$LOG" || true
   else
@@ -688,6 +714,11 @@ esac
 # ROOTFS_TYPE is deliberately NOT cleared — it has a real default (btrfs).
 INSTALL_MODE=""; DISK=""; TARGET=""; ESP_DEV=""
 USERNAME=""; P1=""; HOSTNAME=""; MOKPW=""
+# Cleared for the same reason as the rest: an operator's keyboard choice must
+# come from the answers file or not at all. A stale value here would silently
+# install a layout nobody picked, and a wrong layout is a password that cannot
+# be typed on first boot.
+KEYMAP=""; KEYVARIANT=""; TIMEZONE=""
 
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
@@ -705,6 +736,9 @@ while IFS= read -r line || [ -n "$line" ]; do
     hostname)  HOSTNAME="$v" ;;
     rootfs)    ROOTFS_TYPE="$v" ;;
     mokpw)     MOKPW="$v" ;;
+    keymap)    KEYMAP="$v" ;;
+    keyvariant) KEYVARIANT="$v" ;;
+    timezone)  TIMEZONE="$v" ;;
     *)         die "unknown key in answers file: $k" ;;
   esac
 done < "$ANSWERS"
@@ -736,6 +770,35 @@ case "$INSTALL_MODE" in disk|partition) : ;; *) die "answers: bad mode '$INSTALL
 #
 # A front end validating is not a substitute. The engine takes a file it did not
 # write, and it is the last thing between that file and an erased disk.
+# The keyboard choice is validated here, with the account, and for the same
+# reason: it is only ever checked when it is USED, and by then the disk is gone.
+# A layout that xkb does not know produces a system whose keymap silently falls
+# back to us — which is precisely the lockout this feature exists to end, except
+# now the user believes they chose otherwise. Optional: an absent key means the
+# operator did not choose and the live environment's own layout is carried over,
+# which is what this engine has always done.
+if [ -n "${KEYMAP:-}" ]; then
+  printf '%s' "$KEYMAP" | grep -Eq '^[a-z][a-z0-9_-]{0,31}(,[a-z][a-z0-9_-]{0,31})*$' \
+    || die "Invalid keyboard layout '$KEYMAP'. Nothing has been erased."
+  # Checked against xkb's own list, not a pattern — the pattern only proves it
+  # is shaped like a layout name. base.lst ships with xkeyboard-config, which
+  # installer/Containerfile.installer names explicitly so it cannot vanish; if
+  # it is somehow absent the shape check above stands alone rather than
+  # refusing an install over a missing reference file.
+  if [ -r /usr/share/X11/xkb/rules/base.lst ]; then
+    for _kl in $(printf '%s' "$KEYMAP" | tr ',' ' '); do
+      awk -v want="$_kl" \
+        '/^! layout/{f=1;next} /^!/{f=0} f && $1==want{found=1} END{exit !found}' \
+        /usr/share/X11/xkb/rules/base.lst 2>/dev/null \
+        || die "'$_kl' is not a keyboard layout this system knows. Nothing has been erased."
+    done
+  fi
+fi
+if [ -n "${TIMEZONE:-}" ]; then
+  printf '%s' "$TIMEZONE" | grep -Eq '^[A-Za-z][A-Za-z0-9+_-]*(/[A-Za-z0-9+_-]+)*$' \
+    || die "Invalid timezone '$TIMEZONE'. Nothing has been erased."
+fi
+
 printf '%s' "$USERNAME" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' \
   || die "Invalid username '$USERNAME'. Use lowercase letters, digits, - and _ ; it must start with a letter or _ and be at most 32 characters. Nothing has been erased."
 # The reserved list must cover names that ALREADY EXIST in the image being
