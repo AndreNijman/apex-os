@@ -1312,7 +1312,7 @@ tasks:
 - id: P1-005
   title: Cloudflare R2 capability set
   priority: P1
-  status: todo
+  status: partial
   area: cloudflare
   depends_on:
   - P1-002
@@ -1322,10 +1322,27 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Cloudflare R2 capability set, bucket- and object-scoped. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge
+    4f80746e (82dd4d4b), three operations. CRITERION 1 DONE:
+    an_r2_object_is_addressed_by_the_bucket_this_project_bound_and_the_key_under_it pins all four documented paths
+    exactly, and a_bucket_this_project_does_not_bind_never_reaches_cloudflare proves all three operations resolve
+    through the project's own buckets list - INCLUDING bucket.create, so an agent cannot create a bucket the owner
+    never wrote down. R2 object read/write was verified by hand BEFORE building, because the R2 token page's
+    'object permissions are S3-only' sentence is about the permission group rather than the endpoint, and taking
+    it at face value would have produced a capability set that cannot address an object. CRITERION 2 PARTIAL, and
+    the split is worth stating precisely: the agent never holds a token at all - the broker spends it inside a
+    curl it owns - and every operation is bucket-scoped, but the token actually spent is the ACCOUNT-WIDE one. The
+    narrower per-task credential is section 13.4 / P1-011's work; Provider::mint still answers 'cannot'. R2's own
+    temp-access-credentials does NOT close it either: it requires a parentAccessKeyId, an S3 key this broker does
+    not hold, and it yields SigV4 credentials a REST-only transport cannot spend. A DEFECT THE TESTS SURFACED:
+    NoResource fell through to PermissionDenied instead of BadRequest - 'you did not bind that' reported to the
+    caller as 'you may not' - and it was caught only because the test asserts the error KIND rather than that an
+    error happened.
 - id: P1-006
   title: Cloudflare D1/KV/Queues/Hyperdrive capabilities
   priority: P1
-  status: todo
+  status: done
   area: cloudflare
   depends_on:
   - P1-002
@@ -1335,10 +1352,22 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Cloudflare D1, KV, Queues and Hyperdrive capability sets. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge
+    4f80746e (40339d4f), nine operations. BOTH CRITERIA MET. Semantic separation:
+    a_migration_is_a_file_of_statements_and_a_query_is_one_line,
+    a_queue_change_is_checked_against_the_ranges_cloudflare_documents, and
+    a_grant_for_one_storage_verb_does_not_grant_its_siblings. Project resource binding enforced:
+    every_storage_resource_is_addressed_by_the_id_its_project_wrote_down and
+    a_database_namespace_queue_or_config_this_project_did_not_bind_never_reaches_cloudflare. NO LIVE ACCOUNT WAS
+    TOUCHED - everything runs against a loopback double that 401s any request arriving without an Authorization
+    header, and the paths come from cloudflare/api-schemas openapi.json at d5003a19 cross-checked against the
+    rendered reference. Part of +39 tests (2409 -> 2448 passed / 0 failed) and 23 mutation pairs, every one
+    biting, each restored with cp so cargo actually rebuilt rather than silently reusing the mutant's binary.
 - id: P1-007
   title: Cloudflare DNS capability set
   priority: P1
-  status: todo
+  status: partial
   area: cloudflare
   depends_on:
   - P1-002
@@ -1349,6 +1378,22 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Cloudflare DNS capability set. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 4f80746e (9d14bac0), four
+    operations. TWO OF THREE CRITERIA DONE. Read/create/update/delete are four separate grants
+    (the_four_dns_verbs_are_four_grants). Bound zone and record constraints hold, including the label boundary
+    that a naive prefix check would get wrong: a_name_outside_the_bound_zone_never_reaches_cloudflare proves
+    notexample.com is NOT inside example.com, and
+    a_project_that_narrows_itself_to_some_records_cannot_touch_the_others. CRITERION 3 PARTIAL FOR A STRUCTURAL
+    REASON: 'registrar/nameserver/DNSSEC-root changes require elevated class' cannot be met because NO ELEVATED
+    CLASS EXISTS in apex-secret-core to require. What ships instead is the safe half, proven rather than asserted:
+    NS, DS, DNSKEY and SOA are refused outright on create, update and delete - reading one is allowed, since
+    section 13.9 reserves CHANGES - and registrar, dnssec and custom_ns are never declared at all, proven by
+    changing_a_delegation_or_a_dnssec_record_is_refused_as_an_elevated_shape with all four verbs granted and the
+    fake transport's seen() list empty. The remainder is a real design change: a field on OperationSpec across 28
+    literals in 6 files, plus a grant path gated on section 4.5's break-glass. That is its own item, and the agent
+    deliberately did not take it unilaterally mid-integration. A DEFECT THE TESTS SURFACED: NoRecord fell through
+    to Refused instead of NoSuchResource - 'you did not bind that' reported as 'you may not'.
 - id: P1-008
   title: Cloudflare One capability set
   priority: P1
