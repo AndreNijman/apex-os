@@ -82,7 +82,17 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// dropped key beside it is `actor`, which is a display string. A version
 /// number exists to catch a fail-open, and this change fails closed on its
 /// own.
-pub const PROTOCOL_VERSION: u32 = 5;
+/// 6 — a system-access grant can be narrowed to named verbs (§3.3, P0-007).
+///
+/// `RunRequest::capabilities`, and the one wire change on this list whose
+/// dropped-key failure is a WIDENING rather than a loss. Every other field
+/// here, dropped by a daemon that predates it, costs the caller something they
+/// asked for. This one costs them something they asked to give up: a daemon
+/// below this ignores the key and issues a grant covering the whole privilege
+/// vocabulary, so `--capabilities install` would silently authorise `rollback`
+/// and `update` as well. The CLI refuses to send it to a daemon below
+/// [`SCOPED_GRANT_VERSION`].
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// The revision at which the credential store moved to `apex-secretd`.
 ///
@@ -127,6 +137,20 @@ pub const MCP_BRIDGE_VERSION: u32 = GENERIC_CAPABILITY_VERSION;
 /// what a reader of any one guard needs to know.
 pub const SYSTEM_GRANT_VERSION: u32 = GENERIC_CAPABILITY_VERSION;
 
+/// The revision that first narrowed a grant to named verbs (P0-007).
+///
+/// `apex agent run --capabilities` checks it, and it is the guard whose
+/// absence would be worst: below this the key is dropped and the daemon
+/// issues the grant it always issued, which covers every verb. A flag that
+/// narrows nothing while reading as though it did is the exact fail-open the
+/// numbers on this list exist to catch, so the CLI refuses rather than sends
+/// it and hopes.
+///
+/// Its OWN number rather than another alias of [`GENERIC_CAPABILITY_VERSION`],
+/// because it is a separate wire change in a separate release — the three
+/// aliases above really did ship together and this did not.
+pub const SCOPED_GRANT_VERSION: u32 = 6;
+
 /// The guards arrive in order, checked when the crate compiles rather than
 /// when a test runs: they are facts about three constants, and a revision
 /// numbered behind the one before it would make a `<` comparison in the CLI
@@ -139,6 +163,10 @@ const _: () = assert!(BROKERED_SECRET_SERVICE_VERSION < GENERIC_CAPABILITY_VERSI
 // intended.
 const _: () = assert!(MCP_BRIDGE_VERSION == GENERIC_CAPABILITY_VERSION);
 const _: () = assert!(SYSTEM_GRANT_VERSION == GENERIC_CAPABILITY_VERSION);
+// `<`, not `==`: narrowing a grant arrived a revision after grants did, and a
+// guard claiming they are the same revision would let `--capabilities` reach a
+// daemon that drops it and grants everything.
+const _: () = assert!(SYSTEM_GRANT_VERSION < SCOPED_GRANT_VERSION);
 
 /// The revision that first carried the six dimensions.
 ///
@@ -1012,6 +1040,21 @@ pub struct RunRequest {
     /// window to be explicit. See [`crate::grant::ttl_for`].
     #[serde(default)]
     pub ttl_ms: Option<u64>,
+    /// Which privilege verbs the grant should cover (§3.3's "capability
+    /// scoped", P0-007's third criterion).
+    ///
+    /// `None` is the whole vocabulary, which is what every session grant
+    /// covered before this field existed — so an older client that does not
+    /// send it gets exactly the grant it used to get. `Some` narrows, and is
+    /// validated by [`crate::grant::capabilities_for`] rather than trusted:
+    /// a name that is not a verb is refused, not dropped, because a grant
+    /// quietly covering less than was asked for fails in the middle of a
+    /// session rather than in front of the person who typed it.
+    ///
+    /// Refused with `--unsafe-everything`, which does not go through
+    /// `apex request` and therefore has no verbs to narrow.
+    #[serde(default)]
+    pub capabilities: Option<Vec<String>>,
     /// A security key's answer, for a session asking to elevate from an origin
     /// §7 does not give the local column to (P0-014).
     ///
@@ -1619,6 +1662,7 @@ mod tests {
                 worktree: None,
                 checkpoint: false,
                 ttl_ms: None,
+                capabilities: None,
                 second_factor: None,
                 cols: 80,
                 rows: 24,
@@ -1663,6 +1707,7 @@ mod tests {
                 worktree: Some("issue-217".into()),
                 checkpoint: true,
                 ttl_ms: None,
+                capabilities: None,
                 // Carried through the round trip with a value, not `None`:
                 // the field is the one thing on this request that a daemon
                 // reads to decide whether root is handed out, and a
@@ -1695,6 +1740,7 @@ mod tests {
                 worktree: None,
                 checkpoint: false,
                 ttl_ms: None,
+                capabilities: None,
                 second_factor: None,
                 cols: 80,
                 rows: 24,
@@ -1960,6 +2006,7 @@ mod tests {
             ("generic capabilities", GENERIC_CAPABILITY_VERSION),
             ("the mcp bridge", MCP_BRIDGE_VERSION),
             ("system-access grants", SYSTEM_GRANT_VERSION),
+            ("scoped grants", SCOPED_GRANT_VERSION),
         ] {
             assert!(
                 since <= PROTOCOL_VERSION,
@@ -1969,9 +2016,24 @@ mod tests {
         }
         // The newest guard is the current revision: adding a wire field
         // without bumping the version is the fail-open these exist to catch.
-        assert_eq!(GENERIC_CAPABILITY_VERSION, PROTOCOL_VERSION);
-        assert_eq!(MCP_BRIDGE_VERSION, PROTOCOL_VERSION);
-        assert_eq!(SYSTEM_GRANT_VERSION, PROTOCOL_VERSION);
+        assert_eq!(SCOPED_GRANT_VERSION, PROTOCOL_VERSION);
+        // And every older guard stays strictly behind it. `<`, not
+        // `== PROTOCOL_VERSION - 1`: these three shipped as revision 5 and are
+        // not going to move again, so pinning them one below the current
+        // version would break all three on the next bump to 7 for no reason
+        // anybody could act on.
+        for (name, since) in [
+            ("generic capabilities", GENERIC_CAPABILITY_VERSION),
+            ("the mcp bridge", MCP_BRIDGE_VERSION),
+            ("system-access grants", SYSTEM_GRANT_VERSION),
+        ] {
+            assert!(
+                since < PROTOCOL_VERSION,
+                "the guard for {name} is pinned at {since} and PROTOCOL_VERSION is \
+                 {PROTOCOL_VERSION}: a guard for an older revision must stay strictly \
+                 behind the current one, or a peer that predates it is told it is current"
+            );
+        }
     }
 
     #[test]

@@ -1137,3 +1137,521 @@ fn collect_sessions(daemon: &Arc<Daemon>) -> Vec<SessionInfo> {
     add_process_children(&mut out);
     out
 }
+
+/// The one lock for every test in this crate that redirects an XDG variable.
+///
+/// `set_var` is process-global and `cargo test` runs targets in threads, so a
+/// test that points `XDG_STATE_HOME` at a temporary directory is changing what
+/// every other thread sees. `grants.rs` had a lock for that and so did
+/// `lock_tests`, and two locks over one variable serialise nothing: a
+/// `grants::tests` tempdir dropping between this module's `issue` and its
+/// `grant::load` restored the real `XDG_STATE_HOME` mid-test, and the grant
+/// record was looked for in a directory it had never been written to. It
+/// failed only under the full suite, never alone, which is the signature.
+///
+/// One lock, at the crate root, where both can reach it.
+#[cfg(test)]
+pub mod test_env {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    pub fn lock() -> MutexGuard<'static, ()> {
+        static L: OnceLock<Mutex<()>> = OnceLock::new();
+        L.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    //! §7's lock rules, at the point where a decision becomes an effect
+    //! (P0-015).
+    //!
+    //! `apex_agent_core::lock` already asserts [`LockWatch::step`] over 8
+    //! policies by 7 origins by 4 states. `step` returns a list and touches
+    //! nothing, so every one of those tests would still pass if the daemon
+    //! ignored the list — and until this module nothing anywhere called
+    //! [`lock_tick`], which is the function that performs it. P0-015's second
+    //! criterion is "short-lived root grants revoke on lock by default", and
+    //! the only honest subject for it is a real grant in a real
+    //! [`GrantAuthority`] that is gone afterwards.
+    //!
+    //! The screen is faked and nothing else is. A test that locked the screen
+    //! would need a compositor and a person, and [`lock_tick`] takes
+    //! `&mut dyn LockObserver` precisely so the one thing that cannot be
+    //! driven from a test is the one thing replaced.
+
+    use std::sync::Arc;
+
+    use apex_agent_core::auth::{AuthError, Authenticator, ProcessSubject, Verdict};
+    use apex_agent_core::grant::GrantKind;
+    use apex_agent_core::lock::{LockObserver, LockState, LockWatch};
+    use apex_agent_core::policy::RequestOrigin;
+
+    use super::*;
+
+    /// An authenticator that authorises, so a grant can exist to be revoked.
+    ///
+    /// The opposite choice from `privilege.rs`'s `CountingRefusal`, and for a
+    /// reason: there the question is whether polkit was asked at all, here it
+    /// is what happens to a grant that already exists. Nothing in this module
+    /// asserts anything about authentication.
+    struct AlwaysAuthorises;
+
+    impl Authenticator for AlwaysAuthorises {
+        fn check(&self, _a: &str, _s: &ProcessSubject) -> Result<Verdict, AuthError> {
+            Ok(Verdict::Authorized)
+        }
+    }
+
+    /// A screen whose state the test sets.
+    struct FakeScreen(LockState);
+
+    impl LockObserver for FakeScreen {
+        fn observe(&mut self) -> LockState {
+            self.0.clone()
+        }
+    }
+
+    /// `XDG_STATE_HOME` and `XDG_CONFIG_HOME` pointed at a fresh directory.
+    ///
+    /// Both, not just state: `lock_tick` re-reads the policy with
+    /// `Config::load()` on every tick, so a developer's own
+    /// `~/.config/apex/agent.toml` with `revoke_root_grants = false` in it
+    /// would turn the central assertion here into one that passes for the
+    /// wrong reason — or fails on their machine and nowhere else.
+    struct Sandbox {
+        path: std::path::PathBuf,
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Sandbox {
+        fn new() -> Sandbox {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            let guard = crate::test_env::lock();
+            let path = std::env::temp_dir().join(format!(
+                "apex-lock-test-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::remove_dir_all(&path).ok();
+            std::fs::create_dir_all(&path).expect("mkdir");
+            let mut previous = Vec::new();
+            for name in ["XDG_STATE_HOME", "XDG_CONFIG_HOME"] {
+                previous.push((name, std::env::var_os(name)));
+                // Safe: the lock above serialises every test that touches it.
+                unsafe { std::env::set_var(name, &path) };
+            }
+            Sandbox {
+                path,
+                previous,
+                _guard: guard,
+            }
+        }
+
+        /// Write the `agent.json` carrying `lock` settings, at the path
+        /// `apex agent lock` writes and `Config::load` reads.
+        ///
+        /// Only the `lock` key, deliberately: `LockPolicy` is
+        /// `#[serde(default)]` on the container as well as per field, so this
+        /// also asserts that setting one lock rule does not silently reset the
+        /// other two — which is the failure that comment in `lock.rs` exists
+        /// to prevent.
+        fn with_lock_policy(&self, json: &str) {
+            let dir = self.path.join("apex");
+            std::fs::create_dir_all(&dir).expect("mkdir config");
+            std::fs::write(dir.join("agent.json"), json).expect("write config");
+        }
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            for (name, value) in &self.previous {
+                // Safe: same lock, still held.
+                unsafe {
+                    match value {
+                        Some(v) => std::env::set_var(name, v),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+            std::fs::remove_dir_all(&self.path).ok();
+        }
+    }
+
+    fn daemon() -> Arc<Daemon> {
+        Arc::new(Daemon {
+            registry: Mutex::new(Registry::new()),
+            config: Mutex::new(Config::default()),
+            grants: grants::GrantAuthority::new(),
+            auth: Box::new(AlwaysAuthorises),
+            tests: worktrees::TestObservations::new(),
+            challenges: Mutex::new(apex_agent_core::webauthn::ChallengeStore::new()),
+        })
+    }
+
+    /// This process, as a peer polkit can be asked about.
+    fn me() -> crate::peer::Peer {
+        crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        }
+    }
+
+    /// Issue a real grant of `kind` for `session`, the way `session::start`
+    /// does — through `authenticate`, so the proof is one this crate minted
+    /// rather than a value a test conjured.
+    fn issue(daemon: &Arc<Daemon>, kind: GrantKind, session: u32, now: u64) -> u32 {
+        let proof = grants::authenticate(daemon.auth.as_ref(), kind, &me())
+            .expect("the stub authorises");
+        let caps = apex_agent_core::grant::capabilities_for(kind, None).expect("issuable");
+        daemon
+            .grants
+            .issue(
+                proof,
+                kind,
+                session,
+                "claude",
+                None,
+                900_000,
+                caps,
+                RequestOrigin::LocalTerminal,
+                now,
+            )
+            .id
+    }
+
+    /// A real child in its own process group, in the registry, live.
+    ///
+    /// `hold_session` sends SIGSTOP to a process GROUP, so a fake pgid would
+    /// either signal nothing or signal this test runner. `process_group(0)`
+    /// makes the child its own leader, so its pgid is its pid and the signal
+    /// reaches exactly one process that exists to receive it.
+    fn live_session(
+        d: &Arc<Daemon>,
+        id: u32,
+        origin: Option<RequestOrigin>,
+    ) -> (libc::pid_t, std::process::Child) {
+        use std::os::unix::process::CommandExt;
+        let child = unsafe {
+            std::process::Command::new("sleep")
+                .arg("60")
+                .pre_exec(|| {
+                    // Its own process group. `libc` rather than
+                    // `CommandExt::process_group`, which is the same call and
+                    // is already in use elsewhere in this repository.
+                    if libc::setpgid(0, 0) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                })
+                .spawn()
+        }
+        .expect("spawn sleep");
+        let pid = child.id() as libc::pid_t;
+        let info = apex_agent_core::protocol::SessionInfo {
+            id,
+            agent: "generic".into(),
+            program: "sleep".into(),
+            args: vec![],
+            cwd: "/tmp".into(),
+            project: None,
+            project_name: None,
+            worktree: None,
+            state: apex_agent_core::protocol::AgentState::Working,
+            detail: None,
+            paused: false,
+            policy: apex_agent_core::policy::AgentPolicy::default(),
+            request_origin: origin,
+            origin_source: None,
+            actor: None,
+            grant: None,
+            grant_expires_ms: None,
+            native_observed: None,
+            telemetry: None,
+            children: Vec::new(),
+            pid,
+            started: 0,
+            last_activity: 0,
+            // Live, which is what `hold_session` requires. Written out rather
+            // than defaulted so the one field the whole test depends on is
+            // visible in it.
+            exit_code: None,
+            exit_signal: None,
+            attached: 0,
+            checkpoint: None,
+            cols: 80,
+            rows: 24,
+            injected: 0,
+            capsule: None,
+        };
+        d.registry
+            .lock()
+            .expect("registry lock")
+            .insert(info, -1, pid, pid);
+        (pid, child)
+    }
+
+    /// The kernel's own word for what a process is doing, from
+    /// `/proc/<pid>/stat`. `T` is stopped.
+    ///
+    /// Read from /proc rather than inferred from `info.paused`, which is the
+    /// daemon's own bookkeeping: a `paused` flag set beside a signal that never
+    /// arrived is exactly the failure this is here to catch.
+    fn proc_state(pid: libc::pid_t) -> char {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        // The comm field can contain spaces and parentheses, so the state is
+        // the first field after the LAST ')'.
+        stat.rfind(')')
+            .and_then(|i| stat[i + 1..].split_whitespace().next())
+            .and_then(|f| f.chars().next())
+            .unwrap_or('?')
+    }
+
+    /// Wait for a process to reach `want`, up to two seconds.
+    ///
+    /// A signal is delivered asynchronously; asserting immediately after
+    /// `lock_tick` returns would be a race that passes on a fast machine.
+    fn settles_to(pid: libc::pid_t, want: char) -> char {
+        let mut last = '?';
+        for _ in 0..200 {
+            last = proc_state(pid);
+            if last == want {
+                return last;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        last
+    }
+
+    #[test]
+    fn a_remote_control_session_is_actually_stopped_by_a_lock_and_started_again_by_an_unlock() {
+        // P0-015 criterion 1, at the same depth criterion 2 is asserted at.
+        // §7: "ordinary agents may continue; Remote Control may continue IF
+        // CONFIGURED" — so with nothing configured a Remote Control session is
+        // held, and `LockPolicy::remote_control_continues` defaults to false
+        // for exactly that reading.
+        //
+        // The assertion is on /proc, not on `actions.hold` and not on
+        // `info.paused`: `step` already has tests for the decision, and a
+        // `paused` flag is the daemon agreeing with itself. What had never
+        // been asserted is that a process actually stops.
+        let sb = Sandbox::new();
+        let d = daemon();
+        let (pid, mut child) = live_session(&d, 11, Some(RequestOrigin::RemoteControl));
+        let mut watch = LockWatch::new();
+        let mut ending = Vec::new();
+        let now = 10_000;
+
+        lock_tick(&d, &mut watch, &mut FakeScreen(LockState::Unlocked), &mut ending, now);
+        assert_ne!(proc_state(pid), 'T', "an unlocked screen stopped a session");
+
+        lock_tick(&d, &mut watch, &mut FakeScreen(LockState::Locked), &mut ending, now + 1);
+        let state = settles_to(pid, 'T');
+        assert_eq!(state, 'T', "the screen locked and the session is still running");
+        let paused = d
+            .registry
+            .lock()
+            .expect("registry lock")
+            .list()
+            .into_iter()
+            .any(|h| {
+                let s = h.lock().expect("session lock");
+                s.info.id == 11 && s.info.paused
+            });
+        assert!(paused, "the process stopped but the record does not say so");
+
+        // And an unlock starts it again. A hold that could not be lifted would
+        // be a lock policy that ends every Remote Control session permanently.
+        lock_tick(&d, &mut watch, &mut FakeScreen(LockState::Unlocked), &mut ending, now + 2);
+        let state = settles_to(pid, 'S');
+        assert_ne!(state, 'T', "the screen unlocked and the session is still stopped");
+
+        // SIGKILL, not SIGTERM: a stopped process does not act on SIGTERM
+        // until it is continued, and this one may have been left stopped if
+        // the assertions above failed.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let _ = child.wait();
+        drop(sb);
+    }
+
+    #[test]
+    fn remote_control_keeps_running_across_a_lock_when_the_owner_configured_it() {
+        // "may continue IF CONFIGURED" — the other half, and what makes the
+        // test above about the DEFAULT rather than about `hold_session` being
+        // the only thing `lock_tick` can do. This is Andre's own setting:
+        // `apex agent lock --remote continue`.
+        let sb = Sandbox::new();
+        sb.with_lock_policy(r#"{"lock": {"remote_control_continues": true}}"#);
+        let d = daemon();
+        let (pid, mut child) = live_session(&d, 12, Some(RequestOrigin::RemoteControl));
+        let mut watch = LockWatch::new();
+        let mut ending = Vec::new();
+        let now = 10_000;
+
+        lock_tick(&d, &mut watch, &mut FakeScreen(LockState::Unlocked), &mut ending, now);
+        lock_tick(&d, &mut watch, &mut FakeScreen(LockState::Locked), &mut ending, now + 1);
+        // Give a wrong implementation the same 2s the other test gives a right
+        // one, so this is not passing merely by being read too early.
+        let state = settles_to(pid, 'T');
+        assert_ne!(state, 'T', "`--remote continue` was configured and the session was stopped anyway");
+
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let _ = child.wait();
+        drop(sb);
+    }
+
+    #[test]
+    fn a_root_grant_is_gone_after_the_screen_locks_and_the_default_is_what_does_it() {
+        // P0-015 criterion 2. Asserted on `active_for` — the authority's own
+        // answer to "is this session elevated right now" — and not on
+        // `actions.revoke`, which is a list `step` already has tests for and
+        // which the daemon could build correctly and then ignore.
+        let sb = Sandbox::new();
+        // Deliberately NO config file: the default is the subject. §7 says
+        // "should default to revocation", and a test that had to switch the
+        // behaviour on would be testing a setting rather than a default.
+        let d = daemon();
+        let now = 10_000;
+        let id = issue(&d, GrantKind::SystemAccess, 7, now);
+        assert!(d.grants.active_for(7, now).is_some(), "the grant did not take");
+
+        let mut watch = LockWatch::new();
+        let mut ending = Vec::new();
+
+        // Unlocked first, so the locked tick is a TRANSITION. §7 words the
+        // rule as an event, and `step` fires revocation on the edge.
+        lock_tick(
+            &d,
+            &mut watch,
+            &mut FakeScreen(LockState::Unlocked),
+            &mut ending,
+            now,
+        );
+        assert!(
+            d.grants.active_for(7, now).is_some(),
+            "an unlocked screen revoked a grant"
+        );
+
+        lock_tick(
+            &d,
+            &mut watch,
+            &mut FakeScreen(LockState::Locked),
+            &mut ending,
+            now + 1,
+        );
+        assert!(
+            d.grants.active_for(7, now + 1).is_none(),
+            "the screen locked and grant {id} is still in force"
+        );
+        // And it is recorded as revoked rather than merely dropped, because
+        // `apex agent grants` has to be able to say why it ended.
+        let stored = apex_agent_core::grant::load(&apex_agent_core::grant::grants_dir(), id)
+            .expect("readable")
+            .expect("the record survives the revocation");
+        assert_eq!(
+            stored.closed.map(|c| c.why),
+            Some(apex_agent_core::grant::ClosureReason::Revoked)
+        );
+        drop(sb);
+    }
+
+    #[test]
+    fn the_owner_can_keep_root_grants_across_a_lock_and_the_setting_is_read_per_tick() {
+        // P0-015 criterion 1's other half: "user policy may override". The
+        // same transition as above with `apex agent lock --root-grants keep`
+        // set, so the assertion above is about the DEFAULT and not about
+        // `lock_tick` being unable to revoke anything.
+        let sb = Sandbox::new();
+        sb.with_lock_policy(r#"{"lock": {"revoke_root_grants": false}}"#);
+        let d = daemon();
+        let now = 10_000;
+        issue(&d, GrantKind::SystemAccess, 7, now);
+
+        let mut watch = LockWatch::new();
+        let mut ending = Vec::new();
+        lock_tick(
+            &d,
+            &mut watch,
+            &mut FakeScreen(LockState::Unlocked),
+            &mut ending,
+            now,
+        );
+        lock_tick(
+            &d,
+            &mut watch,
+            &mut FakeScreen(LockState::Locked),
+            &mut ending,
+            now + 1,
+        );
+        assert!(
+            d.grants.active_for(7, now + 1).is_some(),
+            "`--root-grants keep` was ignored and the grant was taken anyway"
+        );
+        drop(sb);
+    }
+
+    #[test]
+    fn an_unreadable_screen_revokes_exactly_as_a_locked_one_does() {
+        // The variant that exists so a lock policy does not fail open. A
+        // machine whose lock state cannot be read is not a machine that is
+        // unlocked, and this is the assertion that makes `treat_as_locked`
+        // true of the daemon rather than only of the enum.
+        let sb = Sandbox::new();
+        let d = daemon();
+        let now = 10_000;
+        issue(&d, GrantKind::SystemAccess, 7, now);
+        let mut watch = LockWatch::new();
+        let mut ending = Vec::new();
+        lock_tick(
+            &d,
+            &mut watch,
+            &mut FakeScreen(LockState::Unlocked),
+            &mut ending,
+            now,
+        );
+        lock_tick(
+            &d,
+            &mut watch,
+            &mut FakeScreen(LockState::Unreadable("loginctl is not on PATH".into())),
+            &mut ending,
+            now + 1,
+        );
+        assert!(
+            d.grants.active_for(7, now + 1).is_none(),
+            "a screen state that could not be read was treated as unlocked"
+        );
+        drop(sb);
+    }
+
+    #[test]
+    fn a_headless_machine_keeps_its_grants_because_there_is_no_screen_to_lock() {
+        // The other half of not failing open: `NoDisplaySession` is a
+        // measurement, not a failure. A build server that revoked every grant
+        // on every tick because it has no screen would be unusable, and the
+        // distinction between "could not read" and "there is nothing to read"
+        // is the whole reason `LockState` has four variants rather than being
+        // a bool.
+        let sb = Sandbox::new();
+        let d = daemon();
+        let now = 10_000;
+        issue(&d, GrantKind::SystemAccess, 7, now);
+        let mut watch = LockWatch::new();
+        let mut ending = Vec::new();
+        lock_tick(
+            &d,
+            &mut watch,
+            &mut FakeScreen(LockState::NoDisplaySession),
+            &mut ending,
+            now,
+        );
+        assert!(
+            d.grants.active_for(7, now).is_some(),
+            "a machine with no screen revoked a grant"
+        );
+        drop(sb);
+    }
+}

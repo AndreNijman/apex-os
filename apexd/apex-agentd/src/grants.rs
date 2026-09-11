@@ -216,6 +216,7 @@ impl GrantAuthority {
         agent: &str,
         project: Option<&str>,
         ttl_ms: u64,
+        capabilities: Vec<String>,
         origin: RequestOrigin,
         now_ms: u64,
     ) -> SystemGrant {
@@ -226,18 +227,20 @@ impl GrantAuthority {
             session,
             agent: agent.to_string(),
             project: project.map(|p| p.to_string()),
-            // A session grant covers the whole privilege vocabulary; a
-            // break-glass grant covers none of it, because break-glass does
-            // not go through `apex request` at all — it goes through sudo.
-            // Naming the verbs rather than saying "all" is what keeps the
-            // scope fixed at issue time: a verb added tomorrow is not covered
-            // by a grant issued today.
-            capabilities: match kind {
-                GrantKind::SystemAccess => grant::normalise_capabilities(
-                    apex_agent_core::request::Verb::names().iter().copied(),
-                ),
-                GrantKind::BreakGlass => Vec::new(),
-            },
+            // Decided by `grant::capabilities_for` and passed in, rather than
+            // derived here. It used to be derived here, and that is exactly
+            // why P0-007's third criterion was only half met: a session grant
+            // always covered the whole vocabulary because this was the only
+            // place the list was built and nothing could reach it. The rule
+            // now lives beside `ttl_for`, where the daemon applies it to a
+            // client that never saw a flag.
+            //
+            // Still a list of names and never a wildcard: a session grant
+            // covers the verbs named at issue time, so a verb added tomorrow
+            // is not covered by a grant issued today. A break-glass grant
+            // covers none of them, because break-glass does not go through
+            // `apex request` at all — it goes through sudo.
+            capabilities,
             issued_ms: now_ms,
             expires_ms: now_ms.saturating_add(ttl_ms),
             boot_id: self.boot.id.clone(),
@@ -581,16 +584,19 @@ mod tests {
     /// `apex agent grants` reads.
     mod tempdir {
         use std::path::PathBuf;
-        use std::sync::{Mutex, MutexGuard, OnceLock};
+        use std::sync::MutexGuard;
 
         /// `set_var` is process-global, so the tests that need it run one at a
         /// time. A lock rather than `--test-threads=1`, which would slow the
         /// whole suite for four tests.
+        ///
+        /// The crate's lock, not one of this module's own. A second lock over
+        /// the same variable serialises nothing against the first: `main.rs`'s
+        /// `lock_tests` also redirects `XDG_STATE_HOME`, and with two locks a
+        /// `Dir` dropping here restored the real one in the middle of a test
+        /// running there. See `crate::test_env`.
         fn lock() -> MutexGuard<'static, ()> {
-            static L: OnceLock<Mutex<()>> = OnceLock::new();
-            L.get_or_init(|| Mutex::new(()))
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+            crate::test_env::lock()
         }
 
         pub struct Dir {
@@ -650,6 +656,20 @@ mod tests {
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         }
+    }
+
+    /// What `--capabilities` absent resolves to for `kind`, computed the way
+    /// the daemon computes it rather than written out: a test that spelled the
+    /// eight verbs itself would keep passing after `Verb::names` grew a ninth,
+    /// and one that hard-coded an empty list for break-glass would keep
+    /// passing if break-glass started covering verbs.
+    fn default_caps(kind: GrantKind) -> Vec<String> {
+        grant::capabilities_for(kind, None).expect("no narrowing is always issuable")
+    }
+
+    /// The whole vocabulary, which is what a session grant gets by default.
+    fn all_verbs() -> Vec<String> {
+        default_caps(GrantKind::SystemAccess)
     }
 
     fn proof() -> Authenticated {
@@ -721,6 +741,7 @@ mod tests {
             "claude",
             None,
             900_000,
+            all_verbs(),
             RequestOrigin::RemoteControl,
             1_000,
         );
@@ -742,6 +763,7 @@ mod tests {
             "claude",
             None,
             900_000,
+            all_verbs(),
             RequestOrigin::LocalTerminal,
             now,
         );
@@ -775,6 +797,7 @@ mod tests {
             "claude",
             Some("/p"),
             900_000,
+            all_verbs(),
             RequestOrigin::LocalTerminal,
             now,
         );
@@ -791,6 +814,64 @@ mod tests {
     }
 
     #[test]
+    fn a_narrowed_grant_is_narrow_at_the_enforcement_point_not_only_in_the_record() {
+        // P0-007 criterion 3's remaining half. `issue` used to build the
+        // capability list itself, from `Verb::names()`, so every session grant
+        // covered all eight verbs and no caller could ask for fewer — the
+        // criterion was met by the type and not by anything a user could
+        // reach. This asserts the narrowing at `covers`, which is what the
+        // privilege gate actually consults; asserting it on `g.capabilities`
+        // would pass even if `covers` ignored the field.
+        let (a, _dir) = isolated();
+        let now = 10_000;
+        let caps = grant::capabilities_for(
+            GrantKind::SystemAccess,
+            Some(&["install".to_string()]),
+        )
+        .expect("one real verb is issuable");
+        let g = a.issue(
+            proof(),
+            GrantKind::SystemAccess,
+            7,
+            "claude",
+            None,
+            900_000,
+            caps,
+            RequestOrigin::LocalTerminal,
+            now,
+        );
+        assert_eq!(g.capabilities, vec!["install".to_string()]);
+        assert!(a.covers(Some(7), "install", now));
+        for verb in apex_agent_core::request::Verb::names() {
+            if *verb == "install" {
+                continue;
+            }
+            assert!(
+                !a.covers(Some(7), verb, now),
+                "a grant narrowed to install still covers {verb}"
+            );
+        }
+        // And the same grant with no narrowing covers all of them, so the
+        // assertion above is about the narrowing and not about `covers` being
+        // broken for everything.
+        let wide = a.issue(
+            proof(),
+            GrantKind::SystemAccess,
+            9,
+            "claude",
+            None,
+            900_000,
+            all_verbs(),
+            RequestOrigin::LocalTerminal,
+            now,
+        );
+        assert_ne!(wide.id, g.id);
+        for verb in apex_agent_core::request::Verb::names() {
+            assert!(a.covers(Some(9), verb, now), "the default grant dropped {verb}");
+        }
+    }
+
+    #[test]
     fn the_authority_says_which_grant_covered_a_verb_not_only_that_one_did() {
         // The request record has to name the grant, so `covers` cannot be the
         // only answer available: a bool cannot be joined to the journal line
@@ -804,6 +885,7 @@ mod tests {
             "claude",
             None,
             60_000,
+            all_verbs(),
             RequestOrigin::LocalTerminal,
             now,
         );
@@ -841,6 +923,7 @@ mod tests {
             "claude",
             None,
             900_000,
+            default_caps(GrantKind::BreakGlass),
             RequestOrigin::LocalTerminal,
             now,
         );
@@ -859,9 +942,9 @@ mod tests {
         let (a, _dir) = isolated();
         let now = 10_000;
         a.issue(proof(), GrantKind::SystemAccess, 7, "claude", None, 1_000,
-                RequestOrigin::LocalTerminal, now);
+                all_verbs(), RequestOrigin::LocalTerminal, now);
         a.issue(proof(), GrantKind::BreakGlass, 8, "claude", None, 1_000,
-                RequestOrigin::LocalTerminal, now);
+                Vec::new(), RequestOrigin::LocalTerminal, now);
         assert!(a.expire(now).is_empty(), "nothing has expired yet");
         assert!(a.active_for(7, now).is_some());
 
@@ -886,7 +969,7 @@ mod tests {
         let (a, _dir) = isolated();
         let now = 10_000;
         let g = a.issue(proof(), GrantKind::BreakGlass, 7, "claude", None, 60_000,
-                        RequestOrigin::LocalTerminal, now);
+                        Vec::new(), RequestOrigin::LocalTerminal, now);
         assert_eq!(g.expires_ms, 70_000);
 
         // From now, not from the old expiry: a renewal is a new window on a
