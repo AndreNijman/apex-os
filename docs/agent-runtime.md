@@ -877,15 +877,25 @@ status is 1 and the packet stays where it is.
 ### An absent field says why it is absent
 
 The packet has a heading for each of the nine things a handoff should carry.
-Four of them have no producer in this build, and they are written as absent
+Three of them have no producer in this build, and they are written as absent
 **with the reason**:
 
 | field | why it is empty |
 | --- | --- |
 | `goal` | the opening instruction is a positional argument and is not recorded apart from the rest of the command line, which is carried instead |
 | `plan` | the runtime does not record one |
-| `test state` | there is no per-worktree test status |
 | `memory project slug` | this runtime has no memory system |
+
+`test state` used to be a fourth. It is not one any more: the runtime keeps a
+per-worktree test record, so the packet asks the daemon for the row that owns
+the outgoing session and writes down what it says. When nobody has run a suite
+there, that is reported as the observation it is — "APEX has not observed a test
+run in this worktree" — and not as a field this build cannot answer. A recorded
+pass names the commit it passed AT, and says **STALE** when the worktree has
+moved on since, because a pass against code that is no longer there would
+otherwise persuade the incoming agent to skip the one check that would have
+corrected it. If the lookup itself fails, the packet says the lookup failed
+rather than reporting that no suite has been run.
 
 A plausible plan reconstructed from the transcript's first heading would be a
 guess wearing the label of a fact, handed to an agent with no way to check it.

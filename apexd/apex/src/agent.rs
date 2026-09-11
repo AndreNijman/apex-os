@@ -75,7 +75,7 @@ pub enum AgentCmd {
     /// grants it held — writes it as a document into the project's `.apex/`,
     /// and starts the target agent pointed at that document.
     ///
-    /// Four of §16's nine fields have no producer in this build. They are
+    /// Three of §16's nine fields have no producer in this build. They are
     /// written as absent WITH THE REASON, never guessed: a plausible plan the
     /// next agent cannot check is worse than a blank it can see.
     Handoff {
