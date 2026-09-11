@@ -133,6 +133,12 @@ pub const RESOURCES: &[(&str, IdShape, &str)] = &[
     // the owner creates the tunnel and writes its id here.
     ("access", IdShape::Hex32OrUuid, "Access application"),
     ("tunnels", IdShape::Uuid, "tunnel"),
+    // §13.6's. A store and not a secret: the secrets inside it are named, not
+    // bound, because a project creates them and a file listing every secret it
+    // will ever make could not be written in advance. The STORE is the boundary
+    // — this project's operations reach the secrets in the stores its own file
+    // lists and no others.
+    ("secrets", IdShape::Hex32, "Secrets Store store"),
 ];
 
 /// What one of those tables says about a name.
@@ -472,6 +478,16 @@ fn valid_uuid(id: &str) -> bool {
         }
     }
     true
+}
+
+/// Whether a string off the wire is a Secrets Store secret id.
+///
+/// Checked for the reason [`super::dns::is_record_id`] is: it is interpolated
+/// into the URL of the request that CHANGES something, and unlike everything
+/// else in a path here it came off the wire rather than out of the project's
+/// own file.
+pub fn valid_store_id(id: &str) -> bool {
+    valid_id(id)
 }
 
 fn valid_id(id: &str) -> bool {
