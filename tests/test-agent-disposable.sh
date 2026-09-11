@@ -67,11 +67,20 @@ section() { printf '\n── %s ──\n' "$1"; }
 give_up() { printf '\ndisposable: %d passed, %d failed\n' "$pass" "$fail"; exit 1; }
 
 DAEMON_PID=""
+# The daemon-death section starts daemons of its own and kills them on purpose.
+# Their pids are collected here so that a case which fails half way through
+# still cannot leave a daemon, an engine or an agent behind.
+EXTRA_PIDS=""
 cleanup() {
     [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null
     [ -n "$DAEMON_PID" ] && { for _ in 1 2 3 4 5; do
         kill -0 "$DAEMON_PID" 2>/dev/null || break; sleep 0.2; done; }
     [ -n "$DAEMON_PID" ] && kill -9 "$DAEMON_PID" 2>/dev/null
+    for p in $EXTRA_PIDS; do kill -9 "$p" 2>/dev/null; done
+    # Anything still naming this suite's own scratch directory. Matched on the
+    # fixture path and never on a program name: a live apex-agentd with other
+    # people's sessions on it must not be reachable from here.
+    for p in $(pgrep -f "$WORK" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -630,6 +639,159 @@ else
     bad "killing the session tears the environment down (the engine's TERM trap)"
     ls -la "$APEX_DISPOSABLE_ROOT" 2>&1 | sed 's/^/      /' >&2
 fi
+
+# ── the DAEMON's own death, measured rather than asserted ─────────────────
+#
+# Three places in this feature used to say the engine's teardown also runs when
+# the DAEMON dies, and none of them had measured it. A cleanup that is claimed
+# to run on daemon death is exactly the kind of claim that passes by never
+# being exercised, so this section gets daemons of its own and really kills
+# them.
+#
+# Two deaths, because they reach the engine by completely different routes and
+# only one of them runs any APEX code at all:
+#
+#   SIGTERM — the daemon's signal thread runs its shutdown, which sends SIGHUP
+#   and then SIGTERM to every live session's process group. This is APEX's own
+#   code doing the work, the same path as apex agent kill.
+#
+#   SIGKILL — none of APEX's code runs. What reaches the engine is the kernel's
+#   doing: the dead daemon's PTY master fd closes, and the kernel sends SIGHUP
+#   to the foreground process group of the slave. The engine traps EXIT, INT
+#   and TERM but NOT HUP, and bash runs an EXIT trap even while it is dying of
+#   an untrapped fatal signal (measured: exit status 129, trap body executed).
+#   That is the whole mechanism, which is why the mutation that proves this
+#   section can go red is "make the engine ignore SIGHUP" and lives in the
+#   engine rather than in apexd.
+#
+# Each case gets its OWN daemon, runtime directory, disposable root and capsule
+# log. Sharing the suite's log would have made every assertion here satisfiable
+# by an EARLIER session's lines: session ids restart at 1 with a new daemon, so
+# "rm disp-agent1" is already in the shared log by this point and a grep for it
+# would pass without this daemon having done anything whatsoever.
+#
+# Still NOT proven here, and still hedged in the docs: a machine that loses
+# power, where nothing gets to run.
+section "the capsule when the DAEMON dies"
+
+MAIN_RUNTIME="$XDG_RUNTIME_DIR"
+MAIN_STATE="$XDG_STATE_HOME"
+MAIN_CONFIG="$XDG_CONFIG_HOME"
+MAIN_SCRATCH="$APEX_AGENT_SCRATCH_ROOT"
+MAIN_DISP="$APEX_DISPOSABLE_ROOT"
+MAIN_CAPLOG="$CAPSULE_LOG"
+
+HOLD2="${WORK}/hold-for-death.sh"
+cat > "$HOLD2" <<'HOLD2_EOF'
+#!/usr/bin/env bash
+printf 'pwd=%s\n' "$PWD" > "$1"
+sleep 600
+HOLD2_EOF
+chmod +x "$HOLD2"
+
+daemon_death_case() {   # daemon_death_case <label> <signal> <how it reads>
+    local label="$1" signal="$2" reads="$3"
+    local dir="${WORK}/death-${label}"
+    mkdir -p "$dir"
+    export XDG_RUNTIME_DIR="${dir}/run"
+    export XDG_STATE_HOME="${dir}/state"
+    export XDG_CONFIG_HOME="${dir}/config"
+    export APEX_AGENT_SCRATCH_ROOT="${dir}/scratch"
+    export APEX_DISPOSABLE_ROOT="${dir}/disp"
+    export CAPSULE_LOG="${dir}/capsule.log"
+    mkdir -p "$XDG_RUNTIME_DIR" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$APEX_DISPOSABLE_ROOT"
+    chmod 0700 "$XDG_RUNTIME_DIR"
+    : > "$CAPSULE_LOG"
+
+    "$AGENTD" > "${dir}/agentd.log" 2>&1 &
+    local dpid=$!
+    EXTRA_PIDS="${EXTRA_PIDS} ${dpid}"
+    local sock="${XDG_RUNTIME_DIR}/apex-agentd/control.sock"
+    local _
+    for _ in $(seq 1 60); do [ -S "$sock" ] && break; sleep 0.1; done
+    if [ ! -S "$sock" ]; then
+        bad "a daemon of its own came up for the ${reads} case"
+        sed 's/^/      /' "${dir}/agentd.log" >&2
+        kill -9 "$dpid" 2>/dev/null
+        return 1
+    fi
+
+    local obs="${dir}/observed"
+    local sid
+    sid="$("$APEX" agent run --agent generic --sandbox unrestricted \
+        --disposable --cwd "$PROJ" -d -- /bin/bash "$HOLD2" "$obs" \
+        2>"${dir}/run.err" | sed -n 's/^session \([0-9]\+\) .*/\1/p' | head -1)"
+    local capsule="disp-agent${sid}"
+    local envdir="${APEX_DISPOSABLE_ROOT}/${capsule}"
+    # The precondition, asserted rather than assumed. Everything below is a
+    # statement about a capsule that was running, and if none was running then
+    # "the environment is gone" is true of a directory that never existed.
+    if [ -n "$sid" ] && wait_file "$obs" && [ -d "$envdir" ] \
+       && [ -n "$(pgrep -f "$dir" 2>/dev/null)" ]; then
+        ok "a disposable session was really running before the daemon was ${reads}"
+    else
+        bad "a disposable session was really running before the daemon was ${reads}"
+        echo "      session=[${sid}] envdir=${envdir}" >&2
+        sed 's/^/      /' "${dir}/run.err" >&2
+        sed 's/^/      | /' "$CAPSULE_LOG" >&2
+        for p in $(pgrep -f "$dir" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
+        kill -9 "$dpid" 2>/dev/null
+        return 1
+    fi
+
+    { kill -"$signal" "$dpid" 2>/dev/null; } 2>/dev/null
+    for _ in $(seq 1 60); do kill -0 "$dpid" 2>/dev/null || break; sleep 0.1; done
+    { wait "$dpid"; } 2>/dev/null
+    if kill -0 "$dpid" 2>/dev/null; then
+        bad "the daemon is dead after ${reads}"
+    else
+        ok "the daemon is dead after ${reads}"
+    fi
+
+    if wait_gone "$envdir"; then
+        ok "the environment is gone after the daemon was ${reads}"
+    else
+        bad "the environment is gone after the daemon was ${reads}"
+        ls -la "$APEX_DISPOSABLE_ROOT" 2>&1 | sed 's/^/      /' >&2
+    fi
+    # A directory that merely vanished is not a teardown. The engine's own
+    # removal pass is what asks the capsule engine to remove the container, so
+    # this line is the one that says the trap body ran to the end.
+    if grep -q "^rm ${capsule}$" "$CAPSULE_LOG"; then
+        ok "and the teardown really ran: the capsule engine was asked to remove ${capsule}"
+    else
+        bad "and the teardown really ran: the capsule engine was asked to remove ${capsule}"
+        sed 's/^/      | /' "$CAPSULE_LOG" >&2
+    fi
+    local survivors
+    survivors="$(pgrep -f "$dir" 2>/dev/null | tr '\n' ' ')"
+    if [ -z "$survivors" ]; then
+        ok "no engine and no agent process outlived the daemon"
+    else
+        bad "no engine and no agent process outlived the daemon"
+        echo "      still alive: ${survivors}" >&2
+        ps -o pid=,args= -p ${survivors} 2>&1 | sed 's/^/      | /' >&2
+    fi
+    if [ -z "$(ls "$APEX_DISPOSABLE_ROOT" 2>/dev/null)" ]; then
+        ok "and that daemon's disposable root is empty, not just missing one entry"
+    else
+        bad "and that daemon's disposable root is empty, not just missing one entry"
+        ls -la "$APEX_DISPOSABLE_ROOT" 2>&1 | sed 's/^/      /' >&2
+    fi
+
+    for p in $(pgrep -f "$dir" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
+    kill -9 "$dpid" 2>/dev/null
+}
+
+daemon_death_case term TERM "stopped with SIGTERM"
+daemon_death_case kill KILL "SIGKILLed, with no chance to run any code"
+
+export XDG_RUNTIME_DIR="$MAIN_RUNTIME"
+export XDG_STATE_HOME="$MAIN_STATE"
+export XDG_CONFIG_HOME="$MAIN_CONFIG"
+export APEX_AGENT_SCRATCH_ROOT="$MAIN_SCRATCH"
+export APEX_DISPOSABLE_ROOT="$MAIN_DISP"
+export CAPSULE_LOG="$MAIN_CAPLOG"
 
 # ── nothing of the user's was touched ────────────────────────────────────────
 section "the suite stayed inside its own fixture"
