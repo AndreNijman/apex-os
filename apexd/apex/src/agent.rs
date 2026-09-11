@@ -1493,6 +1493,24 @@ fn handoff_changes(
 /// "could not ask", so the failure returns `None` and the reason is recorded.
 /// Collapsing those two would hand the receiving agent a failed lookup dressed
 /// as a fact about its own authority.
+/// The worktree row the daemon attributes the outgoing session to.
+///
+/// Matched on `WorktreeStatus.sessions`, which is the daemon's own
+/// session-to-worktree attribution, rather than on a path comparison here.
+/// `worktree::statuses` resolves a session's cwd to the DEEPEST worktree
+/// containing it, so a path match written at this end would disagree with the
+/// daemon for exactly the nested case that attribution exists to settle.
+///
+/// `None` asks for every remembered project. The session id is unique across
+/// them, so it costs one wider reply and removes a slug-resolution step that
+/// could fail on its own and be mistaken for "no tests recorded".
+fn handoff_worktree_row(session: u32) -> Option<apex_agent_core::worktree::WorktreeStatus> {
+    client::worktrees(None)
+        .ok()?
+        .into_iter()
+        .find(|w| w.sessions.contains(&session))
+}
+
 fn handoff_project_grants(project: Option<&str>) -> Option<Vec<String>> {
     let project = project?;
     let reply = client::call(&Request::Grants).ok()?;
@@ -1611,6 +1629,23 @@ fn handoff(id: Option<u32>, to: &str, no_start: bool, transcript_bytes: usize) -
         }
     };
 
+    // The test state is the daemon's observation, not a suite run from here:
+    // a handoff that ran somebody's tests would take minutes and change the
+    // tree it is reporting on.
+    let test_state = match handoff_worktree_row(session.id) {
+        Some(row) => Some(handoff::describe_tests(&row.tests, row.head.as_deref())),
+        None => {
+            unavailable.push(handoff::Missing::new(
+                "test state",
+                "The runtime has a per-worktree test record, but it did not return a row \
+                 for this session. That is a failed lookup and not an observation: it does \
+                 not mean no suite has been run here. `apex agent worktrees` asks the same \
+                 question directly.",
+            ));
+            None
+        }
+    };
+
     let project_grants = handoff_project_grants(session.project.as_deref());
     if project_grants.is_none() {
         unavailable.push(handoff::Missing::new(
@@ -1673,7 +1708,7 @@ fn handoff(id: Option<u32>, to: &str, no_start: bool, transcript_bytes: usize) -
         goal: None,
         plan: None,
         changed_files: changed,
-        test_state: None,
+        test_state,
         transcript,
         memory_slug: None,
         checkpoint: session.checkpoint.clone(),
