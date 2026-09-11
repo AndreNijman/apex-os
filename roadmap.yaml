@@ -1767,7 +1767,7 @@ tasks:
 - id: P1-035
   title: Screenshot and file injection into TUI agents
   priority: P1
-  status: partial
+  status: done
   area: agent-ui
   depends_on: []
   acceptance:
@@ -1777,19 +1777,18 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Screenshot and file injection into TUI agents, implemented and green on task/p1-035-agent-tooling (1bb5db4,
-    83ef1e0): apex-agent-core/src/inject.rs, an OutputScanner that learned CSI so it tracks DECSET 2004 bracketed
-    paste from the session's own output, Request::Inject and Response::Injected (NOT a protocol bump), the apex-
-    agentd handler which refuses any caller resolving to a managed session, refuses relative paths and non-regular
-    files, caps at 32 MiB and copies into the session scratch inbox, plus `apex agent send`. tests/test-agent-
-    inject.sh 40/0 with a real daemon and real PTYs. MEASURED: File::open on a FIFO BLOCKS until a writer arrives,
-    which the first version got wrong. REMAINDER: five named mutations are owed and unrun. Recorded by the
-    orchestrator from the agent card, not from a landing: this is pushed branch work that roadmap/v2.2 does NOT
-    yet carry. A fresh agent is working the item now and will supersede this line.
+    LANDED on roadmap/v2.2 2026-09-11 (round 10), merge 6d7d4a1 of task/p1-035-agent-tooling. Screenshot and file
+    injection into TUI agents: apex-agent-core/src/inject.rs with an OutputScanner that learned CSI so it tracks
+    DECSET 2004 bracketed paste from the session's own output; Request::Inject / Response::Injected (not a
+    protocol bump); the apex-agentd handler, which refuses any caller resolving to a managed session, refuses
+    relative paths and non-regular files, caps at 32 MiB and copies into the session scratch inbox; and apex agent
+    send. tests/test-agent-inject.sh 48 passed / 0 failed on the landed tip with a real daemon and real PTYs. The
+    five owed mutations are CLEARED - 7/7 killed, per the unit card; do not re-run that battery. MEASURED while
+    building: File::open on a FIFO BLOCKS until a writer arrives, which the first version got wrong.
 - id: P1-036
   title: Worktree test/conflict/PR status
   priority: P1
-  status: todo
+  status: done
   area: worktrees
   depends_on: []
   acceptance:
@@ -1797,10 +1796,21 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    LANDED on roadmap/v2.2 2026-09-11 (round 10), merge 6d7d4a1 of task/p1-035-agent-tooling, commits 473b7f6 /
+    f4ec0ee / 3ec4467 / 290002e / 296b0ee. Per-worktree status for a remembered project: git.rs primitives
+    (ahead_behind, merge_tree_conflicts, diff_numstat, upstream_of), apex-agent-core/src/worktree.rs carrying
+    WorktreeStatus + Readiness + ConflictState + TestState, hook.rs detecting a test command on tool events and
+    carrying it as an optional Request::Event field, the daemon handler and apex agent worktrees [--json]. NOT a
+    protocol bump (ToolCheck precedent). The named guarantee is asserted against a genuinely conflicted repo:
+    after a status call MERGE_HEAD is absent, the index sha is unchanged and git status --porcelain is byte-
+    identical - which is why the conflict answer comes from merge-tree and not from a real merge. tests/test-
+    agent-worktrees.sh 61 passed / 0 failed on the landed tip. 7/7 mutations killed. FOUND and fixed on the way:
+    the request was keyed on a slug that was still a path-traversal hole.
 - id: P1-037
   title: Agent disposable capsule integration
   priority: P1
-  status: todo
+  status: partial
   area: capsules
   depends_on: []
   acceptance:
@@ -1808,6 +1818,19 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    LANDED on roadmap/v2.2 2026-09-11 (round 10), merge 6d7d4a1 of task/p1-035-agent-tooling, commits 26ae934 /
+    9870bd7 / d0c612d / f5879df / d701f37. Disposable session capsules: paths::disposable_engine, apex-
+    agentd/src/disposable.rs, RunRequest::{disposable,copy_out}, SessionInfo.capsule, the session.rs branch that
+    makes the session's PTY child the disposable ENGINE, apex agent run --disposable [--copy-out DIR], and the
+    --worktree / --checkpoint refusals. tests/test-agent-disposable.sh 46 passed / 0 failed on the landed tip; 8/8
+    mutations killed. PARTIAL for one named reason, not for the feature: three places in this feature say the
+    engine's teardown also runs when the DAEMON dies, and that was asserted rather than measured. The measurement
+    now exists - a 162-line section that gives each death its own daemon, runtime dir, disposable root and capsule
+    log (a shared log would let an earlier session's lines satisfy it, since session ids restart at 1), covering
+    SIGTERM through APEX's own shutdown path and SIGKILL through the kernel's SIGHUP on the orphaned PTY - but it
+    is UNCOMMITTED in /var/tmp/apex-work/wt-p1-035 and therefore not landed. It is snapshotted to
+    refs/wip/wt-p1-035. Done the moment that section is committed, run and mutation-proved.
 - id: P1-038
   title: Complete Floating/labwc real-world validation matrix
   priority: P1
