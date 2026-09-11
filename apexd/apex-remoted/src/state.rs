@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex};
 use apex_remote_core::device::{DeviceStore, StoreError};
 use apex_remote_core::identity::Identity;
 use apex_remote_core::pairing::Offer;
+use apex_remote_core::rendezvous::Path as RemotePath;
+
+use crate::relay::Sources;
 
 /// A live device connection, as far as the rest of the service needs to know.
 ///
@@ -43,7 +46,17 @@ pub struct State {
     /// The port the LAN listener is on.
     pub port: u16,
     /// The relay base URL, when the owner configured one.
+    ///
+    /// Kept as the owner wrote it, because that is what `apex remote status`
+    /// shows and what a QR code carries. The parsed form is
+    /// [`State::relay_endpoint`].
     pub relay: Option<String>,
+    /// Which loopback source ports are relay splices right now.
+    ///
+    /// A relayed session arrives on this daemon's own listener from
+    /// `127.0.0.1`, so the source port is the only thing that distinguishes
+    /// it from a LAN session, and the splice arms it before the first byte.
+    pub relay_sources: Sources,
     /// Where the device store lives.
     pub store_path: PathBuf,
     devices: Mutex<DeviceStore>,
@@ -68,6 +81,7 @@ impl State {
             port,
             relay,
             store_path,
+            relay_sources: Sources::default(),
             devices: Mutex::new(devices),
             offer: Mutex::new(None),
             live: Mutex::new(Vec::new()),
@@ -132,6 +146,23 @@ impl State {
                     true
                 }
             });
+        }
+    }
+
+    /// How a connection from this address reached the machine.
+    ///
+    /// Relay only when BOTH halves say so: the address is loopback *and* its
+    /// port is one a splice has armed. The kernel reuses ephemeral ports, and
+    /// a check on the port alone would eventually label a LAN session — or a
+    /// local one somebody made by hand — as relayed, which is a lie in the
+    /// direction that matters, because `Path::disclosure` tells the owner a
+    /// third party was involved.
+    pub fn path_of(&self, peer: Option<SocketAddr>) -> RemotePath {
+        match peer {
+            Some(addr) if addr.ip().is_loopback() && self.relay_sources.holds(addr.port()) => {
+                RemotePath::Relay
+            }
+            _ => RemotePath::Lan,
         }
     }
 

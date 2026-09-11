@@ -209,17 +209,22 @@ fn session(
     socket.set_read_timeout(None).ok();
     socket.set_write_timeout(None).ok();
 
+    // The peer address is what identifies THIS connection among a device's
+    // several, so it is read once here: after the socket is shut down there
+    // is nothing to read it from, and `unregister` would then match nothing.
+    // It is also what says which path this session arrived on, so it is read
+    // before the store is told.
+    let peer = socket.peer_addr().ok();
     {
         let mut store = state
             .devices()
             .map_err(|e| ServeError::Protocol(e.to_string()))?;
-        store.seen(&device_id, apex_remote_core::now_ms(), "lan");
+        // Not the literal "lan" it used to be: a relayed session reaches this
+        // listener too, and a device list that called every session local
+        // would be telling the owner nobody else was on the path.
+        store.seen(&device_id, apex_remote_core::now_ms(), state.path_of(peer).as_str());
         let _ = state.save_devices(&store);
     }
-    // The peer address is what identifies THIS connection among a device's
-    // several, so it is read once here: after the socket is shut down there
-    // is nothing to read it from, and `unregister` would then match nothing.
-    let peer = socket.peer_addr().ok();
     if let Ok(s) = socket.try_clone() {
         state.register(Live {
             device_id: device_id.clone(),
