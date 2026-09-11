@@ -204,6 +204,7 @@ impl Harness {
             worktree: None,
             checkpoint: false,
             ttl_ms: None,
+            capabilities: None,
             cols: 80,
             rows: 24,
             env: vec![],
