@@ -200,8 +200,31 @@ awk '/^COPY files\/system\/xdg\/xdg-terminals.list/{f=1} f{print} f&&/agrees wit
 want "the desktop-package stanza was found in Containerfile.core" \
     test -s "$DESKTOP"
 
-want "xdg-terminal-exec is installed alongside the terminal it will open" \
-    grep -q 'xdg-terminal-exec' "$DESKTOP"
+# The PACKAGE LIST, isolated, not the stanza. The first version of this
+# assertion grepped the whole joined stanza for `xdg-terminal-exec` — and the
+# stanza also contains `command -v xdg-terminal-exec` and a FATAL message
+# naming it, so deleting the package from the install line left it passing.
+# It could not fail against the one mutant it exists for. Everything between
+# `dnf5 -y install` and the next `;`, split into words, matched whole.
+# Split on `;` FIRST. The stanza is one joined line carrying two installs
+# (`dnf5 -y install <the desktop set>` and, further down, `dnf5 -y install
+# --skip-unavailable unrar`), and `.*dnf5 -y install ` is greedy — it matched
+# the SECOND one and reported a two-package image. Every install in the stanza
+# now contributes, and `-` flags are dropped rather than counted as packages.
+pkgs=$(tr ';' '\n' < "$DESKTOP" \
+        | sed -n 's/^[[:space:]]*dnf5 -y install //p' \
+        | tr ' ' '\n' | grep -v '^-' | grep .)
+have_pkg() { printf '%s\n' "$pkgs" | grep -qx "$1"; }
+
+want "xdg-terminal-exec is in the package list, not merely mentioned nearby" \
+    have_pkg xdg-terminal-exec
+
+# The control on the assertion above: if the word-split ever stopped matching
+# anything, `have_pkg` would report every package missing and the check would
+# be dead in the same silent way. A package that has been in this list for
+# years proves the extraction still works.
+want "  ...and the extraction that proves it still finds a known package" \
+    have_pkg alacritty
 
 # Installing it and never checking it arrived is how the shipped config file
 # ended up with no reader for months.
