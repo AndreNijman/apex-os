@@ -27,6 +27,7 @@
 //! for a developer running it by hand, and it says what it is giving up.
 
 mod control;
+mod discovery;
 mod net;
 mod peer;
 mod proxy;
@@ -81,6 +82,7 @@ apex-remoted — the desktop service for APEX Remote
                       thread on the only network listener in the stack.
   --relay <url>       the rendezvous to fall back to when no LAN path works
   --ping-interval-ms  how often an open connection is measured (default 15000)
+  --no-announce       do not advertise this machine over mDNS on this network
   --allow-foreground  run outside a systemd user unit (see below)
   --help
 
@@ -179,6 +181,11 @@ fn run(args: &[String]) -> Result<(), String> {
             ),
         }
     }
+
+    // On the local network, for as long as this process runs. Deliberately
+    // not a file in /etc/avahi/services, which would advertise the machine
+    // whether or not the service was running; see discovery.rs.
+    let _announced = (!args.iter().any(|a| a == "--no-announce")).then(|| discovery::announce(&state));
 
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
