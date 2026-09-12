@@ -135,7 +135,6 @@ apex skill
 apex skill list
 apex skill audit
 
-apex provenance
 apex provenance show
 apex provenance record
 
@@ -186,9 +185,7 @@ apex secret approvals
 apex mcp planes
 apex mcp memory
 
-apex blueprint
 apex blueprint show
-apex blueprint diff
 apex blueprint init
 apex blueprint set
 
