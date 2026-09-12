@@ -346,8 +346,7 @@ EOF
     is "and the switch reports off again" "off" "$S2"
 
     # Belt and braces: never leave a process behind whatever the assertions said.
-    LEAK="$(stub_pids)"
-    [ -n "$LEAK" ] && kill -TERM $LEAK 2>/dev/null
+    stub_pids | xargs -r kill -TERM 2>/dev/null
 
     # ── the systemd path ────────────────────────────────────────────────────
     # orca 49 ships /usr/lib/systemd/user/orca.service — Restart=always,
@@ -379,7 +378,7 @@ EOF
     if [ -z "$(stub_pids)" ]; then
         ok "and does not also exec a second reader behind systemd's back"
     else
-        kill -TERM $(stub_pids) 2>/dev/null
+        stub_pids | xargs -r kill -TERM 2>/dev/null
         bad "and does not also exec a second reader behind systemd's back" \
             "both paths ran; two readers speak over each other"
     fi
