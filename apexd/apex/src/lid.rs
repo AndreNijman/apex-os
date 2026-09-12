@@ -1047,6 +1047,101 @@ fn inhibitor_holders(runner: &Runner) -> Result<Vec<String>, String> {
     }
 }
 
+/// Whether logind will act on the lid at all, before any inhibitor is asked.
+///
+/// ── Found by measurement, on 2026-09-12, and it changes the answer ──────────
+///
+/// logind consults `HandleLidSwitchDocked` — whose default is `ignore` —
+/// **before** it consults any inhibitor, and it treats a machine as docked
+/// when an external display is connected as readily as when a real dock is.
+/// The L16 this was written on reads `Docked=true` with one DisplayPort
+/// monitor attached.
+///
+/// On such a machine the lid already does nothing, and APEX's inhibitor is not
+/// what is keeping it awake. `apex lid status` saying "keep-working: 1 live
+/// agent session" there is true and misleading in the same breath: it credits
+/// this feature with an outcome logind would have produced on its own, and it
+/// hides the fact that unplugging the monitor changes the behaviour. The sixth
+/// criterion is that the owner can see WHY the machine did what it did, so the
+/// readout says which of the two it is.
+///
+/// Nothing about the decision changes. A docked machine with live work still
+/// takes the inhibitor — the monitor may be unplugged at any moment, and a
+/// lock taken only after the lid shuts has already lost.
+struct Logind {
+    docked: Option<bool>,
+    external_displays: usize,
+    block_inhibited: Option<String>,
+}
+
+impl Logind {
+    fn read(roots: &Roots, runner: &Runner) -> Logind {
+        let docked = match runner.probe(
+            "busctl",
+            &[
+                "get-property",
+                "org.freedesktop.login1",
+                "/org/freedesktop/login1",
+                "org.freedesktop.login1.Manager",
+                "Docked",
+            ],
+        ) {
+            Ran::Ok(t) => match t.trim() {
+                "b true" => Some(true),
+                "b false" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        };
+        let block_inhibited = match runner.probe(
+            "busctl",
+            &[
+                "get-property",
+                "org.freedesktop.login1",
+                "/org/freedesktop/login1",
+                "org.freedesktop.login1.Manager",
+                "BlockInhibited",
+            ],
+        ) {
+            Ran::Ok(t) => Some(t.trim().trim_start_matches("s ").trim_matches('"').to_string()),
+            _ => None,
+        };
+        Logind { docked, external_displays: external_displays(roots), block_inhibited }
+    }
+
+    /// Whether logind would take the configured lid action at all.
+    ///
+    /// `None` when it could not be established — which is not "yes".
+    fn acts_on_lid(&self) -> Option<bool> {
+        if self.external_displays > 0 {
+            return Some(false);
+        }
+        self.docked.map(|d| !d)
+    }
+}
+
+/// Connected DRM connectors that are not the built-in panel.
+///
+/// The panel is excluded by name: `eDP` and `LVDS` are the laptop's own screen
+/// and are connected on every laptop ever made, so counting them would report
+/// every machine as docked.
+fn external_displays(roots: &Roots) -> usize {
+    let dir = roots.path("/sys/class/drm");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
+    entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.contains("eDP") || name.contains("LVDS") || name.contains("Writeback") {
+                return false;
+            }
+            std::fs::read_to_string(e.path().join("status"))
+                .map(|s| s.trim() == "connected")
+                .unwrap_or(false)
+        })
+        .count()
+}
+
 fn status(roots: &Roots, as_json: bool) -> i32 {
     let runner = Runner::new(roots, true);
     let loaded = load_policy(roots);
@@ -1054,11 +1149,18 @@ fn status(roots: &Roots, as_json: bool) -> i32 {
     let decision = loaded.policy.decide(&inputs);
     let held = inhibitor_holders(&runner);
     let (vpn_name, vpn) = read_vpn(&runner);
+    let logind = Logind::read(roots, &runner);
 
     if as_json {
         println!(
             "{}",
             json!({
+                "logind": {
+                    "docked": logind.docked,
+                    "external_displays": logind.external_displays,
+                    "block_inhibited": logind.block_inhibited,
+                    "acts_on_lid": logind.acts_on_lid(),
+                },
                 "policy_source": loaded.source,
                 "policy_error": loaded.error,
                 "pin": loaded.policy.pin.as_str(),
@@ -1130,6 +1232,39 @@ fn status(roots: &Roots, as_json: bool) -> i32 {
         Ok(h) if h.is_empty() => println!("inhibitor    nobody holds handle-lid-switch"),
         Ok(h) => println!("inhibitor    held by {}", h.join(", ")),
         Err(e) => println!("inhibitor    UNKNOWN — {e}"),
+    }
+    match logind.acts_on_lid() {
+        Some(false) => println!(
+            "logind       WILL NOT ACT ON THE LID — {}{}. HandleLidSwitchDocked (default \
+             `ignore`) is consulted BEFORE any inhibitor, so this machine already stays \
+             awake with the lid shut and APEX is not what is doing it. Unplug the \
+             display and this becomes APEX's job again.",
+            if logind.external_displays > 0 {
+                format!("{} external display(s) connected", logind.external_displays)
+            } else {
+                "logind reports this machine as docked".to_string()
+            },
+            match logind.block_inhibited.as_deref() {
+                Some(b) if b.contains("handle-lid-switch") =>
+                    "; the lid inhibitor is held as well",
+                _ => "",
+            }
+        ),
+        Some(true) => println!(
+            "logind       will act on the lid ({}), so the inhibitor is what decides",
+            match logind.block_inhibited.as_deref() {
+                Some(b) if b.contains("handle-lid-switch") => "handle-lid-switch is blocked",
+                Some(_) | None => "handle-lid-switch is not blocked",
+            }
+        ),
+        // Not "yes". Whether logind will act on the lid is the frame every
+        // other line here sits inside, and a frame nobody could read is not a
+        // frame that says "normal".
+        None => println!(
+            "logind       UNKNOWN — whether logind will act on the lid at all could not be \
+             established, so read the decision below as what APEX would do, not as what \
+             the machine will do"
+        ),
     }
     println!("decision     {}", decision.as_str());
     println!("             {}", decision.why());
@@ -1566,12 +1701,29 @@ mod tests {
     use super::*;
 
     struct Tmp(PathBuf);
+
+    /// Why this counter exists, having cost a red suite to find.
+    ///
+    /// `Tmp::new` named its directory after the tag, the pid and the current
+    /// SECOND. Two tests in this module with the same tag, running in parallel
+    /// in one process — which is how `cargo test` runs them — therefore shared
+    /// one directory. `the_plan_saves_the_value_it_is_about_to_replace` and a
+    /// new case both used "kbd"; the second applied a power-down that zeroed
+    /// the LED file the first was about to read, and the first failed claiming
+    /// the prior brightness had not been captured. It passed alone and failed
+    /// in a full run: the same shape as the XDG_CONFIG_HOME defect this unit
+    /// had already been burned by once.
+    ///
+    /// A unique tag would have fixed that one case. A counter fixes the class.
+    static TMP_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     impl Tmp {
         fn new(tag: &str) -> Tmp {
             let p = std::env::temp_dir().join(format!(
-                "apex-lid-cli-{tag}-{}-{}",
+                "apex-lid-cli-{tag}-{}-{}-{}",
                 std::process::id(),
-                now()
+                now(),
+                TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::create_dir_all(&p).expect("temp");
             Tmp(p)
@@ -1854,6 +2006,47 @@ mod tests {
     }
 
     #[test]
+    fn an_external_display_means_logind_decides_before_any_inhibitor_does() {
+        // Measured on the L16, 2026-09-12: `Docked` is true with one
+        // DisplayPort monitor attached, and logind consults
+        // HandleLidSwitchDocked — default `ignore` — BEFORE any inhibitor. On
+        // such a machine the lid already does nothing and APEX is not what is
+        // keeping it awake. The readout has to say which of the two it is, or
+        // it credits this feature with an outcome logind produced on its own.
+        let t = Tmp::new("drm-ext");
+        t.write("sys/class/drm/card1-eDP-1/status", "connected\n");
+        t.write("sys/class/drm/card1-DP-1/status", "connected\n");
+        t.write("sys/class/drm/card1-HDMI-A-1/status", "disconnected\n");
+        let roots = t.roots();
+        let runner = Runner::new(&roots, true);
+        let l = Logind::read(&roots, &runner);
+        assert_eq!(l.external_displays, 1, "the panel must not be counted as a monitor");
+        assert_eq!(
+            l.acts_on_lid(),
+            Some(false),
+            "with a monitor attached logind ignores the lid, whatever is inhibited"
+        );
+    }
+
+    #[test]
+    fn a_laptop_with_only_its_own_panel_is_not_docked_and_not_assumed_awake() {
+        let t = Tmp::new("drm-panel");
+        t.write("sys/class/drm/card1-eDP-1/status", "connected\n");
+        t.write("sys/class/drm/card1-DP-1/status", "disconnected\n");
+        t.write("sys/class/drm/card1-Writeback-1/status", "connected\n");
+        let roots = t.roots();
+        let runner = Runner::new(&roots, true);
+        let l = Logind::read(&roots, &runner);
+        assert_eq!(l.external_displays, 0, "eDP and Writeback are not external displays");
+        // busctl cannot run under a fixture root, so `Docked` is unknown — and
+        // unknown must not collapse into "logind will act on the lid". Every
+        // other line of the readout sits inside that frame, and a frame nobody
+        // could read is not a frame that says "normal".
+        assert_eq!(l.docked, None);
+        assert_eq!(l.acts_on_lid(), None, "unknown is not yes");
+    }
+
+    #[test]
     fn powering_down_the_keyboard_backlight_zeroes_the_led_it_named() {
         // The defect this exists for: `kbd_backlights` returned the path it had
         // walked, which under a fixture root is already re-rooted, and
@@ -1863,7 +2056,7 @@ mod tests {
         // it had not touched. Planning and describing were both correct; only
         // the one thing that matters was wrong, which is why this assertion is
         // on the LED file and not on the plan.
-        let t = Tmp::new("kbd");
+        let t = Tmp::new("kbd-apply");
         t.write("sys/class/leds/platform::kbd_backlight/brightness", "5\n");
         let roots = t.roots();
         let runner = Runner::new(&roots, false);
