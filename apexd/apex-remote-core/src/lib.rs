@@ -41,6 +41,7 @@ pub mod noise;
 pub mod pairing;
 pub mod relay;
 pub mod rendezvous;
+pub mod tls;
 pub mod wire;
 
 /// The protocol revision this build speaks.
