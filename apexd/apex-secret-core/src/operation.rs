@@ -486,13 +486,19 @@ impl OperationSpec {
         self.params.iter().find(|p| p.name == name)
     }
 
-    /// Check a request's resource and parameters against this declaration.
+    /// Check just the resource half, for a caller that has no parameters to
+    /// give.
     ///
-    /// Refuses an undeclared parameter rather than dropping it. A framework
-    /// that ignored one would let a caller believe it had constrained an
-    /// operation that in fact ran unconstrained — and would let a typo in
-    /// `--branch` push the wrong branch silently.
-    pub fn check(&self, resource: &str, params: &Params) -> Result<(), VocabularyError> {
+    /// §13.8's approval is the one: the owner approves an operation on a
+    /// resource, and deliberately does **not** name the options — approving a
+    /// deployment approves whichever version the agent then names, because a
+    /// version id is not something a person can check by eye. So the resource
+    /// has to be validated on its own, or an owner could approve `../../etc`
+    /// and be told it had worked.
+    ///
+    /// [`OperationSpec::check`] calls this rather than repeating it, so there
+    /// is one implementation of what a resource may be and not two.
+    pub fn check_resource(&self, resource: &str) -> Result<(), VocabularyError> {
         if matches!(self.resource, ResourceKind::None) && !resource.is_empty() {
             return Err(VocabularyError::UnwantedResource {
                 operation: self.id.to_string(),
@@ -504,6 +510,17 @@ impl OperationSpec {
                 resource: resource.to_string(),
             });
         }
+        Ok(())
+    }
+
+    /// Check a request's resource and parameters against this declaration.
+    ///
+    /// Refuses an undeclared parameter rather than dropping it. A framework
+    /// that ignored one would let a caller believe it had constrained an
+    /// operation that in fact ran unconstrained — and would let a typo in
+    /// `--branch` push the wrong branch silently.
+    pub fn check(&self, resource: &str, params: &Params) -> Result<(), VocabularyError> {
+        self.check_resource(resource)?;
         if params.len() > MAX_PARAMS {
             return Err(VocabularyError::TooManyParams(params.len()));
         }

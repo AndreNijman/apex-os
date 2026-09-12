@@ -38,7 +38,7 @@ use apex_secret_core::operation::{
 use apex_secret_core::SecretValue;
 
 use crate::broker;
-use crate::provider::{Bind, Bound, Endpoint, Performed, Provider, ProviderError};
+use crate::provider::{Approval, Bind, Bound, Endpoint, Performed, Provider, ProviderError};
 
 /// A git operation, typed, with its arguments.
 ///
@@ -306,6 +306,10 @@ impl Provider for GitProvider {
             detail: op.summary(),
             // A git push creates nothing a credential could be made of.
             creates: None,
+            // §13.8's environments are Cloudflare's. A git remote has no
+            // preview and no production, and inventing one by matching on a
+            // branch name would be this provider deciding policy.
+            approval: Approval::Standing,
         })
     }
 

@@ -22,6 +22,8 @@
 //!
 //! [cloudflare.production]
 //! worker = "project"
+//! # §13.8, and the only way to get it: an agent may deploy here on its own.
+//! # unattended = true
 //! ```
 //!
 //! §13.1's own example carries `account`, `zone` and a `worker` per
@@ -220,8 +222,9 @@ pub struct Binding {
     /// the broad token is what gets spent. An owner whose credential *can*
     /// mint has no other way to say "and if it ever stops, stop too".
     pub temporary_credentials: Narrowing,
-    /// `[cloudflare.<name>] worker`, by environment name.
-    pub environments: BTreeMap<String, String>,
+    /// `[cloudflare.<name>]`, by environment name: the worker it binds and
+    /// §13.8's protection.
+    pub environments: BTreeMap<String, Environment>,
 }
 
 /// Why a name did not resolve.
@@ -487,6 +490,70 @@ pub struct Worker {
     pub account: Account,
     pub name: String,
     pub environment: String,
+    /// §13.8: whether an agent may put this worker in front of traffic without
+    /// the owner approving that particular deployment.
+    pub protection: Protection,
+}
+
+/// §13.8's two answers to *may an agent do this on its own?*
+///
+/// ## The default protects, and it does not do it by spelling
+///
+/// §13.8's table names three environments — `preview` and `staging` unattended,
+/// `production` requiring approval — and the obvious build is a match on the
+/// string `"production"`. That build is wrong in the direction that costs
+/// something: a project whose environments are `dev` and `live`, or
+/// `production-eu` and `production-us`, gets unattended deployment to all of
+/// them because none of them is spelled the one protected way.
+///
+/// So the polarity is inverted. [`UNATTENDED_BY_DEFAULT`] is the *whole* list
+/// of names that are unattended without the owner saying so, and every other
+/// environment — whatever it is called, including ones invented after this
+/// file — is protected until the owner writes it down. That is also the
+/// honest reading of §13.8's last line: *"owner can explicitly enable
+/// unattended production deployment per project"*. Explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protection {
+    /// An agent may deploy here with nothing but the standing grant. §13.8's
+    /// `preview` and `staging` rows.
+    Unattended,
+    /// The owner approves this deployment, this time. §13.8's `production`
+    /// row, and every environment the owner has not exempted.
+    ApprovalRequired,
+}
+
+/// The environments §13.8 lets an agent deploy to unattended without being
+/// told it may.
+///
+/// Two names, and adding a third is a decision rather than a convenience: each
+/// one is an environment somebody's `apex.toml` can reach unattended by
+/// picking a word, without the owner ever having written `unattended` in the
+/// file.
+pub const UNATTENDED_BY_DEFAULT: &[&str] = &["preview", "staging"];
+
+impl Protection {
+    /// What an environment's protection is, given what the file said about it.
+    ///
+    /// `declared` is the `unattended` key, which is `None` when the owner did
+    /// not write one — and `None` is **not** the same as `Some(false)` for a
+    /// reader, even though both protect: one is a default the owner may not
+    /// know about, and the other is a sentence they wrote.
+    pub fn of(environment: &str, declared: Option<bool>) -> Protection {
+        match declared {
+            Some(true) => Protection::Unattended,
+            Some(false) => Protection::ApprovalRequired,
+            None if UNATTENDED_BY_DEFAULT.contains(&environment) => Protection::Unattended,
+            None => Protection::ApprovalRequired,
+        }
+    }
+}
+
+/// One `[cloudflare.<name>]` environment: the worker it binds, and whether an
+/// agent may deploy to it unattended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Environment {
+    pub worker: String,
+    pub protection: Protection,
 }
 
 /// A zone this project binds.
@@ -623,7 +690,20 @@ impl Binding {
                 continue;
             }
             if let Some(worker) = config.string(&["cloudflare", &name, "worker"])? {
-                environments.insert(name, worker.to_string());
+                // §13.8's per-project override. Read here rather than at use
+                // time so a file that spells it `unattended = "true"` is
+                // refused when the file is read, not silently treated as
+                // protected on the one deployment the owner meant to let
+                // through.
+                let declared = config.boolean(&["cloudflare", &name, "unattended"])?;
+                let protection = Protection::of(&name, declared);
+                environments.insert(
+                    name,
+                    Environment {
+                        worker: worker.to_string(),
+                        protection,
+                    },
+                );
             }
         }
 
@@ -725,7 +805,8 @@ impl Binding {
 
     /// The workers this project binds, sorted, for a message.
     pub fn workers(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.environments.values().cloned().collect();
+        let mut names: Vec<String> =
+            self.environments.values().map(|e| e.worker.clone()).collect();
         names.sort();
         names.dedup();
         names
@@ -744,8 +825,8 @@ impl Binding {
         let found = self
             .environments
             .iter()
-            .find(|(_, worker)| worker.as_str() == named);
-        let Some((environment, name)) = found else {
+            .find(|(_, env)| env.worker.as_str() == named);
+        let Some((environment, env)) = found else {
             return Err(BindingError::NoWorker {
                 path: self.path.clone(),
                 named: named.to_string(),
@@ -754,8 +835,9 @@ impl Binding {
         };
         Ok(Worker {
             account,
-            name: name.clone(),
+            name: env.worker.clone(),
             environment: environment.clone(),
+            protection: env.protection,
         })
     }
 

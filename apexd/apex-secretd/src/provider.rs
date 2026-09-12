@@ -27,15 +27,22 @@
 //! 6. **the host pin** — the provider says where the credential would go and
 //!    the framework compares it with where the credential was stored for. A
 //!    provider cannot skip this, because it never sees the value until after;
-//! 7. **reading the value**, once, only after every check above;
-//! 8. **scrubbing** the value — and a minted one — out of anything returned;
-//! 9. **the audit line**, from the record the decision was made on.
+//! 7. **§13.8's approval** — where the provider declared one is needed, the
+//!    framework finds the owner's and **spends** it, or refuses. A provider
+//!    cannot spend one, record one, or tell whether one exists;
+//! 8. **reading the value**, once, only after every check above;
+//! 9. **scrubbing** the value — and a minted one — out of anything returned;
+//! 10. **the audit line**, from the record the decision was made on.
 //!
-//! **A provider supplies** four things and no policy:
+//! **A provider supplies** five things and no policy:
 //!
 //! * **which operations exist** — a `ProviderSpec`, the §13.2 vocabulary;
 //! * **what a resource name means** — [`Provider::bind`], which resolves a name
 //!   the caller gave into a concrete target *and declares the endpoint*;
+//! * **whether the standing grant is enough for this one** — [`Approval`],
+//!   §13.8. A statement about the resolved request, not a decision: the
+//!   provider says *this is production*, and the framework says whether the
+//!   owner approved it;
 //! * **how a credential is presented** — [`Provider::perform`]: a git credential
 //!   helper, an `Authorization: Bearer`, a signed request, a `wrangler` child;
 //! * **how to mint a short-lived credential**, if it can — [`Provider::mint`],
@@ -158,6 +165,70 @@ pub struct Bound {
     /// too late: the token exists, the reply is the only copy, and a refusal
     /// then would destroy it.
     pub creates: Option<String>,
+    /// Whether the standing grant is the whole of the decision for *this*
+    /// request, or the owner has to have approved this one.
+    ///
+    /// See [`Approval`]. Declared here for the same structural reason
+    /// [`Bound::creates`] is: only the provider knows that `my-worker` is this
+    /// project's production worker, and only the framework may consult the
+    /// store — so the answer has to cross the seam, and the seam is this
+    /// struct.
+    pub approval: Approval,
+}
+
+/// §13.8: whether the grant is enough for this request.
+///
+/// ## Why a provider says this and does not enforce it
+///
+/// §13.8's rule is about *environments*, and an environment is a Cloudflare
+/// idea — `[cloudflare.production] worker = "…"` in the project's own file.
+/// The framework must not learn what one is; that is P1-001's whole argument.
+/// But the framework is also the only thing that may read the store, and an
+/// approval has to live in the store, because a provider that could record
+/// "the owner said yes" could record it for itself.
+///
+/// So the knowledge and the authority are split at exactly the place they
+/// already are for [`Bound::creates`]: the provider says *this one needs the
+/// owner*, in a sentence a person can read, and the framework decides whether
+/// the owner said so. A provider cannot approve anything and cannot skip the
+/// question — [`Approval::Standing`] is not "no check", it is "the grant that
+/// was already checked is the answer".
+///
+/// ## Why it is not a bool
+///
+/// The refusal has to say *why this particular request* needs approval, and
+/// "true" cannot. A `production` deploy and a `preview` deploy differ in
+/// nothing the framework can see: same operation, same credential, same
+/// project. Without the sentence the message would be "this needs approval",
+/// which tells the reader nothing they did not already know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Approval {
+    /// The grant the framework already checked is the whole decision. What
+    /// every provider means unless it says otherwise, and what git, MCP and
+    /// bearer mean always.
+    Standing,
+    /// The owner has to have approved this exact operation on this exact
+    /// resource, and the approval is spent by performing it.
+    ///
+    /// The string is why, in words, and it reaches the person who has to
+    /// decide — so it names the thing that makes this request different, not
+    /// the rule that made it so.
+    Required(String),
+}
+
+impl Approval {
+    /// The word §11's `approval_policy` carries when this arm decided.
+    ///
+    /// `Standing` is not one of them: the policy on that path is whatever
+    /// [`crate::service::Service::decide`] already wrote, and overwriting it
+    /// here would erase the distinction between a grant and a future
+    /// break-glass.
+    pub fn why(&self) -> Option<&str> {
+        match self {
+            Approval::Standing => None,
+            Approval::Required(why) => Some(why),
+        }
+    }
 }
 
 /// A credential an operation created, on its way into the store.
@@ -690,6 +761,7 @@ mod tests {
             },
             detail: "read a thing".into(),
             creates: None,
+            approval: Approval::Standing,
         };
         let minted = Stub(&ONE)
             .mint(&req, &bound, &SecretValue::new(b"not-a-real-token".to_vec()))

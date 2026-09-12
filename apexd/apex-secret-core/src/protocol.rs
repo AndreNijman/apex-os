@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use crate::audit::AuditLine;
 use crate::capability::CapabilityRecord;
 use crate::operation::OperationInfo;
-use crate::store::ServiceInfo;
+use crate::store::{Approval, ServiceInfo};
 
 /// Bumped when a change is not backward compatible. Clients send nothing and
 /// the daemon reports it in [`Response::Hello`], so a mismatch is a message
@@ -111,6 +111,39 @@ pub enum Request {
 
     /// What is allowed, per project.
     Grants,
+
+    /// §13.8: approve one operation, once, or withdraw an approval.
+    ///
+    /// Not a grant. A grant is consulted and keeps standing; this is **spent**
+    /// by the first operation that matches it, and it expires on its own. See
+    /// [`crate::store::Approval`] for why the two are different types in
+    /// different files.
+    ///
+    /// Refused from inside a managed agent session, like `Grant` and for the
+    /// same reason: a session that can approve its own production deploy has
+    /// not been made to ask for approval, it has been made to type one more
+    /// line.
+    Approve {
+        project: String,
+        service: String,
+        /// The operation, in any spelling the registry resolves.
+        operation: String,
+        /// Exactly what the operation will name. Empty for one that names
+        /// nothing.
+        #[serde(default)]
+        resource: String,
+        /// How long it may be spent for, in milliseconds. Bounded by
+        /// [`crate::store::MAX_APPROVAL_TTL_MS`]; defaults to
+        /// [`crate::store::APPROVAL_TTL_MS`].
+        #[serde(default)]
+        ttl_ms: Option<u64>,
+        /// Take one back instead of giving one.
+        #[serde(default)]
+        withdraw: bool,
+    },
+
+    /// Every approval this account has outstanding.
+    Approvals,
 
     /// Perform a capability. The credential does not come back; the
     /// operation's output does.
@@ -186,6 +219,12 @@ pub enum Response {
         projects: BTreeMap<String, Vec<String>>,
     },
 
+    /// §13.8's outstanding one-shot approvals, soonest to expire first.
+    ///
+    /// Metadata only, by construction: [`crate::store::Approval`] has no field
+    /// a value could occupy, for [`Response::Services`]' reason.
+    Approvals { pending: Vec<Approval> },
+
     /// A capability ran. Carries the RESULT, never the credential.
     Performed {
         /// The record as the daemon finally read it, with `audit_id` filled in.
@@ -245,6 +284,7 @@ impl Response {
             Response::Ok => "ok",
             Response::Services { .. } => "services",
             Response::Grants { .. } => "grants",
+            Response::Approvals { .. } => "approvals",
             Response::Performed { .. } => "performed",
             Response::Audit { .. } => "audit",
             Response::Error { .. } => "error",
@@ -313,6 +353,16 @@ mod tests {
             Response::Grants {
                 projects: BTreeMap::from([("/p".to_string(), vec!["demo:git-fetch".to_string()])]),
             },
+            Response::Approvals {
+                pending: vec![Approval {
+                    project: "/p".into(),
+                    service: "demo".into(),
+                    operation: "cloudflare.worker.deploy".into(),
+                    resource: "my-worker".into(),
+                    granted_ms: 1,
+                    expires_ms: 2,
+                }],
+            },
             Response::Performed {
                 record: record.clone(),
                 endpoint: "https://github.com".into(),
@@ -339,6 +389,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "approvals",
                 "audit",
                 "error",
                 "grants",
