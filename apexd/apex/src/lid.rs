@@ -524,7 +524,7 @@ fn owner_configs(roots: &Roots) -> Vec<(String, PathBuf)> {
         if !home.is_empty() {
             out.push((
                 "~/.config/apex/lid.toml".to_string(),
-                config_path_for_home(Path::new(&home)),
+                invoker_config_path(Path::new(&home)),
             ));
         }
     }
@@ -548,11 +548,27 @@ fn owner_configs(roots: &Roots) -> Vec<(String, PathBuf)> {
     out
 }
 
-fn config_path_for_home(home: &Path) -> PathBuf {
+/// Where the INVOKING user's file lives — `XDG_CONFIG_HOME` is theirs to set,
+/// and `apex lid pin` writes where this says.
+fn invoker_config_path(home: &Path) -> PathBuf {
     match std::env::var_os("XDG_CONFIG_HOME") {
         Some(x) if !x.is_empty() => PathBuf::from(x).join("apex/lid.toml"),
-        _ => home.join(".config/apex/lid.toml"),
+        _ => config_path_for_home(home),
     }
+}
+
+/// Where ANOTHER user's file lives, resolved from their home and nothing else.
+///
+/// This deliberately does not consult `XDG_CONFIG_HOME`. That variable belongs
+/// to the process reading it, and the uid scan above runs in the root driver —
+/// so honouring it here made root look for every user's lid config inside
+/// root's own XDG directory, and the owner's pin would have been ignored in
+/// favour of the built-in defaults on any machine where the variable is set.
+/// It also made `the_owner_config_beats_the_system_one` pass alone and fail in
+/// a full run, because a gaming.rs test sets `XDG_CONFIG_HOME` in the same
+/// process.
+fn config_path_for_home(home: &Path) -> PathBuf {
+    home.join(".config/apex/lid.toml")
 }
 
 /// uid → home directory, straight out of `/etc/passwd`.
