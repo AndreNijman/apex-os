@@ -230,9 +230,25 @@ anybody's screen.
 store. It binds the capsule's destination to that credential's **pin**:
 
 * the run is refused if no credential of that name is stored;
-* the capsule's allowed destination is the host the credential was pinned to
-  when it was stored, not a host typed at the call site;
-* `--allow` naming any other host is refused, by name, rather than added.
+* the capsule's allowed destination is the host **and the port** the credential
+  was pinned to when it was stored, not a destination typed at the call site;
+* `--allow` naming any other host is refused, by name, rather than added, and so
+  is the same host on a different port — a different port is a different
+  endpoint.
+
+The pin is exercised against a real `apex-secretd` in
+`tests/browserlab/run-browserlab`'s `capability` flow, with the falsifying
+control the claim needs: an engine that looks the capability up and then does
+not apply it sends the capsule wherever the call site asked.
+
+That flow exists because the first version of this could not work at all. It
+read the pin out of the second column of `apex secret list`, which is
+`scheme://host` and has no port in it, so against a real secret service the
+destination came out as `https://intranet.example` and every capsule naming a
+capability was refused. The suite did not catch it because its stub printed a
+bare host there — a stub that agreed with the engine rather than with the CLI.
+The pin is read from `apex secret list --json` now, which is the spelling with
+the fields in it.
 
 The capability decides where the browser may go. That is the half of
 §13's model a browser can use without overstating it: the framework's rule is
@@ -251,9 +267,19 @@ agentd's proxy tunnels `CONNECT` and a TLS tunnel is opaque to the thing
 carrying it. There is nowhere for the daemon to insert a header.
 
 Presenting a minted, short-lived credential to a site from inside a capsule is
-therefore not built. It needs either a driver in the capsule that can be handed
-a token for one request, or a provider that performs the login and hands back a
-session — both of which are more than a flag.
+therefore not built. **`docs/browser-capsule-auth.md` is the written decision**
+about how it would be: the two routes, what each one costs, the measurements
+that permit or reject each, and the protocol change the chosen one needs.
+
+The short version, because it decides what this page promises. A capsule's
+**profile is the only thing an engine can put inside it** — a session's
+environment is built by the daemon and does not inherit the caller's, measured
+by a control that tried and reached nothing. And **anything a capsule can see,
+the caller can take home**, because `--download` is a path out of the capsule by
+design. So handing the capsule a session would hand the caller the credential,
+which is the thing the framework exists to prevent; the route that keeps it out
+of the capsule is for the daemon to present the header itself, and that is a
+change to the proxy rather than a flag on this command.
 
 ## What is not built
 
@@ -280,7 +306,25 @@ session — both of which are more than a flag.
   needs a page, and reaches its server with `curl -k`, so that what it measures
   is the capsule rather than a certificate.
 
-  Adding one would be a real flag with a real argument behind it — a CA is
-  trust, and handing a capsule a CA it did not have is widening what it will
-  believe. It is not built, and a capsule silently trusting more than the
+  **The mechanism is known and it is not `certutil`.** `nss-tools` is not in
+  the image, which was recorded as closing the question, and it does not: a
+  `policies.json` bound over `/etc/firefox/policies/policies.json` inside the
+  capsule's namespace installs a CA into a fresh profile with no `certutil` at
+  all. Measured with a control — the same server, the same profile, refused
+  without the policy and rendered with it, and the machine's own file untouched.
+  So this is a per-session `--ro-bind` on the sandbox rather than a package
+  that does not exist here. See `docs/browser-capsule-auth.md`.
+
+  It is still not built, and adding it is a real flag with a real argument
+  behind it — a CA is trust, and handing a capsule a CA it did not have is
+  widening what it will believe. A capsule silently trusting more than the
   system does would be worse than the gap.
+
+* **The machine's own Firefox enterprise policy is read inside every capsule**,
+  because the sandbox binds `/` read-only — which is exactly why the bind above
+  works. Today `/etc/firefox/policies/policies.json` carries four preferences at
+  `Status: "default"` and nothing else, so nothing a capsule does is overridden.
+  A `Certificates.Install` there, or a `Proxy` at `Status: "locked"`, would
+  change what every capsule believes or where it connects, and nothing asserts
+  the file's shape. Recorded here rather than guarded, because the file belongs
+  to the image build and not to this command.
