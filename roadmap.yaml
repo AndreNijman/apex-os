@@ -4620,56 +4620,70 @@ tasks:
     VERIFIED: no image was built, so nothing here has run on a real boot; the session was never started on real
     hardware or on a real GPU failure, only headless; and thunar and nmtui are on the menu and present on the L16
     but are not asserted at build time, because this branch could not confirm which layer installs them. ROUND 2
-    (task/p2-f-2, six commits off roadmap/v2.2 e799422b, all PUSHED, NOT merged: c4515644, 7e413f42 merge,
-    0b4d1e6b, e4ca169f, c30defc6, 6ff58f9b, f49272e5). CRITERION 1'S VERB NOW EXISTS. The round opened by finding
-    round 2's work already written and UNCOMMITTED in the worktree by an agent a usage limit had killed; it was
-    committed, not redone. files/system/libexec/apex-session-watchdog counts bounces: the greeter records what it
-    launched on the way out and asks on the way in, a session that did not survive 45 seconds did not start, three
-    in a row and the picker comes up on APEX Safe Graphics with a line saying why. THE LOCKOUT ARGUMENT,
-    DEMONSTRATED RATHER THAN ASSERTED, because this code runs on the only path that reaches Greetd.launch() (the
-    launch is deferred to persistProc.onExited): check prints exactly one line and that line is only ever the
-    recovery id, every failure path prints nothing and exits 0, both hooks are timeout-capped and swallowed by ||
-    true, last-user and last-session are written BEFORE the helper is called, and the greeter compares the
-    helper's output against its own recoverySession constant so the helper can vote for that one session and name
-    no other. The suite replaces the helper with sleep 60, then deletes it, then takes timeout(1) off PATH, and
-    each time requires the launch hook to return 0 within 10s AND to have written the greeter's memory anyway.
-    Recovery is never written to last-session, so one trip through the rescue desktop no longer makes it the
-    preselected default for ever; the PREVIOUS memory survives rather than being cleared, so a fixed machine puts
-    the user back on the desktop they were using. tests/test-apex-session-watchdog.sh 89 passed / 0 failed / 0
-    SKIPPED, as uid 1000 and, under unshare --user --map-root-user, as uid 0. SECTION 5 IS THE ONE THAT MATTERS
-    MOST: _selectWanted is lifted out of the shipped GreetContext.qml and EXECUTED under node, so recovery
+    (task/p2-f-2, eight commits off roadmap/v2.2 e799422b, all PUSHED, NOT merged: c4515644, 7e413f42 merge,
+    0b4d1e6b, e4ca169f, c30defc6, 6ff58f9b, f49272e5, 876f6d10). CRITERION 1'S VERB NOW EXISTS. The round opened
+    by finding round 2's work already written and UNCOMMITTED in the worktree by an agent a usage limit had
+    killed; it was committed, not redone. files/system/libexec/apex-session-watchdog counts bounces: the greeter
+    records what it launched on the way out and asks on the way in, a session that did not survive 45 seconds did
+    not start, three in a row and the picker comes up on APEX Safe Graphics with a line saying why. THE LOCKOUT
+    ARGUMENT, DEMONSTRATED RATHER THAN ASSERTED, because this code runs on the only path that reaches
+    Greetd.launch() (the launch is deferred to persistProc.onExited): check prints exactly one line and that line
+    is only ever the recovery id, every failure path prints nothing and exits 0, both hooks are timeout-capped and
+    swallowed by || true, last-user and last-session are written BEFORE the helper is called, and the greeter
+    compares the helper's output against its own recoverySession constant so the helper can vote for that one
+    session and name no other. The suite replaces the helper with sleep 60, then deletes it, then takes timeout(1)
+    off PATH, and each time requires the launch hook to return 0 within 10s AND to have written the greeter's
+    memory anyway. Recovery is never written to last-session, so one trip through the rescue desktop no longer
+    makes it the preselected default for ever; the PREVIOUS memory survives rather than being cleared, so a fixed
+    machine puts the user back on the desktop they were using. tests/test-apex-session-watchdog.sh 91 passed / 0
+    failed / 0 SKIPPED, as uid 1000 and, under unshare --user --map-root-user, as uid 0. SECTION 5 IS THE ONE THAT
+    MATTERS MOST: _selectWanted is lifted out of the shipped GreetContext.qml and EXECUTED under node, so recovery
     outranking the remembered session (the remembered session being the one that just failed three times), the
     not-installed fall-through setting NO notice, and _userPicked beating both are measured and not grepped. That
     gap was real: tests/test-apex-greet-sessions.sh already runs the same function but injects a ctx with no
     recovery fields, and undefined !== "" is TRUE in JavaScript, so it walked the new branch, matched nothing, and
-    stayed green through the whole change. EIGHT MUTATIONS, each restored byte-identical with plain cp and cmp
-    silent. Six on the Containerfile refusals, run against a staged image tree in both directions: good tree rc 0,
-    and dropping one timeout cap, renaming the watchdog's RECOVERY constant, deleting the session .desktop,
-    dropping the recoverySession comparison, and renaming the record hook each fail it. Two on the QML logic:
-    moving the recovery branch below the remembered-session rule takes the suite to 86/3 (and still passes
-    qmllint, so it is a logic change and not a syntax error), and neutering if (ctx._userPicked) return takes it
-    to 86/3 on the other three. One on the checker: a grep spelling that appears nowhere in the greeter now FAILS
-    check-containerfile-assertions.sh, where before the fix below it passed silently. THE CHECKER WAS BLIND TO THE
-    GREETER. check-containerfile-assertions.sh could not resolve a grep against a file inside a directory COPY
-    whose destination carries no trailing slash, and COPY files/desktop/apex-greet /usr/share/apex-greet is
-    exactly that shape — so every assertion about the LOGIN SCREEN, the boot-critical ones, sat in the bucket it
-    reports as 'could not check'. Fixed, guarded so a destination that merely prefixes an unrelated path stays
-    unresolved: 171 -> 181 checked, 124 -> 114 unresolved, 0 failed. ROUND 1'S LAST OPEN SENTENCE IS CLOSED:
-    thunar and nmtui are now asserted at build time, and the layer question it could not answer is answered — the
-    build order is core -> base -> apex (Containerfile.base is FROM ${CORE}), Thunar comes from
-    Containerfile.core:1033, and nmtui is named by NO APEX dnf list at all: it is inherited from
-    quay.io/fedora/fedora-bootc:43, nothing in the image requires it (rpm -q --whatrequires: none) and it is not
-    even a weak dependency of NetworkManager. The assertion is therefore the only thing between a base-image
-    change and a recovery session whose single network tool vanished silently; the comment says that if it fires
-    the fix is NetworkManager-tui in core, not a smaller menu. CI: the suite was the one unrun-and-undeclared
-    suite, which in this repo means it would have run on no machine unless somebody typed it. It is now in
-    pr-validation beside the session-picker suite, floored four ways — no summary line, any failure, any SKIP, or
-    a drop below 89 — each proved by driving the step's own body with forged summaries. Its
-    unwritable-state-directory section had made ITSELF a skip on the only machine that runs it automatically,
-    because CI is root and chmod 0555 does not stop root; the directory is now uncreatable by SHAPE (its parent is
-    a regular file, so mkdir returns ENOTDIR to uid 0 too). docs/recovery.md documents the third route, what
-    clears the count (an ordinary session surviving, NOT a successful trip through recovery), sudo
-    apex-session-watchdog reset, and what it does NOT catch. THE QML WAS TYPE-CHECKED, NOT ONLY PARSED:
+    stayed green through the whole change. A REGRESSION THIS ROUND SHIPPED AND THIS ROUND CAUGHT, recorded because
+    it is the most useful thing in it: the status line's new middle tier tested the notice AGAINST ""
+    (recoveryNotice !== ""), and a ctx that does not carry the property yields undefined, where undefined !== ""
+    is TRUE in JavaScript. The branch was therefore taken, the line rendered undefined (Qt: 'Unable to assign
+    [undefined] to QString'), and the Caps Lock warning — and through Accessible.name whatever a screen reader was
+    waiting on — was SWALLOWED. tests/test-apex-greet-a11y.sh went 5/0 to 4/1 and was right; it was the same
+    JavaScript trap this branch had already written up for the node harness one file over, missed on the first
+    pass. Both bindings now test for TRUTH, GreetContext's _recoverWanted check with them, the fixture's stub ctx
+    gained the recoveryNotice property it should always have had, and the watchdog suite asserts neither file
+    regresses to the !== "" spelling. THE REAL GAIN: tests/greet-a11y-test.qml INSTANTIATES GreetSurface.qml under
+    a real QML engine through qmltestrunner, so the new test_042_recovery_notice_is_announced is behaviour on a
+    live object and not a grep — the notice reaches Accessible.name WITHOUT the Nerd Font glyph the visible text
+    carries, with role AlertMessage, and an auth error still outranks it. greet-a11y 5/0 with 23/23 fixture
+    functions (EXPECT_TESTS 22 -> 23, exact and not a floor). TEN MUTATIONS, each restored byte-identical with
+    plain cp and cmp silent. Six on the Containerfile refusals, run against a staged image tree in both
+    directions: good tree rc 0, and dropping one timeout cap, renaming the watchdog's RECOVERY constant, deleting
+    the session .desktop, dropping the recoverySession comparison, and renaming the record hook each fail it. Two
+    on the QML logic: moving the recovery branch below the remembered-session rule takes the suite to 86/3 (and
+    still passes qmllint, so it is a logic change and not a syntax error), and neutering if (ctx._userPicked)
+    return takes it to 86/3 on the other three. One on the checker: a grep spelling that appears nowhere in the
+    greeter now FAILS check-containerfile-assertions.sh, where before the fix below it passed silently. Two on the
+    surface: putting the !== "" comparison back takes the watchdog suite to 88/3, and dropping the notice from
+    Accessible.name takes the a11y fixture to 4/1 on test_042. THE CHECKER WAS BLIND TO THE GREETER.
+    check-containerfile-assertions.sh could not resolve a grep against a file inside a directory COPY whose
+    destination carries no trailing slash, and COPY files/desktop/apex-greet /usr/share/apex-greet is exactly that
+    shape — so every assertion about the LOGIN SCREEN, the boot-critical ones, sat in the bucket it reports as
+    'could not check'. Fixed, guarded so a destination that merely prefixes an unrelated path stays unresolved:
+    171 -> 181 checked, 124 -> 114 unresolved, 0 failed. ROUND 1'S LAST OPEN SENTENCE IS CLOSED: thunar and nmtui
+    are now asserted at build time, and the layer question it could not answer is answered — the build order is
+    core -> base -> apex (Containerfile.base is FROM ${CORE}), Thunar comes from Containerfile.core:1033, and
+    nmtui is named by NO APEX dnf list at all: it is inherited from quay.io/fedora/fedora-bootc:43, nothing in the
+    image requires it (rpm -q --whatrequires: none) and it is not even a weak dependency of NetworkManager. The
+    assertion is therefore the only thing between a base-image change and a recovery session whose single network
+    tool vanished silently; the comment says that if it fires the fix is NetworkManager-tui in core, not a smaller
+    menu. CI: the suite was the one unrun-and-undeclared suite, which in this repo means it would have run on no
+    machine unless somebody typed it. It is now in pr-validation beside the session-picker suite, floored four
+    ways — no summary line, any failure, any SKIP, or a drop below 91 — each proved by driving the step's own body
+    with forged summaries. Its unwritable-state-directory section had made ITSELF a skip on the only machine that
+    runs it automatically, because CI is root and chmod 0555 does not stop root; the directory is now uncreatable
+    by SHAPE (its parent is a regular file, so mkdir returns ENOTDIR to uid 0 too). docs/recovery.md documents the
+    third route, what clears the count (an ordinary session surviving, NOT a successful trip through recovery),
+    sudo apex-session-watchdog reset, and what it does NOT catch. THE QML WAS TYPE-CHECKED, NOT ONLY PARSED:
     qmllint-qt6 with -I from qtpaths6 emits a diagnostic set byte-identical to the same file on
     origin/roadmap/v2.2 (two pre-existing QProcess::ExitStatus warnings on onExited, one pre-existing
     QVariantMap/QVariantHash), so the new Process/SplitParser/onRead block added zero diagnostics; and a negative
@@ -4679,17 +4693,20 @@ tasks:
     discovered / 0 newly failing / 0 now clean, check-suites-run-in-ci 0 unrun and undeclared.
     test-apex-safe-graphics 59/0, test-apex-greet-layout 25/0, test-apex-greet-sessions 41/0, shellcheck clean at
     default severity on both new files and both are inside pr-validation's hard shellcheck gate. NOT VERIFIED, AND
-    THIS IS THE HONEST BOUNDARY: no image was built, so nothing in this round has run on a real boot; the greeter
-    has never been INSTANTIATED under a running quickshell (qs -p is forbidden and no image exists), so 'it parses
-    and its types resolve' is the strongest statement available from here; no real bounce was ever observed, only
-    simulated through the extracted hooks; and CRITERION 2 IS STILL STRUCTURAL — the menu's remedies and now their
-    binaries are asserted to exist, but none has been RUN from inside the session. SCOPE OF THE DETECTOR, stated
-    because criterion 1 names 'shell failure': it detects a session that DIES within 45 seconds. A compositor that
-    stays up while the shell inside it crashes in a loop is not a bounce and this will not see it, nor will a
-    desktop that paints nothing but never exits; the virtual console remains the route for those. That narrowness
-    is deliberate — a heuristic wide enough to catch them could put a working machine into the rescue session.
-    STILL OPEN on this item: nothing else; the rest of p2-f's queue is P2-017's SigV4 signer and device-code
-    flows, P2-019's transport, and a real boot.
+    THIS IS THE HONEST BOUNDARY: no image was built, so nothing in this round has run on a real boot;
+    GreetSurface.qml IS instantiated under a real QML engine by the a11y fixture and the recovery notice is
+    exercised there, but GreetContext.qml — which owns the watchdog hooks and the preselection — has never been
+    instantiated under a running quickshell, because it imports Quickshell and qs -p is forbidden and no image
+    exists. For that file 'it parses, its types resolve, and its selection function was extracted and executed
+    under node' is the strongest statement available from here; no real bounce was ever observed, only simulated
+    through the extracted hooks; and CRITERION 2 IS STILL STRUCTURAL — the menu's remedies and now their binaries
+    are asserted to exist, but none has been RUN from inside the session. SCOPE OF THE DETECTOR, stated because
+    criterion 1 names 'shell failure': it detects a session that DIES within 45 seconds. A compositor that stays
+    up while the shell inside it crashes in a loop is not a bounce and this will not see it, nor will a desktop
+    that paints nothing but never exits; the virtual console remains the route for those. That narrowness is
+    deliberate — a heuristic wide enough to catch them could put a working machine into the rescue session. STILL
+    OPEN on this item: nothing else; the rest of p2-f's queue is P2-017's SigV4 signer and device-code flows,
+    P2-019's transport, and a real boot.
 - id: P2-019
   title: Design APEX Fleet / managed-device architecture
   priority: P2

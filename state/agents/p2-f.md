@@ -2,7 +2,7 @@
 items: P2-016 (per dispatch only — see NOTE), P2-017, P2-018, P2-019
 repo: apex-os (the greeter QML is in apex-os, NOT apex-shell)
 worktree: /var/tmp/apex-work/wt-p2-f
-branch: task/p2-f-2   (5 commits + 1 merge off roadmap/v2.2 @ e799422b, all PUSHED)
+branch: task/p2-f-2   (7 commits + 1 merge off roadmap/v2.2 @ e799422b, all PUSHED)
 
 ## NEXT
 Round 2 closed P2-018's criterion 1. The remaining open work, in the order a
@@ -38,6 +38,9 @@ Round 2 (task/p2-f-2, pushed, NOT merged): P2-018 criterion 1 — the verb.
   e4ca169f  CI runs the suite, floored on failures, SKIPS and count drops
   c30defc6  docs/recovery.md: the third route in
   6ff58f9b  §5 — `_selectWanted` extracted and EXECUTED under node
+  f49272e5  doc: how long the preselection actually lasts
+  876f6d10  FIX a regression this round shipped: the notice tested against ""
+            swallowed the Caps Lock warning. See FOUND.
 
 ## FOUND
 - `files/desktop/apex-greet/GreetContext.qml` lives in **apex-os**.
@@ -68,6 +71,14 @@ Round 2 (task/p2-f-2, pushed, NOT merged): P2-018 criterion 1 — the verb.
   without sudo and without a prompt.
 - Build order is **core → base → apex** (`Containerfile.base` is `FROM
   ${CORE}`), so a base assertion CAN see a core package. Thunar is one.
+- **`tests/greet-a11y-test.qml` INSTANTIATES GreetSurface.qml under a real QML
+  engine** (qmltestrunner). It is the only place in either repo where greeter
+  QML is a live object rather than text. It caught a regression this round
+  shipped, and it is where a surface change should be tested.
+- **The `undefined !== ""` trap bit twice in one round, in two files.** A ctx
+  without the property yields undefined and `undefined !== ""` is TRUE, so the
+  branch is taken and the binding renders undefined. Test QML for TRUTH. The
+  watchdog suite now asserts neither greeter file regresses to that spelling.
 - `check-doc-verbs.sh` is red on the tip and not because of this unit:
   `apex browser doctor` undocumented, `apex secret list` stale. Identical on
   origin/roadmap/v2.2 — verified, not assumed.
