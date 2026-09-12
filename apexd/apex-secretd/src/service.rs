@@ -605,7 +605,9 @@ impl Service {
                 let why = scrub_all(&why, &[Some(&stored), Some(presented)]);
                 narrowing_detail = Some(format!(
                     "the short-lived credential was used but could not be \
-                     revoked, so it stands until it expires: {why}"
+                     revoked, so it stands until it expires at {} (unix ms): \
+                     {why}",
+                    lease.expires_ms
                 ));
             }
         }
