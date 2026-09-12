@@ -51,13 +51,18 @@ fn an_r2_target_reads_its_bucket_and_defaults_its_credential_name() {
     );
 }
 
-/// Every kind this build refuses, refused where the project names it — reading
-/// the file — and not at the first upload.
+/// A kind this build does not carry is refused where the project NAMES it —
+/// reading the file — and not at the first upload.
 ///
-/// Driven off `Kind::ALL` rather than a list written here, so that the day a
-/// kind stops being carried this test covers it without anybody remembering to
-/// add it. `s3` is the only one today; `ssh` was the other until P2-001's
-/// second round.
+/// **This build carries all five, so there is no live case.** That is stated
+/// rather than hidden: the loop below runs zero times and asserts so, and what
+/// keeps the machinery honest is the pair of properties in
+/// `target::tests::every_unimplemented_kind_says_what_is_missing_and_every_
+/// implemented_one_says_nothing`. Whoever adds a sixth kind before it works
+/// gets a failing count here and a case to write.
+///
+/// The message itself is asserted on a constructed error, so the sentence an
+/// operator would read cannot rot while there is nothing to produce it.
 #[test]
 fn an_unimplemented_target_is_refused_at_configuration_time_with_its_reason() {
     let mut checked = 0;
@@ -73,11 +78,17 @@ fn an_unimplemented_target_is_refused_at_configuration_time_with_its_reason() {
         assert!(err.to_string().contains("will not back up"), "{err}");
         checked += 1;
     }
-    assert_eq!(
-        checked, 1,
-        "the set of refused kinds changed; a loop over an empty set would have \
-         passed having asserted nothing"
-    );
+    assert_eq!(checked, 0, "a kind started refusing; write its case here");
+
+    // The sentence, on a constructed error, so it stays readable with nothing
+    // producing it.
+    let err = ConfigError::Unimplemented {
+        kind: Kind::S3,
+        why: "there is no signer in this build",
+    };
+    let text = err.to_string();
+    assert!(text.contains("will not back up to a 's3' target"), "{text}");
+    assert!(text.contains("no signer"), "{text}");
 }
 
 #[test]
@@ -171,7 +182,7 @@ fn the_staging_directory_is_always_excluded_whatever_the_project_says() {
     ))
     .expect("parses");
     assert!(config.exclude.is_empty());
-    assert!(config.is_excluded(crate::target::r2::STAGING_DIR));
+    assert!(config.is_excluded(crate::target::bucket::STAGING_DIR));
     assert!(config.is_excluded("_apex-backup/20260912T014233Z-0badc0de/data.000000"));
     assert!(config.is_excluded("nested/_apex-backup/x"));
 }
@@ -396,4 +407,70 @@ fn the_user_and_the_port_are_optional() {
     };
     assert_eq!(endpoint.user, None);
     assert_eq!(endpoint.port, None);
+}
+
+// ── the s3 target ──────────────────────────────────────────────────────────
+
+/// R2 and S3 read the same three lines out of different sections, so they are
+/// one arm — and this is what stops that arm quietly reading the wrong one.
+#[test]
+fn an_s3_target_reads_its_bucket_and_defaults_its_credential_name_to_aws() {
+    let config = parse(&format!(
+        "[backup]\n{RECIPIENT}target = \"s3\"\n\n\
+         [backup.s3]\nbucket = \"example-backups\"\n"
+    ))
+    .expect("parses");
+    assert_eq!(config.kind, Kind::S3);
+    assert_eq!(
+        config.where_to,
+        Where::Bucket {
+            bucket: "example-backups".to_string(),
+            // `aws`, not `cloudflare`: the two arms are one and this is the
+            // assertion that they still differ where they must.
+            service: "aws".to_string(),
+        }
+    );
+}
+
+#[test]
+fn an_s3_target_does_not_read_the_r2_section_and_the_other_way_round() {
+    // An `[backup.r2]` section with `target = "s3"` binds nothing, and the
+    // refusal names the section the operator has to write.
+    let err = parse(&format!(
+        "[backup]\n{RECIPIENT}target = \"s3\"\n\n\
+         [backup.r2]\nbucket = \"example-backups\"\n"
+    ))
+    .expect_err("refused");
+    let ConfigError::Missing { key, hint } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(key.contains("backup.s3"), "{key}");
+    assert!(hint.contains("[s3] buckets"), "{hint}");
+
+    let err = parse(&format!(
+        "[backup]\n{RECIPIENT}target = \"r2\"\n\n\
+         [backup.s3]\nbucket = \"example-backups\"\n"
+    ))
+    .expect_err("refused");
+    let ConfigError::Missing { key, hint } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(key.contains("backup.r2"), "{key}");
+    assert!(hint.contains("[cloudflare] buckets"), "{hint}");
+}
+
+#[test]
+fn an_s3_target_may_name_the_credential_it_uses() {
+    let config = parse(&format!(
+        "[backup]\n{RECIPIENT}target = \"s3\"\n\n\
+         [backup.s3]\nbucket = \"b\"\nservice = \"minio-lab\"\n"
+    ))
+    .expect("parses");
+    assert_eq!(
+        config.where_to,
+        Where::Bucket {
+            bucket: "b".to_string(),
+            service: "minio-lab".to_string(),
+        }
+    );
 }

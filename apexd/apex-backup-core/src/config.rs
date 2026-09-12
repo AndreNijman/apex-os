@@ -28,6 +28,10 @@
 //! [backup.r2]
 //! bucket  = "example-backups"   # must also be in [cloudflare] buckets
 //! service = "cloudflare"        # the stored credential, by name
+//!
+//! [backup.s3]
+//! bucket  = "example-backups"   # must also be in [s3] buckets
+//! service = "aws"               # the stored credential, by name
 //! ```
 //!
 //! Everything here is a *declaration*. Two of them are checked against
@@ -239,20 +243,29 @@ impl BackupConfig {
                     marker: string(&["backup", section, "id"])?,
                 }
             }
-            Kind::R2 => {
-                let Some(bucket) = string(&["backup", "r2", "bucket"])? else {
+            // R2 and S3 read the same three lines out of different sections
+            // and differ only in which capability the target spends, which is
+            // `target::bucket::Ops`. Written as one arm so the two cannot
+            // drift.
+            Kind::R2 | Kind::S3 => {
+                let (section, binding, default_service) = if kind == Kind::R2 {
+                    ("r2", "[cloudflare] buckets", "cloudflare")
+                } else {
+                    ("s3", "[s3] buckets", "aws")
+                };
+                let Some(bucket) = string(&["backup", section, "bucket"])? else {
                     return Err(ConfigError::Missing {
-                        key: "r2] bucket (in [backup.r2".to_string(),
-                        hint: "The R2 bucket, which must also be in \
-                               [cloudflare] buckets — the broker resolves it \
-                               there and refuses anything else."
-                            .to_string(),
+                        key: format!("{section}] bucket (in [backup.{section}"),
+                        hint: format!(
+                            "The bucket, which must also be in {binding} — the \
+                             broker resolves it there and refuses anything else."
+                        ),
                     });
                 };
                 Where::Bucket {
                     bucket,
-                    service: string(&["backup", "r2", "service"])?
-                        .unwrap_or_else(|| "cloudflare".to_string()),
+                    service: string(&["backup", section, "service"])?
+                        .unwrap_or_else(|| default_service.to_string()),
                 }
             }
             Kind::Ssh => {
@@ -332,8 +345,6 @@ impl BackupConfig {
                     root,
                 }
             }
-            // Refused above, before any of this ran.
-            Kind::S3 => unreachable!("an unimplemented kind is refused above"),
         };
 
         Ok(BackupConfig {
@@ -353,7 +364,7 @@ impl BackupConfig {
     /// in the middle of uploading would grow without bound.
     pub fn is_excluded(&self, relative: &str) -> bool {
         relative.split('/').any(|segment| {
-            segment == crate::target::r2::STAGING_DIR
+            segment == crate::target::bucket::STAGING_DIR
                 || self.exclude.iter().any(|e| e == segment)
         })
     }
