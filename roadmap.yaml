@@ -414,7 +414,18 @@ tasks:
     THE TOOL'S OWN RELOAD'. The runner started labwc under WLR_BACKENDS=headless (pid 6162), passed all four
     isolation assertions, and wtype drove real keypresses through virtual-keyboard-unstable-v1. Re-run locally on
     tip 4ae4cf22 as well: 18 passed, 0 failed, 0 skipped. That job did fail overall, but on
-    tests/test-agent-inject.sh, which is apex-agentd's and not this item's.
+    tests/test-agent-inject.sh, which is apex-agentd's and not this item's. THE REST OF THIS CRITERION IS ASSERTED
+    AT CONFIG LEVEL ONLY, AND SAYING SO IS OVERDUE. The round-8 record listed four open qualifications; round 12
+    closed the fourth ('the rebound key after --reconfigure') and called it 'the last open assertion', while the
+    other three left the record without anyone deciding them. They are: rounded SSD corners are not visible at
+    headless output size, the drop shadow is indistinguishable against black, and the window switcher and context
+    menus need a real click. So 'rounded SSD/shadows and modern switcher work' rests on rc.xml carrying
+    cornerRadius 10, dropShadows yes, keepBorder no, maximizedDecoration titlebar and a thumbnail windowSwitcher -
+    the settings are pinned, the pixels are not. KEPT AT done DELIBERATELY rather than inherited: rc.xml is what
+    APEX ships and what APEX can regress, and labwc honouring its own documented config is labwc's contract, not
+    this repo's. If Andre reads the criterion as 'the corners are visibly round on a real screen', this is a
+    partial and the missing piece is a pixel test on a non-headless output, which no assertion in either repo
+    currently makes.
 - id: BASE-015
   title: Preserve recovery/doctor/factory-reset workflow
   priority: P0

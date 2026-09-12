@@ -84,7 +84,9 @@ on `archlinux:latest` — 47/0, 42/0, 12/0 — and the facade test reports
   Theme.borderWidth : root.implicitHeight` and `Math.max(Theme.notchHeight,
   Theme.exclusionGap)`. The file still does both things, at :28 and :107-109,
   but through a per-output `theme.` object rather than the global `Theme.`
-  singleton — an artefact of the per-output-scaling migration. So the fix is the
+  singleton. The commit is `4584fca` "feat(shell): every surface sizes itself
+  from the output it is drawn on" (the P1-040 per-output migration) — found with
+  `git log -L 28,28:src/windows/TopBar.qml`, not inferred. So the fix is the
   capitalisation in ci.yml's inline grep, and the shipped behaviour is fine.
   NOT fixed here on purpose: it is another unit's, and the file is shared
   program-wide machinery that this unit must not push to `roadmap/v2.2`.
