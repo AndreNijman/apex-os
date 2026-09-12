@@ -45,6 +45,8 @@ fun ApexRemoteApp(
     deviceName: String,
     /** A payload the app was launched with, from an `apex-remote:` link. */
     launchPayload: String? = null,
+    /** Called once the payload has been handed to a screen, so it fires once. */
+    onPayloadConsumed: () -> Unit = {},
     viewModel: RemoteViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -52,22 +54,21 @@ fun ApexRemoteApp(
     ApexRemoteTheme(useDynamicColour = state.settings.dynamicColour) {
         val navigation = rememberNavController()
 
-        // A link that carries a pairing code goes straight to the screen that
-        // can explain what accepting it means. It is deliberately NOT paired on
-        // arrival: a URL that paired a phone by being opened would be a URL
-        // worth sending somebody.
-        LaunchedEffect(launchPayload) {
-            if (launchPayload != null) navigation.navigate(Destinations.PAIRING)
-        }
-
         if (!state.unlocked) {
             LockScreen(
                 failure = state.failure,
                 onUnlock = { viewModel.unlockApp(activity) },
             )
-            // Asked once, on arrival, rather than behind a button nobody would
-            // choose to press.
-            LaunchedEffect(Unit) { viewModel.unlockApp(activity) }
+            // Asked once the state is known, rather than behind a button nobody
+            // would choose to press. Keyed on `loading` because the view model
+            // refuses to prompt before it has decided whether this phone can
+            // authenticate at all — so the effect has to run again once it has.
+            LaunchedEffect(state.loading) { viewModel.unlockApp(activity) }
+            // And nothing below this line runs while locked, which is why the
+            // deep-link effect is inside the graph rather than out here:
+            // `NavController.navigate` before a `NavHost` has composed throws
+            // "Navigation graph has not been set", and a cold launch from an
+            // `apex-remote:` link is exactly that moment.
             return@ApexRemoteTheme
         }
 
@@ -86,12 +87,30 @@ fun ApexRemoteApp(
             composable(Destinations.PAIRING) {
                 PairingScreen(
                     state = state,
+                    // Handed to the screen, not acted on. It arrives in the
+                    // paste box with the explanation beside it, and pairing
+                    // still takes a deliberate press.
+                    initialPayload = launchPayload,
                     onPayload = { payload ->
                         viewModel.pair(activity, payload, deviceName)
                     },
                     onBack = { navigation.popBackStack() },
                     onDismiss = { viewModel.dismiss() },
                 )
+            }
+        }
+
+        // A link that carries a pairing code opens the screen that can explain
+        // what accepting it would mean. It is deliberately NOT paired on
+        // arrival: a URL that paired a phone by being opened would be a URL
+        // worth sending somebody. Inside the graph, because navigating before
+        // the `NavHost` has composed throws.
+        LaunchedEffect(launchPayload) {
+            if (launchPayload != null) {
+                navigation.navigate(Destinations.PAIRING)
+                // Consumed, so that locking and unlocking again does not take
+                // the user back to a code that has since expired.
+                onPayloadConsumed()
             }
         }
 

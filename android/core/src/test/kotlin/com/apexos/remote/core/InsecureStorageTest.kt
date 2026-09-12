@@ -81,6 +81,8 @@ class InsecureStorageTest {
         val machine: PairedMachine,
         val deviceSecret: ByteArray,
         val token: ByteArray,
+        /** The desktop half, kept so the session runs against the key that was pinned. */
+        val desktop: InMemoryStaticKey,
     )
 
     /**
@@ -141,6 +143,7 @@ class InsecureStorageTest {
             machine = MachineStore.record(identity, offer, answer, box, nowMs),
             deviceSecret = secret,
             token = tokenBytes,
+            desktop = desktop,
         )
     }
 
@@ -151,18 +154,18 @@ class InsecureStorageTest {
      * its own, so the test really does hold two distinct strings that were
      * session plaintext on this machine at the moment the directory is walked.
      */
-    private fun talkOverASession(machine: PairedMachine, identity: StaticKey) {
-        val desktopSecret = InMemoryStaticKey.generate()
+    private fun talkOverASession(paired: Paired, identity: StaticKey) {
+        // The key the store pinned at pairing, not a fresh one. That makes the
+        // session go through `Device.checkKey(machine.desktopKey)` — the path
+        // the app really uses — instead of past it.
+        val desktopSecret = paired.desktop
+        val machine = paired.machine
         val toDesktop = PipedOutputStream()
         val desktopReads = PipedInputStream(toDesktop, 1 shl 16)
         val toDevice = PipedOutputStream()
         val deviceReads = PipedInputStream(toDevice, 1 shl 16)
 
-        // The machine record pins a desktop key from pairing; this session is a
-        // fresh pair of halves, so the session's desktop key is the one used
-        // here. That is a property of the test harness and not of the protocol:
-        // what matters for the scan is that real transport bytes were produced.
-        val desktopPublic = desktopSecret.publicKey
+        val desktopPublic = Device.checkKey(machine.desktopKey)
         val responder = Thread {
             assertEquals(Transport.HELLO_SESSION.toInt(), desktopReads.read())
             val handshake = Noise.sessionResponder(desktopSecret, REMOTE_PROTOCOL_VERSION)
@@ -209,7 +212,7 @@ class InsecureStorageTest {
         // identity for a session. Everything the app does with a key, done.
         val reloaded = storage.load()
         val identity = reloaded.identityFor(reloaded.find(paired.machine.deviceId)!!, box)
-        talkOverASession(paired.machine, identity)
+        talkOverASession(paired, identity)
 
         // A second write, because a preference change is a write and the
         // criterion is about what is on disk at any moment, not only after the
