@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-screen-reader — turn the Orca screen reader on, off, or the other way
+#  round, from a key the user can press without being able to see the screen.
+#
+#  ── Why this exists ─────────────────────────────────────────────────────────
+#
+#  The image ships orca (Containerfile.core, stage 5a-a11y) and deliberately
+#  autostarts nothing: a reader that starts unbidden talks over a sighted
+#  user's first boot. That decision only holds up if the person who DOES need
+#  the reader can start it, and until this script there was no keybinding, no
+#  toggle and no menu entry — so the only way to switch the reader on was to
+#  find a terminal and type `orca`, which is exactly the thing somebody who
+#  needs a screen reader cannot do first.
+#
+#  The keybinding is SUPER+ALT+S, GNOME's long-standing combination for the
+#  same action, so muscle memory carries over. It is an APEX Shell keybind
+#  default (apex-shell KeybindService.qml), which is what makes it exist on all
+#  three sessions — Hyprland, niri and labwc each get it from that one
+#  definition — and rebindable in Settings rather than frozen in a config file.
+#
+#  ── Two ways to run a reader, and why both are here ─────────────────────────
+#
+#  orca 49 ships /usr/lib/systemd/user/orca.service (Type=notify-reload,
+#  Restart=always, WatchdogSec=6). That unit is NOT enabled — Fedora's user
+#  preset is `disable *` — but `systemctl --user start orca.service` works
+#  whether or not it is, and it is the better way to run the reader: a screen
+#  reader that crashes must come back, and a blind user cannot see that it
+#  stopped. So the unit is preferred whenever the user manager answers.
+#
+#  The direct path is the fallback for a session with no systemd user manager
+#  reachable. It is `setsid orca --replace`, detached from this process, because
+#  a compositor keybind's child is reaped when the handler returns.
+#
+#  ── Measured, not remembered ────────────────────────────────────────────────
+#
+#  * orca 49.7 has NO `--quit`/`-q`. Its whole option list is -h -v -r -s -l -e
+#    -d -p -u --speech-system --debug-file --debug. The obvious
+#    `orca --quit` would have failed silently and left a toggle that could only
+#    ever turn the reader ON. Stopping it is SIGTERM, or `systemctl --user
+#    stop`.
+#  * /usr/bin/orca is a python script with `#!/usr/bin/python3`, so the probe
+#    matches the COMMAND LINE rather than the process name — and the reason is
+#    not the one it is natural to assume. `pgrep -x orca` does in fact work:
+#    Linux takes `comm` from the SCRIPT's basename for a shebang script, not
+#    from the interpreter's, so an orca started as `orca` has comm `orca` even
+#    though its argv[0] is /usr/bin/python3. Measured, after this file first
+#    claimed the opposite:
+#
+#        $ cat /proc/$!/comm          -> orca
+#        $ tr '\0' ' ' </proc/$!/cmdline -> /usr/bin/python3 /…/orca
+#
+#    `-f` is kept because it is a superset: it also finds a reader somebody
+#    started as `python3 /usr/bin/orca`, whose comm really is `python3`. The
+#    pattern is anchored on a path boundary so it cannot match a `not-orca`,
+#    and scoped to this user's own processes so nothing else can ever be
+#    signalled.
+#
+#  ── What it will not do ─────────────────────────────────────────────────────
+#
+#  It signals only processes owned by the invoking user, never by pattern alone
+#  across the machine. It starts nothing when orca is absent; it says so and
+#  exits non-zero, because a toggle that silently does nothing is worse than
+#  one that fails.
+#
+#  Usage: apex-screen-reader [toggle|on|off|status]      (default: toggle)
+#  Exit:  0 success; `status` exits 0 when the reader is running, 1 when not.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+PROG="${0##*/}"
+
+log() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+# ── Is the systemd user manager reachable, and does it know the unit? ────────
+# Both halves matter. `systemctl --user` on a session with no user manager
+# fails with "Failed to connect to bus", and an orca built without the unit
+# would return "not-found" for LoadState — in either case the direct path is
+# the right one, and the difference is invisible from `is-active` alone.
+use_systemd() {
+    command -v systemctl >/dev/null 2>&1 || return 1
+    local state
+    state="$(systemctl --user show -p LoadState --value orca.service 2>/dev/null)" || return 1
+    [ "$state" = "loaded" ]
+}
+
+# ── Is a reader running? ────────────────────────────────────────────────────
+# The process probe is the authority even on the systemd path: a reader started
+# by hand earlier is still a reader, and `systemctl --user is-active` would
+# report `inactive` about it and hand the user a second one.
+reader_pids() {
+    # -u <uid>: only this user's processes, so nothing can be signalled on
+    #           somebody else's behalf.
+    # -f with an anchored path component: a bare `-f orca` would match a text
+    #           editor that happens to have the word in its argv, and `-x orca`
+    #           would miss a reader started as `python3 /usr/bin/orca`.
+    pgrep -u "$(id -u)" -f '(^|/)orca([[:space:]]|$)' 2>/dev/null
+}
+
+is_running() {
+    [ -n "$(reader_pids)" ]
+}
+
+# ── on ──────────────────────────────────────────────────────────────────────
+reader_on() {
+    if is_running; then
+        log "the screen reader is already running"
+        return 0
+    fi
+    command -v orca >/dev/null 2>&1 || {
+        log "orca is not installed — nothing to start"
+        return 1
+    }
+    if use_systemd; then
+        systemctl --user start orca.service && return 0
+        log "systemctl --user start orca.service failed; starting orca directly"
+    fi
+    # Detached. A compositor keybind runs its command as a short-lived child and
+    # reaps it; without setsid the reader dies with the handler.
+    setsid orca --replace </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    return 0
+}
+
+# ── off ─────────────────────────────────────────────────────────────────────
+reader_off() {
+    if ! is_running; then
+        log "the screen reader is not running"
+        return 0
+    fi
+    if use_systemd; then
+        systemctl --user stop orca.service 2>/dev/null
+    fi
+    # And then the processes themselves, because `systemctl --user stop` only
+    # reaches a reader that the unit started. SIGTERM: orca has no quit verb.
+    local pids
+    pids="$(reader_pids)"
+    [ -n "$pids" ] && kill -TERM $pids 2>/dev/null
+    return 0
+}
+
+case "${1:-toggle}" in
+    toggle) if is_running; then reader_off; else reader_on; fi ;;
+    on|start|enable)   reader_on ;;
+    off|stop|disable)  reader_off ;;
+    status)
+        if is_running; then echo on; exit 0; else echo off; exit 1; fi ;;
+    -h|--help|help)
+        printf 'usage: %s [toggle|on|off|status]\n' "$PROG" ;;
+    *)
+        log "unknown verb '${1}'; usage: $PROG [toggle|on|off|status]"
+        exit 2 ;;
+esac

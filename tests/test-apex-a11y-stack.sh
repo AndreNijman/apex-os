@@ -60,6 +60,11 @@ bad()  { printf 'FAIL  %s%s\n' "$1" "${2:+  — $2}"; fail=$((fail + 1)); }
 skp()  { printf 'SKIP  %s%s\n' "$1" "${2:+  — $2}"; skip=$((skip + 1)); }
 note() { printf 'NOTE  %s\n' "$1"; }
 section() { printf '\n── %s ──\n' "$1"; }
+is() {
+    local name=$1 want=$2 got=$3
+    if [ "$got" = "$want" ]; then ok "$name"
+    else bad "$name" "want [$want] got [$got]"; fi
+}
 finish() {
     printf '\napex-a11y-stack: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
     [ "$fail" -eq 0 ]
@@ -207,6 +212,183 @@ if [ -z "$started" ]; then
 else
     bad "nothing in the image autostarts orca" \
         "started from:$started — a screen reader must be started by the user who wants it"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "so there has to be a way to START it"
+# ═════════════════════════════════════════════════════════════════════════════
+# "Not autostarted" is only a defensible decision while the person who needs the
+# reader can switch it on. Until /usr/libexec/apex-screen-reader there was no
+# keybinding, no toggle and no menu entry, so the only route was to open a
+# terminal and type `orca` — which is precisely the thing somebody who cannot
+# see the screen cannot do first. A screen reader that cannot be launched by
+# someone who needs a screen reader is not shipped.
+#
+# The script is RUN here, not read. Two facts it is built around came out of the
+# rpm rather than out of memory, and both are invisible to a grep:
+#
+#   * orca 49.7 has no `--quit`/`-q`. The whole option list is
+#     -h -v -r -s -l -e -d -p -u --speech-system --debug-file --debug. A toggle
+#     written around `orca --quit` would have been able to turn the reader on
+#     and never off, and would have looked perfectly correct in review.
+#   * whether a running reader can be FOUND at all is the other half, and the
+#     first version of this note got it wrong in a way worth keeping: it said
+#     `pgrep -x orca` matches nothing because /usr/bin/orca is
+#     `#!/usr/bin/python3`. Measured instead of assumed, Linux takes `comm`
+#     from the SCRIPT's basename for a shebang script, so `comm` really is
+#     `orca` and `-x` would have worked. The switch matches the command line
+#     anyway, because that also finds a reader started as
+#     `python3 /usr/bin/orca` — a superset, for a different reason than the one
+#     first written down. The mutant for this row is that the probe stops
+#     recognising the reader it started, which is the failure either spelling
+#     can have.
+#
+# The stub below is strict about the option list (it refuses anything orca does
+# not have) and its process really is stopped by a signal.
+
+READER="$ROOT/files/system/libexec/apex-screen-reader"
+if [ -f "$READER" ]; then
+    ok "the image carries a screen-reader switch (files/system/libexec/apex-screen-reader)"
+else
+    bad "the image carries a screen-reader switch" \
+        "there is no /usr/libexec/apex-screen-reader — orca ships with no way to start it"
+fi
+
+if [ -f "$READER" ] && bash -n "$READER" 2>"$W/reader.syntax"; then
+    ok "the switch parses as bash"
+else
+    bad "the switch parses as bash" "$(head -2 "$W/reader.syntax" 2>/dev/null | tr '\n' ' ')"
+fi
+
+# Installed, not merely present in the tree. This is the K12/K13 shape: a
+# launcher was once repointed at a path nothing installed, the ISO would have
+# booted with no installer at all, and every source-reading assertion stayed
+# green because the file plainly existed in the repo.
+if grep -qE '^COPY .*files/system/libexec/apex-screen-reader[[:space:]]+/usr/libexec/apex-screen-reader$' "$CORE"; then
+    ok "Containerfile.core installs it to /usr/libexec/apex-screen-reader"
+else
+    bad "Containerfile.core installs it to /usr/libexec/apex-screen-reader" \
+        "nothing copies the switch into the image, so it exists only in this repository"
+fi
+
+# ── run it ──────────────────────────────────────────────────────────────────
+if [ ! -f "$READER" ] || ! command -v pgrep >/dev/null 2>&1; then
+    skp "the switch starts a reader, and pressing it again stops one" \
+        "no script, or no pgrep here; COULD-NOT-RUN, not a pass"
+else
+    RB="$W/rbin"; mkdir -p "$RB"
+
+    # A stub orca that is as strict about its command line as the real one's
+    # argparse. `--quit` is not in orca 49's option list, so a switch that tried
+    # to stop the reader that way would be refused here exactly as it is in
+    # production — and the reader would still be running afterwards, which the
+    # assertions below would see.
+    cat >"$RB/orca" <<'EOF'
+#!/bin/sh
+for a in "$@"; do
+    case "$a" in
+        -r|--replace|-d|--disable|-e|--enable|-v|--version|-h|--help) ;;
+        *) echo "orca: unrecognized arguments: $a" >&2; exit 2 ;;
+    esac
+done
+# NOT `exec`: the point of this stub is to be found by a command-line probe, and
+# an exec'd `sleep` has `sleep` in its argv and no trace of orca at all.
+sleep 120
+EOF
+    # `systemctl` answers "this unit is unknown here", which is what a session
+    # with no user manager looks like from inside the script, so this run
+    # exercises the DIRECT path: setsid + SIGTERM.
+    cat >"$RB/systemctl" <<'EOF'
+#!/bin/sh
+printf 'not-found\n'
+exit 1
+EOF
+    chmod +x "$RB/orca" "$RB/systemctl"
+
+    reader_state() {
+        env PATH="$RB:/usr/bin:/bin" "$READER" status 2>/dev/null
+    }
+    reader_do() {
+        env PATH="$RB:/usr/bin:/bin" "$READER" "$1" >/dev/null 2>&1
+    }
+    # The switch's own probe is scoped to this user, so the assertions have to
+    # be too: a real orca belonging to somebody else on this machine must not
+    # decide the verdict, and nothing here may signal it.
+    stub_pids() { pgrep -u "$(id -u)" -f "$RB/orca" 2>/dev/null; }
+
+    # Floor first. Every assertion below is about a state changing, and all of
+    # them are vacuous if a reader was already running when the run started.
+    if [ -z "$(stub_pids)" ]; then
+        ok "no stub reader is running before the switch is touched"
+    else
+        bad "no stub reader is running before the switch is touched" \
+            "a previous run leaked one; the assertions below would be meaningless"
+    fi
+
+    S0="$(reader_state)"
+    reader_do toggle
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -n "$(stub_pids)" ] && break; sleep 0.2; done
+    S1="$(reader_state)"
+    PIDS_ON="$(stub_pids | tr '\n' ' ')"
+
+    reader_do toggle
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -z "$(stub_pids)" ] && break; sleep 0.2; done
+    S2="$(reader_state)"
+    PIDS_OFF="$(stub_pids | tr '\n' ' ')"
+
+    is "with no reader running, the switch reports off" "off" "$S0"
+    if [ -n "$PIDS_ON" ]; then
+        ok "one press starts a reader (pid$( [ "$(printf '%s' "$PIDS_ON" | wc -w)" -gt 1 ] && printf 's') $PIDS_ON)"
+    else
+        bad "one press starts a reader" \
+            "nothing was started — a switch that cannot turn the reader ON is the whole defect"
+    fi
+    is "and the switch then reports on" "on" "$S1"
+    if [ -z "$PIDS_OFF" ]; then
+        ok "a second press stops it"
+    else
+        bad "a second press stops it" \
+            "still running as $PIDS_OFF — orca has no --quit verb, so the switch has to signal it"
+    fi
+    is "and the switch reports off again" "off" "$S2"
+
+    # Belt and braces: never leave a process behind whatever the assertions said.
+    stub_pids | xargs -r kill -TERM 2>/dev/null
+
+    # ── the systemd path ────────────────────────────────────────────────────
+    # orca 49 ships /usr/lib/systemd/user/orca.service — Restart=always,
+    # WatchdogSec=6 — and a reader that dies silently is worse than one that
+    # never started, because the user cannot see that it stopped. So the unit is
+    # preferred whenever the user manager answers. That preference is a real
+    # branch and it needs its own evidence: with a systemctl that DOES know the
+    # unit, the switch must go through it rather than exec'ing orca behind
+    # systemd's back.
+    cat >"$RB/systemctl" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$W/systemctl.calls"
+case "\$*" in
+    *'show -p LoadState'*) printf 'loaded\n'; exit 0 ;;
+    *start*) printf '%s\n' start >>"$W/systemctl.verbs"; exit 0 ;;
+    *stop*)  printf '%s\n' stop  >>"$W/systemctl.verbs"; exit 0 ;;
+esac
+exit 0
+EOF
+    chmod +x "$RB/systemctl"
+    : >"$W/systemctl.verbs"
+    reader_do on
+    if grep -qx start "$W/systemctl.verbs" 2>/dev/null; then
+        ok "where the user manager knows orca.service, the switch starts the UNIT"
+    else
+        bad "where the user manager knows orca.service, the switch starts the UNIT" \
+            "it went straight to orca, so a reader that crashes never comes back"
+    fi
+    if [ -z "$(stub_pids)" ]; then
+        ok "and does not also exec a second reader behind systemd's back"
+    else
+        stub_pids | xargs -r kill -TERM 2>/dev/null
+        bad "and does not also exec a second reader behind systemd's back" \
+            "both paths ran; two readers speak over each other"
+    fi
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════

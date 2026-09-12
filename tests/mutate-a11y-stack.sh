@@ -16,8 +16,9 @@ cd "$(dirname "$0")/.." || exit 2
 
 CORE="Containerfile.core"
 AUTO="files/desktop/labwc/autostart"
+READER="files/system/libexec/apex-screen-reader"
 SUITE_F="tests/test-apex-a11y-stack.sh"
-FILES="$CORE $AUTO $SUITE_F"
+FILES="$CORE $AUTO $READER $SUITE_F"
 SUITE="./tests/test-apex-a11y-stack.sh"
 
 applied=0; noapply=0; caught=0; survived=0
@@ -114,6 +115,59 @@ mutate D4 "$SUITE_F" \
     "    if False:
         continue" \
     "a package named only in a comment is not extracted"
+
+# ── the switch ──────────────────────────────────────────────────────────────
+# "Not autostarted" is only a defensible decision while the person who needs the
+# reader can switch it on, so the switch's assertions need the same treatment as
+# the package's. D5 and D6 are the two mistakes that were actually available
+# when this script was written, and both would have looked correct in review.
+
+# D5 — the toggle tries to stop the reader with a verb orca does not have.
+#      orca 49's whole option list is -h -v -r -s -l -e -d -p -u --speech-system
+#      --debug-file --debug: there is no --quit. The result is a switch that can
+#      turn the reader ON and never off, and the stub in the suite is as strict
+#      about its command line as the real argparse, so it refuses it exactly as
+#      production would.
+mutate D5 "$READER" \
+    '    [ -n "$pids" ] && kill -TERM $pids 2>/dev/null' \
+    '    [ -n "$pids" ] && orca --quit 2>/dev/null' \
+    "a second press stops it"
+
+# D6 — the probe stops recognising the reader the switch itself started. Every
+#      press then starts another one and none of them can ever be stopped, which
+#      is what a running-reader probe gets wrong in practice whichever spelling
+#      it uses.
+#
+#      This mutant replaced one that asserted something FALSE. It used to turn
+#      the probe into `pgrep -x orca` on the stated grounds that comm is
+#      `python3` for a `#!/usr/bin/python3` script and `-x` therefore matches
+#      nothing. It SURVIVED, and the survival was right: Linux takes comm from
+#      the SCRIPT's basename, so comm is `orca` and `-x` works. The claim was
+#      corrected in the switch, the Containerfile and the suite rather than the
+#      mutant being softened.
+mutate D6 "$READER" \
+    "(^|/)orca([[:space:]]|\$)" \
+    "(^|/)orca-no-such-reader([[:space:]]|\$)" \
+    "a second press stops it"
+
+# D7 — the reader stops being installed into the image at all, while the script
+#      stays in the repository. Every behavioural assertion above still passes,
+#      because they run the script from the checkout; only the question "does
+#      anything put this in the image" can see it. K12/K13 in miniature.
+mutate D7 "$CORE" \
+    'COPY --chmod=0755 files/system/libexec/apex-screen-reader /usr/libexec/apex-screen-reader' \
+    '# (the switch is no longer installed)' \
+    "Containerfile.core installs it to /usr/libexec/apex-screen-reader"
+
+# D8 — the systemd path is dropped and the switch always execs orca directly.
+#      A reader started outside the unit has no Restart=always, and a blind user
+#      cannot see that it stopped.
+mutate D8 "$READER" \
+    '    if use_systemd; then
+        systemctl --user start orca.service && return 0' \
+    '    if false; then
+        systemctl --user start orca.service && return 0' \
+    "the switch starts the UNIT"
 
 echo
 printf 'mutants applied=%d, failed-to-apply=%d, caught=%d, SURVIVED=%d\n' \

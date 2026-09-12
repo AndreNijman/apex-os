@@ -371,6 +371,9 @@
     <keybind key="W-n">
       <action name="Execute" command="apex shell notifications"/>
     </keybind>
+    <keybind key="W-A-s">
+      <action name="Execute" command="/usr/libexec/apex-screen-reader toggle"/>
+    </keybind>
     <keybind key="A-F9">
       <action name="Execute" command="apex shell record"/>
     </keybind>
@@ -382,6 +385,9 @@
     </keybind>
     <keybind key="W-l">
       <action name="Execute" command="apex shell lock"/>
+    </keybind>
+    <keybind key="W-A-v">
+      <action name="Execute" command="apex shell voice"/>
     </keybind>
     <keybind key="W-C-minus">
       <action name="Execute" command="wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"/>

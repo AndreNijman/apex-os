@@ -81,6 +81,7 @@ ATSPI_RUNTIME=""
 ATSPI_LAUNCHER_PID=""
 ATSPI_REGISTRY_PID=""
 ATSPI_DBUS_PID=""
+ATSPI_STATUS=""
 
 # The pieces, spelled the way each distribution spells them. A missing piece is
 # a SKIP with a name, never a silent degradation to "no tree found = no problem".
@@ -219,30 +220,76 @@ EOF
         printf 'FATAL: the a11y bus is the ambient one this shell started with.\n' >&2
         return 1
     fi
-    export AT_SPI_BUS_ADDRESS="$ATSPI_BUS"
-
     # ── the flag a screen reader sets ───────────────────────────────────────
-    # Set because a screen reader sets it, and because a bridge that DOES gate
-    # on it must find it true. What it is not is this harness's guarantee that a
-    # tree appears -- that was measured rather than assumed, and the result is
-    # worth writing down because it is the opposite of the obvious one:
+    # Set because a screen reader sets it: Orca's first act on connecting is to
+    # put org.a11y.Status.ScreenReaderEnabled true, and toolkits watch that
+    # property to decide whether to pay for an accessibility tree at all. This
+    # harness IS the assistive technology, so it does what one does.
     #
-    #   * org.a11y.Status.IsEnabled cannot be pushed false here at all. Setting
-    #     it to <false> and reading it straight back returns <true>;
-    #     at-spi-bus-launcher reports the bus as enabled once anything is using
-    #     it. So it is not usable as a test lever in either direction.
-    #   * Qt 6.10.3 publishes whenever it can REACH an a11y bus, with IsEnabled
-    #     true or false and with AT_SPI_BUS_ADDRESS exported or not. All four
-    #     combinations register.
+    # ── A correction, and the machine that produced the wrong answer ────────
     #
-    # The gate that actually decides is therefore reachability: an application
-    # with no D-Bus session bus cannot resolve org.a11y.Bus and publishes
-    # nothing at all. That is not a hypothetical -- it is the shipped greeter's
-    # situation, and tests/test-apex-greet-session-bus.sh is about exactly it.
+    # This block used to say the opposite, and said it with measurements:
+    #
+    #     org.a11y.Status.IsEnabled cannot be pushed false here at all. Setting
+    #     it to <false> and reading it straight back returns <true> ... Qt 6.10.3
+    #     publishes whenever it can REACH an a11y bus, with IsEnabled true or
+    #     false. All four combinations register.
+    #
+    # Both observations were real and the conclusion was an artefact of ONE
+    # laptop. On a developer machine with a live desktop session both properties
+    # are ALREADY true before this harness starts, so "set false, read true" was
+    # measuring a value that had never been false, and "Qt does not consult it"
+    # was never tested against a flag that was genuinely off.
+    #
+    # Measured on a second machine -- a bare fedora:43 container, which is what
+    # CI runs -- the same code gives the opposite result:
+    #
+    #     BEFORE: {'IsEnabled': <false>, 'ScreenReaderEnabled': <false>}
+    #     the greeter registers NOTHING with the registry
+    #     ... set both true, and the tree appears exactly as on the laptop.
+    #
+    # So Qt DOES gate on the status flags, they CAN be pushed in both
+    # directions on a machine where nothing has already turned them on, and a
+    # suite that relied on the old paragraph would have reported the greeter as
+    # publishing no accessibility tree the moment it ran anywhere but here. That
+    # is the second time in this unit that a second machine has corrected a
+    # finding a laptop was certain of.
+    #
+    # Reachability is still the OTHER gate, and still the shipped greeter's
+    # problem: an application with no D-Bus session bus cannot resolve
+    # org.a11y.Bus and publishes nothing whatever these flags say. See
+    # tests/test-apex-greet-session-bus.sh.
     #
     # QT_LINUX_ACCESSIBILITY_ALWAYS_ON is still deliberately NOT set. It forces
     # the bridge past every check including reachability, which would make this
-    # harness pass on an image where accessibility genuinely cannot work.
+    # harness pass on an image where accessibility genuinely cannot work. These
+    # two properties are a different thing: they are the switch a screen reader
+    # itself throws, on the bus, over the same interface any reader uses.
+    #
+    # Order matters and is load-bearing: this block sits BEFORE the
+    # AT_SPI_BUS_ADDRESS export because tests/mutate-greet-atspi.sh's A7 splices
+    # a broken session bus in at that export. With the block after it, A7 would
+    # break this harness's own status read and the suite would go red one
+    # assertion early, on a line about the test rather than about the greeter.
+    for _p in ScreenReaderEnabled IsEnabled; do
+        gdbus call --session -d org.a11y.Bus -o /org/a11y/bus \
+              -m org.freedesktop.DBus.Properties.Set \
+              org.a11y.Status "$_p" "<true>" >/dev/null 2>&1
+    done
+    ATSPI_STATUS="$(gdbus call --session -d org.a11y.Bus -o /org/a11y/bus \
+        -m org.freedesktop.DBus.Properties.GetAll org.a11y.Status 2>/dev/null)"
+    export ATSPI_STATUS
+    case "$ATSPI_STATUS" in
+        *"'ScreenReaderEnabled': <true>"*) : ;;
+        *)  # Not fatal here -- the suite that cares asserts it and says so --
+            # but it must never be silent, because the consequence is an empty
+            # tree that reads exactly like a greeter with no markup.
+            printf 'NOTE: org.a11y.Status.ScreenReaderEnabled did not read back true: %s\n' \
+                   "${ATSPI_STATUS:-<no answer>}" ;;
+    esac
+
+    export AT_SPI_BUS_ADDRESS="$ATSPI_BUS"
+
     # ── the registry ────────────────────────────────────────────────────────
     "$ATSPI_REGISTRYD" >"$ATSPI_W/registry.out" 2>"$ATSPI_W/registry.err" &
     ATSPI_REGISTRY_PID=$!
