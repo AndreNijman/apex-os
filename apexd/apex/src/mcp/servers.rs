@@ -510,7 +510,7 @@ pub fn bridged_service(command: &str, args: &[String]) -> Option<String> {
 /// A credential's *value* is in none of it, and its length is not either: a
 /// length is a fact about a secret, and a report that carried one would be a
 /// report worth grepping.
-pub fn as_json(found: &[Server]) -> Value {
+pub fn as_json(found: &[Server], launch: &mcpconf::Curated) -> Value {
     let servers: Vec<Value> = found
         .iter()
         .map(|s| {
@@ -552,6 +552,11 @@ pub fn as_json(found: &[Server]) -> Value {
             // deliberately not here: it is a file, `apex mcp policy` names the
             // file, and a listing that paraphrased it would be a second place
             // to read the same settings out of date.
+            let wrap = launch
+                .decisions
+                .iter()
+                .find(|d| d.name == s.name)
+                .and_then(|d| d.confined);
             let confined = match &s.transport {
                 Transport::Stdio { command, args } => confined(command, args)
                     .map(|(name, inner)| {
@@ -577,6 +582,18 @@ pub fn as_json(found: &[Server]) -> Value {
                 "credential": credential,
                 "agentReadable": s.credential.agent_readable(),
                 "confined": confined,
+                // `confined` above is what the DEFINITION says; this is what
+                // the session launcher decided, which is not the same fact for
+                // a third-party definition it wraps at launch. Both are here
+                // because a consumer that only had the first would report a
+                // plugin's server as unconfined in a session that confines it,
+                // and one that only had the second would report a sandbox that
+                // a hand-run session does not get.
+                "sandbox": {
+                    "state": wrap.map_or("unknown", |w| w.tag()),
+                    "sandboxed": wrap.and_then(|w| w.confined()),
+                    "survivesAHandRun": wrap.is_some_and(|w| w.survives_a_hand_run()),
+                },
                 "definedIn": s.surface.describe(),
                 "rewritable": s.surface.is_writable_here(),
             })
@@ -707,7 +724,10 @@ mod tests {
             }})
             .to_string(),
         );
-        let doc = as_json(&discover(&home, None));
+        let doc = as_json(
+            &discover(&home, None),
+            &crate::connector::launch_verdicts(&home, None),
+        );
         let by_name = |name: &str| {
             doc["servers"]
                 .as_array()
@@ -732,6 +752,62 @@ mod tests {
         // omitting the key and leaving a reader to guess.
         assert!(by_name("plain")["confined"].is_null());
         assert!(by_name("remote")["confined"].is_null());
+
+        // `confined` is what the DEFINITION says; `sandbox` is what the
+        // launcher decided. For the user's own definitions those agree, and
+        // the point of carrying both is the case below where they do not.
+        assert_eq!(wrapped["sandbox"]["state"], "definition");
+        assert_eq!(wrapped["sandbox"]["survivesAHandRun"], Value::Bool(true));
+        assert_eq!(by_name("plain")["sandbox"]["state"], "none");
+        assert_eq!(by_name("remote")["sandbox"]["state"], "no_process");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn the_listing_does_not_call_a_plugins_wrapped_server_unsandboxed() {
+        // A plugin's `.mcp.json` naming a bare program. Nothing on disk wraps
+        // it, so `confined` is null and the listing used to stop there and say
+        // "none — everything the session has" — false of every session
+        // `apex agent` starts, which wraps every third-party definition.
+        let home = fixture("plugin-atlaunch");
+        let install = home.join("plug");
+        std::fs::create_dir_all(&install).expect("mkdir");
+        write(
+            &install.join(".mcp.json"),
+            &serde_json::json!({"mcpServers": {"srv": {"command": "node", "args": ["s.js"]}}})
+                .to_string(),
+        );
+        std::fs::create_dir_all(home.join(".claude/plugins")).expect("mkdir");
+        write(
+            &home.join(".claude/settings.json"),
+            &serde_json::json!({"enabledPlugins": {"p@mk": true}}).to_string(),
+        );
+        write(
+            &home.join(".claude/plugins/installed_plugins.json"),
+            &serde_json::json!({"version": 2, "plugins": {
+                "p@mk": [{"installPath": install.display().to_string(), "version": "1"}]
+            }})
+            .to_string(),
+        );
+
+        let found = discover(&home, None);
+        let launch = crate::connector::launch_verdicts(&home, None);
+        let doc = as_json(&found, &launch);
+        let srv = doc["servers"]
+            .as_array()
+            .expect("servers")
+            .iter()
+            .find(|s| s["name"] == "plugin:p:srv")
+            .expect("the plugin's server")
+            .clone();
+
+        // The definition on disk really is bare — so this is not the wrapped
+        // case wearing a different name.
+        assert!(srv["confined"].is_null(), "{srv}");
+        // And the launcher wraps it, only where the launcher runs.
+        assert_eq!(srv["sandbox"]["state"], "launch");
+        assert_eq!(srv["sandbox"]["sandboxed"], Value::Bool(true));
+        assert_eq!(srv["sandbox"]["survivesAHandRun"], Value::Bool(false));
         std::fs::remove_dir_all(&home).ok();
     }
 

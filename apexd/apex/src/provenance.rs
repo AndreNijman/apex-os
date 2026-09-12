@@ -65,17 +65,25 @@
 //! claimed in one word:
 //!
 //!   * **An MCP server a plugin defines** really can be confined — bubblewrap,
-//!     through `apex mcp run` — and it is confined only if somebody wrapped
-//!     it. `servers::confined_server` measures which, so this reports the fact
-//!     rather than the capability.
+//!     through `apex mcp run` — and there are now two ways it comes to be.
+//!     Its definition on disk may name the wrapper, in which case it is
+//!     confined however the agent is started; or the launch configuration
+//!     `apex-agentd` writes may wrap it, in which case it is confined in a
+//!     session `apex agent` started and **not** in one a person started
+//!     themselves. Those are different facts and the report does not merge
+//!     them: the answer comes from a real [`mcpconf::curate`] run, so it is the
+//!     session launcher's own verdict rather than a second reading of the same
+//!     file that could disagree with it.
 //!   * **Hooks and scripts** a plugin ships are run by the agent, not by
-//!     anything in APEX. Nothing here confines them; they get whatever the
-//!     session's own sandbox is. Reported as unconfined, never as unknown.
+//!     anything in APEX. Nothing here adds a sandbox of its own; they run
+//!     inside whatever the *session* is confined to, which for a confined
+//!     session is a real boundary and for `--sandbox unrestricted` is none.
+//!     Reported as that, never as unknown and never as "sandboxed".
 //!   * **Commands, agents, prompts and skills** are content the model reads.
 //!     There is no process to confine, which is not the same as being safe.
 //!
-//! The word "sandbox" is therefore spent in exactly one place in the output:
-//! where bubblewrap actually runs.
+//! The word "sandbox" is therefore spent only where bubblewrap actually runs,
+//! and never without the clause saying when.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -83,6 +91,8 @@ use std::process::Command;
 
 use anyhow::Result;
 use serde_json::{json, Value};
+
+use apex_agent_core::mcpconf::Wrap;
 
 use crate::digest::{self, Digest};
 use crate::mcp::servers;
@@ -497,9 +507,17 @@ pub fn read_baselines_at(path: &Path) -> Baselines {
 /// What executable content a plugin ships, and what confines each kind.
 #[derive(Debug, Clone, Default)]
 pub struct Confinement {
-    /// MCP servers this plugin defines, and whether each starts confined.
-    /// The one place bubblewrap genuinely applies.
-    pub mcp: Vec<(String, bool)>,
+    /// MCP servers this plugin defines, and what confines each — as the
+    /// session launcher itself answered it, not as this module guessed.
+    ///
+    /// [`Wrap`] rather than a boolean because there are two ways to be
+    /// confined and they do not hold in the same places: a definition that
+    /// names `apex mcp run` survives anybody starting the agent, and one the
+    /// launch configuration rewrites holds only for a session `apex agent`
+    /// started. `None` is the launcher not having classified it at all, which
+    /// is a disagreement between two readers of the same file and is printed
+    /// as that rather than as a verdict.
+    pub mcp: Vec<(String, Option<Wrap>)>,
     /// Files with an execute bit anywhere in the tree.
     pub executables: Vec<String>,
     /// Whether it ships a `hooks` directory.
@@ -516,24 +534,45 @@ impl Confinement {
         for (name, confined) in &self.mcp {
             out.push(format!(
                 "MCP server '{name}' — {}",
-                if *confined {
-                    "sandboxed: it starts through `apex mcp run`, so bubblewrap confines it"
-                } else {
-                    "NOT sandboxed, though it could be: `apex mcp confine` would wrap it"
+                match confined {
+                    Some(Wrap::InDefinition) =>
+                        "sandboxed however the agent is started: its own definition names \
+                         `apex mcp run`, so bubblewrap confines it",
+                    // The clause after the colon is the whole value of this
+                    // arm. Without it the line is true of a session `apex
+                    // agent` started and false of the one the reader is
+                    // probably in.
+                    Some(Wrap::AtLaunch) =>
+                        "sandboxed in a session `apex agent` starts: the launch configuration \
+                         wraps it. Start the agent yourself and it runs exactly as the plugin \
+                         defined it — `apex mcp confine` writes the wrapper to disk instead",
+                    Some(Wrap::Not) =>
+                        "NOT sandboxed, though it could be: `apex mcp confine` would wrap it",
+                    // Reported through the plane, not here: there is no local
+                    // process, and "NOT sandboxed" would describe a program
+                    // that does not exist.
+                    Some(Wrap::NoProcess) =>
+                        "an endpoint off this machine — no local process to confine; \
+                         `apex mcp planes` is where its credential is reported",
+                    None =>
+                        "the session launcher did not classify it, which means two readers of \
+                         the same file disagree — report this rather than trusting either",
                 }
             ));
         }
         if self.hooks {
             out.push(
-                "hooks — run by the agent, not by APEX. Nothing here confines them; they get \
-                 whatever the session's own sandbox is"
+                "hooks — run by the agent, not by APEX, so nothing here adds a sandbox of \
+                 its own. They run inside whatever the SESSION is confined to: a real \
+                 boundary under `--sandbox project` or `strict`, and none at all under \
+                 `unrestricted`"
                     .to_string(),
             );
         }
         if !self.executables.is_empty() {
             out.push(format!(
-                "{} executable file(s) — run by the agent if it is told to. Nothing here \
-                 confines them",
+                "{} executable file(s) — run by the agent if it is told to, inside the \
+                 session's own sandbox and nothing narrower",
                 self.executables.len()
             ));
         }
@@ -561,7 +600,12 @@ impl Confinement {
     fn to_json(&self) -> Value {
         json!({
             "mcpServers": self.mcp.iter()
-                .map(|(n, c)| json!({"name": n, "sandboxed": c}))
+                .map(|(n, c)| json!({
+                    "name": n,
+                    "sandboxed": c.and_then(|w| w.confined()),
+                    "sandboxedBy": c.map_or("unknown", |w| w.tag()),
+                    "sandboxSurvivesAHandRun": c.is_some_and(|w| w.survives_a_hand_run()),
+                }))
                 .collect::<Vec<_>>(),
             "hooks": self.hooks,
             "executables": self.executables,
@@ -572,13 +616,28 @@ impl Confinement {
             // that field would report a documentation-only plugin as
             // "sandboxed" — the label problem, in a field name.
             "hasExecutableContent": self.has_executable_content(),
-            // The criterion, answered honestly rather than with one boolean.
-            "everythingExecutableIsSandboxed": self.mcp.iter().all(|(_, c)| *c)
+            // The criterion, answered honestly rather than with one boolean —
+            // and now with the qualifier that decides whether the answer is
+            // about this machine or about one path through it.
+            "everythingExecutableIsSandboxed":
+                self.mcp.iter().all(|(_, c)| c.and_then(|w| w.confined()) != Some(false))
+                && !self.hooks
+                && self.executables.is_empty(),
+            // The same question asked of a session nobody started through
+            // `apex agent`. Lower than the field above whenever the launch
+            // configuration is doing the confining, and the gap is the point:
+            // a reader who takes the first field for a property of the machine
+            // is reading the wrong one.
+            "everythingExecutableIsSandboxedWithoutApexAgent":
+                self.mcp.iter().all(|(_, c)| match c {
+                    Some(w) => w.survives_a_hand_run() || w.confined().is_none(),
+                    None => false,
+                })
                 && !self.hooks
                 && self.executables.is_empty(),
             "unconfinedExecutableContent":
                 self.hooks || !self.executables.is_empty()
-                || self.mcp.iter().any(|(_, c)| !*c),
+                || self.mcp.iter().any(|(_, c)| c.and_then(|w| w.confined()) == Some(false)),
         })
     }
 }
@@ -830,6 +889,12 @@ pub fn build_at(home: &Path, store: &Path) -> Report {
         .unwrap_or_default();
 
     let found_servers = servers::discover(home, None);
+    // What a session started through `apex agent` would be handed, for this
+    // `$HOME`. Through the one function `apex mcp list` and `apex mcp planes`
+    // also call, so no two readouts can disagree about what confines a
+    // plugin's server. No cwd, for the same reason `discover` is given none
+    // here: a repository's definitions are not a plugin's.
+    let launch = crate::connector::launch_verdicts(home, None);
 
     if let Some(doc) = installed
         .as_ref()
@@ -896,20 +961,24 @@ pub fn build_at(home: &Path, store: &Path) -> Report {
                     },
                 };
 
-                let mcp: Vec<(String, bool)> = found_servers
+                let mcp: Vec<(String, Option<Wrap>)> = found_servers
                     .iter()
                     .filter(|s| matches!(&s.surface, servers::Surface::Plugin { plugin, .. } if plugin == &name))
                     .map(|s| {
-                        let confined = match &s.transport {
-                            servers::Transport::Stdio { command, args } => {
-                                servers::confined_server(command, args).is_some()
-                            }
-                            // An endpoint has no local process to confine, so
-                            // "not sandboxed" would be the wrong word — it is
-                            // reported through the plane instead.
-                            _ => false,
-                        };
-                        (s.name.clone(), confined)
+                        // The launcher's own verdict, looked up by name. Asking
+                        // `confined_server` here would answer a narrower
+                        // question — whether the definition on disk names the
+                        // wrapper — and report a plugin's bare server as
+                        // unsandboxed when every session APEX starts confines
+                        // it. The opposite mistake is the one this module
+                        // exists to refuse, so neither is acceptable: the
+                        // three-way answer is the only true one.
+                        let wrap = launch
+                            .decisions
+                            .iter()
+                            .find(|d| d.name == s.name)
+                            .and_then(|d| d.confined);
+                        (s.name.clone(), wrap)
                     })
                     .collect();
 
@@ -1071,9 +1140,12 @@ pub fn render(r: &Report) -> String {
          the one case that can do better, and its revision line says whether the working\n\
          tree still matches its commit.\n\
          \n\
-         On isolation: only an MCP server is confined by anything here, and only when it\n\
-         has been wrapped by `apex mcp confine`. Hooks and executable files a plugin ships\n\
-         are run by the agent, and nothing in APEX confines them.\n",
+         On isolation: an MCP server is the only plugin content APEX confines on its own,\n\
+         and each line above says WHEN — a definition carrying the wrapper is confined\n\
+         however you start the agent, while one the launch configuration wraps is confined\n\
+         only in a session `apex agent` started. Hooks and executable files a plugin ships\n\
+         get no sandbox from APEX at all; they run inside whatever the session itself is\n\
+         confined to, which under `--sandbox unrestricted` is nothing.\n",
     );
     out
 }
@@ -1509,9 +1581,10 @@ mod tests {
     #[test]
     fn the_report_never_calls_unwrapped_plugin_content_sandboxed() {
         // P1-026's second criterion, kept honest. The word "sandbox" may only
-        // appear for content something actually confines.
+        // appear for content something actually confines, and never without
+        // the clause saying when.
         let c = Confinement {
-            mcp: vec![("plugin:p:srv".into(), false)],
+            mcp: vec![("plugin:p:srv".into(), Some(Wrap::Not))],
             executables: vec!["scripts/go.sh".into()],
             hooks: true,
             skills: 0,
@@ -1519,24 +1592,107 @@ mod tests {
         let lines = c.lines().join("\n");
         assert!(lines.contains("NOT sandboxed"), "{lines}");
         assert!(
-            lines.contains("Nothing here confines them"),
-            "hooks and scripts must be stated as unconfined:\n{lines}"
+            lines.contains("nothing here adds a sandbox of its own"),
+            "hooks must be stated as getting no sandbox from APEX:\n{lines}"
+        );
+        assert!(
+            lines.contains("`unrestricted`"),
+            "and the case where the session has none either:\n{lines}"
         );
         let j = c.to_json();
         assert_eq!(j["everythingExecutableIsSandboxed"], Value::Bool(false));
         assert_eq!(j["unconfinedExecutableContent"], Value::Bool(true));
 
-        // And a wrapped MCP server is the one case that gets the word.
+        // A server whose own definition carries the wrapper is confined
+        // wherever it is started, and gets the word without qualification.
         let c = Confinement {
-            mcp: vec![("plugin:p:srv".into(), true)],
+            mcp: vec![("plugin:p:srv".into(), Some(Wrap::InDefinition))],
             ..Default::default()
         };
         let lines = c.lines().join("\n");
-        assert!(lines.contains("bubblewrap confines it"), "{lines}");
+        assert!(lines.contains("sandboxed however the agent is started"), "{lines}");
+        let j = c.to_json();
+        assert_eq!(j["everythingExecutableIsSandboxed"], Value::Bool(true));
         assert_eq!(
-            c.to_json()["everythingExecutableIsSandboxed"],
+            j["everythingExecutableIsSandboxedWithoutApexAgent"],
             Value::Bool(true)
         );
+        assert_eq!(j["mcpServers"][0]["sandboxSurvivesAHandRun"], Value::Bool(true));
+    }
+
+    #[test]
+    fn a_sandbox_the_launch_configuration_supplies_is_not_reported_as_the_plugins_own() {
+        // The state that did not exist before the curator did, and the one a
+        // boolean gets wrong in BOTH directions. `servers::confined_server`
+        // looks at the definition on disk and would call this bare server
+        // unsandboxed — false of every session `apex agent` starts. Calling it
+        // sandboxed is false of every session anybody else starts. Only the
+        // three-way answer is true of both.
+        let c = Confinement {
+            mcp: vec![("plugin:p:srv".into(), Some(Wrap::AtLaunch))],
+            ..Default::default()
+        };
+        let lines = c.lines().join("\n");
+        assert!(
+            lines.contains("sandboxed in a session `apex agent` starts"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("Start the agent yourself"),
+            "the qualifier is the point of this arm:\n{lines}"
+        );
+        assert!(!lines.contains("NOT sandboxed"), "{lines}");
+
+        let j = c.to_json();
+        // Sandboxed where APEX starts it, and NOT where anybody else does.
+        // The two fields differing is the whole content of this test.
+        assert_eq!(j["everythingExecutableIsSandboxed"], Value::Bool(true));
+        assert_eq!(
+            j["everythingExecutableIsSandboxedWithoutApexAgent"],
+            Value::Bool(false)
+        );
+        assert_eq!(j["mcpServers"][0]["sandboxed"], Value::Bool(true));
+        assert_eq!(j["mcpServers"][0]["sandboxedBy"], "launch");
+        assert_eq!(j["mcpServers"][0]["sandboxSurvivesAHandRun"], Value::Bool(false));
+        assert_eq!(j["unconfinedExecutableContent"], Value::Bool(false));
+    }
+
+    #[test]
+    fn a_plugins_bare_server_is_read_out_of_the_launcher_and_not_off_the_definition() {
+        // End to end, on a fixture `$HOME`: an enabled plugin whose `.mcp.json`
+        // names a bare program. Nothing on disk wraps it, so the old
+        // definition-only test answers "not sandboxed" — and the session the
+        // daemon starts confines it. The report must carry the launcher's
+        // answer, which is the only one true of a real session.
+        let home = fixture("launchwrap");
+        let install = home.join("tree");
+        std::fs::create_dir_all(&install).expect("mkdir");
+        std::fs::write(
+            install.join(".mcp.json"),
+            json!({"mcpServers": {"srv": {"command": "node", "args": ["s.js"]}}}).to_string(),
+        )
+        .expect("write");
+        machine(&home, &install);
+        std::fs::write(
+            home.join(".claude/settings.json"),
+            json!({"enabledPlugins": {"p@mk": true}}).to_string(),
+        )
+        .expect("write");
+
+        let r = build_at(&home, &store_in(&home));
+        let p = r.plugins.iter().find(|p| p.key == "p@mk").expect("the plugin");
+        assert_eq!(
+            p.confinement.mcp,
+            vec![("plugin:p:srv".to_string(), Some(Wrap::AtLaunch))],
+            "a plugin's bare server is wrapped at launch, not on disk"
+        );
+        // And the definition on disk really is bare, so this is not the
+        // wrapped case wearing a different name.
+        assert!(
+            servers::confined_server("node", &["s.js".to_string()]).is_none(),
+            "the fixture must be a definition nothing on disk wraps"
+        );
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]

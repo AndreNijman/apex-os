@@ -1787,7 +1787,14 @@ RUN set -eux; \
     # every binding and window rule on boot #1 — the same failure Hyprland's
     # `source=` had, one compositor along.
     grep -q '^\[ -f "${CFG_DIR}/ApexShellInput.kdl" \]' "$f"; \
-    grep -q 'ApexShellKeybinds.${_variant}' "$f"; \
+    # ...and the Keybinds half of the same pre-create. This line used to read
+    # `ApexShellKeybinds.${_variant}`, a draft spelling of a variable that
+    # appears nowhere in apex-shell-firstrun, so the assertion could only ever
+    # fail -- the fourth of that shape on this branch, and it is what stopped
+    # `base` at step 116 of 151 once the keybindings one was fixed. What the
+    # comment above actually describes is the pre-create at firstrun line 553,
+    # so that is what is checked, in the same shape as the Input line above it.
+    grep -q '^\[ -f "${CFG_DIR}/ApexShellKeybinds.kdl" \]' "$f"; \
     # `include` is a niri 25.11+ feature. Ask THIS image's niri rather than
     # trusting a version string: if the package is ever pinned back, the build
     # fails here instead of the desktop failing at login.
