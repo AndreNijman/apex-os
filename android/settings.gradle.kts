@@ -36,3 +36,4 @@ rootProject.name = "apex-remote-android"
 // with no SDK, no device and no emulator — which is the only way they can be
 // tested at all under this project's headless rule.
 include(":core")
+include(":app")
