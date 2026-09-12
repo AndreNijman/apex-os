@@ -345,6 +345,25 @@ cmd_rm() {
             "'$name' is the only administrator on this machine; removing it would leave nobody who can use sudo or answer polkit's auth_admin"
     fi
 
+    # fence 4: not a configured disposable guest.
+    #
+    # `userdel` takes the account and leaves BOTH halves of the guest wiring
+    # behind, and the two halves are keyed differently on purpose: the
+    # allowlist names a NAME, apex-guest-session@<uid>.service names a UID. A
+    # uid is reusable. So the next account created at this uid inherits an
+    # enabled session hook, whose allowlist check then refuses because the new
+    # account has a different name — and since a refusal in that unit is
+    # deliberately a FAILURE, that account gets a failed unit at every logout,
+    # for a reason nothing on the machine explains.
+    #
+    # A refusal rather than an implicit `guest disable`: this command is
+    # already removing an account and a home, and quietly turning off a policy
+    # as a side effect of that is how somebody loses a guest configuration
+    # they meant to keep.
+    if is_guest "$name"; then
+        deny "'$name' is a configured disposable guest. Run '$PROG guest disable $name' first — removing it now would leave apex-guest-session-$uid enabled for a uid the next account will be given"
+    fi
+
     local -a argv=()
     [ "$keep" = 1 ] || argv+=(-r)
     argv+=("$name")

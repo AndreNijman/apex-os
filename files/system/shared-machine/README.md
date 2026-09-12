@@ -144,6 +144,18 @@ fences included; the unit's shape — what it binds to, and that it has no
 `SuccessExitStatus` — is asserted there and at build time in
 `Containerfile.base`.
 
+**One failure mode the loudness earned, on the third live cycle.** A logind
+session record stuck in `State=closing` — a session whose leader process is
+gone but which logind never reaped — still counts as a session, so fence 4
+refuses and the wipe does not run. The guest's credentials stay where they are.
+That is the conservative answer and it is correct: from inside the engine, "the
+record is stuck" and "somebody is still sitting at that desktop" look the same.
+What makes it survivable is that the unit fails rather than reporting success,
+so the journal says `refusing: … still has an active login session` and
+`systemctl --failed` shows it. The boot-time sweep clears it at the next boot,
+which is what that unit is the backstop for. `loginctl list-sessions` shows the
+stuck record.
+
 ## Kiosk
 
 `greetd-kiosk.toml` + `sway-kiosk.conf`. The important design note is in the

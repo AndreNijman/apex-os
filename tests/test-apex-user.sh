@@ -270,6 +270,28 @@ ran | grep -q '^userdel owner$' \
     && ok "and --keep-home is the only way to keep it" \
     || bad "and --keep-home is the only way to keep it" "$(ran)"
 
+# THE OTHER fence whose failure only shows up on somebody else's machine-day.
+# The guest wiring has two halves keyed differently -- the allowlist names a
+# NAME, apex-guest-session@<uid>.service names a UID -- so removing a guest
+# without disabling it leaves an enabled hook pointed at a uid that will be
+# handed to the next account, whose logout then fails the unit for a reason
+# nothing explains.
+rc="$(run "$FIX/passwd" rm guest)"
+[ "$rc" = 2 ] && ok "rm refuses an account that is still a configured guest" \
+              || bad "rm refuses an account that is still a configured guest" "rc=$rc"
+grep -q 'guest disable' "$WORK/err" \
+    && ok "and names the command that would make it safe" \
+    || bad "and names the command that would make it safe" "$(cat "$WORK/err")"
+[ -s "$WORK/log" ] && bad "and userdel was not run for it" "$(ran)" \
+                   || ok "and userdel was not run for it"
+# Which must not mean a guest can never be removed: disable it and it goes.
+rc="$(run "$FIX/passwd" guest disable guest)"
+rc="$(run "$FIX/passwd" rm guest)"
+[ "$rc" = 0 ] && ok "but it IS removable once it is no longer a guest" \
+              || bad "but it IS removable once it is no longer a guest" "rc=$rc  $(cat "$WORK/err")"
+fresh_allowlist_early() { printf 'guest\n' > "$FIX/allowlist"; }
+fresh_allowlist_early
+
 # The credential namespace is not in the home (P0-002), userdel knows nothing
 # about it, and a uid is reusable. Saying nothing would hand the next account
 # at that uid the last one's credentials.
