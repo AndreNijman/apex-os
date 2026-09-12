@@ -1399,10 +1399,36 @@ RUN set -eux; \
     # boot and the machine unfiltered, which is the one failure that must not be
     # quiet.
     test -x /usr/sbin/nft; \
-    # The policy must parse. `nft -c` checks without applying, so this is safe
-    # in a build container, and a ruleset that fails to load at boot is a
-    # machine with no firewall and no warning.
-    /usr/sbin/nft -c -f /usr/share/apex/nftables/apex.nft; \
+    # The policy must parse, and "could not check it" is not "it is fine".
+    # `nft -c` applies nothing, but libnftables still opens a netlink socket and
+    # lists the live ruleset before it will look at a file, and that needs
+    # CAP_NET_ADMIN over a real network namespace. A build container has none,
+    # so the check died with
+    #     netlink: Error: cache initialization failed: Operation not permitted
+    # and the parser never ran — which is what blocked every image build from
+    # this branch after this stanza landed. A private user+network namespace of
+    # our own gives nft an empty ruleset it is allowed to read, and the parse
+    # then happens for real; a syntax error still fails the build (proved by
+    # mutation: `policy dropp;` is rejected at the right line and column).
+    N=/usr/share/apex/nftables/apex.nft; \
+    out="$(/usr/sbin/nft -c -f "$N" 2>&1)" && rc=0 || rc=$?; \
+    if [ "$rc" != 0 ] && command -v unshare >/dev/null 2>&1; then \
+        out="$(unshare --user --map-root-user --net \
+                 /usr/sbin/nft -c -f "$N" 2>&1)" && rc=0 || rc=$?; \
+    fi; \
+    if [ "$rc" = 0 ]; then \
+        echo "firewall: the shipped ruleset parses"; \
+    elif printf '%s' "$out" | grep -q 'cache initialization failed'; then \
+        # Reached only if even a private namespace is unavailable. Say that the
+        # ruleset was NOT parsed rather than letting silence read as a pass;
+        # tests/test-apex-firewall.sh parses it on every run and is the gate.
+        echo "NOTE: nft could not reach netlink in this builder, with or without"; \
+        echo "      a private namespace, so the ruleset was NOT parsed here."; \
+        echo "      tests/test-apex-firewall.sh parses it on every run."; \
+    else \
+        echo "FATAL: nft rejected the shipped ruleset:"; \
+        printf '%s\n' "$out"; exit 1; \
+    fi; \
     # Default drop is the whole point; an `accept` policy on input would pass
     # every other assertion here and protect nothing.
     grep -qE '^\s*type filter hook input priority filter; policy drop;$' \

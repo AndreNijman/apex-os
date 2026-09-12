@@ -48,16 +48,29 @@ has() {  # $1 = case name, $2 = extended regex the policy must contain
 }
 
 echo "── the policy parses ──────────────────────────────────────────────────"
+# `nft -c` applies nothing, but libnftables still opens a netlink socket and
+# lists the live ruleset before it will look at a file, and that needs
+# CAP_NET_ADMIN. This case used to SKIP for every non-root caller — which is to
+# say it never once parsed the policy in CI, and the image build hit the same
+# wall (`cache initialization failed: Operation not permitted`) and could not
+# build at all. A private user+network namespace of our own hands nft an empty
+# ruleset it is allowed to read, so an unprivileged run parses for real.
 if ! command -v nft >/dev/null 2>&1; then
     skipped "the ruleset parses" "nft is not installed"
-elif nft -c -f "$RULES" >/dev/null 2>&1; then
-    ok "the ruleset parses"
-elif [ "$(id -u)" != 0 ]; then
-    # `nft -c` still needs CAP_NET_ADMIN to resolve some expressions. Say which
-    # it was rather than reporting a syntax error that did not happen.
-    skipped "the ruleset parses" "checking it needs root; run with sudo for this case"
 else
-    bad "the ruleset parses" "$(nft -c -f "$RULES" 2>&1 | head -1)"
+    nft_out="$(nft -c -f "$RULES" 2>&1)" && nft_rc=0 || nft_rc=$?
+    if [ "$nft_rc" != 0 ] && command -v unshare >/dev/null 2>&1; then
+        nft_out="$(unshare --user --map-root-user --net \
+                     nft -c -f "$RULES" 2>&1)" && nft_rc=0 || nft_rc=$?
+    fi
+    if [ "$nft_rc" = 0 ]; then
+        ok "the ruleset parses"
+    elif printf '%s' "$nft_out" | grep -q 'cache initialization failed'; then
+        # Could-not-run, said as could-not-run. Not a pass and not a syntax error.
+        skipped "the ruleset parses" "nft cannot reach netlink here, even in a private netns"
+    else
+        bad "the ruleset parses" "$(printf '%s' "$nft_out" | head -1)"
+    fi
 fi
 
 echo
