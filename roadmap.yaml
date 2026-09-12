@@ -4190,7 +4190,7 @@ tasks:
     tables are network-namespace scoped, so nft -f apex.nft inside it cannot reach the L16's ruleset. Note for
     anyone reading the old report: c823974 added tests/test-device-firewall-netns.sh and a later commit renamed it
     test-device-services-netns.sh -- the file is not missing. ROUND p2-c 2026-09-13, on task/p2-c-2 (pushed, tip
-    9bd99232, merged off roadmap/v2.2 e799422b). THE BUILT IMAGE EXISTS AND THE READINGS WERE RETAKEN:
+    39d5e1e1, merged off roadmap/v2.2 e799422b). THE BUILT IMAGE EXISTS AND THE READINGS WERE RETAKEN:
     ghcr.io/andrenijman/apex-os:base-d12d3450, whose /usr/libexec/apex-devices is byte-identical to the tip's, and
     which carries every package P2-007 named -- gvfs-fuse, gvfs-nfs, gvfs-gphoto2, gvfs-mtp, gvfs-smb,
     samba-client, cifs-utils, bolt 0.9.11, pipewire-codec-aptx, bluez 5.87, sane-airscan, wireguard-tools,
@@ -4220,12 +4220,17 @@ tasks:
     landing. All three gates rc=0: check-containerfile-assertions 176 -> 177 checked/0 failed,
     check-shellcheck-coverage 150 -> 160 discovered/0 newly failing, check-suites-run-in-ci 72 suites/0 unrun and
     undeclared. tests/suites-not-in-ci.txt and the pr-validation.yml steps were NOT touched -- followups-4 owns
-    those, and no suite was renamed. THIRTY-ONE MUTATIONS across four files, each restored byte-identical with
-    plain cp and verified by sha256. STILL PARTIAL. The remainder is hardware nobody here has -- a print job to a
-    printer, a share mounted from a server, a card in a slot -- plus the L16's masked avahi, whose unmasking is
-    Andre's call and without which that machine can discover neither a printer nor a scanner. The 'rebuilt image
-    and a re-run of apex devices' item is now DONE for the container half and named precisely for the half that
-    needs metal.
+    those, and no suite was renamed. TWENTY-EIGHT MUTATIONS, each restored byte-identical with plain cp and
+    verified by sha256: twelve against tests/test-device-services-netns.sh, seven against apex-devices (one of
+    them re-run under a second fixture), seven against the NM dispatcher, one dirty mode-644 script against the
+    shellcheck gate, and one changed default path against the new Containerfile assertion. Three assertions this
+    round were found UNABLE TO FAIL and were fixed: three connectivity cases that searched the whole report and
+    were satisfied by the `links` line, a dnsmasq case that passed on a machine with dnsmasq, and an hs-list
+    verdict whose `*apexhost*` glob was satisfied by apexhost2 (39d5e1e1). Branch tip is now 39d5e1e1. STILL
+    PARTIAL. The remainder is hardware nobody here has -- a print job to a printer, a share mounted from a server,
+    a card in a slot -- plus the L16's masked avahi, whose unmasking is Andre's call and without which that
+    machine can discover neither a printer nor a scanner. The 'rebuilt image and a re-run of apex devices' item is
+    now DONE for the container half and named precisely for the half that needs metal.
 - id: P2-006
   title: Networking maturity
   priority: P2
@@ -4243,7 +4248,7 @@ tasks:
     route over. THE FINDING OWED TO P1-044, measured with positive controls: a hotspot could not work under the
     shipped policy, three ways -- forward was policy drop, the DHCP rule matched replies rather than a client's
     DISCOVER, and port 53 was shut. LANDED by integrate-4 at 95d068c. ROUND p2-c 2026-09-13, on task/p2-c-2
-    (pushed, tip 9bd99232, merged off roadmap/v2.2 e799422b). THE BUILT IMAGE EXISTS AND THE READINGS WERE
+    (pushed, tip 39d5e1e1, merged off roadmap/v2.2 e799422b). THE BUILT IMAGE EXISTS AND THE READINGS WERE
     RETAKEN: ghcr.io/andrenijman/apex-os:base-d12d3450, whose /usr/libexec/apex-devices is byte-identical to the
     tip's, and which carries every package P2-007 named -- gvfs-fuse, gvfs-nfs, gvfs-gphoto2, gvfs-mtp, gvfs-smb,
     samba-client, cifs-utils, bolt 0.9.11, pipewire-codec-aptx, bluez 5.87, sane-airscan, wireguard-tools,
@@ -4273,39 +4278,45 @@ tasks:
     landing. All three gates rc=0: check-containerfile-assertions 176 -> 177 checked/0 failed,
     check-shellcheck-coverage 150 -> 160 discovered/0 newly failing, check-suites-run-in-ci 72 suites/0 unrun and
     undeclared. tests/suites-not-in-ci.txt and the pr-validation.yml steps were NOT touched -- followups-4 owns
-    those, and no suite was renamed. THIRTY-ONE MUTATIONS across four files, each restored byte-identical with
-    plain cp and verified by sha256. THE HOTSPOT FINDING IS NOW CLOSED, MECHANISM AND MEASUREMENT BOTH. c7a28f2c
-    (the predecessor's) adds `set hotspot_ifaces { type ifname }` empty in the shipped policy, `iifname
-    @hotspot_ifaces udp dport { 53, 67 } accept` plus the tcp half of DNS, `apex firewall hotspot add|remove|list`
-    with the interface name validated before it becomes an nft element, a NetworkManager dispatcher that opens a
-    link only after nmcli confirms ipv4.method=shared, and a Containerfile FATAL refusing any line that accepts 53
-    or 67 without naming a link -- scoped to the link rather than the port, because a `dns` catalogue entry would
-    open a resolver on the cafe Wi-Fi too. c8297aa3 is the measurement: test-device-services-netns.sh 12 -> 29,
-    seventeen new assertions that are each a datagram or a SYN. A second veth apexhost2 on 10.92.0.0/24 exists for
-    no other reason than to be the link the exception is NOT scoped to, so 'the scope holds' is traffic rather
-    than a claim about a rule's text; a third namespace behind this one makes 'does the policy route what a client
-    sends' answerable with a packet delivered elsewhere. The DHCP probe is what a client with no address really
-    sends -- SO_BROADCAST, sport 68, dport 67 -- as a directed broadcast from an addressed source rather than
-    255.255.255.255 from 0.0.0.0, because the namespace now has two links and a limited broadcast would need
-    SO_BINDTODEVICE; the rule matches on arrival interface and ports, identical either way. The hotspot cases call
-    the shipped apex-firewall, not `nft add element`, because the tool is what the dispatcher invokes. The forward
-    case carries its own control: a policy-drop forward chain is added (SILENT), deleted, and re-probed (ARRIVED),
-    so 'the shipped policy routes a client's traffic' is not the only answer the probe can give -- P1-044 removed
-    the forward chain deliberately, and that is now measured instead of inferred from a comment. Eleven mutations,
-    all files restored byte-identical. THE TWO STALE LINES IN `apex devices network` ARE GONE: they stated the
-    firewall's policy as fact -- 'the firewall drops forwarded traffic' and 'the DHCP rule matches replies' -- and
-    both were true when measured and false now, so the reader told a user with a working hotspot two reasons it
-    could not work. It reads the mechanism instead (dispatcher present, hotspot_ifaces set present, systemd
-    askable), never the live set, because nft list needs root and this command must not ask for it. A DEFECT THE
-    MEASUREMENT FOUND: nft prints a set's elements quoted and wraps them one per line as soon as there is more
-    than one, so the old `hotspot list` parser matched neither line and the tool answered 'not sharing this
-    machine's connection on any link' while two links were open -- a firewall tool giving a shut link's answer for
-    an open one. AND A DEFECT FOUND BY RUNNING THE IMAGE: `connectivity` printed nmcli's 'Could not create
-    NMClient object' error as the state of the network and then explained that NetworkManager 'answers <that
-    error> for any connected link'; `links` ten lines above already refused to do that, and connectivity had
-    thrown the rc away. STILL PARTIAL, and the remainder is now exactly two things that need metal: an EAP
-    handshake with a real access point, and a tunnel to a real VPN endpoint -- plus turning this laptop into a
-    hotspot and joining a phone to it, which needs the image on the metal first.
+    those, and no suite was renamed. TWENTY-EIGHT MUTATIONS, each restored byte-identical with plain cp and
+    verified by sha256: twelve against tests/test-device-services-netns.sh, seven against apex-devices (one of
+    them re-run under a second fixture), seven against the NM dispatcher, one dirty mode-644 script against the
+    shellcheck gate, and one changed default path against the new Containerfile assertion. Three assertions this
+    round were found UNABLE TO FAIL and were fixed: three connectivity cases that searched the whole report and
+    were satisfied by the `links` line, a dnsmasq case that passed on a machine with dnsmasq, and an hs-list
+    verdict whose `*apexhost*` glob was satisfied by apexhost2 (39d5e1e1). Branch tip is now 39d5e1e1. THE HOTSPOT
+    FINDING IS NOW CLOSED, MECHANISM AND MEASUREMENT BOTH. c7a28f2c (the predecessor's) adds `set hotspot_ifaces {
+    type ifname }` empty in the shipped policy, `iifname @hotspot_ifaces udp dport { 53, 67 } accept` plus the tcp
+    half of DNS, `apex firewall hotspot add|remove|list` with the interface name validated before it becomes an
+    nft element, a NetworkManager dispatcher that opens a link only after nmcli confirms ipv4.method=shared, and a
+    Containerfile FATAL refusing any line that accepts 53 or 67 without naming a link -- scoped to the link rather
+    than the port, because a `dns` catalogue entry would open a resolver on the cafe Wi-Fi too. c8297aa3 is the
+    measurement: test-device-services-netns.sh 12 -> 29, seventeen new assertions that are each a datagram or a
+    SYN. A second veth apexhost2 on 10.92.0.0/24 exists for no other reason than to be the link the exception is
+    NOT scoped to, so 'the scope holds' is traffic rather than a claim about a rule's text; a third namespace
+    behind this one makes 'does the policy route what a client sends' answerable with a packet delivered
+    elsewhere. The DHCP probe is what a client with no address really sends -- SO_BROADCAST, sport 68, dport 67 --
+    as a directed broadcast from an addressed source rather than 255.255.255.255 from 0.0.0.0, because the
+    namespace now has two links and a limited broadcast would need SO_BINDTODEVICE; the rule matches on arrival
+    interface and ports, identical either way. The hotspot cases call the shipped apex-firewall, not `nft add
+    element`, because the tool is what the dispatcher invokes. The forward case carries its own control: a
+    policy-drop forward chain is added (SILENT), deleted, and re-probed (ARRIVED), so 'the shipped policy routes a
+    client's traffic' is not the only answer the probe can give -- P1-044 removed the forward chain deliberately,
+    and that is now measured instead of inferred from a comment. Eleven mutations, all files restored
+    byte-identical. THE TWO STALE LINES IN `apex devices network` ARE GONE: they stated the firewall's policy as
+    fact -- 'the firewall drops forwarded traffic' and 'the DHCP rule matches replies' -- and both were true when
+    measured and false now, so the reader told a user with a working hotspot two reasons it could not work. It
+    reads the mechanism instead (dispatcher present, hotspot_ifaces set present, systemd askable), never the live
+    set, because nft list needs root and this command must not ask for it. A DEFECT THE MEASUREMENT FOUND: nft
+    prints a set's elements quoted and wraps them one per line as soon as there is more than one, so the old
+    `hotspot list` parser matched neither line and the tool answered 'not sharing this machine's connection on any
+    link' while two links were open -- a firewall tool giving a shut link's answer for an open one. AND A DEFECT
+    FOUND BY RUNNING THE IMAGE: `connectivity` printed nmcli's 'Could not create NMClient object' error as the
+    state of the network and then explained that NetworkManager 'answers <that error> for any connected link';
+    `links` ten lines above already refused to do that, and connectivity had thrown the rc away. STILL PARTIAL,
+    and the remainder is now exactly two things that need metal: an EAP handshake with a real access point, and a
+    tunnel to a real VPN endpoint -- plus turning this laptop into a hotspot and joining a phone to it, which
+    needs the image on the metal first.
 - id: P2-007
   title: Bluetooth/dock/peripheral maturity
   priority: P2
@@ -4321,7 +4332,7 @@ tasks:
     Bluetooth/dock/peripheral maturity, delivered through the same `apex devices` verb and suites as
     P2-005/P2-006. 5d5441b is the message pass -- what a user reads, in the voice the rest of the CLI uses. LANDED
     by integrate-4 at 95d068c; run-clippy PASS. Evidence: ROADMAP/evidence/P2-005-007-device-maturity.md. ROUND
-    p2-c 2026-09-13, on task/p2-c-2 (pushed, tip 9bd99232, merged off roadmap/v2.2 e799422b). THE BUILT IMAGE
+    p2-c 2026-09-13, on task/p2-c-2 (pushed, tip 39d5e1e1, merged off roadmap/v2.2 e799422b). THE BUILT IMAGE
     EXISTS AND THE READINGS WERE RETAKEN: ghcr.io/andrenijman/apex-os:base-d12d3450, whose
     /usr/libexec/apex-devices is byte-identical to the tip's, and which carries every package P2-007 named --
     gvfs-fuse, gvfs-nfs, gvfs-gphoto2, gvfs-mtp, gvfs-smb, samba-client, cifs-utils, bolt 0.9.11,
@@ -4351,36 +4362,42 @@ tasks:
     apexd/` is EMPTY, so cargo test -p apex 315 and run-clippy stand from the landing. All three gates rc=0:
     check-containerfile-assertions 176 -> 177 checked/0 failed, check-shellcheck-coverage 150 -> 160 discovered/0
     newly failing, check-suites-run-in-ci 72 suites/0 unrun and undeclared. tests/suites-not-in-ci.txt and the
-    pr-validation.yml steps were NOT touched -- followups-4 owns those, and no suite was renamed. THIRTY-ONE
-    MUTATIONS across four files, each restored byte-identical with plain cp and verified by sha256. THE READERS
-    P2-007 SAID WOULD CHANGE HAVE BEEN RETAKEN AND THEY DID CHANGE -- that sentence was the whole reason this
-    round was dispatched, and it is now answered with readings rather than a prediction: boltd not installed ->
-    `installed (udev starts it when a device appears)`; headset codecs `aac faststream g722 lc3 ldac opus-g opus
-    sbc` with the note 'no aptX: a Qualcomm headset will fall back to SBC' -> `aac aptx faststream g722 lc3 ldac
-    opus-g opus sbc`; gvfs-fuse, gvfs-nfs, gvfs-gphoto2 and samba-client all present so every file-manager share
-    reader answers yes and both real-mount readers answer yes; wg and the VPN plugins present; dnsmasq rpm-owned.
-    ALSO THIS ROUND, and it belongs to P2-007 because the dock and Bluetooth readers are the ones a container can
-    least be trusted about: the limits of a container reading are written down rather than glossed. `hotplug
-    (udev)` says systemd-udevd is NOT running and says every reader below it would report an absence and be right
-    to; `paired devices` says bluetoothd is not running rather than reporting an empty list, which is the exact
-    defect this file exists to avoid; the Thunderbolt readers DO answer in a container because they read sysfs --
-    two host routers authorised, two domains at security=user with iommu=1, two USB-C ports with something
-    attached. A NEW SUITE SECTION THAT HAD NO COVERAGE AT ALL: 9bd99232 tests the NetworkManager dispatcher, whose
-    security property was asserted only in its own header -- `up` must open a link ONLY after nmcli confirms
-    ipv4.method=shared (every ordinary Wi-Fi connection coming up runs this script, so getting it wrong opens DHCP
-    and a resolver on the cafe network through the door that fills the set), and `down` must close WITHOUT asking
-    anything (the profile may already be gone, and 'I could not check' must not be why a link stays open). Ten
-    cases driving the real script against a logging shim, mutation-proved seven ways; D3 -- removing the 5s cap on
-    the nmcli query -- does not merely fail, it hangs for a minute, which is what a dispatcher script does to
-    every later script on NetworkManager's queue. AND A GATE HOLE CLOSED, 9fd2c4b7: check-shellcheck-coverage.sh
-    used the exec bit as a discovery predicate, but a script installed with `COPY --chmod=0755` needs no exec bit
-    in git, so ten shipped shell scripts with shebangs were linted by nobody -- among them apex-session-select and
-    apex-shell-autostart, both on the login path, and the hotspot dispatcher itself. All ten were already clean,
-    so it cost nothing this time, which is the point. Discovery is the shebang alone now (150 -> 160 scripts); the
-    negative control is a deliberately dirty mode-644 probe that makes the new gate exit 1 naming it while the old
-    predicate, with that same file present, reports every discovered script clean. STILL PARTIAL. The remainder is
-    a paired headset and an attached dock -- hardware nobody here has -- and a booted reading on the L16 for
-    everything behind D-Bus, which is the boot path.
+    pr-validation.yml steps were NOT touched -- followups-4 owns those, and no suite was renamed. TWENTY-EIGHT
+    MUTATIONS, each restored byte-identical with plain cp and verified by sha256: twelve against
+    tests/test-device-services-netns.sh, seven against apex-devices (one of them re-run under a second fixture),
+    seven against the NM dispatcher, one dirty mode-644 script against the shellcheck gate, and one changed
+    default path against the new Containerfile assertion. Three assertions this round were found UNABLE TO FAIL
+    and were fixed: three connectivity cases that searched the whole report and were satisfied by the `links`
+    line, a dnsmasq case that passed on a machine with dnsmasq, and an hs-list verdict whose `*apexhost*` glob was
+    satisfied by apexhost2 (39d5e1e1). Branch tip is now 39d5e1e1. THE READERS P2-007 SAID WOULD CHANGE HAVE BEEN
+    RETAKEN AND THEY DID CHANGE -- that sentence was the whole reason this round was dispatched, and it is now
+    answered with readings rather than a prediction: boltd not installed -> `installed (udev starts it when a
+    device appears)`; headset codecs `aac faststream g722 lc3 ldac opus-g opus sbc` with the note 'no aptX: a
+    Qualcomm headset will fall back to SBC' -> `aac aptx faststream g722 lc3 ldac opus-g opus sbc`; gvfs-fuse,
+    gvfs-nfs, gvfs-gphoto2 and samba-client all present so every file-manager share reader answers yes and both
+    real-mount readers answer yes; wg and the VPN plugins present; dnsmasq rpm-owned. ALSO THIS ROUND, and it
+    belongs to P2-007 because the dock and Bluetooth readers are the ones a container can least be trusted about:
+    the limits of a container reading are written down rather than glossed. `hotplug (udev)` says systemd-udevd is
+    NOT running and says every reader below it would report an absence and be right to; `paired devices` says
+    bluetoothd is not running rather than reporting an empty list, which is the exact defect this file exists to
+    avoid; the Thunderbolt readers DO answer in a container because they read sysfs -- two host routers
+    authorised, two domains at security=user with iommu=1, two USB-C ports with something attached. A NEW SUITE
+    SECTION THAT HAD NO COVERAGE AT ALL: 9bd99232 tests the NetworkManager dispatcher, whose security property was
+    asserted only in its own header -- `up` must open a link ONLY after nmcli confirms ipv4.method=shared (every
+    ordinary Wi-Fi connection coming up runs this script, so getting it wrong opens DHCP and a resolver on the
+    cafe network through the door that fills the set), and `down` must close WITHOUT asking anything (the profile
+    may already be gone, and 'I could not check' must not be why a link stays open). Ten cases driving the real
+    script against a logging shim, mutation-proved seven ways; D3 -- removing the 5s cap on the nmcli query --
+    does not merely fail, it hangs for a minute, which is what a dispatcher script does to every later script on
+    NetworkManager's queue. AND A GATE HOLE CLOSED, 9fd2c4b7: check-shellcheck-coverage.sh used the exec bit as a
+    discovery predicate, but a script installed with `COPY --chmod=0755` needs no exec bit in git, so ten shipped
+    shell scripts with shebangs were linted by nobody -- among them apex-session-select and apex-shell-autostart,
+    both on the login path, and the hotspot dispatcher itself. All ten were already clean, so it cost nothing this
+    time, which is the point. Discovery is the shebang alone now (150 -> 160 scripts); the negative control is a
+    deliberately dirty mode-644 probe that makes the new gate exit 1 naming it while the old predicate, with that
+    same file present, reports every discovered script clean. STILL PARTIAL. The remainder is a paired headset and
+    an attached dock -- hardware nobody here has -- and a booted reading on the L16 for everything behind D-Bus,
+    which is the boot path.
 - id: P2-008
   title: First-party virtualization UX
   priority: P2

@@ -143,24 +143,104 @@ spuriously.
 ## IN PROGRESS
 - nothing half-written.
 
-## FOUND
-- **CI already mints a real logind session.** pr-validation.yml's rust job runs
-  `../tests/in-login-session.sh cargo test --locked`, and run 34703613155's log
-  says `in-login-session: logind session 3, 0::/user.slice/user-1001.slice/session-3.scope,
-  uid 1001`. That is why the five relay tests are green on the runner and red from
-  a systemd user service. Measured, not assumed — it is what makes
-  APEX_REQUIRE_LOCAL_ORIGIN safe to set.
-- **My own near-miss:** resolving a `git stash pop` conflict and then running
-  `git checkout --theirs .` throws the resolution away and restores the stashed
-  side only. It silently deleted upstream's two new `test-apex-backup-{ssh,s3}.sh`
-  steps from pr-validation.yml. `check-suites-run-in-ci.sh` caught it — the gate
-  found a defect in the commit that was wiring the gate.
-- `apex-remoted` is a BINARY-ONLY crate (no lib.rs); integration tests cannot
-  import `may_pair`/`MAY_PAIR`.
-- tests/test-device-image.sh measures 39 assertions, not the 41 the exemption
-  line claimed.
-- 7 DEBT lines left in suites-not-in-ci.txt (+ 1 new upstream one for
-  test-labwc-session.sh, and 3 legitimate `-live` ones).
+## FOUND — the thing worth handing on, measured rather than guessed
 
-## BLOCKED ON
-- nothing
+**Three pre-existing red steps are switching off 47 steps below them.** None of
+the three is mine; all three were red before this round. A failed step skips
+every step BELOW it in the same job, and almost nothing in either job carries
+`if: ${{ !cancelled() }}`, so one defect blanks most of the job.
+
+Measured on run 34716774107 (the same shape on every dispatch this round):
+
+  Static  "Validate Containerfile layer order"  -> reds the job
+  engine  "Run virtualization assertions"       -> 35 steps below it SKIPPED
+  rust    "§26 channels"                        -> 12 steps below it SKIPPED
+
+engine, skipped:
+    P2-008 the vmlab, and its verdicts wherever this runs
+    Run browser capsule assertions
+    P2-012 the browserlab, and its verdicts wherever this runs
+    Run capsule device-profile assertions (live where the hardware is)
+    Run session-picker wording assertions
+    Run shared-machine (guest, kiosk) assertions
+    Run account (standard vs administrator) assertions
+    Run resolver assertions
+    Run display-settings assertions
+    Run the Hyprland Lua config assertions
+    Run the live input-settings assertions
+    Vendor apex-shell for the keybind model
+    Run labwc keybind generator assertions
+    Install a compositor and a synthetic keyboard
+    Run the keybind reload assertions
+    Run the safe-graphics recovery assertions
+    Install bubblewrap
+    Run privilege-request assertions
+    Run file-injection assertions
+    Run worktree-status assertions
+    Run disposable-capsule assertions
+    Run root-approval assertions
+    Run agent-profile assertions
+    Run project-layout assertions
+    Install fish and nushell
+    Run fish and nushell agent-integration assertions
+    Install tmux and zellij
+    Run terminal layout template assertions
+    Run secret-broker assertions
+    Run credential-migration assertions
+    §13.5 backup — encrypted at rest, versioned restore, and the four verdicts
+    §13.5 backup over ssh — a real sshd on loopback
+    §13.5 backup to S3 — SigV4 against an independent verifier
+    ShellCheck the privileged helpers
+    Run plugin CLI assertions
+
+rust, skipped:
+    §19 recovery, repair and the scoped factory reset
+    Every verb is in the binary
+    Docs and the CLI agree, in both directions
+    Containerfile assertions can actually pass
+    Run trusted-device assertions
+    The shipped editors are launchable
+    The desktop AI apps ship with the system and bring no updater
+    Run remote-compute and handoff assertions
+    Run local inference assertions
+    §21 task — binder assertions, refusals and the no-prompt tripwire
+    P1-062 chaos — four faults injected, proven, and survived
+    Post Cache Cargo
+
+That list includes `ShellCheck the privileged helpers`, `Run plugin CLI
+assertions`, the whole backup trio, the bubblewrap suites, `Containerfile
+assertions can actually pass` and `Docs and the CLI agree` — checks that have
+been reporting nothing, on every PR, for as long as those three have been red.
+It is the same "a skipped check counts as success" shape this repository has
+now recorded seven times, one level up: not a selector that names nothing, but
+a job that stops half way.
+
+Two ways to fix it, and the file already argues for both: move a known-red step
+to the BOTTOM of its job (the comment above `Run plugin CLI assertions` says
+exactly why), or give the steps below it `!cancelled()` (what `b4f47cce` did for
+the two gates, which is the only reason any of this round's numbers exist).
+
+## ALSO WORTH KNOWING
+
+- **test-apex-storage.sh (40/0) and test-apex-shared-machine.sh (60/0) were
+  verified LOCALLY ONLY.** I changed their `rm -rf` targets to `${VAR:?}`. Their
+  steps are in the skipped list above, so no dispatch this round ran them.
+- **files/scripts/vendor-apex-shell now fails a build it used to pass silently.**
+  Its two `! grep` refusals are exempt from errexit and could not refuse
+  anything; they are now `if … exit 1`. That script runs in **build-image.yml**,
+  not pr-validation.yml, so the blast radius is the image build. Checked first
+  against the tree live at /usr/share/apex-shell — both refusals pass on real
+  shipped data — but that is what a PREVIOUS build vendored, not the ref the
+  next one will. If an image build goes red on "paths above still point at the
+  developer tree", that is this change working, not a regression.
+- **The rust job now runs on any `files/` change.** Deliberate; the reasoning is
+  in the classifier's comment block. It costs one more concurrent runner on
+  files/-only PRs and closes a hole that hid six suites.
+- **Two new steps need the network by design.** multilib pulls a Fedora image
+  and hits mirrors; labwc apt-installs seven packages. A mirror outage now reads
+  as RED. That is the standard being applied, not a bug — do not "fix" it back
+  into a skip.
+- **`10bc2aa5` on this branch is the predecessor's, not landed yet** (relay.rs
+  and end_to_end.rs, the COULD-NOT-RUN defect). The rust `Tests` step ran green
+  with APEX_REQUIRE_LOCAL_ORIGIN set on runs 34715628612 and 34716774107, so it
+  is runner-verified and should land with the rest rather than be dropped.
