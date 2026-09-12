@@ -3767,30 +3767,55 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Internationalisation baseline. LANDED 2026-09-12 (apex-os merge f6eefd0d, apex-shell merge 1417402). KEYBOARD
-    LAYOUT BEFORE PASSWORD IS DONE AND MEASURED ON A SECOND MACHINE, which is the point of the criterion: CI run
-    34661483871 shows 'cage started de: the same physical keys now produce the GERMAN letters', all four installer
-    steps green. test-installer-keymap.sh 43, test-installer-locale.sh 26, test-installer.sh 44. THE DESIGN FORK
-    WAS SETTLED BY MEASUREMENT BEFORE ANY CODE: the criterion is that a user can TYPE their password on their own
-    layout, so recording the choice in the answers file does not achieve it - the layout must reach the RUNNING
-    cage session. Option (a), localectl set-x11-keymap, is DEAD rather than doubted: libxkbcommon.so.0 links only
-    libc and contains no locale1, localectl or xorg.conf string, so its whole configuration surface is five
-    environment variables read at keymap COMPILE time, and the compositor must restart. TIMEZONES DONE, including
-    survival across the compositor restart. TRANSLATED SHELL - PIPELINE PROVEN, not declared: run-i18n-test.sh 12
-    assertions run a real lupdate, a real lrelease, then a running QML engine reading German back, over 5 of
-    roughly 650 strings, with the ratio reported rather than rounded up; THE GAP IS NAMED AND ASSERTED - nothing
-    in src/ installs a QTranslator. STILL PARTIAL, each with its assertion named: the locale picker is BLOCKED
-    because the image ships glibc-langpack-en only, so a free picker degrades silently to C.UTF-8; the recovery
-    flow is untouched (install is done); the translated installer is GTK4/Python so it needs gettext rather than
-    Qt; and IME, CJK and RTL are unchanged. FOUR DEFECTS FIXED, THREE PRE-EXISTING: test-installer.sh's engine
-    half had been DEAD SINCE JULY (11 assertions that ran on every box except the ISO builder, and in CI); the GUI
-    render container could never build on a non-Fedora runner; Etc/UTC - systemd's own canonical name - slipped a
-    guard that only matched empty-or-UTC, so an installed system could end up with NO /etc/localtime at all, found
-    BY CI and invisible on the developer's laptop because it is set to Australia/Perth, the exact value the
-    assertion expected; and the agent's own, a launcher that execced a session script nothing installed into the
-    image, so the ISO would have booted with no installer. 25 of 25 mutants caught; two survivors were vacuous
-    assertions and one was a page graph that followed Back buttons as forward edges. Xvfb and qt6-qttools-devel
-    were installed to make criteria measurable rather than assumed - qt6-qttools alone does not ship lupdate.
+    Internationalisation baseline. ROUND 20 on apex-shell task/p2-b-round19 (tip eb97b40), pushed, not yet merged.
+    THE NAMED GAP MOVED FROM A GREP TO A MEASUREMENT, AND A CLAIM THIS UNIT HAD CARRIED SINCE ROUND 1 TURNED OUT
+    TO BE FALSE. (1) THE TRANSLATOR GAP IS IN THE HOST, NOT src/. Every round before this recorded it as "no
+    QTranslator anywhere in src/" - a grep over QML. The observation was right and the spelling invited the wrong
+    repair, because it reads like an omission a line of QML could fix. It cannot: QTranslator is a C++ class and
+    is not a QML type. Asked of the binaries instead, with the positive control in the same run because "nm
+    printed nothing" and "the binary contains no such call" look identical from outside: libQt6QuickTest - the
+    host the suite has just watched translate - calls QTranslator 4 times; /usr/bin/quickshell, the host the shell
+    really runs in, calls it 0 times and installTranslator 0 times; libQt6Qml DOES carry an automatic route
+    (QQmlApplicationEngine plus its translation loader, which installs a .qm found beside the root QML file with
+    no code at all) and quickshell constructs a bare QQmlEngine, so that route is not taken either - the
+    engine-constructor count being non-zero is the control for that one. Closing the row needs a translator
+    installed INTO the engine: upstream in quickshell, or a QML extension module on the import path whose
+    initializeEngine() does it. Not attempted - a compiled artefact in a repository of QML and shell scripts, and
+    it changes the image build. Trap recorded: undefined symbols only. libQt6Qml both defines QTranslator's caller
+    and is linked by every QML host, so a scan of the LINK CLOSURE reports "found" for a host that never calls it.
+    (2) "THE SHELL WILL TOFU ON CJK" WAS NEVER RUN AND IS FALSE. The ledger carried it from round 1 to round 19:
+    ~45 sites hardcode font.family "JetBrains Mono", that family has no CJK coverage, therefore tofu. Both
+    premises are true and the conclusion does not follow - QFontEngineMulti asks fontconfig for a font that owns
+    the glyph. Measured through the real engine at pixelSize 32, with the monospace premise asserted FIRST because
+    the whole discriminator rests on it (every glyph JetBrains Mono draws advances 19.1875): CJK 32, Arabic
+    19.265625 (DejaVu Sans Mono), Hebrew 21.390625 (DejaVu Sans), Thai 19.75 (Droid Sans Thai), Devanagari
+    24.453125 (Droid Sans Devanagari) - each matched against a family fontconfig says covers that codepoint, each
+    required not to be covered by JetBrains Mono itself. So THE RTL ROW'S "the image cannot render it" IS ALSO
+    WRONG. What is still absent there is LAYOUT: 0 LayoutMirroring and 0 layoutDirection in src/, re-checked.
+    Fonts were never the blocker. (3) THE SUITE NOW RUNS ON A SECOND MACHINE, AND CI HAD NEVER RUN IT.
+    run-i18n-test.sh is 23 assertions here, 0 failed, 0 skipped; on the GitHub Arch runner 15 passed, 0 failed, 5
+    skipped (run 34700588997). Every earlier round had it on one laptop. Two reasons it had never run there, both
+    fixed on this branch: the step installed its Qt tools with apt-get inside an archlinux container, and the
+    job's shellcheck step above it ran without -x and failed tests/test-headless-lib.sh, which stops the job
+    before this step - an SC2034 about a test fixture switching off the measurement below it. WHAT THE SECOND
+    MACHINE DOES NOT COVER, named rather than implied: section 4's quickshell probe SKIPS there (no quickshell) so
+    the host measurement is ONE LAPTOP ONLY, and the Arabic/Hebrew/Thai/Devanagari rows SKIP because that
+    container has no font covering them - the suite fails on a missing font only where /run/ostree-booted says the
+    font set being measured IS the image's, which is the round-19 lesson about asserting on the runner instead of
+    the product. Only the CJK row has two machines (Noto Sans CJK HK, advance 32, the same number). MUTATION:
+    T1-T4 over the host probe, 4 applied 4 CAUGHT 0 survived; F1-F5 over the font section, 5 applied 5 CAUGHT 0
+    survived, re-run after the ostree gate changed and still 5/5. Tree matches HEAD after every mutate and
+    restore. F3-F5 were first reported SURVIVED and that was the harness grepping for a sentence the failure does
+    not contain - the same shape as I2 and B2 before them; the expectation was corrected, not the mutant. STILL
+    PARTIAL, each with its reason: no user sees a translated word until item (1) is closed, so the ~200-string
+    AgentHelpContent conversion is parked deliberately - 200 unseen strings is the weaker increment; the locale
+    picker is still BLOCKED because Containerfile.core installs glibc-langpack-en only, so a free picker degrades
+    silently to C.UTF-8; the translated installer is GTK4/Python and needs gettext, a separate pipeline; RTL
+    layout mirroring does not exist; IME/fcitx5 ships but no suite asserts it; per-user language does not exist;
+    and the recovery flow still applies no layout. Keyboard layout before password and timezone remain DONE and
+    measured on a second machine (CI run 34661483871, "cage started de: the same physical keys now produce the
+    GERMAN letters"); installer-keymap 43 and installer-locale 26 both green on the runner again in run
+    34701797842.
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2

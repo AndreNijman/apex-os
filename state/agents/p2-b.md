@@ -1068,8 +1068,7 @@ with C6 applied, reported two failures that were the harness's mutations, and th
 its own mutation harness at the same time** — the card's "apex-os suites
 interfere" note, one level up.
 
-## ROUND 20 — the translator gap is in the HOST, the CJK claim was false, and the
-## installer mutation set is re-taken
+## ROUND 20 — the translator gap is in the HOST, the CJK claim was false, and the installer mutation set is re-taken
 
 Branch `task/p2-b-round19` in BOTH repos again — continued, not renamed — each
 merged with `origin/roadmap/v2.2` before anything else (both were
