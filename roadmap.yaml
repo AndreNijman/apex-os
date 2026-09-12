@@ -1489,7 +1489,7 @@ tasks:
 - id: P1-011
   title: Temporary Cloudflare task credentials
   priority: P1
-  status: todo
+  status: done
   area: cloudflare
   depends_on:
   - P1-002
@@ -1500,10 +1500,27 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Temporary Cloudflare task credentials. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 598f6996 (a6691b50,
+    bef9d63d). Provider::mint became a FOUR-WAY VERDICT - Narrowed / NoNarrowerForm / Denied / CouldNotRun -
+    modelled on verify.rs's Verdict, because 'could not ask' and 'there is no narrower form' are different answers
+    and collapsing them is the defect this codebase has found seventeen times. Provider::revoke is NEW: there had
+    been no way to end a minted credential's life at all, including after a FAILED operation. Config surface is
+    [cloudflare] temporary_credentials = prefer|require|off. THE ASSERTION THAT CLOSES IT:
+    an_operation_spends_a_credential_that_did_not_exist_a_moment_ago_and_does_not_outlive_it - the operation's own
+    request carried a token minted seconds earlier, the stored account-wide token was spent on exactly three
+    requests (ask the permission groups, ask for the token, hand it back), and the revoke names the id that was
+    issued. THIS CLOSES P1-005'S OPEN CRITERION IN THE TOKEN DIMENSION and leaves it open in the R2 bucket
+    dimension by Cloudflare's design, not by omission: R2's bucket-scoped resource string carries the Object
+    permissions, which Cloudflare documents as S3-only and unusable against the REST API this broker speaks. DNS
+    does narrow to the resource, because its permission groups are zone-scoped. 31 mutations red, 2596 tests pass,
+    clippy clean. TWO MUTATIONS CAME BACK GREEN FIRST TIME and each found a real hole: the refusal-versus-absence
+    collapse was reachable at only one of Cloudflare's two gating points, and the session-shim test proved the
+    installer WORKED rather than that it was CALLED.
 - id: P1-012
   title: Transparent brokered Wrangler/cloudflared/Terraform auth
   priority: P1
-  status: todo
+  status: done
   area: cloudflare
   depends_on:
   - P1-011
@@ -1513,10 +1530,19 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Transparent brokered wrangler/cloudflared/Terraform auth. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge
+    598f6996 (75df89b1, 0d3aa755). broker::run_tool generalises run_git's existing env-credential branch, so the
+    tool runs believing it has credentials while the broker holds them - the same shape the secret broker already
+    used for git and curl rather than a second mechanism. Four brokered subcommands at FIXED ARGV, and
+    deliberately no wrangler.run: an arbitrary subcommand is not a capability, and offering one would have made
+    the grant meaningless. Shims are routed by apex-agentd into the session bin dir (0d3aa755 fixed them going
+    where an agent's commands would not find them). cloudflared was DECLINED with the reason recorded rather than
+    stubbed out. tests/test-apex-tool-broker.sh, 18/0.
 - id: P1-013
   title: Transactional Worker preview and deploy flow
   priority: P1
-  status: todo
+  status: partial
   area: cloudflare-deploy
   depends_on:
   - P1-004
@@ -1528,6 +1554,16 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Transactional Worker preview and deploy flow. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 598f6996
+    (7c29a6b4). THREE OF FOUR CRITERIA DONE: upload and deploy are separated and pinned, staged rollout is built -
+    it needs a credentialled lookup because Cloudflare's payload is the whole split every time - and rollback is
+    tested. ONE OPEN, for a structural reason rather than effort: 'preview health checks supported' cannot be a
+    brokered operation at all. A health check is an UNAUTHENTICATED GET to *.workers.dev, and the host pin
+    correctly forbids spending an api.cloudflare.com credential anywhere else - so the capability model refuses it
+    by design and it belongs in the apex cf CLI instead. Note that as of 2026-09-12 the relay deployment moved to
+    a custom domain on andrenijman.com, so a preview health check against workers.dev is no longer even the right
+    target for that Worker.
 - id: P1-014
   title: Cloudflare environment protection policies
   priority: P1
