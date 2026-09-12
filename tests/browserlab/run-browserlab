@@ -453,7 +453,14 @@ flow_network() {
     # tried first and produced no denial at all — the browser never asked for
     # it — so the name here is one a browser treats as an ordinary domain, and
     # the port keeps it distinguishable from anything curl did.
+    # --download observed.txt is not decoration. capsule_run always passes
+    # --download-to, and the engine refuses that with nothing nominated —
+    # "nothing would leave" — so the first version of this flow never started a
+    # capsule at all and the assertion below failed for a reason that had
+    # nothing to do with browsers. The engine was right; the lab was calling it
+    # wrong.
     capsule_run browser-proxy --allow "127.0.0.1:$PORT" --timeout 90 \
+        --download observed.txt \
         -- --screenshot "{capsule}/shot.png" "https://browser-only.test:8443/"
     local after_log; after_log="$(tail -n +$((before + 1)) "$LAB/daemon.log" 2>/dev/null)"
     says "the browser's own request reached the daemon's proxy and was denied" \
