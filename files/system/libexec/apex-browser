@@ -460,8 +460,20 @@ cmd_run() {
     # allowlist agentd snapshots when a session starts is the runtime's, so a
     # capsule cannot widen it — checking here turns "the capsule silently
     # reached nothing" into a refusal that names the line to add.
-    local allowed_now
-    allowed_now="$("$APEX" agent allow 2>/dev/null)"
+    # THREE ANSWERS AGAIN. `apex agent allow` with no argument lists what the
+    # runtime honours — but a runtime that cannot be asked returns nothing,
+    # and an empty list read as "nothing is allowed" would refuse every
+    # destination with "add it with apex agent allow", which is advice for a
+    # problem the caller does not have. The exit status separates them.
+    local allowed_now allow_rc
+    allowed_now="$("$APEX" agent allow 2>&1)"; allow_rc=$?
+    if [ "$allow_rc" != 0 ]; then
+        die "the agent runtime could not be asked what a capsule may reach.
+  That is not the same as nothing being allowed, and the difference decides
+  what fixes it: start the runtime (\`systemctl --user enable --now apex-agentd\`)
+  rather than adding a destination. What it said:
+  ${allowed_now}"
+    fi
     for d in "${allow[@]}"; do
         printf '%s\n' "$allowed_now" | grep -Fxq -- "$d" && continue
         printf '%s\n' "$allowed_now" | grep -Fxq -- "${d%%:*}" && continue
@@ -540,17 +552,46 @@ cmd_run() {
     # the teardown below runs either way, and a browser still running when the
     # clock runs out is killed rather than left. What it does change is whether
     # the nominations are believed to be finished, so it is reported.
-    local waited=0 state="" timed_out=0
+    # THE TERMINAL STATES ARE THE RUNTIME'S, NOT A GUESS AT THEM.
+    # protocol.rs::AgentState prints starting, working, waiting_for_user,
+    # permission_request, complete, failed, exited. The first version of this
+    # loop waited for `complete|failed|killed`: `killed` is not a state the
+    # runtime has, so that arm could never fire, and `exited` — which is how a
+    # session that ended without publishing a completion reads — was not in the
+    # list at all, so such a capsule would have been held here until the
+    # timeout and then reported as one.
+    #
+    # AND AN UNANSWERED QUESTION IS ITS OWN ANSWER. An empty read means the
+    # runtime did not answer, which is NOT "the session finished": treating it
+    # as finished would run the nomination loop over a directory the browser
+    # may still be writing into. It is retried a few times — a daemon restart
+    # is survivable — and then it is a distinct outcome with its own sentence.
+    local waited=0 state="" timed_out=0 unanswered=0 lost=0
     while :; do
         state="$("$APEX" agent status "$CAPSULE_SESSION" 2>/dev/null \
-                 | sed -n 's/^state[[:space:]]*\([a-z]*\).*/\1/p' | head -n1)"
+                 | sed -n 's/^state[[:space:]]*\([a-z_]*\).*/\1/p' | head -n1)"
         case "$state" in
-            complete|failed|killed|"") break ;;
+            complete|failed|exited) break ;;
+            "")
+                unanswered=$((unanswered + 1))
+                [ "$unanswered" -ge 5 ] && { lost=1; break; }
+                ;;
+            *) unanswered=0 ;;
         esac
         [ "$waited" -ge "$timeout" ] && { timed_out=1; break; }
         sleep 1
         waited=$((waited + 1))
     done
+    if [ "$lost" = 1 ]; then
+        # Nothing is copied. The capsule is still torn down by the EXIT trap,
+        # so this leaves no browser running and no directory behind — what it
+        # refuses to do is guess that a session it can no longer see is one
+        # that finished.
+        die "the agent runtime stopped answering about session $CAPSULE_SESSION after ${waited}s.
+  That is not the same as the capsule having finished, so nothing was copied
+  out: a nomination loop run now would be reading a directory the browser may
+  still be writing into. The capsule was torn down."
+    fi
     if [ "$timed_out" = 1 ]; then
         warn "the capsule did not finish within ${timeout}s; stopping it.
   Anything it had already written is still nominated normally, but a file it

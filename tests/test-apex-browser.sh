@@ -121,6 +121,10 @@ cat > "$BIN/apex" <<EOF
 { printf 'apex'; printf ' <%s>' "\$@"; printf '\n'; } >> "$CALLS"
 case "\$1 \$2" in
     "agent allow")
+        # A runtime that cannot be asked is a mode, because "nothing is
+        # allowed" and "nobody answered" lead to different advice.
+        [ "\${FAKE_ALLOW_DOWN:-0}" = 1 ] && {
+            printf 'apex: the agent runtime is not running.\n' >&2; exit 1; }
         # With no destination this lists. The suite controls what is on it.
         [ \$# -eq 2 ] && { cat "$WORK/allowlist" 2>/dev/null; exit 0; }
         exit 0 ;;
@@ -138,7 +142,12 @@ case "\$1 \$2" in
         printf 'session 7 — generic in %s\n' "\$cwd"
         exit \${FAKE_RUN_RC:-0} ;;
     "agent status")
-        printf 'session      7\nstate        complete\noutcome      exited 0\n'; exit 0 ;;
+        # Silence is a mode, because "the runtime did not answer" is a
+        # different fact from "the session finished" and the engine has to
+        # tell them apart.
+        [ "\${FAKE_STATUS_SILENT:-0}" = 1 ] && exit 1
+        printf 'session      7\nstate        %s\noutcome      exited 0\n' "\${FAKE_STATUS_STATE:-complete}"
+        exit 0 ;;
     "agent logs")
         printf 'FAKE CAPSULE TRANSCRIPT\n'; exit 0 ;;
     "agent kill"|"agent rm") exit 0 ;;
@@ -285,6 +294,50 @@ out=$("$ENGINE" run --name cap-force --allow e.example:443 --force \
 is  "--force replaces it" "BROWSERLAB-REPORT" "$(cat "$LAND/report.csv")"
 rm -rf "${LAND:?}"/*
 
+echo "── the wait loop's states are the runtime's ────────────────────────────"
+
+# protocol.rs::AgentState prints complete, failed and exited as its terminal
+# names. `exited` is how a session that ended without publishing a completion
+# reads, and the first version of this loop did not list it — such a capsule
+# was held until its timeout and then reported as one. A five-second timeout
+# makes the difference between "it broke out" and "it waited" unmistakable.
+reset_calls
+rm -rf "${LAND:?}"/*
+start=$SECONDS
+out=$(FAKE_STATUS_STATE=exited "$ENGINE" run --name cap-exited --timeout 5 \
+        --allow e.example:443 --download report.csv --download-to "$LAND" \
+        -- https://e.example/ 2>&1)
+took=$((SECONDS - start))
+if [ "$took" -lt 4 ]; then ok "a session in state 'exited' ends the wait at once"
+else bad "a session in state 'exited' ends the wait at once" "waited ${took}s of a 5s timeout"; fi
+hasnt "and is not reported as a timeout" 'did not finish within' "$out"
+if [ -f "$LAND/report.csv" ]; then ok "and its nominated file still leaves"
+else bad "and its nominated file still leaves" "nothing at $LAND/report.csv"; fi
+rm -rf "${LAND:?}"/*
+
+# The third answer. A runtime that stops answering is not a capsule that
+# finished, and copying out on that assumption would read a directory the
+# browser may still be writing into.
+reset_calls
+out=$(FAKE_STATUS_SILENT=1 "$ENGINE" run --name cap-silent --timeout 60 \
+        --allow e.example:443 --download report.csv --download-to "$LAND" \
+        -- https://e.example/ 2>&1); rc=$?
+has   "a runtime that stops answering is its own outcome" 'stopped answering' "$out"
+hasnt "and is not called a finished capsule"              'nominated files left the capsule' "$out"
+if [ -e "$LAND/report.csv" ]; then
+    bad "and nothing is copied out on that assumption" "report.csv was copied anyway"
+else ok "and nothing is copied out on that assumption"; fi
+if [ -e "$ROOT/cap-silent" ]; then
+    bad "and the capsule is still torn down" "$ROOT/cap-silent survived"
+else ok "and the capsule is still torn down"; fi
+rm -rf "${LAND:?}"/*
+
+# A state the runtime does not have must not appear in the engine: an arm
+# that can never fire is this repository's dominant defect class.
+if grep -qE '^[^#]*\|killed\)' "$ENGINE"; then
+    bad "the loop waits on no state the runtime cannot produce" "'killed' is not an AgentState"
+else ok "the loop waits on no state the runtime cannot produce"; fi
+
 echo "── refusals ────────────────────────────────────────────────────────────"
 
 reset_calls
@@ -315,6 +368,14 @@ has "and a display is refused with the reason there is none" 'no compositor' "$o
 
 out=$("$ENGINE" run --allow nowhere.example:443 -- https://nowhere.example/ 2>&1)
 has "a destination the runtime has not allowed is refused"   'apex agent allow nowhere.example:443' "$out"
+
+# The same question, unanswerable. An empty list read as "nothing is allowed"
+# would refuse every destination with advice for a problem the caller does not
+# have — "permission denied is not absence", one more time.
+out=$(FAKE_ALLOW_DOWN=1 "$ENGINE" run --allow e.example:443 -- https://e.example/ 2>&1)
+has   "a runtime that cannot be asked is not read as an empty allowlist" 'could not be asked' "$out"
+has   "and the advice is to start it"                                    'apex-agentd' "$out"
+hasnt "rather than to add the destination"                               'apex agent allow e.example:443' "$out"
 
 echo "── the capability lookup has three answers, not two ────────────────────"
 
