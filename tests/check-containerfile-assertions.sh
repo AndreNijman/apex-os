@@ -191,7 +191,10 @@ for path in sys.argv[1:]:
             # exit status; only a leading `!` inverts a command.
             if not body.startswith('!') or body.startswith('!='):
                 continue
-            # An explicit handler runs regardless of errexit.
+            # An explicit handler runs regardless of errexit. This is a
+            # substring test, so a `||` inside a grep PATTERN would read as a
+            # handler and skip the line. No such line exists in these files
+            # today; if one is ever written, this is where it hides.
             if '||' in body or '&&' in body:
                 continue
             # Effective when nothing but block terminators follows it: the
