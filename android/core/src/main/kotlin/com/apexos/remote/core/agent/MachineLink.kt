@@ -117,12 +117,31 @@ class MachineLink(
         agent: String? = null,
         prompt: String? = null,
         worktree: String? = null,
+        checkpoint: Boolean = false,
     ): AgentSession {
         require(cwd.startsWith("/")) { "a working directory must be absolute, and `$cwd` is not" }
         return Agentd.readSession(
-            request(Agentd.run(cwd, cols, rows, agent, prompt, worktree), retry = false),
+            request(Agentd.run(cwd, cols, rows, agent, prompt, worktree, checkpoint), retry = false),
         )
     }
+
+    /**
+     * Type into a live session, without attaching.
+     *
+     * **Never retried**, and this is the strongest case for that on the whole
+     * link: `input` is the only verb here that is not idempotent in the
+     * ordinary sense. A `run` whose reply was lost may have started an agent;
+     * an `input` whose reply was lost HAS put the bytes on the terminal, and a
+     * retry types the user's sentence a second time — into an agent that has
+     * by then acted on the first copy. Better to tell the caller the
+     * connection went and let them look.
+     *
+     * Bytes go through [Reply.bytes], never straight from a text field: the
+     * daemon appends no terminator, so a reply sent as typed is a reply the
+     * agent never receives.
+     */
+    fun input(id: Int, data: String) =
+        Agentd.readOk(request(Agentd.input(id, data), retry = false))
 
     /**
      * Per-worktree status for every remembered project, or for one slug.

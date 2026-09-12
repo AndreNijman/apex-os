@@ -29,6 +29,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import com.apexos.remote.core.agent.Reply
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -70,6 +76,8 @@ fun SessionScreen(
     onInterrupt: () -> Unit,
     onStop: () -> Unit,
     onRefresh: () -> Unit,
+    /** Type a line into the session without attaching a terminal. */
+    onReply: (String) -> Unit,
     onBack: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -138,11 +146,15 @@ fun SessionScreen(
                 onStop = onStop,
             )
 
+            ReplyBox(session, onReply)
+
             Section("Where it is running")
             Field("Directory", session.cwd)
             session.projectName?.let { Field("Project", it) }
             session.worktree?.let { Field("Worktree", it) }
             session.telemetry?.branch?.let { Field("Branch", it) }
+
+            session.checkpoint?.let { Checkpoint(it) }
 
             Section("Mode")
             // The policy, flattened into the session by the daemon. Six
@@ -408,4 +420,90 @@ private fun Field(label: String, value: String) {
         )
         Text(value, style = MachineText, modifier = Modifier.weight(1f))
     }
+}
+
+/**
+ * Answering an agent that is waiting for you, without opening a terminal.
+ *
+ * This is P1-058's "input-needed workflow" as this runtime can support it.
+ * `Request::Input` writes bytes into the session's PTY, and a phone is allowed
+ * it — `privilege::refuse_input` refuses only a caller that IS a session and
+ * one whose origin could not be classified, and a paired device is neither.
+ * See `Reply.kt`.
+ *
+ * Offered only while the agent is actually waiting. A box that was always
+ * there would invite typing into a working agent, where the bytes queue on the
+ * terminal and surface later in the middle of whatever it then asks — which
+ * reads, correctly, as the app having sent the reply somewhere random.
+ */
+@Composable
+private fun ReplyBox(session: AgentSession, onReply: (String) -> Unit) {
+    if (!session.live || !session.needsYou || session.paused) return
+    var text by remember(session.id) { mutableStateOf("") }
+
+    Section("Reply")
+    Text(
+        "Typed straight into the agent's terminal on the machine, the same as if you were " +
+            "sitting at it. Sending nothing is a bare return, which is how you accept a " +
+            "default.",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp),
+    )
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = text,
+        onValueChange = { text = it },
+        placeholder = { Text("Your answer") },
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        // Multi-line, because an answer to an agent is often a sentence and a
+        // single-line field turns the action key into "send" — which would
+        // make an accidental tap of the keyboard's return key an irreversible
+        // instruction to a machine somewhere else.
+        singleLine = false,
+        maxLines = 4,
+    )
+    Spacer(Modifier.height(8.dp))
+    Row(Modifier.padding(horizontal = 16.dp)) {
+        Button(
+            onClick = {
+                onReply(text)
+                text = ""
+            },
+            shape = RoundedCornerShape(6.dp),
+        ) { Text(if (Reply.isBare(text)) "Send a bare return" else "Send") }
+    }
+    Spacer(Modifier.height(8.dp))
+}
+
+/**
+ * The checkpoint this session was started with.
+ *
+ * A command to read, not a button, and that is measured rather than cautious.
+ * `checkpoint::list` and `checkpoint::restore` exist in `apex-agent-core`, but
+ * their only non-test callers are in `apexd/apex/src/agent.rs` — the CLI —
+ * working on the local filesystem directly. **There is no checkpoint verb on
+ * the socket**: not list, not restore, not undo.
+ *
+ * So P1-056's "checkpoint/undo actions show consequences before execution" is
+ * not met here and cannot be. What a restore would change is computed on the
+ * machine from the checkpoint's tree, and none of it crosses this wire —
+ * summarising the consequences from the fields that ARE here would be
+ * describing a destructive operation from the wrong data. What the screen can
+ * honestly do is say the checkpoint exists, say what the command is, and say
+ * that the machine is where it runs.
+ */
+@Composable
+private fun Checkpoint(id: String) {
+    Section("Checkpoint")
+    Text(
+        "APEX captured the project before this agent started. Undoing is done at the " +
+            "machine — there is no checkpoint request on this connection, so this app can " +
+            "neither run it nor tell you what it would change.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp),
+    )
+    Spacer(Modifier.height(6.dp))
+    Field("Run there", "apex agent undo --checkpoint $id")
 }

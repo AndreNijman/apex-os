@@ -25,7 +25,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.apexos.remote.ui.agent.AgentCenterScreen
+import com.apexos.remote.ui.agent.ApprovalsScreen
 import com.apexos.remote.ui.agent.SessionScreen
+import com.apexos.remote.ui.agent.WorktreesScreen
 import com.apexos.remote.ui.agent.StartAgentScreen
 import com.apexos.remote.ui.agent.knownDirectories
 import com.apexos.remote.ui.term.TerminalScreen
@@ -54,6 +56,12 @@ object Destinations {
 
     /** Starting a new one. */
     const val START = "start"
+
+    /** Projects, their worktrees and the work in them. */
+    const val WORKTREES = "worktrees"
+
+    /** Privileged operations waiting at the machine, and standing grants. */
+    const val APPROVALS = "approvals"
 }
 
 @Composable
@@ -64,6 +72,14 @@ fun ApexRemoteApp(
     launchPayload: String? = null,
     /** Called once the payload has been handed to a screen, so it fires once. */
     onPayloadConsumed: () -> Unit = {},
+    /** The (machine, session) a tapped notification named, if this is one. */
+    alertTarget: Pair<String, Int>? = null,
+    /** Called once the tap has been acted on, so it fires once. */
+    onAlertConsumed: () -> Unit = {},
+    /** Ask Android for `POST_NOTIFICATIONS`. Owned by the activity. */
+    onAskNotifications: () -> Unit = {},
+    /** Bumped each time the permission dialog is answered, whichever way. */
+    notificationsAnswered: Int = 0,
     viewModel: RemoteViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -128,6 +144,23 @@ fun ApexRemoteApp(
             }
 
             composable(Destinations.AGENTS) {
+                // Re-read on arrival AND after the dialog is answered. The
+                // second key is what makes this correct: the permission dialog
+                // is asynchronous, so a refresh on the line after `launch()`
+                // would read the state before the user had answered and
+                // conclude they had said no. It also covers the user revoking
+                // the permission in Android's settings and coming back.
+                LaunchedEffect(notificationsAnswered) { viewModel.refreshNotificationState() }
+
+                // Asked when the user first looks at a machine's agents —
+                // the first moment a notification would have anything to say —
+                // and not at launch, where it is a dialog in front of somebody
+                // who has not seen the app yet. Keyed on the flag rather than
+                // on `Unit`, so it fires once the refresh above has actually
+                // landed rather than against a stale snapshot.
+                LaunchedEffect(state.notificationsUnasked) {
+                    if (state.notificationsUnasked) onAskNotifications()
+                }
                 AgentCenterScreen(
                     machine = state.agents.machine?.machine ?: "",
                     sessions = state.agents.sessions,
@@ -140,6 +173,11 @@ fun ApexRemoteApp(
                         navigation.navigate(Destinations.SESSION)
                     },
                     onStart = { navigation.navigate(Destinations.START) },
+                    onProjects = { navigation.navigate(Destinations.WORKTREES) },
+                    onApprovals = { navigation.navigate(Destinations.APPROVALS) },
+                    pendingApprovals = state.agents.approvals.pending.size,
+                    notificationsEnabled = state.notificationsEnabled,
+                    notificationsUnasked = state.notificationsUnasked,
                     onBack = {
                         // Stop the four-second poll. Leaving it running would
                         // keep a control round trip going to a machine nobody
@@ -176,6 +214,7 @@ fun ApexRemoteApp(
                         onInterrupt = { viewModel.signal(session, "int") },
                         onStop = { viewModel.signal(session, "term") },
                         onRefresh = { viewModel.refreshAgents() },
+                        onReply = { viewModel.replyToSession(session, it) },
                         onBack = { navigation.popBackStack() },
                         onDismiss = { viewModel.dismiss() },
                     )
@@ -202,6 +241,36 @@ fun ApexRemoteApp(
                 }
             }
 
+            composable(Destinations.WORKTREES) {
+                WorktreesScreen(
+                    machine = state.agents.machine?.deviceId ?: "",
+                    state = state.agents.worktrees,
+                    // Which sessions this phone actually has, so a worktree
+                    // row knows whether "open agent" can do anything. The
+                    // daemon's worktree rows carry session ids it knows about,
+                    // and the two lists can disagree.
+                    liveSessions = state.agents.sessions.map { it.id }.toSet(),
+                    onLoad = { viewModel.loadWorktrees() },
+                    onOpenSession = {
+                        if (viewModel.openWorktreeSession(it) != null) {
+                            navigation.navigate(Destinations.SESSION)
+                        }
+                    },
+                    onBack = { navigation.popBackStack() },
+                )
+            }
+
+            composable(Destinations.APPROVALS) {
+                ApprovalsScreen(
+                    state = state.agents.approvals,
+                    nowSeconds = state.agents.nowSeconds,
+                    onLoad = { viewModel.loadApprovals() },
+                    onRevokeGrant = { project, key -> viewModel.revokeGrant(project, key) },
+                    onRevokeSystemGrant = { viewModel.revokeSystemGrant(it) },
+                    onBack = { navigation.popBackStack() },
+                )
+            }
+
             composable(Destinations.START) {
                 StartAgentScreen(
                     machine = state.agents.machine?.machine ?: "",
@@ -209,8 +278,14 @@ fun ApexRemoteApp(
                     knownDirectories = knownDirectories(state.agents.sessions),
                     busy = state.agents.busy,
                     failure = state.agents.failure,
-                    onStart = { agent, cwd, worktree, prompt ->
-                        viewModel.startAgent(cwd = cwd, agent = agent, worktree = worktree, prompt = prompt)
+                    onStart = { agent, cwd, worktree, prompt, checkpoint ->
+                        viewModel.startAgent(
+                            cwd = cwd,
+                            agent = agent,
+                            worktree = worktree,
+                            prompt = prompt,
+                            checkpoint = checkpoint,
+                        )
                     },
                     onBack = { navigation.popBackStack() },
                     onDismiss = { viewModel.dismiss() },
@@ -227,6 +302,32 @@ fun ApexRemoteApp(
             ) {
                 navigation.popBackStack()
                 navigation.navigate(Destinations.SESSION)
+            }
+        }
+
+        // A tapped notification opens the exact session it named, when this
+        // phone still has it. Inside the graph for the same reason as the
+        // pairing effect below: `navigate` before the `NavHost` has composed
+        // throws, and a cold launch from a notification is exactly that
+        // moment.
+        LaunchedEffect(alertTarget) {
+            val target = alertTarget ?: return@LaunchedEffect
+            // Consumed whatever happens. A tap that could not be honoured must
+            // not be retried on the next recomposition: the session is not
+            // coming back, and the user would be unable to navigate away.
+            onAlertConsumed()
+            val (machine, session) = target
+            if (viewModel.openAlerted(machine, session)) {
+                navigation.navigate(Destinations.SESSION) { launchSingleTop = true }
+            } else {
+                // The session is gone, or it belongs to a machine this phone
+                // is not connected to. `SessionInfo.id` is reused after a
+                // prune, so landing on whatever now holds that number would be
+                // opening a stranger's agent — the Agent Center is the honest
+                // destination, and it is where the user can see what IS there.
+                navigation.navigate(
+                    if (state.agents.machine != null) Destinations.AGENTS else Destinations.MACHINES,
+                ) { launchSingleTop = true }
             }
         }
 
