@@ -166,6 +166,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-perm-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "apex-remote-core"
 version = "0.1.0"
 dependencies = [
