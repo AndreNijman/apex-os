@@ -47,7 +47,19 @@ set -uo pipefail
 set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="$(mktemp -d)"
+# Checked, and it has to be. Under `set +e` a failing `mktemp -d` leaves
+# WORK="" and every `$WORK/<name>` below becomes an ABSOLUTE path: `fx contain`
+# turns into `rm -rf /contain; mkdir -p /contain/etc/apex …` and the EXIT trap
+# into `rm -rf ""`. Measured with TMPDIR=/nonexistent: 28 passed, 32 failed
+# behind a wall of "cannot create directory '/contain'" and nothing anywhere
+# saying the suite could not run. As an unprivileged user the writes are merely
+# refused; under podman's DEFAULT capability set `mkdir -p /contain/etc/apex`
+# SUCCEEDED — and a GitHub Actions `container:` job runs as root with exactly
+# that. The section titled "the suite cannot reach the machine it runs on"
+# would then be void at the precise point it claims the opposite.
+WORK="$(mktemp -d)" || { echo "FATAL: could not create a work directory" >&2; exit 2; }
+[ -n "$WORK" ] && [ -d "$WORK" ] \
+    || { echo "FATAL: mktemp -d produced no usable directory" >&2; exit 2; }
 trap 'rm -rf "$WORK"' EXIT
 
 pass=0; fail=0
@@ -59,6 +71,11 @@ section() { printf '\n── %s ──\n' "$1"; }
 
 UNIT="$ROOT/files/system/units/apex-lid.service"
 
+# Checked BEFORE the build below, not after it: a runner with neither python3
+# nor a binary used to spend minutes compiling and then fail on the one-line
+# dependency it could have refused at the start.
+command -v python3 >/dev/null 2>&1 || { echo "FATAL: python3 is required" >&2; exit 2; }
+
 APEX="${APEX_BIN:-}"
 if [ -z "$APEX" ]; then
     for c in "$ROOT/apexd/target/debug/apex" "$ROOT/apexd/target/release/apex"; do
@@ -67,7 +84,11 @@ if [ -z "$APEX" ]; then
 fi
 if [ -z "$APEX" ]; then
     echo "building apex (no binary found; set APEX_BIN to skip this)…" >&2
-    ( cd "$ROOT/apexd" && cargo build -p apex >/dev/null 2>&1 )
+    # stdout hidden, stderr kept: on a runner with no cargo at all the real
+    # error ("cargo: command not found") used to be invisible behind a FATAL
+    # naming something else entirely.
+    ( cd "$ROOT/apexd" && cargo build -p apex >/dev/null 2>&1 ) \
+        || ( cd "$ROOT/apexd" && cargo build -p apex 2>&1 >/dev/null | tail -20 >&2 )
     [ -x "$ROOT/apexd/target/debug/apex" ] && APEX="$ROOT/apexd/target/debug/apex"
 fi
 [ -n "$APEX" ] && [ -x "$APEX" ] || { echo "FATAL: no apex binary to test" >&2; exit 2; }
@@ -102,18 +123,49 @@ fx() {
     printf 'claude-desktop-update.timer\nfwupd-refresh.timer\n' \
         > "$F/var/lib/apex/lid/active-units"
     printf '%s\n' "$@" > "$F/etc/apex/lid.toml"
+    # `fx` checks its own work, and this is not belt and braces. A fixture that
+    # could not be built is INDISTINGUISHABLE from a machine with no lid, no
+    # thermal zone and no battery — which is a shape this suite deliberately
+    # tests. Measured: with no fixture tree at all, the section "a machine with
+    # no lid is inert" went 2 of 2 GREEN, and six negative greps over
+    # `commands.log` (which `log()` reads with `2>/dev/null`) went green with it.
+    #
+    # It says so and does NOT `exit`. Every call site is `F="$(fx …)"`, which is
+    # a command substitution, which is a SUBSHELL: an `exit` here would end only
+    # that subshell and hand the caller an EMPTY path. Measured, while writing
+    # this guard: `APEX_LID_ROOT=""` re-roots nothing, so the driver ran against
+    # the REAL machine's paths and left `var/lib/apex/lid/commands.log` in the
+    # repository — the containment this suite opens by asserting, broken by its
+    # own safety check. `drive` below is what refuses; see there.
+    [ -s "$F/proc/acpi/button/lid/LID/state" ] && [ -s "$F/etc/apex/lid.toml" ] \
+        || echo "FATAL: the fixture '$1' could not be built under $WORK" >&2
     printf '%s' "$F"
 }
 
 # Run the driver against a fixture. HOME is pushed inside the fixture so the
 # invoking account's own ~/.config/apex/lid.toml can never be read — the suite
 # must be as true on Andre's laptop with a pin set as on a CI runner.
-drive() { local F="$1"; shift; APEX_LID_ROOT="$F" HOME="$F/home/nobody" \
-              XDG_CONFIG_HOME="$F/home/nobody/.config" "$APEX" lid "$@" 2>&1; }
+#
+# AND IT REFUSES AN UNBUILT ONE. An empty `$F` makes `APEX_LID_ROOT=""`, which
+# re-roots nothing at all: the driver then reads the real /proc and /sys and
+# writes its command log into the current directory. The whole first section of
+# this suite is the claim that cannot happen, so the check is here, at the one
+# place the binary is ever invoked, rather than at forty-three call sites.
+#
+# A refusal returns nothing, so the caller's POSITIVE assertion — every section
+# has one — goes red with an empty output. That is the correct outcome: an
+# assertion that could not be run must not be a pass.
+drive() {
+    local F="$1"; shift
+    if [ -z "$F" ] || [ ! -s "$F/etc/apex/lid.toml" ]; then
+        echo "FATAL: '$F' is not a built fixture tree, so the driver was not run" >&2
+        return 2
+    fi
+    APEX_LID_ROOT="$F" HOME="$F/home/nobody" \
+        XDG_CONFIG_HOME="$F/home/nobody/.config" "$APEX" lid "$@" 2>&1
+}
 log()   { cat "$1/var/lib/apex/lid/commands.log" 2>/dev/null; }
-jq_()   { python3 -c 'import json,sys;d=json.load(sys.stdin);print(eval(sys.argv[1],{"d":d}))' "$1"; }
 
-command -v python3 >/dev/null 2>&1 || { echo "FATAL: python3 is required" >&2; exit 2; }
 
 # ─────────────────────────────────────────────────────────────────────────────
 section "containment — the suite cannot reach the machine it runs on"
@@ -135,19 +187,37 @@ grep -q '^systemctl stop fwupd-refresh.timer$' <(log "$F") \
 # `systemd-inhibit` that had actually been spawned would still be holding the
 # lock, because the driver's handle outlives a `--once` run only through the
 # child it spawns.
-if command -v systemd-inhibit >/dev/null 2>&1; then
-    if systemd-inhibit --list --no-pager 2>/dev/null | grep -q 'APEX lid'; then
-        bad "the real logind holds no inhibitor from this suite" \
-            "something called 'APEX lid' is holding one"
-    else
-        ok "the real logind holds no inhibitor from this suite"
-    fi
-else
+#
+# THREE answers, and `command -v` only ever asked one of them. It tests whether
+# the BINARY exists; the thing that actually fails is the BUS. In a container
+# with systemd installed and no system bus, `systemd-inhibit --list` exits 1
+# with "Failed to connect to system scope bus via local transport" — swallowed
+# by `2>/dev/null`, stdout empty, `grep -q` fails, and the assertion went
+# GREEN. Measured: the PASS/FAIL lines of that run diff EMPTY against a run on
+# a machine with a live logind. "The bus says nobody holds one" and "there is
+# no bus to ask" are not the same answer, and this is the assertion that exists
+# to catch an inhibitor escaping the fixture.
+#
+# Worth writing down for whoever reads this next: this check has no true
+# positive left. `fn watch` releases the handle on both `--once` exit paths,
+# the child carries `setpriv --pdeathsig TERM`, `Drop for InhibitorHandle` kills
+# it anyway, and under a fixture root `InhibitorHandle::take` never spawns at
+# all. The containment that DOES bite is the pair of log assertions below: with
+# `executes()` true, `append_log` returns early and both greps go red.
+if ! command -v systemd-inhibit >/dev/null 2>&1; then
     # Not a skip: the machine is recorded as unable to answer, and that IS the
     # result. "permission denied is not absence", and neither is "not installed".
     bad "the real logind holds no inhibitor from this suite" \
         "COULD NOT RUN: systemd-inhibit is not on this machine, so the one check \
 that would have caught a real inhibitor escaping the fixture did not happen"
+elif ! inhibit_list="$(systemd-inhibit --list --no-pager 2>&1)"; then
+    bad "the real logind holds no inhibitor from this suite" \
+        "COULD NOT RUN: systemd-inhibit could not answer — $(tr '\n' ' ' <<<"$inhibit_list")"
+elif grep -q 'APEX lid' <<<"$inhibit_list"; then
+    bad "the real logind holds no inhibitor from this suite" \
+        "something called 'APEX lid' is holding one"
+else
+    ok "the real logind holds no inhibitor from this suite"
 fi
 
 # Nothing outside the fixture was written. Proven by the only means a test has:
@@ -289,6 +359,13 @@ python3 - "$plan" <<'PY' && ok "no shipped power-down action blocks Wi-Fi" \
                           || bad "no shipped power-down action blocks Wi-Fi"
 import json,sys
 p=json.loads(sys.argv[1])["plan"]["actions"]
+# Non-vacuity FIRST, the way the two sibling blocks below already do it. This
+# one had none, and it PASSED over a degenerate one-element plan in which every
+# other action had been skipped: `bad == []` and `radios.count("bluetooth") <= 1`
+# are both trivially true of a plan that touches nothing. A bare `assert p`
+# would NOT have caught it — the list had one element.
+assert any(a["action"]=="wifi-power-save" for a in p), \
+    "the Wi-Fi path was never exercised, so this assertion proves nothing: %r" % (p,)
 # rfkill takes a type argument. `bluetooth` is the only one this may ever be:
 # `wifi`, `wlan` or `all` would take the tunnel down with the radio.
 bad=[a for a in p if a["action"]=="bluetooth" and a.get("blocked") is not True]
@@ -376,8 +453,19 @@ out="$(drive "$F" watch --once)"
 grep -q 'the battery guard fired' <<<"$out" \
     && ok "the battery floor fires at 15% against a 20% floor" \
     || bad "the battery floor fires at 15% against a 20% floor" "$out"
-grep -q 'runuser' <(log "$F") \
-    || ok "with no live session there is nothing to checkpoint, and it says so"
+# Was `grep -q runuser … || ok "…"` — with no `bad` branch at all, so the one
+# outcome it exists to catch (the driver spawning `runuser` on a machine with
+# no session) ran NEITHER arm: the count silently dropped to 59 and the suite
+# still printed "0 failed" and exited 0. Measured with the identical construct.
+# And "it says so" was never checked, though the driver does print it.
+if grep -q 'runuser' <(log "$F"); then
+    bad "with no live session there is nothing to checkpoint" "$(log "$F")"
+else
+    ok "with no live session there is nothing to checkpoint"
+fi
+grep -q 'no live session to checkpoint' <<<"$out" \
+    && ok "…and the driver says so rather than leaving the owner to infer it" \
+    || bad "…and the driver says so rather than leaving the owner to infer it" "$out"
 
 # A machine that cannot report its own temperature does not stay awake in a bag.
 F="$(fx nosensor 'pin = "on"')"
@@ -422,6 +510,131 @@ rep="$(drive "$F" report)"
 grep -q 'no VPN state to report' <<<"$rep" \
     && ok "a period whose VPN could not be read says so, and does not claim it held" \
     || bad "a period whose VPN could not be read says so, and does not claim it held" "$rep"
+
+# Nothing half-written is left behind. `save_period` writes a sibling and
+# renames, because a bare `std::fs::write` truncates first and the machine this
+# runs on is a laptop a guard is deliberately suspending — precisely when a
+# write gets interrupted.
+[ -e "$F/var/lib/apex/lid/last.json.new" ] \
+    && bad "no half-written sibling is left behind" "a .new sibling was left behind" \
+    || ok "no half-written sibling is left behind"
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' \
+        "$F/var/lib/apex/lid/last.json" \
+    && ok "and what it left is a whole document" \
+    || bad "and what it left is a whole document"
+
+# THE assertion that tells a rename from a write, and it has to discriminate:
+# "no .new sibling was left" is equally true of a bare `std::fs::write`, which
+# is how that mutant survived the first version of this check. So the write of
+# the sibling is made to FAIL — a directory where the temp file goes — and the
+# previous record is required to still be there afterwards. `std::fs::write`
+# truncates before it writes, so in-place the known-good record becomes rubble
+# and the owner reopens to nothing; writing a sibling and renaming means a
+# failed write costs the NEW record and keeps the last good one.
+G="$(fx atomic 'pin = "on"')"
+printf '%s' '{"closed_at":11,"last_seen":12,"opened_at":null,"sessions_at_close":7,\
+"why":"the known-good record","ended_by":null,"charge_at_close":null,"charge_last":null,\
+"peak_c":null,"powered_down":[],"skipped":[],"vpn":[]}' \
+    | tr -d '\\\n' > "$G/var/lib/apex/lid/last.json"
+mkdir -p "$G/var/lib/apex/lid/last.json.new"
+echo closed > "$G/proc/acpi/button/lid/LID/state"
+echo open   > "$G/proc/acpi/button/lid/LID/state.pending"
+drive "$G" watch --once >/dev/null 2>&1
+echo open > "$G/proc/acpi/button/lid/LID/state"
+drive "$G" watch --once >/dev/null 2>&1
+python3 - "$G/var/lib/apex/lid/last.json" \
+    <<'PY' && ok "a record whose write fails leaves the last good one intact" \
+           || bad "a record whose write fails leaves the last good one intact"
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["why"] == "the known-good record", d
+assert d["sessions_at_close"] == 7, d
+sys.exit(0)
+PY
+rmdir "$G/var/lib/apex/lid/last.json.new" 2>/dev/null
+
+# ─────────────────────────────────────────────────────────────────────────────
+section "a record that could not be read is not a machine that never slept"
+# ─────────────────────────────────────────────────────────────────────────────
+# Three answers where there used to be two. `load_period` was
+# `read_optional(...).ok().flatten()?` then `from_str(...).ok()`, and both
+# `.ok()`s threw a reason away — so a record that EXISTED and could not be read
+# printed "no lid-closed period has been recorded on this machine yet", and so
+# did one truncated by a crash. That is "permission denied is not absence"
+# inside the one verb that delivers the owner's readout after they reopen.
+#
+# Reachable rather than hypothetical: apex-lid.service sets
+# `StateDirectory=apex/lid` with no StateDirectoryMode and no UMask, so the
+# record is 0644 and the shell tile can read it — and adding `UMask=0077` later
+# would turn every unprivileged `apex lid report` into "nothing has happened"
+# with nothing going red.
+#
+# The unreadable record here is a DIRECTORY where the file should be, not a
+# chmod: `read_to_string` answers EISDIR, which is the same `Err` arm as EACCES,
+# and unlike a mode it means the same thing when the suite runs as root — which
+# a GitHub Actions `container:` job does.
+F="$(fx record 'pin = "auto"')"
+rm -f "$F/var/lib/apex/lid/last.json"
+mkdir -p "$F/var/lib/apex/lid/last.json"
+rj="$(drive "$F" report --json)"; rc=$?
+[ "$rc" -ne 0 ] \
+    && ok "a record that cannot be read exits non-zero" \
+    || bad "a record that cannot be read exits non-zero" "rc=$rc"
+python3 - "$rj" <<'PY' && ok "…and says so in the JSON, rather than reporting no period" \
+                       || bad "…and says so in the JSON, rather than reporting no period"
+import json,sys
+d=json.loads(sys.argv[1])
+assert d.get("period") is None, d
+assert d.get("error"), "an unreadable record must carry the reason it could not be read"
+sys.exit(0)
+PY
+drive "$F" report >/dev/null 2>&1
+[ $? -ne 0 ] \
+    && ok "…and the plain-text form fails too, instead of printing 'nothing yet'" \
+    || bad "…and the plain-text form fails too, instead of printing 'nothing yet'"
+rmdir "$F/var/lib/apex/lid/last.json"
+
+# A crash between the truncate and the last byte. Same three-way answer.
+printf '{"closed_at":1,"last_' > "$F/var/lib/apex/lid/last.json"
+rj="$(drive "$F" report --json)"; rc=$?
+[ "$rc" -ne 0 ] \
+    && ok "a truncated record is unreadable, not absent" \
+    || bad "a truncated record is unreadable, not absent" "rc=$rc  $rj"
+python3 - "$rj" <<'PY' && ok "…and names the file and the parse error" \
+                       || bad "…and names the file and the parse error"
+import json,sys
+d=json.loads(sys.argv[1])
+assert d.get("period") is None, d
+assert "last.json" in (d.get("error") or ""), d
+sys.exit(0)
+PY
+
+# And the one case that IS good news, which must stay exit 0 and carry no
+# error key at all — a shell tile is entitled to say "nothing yet" only here.
+rm -f "$F/var/lib/apex/lid/last.json"
+rj="$(drive "$F" report --json)"; rc=$?
+[ "$rc" -eq 0 ] \
+    && ok "a record that has genuinely never been written is not an error" \
+    || bad "a record that has genuinely never been written is not an error" "rc=$rc  $rj"
+python3 - "$rj" <<'PY' && ok "…and carries no error key for a surface to misread" \
+                       || bad "…and carries no error key for a surface to misread"
+import json,sys
+d=json.loads(sys.argv[1])
+assert d.get("period") is None, d
+assert "error" not in d, d
+sys.exit(0)
+PY
+
+# The watch loop's own read of the in-progress record. It cannot refuse to run —
+# a driver that stopped because one file was unreadable would leave the lid
+# unguarded — so it says what it lost and carries on.
+mkdir -p "$F/var/lib/apex/lid/state.json"
+echo closed > "$F/proc/acpi/button/lid/LID/state"
+out="$(drive "$F" watch --once)"
+grep -q 'in-progress record could not be read' <<<"$out" \
+    && ok "an unreadable in-progress record is announced, not silently discarded" \
+    || bad "an unreadable in-progress record is announced, not silently discarded" "$out"
+rmdir "$F/var/lib/apex/lid/state.json" 2>/dev/null
 
 # `status` is what the shell tile will read. Its JSON must carry the decision,
 # every input that produced it, and the file the policy came from.
@@ -512,26 +725,53 @@ grep -q '^CapabilityBoundingSet=.*CAP_SYS_RESOURCE' "$UNIT" \
 # the suite.
 lid_stanza="$(awk '/^# ── Lid-closed continuous operation/,/^# ── What is attached/' \
                 "$ROOT/Containerfile.base")"
-[ -n "$lid_stanza" ] || bad "the lid stanza was found in Containerfile.base" "no match"
-if printf '%s' "$lid_stanza" | grep -q '^ *! *grep'; then
-    bad "no refusal in the lid build stanza is written as '! grep'" \
-        "$(printf '%s' "$lid_stanza" | grep -n '^ *! *grep' | head -3)"
+# Both checks below are greps over `$lid_stanza`, and both are satisfied by an
+# EMPTY one: renaming the heading this awk range keys on left "no refusal in
+# the lid build stanza is written as '! grep'" printing PASS over nothing.
+# Measured. The run went red on the two neighbouring assertions, so it was
+# caught — but a stanza that merely SHIFTS (the awk range matching a truncated
+# span) would produce that lie with no FAIL beside it.
+if [ -n "$lid_stanza" ]; then
+    ok "the lid stanza was found in Containerfile.base"
+    if printf '%s' "$lid_stanza" | grep -q '^ *! *grep'; then
+        bad "no refusal in the lid build stanza is written as '! grep'" \
+            "$(printf '%s' "$lid_stanza" | grep -n '^ *! *grep' | head -3)"
+    else
+        ok "no refusal in the lid build stanza is written as '! grep'"
+    fi
+    printf '%s' "$lid_stanza" | grep -q 'echo "FATAL' \
+        && ok "its refusals say FATAL and exit 1, which does fail a build" \
+        || bad "its refusals say FATAL and exit 1, which does fail a build"
 else
-    ok "no refusal in the lid build stanza is written as '! grep'"
+    bad "the lid stanza was found in Containerfile.base" "no match"
+    bad "no refusal in the lid build stanza is written as '! grep'" \
+        "COULD NOT RUN: the stanza was not found, so nothing was examined"
+    bad "its refusals say FATAL and exit 1, which does fail a build" \
+        "COULD NOT RUN: the stanza was not found, so nothing was examined"
 fi
-printf '%s' "$lid_stanza" | grep -q 'echo "FATAL' \
-    && ok "its refusals say FATAL and exit 1, which does fail a build" \
-    || bad "its refusals say FATAL and exit 1, which does fail a build"
 
 # The image must never acquire a static logind lid policy behind this unit's
 # back: `HandleLidSwitch=ignore` applies to a machine with nothing running as
 # readily as to one mid-build, and turns every laptop bag into an oven.
+# `grep -r` exits 1 for "no match" and 2 for "I could not read something", and
+# `2>/dev/null` collapsed the second into the first. Measured: with one
+# directory under files/ at mode 000 and the suite run as an ordinary user,
+# grep printed "Permission denied" to the stderr being discarded, `$static`
+# came back empty, and this printed PASS — 60 passed, 0 failed, exit 0. That is
+# this repository's own "permission denied is not absence", in the single
+# assertion guarding against the image acquiring a static lid policy.
+scan_err="$WORK/handle-lid-scan.err"
 static="$(grep -rln '^[[:space:]]*HandleLidSwitch[[:space:]]*=' \
             "$ROOT/files" "$ROOT/Containerfile.base" "$ROOT/Containerfile.core" \
-            2>/dev/null | grep -v 'tests/')"
-[ -z "$static" ] \
-    && ok "the image ships no static HandleLidSwitch= anywhere" \
-    || bad "the image ships no static HandleLidSwitch= anywhere" "$static"
+            2>"$scan_err" | grep -v 'tests/')"
+if [ -s "$scan_err" ]; then
+    bad "the image ships no static HandleLidSwitch= anywhere" \
+        "COULD NOT SCAN: $(tr '\n' ' ' <"$scan_err")"
+elif [ -z "$static" ]; then
+    ok "the image ships no static HandleLidSwitch= anywhere"
+else
+    bad "the image ships no static HandleLidSwitch= anywhere" "$static"
+fi
 grep -q 'systemctl enable apex-lid.service' "$ROOT/Containerfile.base" \
     && ok "the unit is enabled in the image, not merely installed" \
     || bad "the unit is enabled in the image, not merely installed"
