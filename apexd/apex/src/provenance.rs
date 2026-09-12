@@ -1354,6 +1354,18 @@ mod tests {
     /// inherit one. Only children forked during the write can be holding it,
     /// and each releases it the instant it execs. One successful exec therefore
     /// proves the window is shut for good.
+    ///
+    /// That the retry is what closes it was measured rather than reasoned, by
+    /// deleting the call below and putting the two builds through the same
+    /// harness on 2026-09-12: **40 failures in 1000 runs (4.0%) without it, 0
+    /// in 1200 with it**, every failure this one test and no other, each
+    /// panicking `git could not be run: Text file busy (os error 26)`. The
+    /// guarded arm ran alongside four concurrent workspace builds, so it was
+    /// the more loaded of the two — and load is what drives this race, which is
+    /// why the earlier 2-in-60 reading understates it. At 4% a clean run of
+    /// 1000 happens with probability 1.6e-18, so this is not a quiet window.
+    ///
+    /// Delete this call and the flake comes back. It is load-bearing.
     fn wait_until_executable(prog: &Path) {
         for _ in 0..200 {
             match Command::new(prog).arg("--probe").output() {
