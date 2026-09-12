@@ -1,0 +1,697 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  run-browserlab — P2-012's capsule against a real agentd, a real bwrap
+#  namespace and a real browser.
+#
+#  ═══ WHY THIS EXISTS WHEN tests/test-apex-browser.sh ALREADY PASSES ═══
+#
+#  That suite puts a recording stub for `apex` on $PATH and asserts the argv
+#  and the profile the engine writes. It proves the engine ASKS for the right
+#  session. It cannot prove the daemon grants it, that the namespace really has
+#  no compositor socket, that the real Firefox profile really is out of reach,
+#  or that an unnominated download really stays put. Those are different
+#  claims, and "isolated profile/cookies/downloads" is the second one.
+#
+#  So every observation here is made either BY THE CAPSULE ABOUT ITSELF, from
+#  inside the namespace, or by a tool reading an artefact from outside. The
+#  ones made from inside come out through the nomination boundary that is
+#  itself under test — the same arrangement tests/vmlab/run-vmlab uses for a
+#  guest's task log, and for the same reason: an observation that arrived by
+#  some other route would not be evidence that the route works.
+#
+#  ═══ THE VERDICT, AND WHY THERE ARE THREE ═══
+#
+#  tests/chaos/lib.sh is sourced for its verdict record and its expectation
+#  counters, exactly as the vmlab sources it, with one arm renamed:
+#
+#      verified        the flow ran end to end and the observations held.
+#      failed          it ran and something did not hold. The reason names it.
+#      could-not-run   it did not run. Never a pass, never a failure, and the
+#                      reason always names what was missing.
+#
+#  A machine without bwrap, without a browser or without a built runtime must
+#  report could-not-run. "Permission denied is not absence" is the rule this
+#  whole file exists to obey: a lab that reported "the capsule is isolated"
+#  from a machine where no capsule started would be the worst output available.
+#
+#  ═══ WHERE IT RUNS, AND WHY ON THE HOST ═══
+#
+#  On the machine, not in a container, and that is the opposite of the vmlab's
+#  choice for a reason that is recorded rather than assumed. The vmlab needs
+#  qemu and libvirt, which are deliberately NOT in the APEX image, so it must
+#  bring its own. A capsule needs bwrap, apex-agentd and a browser, and all
+#  three ARE in the image — so running it in a container would test a stack
+#  that is not the shipped one.
+#
+#  What it must not do to the machine it runs on, and does not:
+#
+#    * it never touches the user's own apex-agentd. It starts its OWN, on a
+#      private $XDG_RUNTIME_DIR, and kills it at the end. The live runtime
+#      keeps running throughout and is never signalled.
+#    * every path it uses is under /var/tmp. That is load-bearing rather than
+#      tidy: session.rs::bridge_program REFUSES a bridge binary under /tmp or
+#      under $HOME, because a confined session cannot see either, and its own
+#      comment says /var/tmp is reachable "which is what makes a live test of
+#      this mode possible at all".
+#    * it opens no window. Every capsule is headless and the lab asserts the
+#      absence of the compositor socket rather than trusting the flag.
+#    * it leaves no capsule, no session and no daemon behind, and the last
+#      flow is the assertion that it did not.
+#
+#  ═══ THE SERVER IT TALKS TO ═══
+#
+#  A python3 HTTPS server on loopback with a self-signed certificate. HTTPS
+#  rather than HTTP because agentd's proxy tunnels CONNECT only and answers an
+#  absolute-form `GET http://…` with 405 — deliberately, so that the tunnel is
+#  opaque and there is no request parsing in the daemon.
+#
+#  Loopback is reachable through the allowlist only when the rule WROTE THE
+#  ADDRESS DOWN: destination::accepts_address allows a local address for an
+#  address rule and denies it (Denial::LocalAddress) for a name rule, because
+#  whoever controls a name controls where it points. That pair is this lab's
+#  falsifying control for the network flow, and it is a property of the shipped
+#  allowlist rather than of the lab.
+#
+#      ./tests/browserlab/run-browserlab              # every flow
+#      ./tests/browserlab/run-browserlab --flow downloads
+#      ./tests/browserlab/run-browserlab --keep       # keep /var/tmp/apex-browserlab
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd -- "$HERE/../.." && pwd)"
+
+# shellcheck source=/dev/null
+if [[ -r "$REPO/tests/chaos/lib.sh" ]]; then source "$REPO/tests/chaos/lib.sh"; fi
+
+VERIFIED="verified"
+FAILED="failed"
+CANNOT="could-not-run"
+
+# Under /var/tmp, never /tmp. See the header: a confined session's /tmp is a
+# fresh tmpfs, so a runtime built there is a bridge the daemon refuses to use
+# and every allowlisted flow would report could-not-run for the wrong reason.
+LAB="${BROWSERLAB_ROOT:-/var/tmp/apex-browserlab}"
+# OUTSIDE the tree teardown deletes, which is the rule `--download-to` enforces
+# on a caller and which this lab broke on itself: with OUT inside $LAB, every
+# verdict, expectation file and captured artefact was removed by the lab's own
+# cleanup the moment the run ended, and a failing flow left nothing to read.
+OUT="${BROWSERLAB_OUT:-${LAB}-out}"
+KEEP=0
+FLOWS=(profile headless network downloads capability teardown)
+
+log()  { printf '\n>>> %s\n' "$*" >&2; }
+info() { printf '    %s\n' "$*" >&2; }
+die()  { printf '!!! %s\n' "$*" >&2; exit 2; }
+
+FLOW_REASON=""
+FLOW_CANNOT=0
+cannot() { FLOW_CANNOT=1; FLOW_REASON="$1"; }
+
+# The chaos counters, under names that make a flow read as a list of claims.
+claim()     { local w="$1"; shift; if "$@" >/dev/null 2>&1; then _chaos_pass "$w"; else _chaos_fail "$w"; fi; }
+claim_not() { local w="$1"; shift; if "$@" >/dev/null 2>&1; then _chaos_fail "$w"; else _chaos_pass "$w"; fi; }
+says()      { if grep -qF -- "$2" <<<"$3"; then _chaos_pass "$1"; else _chaos_fail "$1 (no '$2' in the output)"; fi; }
+says_not()  { if grep -qF -- "$2" <<<"$3"; then _chaos_fail "$1 (found '$2', which should not be there)"; else _chaos_pass "$1"; fi; }
+
+write_verdict() {
+    local dir="$1" name="$2" state="$3" reason="$4"
+    mkdir -p "$dir"
+    if declare -F chaos_write_verdict >/dev/null 2>&1; then
+        chaos_write_verdict "$dir" "$name" "$state" "$reason" 0 "P2-012 flow: $name"
+        return
+    fi
+    local esc="${reason//\\/\\\\}"; esc="${esc//\"/\\\"}"
+    printf '{\n  "name": "%s",\n  "state": "%s",\n  "reason": "%s"\n}\n' \
+        "$name" "$state" "$esc" > "$dir/verdict.json"
+}
+
+# ── prerequisites, each named separately ────────────────────────────────────
+#
+# One sentence per missing thing, so a could-not-run says which one. A single
+# "prerequisites missing" would make the common CI case unreadable.
+APEX_BIN=""
+AGENTD_BIN=""
+BROWSER_BIN="${BROWSERLAB_BROWSER:-/usr/bin/firefox}"
+
+find_built_runtime() {
+    local d
+    for d in "$REPO/apexd/target/debug" "$REPO/apexd/target/release"; do
+        if [[ -x "$d/apex" && -x "$d/apex-agentd" ]]; then
+            APEX_BIN="$d/apex"; AGENTD_BIN="$d/apex-agentd"; return 0
+        fi
+    done
+    return 1
+}
+
+# Called with its output captured, so it runs in a SUBSHELL and cannot set a
+# variable the caller will see. find_built_runtime is therefore called by main
+# BEFORE this, in the parent: the first version called it from in here, the
+# assignments died with the subshell, and the lab went on to exec an empty
+# string — "command not found" at the moment it tried to start its daemon.
+missing_prereq() {
+    [[ -x /usr/bin/bwrap ]] || { printf 'bubblewrap is not installed (/usr/bin/bwrap)'; return 0; }
+    [[ -x "$BROWSER_BIN" ]] || { printf 'no browser at %s' "$BROWSER_BIN"; return 0; }
+    command -v python3 >/dev/null 2>&1 || { printf 'python3 is missing, and it is the lab HTTPS server'; return 0; }
+    command -v openssl >/dev/null 2>&1 || { printf 'openssl is missing, and it makes the lab certificate'; return 0; }
+    [[ -n "$APEX_BIN" && -n "$AGENTD_BIN" ]] || {
+        printf 'no built runtime: run `cargo build --workspace --bins` in apexd/ first (the lab needs apex and apex-agentd from THIS branch; the installed ones predate it)'
+        return 0
+    }
+    # The binary has to be somewhere a confined session can exec it.
+    case "$APEX_BIN" in
+        /tmp/*) printf 'the built runtime is under /tmp, which a confined session cannot see; build in a worktree under /var/tmp'; return 0 ;;
+        "$HOME"/*) printf 'the built runtime is under $HOME, which a confined session masks; build in a worktree under /var/tmp'; return 0 ;;
+    esac
+    return 1
+}
+
+# ── the private runtime ─────────────────────────────────────────────────────
+#
+# HOME is deliberately the REAL one. The sandbox masks $HOME with a tmpfs, so
+# pointing the daemon at a fake home would mask the fake one and leave the
+# user's real home visible through `--ro-bind / /` — the lab would then be
+# proving the isolation of a directory nobody cares about while the thing it
+# claims to protect sat there readable. Every XDG directory IS redirected, so
+# the daemon writes nothing into that home.
+DAEMON_PID=""
+SERVER_PID=""
+
+start_daemon() {
+    export XDG_RUNTIME_DIR="$LAB/run"
+    export XDG_CONFIG_HOME="$LAB/config"
+    export XDG_STATE_HOME="$LAB/state"
+    export XDG_DATA_HOME="$LAB/data"
+    export APEX_AGENT_SCRATCH_ROOT="$LAB/scratch"
+    export APEX_BROWSER_ROOT="$LAB/capsules"
+    export APEX_BROWSER_APEX="$APEX_BIN"
+    export APEX_BROWSER_BIN="$LAB/observer"
+    mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" \
+             "$XDG_DATA_HOME" "$APEX_AGENT_SCRATCH_ROOT" "$APEX_BROWSER_ROOT" "$OUT"
+    chmod 700 "$XDG_RUNTIME_DIR"
+    "$AGENTD_BIN" > "$LAB/daemon.log" 2>&1 &
+    DAEMON_PID=$!
+    local waited=0
+    while (( waited < 20 )); do
+        [[ -S "$XDG_RUNTIME_DIR/apex-agentd/control.sock" ]] && return 0
+        sleep 0.5; waited=$((waited + 1))
+    done
+    return 1
+}
+
+lab_teardown() {
+    [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null
+    if [[ -n "$DAEMON_PID" ]]; then
+        # The lab's own daemon, by pid, never by name. `pkill apex-agentd`
+        # would take the user's live runtime with it.
+        kill "$DAEMON_PID" 2>/dev/null
+        wait "$DAEMON_PID" 2>/dev/null
+    fi
+    if (( KEEP == 0 )) && [[ -n "$LAB" && "$LAB" == /var/tmp/* ]]; then
+        rm -rf -- "$LAB"
+    fi
+    return 0
+}
+
+# ── the lab's HTTPS server ──────────────────────────────────────────────────
+#
+# Serves three things: a page, an attachment (Content-Disposition, so a browser
+# treats it as a download rather than as something to render), and a /ping that
+# answers with a fixed word. Self-signed, so a client must be told to accept it
+# — which is fine, because what is under test is whether the CONNECT reached
+# the destination at all, not whether the lab can run a CA.
+PORT=0
+start_server() {
+    PORT="$(python3 - <<'PY'
+import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()
+PY
+)"
+    [[ "$PORT" =~ ^[0-9]+$ ]] || return 1
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$LAB/key.pem" -out "$LAB/cert.pem" \
+        -days 1 -subj "/CN=127.0.0.1" \
+        -addext "subjectAltName=IP:127.0.0.1" >/dev/null 2>&1 || return 1
+    cat > "$LAB/server.py" <<'PY'
+import http.server, ssl, sys, os
+PORT = int(sys.argv[1]); ROOT = sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        if self.path == "/ping":
+            body = b"APEX-BROWSERLAB-PONG"
+            self.send_response(200); self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body))); self.end_headers()
+            self.wfile.write(body); return
+        if self.path == "/report.csv":
+            body = b"col\nBROWSERLAB-DOWNLOAD\n"
+            self.send_response(200); self.send_header("Content-Type", "text/csv")
+            self.send_header("Content-Disposition", 'attachment; filename="report.csv"')
+            self.send_header("Content-Length", str(len(body))); self.end_headers()
+            self.wfile.write(body); return
+        body = b"<html><body><h1>APEX-BROWSERLAB-PAGE</h1></body></html>"
+        self.send_response(200); self.send_header("Content-Type", "text/html")
+        self.send_header("Set-Cookie", "browserlab=capsule-only; Path=/")
+        self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(os.path.join(ROOT, "cert.pem"), os.path.join(ROOT, "key.pem"))
+srv = http.server.HTTPServer(("127.0.0.1", PORT), H)
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+srv.serve_forever()
+PY
+    python3 "$LAB/server.py" "$PORT" "$LAB" > "$LAB/server.log" 2>&1 &
+    SERVER_PID=$!
+    local waited=0
+    while (( waited < 20 )); do
+        if openssl s_client -connect "127.0.0.1:$PORT" </dev/null >/dev/null 2>&1; then return 0; fi
+        sleep 0.5; waited=$((waited + 1))
+    done
+    return 1
+}
+
+# ── the observer ────────────────────────────────────────────────────────────
+#
+# APEX_BROWSER_BIN points the engine at this instead of at Firefox, and this
+# runs Firefox itself. It is not a stub: the browser that runs is the real one,
+# with the real profile the engine wrote, in the real capsule.
+#
+# What it adds is a witness INSIDE the namespace. Every line it writes is an
+# observation the capsule makes about itself — what its $HOME contains, whether
+# the compositor socket exists, what the network answers — and it leaves
+# through the nomination boundary, which is the boundary under test.
+#
+# It also writes leak.txt, which is never nominated. That is the hostile half:
+# the vmlab's egress flow writes an unnominated file for exactly this reason,
+# and the same falsification applies — an engine whose copy loop ran over the
+# directory instead of over the nominations would hand it over.
+write_observer() {
+    cat > "$LAB/observer" <<OBS
+#!/usr/bin/env bash
+# Written by run-browserlab. Runs INSIDE the capsule.
+set -uo pipefail
+D="\$PWD"
+{
+    printf 'pwd=%s\n' "\$PWD"
+    printf 'home=%s\n' "\$HOME"
+    printf 'uid=%s\n' "\$(id -u)"
+    printf 'home-listing=%s\n' "\$(ls -a "\$HOME" 2>&1 | tr '\n' ' ')"
+    if [ -e "\$HOME/.mozilla" ]; then printf 'REAL-MOZILLA-REACHABLE=yes\n'
+    else printf 'REAL-MOZILLA-REACHABLE=no\n'; fi
+    if [ -e "$HOME/.mozilla/firefox" ]; then printf 'HOST-PROFILE-REACHABLE=yes\n'
+    else printf 'HOST-PROFILE-REACHABLE=no\n'; fi
+    printf 'wayland-display=%s\n' "\${WAYLAND_DISPLAY:-unset}"
+    printf 'x-display=%s\n' "\${DISPLAY:-unset}"
+    if [ -n "\${XDG_RUNTIME_DIR:-}" ] && [ -e "\${XDG_RUNTIME_DIR}/\${WAYLAND_DISPLAY:-wayland-0}" ]; then
+        printf 'COMPOSITOR-SOCKET=present\n'
+    else
+        printf 'COMPOSITOR-SOCKET=absent\n'
+    fi
+    printf 'interfaces=%s\n' "\$(ip -o link show 2>/dev/null | awk -F': ' '{print \$2}' | tr '\n' ' ')"
+    printf 'http_proxy=%s\n' "\${http_proxy:-unset}"
+    # Through the proxy, to the address the rule wrote down.
+    printf 'allowed-get=%s\n' "\$(curl -s --max-time 20 -k "https://127.0.0.1:${PORT}/ping" 2>&1 | head -c 60)"
+    # The same host by a NAME that resolves to loopback. accepts_address must
+    # refuse it: a rule that wrote a name did not mean this machine.
+    printf 'named-loopback-get=%s\n' "\$(curl -s --max-time 20 -k "https://localhost:${PORT}/ping" 2>&1 | head -c 60; printf ' rc=%s' "\$?")"
+    # With no proxy at all, to an address that is NOT loopback. Measured
+    # rather than assumed: the first version probed 127.0.0.1 unproxied and
+    # got "Could not connect to server" — ECONNREFUSED against the capsule's
+    # OWN loopback, where the lab's server is not listening. True, and nothing
+    # to do with routing. 198.51.100.7 is TEST-NET-2 and never routable, so
+    # what comes back is the namespace's answer rather than a server's.
+    printf 'unproxied-literal=%s\n' "\$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy \\
+        curl -s -S --max-time 20 -k "https://198.51.100.7/ping" 2>&1 | head -c 120)"
+    # And by name, which additionally has no resolver to ask — which is why
+    # the DAEMON resolves and why the allowlist checks a name.
+    printf 'unproxied-name=%s\n' "\$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy \\
+        curl -s -S --max-time 20 -k "https://example.com/" 2>&1 | head -c 120)"
+    printf 'unproxied-get=%s\n' "\$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy \\
+        curl -s -S --max-time 20 -k "https://127.0.0.1:${PORT}/ping" 2>&1 | head -c 120)"
+    printf 'profile-dir-exists=%s\n' "\$([ -d "\$PWD/.profile" ] && echo yes || echo no)"
+    printf 'user-js-proxy=%s\n' "\$(grep -c 'network.proxy.type' "\$PWD/.profile/user.js" 2>/dev/null)"
+} > "\$D/observed.txt" 2>&1
+# Never nominated. If this reaches the host, the copy loop ran over the
+# directory instead of over the nominations.
+printf 'BROWSERLAB-LEAK\n' > "\$D/leak.txt"
+printf 'the capsule created leak.txt in %s\n' "\$D" >> "\$D/observed.txt"
+exec "$BROWSER_BIN" "\$@"
+OBS
+    chmod 0755 "$LAB/observer"
+}
+
+# capsule_run FLOW EXTRA... — one capsule, its output captured, its nominated
+# files landing in $OUT/FLOW/got.
+ENGINE="$REPO/files/system/libexec/apex-browser"
+CAPSULE_OUT=""
+capsule_run() {
+    local flow="$1"; shift
+    local got="$OUT/$flow/got"
+    mkdir -p "$got"
+    CAPSULE_OUT="$("$ENGINE" run --timeout 150 --download-to "$got" "$@" 2>&1)"
+    printf '%s\n' "$CAPSULE_OUT" > "$OUT/$flow/engine.log"
+    return 0
+}
+
+# ── flows ───────────────────────────────────────────────────────────────────
+
+# The capsule cannot reach the profile you use, and the one it makes is its own.
+#
+# The negative is only worth making because the positive is true outside: the
+# lab checks that $HOME/.mozilla EXISTS on this machine first, and reports
+# could-not-run if it does not. A capsule that could not find a profile which
+# was not there either would have proved nothing.
+flow_profile() {
+    [[ -e "$HOME/.mozilla" ]] || {
+        cannot "there is no $HOME/.mozilla on this machine, so 'the capsule cannot reach it' would be a claim about nothing"
+        return
+    }
+    capsule_run profile --allow "127.0.0.1:$PORT" \
+        --download observed.txt \
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
+    local obs="$OUT/profile/got/observed.txt"
+    [[ -f "$obs" ]] || { cannot "the capsule produced no observation file, so nothing can be said about what it saw"; return; }
+    local seen; seen="$(cat "$obs")"
+    cp "$obs" "$OUT/profile/observed.txt"
+    says     "the capsule cannot see ~/.mozilla" "REAL-MOZILLA-REACHABLE=no" "$seen"
+    says     "the capsule cannot see the host's Firefox profile directory" "HOST-PROFILE-REACHABLE=no" "$seen"
+    says_not "no host profile leaked into the capsule's home listing" ".mozilla" "$(grep '^home-listing=' <<<"$seen")"
+    says     "the capsule has a profile of its own" "profile-dir-exists=yes" "$seen"
+    says     "that profile pins the proxy" "user-js-proxy=1" "$seen"
+    # From outside: the capsule's profile is inside the capsule, and the
+    # capsule is gone. Cookies are a file in a profile, so this is the cookie
+    # claim as well.
+    claim_not "no capsule directory survived the run" \
+        bash -c "compgen -G '$APEX_BROWSER_ROOT/*' >/dev/null"
+    # And the host's own profile was not written to.
+    claim_not "the run created no new file in the host's Firefox profile" \
+        bash -c "find '$HOME/.mozilla' -newer '$LAB/cert.pem' -print -quit 2>/dev/null | grep -q ."
+}
+
+# Headless is the missing socket, not the flag.
+flow_headless() {
+    capsule_run headless --allow "127.0.0.1:$PORT" \
+        --download observed.txt --download shot.png \
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
+    local obs="$OUT/headless/got/observed.txt"
+    [[ -f "$obs" ]] || { cannot "the capsule produced no observation file"; return; }
+    local seen; seen="$(cat "$obs")"
+    says "there is no compositor socket in the capsule's namespace" "COMPOSITOR-SOCKET=absent" "$seen"
+    # The stronger claim: the browser ran anyway and rendered something. A
+    # headless assertion that came with no rendering would be consistent with a
+    # browser that never started.
+    if [[ -s "$OUT/headless/got/shot.png" ]]; then
+        _chaos_pass "the browser rendered a page with no display at all"
+    else
+        _chaos_fail "the browser produced no screenshot, so 'headless works' has no evidence behind it"
+    fi
+    says "the capsule's own interface list is loopback only" "interfaces=lo " "$seen"
+}
+
+# The allowlist decides, and the falsification is inside the flow.
+flow_network() {
+    capsule_run network --allow "127.0.0.1:$PORT" \
+        --download observed.txt \
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
+    local obs="$OUT/network/got/observed.txt"
+    [[ -f "$obs" ]] || { cannot "the capsule produced no observation file"; return; }
+    local seen; seen="$(cat "$obs")"
+    says "the destination the rule wrote down is reachable" "APEX-BROWSERLAB-PONG" "$(grep '^allowed-get=' <<<"$seen")"
+    # The control. Same server, same port, reached by a NAME. accepts_address
+    # refuses a local address for a name rule, so this must NOT answer.
+    says_not "the same server reached by a name is refused" "APEX-BROWSERLAB-PONG" "$(grep '^named-loopback-get=' <<<"$seen")"
+    # And the daemon says so itself, which is an observation by the enforcer
+    # rather than by the thing being enforced.
+    says "the daemon recorded the denial" "denied" "$(cat "$LAB/daemon.log" 2>/dev/null)"
+    # Ignoring the proxy buys nothing: no route, no resolver.
+    says_not "a capsule that ignores the proxy does not get a connection" "APEX-BROWSERLAB-PONG" "$(grep '^unproxied-get=' <<<"$seen")"
+    # The claim is that the namespace has no ROUTE, so the destination has to
+    # be one that needs routing. Loopback does not, and measuring against it
+    # is how this assertion nearly passed for the wrong reason.
+    # Measured rather than guessed at TWICE. The first version probed loopback,
+    # which exists in the namespace. The second expected curl to print
+    # "Network is unreachable"; it does not — for a literal outside loopback it
+    # reports CURLE_COULDNT_CONNECT, "Failed to connect … after 0 ms". So what
+    # is asserted is what is observable: the connection does not happen, and it
+    # does not happen instantly, against an address in TEST-NET-2 that nothing
+    # on any network would answer.
+    says "an unproxied address outside loopback connects to nothing" "Failed to connect to 198.51.100.7" \
+         "$(grep '^unproxied-literal=' <<<"$seen")"
+    says "and a name cannot even be resolved inside the capsule" "Could not resolve host" \
+         "$(grep '^unproxied-name=' <<<"$seen")"
+
+    # ── that the BROWSER uses the bridge, not just that curl can ────────────
+    #
+    # Everything above is curl's word. The preference file is the only thing
+    # pointing Firefox at the bridge, so the browser's own use of it needs its
+    # own evidence — and the evidence has to come from the enforcer. Pointing
+    # the browser at a destination nobody allowed produces a denial in the
+    # DAEMON's log naming that host, and nothing but a proxied request could
+    # have produced it.
+    : > "$LAB/daemon-mark"
+    local before; before="$(wc -l < "$LAB/daemon.log" 2>/dev/null || echo 0)"
+    # A `.test` host on a port nothing else in this lab uses. `.invalid` was
+    # tried first and produced no denial at all — the browser never asked for
+    # it — so the name here is one a browser treats as an ordinary domain, and
+    # the port keeps it distinguishable from anything curl did.
+    # --download observed.txt is not decoration. capsule_run always passes
+    # --download-to, and the engine refuses that with nothing nominated —
+    # "nothing would leave" — so the first version of this flow never started a
+    # capsule at all and the assertion below failed for a reason that had
+    # nothing to do with browsers. The engine was right; the lab was calling it
+    # wrong.
+    capsule_run browser-proxy --allow "127.0.0.1:$PORT" --timeout 90 \
+        --download observed.txt \
+        -- --screenshot "{capsule}/shot.png" "https://browser-only.test:8443/"
+    local after_log; after_log="$(tail -n +$((before + 1)) "$LAB/daemon.log" 2>/dev/null)"
+    says "the browser's own request reached the daemon's proxy and was denied" \
+         "browser-only.test:8443" "$after_log"
+    # The engine refuses a destination the runtime has not allowed, rather
+    # than starting a capsule that reaches nothing.
+    local refused
+    refused="$("$ENGINE" run --allow "never-allowed.invalid:443" -- "https://never-allowed.invalid/" 2>&1)"
+    says "a destination the runtime has not allowed is refused at the call site" "apex agent allow" "$refused"
+}
+
+# Nomination-only egress, with the turned-around loop as the control.
+flow_downloads() {
+    capsule_run downloads --allow "127.0.0.1:$PORT" \
+        --download observed.txt \
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
+    local got="$OUT/downloads/got"
+    local obs="$got/observed.txt"
+    [[ -f "$obs" ]] || { cannot "the capsule produced no observation file"; return; }
+    # The capsule's own word that the unnominated file existed INSIDE. Without
+    # this, "leak.txt is not on the host" is consistent with it never having
+    # been written, which is not the claim.
+    says "the capsule says it created an unnominated file" "the capsule created leak.txt" "$(cat "$obs")"
+    claim_not "the unnominated file did not reach the host" test -e "$got/leak.txt"
+    claim     "the nominated file did" test -s "$obs"
+
+    # ── the falsifying control ──────────────────────────────────────────────
+    #
+    # A copy of the engine with its copy loop turned around: iterating the
+    # download directory instead of the nominations — the exact defect the
+    # shipped loop's comment says it exists not to have. If the same capsule
+    # then hands over leak.txt, the shipped direction is what stopped it, and
+    # the assertion above is not passing for some unrelated reason.
+    local mutant="$LAB/apex-browser.mutated"
+    cp "$ENGINE" "$mutant"
+    python3 - "$mutant" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = '        for n in "${download[@]}"; do'
+new = '        for n in $(cd "$downloads" && ls -1 2>/dev/null); do'
+assert s.count(old) == 1, "the loop this control turns around is not where it was"
+open(p, "w").write(s.replace(old, new))
+PY
+    chmod 0755 "$mutant"
+    local mgot="$OUT/downloads/mutant-got"
+    mkdir -p "$mgot"
+    "$mutant" run --timeout 150 --allow "127.0.0.1:$PORT" \
+        --download observed.txt --download-to "$mgot" \
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>" \
+        > "$OUT/downloads/mutant.log" 2>&1
+    if [[ -e "$mgot/leak.txt" ]]; then
+        _chaos_pass "an engine whose loop runs over the directory DOES leak the unnominated file"
+    else
+        _chaos_fail "the mutated engine leaked nothing either, so the assertion above is not evidence about the loop"
+    fi
+    rm -f "$mutant"
+
+    # Default-deny at the other end: nothing leaves without a destination.
+    local nodest="$OUT/downloads/nodest"
+    mkdir -p "$nodest"
+    local out
+    out="$("$ENGINE" run --timeout 150 --allow "127.0.0.1:$PORT" --download observed.txt \
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>" 2>&1)"
+    says "without a destination nothing leaves, however much is nominated" "nothing left the capsule" "$out"
+    claim_not "and no destination was invented" bash -c "compgen -G '$nodest/*' >/dev/null"
+}
+
+# What --capability decides, and the difference between three answers.
+flow_capability() {
+    # The refusal that matters most is the one about not knowing. secretd is a
+    # root service and this lab does not start one, so what can be exercised
+    # live here is that a capsule REFUSES rather than guessing — and that the
+    # refusal names the right fix.
+    local out
+    out="$("$ENGINE" run --capability nothing-is-stored-here -- "https://example.invalid/" 2>&1)"
+    if grep -qF "could not be asked" <<<"$out"; then
+        _chaos_pass "a capsule whose capability cannot be looked up refuses, and says the service could not be asked"
+        says "and it names the fix for THAT case rather than the other one" "apex-secretd" "$out"
+        says_not "it does not claim the credential is absent" "has no credential named" "$out"
+        cannot "apex-secretd is not running, so the pin-binding half was not exercised; what ran is the three-answer refusal"
+    elif grep -qF "has no credential named" <<<"$out"; then
+        _chaos_pass "the secret service answered and the capsule refused a name it does not hold"
+        cannot "the service holds no credential to pin a capsule to, so the pin-binding half was not exercised"
+    else
+        _chaos_fail "a capsule with an unknown capability neither refused nor said why: $out"
+    fi
+}
+
+# Not a flow, a postcondition of all of them.
+flow_teardown() {
+    claim_not "no capsule directory is left" \
+        bash -c "compgen -G '$APEX_BROWSER_ROOT/*' >/dev/null"
+    local sessions
+    sessions="$("$APEX_BIN" agent list 2>&1)"
+    says "no session is left running" "no running sessions" "$sessions"
+    {
+        printf 'capsule root after the run:\n'; ls -la "$APEX_BROWSER_ROOT" 2>&1
+        printf '\nsessions after the run:\n'; printf '%s\n' "$sessions"
+    } > "$OUT/teardown/state.txt" 2>&1
+    # The user's own runtime was never touched. Checked rather than promised:
+    # the lab's daemon is a pid it started, and the live one answers on the
+    # real $XDG_RUNTIME_DIR, which the lab replaced in its own environment only.
+    if [[ -S "/run/user/$(id -u)/apex-agentd/control.sock" ]]; then
+        _chaos_pass "the user's own agent runtime socket is still there"
+    else
+        info "the user had no live agent runtime to preserve; nothing to check"
+    fi
+}
+
+# ── driver ──────────────────────────────────────────────────────────────────
+main() {
+    while (( $# )); do
+        case "$1" in
+            --flow) shift; FLOWS=("${1:?--flow needs a name}") ;;
+            # --out and --list mirror tests/vmlab/run-vmlab's, because CI reads
+            # a bundle the same way for both: run with --out, then walk --list
+            # and refuse any flow that FAILED or that gave no reason.
+            --out)  shift; OUT="${1:?--out needs a directory}" ;;
+            --list) printf '%s\n' "${FLOWS[@]}"; exit 0 ;;
+            --keep) KEEP=1 ;;
+            -h|--help) sed -n '1,80p' "${BASH_SOURCE[0]}"; exit 0 ;;
+            *) die "unknown option '$1'" ;;
+        esac
+        shift
+    done
+
+    [[ -x "$ENGINE" ]] || die "no engine at $ENGINE"
+    rm -rf -- "$LAB" 2>/dev/null
+    # OUT is outside $LAB so it survives teardown; it therefore has to be
+    # cleared here instead, or a flow that does not run this time keeps the
+    # verdict it got last time.
+    rm -rf -- "$OUT" 2>/dev/null
+    mkdir -p "$LAB" "$OUT" || die "cannot create $LAB"
+    trap 'lab_teardown' EXIT INT TERM
+
+    find_built_runtime || true
+    local missing
+    if missing="$(missing_prereq)"; then
+        log "the lab cannot run: $missing"
+        local f
+        for f in "${FLOWS[@]}"; do
+            mkdir -p "$OUT/$f"
+            write_verdict "$OUT/$f" "$f" "$CANNOT" "$missing"
+            info "$f: $CANNOT — $missing"
+        done
+        summary
+        return 0
+    fi
+
+    log "starting the lab's own apex-agentd (the live one is not touched)"
+    start_daemon || die "the lab's daemon never opened its control socket; see $LAB/daemon.log"
+    info "daemon pid $DAEMON_PID on $XDG_RUNTIME_DIR"
+
+    log "starting the lab's HTTPS server"
+    start_server || die "the lab's HTTPS server did not come up; see $LAB/server.log"
+    info "https://127.0.0.1:$PORT"
+
+    write_observer
+
+    # The one destination every flow uses, added to the lab runtime's own
+    # allowlist. An ADDRESS rule, because that is the only kind
+    # accepts_address honours for a local address — and the name rule that is
+    # refused is the network flow's control.
+    "$APEX_BIN" agent allow "127.0.0.1:$PORT" >/dev/null 2>&1 \
+        || die "the lab runtime would not take its own allowlist entry"
+
+    local f rc=0
+    for f in "${FLOWS[@]}"; do
+        declare -F chaos_reset_expectations >/dev/null 2>&1 && chaos_reset_expectations
+        FLOW_REASON=""; FLOW_CANNOT=0
+        mkdir -p "$OUT/$f"
+        log "flow: $f"
+        case "$f" in
+            profile)    flow_profile ;;
+            headless)   flow_headless ;;
+            network)    flow_network ;;
+            downloads)  flow_downloads ;;
+            capability) flow_capability ;;
+            teardown)   flow_teardown ;;
+            *) FLOW_REASON="no such flow" ;;
+        esac
+        local state
+        if (( CHAOS_EXPECT_BAD > 0 )); then
+            state="$FAILED"
+            FLOW_REASON="$(printf '%s; ' "${CHAOS_EXPECT_NOTES[@]}" | grep -o 'BAD  [^;]*' | head -3 | tr '\n' ' ')${FLOW_REASON:+ — $FLOW_REASON}"
+            rc=1
+        elif (( FLOW_CANNOT == 1 )); then
+            # could-not-run BEATS verified, which is the vmlab's precedence and
+            # not an accident. The first version only reported could-not-run
+            # when NOTHING had been observed, so the capability flow — which
+            # exercises the refusal live and cannot exercise the pin-binding
+            # without a secret service — came out as "verified" with the gap
+            # demoted to a clause in the reason. A reader scanning the verdict
+            # column would have read that as capability auth being proven. A
+            # flow that names something it could not exercise has not verified
+            # the flow, whatever else held.
+            state="$CANNOT"
+        elif (( CHAOS_EXPECT_OK > 0 )); then
+            state="$VERIFIED"
+            FLOW_REASON="$CHAOS_EXPECT_OK observations held${FLOW_REASON:+ — $FLOW_REASON}"
+        else
+            state="$CANNOT"
+            FLOW_REASON="${FLOW_REASON:-the flow made no observations at all}"
+        fi
+        (( ${#CHAOS_EXPECT_NOTES[@]} )) \
+            && printf '%s\n' "${CHAOS_EXPECT_NOTES[@]}" > "$OUT/$f/expectations.txt" \
+            || : > "$OUT/$f/expectations.txt"
+        write_verdict "$OUT/$f" "$f" "$state" "$FLOW_REASON"
+        info "$f: $state — $FLOW_REASON"
+    done
+
+    summary
+    return "$rc"
+}
+
+summary() {
+    local good=0 bad=0 cant=0 f state reason
+    printf '\n═══ browserlab ═══\n\n' >&2
+    for f in "${FLOWS[@]}"; do
+        [[ -f "$OUT/$f/verdict.json" ]] || continue
+        state="$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' "$OUT/$f/verdict.json")"
+        reason="$(sed -n 's/.*"reason": "\([^"]*\)".*/\1/p' "$OUT/$f/verdict.json")"
+        printf '  %-12s %-14s %s\n' "$f" "$state" "$reason" >&2
+        case "$state" in
+            "$VERIFIED") good=$((good + 1)) ;;
+            "$FAILED")   bad=$((bad + 1)) ;;
+            *)           cant=$((cant + 1)) ;;
+        esac
+    done
+    printf '\n  %d verified, %d could-not-run, %d failed\n\n' "$good" "$cant" "$bad" >&2
+}
+
+main "$@"

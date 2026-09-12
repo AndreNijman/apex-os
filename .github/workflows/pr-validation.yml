@@ -1429,6 +1429,60 @@ jobs:
           path: ${{ runner.temp }}/vmlab
           if-no-files-found: ignore
 
+      # ── P2-012's browser capsule ──────────────────────────────────────────
+      #
+      # The everywhere half. A recording stub for `apex` on $APEX_BROWSER_APEX,
+      # and assertions on the two argvs and the one file that decide anything:
+      # the SESSION argv, where the confinement is asked for (a dropped word
+      # there is a capsule whose home is not masked or whose network is not
+      # filtered, reported as neither, and it is not a compile error); the
+      # BROWSER argv, for --headless, --no-remote and the capsule's own
+      # --profile; and user.js, which is the only thing pointing Firefox at the
+      # egress bridge because Firefox does not read $HTTP_PROXY.
+      - name: Run browser capsule assertions
+        run: ./tests/test-apex-browser.sh
+
+      # ── and its live lab, wherever this runs ──────────────────────────────
+      #
+      # tests/browserlab/run-browserlab boots real capsules through the shipped
+      # engine against a real apex-agentd, a real bwrap namespace and a real
+      # browser. On a runner it will almost always report could-not-run, and
+      # that is the point rather than a shortfall: it needs a runtime built
+      # from THIS branch, and session.rs::bridge_program refuses a bridge under
+      # /tmp or $HOME — a checkout on a runner is under $HOME, so the lab says
+      # so and names it.
+      #
+      # The rule enforced here is the vmlab's and not "it passed": a flow that
+      # could not run must say WHY, and no flow may come back `failed`. A
+      # runner that can run them verifies them instead, which is also a pass.
+      - name: P2-012 the browserlab, and its verdicts wherever this runs
+        run: |
+          set -euo pipefail
+          ./tests/browserlab/run-browserlab --out "$RUNNER_TEMP/browserlab"
+          bad=0
+          for f in $(./tests/browserlab/run-browserlab --list); do
+            v="$RUNNER_TEMP/browserlab/$f/verdict.json"
+            if [ ! -f "$v" ]; then echo "no verdict for $f"; bad=1; continue; fi
+            state=$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' "$v")
+            reason=$(sed -n 's/.*"reason": "\([^"]*\)".*/\1/p' "$v")
+            echo "$f: $state — $reason"
+            case "$state" in
+              failed) echo "  ^ a flow FAILED"; bad=1 ;;
+              could-not-run|verified) ;;
+              *) echo "  ^ unknown verdict state"; bad=1 ;;
+            esac
+            if [ -z "$reason" ]; then echo "  ^ no reason given"; bad=1; fi
+          done
+          exit $bad
+
+      - name: Keep the browserlab bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browserlab-bundles
+          path: ${{ runner.temp }}/browserlab
+          if-no-files-found: ignore
+
       # The half the suite above deliberately cannot answer. Its device-profile
       # coverage is argv-PINNED — it proves the engine emits the flags its
       # author intended, with a stubbed container manager. It cannot prove
