@@ -42,7 +42,8 @@ visible from the page a reader of `apex vm` would be on.
   one implementation rather than two. `Containerfile.base` makes that a build
   refusal.
 * `apexd/apex/src/browser.rs` — the clap surface, wired as `Cmd::Browser`.
-* `tests/test-apex-browser.sh` — 83 assertions against a recording `apex` stub.
+* `tests/test-apex-browser.sh` — 85 assertions against a recording `apex` stub,
+  run by CI beside `tests/test-apex-vm.sh`.
 * `tests/browserlab/run-browserlab` — the live lab.
 * `docs/browser-capsule.md` — the composition table and the not-built list.
 
@@ -126,6 +127,18 @@ pretending they combine. Both mask `$HOME`, `/run` and `$XDG_RUNTIME_DIR`.
 7. **`could-not-run` did not beat `verified` in the lab's own driver.** The
    capability flow came out "verified" with the unexercised half demoted to a
    clause in the reason. The vmlab's precedence is restored.
+8. **`--profile=DIR` walked around the refusal.** Firefox accepts the `=`
+   spelling — measured, it creates and uses a profile there — and the engine's
+   refusal listed only the space-separated forms. One character from pointing a
+   capsule at a directory it neither created nor deletes, which is the exact
+   thing that refusal exists to stop. The two arms were also inconsistent with
+   each other: `-display` already carried its `=` form and `--profile` did not.
+9. **CI runs suites by name, and nothing invoked this one.**
+   `tests/test-apex-browser.sh` would have gated nothing the moment this branch
+   landed. It now runs beside `tests/test-apex-vm.sh`, and the lab gained
+   `--out`/`--list` so CI reads its bundle the way it reads the vmlab's:
+   any flow that came back `failed` or gave no reason fails the job. Simulated
+   locally with a missing browser — 6 could-not-run, each naming why, exit 0.
 
 ## The live lab's verdicts, last full run on the L16
 
@@ -152,13 +165,20 @@ browser-proxy flow calling the engine wrong.
 
 ## Gates
 
-* `tests/test-apex-browser.sh` — **83 passed, 0 failed**. Every new assertion was
+* `tests/test-apex-browser.sh` — **85 passed, 0 failed**. Every new assertion was
   watched going RED against a mutated engine and the engine restored
   byte-identical with plain `cp` (sha256 compared, `git diff` clean).
 * `tests/check-containerfile-assertions.sh` — 106 checked / 0 failed / 0 inert
   before, **127 checked / 0 failed / 0 inert** after. Measured both ways
   against `origin/roadmap/v2.2`'s own copy of the file rather than assumed.
 * `shellcheck -S warning -x` clean on the engine, the suite and the lab.
+* `stop_slop` — `slopcheck.py` over `docs/browser-capsule.md`: 99 hits before,
+  **89** after a pass that cut the throat-clearing openers and the adverbs
+  doing no work. What remains is em dashes and passives, which are this
+  repository's house voice rather than slop: `docs/virtualization.md` scores
+  28 per 1000 words, `docs/recovery.md` 33, `docs/agent-runtime.md` 35, and
+  this page 34. Measured rather than waved at, because rewriting to 0 would
+  have made one page read unlike every other.
 * `cargo clippy --locked --workspace --all-targets -- -D warnings` — clean.
 * `cargo test --locked --workspace` — **3063 passed, 0 failed**.
 
@@ -208,7 +228,9 @@ worth:
 6. **Chromium.** The sandbox, the allowlist and the nomination loop are
    browser-agnostic; the profile writer is not.
 
-Do **not**: run the lab against the user's own `apex-agentd` (it starts its
+Do **not**: pass a RELATIVE path to `--screenshot` (Firefox writes nothing
+anywhere and still exits 0 — use `{capsule}/name`, which the engine expands);
+run the lab against the user's own `apex-agentd` (it starts its
 own, on a private `XDG_RUNTIME_DIR`, and kills it by pid); put the lab or a
 build under `/tmp` or `$HOME` (`session.rs::bridge_program` refuses a bridge
 there, and every allowlisted flow would report could-not-run for the wrong
