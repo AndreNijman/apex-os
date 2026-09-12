@@ -304,6 +304,11 @@ pub fn record_update(tag: &str) {
     };
     let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     if let Err(e) = std::fs::write(&tmp, &text) {
+        // The partial file goes with the error. `tests/chaos/cases/full-disk.sh`
+        // found the same omission in `qualify::save`, where a refused write left
+        // its temp file on the filesystem that had no room for it; this write
+        // has the same shape and would leave the same litter.
+        let _ = std::fs::remove_file(&tmp);
         eprintln!("apex: the update health gate is not armed: {}: {e}", tmp.display());
         return;
     }
