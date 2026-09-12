@@ -80,22 +80,71 @@ CA="$TMP/ca"; mkdir -p "$CA"
 # like a verifier bug.
 CA_NB="$(date -u -d '1 year ago' +%Y%m%d%H%M%SZ)"
 CA_NA="$(date -u -d '9 years' +%Y%m%d%H%M%SZ)"
+# ── one way to sign a certificate, on every openssl this has to run on ──────
+#
+# `openssl x509 -req -not_before/-not_after` and `openssl req -x509
+# -not_before` need OpenSSL 3.5. A Fedora 43 workstation has 3.5; ubuntu-24.04,
+# which is what the CI runner is, ships 3.0.13 and has neither flag on either
+# subcommand. This suite used to feature-detect in ONE of the two places it
+# mints certificates — the leaves — and use the flags unconditionally for the
+# authority. On the runner `mint_ca` therefore failed outright, root.pem was
+# never written, and six assertions about signature verification failed with
+# text that read like a verifier bug rather than a missing CA.
+#
+# `openssl ca -startdate/-enddate` predates all of it and does the same job, so
+# there is now one path and it is exercised on both versions rather than each
+# being exercised on one.
+mkdir -p "$CA/db"
+: > "$CA/db/index.txt"
+cat > "$CA/ca.cnf" <<CNF
+[ca]
+default_ca = apex_test
+[apex_test]
+dir             = $CA
+database        = \$dir/db/index.txt
+new_certs_dir   = \$dir/db
+default_md      = sha256
+policy          = apex_pol
+email_in_dn     = no
+# Random serials rather than a counter file: this suite mints several leaves
+# with the same subject, and a counter would have to be reset between them.
+rand_serial     = yes
+unique_subject  = no
+[apex_pol]
+countryName             = optional
+stateOrProvinceName     = optional
+localityName            = optional
+organizationName        = optional
+organizationalUnitName  = optional
+commonName              = optional
+emailAddress            = optional
+CNF
+
+# sign_cert <csr> <signing-key> <signing-cert|SELFSIGN> <notBefore> <notAfter> <extfile> <out>
+sign_cert() {
+    local csr="$1" key="$2" signer="$3" nb="$4" na="$5" ext="$6" out="$7"
+    local args=(-batch -config "$CA/ca.cnf" -notext -md sha256
+                -keyfile "$key" -startdate "$nb" -enddate "$na"
+                -extfile "$ext" -in "$csr" -out "$out")
+    if [ "$signer" = SELFSIGN ]; then args+=(-selfsign); else args+=(-cert "$signer"); fi
+    openssl ca "${args[@]}" >/dev/null 2>&1
+}
+
 mint_ca() {
+    printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n' \
+        > "$CA/ca.ext"
     openssl ecparam -name prime256v1 -genkey -noout -out "$CA/root.key" 2>/dev/null
-    openssl req -x509 -new -key "$CA/root.key" -sha256 \
-        -not_before "$CA_NB" -not_after "$CA_NA" \
-        -subj '/O=apex test/CN=apex test root' -out "$CA/root.pem" \
-        -addext 'basicConstraints=critical,CA:TRUE' \
-        -addext 'keyUsage=critical,keyCertSign,cRLSign' 2>/dev/null
+    openssl req -new -key "$CA/root.key" -subj '/O=apex test/CN=apex test root' \
+        -out "$CA/root.csr" 2>/dev/null
+    sign_cert "$CA/root.csr" "$CA/root.key" SELFSIGN "$CA_NB" "$CA_NA" "$CA/ca.ext" "$CA/root.pem"
     openssl ecparam -name prime256v1 -genkey -noout -out "$CA/int.key" 2>/dev/null
     openssl req -new -key "$CA/int.key" -subj '/O=apex test/CN=apex test intermediate' \
         -out "$CA/int.csr" 2>/dev/null
-    printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n' > "$CA/int.ext"
-    openssl x509 -req -in "$CA/int.csr" -CA "$CA/root.pem" -CAkey "$CA/root.key" \
-        -sha256 -not_before "$CA_NB" -not_after "$CA_NA" \
-        -extfile "$CA/int.ext" -out "$CA/int.pem" 2>/dev/null
+    sign_cert "$CA/int.csr" "$CA/root.key" "$CA/root.pem" "$CA_NB" "$CA_NA" "$CA/ca.ext" "$CA/int.pem"
 }
 mint_ca
+[ -s "$CA/root.pem" ] && [ -s "$CA/int.pem" ] \
+    || { echo "FATAL: the test CA did not mint; openssl is $(openssl version)" >&2; exit 1; }
 
 # mint_leaf <outdir> <san-uri> <issuer> [expired]
 #
@@ -104,23 +153,21 @@ mint_ca
 # machine reads it. A verifier that forgets `openssl verify -attime` refuses
 # every good image, so the default fixture leaf is the expired one and the
 # suite would go red the moment `-attime` was dropped.
-NOT_BEFORE_OK=0
-openssl x509 -help 2>&1 | grep -q -- '-not_before' && NOT_BEFORE_OK=1
 mint_leaf() {
     local out="$1" san="$2" iss="$3" expired="${4:-}"
     openssl ecparam -name prime256v1 -genkey -noout -out "$out/leaf.key" 2>/dev/null
     openssl req -new -key "$out/leaf.key" -subj '/CN=apex test leaf' -out "$out/leaf.csr" 2>/dev/null
     printf 'subjectAltName=critical,URI:%s\n1.3.6.1.4.1.57264.1.8=ASN1:UTF8String:%s\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n' \
         "$san" "$iss" > "$out/leaf.ext"
-    local window=()
-    if [[ -n "$expired" && "$NOT_BEFORE_OK" -eq 1 ]]; then
-        window=(-not_before "$(date -u -d '2 hours ago' +%Y%m%d%H%M%SZ)"
-                -not_after  "$(date -u -d '110 minutes ago' +%Y%m%d%H%M%SZ)")
+    local nb na
+    if [[ -n "$expired" ]]; then
+        nb="$(date -u -d '2 hours ago' +%Y%m%d%H%M%SZ)"
+        na="$(date -u -d '110 minutes ago' +%Y%m%d%H%M%SZ)"
     else
-        window=(-days 1)
+        nb="$(date -u +%Y%m%d%H%M%SZ)"
+        na="$(date -u -d '1 day' +%Y%m%d%H%M%SZ)"
     fi
-    openssl x509 -req -in "$out/leaf.csr" -CA "$CA/int.pem" -CAkey "$CA/int.key" \
-        -sha256 "${window[@]}" -extfile "$out/leaf.ext" -out "$out/leaf.pem" 2>/dev/null
+    sign_cert "$out/leaf.csr" "$CA/int.key" "$CA/int.pem" "$nb" "$na" "$out/leaf.ext" "$out/leaf.pem"
 }
 
 # crypto_fixture <name> <trust.conf body> [<tamper>] [<san>] [<expired>]
@@ -359,8 +406,7 @@ sec "the ten-minute Fulcio window, which every real signature is already past"
 # perfectly good signature, so the chain must be checked at a past instant —
 # the leaf's own notBefore, which the chain authenticates, and NOT the bundle's
 # rekor integratedTime, which nothing here authenticates.
-if [[ "$NOT_BEFORE_OK" -eq 1 ]]; then
-    exp_nb="$(openssl x509 -noout -startdate -dateopt iso_8601 -in "$R/work/leaf.pem")"
+exp_nb="$(openssl x509 -noout -startdate -dateopt iso_8601 -in "$R/work/leaf.pem")"
     exp_na="$(openssl x509 -noout -enddate -dateopt iso_8601 -in "$R/work/leaf.pem")"
     if openssl verify -CAfile "$CA/root.pem" -untrusted "$CA/int.pem" \
          "$R/work/leaf.pem" >/dev/null 2>&1; then
@@ -371,9 +417,6 @@ if [[ "$NOT_BEFORE_OK" -eq 1 ]]; then
         # done by verifying the chain at a past instant.
         has 'verified — signed by' "$TMP/all" "so the verified result above proves -attime is used"
     fi
-else
-    bad "this openssl has no -not_before, so the expiry trap could not be exercised"
-fi
 
 sec "a tampered signature is a FAILURE, and is worded as one"
 R="$(crypto_fixture tampered 'signature=enforce' sig)"
