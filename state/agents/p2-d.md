@@ -1,6 +1,6 @@
 # p2-d — secure browser automation capsule
 
-Task: **P2-012**. (P2-008 and P2-009 are nominally this unit's and are already
+Task: **P2-012**. (P2-008 and P2-009 are nominally this unit's and were already
 landed `partial` as merge `14650ca3`. They were NOT redone. Their remainders —
 USB passthrough, a guest image carrying an agent CLI — belong elsewhere.)
 
@@ -12,7 +12,7 @@ Repo: apex-os. Branch `task/p2-d-browser-capsule`, worktree
 P2-012: "Isolated browser profile/cookies/downloads and capability auth."
 
 Four things. Three are isolation and one is auth, and they are not equally
-buildable — see the pivot and the capability note below.
+buildable — see the capability section below, which is why this is `partial`.
 
 ## The pivot, and why it is one
 
@@ -23,30 +23,32 @@ the divergence is recorded rather than taken silently. Three measured reasons:
    guest image carries an agent CLI; a browser is the same gap one step over.
 2. **`apex vm run` refuses `--network` by design** — an outbound interface
    would make its file-egress boundary decorative. A browser with no network is
-   not a browser, so this is a different design and not that verb plus a flag.
-3. **The virt stack is deliberately not in the image** and `Containerfile.base`
-   asserts its absence; p2-virt's card additionally forbids installing it on
-   the L16.
+   not a browser.
+3. **The virt stack is deliberately not in the image**, `Containerfile.base`
+   asserts its absence, and p2-virt's card forbids installing it on the L16.
 
 What IS extended is the *rule* rather than the VM: the nomination-only egress
 loop, default-deny at both ends, the no-clobber rule, the destination fenced
 outside the teardown tree, and the four-way fence on the recursive removal.
-Each commit names the guarantee it rests on.
+Each commit names the guarantee it rests on. `docs/virtualization.md`'s "what
+is not built" list now records the VM-tier capsule as not built, so the gap is
+visible from the page a reader of `apex vm` would be on.
 
-A VM-tier browser capsule is recorded under "what is not built".
+## What was built
 
-## The substrate, all of it already in the image
+* `files/system/libexec/apex-browser` — the engine. It contains **no
+  confinement of its own and never invokes `bwrap`**; it asks `apex agent` for
+  a confined, allowlisted session, so the masked home and the egress proxy have
+  one implementation rather than two. `Containerfile.base` makes that a build
+  refusal.
+* `apexd/apex/src/browser.rs` — the clap surface, wired as `Cmd::Browser`.
+* `tests/test-apex-browser.sh` — 81 assertions against a recording `apex` stub.
+* `tests/browserlab/run-browserlab` — the live lab.
+* `docs/browser-capsule.md` — the composition table and the not-built list.
 
-* `apex-agent-core/src/sandbox.rs` — bwrap: `$HOME` a tmpfs, `/run` and
-  `$XDG_RUNTIME_DIR` tmpfs, `--proc /proc`, `--unshare-net`.
-* `apex-agentd/src/egress.rs` — `NetworkPolicy::Allowlist`: an in-namespace
-  bridge on `127.0.0.1:3128` over AF_UNIX to the daemon, which asks
-  `destination::Allowlist::decide` and `accepts_address` and connects to the
-  address it checked. CONNECT only.
-* `files/system/libexec/apex-vm` `cmd_run` — the egress loop and the fence.
-* `apex-secretd` — the capability framework (P1-001), host pin included.
-
-`bwrap`, `apex-agentd` and `/usr/bin/firefox` are all on a stock machine.
+`--sandbox project`, not `strict`: strict IS project with the network removed,
+and the CLI refuses `--sandbox strict --network allowlist` rather than
+pretending they combine. Both mask `$HOME`, `/run` and `$XDG_RUNTIME_DIR`.
 
 ## Measured before any code was written
 
@@ -54,39 +56,79 @@ A VM-tier browser capsule is recorded under "what is not built".
    `session.rs::bridge_program` refuses a bridge under `/tmp` or `$HOME`
    because a confined session cannot see either, and its comment says
    `/var/tmp` is reachable "which is what makes a live test of this mode
-   possible at all". The worktree is under `/var/tmp`. The installed `apex`
-   predates this branch (`apex agent` has no `allow` verb), so the lab uses a
-   dev daemon on a private `XDG_RUNTIME_DIR`/`XDG_CONFIG_HOME`/`XDG_STATE_HOME`
-   and never touches Andre's live runtime.
-2. **Firefox starts headless inside a strict-shaped bwrap and renders.**
-   `--screenshot` produced a 15 KB PNG with no `DISPLAY`, no
-   `WAYLAND_DISPLAY`, `/run` a tmpfs and `--no-remote`. No window appeared.
-3. **The fresh `/proc` is load-bearing, and this was found by breaking it.**
-   With `/proc` inherited read-only (`--ro-bind / /` and no `--proc /proc`),
-   Firefox's own content sandbox cannot write `/proc/self/uid_map`: `EROFS`,
-   every content process dies on `SIGSEGV`, no screenshot is produced, and the
-   parent still exits 0 — a silent nothing. The shipped sandbox already pushes
-   `--proc /proc`, so the browser's own sandbox nests inside APEX's and the
-   capsule has two boundaries. Same defect class as p2-virt's virtiofsd finding:
-   a namespace sandbox that cannot nest.
-4. **A loopback test server is reachable through the allowlist, and only as an
-   address rule.** `accepts_address` allows a local address when the rule wrote
-   that address down and denies it (`Denial::LocalAddress`) when the rule wrote
-   a name. That pair is the lab's falsifying control for the network half.
+   possible at all". The installed `apex` predates this branch (`apex agent`
+   has no `allow` verb there), so the lab uses a dev daemon on a private
+   `XDG_RUNTIME_DIR`/`XDG_CONFIG_HOME`/`XDG_STATE_HOME` and never touches the
+   live runtime.
+2. **Firefox starts headless inside a strict-shaped bwrap and renders** — a
+   15 KB PNG with no `DISPLAY`, no `WAYLAND_DISPLAY`, `/run` a tmpfs and
+   `--no-remote`. No window appeared.
+3. **The fresh `/proc` is load-bearing, found by breaking it.** With `/proc`
+   inherited read-only, Firefox's own content sandbox cannot write
+   `/proc/self/uid_map`: `EROFS`, every content process dies on `SIGSEGV`, no
+   screenshot, and the parent still exits 0 — a silent nothing. The shipped
+   sandbox already pushes `--proc /proc`, so the browser's own sandbox nests
+   inside APEX's and a capsule has two boundaries. Same defect class as
+   p2-virt's virtiofsd finding: a namespace sandbox that cannot nest.
+4. **Loopback is reachable through the allowlist only for an ADDRESS rule.**
+   `accepts_address` allows a local address when the rule wrote it down and
+   denies it (`Denial::LocalAddress`) when the rule wrote a name. That pair is
+   the lab's falsifying control for the network flow.
 5. **The proxy is CONNECT-only** — absolute-form `GET http://…` is answered 405
-   deliberately. So the lab's server is HTTPS and the capsule profile has to
-   trust its CA.
+   deliberately.
 
-## Shape
+## Defects found, all by running rather than by reading
 
-* `files/system/libexec/apex-browser` — the engine. Bash, like `apex-vm` and
-  `apex-disposable`. It shells out to `apex agent`, **never to bwrap**: the
-  confinement and the proxy stay in one implementation.
-* `apexd/apex/src/browser.rs` — the clap surface.
-* `tests/test-apex-browser.sh` — argv and profile assertions against stubs.
-* `tests/browserlab/run-browserlab` — the live lab, three-state verdicts.
-* `docs/browser-capsule.md` — written first, and it carries the not-built list.
+1. **`--profile` is not rejected by the CLI.** clap's trailing var-arg absorbs
+   an unrecognised option into the browser's arguments — the same way
+   `apex vm run` absorbs a `--network` — and a second `--profile` WINS on a
+   Firefox command line. A capsule would have run against a directory it
+   neither created nor deletes. The engine now refuses `--profile`, `-P`,
+   `-ProfileManager` and `-display` among the browser's arguments, by name.
+2. **The download directory was unreachable to a caller.** Downloads lived in
+   `<capsule>/downloads`, but the session's working directory is the capsule
+   root, so `--screenshot shot.png` wrote to the root and the nomination loop
+   reported the capsule "did not produce" a file it was standing next to. The
+   capsule directory is now the download directory and the profile moved to
+   `.profile` — the leading dot is what makes it unnominatable by
+   construction, because a nomination may not start with one.
+3. **The browser phoned home and the allowlist was carrying it.** The lab's
+   daemon log showed a capsule being denied `firefox.settings.services.
+   mozilla.com`, `aus5.mozilla.org` and `location.services.mozilla.com`, over
+   and over, for the rest of its run. The allowlist did its job; the profile
+   now turns those off, so the allowlist is the backstop rather than the only
+   thing stopping it.
+4. **Three answers, three times.** The capability lookup, the wait loop and the
+   allowlist probe each collapsed "could not ask" into "the answer is no". The
+   wait loop's version was the dangerous one: an unanswered `agent status` read
+   as "finished" runs the nomination loop over a directory the browser may
+   still be writing into, and the mutation proving it turns "nothing is copied
+   out on that assumption" red with "report.csv was copied anyway".
+5. **The wait loop waited on a state that does not exist.** `killed` is not an
+   `AgentState`, so that arm could never fire; `exited` is one and was missing,
+   so such a capsule was held until its timeout and then reported as one.
+6. **The lab was measuring the wrong thing for ENETUNREACH.** Its unproxied
+   probe went to 127.0.0.1 and got ECONNREFUSED against the capsule's own
+   loopback — true, and nothing to do with routing. It now probes a TEST-NET-2
+   literal and a name, and a new assertion covers what that left uncovered:
+   that the BROWSER uses the bridge, proven by a denial in the daemon's log.
+7. **`could-not-run` did not beat `verified` in the lab's own driver.** The
+   capability flow came out "verified" with the unexercised half demoted to a
+   clause in the reason. The vmlab's precedence is restored.
+
+## PLACEHOLDER-LAB-TABLE
+
+## Gates
+
+* `tests/test-apex-browser.sh` — 81 passed, 0 failed. Every new assertion was
+  watched going RED against a mutated engine and the engine restored
+  byte-identical with plain `cp` (sha256 compared, `git diff` clean).
+* `tests/check-containerfile-assertions.sh` — 106 checked / 0 failed / 0 inert
+  before, **126 checked / 0 failed / 0 inert** after. Measured both ways
+  against `origin/roadmap/v2.2`'s own copy of the file rather than assumed.
+* `shellcheck -S warning -x` clean on the engine, the suite and the lab.
+* PLACEHOLDER-RUST-GATES
 
 ## NEXT
 
-(in progress — see the report below when this round closes)
+PLACEHOLDER-NEXT
