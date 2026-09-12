@@ -462,12 +462,27 @@ grep -q '^sway-stub-ran$' "$W/bare.log" \
 # survives it, holding the VT and the DRM master — a machine that cannot be
 # logged into. This is the reason the fix is not `dbus-run-session --` in front
 # of the command.
-SWAY_PID="$(sed -n 's/^sway-stub-pid //p' "$W/bare.log" | head -1)"
-if [ -n "$SWAY_PID" ] && [ "$SWAY_PID" = "$CHAIN_PID" ]; then
+#
+# The WRAPPER is invoked directly here rather than through the chain, and that
+# is a correction CI made. Measured through `sh -c "<chain>"` the answer was off
+# by one on the ubuntu runner and exact on this laptop, because whether a shell
+# execs the single command it was handed is a property of WHICH shell — and
+# greetd does not use one at all. Measuring the wrapper against its own child
+# asks about the wrapper instead of about /bin/sh.
+: >"$W/exec.log"
+mkdir -p "$W/run-exec" 2>/dev/null; chmod 700 "$W/run-exec" 2>/dev/null
+env -i PATH="$STUB:/usr/bin:/bin" HOME="$W/home" USER="${USER:-tester}" \
+    TMPDIR="$W" XDG_RUNTIME_DIR="$W/run-exec" PROBE_OUT="$W/exec.probe" \
+    CHAIN_LOG="$W/exec.log" \
+    "$WRAPPER" sway -c "$SWAY_CONF" >>"$W/exec.log" 2>&1 &
+WRAP_PID=$!
+wait "$WRAP_PID"
+SWAY_PID="$(sed -n 's/^sway-stub-pid //p' "$W/exec.log" | head -1)"
+if [ -n "$SWAY_PID" ] && [ "$SWAY_PID" = "$WRAP_PID" ]; then
     ok "the pid greetd would hold is the compositor's own — the wrapper execs, it does not fork"
 else
     bad "the pid greetd would hold is the compositor's own" \
-        "chain started as $CHAIN_PID, compositor ran as ${SWAY_PID:-<none>}; greetd's teardown would miss it"
+        "the wrapper started as $WRAP_PID, the compositor ran as ${SWAY_PID:-<none>}; greetd's teardown would miss it"
 fi
 
 BARE_ADDR="$(probe_get "$W/bare.probe" DBUS_SESSION_BUS_ADDRESS)"
