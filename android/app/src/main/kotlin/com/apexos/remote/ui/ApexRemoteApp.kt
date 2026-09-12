@@ -24,6 +24,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.apexos.remote.ui.agent.AgentCenterScreen
+import com.apexos.remote.ui.agent.SessionScreen
+import com.apexos.remote.ui.agent.StartAgentScreen
+import com.apexos.remote.ui.agent.knownDirectories
+import com.apexos.remote.ui.term.TerminalScreen
 import com.apexos.remote.ui.theme.ApexRemoteTheme
 
 /**
@@ -37,6 +42,18 @@ import com.apexos.remote.ui.theme.ApexRemoteTheme
 object Destinations {
     const val MACHINES = "machines"
     const val PAIRING = "pairing"
+
+    /** Every agent on the connected machine. */
+    const val AGENTS = "agents"
+
+    /** One agent, in full. */
+    const val SESSION = "session"
+
+    /** The attached PTY. */
+    const val TERMINAL = "terminal"
+
+    /** Starting a new one. */
+    const val START = "start"
 }
 
 @Composable
@@ -77,7 +94,11 @@ fun ApexRemoteApp(
                 MachinesScreen(
                     state = state,
                     onPair = { navigation.navigate(Destinations.PAIRING) },
-                    onConnect = { viewModel.connect(activity, it) },
+                    onConnect = {
+                        viewModel.connect(activity, it)
+                        navigation.navigate(Destinations.AGENTS)
+                    },
+                    onPing = { viewModel.ping(activity, it) },
                     onForget = { viewModel.forget(it) },
                     onDynamicColour = { viewModel.setDynamicColour(it) },
                     onLock = { viewModel.lock() },
@@ -104,6 +125,102 @@ fun ApexRemoteApp(
                     onBack = { navigation.popBackStack() },
                     onDismiss = { viewModel.dismiss() },
                 )
+            }
+
+            composable(Destinations.AGENTS) {
+                AgentCenterScreen(
+                    machine = state.agents.machine?.machine ?: "",
+                    sessions = state.agents.sessions,
+                    nowSeconds = state.agents.nowSeconds,
+                    busy = state.busy ?: state.agents.busy,
+                    failure = state.failure ?: state.agents.failure,
+                    onRefresh = { viewModel.refreshAgents() },
+                    onOpen = {
+                        viewModel.selectSession(it)
+                        navigation.navigate(Destinations.SESSION)
+                    },
+                    onStart = { navigation.navigate(Destinations.START) },
+                    onBack = { navigation.popBackStack() },
+                    onDismiss = { viewModel.dismiss() },
+                )
+            }
+
+            composable(Destinations.SESSION) {
+                // Read from the state rather than passed as an argument, so a
+                // poll that arrives while this screen is open updates it. A
+                // detail screen holding a copy from four seconds ago is one
+                // that shows `working` for a session that has since failed.
+                val session = state.agents.selected
+                if (session == null) {
+                    LaunchedEffect(Unit) { navigation.popBackStack() }
+                } else {
+                    SessionScreen(
+                        session = session,
+                        machine = state.agents.machine?.machine ?: "",
+                        nowSeconds = state.agents.nowSeconds,
+                        busy = state.agents.busy,
+                        failure = state.agents.failure,
+                        onAttach = {
+                            if (viewModel.attach(session) != null) {
+                                navigation.navigate(Destinations.TERMINAL)
+                            }
+                        },
+                        onPause = { viewModel.signal(session, "stop") },
+                        onResume = { viewModel.signal(session, "cont") },
+                        onInterrupt = { viewModel.signal(session, "int") },
+                        onStop = { viewModel.signal(session, "term") },
+                        onRefresh = { viewModel.refreshAgents() },
+                        onBack = { navigation.popBackStack() },
+                        onDismiss = { viewModel.dismiss() },
+                    )
+                }
+            }
+
+            composable(Destinations.TERMINAL) {
+                val controller = viewModel.terminal
+                if (controller == null) {
+                    LaunchedEffect(Unit) { navigation.popBackStack() }
+                } else {
+                    TerminalScreen(
+                        controller = controller,
+                        title = state.agents.selected?.let { "${it.agentName} · ${it.where.substringAfterLast('/')}" }
+                            ?: (state.agents.machine?.machine ?: "Terminal"),
+                        settings = state.settings,
+                        onBack = {
+                            // Detaching leaves the session running on the
+                            // machine, which is the entire point of a viewport.
+                            viewModel.detach()
+                            navigation.popBackStack()
+                        },
+                    )
+                }
+            }
+
+            composable(Destinations.START) {
+                StartAgentScreen(
+                    machine = state.agents.machine?.machine ?: "",
+                    hello = state.agents.hello,
+                    knownDirectories = knownDirectories(state.agents.sessions),
+                    busy = state.agents.busy,
+                    failure = state.agents.failure,
+                    onStart = { agent, cwd, worktree, prompt ->
+                        viewModel.startAgent(cwd = cwd, agent = agent, worktree = worktree, prompt = prompt)
+                    },
+                    onBack = { navigation.popBackStack() },
+                    onDismiss = { viewModel.dismiss() },
+                )
+            }
+        }
+
+        // A start that worked lands on the new agent's page, which is where
+        // the next thing somebody wants to do is. Keyed on the id so it fires
+        // once per started session rather than once per recomposition.
+        LaunchedEffect(state.agents.selected?.id) {
+            if (state.agents.selected != null &&
+                navigation.currentDestination?.route == Destinations.START
+            ) {
+                navigation.popBackStack()
+                navigation.navigate(Destinations.SESSION)
             }
         }
 
