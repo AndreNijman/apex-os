@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX Safe Graphics — the desktop that comes up when the normal one cannot
+#  (roadmap P2-018)
+#
+#  This is a labwc session with a baked configuration, software rendering, and
+#  one client: a terminal. It is what a machine has left when the GPU driver,
+#  the compositor's configuration or APEX Shell is broken enough that the
+#  ordinary desktop does not paint.
+#
+#  ── The one property that makes it a recovery session ───────────────────────
+#  `labwc -C /usr/share/apex/safe-graphics` — a config DIRECTORY, not the
+#  user's. labwc reads `rc.xml`, `autostart`, `environment` and `menu.xml` from
+#  there and does not look in `~/.config/labwc` at all. That is the whole of
+#  P2-018's third criterion, and it matters because the user's `rc.xml` is a
+#  file APEX itself writes into: `apex-input-apply` splices a <libinput> block
+#  into it with ElementTree and `apex-labwc-keybinds` generates keybinds. A
+#  recovery session that read it would be a recovery session that inherits
+#  whatever broke the last one.
+#
+#  `-C` and not `XDG_CONFIG_HOME`: the compositor must be isolated from the
+#  user's configuration, and the CLIENTS must not be — a file manager with no
+#  config directory cannot save a bookmark, and a user in recovery still has a
+#  home directory they came here to reach.
+#
+#  ── Software rendering, and the one variable NOT set here ───────────────────
+#  WLR_RENDERER=pixman, LIBGL_ALWAYS_SOFTWARE=1, WLR_NO_HARDWARE_CURSORS=1 and
+#  QT_QUICK_BACKEND=software, because "the GPU does not work" is the case this
+#  exists for and a session that needs GL to tell you GL is broken is no use.
+#
+#  WLR_BACKENDS is deliberately NOT set. Unset, wlroots picks DRM on a real
+#  machine, which is what a person at the keyboard needs — and a test can put
+#  `headless` in the environment and have it honoured, which is the only way
+#  this session gets exercised without taking somebody's display away.
+#
+#  ── How a person reaches it ─────────────────────────────────────────────────
+#  1. From the greeter, as "APEX Safe Graphics".
+#  2. From a virtual console — Ctrl+Alt+F2, log in, run `apex-safe-graphics`.
+#     The greeter is itself a wlroots compositor on VT 1, so a machine with no
+#     working GL may not be able to show the picker at all. This route does not
+#     go through it.
+#
+#  There is deliberately no third route through a recovery BOOT entry: APEX
+#  never writes the ESP or an EFI variable from a shipped unit or helper
+#  (AGENTS.md boot-path rule 1, enforced by tests/test-boot-v2.sh), and a
+#  recovery entry is exactly that write. `docs/recovery.md` records the same
+#  decision for `apex recover`.
+#
+#  Verbs:
+#    apex-safe-graphics             start the session (what greetd runs)
+#    apex-safe-graphics check       can it run here, and what is missing
+#    apex-safe-graphics diagnose    write a diagnostics bundle and say where
+#
+#  Env overrides, for tests:
+#    APEX_SAFE_GRAPHICS_CONFIG   the config directory
+#    APEX_SAFE_GRAPHICS_TERMINAL the terminal the autostart launches
+# ─────────────────────────────────────────────────────────────────────────────
+# Not `set -e`: a diagnostics step that cannot run must be RECORDED as
+# "could not run" and the rest must continue. An early exit would produce a
+# bundle that is short for a reason nobody can see.
+set -uo pipefail
+
+CONFIG_DIR="${APEX_SAFE_GRAPHICS_CONFIG:-/usr/share/apex/safe-graphics}"
+
+log() { printf '[apex-safe-graphics] %s\n' "$*" >&2; }
+
+# ── What has to be here for the session to start ────────────────────────────
+# A list rather than four `if`s, because `check` prints it and the session
+# refuses on it, and those two answers must not be able to disagree.
+missing_parts() {
+    local missing=""
+    command -v labwc >/dev/null 2>&1 || missing="$missing labwc"
+    [ -d "$CONFIG_DIR" ] || missing="$missing $CONFIG_DIR"
+    [ -r "${CONFIG_DIR}/rc.xml" ] || missing="$missing ${CONFIG_DIR}/rc.xml"
+    [ -r "${CONFIG_DIR}/autostart" ] || missing="$missing ${CONFIG_DIR}/autostart"
+    printf '%s' "${missing# }"
+}
+
+# The terminal the session opens. Two candidates, both in the image, and the
+# order is deliberate: foot is the smaller of the two and the one more likely
+# to start on a machine that is already unwell.
+pick_terminal() {
+    if [ -n "${APEX_SAFE_GRAPHICS_TERMINAL:-}" ]; then
+        printf '%s' "$APEX_SAFE_GRAPHICS_TERMINAL"
+        return 0
+    fi
+    local candidate
+    for candidate in foot alacritty xterm; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+do_check() {
+    local missing
+    missing="$(missing_parts)"
+    if [ -n "$missing" ]; then
+        log "cannot start: missing$([ -n "$missing" ] && printf ' %s' "$missing")"
+        return 1
+    fi
+    local term
+    if ! term="$(pick_terminal)"; then
+        # Not fatal. A session with no terminal still shows the menu, and the
+        # menu can still roll the machine back — which is more than a black
+        # screen offers.
+        log "no terminal found; the session will start with the menu only"
+        term="(none)"
+    fi
+    printf 'config      %s\n' "$CONFIG_DIR"
+    printf 'compositor  %s\n' "$(command -v labwc)"
+    printf 'terminal    %s\n' "$term"
+    printf 'renderer    pixman (software)\n'
+    return 0
+}
+
+# ── Diagnostics ─────────────────────────────────────────────────────────────
+# Every step writes a file whether or not it worked, and a step that could not
+# run says so IN the file. A missing file and an empty file both read as "there
+# was nothing to report", which is the thing this must never say about a
+# command it was not allowed to execute.
+collect() {
+    local name="$1"
+    shift
+    local out="${BUNDLE}/${name}"
+    if ! command -v "$1" >/dev/null 2>&1; then
+        printf 'could-not-run: %s is not installed\n' "$1" > "$out"
+        return 0
+    fi
+    if ! "$@" > "$out" 2> "${out}.err"; then
+        {
+            printf '\n--- %s exited non-zero ---\n' "$1"
+            cat "${out}.err" 2>/dev/null
+        } >> "$out"
+    fi
+    rm -f "${out}.err"
+}
+
+do_diagnose() {
+    local dest="${1:-$HOME}"
+    if [ ! -d "$dest" ] || [ ! -w "$dest" ]; then
+        log "FATAL: $dest is not a directory this account can write to"
+        return 1
+    fi
+    local stamp
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    BUNDLE="$(mktemp -d "${dest}/.apex-diagnostics-XXXXXX")" || return 1
+    trap 'rm -rf "$BUNDLE"' RETURN
+
+    collect boot.log journalctl -b -p warning --no-pager
+    collect session.log journalctl -b --user --no-pager
+    collect recover.json apex recover status --json
+    collect doctor.json apex doctor --json
+    collect graphics.txt lspci -k
+    collect modules.txt cat /proc/modules
+    collect compositor.txt sh -c 'printf "XDG_CURRENT_DESKTOP=%s\nWAYLAND_DISPLAY=%s\nXDG_SESSION_TYPE=%s\n" \
+        "${XDG_CURRENT_DESKTOP:-}" "${WAYLAND_DISPLAY:-}" "${XDG_SESSION_TYPE:-}"'
+
+    local archive="${dest}/apex-diagnostics-${stamp}.tar.gz"
+    if ! tar -czf "$archive" -C "$BUNDLE" . 2>/dev/null; then
+        log "FATAL: could not write $archive"
+        return 1
+    fi
+    printf '%s\n' "$archive"
+    return 0
+}
+
+# ── The session ─────────────────────────────────────────────────────────────
+start_session() {
+    local missing
+    missing="$(missing_parts)"
+    if [ -n "$missing" ]; then
+        # Exiting non-zero here returns the user to the greeter, which is the
+        # same fail-safe `apex-gaming-session` takes: a recovery session that
+        # cannot start must never be a black screen with no way out.
+        log "FATAL: cannot start, missing: $missing"
+        log "returning to the greeter rather than starting a broken session"
+        exit 1
+    fi
+
+    # Software rendering. Exported rather than written into the config dir's
+    # `environment` alone, because labwc applies that file to the compositor
+    # and its clients — and the compositor has already chosen a renderer by
+    # then.
+    export WLR_RENDERER=pixman
+    export WLR_NO_HARDWARE_CURSORS=1
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export GALLIUM_DRIVER=llvmpipe
+    export QT_QUICK_BACKEND=software
+
+    # A broken GPU setup is often a broken vendor SELECTION, and those live in
+    # the environment. Unset rather than overridden: the right value is
+    # whatever the software stack picks on its own.
+    unset __GLX_VENDOR_LIBRARY_NAME GBM_BACKEND MESA_LOADER_DRIVER_OVERRIDE
+    unset __NV_PRIME_RENDER_OFFLOAD VK_ICD_FILENAMES
+
+    export XDG_CURRENT_DESKTOP=labwc
+    export XDG_SESSION_TYPE=wayland
+    if [ -n "$(pick_terminal 2>/dev/null)" ]; then
+        APEX_SAFE_GRAPHICS_TERMINAL="$(pick_terminal)"
+        export APEX_SAFE_GRAPHICS_TERMINAL
+    fi
+
+    # `exec`, and the last thing this script does. greetd holds the
+    # compositor's own pid and signals it at logout; a wrapper left in the
+    # middle would be a process holding the VT and DRM master on a machine
+    # nobody can log into. `apex-greet-session` carries the same rule and
+    # Containerfile.base asserts it there.
+    exec labwc -C "$CONFIG_DIR"
+}
+
+case "${1:-session}" in
+    session) start_session ;;
+    check) do_check ;;
+    diagnose)
+        shift
+        do_diagnose "${1:-$HOME}"
+        ;;
+    -h | --help | help)
+        sed -n '/^#  Verbs:/,/^#    APEX_SAFE_GRAPHICS_TERMINAL/p' "$0" | sed 's/^#  \{0,2\}//'
+        ;;
+    *)
+        log "FATAL: '$1' is not a verb; try: session, check, diagnose"
+        exit 2
+        ;;
+esac

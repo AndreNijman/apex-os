@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  APEX Safe Graphics — the root menu.
+
+  This is the whole user interface of the recovery session besides the
+  terminal, so it carries P2-018's second criterion: inspect the failure, roll
+  the machine back, collect diagnostics, reach files and network.
+
+  Every command here is either shipped in the image or a no-op if it is not:
+  labwc prints an error and stays up when an Execute command does not exist,
+  which is the right failure for a menu whose whole purpose is to still be
+  there when other things are not.
+
+  Bound to a PLAIN right-click, not SUPER+right-click. The desktop session
+  reserves plain right-click for APEX Shell's own context menu and puts the
+  emergency menu behind SUPER; here there is no shell and no second menu, and a
+  recovery UI whose only entry point is a modifier chord is a recovery UI
+  somebody cannot find.
+-->
+<openbox_menu>
+  <menu id="root-menu" label="APEX Safe Graphics">
+    <item label="Terminal">
+      <action name="Execute" command="/usr/libexec/apex-safe-graphics-terminal"/>
+    </item>
+    <separator/>
+    <item label="What is wrong (apex recover status)">
+      <action name="Execute" command="/usr/libexec/apex-safe-graphics-terminal apex recover status"/>
+    </item>
+    <item label="Full health report (apex doctor)">
+      <action name="Execute" command="/usr/libexec/apex-safe-graphics-terminal apex doctor"/>
+    </item>
+    <item label="Collect diagnostics into your home directory">
+      <action name="Execute" command="/usr/libexec/apex-safe-graphics-terminal /usr/libexec/apex-safe-graphics diagnose"/>
+    </item>
+    <separator/>
+    <item label="Roll back to the previous deployment">
+      <action name="Execute" command="/usr/libexec/apex-safe-graphics-terminal sudo apex rollback"/>
+    </item>
+    <separator/>
+    <item label="Files">
+      <action name="Execute" command="thunar"/>
+    </item>
+    <item label="Network">
+      <action name="Execute" command="/usr/libexec/apex-safe-graphics-terminal nmtui"/>
+    </item>
+    <separator/>
+    <item label="Log out">
+      <action name="Exit"/>
+    </item>
+  </menu>
+</openbox_menu>
