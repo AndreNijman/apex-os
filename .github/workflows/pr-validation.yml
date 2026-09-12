@@ -1556,9 +1556,15 @@ jobs:
           # accessibility-bus assertions SKIP with a reason rather than being
           # measured, which is a runner that says nothing about the half of the
           # change that matters most.
+          # `|| true` is load-bearing, not decoration: this step runs under
+          # `bash -e`, a for-loop exits with its last command's status, and a
+          # final `[ -x ]` that is false therefore FAILED THE WHOLE STEP on the
+          # first dispatch — while the packages it was reporting on had
+          # installed perfectly.
           for f in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher; do
-            [ -x "$f" ] && echo "have: $f"
+            [ -x "$f" ] && echo "have: $f" || true
           done
+          true
 
       - name: Run greeter session-bus assertions
         if: ${{ !cancelled() }}
