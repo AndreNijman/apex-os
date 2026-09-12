@@ -140,7 +140,19 @@ jobs:
           # false, skipped every job, and passed, because a skipped job counts
           # as success. The file an assertion is ABOUT has to select the job
           # that runs it.
-          grep -Eq '^(files/|tests/|Containerfile)' <<<"$files" && engine=true
+          # `.github/workflows/` is in the ENGINE selector, and it is the sixth
+          # instance of the bug the five comments above describe — this time in
+          # the selector list itself. Nothing selected on workflow files at all,
+          # so a change touching only a workflow set every selector false,
+          # skipped every job, and passed, because a skipped job counts as
+          # success.
+          #
+          # That is not abstract. Deleting the line that invokes a suite is a
+          # workflow-only change, and tests/check-suites-run-in-ci.sh — the gate
+          # that exists to notice exactly that — lives in this job and would not
+          # have run. The check whose job it is to catch a deletion was disarmed
+          # by the deletion.
+          grep -Eq '^(files/|tests/|Containerfile|\.github/workflows/)' <<<"$files" && engine=true
           # The Android client. Its own job, because none of the three above can
           # build it — and because without this rule an Android-only change
           # matches nothing, every selector stays false, every job is skipped,
