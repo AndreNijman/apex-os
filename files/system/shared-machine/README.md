@@ -156,6 +156,12 @@ so the journal says `refusing: … still has an active login session` and
 which is what that unit is the backstop for. `loginctl list-sessions` shows the
 stuck record.
 
+The boot sweep is not smarter about this, and it is worth saying so or the next
+reader will go looking for the difference: both units run the same engine and
+the same fence 4. It succeeds because logind keeps its session records in
+`/run/systemd/sessions`, which does not survive a reboot — the stuck record is
+simply gone by the time the sweep runs, along with every other session.
+
 ## Kiosk
 
 `greetd-kiosk.toml` + `sway-kiosk.conf`. The important design note is in the
