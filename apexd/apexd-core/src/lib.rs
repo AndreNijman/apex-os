@@ -59,6 +59,11 @@ pub mod gaming;
 pub mod gpu;
 pub mod host;
 pub mod irq;
+// P1-063's lid policy. Pure, like its neighbours: the decision is a total
+// function over injected readings, because the act it authorises is a laptop
+// going to sleep in someone's bag and the only machine that could exercise it
+// for real is one a person is using.
+pub mod lid;
 // §25's persistent-state migration framework. It resolves no paths and spawns
 // nothing: callers hand it a document or a `&Path`, which is what lets the
 // suite run entirely inside a temp directory rather than near a real
