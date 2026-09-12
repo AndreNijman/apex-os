@@ -128,12 +128,29 @@ class PairingService {
                 // descriptor per refused connection — on a revoked phone that
                 // keeps trying, which is exactly the phone this path is for.
                 return@withContext try {
-                    Client.openSession(
+                    val session = Client.openSession(
                         input = socket.getInputStream(),
                         output = socket.getOutputStream(),
                         identity = identity,
                         desktopPublic = Device.checkKey(machine.desktopKey),
                     )
+                    // The deadline comes OFF here, and only here: everything
+                    // before this line ran against a peer that had not proved
+                    // anything, and everything after it may sit idle for
+                    // hours. A PTY with nobody typing produces no bytes, and a
+                    // twenty-second read deadline on one would end somebody's
+                    // terminal every twenty seconds of silence. The desktop
+                    // does exactly the same thing at exactly the same point
+                    // (`serve.rs`: "authenticated, so the handshake deadline
+                    // comes off").
+                    //
+                    // The keepalive is what stands in for it: `apex-remoted`
+                    // sends a `Ping` every fifteen seconds and `Session.receive`
+                    // answers it, so a connection that has really gone away
+                    // still fails on the next write rather than hanging for
+                    // ever.
+                    socket.soTimeout = 0
+                    session
                 } catch (e: Exception) {
                     runCatching { socket.close() }
                     throw e
