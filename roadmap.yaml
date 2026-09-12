@@ -2957,7 +2957,7 @@ tasks:
 - id: P1-054
   title: Android Agent Center parity
   priority: P1
-  status: todo
+  status: done
   area: android
   depends_on:
   - P1-053
@@ -2971,10 +2971,39 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Android Agent Center parity. LANDED-READY on apex-os task/p1-053a-android-4 (five commits plus a merge of
+    roadmap/v2.2; head f78266b2). Verified headless, NO device and NO emulator: 295 core JVM tests, 10 app JVM
+    tests, a 43 MB debug APK, via ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug with
+    JAVA_HOME=/usr/lib/jvm/java-21-openjdk ANDROID_HOME=/var/tmp/android-sdk. MET: the list and detail screens
+    show agent graph, provider/model, project/worktree/branch, the flattened policy, current activity, context
+    gauge, elapsed time and status; pause/resume/interrupt/stop are the daemon's own signals
+    (SIGSTOP/SIGCONT/SIGINT/SIGTERM, spelled out on screen, since there is no pause verb); attach opens a real
+    PTY; reconnect is PtyAttachment's. COLOURS MATCH THE DESKTOP AND A TEST SAYS SO IN BOTH HALVES:
+    AgentStateAgreementTest parses vendored agentstate.js for state->token and the new ToneColoursTest parses a
+    vendored Colors.qml for token->colour, both verbatim from apex-shell 6e74101, and tools/check-agent-state.sh
+    diffs both against a live checkout (it did: identical, branch roadmap/v2.2). Three desktop semantics carried
+    rather than invented: live is exit_code==null && exit_signal==null and NOT !isTerminal(state) — state is
+    whatever was last PUBLISHED, including by the agent through the open Event verb, so sorting on it would let an
+    agent hold the top of the list for ever; a finished session's elapsed clock stops at its last activity;
+    darkSurface is luminance(background)<0.18 read off the surface, not a theme flag, which matters because
+    Material You can hand a dark theme a pale surface. NOT MET, and the gap is the runtime's: 'start with
+    profile/project/worktree' is partial. apex-agent-core's Request has NO profile verb (profile.rs is
+    unreachable), NO projects verb and NO worktrees verb — read out of the enum, not remembered. Round 3 had built
+    {"cmd":"worktrees"} and a parser for the answer; nothing could have parsed it and the phone would have shown
+    an error. Removed, with the test kept and inverted. What is offered instead: the adapter from Hello.agents, a
+    directory derived from what the daemon has already reported, and a worktree NAME (RunRequest.worktree does
+    exist), and the screen says why on screen. ALSO NOT VERIFIED: every Compose behaviour (assembleDebug is the
+    only gate a machine with no phone has); no relay leg, so LAN only; the CI android job has still never run,
+    though its path classifier was RUN against this diff (android=true rust=true). Mutation-checked: 8 mutations
+    on the model each turn a NAMED test red (live from published state, a finished clock that keeps running, a
+    sort without live-first, a zero gauge for a session that never reported, an orphan dropped, the cycle net
+    removed, every request retried including signals, a stop during connect ignored); every file restored byte-
+    identical.
 - id: P1-055
   title: Android full PTY/TUI remote terminal
   priority: P1
-  status: todo
+  status: done
   area: android
   depends_on:
   - P1-053
@@ -2988,6 +3017,47 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Android full PTY/TUI remote terminal. LANDED-READY on apex-os task/p1-053a-android-4 (head f78266b2). Verified
+    headless, NO device and NO emulator: 295 core JVM tests, 10 app JVM tests, a 43 MB debug APK. MET: real PTY
+    output with ANSI 16/256/truecolor and attributes — term/Palette.kt fills the hole Colour.resolveCube documents
+    and leaves, and render() is the whole SGR decision (bold brightens, inverse swaps AFTER resolution so an
+    inverted default cell swaps the theme's two defaults rather than two nulls, dim blends towards what is
+    actually behind the ink, hidden wins over everything); text input plus Ctrl/Esc/Tab/arrows/function keys
+    through onPreviewKeyEvent with modifiers that ARM rather than send (there is no chord on a touchscreen); a
+    CONFIGURABLE accessory row stored on MachineStore and never in a preferences file, because a second write path
+    into app storage is one InsecureStorageTest's walk never looks at; scrollback, search, selection and
+    copy/paste in term/Viewport.kt; orientation through one onSizeChanged that a rotation, a keyboard and a split-
+    screen resize all reach. Every position the viewport holds is dropped+index rather than an absolute index,
+    because Screen evicts and a viewport remembering 'line 300' would creep through the output at the rate the
+    scrollback overflows. THE LAST CRITERION IS TESTED HOSTILELY, NOT ASSERTED: a reconnect test that passes
+    because the connection was politely closed has proved nothing. A phone does not get a FIN — it goes into a
+    lift, and soTimeout is deliberately zero after the handshake, so the socket sits in read for hours while every
+    layer above sees exactly what an idle terminal looks like. FrameChannel.lastFrameNanos tells them apart (the
+    desktop pings every 15s and the pings are consumed inside the channel, so the question is 'has any FRAME
+    arrived' and it can only be answered below the multiplexer); the watchdog closes after three missed pings, and
+    answers null for a transport that cannot report liveness so the attachment emits WatchdogUnavailable rather
+    than arming over nothing. LowBandwidthTest: a 17-byte-per-frame trickle paints the same screen as an
+    unthrottled link (with the throttle ASSERTED to have applied — 130 frames where an unthrottled link uses 1);
+    one byte per frame still answers ESC[6n and ESC[c; a silent machine is abandoned and re-attached; a PINGED
+    silent machine is left alone; a link that trickles AND drops recovers the identical screen. TWO DEFECTS FOUND
+    BY WRITING IT. (1) PtyAttachment SILENTLY DROPPED the terminal's answers to a replay's opening frames: the
+    listener read the field meaning 'attached', which the attaching thread sets after openChannel returns, while
+    apex-agentd starts replaying the instant it answers — so a TUI's ESC[6n was computed and thrown away and the
+    TUI waited for ever, a remote terminal that hangs with nothing in any log, against three of the four TUIs this
+    criterion names. It raced, passing on an idle machine and failing as a 20s timeout only under the full suite.
+    Its regression test FORCES the ordering (the channel holds the attaching thread inside send(Open)); twenty-
+    five attachments went on passing against the reverted defect on a quiet box. (2) SIX OF THE SIXTEEN ANSI
+    COLOURS were the same hex as their normal twin — Catppuccin's own mapping, deliberate there — so the app
+    rendered TEN distinct colours where the criterion says sixteen and git's 31 and 91 would have looked
+    identical. Found because deleting the bold-brightening rule changed nothing any test could see. Also fixed:
+    stop() during connect() had nothing to close, so a screen left while connecting attached anyway and held the
+    connection until the far end dropped it. NOT MET: 'works with Claude/OpenCode/Codex/Gemini TUIs' is THREE OF
+    FOUR — there is still no gemini fixture, because gemini is not installed on this machine. NOT VERIFIED: every
+    Compose behaviour, assembleDebug being the only gate; the IME path in particular (composition and suggestion
+    behaviour against a permanently-empty field is reasoned from the API, not observed); no relay leg, so LAN
+    only. Mutation-checked: 17 mutations across the terminal, viewport, palette, watchdog and fixtures each turn a
+    NAMED test red; every file restored byte-identical with plain cp.
 - id: P1-056
   title: Android Projects, Workspaces, Worktrees, Tasks and Review UX
   priority: P1
