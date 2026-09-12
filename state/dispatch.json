@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-13T05:00+08:00",
+  "updated": "2026-09-13T05:40+08:00",
   "_round": "Round 23. TODO IS ZERO: 90 done / 36 partial / 0 todo / 2 blocked of 128 \u2014 every roadmap item has been started, and what remains is finishing partials plus the two LUKS/TPM items that are genuinely blocked. Six agents dispatched fresh after the 3am limit killed five of round 22's.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 c3bfbb0b -> e799422b. Agent-merged: p1-061, p2-b, p1-053c, p2-a. Orchestrator-merged: followups-4 (two suites wired), p1-053c handoff. Plus the skopeo retry, the workflow selector fix, the suite-gate comment fix and the SBOM budget.",
@@ -29,38 +29,6 @@
       "queue_id": "followups-4",
       "card": "ROADMAP/state/agents/followups-4.md",
       "at_dispatch": "Continues the CI debt. Predecessor wired test-apex-firewall.sh and test-device-image.sh and \u2014 the standard to match \u2014 made each step read its own summary line back so a SKIP fails instead of showing green. 61 run / 11 exempt now; 27 shellcheck items left. Owns tests/suites-not-in-ci.txt; other agents told to leave it alone."
-    },
-    {
-      "slug": "p1-063",
-      "items": [
-        "P1-063"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-063b",
-      "branch": "task/p1-063-lid-2",
-      "agent_id": "adff124f6a992952c",
-      "dispatched": "2026-09-13T03:45+08:00",
-      "session": "round 23 orchestrator",
-      "queue_id": "p1-063",
-      "card": "ROADMAP/state/agents/p1-063.md",
-      "at_dispatch": "Andre's own feature. Told criterion 1 is NOT closable by an agent \u2014 the L16 is docked and logind consults HandleLidSwitchDocked before any inhibitor, so it needs the external display unplugged, which is Andre's action. Largest buildable piece left is the apex-shell tile: status --json already carries the logind object and pin needs no privilege, so it is a read plus one exec with no polkit."
-    },
-    {
-      "slug": "p2-c",
-      "items": [
-        "P2-005",
-        "P2-006",
-        "P2-007"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p2-c",
-      "branch": "task/p2-005-device-maturity",
-      "agent_id": "a13709efac8649a23",
-      "dispatched": "2026-09-13T03:45+08:00",
-      "session": "round 23 orchestrator",
-      "queue_id": "p2-c",
-      "card": "ROADMAP/state/agents/p2-005.md",
-      "at_dispatch": "Dispatched now specifically because base passes at last: P2-007's evidence says several readers change their answer once the packages land in a built image. Warned about the P1-044 hotspot finding and told followups-4 owns the CI wiring for two of its suites."
     },
     {
       "slug": "p1-053c",
@@ -110,6 +78,23 @@
       "queue_id": "p2-b",
       "card": "ROADMAP/state/agents/p2-b.md",
       "at_dispatch": "Took p2-f's slot. Warned FIRST that its own card was rebuilt from a transcript after being truncated 1121->16 lines, so older detail is a summary and roadmap.yaml's evidence wins. Given the two claims the last round overturned: the QTranslator blocker is the HOST (quickshell calls it 0 times and builds a bare QQmlEngine), and the CJK-tofu claim was never run and is false \u2014 the real P2-004 gap is layout, 0 LayoutMirroring and 0 layoutDirection, which is buildable. Told that when a mutant 'survives' it should suspect the harness first, because three did last round for that reason."
+    },
+    {
+      "slug": "later",
+      "items": [
+        "L-001",
+        "L-002",
+        "L-003"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-later",
+      "branch": "task/later-tpm-qualification",
+      "agent_id": "abd8dbd3eeb1d3201",
+      "dispatched": "2026-09-13T05:40+08:00",
+      "session": "round 23 orchestrator",
+      "queue_id": "later",
+      "card": "ROADMAP/state/agents/later.md",
+      "at_dispatch": "The LAST TWO BLOCKED ITEMS depend on L-001, which had no recorded evidence at all. Its criteria \u2014 real TPM, TPM clear, firmware update, suspend/resume, recovery keys \u2014 are all forbidden on the L16, so it was dispatched down a route that did not exist until this week: qualify them inside the VM lab, which P2-008 already proved gives a real swtpm TPM 2.0, a varstore that enforces Secure Boot and refuses the wrong keys, and disk+nvram snapshots to revert. Told the recovery path is the load-bearing half \u2014 a TPM clear and a PCR change must still be recoverable, demonstrated failing \u2014 and that if 'real TPM' genuinely means silicon it must say so precisely rather than unblocking L-002/L-003 on an emulated one."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -161,7 +146,9 @@
     "a regression shipped and was caught in the same round: undefined !== \"\"": "p2-f's greeter status line tested a notice against `\"\"`. A ctx without the property yields `undefined`, and `undefined !== \"\"` is TRUE, so the line rendered the string 'undefined' AND swallowed the Caps Lock warning and the screen-reader announcement \u2014 on the login screen. test-apex-greet-a11y.sh went 5/0 -> 4/1 and was right. Both bindings test for truth now. Note the division of labour it recorded: with the fixture's ctx made faithful, reverting the spelling no longer reddens the a11y fixture \u2014 only the watchdog suite catches it.",
     "nmtui is named by no APEX dnf list": "The safe-graphics menu offers nmtui, which is inherited from fedora-bootc:43 and required by nothing \u2014 not even a weak dep of NetworkManager. A base-image change upstream would remove it and the recovery menu would offer a binary that is not there. Now asserted at build time (thunar too). If it fires, the fix is NetworkManager-tui in core.",
     "`cargo test -p apex-remoted` does not rebuild apex-agentd": "Three mutations of inject.rs came back GREEN against a binary compiled before they existed \u2014 a mutation that cannot fail, in the harness rather than the Containerfile this time. Fixed by p1-053c: refuse_if_stale now compares each sibling binary against the crates it is built from. An existence check was necessary and not sufficient. This is the THIRD stale-artefact defect in two days, after check-doc-verbs.sh reading a target/debug/apex that cargo test --bins --no-run never refreshes. Whenever a test drives a BINARY rather than a library, ask what rebuilt it.",
-    "round 1 refused a criterion with arithmetic about the wrong type": "P1-059 C2 was refused as impossible: MAX_PAYLOAD 65514, base64 4/3, ~48 KB against a 100 KB-2 MB screenshot. Every number correct; all of it measured a Frame::Control. Open/Data/Close IS begin/chunk/end \u2014 wire.rs:66 says so \u2014 and Frame::data_frames had been chunking every PTY byte the phone ever received. One daemon verb closed it. The lesson for every unit: before recording that something cannot be done, check which TYPE your measurement was about. A false 'cannot be done from here' is how work does not get done, and this is the second instance in two days (p2-f claimed GreetContext.qml was in apex-shell)."
+    "round 1 refused a criterion with arithmetic about the wrong type": "P1-059 C2 was refused as impossible: MAX_PAYLOAD 65514, base64 4/3, ~48 KB against a 100 KB-2 MB screenshot. Every number correct; all of it measured a Frame::Control. Open/Data/Close IS begin/chunk/end \u2014 wire.rs:66 says so \u2014 and Frame::data_frames had been chunking every PTY byte the phone ever received. One daemon verb closed it. The lesson for every unit: before recording that something cannot be done, check which TYPE your measurement was about. A false 'cannot be done from here' is how work does not get done, and this is the second instance in two days (p2-f claimed GreetContext.qml was in apex-shell).",
+    "the shellcheck gate used the exec bit as a discovery predicate": "FOURTH discovery bug in the orchestrator's own gates, found by p2-c. `find ... -perm -u+x` missed ten shipped scripts that carry a shebang but are not executable in the repo (the Containerfile chmods them) \u2014 including files/system/libexec/apex-session-select and apex-shell-autostart, both ON THE LOGIN PATH. The predicate is the shebang now: 150 -> 162 discovered, 0 newly failing, so all ten were already clean. Running total for the gates: containerfile assertions 106 -> 188 checked, shellcheck 38 -> 162 discovered. Every increment was assertions or files that existed and were never being checked.",
+    "a usable base image exists and the device readers moved in it": "ghcr.io/andrenijman/apex-os:base-d12d3450... \u2014 apex-devices inside it is byte-identical to the tip's, and every package P2-007 named is installed. Before/after for ten readers is in ROADMAP/evidence/P2-005-007-device-maturity.md: VPN protocols none -> openconnect/openvpn/vpnc, WireGuard 'kernel yes tools no' -> yes, boltd absent -> installed, aptX in the codec list, all five file-manager share readers yes, connectivity reads enabled because 21-apex-connectivity.conf ships, and dnsmasq is rpm-owned so the came-from-an-extension caveat no longer fires. A container moves those readers from 'not installed' to 'installed and not running' \u2014 NOT to working; a booted reading needs apex update + reboot, which is the boot path and off-limits."
   },
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt \u2014 the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {

@@ -5,22 +5,24 @@ worktree: /var/tmp/apex-work/wt-followups-4
 branch: task/followups-4
 
 ## NEXT
-Read dispatch run 34717346972 — the ONLY thing still unconfirmed on a runner is
-the last two steps: `P0-002 secrets at rest` (floor 19) and `P3 labwc` (floor
-18, plus its package install). Everything else is runner-green, listed below.
+One thing outstanding: read dispatch run 34717723637 for the `P3 labwc` step.
 
-    gh run view 34717346972 --log | grep -E "measured:|suite coverage:|shellcheck coverage:"
+    gh run view 34717723637 --json jobs -q '.jobs[] | .steps[] | select(.name|test("P3 labwc")) | "\(.name): \(.conclusion)"'
 
-Do NOT bank the run's colour. It is RED from THREE pre-existing failures that
-are not mine and were red before this round: Static "Validate Containerfile
-layer order", engine "Run virtualization assertions", rust "§26 channels".
-Those three are the next thing worth owning if this unit is continued.
+Everything else in this unit's scope is RUNNER-GREEN and listed under DONE.
 
-If labwc's count comes back below 18, the likely cause is the two portal
-assertions — they are guarded by `[ -d /usr/share/xdg-desktop-portal/portals ]`
-and do not run at all if the directory is absent, which drops the count to 16
-without a skip. The install step is meant to prevent that; if it did not,
-lower the floor to what the runner measures and say why in the step.
+Expect `measured: passed=18 failed=0 skipped=0`. If it is still 16/0/2, the
+remaining skip is NOT a missing package — swaylock and swayidle are installed
+and PATH-verified by the step above it as of `4c9de165` — and the next thing to
+read is the per-probe stderr the suite captures at "$WORK/<key>.err"; a
+`fail(rc=N)` would show as a FAIL rather than a SKIP, so a SKIP there means
+`command -v` still missed it.
+
+Do NOT bank the run's colour either way. It is RED from THREE pre-existing
+failures that are not mine and were red before this round: Static "Validate
+Containerfile layer order", engine "Run virtualization assertions", rust
+"§26 channels". Those three, and the 45 steps they silently switch off, are
+written up under FOUND and are the most valuable thing left in this area.
 
 ## DONE — round 3. Both jobs are finished; what is left is reading one run.
 
@@ -51,6 +53,14 @@ and all four exemptions are now reasons rather than debt.
 - `5600b4d7` test-labwc-session.sh — gave the suite a headless render path that
   STRIPS WAYLAND_DISPLAY/DISPLAY rather than trusting WLR_BACKENDS, so it can
   run on a runner and safely on a desktop. Local 18/0/0, no window drawn.
+- `4c9de165` and the step then did its job on run 34717346972: `16 passed, 0
+  failed, 2 skipped`, RED, because ext-session-lock and ext-idle-notify
+  reported "probe client not installed" — swaylock and swayidle were not in the
+  install list. Two protocols of the shipped session went unproven and the step
+  said so instead of banking a pass count two short. Both added and PATH-checked
+  before the suite runs. Reproduced locally first: hiding those two binaries and
+  changing nothing else prints the runner's exact line. Re-dispatched as
+  34717723637 — THE ONLY THING THIS UNIT HAS NOT SEEN GREEN ON A RUNNER.
 
 **Job 2 — shellcheck: 27 -> 0, list emptied.** `23a862b5`, plus `66ca2dfb`
 (apex-pkg SC2120, runner-only). 152 scripts discovered, 0 failing under BOTH
