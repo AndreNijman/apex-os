@@ -219,8 +219,20 @@ class Session internal constructor(
         }
     }
 
+    /**
+     * When a frame last arrived, keepalives included.
+     *
+     * Written here rather than in [receive] precisely because [receive] hides
+     * the pings, and the pings are the only traffic an idle terminal has. See
+     * [FrameChannel.lastFrameNanos].
+     */
+    @Volatile
+    override var lastFrameNanos: Long? = System.nanoTime()
+        private set
+
     /** One frame off the wire, keepalives and all. The only reader of [input]. */
     private fun readFrame(): Frame = Frame.decode(channel.open(Transport.readMessage(input)))
+        .also { lastFrameNanos = System.nanoTime() }
 
     /**
      * Ping, and read until the answer comes back. Returns the round trip in
