@@ -3729,58 +3729,108 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge ebce9b46. Lid-closed continuous operation. Round 2 on
-    apex-os task/p1-063-lid-2, SIX commits pushed. tests/test-apex-lid.sh 60/0, tests/test-apex-lid-live.sh 13
-    passed with one honest could-not-run, clippy --locked --workspace --all-targets -D warnings clean. ROUND 1
-    SHIPPED A POLICY AND A DRIVER NOTHING EVER RAN: no unit, no Containerfile stanza, so on a built image every
-    criterion was unmet however green the suites were. apex-lid.service now exists and is enabled. FIVE PRODUCT
-    DEFECTS FOUND AND FIXED THIS ROUND, all mutation-proved, every file restored byte-identical. (1) A DROPPED VPN
-    WAS REPORTED AS ONE THAT HELD - read_vpn has no memory, so a tunnel that went away answered None, identical to
-    never having had one, and vpn_held scored the timeline as an unordered set: Up Up None None printed 'the VPN
-    held'. VpnState::Down was UNREACHABLE from the driver, so criterion 2 COULD NOT FAIL. Fixed in the driver
-    (note_vpn carries the tunnel name forward) and in vpn_held (reads the timeline in order), with the converse
-    guarded too - a tunnel brought up midway is not retroactively a drop. Same function also returned the moment
-    nmcli was unavailable, so sing-box, APEX's OWN shipped VPN and a tun device NetworkManager never lists, was
-    never asked about. (2) THE KEYBOARD BACKLIGHT WAS NEVER ZEROED - kbd_backlights returned an already-re-rooted
-    path that apply_sysfs re-rooted again; write_abs created the whole tree and reported ok. Planning and
-    describing were right; only the write was wrong. (3) A GUARD FIRING ON THE FIRST POLL LEFT NO RECORD -
-    GuardSuspend opens no keep-working period, so ended_by was written only if one happened to exist. A laptop put
-    away hot reaches its limit immediately, so the common case is the one with no period: the owner reopens and is
-    shown the PREVIOUS close with ended_by null. (4) THE UNIT DISABLED THE FEATURE IT SHIPPED - ProtectHome=yes
-    makes /run/user inaccessible AND EMPTY, and that is where the driver finds every live session and every
-    owner's home; measured with systemd-run, ls /run/user returned nothing under it and '0 1000 1042' without.
-    Zero sessions for ever, pin=auto never activates, the owner's ~/.config/apex/lid.toml never read - the
-    silent-pin defect 2aa9ed45 fixed in code, reintroduced by a unit file. PrivateTmp=yes hid the worktrees the
-    guards' checkpoint runs in (0 entries against 407). runuser could not open a session at all without
-    CAP_SYS_RESOURCE, bisected: CAP_AUDIT_WRITE, CAP_CHOWN, CAP_FOWNER and CAP_SYS_ADMIN each fail alone. (5)
-    EVERY '! grep' REFUSAL IN THE BUILD STANZA WAS INERT - bash does not apply errexit to a pipeline inverted with
-    '!', verified, so the KillMode, ProtectSystem=strict, ProtectKernelTunables and static-HandleLidSwitch guards
-    could never fail a build. All rewritten as if-grep-then-FATAL-exit-1, and the suite now asserts no lid refusal
-    is spelled '! grep'. NOTE FOR ANOTHER UNIT: the pre-existing '! grep -q apex-remote' in the firewall stanza
-    has the same defect, and check-containerfile-assertions.sh does not catch this class. CRITERION 2 IS ASSERTED
-    LIVE ON THE L16: a real WireGuard tunnel (real keys, real handshake, two netns with the veth created INSIDE
-    one so neither end ever exists in the root namespace and NetworkManager cannot auto-create a saved profile)
-    carried 47 of 47 pings with 0 percent loss across a REAL SW_LID close, rx 500 to 6004 bytes DURING the closed
-    window, peer still handshaken after; NM's nine saved connections identical before and after. The lid event was
-    real: uinput device tagged power-switch by udev, logind said 'Watching system buttons on /dev/input/event21',
-    logged 'Lid closed.' and 'Lid opened.', flipped its own LidClosed property, and no suspend or sleep line
-    appeared in the journal. WHAT IS NOT MET. Criterion 1 lacks CAUSATION ONLY: the machine did not suspend, but
-    THE L16 IS DOCKED (Docked=b true, card1-DP-1 connected) and logind consults HandleLidSwitchDocked, default
-    ignore, BEFORE any inhibitor - so the lid would have done nothing with or without the lock. The live suite
-    reports that as COULD-NOT-RUN rather than banking a pass it did not earn; re-running with the external display
-    unplugged closes it and is the single outstanding assertion for this item. That finding is now surfaced in
-    apex lid status, which says which of the two is keeping the machine awake, with 'could not be established' as
-    a third answer that is not 'yes'. Criterion 3's 'draws measurably less' COULD NOT BE MEASURED HERE: measuring
-    it means applying the real power-down to Andre's live desktop - blanking his panel, blocking his bluetooth,
-    stopping his timers - which the standing rules forbid; the power-down and its exact restore are asserted over
-    a fixture, and the two ways it could kill a VPN with the machine awake are closed by name against the SHIPPED
-    defaults with eleven forbidden units active in the fixture so the assertion can actually fail. Criterion 4 is
-    asserted as 'the driver does nothing, so today's behaviour stands' and not by observing a real suspend, which
-    is forbidden here. Criteria 5 and 6 are met. The apex-shell tile is still unwritten; status --json now carries
-    everything it needs including a logind object (docked, external_displays, block_inhibited, acts_on_lid), and
-    apex lid pin needs no privilege by design, so the tile is a read plus one exec with no polkit anywhere.
-    Unrelated pre-existing flake recorded on the card: provenance.rs's a_git_status_that_could_not_run test fails
-    about one run in three in parallel and never with --test-threads=1; provenance.rs is untouched by this branch.
+    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge ebce9b46 (rounds 1+2). ROUND 3 2026-09-13 is on TWO
+    branches, both pushed and neither merged yet: apex-shell task/p1-063-2-shell (four commits 7ad9b7d..dfef320)
+    and apex-os task/p1-063-2 (three commits 175882d..51c00e0a). THE APEX-SHELL SURFACE, WHICH WAS THE LAST
+    GENUINELY-BUILDABLE PIECE, IS NOW WRITTEN AND DRAWN. src/services/lid.js is a pure parser over apex lid
+    status/report --json; LidService.qml polls status then report one after the other, refcounted so a page nobody
+    is looking at spawns nothing, and runs apex lid pin only on an explicit press; LidPage.qml is registered in
+    PageRegistry and reachable from both the Config tab and Nexus; a Quick Settings tile sits next to Caffeine
+    deliberately, because the two are not the same inhibitor and the difference has never been visible - Caffeine
+    takes an idle one, which stops dimming and locking and does NOTHING about the lid. tests/lid-test.js 187
+    assertions; tests/run-lid-page-test.sh 129 assertions over five phases on a headless compositor of its own,
+    rasterised at 980x692 with 17659 distinct pixel values; wired into apex-shell CI as two steps and nine entries
+    in the structure gate. Fixtures are serde's OWN output from a real apex lid binary
+    (tests/fixtures/lid/gen-lid-fixtures.sh), because apex lid status --json is nine nested objects deep and six
+    of them are internally tagged enums, so a hand-written fixture would go on agreeing with a parser that no
+    longer matched the machine. status-l16-docked.json is a capture of the real docked L16 and is NOT regenerated
+    by default; the generator diffs the live machine against it instead and names any field the capture still has
+    that the binary no longer emits, proved by renaming acts_on_lid and watching it go red. SEVEN MORE DEFECTS
+    FOUND AND FIXED THIS ROUND, every one mutation-proved and every file restored byte-identical with plain cp.
+    (1) A GUARD SUSPEND WAS HIDDEN BEHIND THE DOCK. lid.js put the logind frame ("docked - logind ignores the
+    lid", "lid behaviour could not be established") IN FRONT of guard-suspend. But a guard suspend is not a lid
+    decision logind mediates: the driver releases the inhibitor and calls systemctl suspend ITSELF, so it fires on
+    a docked machine exactly as on an undocked one. The surface would have told an owner their lid does nothing
+    while APEX was suspending their laptop. (2) A JSON ARRAY WAS ACCEPTED AS A STATUS DOCUMENT - typeof [] ===
+    "object", so [1,2,3] passed the shape check, every field read as missing, every default applied, and the page
+    rendered a calm fully-populated machine out of it. (3) A GREEN ASSERTION THAT CLAIMED THE OPPOSITE OF ITS
+    LABEL: "does not show a period that is not there" asserted something IS on screen, passing on a line in a
+    different section. (4) A MUTANT SURVIVED AND THE SUITE WAS SHARPENED UNTIL IT DID NOT: an ungated running:true
+    on the sweep timer passed "nothing was asked of apex before the page was shown", because the interval is 15s
+    and the log is read in the first second - the call log cannot see that at all, so the timer itself is now
+    inspected on both edges and the mutant dies on three lines. (5) tests/test-apex-lid.sh - 60 ASSERTIONS THAT
+    HAD NEVER BEEN RUN BY CI - WAS AUDITED IN EIGHT ENVIRONMENTS rather than reasoned about, and EIGHT WAYS IT
+    LIED WERE FIXED. The containment check asked command -v systemd-inhibit, which tests whether the BINARY exists
+    when the thing that fails is the BUS: in a container with systemd and no system bus it went GREEN and its
+    PASS/FAIL lines diffed EMPTY against a live-logind run. grep -rln ... 2>/dev/null read permission-denied (exit
+    2) as no-match (exit 1), so one unreadable directory under files/ turned "the image ships no static
+    HandleLidSwitch= anywhere" into a PASS - this repo's own "permission denied is not absence", in the single
+    assertion guarding that. One assertion had NO bad branch at all, so the outcome it existed to catch ran
+    neither arm and the count silently dropped to 59 while the suite printed "0 failed". mktemp -d was unchecked:
+    with TMPDIR broken, WORK="" makes every $WORK/<name> ABSOLUTE, and under podman's DEFAULT capability set -
+    which a GitHub Actions container: job has - mkdir -p /contain/etc/apex SUCCEEDED, voiding the section titled
+    "the suite cannot reach the machine it runs on" at the point it claims the opposite. A fixture that could not
+    be built is indistinguishable from a machine with no lid, and with no tree at all that section went 2 of 2
+    GREEN. The Containerfile stanza checks were satisfied by an empty stanza. The first plan assertion lacked the
+    non-vacuity guard its two siblings have and passed over a degenerate one-element plan. AND THE FIRST VERSION
+    OF THE FIXTURE GUARD BROKE THE THING IT GUARDED: fx is always called as F="$(fx ...)", a SUBSHELL, so its exit
+    2 ended only the subshell and handed back an EMPTY path - APEX_LID_ROOT="" re-roots nothing, the driver ran
+    against the real machine and left var/lib/apex/lid/commands.log IN THE REPOSITORY. Caught by running it. drive
+    now refuses an unbuilt fixture at the one place the binary is invoked. (6) A RECORD THAT COULD NOT BE READ WAS
+    REPORTED AS A LID THAT WAS NEVER SHUT. load_period was read_optional(...).ok().flatten()? then
+    from_str(...).ok(), and both .ok()s threw a reason away, so an unreadable record AND one truncated by a crash
+    both printed "no lid-closed period has been recorded on this machine yet" - inside the one verb that delivers
+    the owner's readout after they reopen. Three answers now: {"period":null} exit 0 with no error key for a
+    genuine absence, a period, or {"period":null,"error":...} exit 1; an unreadable LAST stops the search rather
+    than falling through to STATE and showing a true record of the WRONG period; the watch loop announces what it
+    lost instead of silently starting fresh over it. Reachable, not hypothetical: apex-lid.service has no
+    StateDirectoryMode and no UMask, so the record is 0644 and the shell tile reads it - adding UMask=0077 later
+    would have turned every unprivileged report into "nothing happened" with nothing going red. (7) save_period
+    WAS A BARE std::fs::write, WHICH TRUNCATES FIRST: a crash between the truncate and the last byte left half a
+    document where the owner's last close used to be, on a laptop a guard is deliberately suspending, which is
+    exactly when a write is interrupted. It writes a sibling and renames. The first atomicity assertion was
+    VACUOUS - "no .new sibling left behind" is equally true of a direct write and the mutant survived it - so the
+    replacement makes the sibling's write FAIL and requires the previous record to still be whole. GATES: apex-os
+    cargo test --workspace 3174 passed 0 failed (the recorded provenance.rs parallel flake aside; apex alone 626/0
+    with --test-threads=1 over three runs), clippy --locked --workspace --all-targets -D warnings clean,
+    check-containerfile-assertions.sh 170 checked 0 failed 0 inert, shellcheck -S warning -x clean,
+    tests/test-apex-lid.sh 60 assertions became 73 and is 73/0 here. apex-shell: every tests/check-*.sh green,
+    every node suite green, run-settings-pages-test.sh 21/0, run-settings-staged-test.sh 21/0, run-popup-smoke.sh
+    and run-nexus-smoke.sh ERROR count 0 each (popup-smoke opens dashboard-home, which is the only thing that
+    instantiates the edited QuickSettings), qmllint 0 errors on every new file. CRITERION 2 REMAINS ASSERTED LIVE
+    FROM ROUND 2: a real WireGuard tunnel (real keys, real handshake, two netns with the veth created INSIDE one
+    so neither end ever exists in the root namespace) carried 47 of 47 pings with 0 percent loss across a REAL
+    SW_LID close, rx 500 to 6004 bytes DURING the closed window, peer still handshaken after, NM's nine saved
+    connections identical before and after; the lid event was real - uinput device tagged power-switch by udev,
+    logind logged "Watching system buttons on /dev/input/event21", "Lid closed." and "Lid opened.", flipped its
+    own LidClosed property, and no suspend line appeared in the journal. WHAT IS STILL NOT MET, AND IT IS THE SAME
+    TWO AS ROUND 2. CRITERION 1 LACKS CAUSATION ONLY: the machine did not suspend, but THE L16 IS DOCKED (Docked=b
+    true, card1-DP-1 connected, re-measured 2026-09-13) and logind consults HandleLidSwitchDocked, default ignore,
+    BEFORE any inhibitor - so the lid would have done nothing with or without the lock. The live suite reports
+    COULD-NOT-RUN rather than banking a pass it did not earn, apex lid status says which of the two is keeping the
+    machine awake with "could not be established" as a third answer that is not "yes", and the new page and tile
+    say it too. RE-RUNNING sudo ./tests/test-apex-lid-live.sh WITH EVERY EXTERNAL DISPLAY UNPLUGGED IS THE SINGLE
+    OUTSTANDING ASSERTION, AND IT IS ANDRE'S ACTION, NOT AN AGENT'S. CRITERION 3's "draws measurably less" STILL
+    COULD NOT BE MEASURED, and this round establishes why more precisely than before: no fixture and no nested
+    session can produce it, because what a panel, a keyboard backlight and a radio draw is physical - and there
+    are TWO preconditions, not one, the second of which was previously unstated. The machine must be UNDOCKED (or
+    HandleLidSwitchDocked and not the inhibitor is what decided) AND ON BATTERY (power_now reads CHARGING power on
+    mains, and this machine is on ac). The closing procedure is now written into docs/lid.md as a runnable recipe:
+    energy_now deltas over a fixed window, lid open versus lid closed under pin on, on an idle machine -
+    energy_now rather than instantaneous power_now, which swings with whatever the CPU did in the second it was
+    sampled. The driver already records the closed half (charge_at_close and charge_last are in every record); the
+    missing half is the open-lid baseline. The power-down and its exact restore remain asserted over a fixture,
+    and the two ways it could kill a VPN with the machine awake are closed by name against the SHIPPED defaults
+    with eleven forbidden units active in the fixture so the assertion can actually fail. Criterion 4 is asserted
+    as "the driver does nothing, so today's behaviour stands" and not by observing a real suspend, which is
+    forbidden here. Criteria 5 and 6 are met, and 6's second half - "the owner can see why the machine did what it
+    did after reopening" - now has a surface rather than only a CLI verb. FOR WHOEVER WIRES tests/test-apex-lid.sh
+    INTO CI: it is honest in a sandbox now (CapabilityBoundingSet= PrivateNetwork=yes ProtectHome=yes
+    PrivateDevices=yes, non-root: PASS/FAIL lines BYTE-IDENTICAL to a run on the laptop), but a container with NO
+    SYSTEM BUS goes red on one assertion BY DESIGN - that is the honest branch of the containment check, not a bug
+    - so a container: job needs a bus or must accept that red; a GitHub-hosted ubuntu-24.04 runner has one and is
+    green. And the gate must key on EXIT STATUS, never on grepping for a count: the assertion-with-no-bad-branch
+    could drop it silently and the stanza check only ever adds.
 - id: P2-001
   title: Encrypted backup framework
   priority: P2
