@@ -480,6 +480,16 @@ pub enum ConnectorPolicy {
     /// per-connector switch.
     Curated,
     /// No connectors at all.
+    ///
+    /// Renamed explicitly, for the reason [`RequestOrigin::RemoteControl`] is:
+    /// snake_case would put `no_connectors` on the wire while [`as_str`] and
+    /// the flag both say `none`, and two spellings of one value is how a
+    /// record written by the daemon stops matching a policy written by a human.
+    /// `the_wire_spelling_of_every_dimension_is_the_one_people_type` asserts
+    /// the pair.
+    ///
+    /// [`as_str`]: ConnectorPolicy::as_str
+    #[serde(rename = "none")]
     NoConnectors,
 }
 
@@ -1321,6 +1331,29 @@ mod tests {
                 p.validate_for(&Allowlist::default(), &[]),
                 Ok(()),
                 "{network}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wire_spelling_of_every_dimension_is_the_one_people_type() {
+        // Found by a real failure rather than reasoned about: the daemon
+        // refused `{"connectors":"none"}` with "unknown variant `none`,
+        // expected one of … `no_connectors`", because the derive's snake_case
+        // and `as_str` had drifted apart on one value. Nothing else would have
+        // caught it — every unit test used the Rust value, and the CLI and the
+        // daemon only meet over the wire.
+        for value in ConnectorPolicy::ALL {
+            let text = serde_json::to_string(value).expect("serialise");
+            assert_eq!(
+                text,
+                format!("\"{}\"", value.as_str()),
+                "{value} is spelled one way on the wire and another in the flag"
+            );
+            assert_eq!(
+                ConnectorPolicy::parse(value.as_str()),
+                Some(*value),
+                "{value} does not parse back from its own name"
             );
         }
     }
