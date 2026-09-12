@@ -2176,8 +2176,11 @@ jobs:
           # behind is a floor that no longer floors anything: at 87, two
           # hundred tests could have stopped running and this step would still
           # have passed, which is precisely the quiet pass it exists to stop.
-          test "$total" -ge 295 \
-            || { echo "::error::only $total protocol tests ran; expected at least 295"; exit 1; }
+          #
+          # 295 -> 421 with P1-056/057/058's models, P1-059's handoff rules and
+          # P1-060's help parity suite.
+          test "$total" -ge 421 \
+            || { echo "::error::only $total protocol tests ran; expected at least 421"; exit 1; }
 
       # The rule InsecureStorageTest rests on. That test walks a directory and
       # accounts for every byte in it, which is evidence about app storage only
@@ -2216,10 +2219,84 @@ jobs:
             total=$((total + ${n:-0}))
           done
           echo "app: $total tests"
-          # 6 -> 10 with P1-054's start screen. Same reasoning as the core
-          # floor above: a floor that has been overtaken stops being one.
-          test "$total" -ge 10 \
-            || { echo "::error::only $total app tests ran; expected at least 10"; exit 1; }
+          # 6 -> 10 with P1-054's start screen, 10 -> 33 with P1-056/057/058's
+          # screens and P1-059/060's manifest assertions. Same reasoning as the
+          # core floor above: a floor that has been overtaken stops being one.
+          test "$total" -ge 33 \
+            || { echo "::error::only $total app tests ran; expected at least 33"; exit 1; }
+
+      # The guide's prose, under the same stop-slop checker the desktop's help
+      # passes. It reports NOT CHECKED and exits 0 when the skill is absent,
+      # which on this runner it is — so this step proves the extractor still
+      # finds the guide, and does NOT prove the prose was examined. Said here
+      # rather than left to be assumed from a green tick.
+      - name: The guide's prose is extractable
+        run: ./tools/check-help-prose.sh
+
+      # ── Release artefacts ────────────────────────────────────────────────
+      #
+      # The first release build this project ever attempted found a real
+      # defect: `lintVitalRelease` runs only on a release target, and it caught
+      # `androidx.fragment` resolving to 1.2.5 under a FragmentActivity that
+      # uses `registerForActivityResult` — a combination that mishandles every
+      # activity result the app takes, including the notification permission.
+      # `assembleDebug` had never said a word about it. That is the reason this
+      # runs on every android change and not only on a tag.
+      - name: Build the release APK and AAB
+        env:
+          # Absent on a pull request, present on the branch this ships from.
+          # With them absent the artefacts are UNSIGNED, and the next step says
+          # so instead of reporting a release.
+          APEX_KEYSTORE: ${{ github.workspace }}/android/ci-release.jks
+          APEX_KEYSTORE_PASSWORD: ${{ secrets.APEX_KEYSTORE_PASSWORD }}
+          APEX_KEY_ALIAS: ${{ secrets.APEX_KEY_ALIAS }}
+          APEX_KEY_PASSWORD: ${{ secrets.APEX_KEY_PASSWORD }}
+          # Through the environment, never spliced into the script body. A
+          # `${{ }}` inside a `run:` is substituted as TEXT before the shell
+          # sees it, so a secret holding a quote would end the string and the
+          # rest would be a command. The same rule the engine follows for every
+          # other value it does not control.
+          APEX_KEYSTORE_BASE64: ${{ secrets.APEX_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          # The keystore arrives base64 in a secret and is written where the
+          # build expects it. No key material is in this repository and none
+          # ever should be: a signing key in a repository is a signing key for
+          # everybody who can clone it, and a forged build of THIS app asks for
+          # a phone's paired device key.
+          if [ -n "${APEX_KEYSTORE_BASE64:-}" ]; then
+            printf '%s' "$APEX_KEYSTORE_BASE64" | base64 -d > ci-release.jks
+          fi
+          ./gradlew --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease
+
+      - name: Signed, or plainly not signed
+        run: |
+          set -euo pipefail
+          apk="$(ls app/build/outputs/apk/release/*.apk)"
+          aab="$(ls app/build/outputs/bundle/release/*.aab)"
+          ls -l "$apk" "$aab"
+          if [ -f ci-release.jks ]; then
+            # A signing key was supplied, so an unsigned artefact is a failure
+            # and `verifyReleaseSigning` is what says so. It reads the APK's
+            # own signature blocks with apksigner and the bundle's with
+            # jarsigner — different schemes, and checking only one would leave
+            # the artefact a store actually takes unchecked.
+            ./gradlew --no-daemon --stacktrace :app:verifyReleaseSigning
+          else
+            # No key on this run. The artefacts exist and cannot be installed,
+            # and this step says exactly that rather than printing a tick that
+            # a reader would take for a shippable build.
+            echo "::notice::release artefacts built UNSIGNED (no signing secrets on this run);"\
+                 "they are not installable and are not a release"
+            case "$apk" in
+              *unsigned*) : ;;
+              *) echo "::error::$apk is not named unsigned but no keystore was supplied"; exit 1 ;;
+            esac
+          fi
+
+      - name: Shred the keystore
+        if: always()
+        run: rm -f ci-release.jks
 
   result:
     name: PR validation

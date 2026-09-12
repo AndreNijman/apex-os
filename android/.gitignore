@@ -12,3 +12,12 @@ local.properties
 *.iml
 .idea/
 captures/
+
+# Signing material. Nothing of the sort belongs in this repository: a signing
+# key here is a signing key for everybody who can clone it, and a forged build
+# of this app asks a phone for its paired device key. The release config reads
+# every value from the environment, and CI writes its keystore from a secret
+# and shreds it in an `if: always()` step.
+*.jks
+*.keystore
+keystore.properties
