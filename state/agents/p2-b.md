@@ -1,10 +1,15 @@
 # p2-b — accessibility baseline (P2-003) and internationalisation baseline (P2-004)
 
-Worktrees, both on `task/p2-b-accessibility-i18n`, both pushed before any work,
-neither rebased:
+**Round 18 is the live one.** Branch `task/p2-b-round18` in both repos, forked
+from `origin/roadmap/v2.2` after rounds 1-2 landed:
 
-- apex-shell: `/var/tmp/apex-work/wt-p2-b` (off `origin/roadmap/v2.2` @ `cd324ec`)
-- apex-os:    `/var/tmp/apex-work/wt-p2-b-os` (off `origin/roadmap/v2.2` @ `4f80746e`)
+- apex-shell: `/var/tmp/apex-work/wt-p2-b2`    (off `1417402`)
+- apex-os:    `/var/tmp/apex-work/wt-p2-b2-os` (off `cafd3635`)
+
+Rounds 1-2, both landed into `roadmap/v2.2`, worktrees kept for reference:
+
+- apex-shell: `/var/tmp/apex-work/wt-p2-b`    on `task/p2-b-accessibility-i18n`
+- apex-os:    `/var/tmp/apex-work/wt-p2-b-os` on `task/p2-b-accessibility-i18n`
 
 ## The items
 
@@ -51,7 +56,7 @@ suite and a mutation pair.
 
 | sub-feature | state | assertion |
 | --- | --- | --- |
-| screen reader | **partial** | Markup measured at runtime (see login row). The end-to-end AT-SPI walk is NOT done — see "What could not be measured". |
+| screen reader | **MEASURED over real AT-SPI (round 18)** | `tests/test-apex-greet-atspi.sh` — 30 assertions, 8/8 mutants caught. The shipped surface runs in a real window on a private compositor against a private a11y bus, and the tree is read back over D-Bus exactly as Orca reads it. The predecessor's "cannot activate" blocker was misdiagnosed — it is SELinux silently refusing the ACTIVATION path, and nothing needs activating. **Still partial for two product reasons, both named and neither a harness limit:** the shipped greeter has no D-Bus session bus, so in production the bridge has nothing to publish on (measured: zero nodes); and `orca` is not in the image, so there is no reader. |
 | magnifier | not present | no magnifier in either repo; wlroots has no standard one |
 | high contrast | present, untested as a11y | six shaders in apex-shell `src/config/shaders/` incl. `HighContrast.glsl`, applied via Hyprland `decoration:screen_shader` only — niri and labwc get nothing, and it is shipped as a visual effect, not an a11y feature |
 | reduced motion | **MEASURED and ratcheted** | `tests/check-reduce-motion.sh` — 12 assertions. Reaches **39 of 450** animation durations (8.7%); **402 are bare int literals** no switch can touch; 9 resolve to neither. Counts pinned exactly in both directions, the chain asserted link by link, 3 self-tests. Runtime half (turn it on in a live shell, read a Behavior's duration back) NOT built — `SettingsService` imports Quickshell so qmltestrunner cannot load it. |
@@ -61,10 +66,10 @@ suite and a mutation pair.
 | slow keys | not present | 0 mentions in either repo |
 | mouse keys | not present | 0 mentions in either repo |
 | on-screen keyboard | not present | no wvkbd/squeekboard/maliit anywhere; none in the image |
-| keyboard-only installer | **not present** | installer is GUI-only (GTK4/Adw); the whiptail text UI was deleted deliberately. Not measured — see NEXT. |
+| keyboard-only installer | **not measured — and now unblocked** | Installer is GUI-only (GTK4/Adw); the whiptail text UI was deleted deliberately. Named in P2-003's acceptance line, so this is the largest remaining hole in the criterion. Round 18 removed the reason it could not be measured: `Xvfb` is installed, `tests/lib/atspi.sh` works against GTK4, and the cage harness exists. NEXT item 1. |
 | keyboard-only DESKTOP | **DONE for the shared controls** | `tests/run-a11y-controls-test.sh` — 21 runtime assertions. Every shared `Cfg*` control is now a tab stop and operates on Space/Enter, proved by posting real `QKeyEvent`s and counting the signal the pages listen to. Pages that use only these controls are covered; bespoke widgets in `popups/` are NOT. |
 | screen-reader markup, desktop | **DONE for the shared controls** | same suite: `CfgRow` hands its label, description, disabled-reason and live readback to whatever control it holds; names and roles read back off the live attached objects. |
-| accessible login/lock/recovery | **login DONE** | `tests/test-apex-greet-a11y.sh` — 22 runtime assertions on the shipped `GreetSurface.qml` under qmltestrunner: accessible name/role read off live objects, tab ring walked with real `Qt.Key_Tab`. Lock and recovery NOT done. |
+| accessible login/lock/recovery | **login DONE, twice over** | QML side: `tests/test-apex-greet-a11y.sh` — 22 assertions on live objects. Bus side (round 18): `tests/test-apex-greet-atspi.sh` — 30 assertions on what the BRIDGE publishes, including that the password never crosses the bus and that a reader can operate the session picker and the layout pill via `DoAction`. Lock and recovery NOT done. |
 
 ### P2-004 — internationalisation
 
@@ -82,28 +87,84 @@ suite and a mutation pair.
 | per-user language | not present | nothing per-user anywhere |
 | non-US recovery / install flows | **install flow DONE, recovery not** | The "engine only COPIES whatever the live ISO resolved" finding is **no longer true for install**: the engine now prefers an operator's `keymap`/`keyvariant`/`timezone` over every inference, and the installer collects them before the password. `bib-config.toml:70-72` still hardcodes `us`/`en_US.UTF-8`/`Australia/Perth`, but those are now the FALLBACK rather than the only outcome. **Recovery is untouched** — nothing in the recovery flow asks for or applies a layout, so a non-US user recovering a machine still types on `us`. Not measured, and named as the remaining half. |
 
-## What could not be measured here, precisely
+## ROUND 18 — the AT-SPI walk is DONE. The blocker was misdiagnosed.
 
-**The end-to-end AT-SPI walk** — starting the greeter under a private a11y bus
-and reading the tree back the way Orca does. Two blockers, both verified rather
-than assumed:
+**Rounds 1 and 2 recorded the end-to-end AT-SPI walk as not measurable on this
+laptop, and roadmap.yaml's P2-003 evidence says the same. That is now false and
+should not be repeated.** The walk runs, green, 30 assertions, 8 of 8 mutants
+caught. What follows is the correction, because the reasoning that produced the
+wrong answer is worth not repeating.
 
-- `at-spi2-registryd` refuses to activate in a `dbus-run-session` here:
-  `Activated service 'org.a11y.atspi.Registry' failed: … Permission denied`.
-- The only a11y bus that *does* answer is `/run/user/1000/at-spi/bus` — Andre's
-  own desktop session's. Reaching it is exactly what this program forbids.
+**What the predecessor saw:** `Activated service 'org.a11y.atspi.Registry'
+failed: … Permission denied`, and concluded at-spi was unavailable in the
+harness. The observation was real. The conclusion did not follow.
 
-The Qt side is NOT the blocker: `QSpiAccessibleBridge` is compiled into
-Fedora's `libQt6Gui.so.6` (31 `org.a11y` symbols), so a Quickshell app can
-publish a tree. **The missing assertion, named:** start `apex-greet` under a
-private D-Bus + at-spi registry, and assert
-`org.a11y.atspi.Accessible.GetChildren` on the app root returns the five
-controls with the names `greet-a11y-test.qml` asserts. That belongs on a build
-box, not on this laptop.
+**What it actually is, measured three ways:**
 
-Separately, the image ships **zero accessibility packages** — no `orca`,
-`at-spi2-core`, `speech-dispatcher`, `espeak-ng`, `brltty`, no on-screen
-keyboard — so today there is no screen reader on APEX for the markup to reach.
+1. The failure is in D-Bus **activation**, not in at-spi. Nothing needs
+   activating: exec `at-spi-bus-launcher` and `at-spi2-registryd` directly and
+   the whole stack comes up clean, in a private runtime dir, every time.
+2. It is **not** the `SystemdService=at-spi-dbus-bus.service` line in
+   `org.a11y.Bus.service` — the obvious culprit. Removing that line and
+   activating anyway fails identically. A trivial service of our own in `/tmp`
+   activates fine in the same bus, so activation itself works.
+3. It is **SELinux**, and it is silent. A **byte-identical copy** of
+   `at-spi-bus-launcher` placed in `/tmp` (label `user_tmp_t`) activates
+   perfectly; the original (label `gnome_atspi_exec_t`) does not. No AVC is
+   logged for it — `journalctl` and the kernel ring have none — which is
+   consistent with a `dontaudit` rule. The mount carries no `noexec`
+   (`ro,nodev,relatime`), so that is ruled out too.
+
+**Consequence for anyone building on this:** never rely on D-Bus activation to
+start the a11y bus on APEX. Exec the launcher. `tests/lib/atspi.sh` does.
+
+## What could not be measured here, precisely (round 18)
+
+The AT-SPI row is measured. Two things remain, and they are product gaps rather
+than harness gaps — which is a different and more useful kind of "partial" than
+the one the roadmap currently records.
+
+**1. The shipped greeter has no bus to publish on.** This is the finding that
+matters most from this round, and nothing was looking for it.
+
+`greetd-config.toml` is not an example: `Containerfile.base:2114` copies it to
+`/etc/greetd/config.toml`, and the live machine runs exactly it. Its command is
+
+    command = "sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf"
+
+There is no `dbus-run-session` anywhere in the chain, and `sway-greet.conf`
+execs only quickshell. So the greeter session has **no D-Bus session bus at
+all**. Measured consequence, not inference: an application that cannot resolve
+`org.a11y.Bus` publishes **zero** nodes — that is mutant A7, and it is the same
+condition the greeter ships in. The markup is right, the bridge works, the
+password is safe, and a screen reader still receives nothing, because there is
+nothing for the bridge to connect to.
+
+The fix is NOT a one-line `dbus-run-session` wrapper: a session bus alone leaves
+activation to fail for the SELinux reason above, so the a11y bus has to be
+execed explicitly too. **Not attempted this round, deliberately.** The login
+screen is boot-critical, greetd cannot be exercised headlessly here, and the one
+load-bearing step is measured to fail under conditions close to production. A
+change there should be made by someone who can boot an ISO and watch it.
+
+**2. There is no screen reader in the image to connect to a bus.**
+And the card's earlier claim that the image ships "ZERO accessibility packages"
+is **wrong** — it was derived from grepping Containerfiles, which only finds
+what is named explicitly. Asked of the image's own rpmdb
+(`rpm --dbpath <deploy>/usr/share/rpm -q`) rather than the merged `/usr`:
+
+| package | in the image? |
+| --- | --- |
+| `at-spi2-core` | **yes** (2.58.8) |
+| `at-spi2-atk` | **yes** |
+| `speech-dispatcher` | **yes** |
+| `espeak-ng` | **yes** |
+| `orca` | **no** |
+| `brltty` | **no** |
+
+So the plumbing and the speech engine are already there as transitive
+dependencies of gtk4/Qt; what is missing is the reader itself. That makes the
+gap a much smaller delta than "zero packages" suggested.
 
 ## Mutation pairs
 
@@ -600,29 +661,131 @@ caveat in the comment: GitHub only offers a dispatch once the file is on the
 DEFAULT branch, so it does nothing for the branch that adds it. The 12 i18n
 assertions are local-only until this lands.
 
+## Round 18 — landed so far
+
+apex-os, branch `task/p2-b-round18`, worktree `/var/tmp/apex-work/wt-p2-b2-os`,
+pushed. apex-shell worktree `/var/tmp/apex-work/wt-p2-b2`, same branch name.
+Both forked from `origin/roadmap/v2.2` AFTER round 2 landed (shell merge
+`1417402`, os merge `f6eefd0d`), so round 2's work is underneath this.
+
+- `tests/lib/atspi.sh` — a private accessibility bus: private session bus with
+  an **empty service directory** (so nothing can be activated onto it — that is
+  what stopped a desktop portal registering itself into the tree and
+  fuse-mounting into the scratch dir), private a11y bus, real registry. Refuses
+  to continue unless the bus is inside the directory it made.
+- `tests/atspi-walk.py` — reads the tree back over D-Bus through Gio. pyatspi is
+  absent here and from the image; "no binding" is not a reason to call a
+  criterion unmeasurable.
+- `tests/test-apex-greet-atspi.sh` — **30 assertions**, green.
+- `tests/greet-atspi-app.qml` — the shipped surface in a real window.
+- `tests/mutate-greet-atspi.sh` — **8 mutants, 8 caught**, tree verified against
+  HEAD after every mutate and every restore.
+
+### Three findings the QML-side suite could not have produced
+
+1. **Qt 6.10.3 never publishes the AT-SPI `password text` role.** Measured four
+   ways — explicit `EditableText` + `passwordEdit` (what the greeter does),
+   `passwordEdit` alone, `echoMode` alone, and an explicit
+   `Accessible.PasswordText` role — all arrive as plain `text`. A bridge
+   limitation, not a greeter defect. Pinned as an equality so a future Qt that
+   fixes it makes the suite say so.
+2. **The password never crosses the bus.** Anything on an a11y bus can call
+   `Text.GetText` on any node, so this was measured: the field is filled with a
+   known secret and the bus returns the mask. The username field is asked the
+   same question and DOES return its text, so the assertion can tell them apart.
+   Mutant A2 (`echoMode` → `Normal`) turns it red — with masking gone the bus
+   really does hand out the typed password.
+3. **A reader can OPERATE the login screen, not just read it.** `DoAction`
+   returns true even for a handler that does nothing, so the reply is not
+   evidence; the effect is read back off the bus. Pressing "Next session" moves
+   the session that would launch; pressing the layout pill changes the announced
+   layout — P2-004's "keyboard layout before password", reached with no mouse
+   and no sight.
+
+### Two tooling defects found while building it
+
+Both would have made assertions quietly meaningless, and neither is visible
+without running the thing:
+
+- `NActions` is a **property** on `org.a11y.atspi.Action`, not a method. Calling
+  `GetNActions()` returned nothing, so every node reported an empty action list
+  while `DoAction` on the same node worked. A suite written against that output
+  would have asserted that a button offers no way to press it — and passed.
+- A hand-built table of AT-SPI role numbers was wrong enough to call an editable
+  text field `table-column` and a push button `panel`. Roles are now asked of the
+  bus with `GetRoleName`. The enum has been renumbered across at-spi2 releases;
+  a test that hardcodes one release's numbering asserts against the wrong
+  vocabulary on every other.
+
+### A harness claim that was wrong, and the mutant that exposed it
+
+`atspi.sh` first said `org.a11y.Status.IsEnabled` was the production gate and
+that setting it honestly was what made the suite meaningful. Mutant A7 flipped
+it to false and **SURVIVED**. Measured rather than argued:
+
+- the property **cannot be pushed false** — set `<false>`, read back `<true>`,
+  because `at-spi-bus-launcher` reports the bus enabled once anything uses it;
+- **Qt 6.10.3 does not consult it.** All four combinations of `IsEnabled`
+  true/false and `AT_SPI_BUS_ADDRESS` exported/not still register.
+
+The real gate is **reachability**. A7 now takes the session bus away from the
+application, which is a real lever and the exact condition the shipped greeter
+runs in. A second correction fell out of it: the suite had been exporting
+`AT_SPI_BUS_ADDRESS` into the application under test — a shortcut no real
+application gets, and the reason A7 survived even after being rewritten. The
+surface now has to resolve `org.a11y.Bus` on the session bus the way every
+desktop application does; the walker keeps the variable, because the walker is
+the assistive technology and a reader IS told where the bus is.
+
 ## NEXT
 
-1. **The `sections` array in `AgentHelpContent.qml`** (~200 prose strings) is the
-   obvious next i18n increment: the pipeline is proven, so this is now mechanical.
-   One caution measured the hard way — `tests/check-agent-help.sh` greps for the
-   exact shape `{ k: "kv", t: "$m"`, so wrapping those `t:` values in `qsTr()`
-   breaks it; that suite and this conversion have to move together.
-2. **Nothing installs a `QTranslator`.** Until something does, the shell's
-   translation pipeline reaches no user. `run-i18n-test.sh` asserts the absence,
-   so the row flips itself when somebody wires it up.
-3. **Locale is still not offered by the installer, deliberately.** The image
+Ordered. Items 1-3 are this round's remaining plan; 4 onward are inherited and
+still true.
+
+1. **The installer is the criterion's literal text and is still unmeasured.**
+   "keyboard-only installer" is named in P2-003's acceptance line and the ledger
+   row says "not present, not measured". It is now measurable and carries no
+   boot risk: `Xvfb` is installed, the cage harness from round 2 exists, and
+   `tests/lib/atspi.sh` works against GTK4 too. Two suites' worth:
+   an AT-SPI walk (every interactive widget named) and a keyboard-only walk
+   (Tab reaches every control within a bounded count; Enter/Space alone advances
+   the page). Run the GTK4 GUI on Xvfb with `GDK_BACKEND=x11` and drive it with
+   `xdotool` (`sudo apex install xdotool`) — real X key events into the real
+   toolkit, and the focus chain is GTK's either way. Cage is NOT in that loop;
+   say so in the header.
+2. **`orca` into `Containerfile.core`**, own commit, cost stated, with a
+   manifest assertion. This is the small delta that turns "the plumbing exists"
+   into "a screen reader exists" — see the corrected package table above. One
+   revert if Andre wants the size back.
+3. **`tests/test-apex-greet-session-bus.sh`** — the config half of finding 1
+   above. Read the shipped `greetd-config.toml` and `sway-greet.conf` and assert
+   what they provide, as a statement of current state that FLIPS when somebody
+   fixes it. The empirical half is already mutant A7.
+4. **The `sections` array in `AgentHelpContent.qml`** (~200 prose strings) is the
+   obvious next i18n increment; the pipeline is proven. One caution measured the
+   hard way — `tests/check-agent-help.sh` greps for the exact shape
+   `{ k: "kv", t: "$m"`, so wrapping those `t:` values in `qsTr()` breaks it;
+   that suite and this conversion must move together.
+5. **Nothing installs a `QTranslator`**, so the shell's translation pipeline
+   reaches no user. `run-i18n-test.sh` asserts the absence, so the row flips
+   itself when somebody wires it up. Worth doing BEFORE item 4: 200 translated
+   strings nobody can see is the weaker increment.
+6. **Locale is still not offered by the installer, deliberately.** The image
    installs `glibc-langpack-en` ONLY (`Containerfile.core:809`), so a free picker
    would let a user choose a locale that silently degrades to `C.UTF-8`. Add
    langpacks first, then a picker restricted to what the target ships.
-4. **The installer is GTK4/Python**, so its translation route is gettext, not the
+7. **The installer is GTK4/Python**, so its translation route is gettext, not the
    Qt pipeline proven here. Separate work.
-5. Remaining accessibility gaps, unchanged from round 1: the end-to-end AT-SPI
-   walk (needs a private a11y bus that would not activate here); `src/popups/`
-   and `src/nexus/NavPane.qml` still use bespoke Rectangle+MouseArea and are
-   mouse-only and unnamed; the image ships **zero** accessibility packages, so
-   the markup reaches no screen reader; and no Arabic/Hebrew/Thai fonts, so RTL
-   input from `fcitx5-m17n` cannot be rendered.
-6. **`Xvfb` is now the tool that makes the compositor-keymap criterion
-   measurable.** If a future runner lacks it, `test-installer-keymap.sh` §3 SKIPs
-   rather than lying — but a skip there means the criterion is unmeasured, not
-   met.
+8. **CJK: measure before fixing.** The card claims apex-shell "will tofu"
+   because ~45 sites hardcode `font.family: "JetBrains Mono"`. That was never
+   run. Qt does fontconfig fallback at the QFont level, so the claim may be
+   false; a `TextMetrics`/`FontMetrics` probe under the headless harness settles
+   it in minutes.
+9. Remaining accessibility gaps, unchanged: `src/popups/` and
+   `src/nexus/NavPane.qml` still use bespoke Rectangle+MouseArea and are
+   mouse-only and unnamed; no Arabic/Hebrew/Thai fonts, so RTL input from
+   `fcitx5-m17n` cannot be rendered.
+10. **`Xvfb` is the tool that makes the compositor-keymap criterion
+    measurable.** If a future runner lacks it, `test-installer-keymap.sh` §3
+    SKIPs rather than lying — but a skip there means the criterion is
+    unmeasured, not met.
