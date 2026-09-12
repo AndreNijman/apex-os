@@ -1344,11 +1344,60 @@ jobs:
       # to START, which no live run on a KVM-less runner could ever catch.
       #
       # The live half — real guests booted through this engine against a real
-      # virtqemud — is tests/vmlab/run-vmlab, which is not run here: these
-      # runners have no /dev/kvm, and it reports could-not-run with that
-      # reason rather than passing.
+      # virtqemud — is tests/vmlab/run-vmlab. It cannot verify anything here:
+      # these runners have no /dev/kvm. The step below runs it anyway, and
+      # that is the point.
       - name: Run virtualization assertions
         run: ./tests/test-apex-vm.sh
+
+      # ── the could-not-run arm, EXERCISED rather than asserted by comment ───
+      #
+      # A lab whose third verdict arm is broken does not announce itself: it
+      # reports "all six flows work" from a machine that booted no guest, which
+      # is this repository's "permission denied is not absence" defect with a
+      # reliability claim on top. The arm only ever fires where there is no
+      # KVM — which is exactly here — so here is where it has to be checked.
+      #
+      # The assertion does NOT require the runner to lack KVM, and that is the
+      # correction rather than a relaxation: GitHub's ubuntu images expose a
+      # /dev/kvm node that is root:kvm 0660 and unusable by the job — present
+      # and not usable, the exact distinction the lab's own `-r -w` check makes
+      # and that a `[ -e /dev/kvm ]` guard would get wrong. So the rule here is
+      # the one that holds on every runner: a flow that could not run must say
+      # why, and no flow may come back `failed`. A runner that CAN boot guests
+      # verifies them instead, which is also a pass.
+      #
+      # tests/test-apex-vm.sh drives both could-not-run branches directly (the
+      # --no-kvm flag and an unusable KVM node), so the arm is proven there on
+      # every runner. This step is the end-to-end shape: the lab, invoked the
+      # way a person invokes it, writing a bundle.
+      - name: P2-008 the vmlab, and its verdicts wherever this runs
+        run: |
+          set -euo pipefail
+          ./tests/vmlab/run-vmlab --out "$RUNNER_TEMP/vmlab"
+          bad=0
+          for f in $(./tests/vmlab/run-vmlab --list); do
+            v="$RUNNER_TEMP/vmlab/$f/verdict.json"
+            if [ ! -f "$v" ]; then echo "no verdict for $f"; bad=1; continue; fi
+            state=$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' "$v")
+            reason=$(sed -n 's/.*"reason": "\([^"]*\)".*/\1/p' "$v")
+            echo "$f: $state — $reason"
+            case "$state" in
+              failed) echo "  ^ a flow FAILED"; bad=1 ;;
+              could-not-run|verified) ;;
+              *) echo "  ^ unknown verdict state"; bad=1 ;;
+            esac
+            if [ -z "$reason" ]; then echo "  ^ no reason given"; bad=1; fi
+          done
+          exit $bad
+
+      - name: Keep the vmlab bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmlab-bundles
+          path: ${{ runner.temp }}/vmlab
+          if-no-files-found: ignore
 
       # The half the suite above deliberately cannot answer. Its device-profile
       # coverage is argv-PINNED — it proves the engine emits the flags its
@@ -1873,6 +1922,10 @@ jobs:
           shellcheck -S warning -x tests/chaos/run-chaos tests/chaos/chaos-loop \
             tests/chaos/lib.sh
           shellcheck -S warning -x tests/chaos/cases/*.sh
+          # The VM lab, with -x for the same reason: it sources the chaos
+          # library for the verdict record, and it runs `rm -rf` and `chown -R`
+          # on paths built from variables inside a container it starts itself.
+          shellcheck -S warning -x tests/vmlab/run-vmlab tests/vmlab/mk-guest
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
       # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
