@@ -550,7 +550,20 @@ else
     bad "an unknown key in the task file is refused and named" "rc=$rc out=$out"
 fi
 
-# A future version must refuse rather than guess.
+# A future version must refuse rather than guess — and say what to do about it.
+#
+# This case shipped red for three rounds and the PRODUCT was never wrong. It
+# asserted the phrase "understands up to", which is what the message said when
+# this file was written (874de9aa, 2026-09-04). P1-045 (5c1a9795, 2026-09-07)
+# rewrote it: §25's point is that a task list from a newer APEX is what a
+# `bootc rollback` leaves behind, so the refusal has to name the remedy, not
+# only the mismatch. That commit updated the Rust unit test beside the message
+# (`task.rs::a_future_version_is_refused_rather_than_guessed_at`) and did not
+# update this one, so the two halves of the same claim disagreed.
+#
+# Asserted in the same four parts the Rust test asserts, so they go stale
+# together rather than one at a time, and so a message that named the problem
+# and dropped the remedy fails here too.
 cp "$TASKS" "$TASKS.bak"
 python3 - "$TASKS" <<'PY'
 import sys, pathlib
@@ -559,10 +572,19 @@ p.write_text("version = 99\n" + p.read_text())
 PY
 out=$(apex task list 2>&1); rc=$?
 cp "$TASKS.bak" "$TASKS"
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "understands up to"; then
-    ok "a task file from a newer apex is refused with the version it understands"
+# `reads version [0-9]+` rather than `reads version 1`: the version this build
+# understands is the one thing here that is expected to change, and pinning it
+# is how the case above went stale in the first place.
+missing=
+[ "$rc" -ne 0 ] || missing="$missing rc=$rc"
+for part in 'version 99' 'reads version [0-9]+' 'rollback' 'Boot the newer deployment'; do
+    printf '%s' "$out" | grep -qE "$part" || missing="$missing [$part]"
+done
+if [ -z "$missing" ]; then
+    ok "a task file from a newer apex is refused, with both versions and the remedy"
 else
-    bad "a task file from a newer apex is refused" "rc=$rc out=$out"
+    bad "a task file from a newer apex is refused, with both versions and the remedy" \
+        "missing:$missing out=$out"
 fi
 
 # A hand-edited worktree name that is not its own slug would point the record
