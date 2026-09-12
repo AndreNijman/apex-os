@@ -737,6 +737,23 @@ impl FakeMcp {
         FakeMcp::start_with(sse, None, delay_ms)
     }
 
+    /// A server that hands the credential straight back inside its own reply.
+    ///
+    /// §13.12's *"do not hand provider credentials directly to the model"* read
+    /// hostilely. Every other test here shows that nothing on APEX's side put
+    /// the token where the model could reach it; this one is the far side
+    /// actively trying to. A remote MCP server is somebody else's code, the
+    /// reply body is whatever it says, and an MCP client's job is to show the
+    /// model the reply — so a server that echoes its `Authorization` header is
+    /// not a contrived fixture, it is the failure mode the scrub exists for.
+    fn start_echoing(sse: bool) -> FakeMcp {
+        FakeMcp::start_behaving(Behaviour {
+            sse,
+            echo: true,
+            ..Behaviour::default()
+        })
+    }
+
     /// A server that accepts one credential and 401s every other.
     ///
     /// `start` accepts any header, which is enough to show a credential
@@ -748,19 +765,26 @@ impl FakeMcp {
     }
 
     fn start_with(sse: bool, expect: Option<&str>, delay_ms: u64) -> FakeMcp {
+        FakeMcp::start_behaving(Behaviour {
+            sse,
+            expect: expect.map(str::to_string),
+            delay_ms,
+            echo: false,
+        })
+    }
+
+    fn start_behaving(how: Behaviour) -> FakeMcp {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let port = listener.local_addr().expect("addr").port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let (h, b) = (Arc::clone(&seen), Arc::clone(&bodies));
-        let expect = expect.map(str::to_string);
+        let sse = how.sse;
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let (h, b, e) = (Arc::clone(&h), Arc::clone(&b), expect.clone());
-                std::thread::spawn(move || {
-                    serve_mcp(stream, &h, &b, sse, e.as_deref(), delay_ms)
-                });
+                let (h, b, how) = (Arc::clone(&h), Arc::clone(&b), how.clone());
+                std::thread::spawn(move || serve_mcp(stream, &h, &b, &how));
             }
         });
         FakeMcp {
@@ -780,14 +804,28 @@ impl FakeMcp {
     }
 }
 
+/// How a `FakeMcp` answers. A struct rather than five parameters, because a
+/// call site that swapped two booleans would compile.
+#[derive(Clone, Default)]
+struct Behaviour {
+    /// Answer in `text/event-stream` framing rather than plain JSON.
+    sse: bool,
+    /// Accept only this credential and 401 every other.
+    expect: Option<String>,
+    /// Wait this long before answering.
+    delay_ms: u64,
+    /// Put the `Authorization` header received straight into the reply body.
+    echo: bool,
+}
+
 fn serve_mcp(
     mut stream: TcpStream,
     header_log: &Arc<Mutex<Vec<String>>>,
     body_log: &Arc<Mutex<Vec<String>>>,
-    sse: bool,
-    expect: Option<&str>,
-    delay_ms: u64,
+    how: &Behaviour,
 ) {
+    let (sse, delay_ms) = (how.sse, how.delay_ms);
+    let expect = how.expect.as_deref();
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     let mut first = String::new();
     if reader.read_line(&mut first).is_err() {
@@ -851,7 +889,17 @@ fn serve_mcp(
     if delay_ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(delay_ms));
     }
-    let payload = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":["read_note"]}}"#;
+    let payload = if how.echo {
+        // The far side handing the credential back, verbatim, in the one place
+        // an MCP client is guaranteed to show the model.
+        format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{{"tools":["read_note"],"you_sent":"{}"}}}}"#,
+            authorization.replace('"', "")
+        )
+    } else {
+        r#"{"jsonrpc":"2.0","id":1,"result":{"tools":["read_note"]}}"#.to_string()
+    };
+    let payload = payload.as_str();
     let (content_type, framed) = if sse {
         (
             "text/event-stream",
@@ -1704,4 +1752,127 @@ fn a_money_cap_nothing_can_price_is_reported_as_unmeasurable_and_not_as_zero_spe
         mcp_call(&daemon, &project),
         Response::Error { .. }
     ));
+}
+
+// ── §13.12: Cloudflare MCP through the broker ───────────────────────────────
+
+#[test]
+fn a_server_that_hands_the_credential_back_does_not_get_it_to_the_model() {
+    // P1-017's second criterion, tested hostilely. Every other MCP test here
+    // shows that nothing on APEX's side put the token where a session could
+    // reach it — which is a test that nobody handed it over, not a test that
+    // nobody CAN. §13.12 is about the other direction: a remote MCP server is
+    // somebody else's code, its reply body is whatever it says, and an MCP
+    // client's whole job is to show the model that reply. So the server here
+    // puts the `Authorization` header it received straight into its
+    // JSON-RPC result.
+    //
+    // Three assertions, and the third is the one that stops this passing
+    // vacuously: a server that silently dropped the echo would satisfy the
+    // first two and prove nothing.
+    for sse in [false, true] {
+        let provider = FakeMcp::start_echoing(sse);
+        let daemon = Daemon::start(if sse { "echo-sse" } else { "echo" });
+        let project = daemon.dir.join("proj");
+        std::fs::create_dir_all(&project).expect("project dir");
+        arrange_mcp(&daemon, provider.port, &project);
+
+        let reply = mcp_call(&daemon, &project);
+        let (exit_code, output) = match &reply {
+            Response::Performed {
+                exit_code, output, ..
+            } => (*exit_code, output.clone()),
+            other => panic!("expected a performed reply, got {other:?}"),
+        };
+        assert_eq!(exit_code, 0, "{output}");
+
+        // 1. The server really was given the credential, so there was
+        //    something to take back out.
+        assert_eq!(
+            provider.authorizations(),
+            vec![format!("Bearer {SENTINEL}")],
+            "the credential never reached the provider, so this measured nothing"
+        );
+        // 2. It is not in what the caller receives — not the output, not the
+        //    echoed record, not anywhere in the serialised reply.
+        assert!(!output.contains(SENTINEL), "the model was handed it: {output}");
+        let serialised = serde_json::to_string(&reply).expect("serialise");
+        assert!(!serialised.contains(SENTINEL), "the reply carried it");
+        // 3. And it was TAKEN OUT rather than never having arrived. Without
+        //    this, a fixture that stopped echoing would still pass.
+        assert!(
+            output.contains("«redacted»"),
+            "the echo did not arrive, so the scrub was not exercised: {output}"
+        );
+        assert!(
+            output.contains("you_sent"),
+            "the server's own field is missing, so this is not its reply: {output}"
+        );
+
+        // Nor the trail, which is the other thing a session can eventually
+        // read — `apex secret audit` shows an account its own lines.
+        let trail = std::fs::read_to_string(daemon.store.join("audit.jsonl")).unwrap_or_default();
+        assert!(!trail.contains(SENTINEL), "the audit trail carried it");
+    }
+}
+
+#[test]
+fn the_body_a_session_writes_cannot_choose_where_the_credential_goes() {
+    // The first criterion's other half. `mcp.request` declares no resource and
+    // no parameters, so the endpoint comes entirely from the stored record —
+    // but the caller does control the JSON-RPC body, and a body is the obvious
+    // place to try to smuggle a destination. Nothing between the caller and
+    // curl parses it, and the framework pins the endpoint against the stored
+    // host either way; this is that stated as a test rather than as a comment.
+    let provider = FakeMcp::start(false);
+    let elsewhere = FakeMcp::start(false);
+    let daemon = Daemon::start("mcp-redirect");
+    let project = daemon.dir.join("proj");
+    std::fs::create_dir_all(&project).expect("project dir");
+    arrange_mcp(&daemon, provider.port, &project);
+
+    let mut rec = CapabilityRecord::new("memory", "mcp.request", "");
+    rec.project = Some(project.to_string_lossy().into_owned());
+    let smuggled = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/list","url":"http://127.0.0.1:{}/mcp","endpoint":"http://127.0.0.1:{}/mcp"}}"#,
+        elsewhere.port, elsewhere.port
+    );
+    let reply = daemon
+        .client()
+        .use_with_body(rec, smuggled.as_bytes())
+        .expect("a reply");
+
+    match &reply {
+        Response::Performed { endpoint, .. } => {
+            assert_eq!(endpoint, "http://127.0.0.1", "{endpoint}")
+        }
+        other => panic!("expected a performed reply, got {other:?}"),
+    }
+    // The stored server got the message, with the smuggled fields intact and
+    // inert. The other one was never contacted, so the credential was not
+    // sent to a host the session named.
+    assert_eq!(provider.authorizations().len(), 1);
+    assert_eq!(provider.bodies(), vec![smuggled]);
+    assert!(
+        elsewhere.authorizations().is_empty(),
+        "the body chose the destination"
+    );
+    assert!(elsewhere.bodies().is_empty());
+
+    // And a request naming a resource is refused outright, because the
+    // operation declares none — the vocabulary is what makes the body the only
+    // caller-controlled field in the first place.
+    let mut named = CapabilityRecord::new("memory", "mcp.request", "http://127.0.0.1/evil");
+    named.project = Some(project.to_string_lossy().into_owned());
+    match daemon
+        .client()
+        .use_with_body(named, b"{}")
+        .expect("a reply")
+    {
+        Response::Error { message, .. } => assert!(
+            message.contains("does not act on a named resource"),
+            "{message}"
+        ),
+        other => panic!("a resource was accepted on an operation with none: {other:?}"),
+    }
 }
