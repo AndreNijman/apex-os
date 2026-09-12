@@ -41,7 +41,7 @@ together or not at all**.
 
 ## NEXT
 
-Worktree `/var/tmp/apex-work/wt-followups2`, branch `task/followups-r19`, four
+Worktree `/var/tmp/apex-work/wt-followups2`, branch `task/followups-r19`, five
 commits, all pushed. Ready to merge into `roadmap/v2.2`.
 
 **All three items are done.** Nothing is outstanding on this card.
@@ -103,6 +103,11 @@ Declared rather than written up because each belongs to a wholly undocumented
 cluster, and one sub-verb alone would take its parent off the list on a
 passing mention. That is why 117 + 4 = 121: the four were never in the 132.
 The gate exits 0.
+
+A fifth commit (`a9a0c4fc`) corrects one claim in `docs/hosts.md`: `apex
+host show` prints free space on /var only when the probe reported it, and
+`describe_self` never sets `free_mib` -- so the APEX-peer path, the better of
+the two probes, is the one with no free-space line.
 
 Mutation: renaming the `apex host path` heading out of `docs/hosts.md` took
 the reverse pass to `BAD apex host path`, 1 undeclared; restored with `cp`.

@@ -1,15 +1,27 @@
 # p2-b — accessibility baseline (P2-003) and internationalisation baseline (P2-004)
 
-**Round 18 is the live one.** Branch `task/p2-b-round18` in both repos, forked
-from `origin/roadmap/v2.2` after rounds 1-2 landed:
+**Round 18b is the live one.** Branch `task/p2-b-round18b`, pushed, tip
+`73f158d2`:
 
-- apex-shell: `/var/tmp/apex-work/wt-p2-b2`    (off `1417402`)
-- apex-os:    `/var/tmp/apex-work/wt-p2-b2-os` (off `cafd3635`)
+- apex-os:    `/var/tmp/apex-work/wt-p2-b3-os` — all of this round's work.
+  Forked from `origin/roadmap/v2.2` and carries `task/p2-b-round18` through the
+  merge `2d4d0d26`, because round 18 had never reached `roadmap/v2.2`. **Merge
+  `round18b`; do NOT also merge `round18` separately.**
+- apex-shell: `/var/tmp/apex-work/wt-p2-b3` — **identical to
+  `origin/roadmap/v2.2` (`207a045`), no commits at all.** It exists only so
+  `pr-validation.yml`'s `Input page and generator agree` step finds a matching
+  branch name; see the CI section. Merging it is a no-op and deleting it is
+  equally fine.
 
-Rounds 1-2, both landed into `roadmap/v2.2`, worktrees kept for reference:
+The `claude-memory` MCP returned 502 for this entire session too, so as in round
+2 **this card is the durable record.** Both repos are pushed.
 
-- apex-shell: `/var/tmp/apex-work/wt-p2-b`    on `task/p2-b-accessibility-i18n`
-- apex-os:    `/var/tmp/apex-work/wt-p2-b-os` on `task/p2-b-accessibility-i18n`
+Earlier rounds, all landed or superseded, worktrees kept for reference:
+
+- round 18  — `task/p2-b-round18`: apex-os `/var/tmp/apex-work/wt-p2-b2-os`,
+  apex-shell `/var/tmp/apex-work/wt-p2-b2`. Carried into `round18b`.
+- rounds 1-2 — `task/p2-b-accessibility-i18n`, landed into `roadmap/v2.2`:
+  apex-shell `/var/tmp/apex-work/wt-p2-b`, apex-os `/var/tmp/apex-work/wt-p2-b-os`
 
 ## The items
 
@@ -800,7 +812,7 @@ Dispatched rather than guessed at, three times: runs **34673525673**,
 | --- | --- |
 | `Static validation` | **green** |
 | `Installer safety and UI` | **green** — `installer-a11y: 47 passed, 0 failed, 4 skipped` |
-| `Package engine` | red ONLY at `Run file-injection assertions` — the known cgroup failure, red on `roadmap/v2.2` itself (run 34672131214). Both new accessibility steps in that job are green. |
+| `Package engine` | both new accessibility steps green, and their TOTALS read rather than their tick assumed — `apex-greet-session-bus: 16 passed, 0 failed, 0 skipped` and `apex-a11y-stack: 9 passed, 0 failed, 1 skipped` (the one skip is the ostree rpmdb probe, which a runner has nothing to answer). Both suites exit 0 on a tool SKIP, so a green tick alone would have proved nothing. The job's red is ONLY `Run file-injection assertions` — the known cgroup failure, red on `roadmap/v2.2` itself (run 34672131214). |
 | `Rust validation` | red at `§48 storage`, the SAME step that is red on `roadmap/v2.2`'s own run (job 103495368392). This branch changes no `.rs`, nothing under `apexd/`, and no storage code — checked, not assumed. |
 
 **The four CI skips are the honest half and should not be read as coverage.**
@@ -811,6 +823,13 @@ on the same display. So "what was typed is what the field contains" and "the
 password never crosses the bus" are measured on THIS LAPTOP ONLY. They say
 COULD-NOT-RUN on the runner rather than passing, which is the point, but the
 second machine does not cover them.
+
+**A cross-machine datum worth keeping:** the session-bus suite's NOTE fires on
+the runner too, for a DIFFERENT reason — there `org.a11y.Bus was not provided by
+any .service files` (at-spi2-core's D-Bus activation file is not installed),
+where on this laptop it is SELinux refusing the exec. Two unrelated causes, the
+same consequence, and the suite reports which one it met instead of asserting
+either. That is why it is a NOTE and not an assertion.
 
 - **`Package engine` — both new suites GREEN on the runner.** `Run greeter
   session-bus assertions` and `Run accessibility-stack assertions` both pass on
