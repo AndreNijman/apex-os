@@ -167,7 +167,7 @@ fn providers(json: bool) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(0);
     }
-    println!("{:<12} {:<20} {:<14} {}", "PROVIDER", "NAME", "CREDENTIAL", "HOST");
+    println!("{:<12} {:<20} {:<14} HOST", "PROVIDER", "NAME", "CREDENTIAL");
     for p in account::PROVIDERS {
         println!(
             "{:<12} {:<20} {:<14} {}",
