@@ -123,12 +123,32 @@ it.
 | round-trip measurement and quality bands | `serve.rs`, `rendezvous.rs` | yes |
 | the room protocol, end to end | `apexd/apex-remoted/tests/relay.rs` | yes, 8 suites against a double |
 | the relay's rules | `relay/src/room.js` | yes, 9 `node --test` |
-| **the Worker and the Durable Object** | `relay/src/index.js` | **no — never executed** |
+| **the Worker and the Durable Object** | `relay/src/index.js` | **yes** — see below |
 
-The last row is the honest gap. `index.js` has never been run: there is no
-wrangler on this machine and running it for real means an account. Its rules
-are in `room.js` and those are tested; its Cloudflare-shaped half —
-hibernation, attachments, forwarding — is reviewed code and nothing more.
+> **CLOSED 2026-09-12 by the `relay-tls` unit** (apex-os `0ad66ab2`). wrangler
+> is now a dev-dependency of `relay/` and `wrangler dev --local` needs **no
+> Cloudflare account**, so this row was a missing dependency and never a
+> missing permission. `APEX_RELAY_URL=ws://127.0.0.1:8787 cargo test -p
+> apex-remoted --test relay` runs **6 of the 8 suites against the real Worker**
+> — including pairing and a live session end to end, and the Worker's own 404,
+> 409 and 426. The two that do not run print `SKIP-EXTERNAL` and say why: one
+> asserts what the *operator* can see by reading everything the double copied,
+> and one simulates a network change by cutting the relay's own sockets from
+> inside it. Neither is a thing a real relay hands over; both stay covered
+> against the double.
+>
+> **Running it found a defect, which is the point of having run it.**
+> `Uncaught TypeError: Can't call WebSocket send() after close()` at
+> `webSocketMessage` — `ctx.getWebSockets()` keeps returning sockets the object
+> has already closed. The same staleness would have let `waiting()` hold a room
+> **for ever** (the 409-forever failure §2 above claims to have designed out)
+> and let `socketFor` route a live peer's frames into a dead socket. Fixed with
+> an `isOpen()` guard on both, and a `farewell()` that is a no-op on an
+> already-closed socket. Measured: against the pre-fix Worker the Rust suite
+> reported `8 passed; 0 failed` three times in a row while wrangler logged two
+> uncaught exceptions — a Worker that throws inside a WebSocket event still
+> leaves the socket closed, which is what the client was waiting for, so the
+> client is *satisfied by the failure*. Only the Worker's own log sees it.
 
 A Rust test reads `relay/src/room.js` and asserts the three notice strings and
 the two role words match the enum, so the two languages cannot drift apart on
@@ -137,6 +157,36 @@ the wire values even though they are tested separately.
 ## 5. Deploying it — exactly what Andre would run
 
 ### 5.1 The blocker first
+
+> **RESOLVED 2026-09-12 by the `relay-tls` unit** (apex-os `f4e854f0`).
+> **Option 1 was chosen** — Andre delegated the decision and the orchestrator
+> took it. `apex-remote-core` now has `src/tls.rs`: `rustls` on the `ring`
+> provider, with the **machine's** root store via `rustls-native-certs` rather
+> than a vendored `webpki-roots` bundle. `apex-remoted --relay wss://…` works.
+>
+> The root-store half was the decision left open. The machine wins because the
+> Sigstore root is pinned for a reason that does not transfer: there the thing
+> being verified **is the OS image**, so the store inside that image cannot be
+> the authority on it. A relay dial happens afterwards on a booted, trusted
+> machine — where `update-ca-trust` removals must apply, and where the
+> realistic private deployment sits behind an internal CA that a vendored
+> bundle could never reach. An empty store is therefore a **named refusal** and
+> never a fall back to a vendored bundle, since falling back would re-trust
+> exactly what an administrator had just removed.
+>
+> Cost, measured rather than estimated: `Cargo.lock` 178 → **193, so 15
+> crates** — which is what this section predicted. Only **9** compile on Linux;
+> the other 6 are the macOS/Windows entries `rustls-native-certs` carries.
+>
+> Verification is the **refusals**, because a client that accepts any
+> certificate also connects and passes every happy-path assertion:
+> `apex-remote-core/tests/tls.rs` mints a CA with the `openssl` CLI, serves it
+> from a loopback `rustls` listener, and asserts by variant *and* by message
+> that an untrusted issuer, a wrong hostname and an expired certificate are
+> each refused. All three are mutation-proved: made to accept one at a time,
+> each named test goes red. Nothing reaches the network.
+>
+> The account below is kept as the record of how the choice was made.
 
 **The client cannot dial `wss://` today.** Nothing in the apexd workspace
 speaks TLS; `apex-secretd`'s Cloudflare provider settled that question for the
@@ -172,10 +222,14 @@ and a desktop that will not dial it.
 
 ```
 cd relay
-npm install --save-dev wrangler      # not installed on the L16 or katana
+# npm install --save-dev wrangler    # DONE 2026-09-12; wrangler 4.131.1 is
+                                     # committed as a dev-dependency of relay/
 npx wrangler login                   # opens a browser; grants the CLI the account
 npx wrangler deploy
 ```
+
+A fresh clone still needs `npm install` inside `relay/` first —
+`node_modules/` and `.wrangler/` are gitignored.
 
 `wrangler deploy` prints the URL, `https://apex-remote-relay.<subdomain>.workers.dev`.
 Then, on each machine:
@@ -189,17 +243,19 @@ systemctl --user restart apex-remoted
 apex remote status          # "relay" and "rendezvous" should both be filled in
 ```
 
-Before any of that, the step this unit could not take:
+Before any of that, the step this unit could not take — **taken 2026-09-12**:
 
 ```
 cd relay && npx wrangler dev --local
 # then, in apex-os/apexd:
-cargo test -p apex-remoted --test relay
-#   with the harness pointed at http://127.0.0.1:8787 instead of its double
+APEX_RELAY_URL=ws://127.0.0.1:8787 cargo test -p apex-remoted --test relay
 ```
 
-That is what would turn the last row of the table in §4 from "no" to "yes",
-and it is the one thing I would do before deploying.
+That turned the last row of §4 from "no" to "yes", and it found the
+send-after-close defect recorded there. Worth re-running after any change to
+`index.js`, and worth reading `wrangler`'s own log afterwards rather than only
+the test summary — the whole lesson of that defect is that the summary was
+green while the Worker was throwing.
 
 ### 5.3 What it costs
 
@@ -269,9 +325,13 @@ The *browsing* half is the device's, and it is the Android app's (P1-053).
 
 ## 6. Known gaps, named
 
-- **The Worker has never run.** §4, §5.2.
-- **No `wss://` from the client.** §5.1. This is the one that stops "deployable"
-  from meaning "deployed and working".
+- ~~**The Worker has never run.**~~ **CLOSED 2026-09-12** — it runs under
+  `wrangler dev --local` and 6 of 8 suites drive it. §4.
+- ~~**No `wss://` from the client.**~~ **CLOSED 2026-09-12** — `rustls` plus the
+  machine's root store, in `apex-remote-core`. §5.1. This was the one that
+  stopped "deployable" from meaning "deployed and working"; what remains
+  between here and a working relay is `wrangler login` and `wrangler deploy`,
+  both of which are Andre's account and Andre's decision.
 - **The relay is unauthenticated.** Any client that knows a rendezvous id can
   dial it, as host or guest. That is a denial of service, not a disclosure —
   Noise refuses an impostor at either end — but a public deployment would want

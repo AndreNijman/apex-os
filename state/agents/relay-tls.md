@@ -151,9 +151,147 @@ status` clean after the last restore.
   recorded rather than fixed or ignored.
 - `tests/check-doc-verbs.sh`, `tests/check-no-conflict-markers.sh` — pass.
 
+### The Worker, run for the first time — `0ad66ab2` and `0bb075a7`
+
+`wrangler` is installed as a dev-dependency of `relay/` (**4.131.1**).
+`wrangler dev --local` runs the Worker on this machine and **needs no
+Cloudflare account**, so §4's gap was a missing dependency and never a missing
+permission. Nothing deployed, no account authenticated to, no real relay
+dialled.
+
+**Running `relay/src/index.js` for the first time found a defect in it:**
+
+```
+Uncaught TypeError: Can't call WebSocket send() after close().
+    at webSocketMessage (relay/src/index.js:185)
+```
+
+`ctx.getWebSockets()` goes on returning a socket the object has already closed.
+Ordinary sequence: a guest leaves → `webSocketClose` → `partnerLost` tells the
+host and closes the host's socket → a frame the desktop had already sent
+arrives → `webSocketMessage` runs on that closed socket, finds its peer gone,
+and calls `send()` on it.
+
+The same staleness had two consequences nobody had seen because nobody had run
+the file. A closed-but-listed socket satisfies `waiting()` — which would hold a
+room **for ever** and answer that desktop's every later dial with 409, the
+exact failure §2 says the design had engineered out — and satisfies
+`socketFor`, so a live peer's frames would be copied into a socket nobody
+reads. Fixed by checking liveness where occupancy and routing are decided:
+`isOpen()` guards `waiting()` and `socketFor()`, and `farewell()` replaces the
+two open-coded send-then-close pairs. `relay/test/room.test.mjs` still 9/9 —
+this was never a rules bug, which is why the room.js/index.js split could not
+catch it.
+
+**Why the Rust suite could never have found it — measured, not argued:**
+
+| Worker | 3 consecutive `cargo test -p apex-remoted --test relay` runs | uncaught exceptions in wrangler's log |
+| --- | --- | --- |
+| pre-fix | `8 passed; 0 failed` every time | **2** |
+| fixed | `8 passed; 0 failed` every time | **0** |
+
+Identical traffic in the fixed window (60 × 101, 33 × 409), so the same paths
+ran. A Worker that throws inside a WebSocket event still leaves the socket
+closed, which is what the client was waiting for — so the client is *satisfied
+by the failure*. Only the Worker's own log sees it.
+
+### §4's last row: **no → yes**
+
+> **the Worker and the Durable Object** | `relay/src/index.js` | **yes — 6 of 8
+> suites under `wrangler dev --local`, plus pairing and a session end to end**
+
+Pointed at it with `APEX_RELAY_URL=ws://127.0.0.1:8787`. The default run is
+byte-identical: 8 tests, all against the double.
+
+| suite | against the Worker |
+| --- | --- |
+| `a_device_reaches_the_desktop_through_a_relay_neither_of_them_listens_on` | **ran** — pairing and a live session, end to end |
+| `a_relayed_session_is_recorded_as_relayed_and_a_direct_one_is_not` | **ran** |
+| `a_guest_that_arrives_with_no_desktop_waiting_is_refused_by_status_not_by_silence` | **ran** — the Worker's own 409 |
+| `two_desktops_cannot_hold_one_rendezvous` | **ran** — the Worker's own 409 |
+| `the_desktop_measures_the_connection_and_a_device_cannot_invent_the_answer` | **ran** |
+| `no_relay_is_configured_unless_the_owner_configures_one` | **ran** |
+| `the_relay_carries_the_session_and_can_read_none_of_it` | **skipped**, prints `SKIP-EXTERNAL` — the claim is about what the OPERATOR sees, asserted by reading everything the double copied. A real relay does not hand that over and inferring it from outside would be weaker than the claim. |
+| `a_network_change_costs_the_session_and_costs_nothing_else` | **skipped**, prints `SKIP-EXTERNAL` — cuts every socket the relay holds, from inside it. Nothing outside a relay can do that; cutting the client end tests a different event. |
+
+Both skipped suites stay fully covered against the double, which is where they
+belong.
+
+`wait_ready` and `hosts_seen` could not survive the switch — both asked the
+double what had arrived. In external mode they ask the **relay** instead, by
+dialling as a host and expecting **409**: somebody already holds this room.
+That is the stronger of the two questions, because it is the Durable Object's
+own `waiting()` answering about *live* sockets rather than a tally of
+connections that once arrived and may since have died — which is exactly the
+bug found above. `seen()` and `cut_everything()` **panic** in external mode
+rather than returning an empty `Observed`, because an empty one would let
+`assert!(x.is_empty())` pass and turn a skipped claim into one that looked
+proved.
+
+`ws://` deliberately: what TLS refuses is proved in apex-remote-core's tls
+suite against a minted CA, and pointing this at wrangler's self-signed
+certificate would only re-test that refusal.
+
+### What Andre would now run to deploy
+
+Checked rather than copied: `apex-remoted.service` really is a **user** unit
+(`Containerfile.base:207` installs it to `/usr/lib/systemd/user/`), so the
+design doc's `systemctl --user` is right. `Containerfile.base:332` asserts the
+shipped unit's `ExecStart` carries no `--relay`; a `systemctl --user edit`
+drop-in does not touch the shipped file, so that assertion still holds.
+
+```
+cd relay
+npx wrangler login          # opens a browser; grants the CLI the account
+npx wrangler deploy         # prints https://apex-remote-relay.<subdomain>.workers.dev
+```
+
+`npm install --save-dev wrangler` is **already done and committed** — it is no
+longer a step. Then on each machine:
+
+```
+systemctl --user edit apex-remoted
+#   [Service]
+#   ExecStart=
+#   ExecStart=/usr/bin/apex-remoted --relay wss://apex-remote-relay.<subdomain>.workers.dev
+systemctl --user restart apex-remoted
+apex remote status          # "relay" and "rendezvous" both filled in
+```
+
+The `wss://` in that ExecStart is the thing this unit made possible. Before it,
+that line started a daemon that refused its own configuration.
+
+**Still not done, and not pretended** (§6, unchanged by this unit): the relay
+is unauthenticated — anyone who learns a rendezvous id can occupy it. A denial
+of service, not a disclosure, because Noise refuses an impostor at either end,
+but a public URL wants a token or Cloudflare Access in front of it first. No
+rate limiting and no connection cap.
+
 ### NEXT
 
-`wrangler dev --local` against the real Worker — see below.
+**Nothing is in progress. The worktree is clean and all three commits are
+pushed.** `task/relay-tls` @ `0bb075a7`, forked from `roadmap/v2.2` @
+`b79838a4`, never rebased.
+
+Whoever follows should know:
+1. `relay/node_modules/` and `relay/.wrangler/` are gitignored; a fresh
+   worktree needs `npm install` inside `relay/` before `wrangler dev --local`
+   will run.
+2. Deploying is **Andre's decision and his account** — `npx wrangler login`
+   is the first step and no agent should take it.
+3. The two `SKIP-EXTERNAL` suites are a deliberate boundary, not a gap to
+   close. Closing them would mean an observing pass-through proxy between the
+   client and the Worker, which would measure the proxy rather than the
+   Durable Object.
+
+### Housekeeping
+
+- `relay/.wrangler/` (5.5 MB of miniflare sqlite) was committed by accident in
+  `0ad66ab2` and untracked + gitignored in `0bb075a7`. Fixed additively rather
+  than by amending a pushed branch.
+- Final full-workspace `cargo test --locked`: **everything green**, including
+  the `apex-secretd` test that flaked earlier — which confirms that failure was
+  load, not this branch.
 
 ## The implementation shape, and the trap in it
 
