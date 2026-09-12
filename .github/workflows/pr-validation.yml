@@ -1877,16 +1877,39 @@ jobs:
       # The suite splices into fixture files only — it must never touch a real
       # ~/.config/labwc/rc.xml, which is what the helper's own default would do
       # if `apply` were ever called without --rc.
-      # The model lives in apex-shell, so the suite needs that tree. Vendored
-      # from remote `main`, which is exactly what Containerfile.base does — so a
-      # shell change that moves the keybind defaults fails here until it lands,
-      # which is the documented merge order (shell before or with the OS) doing
-      # its job rather than a broken check.
+      # The model lives in apex-shell, so the suite needs that tree. It vendors
+      # the MATCHING branch, falling back to the default one, and says which.
+      #
+      # This used to clone the default branch unconditionally, and the comment
+      # justified it: "exactly what Containerfile.base does — so a shell change
+      # that moves the keybind defaults fails here until it lands, which is the
+      # documented merge order doing its job." That premise was true and is not
+      # any more. build-image.yml pinned apex-shell to `main` while this program
+      # develops both repos on roadmap/v2.2 and is forbidden from pushing main
+      # until the final integration, so the "merge order" this relied on cannot
+      # happen while the program runs — apex-shell/main last moved 2026-09-04
+      # and roadmap/v2.2 was 137 commits ahead of it. The image was being built
+      # from two repos at different ages, and this check was comparing against
+      # the older one, so it could not have noticed.
+      #
+      # Both are pinned to the matching branch now. Keep the two in step: if one
+      # is ever changed, the other is wrong.
       - name: Vendor apex-shell for the keybind model
         run: |
           set -euo pipefail
-          git clone --depth 1 https://github.com/AndreNijman/apex-shell.git \
-            "${GITHUB_WORKSPACE}/../apex-shell"
+          want="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          if git ls-remote --exit-code --heads \
+               https://github.com/AndreNijman/apex-shell "$want" >/dev/null 2>&1; then
+            echo "keybind model: vendoring apex-shell branch '$want'"
+            git clone --depth 1 --branch "$want" \
+              https://github.com/AndreNijman/apex-shell.git \
+              "${GITHUB_WORKSPACE}/../apex-shell"
+          else
+            echo "keybind model: apex-shell has no branch '$want'; using its default branch"
+            git clone --depth 1 https://github.com/AndreNijman/apex-shell.git \
+              "${GITHUB_WORKSPACE}/../apex-shell"
+          fi
+          git -C "${GITHUB_WORKSPACE}/../apex-shell" log -1 --format='vendored apex-shell %h %s'
           test -f "${GITHUB_WORKSPACE}/../apex-shell/src/services/config_tab/KeybindService.qml"
 
       - name: Run labwc keybind generator assertions
