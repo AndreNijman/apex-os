@@ -52,6 +52,15 @@ pub enum AuditEvent {
     Granted,
     /// A capability was withdrawn.
     Revoked,
+    /// §13.8: the owner approved ONE operation, once. Distinct from `Granted`
+    /// because it is a different kind of permission and is read as one: a
+    /// grant keeps standing, an approval is spent by the next matching
+    /// operation and expires on its own. A trail that spelled both `granted`
+    /// would make "the owner allows this" and "the owner allowed this once"
+    /// the same sentence.
+    Approved,
+    /// An approval was taken back before anything spent it.
+    Withdrawn,
     /// A capability ran. `exit_code` says how it ended.
     Used,
     /// A capability was refused. `reason` says why.
@@ -65,6 +74,8 @@ impl AuditEvent {
             AuditEvent::Removed => "removed",
             AuditEvent::Granted => "granted",
             AuditEvent::Revoked => "revoked",
+            AuditEvent::Approved => "approved",
+            AuditEvent::Withdrawn => "withdrawn",
             AuditEvent::Used => "used",
             AuditEvent::Refused => "refused",
         }

@@ -52,7 +52,7 @@ use apex_secret_core::operation::{Effect, OperationSpec, ProviderSpec, ResourceK
 use apex_secret_core::SecretValue;
 
 use crate::broker;
-use crate::provider::{Bind, Bound, Endpoint, Performed, Provider, ProviderError};
+use crate::provider::{Approval, Bind, Bound, Endpoint, Performed, Provider, ProviderError};
 
 /// The MCP vocabulary, in §13.2's shape.
 ///
@@ -151,6 +151,11 @@ impl Provider for McpProvider {
             detail: format!("mcp request to {}", req.service.service),
             // An MCP request answers; it does not issue a credential.
             creates: None,
+            // §13.8 is about environments, and an MCP server has none: the
+            // endpoint is the stored record's own and the caller contributes
+            // nothing to it. There is no production half of a thing with one
+            // half.
+            approval: Approval::Standing,
         })
     }
 
