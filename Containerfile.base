@@ -1861,6 +1861,12 @@ RUN set -eux; \
     # line — so the refusal has to live in the engine, after the separator.
     grep -qE "^[^#]*--profile\|-profile\|-P" /usr/libexec/apex-browser; \
     grep -qE "^[^#]*--display\|-display" /usr/libexec/apex-browser; \
+    # {capsule} is not a convenience. Firefox's --screenshot writes nothing at
+    # all when given a relative filename — the run exits 0 and produces no
+    # file — and a caller cannot type the path of a capsule this engine names
+    # for them, so without the substitution nothing the browser writes by path
+    # can ever be nominated.
+    grep -qE '^[^#]*\{capsule\}' /usr/libexec/apex-browser; \
     # The copy loop runs over the NOMINATIONS. Iterating the capsule and
     # copying what matched would let the page decide what leaves by choosing a
     # filename, which is the one property this verb exists to have.

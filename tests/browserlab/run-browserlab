@@ -92,7 +92,11 @@ CANNOT="could-not-run"
 # fresh tmpfs, so a runtime built there is a bridge the daemon refuses to use
 # and every allowlisted flow would report could-not-run for the wrong reason.
 LAB="${BROWSERLAB_ROOT:-/var/tmp/apex-browserlab}"
-OUT="$LAB/out"
+# OUTSIDE the tree teardown deletes, which is the rule `--download-to` enforces
+# on a caller and which this lab broke on itself: with OUT inside $LAB, every
+# verdict, expectation file and captured artefact was removed by the lab's own
+# cleanup the moment the run ended, and a failing flow left nothing to read.
+OUT="${BROWSERLAB_OUT:-${LAB}-out}"
 KEEP=0
 FLOWS=(profile headless network downloads capability teardown)
 
@@ -363,7 +367,7 @@ flow_profile() {
     }
     capsule_run profile --allow "127.0.0.1:$PORT" \
         --download observed.txt \
-        -- --screenshot "shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
     local obs="$OUT/profile/got/observed.txt"
     [[ -f "$obs" ]] || { cannot "the capsule produced no observation file, so nothing can be said about what it saw"; return; }
     local seen; seen="$(cat "$obs")"
@@ -387,7 +391,7 @@ flow_profile() {
 flow_headless() {
     capsule_run headless --allow "127.0.0.1:$PORT" \
         --download observed.txt --download shot.png \
-        -- --screenshot "shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
     local obs="$OUT/headless/got/observed.txt"
     [[ -f "$obs" ]] || { cannot "the capsule produced no observation file"; return; }
     local seen; seen="$(cat "$obs")"
@@ -407,7 +411,7 @@ flow_headless() {
 flow_network() {
     capsule_run network --allow "127.0.0.1:$PORT" \
         --download observed.txt \
-        -- --screenshot "shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
     local obs="$OUT/network/got/observed.txt"
     [[ -f "$obs" ]] || { cannot "the capsule produced no observation file"; return; }
     local seen; seen="$(cat "$obs")"
@@ -423,7 +427,14 @@ flow_network() {
     # The claim is that the namespace has no ROUTE, so the destination has to
     # be one that needs routing. Loopback does not, and measuring against it
     # is how this assertion nearly passed for the wrong reason.
-    says "an unproxied literal address is unreachable, not refused" "Network is unreachable" \
+    # Measured rather than guessed at TWICE. The first version probed loopback,
+    # which exists in the namespace. The second expected curl to print
+    # "Network is unreachable"; it does not — for a literal outside loopback it
+    # reports CURLE_COULDNT_CONNECT, "Failed to connect … after 0 ms". So what
+    # is asserted is what is observable: the connection does not happen, and it
+    # does not happen instantly, against an address in TEST-NET-2 that nothing
+    # on any network would answer.
+    says "an unproxied address outside loopback connects to nothing" "Failed to connect to 198.51.100.7" \
          "$(grep '^unproxied-literal=' <<<"$seen")"
     says "and a name cannot even be resolved inside the capsule" "Could not resolve host" \
          "$(grep '^unproxied-name=' <<<"$seen")"
@@ -438,11 +449,15 @@ flow_network() {
     # have produced it.
     : > "$LAB/daemon-mark"
     local before; before="$(wc -l < "$LAB/daemon.log" 2>/dev/null || echo 0)"
-    capsule_run browser-proxy --allow "127.0.0.1:$PORT" --timeout 60 \
-        -- --screenshot "shot.png" "https://never-allowed.browserlab.invalid/"
+    # A `.test` host on a port nothing else in this lab uses. `.invalid` was
+    # tried first and produced no denial at all — the browser never asked for
+    # it — so the name here is one a browser treats as an ordinary domain, and
+    # the port keeps it distinguishable from anything curl did.
+    capsule_run browser-proxy --allow "127.0.0.1:$PORT" --timeout 90 \
+        -- --screenshot "{capsule}/shot.png" "https://browser-only.test:8443/"
     local after_log; after_log="$(tail -n +$((before + 1)) "$LAB/daemon.log" 2>/dev/null)"
     says "the browser's own request reached the daemon's proxy and was denied" \
-         "never-allowed.browserlab.invalid" "$after_log"
+         "browser-only.test:8443" "$after_log"
     # The engine refuses a destination the runtime has not allowed, rather
     # than starting a capsule that reaches nothing.
     local refused
@@ -454,7 +469,7 @@ flow_network() {
 flow_downloads() {
     capsule_run downloads --allow "127.0.0.1:$PORT" \
         --download observed.txt \
-        -- --screenshot "shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
     local got="$OUT/downloads/got"
     local obs="$got/observed.txt"
     [[ -f "$obs" ]] || { cannot "the capsule produced no observation file"; return; }
@@ -488,7 +503,7 @@ PY
     mkdir -p "$mgot"
     "$mutant" run --timeout 150 --allow "127.0.0.1:$PORT" \
         --download observed.txt --download-to "$mgot" \
-        -- --screenshot "shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>" \
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>" \
         > "$OUT/downloads/mutant.log" 2>&1
     if [[ -e "$mgot/leak.txt" ]]; then
         _chaos_pass "an engine whose loop runs over the directory DOES leak the unnominated file"
@@ -502,7 +517,7 @@ PY
     mkdir -p "$nodest"
     local out
     out="$("$ENGINE" run --timeout 150 --allow "127.0.0.1:$PORT" --download observed.txt \
-        -- --screenshot "shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>" 2>&1)"
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>" 2>&1)"
     says "without a destination nothing leaves, however much is nominated" "nothing left the capsule" "$out"
     claim_not "and no destination was invented" bash -c "compgen -G '$nodest/*' >/dev/null"
 }
@@ -563,6 +578,10 @@ main() {
 
     [[ -x "$ENGINE" ]] || die "no engine at $ENGINE"
     rm -rf -- "$LAB" 2>/dev/null
+    # OUT is outside $LAB so it survives teardown; it therefore has to be
+    # cleared here instead, or a flow that does not run this time keeps the
+    # verdict it got last time.
+    rm -rf -- "$OUT" 2>/dev/null
     mkdir -p "$LAB" "$OUT" || die "cannot create $LAB"
     trap 'lab_teardown' EXIT INT TERM
 
