@@ -56,7 +56,7 @@ suite and a mutation pair.
 
 | sub-feature | state | assertion |
 | --- | --- | --- |
-| screen reader | **MEASURED over real AT-SPI (round 18)** | `tests/test-apex-greet-atspi.sh` — 30 assertions, 8/8 mutants caught. The shipped surface runs in a real window on a private compositor against a private a11y bus, and the tree is read back over D-Bus exactly as Orca reads it. The predecessor's "cannot activate" blocker was misdiagnosed — it is SELinux silently refusing the ACTIVATION path, and nothing needs activating. **Still partial for two product reasons, both named and neither a harness limit:** the shipped greeter has no D-Bus session bus, so in production the bridge has nothing to publish on (measured: zero nodes); and `orca` is not in the image, so there is no reader. |
+| screen reader | **MEASURED over real AT-SPI (round 18)** | `tests/test-apex-greet-atspi.sh` — 30 assertions, 8/8 mutants caught. The shipped surface runs in a real window on a private compositor against a private a11y bus, and the tree is read back over D-Bus exactly as Orca reads it. The predecessor's "cannot activate" blocker was misdiagnosed — it is SELinux silently refusing the ACTIVATION path, and nothing needs activating. **Still partial for two product reasons, both named and neither a harness limit:** the shipped greeter has no D-Bus session bus, so in production the bridge has nothing to publish on (measured: zero nodes); and `orca` was not in the image, so there was no reader. **Round 18b closed the second of those**: `Containerfile.core` now installs `orca` (stage 5a-a11y), asserted by `tests/test-apex-a11y-stack.sh` — 13 assertions, 4/4 mutants caught. The first is now ASSERTED rather than only observed: `tests/test-apex-greet-session-bus.sh` — 16 assertions, 6/6 mutants caught — runs greetd's own command string with the compositor and quickshell stubbed and shows the client can reach no session bus on either host. It goes RED when somebody fixes it. |
 | magnifier | not present | no magnifier in either repo; wlroots has no standard one |
 | high contrast | present, untested as a11y | six shaders in apex-shell `src/config/shaders/` incl. `HighContrast.glsl`, applied via Hyprland `decoration:screen_shader` only — niri and labwc get nothing, and it is shipped as a visual effect, not an a11y feature |
 | reduced motion | **MEASURED and ratcheted** | `tests/check-reduce-motion.sh` — 12 assertions. Reaches **39 of 450** animation durations (8.7%); **402 are bare int literals** no switch can touch; 9 resolve to neither. Counts pinned exactly in both directions, the chain asserted link by link, 3 self-tests. Runtime half (turn it on in a live shell, read a Behavior's duration back) NOT built — `SettingsService` imports Quickshell so qmltestrunner cannot load it. |
@@ -66,7 +66,7 @@ suite and a mutation pair.
 | slow keys | not present | 0 mentions in either repo |
 | mouse keys | not present | 0 mentions in either repo |
 | on-screen keyboard | not present | no wvkbd/squeekboard/maliit anywhere; none in the image |
-| keyboard-only installer | **not measured — and now unblocked** | Installer is GUI-only (GTK4/Adw); the whiptail text UI was deleted deliberately. Named in P2-003's acceptance line, so this is the largest remaining hole in the criterion. Round 18 removed the reason it could not be measured: `Xvfb` is installed, `tests/lib/atspi.sh` works against GTK4, and the cage harness exists. NEXT item 1. |
+| keyboard-only installer | **MEASURED (rounds 18 / 18b)** | `installer/test-installer-a11y.sh` — **50 assertions**; mutation verdicts in the ROUND 18b table below, never quoted from here. The shipped GTK4 GUI runs on a private Xvfb; `xdotool` delivers real X key events into the real toolkit and the resulting focus, names and text are read back over AT-SPI. SIX of the installer's eleven pages are name-audited (welcome, keyboard, wifi, secureboot, **confirm**, account); the Tab ring is walked on `account` and required to reach every field, name every stop and close; the fields are typed into with the keyboard alone and read back, with the password still masked on the bus; and **the keyboard alone advances the flow** — Tab to `Begin`, then Return, then Space, each in its own process, each required to produce the next page's sentinel AND to leave the old page's primary button gone. NOT audited, and named: `disk`/`mode`/`part` enumerate real block devices, `run` starts an install, `done` follows one. |
 | keyboard-only DESKTOP | **DONE for the shared controls** | `tests/run-a11y-controls-test.sh` — 21 runtime assertions. Every shared `Cfg*` control is now a tab stop and operates on Space/Enter, proved by posting real `QKeyEvent`s and counting the signal the pages listen to. Pages that use only these controls are covered; bespoke widgets in `popups/` are NOT. |
 | screen-reader markup, desktop | **DONE for the shared controls** | same suite: `CfgRow` hands its label, description, disabled-reason and live readback to whatever control it holds; names and roles read back off the live attached objects. |
 | accessible login/lock/recovery | **login DONE, twice over** | QML side: `tests/test-apex-greet-a11y.sh` — 22 assertions on live objects. Bus side (round 18): `tests/test-apex-greet-atspi.sh` — 30 assertions on what the BRIDGE publishes, including that the password never crosses the bus and that a reader can operate the session picker and the layout pill via `DoAction`. Lock and recovery NOT done. |
@@ -737,30 +737,126 @@ surface now has to resolve `org.a11y.Bus` on the session bus the way every
 desktop application does; the walker keeps the variable, because the walker is
 the assistive technology and a reader IS told where the bus is.
 
+## ROUND 18b — what landed, and the verdicts
+
+Branch `task/p2-b-round18b`, worktree `/var/tmp/apex-work/wt-p2-b3-os`, pushed.
+Forked from `origin/roadmap/v2.2` and **merged `origin/task/p2-b-round18` into
+it** (`2d4d0d26`), because round 18 had NOT reached `roadmap/v2.2` — the
+orchestrator should merge `round18b` and needs no separate merge of `round18`.
+
+**Correcting the dispatch note:** the agent before this one did not "push
+nothing". `39f20442` — the whole installer accessibility audit, 38 assertions —
+was on `origin/task/p2-b-round18` already. What it lost was
+`installer/mutate-installer-a11y.sh`, sitting uncommitted in its worktree. That
+harness was recovered and committed first, before anything else was attempted.
+
+| commit | what |
+| --- | --- |
+| `eec6507f` | the recovered installer mutation harness, 6 mutants |
+| `cb9254f7` | `tests/test-apex-greet-session-bus.sh` (16) + its 6 mutants |
+| `c688de74` | `orca` into `Containerfile.core` + `tests/test-apex-a11y-stack.sh` (13) + 4 mutants |
+| `db16b410` | the installer audit's page-advance section and the `confirm` page (38 → 50) |
+| `6805174a` | all three suites into `pr-validation.yml`, and the job-selector defect below |
+
+### Mutation verdicts
+
+| set | result |
+| --- | --- |
+| `installer/mutate-installer-a11y.sh` | B1-B6 run at `eec6507f`: 6 applied, 5 CAUGHT, B2 mis-expected (see below). B7/B8 added for the page-advance section; **a full B1-B8 re-run at `db16b410` was still in flight when this line was written — if no later line in this card records its verdicts, RE-RUN IT before quoting a number.** |
+| `tests/mutate-greet-session-bus.sh` | C1-C6, 6 applied, **6 CAUGHT**, 0 survived |
+| `tests/mutate-a11y-stack.sh` | D1-D4, 4 applied, **4 CAUGHT**, 0 survived |
+
+**B2 was first reported SURVIVED, and that was the harness's fault, not a
+survival.** Unnaming the Wi-Fi password removes the very node the wifi page's
+sentinel waits for, so the page is never recognised as built and the per-page
+audit is never reached — the suite failed earlier and louder, on three named
+assertions. The harness was grepping for a sentence the failure does not
+contain. Identical in shape to I2 in the i18n round. The expected assertion is
+corrected, not the mutant.
+
+**C5 and B5 are the two that matter.** Both are vacuity floors: B5 empties the
+set of roles the audit considers interactive, so "every focusable control
+announces itself" becomes trivially true of nothing; C5 breaks the session-bus
+probe so it answers "no bus" whatever it is given, which would leave four
+absence assertions green and meaningless. Both caught.
+
+**C6 proves the session-bus suite flips.** It execs `at-spi-bus-launcher` from
+the sway host config the way `tests/lib/atspi.sh` does, and "a session bus alone
+is not enough: the greeter chain starts no accessibility bus" goes red. So the
+suite really is a statement of current state and not a constant.
+
+### Two things found that nothing was looking for
+
+1. **The page-advance hole.** The installer audit's section titled "the keyboard
+   alone can fill the page in **and move on**" did not move on. A primary button
+   can be reachable, named, announced perfectly and completely INERT to the
+   keyboard; the user is stuck on step 1 of 7 with a mouse the criterion says
+   they do not have, and every assertion stays green. Mutant B7 is exactly that
+   defect and it is now caught. This is K11 one layer lower: there the forward
+   edge existed in the page graph and could still have left the flow, here the
+   edge exists and the key press may not travel it.
+
+2. **`Containerfile*` selected no CI job at all** — the SIXTH instance of a bug
+   `pr-validation.yml` already documents five times. A PR touching only
+   `Containerfile.core` set `rust=false, installer=false, engine=false`, ran
+   nothing and passed, because a skipped job counts as success. Deleting `orca`
+   from that file and touching nothing else was precisely the change that would
+   have sailed through the assertion written to prevent it.
+
+### The negative control that could not fail, caught in review
+
+`test-apex-a11y-stack.sh` first used `ibus` — a word appearing only in
+`Containerfile.core`'s prose — as proof that the package extractor ignores
+comments. That control **cannot fail**: no comment in that file carries a `dnf5
+install` line for a broken parser to read a package out of, so the assertion
+held however broken the parser was. It is now a FIXTURE with a known right
+answer (a live install line, a commented-out one, and a trailing-`#` comment on
+a live line), and mutant D4 turns it red.
+
+### Cost of the orca change, measured not estimated
+
+`dnf5 install --assumeno orca` inside `ghcr.io/andrenijman/apex-os:daily`
+(6 weeks old; say so rather than imply a fresh number): **5 packages** — orca,
+brlapi, python3-brlapi, python3-louis, **python3-pyatspi** — **4 MiB
+downloaded, 23 MiB installed**. Nothing pulls `speech-dispatcher` or
+`espeak-ng`, which is the rpmdb confirming they were already there. Deliberately
+**not autostarted**: a reader that starts unbidden talks over a sighted user's
+first boot, and at the greeter it would have nothing to talk to until the
+session-bus hole is closed.
+
 ## NEXT
 
-Ordered. Items 1-3 are this round's remaining plan; 4 onward are inherited and
-still true.
+Ordered. 1-3 are this unit's remaining plan; 4 onward are inherited and still
+true. Rounds 18 and 18b closed the previous items 1-3.
 
-1. **The installer is the criterion's literal text and is still unmeasured.**
-   "keyboard-only installer" is named in P2-003's acceptance line and the ledger
-   row says "not present, not measured". It is now measurable and carries no
-   boot risk: `Xvfb` is installed, the cage harness from round 2 exists, and
-   `tests/lib/atspi.sh` works against GTK4 too. Two suites' worth:
-   an AT-SPI walk (every interactive widget named) and a keyboard-only walk
-   (Tab reaches every control within a bounded count; Enter/Space alone advances
-   the page). Run the GTK4 GUI on Xvfb with `GDK_BACKEND=x11` and drive it with
-   `xdotool` (`sudo apex install xdotool`) — real X key events into the real
-   toolkit, and the focus chain is GTK's either way. Cage is NOT in that loop;
-   say so in the header.
-2. **`orca` into `Containerfile.core`**, own commit, cost stated, with a
-   manifest assertion. This is the small delta that turns "the plumbing exists"
-   into "a screen reader exists" — see the corrected package table above. One
-   revert if Andre wants the size back.
-3. **`tests/test-apex-greet-session-bus.sh`** — the config half of finding 1
-   above. Read the shipped `greetd-config.toml` and `sway-greet.conf` and assert
-   what they provide, as a statement of current state that FLIPS when somebody
-   fixes it. The empirical half is already mutant A7.
+1. **Give the greeter a session bus, and exec the a11y launcher beside it.**
+   This is now the single largest thing standing between APEX and "screen reader
+   validated", and it is fully characterised: `tests/test-apex-greet-session-bus.sh`
+   states the current hole on BOTH hosts and goes red the moment it is closed;
+   mutant C1 shows what closing it looks like on the sway host, C4 on the labwc
+   one, C6 shows the accessibility-bus half. A one-line `dbus-run-session` is
+   NOT the fix — on an SELinux system `org.a11y.Bus` cannot be D-Bus activated
+   at all, measured again this round (EACCES, no AVC), so the launcher must be
+   execed explicitly the way `tests/lib/atspi.sh` does. **Still deliberately not
+   attempted here:** the login screen is boot-critical, greetd cannot be
+   exercised headlessly on this laptop, and this should be done by someone who
+   can boot an ISO and watch it come up.
+
+2. **A way to START orca.** The image now ships it and nothing launches it,
+   which is correct (a reader that starts unbidden talks over a sighted user's
+   first boot) but incomplete: there is no keybinding and no settings toggle, so
+   a blind user has no way to turn it on without sighted help. GNOME's
+   convention is Super+Alt+S. The keybindings live in
+   `/usr/share/apex/hypr/apex/keybindings.lua`; `tests/test-apex-a11y-stack.sh`
+   is where the assertion belongs, beside the "nothing autostarts it" one.
+
+3. **The Tab ring is walked on ONE page.** `installer/test-installer-a11y.sh`
+   walks `account` (most fields, both passwords) and advances welcome →
+   keyboard. Every other audited page is name-audited only, so a focus trap on
+   `wifi`, `secureboot` or `confirm` would not be seen. `advance_with` and the
+   ring walk are both parameterised enough to extend; the cost is runtime, about
+   a minute per page.
+
 4. **The `sections` array in `AgentHelpContent.qml`** (~200 prose strings) is the
    obvious next i18n increment; the pipeline is proven. One caution measured the
    hard way — `tests/check-agent-help.sh` greps for the exact shape
@@ -784,8 +880,9 @@ still true.
 9. Remaining accessibility gaps, unchanged: `src/popups/` and
    `src/nexus/NavPane.qml` still use bespoke Rectangle+MouseArea and are
    mouse-only and unnamed; no Arabic/Hebrew/Thai fonts, so RTL input from
-   `fcitx5-m17n` cannot be rendered.
-10. **`Xvfb` is the tool that makes the compositor-keymap criterion
-    measurable.** If a future runner lacks it, `test-installer-keymap.sh` §3
-    SKIPs rather than lying — but a skip there means the criterion is
-    unmeasured, not met.
+   `fcitx5-m17n` cannot be rendered. The `disk`/`mode`/`part` installer pages
+   are not audited either, because they enumerate real block devices.
+10. **`Xvfb` and `xdotool` are the tools that make the installer criterion
+    measurable.** Both are now installed in CI's installer job as well as on this
+    laptop. If a future runner lacks them the suite SKIPs rather than lying — but
+    a skip there means the criterion is unmeasured, not met.
