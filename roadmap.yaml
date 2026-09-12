@@ -2596,23 +2596,45 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    APEX Remote relay, reconnect, mDNS discovery and connection quality. LANDED on apex-os roadmap/v2.2 2026-09-12
-    as merge b79838a4 (branch tip 373e833c), with the apex-shell half at merge a36f1a4. The relay's server side
-    exists as code with tests against a local double: relay/ with its Durable Object room and
-    relay/test/room.test.mjs, plus reconnect across network changes, _apex-remote._tcp mDNS announcement, and
-    rendered connection quality. apex-remote-core 83 tests, apex-remoted 35+3+10+8. Clippy had NEVER run against
-    this branch's Rust because clippy was not installed on this machine until 2026-09-12; run now, it found three
-    lints, all in the relay's own test code, fixed in 373e833c, and cargo clippy --locked --workspace --all-
-    targets -- -D warnings exits 0. NOTHING WAS DEPLOYED, deliberately: no wrangler, no Worker, no Durable Object,
-    no account authentication - which remained the right posture after the build-image.yml fleet hazard found the
-    same day. DEPLOYMENT IS BLOCKED ON A DECISION THAT IS ANDRE'S RATHER THAN ON A DEFECT: apex-remoted refuses a
-    wss:// relay BY NAME and *.workers.dev is HTTPS-only. Three ways out are costed in
-    ROADMAP/design/P1-052-relay.md section 5 - rustls (about fifteen crates), an openssl s_client child in the
-    shape apex-secretd already uses for curl, or a custom domain served over ws://. A MUTATION VERDICT WAS
-    CORRECTED: an inherited pair recorded as SURVIVED was re-taken after the orchestrator's correction about
-    restores that preserve mtimes, and it reds at 7/1 with a 'Compiling apex-remoted' line on both the mutation
-    and the restore - the survival had been an artefact of a skipped rebuild. The remaining inherited pairs are
-    not re-measured and the card says so rather than implying they were.
+    APEX Remote relay, reconnect, mDNS discovery and connection quality — AND THE CLIENT CAN NOW DIAL IT. LANDED
+    on apex-os roadmap/v2.2 2026-09-12 as merges b79838a4 (the relay, reconnect, mDNS, connection quality) and
+    9b15ce3c (TLS), with the apex-shell pages at merge a36f1a4. The relay's server side is a Worker with a Durable
+    Object room plus relay/test/room.test.mjs; apex-remote-core 83 tests, apex-remoted 35+3+10+8, clippy clean.
+    THE wss:// BLOCKER IS CLOSED. apex-remoted refused a wss:// relay by name because nothing in the workspace
+    spoke TLS, and *.workers.dev is HTTPS-only, so the Worker was reachable by a browser and not by this client.
+    Andre delegated the choice ('you pick for relay, figure it out yourself'); the orchestrator chose rustls in
+    apex-remote-core over an openssl s_client child (the curl precedent it leans on is for ONE-SHOT requests,
+    while a relay connection is long-lived and must reconnect, so every reconnect becomes a process-lifecycle
+    problem) and over a custom domain on ws:// (TLS to the relay hides the rendezvous id and traffic pattern from
+    an ON-PATH OBSERVER, a different party from the relay operator the disclosure already names, and cleartext
+    contradicts a project that pins a Sigstore root and refuses an unverified image). ROOT STORE: rustls-native-
+    certs, the machine's own, NOT a vendored bundle - because what is being verified differs. APEX pins the
+    Sigstore root where the thing verified IS the OS image, so a store shipped inside that image cannot be the
+    authority on it; a relay dial happens afterwards on an already-trusted machine, where the machine IS the
+    authority. An admin who runs update-ca-trust to remove a CA means it everywhere, and a vendored bundle would
+    keep trusting what was deleted; and a private deployment behind an internal CA is unreachable from a vendored
+    bundle. The cost is paid openly: an empty store is a NAMED refusal printing /etc/pki/tls/certs, SSL_CERT_FILE
+    and SSL_CERT_DIR, never a silent fall back, because falling back would re-trust exactly the CA just removed.
+    COST MEASURED: 178 -> 193 crates, 15, matching the design doc's prediction; only 9 compile on Linux; ring
+    needs a C compiler at image-build time and Containerfile.core:1396-1406 puts gcc/clang/make/cmake in the FINAL
+    core image, checked rather than assumed. THE REFUSALS ARE THE TEST, since a TLS client that accepts anything
+    also connects: asserted by variant AND by message against a CA minted per run and served from a loopback
+    rustls listener - untrusted issuer is UnknownIssuer, a certificate for other.test asked for as relay.test is
+    not-valid-for-name with both names in the message, and one expired in 2020 is refused with its dates. Seven
+    mutants, including one that collapses the message and reddens all three 'says so' tests while the variant-only
+    ones stay green, one that downgrades wss:// to plaintext, and one that violates a lock invariant and
+    DEADLOCKS. RUNNING THE WORKER FOR THE FIRST TIME FOUND A DEFECT IN IT: under wrangler dev --local, 'Can't call
+    WebSocket send() after close()' - ctx.getWebSockets() keeps returning sockets the object has already closed,
+    which would also have let waiting() hold a room forever, the exact 409-forever failure the design claims to
+    have removed. Fixed with an isOpen() guard. HOW IT WAS CAUGHT IS THE LESSON: against the pre-fix Worker the
+    Rust suite reported 8 passed / 0 failed THREE TIMES while wrangler logged two exceptions, because a Worker
+    that throws still leaves the socket closed and only its own log sees it. A green suite was hiding a server-
+    side defect until the real server ran. Six of eight suites now run against the real Worker including pairing
+    and a live session end to end; the two that do not print SKIP-EXTERNAL and say why. DEPLOYMENT IS NOW A THREE-
+    LINE OPERATION FOR ANDRE and nothing is deployed: cd relay && npx wrangler login && npx wrangler deploy, then
+    systemctl --user edit apex-remoted to point ExecStart at --relay wss://..., then restart and apex remote
+    status. --user is verified against Containerfile.base:207. UNCHANGED CAVEAT: the relay is still
+    unauthenticated and unrate-limited, so a public URL wants a token or Cloudflare Access first.
 - id: P1-053
   title: Create polished first-party APEX Remote Android app foundation
   priority: P1

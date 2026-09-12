@@ -12,7 +12,9 @@
 
 *(kept current — a fresh agent replaces the dead one by reading this line)*
 
-**→ Building `apexd/apex-backup-core`: format + crypto first.**
+**→ P2-001 and P2-002 are done and pushed (5 commits). Now P2-013: generalise
+`[identity.*]` to github/ssh/agent, find the enforcement seam for each, and
+report honestly where there is none.**
 
 ---
 
@@ -170,3 +172,44 @@ Worktree created off `24472b64`, branch pushed before any work. Read
 `apex-secret-core/{project,protocol,operation,store}.rs`, `broker.rs`,
 `tests/test-secret-at-rest.sh`. Recorded the exists/adds split above and the
 four R2 constraints. No code yet.
+
+### 2026-09-12 — round 1, P2-001 and P2-002 landed on the branch
+
+Five commits on `task/p2-a-backup`, all pushed. Nothing rebased.
+
+* `f79254e3` format, sealed box, four verdicts — 42 tests, 23 mutations
+* `70fd7384` targets: local, NAS with the mount checked, R2 brokered — 79 tests, 20 mutations
+* `025d2a31` keys, config, session — 129 tests, 35 mutations
+* `5aa7d58c` `apex backup`, the R2 call sequence, `tests/test-apex-backup.sh`
+
+**Counts on the branch tip:** `apex-backup-core` 132 passed / 0 failed;
+`apex-secretd` 183 + 15 passed / 0 failed; `apex` 535 + 8 + 6 passed / 0 failed;
+`tests/test-apex-backup.sh` 64 passed / 0 failed (including the real-root half);
+`tests/test-apex-verbs.sh` 59 passed / 0 failed. `cargo clippy --locked
+--workspace --all-targets -- -D warnings` clean.
+
+**85 mutations run. 75 caught on the first pass; 10 survived, of which 6 were
+real gaps now closed and 4 were the tests being weaker than they looked.** The
+two worth naming:
+
+* **`restore` never checked the manifest's offsets.** Zeroing every offset left
+  the entire round trip green, because restore reads sequentially and only
+  `verify` looked at the field — so a manifest could disagree with itself about
+  where each file starts and a restore would hand back a tree that looked
+  right. The path that writes files checks it now.
+* **a `valid_name` call in `SnapshotId::parse` could be deleted with nothing
+  going red**, because the shape check subsumes it. A check that cannot refuse
+  anything is the dead cosign branch again; it is gone and the coupling is
+  asserted directly.
+
+**One defect the shell suite found, bigger than its symptom:** a second restore
+into the same directory failed `EEXIST` on a symlink. The dangerous half was
+that a symlink already at an entry's path is something `File::create` FOLLOWS —
+a destination holding `etc/passwd -> /etc/passwd` would have had a root restore
+write outside the destination. Now cleared first, `O_NOFOLLOW` on the write as
+well, and a directory in the way is reported rather than deleted.
+
+**One mutation deliberately left surviving,** recorded in the source: the
+per-entry `readdir` `?` in `FsTarget::list` cannot be reached from a fixture,
+because `read_dir` opens the directory once and the `chmod 000` test fails at
+the open. It needs an NFS mount losing its server mid-listing.
