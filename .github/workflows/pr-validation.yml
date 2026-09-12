@@ -978,6 +978,21 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-verbs.sh
 
+      # tests/check-doc-verbs.sh existed since the `apex request install clang`
+      # defect and ran NOWHERE — not in this workflow, not from any suite — so
+      # it was a checker somebody had to remember to type. Both directions run
+      # here now. Forward: every `apex …` a doc shows parses. Reverse: every
+      # command the binary offers is named by some doc, or is declared in
+      # tests/doc-verbs-undocumented, which is a debt list that can only
+      # shrink. The reverse direction is the one that found `apex remote
+      # pair|devices|revoke|status|enable` documented nowhere; the forward one
+      # structurally cannot, because a verb no doc mentions produces no line.
+      # It asks the binary this job already built, not the installed apex,
+      # which on a runner does not exist.
+      - name: Docs and the CLI agree, in both directions
+        working-directory: ${{ github.workspace }}
+        run: ./tests/check-doc-verbs.sh
+
       - name: Run trusted-device assertions
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-host.sh
