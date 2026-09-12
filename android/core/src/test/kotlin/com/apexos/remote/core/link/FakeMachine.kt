@@ -49,7 +49,41 @@ class FakeMachine(
     private val dropOnAttempts: Set<Int> = emptySet(),
     /** Answer an `Open` with only a `Close`, as a proxy failure does. */
     private val closeWithoutReply: String? = null,
+    /**
+     * How many bytes of scrollback go in one `Data` frame.
+     *
+     * [CHUNK] models a healthy read. A small number models the other thing a
+     * phone actually gets: a congested link where the far end's writes are
+     * broken up by the path's MTU and the kernel's window, delivering an
+     * escape sequence in three pieces across three frames.
+     */
+    private val chunkBytes: Int = CHUNK,
+    /** Milliseconds between chunks. A slow link, modelled as a slow link. */
+    private val chunkDelayMs: Long = 0,
+    /**
+     * After attaching, send nothing at all and never close — including no
+     * pings.
+     *
+     * The failure mode a close-based test cannot reach: a phone that walked
+     * into a lift. TCP does not announce it, the socket does not throw, and
+     * everything above looks exactly like a terminal nobody is typing into.
+     */
+    private val silentAfterAttach: Boolean = false,
+    /**
+     * Send a `Ping` this often, as `apex-remoted` does every fifteen seconds.
+     *
+     * Zero for a machine that sends no keepalive at all — which is what makes
+     * [silentAfterAttach] a *silent* connection rather than merely an idle
+     * one. The two are told apart by exactly this traffic, so a fixture that
+     * could not produce it could not test the distinction.
+     */
+    private val pingEveryMs: Long = 0,
 ) {
+    /** How many `Data` frames have been sent. The throttle's own evidence. */
+    val dataFramesSent = AtomicInteger(0)
+
+    /** How many keepalives have gone out. */
+    val pingsSent = AtomicInteger(0)
     /** How many connections have been opened. One per handshake, in the real thing. */
     val connections = AtomicInteger(0)
 
@@ -70,6 +104,27 @@ class FakeMachine(
         thread.isDaemon = true
         synchronized(threads) { threads.add(thread) }
         thread.start()
+        if (pingEveryMs > 0) {
+            // The keepalive, from the machine's side — which is the only side
+            // it comes from. A client's own outbound ping does not prove the
+            // far end is alive, and a fixture that pinged from the client
+            // would be testing the client against itself.
+            val keepalive = Thread({
+                try {
+                    var token = 0L
+                    while (true) {
+                        Thread.sleep(pingEveryMs)
+                        toClient.put(Frame.Ping(token++))
+                        pingsSent.incrementAndGet()
+                    }
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            }, "fake-machine-keepalive-$attempt")
+            keepalive.isDaemon = true
+            synchronized(threads) { threads.add(keepalive) }
+            keepalive.start()
+        }
         return channel
     }
 
@@ -99,14 +154,22 @@ class FakeMachine(
                             toClient.put(Frame.Close(frame.channel, ""))
                             continue
                         }
+                        if (silentAfterAttach) {
+                            // Attached, and then nothing. Not a close, not a
+                            // ping: the connection is up as far as every layer
+                            // above can tell, and no byte will ever arrive.
+                            continue
+                        }
                         val drop = attempt in dropOnAttempts && dropAfterBytes >= 0
                         val limit = if (drop) minOf(dropAfterBytes, scrollback.size) else scrollback.size
                         // In pieces, as a real socket delivers it.
                         var at = 0
                         while (at < limit) {
-                            val end = minOf(at + CHUNK, limit)
+                            val end = minOf(at + chunkBytes, limit)
                             toClient.put(Frame.Data(frame.channel, scrollback.copyOfRange(at, end)))
+                            dataFramesSent.incrementAndGet()
                             at = end
+                            if (chunkDelayMs > 0) Thread.sleep(chunkDelayMs)
                         }
                         if (drop) {
                             // The plug. A dead socket, not a polite close: the
@@ -165,11 +228,18 @@ class FakeMachine(
             for (f in Frame.dataFrames(channelId, bytes)) send(f)
         }
 
+        @Volatile
+        override var lastFrameNanos: Long? = System.nanoTime()
+            private set
+
         override fun receive(): Frame {
             while (true) {
                 if (closed) throw EOFException("this connection to $machine is closed")
                 val item = inbound.poll(30, TimeUnit.SECONDS)
                     ?: throw EOFException("$machine said nothing for thirty seconds")
+                // Before the keepalive filtering below, and that is the whole
+                // point: a ping is traffic even though it never surfaces.
+                lastFrameNanos = System.nanoTime()
                 if (item is Hangup) {
                     closed = true
                     throw EOFException("the connection to $machine ended")
