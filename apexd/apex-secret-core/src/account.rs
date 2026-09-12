@@ -65,15 +65,14 @@
 //! account is called. Obtaining the credential is the front-end's job and
 //! spending it is `apex-secretd`'s.
 
-use crate::operation::{Effect, OperationId};
-use crate::store::valid_service_name;
+use crate::operation::Effect;
 
 /// The reserved prefix. See the module note.
 pub const NAMESPACE: &str = "account";
 
 /// Longest an account's local name may be.
 ///
-/// [`valid_service_name`] caps the whole service name at 64 bytes, and the
+/// [`crate::store::valid_service_name`] caps the whole service name at 64 bytes, and the
 /// prefix plus the longest provider id spends some of that. Bounded here so
 /// the refusal names the account name the user typed rather than a derived
 /// string they never wrote.
@@ -232,6 +231,14 @@ impl Provider {
     /// Look a scope up by the name a person types.
     pub fn scope(&self, name: &str) -> Option<&'static Scope> {
         self.scopes.iter().find(|s| s.name == name)
+    }
+
+    /// The host, for a listing: the fixed one, or what the user must supply.
+    pub fn host_display(&self) -> String {
+        match self.host {
+            Host::Fixed(h) => h.to_string(),
+            Host::PerAccount => "yours (--host)".to_string(),
+        }
     }
 
     /// Whether this provider needs `--host` at `add` time.
@@ -428,6 +435,8 @@ pub fn provider(id: &str) -> Option<&'static Provider> {
 pub enum AccountError {
     UnknownProvider(String),
     BadName(String),
+    /// The whole token, when it does not even have a provider in it.
+    BadRef(String),
     UnknownScope {
         provider: &'static str,
         scope: String,
@@ -458,6 +467,12 @@ impl std::fmt::Display for AccountError {
                  lowercase letters, digits, '_' and '-', starting with a letter or digit",
                 n.escape_debug()
             ),
+            AccountError::BadRef(t) => write!(
+                f,
+                "'{}' does not name an account; accounts are written \
+                 <provider>.<name>, as in nextcloud.home",
+                t.escape_debug()
+            ),
             AccountError::UnknownScope { provider, scope } => write!(
                 f,
                 "{provider} has no scope '{}'; `apex account scopes {provider}` lists them",
@@ -485,7 +500,7 @@ impl std::error::Error for AccountError {}
 
 /// Account names: the part the user chooses.
 ///
-/// Stricter than [`valid_service_name`] on purpose. That function allows `.`,
+/// Stricter than [`crate::store::valid_service_name`] on purpose. That function allows `.`,
 /// which is this namespace's own separator, and allows uppercase, which would
 /// make `Home` and `home` two accounts that look like one in a list.
 pub fn valid_account_name(name: &str) -> bool {
@@ -526,6 +541,27 @@ impl AccountRef {
         format!("{NAMESPACE}.{}.{}", self.provider.id, self.name)
     }
 
+    /// Read an account out of the form a person types: `nextcloud.home`.
+    ///
+    /// The same string as [`AccountRef::service`] with the namespace taken
+    /// off, and that is deliberate rather than convenient — an account is
+    /// addressed by one token everywhere, so the name in `apex account list`,
+    /// the name in a grant, and the name in the audit trail are the same word.
+    pub fn parse_ref(text: &str) -> Result<AccountRef, AccountError> {
+        // A caller who pasted the stored name gets what they meant rather than
+        // "no provider called account". The reverse — accepting `account.x.y`
+        // as provider `account` — is impossible, because there is no provider
+        // by that name.
+        let text = text
+            .strip_prefix(NAMESPACE)
+            .and_then(|t| t.strip_prefix('.'))
+            .unwrap_or(text);
+        let (provider_id, name) = text
+            .split_once('.')
+            .ok_or_else(|| AccountError::BadRef(text.to_string()))?;
+        AccountRef::new(provider_id, name)
+    }
+
     /// Read an account back out of a service name, or `None` when the service
     /// is not an account at all.
     ///
@@ -554,6 +590,8 @@ impl AccountRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::operation::OperationId;
+    use crate::store::valid_service_name;
 
     #[test]
     fn every_provider_derives_a_service_name_the_store_accepts() {
@@ -622,6 +660,28 @@ mod tests {
                 "{foreign} parsed as an account"
             );
         }
+    }
+
+    #[test]
+    fn the_form_a_person_types_is_the_stored_name_without_the_prefix() {
+        let typed = AccountRef::parse_ref("nextcloud.home").unwrap();
+        assert_eq!(typed.service(), "account.nextcloud.home");
+        // Pasting back what `apex account list` printed is the same account
+        // and not a provider called `account`.
+        assert_eq!(AccountRef::parse_ref("account.nextcloud.home").unwrap(), typed);
+        // The refusals are three different answers, not one.
+        assert!(matches!(
+            AccountRef::parse_ref("home").unwrap_err(),
+            AccountError::BadRef(_)
+        ));
+        assert!(matches!(
+            AccountRef::parse_ref("nosuch.home").unwrap_err(),
+            AccountError::UnknownProvider(_)
+        ));
+        assert!(matches!(
+            AccountRef::parse_ref("nextcloud.Home").unwrap_err(),
+            AccountError::BadName(_)
+        ));
     }
 
     #[test]
