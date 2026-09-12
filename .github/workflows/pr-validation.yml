@@ -1488,6 +1488,21 @@ jobs:
       - name: Run shared-machine (guest, kiosk) assertions
         run: ./tests/test-apex-shared-machine.sh
 
+      # P2-016 criterion 1. One assertion carries it: `apex user add` without
+      # --admin must not put the account in wheel, because wheel is what
+      # polkit's auth_admin and sudo both resolve to on APEX. A dropped
+      # condition there is not a compile error and not a visible failure -- it
+      # is every account APEX creates able to approve a root operation, which
+      # is the state installer/apex-install is in today.
+      #
+      # It runs the real /usr/libexec/apex-user against a fixture passwd and
+      # group file, with every privileged tool (useradd, userdel, gpasswd,
+      # systemctl) replaced by a stub that records its argv. So the decisions
+      # go through the production path while no account is created, removed or
+      # changed, and nothing is written outside its temp directory.
+      - name: Run account (standard vs administrator) assertions
+        run: ./tests/test-apex-user.sh
+
       # What a screen reader and a keyboard-only user get from the login
       # screen. P2-003's "accessible login" and P2-004's "keyboard layout
       # before password" both land on the same surface, so they are measured

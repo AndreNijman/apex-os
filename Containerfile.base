@@ -941,6 +941,8 @@ RUN set -eux; \
 COPY files/system/libexec/apex-guest-wipe /usr/libexec/apex-guest-wipe
 COPY files/system/units/apex-guest-wipe@.service \
      /usr/lib/systemd/system/apex-guest-wipe@.service
+COPY files/system/units/apex-guest-session@.service \
+     /usr/lib/systemd/system/apex-guest-session@.service
 COPY files/system/shared-machine/guest-accounts /etc/apex/guest-accounts
 COPY files/system/shared-machine/greetd-kiosk.toml \
      /usr/share/apex/shared-machine/greetd-kiosk.toml
@@ -962,6 +964,26 @@ RUN set -eux; \
     test -f /usr/lib/systemd/system/apex-guest-wipe@.service; \
     test ! -e /etc/systemd/system/multi-user.target.wants/apex-guest-wipe@.service; \
     grep -q '^SuccessExitStatus=0 2$' /usr/lib/systemd/system/apex-guest-wipe@.service; \
+    : '── the session-end hook: installed, not enabled, and LOUD ──'; \
+    : 'The two units differ in exactly one judgement and it is not cosmetic.'; \
+    : 'The boot sweep above treats a refusal as success, because on a machine'; \
+    : 'with no guest configured refusing IS the right answer. The hook below'; \
+    : 'is only ever enabled for an account that is a configured guest, so a'; \
+    : 'refusal there means the guest left credentials behind -- it must fail'; \
+    : 'loudly, and a copied SuccessExitStatus would make it green instead.'; \
+    test -f /usr/lib/systemd/system/apex-guest-session@.service; \
+    ! grep -q '^SuccessExitStatus' /usr/lib/systemd/system/apex-guest-session@.service; \
+    : 'And it must hang off the unit logind actually stops. Binding to the'; \
+    : 'user slice never fires: logind does not stop user-<uid>.slice, and a'; \
+    : 'unit that BindsTo it keeps it from being collected, so the trigger the'; \
+    : 'hook is waiting for is the one the hook prevents. Measured on the L16.'; \
+    grep -q '^BindsTo=user-runtime-dir@%i.service$' \
+         /usr/lib/systemd/system/apex-guest-session@.service; \
+    grep -q '^WantedBy=user-runtime-dir@%i.service$' \
+         /usr/lib/systemd/system/apex-guest-session@.service; \
+    ! grep -qE '^(BindsTo|WantedBy)=user-%i\.slice$' \
+         /usr/lib/systemd/system/apex-guest-session@.service; \
+    test -z "$(find /etc/systemd/system -name 'apex-guest-session@*.service' -print -quit)"; \
     : '── the kiosk config is a recipe, and lands where recipes land ──'; \
     : 'greetd reads exactly one file, /etc/greetd/config.toml, and the'; \
     : 'assertion that it carries no auto-login is NOT made here: this stanza'; \
@@ -979,6 +1001,40 @@ RUN set -eux; \
     if grep -qE '^[[:space:]]*\[initial_session\]' /usr/share/apex/shared-machine/greetd-kiosk.toml \
         ; then echo "FATAL: the kiosk recipe fires once per boot instead of restarting"; exit 1; fi; \
     echo "shared-machine recipes installed, inert"
+
+# ── apex user: the surface that can create a STANDARD account (P2-016) ───────
+#
+# The standard/administrator distinction was enforced on APEX long before it
+# could be reached: installer/apex-install puts the one account it creates in
+# `wheel` unconditionally and the GUI offers no choice, so every account APEX
+# had ever made was an administrator. This is the engine behind `apex user`.
+COPY --chmod=0755 files/system/libexec/apex-user /usr/libexec/apex-user
+RUN set -eux; \
+    bash -n /usr/libexec/apex-user; \
+    : '── the default is STANDARD, and that is one line ──'; \
+    : 'Each grep is anchored to an EXECUTABLE line (^[^#]*), because this'; \
+    : 'file discusses every one of these decisions at length in its own'; \
+    : 'comments and a check its own prose can satisfy proves nothing — this'; \
+    : 'repository has shipped five of those.'; \
+    grep -qE '^[^#]*ADMIN_GROUP=wheel' /usr/libexec/apex-user; \
+    : 'wheel is added only under the --admin branch. If this ever became'; \
+    : 'unconditional, every account apex user makes could approve a root'; \
+    : 'operation, and nothing would say so.'; \
+    grep -qE '^[^#]*\[ "\$admin" = 1 \] && argv\+=\(-G "\$ADMIN_GROUP"\)' \
+        /usr/libexec/apex-user; \
+    test "$(grep -cE '^[^#]*-G "\$ADMIN_GROUP"' /usr/libexec/apex-user)" = 1; \
+    : '── the refusal there is no recovery from ──'; \
+    : 'polkit auth_admin and sudo both resolve to wheel, so an APEX with no'; \
+    : 'member of it left cannot approve anything or become root again from'; \
+    : 'inside the running system.'; \
+    grep -qE '^[^#]*only administrator on this machine' /usr/libexec/apex-user; \
+    : '── the test override is not a way into a privileged run ──'; \
+    grep -qE '^[^#]*APEX_USER_TOOLS is set and this is running as root' \
+        /usr/libexec/apex-user; \
+    : '── it is not setuid; it is meant to be reached through sudo ──'; \
+    test ! -u /usr/libexec/apex-user; \
+    test ! -g /usr/libexec/apex-user; \
+    echo "apex-user installed: add makes a standard account"
 
 COPY files/system/libexec/apex-boot-windows /usr/libexec/apex-boot-windows
 COPY files/system/sudoers/apex-boot-windows /etc/sudoers.d/020-apex-boot-windows

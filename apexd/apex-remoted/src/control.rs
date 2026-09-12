@@ -142,12 +142,13 @@ fn handle(stream: UnixStream, state: &State) -> std::io::Result<()> {
 }
 
 fn dispatch(req: Request, peer: Option<crate::peer::Peer>, state: &State) -> Reply {
+    // WHO is asking, before WHAT is asked.
+    if let Err(why) = authorized(&req, peer) {
+        return Reply::error(why);
+    }
     match req {
         Request::Status => status(state),
-        Request::Pair => match local_caller(peer) {
-            Ok(()) => pair(state),
-            Err(why) => Reply::error(why),
-        },
+        Request::Pair => pair(state),
         Request::Devices => match state.devices() {
             Ok(store) => Reply::Devices {
                 devices: store.list().into_iter().cloned().collect(),
@@ -156,6 +157,56 @@ fn dispatch(req: Request, peer: Option<crate::peer::Peer>, state: &State) -> Rep
         },
         Request::Revoke { device } => revoke(state, &device),
     }
+}
+
+/// Who may ask this.
+///
+/// Two halves, and until P2-016 only one verb was asked about either. `Pair`
+/// went through [`local_caller`]; `Status`, `Devices` and `Revoke` went through
+/// nothing at all, on the argument that the socket lives in a `0700` directory
+/// inside `$XDG_RUNTIME_DIR` and another account cannot reach it.
+///
+/// That argument is true and it is the same argument `local_caller`'s own
+/// comment dismisses, one line above, with "checked anyway: it costs one
+/// syscall". The asymmetry was measured rather than reasoned about: a second
+/// account on the L16, with the directory and the socket mode widened by hand
+/// so that the filesystem was not the thing answering, got the owner's machine
+/// key and LAN addresses out of `Status`, the owner's paired-device list out of
+/// `Devices`, and reached the owner's device STORE through `Revoke` — which
+/// answered "no paired device 'somebody-elses-phone'", meaning it had looked,
+/// and would have revoked one whose name matched. Only `Pair` said no.
+///
+/// P2-016's fourth criterion is that a remote agent's permissions are bound to
+/// the owning user. A verb that hands another account the owner's device list,
+/// or takes a device's access away on the owner's behalf, is not bound to
+/// anybody. So the account half now applies to every request, and the
+/// human-at-the-keyboard half stays where it was — `apex remote devices` from
+/// a script is a reasonable thing to do; pairing a phone from one is not.
+///
+/// There is no `sudo` path to keep open here, which is what makes this
+/// different from `apex-agentd` (see `apex-agentd/src/peer.rs::is_own_user`):
+/// `apex remote` finds this socket through `$XDG_RUNTIME_DIR`, so under sudo it
+/// looks in root's and finds no daemon at all.
+fn authorized(req: &Request, peer: Option<crate::peer::Peer>) -> Result<(), String> {
+    match req {
+        Request::Pair => local_caller(peer),
+        _ => own_user(peer),
+    }
+}
+
+/// The account half: is this connection this user's?
+fn own_user(peer: Option<crate::peer::Peer>) -> Result<(), String> {
+    let Some(peer) = peer else {
+        return Err(
+            "the kernel would not report the peer credentials of this connection, so there is no \
+             way to tell which account it belongs to"
+                .to_string(),
+        );
+    };
+    if !crate::peer::is_own_user(&peer) {
+        return Err("that connection does not belong to this user".to_string());
+    }
+    Ok(())
 }
 
 /// Refuse anything but a human at this machine.
@@ -172,9 +223,7 @@ fn local_caller(peer: Option<crate::peer::Peer>) -> Result<(), String> {
                 .to_string(),
         );
     };
-    if !crate::peer::is_own_user(&peer) {
-        return Err("that connection does not belong to this user".to_string());
-    }
+    own_user(Some(peer))?;
     may_pair(apex_agent_core::origin::observe_pid(peer.pid)?)
 }
 
@@ -317,6 +366,106 @@ mod tests {
             }
         }
         assert_eq!(allowed, 2, "the wrong number of origins may pair");
+    }
+
+    #[test]
+    fn another_accounts_connection_may_not_pair_however_local_it_looks() {
+        // P2-016 criterion 4: a remote agent's permissions are bound to the
+        // OWNING user. Pairing is where that binding is made, and until now
+        // nothing asserted the uid half of it — every test in this file runs
+        // as one uid, so `local_caller`'s `is_own_user` branch was never
+        // reached and the check could have been deleted without a red run.
+        // The same file already records that lesson once, for `may_pair`.
+        //
+        // The pid is THIS process's on purpose. It classifies as whatever the
+        // test runner is, and under tests/in-login-session.sh that is a local
+        // origin — the one `may_pair` allows. So with the uid check removed
+        // this peer WOULD pair, which is what makes the assertion able to
+        // fail rather than passing on the origin rule's coat-tails.
+        //
+        // uid 0 rather than "some uid that is not mine": root always resolves
+        // to a real account, on every machine, and it is the account that
+        // must not quietly inherit another's paired devices. `me().uid + 1`
+        // is not an account on a one-account machine, and this program has
+        // already shipped one test that passed for that reason instead of the
+        // one it was testing.
+        for (uid, what) in [
+            (0, "root"),
+            (unsafe { libc::getuid() }.wrapping_add(1), "a neighbouring uid"),
+        ] {
+            let foreign = crate::peer::Peer {
+                pid: std::process::id() as libc::pid_t,
+                uid,
+                gid: unsafe { libc::getgid() },
+            };
+            let Err(why) = local_caller(Some(foreign)) else {
+                panic!("{what} paired a device");
+            };
+            assert!(
+                why.contains("does not belong to this user"),
+                "{what}: {why}"
+            );
+            // Refused for THAT reason and not by the origin rule. The two are
+            // different failures with different fixes, and a test that
+            // accepted either would go green on a CI runner — where every
+            // caller is a scheduled-job — over a uid check that had been
+            // removed.
+            assert!(!why.contains("apex remote pair"), "{what}: {why}");
+        }
+    }
+
+    #[test]
+    fn every_control_verb_is_refused_to_another_account_and_not_only_pairing() {
+        // The asymmetry P2-016 found, over the whole vocabulary rather than
+        // over one verb. `Devices` discloses the owner's paired devices and
+        // `Revoke` takes a device's access away; before this they reached the
+        // owner's store with no question asked about who was on the other end
+        // of the socket, and only `Pair` said no. Measured with a real second
+        // account, not inferred.
+        let foreign = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: 0,
+            gid: unsafe { libc::getgid() },
+        };
+        let every = [
+            Request::Status,
+            Request::Pair,
+            Request::Devices,
+            Request::Revoke {
+                device: "somebody-elses-phone".into(),
+            },
+        ];
+        for req in &every {
+            let Err(why) = authorized(req, Some(foreign)) else {
+                panic!("{req:?} was allowed from another account");
+            };
+            assert!(
+                why.contains("does not belong to this user"),
+                "{req:?}: {why}"
+            );
+        }
+
+        // And the account half must not have swallowed the human half: this
+        // process's own peer still has to satisfy `may_pair` for `Pair`, and
+        // must not for the other three. Without this, `authorized` collapsing
+        // to `own_user` for everything would pass the loop above and quietly
+        // let a scheduled job pair a phone.
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        for req in &every {
+            let verdict = authorized(req, Some(me));
+            match req {
+                Request::Pair => assert_eq!(
+                    verdict.is_ok(),
+                    local_caller(Some(me)).is_ok(),
+                    "Pair stopped asking the origin rule"
+                ),
+                other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
+            }
+        }
     }
 
     #[test]
