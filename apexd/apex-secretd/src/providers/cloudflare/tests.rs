@@ -5398,38 +5398,70 @@ fn an_approval_that_has_expired_is_not_an_approval() {
 }
 
 #[test]
-fn two_deployments_racing_one_approval_produce_exactly_one_deployment() {
+fn deployments_racing_one_approval_produce_exactly_one_deployment() {
     // `apex-secretd` serves one thread per connection, so the read-check-write
-    // of the approvals file is genuinely concurrent. Without the mutex both
+    // of the approvals file is genuinely concurrent. Without the mutex, two
     // threads read the file, both find the approval, both deploy, and both
     // write back a file missing one entry — a single-use approval used twice,
     // which is the one failure this whole mechanism exists to prevent.
+    //
+    // ## Why this is eight threads and forty rounds and not two threads once
+    //
+    // Measured, not guessed. Two threads racing once passed eight times out of
+    // eight with the mutex taken out, because the unprotected window is a file
+    // read, a vector scan and a file write — microseconds that two threads
+    // spawned in sequence rarely land inside. A test that cannot fail when the
+    // thing it tests is removed is this repository's named defect, so the
+    // shape had to change rather than the claim being softened: every thread
+    // waits on a barrier so they arrive together, and the round is repeated
+    // until the interleaving happens.
+    //
+    // What that buys is a test that fails within the first few rounds with the
+    // mutex gone. What it does not buy is a proof: a machine that serialised
+    // these threads for its own reasons would still pass. The invariant this
+    // is the concurrent half of is asserted deterministically in
+    // `store::tests::an_approval_is_spent_once_and_is_then_gone`.
+    const THREADS: usize = 8;
+    const ROUNDS: usize = 40;
+
     let f = Fixture::with_project(
         "race",
         Mode::Normal,
         &["cloudflare.worker.deploy"],
         &protected_project_file(),
     );
-    assert!(f.approve("cloudflare.worker.deploy", "project").as_error().is_none());
 
-    let allowed = std::sync::atomic::AtomicUsize::new(0);
-    std::thread::scope(|scope| {
-        for _ in 0..2 {
-            scope.spawn(|| {
-                let reply = f.use_it(
-                    f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION),
-                );
-                if reply.as_error().is_none() {
-                    allowed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }
-            });
-        }
-    });
-    assert_eq!(
-        allowed.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "one approval authorised more than one deployment under contention"
-    );
+    for round in 0..ROUNDS {
+        assert!(f.approve("cloudflare.worker.deploy", "project").as_error().is_none());
+        let allowed = std::sync::atomic::AtomicUsize::new(0);
+        let gate = std::sync::Barrier::new(THREADS);
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    // Everything expensive happens before the barrier, so what
+                    // the threads race is the spend and not the allocation of
+                    // the record.
+                    let rec = f
+                        .record("cloudflare.worker.deploy", "project")
+                        .param("version", NEW_VERSION);
+                    gate.wait();
+                    if f.use_it(rec).as_error().is_none() {
+                        allowed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            allowed.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "round {round}: one approval authorised more than one deployment"
+        );
+        assert!(
+            f.outstanding().is_empty(),
+            "round {round}: the approval survived: {:?}",
+            f.outstanding()
+        );
+    }
 }
 
 #[test]
