@@ -1066,8 +1066,27 @@ impl ClosedPeriod {
         if self.vpn.iter().all(|s| matches!(s.state, VpnState::None)) {
             return None;
         }
-        if self.vpn.iter().any(|s| matches!(s.state, VpnState::Down)) {
-            return Some(false);
+        // Order matters, and reading the timeline as an unordered set is how
+        // this method scored a dropped tunnel as a held one. `read_vpn` has no
+        // memory: it asks NetworkManager what is active *now*, so a tunnel that
+        // has gone away comes back `None`, which is the same answer as a
+        // machine that never had one. A timeline of Up, Up, None, None was
+        // therefore "not all None, no Down, no Unreadable" — and returned
+        // `Some(true)`, printing "the VPN held" about a VPN that dropped, on
+        // the one criterion the whole request rests on.
+        //
+        // The driver marks the transition itself (see `note_vpn` in
+        // `apex::lid`); this is the second line of defence, so that a period
+        // recorded by an older driver, or one that lost the name, still scores
+        // honestly.
+        let mut seen_up = false;
+        for s in &self.vpn {
+            match &s.state {
+                VpnState::Down => return Some(false),
+                VpnState::None if seen_up => return Some(false),
+                VpnState::Up => seen_up = true,
+                _ => {}
+            }
         }
         if self.vpn.iter().any(|s| matches!(s.state, VpnState::Unreadable { .. })) {
             return None;
@@ -1651,6 +1670,60 @@ mod tests {
         let mut p = period();
         p.vpn = vec![VpnSample { at: 1_000, name: None, state: VpnState::None }];
         assert_eq!(p.vpn_held(), None);
+    }
+
+    #[test]
+    fn a_tunnel_that_vanishes_after_it_was_up_is_a_drop_not_an_absence() {
+        // The defect this exists for, and it was live: `read_vpn` has no
+        // memory, so a tunnel that goes away reports `None` — the same answer
+        // as a machine that never had one. Scored as an unordered set, the
+        // timeline below was "not all None, no Down, no Unreadable" and came
+        // back `Some(true)`. The machine printed "the VPN held" about a VPN
+        // that dropped, on the criterion the entire request rests on.
+        let mut p = period();
+        p.vpn = vec![
+            VpnSample { at: 1_000, name: Some("work".into()), state: VpnState::Up },
+            VpnSample { at: 1_030, name: Some("work".into()), state: VpnState::Up },
+            VpnSample { at: 1_060, name: None, state: VpnState::None },
+            VpnSample { at: 1_090, name: None, state: VpnState::None },
+        ];
+        assert_eq!(
+            p.vpn_held(),
+            Some(false),
+            "a tunnel that was up and is now absent has dropped, not never existed"
+        );
+        assert!(p.summary().contains("the VPN DROPPED"), "{}", p.summary());
+    }
+
+    #[test]
+    fn a_tunnel_brought_up_midway_is_not_retroactively_a_drop() {
+        // The other side of the same rule, and the one that keeps it from
+        // being a blanket "any None fails". A machine whose owner connects the
+        // VPN after the lid shut has a timeline that starts with nothing, and
+        // nothing is what there was.
+        let mut p = period();
+        p.vpn = vec![
+            VpnSample { at: 1_000, name: None, state: VpnState::None },
+            VpnSample { at: 1_030, name: Some("work".into()), state: VpnState::Up },
+            VpnSample { at: 1_060, name: Some("work".into()), state: VpnState::Up },
+        ];
+        assert_eq!(p.vpn_held(), Some(true));
+        assert!(p.summary().contains("the VPN held"), "{}", p.summary());
+    }
+
+    #[test]
+    fn a_drop_outranks_an_unreadable_sample_that_follows_it() {
+        // Ordering, again: an unreadable sample collapses the verdict to "not
+        // conclusive", and a drop that happened before one must not be erased
+        // by it. The machine knows the tunnel went; a later failure to ask
+        // does not unknow it.
+        let mut p = period();
+        p.vpn = vec![
+            VpnSample { at: 1_000, name: Some("work".into()), state: VpnState::Up },
+            VpnSample { at: 1_030, name: None, state: VpnState::None },
+            VpnSample { at: 1_060, name: None, state: VpnState::Unreadable { why: "x".into() } },
+        ];
+        assert_eq!(p.vpn_held(), Some(false));
     }
 
     #[test]

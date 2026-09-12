@@ -1518,6 +1518,86 @@ RUN set -eux; \
     test -L /etc/systemd/system/multi-user.target.wants/apex-firewall.service; \
     echo "firewall: default-drop policy present, parses, and is enabled"
 
+# ── Lid-closed continuous operation ─────────────────────────────────────────
+# "if i close my laptop lid without shutting down … all agents and whatever
+# theyre using/doing can stay running, also staying with the vpn." Without this
+# unit the policy and the driver exist in the binary and nothing ever runs
+# them, so every acceptance criterion for P1-063 is unmet on a real machine no
+# matter how green the suites are.
+COPY files/system/units/apex-lid.service /usr/lib/systemd/system/apex-lid.service
+RUN set -eux; \
+    # The binary this unit names is copied in much later, at the very bottom of
+    # this file, so that an apexd-only change invalidates one layer instead of
+    # the whole image. `apex lid --help` is therefore asserted down there with
+    # the rest of the CLI surface, not here.
+    grep -q '^ExecStart=/usr/bin/apex lid watch$' \
+        /usr/lib/systemd/system/apex-lid.service; \
+    # ── every refusal below is an `if … exit 1`, never `! grep` ─────────────
+    # bash does NOT apply errexit to a pipeline whose status is inverted with
+    # `!` (bash(1), `set -e`): `set -e; ! grep -q x <<<x; echo REACHED` prints
+    # REACHED. Four Containerfile assertions on this branch have already been
+    # found that could never pass or never run, each costing a 50-minute build
+    # to discover — a `! grep` guard is a fifth of the same species, and it
+    # cannot fail a build no matter what it matches.
+    U=/usr/lib/systemd/system/apex-lid.service; \
+    # The primitive is an inhibitor, and the image must never acquire a static
+    # logind lid policy behind its back: `HandleLidSwitch=ignore` applies to a
+    # machine with nothing running as readily as to one mid-build, and turns
+    # every laptop bag into an oven.
+    if grep -rqs '^ *HandleLidSwitch *=' /usr/lib/systemd/logind.conf.d/ \
+            /etc/systemd/logind.conf.d/ /usr/lib/systemd/logind.conf; then \
+        echo "FATAL: a static HandleLidSwitch= shipped; the lid policy must be an inhibitor"; \
+        exit 1; \
+    fi; \
+    # `Restart=always` on a driver that exits 0 on a desktop would restart it
+    # for ever; the unit says on-failure and that is load bearing.
+    grep -q '^Restart=on-failure$' "$U"; \
+    # KillMode must stay at the default. `process` would leave the
+    # `systemd-inhibit … sleep infinity` child alive with its keeper gone — a
+    # lid lock nothing can drop.
+    if grep -q '^KillMode=' "$U"; then \
+        echo "FATAL: KillMode is set; the inhibitor child must die with the driver"; exit 1; fi; \
+    # ProtectSystem=strict or ProtectKernelTunables=yes would remount /sys
+    # read-only and silently break every power-down write the unit exists to
+    # make: the backlight, the keyboard LED. Both are refused here because the
+    # symptom — a keyboard backlight that never dims — looks like anything but
+    # a unit file.
+    if grep -q '^ProtectSystem=strict$' "$U"; then \
+        echo "FATAL: ProtectSystem=strict makes /sys read-only; the power-down writes it"; exit 1; fi; \
+    if grep -q '^ProtectKernelTunables=yes$' "$U"; then \
+        echo "FATAL: ProtectKernelTunables=yes makes /sys read-only; the power-down writes it"; exit 1; fi; \
+    # ProtectHome=yes makes /run/user inaccessible AND EMPTY, which is where
+    # this driver finds every live session and every owner's home. Measured on
+    # the L16: `ls /run/user` under ProtectHome=yes returns nothing. The driver
+    # would then see zero sessions for ever, `pin = "auto"` would never
+    # activate, and the owner's ~/.config/apex/lid.toml would never be read —
+    # the silent-pin defect 2aa9ed45 fixed in the code, reintroduced by a unit.
+    if grep -q '^ProtectHome=yes$' "$U"; then \
+        echo "FATAL: ProtectHome=yes empties /run/user; the driver would see no sessions"; exit 1; fi; \
+    grep -q '^ProtectHome=no$' "$U"; \
+    # PrivateTmp=yes hides the /tmp and /var/tmp a project worktree may live
+    # in, and the guards' checkpoint runs inside one.
+    if grep -q '^PrivateTmp=yes$' "$U"; then \
+        echo "FATAL: PrivateTmp=yes hides worktrees under /tmp; the checkpoint runs in one"; exit 1; fi; \
+    # CAP_SYS_RESOURCE is what `runuser` needs — without it pam_limits refuses
+    # the session and the checkpoint dies at the moment work was to be saved.
+    # Found by bisection on the L16, not guessed: CAP_AUDIT_WRITE, CAP_CHOWN,
+    # CAP_FOWNER and CAP_SYS_ADMIN each fail on their own.
+    grep -q '^CapabilityBoundingSet=.*CAP_SYS_RESOURCE' "$U"; \
+    grep -q '^CapabilityBoundingSet=.*CAP_NET_ADMIN' "$U"; \
+    # rfkill and `iw` are what the power-down half spends CAP_NET_ADMIN on.
+    # They arrive as dependencies rather than named packages, so assert them:
+    # without them the bluetooth block and the Wi-Fi power-save line fail at
+    # the moment the lid shuts, which is the moment nobody is watching.
+    command -v rfkill >/dev/null; \
+    command -v iw >/dev/null; \
+    # runuser is how a guard checkpoints a live session as its owner instead of
+    # leaving root-owned git objects in the user's repository.
+    command -v runuser >/dev/null; \
+    systemctl enable apex-lid.service; \
+    test -L /etc/systemd/system/multi-user.target.wants/apex-lid.service; \
+    echo "lid: apex-lid.service present, enabled, and no static logind lid policy"
+
 # ── What is attached, what is not, and what could not be looked at ──────────
 # The third answer is why this ships. A failed stat is falsy and an empty list
 # is falsy, so a device reader that does not separate them tells a user with a
@@ -2429,6 +2509,14 @@ RUN set -eux; \
     # else on the OS side. Losing it silently turns the settings page into a
     # screen that renders no diagnostics.
     /usr/bin/apex doctor --help | grep -q -- '--json'; \
+    # P1-063. `apex-lid.service` names `/usr/bin/apex lid watch` and is enabled
+    # in this image; a binary built before `apex lid` existed would pass
+    # `test -x` and leave the unit failing at every boot with the lid policy
+    # never running. Every verb by name, for the reason the lists above give.
+    for v in status explain pin report plan watch; do \
+        /usr/bin/apex lid "$v" --help >/dev/null \
+            || { echo "FATAL: apex lid $v is gone"; exit 1; }; \
+    done; \
     # `reset` refuses to run as root. Root's home is not the user's, so a
     # `sudo apex recover reset` would reset root's desktop and leave the user's
     # exactly as it is — while reporting success. This build runs as root, so
