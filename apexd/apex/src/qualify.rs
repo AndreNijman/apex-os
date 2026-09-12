@@ -206,13 +206,39 @@ fn save(path: &Path, db: &Db) -> Result<(), String> {
     // Atomic replacement, the repo contract for persistent state: a file
     // truncated by a crash mid-write is a file somebody has to reconstruct.
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &text).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
-    // 0600 before the rename, not after. Between a 0644 create and a later
-    // chmod there is a window in which another user on the machine can read
-    // it, and this file describes the owner's hardware.
+    // 0600 at CREATION, not by a chmod afterwards. The comment this replaces
+    // said "0600 before the rename, not after", and it was right about the
+    // window it was closing and wrong about where the window was: a
+    // `set_permissions` between the write and the rename never runs when the
+    // write fails, and the failure path left the file behind at 0644.
+    // `OpenOptions::mode` is the honest version, because there is then no
+    // instant at which the file exists at any other mode.
+    //
+    // tests/chaos/cases/full-disk.sh found this by filling a tmpfs and asking
+    // for a record: the write failed correctly, the existing document survived
+    // correctly, and a world-readable `qualification.json.tmp` was left next to
+    // a 0600 document describing the owner's hardware — on the one filesystem
+    // that had no space to spare for it.
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let write_tmp = || -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(text.as_bytes())
+        };
+        if let Err(e) = write_tmp() {
+            // The partial file goes, and it goes before the error is returned.
+            // Leaving it is not a cosmetic untidiness: on a full disk it is
+            // space that will not come back, and its contents are a prefix of
+            // this document.
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("writing {}: {e}", tmp.display()));
+        }
     }
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
