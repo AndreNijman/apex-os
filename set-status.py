@@ -27,8 +27,19 @@ def block(text, indent="    "):
     """Render text as the body of a `>-` folded scalar."""
     # A folded scalar joins lines with spaces, so a stray colon is safe, but a
     # line starting with a list marker or ending in a colon still is not.
+    #
+    # break_on_hyphens=False is load-bearing, not tidiness. textwrap defaults it
+    # to True, so it happily splits `llama-server` across two lines — and a
+    # folded scalar rejoins lines with a SPACE, so the evidence read back says
+    # `llama- server`. That silently corrupts exactly the tokens evidence is
+    # made of: file names, crate names, test names, item ids. It had already
+    # happened 114 times across 64 of the 128 tasks before anyone looked
+    # (`apexd- core`, `test-agent- inject`, `with- binary`, `no- op`). Existing
+    # entries are left as they are; rewriting them wholesale is a bigger and
+    # riskier edit than the one that stops it recurring.
     flat = " ".join(text.split())
-    return "\n".join(indent + line for line in textwrap.wrap(flat, 110))
+    lines = textwrap.wrap(flat, 110, break_on_hyphens=False, break_long_words=False)
+    return "\n".join(indent + line for line in lines)
 
 
 def main():

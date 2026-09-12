@@ -6,7 +6,89 @@ branch: task/base-partials (apex-os), task/base-partials-shell (apex-shell)
 base: apex-os e67fab9, apex-shell a90cef6 (both origin/roadmap/v2.2)
 
 ## NEXT
-Round 12 (fresh agent; round 11's agent died on a usage limit at step 0).
+Round 13 (fresh agent; its dispatch prompt described ROUND 11's state — it said
+BASE-013's `836df42` was unlanded and that BASE-013/BASE-014 were "the real work
+this round". All of that was already finished and landed by round 12. Whoever
+dispatches next: this card, not the queue entry, is the current state.)
+
+**NOTHING IS IN PROGRESS. ALL EIGHT ITEMS ARE LANDED IN BOTH REPOS.** Checked
+rather than assumed, with `git merge-base --is-ancestor`: `task/base-partials`
+is contained in apex-os `origin/roadmap/v2.2`, and `task/base-partials-shell` is
+contained in apex-shell `origin/roadmap/v2.2`. Zero unlanded commits either
+side. Both worktrees clean.
+
+**ROUND 13 CLOSED BASE-014'S LAST QUALIFICATION — NO CODE, JUST LOOKING.**
+The card said "whether the GitHub runner can start labwc headless is NOT
+verified", because the branch could not push to the branch pr-validation.yml
+triggers on. But the work LANDED, so CI *did* run it. Run `34635660418`, job
+`Package engine`, step "Run the keybind reload assertions":
+`labwc-keybind-reload: 18 passed, 0 failed, 0 skipped` on ubuntu-24.04 —
+it did not skip. labwc came up headless (pid 6162), all four isolation
+assertions passed, and wtype drove real keys. **A named gap that was closable by
+reading a CI log nobody had opened.** Worth generalising: when a unit's branch
+lands, the merge's own CI run is evidence the branch itself could never produce.
+
+**Exact next action for whoever follows: none for an agent.** The only two open
+questions are ANDRE'S:
+  1. Ratify or change "Scrolling" (niri) and "Tiling" (Hyprland). "Floating" is
+     already ratified at ROADMAP.md:1031. These are new user-visible words on
+     the login carousel and in Settings; they live in one map + one option list
+     in apex-shell and two .desktop files + one Containerfile sed in apex-os.
+  2. Decide whether BASE-009's and BASE-010's hardware gaps are acceptable as
+     recorded. Both are now stated as exact unblock conditions, not vibes:
+     BASE-009 needs a machine with gamescope+steam where `loginctl
+     terminate-user` may be run; BASE-010 needs a machine whose apexd reports
+     NON-ZERO spendable VRAM (a discrete card — see below), plus llama-server
+     and a model. katana is both machines and is off-limits.
+
+**Do NOT try to close BASE-010 by installing llama-cpp on the L16.** Round 13
+checked this properly instead of assuming. `apex ai status` here reads
+`device 0 card1 — 1024 MiB total, 806 used, 0 spendable`; `pick_device()`
+requires `budget_mib() > VRAM_OVERHEAD_MIB` (256), so this APU is filtered out
+and `select_backend()` falls to `Backend::Cpu` BY DESIGN. `ai.rs:240-260`
+already documents it as a stated limitation with this exact laptop's numbers.
+An install would buy a CPU placement, which proves the supervisor's bookkeeping
+and not "placed on the GPU, and unloading released its VRAM". No install was
+attempted.
+
+### Round-13 findings that belong to OTHER units, not this one
+- **apex-agentd fails CI on the runner, twice, same root cause.**
+  `tests/test-agent-inject.sh` → `FAIL two sessions started`, because
+  `/proc/<pid>/cgroup` places the connection in
+  `/system.slice/hosted-compute-agent.service`, "which is neither a login
+  session nor a user service". And `apex-agentd/tests/system_grants.rs:623`
+  `a_session_cannot_ask_for_a_grant_or_renew_one_however_it_asks` fails with
+  `no_such_request` where it wants `permission_denied` — the grant was never
+  issued, for the same reason. This is the "CI runner is a second environment"
+  class. It is what reddens `Package engine` and `Rust validation` on
+  roadmap/v2.2 today; it is NOT base-partials' and was not introduced by it.
+- **The round-12 card's "flaky grants test" did not recur.** Full workspace on
+  tip 4ae4cf22: **3032 passed, 0 failed**.
+- **`apexd: nvidia-smi query failed (exit status: 9)` on this AMD-only laptop is
+  ALREADY FIXED on the tip** — `gpu.rs` guards it with
+  `classify_smi(...).is_worth_reporting()`. What prints on the live L16 is the
+  older shipped image binary. Checked before filing, so it is not filed.
+- A stray 2.4 MB ImageMagick PostScript file named `os` (created 05:23Z by
+  another agent) was sitting untracked and un-ignored at the root of
+  `wt-base-os`. Moved to the session scratchpad, not deleted; worktree is clean.
+
+### Round-13 re-verification on the current tip (nothing drifted)
+apex-os `4ae4cf22`, apex-shell `bdfb056` — several unrelated merges after the
+landing. Every count in this card's evidence still holds:
+`test-apex-greet-sessions.sh` 41/0/0 · `test-labwc-keybind-reload.sh` 18/0/0 ·
+`cargo test --locked --workspace` 3032/0 · `check-compositor-naming.sh` 42/0 ·
+`compositor-facade-test.qml` 60/0 under real headless labwc ·
+`check-compositor-backends.sh` 47/0 · `check-gaming-mode-gate.sh` 12/0.
+
+**A note on status vocabulary.** Round 13's dispatch prompt asked for BASE-009
+and BASE-010 to be recorded `blocked`. They were left `partial`, deliberately.
+`blocked` is used by only 2 of 128 items in this roadmap and reads as "no
+progress is possible"; both of these have every reachable half closed, landed
+and tested, with only a hardware-bound remainder. `partial` plus an exact
+unblock condition is the more truthful record, and downgrading would have hidden
+work that is done.
+
+## NEXT (round 12, superseded)
 
 **BASE-013 is CLOSED, both halves.** The shell WIP the previous agent left
 dirty is committed and pushed as `ea83d21` on task/base-partials-shell, after

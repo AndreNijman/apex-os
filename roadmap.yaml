@@ -244,11 +244,18 @@ tasks:
     restoring the return prints the lockout verbatim: 'want [hyprland] got [apex-labwc]'. (3) THE POWERMENU GATE:
     Gaming Mode was offered without honouring the same TryExec gate the greeter honours, so it appeared on
     machines with no gamescope at all - fixed at c035671, 12/0. Perf metric accuracy was already proven live (vram
-    matched nvidia-smi; frame time honestly unmeasurable). MISSING, NAMED RATHER THAN FAKED, and it is hardware
-    and not effort: the live Desktop->Gaming switch and the controller-first path. apex-session-select --switch IS
-    loginctl terminate-user, so exercising it ends the session running the test, and this laptop has neither
-    gamescope nor steam installed. The gaming machine is off-limits by Andre's instruction of 2026-09-11, so this
-    remainder cannot be closed here at all - it needs that machine, idle, with the gaming userspace installed.
+    matched nvidia-smi; frame time honestly unmeasurable). RE-VERIFIED ON THE CURRENT TIP (round 13, 2026-09-12,
+    apex-os 4ae4cf22 / apex-shell bdfb056): test-apex-greet-sessions.sh 41 passed 0 failed 0 skipped locally AND
+    on the GitHub runner (run 34635660418, job 'Package engine'); check-compositor-backends.sh 47/0;
+    check-gaming-mode-gate.sh 12/0. No drift. MISSING, NAMED RATHER THAN FAKED, and it is hardware and not effort:
+    the live Desktop->Gaming switch and the controller-first path. apex-session-select --switch IS loginctl
+    terminate-user, so exercising it ends the session running the test, and this laptop has neither gamescope nor
+    steam installed (re-checked this round: both ABSENT on the L16; steam exists only as a Flatpak, which
+    apex-gaming-session's `command -v steam` does not satisfy). Installing them here would still not help, because
+    the switch itself cannot be run on the machine hosting the agent. TO UNBLOCK: a machine with gamescope and
+    steam installed, idle, with no session that matters, where `loginctl terminate-user` may be run - and a human
+    present to see the switch land, since the test necessarily kills its own session. katana is that machine and
+    is off-limits by Andre's instruction of 2026-09-11.
 - id: BASE-010
   title: Preserve local AI service abstraction
   priority: P0
@@ -272,10 +279,20 @@ tasks:
     locate(runtime_kind) reddens exactly those three, which IS the proof that the two pre-existing ones now assert
     something. (3) A third defect found inside that fix: 'fit: 999 layer(s)' printed the all-layers sentinel as a
     layer count - the same lie in the other direction - fixed at 532d5b8e. RTX 3070 detection, the accel list, the
-    VRAM budget, the per-user socket and the TCP refusal were already proven live at 44/0. cargo 2346 passed / 0
-    failed. MISSING and named rather than simulated: placement onto a live GPU, and idle-unload actually releasing
-    VRAM. Both need llama-server plus a model plus a GPU, and no machine reachable from here has a runtime or a
-    model installed - so the assertion would have to be faked to close, and it was not.
+    VRAM budget, the per-user socket and the TCP refusal were already proven live at 44/0. RE-VERIFIED ON THE
+    CURRENT TIP (round 13, 2026-09-12, apex-os 4ae4cf22): cargo test --locked --workspace 3032 passed, 0 failed,
+    across the whole workspace - up from 2346 as other units landed, and with zero failures, including the grants
+    test that had been flaky at round 12. MISSING and named rather than simulated: placement onto a live GPU, and
+    idle-unload actually releasing VRAM. THE UNBLOCK CONDITION IS NOW EXACT rather than 'needs a model'. It is not
+    enough to install llama-cpp and pull a model here: this laptop is an AMD APU and apexd reads it as 'device 0
+    card1 - 1024 MiB total, 806 used, 0 spendable', so pick_device() filters it out (it requires budget_mib() >
+    VRAM_OVERHEAD_MIB, which is 256) and select_backend() falls through to Backend::Cpu BY DESIGN. ai.rs:240-260
+    already records this as a stated limitation: on an APU, VRAM is system RAM, mem_info_vram_total reports only
+    the BIOS carveout, and GTT is not portably accountable - so the planner underestimates in the safe direction.
+    A CPU placement would prove the supervisor's bookkeeping, not the claim 'the model was placed on the GPU and
+    unloading released its VRAM', so it was not built and no install was attempted. TO UNBLOCK: a machine whose
+    apexd reports a device with non-zero spendable VRAM - in practice a DISCRETE card, not an APU - with
+    llama-server installed and a model in the store. katana's RTX 3070 is such a machine and is off-limits.
 - id: BASE-011
   title: Preserve unified APEX Search/command surface
   priority: P0
@@ -344,7 +361,14 @@ tasks:
     engine assertions in compositor-facade-test.qml at 60/0 under real headless labwc. Seven mutation pairs; the
     decisive one is an argument typo, presentedName(root.nam), which leaves the grep checker 42 passed / 0 failed
     and BLIND while the facade goes 58/2 - that same mutant also proves the harness really resolves labwc rather
-    than silently falling back to another adapter. Settings-pages 17/0, popup-smoke 0 errors.
+    than silently falling back to another adapter. Settings-pages 17/0, popup-smoke 0 errors. RE-VERIFIED ON THE
+    CURRENT TIP (round 13, 2026-09-12, apex-os 4ae4cf22 / apex-shell bdfb056, several unrelated merges later):
+    check-compositor-naming.sh 42 passed 0 failed, compositor-facade-test.qml 60 passed 0 failed under real
+    headless labwc, check-compositor-backends.sh 47 passed 0 failed. No drift. STILL OPEN AND IT IS ANDRE'S CALL,
+    NOT AN AGENT'S: 'Floating' is ratified at ROADMAP.md:1031, but 'Scrolling' (niri) and 'Tiling' (Hyprland) are
+    an agent's reading of ROADMAP.md:91 and are new user-visible words on the login carousel and in Settings. They
+    live in one map plus one option list in apex-shell and two .desktop files plus one Containerfile sed in
+    apex-os, so changing them is cheap.
 - id: BASE-014
   title: Preserve modern Floating/labwc visual integration
   priority: P0
@@ -368,11 +392,18 @@ tasks:
     18/0, a NEW file rather than a section in test-labwc-session.sh - that suite nests on the PARENT display (the
     agent's environment carried the developer's own wayland-1) and is in no workflow at all. The new one runs
     under WLR_BACKENDS=headless, asserts isolation as FOUR HARD FAILURES BEFORE the first keypress, and unsets the
-    inherited LABWC_PID because --reconfigure SIGHUPs it. It reproduces the original bug in-suite (--no-reload:
-    the new key is dead and the old one still alive) and then proves the criterion. Four mutation pairs, two of
-    them against the product rather than the test. The motivating bug is quoted in test-labwc-keybinds.sh:5-9 -
-    'rebind the launcher, watch the UI confirm it, press the key, nothing happens' - and it is now tested end to
-    end.
+    inherited LABWC_PID - labwc --reconfigure SIGHUPs whatever that names. It reproduces the original bug in-suite
+    (--no-reload: the new key is dead and the old one still alive) and then proves the criterion. Four mutation
+    pairs, two of them against the product rather than the test. THE ITEM'S ONE REMAINING QUALIFICATION IS NOW
+    CLOSED (round 13, 2026-09-12). The recorded gap was that nobody knew whether a GitHub runner could start labwc
+    headless, because the branch could not push to the branch pr-validation.yml triggers on - so the suite might
+    only ever have SKIPPED in CI. It did not skip. The landing merge's own run 34635660418, job 'Package engine',
+    step 'Run the keybind reload assertions', printed 'labwc-keybind-reload: 18 passed, 0 failed, 0 SKIPPED' on
+    ubuntu-24.04, including 'PASS THE REBOUND KEY FIRES AFTER --reconfigure' and 'PASS THE REBOUND KEY FIRES AFTER
+    THE TOOL'S OWN RELOAD'. The runner started labwc under WLR_BACKENDS=headless (pid 6162), passed all four
+    isolation assertions, and wtype drove real keypresses through virtual-keyboard-unstable-v1. Re-run locally on
+    tip 4ae4cf22 as well: 18 passed, 0 failed, 0 skipped. That job did fail overall, but on
+    tests/test-agent-inject.sh, which is apex-agentd's and not this item's.
 - id: BASE-015
   title: Preserve recovery/doctor/factory-reset workflow
   priority: P0
