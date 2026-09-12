@@ -513,6 +513,100 @@ mod tests {
         assert!(!output.contains(STORED), "{output}");
     }
 
+    /// The lease ends whatever the operation did, and the framework is what
+    /// ends it — a provider cannot, because it does not know whether `perform`
+    /// was the last thing to happen.
+    ///
+    /// Both halves in one test because they are one property: a credential
+    /// minted for an operation does not outlive it, and a failure is the case
+    /// most likely to be forgotten.
+    #[test]
+    fn the_framework_ends_a_lease_however_the_operation_ended() {
+        let worked = fixture("lease-ok", Minting::Narrowed, "demo.object.read");
+        assert!(worked
+            .service
+            .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new())
+            .as_error()
+            .is_none());
+        assert_eq!(worked.revoked(), vec![LEASE.to_string()]);
+
+        let failed = fixture_with(
+            "lease-fail",
+            Minting::Narrowed,
+            true,
+            false,
+            "demo.object.read",
+        );
+        assert!(failed
+            .service
+            .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new())
+            .as_error()
+            .is_some());
+        assert_eq!(
+            failed.revoked(),
+            vec![LEASE.to_string()],
+            "the operation failed and its credential was left standing"
+        );
+    }
+
+    /// The four answers reach the trail as four different words, at the
+    /// framework layer where every provider that will ever be written meets
+    /// them.
+    ///
+    /// This is the "permission denied is not absence" rule in the one place it
+    /// is easiest to break: three of the four arms end with the stored
+    /// credential being used, so from the operation's point of view they look
+    /// identical, and only the trail tells them apart.
+    #[test]
+    fn a_narrowing_that_failed_and_a_narrowing_with_nothing_to_do_are_not_the_same_line() {
+        let word = |name: &str, mints: Minting| -> String {
+            let f = fixture(name, mints, "demo.object.read");
+            assert!(f
+                .service
+                .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new())
+                .as_error()
+                .is_none());
+            let trail = std::fs::read_to_string(Store::new(f.dir.clone()).audit_path())
+                .expect("the trail");
+            let line: serde_json::Value = serde_json::from_str(
+                trail
+                    .lines()
+                    .rfind(|l| l.contains("\"used\""))
+                    .expect("a used line"),
+            )
+            .expect("json");
+            line["narrowing"].as_str().expect("narrowing").to_string()
+        };
+        assert_eq!(word("w-narrowed", Minting::Narrowed), "narrowed");
+        assert_eq!(word("w-none", Minting::None), "no-narrower-form");
+        assert_eq!(word("w-denied", Minting::Denied), "denied");
+        assert_eq!(word("w-couldnot", Minting::CouldNotRun), "could-not-run");
+    }
+
+    /// §13.4 says *prefer*, so three of the four arms fall back to the stored
+    /// credential rather than refusing — that is what this service already
+    /// did, and refusing instead would break every operation for an owner
+    /// whose stored token cannot issue credentials.
+    ///
+    /// A provider that has been told the project will not accept that says so
+    /// with an `Err`, and then nothing runs. The credential is never
+    /// presented: the refusal happens before `perform` is reached.
+    #[test]
+    fn a_provider_that_will_not_run_without_a_narrowed_credential_stops_the_operation() {
+        let f = fixture("w-required", Minting::Refuses, "demo.object.read");
+        let reply =
+            f.service
+                .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new());
+        let (kind, message) = reply.as_error().expect("it must refuse");
+        assert_eq!(kind, ErrorKind::PermissionDenied);
+        assert!(message.contains("narrowed"), "{message}");
+        assert!(
+            f.api.authorizations().is_empty(),
+            "the credential was presented anyway"
+        );
+        assert!(f.revoked().is_empty());
+    }
+
     #[test]
     fn a_provider_that_puts_the_credential_in_an_error_does_not_get_to_hand_it_over() {
         // `refuse` was the one path out of `use_capability` that ran no scrub.

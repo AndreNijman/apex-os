@@ -204,6 +204,14 @@ enum Mode {
     /// a token. The shape that separates "would not issue one" from "there is
     /// not one".
     MintingDenied,
+    /// An account that refuses the permission-group list itself.
+    ///
+    /// A separate mode from [`Mode::MintingDenied`] because it is a separate
+    /// refusal in a separate place: Cloudflare gates reading the list and
+    /// creating a token on the same permission, so a credential that lacks it
+    /// can be turned away at either, and a build that got one of the two right
+    /// would look correct until an account turned it away at the other.
+    ListDenied,
     /// An account that issues a token and then will not take the revoke back.
     /// The credential stands until it expires, and the trail has to say so.
     RevokeFails,
@@ -212,7 +220,10 @@ enum Mode {
 impl Mode {
     /// Whether the double knows about account-owned tokens at all.
     fn mints(self) -> bool {
-        matches!(self, Mode::Minting | Mode::MintingDenied | Mode::RevokeFails)
+        matches!(
+            self,
+            Mode::Minting | Mode::MintingDenied | Mode::ListDenied | Mode::RevokeFails
+        )
     }
 }
 
@@ -396,7 +407,16 @@ fn tokens(method: &str, target: &str, mode: Mode) -> (u16, String) {
         );
     }
     match (method, path) {
-        ("GET", p) if p == format!("{base}/permission_groups") => ok(&permission_groups()),
+        ("GET", p) if p == format!("{base}/permission_groups") => {
+            if mode == Mode::ListDenied {
+                return (
+                    403,
+                    r#"{"success":false,"errors":[{"code":10000,"message":"Authentication error"}],"messages":[],"result":null}"#
+                        .to_string(),
+                );
+            }
+            ok(&permission_groups())
+        }
         ("POST", p) if p == base => {
             if mode == Mode::MintingDenied {
                 return (
@@ -437,7 +457,7 @@ fn tokens(method: &str, target: &str, mode: Mode) -> (u16, String) {
 fn permission_groups() -> String {
     let mut groups: Vec<String> = Vec::new();
     let mut id = 0u32;
-    let mut push = |name: &str, groups: &mut Vec<String>, id: &mut u32| {
+    let push = |name: &str, groups: &mut Vec<String>, id: &mut u32| {
         *id += 1;
         groups.push(format!(
             r#"{{"id":"{:032x}","name":"{name}","scopes":["com.cloudflare.api.account"]}}"#,
@@ -3734,4 +3754,385 @@ fn a_cloudflare_operation_cannot_be_granted_in_every_project_even_though_it_name
 
     std::fs::remove_dir_all(&store).ok();
     std::fs::remove_dir_all(&project).ok();
+}
+
+// ---------------------------------------------------------------------------
+// §13.4 — temporary task credentials (P1-011)
+// ---------------------------------------------------------------------------
+
+/// P1-005's second acceptance criterion, which its own evidence left open:
+/// *"No broad token when narrower scope is possible."*
+///
+/// Half of it was already true — the agent never holds a token, and every
+/// operation is scoped to a resource the project's file names — and the other
+/// half was not: the token actually spent was the account-wide one the owner
+/// stored. This is the half that was missing, and it is one assertion: the
+/// request that did the work carried a credential that did not exist when the
+/// request arrived and does not exist by the time it is answered.
+///
+/// Three mutations, all red:
+/// * present the stored value instead of the minted one in `service.rs`
+///   (`Minted::Narrowed { value, .. } => (&stored, None)`);
+/// * drop the revoke on the success path;
+/// * make `temporary::mint` return the stored token rather than `result.value`.
+#[test]
+fn an_operation_spends_a_credential_that_did_not_exist_a_moment_ago_and_does_not_outlive_it() {
+    let f = Fixture::new("mint-r2", Mode::Minting, &["cloudflare.r2.object.read"]);
+    let reply = f.use_it(f.record("cloudflare.r2.object.read", "example-assets/backups/latest.sql"));
+    assert!(reply.as_error().is_none(), "{reply:?}");
+
+    // What the operation itself did, and with what.
+    let operation = f.fake.seen();
+    assert_eq!(operation.len(), 1, "{operation:#?}");
+    assert_eq!(
+        operation[0].authorization.as_deref(),
+        Some(format!("Bearer {MINTED}").as_str()),
+        "the operation spent the stored account-wide token, not the narrow one"
+    );
+    assert_ne!(
+        operation[0].authorization.as_deref(),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+
+    // What narrowing it cost, and with what. The stored credential is spent on
+    // exactly these three and nowhere else.
+    let exchange = f.fake.minting();
+    assert_eq!(exchange.len(), 3, "{exchange:#?}");
+    let stored = Some(format!("Bearer {TOKEN}"));
+    assert_eq!(
+        exchange
+            .iter()
+            .map(|s| (s.method.as_str(), s.authorization.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("GET", stored.clone()),
+            ("POST", stored.clone()),
+            ("DELETE", stored),
+        ],
+        "the exchange must be asked for with the credential that can make it, \
+         and only that one"
+    );
+    assert!(
+        exchange[0].path.ends_with("/tokens/permission_groups"),
+        "{}",
+        exchange[0].path
+    );
+    assert!(
+        exchange[2].path.ends_with(&format!("/tokens/{MINTED_ID}")),
+        "the token that was spent was not the token that was revoked: {}",
+        exchange[2].path
+    );
+
+    // And the policy it was created under is one product at one scope.
+    let body: serde_json::Value =
+        serde_json::from_str(&exchange[1].body).expect("the creation body is json");
+    let policies = body["policies"].as_array().expect("policies");
+    assert_eq!(policies.len(), 1, "{body}");
+    assert_eq!(policies[0]["effect"], "allow");
+    assert_eq!(
+        policies[0]["permission_groups"]
+            .as_array()
+            .expect("groups")
+            .len(),
+        1
+    );
+    assert_eq!(
+        policies[0]["resources"],
+        serde_json::json!({ format!("com.cloudflare.api.account.{ACCOUNT}"): "*" })
+    );
+    assert!(
+        body["expires_on"].as_str().is_some_and(|e| e.ends_with('Z')),
+        "a token with no expiry is not a short-lived one: {body}"
+    );
+}
+
+/// The arm every implementation forgets, and the one that matters most.
+///
+/// A minted credential that outlives a *failed* operation is exactly the
+/// credential §13.4 says not to leave lying around — and a failure is often
+/// the case where something went wrong enough to be worth not leaving one. So
+/// the revoke happens before the error is even looked at.
+///
+/// Mutation: move the revoke inside the `Ok(out)` arm in `service.rs`. Red.
+#[test]
+fn a_short_lived_credential_is_revoked_even_when_the_operation_it_was_minted_for_failed() {
+    let f = Fixture::new("mint-fail", Mode::Minting, &["cloudflare.dns.delete"]);
+    // A name the project's zone holds no record for: the lookup runs with the
+    // minted credential, answers an absence, and `perform` returns an error —
+    // which is the path the revoke is easiest to leave off.
+    let reply = f.use_it(
+        f.record("cloudflare.dns.delete", "gone.example.com")
+            .param("type", "A"),
+    );
+    assert!(
+        reply.as_error().is_some(),
+        "this test needs an operation that failed AFTER the credential was \
+         presented: {reply:?}"
+    );
+    // It really did reach the far side with the minted credential first.
+    assert_eq!(
+        f.fake.seen()[0].authorization.as_deref(),
+        Some(format!("Bearer {MINTED}").as_str()),
+        "{:#?}",
+        f.fake.seen()
+    );
+
+    let exchange = f.fake.minting();
+    assert!(
+        exchange.iter().any(|s| s.method == "DELETE"
+            && s.path.ends_with(&format!("/tokens/{MINTED_ID}"))),
+        "the operation failed and the credential minted for it was left \
+         standing: {exchange:#?}"
+    );
+}
+
+/// "Permission denied is not absence", in the one place a credential service
+/// is most tempted to collapse the two.
+///
+/// An account whose stored credential may not create tokens has said nothing
+/// about whether a narrower token is possible — someone else's credential on
+/// the same account could make one. An account this build cannot describe a
+/// policy for has said nothing either. Neither is *"there is no narrower
+/// form"*, which is a conclusion, and the trail has to be able to tell an
+/// operator which of the three happened so they can act on it.
+///
+/// Mutation: collapse `Denied` into `NoNarrowerForm` in `Minted::as_str`, or
+/// return `NoNarrowerForm` from `temporary::group_ids`' 403 arm. Red.
+#[test]
+fn a_credential_that_may_not_narrow_itself_is_not_a_credential_with_nothing_to_narrow_to() {
+    // Cloudflare gates reading the permission groups and creating a token on
+    // the same permission, so a credential that lacks it is turned away at one
+    // of two places. Both are `Denied`, and both are measured: a build that
+    // got one right would look correct until an account refused at the other.
+    let mut refusals = Vec::new();
+    for (name, mode) in [
+        ("denied-create", Mode::MintingDenied),
+        ("denied-list", Mode::ListDenied),
+    ] {
+        let refused = Fixture::new(name, mode, &["cloudflare.worker.read"]);
+        assert!(refused
+            .use_it(refused.record("cloudflare.worker.read", "project"))
+            .as_error()
+            .is_none());
+        refusals.push(refused.trail());
+    }
+    let refused_trail = refusals[0].clone();
+
+    let silent = Fixture::new("no-tokens", Mode::Normal, &["cloudflare.worker.read"]);
+    assert!(silent
+        .use_it(silent.record("cloudflare.worker.read", "project"))
+        .as_error()
+        .is_none());
+    let silent_trail = silent.trail();
+
+    let word = |trail: &str| -> String {
+        let line: serde_json::Value = serde_json::from_str(
+            trail
+                .lines()
+                .rfind(|l| l.contains("\"used\""))
+                .expect("a used line"),
+        )
+        .expect("json");
+        line["narrowing"].as_str().expect("narrowing").to_string()
+    };
+
+    // The account refused, at either place. Not an absence.
+    for trail in &refusals {
+        assert_eq!(word(trail), "denied", "{trail}");
+    }
+    // The account could not be asked. Not an absence and not a refusal.
+    assert_eq!(word(&silent_trail), "could-not-run", "{silent_trail}");
+    assert_ne!(word(&refused_trail), word(&silent_trail));
+
+    // Both still ran, on the stored credential. §13.4 says *prefer*, and
+    // refusing an operation because its credential could not be narrowed would
+    // break every operation for an owner whose token is not a Super
+    // Administrator's — which Cloudflare documents as the requirement for
+    // creating an account-owned token, and is therefore the ordinary case.
+    for trail in refusals.iter().chain(std::iter::once(&silent_trail)) {
+        assert!(trail.contains("\"used\""), "the operation did not run");
+    }
+}
+
+/// A name this build does not recognise is this build not recognising it.
+///
+/// The fixture's account offers no `Hyperdrive Read` group. That is not the
+/// account refusing and it is not this operation having no narrow form — it is
+/// a policy this build could not assemble, and the only honest answer is that
+/// it could not run.
+///
+/// Mutation: answer `NoNarrowerForm` from the missing-group arm. Red.
+#[test]
+fn a_permission_group_this_build_cannot_find_is_not_a_refusal_and_not_an_absence() {
+    let f = Fixture::new("no-group", Mode::Minting, &["cloudflare.hyperdrive.read"]);
+    let reply = f.use_it(f.record("cloudflare.hyperdrive.read", "pg"));
+    assert!(reply.as_error().is_none(), "{reply:?}");
+
+    // It asked, and then stopped: no token was created against a policy it
+    // could not describe.
+    let exchange = f.fake.minting();
+    assert_eq!(exchange.len(), 1, "{exchange:#?}");
+    assert_eq!(exchange[0].method, "GET");
+
+    let trail = f.trail();
+    let line: serde_json::Value = serde_json::from_str(
+        trail
+            .lines()
+            .rfind(|l| l.contains("\"used\""))
+            .expect("a used line"),
+    )
+    .expect("json");
+    assert_eq!(line["narrowing"], "could-not-run", "{trail}");
+    assert!(
+        line["narrowing_detail"]
+            .as_str()
+            .expect("a reason")
+            .contains("Hyperdrive Read"),
+        "the reason must name what it looked for: {line}"
+    );
+    // And the operation ran anyway, on the stored credential.
+    assert_eq!(
+        f.fake.seen()[0].authorization.as_deref(),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+}
+
+/// DNS is the one surface where the narrowing reaches past the product to the
+/// resource: DNS permission groups are zone-scoped, so a token minted for a
+/// DNS operation names the one zone this project bound and no other.
+///
+/// Mutation: make every policy account-scoped by dropping `zone_scoped` from
+/// the DNS rows in `POLICY`. Red.
+#[test]
+fn a_token_minted_for_dns_names_the_one_zone_this_project_bound() {
+    let f = Fixture::new("mint-dns", Mode::Minting, &["cloudflare.dns.read"]);
+    assert!(f
+        .use_it(f.record("cloudflare.dns.read", "example.com"))
+        .as_error()
+        .is_none());
+
+    let exchange = f.fake.minting();
+    let creation = exchange
+        .iter()
+        .find(|s| s.method == "POST")
+        .expect("a token was created");
+    let body: serde_json::Value = serde_json::from_str(&creation.body).expect("json");
+    assert_eq!(
+        body["policies"][0]["resources"],
+        serde_json::json!({ format!("com.cloudflare.api.account.zone.{ZONE}"): "*" }),
+        "a DNS token scoped to the whole account is broader than it needs to \
+         be, and §13.9 is about exactly that: {body}"
+    );
+}
+
+/// An operation with no row in [`super::temporary::POLICY`] goes on spending
+/// the account-wide token, silently. So adding an operation and forgetting the
+/// row has to fail here rather than in production.
+#[test]
+fn every_declared_operation_can_name_the_narrowest_token_that_carries_it() {
+    let missing: Vec<&str> = SPEC
+        .operations
+        .iter()
+        .map(|op| op.id)
+        .filter(|id| super::temporary::policy_for(id).is_none())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these operations have no §13.4 policy, so each of them would keep \
+         spending the stored account-wide credential without anything saying \
+         so: {missing:?}"
+    );
+    // …and nothing in the table names an operation that does not exist, which
+    // is how a row survives a rename.
+    let unknown: Vec<&str> = super::temporary::POLICY
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| !SPEC.operations.iter().any(|op| op.id == *id))
+        .collect();
+    assert!(unknown.is_empty(), "policy rows for nothing: {unknown:?}");
+}
+
+/// A minted token is still a credential. §13.4 says so in as many words, and
+/// the framework scrubs it for the same reason it scrubs the stored one.
+#[test]
+fn a_minted_credential_reaches_neither_the_caller_nor_the_trail() {
+    let f = Fixture::new("mint-scrub", Mode::Minting, &["cloudflare.worker.read"]);
+    let reply = f.use_it(f.record("cloudflare.worker.read", "project"));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert!(!output.contains(MINTED), "the minted token came back: {output}");
+    assert!(!output.contains(TOKEN), "the stored token came back: {output}");
+    let trail = f.trail();
+    assert!(!trail.contains(MINTED), "the trail holds the minted credential");
+    assert!(!trail.contains(TOKEN), "the trail holds the stored credential");
+    // The handle is not a credential and is the one thing worth keeping: a
+    // token that outlived its operation has to be traceable to the line that
+    // says so.
+    assert!(
+        !trail.contains(&format!("Bearer {MINTED}")),
+        "{trail}"
+    );
+}
+
+/// A revoke that did not happen leaves exactly the credential the revoke
+/// exists to remove, and an expiry is a backstop rather than a revocation. So
+/// it is recorded, and the operation still succeeds — it already happened.
+///
+/// Mutation: drop the `Err` arm of the revoke in `service.rs`. Red.
+#[test]
+fn a_revoke_that_could_not_be_done_is_recorded_rather_than_dropped() {
+    let f = Fixture::new("revoke-fails", Mode::RevokeFails, &["cloudflare.worker.read"]);
+    let reply = f.use_it(f.record("cloudflare.worker.read", "project"));
+    assert!(
+        reply.as_error().is_none(),
+        "a revoke that failed must not fail the operation that already ran: {reply:?}"
+    );
+    let trail = f.trail();
+    let line: serde_json::Value = serde_json::from_str(
+        trail
+            .lines()
+            .rfind(|l| l.contains("\"used\""))
+            .expect("a used line"),
+    )
+    .expect("json");
+    assert_eq!(line["narrowing"], "narrowed", "{trail}");
+    let detail = line["narrowing_detail"].as_str().expect("a reason");
+    assert!(
+        detail.contains("could not be") && detail.contains("revoked"),
+        "the trail does not say the credential is still standing: {detail}"
+    );
+}
+
+/// The four answers have to stay four. Collapsing any two of them is the
+/// defect the enum exists to prevent, and it would be an easy edit.
+#[test]
+fn the_four_answers_to_a_narrowing_request_are_four_different_words() {
+    use crate::provider::Minted;
+    let words = [
+        Minted::NoNarrowerForm(String::new()).as_str(),
+        Minted::Denied(String::new()).as_str(),
+        Minted::CouldNotRun(String::new()).as_str(),
+        "narrowed",
+    ];
+    let unique: std::collections::BTreeSet<&str> = words.iter().copied().collect();
+    assert_eq!(unique.len(), 4, "{words:?}");
+    // And none of them is the word an older line, or a line that never got
+    // that far, deserializes to.
+    assert!(!unique.contains("unknown"));
+    assert!(!unique.contains(apex_secret_core::audit::NOT_ATTEMPTED));
+}
+
+/// An expiry is a fixed-width instant in UTC, and a clock that cannot produce
+/// one must not produce a nonsense one.
+#[test]
+fn an_expiry_is_written_the_way_the_schema_asks_for_it() {
+    use super::temporary::rfc3339;
+    assert_eq!(rfc3339(0).as_deref(), Some("1970-01-01T00:00:00Z"));
+    assert_eq!(rfc3339(1_000_000_000).as_deref(), Some("2001-09-09T01:46:40Z"));
+    // A leap day, because the civil conversion is where that goes wrong.
+    assert_eq!(rfc3339(1_709_164_800).as_deref(), Some("2024-02-29T00:00:00Z"));
+    assert_eq!(rfc3339(253_402_300_799).as_deref(), Some("9999-12-31T23:59:59Z"));
+    // Past the end of the fixed-width format. Not a time this build will write.
+    assert_eq!(rfc3339(253_402_300_800), None);
 }
