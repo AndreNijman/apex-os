@@ -74,6 +74,14 @@ data class UiState(
     val notificationsEnabled: Boolean = true,
     /** True while `POST_NOTIFICATIONS` has never been asked for (API 33+). */
     val notificationsUnasked: Boolean = false,
+    /**
+     * The last crash report, when consent allowed one to be kept (P1-060).
+     *
+     * Null both when there is none and when consent is off, which are the same
+     * state on disk and deliberately the same state here: there is no path on
+     * which a report exists and the user has not agreed to it existing.
+     */
+    val crash: String? = null,
     val agents: AgentUiState = AgentUiState(),
 )
 
@@ -996,6 +1004,34 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     fun setDynamicColour(on: Boolean) = viewModelScope.launch {
         val store = repository.settings(_state.value.settings.copy(dynamicColour = on))
         _state.update { it.copy(settings = store.settings) }
+    }
+
+    // ---- crash reports (P1-060) -----------------------------------------
+
+    /**
+     * Turn keeping a crash report on or off.
+     *
+     * Turning it OFF also deletes whatever is already kept, and that is the
+     * half worth writing down: consent withdrawn has to mean the file goes,
+     * not that the next one is skipped. A report sitting on disk from before
+     * somebody changed their mind is exactly the thing they changed their mind
+     * about.
+     */
+    fun setCrashReports(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(crashReports = on))
+        if (!on) repository.clearCrash()
+        _state.update { it.copy(settings = store.settings, crash = if (on) it.crash else null) }
+    }
+
+    /** Read whatever the last crash left, for the settings dialog to offer. */
+    fun refreshCrash() = viewModelScope.launch {
+        _state.update { it.copy(crash = repository.crash()) }
+    }
+
+    /** Forget the kept report, once it has been read or sent. */
+    fun clearCrash() = viewModelScope.launch {
+        repository.clearCrash()
+        _state.update { it.copy(crash = null) }
     }
 
     fun dismiss() = _state.update { it.copy(message = null, failure = null, connection = null) }
