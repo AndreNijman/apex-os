@@ -147,12 +147,12 @@ tasks:
   - stop_slop
   evidence: >-
     CLOSED 2026-09-11 (round 10), landed on roadmap/v2.2 in merge 65bd5c7 of task/base-partials (2c77182). The one
-    outstanding qualification was that the amd and hw device profiles were argv-pinned and never hardware-
-    verified. Closed on the L16, which HAS the hardware (Radeon 780M, /dev/kfd present, the engine reads the
-    machine as amd). New tests/test-apex-env-devices-live.sh sources the SHIPPED files/system/libexec/apex-env and
-    calls gpu_flags, so a profile change changes the test, then hands exactly those flags to real rootless podman
-    and reads back whether each node is present and OPENABLE: 14 passed / 0 failed / 2 skipped. /dev/kfd and
-    /dev/dri/renderD128 both open inside the container with the amd profile's six arguments and both ABSENT
+    outstanding qualification was that the amd and hw device profiles were argv-pinned and never
+    hardware-verified. Closed on the L16, which HAS the hardware (Radeon 780M, /dev/kfd present, the engine reads
+    the machine as amd). New tests/test-apex-env-devices-live.sh sources the SHIPPED files/system/libexec/apex-env
+    and calls gpu_flags, so a profile change changes the test, then hands exactly those flags to real rootless
+    podman and reads back whether each node is present and OPENABLE: 14 passed / 0 failed / 2 skipped. /dev/kfd
+    and /dev/dri/renderD128 both open inside the container with the amd profile's six arguments and both ABSENT
     without them (negative control on every device assertion); /dev/bus/usb arrives for hw and not otherwise; none
     adds nothing. The two skips are named: keep-groups is unverifiable here because amdgpu leaves /dev/kfd mode
     0666, and nvidia has no device on this machine. Mutation-proved four ways, including that collapsing
@@ -200,9 +200,9 @@ tasks:
   evidence: >-
     Ran live on katana. apex blueprint diff/apply applied a real change and the second apply was a no-op
     (idempotent). Planted a sentinel token in ~/.local/state/apex/secrets/github.json, ran apex sync export,
-    sentinel absent from the bundle. Bundle carries only bundle-meta/blueprint/projects (apexd-
-    core/src/blueprint.rs:993-1000); collect_projects never touches the secret broker. Harness test-apex-
-    blueprint.sh 140/0.
+    sentinel absent from the bundle. Bundle carries only bundle-meta/blueprint/projects
+    (apexd-core/src/blueprint.rs:993-1000); collect_projects never touches the secret broker. Harness
+    test-apex-blueprint.sh 140/0.
 - id: BASE-008
   title: Preserve APEX Modes and workload policy
   priority: P0
@@ -440,8 +440,8 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Ran live. apex doctor passes on L16 against real hardware and service checks; test-apex-recover.sh --with-
-    binary is 189/189 on katana including JSON and text parity. apex recover status reports the previous
+    Ran live. apex doctor passes on L16 against real hardware and service checks; test-apex-recover.sh
+    --with-binary is 189/189 on katana including JSON and text parity. apex recover status reports the previous
     deployment as available, matching ostree admin status. Reset and repair dry-run enumerates what will be
     removed, emptied and preserved, backs up before deleting, and refuses on a stale token, a symlink or root. One
     defect, the unprivileged package row asserts no user packages as a verified fact when it merely could not read
@@ -514,12 +514,12 @@ tasks:
     earlier; the remaining hole was that probe() consulted chain.bootloader_unavailable for the ROUTE and then
     dropped it, so Surface could not carry it and both renderings of apex recover status printed a bare 'grub'
     while apex boot status printed the caveat for the same machine. Now carried onto Surface with a caveat line
-    under the human label and a bootloaderUnavailable sibling key in the JSON (the VALUE is untouched: apex-
-    shell's RecoveryService.qml reads it and two shell suites pin the bare strings). The reason string stays out
-    of the human line because it is an efivarfs path plus an OS error, one token past the 96-column budget the
-    rendered report is measured against. cargo test -p apex 412 passed / 0 failed with 4 new tests; test-apex-
-    recover.sh --with-binary 201/0 (194 before), including a CHECKED seal - the suite walks mode 000 as root
-    first, so it proves the refusal is real before asserting through it.
+    under the human label and a bootloaderUnavailable sibling key in the JSON (the VALUE is untouched:
+    apex-shell's RecoveryService.qml reads it and two shell suites pin the bare strings). The reason string stays
+    out of the human line because it is an efivarfs path plus an OS error, one token past the 96-column budget the
+    rendered report is measured against. cargo test -p apex 412 passed / 0 failed with 4 new tests;
+    test-apex-recover.sh --with-binary 201/0 (194 before), including a CHECKED seal - the suite walks mode 000 as
+    root first, so it proves the refusal is real before asserting through it.
 - id: P0-001
   title: Qualify current integrated image on real hardware
   priority: P0
@@ -539,13 +539,13 @@ tasks:
   - stop_slop
   evidence: >-
     Probed on both machines 2026-09-06, evidence in ROADMAP/evidence/P0-001-hardware-qualification.md. Both boot
-    digest sha256:308127d9 from different tags with the same ostree checksum, which is direct evidence the one-
-    image collapse and tag promotion work on real hardware; zero failed units on either; all three GPU vendors
+    digest sha256:308127d9 from different tags with the same ostree checksum, which is direct evidence the
+    one-image collapse and tag promotion work on real hardware; zero failed units on either; all three GPU vendors
     clean at driver level, with the Optimus pair live on katana; WiFi, Bluetooth, audio and portals all working;
     Steam and gamescope correctly absent, since the one-image design installs them on demand. Outstanding and
-    honestly so: fresh install needs a wipe and cannot be attempted; multi-monitor needs physical displays; per-
-    compositor workflow passes are unrecorded. The rollback reboot remains unverified for two reasons, katana has
-    been in use for gaming whenever it was free, and its rollback slot currently holds the same digest as the
+    honestly so: fresh install needs a wipe and cannot be attempted; multi-monitor needs physical displays;
+    per-compositor workflow passes are unrecorded. The rollback reboot remains unverified for two reasons, katana
+    has been in use for gaming whenever it was free, and its rollback slot currently holds the same digest as the
     booted one because the hotfix unlock created a second deployment of the same commit, so a reboot into it would
     prove very little. Two findings stand: Secure Boot is disabled on katana against the stated end-state of both
     machines enforcing, and suspend has never run there against 40 resumes on the L16.
@@ -565,10 +565,10 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Protected apex-secretd service. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 24472b64. Two crates, apex-
-    secret-core and apex-secretd, with apex-agent-core/src/secret.rs DELETED rather than emptied; the store is
-    /var/lib/apex-secretd/users/<uid>/ at 0700 root-owned with each value in its own 0600 file and metadata kept
-    separate; grants and the audit trail moved behind the same boundary. Criterion 1's at-rest half is now
+    Protected apex-secretd service. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 24472b64. Two crates,
+    apex-secret-core and apex-secretd, with apex-agent-core/src/secret.rs DELETED rather than emptied; the store
+    is /var/lib/apex-secretd/users/<uid>/ at 0700 root-owned with each value in its own 0600 file and metadata
+    kept separate; grants and the audit trail moved behind the same boundary. Criterion 1's at-rest half is now
     measured rather than asserted: tests/test-secret-at-rest.sh 19 passed / 0 failed RUN AS REAL ROOT. 47455d93 is
     the defect that made the old check worthless - the suite was reading SUDO'S uid rather than the daemon's, so
     the assertion passed for exactly the reason it exists to rule out. 20332ca1 turned the zero-guard into a
@@ -731,8 +731,8 @@ tasks:
     asserted in the argv over the whole value set, and validate, build_argv and the unconfined path each refuse a
     mode with no namespace. Verified behaviourally against an isolated daemon, allowed host 200, unlisted host
     403, and a name allowed by policy refused after it resolved to 127.0.0.1. 1202 tests, clippy clean. Honest
-    limits recorded in the docs, a CONNECT tunnel is opaque so volume to an allowed host is unbounded, and non-
-    HTTP traffic fails outright rather than being filtered.
+    limits recorded in the docs, a CONNECT tunnel is opaque so volume to an allowed host is unbounded, and
+    non-HTTP traffic fails outright rather than being filtered.
 - id: P0-009
   title: Create APEX agent profile system
   priority: P0
@@ -776,12 +776,12 @@ tasks:
     what is exportable, so exportable-here cannot be writable-there. The writable overlay needs no bind at all:
     HOME is a tmpfs and bwrap creates its own mount points, so ~/.claude is an empty writable directory with only
     the listed entries mounted in, and anything unlisted is writable, session-private and gone at exit. Missing
-    writable directories are created before the session starts, because a --ro-bind-try of a missing path is a no-
-    op and the writes would silently vanish. Verified with real claude 2.1.261 under --sandbox project on katana,
-    reporting from inside its own namespace that skills, commands, CLAUDE.md and settings.json are read-only while
-    projects, todos and plugins/cache are writable, with 18 skills visible, no access to the real home and ~/.ssh
-    absent. What Claude writes at runtime was measured with find -newermt rather than assumed, and every path it
-    touched is a listed writable entry.
+    writable directories are created before the session starts, because a --ro-bind-try of a missing path is a
+    no-op and the writes would silently vanish. Verified with real claude 2.1.261 under --sandbox project on
+    katana, reporting from inside its own namespace that skills, commands, CLAUDE.md and settings.json are
+    read-only while projects, todos and plugins/cache are writable, with 18 skills visible, no access to the real
+    home and ~/.ssh absent. What Claude writes at runtime was measured with find -newermt rather than assumed, and
+    every path it touched is a listed writable entry.
 - id: P0-011
   title: Bridge Claude native hooks into apex-agentd
   priority: P0
@@ -851,16 +851,16 @@ tasks:
     Landed on roadmap/v2.2 (720c1f8). All three criteria met. Origin is established rather than asserted: an
     unsessioned peer is classified from /proc/<pid>/cgroup and its controlling terminal, where session-N.scope is
     a login and user@N.service is a scheduled job with nobody present, and a process can choose neither; a
-    connection belonging to a session inherits that session's origin, since re-observing would answer local-
-    terminal for every Remote Control agent; and a client may declare only a narrower origin, with local-terminal
-    and apex-shell undeclarable. The narrowing rule is stated over both properties policy reads rather than a
-    trust rank, because mcp is less trusted for elevation and more permitted on lock, so one rank would let a
-    Remote Control session redeclare itself mcp and buy back the lock rule it was denied, asserted over all 49
-    pairs. Fail-closed, a /proc read that fails is refused with the path rather than defaulted to local. Carried
-    on SessionInfo, PrivilegeRequest and both audit logs beside origin_source, so a record saying claude-remote-
-    control also says whether the daemon observed it or a client asked. PROTOCOL_VERSION 3, and the brittle
-    assert_eq between it and the dimensions version was replaced by a guard that pins each version to a revision
-    that exists. 1255 tests on the integration branch.
+    connection belonging to a session inherits that session's origin, since re-observing would answer
+    local-terminal for every Remote Control agent; and a client may declare only a narrower origin, with
+    local-terminal and apex-shell undeclarable. The narrowing rule is stated over both properties policy reads
+    rather than a trust rank, because mcp is less trusted for elevation and more permitted on lock, so one rank
+    would let a Remote Control session redeclare itself mcp and buy back the lock rule it was denied, asserted
+    over all 49 pairs. Fail-closed, a /proc read that fails is refused with the path rather than defaulted to
+    local. Carried on SessionInfo, PrivilegeRequest and both audit logs beside origin_source, so a record saying
+    claude-remote-control also says whether the daemon observed it or a client asked. PROTOCOL_VERSION 3, and the
+    brittle assert_eq between it and the dimensions version was replaced by a guard that pins each version to a
+    revision that exists. 1255 tests on the integration branch.
 - id: P0-014
   title: Remote Control privilege policy
   priority: P0
@@ -897,8 +897,8 @@ tasks:
     behind an origin observation that fails on a runner. Moved ahead of it - refuses strictly more, never less,
     gate untouched. Reproduced locally with NO sudo and NO prompt via unshare -C --map-current-user, which yields
     cgroup 0::/ and matches neither branch of classify exactly like a runner: 9 passed / 2 failed before, naming
-    the same two tests CI named, 11/0 after. That mechanism is reusable and is on the card beside in-login-
-    session.sh.
+    the same two tests CI named, 11/0 after. That mechanism is reusable and is on the card beside
+    in-login-session.sh.
 - id: P0-015
   title: Lock-state policy for autonomous sessions
   priority: P0
@@ -919,12 +919,12 @@ tasks:
     /proc/<pid>/stat - rather than on info.paused, which is only the daemon agreeing with itself. LockState and
     LockPolicy were already section 7 verbatim, decided over 8 policies by 7 origins by 4 states, with Unreadable
     treated as locked and NoDisplaySession as unlocked. The reader is tested too: 8d081ff had landed
-    LockedHintService and the Lockscreen line that drives it with no test of any kind, and with the gap a change-
-    signal always has - onSecureStateChanged fires on a CHANGE, so a shell restarted while logind believed the
-    session locked left LockedHint reading yes until somebody locked and unlocked by hand, and apex-agentd polls
-    exactly that property. Criterion 2 ('short-lived root grants revoke on lock by default') is satisfied now that
-    P0-007 provides a grant with a lifetime to revoke - it had no subject at all while SystemAccess::Session and
-    Unsafe were both refused.
+    LockedHintService and the Lockscreen line that drives it with no test of any kind, and with the gap a
+    change-signal always has - onSecureStateChanged fires on a CHANGE, so a shell restarted while logind believed
+    the session locked left LockedHint reading yes until somebody locked and unlocked by hand, and apex-agentd
+    polls exactly that property. Criterion 2 ('short-lived root grants revoke on lock by default') is satisfied
+    now that P0-007 provides a grant with a lifetime to revoke - it had no subject at all while
+    SystemAccess::Session and Unsafe were both refused.
 - id: P0-016
   title: Add Agent Settings page with password-gated Always Unrestricted toggle
   priority: P0
@@ -1021,20 +1021,20 @@ tasks:
     the roadmap recorded as uncovered were in fact covered by run-display-transaction-test.sh, which passes 41 of
     41 against a headless labwc with two virtual outputs — the evidence below was written from the branch state,
     not from a run. What was genuinely missing was criterion 5's word "exact" and criterion 6's recovery path, and
-    testing those honestly needed outputs that can be created and destroyed, which labwc cannot do. run-display-
-    unplug-test.sh uses headless sway's create_output and `output <name> unplug`, 17 assertions, and found two
-    defects. First: the guard wrote `state reverted` whether or not the restore had worked, so an engine that
-    failed during the countdown left the machine on an unconfirmed layout with a record saying it had been put
-    back, and reconcile at the next start believed it. It records revert-failed now, retries, and the Display page
-    says the screen was never confirmed. Second: a rollback naming an output unplugged during the countdown made
-    wlr-randr reject the whole invocation, so EVERY other output kept the unconfirmed layout; restore now prunes
-    the rollback against a fresh enumeration first. Criterion 5 is a whole-enumeration comparison across four
-    fields and two outputs, not one scale value. The watchdog is apex-display-guard.sh, spawned by _begin() BEFORE
-    the engine is called, so a dialog that fails to construct cannot affect it. Still open, and not fixable from
-    this repository: the compositor dying mid-countdown. apex-display-apply persists on every apply — measured,
-    one temporary apply writes kanshi/config and apex-display.conf with the unconfirmed layout — so a session that
-    dies comes back on it. That needs `apply --no-persist` in apex-os; spelled out with the measurement in
-    ROADMAP/design/P0-018-display-recovery.md.
+    testing those honestly needed outputs that can be created and destroyed, which labwc cannot do.
+    run-display-unplug-test.sh uses headless sway's create_output and `output <name> unplug`, 17 assertions, and
+    found two defects. First: the guard wrote `state reverted` whether or not the restore had worked, so an engine
+    that failed during the countdown left the machine on an unconfirmed layout with a record saying it had been
+    put back, and reconcile at the next start believed it. It records revert-failed now, retries, and the Display
+    page says the screen was never confirmed. Second: a rollback naming an output unplugged during the countdown
+    made wlr-randr reject the whole invocation, so EVERY other output kept the unconfirmed layout; restore now
+    prunes the rollback against a fresh enumeration first. Criterion 5 is a whole-enumeration comparison across
+    four fields and two outputs, not one scale value. The watchdog is apex-display-guard.sh, spawned by _begin()
+    BEFORE the engine is called, so a dialog that fails to construct cannot affect it. Still open, and not fixable
+    from this repository: the compositor dying mid-countdown. apex-display-apply persists on every apply —
+    measured, one temporary apply writes kanshi/config and apex-display.conf with the unconfirmed layout — so a
+    session that dies comes back on it. That needs `apply --no-persist` in apex-os; spelled out with the
+    measurement in ROADMAP/design/P0-018-display-recovery.md.
 - id: P0-019
   title: Make Input settings actually control hardware on all supported compositors
   priority: P0
@@ -1063,14 +1063,14 @@ tasks:
     name, and neither Hyprland nor niri has a click method that produces no button, so Off is not offered there.
     Per-device settings distinguish touchpad, trackpoint, mouse, touchscreen and keyboard, verified against real
     hardware on both machines, including that the touchpad's companion mouse node is not a trackpoint because udev
-    writes ID_INPUT_POINTINGSTICK=0 on it, and a device-name collision found against the live compositor. test-
-    apex-input.sh went 61 to 109 assertions and fails 37 against the previous generator; a new live suite runs 22
-    assertions against a nested Hyprland and is 18/3 pre-fix; the shell page suite is 43/0 and 7/23 pre-fix. Two
-    real defects fixed on the way: one compositor rejecting its config stopped the other two, so a broken niri
-    meant a Hyprland user could not change a touchpad setting at all while the page reported success; and hyprctl
-    getoption returns booleans as bool but enums as int and hyphenates two names the Lua keys spell with
-    underscores, either of which would have made read-back silently wrong. Not verified and stated as such: no
-    libinput setting was watched changing on a physical device, because a headless nested Hyprland has no input
+    writes ID_INPUT_POINTINGSTICK=0 on it, and a device-name collision found against the live compositor.
+    test-apex-input.sh went 61 to 109 assertions and fails 37 against the previous generator; a new live suite
+    runs 22 assertions against a nested Hyprland and is 18/3 pre-fix; the shell page suite is 43/0 and 7/23
+    pre-fix. Two real defects fixed on the way: one compositor rejecting its config stopped the other two, so a
+    broken niri meant a Hyprland user could not change a touchpad setting at all while the page reported success;
+    and hyprctl getoption returns booleans as bool but enums as int and hyphenates two names the Lua keys spell
+    with underscores, either of which would have made read-back silently wrong. Not verified and stated as such:
+    no libinput setting was watched changing on a physical device, because a headless nested Hyprland has no input
     devices and the only alternative was Andre's own touchpad while he was typing on it.
 - id: P0-020
   title: Disable mouse-wheel/touchpad-scroll value changes on all settings sliders
@@ -1098,10 +1098,10 @@ tasks:
     no Slider, RangeSlider, SpinBox, Dial or Tumbler at all, and the only stock control present is ScrollBar,
     where taking the wheel is the correct behaviour. tests/run-slider-wheel-test.sh posts real QWheelEvent,
     QMouseEvent and QKeyEvent through QQuickWindow's delivery agent, 11/11, and against the pre-fix tree it is 4
-    passed 7 failed; an independent reviewer re-executed the suite and watched all assertions pass. tests/check-
-    wheel-value.sh is the source-level half, 16/16, with six self-test mutants and two inverse mutants, and it
-    names all six removed sites against the pre-fix tree. Both wired into CI. Not verified, real libinput wheel
-    and touchpad through a compositor, since neither machine has wlrctl or ydotool.
+    passed 7 failed; an independent reviewer re-executed the suite and watched all assertions pass.
+    tests/check-wheel-value.sh is the source-level half, 16/16, with six self-test mutants and two inverse
+    mutants, and it names all six removed sites against the pre-fix tree. Both wired into CI. Not verified, real
+    libinput wheel and touchpad through a compositor, since neither machine has wlrctl or ydotool.
 - id: P0-021
   title: Fix Agent Center and embedded agent terminal color rendering
   priority: P0
@@ -1120,24 +1120,25 @@ tasks:
   - stop_slop
   evidence: >-
     Agent Center and embedded agent terminal colour rendering. ALL FIVE CRITERIA NOW CLOSED. Criteria 1, 2 and 5
-    were closed by the two branches that turned out to be two halves of one item, both landed by content on apex-
-    shell roadmap/v2.2 (p0-018-display-finish carries the palette mechanism, p0-021-agent-colors the agent-state
-    tokens that depend on it, including 9200d3f where four of seven agent states rendered as the palette's own
-    foreground). Criterion 3 is N/A by its own 'If PTY/TUI output is embedded': no PTY is embedded, by documented
-    design, so there is no code path that could flatten agent bytes to white. CRITERION 4 IS NOW ASSERTED, which
-    was the one real gap: landed 2026-09-12 on apex-shell roadmap/v2.2 as merge 34fef17 (8fe8341). Agent identity
-    reaches exactly one thing in the shell - AGENT_NAMES in agentstate.js, a display-name map - and StateBadge
-    takes no agent parameter, so the five kinds rendered alike by construction while all 17 existing render cases
-    were a state x palette matrix whose fixture hardcoded agent claude for every one. Four new cases build five
-    REAL SessionRows under the headless harness differing only in agent (claude, opencode, codex, gemini, generic)
-    at permission_request, a solid badge so fill geometry is exercised too, and assert an identical toneColor and
-    identical badge geometry - preceded by an anti-vacuity case that requires the five rows to have rendered five
-    DIFFERENT names, read back out of the built rows, before the sameness comparisons are allowed to mean
-    anything. Mutation-proved three ways, each restored byte-identical: a per-agent tone (codex) reddens the
-    colour case #d0bcff vs #f87171; a per-agent badge size (gemini) reddens the geometry case solid/22/22/6.6 vs
-    solid/34/34/10.2; and removing the fixture's agent parameter reddens the anti-vacuity case with ["Claude"].
-    agent-state-render 17 passed/0 failed -> 21 passed/0 failed. REMAINING, and it is not an acceptance criterion:
-    no human has looked at the badge weights on a real panel. That needs Andre, not an agent.
+    were closed by the two branches that turned out to be two halves of one item, both landed by content on
+    apex-shell roadmap/v2.2 (p0-018-display-finish carries the palette mechanism, p0-021-agent-colors the
+    agent-state tokens that depend on it, including 9200d3f where four of seven agent states rendered as the
+    palette's own foreground). Criterion 3 is N/A by its own 'If PTY/TUI output is embedded': no PTY is embedded,
+    by documented design, so there is no code path that could flatten agent bytes to white. CRITERION 4 IS NOW
+    ASSERTED, which was the one real gap: landed 2026-09-12 on apex-shell roadmap/v2.2 as merge 34fef17 (8fe8341).
+    Agent identity reaches exactly one thing in the shell - AGENT_NAMES in agentstate.js, a display-name map - and
+    StateBadge takes no agent parameter, so the five kinds rendered alike by construction while all 17 existing
+    render cases were a state x palette matrix whose fixture hardcoded agent claude for every one. Four new cases
+    build five REAL SessionRows under the headless harness differing only in agent (claude, opencode, codex,
+    gemini, generic) at permission_request, a solid badge so fill geometry is exercised too, and assert an
+    identical toneColor and identical badge geometry - preceded by an anti-vacuity case that requires the five
+    rows to have rendered five DIFFERENT names, read back out of the built rows, before the sameness comparisons
+    are allowed to mean anything. Mutation-proved three ways, each restored byte-identical: a per-agent tone
+    (codex) reddens the colour case #d0bcff vs #f87171; a per-agent badge size (gemini) reddens the geometry case
+    solid/22/22/6.6 vs solid/34/34/10.2; and removing the fixture's agent parameter reddens the anti-vacuity case
+    with ["Claude"]. agent-state-render 17 passed/0 failed -> 21 passed/0 failed. REMAINING, and it is not an
+    acceptance criterion: no human has looked at the badge weights on a real panel. That needs Andre, not an
+    agent.
 - id: P0-022
   title: Add Agents and Workspaces help/onboarding inside the Agents tab
   priority: P0
@@ -1158,9 +1159,9 @@ tasks:
   - stop_slop
   evidence: >-
     Landed on roadmap/v2.2. A permanent 'How Agents and Workspaces work' entry pinned above the Agents page body
-    so it shows in the empty and daemon-off states too, a first-run card with its own persistence, and a seven-
-    section guide (start, projects and workspaces, review, sandbox and permissions, other computers, keys and
-    commands, stuck sessions). Dismissal persists to XDG_STATE_HOME/apex-shell/agent-help.json rather than
+    so it shows in the empty and daemon-off states too, a first-run card with its own persistence, and a
+    seven-section guide (start, projects and workspaces, review, sandbox and permissions, other computers, keys
+    and commands, stuck sessions). Dismissal persists to XDG_STATE_HOME/apex-shell/agent-help.json rather than
     settings.json, so Config Misc Reset all cannot resurrect the card. Every CLI verb documented was read out of
     the clap enums and cited by line; two documentation bugs were found doing it and fixed separately. Features
     that do not exist yet carry a NOT IN THIS BUILD block rather than being described as available. slopcheck
@@ -1187,12 +1188,12 @@ tasks:
   evidence: >-
     Unified settings staging/apply/save/revert semantics; landed on roadmap/v2.2. Verified surviving P0-018's
     359-line KeybindService.qml rewrite underneath it, which git auto-merged with no conflict so nothing else
-    exercised the seam: run-settings-staged-test.sh 21/0 and run-settings-controls-test.sh 16/0, plus settings-
-    semantics 33/0 and settings-pages 15/0 at d2d1f33. The CfgCommit staging bar is what replaced P0-018's three
-    CfgRow/CfgButton rows and was deliberately kept over them at integration. Its CfgRow.qml and KeybindsPage.qml
-    work removed three white-foreground literals, which is why check-color-tokens EXPECT_WHITE_FG moved 212 -> 211
-    in d2d1f33. reconstructed 2026-09-07 from ROADMAP/state/agents/integrate-1.md; the original text was destroyed
-    by the set-status.py --evidence defect (script fixed the same day).
+    exercised the seam: run-settings-staged-test.sh 21/0 and run-settings-controls-test.sh 16/0, plus
+    settings-semantics 33/0 and settings-pages 15/0 at d2d1f33. The CfgCommit staging bar is what replaced
+    P0-018's three CfgRow/CfgButton rows and was deliberately kept over them at integration. Its CfgRow.qml and
+    KeybindsPage.qml work removed three white-foreground literals, which is why check-color-tokens EXPECT_WHITE_FG
+    moved 212 -> 211 in d2d1f33. reconstructed 2026-09-07 from ROADMAP/state/agents/integrate-1.md; the original
+    text was destroyed by the set-status.py --evidence defect (script fixed the same day).
 - id: P0-024
   title: Create settings UI regression test harness
   priority: P0
@@ -1215,10 +1216,10 @@ tasks:
     Settings UI regression test harness. NOTE: this item's original acceptance record is UNRECOVERABLE -- it was
     destroyed by the --evidence defect and no snapshot in refs/wip/roadmap-state (62 snapshots, oldest 2026-09-06)
     ever held it. What IS verifiable: the harness suites are run from the repository root at every integration
-    round and were all green on roadmap/v2.2 at d2d1f33 -- settings-semantics 33/0, settings-pages 15/0, run-
-    settings-staged-test 21/0, run-settings-controls-test 16/0, display-transaction statics 42/0, check-color-
-    tokens 22/0, agent-state 27/0, scale-tokens 5/0, plus nested headless labwc and sway runs. Anyone re-
-    qualifying P0-024 should re-derive its acceptance criteria rather than trust this line.
+    round and were all green on roadmap/v2.2 at d2d1f33 -- settings-semantics 33/0, settings-pages 15/0,
+    run-settings-staged-test 21/0, run-settings-controls-test 16/0, display-transaction statics 42/0,
+    check-color-tokens 22/0, agent-state 27/0, scale-tokens 5/0, plus nested headless labwc and sway runs. Anyone
+    re-qualifying P0-024 should re-derive its acceptance criteria rather than trust this line.
 - id: P0-025
   title: Migrate Hyprland compositor configuration from legacy hyprlang to Lua
   priority: P0
@@ -1250,21 +1251,21 @@ tasks:
   evidence: >-
     Done on task/p0-018-display-finish (a153b02), carrying 8979d7d and completing the apex-shell half.
     KeybindService already wrote apex/shell-keybinds.lua rather than the hyprlang fragment. Two defects remained,
-    both about config the user owns. apex-hypr-migrate converts a hand-edited ApexShellKeybinds.conf INTO shell-
-    keybinds.lua — the only name require can reach it by — and the shell rewrote that file whole on every start,
-    so the migration preserved a keybind and the next login silently deleted it. The generated module carries an
-    APEX-SHELL-GENERATED marker now and apex-keybinds-rescue.sh moves any unmarked file to apex/shell-keybinds-
-    user.lua, which the generated module requires last, so the binds keep working rather than being backed up into
-    silence. Second: a rebind claimed only the NEW combo, so moving Terminal off SUPER+T left apex/keybindings.lua
-    still opening one there, and unbinding it emitted nothing at all — a regression from replacing hyprlang's
-    indiscriminate unbind pass with disable(). Every default the user has moved off or switched off is released by
-    name now. hyprctl configerrors WAS verified, against a nested Hyprland 0.56.2 with its own
-    HYPRLAND_INSTANCE_SIGNATURE, runtime dir and HOME, asked by signature and refusing to run if that matches the
-    ambient one: clean with the module absent, after the first generated write, after a rebind through the page's
-    own path, and with a rescued user module loaded. Headless does not work and the suite says so — 0.56.2 dies in
-    CBackend::create() with AQ_BACKENDS=headless on a GPU machine with no DRM master, and nested in a headless
-    labwc it dies the same way, both measured — so it nests inside a running Wayland session and skips where there
-    is none.
+    both about config the user owns. apex-hypr-migrate converts a hand-edited ApexShellKeybinds.conf INTO
+    shell-keybinds.lua — the only name require can reach it by — and the shell rewrote that file whole on every
+    start, so the migration preserved a keybind and the next login silently deleted it. The generated module
+    carries an APEX-SHELL-GENERATED marker now and apex-keybinds-rescue.sh moves any unmarked file to
+    apex/shell-keybinds-user.lua, which the generated module requires last, so the binds keep working rather than
+    being backed up into silence. Second: a rebind claimed only the NEW combo, so moving Terminal off SUPER+T left
+    apex/keybindings.lua still opening one there, and unbinding it emitted nothing at all — a regression from
+    replacing hyprlang's indiscriminate unbind pass with disable(). Every default the user has moved off or
+    switched off is released by name now. hyprctl configerrors WAS verified, against a nested Hyprland 0.56.2 with
+    its own HYPRLAND_INSTANCE_SIGNATURE, runtime dir and HOME, asked by signature and refusing to run if that
+    matches the ambient one: clean with the module absent, after the first generated write, after a rebind through
+    the page's own path, and with a rescued user module loaded. Headless does not work and the suite says so —
+    0.56.2 dies in CBackend::create() with AQ_BACKENDS=headless on a GPU machine with no DRM master, and nested in
+    a headless labwc it dies the same way, both measured — so it nests inside a running Wayland session and skips
+    where there is none.
 - id: P1-001
   title: Create generic capability provider framework
   priority: P1
@@ -1314,12 +1315,12 @@ tasks:
   evidence: >-
     First-party Cloudflare provider, pushed on task/p1-002-cloudflare and landed by integrate-3 at bc4f06e.
     providers/cloudflare/{mod,binding,api,tests}.rs, 7 operations (six of section 13.2's 32; 26 remain). Final
-    1543 passed / 0 failed at tip 2514e09 from a 1477/0 baseline; -D warnings --all-targets clean; check-no-
-    conflict-markers PASS. Fifteen mutation pairs, every one bites (M1 100/0->97/3, M2 ->91/9, M7 O_NOFOLLOW
-    dropped 71/0->68/3, M15 curl-config escaper disabled 103/0->100/3, others ->99/1). Carries two independent
-    P1-001 fixes: 8110944, service.rs refuse() ran no scrub, so a provider that put the credential in an Err after
-    the value was read leaked it to the caller AND the trail; and 74f1055, worker.route.read returned the whole
-    zone's routing while the audit line claimed it was one worker's. reconstructed 2026-09-07 from
+    1543 passed / 0 failed at tip 2514e09 from a 1477/0 baseline; -D warnings --all-targets clean;
+    check-no-conflict-markers PASS. Fifteen mutation pairs, every one bites (M1 100/0->97/3, M2 ->91/9, M7
+    O_NOFOLLOW dropped 71/0->68/3, M15 curl-config escaper disabled 103/0->100/3, others ->99/1). Carries two
+    independent P1-001 fixes: 8110944, service.rs refuse() ran no scrub, so a provider that put the credential in
+    an Err after the value was read leaked it to the caller AND the trail; and 74f1055, worker.route.read returned
+    the whole zone's routing while the audit line claimed it was one worker's. reconstructed 2026-09-07 from
     ROADMAP/state/agents/p1-002.md; the original text was destroyed by the set-status.py --evidence defect (script
     fixed the same day).
 - id: P1-003
@@ -1465,8 +1466,8 @@ tasks:
   - stop_slop
   evidence: >-
     Cloudflare One capability set - Access, service tokens and Tunnels. LANDED on apex-os roadmap/v2.2 2026-09-12
-    as merge 230ee02a (13ea48c1, 9be6d910). Both criteria closed by named tests: brokered Access/service-
-    token/Tunnel operations by the_cloudflare_one_verbs_are_separate_grants and
+    as merge 230ee02a (13ea48c1, 9be6d910). Both criteria closed by named tests: brokered
+    Access/service-token/Tunnel operations by the_cloudflare_one_verbs_are_separate_grants and
     every_declared_operation_reaches_cloudflare_with_the_credential_and_returns_without_it; and 'created service
     secrets enter apex-secretd directly' by the Bound::creates seam plus
     a_credential_an_operation_creates_is_stored_and_never_comes_back - a credential the operation mints goes into
@@ -1495,28 +1496,28 @@ tasks:
     task/project' by a_gatewayed_run_is_tagged_with_this_task_and_not_with_this_machine_s_paths. THE CARD'S
     CENTRAL DESIGN CLAIM WAS WRONG AND WAS CHECKED RATHER THAN INHERITED: it said an AI Gateway run needs a
     different host (gateway.ai.cloudflare.com) and therefore a second stored credential. It does not - but the
-    replacement claim was also uncited and the pinned schema cannot settle it either way, because workers-ai-post-
-    run-model declares two path parameters and NO headers and the string cf-aig does not occur anywhere in the 25
-    MB document. Verified against Cloudflare's documentation instead: POST /accounts/{id}/ai/run/{model} with cf-
-    aig-gateway-id, on api.cloudflare.com, the docs stating that path form also continues to work. Same host, same
-    credential; the difference between a gatewayed and an ungatewayed run really is a header and a grant. The
-    module note cites three URLs and says plainly which claim the schema cannot back. THREE MUTATIONS EXPOSED TEST
-    GAPS RATHER THAN CODE GAPS, the class this program keeps finding: a leaked project path PASSED because the
-    filter that makes a header value safe strips '/' as a side effect, so 'contains no slash' and 'is not the
-    path' both hold while the whole directory layout ships to Cloudflare; discarding the read-modify-write's read
-    entirely PASSED because the assertion asked about collect_logs, which the required-field fallback sets to true
-    regardless, making preserved and defaulted the same observation; and Effect::Read on an operation that SPENDS
-    MONEY passed because nothing asserted otherwise, so a read-only grant could have run inference. THE THIRD
-    CRITERION IS OPEN FOR A STRUCTURAL REASON: 'APEX AI service can route through Cloudflare' cannot be closed
-    from this unit, because apexd_core::ai::Backend is compute-only (Cuda/Rocm/Vulkan/Cpu) AND the inference
-    runtime starts under bubblewrap --unshare-net, so the backend cannot reach api.cloudflare.com because it
-    cannot reach anything at all. Closing it needs something outside the sandbox to make the brokered call and
-    hand the answer back - a design change in another crate, deliberately not taken unilaterally mid-integration.
-    Same shape as P1-007's missing elevated class. ALSO RECORDED, NOT SMOOTHED OVER: cargo test --workspace gives
-    1400 on this machine and the 2466/2474 earlier rounds recorded could not be reproduced (the diff is additive,
-    so no tests were removed - the counting method differs and is not known); one unidentified failure in one of
-    eight workspace runs, never reproduced in the other seven; and stop_slop, a listed gate on all three items,
-    was not run on this round or any earlier one.
+    replacement claim was also uncited and the pinned schema cannot settle it either way, because
+    workers-ai-post-run-model declares two path parameters and NO headers and the string cf-aig does not occur
+    anywhere in the 25 MB document. Verified against Cloudflare's documentation instead: POST
+    /accounts/{id}/ai/run/{model} with cf-aig-gateway-id, on api.cloudflare.com, the docs stating that path form
+    also continues to work. Same host, same credential; the difference between a gatewayed and an ungatewayed run
+    really is a header and a grant. The module note cites three URLs and says plainly which claim the schema
+    cannot back. THREE MUTATIONS EXPOSED TEST GAPS RATHER THAN CODE GAPS, the class this program keeps finding: a
+    leaked project path PASSED because the filter that makes a header value safe strips '/' as a side effect, so
+    'contains no slash' and 'is not the path' both hold while the whole directory layout ships to Cloudflare;
+    discarding the read-modify-write's read entirely PASSED because the assertion asked about collect_logs, which
+    the required-field fallback sets to true regardless, making preserved and defaulted the same observation; and
+    Effect::Read on an operation that SPENDS MONEY passed because nothing asserted otherwise, so a read-only grant
+    could have run inference. THE THIRD CRITERION IS OPEN FOR A STRUCTURAL REASON: 'APEX AI service can route
+    through Cloudflare' cannot be closed from this unit, because apexd_core::ai::Backend is compute-only
+    (Cuda/Rocm/Vulkan/Cpu) AND the inference runtime starts under bubblewrap --unshare-net, so the backend cannot
+    reach api.cloudflare.com because it cannot reach anything at all. Closing it needs something outside the
+    sandbox to make the brokered call and hand the answer back - a design change in another crate, deliberately
+    not taken unilaterally mid-integration. Same shape as P1-007's missing elevated class. ALSO RECORDED, NOT
+    SMOOTHED OVER: cargo test --workspace gives 1400 on this machine and the 2466/2474 earlier rounds recorded
+    could not be reproduced (the diff is additive, so no tests were removed - the counting method differs and is
+    not known); one unidentified failure in one of eight workspace runs, never reproduced in the other seven; and
+    stop_slop, a listed gate on all three items, was not run on this round or any earlier one.
 - id: P1-010
   title: Cloudflare Secrets Store integration
   priority: P1
@@ -1534,11 +1535,11 @@ tasks:
   evidence: >-
     Cloudflare Secrets Store capability set. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 230ee02a
     (2c59ff1a, a77bd0c6). Create, bind and rotate closed by eight named tests. The 'non-readable secrets stored as
-    references and metadata only' criterion rests on a schema finding rather than an assumption: secrets-
-    store_value is writeOnly and x-sensitive in Cloudflare's own OpenAPI document, so the value arrives as a
-    request body or a project file rather than as a parameter, and nothing in the capability set can read it back.
-    a77bd0c6 is a real defect the tests surfaced: secret.bind ECHOED a worker's existing bindings rather than
-    inheriting them, which would have rewritten a worker's binding list on every bind. NO LIVE ACCOUNT WAS
+    references and metadata only' criterion rests on a schema finding rather than an assumption:
+    secrets-store_value is writeOnly and x-sensitive in Cloudflare's own OpenAPI document, so the value arrives as
+    a request body or a project file rather than as a parameter, and nothing in the capability set can read it
+    back. a77bd0c6 is a real defect the tests surfaced: secret.bind ECHOED a worker's existing bindings rather
+    than inheriting them, which would have rewritten a worker's binding list on every bind. NO LIVE ACCOUNT WAS
     TOUCHED.
 - id: P1-011
   title: Temporary Cloudflare task credentials
@@ -1749,9 +1750,10 @@ tasks:
     test assertions that measured this laptop rather than the code were corrected before landing: the race test
     asserted the trail's ORDER, which is a fact about thread timing and would fail on a loaded runner, and the
     unreadable-budget test relied on mode bits, which mean nothing to root, so it now leads with a budget that
-    does not parse and guards the permission arm on getuid. MEASURED rather than inferred: tests/test-secret-
-    broker.sh is 63 passed / 2 failed on 4ed092b8, this branch's base, and 64 / 1 here; the shared failure asserts
-    'cloudflare.dns.delete' is not an operation, which P1-008 made false. Neither failure is this branch's.
+    does not parse and guards the permission arm on getuid. MEASURED rather than inferred:
+    tests/test-secret-broker.sh is 63 passed / 2 failed on 4ed092b8, this branch's base, and 64 / 1 here; the
+    shared failure asserts 'cloudflare.dns.delete' is not an operation, which P1-008 made false. Neither failure
+    is this branch's.
 - id: P1-017
   title: Cloudflare MCP through APEX broker
   priority: P1
@@ -1888,9 +1890,9 @@ tasks:
     statusline.rs 698). The shell half had ONE conflict, both hunks in src/services/agents/SessionRow.qml,
     resolved keep-both -- with the trap that a naive keep-both leaves two row-level height properties, a QML
     duplicate-property error; the stale Theme.px(52) was moved into the new header Item and only one row-level
-    height remains. Post-landing shell suites: agentgraph 67/0, notifybus 41/0, agenttelemetry 59/0, check-agent-
-    settings 17/0, check-remote-agents 13/0, agent-policy all-pass; settings-semantics 33/0, settings-pages 15/0,
-    colour 22/0 (EXPECT_WHITE_FG 211 unchanged), scale 5/0, agent-state 27/0, markers PASS.
+    height remains. Post-landing shell suites: agentgraph 67/0, notifybus 41/0, agenttelemetry 59/0,
+    check-agent-settings 17/0, check-remote-agents 13/0, agent-policy all-pass; settings-semantics 33/0,
+    settings-pages 15/0, colour 22/0 (EXPECT_WHITE_FG 211 unchanged), scale 5/0, agent-state 27/0, markers PASS.
 - id: P1-021
   title: Integrate Claude statusline telemetry
   priority: P1
@@ -1914,8 +1916,8 @@ tasks:
     85e3e2a: statusline.rs (Telemetry, parse, git_branch from .git/HEAD including worktree pointer files, overlay,
     chain), Request::Telemetry as its own request so last_activity does NOT move, and `apex agent statusline` runs
     the user's command FIRST. apex-agent-core 462/0, hook_bridge 12/0, policy_invariants 33/0, six mutants killed.
-    reconstructed 2026-09-07 from ROADMAP/state/agents/p1-020.md; the original text was destroyed by the set-
-    status.py --evidence defect (script fixed the same day). LANDED by integrate-4 with the rest of
+    reconstructed 2026-09-07 from ROADMAP/state/agents/p1-020.md; the original text was destroyed by the
+    set-status.py --evidence defect (script fixed the same day). LANDED by integrate-4 with the rest of
     task/p1-020-agent-graph, apex-shell roadmap/v2.2 = ed1c466. One rebase-introduced failure was found and fixed
     IN the landing commit rather than on top of it: agenttelemetry 'SessionRow does not freeze the clock in a
     property' went 59/0 to 58/1 because the check was a bare regex on property NAME: Date.now(), and the merged
@@ -1944,10 +1946,11 @@ tasks:
     retraction), AgentService spawns detached instead of through one shared Process, NotificationService gains
     extraHints plus byKey/idForKey/retract. tests/notifybus-test.js 41/0 with 9 mutants plus an inverse mutant;
     tests/run-notify-spawn-test.sh 10/0 under headless labwc. run-agent-center-smoke.sh wired into CI as 6046b71.
-    reconstructed 2026-09-07 from ROADMAP/state/agents/p1-020.md; the original text was destroyed by the set-
-    status.py --evidence defect (script fixed the same day). LANDED by integrate-4 with task/p1-020-agent-graph,
-    apex-shell roadmap/v2.2 = ed1c466. notifybus 41/0 after the landing; qmldir and .github/workflows/ci.yml auto-
-    merged clean and ci.yml re-validated as YAML (parses, 3 jobs, no duplicate step names).
+    reconstructed 2026-09-07 from ROADMAP/state/agents/p1-020.md; the original text was destroyed by the
+    set-status.py --evidence defect (script fixed the same day). LANDED by integrate-4 with
+    task/p1-020-agent-graph, apex-shell roadmap/v2.2 = ed1c466. notifybus 41/0 after the landing; qmldir and
+    .github/workflows/ci.yml auto-merged clean and ci.yml re-validated as YAML (parses, 3 jobs, no duplicate step
+    names).
 - id: P1-023
   title: Global push-to-talk routing
   priority: P1
@@ -1962,19 +1965,19 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED on roadmap/v2.2 2026-09-11 (round 10) in BOTH repos: apex-shell merge dc2283e of task/p1-023-handoff-
-    lifecycle (8 commits), apex-os merge 09846c9 of task/p1-023-push-to-talk-daemon (2 commits). Global push-to-
-    talk routing, end to end. Shell half: the verb wired through all three keybind generators, the microphone
-    indicator in CenterContent keyed on indicatorLabel !== '' so a REFUSAL is visible too, the 6s dismiss timer,
-    and the 'Speak to it' help section with both todo blocks. check-push-to-talk.sh 42/0, its node half 57
-    assertions, 14/14 mutants caught; check-agent-help.sh 24/0 with slopcheck TOTAL 0 and no new allowlist entry.
-    apex-os half: Request::Input { id, data }, session::write_input, privilege::refuse_input, apex agent input
-    <id> <text> [--submit], completion and doc parity, tests/session_input.rs; 11/11 mutants caught. THE DESIGN
-    FINDING, measured not argued: push-to-talk is a TOGGLE, because labwc and niri cannot fire on key RELEASE -
-    hold-to-talk is unimplementable on these compositors. The refusal in refuse_input is the load-bearing part: a
-    session may not type into a sibling (bytes on a PTY are indistinguishable from a person typing, so an agent
-    that could send them could borrow a sibling's grants), and a connection the kernel will not classify is
-    refused too rather than assumed human.
+    LANDED on roadmap/v2.2 2026-09-11 (round 10) in BOTH repos: apex-shell merge dc2283e of
+    task/p1-023-handoff-lifecycle (8 commits), apex-os merge 09846c9 of task/p1-023-push-to-talk-daemon (2
+    commits). Global push-to-talk routing, end to end. Shell half: the verb wired through all three keybind
+    generators, the microphone indicator in CenterContent keyed on indicatorLabel !== '' so a REFUSAL is visible
+    too, the 6s dismiss timer, and the 'Speak to it' help section with both todo blocks. check-push-to-talk.sh
+    42/0, its node half 57 assertions, 14/14 mutants caught; check-agent-help.sh 24/0 with slopcheck TOTAL 0 and
+    no new allowlist entry. apex-os half: Request::Input { id, data }, session::write_input,
+    privilege::refuse_input, apex agent input <id> <text> [--submit], completion and doc parity,
+    tests/session_input.rs; 11/11 mutants caught. THE DESIGN FINDING, measured not argued: push-to-talk is a
+    TOGGLE, because labwc and niri cannot fire on key RELEASE - hold-to-talk is unimplementable on these
+    compositors. The refusal in refuse_input is the load-bearing part: a session may not type into a sibling
+    (bytes on a PTY are indistinguishable from a person typing, so an agent that could send them could borrow a
+    sibling's grants), and a connection the kernel will not classify is refused too rather than assumed human.
 - id: P1-024
   title: Cross-agent handoff packet
   priority: P1
@@ -2051,8 +2054,8 @@ tasks:
   evidence: >-
     Plugin and marketplace provenance and isolation. CRITERION 1 DONE, unchanged since the 2026-09-11 landing
     (merge ba105394, apexd/apex/src/provenance.rs plus apex provenance show/record): marketplace origin and
-    commit/hash are tracked, and provenance here means the hash of what RUNS rather than a recorded URL nobody re-
-    checks. Two mutation pairs prove the parts that matter, both of the permission-denied-is-not-absence class:
+    commit/hash are tracked, and provenance here means the hash of what RUNS rather than a recorded URL nobody
+    re-checks. Two mutation pairs prove the parts that matter, both of the permission-denied-is-not-absence class:
     provenance.rs's 'git status could not run' arm flipped to Some(false) takes 522/0 -> 521/1 on
     a_git_status_that_could_not_run_is_not_a_clean_working_tree, and the EACCES arm collapsed to None takes 522/0
     -> 521/1 on a_registry_that_is_there_and_refused_is_not_a_registry_that_is_absent. Both were checked for
@@ -2098,9 +2101,9 @@ tasks:
     criterion by grepping provenance.rs for the words it may and may not print, and required 'Nothing here
     confines them' about a plugin's hooks - the wording this round replaced because it understates the case. Left
     alone it was the one thing on the branch CI would have caught and the cargo tests could not: 73 passed, 1
-    failed. The assertion was replaced by four that are harder to satisfy vacuously rather than deleted - the at-
-    launch sentence, the clause saying where it stops, the hooks wording, and the named case where the session has
-    no sandbox either. tests/test-apex-skill.sh --with-binary: 73/0 on the tip -> 82/0 on this branch. Branch
+    failed. The assertion was replaced by four that are harder to satisfy vacuously rather than deleted - the
+    at-launch sentence, the clause saying where it stops, the hooks wording, and the named case where the session
+    has no sandbox either. tests/test-apex-skill.sh --with-binary: 73/0 on the tip -> 82/0 on this branch. Branch
     task/p1-025-plugin-trust-2, pushed, unmerged at the time of writing.
 - id: P1-027
   title: Memory provider interface
@@ -2184,11 +2187,11 @@ tasks:
     its first shell-level guard: tests/test-apex-skill.sh had nothing at all about the per-connector switch. Six
     assertions added - that the --connectors table is printed, that it names local_only, that the readout says
     where the selection applies and where it stops, that the JSON carries perConnectorSwitch with its scope and a
-    row per policy value, and that an empty connector_allow prints a refusal rather than a row of zeroes. Fixture-
-    driven: the suite's run() sets XDG_CONFIG_HOME into the fixture, so the empty list asserted is the fixture's
-    and not this machine's. tests/test-apex-skill.sh --with-binary: 73/0 on the tip -> 82/0 on this branch. Branch
-    task/p1-025-plugin-trust-2 (cbcacfc3, 93ea60f4, 4ac67153, 7f0038d3, e48234fb), pushed, unmerged at the time of
-    writing; round 1 is merged as 564fffd5.
+    row per policy value, and that an empty connector_allow prints a refusal rather than a row of zeroes.
+    Fixture-driven: the suite's run() sets XDG_CONFIG_HOME into the fixture, so the empty list asserted is the
+    fixture's and not this machine's. tests/test-apex-skill.sh --with-binary: 73/0 on the tip -> 82/0 on this
+    branch. Branch task/p1-025-plugin-trust-2 (cbcacfc3, 93ea60f4, 4ac67153, 7f0038d3, e48234fb), pushed, unmerged
+    at the time of writing; round 1 is merged as 564fffd5.
 - id: P1-029
   title: Represent local/remote/scheduled/cloud agent lifecycle types
   priority: P1
@@ -2222,8 +2225,8 @@ tasks:
     apex_agent_prompt, plus vendor_completions.d/{apex,a,aa,ad,ap}.fish and Containerfile.base COPY and
     assertions. Branch totals verified locally, not on CI, per Andre's standing rule: 1461 rust tests / 0 failed
     (+25 over a 1436 baseline), test-shell-agent.sh 58/0, test-mux-layouts.sh 46/0, test-project-layout.sh 23/0,
-    clippy -D warnings clean in rust:1-slim, check-no-conflict-markers / check-doc-verbs (36 valid) / check-
-    containerfile-order all pass. Thirteen mutations, every one caught. reconstructed 2026-09-07 from
+    clippy -D warnings clean in rust:1-slim, check-no-conflict-markers / check-doc-verbs (36 valid) /
+    check-containerfile-order all pass. Thirteen mutations, every one caught. reconstructed 2026-09-07 from
     ROADMAP/state/agents/p1-030.md; the original text was destroyed by the set-status.py --evidence defect (script
     fixed the same day).
 - id: P1-031
@@ -2260,15 +2263,16 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    tmux integration, b5764d1 on task/p1-030-shell-integrations: `apex project layout templates|open`, apex-agent-
-    core/src/mux.rs and files/system/libexec/apex-mux as the tmux and zellij adapter. ProjectLayout gained
-    template/mux so there is one layout record rather than two. Same branch test totals as P1-030 (test-mux-
-    layouts.sh 46/0, test-project-layout.sh 23/0). SAFETY FINDING, written up at errors-and-fixes/test-pane-
-    started-a-real-agent-session-on-the-live-daemon.md: a tmux pane in an early manual test genuinely started a
-    claude session on Andre's live daemon (removed with `apex agent rm 5`, daemon untouched). Isolating
-    TMUX_TMPDIR does nothing about what the panes execute; the suite now fixtures XDG_RUNTIME_DIR and puts a stub
-    apex first on PATH. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-030.md; the original text was
-    destroyed by the set-status.py --evidence defect (script fixed the same day).
+    tmux integration, b5764d1 on task/p1-030-shell-integrations: `apex project layout templates|open`,
+    apex-agent-core/src/mux.rs and files/system/libexec/apex-mux as the tmux and zellij adapter. ProjectLayout
+    gained template/mux so there is one layout record rather than two. Same branch test totals as P1-030
+    (test-mux-layouts.sh 46/0, test-project-layout.sh 23/0). SAFETY FINDING, written up at
+    errors-and-fixes/test-pane-started-a-real-agent-session-on-the-live-daemon.md: a tmux pane in an early manual
+    test genuinely started a claude session on Andre's live daemon (removed with `apex agent rm 5`, daemon
+    untouched). Isolating TMUX_TMPDIR does nothing about what the panes execute; the suite now fixtures
+    XDG_RUNTIME_DIR and puts a stub apex first on PATH. reconstructed 2026-09-07 from
+    ROADMAP/state/agents/p1-030.md; the original text was destroyed by the set-status.py --evidence defect (script
+    fixed the same day).
 - id: P1-033
   title: Finish Zellij integration
   priority: P1
@@ -2282,12 +2286,12 @@ tasks:
   - stop_slop
   evidence: >-
     Zellij integration, b5764d1 plus 63493c7 on task/p1-030-shell-integrations. Measured constraint: zellij has no
-    way to start a session with a layout without attaching, so apex-mux does it in two steps (attach --create-
-    background, then add the layout as a tab), at the cost of one leftover default tab. 63493c7 also redirects
-    every directory zellij writes to under /tmp during the Containerfile's layout-parse check; the image would
-    otherwise ship two dead zellij session records in the build user's cache. Same branch test totals as P1-030.
-    reconstructed 2026-09-07 from ROADMAP/state/agents/p1-030.md; the original text was destroyed by the set-
-    status.py --evidence defect (script fixed the same day).
+    way to start a session with a layout without attaching, so apex-mux does it in two steps (attach
+    --create-background, then add the layout as a tab), at the cost of one leftover default tab. 63493c7 also
+    redirects every directory zellij writes to under /tmp during the Containerfile's layout-parse check; the image
+    would otherwise ship two dead zellij session records in the build user's cache. Same branch test totals as
+    P1-030. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-030.md; the original text was destroyed by the
+    set-status.py --evidence defect (script fixed the same day).
 - id: P1-034
   title: Add editor/agent layout templates
   priority: P1
@@ -2305,8 +2309,8 @@ tasks:
     file). 00d0bd1 de-flaked test-project-layout.sh's 'a dry run starts nothing', which had been counting every
     `sleep` on the machine, and taught the CI selector to pick the rust job for
     files/desktop/{fish,nushell,shell}/ and files/system/libexec/apex-mux. test-project-layout.sh 23/0.
-    reconstructed 2026-09-07 from ROADMAP/state/agents/p1-030.md; the original text was destroyed by the set-
-    status.py --evidence defect (script fixed the same day).
+    reconstructed 2026-09-07 from ROADMAP/state/agents/p1-030.md; the original text was destroyed by the
+    set-status.py --evidence defect (script fixed the same day).
 - id: P1-035
   title: Screenshot and file injection into TUI agents
   priority: P1
@@ -2341,10 +2345,10 @@ tasks:
     merge c3e29af2; pushed as 473b7f6 (the engine: git.rs primitives, worktree.rs, worktrees.rs, hook.rs
     detection, Request/Response::Worktrees, the daemon handler and apex agent worktrees [--json]) and f4ec0ee
     (hardening plus three doc-vs-code corrections). tests: worktrees 61 passed / 0 failed on the merged tree. TWO
-    DESIGN CONSTRAINTS that are load-bearing and were honoured: conflict state comes from git merge-tree --write-
-    tree and NEVER a real merge in a worktree someone is sitting in, with the named guarantee asserted (after a
-    status call on a real conflicted repo, MERGE_HEAD is absent, the index sha is unchanged and git status
-    --porcelain is byte-identical); and the request is keyed on a project slug or session id the caller can
+    DESIGN CONSTRAINTS that are load-bearing and were honoured: conflict state comes from git merge-tree
+    --write-tree and NEVER a real merge in a worktree someone is sitting in, with the named guarantee asserted
+    (after a status call on a real conflicted repo, MERGE_HEAD is absent, the index sha is unchanged and git
+    status --porcelain is byte-identical); and the request is keyed on a project slug or session id the caller can
     already see, never a raw caller-supplied path. f4ec0ee exists because the slug keying was STILL a traversal
     hole after the first pass - a project slug arriving from the socket was joined straight onto a path, so any
     confined session could have made the daemon run merge-tree, which writes objects, in a directory of its
@@ -2369,20 +2373,20 @@ tasks:
     the suite's log lets an earlier session's rm line satisfy a later grep, so the assertion passes without
     testing anything. Mutation 9 (the engine ignores SIGHUP) KILLED at 50/8, four named assertions red per death,
     engine restored byte-identical and verified with git diff --quiet. ISOLATION IS STATED HONESTLY, not implied:
-    a capsule shares the real HOME and gets /run/host read-write as the user, so isolation here means the read-
-    only OS layer and not a security sandbox. THE MEASUREMENT THAT MATTERS, and it corrects two earlier written
-    claims: BOTH daemon deaths tear the capsule down by the SAME route - the kernel's SIGHUP to the orphaned PTY's
-    foreground group when the dead daemon's master fd closes - and apex-agentd's own SIGTERM shutdown DOES NOT RUN
-    AT ALL. The inherited diagnosis (that threads do not inherit the signal mask) was wrong and so was its first
-    correction: apex-agentd-sig's SigBlk=0 is a DISPLAY ARTIFACT of sitting in rt_sigtimedwait, which parks the
-    waited-for bits out of blocked while it sleeps. Proved with a three-thread probe: before-mask sleeping 0,
-    after-mask sleeping 0x4003, after-mask in sigwait 0. Exactly one thread is genuinely unmasked, apex-agentd-
-    gra, spawned at main.rs:164 before the mask is applied at 169, and the whole fix is that one-line re-order -
-    measured: grants inherits 0x4003, exit status 0 instead of 143, the log prints 'signal 15, stopping sessions',
-    and the socket is removed. NOT THIS ITEM'S TO FIX and carried forward: that re-order, the stale control socket
-    left on disk because remove_file never runs, and the fact that the mutation promised as the guard on the fix
-    does not guard it - measured still surviving 58/0 on a fixed build, because shutdown() is followed by
-    process::exit and the kernel's SIGHUP arrives regardless.
+    a capsule shares the real HOME and gets /run/host read-write as the user, so isolation here means the
+    read-only OS layer and not a security sandbox. THE MEASUREMENT THAT MATTERS, and it corrects two earlier
+    written claims: BOTH daemon deaths tear the capsule down by the SAME route - the kernel's SIGHUP to the
+    orphaned PTY's foreground group when the dead daemon's master fd closes - and apex-agentd's own SIGTERM
+    shutdown DOES NOT RUN AT ALL. The inherited diagnosis (that threads do not inherit the signal mask) was wrong
+    and so was its first correction: apex-agentd-sig's SigBlk=0 is a DISPLAY ARTIFACT of sitting in
+    rt_sigtimedwait, which parks the waited-for bits out of blocked while it sleeps. Proved with a three-thread
+    probe: before-mask sleeping 0, after-mask sleeping 0x4003, after-mask in sigwait 0. Exactly one thread is
+    genuinely unmasked, apex-agentd-gra, spawned at main.rs:164 before the mask is applied at 169, and the whole
+    fix is that one-line re-order - measured: grants inherits 0x4003, exit status 0 instead of 143, the log prints
+    'signal 15, stopping sessions', and the socket is removed. NOT THIS ITEM'S TO FIX and carried forward: that
+    re-order, the stale control socket left on disk because remove_file never runs, and the fact that the mutation
+    promised as the guard on the fix does not guard it - measured still surviving 58/0 on a fixed build, because
+    shutdown() is followed by process::exit and the kernel's SIGHUP arrives regardless.
 - id: P1-038
   title: Complete Floating/labwc real-world validation matrix
   priority: P1
@@ -2432,19 +2436,19 @@ tasks:
   evidence: >-
     Compositor-neutral Night Light: one control across four compositors plus a mechanism table read off a live
     registry. LANDED on apex-shell roadmap/v2.2 2026-09-08 (690014a -> a90cef6, five commits rebased from fork
-    0fd12ee; 9da1822 is the night-light commit). Measured protocol fact that shapes the item and must not be re-
-    derived: wp_color_manager_v1 v3 is advertised by Hyprland 0.56.2 and by NOTHING else (labwc 0.9.6, sway 1.11,
-    niri 26.04 all lack it), so on the wlroots compositors night light and a calibration curve are the same gamma
-    LUT and cannot both be active; the UX says so rather than pretending. Verified on the landed shell tip, not on
-    the branch: check-headless-runners 25/0 (the runner rules survived a real cross-branch merge, see below),
-    check-scale-tokens 8/0, check-colour-page 32/0, check-display-transaction 48/0, check-color-tokens 22/0, run-
-    colour-page-test 47/0, run-display-transaction-test 42/0 against the real shipped engine, run-scaling-test
-    30/0 on two headless outputs, no conflict markers. FOUND while landing: this branch and the integration tip
-    had both rewritten tests/run-scaling-test.sh - the tip moved all nine graphical runners onto the shared
-    tests/lib/headless.sh harness (private HOME and XDG_RUNTIME_DIR, aborts if the socket is not inside it) while
-    this branch taught the same runner to bring up two outputs at different densities. Resolved keep-both by the
-    orchestrator: the harness provides the compositor, the runner overrides WLR_HEADLESS_OUTPUTS, names wlr-randr
-    as an explicit headless_unstub exception because it is the tool that sets the modes, and stubs
+    0fd12ee; 9da1822 is the night-light commit). Measured protocol fact that shapes the item and must not be
+    re-derived: wp_color_manager_v1 v3 is advertised by Hyprland 0.56.2 and by NOTHING else (labwc 0.9.6, sway
+    1.11, niri 26.04 all lack it), so on the wlroots compositors night light and a calibration curve are the same
+    gamma LUT and cannot both be active; the UX says so rather than pretending. Verified on the landed shell tip,
+    not on the branch: check-headless-runners 25/0 (the runner rules survived a real cross-branch merge, see
+    below), check-scale-tokens 8/0, check-colour-page 32/0, check-display-transaction 48/0, check-color-tokens
+    22/0, run-colour-page-test 47/0, run-display-transaction-test 42/0 against the real shipped engine,
+    run-scaling-test 30/0 on two headless outputs, no conflict markers. FOUND while landing: this branch and the
+    integration tip had both rewritten tests/run-scaling-test.sh - the tip moved all nine graphical runners onto
+    the shared tests/lib/headless.sh harness (private HOME and XDG_RUNTIME_DIR, aborts if the socket is not inside
+    it) while this branch taught the same runner to bring up two outputs at different densities. Resolved
+    keep-both by the orchestrator: the harness provides the compositor, the runner overrides WLR_HEADLESS_OUTPUTS,
+    names wlr-randr as an explicit headless_unstub exception because it is the tool that sets the modes, and stubs
     gammastep/hyprsunset locally rather than in headless.sh - a stub that exits 0 would tell the night-light
     mechanism table that a mechanism exists, and that table is another suite's subject.
 - id: P1-040
@@ -2479,11 +2483,11 @@ tasks:
     the measurement written into src/theme/OutputScale.qml so the next person to have the idea gets the result
     instead. It is guarded by a named runner and not only by that comment: ThemeSet.fs() mutated to return
     undefined takes run-settings-pages-test.sh to "a settings page failed to build", which is the exact string a
-    rebuilt registry would trip. COUNTS: run-scaling-test 30/0 -> 88/0; check-scale-tokens 8/0 -> 49/0; check-
-    reduce-motion 11/1 -> 12/0; run-nav-geometry 4334/16 -> 4366/0; and the 19-suite regression sweep, re-run on a
-    fresh worktree at the MERGED tip so it grades the integration, matches the pre-migration baseline suite for
-    suite. THREE DEFECTS FOUND IN ROUND THREE, ALL FIXED. (1) The 16 nav-geometry failures that two cards and a
-    dispatch brief recorded as "all at the 0.85 factor, the 1366x768 bucket" are nothing of the kind:
+    rebuilt registry would trip. COUNTS: run-scaling-test 30/0 -> 88/0; check-scale-tokens 8/0 -> 49/0;
+    check-reduce-motion 11/1 -> 12/0; run-nav-geometry 4334/16 -> 4366/0; and the 19-suite regression sweep,
+    re-run on a fresh worktree at the MERGED tip so it grades the integration, matches the pre-migration baseline
+    suite for suite. THREE DEFECTS FOUND IN ROUND THREE, ALL FIXED. (1) The 16 nav-geometry failures that two
+    cards and a dispatch brief recorded as "all at the 0.85 factor, the 1366x768 bucket" are nothing of the kind:
     NAV_GEOMETRY_VERBOSE=1 names them as ONE page - Firewall - at all four page scales and both pane widths, 8
     points x 2 assertions. Every row on that page is behind a FirewallService condition, the service polls only
     while a ServiceRef is held, and the page's own ref is active:onScreen, which a Loader in a test never set. So
@@ -2491,8 +2495,8 @@ tasks:
     way Nexus.qml does and the apex stub answers `firewall status`/`firewall list` out of the payloads
     tests/firewall-test.js captured from the real helper; systemctl is stubbed too, because it was not, and an
     active service would have queried the developer's own system bus from inside a suite that claims to touch
-    nothing. (2) run-nav-geometry-test.sh stubbed wlr-randr on PATH and then set the output mode by CALLING wlr-
-    randr - it found the stub, so labwc kept its measured 1280x720 default while the runner printed "at
+    nothing. (2) run-nav-geometry-test.sh stubbed wlr-randr on PATH and then set the output mode by CALLING
+    wlr-randr - it found the stub, so labwc kept its measured 1280x720 default while the runner printed "at
     1920x1080". NAV_GEOMETRY_MODE has therefore never selected an output size under labwc and the live block has
     only ever graded 720p. tests/lib/headless.sh has the same hole under THIRTEEN runners plus a comment asserting
     it does not ("the default headless output is 1920x1080" - measured false); left alone deliberately and written
@@ -2538,9 +2542,10 @@ tasks:
     honestly deliverable and the shipped deliverable is the assignment stored and reported plus curve.reason shown
     VERBATIM. The shell probes for the color verb exactly as it probes --no-persist (grep --help), because the
     shipped engine's argparse rejects color with exit 2 and an unprobed page throws on every image predating this
-    work. Verified on the landed tips: run-colour-page-test 47/0 (36 modern, 10 legacy, 1 guard), check-colour-
-    page 32/0, test-apex-display 70/0, no path in the suite reached colormgr. Mutation pairs recorded on the agent
-    card: M1 42/6, M2 45/3, M3 46/2, M4 44/3, M5 42/6, sources restored byte-identical by sha256 each time.
+    work. Verified on the landed tips: run-colour-page-test 47/0 (36 modern, 10 legacy, 1 guard),
+    check-colour-page 32/0, test-apex-display 70/0, no path in the suite reached colormgr. Mutation pairs recorded
+    on the agent card: M1 42/6, M2 45/3, M3 46/2, M4 44/3, M5 42/6, sources restored byte-identical by sha256 each
+    time.
 - id: P1-042
   title: Creator input/audio validation
   priority: P1
@@ -2570,9 +2575,9 @@ tasks:
     - the same number as the ceiling. The @pipewire group that would grant 70 ships EMPTY (stock Fedora relies on
     rtkit) and rtkit's own ceiling is also 20, so no configuration of this image reaches 70. The number was
     deliberately LEFT at 20 - raising it is a security-posture decision, not a test fix - and the pam_limits
-    precedence trap for whoever does raise it is recorded in the file. (2) No latency diagnostics ship at all: pw-
-    top, pw-metadata, pw-cli and pw-dump are all absent, so quantum and sample rate are not readable on APEX and
-    'my audio crackles' has no investigable answer.
+    precedence trap for whoever does raise it is recorded in the file. (2) No latency diagnostics ship at all:
+    pw-top, pw-metadata, pw-cli and pw-dump are all absent, so quantum and sample rate are not readable on APEX
+    and 'my audio crackles' has no investigable answer.
 - id: P1-043
   title: GPU parity across NVIDIA/AMD/Intel
   priority: P1
@@ -2688,11 +2693,11 @@ tasks:
     bite (#4 from_tag 391/0 -> 390/1 and 49/0 -> 46/3; #5 verdict's Unavailable arm; #6 promote edge deleted from
     build-image.yml 22/0 -> 21/1; #7 halt_reason; #8 rebooted_into_new). REMAINDER on criterion 2: the transmitter
     -- no endpoint exists and nothing is sent -- and a mutable rollout percentage, which has nowhere to live
-    because an OCI label is baked once per build. MEASURED AND UNCOMFORTABLE: apex, daily, gaming-mesa and gaming-
-    nvidia are four aliases for ONE digest, moved on every successful main build, so every APEX machine today is
-    effectively on EDGE and has never been told so; the L16's origin says :daily. reconstructed 2026-09-07 from
-    ROADMAP/state/agents/p1-045.md; the original text was destroyed by the set-status.py --evidence defect (script
-    fixed the same day).
+    because an OCI label is baked once per build. MEASURED AND UNCOMFORTABLE: apex, daily, gaming-mesa and
+    gaming-nvidia are four aliases for ONE digest, moved on every successful main build, so every APEX machine
+    today is effectively on EDGE and has never been told so; the L16's origin says :daily. reconstructed
+    2026-09-07 from ROADMAP/state/agents/p1-045.md; the original text was destroyed by the set-status.py
+    --evidence defect (script fixed the same day).
 - id: P1-047
   title: SBOM/provenance/trust status
   priority: P1
@@ -2764,26 +2769,27 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Blueprint redesigned into a guided experience, pushed as 6213f05, fd154bc and d54e6d1 on task/p1-048-guided-
-    settings. changeKind/ofKind/removals in blueprint.js, the service splits the user-domain plan, and the page
-    reordered: what this is, nothing here yet, editor, not saved, what Apply would do, added/changed/REMOVED,
-    needs root, apply, advanced. EXPECT_WHITE_FG unchanged at 211 -- the page had no colour literals. Also on this
-    branch, job 1: tests/lib/headless.sh plus twelve runners converted, tests/check-headless-runners.sh (four
-    rules, 25 assertions, four inline mutants and a control), wired into a ci.yml that lists every check by name
-    and would never have run it. TWO BUGS FOUND BY RUNNING RATHER THAN PARSING: headless_cleanup aborted on its
-    own `kill -9` under set -e (set -e exempts only the LEFT operand of &&), so a green suite exited 1 and leaked
-    its sandbox, five of them into /tmp; and the guard read `command -p X` as a lookup when -p RUNS X. NOT DONE
-    AND NOT FAKED: raw TOML editing (the only write verb takes JSON), Import, Export, 'use this device as
-    Blueprint' -- no CLI verbs exist -- and transactional apply with rollback. reconstructed 2026-09-07 from
-    ROADMAP/state/agents/p1-048.md; the original text was destroyed by the set-status.py --evidence defect (script
-    fixed the same day). LANDED by integrate-4: apex-shell roadmap/v2.2 = 690014a, 9 commits, ZERO conflicts
-    despite 29 files and a 391-line BlueprintPage.qml rewrite -- the tip had moved only ci.yml, PageRegistry.qml
-    and src/services/qmldir since d2d1f33 and none of the three collided. settings-pages 16/0 to 17/0 (the new
-    GamingPage is picked up by the page enumeration); check-color-tokens 22/0 with EXPECT_WHITE_FG 211 UNCHANGED,
-    pre-checked rather than discovered late (the branch adds zero Qt.rgba(1,1,1,...) sites, so the ratchet could
-    not be tripped and did not have to be raised). Branch suites after landing: blueprint-editor 87/0, check-
-    blueprint-editor all-pass, gaming-settings 43/0, check-gaming-settings all-pass, check-headless-runners 25/0.
-    Neither src/qmldir nor src/services/qmldir has a duplicate registration.
+    Blueprint redesigned into a guided experience, pushed as 6213f05, fd154bc and d54e6d1 on
+    task/p1-048-guided-settings. changeKind/ofKind/removals in blueprint.js, the service splits the user-domain
+    plan, and the page reordered: what this is, nothing here yet, editor, not saved, what Apply would do,
+    added/changed/REMOVED, needs root, apply, advanced. EXPECT_WHITE_FG unchanged at 211 -- the page had no colour
+    literals. Also on this branch, job 1: tests/lib/headless.sh plus twelve runners converted,
+    tests/check-headless-runners.sh (four rules, 25 assertions, four inline mutants and a control), wired into a
+    ci.yml that lists every check by name and would never have run it. TWO BUGS FOUND BY RUNNING RATHER THAN
+    PARSING: headless_cleanup aborted on its own `kill -9` under set -e (set -e exempts only the LEFT operand of
+    &&), so a green suite exited 1 and leaked its sandbox, five of them into /tmp; and the guard read `command -p
+    X` as a lookup when -p RUNS X. NOT DONE AND NOT FAKED: raw TOML editing (the only write verb takes JSON),
+    Import, Export, 'use this device as Blueprint' -- no CLI verbs exist -- and transactional apply with rollback.
+    reconstructed 2026-09-07 from ROADMAP/state/agents/p1-048.md; the original text was destroyed by the
+    set-status.py --evidence defect (script fixed the same day). LANDED by integrate-4: apex-shell roadmap/v2.2 =
+    690014a, 9 commits, ZERO conflicts despite 29 files and a 391-line BlueprintPage.qml rewrite -- the tip had
+    moved only ci.yml, PageRegistry.qml and src/services/qmldir since d2d1f33 and none of the three collided.
+    settings-pages 16/0 to 17/0 (the new GamingPage is picked up by the page enumeration); check-color-tokens 22/0
+    with EXPECT_WHITE_FG 211 UNCHANGED, pre-checked rather than discovered late (the branch adds zero
+    Qt.rgba(1,1,1,...) sites, so the ratchet could not be tripped and did not have to be raised). Branch suites
+    after landing: blueprint-editor 87/0, check-blueprint-editor all-pass, gaming-settings 43/0,
+    check-gaming-settings all-pass, check-headless-runners 25/0. Neither src/qmldir nor src/services/qmldir has a
+    duplicate registration.
 - id: P1-049
   title: Redesign Gaming settings around simple understandable toggles
   priority: P1
@@ -2805,17 +2811,18 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Gaming settings redesigned around understandable toggles, pushed as 4cd2890 and 7266f50 on task/p1-048-guided-
-    settings. New gaming.js, GamingService.qml and GamingPage.qml, registered in src/qmldir, src/services/qmldir
-    and PageRegistry.qml; the smoke suites derive their page list from the registry, so no test-list edits were
-    needed. Reads `apex gaming --json` (readiness, per-tool presence, blockers, warnings, install_hint) and `apex
-    mode status` (text -- there is no --json on that subcommand), and writes only `apex mode set` followed by a
-    re-read. THE DESIGN TRAP, worth keeping: `apex mode set --auto` is documented one-shot -- APEX ships nothing
-    that re-evaluates it on a timer -- so the master 'optimise games automatically' control CANNOT be a switch; it
-    is the choice plus a read-back, and check-gaming-settings.sh enforces no Timer anywhere. Not built because no
-    verb exists: VRR, background-update suppression. Not reached: per-game profiles, though `apex game profile`
-    does exist and is the obvious next increment. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-048.md;
-    the original text was destroyed by the set-status.py --evidence defect (script fixed the same day).
+    Gaming settings redesigned around understandable toggles, pushed as 4cd2890 and 7266f50 on
+    task/p1-048-guided-settings. New gaming.js, GamingService.qml and GamingPage.qml, registered in src/qmldir,
+    src/services/qmldir and PageRegistry.qml; the smoke suites derive their page list from the registry, so no
+    test-list edits were needed. Reads `apex gaming --json` (readiness, per-tool presence, blockers, warnings,
+    install_hint) and `apex mode status` (text -- there is no --json on that subcommand), and writes only `apex
+    mode set` followed by a re-read. THE DESIGN TRAP, worth keeping: `apex mode set --auto` is documented one-shot
+    -- APEX ships nothing that re-evaluates it on a timer -- so the master 'optimise games automatically' control
+    CANNOT be a switch; it is the choice plus a read-back, and check-gaming-settings.sh enforces no Timer
+    anywhere. Not built because no verb exists: VRR, background-update suppression. Not reached: per-game
+    profiles, though `apex game profile` does exist and is the obvious next increment. reconstructed 2026-09-07
+    from ROADMAP/state/agents/p1-048.md; the original text was destroyed by the set-status.py --evidence defect
+    (script fixed the same day).
 - id: P1-050
   title: Build provider-neutral APEX Remote agent protocol and desktop service
   priority: P1
@@ -2837,29 +2844,29 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Provider-neutral APEX Remote agent protocol and desktop service, complete and pushed on task/p1-050-remote-
-    protocol (tip 322fa45). Decisions: reuse RequestOrigin::RemoteControl rather than an 8th section 7 origin (an
-    8th is a PROTOCOL_VERSION bump plus a change to Capability::ruling and the 7x7 declaration test), with device
-    identity in a separate `actor` field; and the remote protocol IS the existing agentd control protocol carried
-    inside an encrypted channel, not a second protocol. 05c73da apex-remote-core (wire framing, device store,
-    identity, Noise NK for pairing and IK for sessions, rendezvous), 53 tests, four mutations all red. 6f6246e
-    apex-remoted plus `apex remote`, the unit, the firewall catalogue entry and Containerfile wiring, 26 daemon
-    tests. THE HOLE IT CLOSED FIRST, 7041b74: apex-agentd establishes request origin from the connection's cgroup,
-    so a proxy started from a login session is recorded as local-terminal, which privilege::decide accepts as a
-    human at the keyboard and will let approve a root operation. 17b18c4 demonstrates it end to end rather than
-    arguing it -- with the declaration removed the run reads `a phone approved root: allow_once`. Fixed by a per-
-    connection monotonic origin latch; apexd 1760/0 against a 1750/0 baseline measured on a clean worktree.
-    Recorded by the orchestrator from the agent card, not from a landing: this is pushed branch work that
-    roadmap/v2.2 does NOT yet carry. A fresh agent is working the item now and will supersede this line. LANDED on
-    roadmap/v2.2 as 1d4095c (apex-os), 7 commits rebased --onto 4ab5f75 from fork bc4f06e. Two keep-both
-    conflicts, both single match arms: apex/src/agent.rs kept p1-020's AgentCmd::Statusline alongside this
-    branch's actor-carrying AgentCmd::Origin, and apex/src/main.rs kept Cmd::Devices (p2-005) alongside
-    Cmd::Remote. 09c977d's two courtesy clippy fixes in the Cloudflare tests were DROPPED at integration exactly
-    as its own message invited: the tip had already fixed both independently (OperationCase vs this branch's
-    OperationRow for the same type_complexity lint, and a byte-identical raw-string replacement for the empty
-    format!), so the branch's own two clippy fixes are all that commit still carries. cargo test --locked
-    --workspace 1854 passed / 1 failed at 4ab5f75 to 1964 passed / 1 failed at the landing: plus 110 tests, zero
-    removed, zero new failures, 29 to 33 binaries. The one failure is
+    Provider-neutral APEX Remote agent protocol and desktop service, complete and pushed on
+    task/p1-050-remote-protocol (tip 322fa45). Decisions: reuse RequestOrigin::RemoteControl rather than an 8th
+    section 7 origin (an 8th is a PROTOCOL_VERSION bump plus a change to Capability::ruling and the 7x7
+    declaration test), with device identity in a separate `actor` field; and the remote protocol IS the existing
+    agentd control protocol carried inside an encrypted channel, not a second protocol. 05c73da apex-remote-core
+    (wire framing, device store, identity, Noise NK for pairing and IK for sessions, rendezvous), 53 tests, four
+    mutations all red. 6f6246e apex-remoted plus `apex remote`, the unit, the firewall catalogue entry and
+    Containerfile wiring, 26 daemon tests. THE HOLE IT CLOSED FIRST, 7041b74: apex-agentd establishes request
+    origin from the connection's cgroup, so a proxy started from a login session is recorded as local-terminal,
+    which privilege::decide accepts as a human at the keyboard and will let approve a root operation. 17b18c4
+    demonstrates it end to end rather than arguing it -- with the declaration removed the run reads `a phone
+    approved root: allow_once`. Fixed by a per-connection monotonic origin latch; apexd 1760/0 against a 1750/0
+    baseline measured on a clean worktree. Recorded by the orchestrator from the agent card, not from a landing:
+    this is pushed branch work that roadmap/v2.2 does NOT yet carry. A fresh agent is working the item now and
+    will supersede this line. LANDED on roadmap/v2.2 as 1d4095c (apex-os), 7 commits rebased --onto 4ab5f75 from
+    fork bc4f06e. Two keep-both conflicts, both single match arms: apex/src/agent.rs kept p1-020's
+    AgentCmd::Statusline alongside this branch's actor-carrying AgentCmd::Origin, and apex/src/main.rs kept
+    Cmd::Devices (p2-005) alongside Cmd::Remote. 09c977d's two courtesy clippy fixes in the Cloudflare tests were
+    DROPPED at integration exactly as its own message invited: the tip had already fixed both independently
+    (OperationCase vs this branch's OperationRow for the same type_complexity lint, and a byte-identical
+    raw-string replacement for the empty format!), so the branch's own two clippy fixes are all that commit still
+    carries. cargo test --locked --workspace 1854 passed / 1 failed at 4ab5f75 to 1964 passed / 1 failed at the
+    landing: plus 110 tests, zero removed, zero new failures, 29 to 33 binaries. The one failure is
     renewing_a_grant_that_does_not_exist_is_refused_without_asking_anybody, the pre-existing cgroup/origin
     artifact -- cargo test runs under a systemd cgroup that reads as scheduled-job, so the origin gate refuses
     before the existence check -- identical by name in integrate-4's b2d7905 baseline and both its landings.
@@ -2890,13 +2897,13 @@ tasks:
     its alignment patterns in the wrong columns. Four cases still failed after that fix and segno was the one at
     fault: its write_padding_bits quotes ISO/IEC 18004 section 7.4.10 in a comment ('if the bit stream does not
     end at a codeword boundary') while the code has no such condition, so it appends a spurious 0x00 where the
-    0xec/0x11 pad codewords belong. Rather than reproduce a bug to make a test pass, the generator applies a one-
-    line correction, and three things stop that being 'fix the oracle to match me': it builds every case TWICE and
-    DERIVES the corrected list by diffing; the test pins that list at exactly four, so a spreading correction OR
-    an upstream fix turns it red; and section 7.4.10 is asserted directly off the codewords, so those assertions
-    survive deleting every fixture. The other 32 fill their symbol to capacity and provably cannot be reached -
-    asserted, not stated. A SECOND DEFECT THE SUITES CAUGHT THAT READING DID NOT: the pairing page asked for a
-    code from onOnScreenChanged while the ServiceRef beside it raises refCount from a binding on the same
+    0xec/0x11 pad codewords belong. Rather than reproduce a bug to make a test pass, the generator applies a
+    one-line correction, and three things stop that being 'fix the oracle to match me': it builds every case TWICE
+    and DERIVES the corrected list by diffing; the test pins that list at exactly four, so a spreading correction
+    OR an upstream fix turns it red; and section 7.4.10 is asserted directly off the codewords, so those
+    assertions survive deleting every fixture. The other 32 fill their symbol to capacity and provably cannot be
+    reached - asserted, not stated. A SECOND DEFECT THE SUITES CAUGHT THAT READING DID NOT: the pairing page asked
+    for a code from onOnScreenChanged while the ServiceRef beside it raises refCount from a binding on the same
     property, and QML orders neither - the handler won, requestCode saw an inactive service, and THE PAGE SHOWED
     NO CODE AT ALL. Fixed on both paths. 202 new assertions with EXACT green counts rather than floors, which
     caught two of the agent's own counts being wrong; 12 mutants all red with a green control. The page draws
@@ -2935,33 +2942,33 @@ tasks:
     while a relay connection is long-lived and must reconnect, so every reconnect becomes a process-lifecycle
     problem) and over a custom domain on ws:// (TLS to the relay hides the rendezvous id and traffic pattern from
     an ON-PATH OBSERVER, a different party from the relay operator the disclosure already names, and cleartext
-    contradicts a project that pins a Sigstore root and refuses an unverified image). ROOT STORE: rustls-native-
-    certs, the machine's own, NOT a vendored bundle - because what is being verified differs. APEX pins the
-    Sigstore root where the thing verified IS the OS image, so a store shipped inside that image cannot be the
-    authority on it; a relay dial happens afterwards on an already-trusted machine, where the machine IS the
-    authority. An admin who runs update-ca-trust to remove a CA means it everywhere, and a vendored bundle would
-    keep trusting what was deleted; and a private deployment behind an internal CA is unreachable from a vendored
-    bundle. The cost is paid openly: an empty store is a NAMED refusal printing /etc/pki/tls/certs, SSL_CERT_FILE
-    and SSL_CERT_DIR, never a silent fall back, because falling back would re-trust exactly the CA just removed.
-    COST MEASURED: 178 -> 193 crates, 15, matching the design doc's prediction; only 9 compile on Linux; ring
-    needs a C compiler at image-build time and Containerfile.core:1396-1406 puts gcc/clang/make/cmake in the FINAL
-    core image, checked rather than assumed. THE REFUSALS ARE THE TEST, since a TLS client that accepts anything
-    also connects: asserted by variant AND by message against a CA minted per run and served from a loopback
-    rustls listener - untrusted issuer is UnknownIssuer, a certificate for other.test asked for as relay.test is
-    not-valid-for-name with both names in the message, and one expired in 2020 is refused with its dates. Seven
-    mutants, including one that collapses the message and reddens all three 'says so' tests while the variant-only
-    ones stay green, one that downgrades wss:// to plaintext, and one that violates a lock invariant and
-    DEADLOCKS. RUNNING THE WORKER FOR THE FIRST TIME FOUND A DEFECT IN IT: under wrangler dev --local, 'Can't call
-    WebSocket send() after close()' - ctx.getWebSockets() keeps returning sockets the object has already closed,
-    which would also have let waiting() hold a room forever, the exact 409-forever failure the design claims to
-    have removed. Fixed with an isOpen() guard. HOW IT WAS CAUGHT IS THE LESSON: against the pre-fix Worker the
-    Rust suite reported 8 passed / 0 failed THREE TIMES while wrangler logged two exceptions, because a Worker
-    that throws still leaves the socket closed and only its own log sees it. A green suite was hiding a server-
-    side defect until the real server ran. Six of eight suites now run against the real Worker including pairing
-    and a live session end to end; the two that do not print SKIP-EXTERNAL and say why. DEPLOYMENT IS NOW A THREE-
-    LINE OPERATION FOR ANDRE and nothing is deployed: cd relay && npx wrangler login && npx wrangler deploy, then
-    systemctl --user edit apex-remoted to point ExecStart at --relay wss://..., then restart and apex remote
-    status. --user is verified against Containerfile.base:207. UNCHANGED CAVEAT: the relay is still
+    contradicts a project that pins a Sigstore root and refuses an unverified image). ROOT STORE:
+    rustls-native-certs, the machine's own, NOT a vendored bundle - because what is being verified differs. APEX
+    pins the Sigstore root where the thing verified IS the OS image, so a store shipped inside that image cannot
+    be the authority on it; a relay dial happens afterwards on an already-trusted machine, where the machine IS
+    the authority. An admin who runs update-ca-trust to remove a CA means it everywhere, and a vendored bundle
+    would keep trusting what was deleted; and a private deployment behind an internal CA is unreachable from a
+    vendored bundle. The cost is paid openly: an empty store is a NAMED refusal printing /etc/pki/tls/certs,
+    SSL_CERT_FILE and SSL_CERT_DIR, never a silent fall back, because falling back would re-trust exactly the CA
+    just removed. COST MEASURED: 178 -> 193 crates, 15, matching the design doc's prediction; only 9 compile on
+    Linux; ring needs a C compiler at image-build time and Containerfile.core:1396-1406 puts gcc/clang/make/cmake
+    in the FINAL core image, checked rather than assumed. THE REFUSALS ARE THE TEST, since a TLS client that
+    accepts anything also connects: asserted by variant AND by message against a CA minted per run and served from
+    a loopback rustls listener - untrusted issuer is UnknownIssuer, a certificate for other.test asked for as
+    relay.test is not-valid-for-name with both names in the message, and one expired in 2020 is refused with its
+    dates. Seven mutants, including one that collapses the message and reddens all three 'says so' tests while the
+    variant-only ones stay green, one that downgrades wss:// to plaintext, and one that violates a lock invariant
+    and DEADLOCKS. RUNNING THE WORKER FOR THE FIRST TIME FOUND A DEFECT IN IT: under wrangler dev --local, 'Can't
+    call WebSocket send() after close()' - ctx.getWebSockets() keeps returning sockets the object has already
+    closed, which would also have let waiting() hold a room forever, the exact 409-forever failure the design
+    claims to have removed. Fixed with an isOpen() guard. HOW IT WAS CAUGHT IS THE LESSON: against the pre-fix
+    Worker the Rust suite reported 8 passed / 0 failed THREE TIMES while wrangler logged two exceptions, because a
+    Worker that throws still leaves the socket closed and only its own log sees it. A green suite was hiding a
+    server-side defect until the real server ran. Six of eight suites now run against the real Worker including
+    pairing and a live session end to end; the two that do not print SKIP-EXTERNAL and say why. DEPLOYMENT IS NOW
+    A THREE-LINE OPERATION FOR ANDRE and nothing is deployed: cd relay && npx wrangler login && npx wrangler
+    deploy, then systemctl --user edit apex-remoted to point ExecStart at --relay wss://..., then restart and apex
+    remote status. --user is verified against Containerfile.base:207. UNCHANGED CAVEAT: the relay is still
     unauthenticated and unrate-limited, so a public URL wants a token or Cloudflare Access first.
 - id: P1-053
   title: Create polished first-party APEX Remote Android app foundation
@@ -2995,11 +3002,11 @@ tasks:
     naive last-colon split restored; the session run against an unpinned key), and two of them found bugs in the
     test itself - an assertion held up by the rename rather than the cleanup, and an unpinned-key mutation that
     hung for ten minutes reporting no test name until a timeout and a bounded join made it a 70-second named
-    failure. THREE DEFECTS SETTLED FROM PRIMARY SOURCES, each already coded wrong: KeyGenParameterSpec's user-
-    authentication gate applies to secret keys too, so sealing is gated and seal() would have thrown on a real
-    phone at the end of pairing after the token was burnt; androidx.biometric refuses crypto-based device-
-    credential auth before API 30; and the biometric prompt ran AFTER the handshake, so a cancelled prompt left
-    the desktop paired to a phone whose key had just died. Also fixed: a socket leak on failed handshakes, an
+    failure. THREE DEFECTS SETTLED FROM PRIMARY SOURCES, each already coded wrong: KeyGenParameterSpec's
+    user-authentication gate applies to secret keys too, so sealing is gated and seal() would have thrown on a
+    real phone at the end of pairing after the token was burnt; androidx.biometric refuses crypto-based
+    device-credential auth before API 30; and the biometric prompt ran AFTER the handshake, so a cancelled prompt
+    left the desktop paired to a phone whose key had just died. Also fixed: a socket leak on failed handshakes, an
     unlock prompt firing before the phone's capability was known, invalidated-key errors surfacing as AEAD tag
     mismatches, an IPv6 parse bug turning 2001:db8::1 into host 2001:db8: port 1, and a deep link that crashed on
     cold launch and lost its payload. The CI path classifier was RUN rather than read: android/app/** selects
@@ -3054,17 +3061,17 @@ tasks:
     agent hold the top of the list for ever; a finished session's elapsed clock stops at its last activity,
     because a session that failed an hour ago did not take an hour; darkSurface is luminance(background)<0.18 read
     off the surface rather than a theme flag, which matters because Material You can hand a dark theme a pale
-    surface. NOT MET, and the gap is the runtime's: 'start with profile/project/worktree' is PARTIAL. apex-agent-
-    core's Request has NO profile verb (profile.rs is unreachable through it), NO projects verb and NO worktrees
-    verb — read out of the enum, not remembered. Round 3 had built {"cmd":"worktrees"} and a parser for the
-    answer; nothing could have parsed it and the phone would have shown an error where it offered a picker.
+    surface. NOT MET, and the gap is the runtime's: 'start with profile/project/worktree' is PARTIAL.
+    apex-agent-core's Request has NO profile verb (profile.rs is unreachable through it), NO projects verb and NO
+    worktrees verb — read out of the enum, not remembered. Round 3 had built {"cmd":"worktrees"} and a parser for
+    the answer; nothing could have parsed it and the phone would have shown an error where it offered a picker.
     Removed, with the test kept and inverted so it cannot come back. What is offered instead: the adapter from
     Hello.agents, a directory derived from what the daemon has already reported, and a worktree NAME
     (RunRequest.worktree does exist), and the screen says why on screen rather than implying a picker. P1-056 must
     start from this constraint. ALSO NOT VERIFIED: every Compose behaviour (assembleDebug is the only gate a
     machine with no phone has); no relay leg, so LAN only; the CI android job has still never run, though its path
-    classifier was RUN against this branch's own diff (android=true rust=true, the rust selection being over-
-    selection from android/core/src/test/resources/ which the workflow's own comment block justifies leaving
+    classifier was RUN against this branch's own diff (android=true rust=true, the rust selection being
+    over-selection from android/core/src/test/resources/ which the workflow's own comment block justifies leaving
     alone). A DEFECT THIS ROUND ALSO FOUND, recorded here because it hit both items: every socket write was on the
     MAIN THREAD — Android's StrictMode.enableDeathOnNetwork() is on for every app targeting API 11 or later, so a
     signal button and the first keystroke would each have killed the process, and locking the app closed sockets
@@ -3073,7 +3080,7 @@ tasks:
     model each turn a NAMED test red (live from published state, a finished clock that keeps running, a sort
     without live-first, a zero gauge for a session that never reported, an orphan dropped with both safety nets
     removed, the cycle net alone removed, every request retried including signals, a stop during connect ignored);
-    every file restored byte- identical with plain cp.
+    every file restored byte-identical with plain cp.
 - id: P1-055
   title: Android full PTY/TUI remote terminal
   priority: P1
@@ -3256,35 +3263,36 @@ tasks:
   - stop_slop
   evidence: >-
     LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 5ba789a5, and on apex-shell roadmap/v2.2 as merge bdfb056.
-    Both halves pushed: apex-os task/p1-061-app-permissions @16a37751, apex-shell @d1f5a6f. C1 DESIGN docs/app-
-    permissions.md, measured on l16 not assumed: portal interface set is a property of the SESSION
+    Both halves pushed: apex-os task/p1-061-app-permissions @16a37751, apex-shell @d1f5a6f. C1 DESIGN
+    docs/app-permissions.md, measured on l16 not assumed: portal interface set is a property of the SESSION
     (Usb/Secret/RemoteDesktop absent under Hyprland's default=hyprland;gtk, present under niri's gtk;gnome); no
     microphone portal exists in any xdg-desktop-portal; no devices table in the store (nothing ever asked about
     the camera); /dev/video0 is root:video 0660 with a logind uaccess ACL and the user in neither group. Brokers
     camera/location/notifications/files/secrets where primitives permit; USB and RemoteDesktop stay NoPrimitive on
     the default session by a documented decision not to add gnome to Hyprland's list. C2 DONE apex-perm-core: four
-    independent fields (state granted/denied/never-asked/no-primitive, enforcer portal-store/portal-
-    prompt/document-portal/sandbox-context/logind-acl/nothing, origin, revocation) with revocation derived so it
-    can never exceed its enforcer, asserted over the whole enforcer x state product. The axis is per-capability,
-    not Flatpak-vs-native: io.github.cosmic_utils.camera carries devices=all and lands on the same logind ACL as a
-    native binary, com.spotify.Client is the control and is portal-brokered. 22 unit tests on real manifests. C3
-    PARTIAL Settings page exists and is wired (PageRegistry, qmldir, IPC, popup-smoke list) and renders
-    state+enforcer+origin+timing per row with NO control where nothing can be revoked - but it has never been
-    instantiated under a compositor; qmllint proved syntax with a broken copy as negative control, node proved
-    logic 31/31, check-privacy-ui.sh proved wiring 35 checks + 7 mutants each watched to go red. C4 DONE-WITH-ONE-
-    GAP tests/test-apex-permissions.sh 17/17 runs the real xdg-desktop-portal and xdg-permission-store on a
-    private D-Bus session and calls AccessCamera from a bwrap caller with a /.flatpak-info: store=no is refused
-    WITHOUT reaching the dialog, no-entry reaches it, and the same harness still grants - so the refusal is the
-    store's, not the dialog's. Two mutants watched to fail. Native counter-test opens /dev/video0 and asserts it
-    SUCCEEDS. apex permissions revoke exits non-zero with three distinct sentences for three reasons. GAP: whether
-    a store change reaches an already-RUNNING PipeWire client was not measured (would mean revoking on the live
-    machine), so Timing::Immediate is unreachable and a test holds it so. ALSO fixed: Hyprland, the default
-    session, had no Secret portal; naming a backend overrides UseIn= was proven on a private bus before shipping
-    the pin. Gates: clippy --locked --workspace --all-targets -D warnings clean; cargo test --locked --workspace
-    3022 passed 0 failed (tip 2998); shellcheck clean; check-doc-verbs.sh clear for apex permissions (7 apex lid
-    verbs remain, pre-existing P1-063); stop_slop 41 slopcheck hits/1000 words vs 33.3 recovery.md and 45.6
-    update-cost.md, shell files below their landed equivalents; check-color-tokens/check-scale-tokens/check-
-    headless-runners/check-containerfile-assertions all green.
+    independent fields (state granted/denied/never-asked/no-primitive, enforcer
+    portal-store/portal-prompt/document-portal/sandbox-context/logind-acl/nothing, origin, revocation) with
+    revocation derived so it can never exceed its enforcer, asserted over the whole enforcer x state product. The
+    axis is per-capability, not Flatpak-vs-native: io.github.cosmic_utils.camera carries devices=all and lands on
+    the same logind ACL as a native binary, com.spotify.Client is the control and is portal-brokered. 22 unit
+    tests on real manifests. C3 PARTIAL Settings page exists and is wired (PageRegistry, qmldir, IPC, popup-smoke
+    list) and renders state+enforcer+origin+timing per row with NO control where nothing can be revoked - but it
+    has never been instantiated under a compositor; qmllint proved syntax with a broken copy as negative control,
+    node proved logic 31/31, check-privacy-ui.sh proved wiring 35 checks + 7 mutants each watched to go red. C4
+    DONE-WITH-ONE-GAP tests/test-apex-permissions.sh 17/17 runs the real xdg-desktop-portal and
+    xdg-permission-store on a private D-Bus session and calls AccessCamera from a bwrap caller with a
+    /.flatpak-info: store=no is refused WITHOUT reaching the dialog, no-entry reaches it, and the same harness
+    still grants - so the refusal is the store's, not the dialog's. Two mutants watched to fail. Native
+    counter-test opens /dev/video0 and asserts it SUCCEEDS. apex permissions revoke exits non-zero with three
+    distinct sentences for three reasons. GAP: whether a store change reaches an already-RUNNING PipeWire client
+    was not measured (would mean revoking on the live machine), so Timing::Immediate is unreachable and a test
+    holds it so. ALSO fixed: Hyprland, the default session, had no Secret portal; naming a backend overrides
+    UseIn= was proven on a private bus before shipping the pin. Gates: clippy --locked --workspace --all-targets
+    -D warnings clean; cargo test --locked --workspace 3022 passed 0 failed (tip 2998); shellcheck clean;
+    check-doc-verbs.sh clear for apex permissions (7 apex lid verbs remain, pre-existing P1-063); stop_slop 41
+    slopcheck hits/1000 words vs 33.3 recovery.md and 45.6 update-cost.md, shell files below their landed
+    equivalents; check-color-tokens/check-scale-tokens/check-headless-runners/check-containerfile-assertions all
+    green.
 - id: P1-062
   title: Build destructive chaos/torture reliability test infrastructure
   priority: P1
@@ -3303,12 +3311,12 @@ tasks:
   evidence: >-
     Destructive chaos/torture reliability test infrastructure. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge
     a0341a50 (six commits) plus 23783fb7, the schedule criterion 2 actually needed. FIVE CASES, NO STUBS, each
-    running its subject against a fault proven present by an observation the injector did not make: power-loss-
-    during-update truncates the update record at a seeded byte and proves the remainder is a strict prefix AND
-    that a JSON parser refuses it; failed-rollback chmods the deploy dir 0000 and, as root, correctly reports
-    COULD-NOT-INJECT rather than passing, because the mode is ignored and the read succeeds; network-loss uses a
-    netns with a DOWN loopback and requires connect() to get ENETUNREACH specifically rather than merely fail;
-    full-disk fills a tmpfs to the last byte in a mount namespace after verifying the mountpoint IS a tmpfs;
+    running its subject against a fault proven present by an observation the injector did not make:
+    power-loss-during-update truncates the update record at a seeded byte and proves the remainder is a strict
+    prefix AND that a JSON parser refuses it; failed-rollback chmods the deploy dir 0000 and, as root, correctly
+    reports COULD-NOT-INJECT rather than passing, because the mode is ignored and the read succeeds; network-loss
+    uses a netns with a DOWN loopback and requires connect() to get ENETUNREACH specifically rather than merely
+    fail; full-disk fills a tmpfs to the last byte in a mount namespace after verifying the mountpoint IS a tmpfs;
     reboot-loop stages a +3-0 entry nothing can bless, boots five OVMF guests, and reads the ESP out of the FAT to
     find a pair only a staged-and-never-blessed deployment makes. THE VERDICT HAS A COULD-NOT-INJECT ARM AND IT
     FIRES: three mutations land on it rather than on a pass, including one that empties the serial log so the
@@ -3347,13 +3355,13 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge ebce9b46. Lid-closed continuous operation. Round 2 on apex-
-    os task/p1-063-lid-2, SIX commits pushed. tests/test-apex- lid.sh 60/0, tests/test-apex-lid-live.sh 13 passed
-    with one honest could-not-run, clippy --locked --workspace --all-targets -D warnings clean. ROUND 1 SHIPPED A
-    POLICY AND A DRIVER NOTHING EVER RAN: no unit, no Containerfile stanza, so on a built image every criterion
-    was unmet however green the suites were. apex- lid.service now exists and is enabled. FIVE PRODUCT DEFECTS
-    FOUND AND FIXED THIS ROUND, all mutation-proved, every file restored byte-identical. (1) A DROPPED VPN WAS
-    REPORTED AS ONE THAT HELD - read_vpn has no memory, so a tunnel that went away answered None, identical to
+    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge ebce9b46. Lid-closed continuous operation. Round 2 on
+    apex-os task/p1-063-lid-2, SIX commits pushed. tests/test-apex-lid.sh 60/0, tests/test-apex-lid-live.sh 13
+    passed with one honest could-not-run, clippy --locked --workspace --all-targets -D warnings clean. ROUND 1
+    SHIPPED A POLICY AND A DRIVER NOTHING EVER RAN: no unit, no Containerfile stanza, so on a built image every
+    criterion was unmet however green the suites were. apex-lid.service now exists and is enabled. FIVE PRODUCT
+    DEFECTS FOUND AND FIXED THIS ROUND, all mutation-proved, every file restored byte-identical. (1) A DROPPED VPN
+    WAS REPORTED AS ONE THAT HELD - read_vpn has no memory, so a tunnel that went away answered None, identical to
     never having had one, and vpn_held scored the timeline as an unordered set: Up Up None None printed 'the VPN
     held'. VpnState::Down was UNREACHABLE from the driver, so criterion 2 COULD NOT FAIL. Fixed in the driver
     (note_vpn carries the tunnel name forward) and in vpn_held (reads the timeline in order), with the converse
@@ -3367,38 +3375,38 @@ tasks:
     shown the PREVIOUS close with ended_by null. (4) THE UNIT DISABLED THE FEATURE IT SHIPPED - ProtectHome=yes
     makes /run/user inaccessible AND EMPTY, and that is where the driver finds every live session and every
     owner's home; measured with systemd-run, ls /run/user returned nothing under it and '0 1000 1042' without.
-    Zero sessions for ever, pin=auto never activates, the owner's ~/.config/apex/lid.toml never read - the silent-
-    pin defect 2aa9ed45 fixed in code, reintroduced by a unit file. PrivateTmp=yes hid the worktrees the guards'
-    checkpoint runs in (0 entries against 407). runuser could not open a session at all without CAP_SYS_RESOURCE,
-    bisected: CAP_AUDIT_WRITE, CAP_CHOWN, CAP_FOWNER and CAP_SYS_ADMIN each fail alone. (5) EVERY '! grep' REFUSAL
-    IN THE BUILD STANZA WAS INERT - bash does not apply errexit to a pipeline inverted with '!', verified, so the
-    KillMode, ProtectSystem=strict, ProtectKernelTunables and static-HandleLidSwitch guards could never fail a
-    build. All rewritten as if-grep- then-FATAL-exit-1, and the suite now asserts no lid refusal is spelled '!
-    grep'. NOTE FOR ANOTHER UNIT: the pre-existing '! grep -q apex-remote' in the firewall stanza has the same
-    defect, and check-containerfile- assertions.sh does not catch this class. CRITERION 2 IS ASSERTED LIVE ON THE
-    L16: a real WireGuard tunnel (real keys, real handshake, two netns with the veth created INSIDE one so neither
-    end ever exists in the root namespace and NetworkManager cannot auto-create a saved profile) carried 47 of 47
-    pings with 0 percent loss across a REAL SW_LID close, rx 500 to 6004 bytes DURING the closed window, peer
-    still handshaken after; NM's nine saved connections identical before and after. The lid event was real: uinput
-    device tagged power-switch by udev, logind said 'Watching system buttons on /dev/input/event21', logged 'Lid
-    closed.' and 'Lid opened.', flipped its own LidClosed property, and no suspend or sleep line appeared in the
-    journal. WHAT IS NOT MET. Criterion 1 lacks CAUSATION ONLY: the machine did not suspend, but THE L16 IS DOCKED
-    (Docked=b true, card1-DP-1 connected) and logind consults HandleLidSwitchDocked, default ignore, BEFORE any
-    inhibitor - so the lid would have done nothing with or without the lock. The live suite reports that as COULD-
-    NOT-RUN rather than banking a pass it did not earn; re-running with the external display unplugged closes it
-    and is the single outstanding assertion for this item. That finding is now surfaced in apex lid status, which
-    says which of the two is keeping the machine awake, with 'could not be established' as a third answer that is
-    not 'yes'. Criterion 3's 'draws measurably less' COULD NOT BE MEASURED HERE: measuring it means applying the
-    real power- down to Andre's live desktop - blanking his panel, blocking his bluetooth, stopping his timers -
-    which the standing rules forbid; the power-down and its exact restore are asserted over a fixture, and the two
-    ways it could kill a VPN with the machine awake are closed by name against the SHIPPED defaults with eleven
-    forbidden units active in the fixture so the assertion can actually fail. Criterion 4 is asserted as 'the
-    driver does nothing, so today's behaviour stands' and not by observing a real suspend, which is forbidden
-    here. Criteria 5 and 6 are met. The apex-shell tile is still unwritten; status --json now carries everything
-    it needs including a logind object (docked, external_displays, block_inhibited, acts_on_lid), and apex lid pin
-    needs no privilege by design, so the tile is a read plus one exec with no polkit anywhere. Unrelated pre-
-    existing flake recorded on the card: provenance.rs's a_git_status_that_could_not_run test fails about one run
-    in three in parallel and never with --test-threads=1; provenance.rs is untouched by this branch.
+    Zero sessions for ever, pin=auto never activates, the owner's ~/.config/apex/lid.toml never read - the
+    silent-pin defect 2aa9ed45 fixed in code, reintroduced by a unit file. PrivateTmp=yes hid the worktrees the
+    guards' checkpoint runs in (0 entries against 407). runuser could not open a session at all without
+    CAP_SYS_RESOURCE, bisected: CAP_AUDIT_WRITE, CAP_CHOWN, CAP_FOWNER and CAP_SYS_ADMIN each fail alone. (5)
+    EVERY '! grep' REFUSAL IN THE BUILD STANZA WAS INERT - bash does not apply errexit to a pipeline inverted with
+    '!', verified, so the KillMode, ProtectSystem=strict, ProtectKernelTunables and static-HandleLidSwitch guards
+    could never fail a build. All rewritten as if-grep-then-FATAL-exit-1, and the suite now asserts no lid refusal
+    is spelled '! grep'. NOTE FOR ANOTHER UNIT: the pre-existing '! grep -q apex-remote' in the firewall stanza
+    has the same defect, and check-containerfile-assertions.sh does not catch this class. CRITERION 2 IS ASSERTED
+    LIVE ON THE L16: a real WireGuard tunnel (real keys, real handshake, two netns with the veth created INSIDE
+    one so neither end ever exists in the root namespace and NetworkManager cannot auto-create a saved profile)
+    carried 47 of 47 pings with 0 percent loss across a REAL SW_LID close, rx 500 to 6004 bytes DURING the closed
+    window, peer still handshaken after; NM's nine saved connections identical before and after. The lid event was
+    real: uinput device tagged power-switch by udev, logind said 'Watching system buttons on /dev/input/event21',
+    logged 'Lid closed.' and 'Lid opened.', flipped its own LidClosed property, and no suspend or sleep line
+    appeared in the journal. WHAT IS NOT MET. Criterion 1 lacks CAUSATION ONLY: the machine did not suspend, but
+    THE L16 IS DOCKED (Docked=b true, card1-DP-1 connected) and logind consults HandleLidSwitchDocked, default
+    ignore, BEFORE any inhibitor - so the lid would have done nothing with or without the lock. The live suite
+    reports that as COULD-NOT-RUN rather than banking a pass it did not earn; re-running with the external display
+    unplugged closes it and is the single outstanding assertion for this item. That finding is now surfaced in
+    apex lid status, which says which of the two is keeping the machine awake, with 'could not be established' as
+    a third answer that is not 'yes'. Criterion 3's 'draws measurably less' COULD NOT BE MEASURED HERE: measuring
+    it means applying the real power-down to Andre's live desktop - blanking his panel, blocking his bluetooth,
+    stopping his timers - which the standing rules forbid; the power-down and its exact restore are asserted over
+    a fixture, and the two ways it could kill a VPN with the machine awake are closed by name against the SHIPPED
+    defaults with eleven forbidden units active in the fixture so the assertion can actually fail. Criterion 4 is
+    asserted as 'the driver does nothing, so today's behaviour stands' and not by observing a real suspend, which
+    is forbidden here. Criteria 5 and 6 are met. The apex-shell tile is still unwritten; status --json now carries
+    everything it needs including a logind object (docked, external_displays, block_inhibited, acts_on_lid), and
+    apex lid pin needs no privilege by design, so the tile is a read plus one exec with no polkit anywhere.
+    Unrelated pre-existing flake recorded on the card: provenance.rs's a_git_status_that_could_not_run test fails
+    about one run in three in parallel and never with --test-threads=1; provenance.rs is untouched by this branch.
 - id: P2-001
   title: Encrypted backup framework
   priority: P2
@@ -3425,9 +3433,9 @@ tasks:
     loopback sshd fixture. Kind::is_implemented() and unimplemented_reason() carry those refusals and are
     mutation-proved, so an unimplemented target cannot be silently selected. 96 Rust mutations across the unit: 86
     caught first pass, SIX REAL DEFECTS FOUND AND FIXED, four weak tests strengthened, one survivor left and
-    documented in-source. tests/test-apex-backup.sh 64/0 including its real-root half. ALSO RECORDED: an init-vs-
-    run gap the agent verified in source rather than assumed - check_declared is called in run (backup.rs:391) and
-    not in init (line 344).
+    documented in-source. tests/test-apex-backup.sh 64/0 including its real-root half. ALSO RECORDED: an
+    init-vs-run gap the agent verified in source rather than assumed - check_declared is called in run
+    (backup.rs:391) and not in init (line 344).
 - id: P2-002
   title: Cloudflare R2 backup backend
   priority: P2
@@ -3560,28 +3568,29 @@ tasks:
     avahi's ABSENCE rather than its answer. fce0a99 `apex devices` as a verb covering cards, printers, scanners
     and shares, 53 passed, cargo test -p apex 315 passed, mutation-proved seven ways (49/4, 52/1 x5, 51/2;
     restored 53/0). 5a7d0c6 makes 'there is none' and 'I could not look' stop arriving as the same answer. All
-    suites re-run rather than quoted: test-device-image.sh 39/0, test-device-services-netns.sh 12/0, test-apex-
-    devices.sh 55/0, cargo test -p apex 315/0, tests/run-clippy.sh clean. Full write-up with both machines'
-    readings: ROADMAP/evidence/P2-005-007-device-maturity.md. REMAINDER is hardware nobody here has: a print job
-    to a printer, a share mounted from a server, a card in a slot. The L16's avahi is still masked and unmasking
-    it is Andre's call, so that machine cannot discover a printer or scanner at all. reconstructed 2026-09-07 from
-    ROADMAP/state/agents/p2-005.md; the original text was destroyed by the set-status.py --evidence defect (script
-    fixed the same day). LANDED by integrate-4: apex-os roadmap/v2.2 = 95d068c, 8 commits from task/p2-005-device-
-    maturity, ZERO conflicts. cargo test 1799/2 -> 1804/1, which reads as plus 5 tests and zero new failures once
-    the baseline's two are named (a pty deadlock that had to be killed, and the cgroup/origin artifact); only the
-    second recurred. run-clippy.sh PASS on the landed tip, and this was the first landing carrying new Rust.
-    Suites after landing: test-apex-devices 55/0/0, test-device-image 39/0, test-device-services-netns 12/0/0, and
-    test-apex-firewall still 31/0/1. The netns suite is safe on this machine for a checked reason rather than an
-    assumed one: it uses unshare -rmn with no sudo, and nftables tables are network-namespace scoped, so nft -f
-    apex.nft inside it cannot reach the L16's ruleset. Note for anyone reading the old report: c823974 added
-    tests/test-device-firewall-netns.sh and a later commit on the same branch renamed it test-device-services-
-    netns.sh -- the file is not missing. STILL PARTIAL, and every remainder is hardware nobody here has: a print
-    job to a printer, a share mounted from a server, a card in a slot, an EAP handshake with a real access point,
-    a tunnel to a VPN endpoint, a paired headset, an attached dock. Three cheap things are left: an apex devices
-    entry in files/system/libexec/apex-desktop-menu; a rebuilt image plus a re-run of apex devices on both
-    machines, because several readers change answer once 36232f5's packages land (gvfs-fuse, boltd, wg, the NM VPN
-    plugins, dnsmasq as a real package, aptX, the connectivity check); and the L16's masked avahi, whose unmasking
-    is Andre's call, not an agent's -- until then that machine cannot discover a printer or a scanner.
+    suites re-run rather than quoted: test-device-image.sh 39/0, test-device-services-netns.sh 12/0,
+    test-apex-devices.sh 55/0, cargo test -p apex 315/0, tests/run-clippy.sh clean. Full write-up with both
+    machines' readings: ROADMAP/evidence/P2-005-007-device-maturity.md. REMAINDER is hardware nobody here has: a
+    print job to a printer, a share mounted from a server, a card in a slot. The L16's avahi is still masked and
+    unmasking it is Andre's call, so that machine cannot discover a printer or scanner at all. reconstructed
+    2026-09-07 from ROADMAP/state/agents/p2-005.md; the original text was destroyed by the set-status.py
+    --evidence defect (script fixed the same day). LANDED by integrate-4: apex-os roadmap/v2.2 = 95d068c, 8
+    commits from task/p2-005-device-maturity, ZERO conflicts. cargo test 1799/2 -> 1804/1, which reads as plus 5
+    tests and zero new failures once the baseline's two are named (a pty deadlock that had to be killed, and the
+    cgroup/origin artifact); only the second recurred. run-clippy.sh PASS on the landed tip, and this was the
+    first landing carrying new Rust. Suites after landing: test-apex-devices 55/0/0, test-device-image 39/0,
+    test-device-services-netns 12/0/0, and test-apex-firewall still 31/0/1. The netns suite is safe on this
+    machine for a checked reason rather than an assumed one: it uses unshare -rmn with no sudo, and nftables
+    tables are network-namespace scoped, so nft -f apex.nft inside it cannot reach the L16's ruleset. Note for
+    anyone reading the old report: c823974 added tests/test-device-firewall-netns.sh and a later commit on the
+    same branch renamed it test-device-services-netns.sh -- the file is not missing. STILL PARTIAL, and every
+    remainder is hardware nobody here has: a print job to a printer, a share mounted from a server, a card in a
+    slot, an EAP handshake with a real access point, a tunnel to a VPN endpoint, a paired headset, an attached
+    dock. Three cheap things are left: an apex devices entry in files/system/libexec/apex-desktop-menu; a rebuilt
+    image plus a re-run of apex devices on both machines, because several readers change answer once 36232f5's
+    packages land (gvfs-fuse, boltd, wg, the NM VPN plugins, dnsmasq as a real package, aptX, the connectivity
+    check); and the L16's masked avahi, whose unmasking is Andre's call, not an agent's -- until then that machine
+    cannot discover a printer or a scanner.
 - id: P2-006
   title: Networking maturity
   priority: P2
@@ -3594,33 +3603,33 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Networking maturity, on task/p2-005-device-maturity. c823974 and f9ab0e7 add tests/test-device-services-
-    netns.sh, 12 passed, mutation-proved four ways (11/1, 9/3, 9/3, 11/1; restored 12/0) -- the firewall rules had
-    been read but never sent a packet through, and a shared printer was unreachable with nothing saying so.
-    1adbdb2 fixes NetworkManager answering `full` for a link nobody can route over. THE FINDING THAT MATTERS,
-    measured with positive controls and owed to P1-044: a hotspot CANNOT work under the shipped firewall policy,
-    three independent ways -- forward is policy drop, the DHCP rule matches replies rather than a client's
-    DISCOVER, and port 53 is shut. The exception mechanism itself is sound (631/445/2049 reopen immediately). Also
-    open: two lines in `apex devices network` state the current policy as fact and go stale the day it changes.
-    REMAINDER: an EAP handshake with a real access point and a tunnel to a real VPN endpoint. reconstructed
-    2026-09-07 from ROADMAP/state/agents/p2-005.md; the original text was destroyed by the set-status.py
-    --evidence defect (script fixed the same day). LANDED by integrate-4: apex-os roadmap/v2.2 = 95d068c, 8
-    commits from task/p2-005-device-maturity, ZERO conflicts. cargo test 1799/2 -> 1804/1, which reads as plus 5
-    tests and zero new failures once the baseline's two are named (a pty deadlock that had to be killed, and the
-    cgroup/origin artifact); only the second recurred. run-clippy.sh PASS on the landed tip, and this was the
-    first landing carrying new Rust. Suites after landing: test-apex-devices 55/0/0, test-device-image 39/0, test-
-    device-services-netns 12/0/0, and test-apex-firewall still 31/0/1. The netns suite is safe on this machine for
-    a checked reason rather than an assumed one: it uses unshare -rmn with no sudo, and nftables tables are
-    network-namespace scoped, so nft -f apex.nft inside it cannot reach the L16's ruleset. Note for anyone reading
-    the old report: c823974 added tests/test-device-firewall-netns.sh and a later commit on the same branch
-    renamed it test-device-services-netns.sh -- the file is not missing. STILL PARTIAL, and every remainder is
-    hardware nobody here has: a print job to a printer, a share mounted from a server, a card in a slot, an EAP
-    handshake with a real access point, a tunnel to a VPN endpoint, a paired headset, an attached dock. Three
-    cheap things are left: an apex devices entry in files/system/libexec/apex-desktop-menu; a rebuilt image plus a
-    re-run of apex devices on both machines, because several readers change answer once 36232f5's packages land
-    (gvfs-fuse, boltd, wg, the NM VPN plugins, dnsmasq as a real package, aptX, the connectivity check); and the
-    L16's masked avahi, whose unmasking is Andre's call, not an agent's -- until then that machine cannot discover
-    a printer or a scanner.
+    Networking maturity, on task/p2-005-device-maturity. c823974 and f9ab0e7 add
+    tests/test-device-services-netns.sh, 12 passed, mutation-proved four ways (11/1, 9/3, 9/3, 11/1; restored
+    12/0) -- the firewall rules had been read but never sent a packet through, and a shared printer was
+    unreachable with nothing saying so. 1adbdb2 fixes NetworkManager answering `full` for a link nobody can route
+    over. THE FINDING THAT MATTERS, measured with positive controls and owed to P1-044: a hotspot CANNOT work
+    under the shipped firewall policy, three independent ways -- forward is policy drop, the DHCP rule matches
+    replies rather than a client's DISCOVER, and port 53 is shut. The exception mechanism itself is sound
+    (631/445/2049 reopen immediately). Also open: two lines in `apex devices network` state the current policy as
+    fact and go stale the day it changes. REMAINDER: an EAP handshake with a real access point and a tunnel to a
+    real VPN endpoint. reconstructed 2026-09-07 from ROADMAP/state/agents/p2-005.md; the original text was
+    destroyed by the set-status.py --evidence defect (script fixed the same day). LANDED by integrate-4: apex-os
+    roadmap/v2.2 = 95d068c, 8 commits from task/p2-005-device-maturity, ZERO conflicts. cargo test 1799/2 ->
+    1804/1, which reads as plus 5 tests and zero new failures once the baseline's two are named (a pty deadlock
+    that had to be killed, and the cgroup/origin artifact); only the second recurred. run-clippy.sh PASS on the
+    landed tip, and this was the first landing carrying new Rust. Suites after landing: test-apex-devices 55/0/0,
+    test-device-image 39/0, test-device-services-netns 12/0/0, and test-apex-firewall still 31/0/1. The netns
+    suite is safe on this machine for a checked reason rather than an assumed one: it uses unshare -rmn with no
+    sudo, and nftables tables are network-namespace scoped, so nft -f apex.nft inside it cannot reach the L16's
+    ruleset. Note for anyone reading the old report: c823974 added tests/test-device-firewall-netns.sh and a later
+    commit on the same branch renamed it test-device-services-netns.sh -- the file is not missing. STILL PARTIAL,
+    and every remainder is hardware nobody here has: a print job to a printer, a share mounted from a server, a
+    card in a slot, an EAP handshake with a real access point, a tunnel to a VPN endpoint, a paired headset, an
+    attached dock. Three cheap things are left: an apex devices entry in files/system/libexec/apex-desktop-menu; a
+    rebuilt image plus a re-run of apex devices on both machines, because several readers change answer once
+    36232f5's packages land (gvfs-fuse, boltd, wg, the NM VPN plugins, dnsmasq as a real package, aptX, the
+    connectivity check); and the L16's masked avahi, whose unmasking is Andre's call, not an agent's -- until then
+    that machine cannot discover a printer or a scanner.
 - id: P2-007
   title: Bluetooth/dock/peripheral maturity
   priority: P2
@@ -3634,29 +3643,30 @@ tasks:
   - stop_slop
   evidence: >-
     Bluetooth/dock/peripheral maturity, on task/p2-005-device-maturity, delivered through the same `apex devices`
-    verb and suites as P2-005/P2-006 (test-apex-devices.sh 55/0 covering six areas, cargo test -p apex 315/0, run-
-    clippy.sh clean, evidence at ROADMAP/evidence/P2-005-007-device-maturity.md). 5d5441b is the message pass --
-    what a user reads, in the voice the rest of the CLI uses. Several readers change their answer once 36232f5's
-    packages land in a built image: gvfs-fuse, boltd, wg, the VPN plugins, dnsmasq as a real package, aptX and the
-    connectivity check, so the readings must be retaken after the next image build. REMAINDER is hardware nobody
-    here has: a paired headset and an attached dock. reconstructed 2026-09-07 from ROADMAP/state/agents/p2-005.md;
-    the original text was destroyed by the set-status.py --evidence defect (script fixed the same day). LANDED by
-    integrate-4: apex-os roadmap/v2.2 = 95d068c, 8 commits from task/p2-005-device-maturity, ZERO conflicts. cargo
-    test 1799/2 -> 1804/1, which reads as plus 5 tests and zero new failures once the baseline's two are named (a
-    pty deadlock that had to be killed, and the cgroup/origin artifact); only the second recurred. run-clippy.sh
-    PASS on the landed tip, and this was the first landing carrying new Rust. Suites after landing: test-apex-
-    devices 55/0/0, test-device-image 39/0, test-device-services-netns 12/0/0, and test-apex-firewall still
-    31/0/1. The netns suite is safe on this machine for a checked reason rather than an assumed one: it uses
-    unshare -rmn with no sudo, and nftables tables are network-namespace scoped, so nft -f apex.nft inside it
-    cannot reach the L16's ruleset. Note for anyone reading the old report: c823974 added tests/test-device-
-    firewall-netns.sh and a later commit on the same branch renamed it test-device-services-netns.sh -- the file
-    is not missing. STILL PARTIAL, and every remainder is hardware nobody here has: a print job to a printer, a
-    share mounted from a server, a card in a slot, an EAP handshake with a real access point, a tunnel to a VPN
-    endpoint, a paired headset, an attached dock. Three cheap things are left: an apex devices entry in
-    files/system/libexec/apex-desktop-menu; a rebuilt image plus a re-run of apex devices on both machines,
-    because several readers change answer once 36232f5's packages land (gvfs-fuse, boltd, wg, the NM VPN plugins,
-    dnsmasq as a real package, aptX, the connectivity check); and the L16's masked avahi, whose unmasking is
-    Andre's call, not an agent's -- until then that machine cannot discover a printer or a scanner.
+    verb and suites as P2-005/P2-006 (test-apex-devices.sh 55/0 covering six areas, cargo test -p apex 315/0,
+    run-clippy.sh clean, evidence at ROADMAP/evidence/P2-005-007-device-maturity.md). 5d5441b is the message pass
+    -- what a user reads, in the voice the rest of the CLI uses. Several readers change their answer once
+    36232f5's packages land in a built image: gvfs-fuse, boltd, wg, the VPN plugins, dnsmasq as a real package,
+    aptX and the connectivity check, so the readings must be retaken after the next image build. REMAINDER is
+    hardware nobody here has: a paired headset and an attached dock. reconstructed 2026-09-07 from
+    ROADMAP/state/agents/p2-005.md; the original text was destroyed by the set-status.py --evidence defect (script
+    fixed the same day). LANDED by integrate-4: apex-os roadmap/v2.2 = 95d068c, 8 commits from
+    task/p2-005-device-maturity, ZERO conflicts. cargo test 1799/2 -> 1804/1, which reads as plus 5 tests and zero
+    new failures once the baseline's two are named (a pty deadlock that had to be killed, and the cgroup/origin
+    artifact); only the second recurred. run-clippy.sh PASS on the landed tip, and this was the first landing
+    carrying new Rust. Suites after landing: test-apex-devices 55/0/0, test-device-image 39/0,
+    test-device-services-netns 12/0/0, and test-apex-firewall still 31/0/1. The netns suite is safe on this
+    machine for a checked reason rather than an assumed one: it uses unshare -rmn with no sudo, and nftables
+    tables are network-namespace scoped, so nft -f apex.nft inside it cannot reach the L16's ruleset. Note for
+    anyone reading the old report: c823974 added tests/test-device-firewall-netns.sh and a later commit on the
+    same branch renamed it test-device-services-netns.sh -- the file is not missing. STILL PARTIAL, and every
+    remainder is hardware nobody here has: a print job to a printer, a share mounted from a server, a card in a
+    slot, an EAP handshake with a real access point, a tunnel to a VPN endpoint, a paired headset, an attached
+    dock. Three cheap things are left: an apex devices entry in files/system/libexec/apex-desktop-menu; a rebuilt
+    image plus a re-run of apex devices on both machines, because several readers change answer once 36232f5's
+    packages land (gvfs-fuse, boltd, wg, the NM VPN plugins, dnsmasq as a real package, aptX, the connectivity
+    check); and the L16's masked avahi, whose unmasking is Andre's call, not an agent's -- until then that machine
+    cannot discover a printer or a scanner.
 - id: P2-008
   title: First-party virtualization UX
   priority: P2
@@ -3693,12 +3703,13 @@ tasks:
     this branch fixed, each now also a unit test: the install line named no swtpm-tools while libvirt runs
     swtpm_setup, so doctor said every flow is available on a machine where every --tpm domain defines and then
     fails at start; the USB guard skipped itself when lsusb was absent, reporting a question that could not be
-    asked as the answer yes; and apex vm run deleted its own only diagnostic, now --console-to. tests/test-apex-
-    vm.sh 133 passed 0 failed (from 106), every new assertion shown to fail against a mutated engine and the
-    engine restored byte-identical. cargo test --locked workspace 0 failed; clippy --locked --workspace --all-
-    targets -D warnings clean; shellcheck -S warning -x clean. Branch task/p2-virt-2, five commits, all pushed.
-    PARTIAL rather than done because one of the six named flows was never demonstrated end to end: making it done
-    needs a manual run on a machine with a spare USB device somebody is willing to have detached.
+    asked as the answer yes; and apex vm run deleted its own only diagnostic, now --console-to.
+    tests/test-apex-vm.sh 133 passed 0 failed (from 106), every new assertion shown to fail against a mutated
+    engine and the engine restored byte-identical. cargo test --locked workspace 0 failed; clippy --locked
+    --workspace --all-targets -D warnings clean; shellcheck -S warning -x clean. Branch task/p2-virt-2, five
+    commits, all pushed. PARTIAL rather than done because one of the six named flows was never demonstrated end to
+    end: making it done needs a manual run on a machine with a spare USB device somebody is willing to have
+    detached.
 - id: P2-009
   title: Disposable VM agent execution
   priority: P2
@@ -3712,28 +3723,28 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 14650ca3. apex vm run verified live by tests/vmlab/run-
-    vmlab's egress flow on the L16, 16 observations, 0 failed. The security half is what is proven, hostilely: the
-    task writes report.json AND an unnominated leak.txt, the guest's own task log (nominated, so it comes out
-    through the boundary under test) shows leak.txt really was created inside the VM, and it does not arrive on
-    the host - a refusal rather than an absence. The falsifying control is inside the flow: the engine is copied,
-    its egress loop turned around to iterate the CONTENTS of the volume instead of the nominations - the exact
-    defect the shipped loop's comment says it exists not to have - the same task is re-run, and the unnominated
-    file DOES then leak. Two more properties proven from inside the guest rather than from the XML the lab itself
-    wrote: the copy-in volume refuses the guest's write (so a task cannot rewrite its own task.sh), and the guest
-    sees only lo. That last one is only meaningful because virtio_net is in the lab guest's initramfs AND the
-    create flow asserts the same guest sees eth0 on a --network user VM - without that control, lo-only would have
-    passed on a domain that had an interface, which is how the first lab guest behaved. Default-deny confirmed
-    both ways: without --egress-to nothing leaves however much is nominated, and no destination is invented.
-    Nothing survives teardown: no domain, no directory, no volumes. One defect found and fixed: teardown deleted
-    the VM directory including the serial log, so the documented outcome for a guest that never mounted APEXIN -
-    an empty egress and a timeout warning - came with no way to find out why; --console-to FILE saves it, opt-in
-    and validated like --egress-to, and it had to be added to apexd/apex/src/vm.rs as well because that clap
-    surface enumerates its flags and would have refused a flag the engine and the docs both had. PARTIAL rather
-    than done because no guest image carrying an agent CLI exists: what is verified is the BOUNDARY - the read-
-    only copy-in volume, nomination-only egress, no network, and teardown - with an arbitrary command as the task.
-    docs/virtualization.md states that building a guest that carries claude or codex is separate work. Branch
-    task/p2-virt-2.
+    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 14650ca3. apex vm run verified live by
+    tests/vmlab/run-vmlab's egress flow on the L16, 16 observations, 0 failed. The security half is what is
+    proven, hostilely: the task writes report.json AND an unnominated leak.txt, the guest's own task log
+    (nominated, so it comes out through the boundary under test) shows leak.txt really was created inside the VM,
+    and it does not arrive on the host - a refusal rather than an absence. The falsifying control is inside the
+    flow: the engine is copied, its egress loop turned around to iterate the CONTENTS of the volume instead of the
+    nominations - the exact defect the shipped loop's comment says it exists not to have - the same task is
+    re-run, and the unnominated file DOES then leak. Two more properties proven from inside the guest rather than
+    from the XML the lab itself wrote: the copy-in volume refuses the guest's write (so a task cannot rewrite its
+    own task.sh), and the guest sees only lo. That last one is only meaningful because virtio_net is in the lab
+    guest's initramfs AND the create flow asserts the same guest sees eth0 on a --network user VM - without that
+    control, lo-only would have passed on a domain that had an interface, which is how the first lab guest
+    behaved. Default-deny confirmed both ways: without --egress-to nothing leaves however much is nominated, and
+    no destination is invented. Nothing survives teardown: no domain, no directory, no volumes. One defect found
+    and fixed: teardown deleted the VM directory including the serial log, so the documented outcome for a guest
+    that never mounted APEXIN - an empty egress and a timeout warning - came with no way to find out why;
+    --console-to FILE saves it, opt-in and validated like --egress-to, and it had to be added to
+    apexd/apex/src/vm.rs as well because that clap surface enumerates its flags and would have refused a flag the
+    engine and the docs both had. PARTIAL rather than done because no guest image carrying an agent CLI exists:
+    what is verified is the BOUNDARY - the read-only copy-in volume, nomination-only egress, no network, and
+    teardown - with an arbitrary command as the task. docs/virtualization.md states that building a guest that
+    carries claude or codex is separate work. Branch task/p2-virt-2.
 - id: P2-010
   title: Hardware qualification database
   priority: P2
@@ -3884,7 +3895,7 @@ tasks:
     LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 5eca2402. ROUND 2, five commits on apex-os
     task/p2-016-multiuser-2, all pushed (344bd8fd, 5d74649e, 6f7c6db1, 0caec419, 8c14dbf9), branched from
     roadmap/v2.2 at 2aa9ed45; round 1's five are already merged at 1d1c6fb3. No apex-shell change was needed in
-    either round. Workspace 2998 -> 3007 passed / 0 failed, clippy --locked --workspace --all- targets -D warnings
+    either round. Workspace 2998 -> 3007 passed / 0 failed, clippy --locked --workspace --all-targets -D warnings
     clean. tests/test-apex-shared-machine.sh 39 -> 60 / 0. tests/test-apex-user.sh 57 / 0 (new, wired into CI and
     Containerfile.base). tests/check-containerfile-assertions.sh 76 -> 88 checked / 0 failed. Every apex user verb
     is documented, so nothing was added to the doc-verb debt list. THE ROUND'S POINT: round 1 named five things it
@@ -3893,7 +3904,7 @@ tasks:
     REMOVED it; four of the five are now measured and the fifth (a kiosk session actually booted) is not. Verified
     after removal: getent passwd shows only andre at or above 1000, wheel is byte-identical (wheel:x:10:andre),
     /var/lib/apex-greet/last-user matches its pre-round sha, and /etc/apex, /var/lib/apex-secretd,
-    /usr/local/libexec/apex-guest-wipe, the unit, its .wants directory, /tmp/apex- agent-1042 and every fixture
+    /usr/local/libexec/apex-guest-wipe, the unit, its .wants directory, /tmp/apex-agent-1042 and every fixture
     directory are gone, with systemctl --failed empty. One inert artefact remains and needs no action: logind
     session record 21 is stuck in State=closing, a session whose leader died without logind reaping it, which
     loginctl terminate-session cannot remove; it names a uid that is no longer an account, holds no processes or
@@ -3904,23 +3915,23 @@ tasks:
     first account outside wheel is a machine nobody can administer. Proved live by creating apex-fx-std (uid 1043,
     not in wheel, sudo answers 'a password is required') and apex-fx-adm (uid 1044, in wheel) through the engine
     and removing both, wheel byte-identical afterwards. Administrator means wheel because that is what the running
-    machine resolves to, read rather than recalled: polkit's 50-default.rules addAdminRule returns unix-
-    group:wheel and sudoers has %wheel ALL=(ALL) ALL. rm refuses uid 0, a system account, the account you are
+    machine resolves to, read rather than recalled: polkit's 50-default.rules addAdminRule returns
+    unix-group:wheel and sudoers has %wheel ALL=(ALL) ALL. rm refuses uid 0, a system account, the account you are
     running as, a still-configured guest, and THE LAST ADMINISTRATOR - the one refusal with no recovery path from
     inside a running system. Per-user agents, secrets and session isolation are now MEASURED rather than argued:
     every test binary in the workspace, run by the second account inside its own logind session, gives the owner's
     result (4339 passed, and the same 8 failures, which fail identically for uid 1000). Run OUTSIDE a session it
     is 35 failures, all /run/user/<uid> and loginctl show-user, because an account with no session has no runtime
     directory. Round 1's scratch-root defect demonstrated live: as uid 1042, mkdir /tmp/apex-agent/9042 is
-    Permission denied while /tmp/apex- agent-1042/1 succeeds - and mkdir -p /tmp/apex-agent/1 SUCCEEDS for the
+    Permission denied while /tmp/apex-agent-1042/1 succeeds - and mkdir -p /tmp/apex-agent/1 SUCCEEDS for the
     second account because session ids restart at 1 and the directory is already there, owned by andre at 0700, so
     the old failure lands on the chmod. THE HONEST BLOCKER IS FAST SWITCHING, WHICH HAS NO SURFACE AT ALL. Round 1
     equated it with polkit allow_inactive=no, which is the isolation half and not the switching half. Measured:
-    zero hits for any switch- user string across apex-os, and apex-shell's PowerMenu.qml offers Shutdown, Reboot,
+    zero hits for any switch-user string across apex-os, and apex-shell's PowerMenu.qml offers Shutdown, Reboot,
     Windows, Gaming, Log Out, Lock and Suspend and nothing else; greetd runs one session on one VT. Written into
     docs/multi-user.md as a gap rather than left implied. CRITERION 2 - MET for the session-end path. Round 1
     shipped the wipe engine with nothing to run it (apex-guest-wipe@.service is After=user-%i.slice, which orders
-    and never fires). apex-guest- session@.service is the trigger, verified on the real second account both
+    and never fires). apex-guest-session@.service is the trigger, verified on the real second account both
     directions: allowlist names the guest -> home cleared 12 entries to 0, /var/lib/apex-secretd/users/1042 gone,
     unit deactivated successfully; allowlist emptied -> nothing removed, unit FAILED with status=2/INVALIDARGUMENT
     and the journal line refusing: ... is not listed in /etc/apex/guest-accounts. THE OBVIOUS WIRING DOES NOT WORK
@@ -3950,18 +3961,19 @@ tasks:
     machine key, LAN addresses and rendezvous id from Status, the owner's paired-device list from Devices, and
     reached the owner's device STORE through Revoke, which answered 'no paired device' - it had looked, and would
     have revoked one whose name matched; only Pair said no. After, all four are refused and the owner is
-    unaffected on the same widened socket. The account half now applies to every request and the human-at-the-
-    keyboard half stays on Pair alone, because apex remote devices from a script is reasonable and pairing a phone
-    from one is not. There is no sudo path to keep open, unlike apex-agentd, whose peer::is_own_user doc comment
-    claimed to be a gate when it is a classification branch that deliberately lets sudo apex request approve
-    through as uid 0; that comment is corrected here. TWELVE MUTATIONS ACROSS THE FOUR COMMITS, every one caught
-    by a named test and every file restored byte-identical and checked with sha256sum -c. FOR THE INTEGRATOR:
-    tests/check-doc-verbs.sh --reverse is RED on roadmap/v2.2 itself - apex lid and its six subverbs landed at
-    2401a57c/2aa9ed45 documented nowhere and declared nowhere. That is not from this branch, which touched no debt
-    list. Follow-ups on ROADMAP/state/agents/p2-016.md, in value order: fast user switching (the named criterion-1
-    gap, and not small - greetd has no second seat, so it means a greeter on a spare VT plus loginctl activate,
-    and the chvt half cannot be tested on Andre's machine without taking his screen); a standard account offered
-    at install time; a kiosk session actually booted; ensure_private_dir still does not check ownership.
+    unaffected on the same widened socket. The account half now applies to every request and the
+    human-at-the-keyboard half stays on Pair alone, because apex remote devices from a script is reasonable and
+    pairing a phone from one is not. There is no sudo path to keep open, unlike apex-agentd, whose
+    peer::is_own_user doc comment claimed to be a gate when it is a classification branch that deliberately lets
+    sudo apex request approve through as uid 0; that comment is corrected here. TWELVE MUTATIONS ACROSS THE FOUR
+    COMMITS, every one caught by a named test and every file restored byte-identical and checked with sha256sum
+    -c. FOR THE INTEGRATOR: tests/check-doc-verbs.sh --reverse is RED on roadmap/v2.2 itself - apex lid and its
+    six subverbs landed at 2401a57c/2aa9ed45 documented nowhere and declared nowhere. That is not from this
+    branch, which touched no debt list. Follow-ups on ROADMAP/state/agents/p2-016.md, in value order: fast user
+    switching (the named criterion-1 gap, and not small - greetd has no second seat, so it means a greeter on a
+    spare VT plus loginctl activate, and the chvt half cannot be tested on Andre's machine without taking his
+    screen); a standard account offered at install time; a kiosk session actually booted; ensure_private_dir still
+    does not check ownership.
 - id: P2-017
   title: APEX Online Accounts and brokered cloud identity layer
   priority: P2
