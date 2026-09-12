@@ -216,7 +216,7 @@ use apex_secret_core::SecretValue;
 use crate::provider::{Bind, Bound, Endpoint, Lease, Minted, Performed, Provider, ProviderError};
 
 use api::{Api, Body, Call, Multipart};
-use binding::{Account, Binding, BindingError, Bucket, Resource, Worker, Zone};
+use binding::{Account, Binding, BindingError, Bucket, Narrowing, Resource, Worker, Zone};
 use dns::{Lookup, Record};
 use temporary::Scope;
 
@@ -1156,7 +1156,11 @@ impl CloudflareProvider {
     /// moved under it, which is the check that matters; a mint that read a
     /// file the operation then refuses to act on has cost a round trip and
     /// nothing else.
-    fn narrowing(&self, req: &Bind<'_>, zone_scoped: bool) -> Result<(String, Scope), Minted> {
+    fn narrowing(
+        &self,
+        req: &Bind<'_>,
+        zone_scoped: bool,
+    ) -> Result<(String, Scope, Narrowing), Minted> {
         let binding = match Binding::read(
             std::path::Path::new(req.project),
             req.owner.uid,
@@ -1183,8 +1187,13 @@ impl CloudflareProvider {
                 )))
             }
         };
+        let strength = binding.temporary_credentials;
         if !zone_scoped {
-            return Ok((account.id.clone(), Scope::Account(account.id.clone())));
+            return Ok((
+                account.id.clone(),
+                Scope::Account(account.id.clone()),
+                strength,
+            ));
         }
         let target = match self.resolve(req) {
             Ok(target) => target,
@@ -1205,7 +1214,7 @@ impl CloudflareProvider {
                 )))
             }
         };
-        Ok((account.id.clone(), Scope::Zone(zone)))
+        Ok((account.id.clone(), Scope::Zone(zone), strength))
     }
 
     fn resolve(&self, req: &Bind<'_>) -> Result<Target, ProviderError> {
@@ -3496,11 +3505,18 @@ impl Provider for CloudflareProvider {
                 req.operation.id
             )));
         };
-        let (account, scope) = match self.narrowing(req, policy.zone_scoped) {
+        let (account, scope, strength) = match self.narrowing(req, policy.zone_scoped) {
             Ok(narrowing) => narrowing,
             Err(answer) => return Ok(answer),
         };
-        Ok(temporary::mint(
+        if strength == Narrowing::Off {
+            return Ok(Minted::NoNarrowerForm(format!(
+                "{} sets `temporary_credentials = \"off\"` under [cloudflare], \
+                 so no short-lived token was asked for",
+                req.project
+            )));
+        }
+        let answer = temporary::mint(
             &self.api,
             req.operation.id,
             req.audit_id,
@@ -3508,7 +3524,23 @@ impl Provider for CloudflareProvider {
             &scope,
             value,
             req.owner,
-        ))
+        );
+        // §13.4 says *prefer*, so `prefer` carries on with the stored
+        // credential and the trail says why. A project that wrote `require`
+        // has said the opposite, and the whole point of saying it is that the
+        // operation does not quietly run on the broad token when the narrow
+        // one stops being available.
+        if strength == Narrowing::Require && answer.value().is_none() {
+            return Err(ProviderError::Refused(format!(
+                "{} sets `temporary_credentials = \"require\"` under \
+                 [cloudflare], and this operation could not be given a \
+                 short-lived credential, so it was not carried out with the \
+                 stored one: {}",
+                req.project,
+                answer.reason().unwrap_or("no reason given")
+            )));
+        }
+        Ok(answer)
     }
 
     fn revoke(
@@ -3522,7 +3554,7 @@ impl Provider for CloudflareProvider {
         // token was created in, and the revoke addresses it by account. So the
         // `false` here is not a guess: a zone-scoped token and an
         // account-scoped one are deleted at the same path.
-        let (account, _) = self
+        let (account, _, _) = self
             .narrowing(req, false)
             .map_err(|answer| answer.reason().unwrap_or("no account").to_string())?;
         temporary::revoke(&self.api, &account, lease, stored, req.owner)

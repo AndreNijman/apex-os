@@ -812,6 +812,12 @@ impl Fixture {
     /// A service serving ONLY the Cloudflare provider, with a credential
     /// stored for the double and a project bound the way §13.1 says.
     fn new(name: &str, mode: Mode, granted: &[&str]) -> Fixture {
+        Fixture::with_project(name, mode, granted, PROJECT_FILE)
+    }
+
+    /// The same, with a project file of the caller's choosing. §13.4's
+    /// strength is a line in that file, so a test of it needs a different one.
+    fn with_project(name: &str, mode: Mode, granted: &[&str], file: &str) -> Fixture {
         let fake = Fake::start(mode);
         let tag = format!("{name}-{}-{}", std::process::id(), fake.port);
         let store = std::env::temp_dir().join(format!("apex-cf-store-{tag}"));
@@ -819,7 +825,7 @@ impl Fixture {
         std::fs::remove_dir_all(&store).ok();
         std::fs::remove_dir_all(&project).ok();
         std::fs::create_dir_all(&project).expect("project");
-        std::fs::write(project.join("apex.toml"), PROJECT_FILE).expect("apex.toml");
+        std::fs::write(project.join("apex.toml"), file).expect("apex.toml");
 
         let mut registry = Registry::new();
         registry
@@ -4135,4 +4141,110 @@ fn an_expiry_is_written_the_way_the_schema_asks_for_it() {
     assert_eq!(rfc3339(253_402_300_799).as_deref(), Some("9999-12-31T23:59:59Z"));
     // Past the end of the fixed-width format. Not a time this build will write.
     assert_eq!(rfc3339(253_402_300_800), None);
+}
+
+/// [`PROJECT_FILE`] with §13.4's strength set, spliced into the `[cloudflare]`
+/// table it already has rather than appended — a second `[cloudflare]` header
+/// is a duplicate table and TOML refuses the whole file, which would make
+/// every test below measure a parse error instead of the setting.
+fn project_with_narrowing(word: &str) -> String {
+    PROJECT_FILE.replacen(
+        "[cloudflare]\n",
+        &format!("[cloudflare]\ntemporary_credentials = \"{word}\"\n"),
+        1,
+    )
+}
+
+/// §13.4's fallback is the ordinary case, not a rare one: cloudflare requires
+/// Super Administrator on the account to create an account-owned token, so on
+/// most accounts the exchange is refused and the stored credential is what
+/// gets spent. `prefer` is right for that, and it is the default.
+///
+/// An owner whose credential *can* mint needs a way to say "and if it ever
+/// stops, stop too" — otherwise the day the token is downgraded is the day
+/// every operation quietly goes back to spending the broad one, with nothing
+/// but a word in the trail to say so.
+///
+/// Mutations: make `require` fall through to the answer (drop the `Err`), or
+/// read an unknown word as `prefer`. Both red.
+#[test]
+fn a_project_that_requires_a_short_lived_credential_does_not_run_on_the_stored_one() {
+    let required = project_with_narrowing("require");
+    // The account refuses to issue one…
+    let f = Fixture::with_project(
+        "require",
+        Mode::MintingDenied,
+        &["cloudflare.worker.read"],
+        &required,
+    );
+    let reply = f.use_it(f.record("cloudflare.worker.read", "project"));
+    let (kind, message) = reply
+        .as_error()
+        .expect("a project that requires a narrowed credential must not use the broad one");
+    assert_eq!(kind, ErrorKind::PermissionDenied);
+    assert!(message.contains("require"), "{message}");
+    // …and nothing was carried out with the stored credential.
+    assert!(
+        f.fake.seen().is_empty(),
+        "the operation ran anyway: {:#?}",
+        f.fake.seen()
+    );
+
+    // The same project, on an account that can mint, runs.
+    let ok = Fixture::with_project(
+        "require-ok",
+        Mode::Minting,
+        &["cloudflare.worker.read"],
+        &required,
+    );
+    let reply = ok.use_it(ok.record("cloudflare.worker.read", "project"));
+    assert!(reply.as_error().is_none(), "{reply:?}");
+    assert_eq!(
+        ok.fake.seen()[0].authorization.as_deref(),
+        Some(format!("Bearer {MINTED}").as_str())
+    );
+}
+
+/// `off` is a project saying it does not want the two extra requests. It is
+/// not the project saying there is no narrower credential — but that is what
+/// the trail would say if this returned the same word as a provider with
+/// nothing to offer, so the reason names the file.
+#[test]
+fn a_project_that_turns_narrowing_off_says_so_rather_than_looking_like_it_has_none() {
+    let file = project_with_narrowing("off");
+    let f = Fixture::with_project("off", Mode::Minting, &["cloudflare.worker.read"], &file);
+    assert!(f
+        .use_it(f.record("cloudflare.worker.read", "project"))
+        .as_error()
+        .is_none());
+    // It did not ask.
+    assert!(f.fake.minting().is_empty(), "{:#?}", f.fake.minting());
+    // And it ran on the stored credential.
+    assert_eq!(
+        f.fake.seen()[0].authorization.as_deref(),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+    let trail = f.trail();
+    let line: serde_json::Value = serde_json::from_str(
+        trail.lines().rfind(|l| l.contains("\"used\"")).expect("a used line"),
+    )
+    .expect("json");
+    assert_eq!(line["narrowing"], "no-narrower-form");
+    assert!(
+        line["narrowing_detail"].as_str().expect("a reason").contains("off"),
+        "the reason must name the setting and not look like an absence: {line}"
+    );
+}
+
+/// A word this build does not know is a file the owner meant something by.
+/// Reading it as the default would give them the weaker of the two things
+/// they might have meant, silently.
+#[test]
+fn a_narrowing_setting_this_build_does_not_know_is_refused_rather_than_defaulted() {
+    let file = project_with_narrowing("required");
+    let f = Fixture::with_project("badword", Mode::Minting, &["cloudflare.worker.read"], &file);
+    let reply = f.use_it(f.record("cloudflare.worker.read", "project"));
+    let (_, message) = reply.as_error().expect("an unknown setting must be refused");
+    assert!(message.contains("temporary_credentials"), "{message}");
+    assert!(f.fake.seen().is_empty() && f.fake.minting().is_empty());
 }
