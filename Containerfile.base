@@ -995,6 +995,40 @@ RUN set -eux; \
     ! grep -qE '^[[:space:]]*\[initial_session\]' /usr/share/apex/shared-machine/greetd-kiosk.toml; \
     echo "shared-machine recipes installed, inert"
 
+# ── apex user: the surface that can create a STANDARD account (P2-016) ───────
+#
+# The standard/administrator distinction was enforced on APEX long before it
+# could be reached: installer/apex-install puts the one account it creates in
+# `wheel` unconditionally and the GUI offers no choice, so every account APEX
+# had ever made was an administrator. This is the engine behind `apex user`.
+COPY --chmod=0755 files/system/libexec/apex-user /usr/libexec/apex-user
+RUN set -eux; \
+    bash -n /usr/libexec/apex-user; \
+    : '── the default is STANDARD, and that is one line ──'; \
+    : 'Each grep is anchored to an EXECUTABLE line (^[^#]*), because this'; \
+    : 'file discusses every one of these decisions at length in its own'; \
+    : 'comments and a check its own prose can satisfy proves nothing — this'; \
+    : 'repository has shipped five of those.'; \
+    grep -qE '^[^#]*ADMIN_GROUP=wheel' /usr/libexec/apex-user; \
+    : 'wheel is added only under the --admin branch. If this ever became'; \
+    : 'unconditional, every account apex user makes could approve a root'; \
+    : 'operation, and nothing would say so.'; \
+    grep -qE '^[^#]*\[ "\$admin" = 1 \] && argv\+=\(-G "\$ADMIN_GROUP"\)' \
+        /usr/libexec/apex-user; \
+    test "$(grep -cE '^[^#]*-G "\$ADMIN_GROUP"' /usr/libexec/apex-user)" = 1; \
+    : '── the refusal there is no recovery from ──'; \
+    : 'polkit auth_admin and sudo both resolve to wheel, so an APEX with no'; \
+    : 'member of it left cannot approve anything or become root again from'; \
+    : 'inside the running system.'; \
+    grep -qE '^[^#]*only administrator on this machine' /usr/libexec/apex-user; \
+    : '── the test override is not a way into a privileged run ──'; \
+    grep -qE '^[^#]*APEX_USER_TOOLS is set and this is running as root' \
+        /usr/libexec/apex-user; \
+    : '── it is not setuid; it is meant to be reached through sudo ──'; \
+    test ! -u /usr/libexec/apex-user; \
+    test ! -g /usr/libexec/apex-user; \
+    echo "apex-user installed: add makes a standard account"
+
 COPY files/system/libexec/apex-boot-windows /usr/libexec/apex-boot-windows
 COPY files/system/sudoers/apex-boot-windows /etc/sudoers.d/020-apex-boot-windows
 RUN set -eux; \
