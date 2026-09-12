@@ -210,11 +210,28 @@ class PtyAttachment(
         var channel: FrameChannel? = null
         try {
             channel = connect()
+            // A screen left while this was connecting. `connect()` is a socket
+            // and a Noise handshake and can take seconds on a bad link, and
+            // `stop()` during it had nothing to close — so the attempt went on
+            // to attach and then sat in `pump.join()` holding a connection the
+            // user had walked away from until the far end dropped it.
+            if (stopped) {
+                runCatching { channel.close() }
+                return Outcome.Lost(null)
+            }
             // BEFORE the replay, and this line is the reconnect test's target.
             terminal.reset()
             val m = Mux(channel, listener)
             // BEFORE the pump can deliver anything. See [wire].
             wire = m
+            // And again, because `stop()` may have run between the check above
+            // and this assignment — in which case it saw a null `wire` and
+            // closed nothing. Here there is something to close.
+            if (stopped) {
+                runCatching { m.close() }
+                runCatching { channel.close() }
+                return Outcome.Lost(null)
+            }
             val pump = Thread({ m.pump() }, "apex-pty-$channelId")
             pump.isDaemon = true
             pump.start()

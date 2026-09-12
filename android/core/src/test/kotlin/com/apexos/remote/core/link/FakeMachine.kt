@@ -95,11 +95,28 @@ class FakeMachine(
 
     private val threads = ArrayList<Thread>()
 
+    /** Every channel handed out, so [hangUp] can pull the plug on all of them. */
+    private val channels = ArrayList<QueueChannel>()
+
+    /**
+     * The machine goes away, with no warning and no `Close` frame.
+     *
+     * What a real one does when it sleeps, or when the Wi-Fi drops: the
+     * stream simply ends, and everything above has to notice the exception
+     * from `receive` rather than a protocol message. A test that wanted a
+     * polite shutdown would have the client send one.
+     */
+    fun hangUp() {
+        val open = synchronized(channels) { channels.toList() }
+        for (c in open) c.hangUp()
+    }
+
     fun open(): FrameChannel {
         val attempt = connections.incrementAndGet()
         val toClient = LinkedBlockingQueue<Any>()
         val toMachine = LinkedBlockingQueue<Any>()
         val channel = QueueChannel(name, toClient, toMachine)
+        synchronized(channels) { channels.add(channel) }
         val thread = Thread({ serve(attempt, toClient, toMachine) }, "fake-machine-$attempt")
         thread.isDaemon = true
         synchronized(threads) { threads.add(thread) }
@@ -259,6 +276,18 @@ class FakeMachine(
             closed = true
             closedLatch.countDown()
             outbound.offer(Hangup)
+            inbound.offer(Hangup)
+        }
+
+        /**
+         * End the stream from the machine's side, without closing this end.
+         *
+         * Deliberately not [close]: closing sets `closed`, and a client that
+         * saw its own channel marked closed would be being told something the
+         * network never tells it. The reader wakes on the sentinel and throws,
+         * which is exactly what a socket does when the peer vanishes.
+         */
+        fun hangUp() {
             inbound.offer(Hangup)
         }
     }
