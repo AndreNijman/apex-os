@@ -62,7 +62,7 @@ say where to look instead of being a bare "handshake failed".
 
 ## Status
 
-Round 1, in progress.
+Round 2. Complete; nothing in progress.
 
 ### Done
 
@@ -267,10 +267,68 @@ of service, not a disclosure, because Noise refuses an impostor at either end,
 but a public URL wants a token or Cloudflare Access in front of it first. No
 rate limiting and no connection cap.
 
+### Round 2 — two holes found by reviewing what round 1 actually proved (`72f1cfca`)
+
+**1. The headline claim had never run.** Every proof was at one layer or the
+other: `tests/tls.rs` proved what the connector *refuses* over a raw byte
+stream, and the wrangler run proved the room protocol over `ws://`. Nothing had
+ever run `dial`'s secure branch to a **success** — the upgrade request written
+into a `TlsWriter`, the response read a byte at a time back out of a
+`TlsReader`, then real frames through `Sender`/`Receiver` over the split
+connection. "apex-remoted can dial a `wss://` relay" was the whole point of the
+unit and no test executed it.
+
+`a_wss_relay_is_dialled_verified_and_carries_frames_both_ways` closes it
+against a relay that really terminates TLS on loopback, certificate minted per
+run by the `openssl` CLI with `subjectAltName = IP:127.0.0.1` — an IP SAN and
+not a DNS name, because `dial` checks against `Endpoint.host` and for a
+loopback relay URL that host *is* the address. Asserts, in order: the
+`{"relay":"waiting"}` notice decoded from an encrypted frame; a keepalive ping
+sent **from another thread** while this one is parked in `receiver.message()`,
+answered with a pong; and a payload out and the same bytes back.
+
+The middle assertion is the one that matters — it is the overlap
+`wait_for_a_device` creates for as long as a desktop waits, and the one that
+deadlocks if the lock invariant is wrong.
+
+| mutant | what it does | what happened |
+| --- | --- | --- |
+| **F** | `dial` verifies against `"relay.example.com"` instead of `endpoint.host` | `a_wss_relay_is_dialled_verified_and_carries_frames_both_ways` **only** (4 passed, 1 failed) |
+| **G** | `TlsReader::read` takes the connection lock **before** its blocking socket read — the invariant violated | cargo printed `has been running for over 60 seconds` and the run had to be killed. A deadlock is not a failing assertion, which is exactly why the ping is sent from a thread that cannot be the one parked in the read. |
+
+`rustls` is now a **dev**-dependency of `apex-remoted` so the test can be a TLS
+*server*. It was already in the lock through `apex-remote-core`, so this adds
+**no crate**: still **193** packages, and the only `Cargo.lock` movement is two
+dependency edges.
+
+**2. "the relay's TLS certificate was refused" was a lie on two paths.**
+`handshake` mapped *every* `process_new_packets` error to `TlsError::Refused`.
+This tree's own anti-downgrade test hits the case where that is wrong: dialling
+`wss://` at something speaking plain HTTP yields a record-decode error, not a
+certificate complaint, and an operator would go and inspect a CA store over a
+server that presented no certificate at all. Tests were never fooled —
+`certificate()` correctly returned `None` — but a human reading the daemon log
+would have been. `TlsError::Handshake` now carries everything that is not
+`rustls::Error::InvalidCertificate`; the anti-downgrade test asserts the
+*variant*, so the distinction cannot quietly collapse again.
+
+### Two decisions worth knowing about, stated rather than buried
+
+- **The store path, exactly.** `openssl-probe` on Fedora resolves to
+  `/etc/pki/tls/cert.pem` and `/etc/pki/tls/certs`. `TlsError::NoRoots` names
+  `/etc/pki/tls/certs`, `$SSL_CERT_FILE` and `$SSL_CERT_DIR`.
+- **A partially-readable store still dials.** `Trust::system()` treats
+  `load_native_certs().errors` as advisory **when at least one root parsed**.
+  The alternative — refuse on any read error — is defensible, and was not
+  taken: one unreadable file in `/etc/pki/tls/certs` should not take a machine
+  off its relay when the other four hundred roots loaded. Zero roots is still
+  a hard, named refusal. If that trade is wrong, it is one `if` in
+  `Trust::system`.
+
 ### NEXT
 
-**Nothing is in progress. The worktree is clean and all three commits are
-pushed.** `task/relay-tls` @ `0bb075a7`, forked from `roadmap/v2.2` @
+**Nothing is in progress. The worktree is clean and all four commits are
+pushed.** `task/relay-tls` @ `72f1cfca`, forked from `roadmap/v2.2` @
 `b79838a4`, never rebased.
 
 Whoever follows should know:

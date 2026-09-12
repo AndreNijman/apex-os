@@ -123,7 +123,7 @@ it.
 | round-trip measurement and quality bands | `serve.rs`, `rendezvous.rs` | yes |
 | the room protocol, end to end | `apexd/apex-remoted/tests/relay.rs` | yes, 8 suites against a double |
 | the relay's rules | `relay/src/room.js` | yes, 9 `node --test` |
-| **the Worker and the Durable Object** | `relay/src/index.js` | **yes** — see below |
+| **the Worker and the Durable Object** | `relay/src/index.js` | **yes — 6 of 8 suites, over `ws://`, under `wrangler dev --local`** |
 
 > **CLOSED 2026-09-12 by the `relay-tls` unit** (apex-os `0ad66ab2`). wrangler
 > is now a dev-dependency of `relay/` and `wrangler dev --local` needs **no
