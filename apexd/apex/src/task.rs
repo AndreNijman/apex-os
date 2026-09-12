@@ -37,6 +37,13 @@
 //! attaches — the agent runtime client this binary already is. The shell suite
 //! asserts that, with recording stubs for all four first on `PATH`.
 //!
+//! `apex task audit` adds one more thing this file talks to: `apex-secretd`,
+//! over its Unix socket, with the same unprivileged client `apex secret` uses.
+//! That is a read — two of its read-only verbs — and it raises no prompt; what
+//! it is not is a second implementation. §13.14's usage is counted by the
+//! daemon because the trail is root-owned and because a report that counted
+//! differently from the enforcement would eventually disagree with it.
+//!
 //! ── Asking the agent runtime once ───────────────────────────────────────────
 //!
 //! `client::sessions()` is called **at most once per command**, and only after
@@ -49,7 +56,7 @@
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Subcommand};
 
 use apex_agent_core::protocol::SessionInfo;
@@ -58,6 +65,9 @@ use apexd_core::task::{
     check_id, check_project_root, choose_attach, choose_handoff, plan, Attach, Found,
     HandoffTarget, Observed, ResumePlan, Task, TaskState, Tasks,
 };
+
+use apex_secret_core::client::Client as SecretClient;
+use apex_secret_core::protocol::{Request as SecretRequest, Response as SecretResponse};
 
 use crate::blueprint::EXIT_ERROR;
 
@@ -140,6 +150,25 @@ pub enum TaskCmd {
         /// Write the packet and stop, without starting anything.
         #[arg(long)]
         no_start: bool,
+    },
+    /// What this task has spent, and what its budget allows.
+    ///
+    /// §15's `apex task audit <task-id>`, answering §13.14's *"usage visible in
+    /// the task audit"*. Every brokered operation the task's root has made
+    /// today, what each cap in its `[agent.budget]` has left, and the recent
+    /// trail lines with the budget's verdict on each.
+    ///
+    /// The root is the task's **worktree** when it is bound to one, because
+    /// that is the directory its agents run in and therefore the directory the
+    /// trail records. A worktree's own `apex.toml` is how a per-task budget is
+    /// written; the project's covers work done in the project itself.
+    Audit {
+        id: String,
+        /// How many trail lines to show.
+        #[arg(long, default_value_t = 20)]
+        lines: usize,
+        #[arg(long)]
+        json: bool,
     },
     /// Forget a task. Nothing it referenced is touched.
     Rm { id: String },
@@ -702,6 +731,7 @@ fn dispatch(args: TaskArgs) -> Result<i32> {
         TaskCmd::Resume { id, no_attach, json } => cmd_resume(&id, no_attach, json),
         TaskCmd::Checkpoint { id, label, forget } => cmd_checkpoint(&id, label, forget),
         TaskCmd::Handoff { id, agent, no_start } => cmd_handoff(&id, &agent, no_start),
+        TaskCmd::Audit { id, lines, json } => cmd_audit(&id, lines, json),
         TaskCmd::Rm { id } => cmd_rm(&id),
         TaskCmd::Path => {
             println!("tasks   {}", tasks_path().display());
@@ -939,6 +969,119 @@ fn cmd_show(id: &str, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// `apex task audit <id>` — §15's verb, answering §13.14's third criterion.
+///
+/// Everything here is the daemon's answer. Neither the usage nor the trail is
+/// counted in this process: the trail is root-owned, `Request::Audit` hands
+/// back a bounded window of it, and a client that counted what it was given
+/// would present an undercount as a fact. Asking for the number is also the
+/// only way the report and the enforcement can agree, since both then come out
+/// of the same reader over the same lines.
+fn cmd_audit(id: &str, lines: usize, json: bool) -> Result<i32> {
+    let tasks = load()?;
+    let task = tasks.get(id)?;
+    // The directory the task's agents actually run in, which is the directory
+    // the trail records against. A task bound to a worktree spends the
+    // worktree's budget, not the project's — they are two roots and the daemon
+    // matches them exactly, never as a prefix.
+    let root = working_root(task).to_string_lossy().into_owned();
+
+    let mut client = SecretClient::connect().with_context(|| {
+        "apex-secretd is not answering, so what this task has spent is not \
+         known. `systemctl status apex-secretd` says why"
+    })?;
+    let report = match client.call(&SecretRequest::Usage {
+        project: root.clone(),
+    })? {
+        SecretResponse::Usage { report } => *report,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    let entries = match client.call(&SecretRequest::Audit {
+        lines,
+        project: Some(root.clone()),
+    })? {
+        SecretResponse::Audit { entries } => entries,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": id,
+                "root": root,
+                "usage": report,
+                "audit": entries,
+            }))?
+        );
+        return Ok(0);
+    }
+
+    for line in audit_lines(id, &root, task.worktree.is_some(), &report, &entries) {
+        println!("{line}");
+    }
+    Ok(0)
+}
+
+/// What `apex task audit` prints, as lines rather than as side effects.
+///
+/// Separated from the command so the shape can be asserted without a daemon,
+/// a socket and a task file — and because the two things worth getting right
+/// here are both about what is *said* rather than what is fetched: a project
+/// with no budget must not look like one inside its budget, and a cap nothing
+/// can measure must not look like a cap with nothing spent against it.
+fn audit_lines(
+    id: &str,
+    root: &str,
+    worktree_bound: bool,
+    report: &apex_secret_core::budget::Report,
+    entries: &[apex_secret_core::AuditLine],
+) -> Vec<String> {
+    let mut out = vec![format!("task     {id}"), format!("root     {root}")];
+    if worktree_bound {
+        out.push("         (the task's worktree; the project's own budget is separate)".into());
+    }
+    out.push(format!(
+        "today    {} brokered operations",
+        report.operations
+    ));
+    for (operation, count) in &report.per_operation {
+        out.push(format!("           {count:>5}  {operation}"));
+    }
+    if !report.budgeted {
+        // Said, not left blank. "No cap" and "inside the cap" are the two
+        // things a person reading a budget report most needs to tell apart,
+        // and an empty section reads as the second.
+        out.push(format!("budget   none declared in {root}/apex.toml"));
+    }
+    for cap in &report.caps {
+        out.push(format!(
+            "budget   {:<28} {} / {}  ({})",
+            cap.name, cap.used, cap.limit, cap.kind
+        ));
+        if let Some(why) = &cap.unmeasurable {
+            // A cap nothing can measure is refusing every operation under it,
+            // and somebody reading a budget report is exactly the person who
+            // needs to know that before they wonder why nothing works.
+            out.push(format!("           cannot be measured: {why}"));
+        }
+    }
+    if entries.is_empty() {
+        out.push("trail    nothing has been brokered from this root".into());
+        return out;
+    }
+    for e in entries {
+        out.push(format!(
+            "{:<9} {:<12} {:<24} {}",
+            e.event.as_str(),
+            e.spend,
+            e.detail,
+            e.reason.as_deref().unwrap_or("")
+        ));
+    }
+    out
+}
+
 fn cmd_resume(id: &str, no_attach: bool, json: bool) -> Result<i32> {
     let tasks = load()?;
     let task = tasks.get(id)?;
@@ -1119,6 +1262,78 @@ mod tests {
             note: None,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_task_audit_asks_about_the_directory_its_agents_actually_run_in() {
+        // The root the trail records is the worktree, not the project, and the
+        // daemon matches it exactly rather than as a prefix. A `task audit`
+        // that asked about the project root would report zero for a task that
+        // has been deploying all day from its worktree — the worst shape a
+        // usage report can take, because it looks like an answer.
+        let mut t = task();
+        assert_eq!(
+            working_root(&t),
+            PathBuf::from("/home/tester/Projects/apex-os/.apex/worktrees/installer-bug")
+        );
+        t.worktree = None;
+        assert_eq!(
+            working_root(&t),
+            PathBuf::from("/home/tester/Projects/apex-os")
+        );
+    }
+
+    #[test]
+    fn a_project_with_no_budget_is_said_rather_than_left_blank() {
+        // "No cap" and "inside the cap" are the two things a person reading a
+        // budget report most needs to tell apart, and an empty budget section
+        // reads as the second.
+        let report = apex_secret_core::budget::Report {
+            project: "/p".into(),
+            budgeted: false,
+            operations: 3,
+            per_operation: std::collections::BTreeMap::from([("git.push".to_string(), 3)]),
+            ..Default::default()
+        };
+        let lines = audit_lines("t", "/p", false, &report, &[]);
+        assert!(lines.iter().any(|l| l.contains("3 brokered operations")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("none declared in /p/apex.toml")),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.contains("nothing has been brokered")), "{lines:?}");
+    }
+
+    #[test]
+    fn a_cap_that_cannot_be_measured_says_so_next_to_itself() {
+        // A money cap with no price for something that ran is refusing every
+        // operation under it. Printing the numbers without the sentence would
+        // be the friendliest possible way to hide a budget that has stopped
+        // working.
+        let report = apex_secret_core::budget::Report {
+            project: "/p".into(),
+            budgeted: true,
+            operations: 1,
+            caps: vec![apex_secret_core::budget::Cap {
+                name: "cloudflare_daily".into(),
+                kind: "money".into(),
+                used: "?".into(),
+                limit: "5.00".into(),
+                unmeasurable: Some("cloudflare.workers-ai.run has no price".into()),
+            }],
+            ..Default::default()
+        };
+        let lines = audit_lines("t", "/p", true, &report, &[]);
+        assert!(
+            lines.iter().any(|l| l.contains("the task's worktree")),
+            "a worktree-bound task did not say so: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("cannot be measured") && l.contains("workers-ai")),
+            "{lines:?}"
+        );
     }
 
     fn session(id: u32, cwd: &str, live: bool) -> SessionInfo {

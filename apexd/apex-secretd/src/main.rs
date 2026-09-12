@@ -295,6 +295,10 @@ fn dispatch(
         Request::Grants => service.grants(peer),
         Request::Approvals => service.approvals(peer),
         Request::Audit { lines, project } => service.audit(peer, lines, project.as_deref()),
+        // Read-only, like the four above it: it reports what the trail already
+        // holds and changes nothing, so a managed session may ask. An agent
+        // being able to see the budget it is running under is the point.
+        Request::Usage { project } => service.usage(peer, &project),
 
         // Mutating verbs. A session may not change what it is allowed to do.
         Request::Add {

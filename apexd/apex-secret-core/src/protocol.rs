@@ -176,6 +176,20 @@ pub enum Request {
         #[serde(default)]
         project: Option<String>,
     },
+
+    /// §13.14: what this project's budget allows and what it has spent today.
+    ///
+    /// Its own verb rather than something a client works out from
+    /// [`Request::Audit`], because a client cannot do it honestly: the trail is
+    /// root-owned, `Audit` hands back a bounded window of it, and a count taken
+    /// from a window is an undercount presented as a fact. One counting
+    /// implementation, in the daemon, is also the only way the report and the
+    /// enforcement can agree.
+    Usage {
+        /// The root to count, exactly — a worktree is not its project. Required:
+        /// a budget is a project's, and "all of them" is not a budget.
+        project: String,
+    },
 }
 
 fn https() -> String {
@@ -252,6 +266,9 @@ pub enum Response {
     /// The audit trail, oldest first.
     Audit { entries: Vec<AuditLine> },
 
+    /// §13.14's answer to [`Request::Usage`].
+    Usage { report: Box<crate::budget::Report> },
+
     /// Verb failed. `kind` is stable enough to branch on; `message` is for
     /// humans.
     Error { kind: ErrorKind, message: String },
@@ -298,6 +315,7 @@ impl Response {
             Response::Approvals { .. } => "approvals",
             Response::Performed { .. } => "performed",
             Response::Audit { .. } => "audit",
+            Response::Usage { .. } => "usage",
             Response::Error { .. } => "error",
         }
     }
@@ -383,6 +401,23 @@ mod tests {
             Response::Audit {
                 entries: vec![AuditLine::from_record("a1", AuditEvent::Used, 1000, 1, &record)],
             },
+            Response::Usage {
+                report: Box::new(crate::budget::Report {
+                    project: "/p".into(),
+                    day_start_ms: 1,
+                    budgeted: true,
+                    operations: 1,
+                    per_operation: BTreeMap::from([("git.fetch".to_string(), 1)]),
+                    per_service: BTreeMap::from([("demo".to_string(), 1)]),
+                    caps: vec![crate::budget::Cap {
+                        name: "operations_daily".into(),
+                        kind: "operations".into(),
+                        used: "1".into(),
+                        limit: "200".into(),
+                        unmeasurable: None,
+                    }],
+                }),
+            },
             Response::error(ErrorKind::PermissionDenied, "not granted"),
         ]
     }
@@ -408,6 +443,7 @@ mod tests {
                 "ok",
                 "performed",
                 "services",
+                "usage",
             ],
             "the reply surface changed; every entry must be a reply that \
              cannot carry a credential"

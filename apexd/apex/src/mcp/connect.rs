@@ -642,6 +642,66 @@ mod tests {
     }
 
     #[test]
+    fn an_oauth_server_is_routed_through_the_broker_like_any_other() {
+        // §13.12's named case, at the one place that decides it. A remote
+        // server that authenticates by OAuth carries NO credential in the
+        // definition — that is the whole point of OAuth — so before P1-017 it
+        // looked identical to a server with nothing to protect, and `plan`
+        // reported that connecting it replaced nothing. It replaces the thing
+        // that matters: after this, the agent no longer has an account with
+        // the server to authenticate as.
+        //
+        // Cloudflare's own remote servers are the instance §13.12 names, and
+        // they accept a Cloudflare API token as `Authorization: Bearer` — so
+        // the bridge is a route they can actually take. Nothing in this test
+        // or in the code it drives knows their hostnames; the URL below is a
+        // fixture, and the rule is about remote servers.
+        let home = std::env::temp_dir().join(format!(
+            "apex-connect-oauth-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        ));
+        std::fs::create_dir_all(&home).expect("dir");
+        let file = home.join(".claude.json");
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "mcpServers": {"cf-bindings": {
+                    "type": "http",
+                    "url": "https://bindings.mcp.cloudflare.example/mcp"
+                }}
+            })
+            .to_string(),
+        )
+        .expect("write");
+
+        let found = servers::discover(&home, None);
+        let existing = found.iter().find(|s| s.name == "cf-bindings");
+        assert!(
+            existing.expect("the server").credential.agent_readable(),
+            "an OAuth server was reported as having nothing the agent can read"
+        );
+        let plan = plan("cf-bindings", None, None, existing, &found).expect("a plan");
+        assert!(
+            plan.replaced_a_credential,
+            "connecting an OAuth server reported that it replaced nothing"
+        );
+        // The endpoint is taken from the definition, so nobody has to retype a
+        // URL that is already on the machine.
+        assert_eq!(plan.host, "bindings.mcp.cloudflare.example");
+        assert_eq!(plan.path, "/mcp");
+        assert_eq!(plan.scheme, "https");
+        write_bridge(&home, &plan).expect("write");
+
+        let after = servers::discover(&home, None);
+        assert!(
+            !after[0].credential.agent_readable(),
+            "the rewritten definition is still one the agent can authenticate"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
     fn a_directory_scoped_server_is_rewritten_in_its_own_block() {
         // The failure this closes: writing the bridge into the top-level
         // `mcpServers` for a server defined per directory leaves the original

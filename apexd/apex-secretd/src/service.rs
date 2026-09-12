@@ -22,10 +22,14 @@
 //! around is the store being root-owned and the protocol having no verb that
 //! returns a value.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use apex_secret_core::audit::{self, AuditEvent, AuditLine};
+use apex_secret_core::budget::{self, Budget, Usage};
 use apex_secret_core::capability::{self, CapabilityRecord, EndpointError};
 use apex_secret_core::operation::OperationSpec;
 use apex_secret_core::protocol::{ErrorKind, Response};
@@ -87,6 +91,71 @@ pub struct Service {
     /// root-owned and `0700`, and `apex secret approve` reaches it through this
     /// socket like everything else; there is no second process to race with.
     approvals: Mutex<()>,
+    /// §13.14: budgeted operations that have passed the check and have not yet
+    /// reached the trail.
+    ///
+    /// A budget is counted from the audit trail, and a line only appears there
+    /// when the operation is over. Between the check and the line the operation
+    /// is invisible — so with one thread per connection, a cap of five admits
+    /// however many callers happen to be inside that window at once. That is a
+    /// cap that does nothing under exactly the load a cap is for.
+    ///
+    /// So a passing check leaves a reservation here, the next check counts the
+    /// trail *plus* the reservations, and the reservation is dropped when the
+    /// request leaves `use_capability` — by which point either a line has been
+    /// written or the request was refused and never happened. A reservation
+    /// that outlives its usefulness makes the budget stricter for a moment and
+    /// never looser, which is the direction to be wrong in.
+    ///
+    /// Keyed by account and project root, holding one entry per in-flight
+    /// `(credential, operation)`. The lock is taken for the check and for the
+    /// release, never across `perform` — holding it there would serialise every
+    /// budgeted deployment on the machine behind the slowest one.
+    reservations: Mutex<Reservations>,
+}
+
+/// In-flight budgeted operations, by account and project root, each entry a
+/// `(credential, operation)` pair that has passed the check and not yet reached
+/// the trail.
+type Reservations = BTreeMap<(u32, String), Vec<(String, String)>>;
+
+/// What §13.14's check answers with when an operation may proceed.
+struct Budgeted<'a> {
+    /// The word for [`AuditLine::spend`] — `within`, or `no-budget`.
+    word: String,
+    /// The detail behind it, when there is one.
+    detail: Option<String>,
+    /// Held until the operation reaches the trail; `None` for a project with no
+    /// budget, which has no headroom to reserve.
+    reserved: Option<Reservation<'a>>,
+}
+
+/// One in-flight budgeted operation, released when it goes out of scope.
+///
+/// A guard rather than a matching `release` call at each exit, because
+/// [`Service::use_capability`] returns from a dozen places after the check and
+/// a reservation leaked by one of them would cap that project at its current
+/// usage until the daemon restarted.
+pub struct Reservation<'a> {
+    service: &'a Service,
+    key: (u32, String),
+    entry: (String, String),
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        let Ok(mut held) = self.service.reservations.lock() else {
+            return;
+        };
+        if let Some(list) = held.get_mut(&self.key) {
+            if let Some(at) = list.iter().position(|e| e == &self.entry) {
+                list.swap_remove(at);
+            }
+            if list.is_empty() {
+                held.remove(&self.key);
+            }
+        }
+    }
 }
 
 impl Service {
@@ -97,6 +166,7 @@ impl Service {
             registry,
             audit_counter: AtomicU64::new(0),
             approvals: Mutex::new(()),
+            reservations: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -162,6 +232,53 @@ impl Service {
             entries.drain(..entries.len() - limit);
         }
         Response::Audit { entries }
+    }
+
+    /// §13.14: what this project's budget allows and what it has spent today.
+    ///
+    /// The same reader, the same counter and the same trail the enforcement
+    /// uses — so the report cannot say a project is inside its budget while the
+    /// broker refuses it, which is what a second implementation in the CLI
+    /// would eventually do.
+    ///
+    /// A budget that cannot be read is an error here, exactly as it is a
+    /// refusal there. A report that quietly showed "no budget" for a project
+    /// whose `apex.toml` is unreadable would be the friendliest possible way to
+    /// tell somebody their cap is fine while it is not being enforced.
+    pub fn usage(&self, peer: Peer, project: &str) -> Response {
+        if !broker::valid_project(project) {
+            return Response::error(
+                ErrorKind::BadRequest,
+                format!("'{}' is not a project root", project.escape_debug()),
+            );
+        }
+        let Some(owner) = broker::owner(peer.uid) else {
+            return Response::error(
+                ErrorKind::PermissionDenied,
+                format!("uid {} is not an account on this machine", peer.uid),
+            );
+        };
+        let budget = match Budget::read_or_unbudgeted(Path::new(project), owner.uid, &owner.name) {
+            Ok(budget) => budget,
+            Err(e) => {
+                return Response::error(
+                    ErrorKind::BadRequest,
+                    format!(
+                        "this project's budget could not be read, so what it \
+                         allows is not known: {e}"
+                    ),
+                )
+            }
+        };
+        let usage = Usage::of(
+            &audit::tail(&self.store.audit_path(), usize::MAX),
+            peer.uid,
+            project,
+            store::now_ms(),
+        );
+        Response::Usage {
+            report: Box::new(budget::Report::new(project, &budget, &usage)),
+        }
     }
 
     // ── administration, owner only ──────────────────────────────────────────
@@ -533,6 +650,122 @@ impl Service {
             })
     }
 
+    /// §13.14: whether one more operation fits inside the project's budget.
+    ///
+    /// Returns the verdict, the words to put on the audit line, and — when the
+    /// answer is a pass and there was a budget at all — the reservation that
+    /// keeps a concurrent check from spending the same headroom twice.
+    ///
+    /// A project with no budget pays nothing: the file is read, found to
+    /// declare none, and the trail is never touched. That matters because this
+    /// runs on every brokered operation on the machine, and the trail is one
+    /// file that is read whole.
+    fn check_budget(
+        &self,
+        peer: Peer,
+        project: &str,
+        owner: &broker::Owner,
+        service: &str,
+        op: &'static OperationSpec,
+        now: u64,
+    ) -> Result<Budgeted<'_>, (String, String)> {
+        let budget = match Budget::read_or_unbudgeted(Path::new(project), owner.uid, &owner.name) {
+            Ok(budget) => budget,
+            // Not folded into "no budget". A budget file that could not be read
+            // is not a project without a budget, and an agent that can make
+            // `apex.toml` unreadable would otherwise be an agent that can
+            // remove its own cap.
+            Err(e) => {
+                return Err((
+                    budget::UNMEASURABLE.to_string(),
+                    format!(
+                        "this project's budget could not be read, so nothing \
+                         here knows whether this operation fits inside it, and \
+                         it has not run: {e}"
+                    ),
+                ))
+            }
+        };
+        if budget.is_empty() {
+            return Ok(Budgeted {
+                word: audit::NO_BUDGET.to_string(),
+                detail: None,
+                reserved: None,
+            });
+        }
+        // A cap keyed by an operation id nothing implements never bites. The
+        // vocabulary is right here, so it is checked here rather than being
+        // discovered months later by somebody wondering why the cap did
+        // nothing.
+        let unknown = budget.unknown_operations(&self.registry.operation_ids());
+        if !unknown.is_empty() {
+            // An alias is a near miss worth naming separately. A grant may be
+            // written `memory:mcp-request`, so somebody capping the same thing
+            // reaches for the same spelling — but the trail records the
+            // canonical id, so an alias cap would match nothing. Saying which
+            // to write is the difference between a refusal and a puzzle.
+            let named: Vec<String> = unknown
+                .iter()
+                .map(|name| match self.registry.lookup(name) {
+                    Ok((_, op)) => format!("'{name}' (an alias; write '{}')", op.id),
+                    Err(_) => format!("'{name}'"),
+                })
+                .collect();
+            return Err((
+                budget::UNMEASURABLE.to_string(),
+                format!(
+                    "this project's [agent.budget] caps or prices {}, which is \
+                     not how this machine spells an operation it can count — so \
+                     the cap would never bite, and a cap that does nothing is \
+                     worse than no cap. `apex secret capabilities` lists what \
+                     can be capped",
+                    named.join(", ")
+                ),
+            ));
+        }
+
+        let mut held = self.reservations.lock().map_err(|_| {
+            (
+                budget::UNMEASURABLE.to_string(),
+                "this daemon's budget bookkeeping is poisoned, so whether this \
+                 operation fits inside the project's budget is not known and \
+                 it has not run"
+                    .to_string(),
+            )
+        })?;
+        let key = (peer.uid, project.to_string());
+        // The whole trail, not a window: `audit::tail`'s limit exists for a
+        // reader with a screen, and a budget counted from the last N lines is a
+        // budget a busy machine can hide an operation from.
+        let mut usage = Usage::of(
+            &audit::tail(&self.store.audit_path(), usize::MAX),
+            peer.uid,
+            project,
+            now,
+        );
+        for (ran_under, operation) in held.get(&key).into_iter().flatten() {
+            usage.add(ran_under, operation);
+        }
+
+        let spend = budget::check(&budget, &usage, service, op.id);
+        let word = spend.as_str().to_string();
+        let why = spend.reason().map(str::to_string);
+        if !matches!(spend, budget::Spend::Within) {
+            return Err((word, why.unwrap_or_default()));
+        }
+        let entry = (service.to_string(), op.id.to_string());
+        held.entry(key.clone()).or_default().push(entry.clone());
+        Ok(Budgeted {
+            word,
+            detail: why,
+            reserved: Some(Reservation {
+                service: self,
+                key,
+                entry,
+            }),
+        })
+    }
+
     // ── the framework ───────────────────────────────────────────────────────
 
     /// Why a request was allowed, in §11's `approval_policy` vocabulary.
@@ -584,9 +817,10 @@ impl Service {
     /// Perform a capability.
     ///
     /// The order is the security argument, and every step before the last can
-    /// refuse. Steps 1–7 and 9–13 belong to the framework and apply to every
-    /// provider that will ever be registered; only 8 and 11 are the provider's,
-    /// and neither of them decides whether the request was allowed.
+    /// refuse. Every step except 9 and 12 belongs to the framework and applies
+    /// to every provider that will ever be registered; those two are the
+    /// provider's, and neither of them decides whether the request was
+    /// allowed.
     ///
     ///  1. the caller's account, from the kernel — never from the request;
     ///  2. the operation exists, in a registered provider's vocabulary;
@@ -594,18 +828,26 @@ impl Service {
     ///  4. the record is well formed and has not expired;
     ///  5. a credential exists under that name, for that account;
     ///  6. the capability is granted for that project — [`Service::decide`];
-    ///  7. only then may the provider touch the caller's machine;
-    ///  8. the provider resolves what the caller named, and says where the
+    ///  7. §13.14: one more operation fits inside the project's budget, and a
+    ///     reservation is taken so a concurrent request cannot spend the same
+    ///     headroom — [`Service::check_budget`];
+    ///  8. only then may the provider touch the caller's machine;
+    ///  9. the provider resolves what the caller named, and says where the
     ///     credential would go;
-    ///  9. that endpoint is pinned against the one the credential was stored
+    /// 10. that endpoint is pinned against the one the credential was stored
     ///     for — the provider does not get to skip this, because it has not
     ///     been given the value yet;
-    /// 10. §13.8: where the provider said the grant is not enough, the owner's
+    /// 11. §13.8: where the provider said the grant is not enough, the owner's
     ///     one-shot approval is found and SPENT, or the request is refused;
-    /// 11. the value is read, once, and the provider presents it;
-    /// 12. the value — and any short-lived one minted from it — is scrubbed
+    /// 12. the value is read, once, and the provider presents it;
+    /// 13. the value — and any short-lived one minted from it — is scrubbed
     ///     out of everything returned;
-    /// 13. the trail records the record the decision was made on.
+    /// 14. the trail records the record the decision was made on.
+    ///
+    /// Step 7 sits where it does on purpose: before the provider runs anything
+    /// on the caller's machine, and before the owner's one-shot approval can be
+    /// spent. An over-budget request that burned an approval would be an
+    /// approval given for a deployment and consumed by an attempt.
     ///
     /// `body` is the message an operation carries, for the one operation that
     /// carries one. It is not checked here and never can be: what a message
@@ -625,9 +867,20 @@ impl Service {
         // word appear on a `refused` line, where nobody would think to doubt it.
         record.approval_policy = UNDECIDED.to_string();
 
+        // §13.14's verdict, as it stands at each point a refusal can happen.
+        // It starts as "nobody has looked", becomes the budget's answer once
+        // the check has run, and every audit line written from here reads it —
+        // so a request refused for a host mismatch *after* the budget passed
+        // says the budget passed, rather than claiming the check never ran.
+        // A cell because `refuse` borrows it and the check writes it.
+        let spend = RefCell::new((audit::NOT_CHECKED.to_string(), None::<String>));
+
         let refuse = |record: &CapabilityRecord, reason: String, kind: ErrorKind| -> Response {
+            let (word, detail) = spend.borrow().clone();
             self.record(AuditLine {
                 reason: Some(reason.clone()),
+                spend: word,
+                spend_detail: detail,
                 ..AuditLine::from_record(&audit_id, AuditEvent::Refused, peer.uid, peer.pid, record)
             });
             Response::error(kind, reason)
@@ -725,6 +978,30 @@ impl Service {
                 return refuse(&record, reason, ErrorKind::PermissionDenied)
             }
         }
+
+        // §13.14, and the cheapest thing that can refuse.
+        //
+        // BEFORE `bind`, for the reason every framework check is: the provider
+        // does not touch the caller's machine for a request that is not going
+        // to happen. And before the §13.8 approval, so an over-budget request
+        // cannot spend the owner's one-shot approval on an operation that was
+        // never going to run — they approved a deployment, not an attempt.
+        //
+        // The reservation is held until this function returns, which is after
+        // the trail line is written. See `Service::reservations`.
+        let _reserved = match self.check_budget(peer, &project, &owner, &record.provider, op, now) {
+            Ok(budgeted) => {
+                *spend.borrow_mut() = (budgeted.word, budgeted.detail);
+                budgeted.reserved
+            }
+            Err((word, reason)) => {
+                // The verdict reaches the line through the cell `refuse`
+                // reads, because the line is the whole of "usage visible in
+                // the task audit" for a request that did NOT run.
+                *spend.borrow_mut() = (word, Some(reason.clone()));
+                return refuse(&record, reason, ErrorKind::PermissionDenied);
+            }
+        };
 
         // Everything the framework can check has passed, so the provider may
         // now touch the caller's machine. For git that is a `git remote
@@ -911,10 +1188,13 @@ impl Service {
                 // presented is the one refusal that has a §13.4 outcome to
                 // report, and reporting it only on the successful path would
                 // leave the trail silent about exactly the runs worth reading.
+                let (word, detail) = spend.borrow().clone();
                 self.record(AuditLine {
                     reason: Some(reason.clone()),
                     narrowing: narrowing.clone(),
                     narrowing_detail: narrowing_detail.clone(),
+                    spend: word,
+                    spend_detail: detail,
                     ..AuditLine::from_record(
                         &audit_id,
                         AuditEvent::Refused,
@@ -941,12 +1221,15 @@ impl Service {
             ],
         );
 
+        let (spend_word, spend_detail) = spend.borrow().clone();
         self.record(AuditLine {
             endpoint: Some(endpoint.clone()),
             exit_code: Some(out.code),
             detail: bound.detail.clone(),
             narrowing: narrowing.clone(),
             narrowing_detail: narrowing_detail.clone(),
+            spend: spend_word,
+            spend_detail,
             ..AuditLine::from_record(&audit_id, AuditEvent::Used, peer.uid, peer.pid, &record)
         });
 
