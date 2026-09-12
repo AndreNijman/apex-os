@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  chaos-loop — P1-062 criterion 2: "boot/update/install/rollback loops run
+#  continuously in VMs."
+#
+#  Usage:
+#    chaos-loop --out DIR [--iterations N] [--seed N] [--minutes N]
+#               [--cases-dir DIR] [CASE ...]
+#    chaos-loop --out DIR --resume
+#    chaos-loop --out DIR --report
+#
+#  ═══ WHY "CONTINUOUSLY" IS SPELT "BOUNDED AND RESUMABLE" ═══
+#
+#  The word in the criterion is continuously, and taken literally it means a
+#  process that never returns. There is nowhere here to run one. This laptop is
+#  the only machine — katana is off limits — and GitHub CI is a runner with a
+#  wall clock and a six-hour ceiling; a `while true` on either is not continuous
+#  operation, it is a job that gets killed and loses its evidence.
+#
+#  So a run is BOUNDED and a series is RESUMABLE, and the cursor is what makes
+#  the second word true. Each invocation does as many iterations as it was
+#  given or as its time budget allows, writes what it learned after EVERY
+#  iteration rather than at the end, and the next invocation picks up the count,
+#  the seed sequence and the tallies from `$OUT/cursor`. Continuity is then a
+#  property of the series and not of any one process, and killing one costs at
+#  most the iteration in flight.
+#
+#  That is not a compromise reached to fit the runner. It is the shape this
+#  program has already had to learn twice: a usage limit destroyed a
+#  roadmap agent's work because it batched its evidence to the end, and the WIP
+#  snapshot timer exists because of it. A loop that reports only when it
+#  finishes has the same defect, and a chaos loop is by construction the thing
+#  most likely to be interrupted.
+#
+#  ═══ WHAT AN ITERATION IS ═══
+#
+#  One full `run-chaos` over the requested cases, at a seed derived from the
+#  series seed and the iteration number — so iteration 7 of a series is the same
+#  iteration 7 on any machine, and a failure found at iteration 41 can be
+#  reproduced without replaying the first 40.
+#
+#  Every iteration keeps its own complete bundle under `$OUT/iter-NNNN/`. They
+#  are not overwritten and not summarised away: a loop whose fiftieth iteration
+#  failed and whose diagnostics were the fiftieth iteration's is a loop that
+#  found something and threw away the evidence of everything leading to it.
+#
+#  ═══ THE VERDICT ═══
+#
+#  The same three states, aggregated, and with the same rule: a could-not-inject
+#  anywhere in the series fails the series. A loop that ran a thousand
+#  iterations of a case that never injected its fault has proven nothing at all,
+#  and the whole argument of P1-062 is that this must be impossible to report as
+#  a pass.
+#
+#  Exit codes match run-chaos: 0 every iteration green, 1 something failed or
+#  could not inject, 2 the harness itself is broken.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tests/chaos/lib.sh
+. "$HERE/lib.sh"
+
+OUT=""
+ITERATIONS=0
+MINUTES=0
+SEED=""
+CASES_DIR=""
+RESUME=0
+REPORT=0
+WANT=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --out)        OUT="$2"; shift 2 ;;
+        --iterations) ITERATIONS="$2"; shift 2 ;;
+        --minutes)    MINUTES="$2"; shift 2 ;;
+        --seed)       SEED="$2"; shift 2 ;;
+        --cases-dir)  CASES_DIR="$2"; shift 2 ;;
+        --resume)     RESUME=1; shift ;;
+        --report)     REPORT=1; shift ;;
+        --help|-h)    sed -n '2,60p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        --*)          chaos_die "unknown option $1" ;;
+        *)            WANT+=("$1"); shift ;;
+    esac
+done
+
+[[ -n "$OUT" ]] || chaos_die "--out DIR is required; a loop with nowhere to write its evidence is not a loop"
+mkdir -p "$OUT"
+CURSOR="$OUT/cursor"
+
+# ── the cursor ──────────────────────────────────────────────────────────────
+#
+# Plain `key=value`, read with a grep rather than sourced. Sourcing it would
+# make a corrupted cursor into arbitrary code, and the file this harness is
+# most likely to find torn is its own — `power-loss-during-update.sh` exists
+# because that is what happens to small records that get rewritten often.
+#
+# A cursor that will not parse is NOT treated as a fresh start. Starting over
+# silently is how a series that has already found a failure reports a clean
+# run: the failure is in iteration 12's bundle, the cursor that pointed at it
+# is gone, and iteration 1 passes. It is an error, and the bundles are right
+# there to reconstruct from.
+cursor_get() {
+    local key="$1" default="$2"
+    [[ -f "$CURSOR" ]] || { printf '%s' "$default"; return 0; }
+    local v
+    v="$(grep -m1 "^$key=" "$CURSOR" 2>/dev/null | cut -d= -f2- || true)"
+    printf '%s' "${v:-$default}"
+}
+
+cursor_write() {
+    local done_n="$1" surv="$2" fail="$3" cannot="$4" series_seed="$5" cases="$6"
+    # Written to a sibling and renamed. The cursor is rewritten after every
+    # iteration, so it is the file in this tree most exposed to being torn by a
+    # kill — and a torn cursor is a series that cannot say where it got to.
+    local tmp="$CURSOR.tmp.$$"
+    {
+        printf 'schema=1\n'
+        printf 'series_seed=%s\n' "$series_seed"
+        printf 'cases=%s\n' "$cases"
+        printf 'iterations_done=%s\n' "$done_n"
+        printf 'survived=%s\n' "$surv"
+        printf 'failed=%s\n' "$fail"
+        printf 'could_not_inject=%s\n' "$cannot"
+        printf 'updated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$tmp"
+    mv -f "$tmp" "$CURSOR"
+}
+
+if [[ -f "$CURSOR" ]] && ! grep -q '^schema=1$' "$CURSOR"; then
+    chaos_die "the cursor at $CURSOR is not one this build wrote. The iteration bundles under $OUT are intact; move the cursor aside deliberately rather than letting a fresh series report a clean run over a failure somebody already found."
+fi
+
+DONE="$(cursor_get iterations_done 0)"
+N_SURVIVED="$(cursor_get survived 0)"
+N_FAILED="$(cursor_get failed 0)"
+N_CANNOT="$(cursor_get could_not_inject 0)"
+
+# ── report only ─────────────────────────────────────────────────────────────
+if (( REPORT )); then
+    [[ -f "$CURSOR" ]] || chaos_die "no cursor at $CURSOR — nothing has run here"
+    printf '\n═══ chaos series at %s ═══\n' "$OUT"
+    sed 's/^/  /' "$CURSOR"
+    printf '\nper-iteration verdicts:\n'
+    for d in "$OUT"/iter-*/; do
+        [[ -d "$d" ]] || continue
+        printf '  %-12s ' "$(basename "$d")"
+        # One line per case, read out of the bundles rather than out of the
+        # cursor, so a cursor that disagrees with the evidence is visible.
+        for v in "$d"*/verdict.json; do
+            [[ -f "$v" ]] || continue
+            printf '%s=%s ' \
+                "$(sed -n 's/.*"case": "\([^"]*\)".*/\1/p' "$v")" \
+                "$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' "$v")"
+        done
+        printf '\n'
+    done
+    exit 0
+fi
+
+# ── the series seed and the case list ───────────────────────────────────────
+#
+# Both are pinned by the FIRST invocation and re-read on every later one. A
+# resume that quietly changed either would produce a series whose iterations
+# are not comparable with each other, which is the one property a loop has that
+# a single run does not.
+SERIES_SEED="$(cursor_get series_seed "")"
+CASES_RECORDED="$(cursor_get cases "")"
+
+if (( RESUME )) || [[ -n "$SERIES_SEED" ]]; then
+    [[ -n "$SERIES_SEED" ]] || chaos_die "--resume, but no cursor at $CURSOR to resume from"
+    if [[ -n "$SEED" && "$SEED" != "$SERIES_SEED" ]]; then
+        chaos_die "this series was started at seed $SERIES_SEED; --seed $SEED would make its iterations incomparable. Use a different --out."
+    fi
+    if (( ${#WANT[@]} )) && [[ "${WANT[*]}" != "$CASES_RECORDED" ]]; then
+        chaos_die "this series runs '$CASES_RECORDED'; asking for '${WANT[*]}' would change what the tallies mean. Use a different --out."
+    fi
+    (( ${#WANT[@]} )) || { [[ -n "$CASES_RECORDED" ]] && read -r -a WANT <<<"$CASES_RECORDED"; }
+else
+    SERIES_SEED="${SEED:-$(date +%s)}"
+fi
+CASES_STR="${WANT[*]:-}"
+
+# Default budget: one iteration. Explicit rather than infinite, because the
+# caller has to have decided how long this is allowed to take — an unbounded
+# default on a laptop is how somebody's afternoon disappears.
+(( ITERATIONS > 0 || MINUTES > 0 )) || ITERATIONS=1
+
+deadline=0
+(( MINUTES > 0 )) && deadline=$(( $(date +%s) + MINUTES * 60 ))
+
+chaos_log "chaos series at $OUT — seed $SERIES_SEED, ${DONE} iteration(s) already done"
+chaos_info "cases: ${CASES_STR:-<default set>}"
+(( ITERATIONS > 0 )) && chaos_info "this run: up to $ITERATIONS more iteration(s)"
+(( MINUTES > 0 ))    && chaos_info "this run: up to $MINUTES minute(s)"
+
+# ── the loop ────────────────────────────────────────────────────────────────
+ran=0
+worst=0
+while :; do
+    (( ITERATIONS > 0 && ran >= ITERATIONS )) && break
+    if (( deadline > 0 )) && (( $(date +%s) >= deadline )); then
+        chaos_info "time budget reached after $ran iteration(s) this run"
+        break
+    fi
+
+    n=$((DONE + 1))
+    dir="$(printf '%s/iter-%04d' "$OUT" "$n")"
+    # A seed derived from the series seed and the iteration NUMBER, so
+    # iteration 41 is iteration 41 on any machine and can be reproduced without
+    # replaying the forty before it.
+    iseed="$(chaos_seed_for_case "$SERIES_SEED" "iteration-$n")"
+
+    chaos_log "iteration $n (seed $iseed)"
+    rc=0
+    cases_arg=()
+    [[ -n "$CASES_DIR" ]] && cases_arg=(--cases-dir "$CASES_DIR")
+    "$HERE/run-chaos" --out "$dir" --seed "$iseed" "${cases_arg[@]}" "${WANT[@]}" \
+        > "$dir.log" 2>&1 || rc=$?
+    # The driver's own exit 2 means the harness is broken, not the machine.
+    # Stopping the series there is the point: every later iteration would
+    # report the same thing and bury the reason.
+    if (( rc == 2 )); then
+        tail -20 "$dir.log" >&2
+        chaos_die "run-chaos reports the harness itself is broken at iteration $n; the series stops here"
+    fi
+
+    s=0; f=0; c=0
+    for v in "$dir"/*/verdict.json; do
+        [[ -f "$v" ]] || continue
+        case "$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' "$v")" in
+            survived)         s=$((s + 1)) ;;
+            failed)           f=$((f + 1)) ;;
+            could-not-inject) c=$((c + 1)) ;;
+        esac
+    done
+    # An iteration that produced NO verdict at all is not a quiet zero. It is
+    # the loop equivalent of a case that injected nothing, and it is counted as
+    # one so the series cannot come out green having measured nothing.
+    if (( s + f + c == 0 )); then
+        c=1
+        chaos_info "iteration $n produced no verdict at all — counted as could-not-inject"
+    fi
+
+    DONE=$n
+    N_SURVIVED=$((N_SURVIVED + s))
+    N_FAILED=$((N_FAILED + f))
+    N_CANNOT=$((N_CANNOT + c))
+    # Written NOW, not at the end of the series. This is the whole point of the
+    # cursor: a kill here costs the iteration in flight and nothing else.
+    cursor_write "$DONE" "$N_SURVIVED" "$N_FAILED" "$N_CANNOT" "$SERIES_SEED" "$CASES_STR"
+
+    chaos_info "iteration $n: $s survived, $f failed, $c could not inject (rc=$rc)"
+    (( rc > worst )) && worst=$rc
+    ran=$((ran + 1))
+done
+
+printf '\n═══ chaos series summary ═══\n'
+printf 'directory      : %s\n' "$OUT"
+printf 'series seed    : %s\n' "$SERIES_SEED"
+printf 'cases          : %s\n' "${CASES_STR:-<default set>}"
+printf 'iterations     : %d total (%d this run)\n' "$DONE" "$ran"
+printf 'case verdicts  : %d survived, %d failed, %d could not inject\n' \
+    "$N_SURVIVED" "$N_FAILED" "$N_CANNOT"
+printf 'resume with    : %s --out %s --resume --iterations N\n' "$0" "$OUT"
+
+if (( N_FAILED > 0 || N_CANNOT > 0 )); then
+    printf '\nA series is green only when EVERY iteration injected its faults and\n'
+    printf 'survived them. The bundles under %s/iter-*/ are kept in full,\n' "$OUT"
+    printf 'including the iterations that passed — a loop that found something at\n'
+    printf 'iteration 50 and kept only iteration 50 has thrown away the evidence\n'
+    printf 'of everything that led to it.\n'
+    exit 1
+fi
+exit 0

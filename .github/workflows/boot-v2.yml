@@ -49,6 +49,10 @@ on:
         description: "Scenarios to run (blank = all VM scenarios)"
         type: string
         default: ""
+      chaos_iterations:
+        description: "P1-062 chaos series: boot/rollback iterations to run (0 = none)"
+        type: string
+        default: "0"
 
 permissions:
   contents: read
@@ -170,6 +174,66 @@ jobs:
             || { echo "FATAL: expected 'apex-good.efi apex-new+0-3.efi ', got '$entries'" >&2; exit 1; }
 
           echo "boot-v2: every guest booted or was refused as expected"
+
+      # ── P1-062 criterion 2: the boot/rollback loop ──────────────────────
+      #
+      # "Boot/update/install/rollback loops run continuously in VMs." This is
+      # where that can be true, because this is the job that already has the
+      # boot lab, OVMF and qemu — and nowhere else in this repository does.
+      #
+      # `tests/chaos/cases/reboot-loop.sh` is one iteration: a deployment
+      # staged with three boot attempts that nothing ever blesses, five real
+      # guest boots, and the assertion that the machine comes back on the
+      # previous deployment AND that the exhausted entry is still in the ESP
+      # afterwards so the rollback is legible. `chaos-loop` repeats it with a
+      # cursor, so a killed run costs the iteration in flight and nothing else.
+      #
+      # OPT-IN, AND DELIBERATELY SO. The default is 0 iterations and this step
+      # does nothing on a pull request. Making it periodic is one line — a
+      # `schedule:` trigger next to `workflow_dispatch` above — and that line
+      # is not being added on an agent's own judgement, because a cron is a
+      # recurring bill nobody asked for. Each iteration is roughly a minute
+      # with KVM and several without; the accel step above records which.
+      #
+      # `could-not-inject` fails the series with no opt-out, so a run where the
+      # lab is absent or no guest booted cannot come out green. That is the
+      # entire point of the unit.
+      - name: P1-062 chaos — bounded boot/rollback series
+        if: ${{ inputs.chaos_iterations != '' && inputs.chaos_iterations != '0' }}
+        env:
+          ITERATIONS: ${{ inputs.chaos_iterations }}
+        run: |
+          set -euo pipefail
+          # Numeric, checked here rather than interpolated into a command line:
+          # workflow_dispatch input is attacker-controlled for anyone who can
+          # dispatch, and this value reaches a loop bound.
+          case "$ITERATIONS" in
+            ''|*[!0-9]*) echo "::error::chaos_iterations must be a number"; exit 1 ;;
+          esac
+          CHAOS_BOOTLAB_IMAGE=localhost/apex-bootlab \
+            ./tests/chaos/chaos-loop \
+              --out "$RUNNER_TEMP/chaos-series" \
+              --iterations "$ITERATIONS" \
+              --seed "$GITHUB_RUN_ID" \
+              reboot-loop
+          ./tests/chaos/chaos-loop --out "$RUNNER_TEMP/chaos-series" --report
+
+      - name: Upload the chaos series
+        if: ${{ always() && inputs.chaos_iterations != '' && inputs.chaos_iterations != '0' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-boot-series
+          # Verdicts, cursor, env records and serial logs. NOT the disk images:
+          # they are 130 MB each and the ESP is reconstructible from the
+          # verdicts, which is what a reader needs.
+          path: |
+            ${{ runner.temp }}/chaos-series/cursor
+            ${{ runner.temp }}/chaos-series/iter-*/**/verdict.json
+            ${{ runner.temp }}/chaos-series/iter-*/**/observe.out
+            ${{ runner.temp }}/chaos-series/iter-*/env.txt
+            ${{ runner.temp }}/chaos-series/iter-*/**/root/lab/*.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload the serial logs
         if: always()

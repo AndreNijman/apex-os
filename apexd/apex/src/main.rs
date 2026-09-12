@@ -2730,14 +2730,48 @@ async fn cmd_doctor(json: bool) -> i32 {
     // can disagree. Everything except the metrics probe is a file read, and
     // the probe stays here because it is the one check that needs a socket.
     let mut checks = recover::doctor_checks(&v, running);
-    let metrics_up = TcpStream::connect_timeout(
+    // A refused connection and a connection nobody could attempt are different
+    // facts about this machine, and `.is_ok()` returned false for both — so
+    // the line a person read was the same sentence either way. That is this
+    // repository's "permission denied is not absence", one layer down: a
+    // machine whose networking is gone was told its metrics endpoint is not
+    // reachable, which is a claim about apexd made out of a syscall that never
+    // left the box.
+    //
+    // The boolean stays, and both remain a WARN, because neither state is a
+    // machine whose endpoint is reachable — `Check` has no third arm and
+    // inventing one here would be a judgement the other checks do not make
+    // (see `render_doctor`'s note on severity). What changes is the sentence,
+    // which is the part somebody acts on.
+    //
+    // tests/chaos/cases/network-loss.sh holds this, by running the same verb
+    // in three real network namespaces — loopback down, loopback up with
+    // nothing listening, and a listener bound — and asserting the first two do
+    // not read identically.
+    let metrics = TcpStream::connect_timeout(
         &"127.0.0.1:9723".parse::<SocketAddr>().unwrap(),
         Duration::from_millis(200),
-    )
-    .is_ok();
+    );
+    let (metrics_up, metrics_what) = match &metrics {
+        Ok(_) => (true, "metrics endpoint reachable on 127.0.0.1:9723".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => (
+            false,
+            "metrics endpoint on 127.0.0.1:9723 refused the connection — nothing \
+             is listening there, so apexd is not serving metrics"
+                .to_string(),
+        ),
+        Err(e) => (
+            false,
+            format!(
+                "metrics endpoint on 127.0.0.1:9723 could not be probed at all \
+                 ({e}) — this machine's networking did not answer, so whether \
+                 apexd is serving metrics is unknown"
+            ),
+        ),
+    };
     checks.push(recover::Check {
         ok: metrics_up,
-        what: "metrics endpoint reachable on 127.0.0.1:9723".to_string(),
+        what: metrics_what,
     });
 
     // §48: disk-health warnings reach the doctor. Only the rows with something
