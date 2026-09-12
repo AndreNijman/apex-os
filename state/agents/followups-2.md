@@ -41,4 +41,19 @@ together or not at all**.
 
 ## NEXT
 
-Nothing done yet. Item 1 first: it is the only one that is currently red.
+Worktree `/var/tmp/apex-work/wt-followups2`, branch `task/followups-r19`,
+pushed.
+
+**Item 1 is done** (commit 1). The file is `tests/test-secret-broker.sh`, not
+`test-apex-secret-broker.sh` -- the card above had the name wrong. Confirmed
+stale rather than product first: the build answers
+`cloudflare.dns.delete needs a 'type' option`, i.e. it knows the operation and
+is asking for its argument. Swapped the evil-id loop to
+`cloudflare.account.delete` (13.2 offers only `cloudflare.account.read`, so it
+is well-formed and undeclared -- the same substitute `service.rs` already uses)
+and added the arm the stale case stood in for: a name the vocabulary DOES hold
+is stopped by the grant, not by the vocabulary. **66 passed, 0 failed** (was
+64/1). Mutation: renaming the operation id to `cloudflare.dns.remove` took the
+new arm red by name; restored with `cp`.
+
+Item 3 next, then item 2.

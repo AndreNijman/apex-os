@@ -2397,7 +2397,7 @@ tasks:
 - id: P1-040
   title: Fix mixed-DPI shell scaling
   priority: P1
-  status: partial
+  status: done
   area: desktop
   depends_on: []
   acceptance:
@@ -2406,38 +2406,54 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Per-output scaling. THE NAMED ASSERTION IS DELIVERED AND PROVEN, and the item stays partial by design with the
-    remainder argued rather than deferred again. LANDED on apex-shell roadmap/v2.2 2026-09-12 as merge b195195
-    (430f773, 03829aa, 174709a). 'Two outputs at compositor scale 1 with different densities each get their own
-    size' now runs: on two headless outputs the suite builds the REAL production components exactly as shell.qml
-    does and reads laid-out geometry off the actual Rectangles rather than recomputing it - HEADLESS-1 at
-    3840x2160 resolves 1.5 and lays out a 600px card at radius 23, HEADLESS-2 at 1920x1080 resolves 1.0 and lays
-    out the same card at 400px radius 15 - and it asserts that the output count the runner asked for actually
-    ARRIVED, so a one-screen run cannot pass by comparing nothing. ThemeSet.qml is the geometry token table as a
-    function of one scale and Metrics.qml is now an INSTANCE of it, so every existing call site reads what it read
-    before while a second output gets its own set without a second copy of the arithmetic; colours deliberately
-    stay on Theme, because a palette belongs to the shell and not to a monitor. Counts: run-scaling-test 30/0 ->
-    53/0 mixed, 54/0 on an agreeing desk, 32/0 single-output; check-scale-tokens 8/0 -> 16/0; check-headless-
-    runners 25/0 unchanged; scaling-test.js 39/0. Six mutation pairs, restored with cp and sha256-verified: M1
-    43/5, M2 46/2, M3 39/5, M4 46/2, M5 28/1, M6 51/2. M3 is the by-content-lookup trap this repo has hit three
-    times - it renames the objectName the suite finds the card by, and it goes RED rather than vanishing, because
-    'exactly one card was found' is itself an assertion. M6 reds only on HEADLESS-2, whose own density wants 1.0
-    while the manual factor is 1.5, which is exactly why one output could never prove it. TWO DEFECTS FOUND THAT
-    WERE NOT IN THE BRIEF: check-scale-tokens.sh matched only the global spelling, so a file fell OUT of the guard
-    at the moment it was migrated - the guard this very item landed would have retired itself one file at a time,
-    silently - now fixed with its own self-test mutant; and tests/scaling-test.js was never in CI at all, despite
-    existing precisely because the QML suite needs a compositor CI does not have. Both scaling suites are CI steps
-    now. WHAT REMAINS AND WHY IT IS ITS OWN UNIT: the call-site count is the cheap part, since QtQuick's Screen
-    attached property resolves the right output per item with no plumbing (measured correct 1 ms after
-    construction, before first paint at 39-84 ms). Three things block bulk migration: TopBar writes its notch
-    widths into ShellState singleton fields that one bar per output would fight over last-writer-wins; the bar
-    height is the layout datum every other surface anchors to, so the bar and its whole notch subtree are one
-    indivisible step; and nine files read Theme from a QtObject root where Screen cannot attach. A staged four-
-    step design is on the agent card. Census on this tip is 2758 reads across 116 files; the earlier 831/82 figure
-    has no recorded method, so both are stated rather than one quietly replacing the other. SEPARATELY FOUND, PRE-
-    EXISTING: run-nav-geometry-test.sh fails 4270/16 at the 0.85 factor (the firewall pane at 560px lays out no
-    rows), reproduced identically on an untouched worktree at cd324ec, so it predates this branch - the smallest
-    bucket in the table and the one least likely to be seen on a developer's monitor.
+    Per-output scaling, FINISHED. Rounds one to three on apex-shell: merge b195195 (the named assertion), merge
+    207a045 (the migration - a45cca8, 7e4a015, 4584fca, 57111a0, f5787d3), and branch task/p1-040-scaling-finish
+    (a5f7671, 4ced067, 581c327, 6d5527c). WHAT IS TRUE NOW: ThemeSet.qml is the geometry token table as a function
+    of ONE scale and Metrics.qml is an INSTANCE of it - the reference output's - so the second copy of the
+    arithmetic this item was opened for no longer exists; 1042 of the 1046 scale-sensitive reads outside src/theme
+    are migrated across 99 files, every surface declaring its own set from the output it is drawn on (a window
+    from PanelWindow.screen, an Item from the QtQuick Screen attached property), and every PopupWindow from its
+    ANCHOR's screen, because a PopupWindow's own screen is measurably NOT the output it is anchored to - on the
+    harness the popup anchored to the 4K bar reports the 1080p monitor. Colours deliberately stay on Theme: a
+    palette belongs to the shell, not to a monitor. THE NAMED ASSERTION, on two headless outputs BOTH AT
+    COMPOSITOR SCALE 1: HEADLESS-1 3840x2160 resolves 1.5 - 60px bar, notches 270/450/287, a 600px card at radius
+    23 - and HEADLESS-2 1920x1080 resolves 1.0 - 40px bar, notches 180/300/213, the same card at 400px radius 15 -
+    read off the laid-out Rectangles rather than recomputed, with the runner asserting that the output count it
+    asked for actually ARRIVED, so a one-screen run cannot pass by comparing nothing. A SHARED PER-FACTOR REGISTRY
+    WAS BUILT AND DOES NOT WORK: a ThemeSet handed out by a singleton evaluates to undefined at the call site with
+    no TypeError and no ReferenceError (1641 "Unable to assign [undefined] to int"), bisected one variable at a
+    time - the only thing that changed the outcome was WHERE THE OBJECT IS CONSTRUCTED - reverted in 57111a0, with
+    the measurement written into src/theme/OutputScale.qml so the next person to have the idea gets the result
+    instead. It is guarded by a named runner and not only by that comment: ThemeSet.fs() mutated to return
+    undefined takes run-settings-pages-test.sh to "a settings page failed to build", which is the exact string a
+    rebuilt registry would trip. COUNTS: run-scaling-test 30/0 -> 88/0; check-scale-tokens 8/0 -> 49/0; check-
+    reduce-motion 11/1 -> 12/0; run-nav-geometry 4334/16 -> 4366/0; and the 19-suite regression sweep, re-run on a
+    fresh worktree at the MERGED tip so it grades the integration, matches the pre-migration baseline suite for
+    suite. THREE DEFECTS FOUND IN ROUND THREE, ALL FIXED. (1) The 16 nav-geometry failures that two cards and a
+    dispatch brief recorded as "all at the 0.85 factor, the 1366x768 bucket" are nothing of the kind:
+    NAV_GEOMETRY_VERBOSE=1 names them as ONE page - Firewall - at all four page scales and both pane widths, 8
+    points x 2 assertions. Every row on that page is behind a FirewallService condition, the service polls only
+    while a ServiceRef is held, and the page's own ref is active:onScreen, which a Loader in a test never set. So
+    it laid out no rows, and the suite correctly said it had measured nothing. The Loader now sets onScreen the
+    way Nexus.qml does and the apex stub answers `firewall status`/`firewall list` out of the payloads
+    tests/firewall-test.js captured from the real helper; systemctl is stubbed too, because it was not, and an
+    active service would have queried the developer's own system bus from inside a suite that claims to touch
+    nothing. (2) run-nav-geometry-test.sh stubbed wlr-randr on PATH and then set the output mode by CALLING wlr-
+    randr - it found the stub, so labwc kept its measured 1280x720 default while the runner printed "at
+    1920x1080". NAV_GEOMETRY_MODE has therefore never selected an output size under labwc and the live block has
+    only ever graded 720p. tests/lib/headless.sh has the same hole under THIRTEEN runners plus a comment asserting
+    it does not ("the default headless output is 1920x1080" - measured false); left alone deliberately and written
+    up as its own item. (3) QuickControl centred its panel on root.screen.height - the other monitor's height on a
+    mixed desk, 540px out - the POSITION half of the popup bug round two fixed the SIZE half of; it reads its
+    anchor's screen now and scaling-test asserts anchor.rect.y per output. NINE MUTATION PAIRS across the three
+    rounds, every restore a plain cp verified by an empty git status; the two that would otherwise have slipped
+    are M6 (the manual override, which reds only on the output whose own density disagrees with it) and M7 (the
+    anchor rect, which HEADLESS-2 still PASSES under, because a PopupWindow reports HEADLESS-2 whichever bar it is
+    anchored to). TWO THINGS LEFT, both named rather than hidden. PluginService.theme is 4 reads of one versioned
+    snapshot handed to plugin code across a trust boundary and declared stable across apiVersion 1.x: per-output
+    there is an apiVersion change, not a rename, and it is the written-out exception in check-scale-tokens'
+    closure rule. And the honest limit of all of this: it is two headless outputs, read off laid-out pixels.
+    Nobody has looked at a physical mixed-DPI desk.
 - id: P1-041
   title: Creator color-management stack
   priority: P1
@@ -3116,6 +3132,26 @@ tasks:
     and the step's condition names the schedule event explicitly because a scheduled run carries no inputs and a
     skipped step counts as success. GATES: clippy clean, cargo test 2888 passed 0 failed, chaos self-test 63/0,
     the harness itself 4 survived 0 failed 0 could not inject, shellcheck clean, project-layout 23/0.
+- id: P1-063
+  title: Lid-closed continuous operation
+  priority: P1
+  status: todo
+  area: power
+  depends_on:
+  - P0-015
+  acceptance:
+  - Closing the lid while work is live does not suspend the machine; agent sessions, their child processes and their
+    network connections keep running.
+  - An active VPN survives a lid close and stays connected for the whole closed period.
+  - Everything not needed for that work is powered down - display, keyboard backlight, Bluetooth, discretionary user
+    services - and the machine draws measurably less than it does with the lid open.
+  - With no live work, a lid close suspends exactly as it does today.
+  - Thermal and battery guards suspend or hibernate anyway rather than cook the machine in a bag or die mid-task, and
+    say which guard fired.
+  - The owner can pin keep-working on or off, and can see why the machine did what it did after reopening.
+  gates:
+  - tests
+  - stop_slop
 - id: P2-001
   title: Encrypted backup framework
   priority: P2
