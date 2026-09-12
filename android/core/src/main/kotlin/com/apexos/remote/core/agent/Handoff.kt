@@ -24,16 +24,28 @@ package com.apexos.remote.core.agent
  * through the JSON faithfully, so an escaped 0x1b arrives as one 0x1b byte — the
  * escaping is correct and is precisely why the hazard survives to the terminal.
  *
- * **Nothing here submits.** `apex agent input <id> <text>` takes a `--submit`
- * flag and the desktop's own push-to-talk does not pass it:
- * `PushToTalkService.qml` builds `["apex", "agent", "input", id, text]`, full
- * stop. The words land in the agent's input line and a human presses Enter.
- * That is not a limitation being inherited; it is the right rule and the
- * reason is [Voice]'s: speech recognition is wrong often enough that
- * submitting its guess is submitting an instruction nobody read.
- * [com.apexos.remote.core.agent.Reply.bytes] appends CR because a person who
- * typed a sentence and pressed Send meant to send it. A transcript is not that,
- * and it does not go through [Reply].
+ * **A machine's guess is read by a human before it becomes an instruction —
+ * and on a phone that happens BEFORE the send, not after.** The desktop stages:
+ * `apex agent input <id> <text>` takes a `--submit` flag and
+ * `PushToTalkService.qml` does not pass it, so the words wait on the agent's
+ * input line for the person sitting at that machine to press Enter. The rule is
+ * right and the placement is right *there*, because the reviewer is at the
+ * keyboard.
+ *
+ * The phone's user is not. Words staged on a machine nobody is standing at are
+ * words in a terminal nobody will look at until they walk back to it, and a
+ * push-to-talk whose result appears twenty minutes later at a desk is not the
+ * feature anybody asked for. So the review happens where the person is: a
+ * transcript and a clipboard are put into the reply box, on the phone, where
+ * they can be read and edited, and the Send button is the same one a typed
+ * reply uses.
+ *
+ * That is why [Voice.forReview] and [Clipboard.forReview] produce text for a
+ * text field and not bytes for a socket, and why there is exactly one path to
+ * the wire: [com.apexos.remote.core.agent.Reply.bytes], through
+ * `Reply.check`'s recycled-id guard. A second send path would be a second
+ * place for that guard to be forgotten, and forgetting it types somebody's
+ * sentence into a stranger's terminal.
  */
 object Handoff {
 
@@ -55,23 +67,35 @@ object Handoff {
      *    computer looks away from it; a route re-resolved at delivery would
      *    send the words wherever the phone had drifted to.
      *
-     * And one is inherited with its reason examined rather than copied:
+     * ## This app does not hold the microphone, and that is the design
      *
-     * 3. **[MAX_MS] bounds an open microphone.** The desktop needs the cap
-     *    because push-to-talk there is a *toggle* — niri fires nothing on key
-     *    release, so hold-to-talk is unimplementable on one of the three
-     *    supported compositors and one semantic everywhere had to be the
-     *    toggle. **That reasoning does not transfer.** A touch surface reports
-     *    a lift, so this app can hold-to-talk and the microphone shuts when the
-     *    finger leaves. The cap is kept anyway, at the same ninety seconds,
-     *    because a lift that is never delivered — the gesture cancelled by a
-     *    system dialog, the app backgrounded mid-word — is exactly the failure
-     *    the cap was written for, and because two clients whose microphones
-     *    stop at different times is a difference nobody can hold in their head.
+     * Speech reaches it through `RecognizerIntent.ACTION_RECOGNIZE_SPEECH`:
+     * the system's own recogniser opens, shows the system's own microphone
+     * indicator, and hands back text. **`RECORD_AUDIO` is not in the
+     * manifest** and no audio ever enters this process. That is the same rule
+     * P1-059's fourth criterion applies to the photo library, applied to the
+     * microphone — take the Android-mediated selection, never the blanket
+     * permission — and it is worth more here than convenience, because this is
+     * the app that shows which machine is about to run something as root.
      *
-     * This reducer is agnostic about which gesture produced [stop]: a second
-     * tap and a finger lift are the same event. What it is not agnostic about
-     * is that something must have produced it.
+     * The desktop's third rule is therefore inherited with its reason changed
+     * rather than copied. `pushtotalk.js` needs [MAX_MS] because push-to-talk
+     * there is a *toggle*: niri fires nothing on key release, so hold-to-talk
+     * is unimplementable on one of its three compositors and one semantic
+     * everywhere had to be the toggle, and a toggle's failure is a microphone
+     * left open. This app cannot leave a microphone open — it never had one.
+     *
+     * The cap is kept at the same ninety seconds anyway, because the failure it
+     * prevents arrives here by a different road: a result that never comes.
+     * The recogniser is another process, and another process can be killed,
+     * swiped away, or replaced while this app is in the background. Without the
+     * cap that leaves push-to-talk in [Phase.RECORDING] with a destination held
+     * and no event that will ever leave it, which reads to the user as a mic
+     * button that has stopped working. [expired] is what unsticks it.
+     *
+     * This reducer is agnostic about what produced [stop] — a returning
+     * activity result, a second tap, the cap — and is not agnostic about
+     * something having produced it.
      */
     object Voice {
 
@@ -121,85 +145,79 @@ object Handoff {
         )
 
         /**
-         * Why the microphone did not open.
+         * The one refusal that is about this phone rather than about the
+         * session.
          *
-         * Each is a different answer, and a screen that collapsed them into
-         * "push-to-talk did nothing" would be the report this exists to avoid.
+         * Everything else push-to-talk can refuse is something
+         * [com.apexos.remote.core.agent.Reply.check] already decides, and
+         * [route] defers to it rather than keeping a second vocabulary for the
+         * same facts. Two lists of reasons a message cannot be delivered is how
+         * one of them ends up saying something the other does not.
          */
         enum class Refusal(val message: String) {
-            /** Nothing is running on this machine to talk to. */
-            NO_SESSIONS(
-                "There is no agent running on this machine to talk to. Start one first.",
-            ),
-
             /**
-             * The user pinned a target and it has gone.
+             * Nothing on this phone answers `ACTION_RECOGNIZE_SPEECH`.
              *
-             * Deliberately not a fall-through to something else that happens to
-             * be running: they named a destination. `pushtotalk.js` refuses the
-             * same case for the same reason.
+             * The only device-side refusal there is, because this app asks for
+             * no microphone permission and so has none to be denied. A phone
+             * with no recogniser installed — or one whose recogniser has been
+             * disabled — is told that, not sent to a permission screen where it
+             * would find nothing.
+             *
+             * **Raised from a thrown `ActivityNotFoundException`, never from a
+             * `resolveActivity` that answered null.** On API 30 and later,
+             * package visibility makes `resolveActivity` return null for an
+             * intent this app has not declared a `<queries>` entry for — so a
+             * pre-check would report "no recogniser" on a phone that has one,
+             * which is refusal and absence confused in the direction that makes
+             * a working feature look broken. The manifest declares the
+             * `<queries>` entry as well, and `ManifestTest` asserts it.
              */
-            PINNED_GONE(
-                "The agent you chose to talk to is no longer running. Pick another one.",
-            ),
-
-            /** Several are running and none was chosen. */
-            AMBIGUOUS(
-                "Several agents are running. Choose the one to talk to — push-to-talk will " +
-                    "not guess which of them should hear this.",
-            ),
-
-            /** The microphone permission has not been granted. */
-            NO_MICROPHONE(
-                "APEX Remote has not been given the microphone. Grant it in Android's " +
-                    "settings, or type instead.",
-            ),
-
-            /** No speech recogniser on this device. */
             NO_RECOGNISER(
-                "This phone has no speech recognition available offline or otherwise, so " +
-                    "there is nothing to turn speech into text. Type instead.",
+                "This phone has no speech recognition installed, so there is nothing to turn " +
+                    "speech into text. Type instead.",
             ),
         }
 
-        /** A target that was chosen, or why none was. */
+        /** A destination, or the sentence explaining why there is none. */
         data class Route(
             val target: Reply.Target?,
+            /** What the user is told they are talking to. Display only. */
             val label: String,
-            val refusal: Refusal?,
+            /** Why not, ready to show. Null when [target] is set. */
+            val why: String?,
         )
 
         /**
          * Which agent the words would go to, resolved **before** anything opens
-         * the microphone.
+         * the recogniser.
          *
-         * @param machine the device id the phone is connected to now.
-         * @param live the sessions from the most recent `list`.
-         * @param pinned a session id the user chose, or null.
+         * The destination is the session on screen, which is what "target the
+         * selected agent" means in an app whose Session screen *is* the
+         * selection. There is deliberately no picker and no fallback: the
+         * desktop routes to "the active project or the focused agent session"
+         * because a compositor knows what is focused, and a phone showing one
+         * session already knows, so a second rule guessing between several
+         * would be a rule with nothing to decide.
          *
-         * The order is the desktop's: a pinned target outranks everything,
-         * because it is a choice and the alternative is a guess. With nothing
-         * pinned, exactly one running agent is unambiguous and more than one is
-         * not — this app has no notion of "focused", so where the desktop falls
-         * back to the focused session it refuses instead. Guessing would be the
-         * worse failure: these words become an instruction.
+         * Every refusal comes from [Reply.check], not from a vocabulary of its
+         * own — the session pruned, the id recycled, the agent exited or
+         * paused. That is the same guard a typed reply passes, applied one step
+         * earlier so the recogniser never opens for a session that has gone.
          */
         fun route(
             machine: String,
+            session: AgentSession,
             live: List<AgentSession>,
-            pinned: Int? = null,
         ): Route {
-            val running = live.filter { !it.isTerminal }
-            if (pinned != null) {
-                val found = running.firstOrNull { it.id == pinned }
-                    ?: return Route(null, "", Refusal.PINNED_GONE)
-                return Route(found.toTarget(machine), found.routeLabel, null)
-            }
-            return when (running.size) {
-                0 -> Route(null, "", Refusal.NO_SESSIONS)
-                1 -> running[0].let { Route(it.toTarget(machine), it.routeLabel, null) }
-                else -> Route(null, "", Refusal.AMBIGUOUS)
-            }
+            // `started` is on the identity and the id alone is not: the daemon
+            // reuses a session number after a prune (`registry.rs:441`), so a
+            // route that carried only the number could deliver a dictated
+            // sentence into a stranger's terminal. Same three values
+            // [Reply.Target] carries for a typed reply, for the same reason.
+            val target = Reply.Target(machine, session.id, session.started)
+            Reply.check(target, machine, live)?.let { return Route(null, "", it.message) }
+            return Route(target, session.routeLabel, null)
         }
 
         /**
@@ -214,8 +232,10 @@ object Handoff {
             // Not interruptible, and a second press while words are in flight
             // must not start a new recording on top of them.
             if (state.phase == Phase.TRANSCRIBING || state.phase == Phase.DELIVERING) return state
-            val target = route.target
-                ?: return State(phase = Phase.ERROR, error = (route.refusal ?: Refusal.NO_SESSIONS).message)
+            val target = route.target ?: return State(
+                phase = Phase.ERROR,
+                error = route.why ?: "There is nothing on screen to talk to.",
+            )
             return State(
                 phase = Phase.RECORDING,
                 target = target,
@@ -287,22 +307,51 @@ object Handoff {
         fun micOpen(state: State): Boolean = state.phase == Phase.RECORDING
 
         /**
-         * What goes on the wire for a finished transcript.
+         * Whether a returning transcript belongs to what is on screen now.
          *
-         * **No terminator.** This is the one place the difference between this
-         * and [Reply.bytes] is decided, and it is deliberate: `apex agent
-         * input` takes `--submit` and the desktop's push-to-talk does not pass
-         * it. A transcript is a machine's guess at what a person said, and a
-         * guess that submits itself is an instruction nobody read. It is staged
-         * in the agent's input line, visible, and a human presses Enter — the
-         * same rule `apex_agent_core::inject` applies to a handed-over file,
-         * for the same reason.
+         * The frozen target, surviving the move of the review step onto the
+         * phone. The recogniser is **another activity**: this one is stopped
+         * while it runs, and what comes back arrives at whatever the user has
+         * since navigated to. Filling the reply box without this check would
+         * put one agent's dictated answer into another agent's box, where the
+         * person would read it as their own words and press Send.
          *
-         * The trailing space matters and is not padding: the words are staged
-         * where a person will keep typing, and a caret jammed against the last
-         * word is the difference between adding a clause and editing one.
+         * Compares all three values, not the id: ids are reused after a prune,
+         * so a transcript that returns to the same NUMBER on a different
+         * session must be refused too.
+         *
+         * @param onScreen the target the reply box would send to now, or null
+         *   when nothing is on screen to send to.
          */
-        fun payload(text: String): String = text.trim() + " "
+        fun landsOn(state: State, onScreen: Reply.Target?): Boolean =
+            state.target != null && state.target == onScreen
+
+        /**
+         * Shown when it does not.
+         *
+         * Says the words were kept out rather than that something failed: the
+         * transcript is discarded, and a person who has just spoken a sentence
+         * needs to know it is gone rather than wonder where it went.
+         */
+        const val LANDED_ELSEWHERE: String =
+            "That was dictated for a different agent, so it has not been put in this box. " +
+                "Go back to that session and say it again."
+
+        /**
+         * What a finished transcript becomes in the reply box.
+         *
+         * Text for a text field, never bytes for a socket. A transcript is a
+         * machine's guess at what a person said, and this is the step where a
+         * person reads the guess — so it carries **no terminator**, because a
+         * string that arrived in an editable box already submits nothing.
+         * Pressing Send is what submits, and Send goes through [Reply.bytes]
+         * and `Reply.check` like every other reply.
+         *
+         * The trailing space is not padding. The words land where somebody will
+         * keep typing, and a caret jammed against the last word is the
+         * difference between adding a clause and editing one.
+         */
+        fun forReview(text: String): String = text.trim() + " "
     }
 
     // ── Clipboard ───────────────────────────────────────────────────────────
@@ -342,10 +391,26 @@ object Handoff {
      * DECSET 2004, because the daemon *is* the terminal and knows. `input`
      * brackets nothing, and a phone has no way to learn whether the mode is on.
      *
-     * So a paste is classified before it is sent and the user is told what will
-     * happen. Nothing is silently stripped: text that came off a clipboard is
-     * text somebody chose, and a send that quietly delivered something else
-     * would be worse than one that refused.
+     * ## [inspect] runs on the BOX, not on the clipboard
+     *
+     * This is the placement that matters and the first attempt got it wrong.
+     * A rule that only ran when the user tapped a *Send clipboard* button
+     * would be bypassed by the ordinary way anybody pastes: long-press the
+     * reply field, tap Paste. The IME writes straight into the text field,
+     * no code of this app's runs, and the three-line stack trace goes to
+     * [Reply.bytes] — which trims the ends, adds CR, and submits at the first
+     * interior newline with the remaining two lines typed into whatever the
+     * agent asks next.
+     *
+     * So [inspect] is a gate on **the send**, applied to whatever is in the box
+     * however it got there — typed, dictated, pasted by the keyboard, or put
+     * there by this app's own button. The button is a convenience over a rule
+     * the send applies anyway, which is the only arrangement in which the rule
+     * cannot be walked around.
+     *
+     * Nothing is silently stripped. Text somebody chose to paste is text they
+     * chose; a send that quietly delivered something else would be worse than
+     * one that stopped and asked.
      */
     object Clipboard {
 
@@ -384,7 +449,12 @@ object Handoff {
          */
         const val MAX_CHARS: Int = 16_384
 
-        /** Classify a clipboard without sending it. */
+        /**
+         * Classify what is about to be typed, without typing it.
+         *
+         * Called on the reply box's contents before every send — see the note
+         * above on why it is not called on the clipboard.
+         */
         fun inspect(text: String): Shape {
             val submits = text.dropLast(1).any { it == '\n' || it == '\r' }
             val control = text
@@ -435,13 +505,14 @@ object Handoff {
         }
 
         /**
-         * The bytes for a clipboard send.
+         * Reduce what is in the box to what the chosen [Choice] would send.
          *
-         * Never terminated, for [Voice.payload]'s reason and one more: the
-         * content already contains whatever line breaks the user copied, so
-         * appending another would submit a paste the user was still looking at.
+         * Applied so that what the person reads in the box is exactly what Send
+         * will deliver. A reduction applied at send time instead would show
+         * them one thing and send another, which is the failure mode this whole
+         * section exists to avoid.
          */
-        fun payload(text: String, choice: Choice): String {
+        fun forReview(text: String, choice: Choice): String {
             val clipped = text.take(MAX_CHARS)
             return when (choice) {
                 Choice.EVERYTHING -> clipped
@@ -534,10 +605,6 @@ object Handoff {
         )
     }
 }
-
-/** The three values that make a session itself, for [Reply.check]. */
-private fun AgentSession.toTarget(machine: String): Reply.Target =
-    Reply.Target(machine = machine, session = id, started = started)
 
 /** What the user is told they are about to talk to. */
 private val AgentSession.routeLabel: String
