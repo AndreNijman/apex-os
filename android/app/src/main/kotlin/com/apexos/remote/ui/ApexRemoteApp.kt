@@ -25,6 +25,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.apexos.remote.ui.agent.AgentCenterScreen
+import com.apexos.remote.ui.agent.HelpScreen
 import com.apexos.remote.ui.agent.ApprovalsScreen
 import com.apexos.remote.ui.agent.SessionScreen
 import com.apexos.remote.ui.agent.WorktreesScreen
@@ -62,6 +63,9 @@ object Destinations {
 
     /** Privileged operations waiting at the machine, and standing grants. */
     const val APPROVALS = "approvals"
+
+    /** The guide (P1-060), whose words live in `:core`. */
+    const val HELP = "help"
 }
 
 @Composable
@@ -175,6 +179,7 @@ fun ApexRemoteApp(
                     onStart = { navigation.navigate(Destinations.START) },
                     onProjects = { navigation.navigate(Destinations.WORKTREES) },
                     onApprovals = { navigation.navigate(Destinations.APPROVALS) },
+                    onHelp = { navigation.navigate(Destinations.HELP) },
                     pendingApprovals = state.agents.approvals.pending.size,
                     notificationsEnabled = state.notificationsEnabled,
                     notificationsUnasked = state.notificationsUnasked,
@@ -270,6 +275,10 @@ fun ApexRemoteApp(
                     onRevokeSystemGrant = { viewModel.revokeSystemGrant(it) },
                     onBack = { navigation.popBackStack() },
                 )
+            }
+
+            composable(Destinations.HELP) {
+                HelpScreen(onBack = { navigation.popBackStack() })
             }
 
             composable(Destinations.START) {
