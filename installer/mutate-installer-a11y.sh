@@ -173,6 +173,25 @@ mutate B8 "$SUITE_F" \
     'xdotool key --window "$wid" --clearmodifiers shift' \
     "pressing it with the keyboard alone opens the next page"
 
+# B9 — the safety property on the last screen before an irreversible erase.
+#      The destructive button is built insensitive and only the ERASE field's
+#      changed handler turns it on; make it sensitive from the start and a
+#      keyboard user can land on it without having confirmed anything. The
+#      audit cannot see this — the button is named either way — and neither can
+#      a ring walk that only counts stops.
+mutate B9 "$GUI" \
+    'go = self.btn("Erase and install", "apex-destroy", lambda *_: self.begin(), False)' \
+    'go = self.btn("Erase and install", "apex-destroy", lambda *_: self.begin(), True)' \
+    "the erase button is out of reach until ERASE is typed"
+
+# B10 — the per-page ring walk's own vacuity floor. Press a key that moves
+#       nothing and every stop the walk records is the same control, which is
+#       exactly what a focus trap looks like from the outside.
+mutate B10 "$SUITE_F" \
+    'xdotool key --window "$wid" --clearmodifiers Tab >/dev/null 2>&1' \
+    'xdotool key --window "$wid" --clearmodifiers shift >/dev/null 2>&1' \
+    "Tab really moves focus around it"
+
 echo
 printf 'mutants applied=%d, failed-to-apply=%d, caught=%d, SURVIVED=%d\n' \
     "$applied" "$noapply" "$caught" "$survived"
