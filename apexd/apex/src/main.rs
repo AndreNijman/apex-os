@@ -6,6 +6,7 @@
 
 mod agent;
 mod ai;
+mod backup;
 mod blueprint;
 mod channel;
 mod boot;
@@ -531,6 +532,17 @@ enum Cmd {
     Cloudflare {
         #[command(subcommand)]
         cmd: cloudflare::CloudflareCmd,
+    },
+
+    /// Encrypted backups: local, NAS or an R2 bucket through the broker.
+    ///
+    /// A snapshot is sealed to a public key, so taking one needs no privilege
+    /// and no secret. Only the private half opens one, and it is root-owned —
+    /// which is what stops anything running as you from reading what your
+    /// backups hold.
+    Backup {
+        #[command(subcommand)]
+        cmd: backup::BackupCmd,
     },
 
     /// The secret service: let an agent USE a credential without holding it.
@@ -1345,6 +1357,7 @@ async fn main() {
         Cmd::Task(args) => task::run(args),
         Cmd::Request { cmd } => request::main(cmd),
         Cmd::Cloudflare { cmd } => cloudflare::main(cmd),
+        Cmd::Backup { cmd } => backup::main(cmd),
         Cmd::Secret { cmd } => secret::main(cmd),
         Cmd::Mcp { cmd } => mcp::main(cmd),
         Cmd::GitShim { args } => gitshim::main(args),

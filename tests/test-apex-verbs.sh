@@ -55,7 +55,7 @@ VERBS="
 status tier profile battery fan game mode workload perf gaming
 fingerprint pin rollback update shell metrics doctor changelog
 install remove resolve search repo pkg env devices firewall remote
-agent project request secret mcp skill provenance
+agent project request secret mcp skill provenance backup
 blueprint apply sync plugin cloudflare
 ai host build send open
 task recover disposable boot

@@ -738,6 +738,16 @@ pub enum ProjectCmd {
     },
     /// Stop tracking a project. The checkout is never touched.
     Forget { slug: String },
+    /// §36's `[identity.*]`: which account this project may act as.
+    ///
+    /// Prints all four sections whether the project binds them or not, and —
+    /// the part that matters — whether anything in this build actually checks
+    /// each one. A report that listed a binding without saying it is
+    /// unenforced would tell you an ssh host group protects something.
+    Identity {
+        #[arg(long)]
+        json: bool,
+    },
     /// The capsule (§8) this project's work belongs in.
     ///
     /// With no argument it reports the binding, and suggests an image alias
@@ -3309,6 +3319,60 @@ fn confirm() -> Result<bool> {
 
 // ── project verbs ───────────────────────────────────────────────────────────
 
+/// `apex project identity` — §36, P2-013.
+///
+/// Read as the invoking account against its own project, so the answer is the
+/// one `apex-secretd` would get: the same `ProjectConfig` reader, the same
+/// `O_NOFOLLOW` walk, the same owner check. A file that cannot be read is an
+/// error here too, and never "this project binds nothing".
+fn project_identity(json: bool) -> Result<i32> {
+    use apex_secret_core::identity::Identities;
+
+    let root = current_project()?;
+    let uid = unsafe { libc::getuid() };
+    let name = std::env::var("USER").unwrap_or_else(|_| format!("uid {uid}"));
+    let identities = Identities::read_or_unbound(std::path::Path::new(&root.root), uid, &name)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let report = identities.report();
+
+    if json {
+        let rows: Vec<serde_json::Value> = report
+            .values()
+            .map(|bound| {
+                serde_json::json!({
+                    "identity": bound.kind.as_str(),
+                    "binds": bound.binds,
+                    "enforced": bound.enforced,
+                    "enforcedBy": bound.enforced_by,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({ "project": root.root, "identities": rows })
+        );
+        return Ok(0);
+    }
+
+    println!("{}\n", root.root);
+    for bound in report.values() {
+        match &bound.binds {
+            Some(binds) => println!(
+                "  {:<11} {binds}{}",
+                bound.kind.as_str(),
+                if bound.enforced {
+                    ""
+                } else {
+                    "   (NOT ENFORCED)"
+                }
+            ),
+            None => println!("  {:<11} not bound", bound.kind.as_str()),
+        }
+        println!("              checked by: {}", bound.enforced_by);
+    }
+    Ok(0)
+}
+
 pub fn project_cmd(cmd: ProjectCmd) -> i32 {
     let result = match cmd {
         ProjectCmd::List { json } => project_list(json),
@@ -3322,6 +3386,7 @@ pub fn project_cmd(cmd: ProjectCmd) -> i32 {
                 0
             })
         }
+        ProjectCmd::Identity { json } => project_identity(json),
         ProjectCmd::Switch { name } => project_switch(name),
         ProjectCmd::Env { name, clear } => project_env(name, clear),
         ProjectCmd::Layout { cmd } => match cmd {

