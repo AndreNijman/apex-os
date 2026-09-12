@@ -16,8 +16,9 @@
 #  every mutate AND every restore, because a previous round of this unit spent a
 #  whole run producing verdicts against a tree that had been silently corrupted.
 #
-#  SLOW: every mutant starts five GUI processes on a private Xvfb. Budget a few
-#  minutes each.
+#  SLOW: every mutant starts SIX GUI processes on a private Xvfb -- five audited
+#  pages plus the wifi page again with a stubbed scanner. Budget a few minutes
+#  each.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
@@ -114,14 +115,16 @@ mutate B1 "$GUI" \
 #      in the i18n round. The name check is the assertion that actually carries
 #      this mutant, so it is the one named.
 #
-#      REQUIRES a Wi-Fi adapter on the machine running it. Without one the
-#      installer builds its no-adapter page, the field does not exist, and the
-#      suite SKIPs that assertion -- so this mutant would report SURVIVED for a
-#      reason that has nothing to do with the code.
+#      This used to REQUIRE a Wi-Fi adapter on the machine running it: without
+#      one the installer built its no-adapter page, the field did not exist, the
+#      suite SKIPped, and the mutant reported SURVIVED for a reason that had
+#      nothing to do with the code. `ring_wifi` builds the adapter shape from a
+#      stubbed scanner on any machine, so the assertion named here is that one
+#      and the caveat is gone.
 mutate B2 "$GUI" \
     'a11y(self.wifi_pw, "Network password")' \
     'pass  # a11y(self.wifi_pw, "Network password")' \
-    "the Wi-Fi password field announces itself"
+    "the 'Network password' field announces itself"
 
 # B3 — a Secure Boot enrolment password. These two have no visible caption at
 #      all, so the accessible name is their ONLY label.
@@ -191,6 +194,50 @@ mutate B10 "$SUITE_F" \
     'xdotool key --window "$wid" --clearmodifiers Tab >/dev/null 2>&1' \
     'xdotool key --window "$wid" --clearmodifiers shift >/dev/null 2>&1' \
     "Tab really moves focus around it"
+
+# ── the wifi page's Tab ring (round 23) ─────────────────────────────────────
+# Every one of these four is only exercisable because the scan is stubbed: on a
+# machine with no adapter the page they live on does not exist.
+
+# B11 — the defect the ring walk found. Every network in the list was a Tab stop
+#       announcing NOTHING: the node that takes the focus is the GtkListBoxRow
+#       GTK creates around a plain Gtk.Box, and the SSID label lives inside it.
+#       Invisible to the page audit, which does not consider `list item`
+#       interactive, and invisible to any grep, because the name IS in the tree.
+mutate B11 "$GUI" \
+    '                        a11y(row, n["ssid"],' \
+    '                        pass  # a11y(row, n["ssid"],' \
+    "every network in the list announces its name"
+
+# B12 — the signal bars go back into the accessibility tree, where a reader
+#       spells them out one block character at a time in front of the network's
+#       name. Nothing about names or Tab stops changes; only the glyph check
+#       can see this.
+mutate B12 "$GUI" \
+    '                        r.append(lbl(bars, "apex-accent apex-mono", wrap=False,
+                                     pres=True))' \
+    '                        r.append(lbl(bars, "apex-accent apex-mono", wrap=False))' \
+    "the signal bars are out of the accessibility tree"
+
+# B13 — the ScrolledWindow around the network list is focusable again. GTK makes
+#       it so it can be scrolled from the keyboard, and it is a `generic` with no
+#       name: a stop in the ring that announces nothing. The page still opens
+#       with focus on the named list, because the explicit grab_focus below
+#       survives this mutant -- so the assertion that carries it is the one that
+#       requires every stop the ring reaches to have a name, not the one about
+#       the opening focus.
+mutate B13 "$GUI" \
+    '        sc.set_focusable(False)' \
+    '        pass  # sc.set_focusable(False)' \
+    "page 'wifi': every control the Tab ring reaches has a name"
+
+# B14 — nothing claims the keyboard when the page opens. With the scroll
+#       container out of the ring and no explicit grab, a keyboard user starts
+#       nowhere: no node reports the focused state at all.
+mutate B14 "$GUI" \
+    '        GLib.idle_add(lambda: (self.net_list.grab_focus(), False)[1])' \
+    '        pass  # GLib.idle_add(lambda: (self.net_list.grab_focus(), False)[1])' \
+    "page 'wifi': the control focused when the page opens says what it is"
 
 echo
 printf 'mutants applied=%d, failed-to-apply=%d, caught=%d, SURVIVED=%d\n' \
