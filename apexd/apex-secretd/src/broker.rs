@@ -398,6 +398,15 @@ fn run_git(
 /// with an authentication error that has nothing to do with what it was
 /// asked to do, and the operator would go looking in the wrong place. The
 /// assertion means the two constants cannot drift apart silently.
+///
+/// It covers the tool and not the whole operation: §13.4's exchange makes two
+/// requests of its own before the tool starts, each bounded by
+/// [`crate::providers::cloudflare::api::TIMEOUT_SECS`], so a worst case where
+/// both of those run long AND the tool runs to its limit exceeds the
+/// credential's life. That case ends in an authentication failure from the far
+/// side rather than in anything unsafe — a credential that expired is a
+/// credential that stopped working — and tightening it would mean a timeout
+/// budget threaded through three modules to buy nothing.
 pub const TOOL_TIMEOUT_SECS: u64 = 180;
 
 const _: () = assert!(

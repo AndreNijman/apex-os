@@ -41,6 +41,23 @@
 //! APEX` is where that belongs, and it is not this.
 //!
 //! So: four subcommands, each of which starts, finishes and prints.
+//!
+//! ## What §13.1's binding gates here, and what it does not
+//!
+//! Worth stating plainly, because it is weaker than it looks. For the REST
+//! operations the project's `apex.toml` decides the **script name in the URL**,
+//! so a worker the project did not bind cannot be addressed at all. For a
+//! brokered `wrangler`, the binding decides the grant, the account id and
+//! `--env` — but the script that gets deployed is whatever `wrangler.toml` in
+//! the caller's own directory names. `wrangler` reads that file and this build
+//! does not.
+//!
+//! That is the same trust model rather than a hole: `apex.toml` and
+//! `wrangler.toml` are both the caller's own files, in the caller's own
+//! project, and a caller who can edit one can edit the other. But it means
+//! `a_worker_this_project_did_not_bind_never_reaches_wrangler` proves the
+//! *name* was refused before anything ran, not that wrangler could only have
+//! deployed the bound script.
 
 use std::path::{Path, PathBuf};
 

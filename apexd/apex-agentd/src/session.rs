@@ -660,7 +660,16 @@ fn install_redacted_settings(
 /// a private remote fails to authenticate the way it does today. Nothing is
 /// less safe: the shim holds no credential and enforces nothing.
 fn install_git_shim(scratch: &Path) -> Option<PathBuf> {
-    let apex = apex_program()?;
+    install_session_bin(scratch, &apex_program()?, Path::new(TOOL_SHIM_DIR))
+}
+
+/// The half of [`install_git_shim`] that names what it installs FROM.
+///
+/// Split out so a test can drive the real wiring: which shims end up in the
+/// one directory that goes first on a session's `PATH` is the property, and a
+/// test that called each installer separately would prove each works and not
+/// that either is reached.
+fn install_session_bin(scratch: &Path, apex: &Path, tools: &Path) -> Option<PathBuf> {
     let bin = scratch.join(SESSION_BIN);
     if let Err(e) = std::fs::create_dir_all(&bin) {
         eprintln!(
@@ -689,7 +698,57 @@ fn install_git_shim(scratch: &Path) -> Option<PathBuf> {
         eprintln!("apex-agentd: could not make {} executable ({e})", shim.display());
         return None;
     }
+    install_tool_shims_from(&bin, tools);
     Some(bin)
+}
+
+/// Where the image installs P1-012's `wrangler` and `terraform` shim.
+///
+/// A directory rather than the script, because what goes in a session's `bin`
+/// is one symlink per tool: the shim reads `argv[0]` to decide which tool it is
+/// standing in for.
+pub const TOOL_SHIM_DIR: &str = "/usr/libexec/apex/tools";
+
+/// §13.4's tool half, put where a session's own `wrangler` will find it.
+///
+/// ## Why here and not in `/etc/profile.d`
+///
+/// There is a profile.d drop-in that does the same thing, and it is **not what
+/// makes this work for an agent**. `/etc/profile.d/*.sh` is read by a *login*
+/// shell. An agent's tool calls are `bash -c '…'` — non-login,
+/// non-interactive — and never read it. The drop-in is for a person who opens
+/// a terminal inside a managed session; this is for the agent, and this is the
+/// one that matters for P1-012's "existing skills can continue invoking normal
+/// tools".
+///
+/// Symlinks into the same `bin` the git shim uses, so there is one directory
+/// at the front of the session's `PATH` rather than two, and so an unconfined
+/// session gets neither — for the reason the git shim gives: an unconfined
+/// session has the user's own tools and the user's own credentials, and no
+/// reason to be routed anywhere.
+///
+/// Best-effort, like the hook settings and for the same reason: a session
+/// whose tool shims could not be installed is a session where `wrangler`
+/// reaches the real binary with no credential and says so. That is a worse
+/// experience, not a hole — nothing here is a boundary, and the note in the
+/// shim itself says so.
+fn install_tool_shims_from(bin: &Path, source: &Path) {
+    for tool in ["wrangler", "terraform"] {
+        let from = source.join(tool);
+        if !from.exists() {
+            // The image did not install it. Not an error: a development build
+            // running from a checkout has no /usr/libexec/apex.
+            continue;
+        }
+        let link = bin.join(tool);
+        let _ = std::fs::remove_file(&link);
+        if let Err(e) = std::os::unix::fs::symlink(&from, &link) {
+            eprintln!(
+                "apex-agentd: could not link {} ({e}), so {tool} is not brokered in this session",
+                link.display()
+            );
+        }
+    }
 }
 
 /// The directory inside the session scratch that goes first on its `PATH`.
@@ -1561,5 +1620,88 @@ mod tests {
 
         let (c, _d) = UnixStream::pair().unwrap();
         assert!(!same_peer(a.as_raw_fd(), c.as_raw_fd()));
+    }
+
+    /// P1-012's first criterion, at the only place that can deliver it.
+    ///
+    /// There is an `/etc/profile.d` drop-in that puts the tool shims on PATH,
+    /// and it is NOT what makes this work for an agent: profile.d is read by a
+    /// login shell, and an agent's tool calls are `bash -c '…'`. The session's
+    /// `bin` directory is what goes first on its `PATH`, so this is where a
+    /// skill's own `wrangler deploy` either finds the broker or does not.
+    ///
+    /// Mutation: drop the `install_tool_shims` call from `install_git_shim`.
+    /// Red.
+    #[test]
+    fn a_session_gets_the_tool_shims_on_the_path_its_own_commands_use() {
+        let root = std::env::temp_dir().join(format!(
+            "apex-toolshim-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("image");
+        std::fs::create_dir_all(&source).expect("source");
+        for tool in ["wrangler", "terraform"] {
+            std::fs::write(source.join(tool), "#!/bin/sh\nexit 0\n").expect("shim");
+        }
+        // A test that installed from an empty directory would pass without
+        // linking anything, so the fixture has to be real first.
+        assert!(source.join("wrangler").exists());
+
+        // The REAL wiring, not the installer on its own: what a session gets
+        // is whatever ends up in the one directory that goes first on its
+        // PATH, and a test that called each installer separately would prove
+        // each works rather than that either is reached.
+        let scratch = root.join("scratch");
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        let apex = root.join("apex");
+        std::fs::write(&apex, "#!/bin/sh\nexit 0\n").expect("apex");
+        let bin = install_session_bin(&scratch, &apex, &source).expect("a session bin");
+
+        // git first, because that is what this directory has always been for
+        // and a regression there would be the louder failure.
+        assert!(bin.join("git").exists(), "the git shim is gone");
+
+        for tool in ["wrangler", "terraform"] {
+            let link = bin.join(tool);
+            assert!(
+                link.exists(),
+                "{tool} is not on the session's own PATH, so a skill's \
+                 `{tool} deploy` reaches the real tool with no credential"
+            );
+            assert_eq!(
+                std::fs::read_link(&link).expect("a link"),
+                source.join(tool),
+                "{tool} does not point at the shim"
+            );
+        }
+
+        // Installing again is not an error: a session is set up once, but a
+        // link left behind by anything else must not stop this.
+        install_session_bin(&scratch, &apex, &source).expect("again");
+        assert!(bin.join("wrangler").exists());
+
+        // An image that never installed them leaves nothing behind and does
+        // not fail — a development build running from a checkout has no
+        // /usr/libexec/apex, and a session must still start.
+        let empty = root.join("no-image");
+        let bare_scratch = root.join("bare");
+        std::fs::create_dir_all(&bare_scratch).expect("bare");
+        let bare = install_session_bin(&bare_scratch, &apex, &empty).expect("still a bin");
+        assert!(!bare.join("wrangler").exists());
+        assert!(bare.join("git").exists(), "git must still be brokered");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The constant the image installs to and the one a session links from are
+    /// the same string, and the Containerfile is the other half of it.
+    #[test]
+    fn the_tool_shim_directory_is_the_one_the_image_writes() {
+        assert_eq!(TOOL_SHIM_DIR, "/usr/libexec/apex/tools");
+        assert!(Path::new(TOOL_SHIM_DIR).is_absolute());
     }
 }

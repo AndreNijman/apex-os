@@ -84,17 +84,45 @@ real_tool() {
 # something either tool accepts, and a flag after it is the caller asking for
 # something the brokered argv does not do — so those fall through to the real
 # tool rather than being silently run as a different command.
+# The worker a brokered wrangler acts on.
+#
+# §13.1 binds the NAME on the daemon's side — a name the project did not bind
+# does not resolve and nothing runs — so what this has to supply is which of
+# the project's workers is meant. `wrangler.toml` already says, in the same
+# directory, and reading it is what makes `wrangler deploy` work with no
+# arguments the way it always has. $APEX_CF_WORKER overrides it for a project
+# whose config this cannot parse.
+worker_name() {
+    if [ -n "${APEX_CF_WORKER:-}" ]; then
+        printf '%s\n' "$APEX_CF_WORKER"
+        return 0
+    fi
+    local file
+    for file in wrangler.toml wrangler.json wrangler.jsonc; do
+        [ -f "$file" ] || continue
+        # The first top-level `name` — in TOML unquoted, in JSON quoted. Both
+        # spellings, one expression, and nothing clever: a name wrangler would
+        # accept has no quotes or spaces in it anyway.
+        local found
+        found=$(sed -n 's/^[[:space:]]*[{,]\{0,1\}[[:space:]]*"\{0,1\}name"\{0,1\}[[:space:]]*[:=][[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n 1)
+        if [ -n "$found" ]; then
+            printf '%s\n' "$found"
+            return 0
+        fi
+    done
+    return 1
+}
+
 operation=""
 resource=""
+environment=""
 case "$tool" in
     wrangler)
         case "${1:-}:${2:-}" in
-            deploy:|deploy:--*) operation="cloudflare.wrangler.deploy" ;;
-            versions:upload)    operation="cloudflare.wrangler.versions-upload" ;;
+            deploy:*)        operation="cloudflare.wrangler.deploy" ;;
+            versions:upload) operation="cloudflare.wrangler.versions-upload" ;;
         esac
-        # Which worker. §13.1 binds the name; the environment comes from the
-        # project file on the daemon's side, not from here.
-        resource="${APEX_CF_WORKER:-}"
+        resource="$(worker_name || true)"
         ;;
     terraform)
         case "${1:-}" in
@@ -107,26 +135,58 @@ case "$tool" in
         ;;
 esac
 
+operation_words="${1:-}"
+[ "$operation" = "cloudflare.wrangler.versions-upload" ] && operation_words="versions upload"
+
 if [ -z "$operation" ]; then
     exec_real=$(real_tool) || die "$tool is not installed on this machine"
     exec "$exec_real" "$@"
 fi
 
-# A brokered subcommand whose argv carries more than the broker will run. The
-# broker's argv is fixed, so honouring extra flags would mean running something
-# other than what was asked for. Say so rather than quietly dropping them.
 shift_count=1
 [ "$operation" = "cloudflare.wrangler.versions-upload" ] && shift_count=2
 shift "$shift_count" || true
+
+# `--env <name>` is the one flag worth understanding rather than refusing: it
+# is how a skill picks between a project's environments, and it is far and away
+# the most common thing after the subcommand itself. The daemon does not take
+# it as an argument — the environment comes from the project's own apex.toml,
+# for the worker being named — so what this does is turn it into the WORKER
+# that environment binds, and let the daemon resolve that name the way it
+# resolves every other. A name the project did not bind still does not resolve.
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --env|-e)
+            [ "$#" -ge 2 ] || die "--env needs a name"
+            environment="$2"; shift 2 ;;
+        --env=*)
+            environment="${1#--env=}"; shift ;;
+        *) break ;;
+    esac
+done
+
+# Anything left is a flag the fixed argv cannot carry. The broker runs a
+# command line this build wrote, so honouring extra flags would mean running
+# something other than what was asked for. Say so rather than quietly dropping
+# them — a `--dry-run` that silently deployed would be the worst outcome here.
 if [ "$#" -gt 0 ]; then
-    die "apex brokers \`$tool\` for this subcommand and runs a fixed command line, \
-so it cannot also pass $*. Run the tool directly if you need those flags — it \
-will not be authenticated, because the credential is not yours to hold."
+    die "apex brokers \`$tool $operation_words\` and runs a fixed command line, \
+so it cannot also pass $*. Run \`$(real_tool 2>/dev/null || echo "$tool")\` \
+directly if you need those flags — it will not be authenticated, because the \
+credential is not yours to hold."
+fi
+
+if [ "$tool" = "wrangler" ] && [ -n "$environment" ]; then
+    # The environment names a worker in this project's apex.toml, and that
+    # worker is what the daemon is asked for. APEX_CF_WORKER stays the
+    # override: a caller who set both meant the one they typed.
+    [ -n "${APEX_CF_WORKER:-}" ] || resource="$environment"
 fi
 
 if [ "$tool" = "wrangler" ] && [ -z "$resource" ]; then
-    die "set APEX_CF_WORKER to the worker this project binds, so apex knows \
-which one to deploy. \`apex cf status\` lists them."
+    die "apex could not tell which worker to act on: there is no \`name\` in a \
+wrangler.toml/.json/.jsonc here and APEX_CF_WORKER is not set. \`apex cf \
+status\` lists the workers this project binds."
 fi
 
 exec apex secret use cloudflare "$operation" "$resource"

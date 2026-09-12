@@ -19,9 +19,21 @@
 //!   zone, and a name it did not bind does not resolve at all;
 //! * **how a credential is presented** — [`api`], a `curl` the broker owns,
 //!   with the token on the child's stdin and never in `argv`;
-//! * **how to mint a short-lived one** — it does not, yet. §13.4's scoped
-//!   tokens are P1-011, and [`crate::provider::Provider::mint`]'s default says
-//!   "cannot" rather than pretending.
+//! * **how to mint a short-lived one** — [`temporary`], which is §13.4: the
+//!   stored token buys a token carrying one permission group at one scope,
+//!   expiring in minutes, deleted the moment the operation returns. A request
+//!   for one has four answers and they are not the same answer —
+//!   [`crate::provider::Minted`] separates *there is nothing narrower* from
+//!   *the account refused* from *the attempt did not run* — and the trail
+//!   records which. Three of the four carry on with the stored credential,
+//!   because §13.4 says *prefer*; a project that wrote
+//!   `temporary_credentials = "require"` gets a refusal instead.
+//!
+//! And a fifth thing, which is §13.4's other sentence:
+//!
+//! * **how to run the tool instead of the API** — [`tools`], a broker-owned
+//!   `wrangler` or `terraform` with the credential in its environment and a
+//!   fixed argv this build writes.
 //!
 //! Everything else is the framework's, in the order [`crate::provider`] sets
 //! out, and this module could not skip a step if it tried: it never sees the

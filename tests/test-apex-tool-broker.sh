@@ -112,15 +112,53 @@ check "terraform fmt runs the real tool" "real-terraform fmt -check" "$(logged)"
 
 # ── a brokered subcommand with flags the fixed argv cannot carry ────────────
 run wrangler deploy --dry-run
-check "extra flags on a brokered subcommand are refused, not dropped" "" "$(logged)"
+check "a --dry-run is refused, never silently deployed" "" "$(logged)"
 if grep -q "fixed command line" "$tmp/err"; then
     pass=$((pass + 1)); printf 'ok    %s\n' "the refusal says why"
 else
     fail=$((fail + 1)); printf 'FAIL  the refusal does not say why: %s\n' "$(cat "$tmp/err")"
 fi
 
+# ── --env is understood, not refused ────────────────────────────────────────
+# The most common real invocation after the bare subcommand. Refusing it would
+# mean "existing skills can continue invoking normal tools" was true only for
+# skills that never pick an environment.
+export APEX_CF_WORKER=project
+run wrangler deploy --env staging
+check "APEX_CF_WORKER wins over --env when both are given" \
+    "apex secret use cloudflare cloudflare.wrangler.deploy project" "$(logged)"
+
+unset APEX_CF_WORKER
+run wrangler deploy --env staging
+check "--env names the worker the daemon resolves" \
+    "apex secret use cloudflare cloudflare.wrangler.deploy staging" "$(logged)"
+
+run wrangler deploy --env=canary
+check "--env=name is the same flag" \
+    "apex secret use cloudflare cloudflare.wrangler.deploy canary" "$(logged)"
+
+run wrangler versions upload --env staging
+check "--env works on versions upload too" \
+    "apex secret use cloudflare cloudflare.wrangler.versions-upload staging" "$(logged)"
+
+# ── the worker comes from wrangler.toml, the way wrangler finds it ──────────
+# A skill that has always run a bare `wrangler deploy` sets no variable. If the
+# shim needed one, transparency would be a claim rather than a fact.
+work="$tmp/project"; mkdir -p "$work"
+printf 'name = "from-toml"\nmain = "src/index.ts"\n' > "$work/wrangler.toml"
+(cd "$work" && run wrangler deploy)
+check "a bare deploy reads the worker out of wrangler.toml" \
+    "apex secret use cloudflare cloudflare.wrangler.deploy from-toml" "$(logged)"
+
+printf '{\n  // the worker\n  "name": "from-json",\n  "main": "src/index.ts"\n}\n' > "$work/wrangler.jsonc"
+rm "$work/wrangler.toml"
+(cd "$work" && run wrangler deploy)
+check "and out of wrangler.jsonc when that is what the project has" \
+    "apex secret use cloudflare cloudflare.wrangler.deploy from-json" "$(logged)"
+
 # ── a worker nobody named ───────────────────────────────────────────────────
 unset APEX_CF_WORKER
+cd "$tmp"
 run wrangler deploy
 check "a deploy with no worker named reaches neither apex nor wrangler" "" "$(logged)"
 if grep -q "APEX_CF_WORKER" "$tmp/err"; then
