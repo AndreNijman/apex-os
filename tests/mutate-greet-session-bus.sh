@@ -98,7 +98,7 @@ mutate C1 "$TOML" \
 mutate C2 "$TOML" \
     'command = "sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf"' \
     'command = "cage -ds -- qs -p /usr/share/apex-greet/shell.qml"' \
-    "the live command is the sway host"
+    "the live command is not one of the two hosts kept in comments"
 
 # C3 — the host stops launching the greeter's client. Every assertion about what
 #      that client can see is then vacuously true, so the floor assertion is the

@@ -122,11 +122,21 @@ else
         "$(tr '\n' ' ' <"$W/toml.err")"
 fi
 
+# Phrased as "not one of the two dead hosts" rather than "starts with sway" on
+# purpose. The fix this suite is waiting for (NEXT item 1) is a wrapper in front
+# of the command — `dbus-run-session -- sway …` — and a check anchored on the
+# first word would go red for that, beside the assertion that is SUPPOSED to go
+# red, and send whoever makes the fix looking for a second problem. That the
+# chain really does reach a compositor host and a client is asserted below, by
+# running it.
 case "$COMMAND" in
-    sway\ *|*/sway\ *)
-        ok "the live command is the sway host, not one of the two kept in comments" ;;
-    *)  bad "the live command is the sway host, not one of the two kept in comments" \
-            "got [$COMMAND]" ;;
+    *cage*)
+        bad "the live command is not one of the two hosts kept in comments" \
+            "it is the ABANDONED cage host — cage 0.2.0 serves quickshell no layer-shell, so the greeter launches and never paints" ;;
+    *labwc*)
+        bad "the live command is not one of the two hosts kept in comments" \
+            "it is the labwc FALLBACK; if that swap is deliberate, update this suite — the labwc autostart section below already covers that host" ;;
+    *)  ok "the live command is not one of the two hosts kept in comments" ;;
 esac
 
 # The command names an INSTALLED path. Hardcoding the repo file here would
