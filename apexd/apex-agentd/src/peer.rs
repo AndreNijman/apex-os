@@ -79,10 +79,29 @@ pub fn credentials(stream: &UnixStream) -> Option<Peer> {
 
 /// Whether the peer is the user this daemon runs for.
 ///
-/// The socket already lives in a `0700` directory inside `$XDG_RUNTIME_DIR`, so
-/// this should be unreachable. Checked anyway: it costs one syscall, and the
-/// consequence of being wrong is that another account's process files privilege
-/// requests attributed to this user.
+/// The socket lives in a `0700` directory inside `$XDG_RUNTIME_DIR`, so a
+/// foreign uid should not be able to reach it at all. Read anyway; it costs
+/// one syscall.
+///
+/// **This is not a refusal, and its own doc comment used to say otherwise.**
+/// It read "the consequence of being wrong is that another account's process
+/// files privilege requests attributed to this user", which describes a gate.
+/// There is no gate here. [`crate::privilege::origin`] uses this as a
+/// CLASSIFICATION BRANCH: a peer that is not this user's process skips the
+/// session-ancestry walk — attributing a foreign process to one of this user's
+/// sessions is the thing that would be wrong — and the request then proceeds
+/// on its observed origin.
+///
+/// That is deliberate, and the caller it exists for is the important one:
+/// `sudo apex request approve` arrives on this socket as uid 0. It is still a
+/// human at a terminal and it is §4's entire approval path, so a daemon that
+/// refused every foreign uid would refuse the approval it was waiting for.
+///
+/// `apex-remoted` (`control.rs::local_caller`) and `apex-aid` DO refuse a
+/// foreign uid, because pairing a device and driving the assistant have no
+/// sudo path to keep open. The three are not inconsistent; they are answering
+/// different questions. Do not make this one match them without handling the
+/// approval path first.
 pub fn is_own_user(peer: &Peer) -> bool {
     // Safe: getuid cannot fail and has no side effects.
     peer.uid == unsafe { libc::getuid() }

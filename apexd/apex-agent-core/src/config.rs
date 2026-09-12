@@ -14,7 +14,8 @@ use crate::adapter;
 use crate::paths;
 use crate::lock::LockPolicy;
 use crate::policy::{
-    AgentPolicy, ConnectorPolicy, NativeMode, NetworkPolicy, OriginPolicy, SecretPolicy,
+    AgentPolicy, ConnectorPolicy, NativeMode, NetworkPolicy, OriginPolicy, PluginPolicy,
+    SecretPolicy,
     SystemAccess,
 };
 use crate::protocol::SandboxPolicy;
@@ -55,6 +56,9 @@ pub struct Config {
     /// Dimension 7: applied when `--connectors` is not given.
     #[serde(default)]
     pub connectors: ConnectorPolicy,
+    /// Dimension 8: applied when `--plugins` is not given.
+    #[serde(default)]
+    pub plugins: PluginPolicy,
     /// Destinations an `allowlist` session may reach, one `host` or
     /// `host:port` per entry.
     ///
@@ -76,6 +80,16 @@ pub struct Config {
     /// and `--connectors none` already makes the second.
     #[serde(default)]
     pub connector_allow: Vec<String>,
+    /// Dimension 8's names: the plugins a `--plugins curated` session loads.
+    ///
+    /// Here rather than in the request for `connector_allow`'s reason, and
+    /// spelled the way `enabledPlugins` spells them — `name@marketplace`,
+    /// which is also what a person types. No repair pass filters this one:
+    /// unlike a connector name there is no shape a plugin name cannot have,
+    /// and a name that matches nothing installed simply keeps nothing, which
+    /// `pluginconf::curate` reports as the empty keep-list it is.
+    #[serde(default)]
+    pub plugin_allow: Vec<String>,
     /// §7's lock rules: what happens to running sessions, and to grants in
     /// force, when the screen locks.
     ///
@@ -116,8 +130,10 @@ impl Default for Config {
             network: NetworkPolicy::default(),
             origin: OriginPolicy::default(),
             connectors: ConnectorPolicy::default(),
+            plugins: PluginPolicy::default(),
             network_allow: Vec::new(),
             connector_allow: Vec::new(),
+            plugin_allow: Vec::new(),
             lock: LockPolicy::default(),
             detach_key: default_detach_key(),
             auto_checkpoint: false,
@@ -150,6 +166,7 @@ impl Config {
             network: self.network,
             origin: self.origin,
             connectors: self.connectors,
+            plugins: self.plugins,
         }
     }
 
@@ -162,6 +179,7 @@ impl Config {
         self.network = p.network;
         self.origin = p.origin;
         self.connectors = p.connectors;
+        self.plugins = p.plugins;
     }
 
     /// Load the user's configuration.

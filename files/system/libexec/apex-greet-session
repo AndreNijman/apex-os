@@ -1,0 +1,207 @@
+#!/bin/sh
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-greet-session — give the login screen a D-Bus session bus and an
+#  accessibility bus, then get out of the way (roadmap P2-003, "screen
+#  reader … validated").
+#
+#  greetd runs this instead of running the compositor directly:
+#
+#      command = "/usr/libexec/apex-greet-session sway --unsupported-gpu -c …"
+#
+#  ── The hole it closes ──────────────────────────────────────────────────────
+#
+#  The greeter's accessibility markup has been correct for several rounds:
+#  tests/test-apex-greet-atspi.sh walks the shipped surface over a real AT-SPI
+#  bus, 31 assertions, and a screen reader can read AND operate the login
+#  screen there. In production it received nothing, because greetd's command was
+#  `sway …` with no session bus anywhere in the chain, and Qt's accessibility
+#  bridge resolves org.a11y.Bus on the SESSION bus like every other desktop
+#  application. No session bus, no org.a11y.Bus, no tree: zero nodes.
+#  tests/test-apex-greet-session-bus.sh measured exactly that, on both greeter
+#  hosts, and now measures the opposite.
+#
+#  ── Why not `dbus-run-session --` in front of the command ───────────────────
+#
+#  Two reasons, both measured rather than argued.
+#
+#  1. A session bus alone leaves the accessibility bus unstarted. On an SELinux
+#     system org.a11y.Bus cannot be D-Bus ACTIVATED at all: at-spi-bus-launcher
+#     is refused with EACCES and no AVC is logged (a byte-identical copy of the
+#     same binary under a different label activates perfectly). So the launcher
+#     has to be execed, which is what tests/lib/atspi.sh does and what this
+#     script does.
+#  2. `dbus-run-session` puts a process between greetd and the compositor.
+#     greetd holds the PID of what it started and tears the greeter down on a
+#     successful login; a middleman that does not forward the signal leaves a
+#     compositor holding the VT and the DRM master on a machine nobody can log
+#     in to. This script keeps the shallow tree: it starts the bus with
+#     `dbus-daemon --fork` and then EXECS the compositor, so the PID greetd
+#     holds is still the compositor's, exactly as before. The session-bus suite
+#     asserts that equality by printing $$ on both sides. The cost of exec'ing
+#     is that nothing is left to clean up afterwards, which is what the watcher
+#     at the bottom of this file is for.
+#
+#  ── The rule this file is written to ────────────────────────────────────────
+#
+#  greetd is boot-critical. Every step below is optional and every failure is
+#  survivable: if dbus-daemon is missing, if the launcher is missing, if the
+#  runtime directory cannot be made, the script carries on and still execs the
+#  compositor. The ONLY unconditional statement in it is the last line. A
+#  greeter with no screen reader is a bad day; a greeter that does not start is
+#  a machine Andre cannot log in to, and this file must never be the reason for
+#  the second. `tests/test-apex-greet-session-bus.sh` proves the degradation by
+#  taking each piece away in turn and requiring the client to still run.
+#
+#  ── What it does NOT do ─────────────────────────────────────────────────────
+#
+#  It does not start a screen reader. A reader that starts unbidden talks over
+#  every sighted user at every login, and at the greeter it would be talking on
+#  behalf of the `greetd` system user, whose audio path is not something this
+#  repository can assert. The reader is started BY THE USER, from the keybinding
+#  in sway-greet.conf / labwc-greet/rc.xml, and orca sets
+#  org.a11y.Status.ScreenReaderEnabled itself when it connects — which is the
+#  property Qt's bridge gates on (see tests/lib/atspi.sh).
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [ "$#" -eq 0 ]; then
+    echo "apex-greet-session: no compositor command given" >&2
+    exit 2
+fi
+
+# ── a runtime directory ─────────────────────────────────────────────────────
+# logind normally gives the greetd user one. If it did not, the bus sockets have
+# to live somewhere private rather than somewhere shared: a world-readable
+# socket at the login screen is a bus anyone on the machine could join.
+if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR:-}" ]; then
+    _d="$(mktemp -d "${TMPDIR:-/tmp}/apex-greet.XXXXXX" 2>/dev/null)" || _d=""
+    if [ -n "$_d" ]; then
+        chmod 700 "$_d" 2>/dev/null
+        XDG_RUNTIME_DIR="$_d"
+        export XDG_RUNTIME_DIR
+    fi
+fi
+
+# ── the session bus ─────────────────────────────────────────────────────────
+# An EMPTY service directory, deliberately. The greeter needs a bus to resolve
+# names on, not a bus that can conjure daemons: with the standard service
+# directories a portal or an indicator can be activated into the login screen as
+# the greetd user, which is both a surface nobody audits and the thing that
+# polluted the accessibility tree the first time this harness was built. Every
+# process this script wants is execed by hand, so activation has nothing to do.
+_busdir="${XDG_RUNTIME_DIR:-/tmp}/apex-greet-bus"
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2>&1; then
+    if mkdir -p "$_busdir/no-services" 2>/dev/null; then
+        chmod 700 "$_busdir" 2>/dev/null
+        cat >"$_busdir/session.conf" <<EOF 2>/dev/null
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:tmpdir=$_busdir</listen>
+  <servicedir>$_busdir/no-services</servicedir>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+EOF
+        # --print-pid alongside --print-address, into a file. This script EXECS
+        # the compositor, so it is never around to clean up after it — the
+        # watcher at the bottom is, and it reads these files. They are also how
+        # a test, or anything else tearing a greet session down, can find
+        # exactly these processes rather than pattern-matching every
+        # dbus-daemon on the box.
+        _addr="$(dbus-daemon --config-file="$_busdir/session.conf" \
+                             --fork --print-address=1 --print-pid=3 \
+                             3>"$_busdir/bus.pid" 2>/dev/null)"
+        if [ -n "$_addr" ]; then
+            DBUS_SESSION_BUS_ADDRESS="$_addr"
+            export DBUS_SESSION_BUS_ADDRESS
+        fi
+    fi
+fi
+
+# ── the accessibility bus, and the registry on it ───────────────────────────
+# Execed, never activated: see the header. Both go into the background so the
+# greeter is never held up by them — a login screen that takes two seconds
+# longer to paint because a bus was slow is a regression for everybody.
+if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    _launcher=""
+    for _c in /usr/libexec/at-spi-bus-launcher \
+              /usr/lib/at-spi2-core/at-spi-bus-launcher \
+              /usr/libexec/at-spi2-core/at-spi-bus-launcher; do
+        [ -x "$_c" ] && { _launcher="$_c"; break; }
+    done
+    _registryd=""
+    for _c in /usr/libexec/at-spi2-registryd \
+              /usr/lib/at-spi2-core/at-spi2-registryd \
+              /usr/libexec/at-spi2-core/at-spi2-registryd; do
+        [ -x "$_c" ] && { _registryd="$_c"; break; }
+    done
+
+    if [ -n "$_launcher" ]; then
+        "$_launcher" >/dev/null 2>&1 &
+        printf '%s\n' "$!" >"$_busdir/a11y.pid" 2>/dev/null
+        # The registry has to come up AFTER org.a11y.Bus has a name to answer
+        # on, so the wait happens in its own subshell rather than in front of
+        # the compositor. It is bounded: ten seconds and then give up quietly,
+        # because nothing here is allowed to block a login screen for ever.
+        #
+        # It is execed rather than activated for the same reason the launcher
+        # is. The original "at-spi cannot work here" report in this repository
+        # was `Activated service 'org.a11y.atspi.Registry' failed: Permission
+        # denied` — activation, not at-spi. Without a registry the bus answers
+        # GetAddress perfectly and a screen reader still enumerates nothing,
+        # which is the most deceptive of the failure modes available.
+        if [ -n "$_registryd" ]; then
+            (
+                _i=0
+                while [ "$_i" -lt 40 ]; do
+                    if command -v gdbus >/dev/null 2>&1; then
+                        gdbus call --session -d org.a11y.Bus -o /org/a11y/bus \
+                              -m org.a11y.Bus.GetAddress >/dev/null 2>&1 && break
+                    else
+                        # No gdbus to ask with. Wait a beat and try anyway --
+                        # the registry retries its own connection.
+                        [ "$_i" -ge 4 ] && break
+                    fi
+                    _i=$((_i + 1))
+                    sleep 0.25
+                done
+                exec "$_registryd" >/dev/null 2>&1
+            ) &
+            printf '%s\n' "$!" >"$_busdir/registry.pid" 2>/dev/null
+        fi
+    fi
+fi
+
+# ── clean up after the compositor, since this script will not be here to ────
+# What greetd does on teardown — signal one pid, or the whole process group — is
+# a property of greetd rather than of this repository, and the honest answer is
+# that it was not measured here. Written as though the session teardown reaps
+# these, it would be a claim this file cannot support; and if it is wrong, every
+# login and every greeter restart leaves a session bus, an accessibility bus, a
+# launcher and a registry behind as orphans owned by the greetd user.
+#
+# So the cleanup is owned here. `$$` inside a subshell is the PARENT's pid,
+# which after the exec below is the compositor's, so this waits for the
+# compositor to go and then kills exactly the pids recorded above — never a
+# pattern, never anything this script did not start. If greetd does kill the
+# group, this has already gone with it and the kills never run.
+if [ -d "$_busdir" ]; then
+    (
+        while kill -0 $$ 2>/dev/null; do sleep 2; done
+        for _f in registry.pid a11y.pid bus.pid; do
+            _p="$(cat "$_busdir/$_f" 2>/dev/null)"
+            case "$_p" in ''|*[!0-9]*) continue ;; esac
+            kill -TERM "$_p" 2>/dev/null
+        done
+        rm -rf "$_busdir" 2>/dev/null
+    ) >/dev/null 2>&1 &
+fi
+
+# ── the compositor, and nothing after it ────────────────────────────────────
+# exec, so greetd keeps holding the compositor's own PID and its teardown works
+# exactly as it did before this script existed.
+exec "$@"

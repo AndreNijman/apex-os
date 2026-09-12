@@ -66,6 +66,7 @@ pub mod mux;
 pub mod lock;
 pub mod origin;
 pub mod paths;
+pub mod pluginconf;
 pub mod policy;
 pub mod profile;
 pub mod project;

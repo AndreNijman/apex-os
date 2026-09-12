@@ -941,6 +941,8 @@ RUN set -eux; \
 COPY files/system/libexec/apex-guest-wipe /usr/libexec/apex-guest-wipe
 COPY files/system/units/apex-guest-wipe@.service \
      /usr/lib/systemd/system/apex-guest-wipe@.service
+COPY files/system/units/apex-guest-session@.service \
+     /usr/lib/systemd/system/apex-guest-session@.service
 COPY files/system/shared-machine/guest-accounts /etc/apex/guest-accounts
 COPY files/system/shared-machine/greetd-kiosk.toml \
      /usr/share/apex/shared-machine/greetd-kiosk.toml
@@ -962,6 +964,28 @@ RUN set -eux; \
     test -f /usr/lib/systemd/system/apex-guest-wipe@.service; \
     test ! -e /etc/systemd/system/multi-user.target.wants/apex-guest-wipe@.service; \
     grep -q '^SuccessExitStatus=0 2$' /usr/lib/systemd/system/apex-guest-wipe@.service; \
+    : '── the session-end hook: installed, not enabled, and LOUD ──'; \
+    : 'The two units differ in exactly one judgement and it is not cosmetic.'; \
+    : 'The boot sweep above treats a refusal as success, because on a machine'; \
+    : 'with no guest configured refusing IS the right answer. The hook below'; \
+    : 'is only ever enabled for an account that is a configured guest, so a'; \
+    : 'refusal there means the guest left credentials behind -- it must fail'; \
+    : 'loudly, and a copied SuccessExitStatus would make it green instead.'; \
+    test -f /usr/lib/systemd/system/apex-guest-session@.service; \
+    if grep -q '^SuccessExitStatus' /usr/lib/systemd/system/apex-guest-session@.service \
+        ; then echo "FATAL: a copied SuccessExitStatus would turn a guest-wipe refusal green"; exit 1; fi; \
+    : 'And it must hang off the unit logind actually stops. Binding to the'; \
+    : 'user slice never fires: logind does not stop user-<uid>.slice, and a'; \
+    : 'unit that BindsTo it keeps it from being collected, so the trigger the'; \
+    : 'hook is waiting for is the one the hook prevents. Measured on the L16.'; \
+    grep -q '^BindsTo=user-runtime-dir@%i.service$' \
+         /usr/lib/systemd/system/apex-guest-session@.service; \
+    grep -q '^WantedBy=user-runtime-dir@%i.service$' \
+         /usr/lib/systemd/system/apex-guest-session@.service; \
+    if grep -qE '^(BindsTo|WantedBy)=user-%i\.slice$' \
+         /usr/lib/systemd/system/apex-guest-session@.service \
+        ; then echo "FATAL: the session hook binds to user-%i.slice, which logind never stops"; exit 1; fi; \
+    test -z "$(find /etc/systemd/system -name 'apex-guest-session@*.service' -print -quit)"; \
     : '── the kiosk config is a recipe, and lands where recipes land ──'; \
     : 'greetd reads exactly one file, /etc/greetd/config.toml, and the'; \
     : 'assertion that it carries no auto-login is NOT made here: this stanza'; \
@@ -979,6 +1003,40 @@ RUN set -eux; \
     if grep -qE '^[[:space:]]*\[initial_session\]' /usr/share/apex/shared-machine/greetd-kiosk.toml \
         ; then echo "FATAL: the kiosk recipe fires once per boot instead of restarting"; exit 1; fi; \
     echo "shared-machine recipes installed, inert"
+
+# ── apex user: the surface that can create a STANDARD account (P2-016) ───────
+#
+# The standard/administrator distinction was enforced on APEX long before it
+# could be reached: installer/apex-install puts the one account it creates in
+# `wheel` unconditionally and the GUI offers no choice, so every account APEX
+# had ever made was an administrator. This is the engine behind `apex user`.
+COPY --chmod=0755 files/system/libexec/apex-user /usr/libexec/apex-user
+RUN set -eux; \
+    bash -n /usr/libexec/apex-user; \
+    : '── the default is STANDARD, and that is one line ──'; \
+    : 'Each grep is anchored to an EXECUTABLE line (^[^#]*), because this'; \
+    : 'file discusses every one of these decisions at length in its own'; \
+    : 'comments and a check its own prose can satisfy proves nothing — this'; \
+    : 'repository has shipped five of those.'; \
+    grep -qE '^[^#]*ADMIN_GROUP=wheel' /usr/libexec/apex-user; \
+    : 'wheel is added only under the --admin branch. If this ever became'; \
+    : 'unconditional, every account apex user makes could approve a root'; \
+    : 'operation, and nothing would say so.'; \
+    grep -qE '^[^#]*\[ "\$admin" = 1 \] && argv\+=\(-G "\$ADMIN_GROUP"\)' \
+        /usr/libexec/apex-user; \
+    test "$(grep -cE '^[^#]*-G "\$ADMIN_GROUP"' /usr/libexec/apex-user)" = 1; \
+    : '── the refusal there is no recovery from ──'; \
+    : 'polkit auth_admin and sudo both resolve to wheel, so an APEX with no'; \
+    : 'member of it left cannot approve anything or become root again from'; \
+    : 'inside the running system.'; \
+    grep -qE '^[^#]*only administrator on this machine' /usr/libexec/apex-user; \
+    : '── the test override is not a way into a privileged run ──'; \
+    grep -qE '^[^#]*APEX_USER_TOOLS is set and this is running as root' \
+        /usr/libexec/apex-user; \
+    : '── it is not setuid; it is meant to be reached through sudo ──'; \
+    test ! -u /usr/libexec/apex-user; \
+    test ! -g /usr/libexec/apex-user; \
+    echo "apex-user installed: add makes a standard account"
 
 COPY files/system/libexec/apex-boot-windows /usr/libexec/apex-boot-windows
 COPY files/system/sudoers/apex-boot-windows /etc/sudoers.d/020-apex-boot-windows
@@ -2438,6 +2496,58 @@ RUN set -eux; \
              /usr/share/apex/shared-machine/greetd-kiosk.toml \
         ; then echo "FATAL: the shipped greetd config IS the shared-machine kiosk recipe"; exit 1; fi; \
     echo "login config: no auto-login, and not the kiosk recipe"
+
+# ── The login screen's session bus ─────────────────────────────────────────
+# greetd's command is this wrapper, not the compositor directly. It gives the
+# greet session a D-Bus session bus and an accessibility bus and then EXECS the
+# compositor, so greetd still holds the compositor's own PID and tears the
+# greeter down exactly as before.
+#
+# Without it the greeter's accessibility markup reached nobody. Qt's AT-SPI
+# bridge resolves org.a11y.Bus on the SESSION bus like every other desktop
+# application, and the greet session had no session bus at all — so a login
+# screen that is fully marked up, and that a screen reader can both read and
+# operate under test, published zero nodes in production.
+#
+# THE ASSERTIONS BELOW ARE THE SAFETY ARGUMENT, and they are here rather than
+# only in tests/ because greetd is boot-critical: a greeter whose command names
+# a path nothing installed is a machine that cannot be logged into, and every
+# source-reading assertion in the repository would stay green while it was true
+# (the K12/K13 defect, where a launcher was repointed at a file no Containerfile
+# copied and the ISO would have booted with no installer at all).
+COPY --chmod=0755 files/system/libexec/apex-greet-session /usr/libexec/apex-greet-session
+RUN set -eux; \
+    sh -n /usr/libexec/apex-greet-session; \
+    test -x /usr/libexec/apex-greet-session; \
+    : 'greetd command must NAME the wrapper, and the wrapper must exist at the'; \
+    : 'path it is named by. Read out of the live config, not out of the repo.'; \
+    grep -q '^command = "/usr/libexec/apex-greet-session ' /etc/greetd/config.toml; \
+    : 'and the wrapper last act must still be to exec what it was handed.'; \
+    : 'A wrapper that forgot that line is a login screen that never paints.'; \
+    tail -1 /usr/libexec/apex-greet-session | grep -qx 'exec "$@"'; \
+    : 'The pieces it uses are optional at runtime and asserted here, because'; \
+    : 'the greeter degrading gracefully is only interesting if the good path'; \
+    : 'is the one that ships. at-spi2-core arrives as a transitive dependency'; \
+    : 'of gtk4/Qt; if either ever stops being installed, this build says so'; \
+    : 'instead of shipping a silently unreadable greeter.'; \
+    command -v dbus-daemon >/dev/null; \
+    test -x /usr/libexec/at-spi-bus-launcher; \
+    test -x /usr/libexec/at-spi2-registryd; \
+    : 'The one key a user who cannot see the screen can press, on both hosts.'; \
+    grep -q 'apex-screen-reader' /usr/share/apex-greet/sway-greet.conf; \
+    grep -q 'apex-screen-reader' /usr/share/apex-greet/labwc-greet/rc.xml; \
+    test -x /usr/libexec/apex-screen-reader; \
+    : 'The host config is NOT put through sway -C here, and that is measured'; \
+    : 'rather than an oversight. /usr/bin/sway carries the file capability'; \
+    : 'cap_sys_nice=ep, and exec of a binary with an EFFECTIVE file capability'; \
+    : 'outside the bounding set returns EPERM -- so inside an image build sway'; \
+    : 'cannot run at all: rc=126, Operation not permitted, for a good config'; \
+    : 'and a deliberately broken one alike. A check that returns 126 either'; \
+    : 'way is not a check. The parse check lives in'; \
+    : 'tests/test-apex-greet-session-bus.sh, where it runs on a real machine'; \
+    : 'and is proved in both directions, and SKIPs with a reason where sway'; \
+    : 'cannot be executed.'; \
+    echo "greeter session wrapper: installed, named by greetd, and both hosts bind the reader"
 
 # ── Greeter wallpaper: the user's own, not the shipped default ─────────────
 # THE BUG: change your wallpaper in APEX Shell and the login/lock screen kept

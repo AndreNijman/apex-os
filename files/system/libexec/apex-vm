@@ -1554,7 +1554,12 @@ cmd_run() {
 
 # ── usage ───────────────────────────────────────────────────────────────────
 usage() {
-    cat >&2 <<EOF
+    # stdout, not stderr: this function is reached ONLY by `""|-h|--help|help`
+    # -- an unknown command goes to `die` instead -- so it is an explicit help
+    # request, and `apex vm --help | grep` must work. It wrote to stderr, which
+    # left stdout empty and made the image's own
+    # `apex-vm --help | grep -q 'no viewer'` assertion unable to pass.
+    cat <<EOF
 apex vm — full virtual machines, headless and rootless.
 
   apex vm doctor                       what the stack has and what it needs
