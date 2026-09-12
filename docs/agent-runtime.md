@@ -1775,7 +1775,7 @@ Only you can add a service record, and the host is pinned from then on.
 | `$XDG_STATE_HOME/apex/agent/layouts/` | saved project window layouts |
 | `$XDG_STATE_HOME/apex/agent/privilege-audit.jsonl` | append-only privilege audit |
 | `$XDG_CONFIG_HOME/apex/agent.json` | default agent, the six permission dimensions, the network allowlist, detach key |
-| `/tmp/apex-agent/<id>/` | per-session scratch, and an allowlisted session's egress socket; removed with the session |
+| `/tmp/apex-agent-<uid>/<id>/` | per-session scratch, and an allowlisted session’s egress socket; removed with the session. The uid is in the path: a shared root meant the second account on a machine could not start a session (P2-016) |
 
 The agent's own profile is not APEX's to keep, and APEX keeps no copy of it.
 `apex agent profile inspect` prints where every part of it lives.

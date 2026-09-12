@@ -1531,6 +1531,158 @@ mod tests {
         rec
     }
 
+    /// A peer for a **real** second account on this machine.
+    ///
+    /// `me().uid + 1` is the obvious way to write "somebody else" and it is the
+    /// wrong one, which cost `one_account_cannot_reach_another_accounts_
+    /// credentials` its meaning for as long as it existed. `use_capability`
+    /// looks the caller's account up in the passwd database *before* it looks
+    /// in the store:
+    ///
+    /// ```text
+    ///   let Some(owner) = broker::owner(peer.uid) else { …PermissionDenied… };
+    ///   let Some(info)  = self.store.info(peer.uid, …) else { …NoSuchService… };
+    /// ```
+    ///
+    /// Measured on this laptop on 2026-09-12: `id -u` is 1000 and there is no
+    /// uid 1001 in `getent passwd` — the only account at or above 1000 is
+    /// `andre`. So the refusal that test read as isolation was "uid 1001 is not
+    /// an account on this machine", raised one step before the store was
+    /// consulted at all. Permission denied is not absence: the credential
+    /// namespace was never reached, and the assertion would have stayed green
+    /// with the per-uid store ripped out.
+    ///
+    /// root always exists, so it is the second account, and it is also the one
+    /// worth naming: on a shared machine the account that must not quietly
+    /// inherit another's credential is the administrator's.
+    fn another_real_account() -> Peer {
+        let me = me();
+        let other = if me.uid == 0 { 65534 } else { 0 };
+        assert!(
+            broker::owner(other).is_some(),
+            "uid {other} must be a real account for this test to test anything"
+        );
+        Peer { uid: other, ..me }
+    }
+
+    #[test]
+    fn the_other_account_in_these_tests_is_a_real_one() {
+        // The guard on the guard. If `another_real_account` ever stops
+        // resolving, the two tests below would go on passing while asserting
+        // the account lookup instead of the isolation — which is the exact
+        // failure they were written to replace, so it is pinned here in one
+        // place rather than discovered again.
+        let other = another_real_account();
+        assert_ne!(other.uid, me().uid);
+        assert!(broker::owner(other.uid).is_some());
+        assert!(broker::owner(me().uid).is_some(), "our own uid must resolve");
+    }
+
+    #[test]
+    fn another_account_is_refused_because_the_credential_is_absent_not_because_it_cannot_look() {
+        // Criterion 1's per-user secrets, asserted where it is decided rather
+        // than where it is convenient. Both accounts are real, so the passwd
+        // lookup passes for both and the ONLY thing left to refuse the second
+        // one is the per-uid store namespace.
+        let (svc, dir) = temp_service("uid-absent");
+        let mine = me();
+        let theirs = another_real_account();
+        svc.add(
+            mine,
+            demo_service("demo", "github.com", "https"),
+            SecretValue::new(SENTINEL.into()),
+        );
+
+        let resp = svc.use_capability(
+            theirs,
+            record("demo", "git-fetch", "origin", "/tmp/p"),
+            Vec::new(),
+        );
+        let (kind, message) = resp.as_error().expect("must refuse");
+        assert_eq!(
+            kind,
+            ErrorKind::NoSuchService,
+            "refused, but not by the store: {message}"
+        );
+        assert!(
+            message.contains("demo"),
+            "the refusal must name what was absent: {message}"
+        );
+        // And the refusal is about absence in THEIR namespace, not about who
+        // they are: nothing in it mentions the account.
+        assert!(
+            !message.contains("not an account"),
+            "this is the account lookup answering, one step too early: {message}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_grant_on_a_shared_project_path_does_not_cross_accounts() {
+        // The shared-machine case, which is what P2-016 is about and what a
+        // per-uid store is not on its own enough to settle. A grant is keyed by
+        // PROJECT PATH, and a project path is common ground: /srv/build,
+        // /var/tmp/ci, a shared checkout. Two accounts naming the same
+        // directory must not share the permission attached to it.
+        //
+        // Both accounts hold a credential called `demo` here, deliberately, so
+        // the service-existence step passes for both and the request reaches
+        // the grant decision. That is what makes the refusal below specifically
+        // about the grant and not a second reading of the previous test.
+        let (svc, dir) = temp_service("uid-grants");
+        let mine = me();
+        let theirs = another_real_account();
+        const SHARED: &str = "/srv/shared";
+
+        for who in [mine, theirs] {
+            svc.add(
+                who,
+                demo_service("demo", "github.com", "https"),
+                SecretValue::new(SENTINEL.into()),
+            );
+        }
+        // `grant` answers with the whole grant map rather than `Ok`, so the
+        // caller sees what it now has; the shared path must be in it.
+        match svc.grant(mine, SHARED, "demo", "git-fetch", false) {
+            Response::Grants { projects } => {
+                assert!(projects.contains_key(SHARED), "{projects:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Mine works on the shared path...
+        match svc.grants(mine) {
+            Response::Grants { projects } => {
+                assert!(projects.contains_key(SHARED), "{projects:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // ...and theirs sees no grant on it at all.
+        match svc.grants(theirs) {
+            Response::Grants { projects } => {
+                assert!(
+                    projects.is_empty(),
+                    "another account's grant on a shared path was visible: {projects:?}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let resp = svc.use_capability(
+            theirs,
+            record("demo", "git-fetch", "origin", SHARED),
+            Vec::new(),
+        );
+        let (kind, message) = resp.as_error().expect("must refuse");
+        assert_eq!(kind, ErrorKind::PermissionDenied, "{message}");
+        assert!(
+            message.contains("not granted for this project"),
+            "refused, but not by the grant decision — so this test would stay \
+             green with per-uid grants removed: {message}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_grant_already_on_disk_under_an_old_spelling_still_works_and_can_be_removed() {
         // The compatibility claim, against a grants.json the way P0-002 wrote
@@ -1910,6 +2062,19 @@ mod tests {
 
     #[test]
     fn one_account_cannot_reach_another_accounts_credentials() {
+        // A uid that is deliberately NOT an account. `list` and `audit` read
+        // the store and the trail directly and never consult passwd, so they
+        // are answered by the per-uid namespace whether or not the uid exists —
+        // which is what makes this the right test for them, and what made it
+        // the WRONG test for `use_capability`.
+        //
+        // That third assertion used to live here as `.as_error().is_some()`.
+        // On this machine there is no uid 1001, so it was satisfied by "uid
+        // 1001 is not an account on this machine", raised before the store was
+        // opened: the isolation it named was never exercised. It moved to
+        // `another_account_is_refused_because_the_credential_is_absent_not_
+        // because_it_cannot_look`, which uses a real second account and pins
+        // the refusal kind.
         let (svc, dir) = temp_service("uids");
         let mine = me();
         let theirs = Peer {
@@ -1919,6 +2084,8 @@ mod tests {
         svc.add(mine, demo_service("demo", "github.com", "https"), SecretValue::new(SENTINEL.into()));
 
         assert_eq!(svc.list(theirs), Response::Services { services: vec![] });
+        // Still filed, because the audit assertions below need a refused line
+        // of theirs to exist — but it is no longer read as proof of isolation.
         assert!(svc
             .use_capability(theirs, record("demo", "git-fetch", "origin", "/tmp/p"), Vec::new())
             .as_error()
