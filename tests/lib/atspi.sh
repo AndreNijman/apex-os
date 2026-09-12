@@ -220,8 +220,6 @@ EOF
         printf 'FATAL: the a11y bus is the ambient one this shell started with.\n' >&2
         return 1
     fi
-    export AT_SPI_BUS_ADDRESS="$ATSPI_BUS"
-
     # ── the flag a screen reader sets ───────────────────────────────────────
     # Set because a screen reader sets it: Orca's first act on connecting is to
     # put org.a11y.Status.ScreenReaderEnabled true, and toolkits watch that
@@ -267,6 +265,12 @@ EOF
     # harness pass on an image where accessibility genuinely cannot work. These
     # two properties are a different thing: they are the switch a screen reader
     # itself throws, on the bus, over the same interface any reader uses.
+    #
+    # Order matters and is load-bearing: this block sits BEFORE the
+    # AT_SPI_BUS_ADDRESS export because tests/mutate-greet-atspi.sh's A7 splices
+    # a broken session bus in at that export. With the block after it, A7 would
+    # break this harness's own status read and the suite would go red one
+    # assertion early, on a line about the test rather than about the greeter.
     for _p in ScreenReaderEnabled IsEnabled; do
         gdbus call --session -d org.a11y.Bus -o /org/a11y/bus \
               -m org.freedesktop.DBus.Properties.Set \
@@ -283,6 +287,8 @@ EOF
             printf 'NOTE: org.a11y.Status.ScreenReaderEnabled did not read back true: %s\n' \
                    "${ATSPI_STATUS:-<no answer>}" ;;
     esac
+
+    export AT_SPI_BUS_ADDRESS="$ATSPI_BUS"
 
     # ── the registry ────────────────────────────────────────────────────────
     "$ATSPI_REGISTRYD" >"$ATSPI_W/registry.out" 2>"$ATSPI_W/registry.err" &

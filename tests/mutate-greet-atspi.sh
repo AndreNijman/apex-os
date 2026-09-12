@@ -147,12 +147,22 @@ mutate A6 "$SURFACE" \
 #      purest false green available in an accessibility audit.
 #
 #      The lever is reachability, not the a11y flag. The first version of this
-#      mutant flipped org.a11y.Status.IsEnabled to false and SURVIVED -- which
-#      turned out not to be a weak assertion but a mutant that never applied:
-#      the property reads back true however it is set, because
-#      at-spi-bus-launcher reports the bus enabled once anything uses it, and Qt
-#      6.10.3 does not consult it in any case. Both measured; see the note in
-#      tests/lib/atspi.sh.
+#      mutant flipped org.a11y.Status.IsEnabled to false and SURVIVED, and the
+#      reason recorded here was that the property reads back true however it is
+#      set and that Qt does not consult it. BOTH HALVES OF THAT WERE WRONG, and
+#      wrong in a way only a second machine could show: on a developer box with
+#      a live desktop session the property is ALREADY true before the harness
+#      starts, so it was never pushed from false, and Qt's non-consultation was
+#      never tested against a flag that was off. In a bare fedora:43 container
+#      both flags start false, Qt publishes nothing at all, and setting them is
+#      what makes the tree appear. See the corrected note in tests/lib/atspi.sh.
+#
+#      That correction is also why the harness sets those flags BEFORE it
+#      exports AT_SPI_BUS_ADDRESS, which is where this mutant splices in: with
+#      the order the other way round, A7 breaks the HARNESS's own status read
+#      and the suite goes red one assertion earlier, on a line that is about the
+#      test rather than about the greeter. The mutant is unchanged; the code it
+#      mutates was reordered so it still means what it says.
 #
 #      Taking the session bus away from the application is the real gate, and it
 #      is the exact condition the shipped greeter runs in.

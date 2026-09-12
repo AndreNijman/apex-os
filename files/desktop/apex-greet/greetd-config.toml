@@ -41,7 +41,20 @@ vt = 1
 # shared greeter config because it is a no-op where the driver never binds.
 #
 # `labwc` (installed, see the fallback note below) has no such gate.
-command = "sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf"
+# apex-greet-session is a WRAPPER, not a different host. It gives the greet
+# session a D-Bus session bus and an accessibility bus and then EXECS the
+# compositor, so the PID greetd holds — and terminates on a successful login —
+# is still sway's own. Without it the greeter's accessibility markup reaches
+# nobody: Qt's AT-SPI bridge resolves org.a11y.Bus on the session bus like every
+# other desktop application, and this session had no session bus at all, so a
+# screen reader received zero nodes from a login screen that is fully marked up.
+#
+# It is written so that every step it takes is optional. A missing dbus-daemon,
+# a missing at-spi-bus-launcher, an unmakeable runtime directory — each is
+# survived and the compositor still starts. The only unconditional line in it is
+# the exec. tests/test-apex-greet-session-bus.sh takes each piece away in turn
+# and requires the greeter's own client to run regardless.
+command = "/usr/libexec/apex-greet-session sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf"
 #
 # ABANDONED host (M0 spike A) — cage 0.2.0 does not serve quickshell's
 # layer-shell, so the greeter never paints under it. Kept ONLY as a labelled
@@ -50,8 +63,10 @@ command = "sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf"
 #   command = "cage -ds -- qs -p /usr/share/apex-greet/shell.qml"
 #
 # FALLBACK host — labwc (also native wlr-layer-shell). Swap the command above
-# for this line if sway misbehaves on some hardware (see labwc-greet/README.md):
-#   command = "labwc -C /usr/share/apex-greet/labwc-greet"
+# for this line if sway misbehaves on some hardware (see labwc-greet/README.md).
+# Note the wrapper is on this line too: a machine that took the fallback would
+# otherwise have a login screen no screen reader can hear, and nothing to say so.
+#   command = "/usr/libexec/apex-greet-session labwc -C /usr/share/apex-greet/labwc-greet"
 #
 # Fedora's greetd package provisions a `greetd` system user (sysusers.d);
 # there is no `greeter` user. logind grants this user the seat/DRM access
