@@ -191,12 +191,50 @@ section "the engine honours the operator's choice"
 
 FN="$W/fn.sh"
 sed -n '/^set_locale_keymap_in()/,/^}/p' "$ENGINE" > "$FN"
+# ── Take the HOST'S CLOCK out of the measurement ─────────────────────────────
+# The function infers a timezone from the real /etc/localtime. That made three
+# assertions below depend on the machine running them: this passed on a laptop
+# set to Australia/Perth and FAILED in CI, where a GitHub runner resolves
+# Etc/UTC. A test whose verdict depends on where the tester lives is not
+# measuring the engine.
+#
+# So the one absolute path the function reads is redirected to a file this suite
+# controls. The substitution is asserted below rather than assumed, because a
+# silent miss would restore exactly the host-dependence it exists to remove.
+#
+# Only the two HOST reads are redirected. A blanket s|/etc/localtime|…| also
+# rewrites "$deploy/etc/localtime", which is where the function WRITES its
+# result — the first attempt did exactly that, and every timezone assertion
+# went red with an empty value because the link was being created in the fake
+# host directory instead of the deploy root. Both halves are asserted below.
+FAKE_ETC="$W/fake-etc"
+mkdir -p "$FAKE_ETC"
+sed -i -e "s|-L /etc/localtime|-L $FAKE_ETC/localtime|g" \
+       -e "s|readlink /etc/localtime|readlink $FAKE_ETC/localtime|g" "$FN"
 n_lines=$(wc -l < "$FN")
 if [ "$n_lines" -lt 30 ]; then
     bad "set_locale_keymap_in extracted from the engine" "only $n_lines lines; the extraction is wrong"
     finish; exit 1
 fi
 ok "set_locale_keymap_in extracted from the engine ($n_lines lines)"
+
+# The redirect has to have landed, or every timezone assertion silently goes
+# back to reading the tester's own machine.
+if grep -q "readlink $FAKE_ETC/localtime" "$FN"; then
+    ok "the extracted copy READS a timezone this suite controls, not the host's"
+else
+    bad "the extracted copy READS a timezone this suite controls, not the host's" \
+        "the redirect did not apply; the assertions below would measure this machine"
+fi
+# The other half, and not a formality: over-substituting here silently moves the
+# function's OUTPUT out of the deploy root, which turns every assertion below
+# into "want [a zone] got []".
+if grep -q 'deploy/etc/localtime' "$FN"; then
+    ok "…while still WRITING its result into the deploy root"
+else
+    bad "…while still WRITING its result into the deploy root" \
+        "the deploy path was rewritten too; the assertions below would all read empty"
+fi
 
 # Stubs. The function reads the LIVE machine through localectl/timedatectl and
 # relabels through setfiles; none of that may happen here, and a stub that
@@ -206,6 +244,12 @@ for t in localectl timedatectl setfiles; do
     printf '#!/usr/bin/env bash\nexit 1\n' > "$W/bin/$t"
     chmod +x "$W/bin/$t"
 done
+
+# host_tz <zone|"">  — what the "live environment" resolves, for this run only.
+host_tz() {
+    rm -f "$FAKE_ETC/localtime"
+    [ -n "${1:-}" ] && ln -sfn "../usr/share/zoneinfo/$1" "$FAKE_ETC/localtime"
+}
 
 run_fn() {   # run_fn <deploy> [KEYMAP] [KEYVARIANT] [TIMEZONE]
     local deploy="$1" km="${2:-}" kv="${3:-}" tz="${4:-}"
@@ -268,11 +312,39 @@ run_fn "$D5" "" "" "UTC"
 got="$(readlink "$D5/etc/localtime" 2>/dev/null | sed 's|.*/zoneinfo/||')"
 is "an explicitly chosen UTC is not overruled by the Perth fallback" "UTC" "$got"
 
-# (6) No timezone chosen keeps the long-standing fallback.
+# (6) No timezone chosen, and a live environment with no zone set: the
+#     long-standing Australia/Perth fallback, which is the value the ISO's own
+#     kickstart uses so the two install paths agree.
+host_tz ""
 D6="$(mk_deploy)"
 run_fn "$D6" "" "" ""
 got="$(readlink "$D6/etc/localtime" 2>/dev/null | sed 's|.*/zoneinfo/||')"
-is "no choice keeps the existing Australia/Perth fallback" "Australia/Perth" "$got"
+is "no choice and no live zone falls back to Australia/Perth" "Australia/Perth" "$got"
+
+# (7) THE CI FINDING. systemd writes the CANONICAL name, and on a machine with
+#     no timezone configured that name is "Etc/UTC" — not "UTC". The engine's
+#     guard matched only ""|"UTC", so the commonest spelling of the exact case
+#     it exists to catch went straight past it: the deploy root had no Etc/UTC
+#     in it and the installed system got NO /etc/localtime at all.
+host_tz "Etc/UTC"
+D7="$(mk_deploy)"
+run_fn "$D7" "" "" ""
+got="$(readlink "$D7/etc/localtime" 2>/dev/null | sed 's|.*/zoneinfo/||')"
+is "a live environment on Etc/UTC is treated as unset, not copied through" \
+   "Australia/Perth" "$got"
+
+# (8) …and a live environment with a REAL zone is carried over untouched. This
+#     is the other half: (7) must not become "always Perth", which would throw
+#     away a correct value the ISO had already resolved.
+host_tz "Europe/Berlin"
+D8="$(mk_deploy)"
+run_fn "$D8" "" "" ""
+got="$(readlink "$D8/etc/localtime" 2>/dev/null | sed 's|.*/zoneinfo/||')"
+is "a live environment on a real zone is carried into the install" \
+   "Europe/Berlin" "$got"
+
+# Restore a neutral host zone for anything after this point.
+host_tz ""
 
 # ── The answers file ─────────────────────────────────────────────────────────
 # The engine dies on an unknown key, so a GUI that writes one the engine does

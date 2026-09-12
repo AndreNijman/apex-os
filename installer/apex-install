@@ -513,8 +513,18 @@ set_locale_keymap_in() {  # $1=deploy dir
   fi
   # An operator who explicitly chose UTC means it; only an INFERRED "UTC" is the
   # systemd fallback this line exists to replace.
+  #
+  # The spellings matter and only matched two of them before. systemd writes the
+  # CANONICAL zone name into /etc/localtime, and on a machine with no timezone
+  # set that name is "Etc/UTC", not "UTC" — so the commonest form of the very
+  # case this line exists to catch went straight past it. Found by CI: a GitHub
+  # runner resolves Etc/UTC, the deploy root being built had no Etc/UTC in it,
+  # and the installed system got NO /etc/localtime at all.
   if [ -z "${TIMEZONE:-}" ]; then
-    case "$tz" in ""|"UTC") tz="Australia/Perth" ;; esac
+    case "$tz" in
+      ""|"UTC"|"Etc/UTC"|"GMT"|"Etc/GMT"|"Etc/Universal"|"Universal"|"Zulu"|"Etc/Zulu")
+        tz="Australia/Perth" ;;
+    esac
   fi
   if [ -e "$deploy/usr/share/zoneinfo/$tz" ]; then
     ln -sfn "../usr/share/zoneinfo/$tz" "$deploy/etc/localtime" 2>>"$LOG" || true
