@@ -100,21 +100,22 @@ for kind in local nas ssh s3 r2; do
         && ok "\`backup targets\` names ${kind}" \
         || { bad "\`backup targets\` names ${kind}"; printf '      %s\n' "$targets"; }
 done
-for kind in local nas r2; do
+for kind in local nas ssh r2; do
     printf '%s' "$targets" | grep -E "^  ${kind} +carried" -q \
         && ok "${kind} is carried" || bad "${kind} is carried"
 done
-# The two that refuse do so by name, with a reason. A target kind that parsed
-# and then did nothing would be the worst defect this subsystem could ship.
-for kind in ssh s3; do
-    printf '%s' "$targets" | grep -E "^  ${kind} +REFUSED" -q \
-        && ok "${kind} is refused rather than silently doing nothing" \
-        || bad "${kind} is refused rather than silently doing nothing"
-done
+# The one that refuses does so by name, with a reason. A target kind that
+# parsed and then did nothing would be the worst defect this subsystem could
+# ship. `ssh` was the second of these until P2-001's second round; the whole of
+# it is now exercised by tests/test-apex-backup-ssh.sh against a real sshd.
+printf '%s' "$targets" | grep -E "^  s3 +REFUSED" -q \
+    && ok "s3 is refused rather than silently doing nothing" \
+    || bad "s3 is refused rather than silently doing nothing"
 printf '%s' "$targets" | grep -q "SigV4" \
     && ok "s3's refusal says what is missing" || bad "s3's refusal says what is missing"
-printf '%s' "$targets" | grep -q "sshd" \
-    && ok "ssh's refusal says what is missing" || bad "ssh's refusal says what is missing"
+printf '%s' "$targets" | grep -E "^  ssh +REFUSED" -q \
+    && bad "ssh is carried and must not still print a refusal" \
+    || ok "ssh no longer prints a refusal it does not mean"
 
 # ── a key ────────────────────────────────────────────────────────────────────
 section "the keypair"
