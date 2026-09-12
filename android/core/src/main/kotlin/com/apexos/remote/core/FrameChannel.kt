@@ -41,4 +41,33 @@ interface FrameChannel : java.io.Closeable {
      * unknown connection quality forever.
      */
     fun receive(): Frame
+
+    /**
+     * `System.nanoTime()` when a frame last arrived — **keepalives included**
+     * — or `null` for a channel that does not track it.
+     *
+     * ## Why this cannot be computed above
+     *
+     * `apex-remoted` sends a `Ping` every fifteen seconds and those pings are
+     * the *only* traffic an idle session has. [receive] answers them and never
+     * returns them, which is right: a caller that had to handle keepalives
+     * would be every caller. But it means a layer above this sees exactly the
+     * same thing on a healthy idle terminal and on a connection that has
+     * silently gone away — no frames at all — and those two need telling
+     * apart, because the second one is a phone that walked into a lift.
+     *
+     * A dead TCP connection does not announce itself. `soTimeout` is
+     * deliberately zero after the handshake (`PairingService.connect` says
+     * why: a PTY with nobody typing produces no bytes for hours), so a socket
+     * whose peer vanished without a FIN will sit in `read` until the kernel's
+     * own keepalive gives up, which on Android is measured in hours.
+     *
+     * ## `null` refuses rather than lies
+     *
+     * A default of "zero, meaning fresh" would make a watchdog over a channel
+     * that does not track this silently watch nothing — a reconnect test that
+     * passes because nothing ever disconnected. `null` makes the watchdog
+     * refuse to arm and say so.
+     */
+    val lastFrameNanos: Long? get() = null
 }

@@ -148,16 +148,6 @@ data class ChildInfo(
     val isSubagent: Boolean get() = kind == "subagent"
 }
 
-/** A git worktree under a project, from `{"cmd":"worktrees"}`. */
-@Serializable
-data class WorktreeStatus(
-    val name: String = "",
-    val path: String = "",
-    val branch: String? = null,
-    val project: String? = null,
-    val sessions: List<Int> = emptyList(),
-)
-
 /** What the daemon says about itself, and the only request a mismatched client can rely on. */
 @Serializable
 data class Hello(
@@ -230,8 +220,28 @@ object Agentd {
 
     fun interrupt(id: Int): String = signal(id, "int")
 
-    fun worktrees(project: String? = null): String =
-        if (project == null) """{"cmd":"worktrees"}""" else """{"cmd":"worktrees","project":"${escape(project)}"}"""
+    /**
+     * THERE IS NO `worktrees` VERB, AND THERE IS NO `projects` VERB EITHER.
+     *
+     * This is recorded as a function that does not exist rather than as a
+     * comment somewhere, because an earlier round of this app built
+     * `{"cmd":"worktrees"}` and a `WorktreeStatus` to parse the answer. Nothing
+     * would have parsed: `apex-agent-core`'s `Request` is an internally-tagged
+     * serde enum whose entire vocabulary is Hello, Run, List, Info, Attach,
+     * Resize, Signal, Event, Logs, Remove, Prune, and the privilege and secret
+     * verbs. `apex-remoted` forwards a control line to the daemon unchanged —
+     * it refuses only `attach`, and for its own reasons — so the request would
+     * have reached a daemon that cannot deserialise it.
+     *
+     * What a phone can therefore actually offer when starting an agent is:
+     * which adapter (from `Hello.agents`), which directory, and which worktree
+     * *name* — because `RunRequest.worktree` does exist and means "create or
+     * reuse this git worktree under the project". [Places.from] derives the
+     * directories worth offering from the sessions the daemon already reports,
+     * which is the only source of them there is.
+     */
+    private const val NO_WORKTREE_VERB: String =
+        "apex-agentd has no worktrees verb; see the note in Agentd"
 
     /**
      * Start a session.
@@ -321,15 +331,6 @@ object Agentd {
     fun readHello(reply: String): Hello {
         val obj = require(reply, "hello")
         return json.decodeFromJsonElement(Hello.serializer(), obj)
-    }
-
-    fun readWorktrees(reply: String): List<WorktreeStatus> {
-        val obj = require(reply, "worktrees")
-        val array = obj["worktrees"] ?: return emptyList()
-        return json.decodeFromJsonElement(
-            kotlinx.serialization.builtins.ListSerializer(WorktreeStatus.serializer()),
-            array,
-        )
     }
 
     /**

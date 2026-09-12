@@ -7,6 +7,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.apexos.remote.core.Device
 import com.apexos.remote.core.PairedMachine
+import com.apexos.remote.core.StaticKey
+import com.apexos.remote.core.agent.AgentSession
+import com.apexos.remote.core.agent.Hello
+import com.apexos.remote.core.agent.MachineLink
 import com.apexos.remote.core.Pairing
 import com.apexos.remote.core.PairingException
 import com.apexos.remote.core.PairingOffer
@@ -17,7 +21,11 @@ import com.apexos.remote.pairing.PairingService
 import com.apexos.remote.security.AppLock
 import com.apexos.remote.security.AppLockRefused
 import com.apexos.remote.security.KeystoreSecretBox
+import com.apexos.remote.ui.term.TerminalController
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -45,18 +53,31 @@ data class UiState(
     val message: String? = null,
     val failure: String? = null,
     val connection: ConnectionReport? = null,
+    val agents: AgentUiState = AgentUiState(),
 )
 
 /**
  * What a successful connection proved.
  *
- * P1-054 and P1-055 turn this into an agent list and a terminal. Until they
- * do, saying which machine answered and how long it took is the honest end of
- * the story — and it is not nothing: it means the pinned key still matches, the
- * device is still paired, and the round trip came back on a frame that crossed
- * the same path everything else will.
+ * Kept from P1-053, and still shown when a connection is made and nothing else
+ * is asked of it: the pinned key still matches, the device is still paired,
+ * and the round trip came back on a frame that crossed the same path
+ * everything else will.
  */
 data class ConnectionReport(val machine: String, val roundTripMs: Long?)
+
+/** The Agent Center's state for one machine. */
+data class AgentUiState(
+    val machine: PairedMachine? = null,
+    val sessions: List<AgentSession> = emptyList(),
+    val hello: Hello? = null,
+    /** The session whose detail screen is open. */
+    val selected: AgentSession? = null,
+    val busy: String? = null,
+    val failure: String? = null,
+    /** Refreshed on every poll, so elapsed times move without recomputing per row. */
+    val nowSeconds: Long = System.currentTimeMillis() / 1000,
+)
 
 class RemoteViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = MachineRepository(application)
@@ -64,6 +85,33 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    /**
+     * Device keys unwrapped this session, by device id.
+     *
+     * IN MEMORY, and that is the whole design. Unwrapping needs a `Cipher` the
+     * keystore authorised, which needs an `Activity` and a biometric prompt —
+     * and `PtyAttachment` calls its `connect` lambda on every backoff retry.
+     * A `connect` that went through `AppLock.unlock` would produce a prompt
+     * storm on a train: one dialog per reconnect, for as long as the tunnel
+     * lasts, and nothing headless would ever catch it.
+     *
+     * So the prompt happens once, here, and the reconnect loop is handed
+     * something that cannot prompt. Memory is not storage: this never reaches
+     * `AppStorage`, so `InsecureStorageTest`'s walk is unaffected — and it is
+     * cleared on [lock] and in [onCleared], which is what makes locking the
+     * app mean something.
+     */
+    private val identities = HashMap<String, StaticKey>()
+
+    /** One control connection per machine, opened on demand. */
+    private val links = HashMap<String, MachineLink>()
+
+    /** The attached terminal, when there is one. At most one at a time. */
+    var terminal: TerminalController? = null
+        private set
+
+    private var poll: Job? = null
 
     init {
         refresh()
@@ -113,7 +161,59 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun lock() = _state.update { it.copy(unlocked = false, connection = null) }
+    /**
+     * Lock the app, and mean it.
+     *
+     * Everything derived from an unwrapped key goes: the terminal detaches
+     * (the session keeps running on the machine, which is the point), the
+     * control connections close, and the keys themselves are dropped so the
+     * next connection needs the prompt again. A lock that only hid the screen
+     * would leave a live socket and a usable key behind it.
+     */
+    fun lock() {
+        poll?.cancel()
+        poll = null
+        terminal?.close()
+        terminal = null
+        // Closing a `MachineLink` writes to and shuts a socket, and Android
+        // kills a process that touches a socket on the main thread —
+        // `StrictMode.enableDeathOnNetwork()` is on for every app targeting
+        // API 11 or later and a debug build does not relax it. The keys and
+        // the visible state go immediately, on this thread, because those are
+        // what "locked" means; the sockets follow.
+        val closing = links.values.toList()
+        links.clear()
+        identities.clear()
+        _state.update {
+            it.copy(unlocked = false, connection = null, agents = AgentUiState())
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            closing.forEach { runCatching { it.close() } }
+        }
+    }
+
+    /** Stop polling. Called when the Agent Center is no longer on screen. */
+    fun leaveAgents() {
+        poll?.cancel()
+        poll = null
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        terminal?.close()
+        val closing = links.values.toList()
+        links.clear()
+        identities.clear()
+        // `viewModelScope` is cancelled by the time this runs, so the closes
+        // go to a plain thread rather than a coroutine that would never start.
+        // Daemon, because a process on its way out must not be held open by a
+        // socket close that is waiting on a machine that has gone.
+        if (closing.isNotEmpty()) {
+            Thread({ closing.forEach { runCatching { it.close() } } }, "apex-link-close").apply {
+                isDaemon = true
+            }.start()
+        }
+    }
 
     /**
      * Read a scanned or pasted payload, and pair with what it names.
@@ -169,25 +269,225 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         }
 
     /**
-     * Open a session, prove it works, and hang up.
+     * Unwrap this machine's key once, open the Agent Center, and keep both.
      *
-     * The prompt happens here and not inside the socket code: unwrapping the
-     * device key needs an authorised `Cipher`, and getting one needs an
-     * `Activity`. Everything after it is off the main thread.
+     * The prompt happens HERE and nowhere deeper, and that is not tidiness:
+     * `PtyAttachment` calls its `connect` lambda on every backoff retry, so a
+     * lambda that unwrapped through `AppLock` would put a biometric dialog on
+     * the screen once per reconnect — a prompt storm for as long as a tunnel
+     * lasts. See [identities].
      */
     fun connect(activity: FragmentActivity, machine: PairedMachine) = viewModelScope.launch {
+        _state.update {
+            it.copy(
+                busy = "Connecting to ${machine.machine}…",
+                failure = null,
+                agents = it.agents.copy(machine = machine, failure = null),
+            )
+        }
+        try {
+            openIdentity(activity, machine)
+            val link = linkFor(machine)
+            val (hello, sessions) = withContext(Dispatchers.IO) {
+                // `hello` first: it is the only request a mismatched client
+                // can rely on, and the adapter list it carries is what the
+                // start screen offers.
+                val h = runCatching { link.hello() }.getOrNull()
+                h to link.sessions()
+            }
+            _state.update {
+                it.copy(
+                    busy = null,
+                    connection = null,
+                    agents = it.agents.copy(
+                        machine = machine,
+                        hello = hello,
+                        sessions = sessions,
+                        nowSeconds = System.currentTimeMillis() / 1000,
+                        failure = null,
+                    ),
+                )
+            }
+            startPolling(machine)
+        } catch (e: Exception) {
+            _state.update { it.copy(busy = null, failure = describeConnectFailure(machine, e)) }
+        }
+    }
+
+    /**
+     * Refresh the list every few seconds while it is on screen.
+     *
+     * Four seconds, and not faster: each poll is a control round trip over a
+     * Noise session, and the thing it is watching — an agent's state — changes
+     * on a human timescale. A phone that asked every second would spend
+     * battery to redraw the same list.
+     */
+    private fun startPolling(machine: PairedMachine) {
+        poll?.cancel()
+        poll = viewModelScope.launch {
+            while (true) {
+                delay(POLL_MS)
+                val link = links[machine.deviceId] ?: return@launch
+                val sessions = runCatching { withContext(Dispatchers.IO) { link.sessions() } }.getOrNull()
+                _state.update {
+                    if (it.agents.machine?.deviceId != machine.deviceId) return@update it
+                    it.copy(
+                        agents = it.agents.copy(
+                            sessions = sessions ?: it.agents.sessions,
+                            // Advanced every poll whether or not the list
+                            // changed, so elapsed times move.
+                            nowSeconds = System.currentTimeMillis() / 1000,
+                            selected = it.agents.selected?.let { chosen ->
+                                sessions?.firstOrNull { s -> s.id == chosen.id } ?: chosen
+                            },
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    fun refreshAgents() = viewModelScope.launch {
+        val machine = _state.value.agents.machine ?: return@launch
+        val link = links[machine.deviceId] ?: return@launch
+        try {
+            val sessions = withContext(Dispatchers.IO) { link.sessions() }
+            _state.update {
+                it.copy(
+                    agents = it.agents.copy(
+                        sessions = sessions,
+                        nowSeconds = System.currentTimeMillis() / 1000,
+                        failure = null,
+                    ),
+                )
+            }
+        } catch (e: Exception) {
+            _state.update { it.copy(agents = it.agents.copy(failure = describe(e))) }
+        }
+    }
+
+    fun selectSession(session: AgentSession?) =
+        _state.update { it.copy(agents = it.agents.copy(selected = session)) }
+
+    /**
+     * Signal a session.
+     *
+     * Not retried when the connection drops — `MachineLink` refuses to, and it
+     * is right: a SIGTERM delivered twice because its reply was lost is a
+     * second signal into whatever the agent was doing next. The failure comes
+     * back to the screen so a person can decide.
+     */
+    fun signal(session: AgentSession, signal: String) = viewModelScope.launch {
+        val machine = _state.value.agents.machine ?: return@launch
+        val link = links[machine.deviceId] ?: return@launch
+        _state.update { it.copy(agents = it.agents.copy(busy = "Sending…", failure = null)) }
+        try {
+            withContext(Dispatchers.IO) { link.signal(session.id, signal) }
+            _state.update { it.copy(agents = it.agents.copy(busy = null)) }
+            refreshAgents()
+        } catch (e: Exception) {
+            _state.update {
+                it.copy(
+                    agents = it.agents.copy(
+                        busy = null,
+                        failure = "The signal may not have arrived: ${describe(e)}. " +
+                            "Refresh before sending it again.",
+                    ),
+                )
+            }
+        }
+    }
+
+    fun startAgent(cwd: String, agent: String?, worktree: String?, prompt: String?) =
+        viewModelScope.launch {
+            val machine = _state.value.agents.machine ?: return@launch
+            val link = links[machine.deviceId] ?: return@launch
+            _state.update { it.copy(agents = it.agents.copy(busy = "Starting…", failure = null)) }
+            try {
+                val session = withContext(Dispatchers.IO) {
+                    // 80x24 because nothing has been laid out yet; the terminal
+                    // screen sends a real resize the moment it measures itself.
+                    link.run(cwd = cwd, cols = 80, rows = 24, agent = agent, prompt = prompt, worktree = worktree)
+                }
+                _state.update {
+                    it.copy(
+                        agents = it.agents.copy(
+                            busy = null,
+                            sessions = listOf(session) + it.agents.sessions.filterNot { s -> s.id == session.id },
+                            selected = session,
+                        ),
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(agents = it.agents.copy(busy = null, failure = describe(e))) }
+            }
+        }
+
+    /**
+     * Attach to a session's PTY.
+     *
+     * A second connection, not this link's: `apex-remoted` answers a control
+     * frame from a single-threaded loop that blocks while `apex-agentd`
+     * thinks, and a privilege request waits as long as the person does.
+     * Sharing would freeze the terminal behind a prompt somebody has not
+     * answered.
+     */
+    fun attach(session: AgentSession): TerminalController? {
+        val machine = _state.value.agents.machine ?: return null
+        val identity = identities[machine.deviceId] ?: return null
+        terminal?.close()
+        val controller = TerminalController(
+            sessionId = session.id,
+            // Cannot prompt, and must not: see [identities].
+            connect = { runBlocking { pairing.connect(machine, identity) } },
+        )
+        terminal = controller
+        return controller
+    }
+
+    /**
+     * Leave the terminal. The session goes on running on the machine.
+     *
+     * `close()` is safe to call from here: `TerminalController` puts its own
+     * socket work on its io thread, for the same reason [lock] does.
+     */
+    fun detach() {
+        terminal?.close()
+        terminal = null
+    }
+
+    private suspend fun openIdentity(activity: FragmentActivity, machine: PairedMachine): StaticKey {
+        identities[machine.deviceId]?.let { return it }
+        val box = KeystoreSecretBox.forDevice(machine.deviceId)
+        val sealed = requireNotNull(com.apexos.remote.core.Base64Url.decode(machine.sealed)) {
+            "the stored key for ${machine.machine} is not base64url"
+        }
+        val identity = AppLock.unlock(activity, box, sealed, machine.machine)
+        identities[machine.deviceId] = identity
+        return identity
+    }
+
+    private fun linkFor(machine: PairedMachine): MachineLink =
+        links.getOrPut(machine.deviceId) {
+            MachineLink({
+                val identity = identities[machine.deviceId]
+                    ?: throw IllegalStateException("${machine.machine} is locked")
+                runBlocking { pairing.connect(machine, identity) }
+            })
+        }
+
+    /**
+     * Open a session, prove it works, and hang up.
+     *
+     * Kept for the machines list, where "does this still work" is the question
+     * being asked and nothing more is wanted.
+     */
+    fun ping(activity: FragmentActivity, machine: PairedMachine) = viewModelScope.launch {
         _state.update { it.copy(busy = "Connecting to ${machine.machine}…", failure = null) }
         try {
-            val box = KeystoreSecretBox.forDevice(machine.deviceId)
-            val sealed = requireNotNull(com.apexos.remote.core.Base64Url.decode(machine.sealed)) {
-                "the stored key for ${machine.machine} is not base64url"
-            }
-            val identity = AppLock.unlock(activity, box, sealed, machine.machine)
+            val identity = openIdentity(activity, machine)
             val report = withContext(Dispatchers.IO) {
                 pairing.connect(machine, identity).use { session ->
-                    // A completed handshake and "frames cross this path" are
-                    // not the same claim, and only the second one is worth
-                    // showing somebody. So: ping, and wait for the answer.
                     ConnectionReport(session.machine, session.measureRoundTrip())
                 }
             }
@@ -265,5 +565,16 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         is PairingException -> e.error.message
         is AppLockRefused -> e.message ?: "the unlock was cancelled"
         else -> e.message ?: e::class.java.simpleName
+    }
+
+    private companion object {
+        /**
+         * Four seconds between list refreshes.
+         *
+         * Each one is a control round trip over a Noise session, and what it
+         * watches — an agent's state — changes on a human timescale. A phone
+         * polling every second would spend battery redrawing the same list.
+         */
+        const val POLL_MS: Long = 4_000
     }
 }

@@ -62,6 +62,7 @@ fun MachinesScreen(
     state: UiState,
     onPair: () -> Unit,
     onConnect: (PairedMachine) -> Unit,
+    onPing: (PairedMachine) -> Unit,
     onForget: (PairedMachine) -> Unit,
     onDynamicColour: (Boolean) -> Unit,
     onLock: () -> Unit,
@@ -112,6 +113,7 @@ fun MachinesScreen(
                         MachineRow(
                             machine = machine,
                             onClick = { onConnect(machine) },
+                            onPing = { onPing(machine) },
                             onForget = { forgetting = machine },
                         )
                     }
@@ -190,7 +192,12 @@ fun MachinesScreen(
 }
 
 @Composable
-private fun MachineRow(machine: PairedMachine, onClick: () -> Unit, onForget: () -> Unit) {
+private fun MachineRow(
+    machine: PairedMachine,
+    onClick: () -> Unit,
+    onPing: () -> Unit,
+    onForget: () -> Unit,
+) {
     Column {
         Row(
             Modifier
@@ -226,6 +233,12 @@ private fun MachineRow(machine: PairedMachine, onClick: () -> Unit, onForget: ()
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            // "Does this still answer" is a different question from "show me
+            // the agents", and it is the one somebody asks after changing a
+            // network. It costs one handshake and one frame.
+            TextButton(onClick = onPing) {
+                Text("Test", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             TextButton(onClick = onForget) {
                 Text("Forget", color = MaterialTheme.colorScheme.onSurfaceVariant)
