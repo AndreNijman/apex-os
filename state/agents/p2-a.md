@@ -271,6 +271,16 @@ refuses the run* red and was restored with a plain `cp` — cargo printed
    every run since, alone and combined. Those tests exec `target/debug/apex` and
    cargo was relinking it at the time. Recorded so the next agent does not chase
    it as theirs.
+7. **The recipient check is on `run`, not on `init`.** `apex backup init` calls
+   `setup()`, so it reads `config.recipient`, but it never calls
+   `check_declared`: it marks the directory and returns. So an operator can
+   `init` a target whose declared recipient does not match the root-registered
+   one and see no warning until the first `apex backup run` refuses. That
+   refusal is the boundary that matters and it holds -- a swapped recipient
+   never gets a snapshot written -- so this is a UX gap, not a security one.
+   Deliberately left: `init` is a directory operation and adding a key check to
+   it would make `apex backup init` fail on a machine where `apex backup key
+   init` has not been run yet, which is the normal order.
 
 ---
 
@@ -279,6 +289,16 @@ refuses the run* red and was restored with a plain `cp` — cargo printed
 Branched from `24472b64` and **never rebased**; `git merge-base
 origin/roadmap/v2.2 HEAD` is exactly `24472b64`. `roadmap/v2.2` has moved on
 since (P1-011/P1-012/P1-013, the relay work, P2-004), so there is a merge to do.
+
+**Every measurement below was taken on this branch, not on a merge.**
+`tests/run-clippy.sh` PASS, `cargo test --locked --workspace` 1823/0 and the
+three shell suites all describe `task/p2-a-backup` at `4dd8f4fe`. Read none of
+them as "merges clean": the merge itself was not attempted, because the dispatch
+said do not rebase. Expect textual conflicts in the two overlapping files that
+are edits rather than new files -- `.github/workflows/pr-validation.yml` and
+`apexd/apex-secretd/src/providers/cloudflare/tests.rs` -- plus a `Cargo.lock`
+that is easier to regenerate with `cargo update -p x25519-dalek --precise
+2.0.1` than to merge by hand.
 
 **31 files changed here; 3 of them the tip has also touched:**
 
