@@ -1,6 +1,9 @@
 package com.apexos.remote.core.agent
 
 import kotlinx.serialization.SerialName
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -278,6 +281,117 @@ object Agentd {
         append('}')
     }
 
+    // ---- approvals (P1-057) ---------------------------------------------
+    //
+    // Note which verb is NOT here: `decide`. See the head of `Approvals.kt` —
+    // `privilege.rs:1176` refuses it from any non-local origin, before the
+    // pending check, and no setting changes that. A builder for it would be a
+    // builder for a request that is always refused.
+
+    /** Every privilege request the daemon has, decided or not. */
+    fun requests(): String = """{"cmd":"requests"}"""
+
+    /** Per-project grants: project root -> grant keys. */
+    fun grants(): String = """{"cmd":"grants"}"""
+
+    /** System-access grants, each with the state the daemon computed for it. */
+    fun systemGrants(): String = """{"cmd":"system_grants"}"""
+
+    /**
+     * Withdraw a per-project grant, or every grant for the project.
+     *
+     * Omitting `key` revokes them all — `Request::Revoke.key` is
+     * `#[serde(default)]` and absent means "everything for this project". That
+     * is a wide action, so the key is never omitted by accident here: a caller
+     * passing null has asked for it.
+     *
+     * Allowed from a phone, unlike `decide`, and the asymmetry is the point:
+     * `privilege.rs:1289` gates this on the caller not being a managed session
+     * and applies no origin check, because revoking only ever removes
+     * authority. A device that cannot grant anything can still take it back.
+     */
+    fun revoke(project: String, key: String? = null): String = buildString {
+        append("""{"cmd":"revoke","project":"""").append(escape(project)).append('"')
+        if (key != null) append(""","key":"""").append(escape(key)).append('"')
+        append('}')
+    }
+
+    /** End a live system-access grant now. Allowed from a phone, as above. */
+    fun revokeSystemGrant(id: Int): String =
+        """{"cmd":"revoke_system_grant","id":$id}"""
+
+    fun readRequests(reply: String): List<PrivilegeRequest> {
+        val obj = require(reply, "requests")
+        val array = obj["requests"] ?: return emptyList()
+        return json.decodeFromJsonElement(
+            ListSerializer(PrivilegeRequest.serializer()),
+            array,
+        )
+    }
+
+    /**
+     * One request, from a `privilege_request`.
+     *
+     * Read from the top level like [readSession]: `Response::Request` is a
+     * newtype variant under an internal tag, so `id`, `verb` and the rest sit
+     * beside `"reply"` rather than under a key.
+     */
+    fun readRequest(reply: String): PrivilegeRequest {
+        val obj = require(reply, "request")
+        return json.decodeFromJsonElement(PrivilegeRequest.serializer(), obj)
+    }
+
+    fun readGrants(reply: String): Grants {
+        val obj = require(reply, "grants")
+        val projects = obj["projects"] ?: return emptyMap()
+        return json.decodeFromJsonElement(
+            MapSerializer(
+                String.serializer(),
+                ListSerializer(
+                    String.serializer(),
+                ),
+            ),
+            projects,
+        )
+    }
+
+    /**
+     * System grants, paired with the state the daemon computed for each.
+     *
+     * `states` arrives as `[["active","14m left"], …]` — an array of
+     * two-element ARRAYS, because that is how serde serializes a Rust tuple.
+     * Decoding it as objects would throw, and decoding it as a flat list of
+     * strings would silently pair every grant with the wrong half.
+     *
+     * The two lists are the same length by the daemon's contract. A reply that
+     * breaks it is not trusted into a zip: a grant with no state is shown with
+     * an empty one rather than dropped, because a live root grant missing from
+     * a list the user is reading is the worst outcome available here.
+     */
+    fun readSystemGrants(reply: String): List<Pair<SystemGrant, GrantState>> {
+        val obj = require(reply, "system_grants")
+        val grants = obj["grants"]?.let {
+            json.decodeFromJsonElement(
+                ListSerializer(SystemGrant.serializer()),
+                it,
+            )
+        } ?: return emptyList()
+        val states = obj["states"]?.let {
+            json.decodeFromJsonElement(
+                ListSerializer(
+                    ListSerializer(
+                        String.serializer(),
+                    ),
+                ),
+                it,
+            )
+        } ?: emptyList()
+        return grants.mapIndexed { i, g ->
+            val pair = states.getOrNull(i).orEmpty()
+            g to GrantState(pair.getOrElse(0) { "" }, pair.getOrElse(1) { "" })
+        }
+    }
+
     /**
      * JSON string escaping, including the one that is not about JSON.
      *
@@ -324,7 +438,7 @@ object Agentd {
     fun readSessions(reply: String): List<AgentSession> {
         val obj = require(reply, "sessions")
         val array = obj["sessions"] ?: return emptyList()
-        return json.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(AgentSession.serializer()), array)
+        return json.decodeFromJsonElement(ListSerializer(AgentSession.serializer()), array)
     }
 
     /**
@@ -349,7 +463,7 @@ object Agentd {
         val obj = require(reply, "worktrees")
         val array = obj["worktrees"] ?: return emptyList()
         return json.decodeFromJsonElement(
-            kotlinx.serialization.builtins.ListSerializer(WorktreeStatus.serializer()),
+            ListSerializer(WorktreeStatus.serializer()),
             array,
         )
     }

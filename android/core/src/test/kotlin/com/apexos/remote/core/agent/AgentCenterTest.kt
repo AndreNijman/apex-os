@@ -426,15 +426,12 @@ class AgentCenterTest {
     }
 
     @Test
-    fun `there is no worktrees verb, and nothing here builds one`() {
-        // An earlier round built `{"cmd":"worktrees"}` and a parser for the
-        // answer. `apex-agent-core`'s `Request` has no such variant — the
-        // vocabulary is Hello, Run, List, Info, Attach, Resize, Signal, Event,
-        // Logs, Remove, Prune and the privilege/secret verbs — and
-        // `apex-remoted` forwards a control line unchanged, so the request
-        // would have reached a daemon that cannot deserialise it.
+    fun `the worktrees verb exists and its answer groups into projects`() {
+        // INVERTED BACK. This asserted `Agentd` had no `worktrees` builder,
+        // citing a vocabulary read off the wrong enum. See AgentdTest and
+        // Worktrees.kt for the full account.
         val methods = Agentd::class.java.methods.map { it.name }
-        assertFalse("worktrees" in methods, "the worktrees verb is back, and the daemon still has none")
-        assertFalse("readWorktrees" in methods)
+        assertTrue("worktrees" in methods)
+        assertTrue("readWorktrees" in methods)
     }
 }
