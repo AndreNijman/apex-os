@@ -4128,7 +4128,10 @@ fn project_remove(name: String, delete_branch: bool, destroy_preview: bool) -> R
         let failed = crate::cloudflare::preview::destroy(&plan)?;
         if failed > 0 {
             eprintln!(
-                "apex project: {failed} of this worktree's Cloudflare resources                  could not be destroyed, so the worktree has been LEFT IN PLACE.                  Removing it now would leave them up with nothing that knows how                  to take them down."
+                "apex project: {failed} of this worktree's Cloudflare resources \
+                 could not be destroyed, so the worktree has been LEFT IN PLACE. \
+                 Removing it now would leave them up with nothing that knows how \
+                 to take them down."
             );
             return Ok(1);
         }
@@ -4139,7 +4142,9 @@ fn project_remove(name: String, delete_branch: bool, destroy_preview: bool) -> R
             .count();
         if left > 0 {
             println!(
-                "{left} thing{} in the plan above {} not something this build can                  destroy. The worktree is being removed anyway; the list stays                  true.",
+                "{left} thing{} in the plan above {} not something this build can \
+                 destroy. The worktree is being removed anyway; the list stays \
+                 true.",
                 if left == 1 { "" } else { "s" },
                 if left == 1 { "is" } else { "are" }
             );
