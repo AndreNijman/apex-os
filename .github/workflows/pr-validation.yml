@@ -610,6 +610,25 @@ jobs:
       # mentioning the forbidden token does NOT trip it — the inverse mutant.
       # This repository has shipped four checks satisfied by their own comments;
       # this one proves it is not a fifth.
+      # P1-062's chaos harness, tested. `tests/chaos/` is what decides whether
+      # APEX survives a fault, so "what decides whether the decider is right?"
+      # needs an answer that is not "somebody read it".
+      #
+      # In `static` because it needs no binary and because the `rust` selector
+      # (^(apexd/|config/|tests/)) would in fact catch it — but the boot-path
+      # half is a rule about FILE CONTENT under tests/chaos/, and a rule that
+      # can be skipped is a rule that gets broken on the PR that skips it.
+      # `static` has no path filter and can never be skipped.
+      #
+      # It carries its own inverse mutants, the way `check-ai-parity
+      # --self-test` does: a COMMENT naming bootctl must not trip the check,
+      # and neither must a fixture FILE named rpm-ostree-status.json, while a
+      # real `sudo rpm-ostree status` must. Without both directions the check
+      # would be satisfiable by its own prose, which is the defect this
+      # repository has shipped four times.
+      - name: P1-062 the chaos harness — the boot-path rule, and every verdict arm
+        run: ./tests/test-apex-chaos.sh
+
       - name: §14 the daemon, the CLI and the unit agree
         run: |
           set -euo pipefail
@@ -1095,6 +1114,59 @@ jobs:
           # A missing binary must be a hard failure, not a skip.
           test -x "$APEX_BIN"
           ./tests/test-apex-task.sh
+
+      # ── LAST IN THIS JOB, DELIBERATELY ──────────────────────────────────
+      # A failed step skips every step BELOW it in the same job, and this
+      # repository has already been bitten by that: a known-red step placed
+      # mid-job silently switched off the four suites under it. The chaos run
+      # is expected green, but it is also the step most likely to go red for an
+      # environmental reason on a runner this repository does not control —
+      # a kernel that refuses a namespace turns two cases into could-not-inject
+      # and fails the run by design. Nothing else should be disabled by that.
+      # P1-062's chaos cases, for real, against the built binary.
+      #
+      # THIS JOB AND NOT ANOTHER: two of the four cases need an unprivileged
+      # user namespace — `network-loss` puts `apex doctor` in a network
+      # namespace, `full-disk` mounts a size-limited tmpfs in a mount
+      # namespace — and Ubuntu 24.04 ships
+      # kernel.apparmor_restrict_unprivileged_userns=1. The bubblewrap step
+      # near the top of this job already turns it off. In any other job those
+      # two cases report could-not-inject, which fails the run by design and
+      # with no opt-out, so there is no version of this that quietly skips.
+      #
+      # A chaos run is green only when every requested case both INJECTED its
+      # fault (proven by an observation the injector did not make) and the
+      # subject survived it. could-not-inject fails the run. That is the whole
+      # point of the unit and it has no override.
+      #
+      # The bundles are uploaded on failure AND on success, because criterion 3
+      # is "failures produce reproducible diagnostics" and a diagnostic that
+      # only exists inside a finished runner is not one. Each bundle carries
+      # the seed, the git revision, the binary's own sha256, the environment
+      # probe, both the faulted and the no-fault runs, and sha256 snapshots of
+      # the fixture tree before and after — enough for
+      # `run-chaos --replay <bundle>` on another machine.
+      - name: P1-062 chaos — four faults injected, proven, and survived
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --bin apex --manifest-path apexd/Cargo.toml
+          # A missing binary must be a hard failure, not a skip. Without this
+          # every case reports could-not-inject for the least interesting
+          # possible reason.
+          test -x "$APEX_BIN"
+          ./tests/chaos/run-chaos --out "$RUNNER_TEMP/chaos" --seed "$GITHUB_RUN_ID"
+
+      - name: Chaos diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-bundles
+          path: ${{ runner.temp }}/chaos
+          if-no-files-found: warn
+          retention-days: 14
 
   installer:
     name: Installer safety and UI
@@ -1652,7 +1724,17 @@ jobs:
             tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh \
             tests/test-apex-greet-sessions.sh \
             tests/test-apex-greet-a11y.sh tests/test-apex-greet-layout.sh \
-            tests/test-labwc-keybind-reload.sh
+            tests/test-labwc-keybind-reload.sh \
+            tests/test-apex-chaos.sh
+          # The chaos harness separately, with -x so the driver's `. lib.sh`
+          # is followed, and the cases as bash fragments because they are
+          # sourced rather than executed and have no shebang of their own.
+          # It belongs under a HARD gate for the same reason the libexec
+          # helpers do: these scripts run `mount`, `chmod 0000` and `rm` with
+          # expansions, and an empty variable in one of those is a path on the
+          # machine running it.
+          shellcheck -S warning -x tests/chaos/run-chaos tests/chaos/lib.sh
+          shellcheck -S warning -x tests/chaos/cases/*.sh
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
       # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict

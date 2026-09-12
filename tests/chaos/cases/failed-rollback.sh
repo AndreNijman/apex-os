@@ -1,3 +1,7 @@
+# shellcheck shell=bash
+# The CASE_* variables and the case_* functions are the contract
+# tests/chaos/run-chaos reads; nothing in this file uses them itself.
+# shellcheck disable=SC2034
 # ─────────────────────────────────────────────────────────────────────────────
 #  failed-rollback — the rollback target is there and cannot be read.
 #
@@ -102,7 +106,7 @@ case_judge() {
     # The baseline must have been the interesting state, or every assertion
     # below passes for the wrong reason. Two deployments -> available.
     expect_json "with the tree intact the rollback target is available" \
-        "$CASE_DIR/baseline.json" "$ROW['state']" "available"
+        "$CASE_DIR/baseline.json" "${ROW}['state']" "available"
 
     # The claim itself: unknown, not absent. `unavailable` is the state that
     # means "nobody could measure this"; `attention` is the state the Ok(1)
@@ -110,16 +114,16 @@ case_judge() {
     # answered `attention` here would be telling a user in trouble that their
     # way back does not exist.
     expect_json "an unreadable deploy directory is reported as unmeasured" \
-        "$CASE_DIR/observe.json" "$ROW['state']" "unavailable"
+        "$CASE_DIR/observe.json" "${ROW}['state']" "unavailable"
     expect_json_nonempty "…and the detail names what could not be read" \
-        "$CASE_DIR/observe.json" "$ROW['detail']"
+        "$CASE_DIR/observe.json" "${ROW}['detail']"
     # The recovery-routes summary carries the same claim in a boolean, and it
     # is the one APEX Settings would grey a button on. `None` is "unknown";
     # `False` would be the hidden rollback.
     expect_json "with the tree intact the rollback route is available" \
-        "$CASE_DIR/baseline.json" "$ROUTE['available']" "True"
+        "$CASE_DIR/baseline.json" "${ROUTE}['available']" "True"
     expect_json "the rollback route is unknown rather than unavailable" \
-        "$CASE_DIR/observe.json" "$ROUTE['available']" "None"
+        "$CASE_DIR/observe.json" "${ROUTE}['available']" "None"
 
     expect_differs_from_baseline "the surface reacted to the fault at all" \
         "$CASE_BASELINE_OUT" "$CASE_OBSERVED"

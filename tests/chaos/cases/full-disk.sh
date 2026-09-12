@@ -1,3 +1,7 @@
+# shellcheck shell=bash
+# The CASE_* variables and the case_* functions are the contract
+# tests/chaos/run-chaos reads; nothing in this file uses them itself.
+# shellcheck disable=SC2034
 # ─────────────────────────────────────────────────────────────────────────────
 #  full-disk — the machine records a result onto a filesystem with no space
 #  left on it.
@@ -89,8 +93,8 @@ CASE_NEEDS="apex-binary userns tmpfs-ns"
 # The check the baseline records and the check the fault refuses. Two different
 # rows, so "the record changed" and "the record did not change" are about
 # different facts and neither can be satisfied by the other's write.
-BASELINE_CHECK=sleep
-FAULT_CHECK=audio
+BASELINE_CHECK="sleep"
+FAULT_CHECK="audio"
 
 # ── the one inner script both arms run ──────────────────────────────────────
 #
