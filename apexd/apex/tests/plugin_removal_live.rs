@@ -185,6 +185,14 @@ fn run_session(root: &Path, home: &Path, sentinel: &Path, settings: Option<&Path
     let _ = std::fs::remove_file(sentinel);
     let cwd = root.join("proj");
     std::fs::create_dir_all(&cwd).expect("project directory");
+    // Created, so the hook bridge's failure is an ordinary "nothing is
+    // listening there" rather than anything stranger. `paths::runtime_dir`
+    // returns a non-empty `XDG_RUNTIME_DIR` verbatim with no existence check
+    // and falls back to `/run/user/<uid>` only when the variable is UNSET, so
+    // pointing it here is what keeps the 19 hook invocations in the document
+    // away from the live `apex-agentd` socket.
+    let runtime = root.join("run");
+    std::fs::create_dir_all(&runtime).expect("runtime directory");
 
     let mut cmd = Command::new("claude");
     cmd.current_dir(&cwd)
@@ -203,7 +211,7 @@ fn run_session(root: &Path, home: &Path, sentinel: &Path, settings: Option<&Path
         // The hook bridge in the document runs the real `apex`. Pointing the
         // runtime directory at the fixture means it cannot find — and so
         // cannot talk to — the live `apex-agentd` on this machine.
-        .env("XDG_RUNTIME_DIR", root.join("run"))
+        .env("XDG_RUNTIME_DIR", &runtime)
         // Nothing leaves the machine: port 1 has nothing on it.
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")
         .env("ANTHROPIC_API_KEY", "sk-ant-this-key-is-not-real")
