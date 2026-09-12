@@ -957,16 +957,16 @@ RUN set -eux; \
     test ! -e /etc/systemd/system/multi-user.target.wants/apex-guest-wipe@.service; \
     grep -q '^SuccessExitStatus=0 2$' /usr/lib/systemd/system/apex-guest-wipe@.service; \
     : '── the kiosk config is a recipe, and lands where recipes land ──'; \
-    : 'greetd reads exactly one file, /etc/greetd/config.toml, and that file'; \
-    : 'is installed by Containerfile.apex -- it does not exist in this stage.'; \
-    : 'So the assertion that it carries no auto-login is NOT made here: a'; \
-    : 'grep against a path that does not exist yet passes vacuously, which'; \
-    : 'is the exact defect check-containerfile-assertions.sh was written for'; \
-    : 'after four of them shipped. tests/test-apex-shared-machine.sh asserts'; \
-    : 'it against the source file instead, and watches it go red.'; \
+    : 'greetd reads exactly one file, /etc/greetd/config.toml, and the'; \
+    : 'assertion that it carries no auto-login is NOT made here: this stanza'; \
+    : 'runs 1300 lines before the COPY that creates that file, so a grep'; \
+    : 'against it would pass vacuously -- the exact defect'; \
+    : 'check-containerfile-assertions.sh was written for after four of them'; \
+    : 'shipped. It is made just after that COPY instead, where the file is'; \
+    : 'real, and tests/test-apex-shared-machine.sh asserts it against the'; \
+    : 'source file too and watches it go red.'; \
     test -f /usr/share/apex/shared-machine/greetd-kiosk.toml; \
     test -f /usr/share/apex/shared-machine/sway-kiosk.conf; \
-    test ! -e /etc/greetd/config.toml; \
     : 'The recipe must at least be a kiosk: a default_session greetd will'; \
     : 'restart, not an initial_session that fires once per boot.'; \
     grep -qE '^[[:space:]]*\[default_session\]' /usr/share/apex/shared-machine/greetd-kiosk.toml; \
@@ -2247,6 +2247,23 @@ COPY files/desktop/apex-greet /usr/share/apex-greet
 COPY files/branding/wallpapers/apex-wallpaper-default.jpg \
      /usr/share/backgrounds/apex/default.jpg
 COPY files/desktop/apex-greet/greetd-config.toml /etc/greetd/config.toml
+
+# The shipped login config is NOT the kiosk recipe, asserted here because here
+# is where the file first exists. P2-016's third criterion is that kiosk policy
+# is possible "without weakening ordinary desktop use", which is a claim about
+# THIS file rather than about the recipe — and the only way to break it by
+# accident is for the recipe to end up installed as the live config.
+RUN set -eux; \
+    test -f /etc/greetd/config.toml; \
+    : 'greetd auto-login is [initial_session]. The ordinary config must not'; \
+    : 'have one: a machine that logs a user in without asking is a kiosk,'; \
+    : 'whatever else it calls itself.'; \
+    ! grep -qE '^[[:space:]]*\[initial_session\]' /etc/greetd/config.toml; \
+    : 'And it must not BE the recipe. Compared by content, because a recipe'; \
+    : 'copied into place would satisfy every other check in this file.'; \
+    ! cmp -s /etc/greetd/config.toml \
+             /usr/share/apex/shared-machine/greetd-kiosk.toml; \
+    echo "login config: no auto-login, and not the kiosk recipe"
 
 # ── Greeter wallpaper: the user's own, not the shipped default ─────────────
 # THE BUG: change your wallpaper in APEX Shell and the login/lock screen kept
