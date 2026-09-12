@@ -201,6 +201,7 @@ fun ApexRemoteApp(
                     SessionScreen(
                         session = session,
                         machine = state.agents.machine?.machine ?: "",
+                        liveSessions = state.agents.sessions,
                         nowSeconds = state.agents.nowSeconds,
                         busy = state.agents.busy,
                         failure = state.agents.failure,

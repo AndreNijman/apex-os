@@ -25,6 +25,35 @@
          is not already connected to. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Push-to-talk, and what is NOT here is the point of it.
+
+         RECORD_AUDIO is absent, deliberately. Speech reaches this app through
+         `RecognizerIntent.ACTION_RECOGNIZE_SPEECH`: the system's own recogniser
+         opens, shows the system's own microphone indicator, and hands back
+         text. No audio ever enters this process, so there is no microphone
+         permission to grant, to forget about, or to be abused if this app is
+         ever compromised — and this is the app that shows which machine is
+         about to run something as root.
+
+         That is the same rule P1-059's fourth criterion states for the photo
+         library, applied to the microphone: take the Android-mediated
+         selection, never the blanket permission. Which is also why no storage
+         or media permission appears anywhere in this file; `ManifestTest`
+         asserts their absence rather than trusting it, because the moment a
+         file-handoff transport exists the obvious way to read the file is a
+         permission.
+
+         This `<queries>` entry is what package visibility on API 30 and later
+         requires for the recogniser to be visible at all. Without it,
+         `resolveActivity` answers null on a phone that HAS a recogniser, which
+         is refusal and absence confused in the direction that makes a working
+         feature look broken. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"

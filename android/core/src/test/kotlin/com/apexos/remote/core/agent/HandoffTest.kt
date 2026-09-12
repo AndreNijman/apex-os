@@ -32,74 +32,89 @@ class HandoffTest {
         started = started,
     )
 
-    // ── routing ─────────────────────────────────────────────────────────────
+    // ── routing: the session on screen, guarded by Reply.check ──────────────
 
     @Test
-    fun `one running agent is an unambiguous destination`() {
-        val r = Handoff.Voice.route("l16", listOf(session(3)))
-        assertNotNull(r.target)
+    fun `the destination is the session on screen`() {
+        val on = session(3)
+        val r = Handoff.Voice.route("l16", on, listOf(on))
         assertEquals(3, r.target?.session)
         assertEquals("l16", r.target?.machine)
-        assertNull(r.refusal)
+        assertNull(r.why)
+        assertTrue(r.label.isNotBlank(), "the user must be told what they are talking to")
     }
 
     @Test
-    fun `several running agents refuse rather than guessing`() {
-        // The important one. The desktop falls back to the focused session;
-        // this app has no notion of focus, and a guess here becomes an
-        // instruction typed at whichever agent the guess landed on.
-        val r = Handoff.Voice.route("l16", listOf(session(3), session(4)))
+    fun `a session that has gone refuses before the recogniser opens`() {
+        // The point of resolving first: a microphone that opens for a session
+        // that is not there wastes the sentence somebody just said.
+        val r = Handoff.Voice.route("l16", session(3), live = emptyList())
         assertNull(r.target)
-        assertEquals(Handoff.Voice.Refusal.AMBIGUOUS, r.refusal)
+        assertEquals(Reply.Refusal.GONE.message, r.why)
     }
 
     @Test
-    fun `no running agent is not the same answer as too many`() {
-        val r = Handoff.Voice.route("l16", emptyList())
-        assertEquals(Handoff.Voice.Refusal.NO_SESSIONS, r.refusal)
-        val exited = Handoff.Voice.route("l16", listOf(session(3, state = AgentStates.EXITED)))
+    fun `every refusal comes from Reply check and not from a second vocabulary`() {
+        // Two lists of reasons a message cannot be delivered is how one of them
+        // ends up saying something the other does not. Each case below is
+        // asserted to carry Reply's OWN sentence.
+        val on = session(3, started = 100L)
         assertEquals(
-            Handoff.Voice.Refusal.NO_SESSIONS,
-            exited.refusal,
-            "an exited session is not something to talk to",
+            Reply.Refusal.RECYCLED.message,
+            Handoff.Voice.route("l16", on, listOf(session(3, started = 999L))).why,
         )
-    }
-
-    @Test
-    fun `a pinned target that has gone does not fall through to another one`() {
-        // `pushtotalk.js` refuses this case and says why: the user named a
-        // destination and it is gone. Quietly picking the other running agent
-        // would deliver their words somewhere they did not choose.
-        val r = Handoff.Voice.route("l16", listOf(session(9)), pinned = 3)
-        assertNull(r.target)
-        assertEquals(Handoff.Voice.Refusal.PINNED_GONE, r.refusal)
-    }
-
-    @Test
-    fun `a pinned target outranks a single running agent`() {
-        val r = Handoff.Voice.route("l16", listOf(session(3), session(9)), pinned = 9)
-        assertEquals(9, r.target?.session)
+        assertEquals(
+            Reply.Refusal.EXITED.message,
+            Handoff.Voice.route("l16", on, listOf(session(3, started = 100L, state = AgentStates.EXITED))).why,
+        )
+        assertEquals(
+            Reply.Refusal.PAUSED.message,
+            Handoff.Voice.route(
+                "l16",
+                on,
+                listOf(session(3, started = 100L).copy(paused = true)),
+            ).why,
+        )
+        // OTHER_MACHINE is NOT reachable here and that is correct rather than a
+        // gap: route() builds the target from the machine it is handed, so the
+        // two can never disagree. Reply.Refusal.OTHER_MACHINE guards a target
+        // that was STORED — one composed against a notification and sent after
+        // the phone connected somewhere else — which is a different moment.
     }
 
     @Test
     fun `the route carries started, because a session id is not an identity`() {
-        // The same hazard `Reply.Target` exists for: ids are reused after a
-        // prune, so a route that carried only the number could deliver into a
-        // stranger's terminal.
-        val r = Handoff.Voice.route("l16", listOf(session(3, started = 1_726_000_000L)))
+        // The daemon reuses a session number after a prune, so a route that
+        // carried only the number could deliver a dictated sentence into a
+        // stranger's terminal. Asserted on the value AND through the guard that
+        // reads it, because a field nothing compares is a field that can be
+        // wrong for ever.
+        val on = session(3, started = 1_726_000_000L)
+        val r = Handoff.Voice.route("l16", on, listOf(on))
         assertEquals(1_726_000_000L, r.target?.started)
         assertEquals(
             Reply.Refusal.RECYCLED,
             Reply.check(r.target!!, "l16", listOf(session(3, started = 9L))),
-            "a route whose started no longer matches must be refused by Reply.check",
+            "a route whose started no longer matches was not refused by Reply.check",
         )
+    }
+
+    @Test
+    fun `push-to-talk has exactly one refusal of its own, and it is about this phone`() {
+        // Everything else is Reply's. If this list grows, the two vocabularies
+        // have started to diverge.
+        assertEquals(
+            listOf(Handoff.Voice.Refusal.NO_RECOGNISER),
+            Handoff.Voice.Refusal.entries.toList(),
+        )
+        assertTrue(Handoff.Voice.Refusal.NO_RECOGNISER.message.isNotBlank())
     }
 
     // ── the microphone is never open without somewhere to go ────────────────
 
     @Test
     fun `a refused route leaves the microphone shut`() {
-        val refused = Handoff.Voice.route("l16", emptyList())
+        val refused = Handoff.Voice.route("l16", session(3), live = emptyList())
         val s = Handoff.Voice.start(Handoff.Voice.State(), refused, now = 10L)
         assertEquals(Handoff.Voice.Phase.ERROR, s.phase)
         assertNull(s.target)
@@ -109,7 +124,7 @@ class HandoffTest {
 
     @Test
     fun `the target is held for the whole time the microphone is open`() {
-        val route = Handoff.Voice.route("l16", listOf(session(3)))
+        val route = Handoff.Voice.route("l16", session(3), listOf(session(3)))
         var s = Handoff.Voice.start(Handoff.Voice.State(), route, now = 0L)
         assertEquals(Handoff.Voice.Phase.RECORDING, s.phase)
         assertNotNull(s.target)
@@ -124,9 +139,9 @@ class HandoffTest {
     fun `the frozen target does not follow the phone to another session`() {
         // What "frozen" buys. The list moves while somebody is talking; the
         // destination does not.
-        val route = Handoff.Voice.route("l16", listOf(session(3)))
+        val route = Handoff.Voice.route("l16", session(3), listOf(session(3)))
         val recording = Handoff.Voice.start(Handoff.Voice.State(), route, now = 0L)
-        val later = Handoff.Voice.route("l16", listOf(session(8)))
+        val later = Handoff.Voice.route("l16", session(8), listOf(session(8)))
         assertEquals(8, later.target?.session)
         assertEquals(
             3,
@@ -137,7 +152,7 @@ class HandoffTest {
 
     @Test
     fun `transcribing and delivering cannot be interrupted by another press`() {
-        val route = Handoff.Voice.route("l16", listOf(session(3)))
+        val route = Handoff.Voice.route("l16", session(3), listOf(session(3)))
         val transcribing = Handoff.Voice.stop(Handoff.Voice.start(Handoff.Voice.State(), route, 0L))
         assertEquals(
             transcribing,
@@ -155,7 +170,7 @@ class HandoffTest {
             Handoff.Voice.MAX_MS,
             "the cap must agree with apex-shell's pushtotalk.js MAX_MS",
         )
-        val route = Handoff.Voice.route("l16", listOf(session(3)))
+        val route = Handoff.Voice.route("l16", session(3), listOf(session(3)))
         val s = Handoff.Voice.start(Handoff.Voice.State(), route, now = 1_000L)
         assertFalse(Handoff.Voice.expired(s, now = 1_000L + 89_999L))
         assertTrue(Handoff.Voice.expired(s, now = 1_000L + 90_000L))
@@ -173,7 +188,7 @@ class HandoffTest {
         // A room too loud to hear in. Sending the empty string would put
         // nothing in the agent's input line while the phone reported it had
         // spoken, and nobody would learn why the agent never answered.
-        val route = Handoff.Voice.route("l16", listOf(session(3)))
+        val route = Handoff.Voice.route("l16", session(3), listOf(session(3)))
         val s = Handoff.Voice.stop(Handoff.Voice.start(Handoff.Voice.State(), route, 0L))
         val blank = Handoff.Voice.transcribed(s, "   \n ")
         assertEquals(Handoff.Voice.Phase.ERROR, blank.phase)
@@ -182,7 +197,7 @@ class HandoffTest {
 
     @Test
     fun `a delivered transcript returns to idle with nothing held`() {
-        val route = Handoff.Voice.route("l16", listOf(session(3)))
+        val route = Handoff.Voice.route("l16", session(3), listOf(session(3)))
         var s = Handoff.Voice.transcribed(
             Handoff.Voice.stop(Handoff.Voice.start(Handoff.Voice.State(), route, 0L)),
             "ship it",
@@ -198,7 +213,7 @@ class HandoffTest {
         // A guard that only fired in one phase would leave the microphone open
         // in a state nothing could leave, which is the failure the cap exists
         // for happening on purpose.
-        val route = Handoff.Voice.route("l16", listOf(session(3)))
+        val route = Handoff.Voice.route("l16", session(3), listOf(session(3)))
         for (s in listOf(
             Handoff.Voice.State(),
             Handoff.Voice.start(Handoff.Voice.State(), route, 0L),
@@ -215,27 +230,83 @@ class HandoffTest {
         )
     }
 
-    // ── what a transcript becomes on the wire ───────────────────────────────
+    // ── the transcript comes back to another activity's screen ──────────────
 
     @Test
-    fun `a transcript is staged and never submitted`() {
-        // THE rule of this feature. `apex agent input` takes --submit and the
-        // desktop's push-to-talk does not pass it; a speech recogniser's guess
-        // that submits itself is an instruction nobody read.
-        val payload = Handoff.Voice.payload("  delete the old branches  ")
-        assertFalse(payload.contains('\r'), "a transcript submitted itself")
-        assertFalse(payload.contains('\n'), "a transcript submitted itself")
-        assertEquals("delete the old branches ", payload)
-        assertTrue(
-            Reply.bytes("delete the old branches").endsWith("\r"),
-            "a TYPED reply still submits — the two paths must stay different",
+    fun `a transcript only lands in the box it was dictated for`() {
+        // The frozen target, surviving the move of the review step onto the
+        // phone. The recogniser is ANOTHER ACTIVITY: this one is stopped while
+        // it runs, and what comes back arrives at whatever the user has since
+        // navigated to. Without this, one agent's dictated answer lands in
+        // another agent's box, where the person reads it as their own words and
+        // presses Send.
+        val on = session(3)
+        val route = Handoff.Voice.route("l16", on, listOf(on))
+        val delivering = Handoff.Voice.transcribed(
+            Handoff.Voice.stop(Handoff.Voice.start(Handoff.Voice.State(), route, 0L)),
+            "run the tests",
+        )
+        assertTrue(Handoff.Voice.landsOn(delivering, route.target))
+        assertFalse(
+            Handoff.Voice.landsOn(delivering, Reply.Target("l16", 8, 1_000L)),
+            "a transcript landed in a different session's box",
+        )
+        assertFalse(
+            Handoff.Voice.landsOn(delivering, Reply.Target("katana", 3, 1_000L)),
+            "a transcript crossed to another machine",
+        )
+        assertFalse(
+            Handoff.Voice.landsOn(delivering, null),
+            "a transcript landed with nothing on screen",
+        )
+        assertTrue(Handoff.Voice.LANDED_ELSEWHERE.isNotBlank())
+    }
+
+    @Test
+    fun `a recycled id is not the same box`() {
+        // Compares all three values, not the number. A transcript returning to
+        // the same id on a DIFFERENT session must be refused too.
+        val on = session(3, started = 100L)
+        val route = Handoff.Voice.route("l16", on, listOf(on))
+        val delivering = Handoff.Voice.transcribed(
+            Handoff.Voice.stop(Handoff.Voice.start(Handoff.Voice.State(), route, 0L)),
+            "carry on",
+        )
+        assertFalse(
+            Handoff.Voice.landsOn(delivering, Reply.Target("l16", 3, 999L)),
+            "the id was reused and the transcript landed in the new session's box",
         )
     }
 
     @Test
-    fun `a transcript is built into the request as input, not as a reply`() {
-        val wire = Agentd.input(3, Handoff.Voice.payload("open the diff"))
-        assertEquals("""{"cmd":"input","id":3,"data":"open the diff "}""", wire)
+    fun `nothing lands before there is a transcript`() {
+        val on = session(3)
+        val route = Handoff.Voice.route("l16", on, listOf(on))
+        assertFalse(Handoff.Voice.landsOn(Handoff.Voice.State(), route.target))
+    }
+
+    // ── what a transcript becomes on the wire ───────────────────────────────
+
+    @Test
+    fun `a transcript reaches the reply box unsubmitted, and Send is what submits`() {
+        // The rule of this feature, placed where the reviewer is. A recogniser's
+        // guess is read by a person before it becomes an instruction; on a
+        // phone that person is here, so the guess goes into an editable box and
+        // the existing Send button is the only thing that terminates it.
+        val forReview = Handoff.Voice.forReview("  delete the old branches  ")
+        assertFalse(forReview.contains('\r'), "a transcript submitted itself")
+        assertFalse(forReview.contains('\n'), "a transcript submitted itself")
+        assertEquals("delete the old branches ", forReview)
+        // And the one path to the wire still terminates, because a person read
+        // it and pressed Send.
+        assertTrue(
+            Reply.bytes(forReview).endsWith("\r"),
+            "the single send path stopped submitting, so a reply now waits unseen",
+        )
+        assertEquals(
+            """{"cmd":"input","id":3,"data":"delete the old branches\r"}""",
+            Agentd.input(3, Reply.bytes(forReview)),
+        )
     }
 
     // ── clipboard ───────────────────────────────────────────────────────────
@@ -307,19 +378,19 @@ class HandoffTest {
         val text = "git log --oneline\nrm -rf build\n"
         assertEquals(
             "git log --oneline",
-            Handoff.Clipboard.payload(text, Handoff.Clipboard.Choice.FIRST_LINE),
+            Handoff.Clipboard.forReview(text, Handoff.Clipboard.Choice.FIRST_LINE),
             "FIRST_LINE must not carry the second command with it",
         )
-        assertEquals(text, Handoff.Clipboard.payload(text, Handoff.Clipboard.Choice.EVERYTHING))
+        assertEquals(text, Handoff.Clipboard.forReview(text, Handoff.Clipboard.Choice.EVERYTHING))
     }
 
     @Test
-    fun `neither clipboard choice appends a terminator`() {
-        // The content already carries whatever the user copied. Appending a CR
-        // would submit a paste they were still looking at.
+    fun `neither clipboard choice terminates by itself`() {
+        // What lands in the box is what the person reads. A choice that
+        // terminated would show them a paste and send a submitted one.
         for (c in Handoff.Clipboard.Choice.entries) {
             assertFalse(
-                Handoff.Clipboard.payload("some text", c).endsWith("\r"),
+                Handoff.Clipboard.forReview("some text", c).endsWith("\r"),
                 "$c appended a carriage return",
             )
         }
@@ -330,8 +401,31 @@ class HandoffTest {
         val big = "y".repeat(Handoff.Clipboard.MAX_CHARS * 2)
         assertEquals(
             Handoff.Clipboard.MAX_CHARS,
-            Handoff.Clipboard.payload(big, Handoff.Clipboard.Choice.EVERYTHING).length,
+            Handoff.Clipboard.forReview(big, Handoff.Clipboard.Choice.EVERYTHING).length,
         )
+    }
+
+    @Test
+    fun `the send-path rule catches a paste the app never handled`() {
+        // The placement that matters, and the reason it is not on the clipboard
+        // button. A user long-presses the reply field and taps the keyboard's
+        // own Paste; no code of this app's runs. Reply.bytes then trims the
+        // ENDS only, so the interior newline survives — and on a PTY that
+        // newline IS the return key, submitting line one and typing lines two
+        // and three into whatever the agent asks next.
+        val pasted = "Traceback (most recent call last):\n  File \"x.py\", line 3\nValueError"
+        assertTrue(
+            Handoff.Clipboard.inspect(pasted).submits,
+            "a paste that presses return partway through was not caught at the send",
+        )
+        // And the proof that Reply.bytes does not save you: the hazard is still
+        // in what it produces.
+        assertTrue(
+            Reply.bytes(pasted).count { it == '\n' } > 0,
+            "Reply.bytes was assumed to strip interior newlines, and it does not",
+        )
+        // An ordinary typed sentence passes, so the gate is not a wall.
+        assertTrue(Handoff.Clipboard.inspect("rerun the failing test").isPlain)
     }
 
     // ── the file criterion, and the permissions that guard it ───────────────

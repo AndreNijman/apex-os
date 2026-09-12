@@ -34,6 +34,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalClipboardManager
+import com.apexos.remote.core.agent.Handoff
 import com.apexos.remote.core.agent.Reply
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,6 +74,11 @@ import com.apexos.remote.ui.theme.MachineText
 fun SessionScreen(
     session: AgentSession,
     machine: String,
+    /**
+     * The most recent `list`, so push-to-talk can resolve its destination
+     * through `Reply.check` before opening anything.
+     */
+    liveSessions: List<AgentSession>,
     nowSeconds: Long,
     busy: String?,
     failure: String?,
@@ -146,7 +158,7 @@ fun SessionScreen(
                 onStop = onStop,
             )
 
-            ReplyBox(session, onReply)
+            ReplyBox(session, machine, liveSessions, onReply)
 
             Section("Where it is running")
             Field("Directory", session.cwd)
@@ -437,9 +449,50 @@ private fun Field(label: String, value: String) {
  * reads, correctly, as the app having sent the reply somewhere random.
  */
 @Composable
-private fun ReplyBox(session: AgentSession, onReply: (String) -> Unit) {
+private fun ReplyBox(
+    session: AgentSession,
+    machine: String,
+    liveSessions: List<AgentSession>,
+    onReply: (String) -> Unit,
+) {
     if (!session.live || !session.needsYou || session.paused) return
     var text by remember(session.id) { mutableStateOf("") }
+    // NOT keyed on the session. The recogniser is another activity and its
+    // result comes back to whatever is on screen then, so this state has to
+    // outlive a change of session in order for `landsOn` to catch one.
+    var voice by remember { mutableStateOf(Handoff.Voice.State()) }
+    var choice by remember(session.id) { mutableStateOf(Handoff.Clipboard.Choice.FIRST_LINE) }
+    val clipboard = LocalClipboardManager.current
+    val onScreen = Reply.Target(machine, session.id, session.started)
+
+    val recogniser = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val heard = result.data
+            ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            .orEmpty()
+        // The frozen target. See Handoff.Voice.landsOn: without this, one
+        // agent's dictated answer lands in another agent's box, where the
+        // person reads it as their own words and presses Send.
+        voice = when {
+            !Handoff.Voice.landsOn(
+                Handoff.Voice.transcribed(Handoff.Voice.stop(voice), heard.ifBlank { "x" }),
+                onScreen,
+            ) -> Handoff.Voice.failed(voice, Handoff.Voice.LANDED_ELSEWHERE)
+
+            else -> {
+                val next = Handoff.Voice.transcribed(Handoff.Voice.stop(voice), heard)
+                if (next.phase == Handoff.Voice.Phase.DELIVERING) {
+                    // Into the box, unsubmitted, where a person reads it.
+                    text = (text.trimEnd() + " " + Handoff.Voice.forReview(next.text)).trimStart()
+                    Handoff.Voice.delivered(next)
+                } else {
+                    next
+                }
+            }
+        }
+    }
 
     Section("Reply")
     Text(
@@ -463,16 +516,135 @@ private fun ReplyBox(session: AgentSession, onReply: (String) -> Unit) {
         singleLine = false,
         maxLines = 4,
     )
+
+    // The send-path gate, applied to whatever is in the box HOWEVER IT GOT
+    // THERE — typed, dictated, or pasted by the keyboard's own Paste, which
+    // runs no code of this app's. On a PTY an interior newline IS the return
+    // key, so a pasted stack trace would submit its first line and type the
+    // rest into whatever the agent asked next. `Reply.bytes` trims the ends
+    // only and does not save you.
+    val shape = Handoff.Clipboard.inspect(text)
+    if (!shape.isPlain) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            buildString {
+                if (shape.submits) {
+                    append(
+                        "This is ${shape.lines} lines. On the agent's terminal every line " +
+                            "break is a press of Enter, so sending all of it runs the first " +
+                            "line and types the rest into whatever it asks next.",
+                    )
+                }
+                if (shape.controlBytes.isNotEmpty()) {
+                    if (isNotEmpty()) append(" ")
+                    append(
+                        "It also carries control characters " +
+                            shape.controlBytes.joinToString(", ") { "0x%02x".format(it) } +
+                            ", which a terminal acts on rather than shows.",
+                    )
+                }
+                if (shape.truncated) {
+                    if (isNotEmpty()) append(" ")
+                    append("Only the first ${Handoff.Clipboard.MAX_CHARS} characters would be sent.")
+                }
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
+        Spacer(Modifier.height(4.dp))
+        Row(Modifier.padding(horizontal = 16.dp)) {
+            for (c in Handoff.Clipboard.Choice.entries) {
+                val label = when (c) {
+                    Handoff.Clipboard.Choice.FIRST_LINE -> "First line only"
+                    Handoff.Clipboard.Choice.EVERYTHING -> "Send all of it"
+                }
+                if (c == choice) {
+                    Button(onClick = {}, shape = RoundedCornerShape(6.dp)) { Text(label) }
+                } else {
+                    OutlinedButton(
+                        onClick = { choice = c },
+                        shape = RoundedCornerShape(6.dp),
+                    ) { Text(label) }
+                }
+                Spacer(Modifier.width(8.dp))
+            }
+        }
+    }
+
+    voice.error.takeIf { it.isNotBlank() }?.let {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            it,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
+    }
+
     Spacer(Modifier.height(8.dp))
-    Row(Modifier.padding(horizontal = 16.dp)) {
+    Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         Button(
             onClick = {
-                onReply(text)
+                onReply(
+                    if (shape.isPlain) text else Handoff.Clipboard.forReview(text, choice),
+                )
                 text = ""
             },
             shape = RoundedCornerShape(6.dp),
         ) { Text(if (Reply.isBare(text)) "Send a bare return" else "Send") }
+        Spacer(Modifier.width(8.dp))
+        OutlinedButton(
+            onClick = {
+                // Resolved BEFORE anything opens, through Reply.check, so the
+                // recogniser never opens for a session that has gone.
+                val route = Handoff.Voice.route(machine, session, liveSessions)
+                voice = Handoff.Voice.start(voice, route, System.currentTimeMillis())
+                if (voice.phase == Handoff.Voice.Phase.RECORDING) {
+                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(
+                            RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+                        )
+                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to ${route.label}")
+                    }
+                    // Caught rather than pre-checked with `resolveActivity`,
+                    // which on API 30+ answers null for an intent this app has
+                    // not declared in <queries> — reporting "no recogniser" on
+                    // a phone that has one. The <queries> entry is declared
+                    // too; this is the belt.
+                    try {
+                        recogniser.launch(intent)
+                    } catch (e: ActivityNotFoundException) {
+                        voice = Handoff.Voice.failed(
+                            voice,
+                            Handoff.Voice.Refusal.NO_RECOGNISER.message,
+                        )
+                    }
+                }
+            },
+            shape = RoundedCornerShape(6.dp),
+        ) { Text("Speak") }
+        Spacer(Modifier.width(8.dp))
+        OutlinedButton(
+            onClick = {
+                // A convenience over the gate above, not a second path: what it
+                // puts in the box is inspected by the same `shape` on the next
+                // recomposition, exactly as a keyboard paste would be.
+                val copied = clipboard.getText()?.text.orEmpty()
+                if (copied.isNotEmpty()) text = copied
+            },
+            shape = RoundedCornerShape(6.dp),
+        ) { Text("Paste") }
     }
+
+    Spacer(Modifier.height(8.dp))
+    Text(
+        Handoff.Files.WHY,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp),
+    )
     Spacer(Modifier.height(8.dp))
 }
 
